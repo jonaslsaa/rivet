@@ -1,10 +1,14 @@
 //! `net.minecraft.util` port surface.
 //!
-//! STUB(mc.nbt) — only the `Mth.floor` pair used by `FloatTag`/`DoubleTag`
-//! (`net.minecraft.util.Mth`) is provided here so far. Owned by rivet-util.
+//! `mth` is a full port of `net.minecraft.util.Mth` (arithmetic, trig tables,
+//! lerp/clamp/floorDiv, packing helpers), golden-tested against Java. `random`
+//! ports `net.minecraft.util.random` (Xoroshiro/Legacy RNG), also
+//! parity-tested. `java_hash` ports the JDK string hashing used by
+//! `ResourceLocation`.
 //!
-//! The `data_io` / `delegate_data_output` / `fast_buffered_input_stream` /
-//! `util` modules are STUB(mc.nbt.io) — the byte-IO contract `NbtIo` needs.
+//! STUB(mc.nbt.io): `data_io` / `delegate_data_output` /
+//! `fast_buffered_input_stream` / `util` are the byte-IO contract `NbtIo`
+//! needs; only the surface `NbtIo` uses is provided.
 
 pub mod data_io;
 pub mod delegate_data_output;

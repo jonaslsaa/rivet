@@ -52,7 +52,7 @@ impl Component {
     /// `MutableComponent.withStyle(Style)` — applies the patch to the current
     /// style (Java: `withStyle(Style patch)` = `setStyle(patch.applyTo(this.style))`).
     pub fn with_style(mut self, patch: Style) -> MutableComponent {
-        self.style = self.style.apply_to(&patch);
+        self.style = patch.apply_to(&self.style);
         self
     }
 

@@ -1,6 +1,7 @@
 // STUB(mc.nbt.text) — minimal port of `net.minecraft.ChatFormatting` for
-// `TextComponentTagVisitor`. Owned by the `net.minecraft` package (rivet-server);
-// lives in rivet-text to avoid a Cargo cycle. Full enum with exact codes.
+// `TextComponentTagVisitor`. Promoted into rivet-core with CrashReport
+// (decision 7754455) to break the rivet-server <-> rivet-nbt Cargo cycle; the
+// full enum with exact codes belongs to rivet-text.
 
 /// Port of `net.minecraft.ChatFormatting` (enum of format codes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

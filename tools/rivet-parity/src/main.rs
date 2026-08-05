@@ -346,8 +346,16 @@ fn check_nbt_encode(
                 let oi = result["tag_id"].as_i64().unwrap_or(-1);
                 let oracle_len = result["bytes"].as_i64().unwrap_or(-1);
 
-                let rust_tag =
-                    rust_parse_snbt(input).expect("valid encode corpus input must parse in rust");
+                let rust_tag = match rust_parse_snbt(input) {
+                    Ok(tag) => tag,
+                    Err(err) => {
+                        // `rust_bytes` succeeded above, so this is genuinely
+                        // unreachable — but a panic here would truncate the
+                        // transcript, so fail this check instead.
+                        check.field("rust_parse", "ok", &err);
+                        return check.finish();
+                    }
+                };
                 let rd = describe_tag(&rust_tag);
                 check.field("tag_type", ot, &rd.type_name);
                 check.field("tag_id", &oi.to_string(), &rd.id.to_string());
