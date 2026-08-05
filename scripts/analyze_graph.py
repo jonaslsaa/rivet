@@ -8,10 +8,24 @@ dependencies, condenses cycles (Tarjan SCC), and assigns each unit a topological
 its dependency closure is done. Units in the same SCC share a `cycle` id and must
 be scheduled together (or split first — see the needs_split flag).
 
+`--split-nbt` refines the net.minecraft.nbt package into class-cluster units
+(epic #9): one irreducible SCC (the sealed Tag hierarchy + visitor interfaces +
+type system + accounter + exceptions, which map to Rust enums and cannot split
+without stubs) plus the one-directional downstream layers (io, ops, snbt, text,
+utils, visitors). The split used to live in scripts/split_nbt_units.py; it is
+folded here so re-running the analyzer is idempotent with the split.
+
+Every unit also gets a `java_paths` column (comma-joined file paths relative to
+the source root). This gives each split unit its concrete file set, so a unit's
+dep on a package it shares (net.minecraft.nbt) is a real dep on the sibling unit
+that owns those files — never a self-dependency.
+
 Known limitation: same-package class references need no import in Java, so the
-graph is package-level only; class-cluster refinement is epic #9.
+package-level graph cannot see intra-package edges; the nbt split's boundaries
+and deps are therefore authored data (NBT_UNITS below), validated against disk.
 """
 
+import argparse
 import re
 import sys
 from collections import defaultdict
@@ -55,6 +69,82 @@ IMP_RE = re.compile(r"^\s*import\s+(?:static\s+)?([\w.]+)\s*;", re.M)
 INTERNAL_PREFIXES = tuple(p for p, _ in CRATE_RULES)
 SPLIT_FILE_THRESHOLD = 15
 
+# Class-cluster split of net.minecraft.nbt (epic #9): unit id -> metadata.
+# (java_package, [file names relative to the nbt package dir], wave, cycle, [deps]).
+# The core SCC depends only on externals; every downstream layer depends on the
+# core (`net.minecraft.nbt`) plus its own externals. deps are comma-joined java
+# packages; the core is referenced as `net.minecraft.nbt` (resolved by the
+# wave-picker to the `mc.nbt` unit via the derived unit id).
+NBT_UNITS = {
+    "mc.nbt": (
+        "net.minecraft.nbt",
+        [
+            "Tag.java", "CollectionTag.java", "PrimitiveTag.java", "NumericTag.java",
+            "EndTag.java", "ByteTag.java", "ShortTag.java", "IntTag.java",
+            "LongTag.java", "FloatTag.java", "DoubleTag.java", "StringTag.java",
+            "ByteArrayTag.java", "IntArrayTag.java", "LongArrayTag.java",
+            "ListTag.java", "CompoundTag.java", "TagVisitor.java",
+            "StreamTagVisitor.java", "TagType.java", "TagTypes.java",
+            "NbtAccounter.java", "NbtException.java", "NbtAccounterException.java",
+            "NbtFormatException.java", "ReportedNbtException.java",
+            "package-info.java",
+        ],
+        3, "27",
+        ["com.mojang.serialization", "net.minecraft", "net.minecraft.util"],
+    ),
+    "mc.nbt.io": (
+        "net.minecraft.nbt",
+        ["NbtIo.java"],
+        4, "",
+        ["net.minecraft.nbt", "net.minecraft", "net.minecraft.util"],
+    ),
+    "mc.nbt.ops": (
+        "net.minecraft.nbt",
+        ["NbtOps.java"],
+        4, "",
+        ["net.minecraft.nbt", "com.mojang.datafixers.util", "com.mojang.serialization",
+         "net.minecraft.util"],
+    ),
+    "mc.nbt.snbt": (
+        "net.minecraft.nbt",
+        ["SnbtGrammar.java", "SnbtOperations.java", "TagParser.java",
+         "StringTagVisitor.java", "SnbtPrinterTagVisitor.java"],
+        4, "",
+        ["net.minecraft.nbt", "com.mojang.brigadier", "com.mojang.brigadier.exceptions",
+         "com.mojang.serialization", "net.minecraft.core", "net.minecraft.network.chat",
+         "net.minecraft.util", "net.minecraft.util.parsing.packrat",
+         "net.minecraft.util.parsing.packrat.commands"],
+    ),
+    "mc.nbt.text": (
+        "net.minecraft.nbt",
+        ["TextComponentTagVisitor.java"],
+        4, "",
+        ["net.minecraft.nbt", "net.minecraft", "net.minecraft.network.chat"],
+    ),
+    "mc.nbt.utils": (
+        "net.minecraft.nbt",
+        ["NbtUtils.java"],
+        4, "",
+        ["net.minecraft.nbt", "com.mojang.brigadier.exceptions", "com.mojang.serialization",
+         "net.minecraft", "net.minecraft.core", "net.minecraft.core.registries",
+         "net.minecraft.network.chat", "net.minecraft.resources", "net.minecraft.util",
+         "net.minecraft.world.level.block", "net.minecraft.world.level.block.state",
+         "net.minecraft.world.level.block.state.properties", "net.minecraft.world.level.material",
+         "net.minecraft.world.level.storage"],
+    ),
+    "mc.nbt.visitors": (
+        "net.minecraft.nbt.visitors",
+        ["visitors/CollectFields.java", "visitors/CollectToTag.java",
+         "visitors/FieldSelector.java", "visitors/FieldTree.java",
+         "visitors/SkipAll.java", "visitors/SkipFields.java",
+         "visitors/package-info.java"],
+        4, "",
+        ["net.minecraft.nbt"],
+    ),
+}
+NBT_SPLIT_PACKAGES = {"net.minecraft.nbt", "net.minecraft.nbt.visitors"}
+NBT_DIR = Path("net/minecraft/nbt")
+
 
 def crate_for(pkg: str) -> str:
     if pkg == "net.minecraft":  # root-package classes only; subpackages match CRATE_RULES
@@ -63,6 +153,14 @@ def crate_for(pkg: str) -> str:
         if pkg == prefix or pkg.startswith(prefix + "."):
             return crate
     return "rivet-server"
+
+
+def derive_id(pkg: str) -> str:
+    return (
+        pkg.replace("net.minecraft.", "mc.")
+        .replace("org.bukkit.", "bukkit.")
+        .replace("io.papermc.paper.", "paper.")
+    )
 
 
 def tarjan_scc(nodes: list[str], edges: dict[str, set[str]]) -> list[list[str]]:
@@ -115,7 +213,16 @@ def tarjan_scc(nodes: list[str], edges: dict[str, set[str]]) -> list[list[str]]:
 
 
 def main() -> None:
-    pkg_files: dict[str, list[Path]] = defaultdict(list)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--split-nbt", action="store_true",
+        help="split net.minecraft.nbt into class-cluster units (idempotent)",
+    )
+    args = parser.parse_args()
+
+    # A package can span several source roots (e.g. moonrise code appears under
+    # both minecraft/java and main/java), so each file carries its own root.
+    pkg_files: dict[str, list[tuple[str, Path]]] = defaultdict(list)
     pkg_loc: dict[str, int] = defaultdict(int)
     pkg_root: dict[str, str] = {}
     pkg_deps: dict[str, set[str]] = defaultdict(set)
@@ -129,7 +236,7 @@ def main() -> None:
             if not m:
                 continue
             pkg = m.group(1)
-            pkg_files[pkg].append(f)
+            pkg_files[pkg].append((root_name, f))
             pkg_loc[pkg] += text.count("\n")
             pkg_root.setdefault(pkg, root_name)
             for imp in IMP_RE.findall(text):
@@ -164,33 +271,77 @@ def main() -> None:
         depth(s)
 
     cycle_members = {i: scc for i, scc in enumerate(sccs) if len(scc) > 1}
+    header = (
+        "id\tjava_package\tjava_paths\tsource_root\tfiles\tloc\tcrate\twave\tcycle"
+        "\tneeds_split\tdeps\tstatus\tattempts\tnotes"
+    )
+
+    def java_paths(pkg: str) -> str:
+        return ",".join(
+            sorted(f.relative_to(ROOTS[root]).as_posix() for root, f in pkg_files[pkg])
+        )
+
+    def package_row(pkg: str) -> list[str]:
+        in_cycle = scc_of[pkg] if scc_of[pkg] in cycle_members else ""
+        needs_split = "yes" if (
+            len(pkg_files[pkg]) > SPLIT_FILE_THRESHOLD or in_cycle != ""
+        ) else ""
+        return [
+            derive_id(pkg), pkg, java_paths(pkg), pkg_root[pkg],
+            str(len(pkg_files[pkg])), str(pkg_loc[pkg]), crate_for(pkg),
+            str(wave[scc_of[pkg]]), str(in_cycle), needs_split,
+            ",".join(sorted(deps[pkg])), "pending", "0", "",
+        ]
+
+    def split_row() -> list[str]:
+        root_dir = ROOTS["minecraft"]
+        nbt_dir = root_dir / NBT_DIR
+        rows = []
+        for unit_id, (pkg, files, wv, cyc, deps_list) in NBT_UNITS.items():
+            loc = 0
+            paths: list[str] = []
+            for f in files:
+                path = nbt_dir / f
+                if not path.is_file():
+                    sys.exit(f"--split-nbt: missing file for unit {unit_id}: {path}")
+                loc += sum(1 for _ in path.open(encoding="utf-8", errors="replace"))
+                paths.append((NBT_DIR / f).as_posix())
+            dep_str = ",".join(sorted(d for d in deps_list if d in known))
+            rows.append([
+                unit_id, pkg, ",".join(sorted(paths)), "minecraft",
+                str(len(files)), str(loc), "rivet-nbt", str(wv), cyc, "",
+                dep_str, "pending", "0", "",
+            ])
+        return rows
+
+    rows = [
+        r for pkg in sorted(known)
+        if not (args.split_nbt and pkg in NBT_SPLIT_PACKAGES)
+        for r in [package_row(pkg)]
+    ]
+    if args.split_nbt:
+        rows.extend(split_row())
+
+    # Stable ordering: wave, then unit id.
+    rows.sort(key=lambda r: (int(r[7]), r[0]))
 
     out = REPO / "MANIFEST.tsv"
     with out.open("w", encoding="utf-8") as fh:
-        fh.write("id\tjava_package\tsource_root\tfiles\tloc\tcrate\twave\tcycle\tneeds_split\tdeps\tstatus\tattempts\tnotes\n")
-        for pkg in sorted(known, key=lambda p: (wave[scc_of[p]], p)):
-            unit_id = pkg.replace("net.minecraft.", "mc.").replace(
-                "org.bukkit.", "bukkit.").replace("io.papermc.paper.", "paper.")
-            in_cycle = scc_of[pkg] if scc_of[pkg] in cycle_members else ""
-            needs_split = "yes" if (
-                len(pkg_files[pkg]) > SPLIT_FILE_THRESHOLD or in_cycle != "") else ""
-            fh.write("\t".join([
-                unit_id, pkg, pkg_root[pkg], str(len(pkg_files[pkg])),
-                str(pkg_loc[pkg]), crate_for(pkg), str(wave[scc_of[pkg]]),
-                str(in_cycle), needs_split, ",".join(sorted(deps[pkg])),
-                "pending", "0", "",
-            ]) + "\n")
+        fh.write(header + "\n")
+        for r in rows:
+            fh.write("\t".join(r) + "\n")
 
-    n_units = len(known)
+    n_split = len(NBT_UNITS) if args.split_nbt else 0
     n_cycles = len(cycle_members)
     biggest = max(cycle_members.values(), key=len, default=[])
-    print(f"{n_units} units -> {out}")
+    print(f"{len(rows)} units -> {out} (nbt split: {n_split} class-cluster units)"
+          if args.split_nbt else f"{len(rows)} units -> {out}")
     print(f"waves: 0..{max(wave.values())}, cycles: {n_cycles} "
           f"(largest {len(biggest)} pkgs), needs_split: "
-          f"{sum(1 for p in known if len(pkg_files[p]) > SPLIT_FILE_THRESHOLD or scc_of[p] in cycle_members)}")
+          f"{sum(1 for r in rows if r[9] == 'yes')}")
     per_crate: dict[str, int] = defaultdict(int)
-    for pkg in known:
-        per_crate[crate_for(pkg)] += pkg_loc[pkg]
+    for r in rows:
+        per_crate[r[6]] += int(r[5])
     for crate, loc in sorted(per_crate.items(), key=lambda kv: -kv[1]):
         print(f"  {crate:22} {loc:>8} LOC")
 
