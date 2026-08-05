@@ -3,7 +3,8 @@
 //! Subcommands:
 //! - `extract` — dump the block registry + block states from the Paper 26.2
 //!   bundler jar into `data/block_states.json`
-//! - `generate` — read that JSON and emit Rust registry source under `generated/`
+//! - `generate` — read that JSON and emit Rust registry source into
+//!   `crates/rivet-registry/src/generated/` (committed, feature-gated)
 //!
 //! The tool is excluded from the cargo workspace (see root `Cargo.toml`).
 
@@ -58,7 +59,7 @@ fn print_usage() {
          \x20             Flags: --bundler <path>   path to paper-bundler-26.2*.jar\n\
          \x20                     --output <path>   output JSON (default data/block_states.json)\n\
          \x20   generate  Read data/block_states.json and emit Rust registry source\n\
-         \x20             under generated/ (sample for crates/rivet-registry).\n\
+         \x20             into crates/rivet-registry/src/generated/ (committed).\n\
          \x20             Flags: --input <path>    input JSON (default data/block_states.json)\n\
          \x20                     --output <dir>   output dir (default generated/)\n\
          \n\

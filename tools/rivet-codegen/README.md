@@ -12,8 +12,9 @@ for `crates/rivet-registry`. It is excluded from the cargo workspace
 
 - **`extract`** — pulls the block registry + block-state properties out of the
   Paper 26.2 bundler jar and writes `data/block_states.json`.
-- **`generate`** — reads that JSON and emits a sample registry table under
-  `generated/` (a `BlockId` registry + a block-state property enum structure).
+- **`generate`** — reads that JSON and emits the registry tables directly into
+  `crates/rivet-registry/src/generated/` (a `BlockId` registry + a block-state
+  property enum structure).
 
 ```
 rivet-codegen extract [--bundler <path>] [--output <path>]
@@ -32,7 +33,7 @@ checkout; the tool needs a jar produced elsewhere.
 ```
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
-target/release/rivet-codegen generate         # -> generated/{blocks.rs, block_properties.rs}
+target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs}
 ```
 
 `extract` caches the unpacked classpath in `.cache/` (gitignored) so reruns are
@@ -82,12 +83,20 @@ the block-state index layout and must not be sorted during codegen.
 
 ## Generated output
 
-- `generated/blocks.rs` — `BlockId(pub u16)`, a `phf::Map<&'static str, u16>`
+Wired into `crates/rivet-registry/src/generated/`, committed, and gated behind
+the crate's `"blocks"` cargo feature:
+
+- `mod.rs` — declares the two generated submodules.
+- `blocks.rs` — `BlockId(pub u16)`, a `phf::Map<&'static str, u16>`
   (`BLOCK_BY_NAME`), an id-indexed `BLOCK_BY_ID` array, and lookup methods.
-- `generated/block_properties.rs` — `BlockPropertyId`, an enum with one variant
-  per distinct `(name, values)` property type, plus the value tables and a
-  per-block `BLOCK_STATE_SHAPES` table (ordered property ids by block id).
+- `block_properties.rs` — `BlockPropertyId`, an enum with one variant per
+  distinct `(name, values)` property type, plus the value tables and a per-block
+  `BLOCK_STATE_SHAPES` table (ordered property ids by block id).
 
 The generator asserts block ids are contiguous `0..n` (true for vanilla 26.2).
-These files are samples for `crates/rivet-registry`; wiring them into the crate
-(adding the `phf` dependency, feature-gating) is a follow-up.
+After regenerating, run `cargo fmt -p rivet-registry` (the phf macro output is
+not format-clean as emitted) and `cargo check -p rivet-registry --features blocks`.
+The codegen test `generated_output_matches_committed` enforces the golden
+no-drift invariant: it regenerates to a temp dir, rustfmts the temp copy, and
+asserts byte-equality with the committed `src/generated/` — without touching
+repository source.
