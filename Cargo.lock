@@ -24,12 +24,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bytes"
-version = "1.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
-
-[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -175,7 +169,6 @@ version = "0.1.0-dev+mc26.2"
 name = "rivet-nbt"
 version = "0.1.0-dev+mc26.2"
 dependencies = [
- "bytes",
  "cesu8",
  "flate2",
  "rivet-core",
