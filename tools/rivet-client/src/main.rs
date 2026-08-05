@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use azalea::app::{App, Plugin, Update};
+use azalea::core::game_type::GameMode;
 use azalea::ecs::message::MessageReader;
 use azalea::ecs::prelude::{Res, Resource};
 use azalea::ecs::schedule::IntoScheduleConfigs;
 use azalea::join::{ConnectionFailedEvent, poll_create_connection_task};
 use azalea::prelude::*;
-use azalea::core::game_type::GameMode;
 use serde_json::{Value, json};
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:25599";
@@ -222,7 +222,12 @@ async fn observe_and_emit(bot: Client, state: State) {
         if now >= started + OBSERVATION_TIMEOUT {
             break;
         }
-        if now >= started + MIN_OBSERVATION && now.duration_since(last_change) >= QUIET_PERIOD {
+        // Never quiesce on an empty chunk set: a stalled or regressed chunk
+        // stream must surface as `chunk_count: 0`, not be accepted as stable.
+        if size > 0
+            && now >= started + MIN_OBSERVATION
+            && now.duration_since(last_change) >= QUIET_PERIOD
+        {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -241,7 +246,11 @@ async fn observe_and_emit(bot: Client, state: State) {
         .unwrap_or_else(|| "?".to_string());
 
     let (health, food, saturation) = match bot.hunger() {
-        Ok(hunger) => (bot.health().ok(), Some(hunger.food), Some(hunger.saturation)),
+        Ok(hunger) => (
+            bot.health().ok(),
+            Some(hunger.food),
+            Some(hunger.saturation),
+        ),
         Err(_) => (None, None, None),
     };
     let experience = bot.experience().ok();

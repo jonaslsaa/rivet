@@ -58,6 +58,22 @@ pub struct Server {
     /// Byte offset in the boot log at the moment `Done` was seen; used to
     /// inspect only the post-Done tail for the clean-save marker.
     done_offset: usize,
+    /// Set by `shutdown` after the child has exited; `Drop` then leaves it
+    /// alone instead of killing an already-reaped process.
+    stopped: bool,
+}
+
+/// If a `Server` is dropped without a clean `shutdown` (an error or panic
+/// anywhere in the join path), kill the underlying java process so it does not
+/// keep port 25599 hostage for the next run.
+impl Drop for Server {
+    fn drop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        let _ = signal_process(self.child.id(), "KILL");
+        let _ = self.child.wait();
+    }
 }
 
 /// Send a signal to `pid` via the POSIX `kill` utility (no signal crate).
@@ -100,7 +116,11 @@ pub fn ensure_jar(crate_root: &Path) -> Result<PathBuf, Error> {
             fs::create_dir_all(parent)?;
         }
         fs::copy(&from_source, &local)?;
-        println!("    copied {} -> {}", from_source.display(), local.display());
+        println!(
+            "    copied {} -> {}",
+            from_source.display(),
+            local.display()
+        );
         return Ok(local);
     }
     Err(Error::Gate(format!(
@@ -238,6 +258,7 @@ pub fn boot(
         child,
         log_path: log_path.to_path_buf(),
         done_offset,
+        stopped: false,
     })
 }
 
@@ -250,6 +271,7 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
     thread::sleep(Duration::from_millis(1500));
     let _ = signal_process(pid, "TERM");
     wait_for_exit(&mut server.child, SHUTDOWN_TIMEOUT)?;
+    server.stopped = true;
 
     let bytes = fs::read(&server.log_path)?;
     let tail = if bytes.len() > server.done_offset {
