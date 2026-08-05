@@ -16,12 +16,12 @@ How we run the port with Claude Code workflows. Companion to `RESEARCH.md`.
 `MANIFEST.tsv`, one row per **unit** (a class cluster that translates together — not per Java file; cyclic Java clusters must move as one unit):
 
 ```
-id	java_paths	rust_module	crate	deps	ownership_ref	status	attempts	notes
-nbt-tag	net/minecraft/nbt/Tag.java,...	rivet-nbt::tag	rivet-nbt	-	OWNERSHIP.md#nbt	done	1	
-ent-base	world/entity/Entity.java,...	rivet-entity::base	rivet-entity	world-chunk,registry	OWNERSHIP.md#entities	pending	0	
+id	java_package	java_paths	source_root	files	loc	crate	wave	cycle	needs_split	deps	status	attempts	notes
+mc.nbt	net.minecraft.nbt	net/minecraft/nbt/Tag.java,...	minecraft	27	3109	rivet-nbt	3	nbt		com.mojang.serialization,net.minecraft,net.minecraft.util	done	1	
+mc.nbt.utils	net.minecraft.nbt	net/minecraft/nbt/NbtUtils.java	minecraft	1	560	rivet-nbt	5		mc.nbt.snbt,mc.nbt.text,net.minecraft.nbt,...	pending	0	
 ```
 
-Statuses: `pending → translated → reviewed → fixed → done`, plus `blocked(reason)` for human triage. Built by a one-time analysis workflow that walks the Java import graph, clusters cycles, and topo-orders crates. The wave-picker selects only units whose `deps` are `done`.
+Statuses: `pending → translated → reviewed → fixed → done`, plus `blocked(reason)` for human triage. Built by `scripts/analyze_graph.py` (run with `--split-nbt` to fold in the net.minecraft.nbt class-cluster split); rerunning it is idempotent and preserves each unit's `status`/`attempts`/`notes` by id (notes may span several roots: a package's files can live under multiple source roots, and `source_root` is then the comma-joined list of those roots — each `java_paths` entry is relative to the root it was found under). `deps` are comma-joined java packages, or unit ids (`mc.nbt.snbt`) where a unit must name a sibling unit that shares its `java_package`. The wave-picker selects only units whose `deps` are `done`, preferring low-wave cycle-free units.
 
 ## Parallelization: tracks, waves, and the big cycle
 
