@@ -8,11 +8,13 @@
 //! workspace deps, so the few needed ones live here.
 
 /// Java `String.hashCode()`: `s[0]*31^(n-1) + s[1]*31^(n-2) + ... + s[n-1]`,
-/// wrapping `i32` arithmetic.
+/// wrapping `i32` arithmetic. Java iterates UTF-16 code units (each char /
+/// surrogate code unit), so the hash must use `encode_utf16()`, not UTF-8
+/// bytes — non-ASCII input otherwise diverges.
 pub fn string_hash(s: &str) -> i32 {
     let mut hash: i32 = 0;
-    for &byte in s.as_bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(byte as i32);
+    for unit in s.encode_utf16() {
+        hash = hash.wrapping_mul(31).wrapping_add(unit as i32);
     }
     hash
 }
