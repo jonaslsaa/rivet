@@ -57,6 +57,8 @@ SPLIT_FILE_THRESHOLD = 15
 
 
 def crate_for(pkg: str) -> str:
+    if pkg == "net.minecraft":  # root-package classes only; subpackages match CRATE_RULES
+        return "rivet-core"
     for prefix, crate in CRATE_RULES:
         if pkg == prefix or pkg.startswith(prefix + "."):
             return crate

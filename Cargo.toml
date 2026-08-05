@@ -9,6 +9,7 @@ edition = "2024"
 
 # Library choices are documented in CRATES.md — add dependencies there first.
 [workspace.dependencies]
+rivet-core = { path = "crates/rivet-core" }
 rivet-util = { path = "crates/rivet-util" }
 rivet-nbt = { path = "crates/rivet-nbt" }
 rivet-serialization = { path = "crates/rivet-serialization" }

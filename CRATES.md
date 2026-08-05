@@ -4,9 +4,10 @@
 
 | Crate | Ports | Notes |
 |---|---|---|
+| `rivet-core` | `net.minecraft` root package | `CrashReport`, `ChatFormatting`, `SharedConstants`, `Util`, root exceptions. Bottom of the stack — keeps module-path mirroring clean instead of scattering root classes ad hoc. |
 | `rivet-util` | `net.minecraft.util`, `Mth`, RNG | Java-parity layer: LCG/Xoroshiro128++ RNG, `nextGaussian` quirk, md5 `seedFromHashOf`, 65536-entry sin table, `java_string_hash`. Golden-tested against Java fixtures. |
-| `rivet-nbt` | `net.minecraft.nbt` | Own port (Java modified-UTF-8 via `cesu8`); SNBT; fuzz targets. |
-| `rivet-serialization` | Mojang DataFixerUpper (MIT) | `Codec`/`DynamicOps`/`DataResult` shape preserved; serde only beneath external JSON. |
+| `rivet-serialization` | Mojang DataFixerUpper (MIT) | `Codec`/`DynamicOps`/`DataResult` shape preserved; serde only beneath external JSON. A leaf: DFU has no Minecraft deps. |
+| `rivet-nbt` | `net.minecraft.nbt` | Own port (Java modified-UTF-8 via `cesu8`); SNBT; fuzz targets. **Depends on `rivet-serialization`** — faithful to Java, where `NbtOps implements DynamicOps<Tag>`. |
 | `rivet-text` | Adventure (MIT) usage in Paper | Components, legacy `§` codes. |
 | `rivet-brigadier` | Mojang Brigadier (MIT) | Direct port. |
 | `rivet-registry` | `core.registries`, `src/generated` | **Generated** by `tools/rivet-codegen` from extracted vanilla data; committed; feature-gated; prefer compact tables over huge Rust source. |
