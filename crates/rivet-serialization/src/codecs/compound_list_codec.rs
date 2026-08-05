@@ -43,10 +43,19 @@ where
                     failed.push(Pair::of(key.clone(), value.clone()));
                 }
 
-                // `result.apply2stable((u, e) -> { read.add(e); return u; }, readEntry)`
-                // — the entry is pushed here on success (the `apply2_stable`
-                // function no longer needs to capture `read`).
-                if let Some(e) = read_entry.clone().result_or_partial_silent() {
+                // `result.apply2stable((u, e) -> { read.add(e); return u; }, readEntry)`.
+                // Java's Instance.ap2 fast path (all three Success) invokes the
+                // closure directly; otherwise `Applicative.super.ap2` =
+                // `ap(ap(map(curry, func), result), readEntry)`. In that chain
+                // the closure only materializes while both sides still carry a
+                // value — Success OR error-with-partial (Error.ap maps
+                // `partialValue.map(f -> f.apply(a))`). Once either side is a
+                // FULL error (no partial), the partial function never forms and
+                // `read.add(e)` stops running. So `read` grows only while
+                // `result` AND `readEntry` both `has_result_or_partial()`.
+                if result.has_result_or_partial()
+                    && let Some(e) = read_entry.clone().result_or_partial_silent()
+                {
                     read.push(Pair::of(e.0, e.1));
                 }
                 let r = result.clone();

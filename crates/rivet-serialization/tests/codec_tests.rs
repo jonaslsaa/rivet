@@ -395,3 +395,73 @@ fn unbounded_map_codec_decode_has_stable_lifecycle() {
     // `getMap` sets stable, `apply2stable` keeps it stable.
     assert_eq!(result.lifecycle(), Lifecycle::stable());
 }
+
+// ---------------------------------------------------------------------------
+// CompoundListCodec: entries do not accumulate into `read` past a full error
+// ---------------------------------------------------------------------------
+
+/// A `Codec<String>` that fails (full error, no partial) on the key `"bad"`,
+/// mimicking Java's `FieldDecoder` missing-key error: `result` becomes a full
+/// error with no partial, so `CompoundListCodec.decode` must stop adding later
+/// entries to `read`.
+#[derive(Debug)]
+struct FailingKeyCodec;
+
+impl rivet_serialization::Encoder<String, TestOps> for FailingKeyCodec {
+    fn encode(&self, input: &String, ops: &TestOps, prefix: &Value) -> DataResult<Value> {
+        let _ = (input, ops);
+        DataResult::success(prefix.clone())
+    }
+}
+
+impl rivet_serialization::Decoder<String, TestOps> for FailingKeyCodec {
+    fn decode(&self, _ops: &TestOps, input: &Value) -> DataResult<(String, Value)> {
+        match input {
+            Value::Str(s) if s == "bad" => DataResult::error("bad key"),
+            Value::Str(s) => DataResult::success((s.clone(), Value::Null)),
+            other => DataResult::error(format!("Not a string: {other:?}")),
+        }
+    }
+}
+
+impl rivet_serialization::Codec<String, TestOps> for FailingKeyCodec {}
+
+#[test]
+fn compound_list_codec_skips_entries_past_a_full_error() {
+    // Java `CompoundListCodec.decode`: `result.getPlain().apply2stable((u, e) ->
+    // { read.add(e); return u; }, readEntry)`. The accumulator runs only while
+    // `result` and `readEntry` both carry a value (Instance.ap2 fast path, or
+    // the Applicative fallback that maps error partials). Once `result` is a
+    // FULL error (no partial), later entries never reach `read.add` — even a
+    // succeeding entry must not accumulate. This locks that faithful behavior:
+    // the bad key first fully errors `result`; the valid `good` entry after it
+    // must NOT appear in the decoded `read` list.
+    let ops = TestOps;
+    let key_codec: Arc<dyn rivet_serialization::Codec<String, TestOps>> = Arc::new(FailingKeyCodec);
+    let value_codec: Arc<dyn rivet_serialization::Codec<String, TestOps>> =
+        rivet_serialization::codec::string_codec();
+    let codec = rivet_serialization::codec::compound_list(key_codec, value_codec);
+
+    // `bad` first (errors, no partial) then `good` (would succeed).
+    let input = Value::Map(vec![
+        ("bad".to_string(), Value::Str("v1".to_string())),
+        ("good".to_string(), Value::Str("v2".to_string())),
+    ]);
+    let result = codec.decode(&ops, &input);
+    assert!(result.is_error(), "the bad key must error the decode");
+    // The error-with-partial carries the accumulated `read` list. Because the
+    // full error happened at the first entry, the `good` entry must NOT be in
+    // the partial — Java's `read.add` stopped running.
+    let partial = result.result_or_partial_silent();
+    match partial {
+        Some((read, _)) => {
+            assert!(
+                read.is_empty(),
+                "entries after a full error must not accumulate; got {read:?}"
+            );
+        }
+        None => {
+            // A full error with no partial is also faithful.
+        }
+    }
+}
