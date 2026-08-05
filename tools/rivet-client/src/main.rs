@@ -79,12 +79,14 @@ fn usage() -> String {
 #[derive(Clone, Component)]
 struct State {
     spawned: Arc<AtomicBool>,
+    terminal_emitted: Arc<AtomicBool>,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             spawned: Arc::new(AtomicBool::new(false)),
+            terminal_emitted: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -145,6 +147,7 @@ async fn handle(bot: Client, event: Event, state: State) {
             bot.exit();
         }
         Event::Disconnect(reason) => {
+            state.terminal_emitted.store(true, Ordering::Release);
             emit(json!({
                 "event": "disconnect",
                 "reason": reason.map(|reason| format!("{reason:?}")),
@@ -176,6 +179,7 @@ async fn main() -> ExitCode {
 
     let state = State::default();
     let spawned = Arc::clone(&state.spawned);
+    let terminal_emitted = Arc::clone(&state.terminal_emitted);
     let (failure_tx, failure_rx) = tokio::sync::oneshot::channel();
     let connection_failure = ConnectionFailure(Arc::new(Mutex::new(Some(failure_tx))));
     let account = Account::offline(&args.username);
@@ -199,6 +203,12 @@ async fn main() -> ExitCode {
             if spawned.load(Ordering::Acquire) {
                 ExitCode::SUCCESS
             } else {
+                if !terminal_emitted.load(Ordering::Acquire) {
+                    emit(json!({
+                        "event": "connection_failed",
+                        "reason": "Azalea exited before spawning; see stderr for its resolution or startup error",
+                    }));
+                }
                 ExitCode::FAILURE
             }
         }
