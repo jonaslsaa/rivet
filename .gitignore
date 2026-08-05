@@ -1,4 +1,5 @@
 /target
+/working
 /working/
 .DS_Store
 *.jar
