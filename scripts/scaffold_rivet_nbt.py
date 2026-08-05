@@ -20,9 +20,8 @@ Ownership (unit -> files it will fill):
 Every generated file is an empty stub carrying `// STUB(<unit>)` so cargo check
 passes on the empty tree and agents fill their own files only.
 
-WARNING: running scripts/analyze_graph.py regenerates MANIFEST.tsv from scratch
-and will undo the class-cluster split in it. Re-run scripts/split_nbt_units.py
-first if you need a fresh manifest.
+scripts/analyze_graph.py --split-nbt regenerates MANIFEST.tsv and owns the
+class-cluster split; rerunning it is idempotent and preserves unit status.
 """
 
 import sys

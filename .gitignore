@@ -5,6 +5,10 @@
 *.jar
 /fixtures/large/
 
+# Python bytecode from the manifest tooling (scripts/*.py) — regenerable
+__pycache__/
+*.pyc
+
 # Oracle harness scratch space (server runs, worlds, logs) — never committed
 tools/rivet-oracle/work/
 
