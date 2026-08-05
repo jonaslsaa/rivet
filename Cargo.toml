@@ -24,7 +24,7 @@ rivet-api = { path = "crates/rivet-api" }
 unsafe_code = "warn" # rivet-ffi overrides locally; see PORTING.md
 
 [workspace.lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -1 }
 # Faithful Java semantics require these (see PORTING.md, LESSONS-PUMPKIN.md):
 cast_possible_truncation = "allow"
 cast_possible_wrap = "allow"
