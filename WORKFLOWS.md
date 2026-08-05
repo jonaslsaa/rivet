@@ -121,6 +121,14 @@ Fixer rule: errors are fixed by *correcting the translation*, never by deleting 
 
 Runs against a milestone branch, scenarios in parallel: worldgen chunk-hash diff over N seeds vs vanilla, packet round-trips vs recorded sessions, azalea bot scripts (join, move, dig, place, combat) executed against both servers with compared outcomes. Output: structured failure list → converted to manifest rows tagged `regression`. Milestones promote only on green.
 
+### Headless client driver
+
+Use Azalea pinned to an exact Minecraft 26.2-compatible release or Git revision as the headless client for behavioral scenarios. Keep it in an isolated tool package/process with its own pinned nightly Rust toolchain: Rivet's production workspace remains on its pinned stable toolchain, and Azalea's Bevy/ECS dependency graph must not enter any server crate. `rivet-oracle` starts the driver and consumes a versioned, machine-readable JSON transcript.
+
+Each scenario is run with identical seed, configuration, world state, and offline bot identity against Paper and Rivet. Compare normalized observable outcomes—login state, position, inventory, health, chunks, server corrections, and relevant packets—rather than treating a successful connection as sufficient. Preserve raw logs or packet captures for diagnosing differences, but exclude nondeterministic values from the parity comparison only when the exclusion is explicit and justified.
+
+Before Rivet implements enough of the protocol to accept a client, validate the harness by running scenarios Paper-versus-Paper and requiring identical normalized transcripts. Also include a controlled negative case to prove that the comparator detects a known difference. Start with a single join scenario, then add movement, digging, placement, inventory, and combat as the corresponding server functionality lands. The harness uses `online-mode=false`; no Microsoft account is required.
+
 ## Test reuse: what we can port, what we must record, what we must build
 
 Measured in the tree: 186 JUnit files (~21k LOC) in `paper-server/src/test` + `paper-api/src/test`, and the vanilla **GameTest framework** (47 files under `net/minecraft/gametest`).
