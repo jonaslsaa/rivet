@@ -31,28 +31,28 @@ pub mod string_reader;
 pub mod suggestion;
 pub mod tree;
 
-/// `com.mojang.brigadier.Message` — Java interface with a single `getString()`.
-pub use message::Message;
+/// `com.mojang.brigadier.AmbiguityConsumer<S>`.
+pub use ambiguity_consumer::AmbiguityConsumer;
 /// `com.mojang.brigadier.Command` — functional interface returning an `int` result.
 pub use command::{Command, CommandFn};
 /// `com.mojang.brigadier.CommandDispatcher<S>`.
 pub use command_dispatcher::CommandDispatcher;
-/// `com.mojang.brigadier.ParseResults<S>`.
-pub use parse_results::ParseResults;
-/// `com.mojang.brigadier.StringReader`.
-pub use string_reader::StringReader;
-/// `com.mojang.brigadier.RedirectModifier<S>`.
-pub use redirect_modifier::RedirectModifier;
-/// `com.mojang.brigadier.SingleRedirectModifier<S>`.
-pub use single_redirect_modifier::SingleRedirectModifier;
-/// `com.mojang.brigadier.ResultConsumer<S>`.
-pub use result_consumer::ResultConsumer;
-/// `com.mojang.brigadier.AmbiguityConsumer<S>`.
-pub use ambiguity_consumer::AmbiguityConsumer;
 /// `com.mojang.brigadier.ImmutableStringReader`.
 pub use immutable_string_reader::ImmutableStringReader;
 /// `com.mojang.brigadier.LiteralMessage`.
 pub use literal_message::LiteralMessage;
+/// `com.mojang.brigadier.Message` — Java interface with a single `getString()`.
+pub use message::Message;
+/// `com.mojang.brigadier.ParseResults<S>`.
+pub use parse_results::ParseResults;
+/// `com.mojang.brigadier.RedirectModifier<S>`.
+pub use redirect_modifier::RedirectModifier;
+/// `com.mojang.brigadier.ResultConsumer<S>`.
+pub use result_consumer::ResultConsumer;
+/// `com.mojang.brigadier.SingleRedirectModifier<S>`.
+pub use single_redirect_modifier::SingleRedirectModifier;
+/// `com.mojang.brigadier.StringReader`.
+pub use string_reader::StringReader;
 
 #[cfg(test)]
 mod tests;

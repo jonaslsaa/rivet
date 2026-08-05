@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
+use crate::LiteralMessage;
 use crate::exceptions::{
     BuiltInExceptionProvider, Dynamic2CommandExceptionType, DynamicCommandExceptionType,
     SimpleCommandExceptionType,
 };
-use crate::LiteralMessage;
 
 /// Java `BuiltInExceptions` — the singleton `CommandSyntaxException.BUILT_IN_EXCEPTIONS`.
 ///
@@ -108,7 +108,10 @@ impl BuiltInExceptions {
             }),
 
             literal_incorrect: DynamicCommandExceptionType::new(|expected| {
-                Arc::new(LiteralMessage::new(format!("Expected literal {}", expected)))
+                Arc::new(LiteralMessage::new(format!(
+                    "Expected literal {}",
+                    expected
+                )))
             }),
 
             reader_expected_start_of_quote: SimpleCommandExceptionType::new(LiteralMessage::new(

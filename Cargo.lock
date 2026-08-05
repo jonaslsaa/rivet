@@ -194,7 +194,6 @@ dependencies = [
  "base64",
  "rivet-nbt",
  "rivet-util",
- "serde",
  "serde_json",
 ]
 

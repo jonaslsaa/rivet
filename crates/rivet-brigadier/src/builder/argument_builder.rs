@@ -152,7 +152,9 @@ pub trait ArgumentBuilderBehavior<S: 'static> {
         if self.base().target.is_some() {
             panic!("Cannot add children to a redirected node");
         }
-        self.base_mut().arguments.add_child(Arc::from(argument.build()));
+        self.base_mut()
+            .arguments
+            .add_child(Arc::from(argument.build()));
         self
     }
 
@@ -198,7 +200,11 @@ pub trait ArgumentBuilderBehavior<S: 'static> {
     }
 
     /// Java `fork(CommandNode<S>, RedirectModifier<S>)`.
-    fn fork(&mut self, target: Arc<dyn CommandNode<S>>, modifier: Arc<dyn RedirectModifier<S>>) -> &mut Self {
+    fn fork(
+        &mut self,
+        target: Arc<dyn CommandNode<S>>,
+        modifier: Arc<dyn RedirectModifier<S>>,
+    ) -> &mut Self {
         self.forward(target, Some(modifier), true)
     }
 
@@ -228,7 +234,10 @@ struct SingleRedirectModifierAdapter<S> {
 }
 
 impl<S: 'static> RedirectModifier<S> for SingleRedirectModifierAdapter<S> {
-    fn apply(&self, context: &CommandContext<S>) -> Result<Vec<S>, CommandSyntaxException<'static>> {
+    fn apply(
+        &self,
+        context: &CommandContext<S>,
+    ) -> Result<Vec<S>, CommandSyntaxException<'static>> {
         self.inner.apply(context).map(|s| vec![s])
     }
 }

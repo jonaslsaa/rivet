@@ -10,5 +10,6 @@ use crate::exceptions::CommandSyntaxException;
 /// redirect to.
 pub trait RedirectModifier<S>: Send + Sync {
     /// Java `apply(CommandContext<S>) throws CommandSyntaxException`.
-    fn apply(&self, context: &CommandContext<S>) -> Result<Vec<S>, CommandSyntaxException<'static>>;
+    fn apply(&self, context: &CommandContext<S>)
+    -> Result<Vec<S>, CommandSyntaxException<'static>>;
 }

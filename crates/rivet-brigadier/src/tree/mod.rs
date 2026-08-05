@@ -49,7 +49,9 @@ pub trait CommandNode<S>: Send + Sync {
     /// Java `getRequirement()`.
     fn get_requirement(&self) -> Predicate<S>;
     /// Java `getRedirectModifier()`.
-    fn get_redirect_modifier(&self) -> Option<Arc<dyn crate::redirect_modifier::RedirectModifier<S>>>;
+    fn get_redirect_modifier(
+        &self,
+    ) -> Option<Arc<dyn crate::redirect_modifier::RedirectModifier<S>>>;
     /// Java `isFork()`.
     fn is_fork(&self) -> bool;
     /// Java `toString()` — rendered per concrete node (`<literal ...>` /
@@ -126,7 +128,9 @@ impl<S: 'static> CommandNode<S> for RootCommandNode<S> {
     fn get_requirement(&self) -> Predicate<S> {
         Arc::clone(&self.requirement)
     }
-    fn get_redirect_modifier(&self) -> Option<Arc<dyn crate::redirect_modifier::RedirectModifier<S>>> {
+    fn get_redirect_modifier(
+        &self,
+    ) -> Option<Arc<dyn crate::redirect_modifier::RedirectModifier<S>>> {
         None
     }
     fn is_fork(&self) -> bool {
@@ -205,7 +209,9 @@ impl<S: 'static> CommandNode<S> for LiteralCommandNode<S> {
     fn get_requirement(&self) -> Predicate<S> {
         Arc::clone(&self.requirement)
     }
-    fn get_redirect_modifier(&self) -> Option<Arc<dyn crate::redirect_modifier::RedirectModifier<S>>> {
+    fn get_redirect_modifier(
+        &self,
+    ) -> Option<Arc<dyn crate::redirect_modifier::RedirectModifier<S>>> {
         self.modifier.as_ref().map(Arc::clone)
     }
     fn is_fork(&self) -> bool {
@@ -279,7 +285,9 @@ impl<S: 'static, T: 'static> ArgumentCommandNode<S, T> {
     }
 
     /// Java `getCustomSuggestions()` — on the subclass, not the base `CommandNode`.
-    pub fn get_custom_suggestions(&self) -> Option<Arc<dyn crate::suggestion::SuggestionProvider<S>>> {
+    pub fn get_custom_suggestions(
+        &self,
+    ) -> Option<Arc<dyn crate::suggestion::SuggestionProvider<S>>> {
         self.custom_suggestions.as_ref().map(Arc::clone)
     }
 
@@ -307,7 +315,9 @@ impl<S: 'static, T: 'static> CommandNode<S> for ArgumentCommandNode<S, T> {
     fn get_requirement(&self) -> Predicate<S> {
         Arc::clone(&self.requirement)
     }
-    fn get_redirect_modifier(&self) -> Option<Arc<dyn crate::redirect_modifier::RedirectModifier<S>>> {
+    fn get_redirect_modifier(
+        &self,
+    ) -> Option<Arc<dyn crate::redirect_modifier::RedirectModifier<S>>> {
         self.modifier.as_ref().map(Arc::clone)
     }
     fn is_fork(&self) -> bool {

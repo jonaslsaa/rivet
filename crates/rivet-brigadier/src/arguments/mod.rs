@@ -8,5 +8,8 @@ use crate::string_reader::StringReader;
 /// Java `ArgumentType<T>` — parses a `StringReader` into a `T`.
 pub trait ArgumentType<T>: Send + Sync {
     /// Java `parse(StringReader) throws CommandSyntaxException`.
-    fn parse(&self, reader: &mut StringReader) -> Result<T, crate::exceptions::CommandSyntaxException<'static>>;
+    fn parse(
+        &self,
+        reader: &mut StringReader,
+    ) -> Result<T, crate::exceptions::CommandSyntaxException<'static>>;
 }
