@@ -1,0 +1,3 @@
+# Build output and extraction scratch space — regenerable by `extract`
+/target
+/.cache
