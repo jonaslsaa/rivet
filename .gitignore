@@ -4,6 +4,9 @@
 *.jar
 /fixtures/large/
 
+# Oracle harness scratch space (server runs, worlds, logs) — never committed
+tools/rivet-oracle/work/
+
 # Project .claude (workflows, settings) is repo content — override global ignore
 !.claude/
 .claude/settings.local.json
