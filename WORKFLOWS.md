@@ -32,7 +32,7 @@ entity↔level↔server back-references make most of Minecraft a single SCC at p
 - `MANIFEST.tsv` columns `wave` (topo depth), `cycle` (SCC id), `needs_split` encode this; the wave-picker prefers low-wave cycle-free units and otherwise schedules cluster-sized bites of the big SCC.
 
 **Concurrent tracks** (independent agent sessions/workflows, from day one):
-- **A — oracle/infra**: epics #1–3 (harness, azalea driver, CI/fuzz).
+- **A — oracle/infra**: epics #1–3 (harness, azalea driver, gate/fuzz tooling).
 - **B — foundation crates**: epics #4–8 — util, nbt, serialization, brigadier, registry-codegen are mutually independent; up to five parallel sessions.
 - **C — manifest refinement**: epic #9.
 - **D — adapter de-risk**: epic #14 (FFM spike) as soon as the M1 skeleton exists.
@@ -42,13 +42,13 @@ The serial spine is protocol → join → world → entity → gameplay; tracks 
 
 Three tiers, isolation matched to conflict risk:
 1. **Within a wave (same session)**: no worktrees. The scaffold pre-creates crates/mod trees/stubs so workflow agents own disjoint files in one checkout — nothing to merge, and one shared cargo `target/` keeps incremental builds warm. This is deliberate (Bun needed 4 worktrees because their agents shared files; we design the sharing away).
-2. **Across epics/tracks (multiple Claude sessions)**: one session per epic, each in **its own git worktree + branch** (`claude --worktree`, background agents with worktree isolation, or `git worktree add`). Sessions never share a checkout — cross-track conflicts are resolved at PR merge, where CI gates them. This is the intended way to scale beyond one session: 3–5 concurrent epic sessions, each producing PRs against `main`.
+2. **Across epics/tracks (multiple Claude sessions)**: one session per epic, each in **its own git worktree + branch** (`claude --worktree`, background agents with worktree isolation, or `git worktree add`). Sessions never share a checkout — cross-track conflicts are resolved at PR merge, gated by `scripts/gate.sh` run on the merged result (D10 — no hosted CI). This is the intended way to scale beyond one session: 3–5 concurrent epic sessions, each producing PRs against `main`.
 3. **Shared-file hotspots** (`Cargo.toml`, `lib.rs` mod lists, MANIFEST.tsv): only the wave controller edits these, serially, between waves. If two tracks both need a workspace change, it goes in a tiny standalone PR first.
 Caveats: each worktree gets its own cargo `target/` (disk + cold builds — do not share one via symlink; concurrent cargo runs fight over the lock; consider sccache if this hurts). Keep MANIFEST.tsv updates append/status-only so PR merges of it stay trivial.
 
 ## GitHub process wiring
 
-Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/rivet. Agents decompose epics into sub-issues using the **port-unit issue template**, work them via small PRs (PR template carries the fidelity checklist), and update `MANIFEST.tsv` in the same PR. CI (fmt → clippy -Dwarnings → test) gates merges; `blocked` label = controller triage; `regression`/`parity` labels come from `verify-oracle` runs.
+Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/rivet. Agents decompose epics into sub-issues using the **port-unit issue template**, work them via small PRs (PR template carries the fidelity checklist), and update `MANIFEST.tsv` in the same PR. **No hosted CI (D10)**: the controller runs `scripts/gate.sh` (fmt → clippy -Dwarnings → test) on every PR before merging — a red gate blocks the merge. `blocked` label = controller triage; `regression`/`parity` labels come from `verify-oracle` runs.
 
 ## Workflow catalog (`.claude/workflows/`)
 

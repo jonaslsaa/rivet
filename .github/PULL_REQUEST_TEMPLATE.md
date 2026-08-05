@@ -10,6 +10,7 @@
 - [ ] HashMap iteration order not observable (or IndexMap/sort used)
 - [ ] Existing Java tests ported alongside; no test/fixture weakened
 - [ ] `MANIFEST.tsv` status updated for the unit(s)
+- [ ] `scripts/gate.sh` green on this branch (no hosted CI — this is the gate, D10)
 - [ ] Any `// STUB(...)` items created are listed below
 
 ## Stubs / blocked / open questions

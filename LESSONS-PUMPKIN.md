@@ -9,7 +9,7 @@ Distilled from a deep read of `working/Pumpkin` (0.1.0-dev+26.2, ~310k hand-writ
 - **Porting Mojang's Codec abstraction, not just the data.** `pumpkin-codecs/` is a DFU port (`DynamicOps`, `DataResult`, `Lifecycle`) — validates our `rivet-serialization` plan.
 - **Hybrid protocol strategy**: generated packet *IDs* per protocol version + hand-written packet *bodies* with derive macros (`#[java_packet(...)]`, `derive(PacketRead/PacketWrite)`) for simple cases.
 - **Committed generated data behind fine-grained cargo features** (`pumpkin-data`, ~50 features) — but their 22.9MB `block.rs` hurts build times; we should prefer compact tables/binary blobs where possible.
-- **Lint posture tuned for faithful Java semantics**: `cast_possible_truncation/wrap`, `float_cmp` allowed; `todo!`/`print_stdout` denied. CI chain `fmt → cargo-machete → clippy → nextest` multi-arch; cargo-fuzz targets on every parser (NBT, packet codecs).
+- **Lint posture tuned for faithful Java semantics**: `cast_possible_truncation/wrap`, `float_cmp` allowed; `todo!`/`print_stdout` denied. Their check chain `fmt → cargo-machete → clippy → nextest` is right — we run the same chain locally as `scripts/gate.sh` (no hosted CI, D10); cargo-fuzz targets on every parser (NBT, packet codecs).
 - **AI-agent PR etiquette** in their CONTRIBUTING.md (agents tag PRs, warning about duplicate agent PRs) — precedent for our process.
 
 ## What Pumpkin got wrong (avoid — these validate DECISIONS.md)

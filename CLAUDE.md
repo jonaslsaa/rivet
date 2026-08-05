@@ -12,6 +12,7 @@ Faithful Rust port of the Paper Minecraft server (pinned MC 26.2), plus a JVM ad
 ## Commands
 
 - `cargo check --workspace` / `cargo test --workspace` (nextest preferred when available)
+- `scripts/gate.sh` — the merge gate (fmt, clippy -Dwarnings, tests). No hosted CI: run this before merging any PR.
 - Java oracle lives in `working/Paper` (gradle).
 
 ## Non-negotiables

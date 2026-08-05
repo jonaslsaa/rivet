@@ -29,3 +29,6 @@ The Java server is the oracle; parity is measured, not asserted (`WORKFLOWS.md` 
 
 ## D9 — Process
 Work is organized as GitHub **epics → agent-created sub-issues → PRs**, milestones M0–M4 (see `WORKFLOWS.md`). Reference docs (`PORTING.md`, `OWNERSHIP.md`) are updated via dedicated PRs, never silently mid-wave. Rust edition 2024, `rustfmt` defaults, clippy clean at wave gates.
+
+## D10 — No hosted CI
+No GitHub Actions (or any hosted CI). The merge gate is `scripts/gate.sh` (fmt → clippy `-Dwarnings` → tests), run locally by the controller before merging any PR and at the end of every wave. A red gate blocks the merge; enforcement is by process (PR checklist + controller), not by GitHub.
