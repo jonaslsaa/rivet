@@ -5,3 +5,12 @@ edition.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+cesu8 = { workspace = true }
+flate2 = { workspace = true }
+rivet-core = { workspace = true }
+rivet-serialization = { workspace = true }
+rivet-text = { workspace = true }
+rivet-util = { workspace = true }
+ryu = { workspace = true }
