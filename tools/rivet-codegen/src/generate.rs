@@ -1,5 +1,5 @@
 //! `rivet-codegen generate` — read the extracted block-state JSON and emit Rust
-//! registry source for `crates/rivet-registry` (as a sample in `generated/`).
+//! registry source directly into `crates/rivet-registry/src/generated/`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -7,14 +7,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::model::BlockRegistry;
+use crate::model::{BlockDef, BlockRegistry};
 
 pub fn default_input(repo_root: &Path) -> PathBuf {
     repo_root.join("tools/rivet-codegen/data/block_states.json")
 }
 
+/// Generated tables are written directly into the `rivet-registry` crate so the
+/// committed output cannot drift from what the generator produces.
 pub fn default_output(repo_root: &Path) -> PathBuf {
-    repo_root.join("tools/rivet-codegen/generated")
+    repo_root.join("crates/rivet-registry/src/generated")
 }
 
 pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> {
@@ -70,6 +72,8 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
         data.minecraft_version
     );
 
+    fs::write(output.join("mod.rs"), format!("{header}{}", render_mod()))
+        .context("write generated/mod.rs")?;
     fs::write(output.join("blocks.rs"), format!("{header}{}", render_blocks(&data)?))
         .context("write generated/blocks.rs")?;
     fs::write(
@@ -87,6 +91,11 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
         output.display()
     );
     Ok(())
+}
+
+/// The generated module file: declares the two generated submodules.
+fn render_mod() -> String {
+    "pub mod block_properties;\npub mod blocks;\n".to_string()
 }
 
 /// `axis` -> `Axis`, `creaking_heart_state` -> `CreakingHeartState`. Appends a
@@ -126,6 +135,11 @@ fn render_blocks(data: &BlockRegistry) -> Result<String> {
         }
     }
 
+    // Emit in registry-id order so `BLOCK_BY_ID`'s id == index invariant holds
+    // by construction, independent of the source JSON's block ordering.
+    let mut blocks: Vec<&BlockDef> = data.blocks.iter().collect();
+    blocks.sort_unstable_by_key(|b| b.id);
+
     let mut out = String::new();
     out.push_str("/// A numeric vanilla block id (index into the `minecraft:block` registry).\n");
     out.push_str("#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]\n");
@@ -133,14 +147,14 @@ fn render_blocks(data: &BlockRegistry) -> Result<String> {
 
     out.push_str("/// Block name -> registry id.\n");
     out.push_str("pub static BLOCK_BY_NAME: phf::Map<&'static str, u16> = phf::phf_map! {\n");
-    for b in &data.blocks {
+    for b in &blocks {
         out.push_str(&format!("    {:?} => {}u16,\n", b.name, b.id));
     }
     out.push_str("};\n\n");
 
     out.push_str("/// Block names indexed by registry id (id == index).\n");
     out.push_str("pub static BLOCK_BY_ID: &[&str] = &[\n");
-    for b in &data.blocks {
+    for b in &blocks {
         out.push_str(&format!("    {:?}, // {}\n", b.name, b.id));
     }
     out.push_str("];\n\n");
@@ -218,6 +232,59 @@ fn render_block_properties(
     }
     out.push_str("];\n");
     out
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use std::fs;
+    use std::process::Command;
+
+    use super::run;
+
+    const GENERATED_FILES: [&str; 3] = ["block_properties.rs", "blocks.rs", "mod.rs"];
+
+    /// The committed `src/generated/` is the golden artifact. Regenerate to a
+    /// temp dir, rustfmt the temp copy (`phf::phf_map!` output is not
+    /// format-clean as emitted), and assert byte-equality with what is
+    /// committed. This enforces the no-drift guarantee without mutating
+    /// repository source — a regeneration that changes output fails here until
+    /// the new output is committed.
+    #[test]
+    fn generated_output_matches_committed() {
+        let repo_root = crate::extract::find_repo_root().unwrap();
+        let committed = repo_root.join("crates/rivet-registry/src/generated");
+        let tmp = tempfile::tempdir().unwrap();
+
+        run(None, Some(tmp.path())).unwrap();
+
+        let files: Vec<_> = GENERATED_FILES.iter().map(|f| tmp.path().join(f)).collect();
+        let status = Command::new("rustfmt")
+            .args(["--edition", "2024"])
+            .args(&files)
+            .status()
+            .expect("failed to run rustfmt");
+        assert!(status.success(), "rustfmt failed on freshly generated output");
+
+        let mut committed_files: Vec<String> = fs::read_dir(&committed)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        committed_files.sort();
+        assert_eq!(
+            committed_files, GENERATED_FILES,
+            "committed src/generated/ has unexpected files"
+        );
+
+        for name in GENERATED_FILES {
+            let generated = fs::read(tmp.path().join(name)).unwrap();
+            let wanted = fs::read(committed.join(name)).unwrap();
+            assert_eq!(
+                generated, wanted,
+                "generated output for {name} drifted from the committed golden copy; \
+                 run `tools/rivet-codegen generate` and commit the result"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
