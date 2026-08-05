@@ -15,9 +15,9 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock};
 
+use crate::Message;
 use crate::exceptions::{BuiltInExceptions, CommandExceptionType};
 use crate::immutable_string_reader::utf16_units_to_string;
-use crate::Message;
 
 /// Java `CommandSyntaxException.CONTEXT_AMOUNT`.
 pub const CONTEXT_AMOUNT: i32 = 10;
@@ -30,8 +30,7 @@ pub const CONTEXT_AMOUNT: i32 = 10;
 pub static ENABLE_COMMAND_STACK_TRACES: AtomicBool = AtomicBool::new(true);
 
 /// Java `CommandSyntaxException.BUILT_IN_EXCEPTIONS`.
-pub static BUILT_IN_EXCEPTIONS: LazyLock<BuiltInExceptions> =
-    LazyLock::new(BuiltInExceptions::new);
+pub static BUILT_IN_EXCEPTIONS: LazyLock<BuiltInExceptions> = LazyLock::new(BuiltInExceptions::new);
 
 /// Java `CommandSyntaxException`.
 pub struct CommandSyntaxException<'a> {
@@ -43,7 +42,10 @@ pub struct CommandSyntaxException<'a> {
 
 impl CommandSyntaxException<'_> {
     /// Java `CommandSyntaxException(CommandExceptionType, Message)` — no input, cursor -1.
-    pub fn new(exception_type: &dyn CommandExceptionType, message: Arc<dyn Message>) -> CommandSyntaxException<'_> {
+    pub fn new(
+        exception_type: &dyn CommandExceptionType,
+        message: Arc<dyn Message>,
+    ) -> CommandSyntaxException<'_> {
         CommandSyntaxException {
             exception_type,
             message,

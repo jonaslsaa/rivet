@@ -27,7 +27,10 @@ impl<S: 'static> CommandDispatcher<S> {
     }
 
     /// Java `register(LiteralArgumentBuilder<S>)`.
-    pub fn register(&mut self, _command: crate::builder::LiteralArgumentBuilder<S>) -> std::sync::Arc<LiteralCommandNode<S>> {
+    pub fn register(
+        &mut self,
+        _command: crate::builder::LiteralArgumentBuilder<S>,
+    ) -> std::sync::Arc<LiteralCommandNode<S>> {
         // STUB(brigadier): builder unit only needs the signature; real body is the
         // root unit's port.
         std::sync::Arc::new(LiteralCommandNode::new(

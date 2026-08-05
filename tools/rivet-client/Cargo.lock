@@ -2589,7 +2589,6 @@ name = "rivet-client"
 version = "0.1.0"
 dependencies = [
  "azalea",
- "serde",
  "serde_json",
  "tokio",
 ]

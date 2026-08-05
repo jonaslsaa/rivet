@@ -6,8 +6,8 @@
 //! `getMessage()` post-processes `message.getString()` by appending the `" at
 //! position N: ..."` context; that is reproduced by `Display`.
 
-pub mod built_in_exceptions;
 pub mod built_in_exception_provider;
+pub mod built_in_exceptions;
 pub mod command_exception_type;
 pub mod command_syntax_exception;
 pub mod dynamic2_command_exception_type;
@@ -17,13 +17,13 @@ pub mod dynamic_command_exception_type;
 pub mod dynamic_n_command_exception_type;
 pub mod simple_command_exception_type;
 
-pub use built_in_exceptions::BuiltInExceptions;
 pub use built_in_exception_provider::BuiltInExceptionProvider;
+pub use built_in_exceptions::BuiltInExceptions;
 pub use command_exception_type::CommandExceptionType;
 pub use command_syntax_exception::CommandSyntaxException;
+pub use dynamic_command_exception_type::DynamicCommandExceptionType;
+pub use dynamic_n_command_exception_type::DynamicNCommandExceptionType;
 pub use dynamic2_command_exception_type::Dynamic2CommandExceptionType;
 pub use dynamic3_command_exception_type::Dynamic3CommandExceptionType;
 pub use dynamic4_command_exception_type::Dynamic4CommandExceptionType;
-pub use dynamic_command_exception_type::DynamicCommandExceptionType;
-pub use dynamic_n_command_exception_type::DynamicNCommandExceptionType;
 pub use simple_command_exception_type::SimpleCommandExceptionType;

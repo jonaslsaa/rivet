@@ -3,9 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::exceptions::{CommandExceptionType, CommandSyntaxException};
 use crate::ImmutableStringReader;
 use crate::Message;
+use crate::exceptions::{CommandExceptionType, CommandSyntaxException};
 
 /// Java `DynamicNCommandExceptionType` — a message function taking a variable number
 /// of dynamic args.
@@ -35,8 +35,17 @@ impl DynamicNCommandExceptionType {
     }
 
     /// Java `createWithContext(ImmutableStringReader, Object... args)`.
-    pub fn create_with_context(&self, reader: &dyn ImmutableStringReader, args: &[String]) -> CommandSyntaxException<'_> {
-        CommandSyntaxException::new_with_context(self, (self.function)(args), reader.get_string(), reader.get_cursor())
+    pub fn create_with_context(
+        &self,
+        reader: &dyn ImmutableStringReader,
+        args: &[String],
+    ) -> CommandSyntaxException<'_> {
+        CommandSyntaxException::new_with_context(
+            self,
+            (self.function)(args),
+            reader.get_string(),
+            reader.get_cursor(),
+        )
     }
 }
 

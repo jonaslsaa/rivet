@@ -2,10 +2,10 @@
 //! `CommandSyntaxExceptionTest` semantics, against the translated `StringReader`
 //! and `CommandSyntaxException`. Faithful-behavior tests only (no gameplay logic).
 
-use crate::exceptions::built_in_exception_provider::BuiltInExceptionProvider;
-use crate::exceptions::CommandSyntaxException;
 use crate::ImmutableStringReader;
 use crate::StringReader;
+use crate::exceptions::CommandSyntaxException;
+use crate::exceptions::built_in_exception_provider::BuiltInExceptionProvider;
 
 fn reader(input: &str) -> StringReader {
     StringReader::new(input)
@@ -84,7 +84,10 @@ fn read_int_invalid_resets_cursor() {
 fn read_int_overflow_invalid() {
     let mut r = reader("99999999999999999999");
     let err = r.read_int().unwrap_err();
-    assert_eq!(err.get_raw_message().get_string(), "Invalid integer '99999999999999999999'");
+    assert_eq!(
+        err.get_raw_message().get_string(),
+        "Invalid integer '99999999999999999999'"
+    );
     assert_eq!(r.get_cursor(), 0);
 }
 
@@ -140,7 +143,10 @@ fn read_quoted_string() {
 #[test]
 fn read_quoted_string_escapes() {
     let mut r = reader(r#""hello \"world\" and \\ backslash""#);
-    assert_eq!(r.read_quoted_string().unwrap(), "hello \"world\" and \\ backslash");
+    assert_eq!(
+        r.read_quoted_string().unwrap(),
+        "hello \"world\" and \\ backslash"
+    );
 }
 
 #[test]
@@ -155,7 +161,10 @@ fn read_quoted_string_unclosed() {
 fn read_quoted_string_expected_start() {
     let mut r = reader("hello");
     let err = r.read_quoted_string().unwrap_err();
-    assert_eq!(err.get_raw_message().get_string(), "Expected quote to start a string");
+    assert_eq!(
+        err.get_raw_message().get_string(),
+        "Expected quote to start a string"
+    );
 }
 
 #[test]
@@ -187,7 +196,10 @@ fn read_string_until_invalid_escape_surrogate_rewinds_to_first_unit() {
         "Invalid escape sequence '\u{1F600}' in quoted string"
     );
     // Java would render the lone high surrogate here; Rust renders the full char.
-    assert_eq!(err.get_message(), "Invalid escape sequence '\u{1F600}' in quoted string at position 4: \"hi\\<--[HERE]");
+    assert_eq!(
+        err.get_message(),
+        "Invalid escape sequence '\u{1F600}' in quoted string at position 4: \"hi\\<--[HERE]"
+    );
 }
 
 #[test]
@@ -208,7 +220,10 @@ fn read_boolean() {
     assert!(!r.read_boolean().unwrap());
     let mut r = reader("tru");
     let err = r.read_boolean().unwrap_err();
-    assert_eq!(err.get_raw_message().get_string(), "Invalid bool, expected true or false but found 'tru'");
+    assert_eq!(
+        err.get_raw_message().get_string(),
+        "Invalid bool, expected true or false but found 'tru'"
+    );
     assert_eq!(r.get_cursor(), 0);
 }
 

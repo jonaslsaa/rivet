@@ -3,9 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::exceptions::{CommandExceptionType, CommandSyntaxException};
 use crate::ImmutableStringReader;
 use crate::Message;
+use crate::exceptions::{CommandExceptionType, CommandSyntaxException};
 
 /// Java `Dynamic3CommandExceptionType` — a message function taking three dynamic args.
 pub struct Dynamic3CommandExceptionType {
@@ -18,7 +18,9 @@ type Function = Box<dyn Fn(&str, &str, &str) -> Arc<dyn Message> + Send + Sync>;
 impl Dynamic3CommandExceptionType {
     /// Java `Dynamic3CommandExceptionType(Function)`. Args are pre-stringified
     /// (`String.valueOf`) — see `DynamicCommandExceptionType::new`.
-    pub fn new(function: impl Fn(&str, &str, &str) -> Arc<dyn Message> + Send + Sync + 'static) -> Self {
+    pub fn new(
+        function: impl Fn(&str, &str, &str) -> Arc<dyn Message> + Send + Sync + 'static,
+    ) -> Self {
         Dynamic3CommandExceptionType {
             function: Box::new(function),
         }
@@ -30,8 +32,19 @@ impl Dynamic3CommandExceptionType {
     }
 
     /// Java `createWithContext(ImmutableStringReader, Object a, Object b, Object c)`.
-    pub fn create_with_context(&self, reader: &dyn ImmutableStringReader, a: &str, b: &str, c: &str) -> CommandSyntaxException<'_> {
-        CommandSyntaxException::new_with_context(self, (self.function)(a, b, c), reader.get_string(), reader.get_cursor())
+    pub fn create_with_context(
+        &self,
+        reader: &dyn ImmutableStringReader,
+        a: &str,
+        b: &str,
+        c: &str,
+    ) -> CommandSyntaxException<'_> {
+        CommandSyntaxException::new_with_context(
+            self,
+            (self.function)(a, b, c),
+            reader.get_string(),
+            reader.get_cursor(),
+        )
     }
 }
 

@@ -23,7 +23,10 @@ use crate::tree::{ArgumentCommandNode, CommandNode, LiteralCommandNode};
 struct IntegerArgumentType;
 
 impl ArgumentType<i32> for IntegerArgumentType {
-    fn parse(&self, reader: &mut StringReader) -> Result<i32, crate::exceptions::CommandSyntaxException<'static>> {
+    fn parse(
+        &self,
+        reader: &mut StringReader,
+    ) -> Result<i32, crate::exceptions::CommandSyntaxException<'static>> {
         reader.read_int()
     }
 }
@@ -34,14 +37,19 @@ fn integer() -> Arc<dyn ArgumentType<i32>> {
 
 /// A command recording its context source, for `executes(command)` assertions.
 fn command_fn<S: Send + Sync + Clone + 'static>() -> Arc<dyn crate::command::Command<S>> {
-    Arc::new(ClosureCommand::new(Box::new(|_| Ok(crate::command::SINGLE_SUCCESS))))
+    Arc::new(ClosureCommand::new(Box::new(|_| {
+        Ok(crate::command::SINGLE_SUCCESS)
+    })))
 }
 
 /// A concrete `RedirectModifier` for `fork(...)` assertions.
 struct SourceRedirectModifier;
 
 impl crate::redirect_modifier::RedirectModifier<i32> for SourceRedirectModifier {
-    fn apply(&self, context: &CommandContext<i32>) -> Result<Vec<i32>, crate::exceptions::CommandSyntaxException<'static>> {
+    fn apply(
+        &self,
+        context: &CommandContext<i32>,
+    ) -> Result<Vec<i32>, crate::exceptions::CommandSyntaxException<'static>> {
         Ok(vec![*context.get_source()])
     }
 }
@@ -50,7 +58,10 @@ impl crate::redirect_modifier::RedirectModifier<i32> for SourceRedirectModifier 
 struct SourceSingleRedirectModifier;
 
 impl crate::single_redirect_modifier::SingleRedirectModifier<i32> for SourceSingleRedirectModifier {
-    fn apply(&self, context: &CommandContext<i32>) -> Result<i32, crate::exceptions::CommandSyntaxException<'static>> {
+    fn apply(
+        &self,
+        context: &CommandContext<i32>,
+    ) -> Result<i32, crate::exceptions::CommandSyntaxException<'static>> {
         Ok(*context.get_source())
     }
 }
@@ -144,10 +155,12 @@ fn test_then_node_appends_raw_node() {
         None,
         false,
     )) as Arc<dyn CommandNode<i32>>;
-    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        builder.redirect(target);
-    }))
-    .is_err());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            builder.redirect(target);
+        }))
+        .is_err()
+    );
 }
 
 /// Java `redirect(CommandNode, SingleRedirectModifier)` — wraps the single result in
@@ -249,7 +262,10 @@ fn test_literal_build_preserves_redirect() {
     builder.redirect(Arc::clone(&target));
 
     let node = builder.build();
-    let node = node.as_any().downcast_ref::<LiteralCommandNode<i32>>().unwrap();
+    let node = node
+        .as_any()
+        .downcast_ref::<LiteralCommandNode<i32>>()
+        .unwrap();
     assert!(Arc::ptr_eq(&node.get_redirect().unwrap(), &target));
 }
 
@@ -270,9 +286,15 @@ fn test_required_build_preserves_fork_and_modifier() {
     builder.fork(target, Arc::clone(&modifier));
 
     let node = builder.build();
-    let node = node.as_any().downcast_ref::<ArgumentCommandNode<i32, i32>>().unwrap();
+    let node = node
+        .as_any()
+        .downcast_ref::<ArgumentCommandNode<i32, i32>>()
+        .unwrap();
     assert!(node.is_fork());
-    assert!(Arc::ptr_eq(&node.get_redirect_modifier().unwrap(), &modifier));
+    assert!(Arc::ptr_eq(
+        &node.get_redirect_modifier().unwrap(),
+        &modifier
+    ));
 }
 
 #[test]
@@ -282,7 +304,10 @@ fn test_literal_build_preserves_requirement() {
     builder.requires(Arc::clone(&requirement));
 
     let node = builder.build();
-    let node = node.as_any().downcast_ref::<LiteralCommandNode<i32>>().unwrap();
+    let node = node
+        .as_any()
+        .downcast_ref::<LiteralCommandNode<i32>>()
+        .unwrap();
     assert!(Arc::ptr_eq(&node.get_requirement(), &requirement));
 }
 
@@ -294,8 +319,14 @@ fn test_required_build_preserves_custom_suggestions() {
     builder.suggests(Arc::clone(&provider));
 
     let node = builder.build();
-    let node = node.as_any().downcast_ref::<ArgumentCommandNode<i32, i32>>().unwrap();
-    assert!(Arc::ptr_eq(&node.get_custom_suggestions().unwrap(), &provider));
+    let node = node
+        .as_any()
+        .downcast_ref::<ArgumentCommandNode<i32, i32>>()
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &node.get_custom_suggestions().unwrap(),
+        &provider
+    ));
 }
 
 // ---- LiteralArgumentBuilderTest ----
@@ -305,7 +336,10 @@ fn test_literal_build() {
     let builder = LiteralArgumentBuilder::<i32>::literal("foo");
     let node = builder.build();
 
-    let node = node.as_any().downcast_ref::<LiteralCommandNode<i32>>().unwrap();
+    let node = node
+        .as_any()
+        .downcast_ref::<LiteralCommandNode<i32>>()
+        .unwrap();
     assert_eq!(node.get_literal(), "foo");
 }
 
@@ -316,7 +350,10 @@ fn test_literal_build_with_executor() {
     builder.executes(Some(Arc::clone(&command)));
 
     let node = builder.build();
-    let node = node.as_any().downcast_ref::<LiteralCommandNode<i32>>().unwrap();
+    let node = node
+        .as_any()
+        .downcast_ref::<LiteralCommandNode<i32>>()
+        .unwrap();
     assert_eq!(node.get_literal(), "foo");
     assert!(Arc::ptr_eq(&node.get_command().unwrap(), &command));
 }
@@ -324,8 +361,14 @@ fn test_literal_build_with_executor() {
 #[test]
 fn test_literal_build_with_children() {
     let mut builder = LiteralArgumentBuilder::<i32>::literal("foo");
-    builder.then(RequiredArgumentBuilder::<i32, i32>::argument("bar", integer()));
-    builder.then(RequiredArgumentBuilder::<i32, i32>::argument("baz", integer()));
+    builder.then(RequiredArgumentBuilder::<i32, i32>::argument(
+        "bar",
+        integer(),
+    ));
+    builder.then(RequiredArgumentBuilder::<i32, i32>::argument(
+        "baz",
+        integer(),
+    ));
 
     let node = builder.build();
     assert_eq!(node.get_children().len(), 2);
@@ -339,7 +382,10 @@ fn test_required_build() {
     let builder = RequiredArgumentBuilder::<i32, i32>::argument("foo", Arc::clone(&type_));
     let node = builder.build();
 
-    let node = node.as_any().downcast_ref::<ArgumentCommandNode<i32, i32>>().unwrap();
+    let node = node
+        .as_any()
+        .downcast_ref::<ArgumentCommandNode<i32, i32>>()
+        .unwrap();
     assert_eq!(node.get_name(), "foo");
     assert!(Arc::ptr_eq(node.get_type(), &type_));
 }
@@ -352,7 +398,10 @@ fn test_required_build_with_executor() {
     builder.executes(Some(Arc::clone(&command)));
 
     let node = builder.build();
-    let node = node.as_any().downcast_ref::<ArgumentCommandNode<i32, i32>>().unwrap();
+    let node = node
+        .as_any()
+        .downcast_ref::<ArgumentCommandNode<i32, i32>>()
+        .unwrap();
     assert_eq!(node.get_name(), "foo");
     assert!(Arc::ptr_eq(node.get_type(), &type_));
     assert!(Arc::ptr_eq(&node.get_command().unwrap(), &command));
@@ -361,8 +410,14 @@ fn test_required_build_with_executor() {
 #[test]
 fn test_required_build_with_children() {
     let mut builder = RequiredArgumentBuilder::<i32, i32>::argument("foo", integer());
-    builder.then(RequiredArgumentBuilder::<i32, i32>::argument("bar", integer()));
-    builder.then(RequiredArgumentBuilder::<i32, i32>::argument("baz", integer()));
+    builder.then(RequiredArgumentBuilder::<i32, i32>::argument(
+        "bar",
+        integer(),
+    ));
+    builder.then(RequiredArgumentBuilder::<i32, i32>::argument(
+        "baz",
+        integer(),
+    ));
 
     let node = builder.build();
     assert_eq!(node.get_children().len(), 2);
@@ -396,7 +451,10 @@ fn default_requirement_is_shared_per_source_type() {
     ));
     // The node's requirement is the builder's requirement (forwarded by `build()`).
     let node = builder.build();
-    let node = node.as_any().downcast_ref::<LiteralCommandNode<i32>>().unwrap();
+    let node = node
+        .as_any()
+        .downcast_ref::<LiteralCommandNode<i32>>()
+        .unwrap();
     assert!(Arc::ptr_eq(
         &node.get_requirement(),
         &ArgumentBuilder::<i32>::default_requirement::<i32>()

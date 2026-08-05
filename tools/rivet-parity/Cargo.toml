@@ -8,5 +8,4 @@ description = "Byte-for-byte NBT/SNBT parity diff between rivet-nbt and the Pape
 base64 = "0.22"
 rivet-nbt = { path = "../../crates/rivet-nbt" }
 rivet-util = { path = "../../crates/rivet-util" }
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"

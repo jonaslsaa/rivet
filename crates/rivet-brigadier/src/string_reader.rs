@@ -1,9 +1,9 @@
 //! Port of `com.mojang.brigadier.StringReader` (upstream).
 
+use crate::ImmutableStringReader;
+use crate::exceptions::BuiltInExceptionProvider;
 use crate::exceptions::CommandSyntaxException;
 use crate::immutable_string_reader::utf16_units_to_string;
-use crate::exceptions::BuiltInExceptionProvider;
-use crate::ImmutableStringReader;
 
 /// Java `StringReader.SYNTAX_ESCAPE` = `'\\'`.
 const SYNTAX_ESCAPE: char = '\\';
@@ -31,7 +31,11 @@ impl StringReader {
     pub fn new(string: impl Into<String>) -> Self {
         let string = string.into();
         let units: Vec<u16> = string.encode_utf16().collect();
-        StringReader { string, units, cursor: 0 }
+        StringReader {
+            string,
+            units,
+            cursor: 0,
+        }
     }
 
     /// `StringReader(StringReader)` copy constructor.
@@ -211,7 +215,10 @@ impl StringReader {
     }
 
     /// Java `StringReader.readStringUntil(char)`.
-    pub fn read_string_until(&mut self, terminator: char) -> Result<String, CommandSyntaxException<'static>> {
+    pub fn read_string_until(
+        &mut self,
+        terminator: char,
+    ) -> Result<String, CommandSyntaxException<'static>> {
         let mut result = String::new();
         let mut escaped = false;
         while self.can_read() {

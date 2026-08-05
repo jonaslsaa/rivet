@@ -3,9 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::exceptions::{CommandExceptionType, CommandSyntaxException};
 use crate::ImmutableStringReader;
 use crate::Message;
+use crate::exceptions::{CommandExceptionType, CommandSyntaxException};
 
 /// Java `SimpleCommandExceptionType` — a fixed message, no dynamic args.
 pub struct SimpleCommandExceptionType {
@@ -26,8 +26,16 @@ impl SimpleCommandExceptionType {
     }
 
     /// Java `createWithContext(ImmutableStringReader)`.
-    pub fn create_with_context(&self, reader: &dyn ImmutableStringReader) -> CommandSyntaxException<'_> {
-        CommandSyntaxException::new_with_context(self, Arc::clone(&self.message), reader.get_string(), reader.get_cursor())
+    pub fn create_with_context(
+        &self,
+        reader: &dyn ImmutableStringReader,
+    ) -> CommandSyntaxException<'_> {
+        CommandSyntaxException::new_with_context(
+            self,
+            Arc::clone(&self.message),
+            reader.get_string(),
+            reader.get_cursor(),
+        )
     }
 }
 
