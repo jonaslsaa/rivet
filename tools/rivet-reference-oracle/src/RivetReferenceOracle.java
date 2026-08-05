@@ -23,6 +23,8 @@ import net.minecraft.nbt.TagParser;
 
 public final class RivetReferenceOracle {
     private static final int PROTOCOL_VERSION = 1;
+    private static final int MAX_NBT_BYTES = 16 * 1024 * 1024;
+    private static final int MAX_BASE64_CHARS = ((MAX_NBT_BYTES + 2) / 3) * 4;
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
     private static final TagParser<Tag> SNBT_PARSER = TagParser.create(NbtOps.INSTANCE);
 
@@ -73,7 +75,10 @@ public final class RivetReferenceOracle {
 
     private static JsonObject ping() {
         JsonObject result = new JsonObject();
-        result.addProperty("paper_minecraft_version", "26.2");
+        result.addProperty("paper_specification", requiredProperty("rivet.paper.specification"));
+        result.addProperty("paper_implementation", requiredProperty("rivet.paper.implementation"));
+        result.addProperty("paper_commit", requiredProperty("rivet.paper.commit"));
+        result.addProperty("paper_sha256", requiredProperty("rivet.paper.sha256"));
         result.addProperty("java_version", Runtime.version().toString());
         return result;
     }
@@ -96,10 +101,16 @@ public final class RivetReferenceOracle {
     }
 
     private static JsonObject decodeNbt(final String input) throws Exception {
+        if (input.length() > MAX_BASE64_CHARS) {
+            throw new IllegalArgumentException("base64 NBT input exceeds " + MAX_NBT_BYTES + " decoded bytes");
+        }
         byte[] bytes = Base64.getDecoder().decode(input);
+        if (bytes.length > MAX_NBT_BYTES) {
+            throw new IllegalArgumentException("NBT input exceeds " + MAX_NBT_BYTES + " bytes");
+        }
         CompoundTag tag;
         try (DataInputStream data = new DataInputStream(new ByteArrayInputStream(bytes))) {
-            tag = NbtIo.read(data, NbtAccounter.unlimitedHeap());
+            tag = NbtIo.read(data, NbtAccounter.create(MAX_NBT_BYTES));
             if (data.available() != 0) {
                 throw new IllegalArgumentException("trailing bytes after root compound: " + data.available());
             }
@@ -125,6 +136,14 @@ public final class RivetReferenceOracle {
             throw new IllegalArgumentException("property '" + property + "' must be a string");
         }
         return value.getAsString();
+    }
+
+    private static String requiredProperty(final String property) {
+        String value = System.getProperty(property);
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException("launcher did not provide " + property);
+        }
+        return value;
     }
 
     private static JsonObject success(final JsonElement id, final JsonObject result) {
@@ -162,11 +181,19 @@ public final class RivetReferenceOracle {
             "{\"id\":\"parse\",\"op\":\"snbt.parse\",\"input\":\"{answer:42,ok:true}\"}"
         );
         requireSuccess(parsed, "snbt.parse");
+        JsonObject parsedResult = parsed.getAsJsonObject("result");
+        requireEquals(10, parsedResult.get("tag_id").getAsInt(), "compound tag id");
+        requireEquals("{answer:42,ok:1b}", parsedResult.get("snbt").getAsString(), "canonical SNBT");
 
         String encodedRequest = "{\"id\":\"encode\",\"op\":\"nbt.encode\","
             + "\"input\":\"{name:\\\"Rivet\\\",values:[I;1,2,3]}\"}";
         JsonObject encoded = processLine(encodedRequest);
         requireSuccess(encoded, "nbt.encode");
+        requireEquals(
+            "CgAACAAEbmFtZQAFUml2ZXQLAAZ2YWx1ZXMAAAADAAAAAQAAAAIAAAADAA==",
+            encoded.getAsJsonObject("result").get("output_base64").getAsString(),
+            "binary NBT fixture"
+        );
 
         String base64 = encoded.getAsJsonObject("result").get("output_base64").getAsString();
         JsonObject decodeRequest = new JsonObject();
@@ -182,16 +209,37 @@ public final class RivetReferenceOracle {
             throw new IllegalStateException("NBT round trip changed SNBT");
         }
 
+        byte[] oversizedArray = new byte[]{10, 0, 0, 7, 0, 1, 'x', 127, -1, -1, -1};
+        JsonObject hostileRequest = new JsonObject();
+        hostileRequest.addProperty("op", "nbt.decode");
+        hostileRequest.addProperty("input_base64", Base64.getEncoder().encodeToString(oversizedArray));
+        JsonObject hostile = processLine(GSON.toJson(hostileRequest));
+        if (hostile.get("ok").getAsBoolean()) {
+            throw new IllegalStateException("oversized NBT declaration was accepted");
+        }
+        requireSuccess(processLine("{\"op\":\"ping\"}"), "ping after malformed NBT");
+
+        JsonObject malformed = processLine("{\"op\":\"snbt.parse\",\"input\":\"{broken:\"}");
+        if (malformed.get("ok").getAsBoolean()) {
+            throw new IllegalStateException("malformed SNBT was accepted");
+        }
+
         JsonObject summary = new JsonObject();
         summary.addProperty("ok", true);
         summary.addProperty("protocol", PROTOCOL_VERSION);
-        summary.addProperty("tests", 4);
+        summary.addProperty("tests", 9);
         System.out.println(GSON.toJson(summary));
     }
 
     private static void requireSuccess(final JsonObject response, final String operation) {
         if (!response.get("ok").getAsBoolean()) {
             throw new IllegalStateException(operation + " self-test failed: " + response);
+        }
+    }
+
+    private static void requireEquals(final Object expected, final Object actual, final String label) {
+        if (!expected.equals(actual)) {
+            throw new IllegalStateException(label + ": expected " + expected + ", got " + actual);
         }
     }
 }

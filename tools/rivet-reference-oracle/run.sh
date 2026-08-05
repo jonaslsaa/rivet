@@ -4,6 +4,7 @@ set -euo pipefail
 tool_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_dir="$(cd "$tool_dir/../.." && pwd)"
 paper_libraries="${RIVET_PAPER_LIBRARIES:-$repo_dir/tools/rivet-oracle/work/run/libraries}"
+paper_runtime_jar="${RIVET_PAPER_RUNTIME_JAR:-$(dirname "$paper_libraries")/versions/26.2/paper-26.2.jar}"
 classes_dir="$tool_dir/target/classes"
 source_file="$tool_dir/src/RivetReferenceOracle.java"
 
@@ -60,19 +61,44 @@ if [[ ! -d "$paper_libraries" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$paper_runtime_jar" ]]; then
+    echo "Materialized Paper runtime jar not found at $paper_runtime_jar" >&2
+    echo "Boot Paper once or set RIVET_PAPER_RUNTIME_JAR" >&2
+    exit 1
+fi
+
+paper_sha256="$(shasum -a 256 "$paper_jar" | awk '{print $1}')"
+runtime_sha256="$(shasum -a 256 "$paper_runtime_jar" | awk '{print $1}')"
+if [[ "$paper_sha256" != "$runtime_sha256" ]]; then
+    echo "Paper compile jar and materialized runtime jar do not match" >&2
+    echo "compile: $paper_sha256  $paper_jar" >&2
+    echo "runtime: $runtime_sha256  $paper_runtime_jar" >&2
+    exit 1
+fi
+
+manifest="$(unzip -p "$paper_jar" META-INF/MANIFEST.MF)"
+paper_specification="$(printf '%s\n' "$manifest" | awk -F': ' '$1 == "Specification-Version" {gsub("\\r", "", $2); print $2; exit}')"
+paper_implementation="$(printf '%s\n' "$manifest" | awk -F': ' '$1 == "Implementation-Version" {gsub("\\r", "", $2); print $2; exit}')"
+paper_commit="$(printf '%s\n' "$manifest" | awk -F': ' '$1 == "Git-Commit" {gsub("\\r", "", $2); print $2; exit}')"
+if [[ "$paper_specification" != 26.2* || -z "$paper_implementation" || -z "$paper_commit" ]]; then
+    echo "Expected a Paper 26.2 server jar, got specification '$paper_specification'" >&2
+    exit 1
+fi
+
 classpath="$paper_jar"
 while IFS= read -r -d '' library; do
     classpath="$classpath:$library"
 done < <(find "$paper_libraries" -type f -name '*.jar' -print0)
 
-class_file="$classes_dir/dev/rivet/oracle/RivetReferenceOracle.class"
-if [[ ! -f "$class_file" || "$source_file" -nt "$class_file" ]]; then
-    mkdir -p "$classes_dir"
-    echo "Compiling Rivet reference oracle against $(basename "$paper_jar")" >&2
-    "$javac_cmd" --release 25 -cp "$classpath" -d "$classes_dir" "$source_file"
-fi
+mkdir -p "$classes_dir"
+echo "Compiling Rivet reference oracle against $paper_implementation ($paper_commit)" >&2
+"$javac_cmd" --release 25 -cp "$classpath" -d "$classes_dir" "$source_file"
 
 cd "$tool_dir/target"
 exec "$java_cmd" --enable-native-access=ALL-UNNAMED \
+    -Drivet.paper.sha256="$paper_sha256" \
+    -Drivet.paper.specification="$paper_specification" \
+    -Drivet.paper.implementation="$paper_implementation" \
+    -Drivet.paper.commit="$paper_commit" \
     -cp "$classes_dir:$classpath" \
     dev.rivet.oracle.RivetReferenceOracle "$@"

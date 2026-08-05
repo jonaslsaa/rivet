@@ -18,7 +18,10 @@ The tool currently supports:
 It compiles against `working/Paper/paper-server/build/libs/paper-server-*.jar`
 and uses libraries materialized by the M0 Paper run under
 `tools/rivet-oracle/work/run/libraries`. Both locations can be overridden with
-`RIVET_PAPER_JAR` and `RIVET_PAPER_LIBRARIES`.
+`RIVET_PAPER_JAR` and `RIVET_PAPER_LIBRARIES`; when overriding them, point
+`RIVET_PAPER_RUNTIME_JAR` at the Paper jar materialized beside those runtime
+libraries. The launcher requires the compile and runtime jars to have the same
+SHA-256 and verifies their manifest identifies Paper 26.2.
 Paper 26.2 requires Java 25. The launcher finds a Java 25 SDKMAN installation
 or uses `JAVA_HOME`; set `RIVET_JAVA_HOME` when neither points to the required
 JDK.

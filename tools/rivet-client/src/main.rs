@@ -6,11 +6,13 @@ use std::time::Duration;
 
 use azalea::prelude::*;
 use serde_json::{Value, json};
+use tokio::net::TcpStream;
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:25599";
 const DEFAULT_USERNAME: &str = "RivetProbe";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const AZALEA_REVISION: &str = "6249c295d353b9b3ef68f665b311cba39211fd19";
+const TRANSCRIPT_PROTOCOL: u64 = 1;
 
 #[derive(Debug)]
 struct Args {
@@ -82,7 +84,11 @@ impl Default for State {
     }
 }
 
-fn emit(value: Value) {
+fn emit(mut value: Value) {
+    value
+        .as_object_mut()
+        .expect("events must be JSON objects")
+        .insert("protocol".to_owned(), json!(TRANSCRIPT_PROTOCOL));
     println!("{value}");
 }
 
@@ -139,6 +145,27 @@ async fn main() -> ExitCode {
         "timeout_seconds": args.timeout.as_secs(),
         "azalea_revision": AZALEA_REVISION,
     }));
+
+    let preflight_timeout = args.timeout.min(Duration::from_secs(3));
+    match tokio::time::timeout(preflight_timeout, TcpStream::connect(&args.address)).await {
+        Ok(Ok(connection)) => drop(connection),
+        Ok(Err(error)) => {
+            emit(json!({
+                "event": "connection_failed",
+                "phase": "tcp_preflight",
+                "reason": error.to_string(),
+            }));
+            return ExitCode::FAILURE;
+        }
+        Err(_) => {
+            emit(json!({
+                "event": "connection_failed",
+                "phase": "tcp_preflight",
+                "reason": format!("TCP preflight exceeded {} seconds", preflight_timeout.as_secs()),
+            }));
+            return ExitCode::FAILURE;
+        }
+    }
 
     let state = State::default();
     let spawned = Arc::clone(&state.spawned);
