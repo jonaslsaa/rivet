@@ -1,6 +1,10 @@
-# Rivet
+<div align="center">
+  <img src="assets/rivet.png" alt="A forged iron rivet rendered as a voxel item" width="280">
+  <h1>Rivet</h1>
+  <p><strong>The Paper Minecraft server, reborn in Rust.</strong></p>
+</div>
 
-**The Paper Minecraft server, reborn in Rust.**
+---
 
 Rivet is a faithful port of [Paper](https://papermc.io) — the world's most-used Minecraft server — to Rust. Same worlds, same gameplay, same plugins. None of the JVM's weight.
 
