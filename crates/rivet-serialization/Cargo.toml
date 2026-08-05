@@ -1,0 +1,7 @@
+[package]
+name = "rivet-serialization"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true

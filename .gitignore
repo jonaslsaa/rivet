@@ -1,1 +1,5 @@
-working/**
+/target
+/working/
+.DS_Store
+*.jar
+/fixtures/large/

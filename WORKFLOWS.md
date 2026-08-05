@@ -1,0 +1,142 @@
+# Rivet Agent Orchestration Design
+
+How we run the port with Claude Code workflows. Companion to `RESEARCH.md`.
+
+## Design principles
+
+1. **Durable state lives in git, not in workflows.** Workflows crash, sessions end, resume caches are session-scoped. The single source of truth is `MANIFEST.tsv` (the work queue) plus committed code. Every workflow invocation is a stateless, idempotent executor over the manifest: it reads unit status, skips anything already `done`, and the orchestrator script (never the agents) writes status updates back.
+2. **Disjoint-file assignment beats worktrees.** Bun used 4 worktrees × 16 agents because their agents shared files. We can do better: the scaffold phase pre-creates every crate, `mod` declaration, and stub file *serially*, so translation agents each own a disjoint set of files in the main tree. No worktrees, no merge stage, no conflicts. Worktree isolation is reserved for the rare agent that must touch shared files (`Cargo.toml`, `lib.rs`) — or better, the orchestrator batches those edits itself between waves.
+3. **Translation does not gate on compilation.** Bun's insight: translate everything first, then burn down compiler errors as a separate crate-by-crate phase. Requiring `cargo check` green per-unit serializes the whole wave on the slowest unit and causes agents to "fix" errors by deleting code.
+4. **Reviewers never see the implementer's context.** Diff + Java original + drift checklist only. Schema-forced verdicts.
+5. **Fix the process, not the output.** When the same bug class appears in ≥2 units, the fix is an edit to `PORTING.md`/the wave prompt, then re-run — not hand-patching. The main session (campaign controller) owns this.
+6. **The oracle gates promotion, agents gate merges.** Unit-level: adversarial review. Wave-level: `cargo check` clean + unit tests. Milestone-level: differential oracle (worldgen hashes, packet conformance, azalea bot scenarios) before a milestone branch promotes to `main`. No agent may weaken a test or the oracle to go green — enforced in every prompt and checked by reviewers.
+
+## The manifest
+
+`MANIFEST.tsv`, one row per **unit** (a class cluster that translates together — not per Java file; cyclic Java clusters must move as one unit):
+
+```
+id	java_paths	rust_module	crate	deps	ownership_ref	status	attempts	notes
+nbt-tag	net/minecraft/nbt/Tag.java,...	rivet-nbt::tag	rivet-nbt	-	OWNERSHIP.md#nbt	done	1	
+ent-base	world/entity/Entity.java,...	rivet-entity::base	rivet-entity	world-chunk,registry	OWNERSHIP.md#entities	pending	0	
+```
+
+Statuses: `pending → translated → reviewed → fixed → done`, plus `blocked(reason)` for human triage. Built by a one-time analysis workflow that walks the Java import graph, clusters cycles, and topo-orders crates. The wave-picker selects only units whose `deps` are `done`.
+
+## Workflow catalog (`.claude/workflows/`)
+
+| Workflow | Shape | Purpose |
+|---|---|---|
+| `analyze-graph` | fan-out readers → merge | Build/refresh MANIFEST.tsv from Java sources |
+| `scaffold` | serial | Crate skeletons, mod trees, stub files, Cargo.toml — run once per crate wave, before fan-out |
+| `translate-wave` | pipeline per unit | The core loop (below) |
+| `check-burndown` | loop until clean | Compiler-error work queue, partitioned by module |
+| `verify-oracle` | parallel scenarios | Differential tests vs vanilla/Paper; failures → new manifest rows |
+| `shim-gen` | pipeline per API class | JVM adapter codegen (below) |
+| `doc-drift` | small panel | After each wave: mine review findings for systemic patterns → proposed PORTING.md edits |
+
+## The core loop: `translate-wave`
+
+Args: `{ waveId, units: [...manifest rows...] }` (topo-ready units only, ~10–30 per wave; concurrency caps at 16 anyway).
+
+```js
+export const meta = {
+  name: 'translate-wave',
+  description: 'Translate a wave of manifest units from Java to Rust with adversarial review',
+  phases: [{ title: 'Translate' }, { title: 'Review' }, { title: 'Fix' }],
+}
+const results = await pipeline(
+  args.units,
+  // Stage 1 — implementer: full context (Java source, PORTING.md, OWNERSHIP.md section, stub files)
+  u => agent(implementPrompt(u), { label: `impl:${u.id}`, phase: 'Translate', schema: IMPL_REPORT }),
+  // Stage 2 — two adversarial reviewers: diff + Java original + drift checklist ONLY
+  (impl, u) => parallel([
+    () => agent(reviewPrompt(u, impl, 'semantic-drift'), { label: `rev1:${u.id}`, phase: 'Review', schema: FINDINGS, effort: 'high' }),
+    () => agent(reviewPrompt(u, impl, 'ownership-and-api'), { label: `rev2:${u.id}`, phase: 'Review', schema: FINDINGS, effort: 'high' }),
+  ]).then(f => ({ impl, findings: f.filter(Boolean).flatMap(r => r.findings) })),
+  // Stage 3 — fixer: applies confirmed findings, returns final report
+  (r, u) => r.findings.length
+    ? agent(fixPrompt(u, r.findings), { label: `fix:${u.id}`, phase: 'Fix', schema: IMPL_REPORT })
+    : r.impl
+)
+return { waveId: args.waveId, results }
+```
+
+Notes:
+- **pipeline(), not phase barriers** — unit A gets reviewed while unit B is still translating.
+- The two reviewers get **different lenses**, not identical prompts: one hunts semantic drift (checklist below), one audits ownership decisions against `OWNERSHIP.md` and API-shape fidelity.
+- Agents return structured reports; the **main session** updates MANIFEST.tsv and commits per wave. Agents never `git commit`, never `git stash/reset` (forbidden in every prompt — Bun learned this the hard way).
+- Implementer prompt hard rules: no TODO-and-skip, no inventing APIs, wrapping arithmetic everywhere Java arithmetic exists, `blocked` verdict with reason if the unit can't translate faithfully.
+
+### The Java→Rust semantic-drift checklist (reviewer lens 1)
+
+The bug classes a Java→Rust port breeds, kept in `PORTING.md` and pasted into every review prompt:
+
+- **Integer overflow**: Java wraps silently; Rust panics in debug. Minecraft's RNG, worldgen, and hashing *depend* on wrapping. Every arithmetic op on Java `int`/`long` ports as `wrapping_*` / `Wrapping<i32>` unless proven otherwise. This is the #1 worldgen-parity killer.
+- `>>` vs `>>>`: Java has both arithmetic and logical shifts; map to the right one on the right signedness.
+- **HashMap/HashSet iteration order** assumptions; Java `HashMap` order ≠ `std::collections::HashMap` order — flag any iteration whose order is observable.
+- **UTF-16 vs UTF-8**: `String.length()`/`charAt` semantics, `char` arithmetic.
+- **Float parity**: MC uses lookup-table `sin`/`cos` (`Mth.sin`) — port the table, don't call `f32::sin`. `Math.floor(double)→int` casts saturate differently than Rust `as`.
+- `null` → `Option` elisions: any Java null-check dropped in translation.
+- `equals`/`hashCode` identity vs value semantics; `==` on boxed types.
+- Dropped `synchronized`/`volatile`; static-init order dependencies.
+- Eager vs lazy: `unwrap_or(expensive())` where Java had short-circuit; side effects inside `debug_assert!`.
+
+## `check-burndown`
+
+After each wave: run `cargo check` (orchestrator or a single agent), partition errors by module, spawn one fixer per partition, loop until clean or dry.
+
+```js
+let rounds = 0
+while (rounds++ < 8) {
+  const check = await agent('Run cargo check --message-format=json for the workspace; return errors grouped by module.', { schema: ERRORS })
+  if (!check.groups.length) break
+  await parallel(check.groups.map(g => () =>
+    agent(burndownPrompt(g), { label: `burn:${g.module}`, effort: 'low' })))
+  log(`round ${rounds}: ${check.groups.length} modules with errors`)
+}
+```
+
+Fixer rule: errors are fixed by *correcting the translation*, never by deleting functionality or `todo!()` — a `todo!()` requires a `blocked` manifest note.
+
+## `verify-oracle`
+
+Runs against a milestone branch, scenarios in parallel: worldgen chunk-hash diff over N seeds vs vanilla, packet round-trips vs recorded sessions, azalea bot scripts (join, move, dig, place, combat) executed against both servers with compared outcomes. Output: structured failure list → converted to manifest rows tagged `regression`. Milestones promote only on green.
+
+## Test reuse: what we can port, what we must record, what we must build
+
+Measured in the tree: 186 JUnit files (~21k LOC) in `paper-server/src/test` + `paper-api/src/test`, and the vanilla **GameTest framework** (47 files under `net/minecraft/gametest`).
+
+1. **The Java server is the executable oracle** — the replacement for Bun's 60k tests. Never hand-write expected values; generate them from the Java side and check them in as golden fixtures: worldgen chunk hashes per seed, packet captures per scenario, region/NBT files, registry dumps, loot-table rolls with fixed seeds.
+2. **Port the GameTest runner early, reuse vanilla's test content.** Modern Minecraft defines test instances as *data* (structures + test-environment definitions in data packs) executed by the framework. Port the runner (small — 47 files) and the vanilla test content runs against Rivet unchanged. This is the closest thing to a language-independent behavioral suite that exists for Minecraft, and it's the highest-leverage single test investment.
+3. **Port Paper's JUnit tests with their units.** They're mostly registry/API-consistency checks (MaterialTest, BlockDataTest, …) — mechanical to translate, and they pin the API surface. Policy: when a unit's Java class has tests, the same wave translates the tests; the implementer's report lists them and reviewers check the tests weren't weakened in translation.
+4. **Tests-with-translation policy for untested code** (most of the 630k): the implementer writes round-trip/property tests for anything with a serialization or math surface (NBT, packets, RNG, Mth) against the golden fixtures from #1. Behavior-heavy code gets its coverage from GameTests and bot scenarios instead — don't ask agents to invent unit tests for AI/gameplay logic; invented tests just enshrine the translation's own bugs.
+
+**The on-track signal is a parity scoreboard, not vibes**: a checked-in `PARITY.md` updated by `verify-oracle` after each milestone run — % chunks hash-identical over N seeds, % recorded packets round-tripping, GameTests passing/total, Paper JUnit ports green, corpus plugins booting. Wave-level health is cheaper and continuous: `cargo check` clean, per-wave test pass rate, and reviewer-findings-per-unit trending *down* (if it isn't, stop scaling and fix PORTING.md). Any scoreboard number that goes down blocks the next wave — regressions are cheapest the wave they appear.
+
+## The JVM plugin adapter track (`shim-gen`)
+
+Goal: real Paper plugins (jars) run against the Rust server. Architecture:
+
+- **Keep `paper-api` as-is** (plugins compile against it unchanged). Reimplement the *implementation* layer (`CraftServer`, `CraftWorld`, `CraftPlayer`, event dispatch, scheduler) as Java shims that call into Rust over **JNI / Java 22+ FFM (Panama)**.
+- JVM runs **in-process**, plugin code confined to a dedicated "main thread" that is tick-synchronized with the Rust tick loop (Bukkit's API is main-thread-confined anyway — this maps cleanly).
+- Rust side exposes a stable C ABI facade (`rivet-ffi` crate); events flow Rust → JVM dispatch → mutations back through the facade. Batch per-tick to amortize FFI cost; benchmark event-storm latency *early* (M1), because if this is too slow the whole adapter needs a redesign.
+- **Honest limit**: plugins that reflect into NMS/CraftBukkit internals (many do) cannot work; only API-clean plugins are in scope. Track a compatibility corpus (LuckPerms, EssentialsX-core-commands, Vault, PlaceholderAPI, WorldGuard as stretch) and make "corpus plugin boots and passes its smoke script" the oracle for this track.
+
+`shim-gen` is embarrassingly parallel and highly mechanical — ideal agent work:
+
+pipeline over paper-api classes: **generate** (Java shim + Rust FFI stub from the API signatures) → **compile-gate** (javac + cargo check per class, this track *does* gate per-unit since units are tiny) → **review** (one diff reviewer, `effort: low`) — then integration-test waves that boot the corpus plugins.
+
+This track only needs the Rust core's internal API, so it starts at M1 against the minimal server, de-risking the FFI design years before M4.
+
+## Campaign control
+
+- **The main session is the controller, not a workflow.** Per cycle: pick ready units from MANIFEST (topo order) → `translate-wave` → `check-burndown` → read journals → `doc-drift` → update docs/manifest → commit → next wave. Chained single-phase workflows with judgment between them beat one mega-workflow.
+- **Long autonomous runs**: `/loop` (dynamic self-pacing) with the cycle above as the loop body; wakeups land as workflow notifications arrive. Token budget directives (`+Nk`) with the loop-until-budget guard for bounded overnight runs.
+- **Config prerequisites**: raise the workflow size guideline (default is <15 agents) via "Dynamic workflow size" in /config; pre-allow the build commands (cargo, javac, gradle) to avoid permission stalls mid-wave.
+- **Escalation**: `blocked` units and 3×-failed units stop being retried and surface in the wave report for human/controller decision. Systemic findings (same bug class twice) trigger `doc-drift`, and affected `done` units get re-queued for a targeted re-review.
+- **Model/effort tiering**: implementers inherit session model; reviewers `effort: high`; mechanical work (stubs, burndown, shim codegen) `effort: low`.
+
+## Pilot before scale (non-negotiable)
+
+Exactly like Bun's 3-file trial: pick 3 units from `rivet-nbt` (leaf crate, oracle-testable via NBT round-trip against real region files), run the full `translate-wave` → `check-burndown` → review cycle, then spend a session tuning prompts, schemas, and PORTING.md from what went wrong. Only then scale to full waves.

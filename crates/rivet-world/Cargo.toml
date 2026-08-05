@@ -1,0 +1,7 @@
+[package]
+name = "rivet-world"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
