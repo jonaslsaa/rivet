@@ -3,9 +3,8 @@
 use crate::codec::Codec;
 use crate::codecs::simple_map_codec::BaseMapCodec;
 use crate::data_result::DataResult;
-use crate::dynamic_ops::{DynamicOps, MapLike, RecordBuilder};
+use crate::dynamic_ops::DynamicOps;
 use crate::lifecycle::Lifecycle;
-use crate::pair::Pair;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -38,7 +37,7 @@ where
         ops.get_map(input)
             .set_lifecycle(Lifecycle::stable())
             .flat_map(|map| self.decode_map(ops, map.as_ref()))
-            .flat_map(|r| DataResult::success((r, input.clone())))
+            .map_owned(|r| (r, input.clone()))
     }
 }
 
@@ -76,5 +75,3 @@ impl<K, V, Ops: DynamicOps + 'static> Debug for UnboundedMapCodec<K, V, Ops> {
         )
     }
 }
-
-pub(crate) type _Pair<F, S> = Pair<F, S>;

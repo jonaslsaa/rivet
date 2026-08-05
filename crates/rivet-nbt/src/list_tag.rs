@@ -349,10 +349,10 @@ impl ListTag {
 
 /// `ListTag.tryUnwrap(CompoundTag)`.
 fn try_unwrap(tag: &CompoundTag) -> Tag {
-    if tag.size() == 1 {
-        if let Some(value) = tag.get("") {
-            return value.clone();
-        }
+    if tag.size() == 1
+        && let Some(value) = tag.get("")
+    {
+        return value.clone();
     }
     Tag::Compound(tag.clone())
 }

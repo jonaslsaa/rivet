@@ -22,7 +22,7 @@ impl<F, S, Ops: DynamicOps + 'static> crate::Decoder<Pair<F, S>, Ops> for PairCo
             let f = p1.0;
             second
                 .decode(ops, &p1.1)
-                .flat_map(move |p2| DataResult::success((Pair::of(f, p2.0), p2.1)))
+                .map_owned(move |p2| (Pair::of(f, p2.0), p2.1))
         })
     }
 }

@@ -277,16 +277,16 @@ mod tests {
         let one = Tag::Byte(ByteTag::value_of(1));
         let zero = Tag::Byte(ByteTag::value_of(0));
         assert_eq!(
-            run_builtin(BuiltinOp::Bool, &ops, &[one.clone()]),
+            run_builtin(BuiltinOp::Bool, &ops, std::slice::from_ref(&one)),
             Ok(Tag::Byte(ByteTag::value_of_bool(true)))
         );
         assert_eq!(
-            run_builtin(BuiltinOp::Bool, &ops, &[zero.clone()]),
+            run_builtin(BuiltinOp::Bool, &ops, std::slice::from_ref(&zero)),
             Ok(Tag::Byte(ByteTag::value_of_bool(false)))
         );
         // bool(true) → true.
         assert_eq!(
-            run_builtin(BuiltinOp::Bool, &ops, &[one.clone()]),
+            run_builtin(BuiltinOp::Bool, &ops, std::slice::from_ref(&one)),
             Ok(Tag::Byte(ByteTag::value_of_bool(true)))
         );
         // Non-numeric → error.

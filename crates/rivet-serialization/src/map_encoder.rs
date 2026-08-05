@@ -6,6 +6,7 @@
 
 use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, Keyable, RecordBuilder};
+use crate::functions::DecoderFn;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -30,7 +31,7 @@ where
 /// `MapEncoder.flatComap(Function)`.
 pub fn flat_comap<A, B, Ops: DynamicOps + 'static>(
     inner: Arc<dyn MapEncoder<A, Ops>>,
-    function: Arc<dyn Fn(&B) -> DataResult<A>>,
+    function: DecoderFn<B, A>,
 ) -> Arc<dyn MapEncoder<B, Ops>>
 where
     A: 'static + Clone,
@@ -41,6 +42,11 @@ where
 
 /// `MapEncoder.encoder()` — an `Encoder` that builds into a fresh builder and
 /// merges into the prefix.
+///
+/// STUB(mc.nbt): Java's `encoder()` uses `compressedBuilder(ops)`, which
+/// returns a `KeyCompressor`-backed builder when `ops.compressMaps()`. The
+/// compressed builder is not ported; `MapEncoderAsEncoder` always builds via
+/// `ops.map_builder()`.
 pub fn encoder<A, Ops: DynamicOps + 'static>(
     inner: Arc<dyn MapEncoder<A, Ops>>,
 ) -> Arc<dyn crate::Encoder<A, Ops>>
@@ -108,7 +114,7 @@ impl<B, A, Ops: DynamicOps + 'static> MapEncoder<B, Ops> for ComappedMapEncoder<
 
 /// `MapEncoder.flatComap(Function)` result.
 pub struct FlatComappedMapEncoder<B, A, Ops: DynamicOps + 'static> {
-    function: Arc<dyn Fn(&B) -> DataResult<A>>,
+    function: DecoderFn<B, A>,
     inner: Arc<dyn MapEncoder<A, Ops>>,
 }
 impl<B, A, Ops: DynamicOps + 'static> std::fmt::Debug for FlatComappedMapEncoder<B, A, Ops> {

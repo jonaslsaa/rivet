@@ -8,6 +8,7 @@
 use rivet_serialization::DataResult;
 use rivet_serialization::data_result::{ap2, ap3};
 use rivet_serialization::either::Either;
+use rivet_serialization::functions::{Fn2, Fn3};
 use rivet_serialization::lifecycle::Lifecycle;
 use rivet_serialization::pair::Pair;
 use std::sync::Arc;
@@ -99,6 +100,21 @@ fn flat_map_accumulates_messages_when_both_have_partials() {
 }
 
 #[test]
+fn flat_map_error_with_partial_to_success_stays_error() {
+    // Java `Error.flatMap`: when the partial's continuation succeeds, the
+    // result ALWAYS stays an error — `new Error<>(messageSupplier,
+    // Optional.of(secondSuccess.value), combinedLifecycle)`. The continuation
+    // value is promoted to the partial, never to a success.
+    let r: DataResult<i32> =
+        DataResult::error_with_partial("first", 1).flat_map(|v: i32| DataResult::success(v + 1));
+    assert!(r.is_error());
+    assert!(!r.is_success());
+    assert_eq!(r.result(), None);
+    assert_eq!(r.error_ref().unwrap().message(), "first");
+    assert_eq!(r.clone().result_or_partial_silent(), Some(2));
+}
+
+#[test]
 fn apply2_combines_successes() {
     let a = DataResult::success(1_i32);
     let b = DataResult::success(2_i32);
@@ -133,8 +149,7 @@ fn apply2_stable_joins_lifecycles() {
 
 #[test]
 fn ap_free_function_fast_path() {
-    let f: DataResult<Arc<dyn Fn(&i32, &i32) -> i32>> =
-        DataResult::success(Arc::new(|a: &i32, b: &i32| a + b));
+    let f: DataResult<Fn2<i32, i32, i32>> = DataResult::success(Arc::new(|a: &i32, b: &i32| a + b));
     let a = DataResult::success(4_i32);
     let b = DataResult::success(5_i32);
     let r = ap2(f, a, b);
@@ -143,7 +158,7 @@ fn ap_free_function_fast_path() {
 
 #[test]
 fn ap3_free_function_fast_path() {
-    let f: DataResult<Arc<dyn Fn(&i32, &i32, &i32) -> i32>> =
+    let f: DataResult<Fn3<i32, i32, i32, i32>> =
         DataResult::success(Arc::new(|a: &i32, b: &i32, c: &i32| a + b + c));
     let a = DataResult::success(1_i32);
     let b = DataResult::success(2_i32);

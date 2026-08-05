@@ -2,7 +2,7 @@
 
 use crate::codec::Codec;
 use crate::data_result::DataResult;
-use crate::dynamic_ops::{DynamicOps, RecordBuilder};
+use crate::dynamic_ops::DynamicOps;
 use crate::lifecycle::Lifecycle;
 use crate::pair::Pair;
 use crate::unit::Unit;
@@ -37,7 +37,7 @@ where
                 let v = element_codec.parse(ops, value);
                 // `k.apply2stable(Pair::new, v)`
                 let read_entry: DataResult<(K, V)> =
-                    DataResult::apply2(k, |a, b| (a.clone(), b.clone()), v);
+                    DataResult::apply2_stable(k, |a, b| (a.clone(), b.clone()), v);
 
                 if read_entry.error_ref().is_some() {
                     failed.push(Pair::of(key.clone(), value.clone()));

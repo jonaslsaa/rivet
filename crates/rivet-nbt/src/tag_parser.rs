@@ -91,7 +91,6 @@ fn char_from_u16(u: u16) -> String {
 
 const ERROR_TRAILING_DATA: &str = "Unexpected trailing data";
 const ERROR_EXPECTED_COMPOUND: &str = "Expected compound tag";
-const ERROR_EXPECTED_STRING_UUID: &str = "Expected a string representing a valid UUID";
 const ERROR_NUMBER_PARSE_FAILURE_PREFIX: &str = "Failed to parse number: ";
 const ERROR_EXPECTED_HEX_ESCAPE_PREFIX: &str = "Expected a character literal of length ";
 const ERROR_INVALID_CODEPOINT_PREFIX: &str = "Invalid Unicode character value: ";
@@ -279,8 +278,7 @@ struct ErrorInfo {
 }
 
 /// The recursive-descent SNBT engine over `NbtOps` (`Tag`).
-struct SnbtParser<'a> {
-    input: &'a str,
+struct SnbtParser {
     units: Vec<u16>,
     cursor: usize,
     /// Paper depth tracking (`Scope.increaseDepth`/`decreaseDepth`).
@@ -289,10 +287,9 @@ struct SnbtParser<'a> {
     best: Option<ErrorInfo>,
 }
 
-impl<'a> SnbtParser<'a> {
-    fn new(input: &'a str, ops: NbtOps) -> SnbtParser<'a> {
+impl SnbtParser {
+    fn new(input: &str, ops: NbtOps) -> SnbtParser {
         SnbtParser {
-            input,
             units: input.encode_utf16().collect(),
             cursor: 0,
             depth: 0,
@@ -526,23 +523,23 @@ impl<'a> SnbtParser<'a> {
     fn parse_integer_suffix(&mut self) -> Option<IntegerSuffix> {
         let mark = self.mark();
         // Branch: u/U then a type letter.
-        if self.try_chars(b'u' as u16, b'U' as u16) {
-            if let Some(ty) = self.parse_suffix_type_letter() {
-                return Some(IntegerSuffix {
-                    signed: Some(SignedPrefix::Unsigned),
-                    ty: Some(ty),
-                });
-            }
+        if self.try_chars(b'u' as u16, b'U' as u16)
+            && let Some(ty) = self.parse_suffix_type_letter()
+        {
+            return Some(IntegerSuffix {
+                signed: Some(SignedPrefix::Unsigned),
+                ty: Some(ty),
+            });
         }
         self.restore(mark);
         // Branch: s/S then a type letter.
-        if self.try_chars(b's' as u16, b'S' as u16) {
-            if let Some(ty) = self.parse_suffix_type_letter() {
-                return Some(IntegerSuffix {
-                    signed: Some(SignedPrefix::Signed),
-                    ty: Some(ty),
-                });
-            }
+        if self.try_chars(b's' as u16, b'S' as u16)
+            && let Some(ty) = self.parse_suffix_type_letter()
+        {
+            return Some(IntegerSuffix {
+                signed: Some(SignedPrefix::Signed),
+                ty: Some(ty),
+            });
         }
         self.restore(mark);
         // Plain type letters (either case).
@@ -868,36 +865,36 @@ impl<'a> SnbtParser<'a> {
         // Branch a: whole '.' cut [fraction] [exponent] [suffix].
         if !matched {
             let m = self.mark();
-            if let Some(w) = self.parse_decimal_numeral() {
-                if self.try_char(b'.' as u16) {
-                    cut = true;
-                    let fm = self.mark();
-                    fraction = match self.parse_decimal_numeral() {
-                        Some(f) => Some(f),
-                        None => {
-                            self.restore(fm);
-                            None
-                        }
-                    };
-                    let em = self.mark();
-                    exponent = match self.parse_float_exponent_part() {
-                        Some(e) => Some(e),
-                        None => {
-                            self.restore(em);
-                            None
-                        }
-                    };
-                    let sm = self.mark();
-                    type_suffix = match self.parse_float_type_suffix() {
-                        Some(t) => Some(t),
-                        None => {
-                            self.restore(sm);
-                            None
-                        }
-                    };
-                    whole = Some(w);
-                    matched = true;
-                }
+            if let Some(w) = self.parse_decimal_numeral()
+                && self.try_char(b'.' as u16)
+            {
+                cut = true;
+                let fm = self.mark();
+                fraction = match self.parse_decimal_numeral() {
+                    Some(f) => Some(f),
+                    None => {
+                        self.restore(fm);
+                        None
+                    }
+                };
+                let em = self.mark();
+                exponent = match self.parse_float_exponent_part() {
+                    Some(e) => Some(e),
+                    None => {
+                        self.restore(em);
+                        None
+                    }
+                };
+                let sm = self.mark();
+                type_suffix = match self.parse_float_type_suffix() {
+                    Some(t) => Some(t),
+                    None => {
+                        self.restore(sm);
+                        None
+                    }
+                };
+                whole = Some(w);
+                matched = true;
             }
             if !matched {
                 self.restore(m);
@@ -943,21 +940,21 @@ impl<'a> SnbtParser<'a> {
         // Branch c: whole exponent cut [suffix].
         if !matched && !cut {
             let m = self.mark();
-            if let Some(w) = self.parse_decimal_numeral() {
-                if let Some(e) = self.parse_float_exponent_part() {
-                    cut = true;
-                    let sm = self.mark();
-                    type_suffix = match self.parse_float_type_suffix() {
-                        Some(t) => Some(t),
-                        None => {
-                            self.restore(sm);
-                            None
-                        }
-                    };
-                    whole = Some(w);
-                    exponent = Some(e);
-                    matched = true;
-                }
+            if let Some(w) = self.parse_decimal_numeral()
+                && let Some(e) = self.parse_float_exponent_part()
+            {
+                cut = true;
+                let sm = self.mark();
+                type_suffix = match self.parse_float_type_suffix() {
+                    Some(t) => Some(t),
+                    None => {
+                        self.restore(sm);
+                        None
+                    }
+                };
+                whole = Some(w);
+                exponent = Some(e);
+                matched = true;
             }
             if !matched {
                 self.restore(m);
@@ -1085,14 +1082,13 @@ impl<'a> SnbtParser<'a> {
         }
         // \N{name} — STUB: Character.codePointOf is not ported.
         if self.try_char(b'N' as u16) {
-            if self.try_char(b'{' as u16) {
-                if self.parse_unicode_name().is_some() {
-                    if self.try_char(b'}' as u16) {
-                        self.store(self.mark(), ERROR_INVALID_CHARACTER_NAME, true);
-                        self.restore(mark);
-                        return None;
-                    }
-                }
+            if self.try_char(b'{' as u16)
+                && self.parse_unicode_name().is_some()
+                && self.try_char(b'}' as u16)
+            {
+                self.store(self.mark(), ERROR_INVALID_CHARACTER_NAME, true);
+                self.restore(mark);
+                return None;
             }
             self.restore(mark);
         }
@@ -1326,11 +1322,9 @@ impl<'a> SnbtParser<'a> {
         let mut elements: Vec<(String, Tag)> = Vec::new();
         loop {
             let before_sep = self.mark();
-            if !elements.is_empty() {
-                if !self.try_char(b',' as u16) {
-                    self.restore(before_sep);
-                    break;
-                }
+            if !elements.is_empty() && !self.try_char(b',' as u16) {
+                self.restore(before_sep);
+                break;
             }
             let after_sep = self.mark();
             match self.parse_map_entry() {
@@ -1401,11 +1395,9 @@ impl<'a> SnbtParser<'a> {
         let mut elements: Vec<IntegerLiteral> = Vec::new();
         loop {
             let before_sep = self.mark();
-            if !elements.is_empty() {
-                if !self.try_char(b',' as u16) {
-                    self.restore(before_sep);
-                    break;
-                }
+            if !elements.is_empty() && !self.try_char(b',' as u16) {
+                self.restore(before_sep);
+                break;
             }
             let after_sep = self.mark();
             match self.parse_integer_literal() {
@@ -1424,11 +1416,9 @@ impl<'a> SnbtParser<'a> {
         let mut elements: Vec<Tag> = Vec::new();
         loop {
             let before_sep = self.mark();
-            if !elements.is_empty() {
-                if !self.try_char(b',' as u16) {
-                    self.restore(before_sep);
-                    break;
-                }
+            if !elements.is_empty() && !self.try_char(b',' as u16) {
+                self.restore(before_sep);
+                break;
             }
             let after_sep = self.mark();
             match self.parse_literal() {
@@ -1447,11 +1437,9 @@ impl<'a> SnbtParser<'a> {
         let mut elements: Vec<Tag> = Vec::new();
         loop {
             let before_sep = self.mark();
-            if !elements.is_empty() {
-                if !self.try_char(b',' as u16) {
-                    self.restore(before_sep);
-                    break;
-                }
+            if !elements.is_empty() && !self.try_char(b',' as u16) {
+                self.restore(before_sep);
+                break;
             }
             let after_sep = self.mark();
             match self.parse_literal() {

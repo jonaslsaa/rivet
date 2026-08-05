@@ -4,7 +4,6 @@ use crate::codec::Codec;
 use crate::data_result::DataResult;
 use crate::dynamic_ops::DynamicOps;
 use crate::either::Either;
-use crate::pair::Pair;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -21,13 +20,13 @@ impl<F, S, Ops: DynamicOps + 'static> crate::Decoder<Either<F, S>, Ops> for Eith
         let second = self.second.clone();
         let first_read: DataResult<(Either<F, S>, Ops::Output)> = first
             .decode(ops, input)
-            .flat_map(|vo| DataResult::success((Either::left(vo.0), vo.1)));
+            .map_owned(|vo| (Either::left(vo.0), vo.1));
         if first_read.is_success() {
             return first_read;
         }
         let second_read: DataResult<(Either<F, S>, Ops::Output)> = second
             .decode(ops, input)
-            .flat_map(|vo| DataResult::success((Either::right(vo.0), vo.1)));
+            .map_owned(|vo| (Either::right(vo.0), vo.1));
         if second_read.is_success() {
             return second_read;
         }
@@ -75,5 +74,3 @@ impl<F, S, Ops: DynamicOps + 'static> Debug for EitherCodec<F, S, Ops> {
         write!(f, "EitherCodec[{:?}, {:?}]", self.first, self.second)
     }
 }
-
-pub(crate) type _Pair<F, S> = Pair<F, S>;

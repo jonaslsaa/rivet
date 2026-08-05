@@ -7,6 +7,7 @@
 
 use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, Keyable, MapLike};
+use crate::functions::DecoderFn;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -17,6 +18,12 @@ pub trait MapDecoder<A, Ops: DynamicOps + 'static>: Debug + Keyable<Ops> {
 
     /// `MapDecoder.compressedDecode(DynamicOps<T> ops, T input)` — default:
     /// non-compressed (`ops.getMap(input)`), using the lifecycle of `decode`.
+    ///
+    /// STUB(mc.nbt): Java's `compressMaps() == true` branch (a
+    /// `KeyCompressor`-backed `MapLike` over a packed list of entries) is not
+    /// ported. Any ops that overrides `compressMaps()` to return `true` will
+    /// decode through the non-compressed `getMap` path instead of the packed
+    /// list form.
     fn compressed_decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<A> {
         let map = ops
             .get_map(input)
@@ -52,7 +59,7 @@ where
 /// `MapDecoder.flatMap(Function)`.
 pub fn flat_map<A, B, Ops: DynamicOps + 'static>(
     inner: Arc<dyn MapDecoder<A, Ops>>,
-    function: Arc<dyn Fn(&A) -> DataResult<B>>,
+    function: DecoderFn<A, B>,
 ) -> Arc<dyn MapDecoder<B, Ops>>
 where
     A: 'static,
@@ -144,7 +151,13 @@ impl<A, Ops: DynamicOps + 'static> MapDecoder<A, Ops> for FieldDecoder<A, Ops> {
     fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<A> {
         match input.get_string(&self.name) {
             Some(value) => self.element_codec.parse(ops, &value),
-            None => DataResult::error(format!("No key {} in {:?}", self.name, input.entries())),
+            // Java: `"No key " + name + " in " + input` where `input` is the
+            // `MapLike` toString — `MapLike[<entries>]`.
+            None => DataResult::error(format!(
+                "No key {} in MapLike[{:?}]",
+                self.name,
+                input.entries()
+            )),
         }
     }
 }
@@ -161,15 +174,17 @@ impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for MapDecoderAsDecoder<A, Op
 
 impl<A, Ops: DynamicOps + 'static> crate::Decoder<A, Ops> for MapDecoderAsDecoder<A, Ops> {
     fn decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(A, Ops::Output)> {
+        // Java `MapDecoder.decoder()`: `compressedDecode(ops, input).map(r ->
+        // Pair.of(r, input))`.
         self.inner
             .compressed_decode(ops, input)
-            .flat_map(|r| DataResult::success((r, input.clone())))
+            .map_owned(|r| (r, input.clone()))
     }
 }
 
 /// `MapDecoder.flatMap(Function)` result.
 pub struct FlatMappedMapDecoder<A, B, Ops: DynamicOps + 'static> {
-    function: Arc<dyn Fn(&A) -> DataResult<B>>,
+    function: DecoderFn<A, B>,
     inner: Arc<dyn MapDecoder<A, Ops>>,
 }
 impl<A, B, Ops: DynamicOps + 'static> std::fmt::Debug for FlatMappedMapDecoder<A, B, Ops> {
@@ -211,7 +226,7 @@ impl<A, B, Ops: DynamicOps + 'static> Keyable<Ops> for MappedMapDecoder<A, B, Op
 
 impl<A, B, Ops: DynamicOps + 'static> MapDecoder<B, Ops> for MappedMapDecoder<A, B, Ops> {
     fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<B> {
-        self.inner.decode(ops, input).map(|v| (self.function)(&v))
+        self.inner.decode(ops, input).map(|v| (self.function)(v))
     }
 }
 

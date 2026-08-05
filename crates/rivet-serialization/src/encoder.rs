@@ -8,6 +8,7 @@
 
 use crate::data_result::DataResult;
 use crate::dynamic_ops::DynamicOps;
+use crate::functions::DecoderFn;
 use crate::map_encoder::MapEncoder;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -50,7 +51,7 @@ where
 /// `Encoder.flatComap(Function)`.
 pub fn flat_comap<A, B, Ops: DynamicOps + 'static>(
     inner: Arc<dyn Encoder<A, Ops>>,
-    function: Arc<dyn Fn(&B) -> DataResult<A>>,
+    function: DecoderFn<B, A>,
 ) -> Arc<dyn Encoder<B, Ops>>
 where
     A: 'static,
@@ -106,7 +107,7 @@ impl<B, A, Ops: DynamicOps + 'static> Encoder<B, Ops> for ComappedEncoder<B, A, 
 
 /// `Encoder.flatComap(Function)` result.
 pub struct FlatComappedEncoder<B, A, Ops: DynamicOps + 'static> {
-    function: Arc<dyn Fn(&B) -> DataResult<A>>,
+    function: DecoderFn<B, A>,
     inner: Arc<dyn Encoder<A, Ops>>,
 }
 impl<B, A, Ops: DynamicOps + 'static> std::fmt::Debug for FlatComappedEncoder<B, A, Ops> {

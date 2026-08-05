@@ -42,18 +42,21 @@ pub trait BaseMapCodec<K, V, Ops: DynamicOps + 'static> {
 
             // `key.apply2stable(Pair::of, value)`
             let entry_result: DataResult<(K, V)> =
-                DataResult::apply2(key, |k: &K, v: &V| (k.clone(), v.clone()), value);
+                DataResult::apply2_stable(key, |k: &K, v: &V| (k.clone(), v.clone()), value);
 
             if let Some(entry) = entry_result.clone().result_or_partial_silent() {
                 let k = entry.0.clone();
-                if read.contains_key(&k) {
-                    failed.push(pair.clone());
-                    result = result.apply2_stable(
-                        |_u: &Unit, _p: &Unit| Unit,
-                        DataResult::error(format!("Duplicate entry for key: '{}'", k)),
-                    );
-                } else {
-                    read.insert(k, entry.1.clone());
+                match read.entry(k.clone()) {
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        failed.push(pair.clone());
+                        result = result.apply2_stable(
+                            |_u: &Unit, _p: &Unit| Unit,
+                            DataResult::error(format!("Duplicate entry for key: '{}'", k)),
+                        );
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(entry.1.clone());
+                    }
                 }
             }
             if entry_result.is_error() {

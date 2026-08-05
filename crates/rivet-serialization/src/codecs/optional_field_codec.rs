@@ -16,12 +16,6 @@ pub struct OptionalFieldCodec<A, Ops: DynamicOps + 'static> {
     pub lenient: bool,
 }
 
-impl<A, Ops: DynamicOps + 'static> OptionalFieldCodec<A, Ops> {
-    fn key(&self, ops: &Ops) -> Ops::Output {
-        ops.create_string(self.name.clone())
-    }
-}
-
 impl<A, Ops: DynamicOps + 'static> Keyable<Ops> for OptionalFieldCodec<A, Ops> {
     fn keys(&self, ops: &Ops) -> Vec<Ops::Output> {
         vec![ops.create_string(self.name.clone())]
@@ -42,7 +36,11 @@ where
         if parsed.is_error() && self.lenient {
             return DataResult::success(None);
         }
-        // `parsed.map(Optional::of).setPartial(parsed.resultOrPartial())`
+        // `parsed.map(Optional::of).setPartial(parsed.resultOrPartial())` —
+        // Java's `setPartial(R)` with R = `Optional<A>` ALWAYS wraps the value
+        // in `Optional.of(...)`, so an error-without-partial gets partial
+        // `Some(None)` (the empty `Optional`), matching `set_partial`.
+        // (DFU 10.0.21 has no `setPartial(Optional<R>)` overload.)
         parsed
             .clone()
             .map(|a| Some(a.clone()))
@@ -55,11 +53,8 @@ where
         ops: &Ops,
         prefix: &mut dyn RecordBuilder<Output = Ops::Output>,
     ) {
-        match input {
-            Some(value) => {
-                prefix.add_string_result(&self.name, self.element_codec.encode_start(ops, value));
-            }
-            None => {}
+        if let Some(value) = input {
+            prefix.add_string_result(&self.name, self.element_codec.encode_start(ops, value));
         }
     }
 }

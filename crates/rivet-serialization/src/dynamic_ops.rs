@@ -20,6 +20,13 @@ pub use crate::pair::Pair;
 use crate::data_result::DataResult;
 use crate::lifecycle::Lifecycle;
 use std::fmt::Debug;
+use std::sync::Arc;
+
+/// `getMapEntries` consumer — feeds each map entry pair to the callback.
+type MapEntryConsumer<O> = Box<dyn Fn(&mut dyn FnMut(&O, &O))>;
+
+/// `getList` consumer — feeds each list element to the callback.
+type ListConsumer<O> = Box<dyn Fn(&mut dyn FnMut(&O))>;
 
 /// `com.mojang.serialization.MapLike<T>`.
 ///
@@ -75,17 +82,20 @@ where
 /// `com.mojang.serialization.RecordBuilder<T>`.
 ///
 /// Backward-compatible with the STUB(mc.nbt) shape that `rivet-nbt`'s
-/// `NbtRecordBuilder` implements (`build(&self, Option<Output>)`); all the
-/// mutating `add`/`withErrorsFrom`/`setLifecycle`/`mapError` conveniences are
-/// defaulted to no-ops so existing implementors keep compiling. The full
-/// accumulating builder is `RecordBuilderImpl` (the Java `MapBuilder` port) —
-/// a future rivet-nbt wave replaces `NbtRecordBuilder` with it.
+/// `NbtRecordBuilder` implements (`build(&mut self, Option<Output>)`). The
+/// mutating `add`/`withErrorsFrom`/`setLifecycle`/`mapError` conveniences
+/// default to no-ops (STUB(mc.nbt)) so existing implementors keep compiling —
+/// an implementor that does not override them silently swallows encode output
+/// until `rivet-nbt`'s full `MapBuilder` port lands. The accumulating
+/// reference builder is `RecordBuilderImpl` (the Java `MapBuilder` port).
 pub trait RecordBuilder: Debug {
     type Output;
 
     /// `RecordBuilder.build(T prefix)` — the required method (Java signature
     /// `build(T)`); `prefix: Option` preserves the stub's reduced shape.
-    fn build(&self, prefix: Option<Self::Output>) -> DataResult<Self::Output>;
+    /// Java `AbstractBuilder.build` resets the accumulated state after each
+    /// build, hence `&mut self`.
+    fn build(&mut self, prefix: Option<Self::Output>) -> DataResult<Self::Output>;
 
     /// `RecordBuilder.add(T key, T value)`.
     fn add(&mut self, _key: Self::Output, _value: Self::Output) {}
@@ -98,7 +108,9 @@ pub trait RecordBuilder: Debug {
 
     /// `RecordBuilder.add(DataResult<T> key, DataResult<T> value)` — Java's
     /// `AbstractUniversalBuilder.add(DataResult, DataResult)`: resolves the key
-    /// through the ops and appends when both are present.
+    /// through the ops and appends when both are present. The default is a
+    /// STUB(mc.nbt) no-op for the reduced `NbtRecordBuilder` shape; the full
+    /// `RecordBuilderImpl` implements it.
     fn add_result_result(
         &mut self,
         _key: DataResult<Self::Output>,
@@ -119,12 +131,12 @@ pub trait RecordBuilder: Debug {
     fn map_error(&mut self, _on_error: Box<dyn Fn(String) -> String>) {}
 
     /// `build(T prefix)` — convenience for a concrete prefix (Java's `build(T)`).
-    fn build_with_prefix(&self, prefix: Self::Output) -> DataResult<Self::Output> {
+    fn build_with_prefix(&mut self, prefix: Self::Output) -> DataResult<Self::Output> {
         self.build(Some(prefix))
     }
 
     /// `RecordBuilder.build(DataResult<T> prefix)`.
-    fn build_result(&self, prefix: DataResult<Self::Output>) -> DataResult<Self::Output> {
+    fn build_result(&mut self, prefix: DataResult<Self::Output>) -> DataResult<Self::Output> {
         prefix.flat_map(|p| self.build_with_prefix(p))
     }
 }
@@ -146,10 +158,10 @@ pub trait ListBuilder: Debug {
     fn map_error(&mut self, _on_error: Box<dyn Fn(String) -> String>) {}
 
     /// `ListBuilder.build(T prefix)`.
-    fn build(&self, prefix: Self::Output) -> DataResult<Self::Output>;
+    fn build(&mut self, prefix: Self::Output) -> DataResult<Self::Output>;
 
     /// `ListBuilder.build(DataResult<T> prefix)`.
-    fn build_result(&self, prefix: DataResult<Self::Output>) -> DataResult<Self::Output> {
+    fn build_result(&mut self, prefix: DataResult<Self::Output>) -> DataResult<Self::Output> {
         prefix.flat_map(|p| self.build(p))
     }
 }
@@ -190,13 +202,18 @@ pub struct KeyCompressor<T> {
 
 impl<T> KeyCompressor<T> {
     /// `KeyCompressor(DynamicOps<T>, Stream<T> keys)`.
+    ///
+    /// Java's constructor also fills `compressString` from
+    /// `ops.getStringValue(key)`; without the ops (and an empty-string
+    /// placeholder would be wrong), use `new_with_strings` when the string
+    /// table is needed. The `compressString` table starts empty so
+    /// `compress_string` returns the `usize::MAX` sentinel for a real key.
     pub fn new(keys: Vec<T>) -> KeyCompressor<T>
     where
         T: Clone + PartialEq,
     {
         let mut decompress = Vec::new();
         let mut compress = Vec::new();
-        let mut compress_string = Vec::new();
 
         for key in keys {
             if compress.iter().any(|(k, _)| *k == key) {
@@ -204,7 +221,6 @@ impl<T> KeyCompressor<T> {
             }
             let next = compress.len();
             compress.push((key.clone(), next));
-            compress_string.push((String::new(), next));
             decompress.push(key);
         }
 
@@ -212,7 +228,7 @@ impl<T> KeyCompressor<T> {
         KeyCompressor {
             decompress,
             compress,
-            compress_string,
+            compress_string: Vec::new(),
             size,
         }
     }
@@ -325,6 +341,29 @@ impl<'a, O: DynamicOps> RecordBuilder for RecordBuilderImpl<'a, O> {
         self.add_result(self.ops.create_string(key.to_string()), value);
     }
 
+    /// `AbstractUniversalBuilder.add(DataResult<T> key, DataResult<T> value)` —
+    /// Java `builder.ap(key.apply2stable((k, v) -> b -> append(k, v, b), value))`.
+    /// The resolved key/value pair is appended (mirroring `add_result`'s
+    /// result-or-partial push) and the error state is accumulated via `ap`.
+    fn add_result_result(&mut self, key: DataResult<O::Output>, value: DataResult<O::Output>) {
+        // Push the entry when both key and value have a result-or-partial
+        // (Java's `append` inside the ap function).
+        let ok = key.clone().result_or_partial_silent();
+        let ov = value.clone().result_or_partial_silent();
+        if let (Some(k), Some(v)) = (ok, ov) {
+            self.entries.push(Pair::of(k, v));
+        }
+        // Thread the combined key+value error state through `()` values (the
+        // builder state is `DataResult<()>`; `O::Output` is not `'static`, so
+        // the pair cannot be carried through the `Arc<dyn Fn>` applicative).
+        let key_unit = key.map(|_| ());
+        let value_unit = value.map(|_| ());
+        let combined: DataResult<()> = key_unit.apply2_stable(|_, _| (), value_unit);
+        let builder = self.builder.clone();
+        let noop: Arc<dyn Fn(&())> = Arc::new(|_| {});
+        self.builder = builder.ap(combined.map(|_| noop));
+    }
+
     /// `AbstractBuilder.withErrorsFrom(DataResult<?>)` —
     /// `builder.flatMap(v -> result.map(r -> v))`.
     fn with_errors_from(&mut self, result: &DataResult<()>) {
@@ -340,18 +379,22 @@ impl<'a, O: DynamicOps> RecordBuilder for RecordBuilderImpl<'a, O> {
     /// `AbstractBuilder.mapError(UnaryOperator<String>)`.
     fn map_error(&mut self, on_error: Box<dyn Fn(String) -> String>) {
         let builder = self.builder.clone();
-        self.builder = builder.map_error(move |e| on_error(e));
+        self.builder = builder.map_error(on_error);
     }
 
     /// `MapBuilder.build(ImmutableMap.Builder, T prefix)` —
     /// `ops.mergeToMap(prefix, builder.buildKeepingLast())`, combined with the
     /// accumulated error state (`AbstractBuilder.build`:
-    /// `builder.flatMap(b -> build(b, prefix))`).
-    fn build(&self, prefix: Option<O::Output>) -> DataResult<O::Output> {
+    /// `builder.flatMap(b -> build(b, prefix))`). Java resets the accumulated
+    /// state after each build, so a reused builder starts fresh.
+    fn build(&mut self, prefix: Option<O::Output>) -> DataResult<O::Output> {
         let entries = self.entries.clone();
         let builder = self.builder.clone();
         let prefix = prefix.unwrap_or_else(|| self.ops.empty());
-        builder.flat_map(|_| self.ops.merge_to_map_many(&prefix, entries))
+        let result = builder.flat_map(|_| self.ops.merge_to_map_many(&prefix, entries));
+        self.builder = DataResult::success_with_lifecycle((), Lifecycle::stable());
+        self.entries.clear();
+        result
     }
 }
 
@@ -376,6 +419,10 @@ pub trait DynamicOps: Debug {
     fn convert_to<U: DynamicOps>(&self, out_ops: &U, input: &Self::Output) -> U::Output;
 
     /// `getNumberValue(T input)`.
+    ///
+    /// STUB(mc.nbt): Java returns a `Number` (capable of `BigInteger`/
+    /// `BigDecimal`); the STUB(mc.nbt) surface narrows it to `f64`, so values
+    /// larger than f64/i64 truncate or error where Java would not.
     fn get_number_value(&self, input: &Self::Output) -> DataResult<f64>;
 
     /// `getNumberValue(T input, Number defaultValue)`.
@@ -510,10 +557,7 @@ pub trait DynamicOps: Debug {
     ) -> DataResult<Vec<Pair<Self::Output, Self::Output>>>;
 
     /// `getMapEntries(T input)` — a consumer that feeds key/value pairs.
-    fn get_map_entries(
-        &self,
-        input: &Self::Output,
-    ) -> DataResult<Box<dyn Fn(&mut dyn FnMut(&Self::Output, &Self::Output))>>;
+    fn get_map_entries(&self, input: &Self::Output) -> DataResult<MapEntryConsumer<Self::Output>>;
 
     /// `createMap(Stream<Pair<T, T>>)`.
     fn create_map(&self, map: Vec<Pair<Self::Output, Self::Output>>) -> Self::Output;
@@ -525,15 +569,13 @@ pub trait DynamicOps: Debug {
     fn get_stream(&self, input: &Self::Output) -> DataResult<Vec<Self::Output>>;
 
     /// `getList(T input)`.
-    fn get_list(
-        &self,
-        input: &Self::Output,
-    ) -> DataResult<Box<dyn Fn(&mut dyn FnMut(&Self::Output))>>;
+    fn get_list(&self, input: &Self::Output) -> DataResult<ListConsumer<Self::Output>>;
 
     /// `createList(Stream<T> input)`.
     fn create_list(&self, input: Vec<Self::Output>) -> Self::Output;
 
-    /// `getByteBuffer(T input)` (surfaced as `Vec<u8>` per the stub).
+    /// `getByteBuffer(T input)` — STUB(mc.nbt): Java returns a `ByteBuffer`;
+    /// narrowed to `Vec<u8>`.
     fn get_byte_buffer(&self, input: &Self::Output) -> DataResult<Vec<u8>>;
 
     /// `createByteList(ByteBuffer input)`.
@@ -555,6 +597,11 @@ pub trait DynamicOps: Debug {
     fn remove(&self, input: Self::Output, key: &str) -> Self::Output;
 
     /// `compressMaps()`.
+    ///
+    /// STUB(mc.nbt): the `true` branch (packed list-of-entries form via
+    /// `KeyCompressor`) is not ported — `MapDecoder.compressedDecode`,
+    /// `MapEncoder.encoder()` and `MapCodecCodec.encode` all fall back to the
+    /// non-compressed map form when an ops overrides this to return `true`.
     fn compress_maps(&self) -> bool {
         false
     }
@@ -716,14 +763,18 @@ impl<'a, O: DynamicOps> ListBuilder for ListBuilderImpl<'a, O> {
     /// `Builder.mapError(UnaryOperator<String>)`.
     fn map_error(&mut self, on_error: Box<dyn Fn(String) -> String>) {
         let builder = self.builder.clone();
-        self.builder = builder.map_error(move |e| on_error(e));
+        self.builder = builder.map_error(on_error);
     }
 
     /// `Builder.build(T prefix)` — `builder.flatMap(b -> ops.mergeToList(prefix, b.build()))`.
-    fn build(&self, prefix: O::Output) -> DataResult<O::Output> {
+    /// Java resets the accumulated state after each build.
+    fn build(&mut self, prefix: O::Output) -> DataResult<O::Output> {
         let values = self.values.clone();
         let builder = self.builder.clone();
-        builder.flat_map(|_| self.ops.merge_to_list_many(&prefix, values))
+        let result = builder.flat_map(|_| self.ops.merge_to_list_many(&prefix, values));
+        self.builder = DataResult::success_with_lifecycle((), Lifecycle::stable());
+        self.values.clear();
+        result
     }
 }
 

@@ -121,14 +121,20 @@ impl<O> Dynamic<O> {
 
     /// `Dynamic.get(String)` — `new OptionalDynamic<>(ops, ops.getMap(value)
     /// .flatMap(m -> ...))`.
+    ///
+    /// Paper gates the `" in " + value` suffix behind
+    /// `-DPaper.debugDynamicMissingKeys` (default false), so the default error
+    /// is just `"key missing: {key}"`.
     pub fn get(&self, ops: &impl DynamicOps<Output = O>, key: &str) -> OptionalDynamic<O>
     where
-        O: Clone,
+        O: Clone + Debug,
     {
         let delegate = ops
             .get_map(&self.value)
             .flat_map(move |m| match m.get_string(key) {
                 Some(v) => DataResult::success(Dynamic::new(ops, v)),
+                // Paper default: `"key missing: " + key` (the value is only
+                // appended with `Paper.debugDynamicMissingKeys` enabled).
                 None => DataResult::error(format!("key missing: {}", key)),
             });
         OptionalDynamic {

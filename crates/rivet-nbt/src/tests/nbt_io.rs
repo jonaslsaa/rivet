@@ -22,7 +22,6 @@ use crate::tag::Tag;
 use crate::visitors::collect_to_tag::CollectToTag;
 use crate::visitors::skip_all::SkipAll;
 
-use rivet_util::data_io::{DataInput, DataOutput};
 use rivet_util::{DataInputStream, DataOutputStream};
 
 /// Write a `CompoundTag` root with `NbtIo.write` into an in-memory buffer.
@@ -422,7 +421,12 @@ fn all_committed_fixtures_parse_as_compounds() {
         "{} of {} fixtures failed to parse as compounds:\n{}",
         failures.len(),
         fixtures.len(),
-        failures.iter().take(10).cloned().collect::<Vec<_>>().join("\n")
+        failures
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 

@@ -430,11 +430,11 @@ impl CompoundTag {
     /// `CompoundTag.merge(CompoundTag)`.
     pub fn merge(&mut self, other: &CompoundTag) -> &mut CompoundTag {
         for (tag_name, other_tag) in other.tags.iter() {
-            if let Some(Tag::Compound(other_compound)) = other.tags.get(tag_name) {
-                if let Some(Tag::Compound(self_compound)) = self.tags.get_mut(tag_name) {
-                    self_compound.merge(other_compound);
-                    continue;
-                }
+            if let Some(Tag::Compound(other_compound)) = other.tags.get(tag_name)
+                && let Some(Tag::Compound(self_compound)) = self.tags.get_mut(tag_name)
+            {
+                self_compound.merge(other_compound);
+                continue;
             }
             self.put(tag_name.clone(), other_tag.copy_tag());
         }

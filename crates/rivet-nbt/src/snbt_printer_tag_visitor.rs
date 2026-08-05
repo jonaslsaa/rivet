@@ -28,8 +28,6 @@ use crate::tag_visitor::TagVisitor;
 const NAME_VALUE_SEPARATOR: char = ':';
 /// `SnbtPrinterTagVisitor.ELEMENT_SEPARATOR` — `','`.
 const ELEMENT_SEPARATOR: char = ',';
-/// `SnbtPrinterTagVisitor.LIST_TYPE_SEPARATOR` — `';'`.
-const LIST_TYPE_SEPARATOR: char = ';';
 /// `SnbtPrinterTagVisitor.ELEMENT_SPACING` — `" "`.
 const ELEMENT_SPACING: char = ' ';
 /// `SnbtPrinterTagVisitor.NEWLINE` — `"\n"`.

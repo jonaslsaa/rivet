@@ -2,7 +2,7 @@
 
 use crate::codec::Codec;
 use crate::data_result::DataResult;
-use crate::dynamic_ops::{DynamicOps, ListBuilder};
+use crate::dynamic_ops::DynamicOps;
 use crate::lifecycle::Lifecycle;
 use crate::unit::Unit;
 use std::fmt::Debug;

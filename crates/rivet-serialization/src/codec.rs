@@ -19,11 +19,36 @@ use crate::codecs::xor_codec::XorCodec;
 use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, Keyable};
 use crate::either::Either;
+use crate::functions::DecoderFn;
 use crate::lifecycle::Lifecycle;
 use crate::map_codec::MapCodec;
 use crate::pair::Pair;
 use std::fmt::Debug;
 use std::sync::Arc;
+
+/// `Codec.recursive`/`lazyInitialized` wrapper — `Function<Codec<A>, Codec<A>>`.
+/// The `Ops: DynamicOps` bound is needed on the RHS (`Codec<A, Ops>`) but is
+/// not enforced at alias usage sites, so the `type_alias_bounds` lint is
+/// allowed here.
+#[allow(type_alias_bounds)]
+type RecursiveFn<A, Ops: DynamicOps + 'static> =
+    Arc<dyn Fn(Arc<dyn Codec<A, Ops>>) -> Arc<dyn Codec<A, Ops>>>;
+
+/// `Codec.stringResolver` encode half — `Function<E, Optional<String>>`.
+type ToStringFn<E> = Arc<dyn Fn(&E) -> Option<String>>;
+
+/// `Codec.stringResolver` decode half — `Function<String, Optional<E>>`.
+type FromStringFn<E> = Arc<dyn Fn(&String) -> Option<E>>;
+
+/// `PrimitiveCodec` read half — `BiFunction<Ops, T, DataResult<A>>`.
+/// See `RecursiveFn` for why `type_alias_bounds` is allowed.
+#[allow(type_alias_bounds)]
+type PrimitiveReadFn<A, Ops: DynamicOps + 'static> =
+    Arc<dyn Fn(&Ops, &Ops::Output) -> DataResult<A>>;
+
+/// `PrimitiveCodec` write half — `BiFunction<Ops, A, T>`.
+#[allow(type_alias_bounds)]
+type PrimitiveWriteFn<A, Ops: DynamicOps + 'static> = Arc<dyn Fn(&Ops, &A) -> Ops::Output>;
 
 /// `com.mojang.serialization.Codec<A>`.
 pub trait Codec<A, Ops: DynamicOps + 'static>:
@@ -244,7 +269,7 @@ where
 /// `Codec.recursive(String, Function<Codec<A>, Codec<A>>)`.
 pub fn recursive<A, Ops: DynamicOps + 'static>(
     name: String,
-    wrapped: Arc<dyn Fn(Arc<dyn Codec<A, Ops>>) -> Arc<dyn Codec<A, Ops>>>,
+    wrapped: RecursiveFn<A, Ops>,
 ) -> Arc<dyn Codec<A, Ops>>
 where
     A: 'static,
@@ -420,9 +445,9 @@ pub fn string_range<Ops: DynamicOps + 'static>(
     validate(
         string_codec::<Ops>(),
         Arc::new(move |value: &String| {
-            // Java `String.length()` is UTF-16 code units; `chars().count()` is
-            // the UTF-16 unit count.
-            let length = value.chars().count() as i32;
+            // Java `String.length()` counts UTF-16 code units; an astral-plane
+            // char (e.g. an emoji) is 1 scalar value but 2 UTF-16 units.
+            let length = value.encode_utf16().count() as i32;
             if length < min_size {
                 return DataResult::error(format!(
                     "String \"{}\" is too short: {}, expected range [{}-{}]",
@@ -496,12 +521,16 @@ fn check_range<T: PartialOrd + std::fmt::Display>(value: T, min: T, max: T) -> D
 }
 
 /// `Codec.stringResolver(Function<E, String>, Function<String, E>)`.
+///
+/// Java encodes via `Optional.ofNullable(toString.apply(e))` — only a `null`
+/// return is an error, so the encode side is `Fn(&E) -> Option<String>`
+/// (`None` = unknown element).
 pub fn string_resolver<E, Ops: DynamicOps + 'static>(
-    to_string: Arc<dyn Fn(&E) -> String>,
-    from_string: Arc<dyn Fn(&String) -> Option<E>>,
+    to_string: ToStringFn<E>,
+    from_string: FromStringFn<E>,
 ) -> Arc<dyn Codec<E, Ops>>
 where
-    E: 'static + Debug,
+    E: 'static + std::fmt::Display,
 {
     let str_codec = string_codec::<Ops>();
     let f = from_string.clone();
@@ -511,13 +540,9 @@ where
             Some(e) => DataResult::success(e),
             None => DataResult::error(format!("Unknown element name:{}", name)),
         }),
-        Arc::new(move |e: &E| {
-            let s = to_string(e);
-            if s.is_empty() {
-                DataResult::error(format!("Element with unknown name: {:?}", e))
-            } else {
-                DataResult::success(s)
-            }
+        Arc::new(move |e: &E| match to_string(e) {
+            Some(s) => DataResult::success(s),
+            None => DataResult::error(format!("Element with unknown name: {}", e)),
         }),
     )
 }
@@ -579,7 +604,7 @@ where
 /// `Codec.comapFlatMap(Function, Function)`.
 pub fn comap_flat_map<A, S, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    to: Arc<dyn Fn(&A) -> DataResult<S>>,
+    to: DecoderFn<A, S>,
     from: Arc<dyn Fn(&S) -> A>,
 ) -> Arc<dyn Codec<S, Ops>>
 where
@@ -597,7 +622,7 @@ where
 pub fn flat_comap_map<A, S, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
     to: Arc<dyn Fn(&A) -> S>,
-    from: Arc<dyn Fn(&S) -> DataResult<A>>,
+    from: DecoderFn<S, A>,
 ) -> Arc<dyn Codec<S, Ops>>
 where
     A: 'static,
@@ -613,8 +638,8 @@ where
 /// `Codec.flatXmap(Function, Function)`.
 pub fn flat_xmap<A, S, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    to: Arc<dyn Fn(&A) -> DataResult<S>>,
-    from: Arc<dyn Fn(&S) -> DataResult<A>>,
+    to: DecoderFn<A, S>,
+    from: DecoderFn<S, A>,
 ) -> Arc<dyn Codec<S, Ops>>
 where
     A: 'static,
@@ -630,7 +655,7 @@ where
 /// `Codec.validate(Function<A, DataResult<A>>)`.
 pub fn validate<A, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    checker: Arc<dyn Fn(&A) -> DataResult<A>>,
+    checker: DecoderFn<A, A>,
 ) -> Arc<dyn Codec<A, Ops>>
 where
     A: 'static,
@@ -677,9 +702,14 @@ where
     A: 'static + Clone,
 {
     let v = value.clone();
+    // `DataFixUtils.consumerToFunction`: invoke the callback and return the
+    // message unchanged.
     or_else_get_map_error(
         codec,
-        Arc::new(move |_e: String| String::new()),
+        Arc::new(move |e: String| {
+            on_error(&e);
+            e
+        }),
         Arc::new(move || v.clone()),
     )
 }
@@ -693,7 +723,14 @@ pub fn or_else_get<A, Ops: DynamicOps + 'static>(
 where
     A: 'static + Clone,
 {
-    or_else_get_map_error(codec, Arc::new(move |_e: String| String::new()), value)
+    or_else_get_map_error(
+        codec,
+        Arc::new(move |e: String| {
+            on_error(&e);
+            e
+        }),
+        value,
+    )
 }
 
 /// `Codec.orElseGet(UnaryOperator<String>, Supplier<A>)`.
@@ -907,7 +944,7 @@ pub struct OfCodec<A, Ops: DynamicOps + 'static> {
 }
 impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for OfCodec<A, Ops> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "OfCodec")
+        write!(f, "OfCodec[{}]", (self.name)())
     }
 }
 
@@ -928,7 +965,7 @@ impl<A, Ops: DynamicOps + 'static> Codec<A, Ops> for OfCodec<A, Ops> {}
 /// `Codec.recursive(...)` result.
 pub struct RecursiveCodec<A, Ops: DynamicOps + 'static> {
     name: String,
-    wrapped: Arc<dyn Fn(Arc<dyn Codec<A, Ops>>) -> Arc<dyn Codec<A, Ops>>>,
+    wrapped: RecursiveFn<A, Ops>,
     cell: std::cell::OnceCell<Arc<dyn Codec<A, Ops>>>,
     weak: std::sync::Weak<RecursiveCodec<A, Ops>>,
 }
@@ -993,13 +1030,14 @@ impl<A: 'static, Ops: DynamicOps + 'static> Codec<A, Ops> for RecursiveCodec<A, 
 /// `PrimitiveCodec<A>` — a codec with a `read`/`write` pair (the Java
 /// interface default methods `decode`/`encode` are the shared impl).
 pub struct PrimitiveCodecImpl<A, Ops: DynamicOps + 'static> {
-    read: Arc<dyn Fn(&Ops, &Ops::Output) -> DataResult<A>>,
-    write: Arc<dyn Fn(&Ops, &A) -> Ops::Output>,
+    read: PrimitiveReadFn<A, Ops>,
+    write: PrimitiveWriteFn<A, Ops>,
     name: &'static str,
 }
 impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for PrimitiveCodecImpl<A, Ops> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PrimitiveCodecImpl")
+        // Java `PrimitiveCodec.toString()` returns the name ("Bool", "Int", ...).
+        write!(f, "{}", self.name)
     }
 }
 
@@ -1012,7 +1050,9 @@ impl<A, Ops: DynamicOps + 'static> crate::Encoder<A, Ops> for PrimitiveCodecImpl
 
 impl<A, Ops: DynamicOps + 'static> crate::Decoder<A, Ops> for PrimitiveCodecImpl<A, Ops> {
     fn decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(A, Ops::Output)> {
-        (self.read)(ops, input).flat_map(|r| DataResult::success((r, ops.empty())))
+        // Java `PrimitiveCodec.decode`: `read(ops, input).map(r -> Pair.of(r,
+        // ops.empty()))`.
+        (self.read)(ops, input).map_owned(|r| (r, ops.empty()))
     }
 }
 
@@ -1058,6 +1098,9 @@ impl<Ops: DynamicOps + 'static> crate::Encoder<crate::dynamic::Dynamic<Ops::Outp
         prefix: &Ops::Output,
     ) -> DataResult<Ops::Output> {
         let value: &Ops::Output = &input.value;
+        // Java uses reference identity (`input.getValue() == input.getOps().empty()`);
+        // `Ops::Output` is value-semantic here, so this is a deliberate switch
+        // to value equality (a structurally-equal empty is treated as empty).
         if value == &ops.empty() {
             // nothing to merge, return rest
             return DataResult::success_with_lifecycle(prefix.clone(), Lifecycle::experimental());

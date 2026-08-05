@@ -364,10 +364,41 @@ impl DynamicOps for NbtOps {
     fn get_byte_buffer(&self, input: &Tag) -> DataResult<Vec<u8>> {
         match input {
             Tag::ByteArray(t) => DataResult::success(t.data.iter().map(|v| *v as u8).collect()),
-            _ => DataResult::error(format!(
-                "Not a byte buffer: {}",
-                crate::string_tag_visitor::StringTagVisitor::to_string(input)
-            )),
+            // Java `NbtOps.getByteBuffer` falls back to
+            // `DynamicOps.super.getByteBuffer` for non-ByteArray inputs:
+            // `getStream(input).flatMap(...)` — every element must pass
+            // `getNumberValue` (cast to byte); a non-list keeps the getStream
+            // error, and a non-number element reports "Some elements are not
+            // bytes: {input}".
+            _ => self.get_stream(input).map_or_else(
+                |elements| {
+                    let mut buffer = Vec::with_capacity(elements.len());
+                    let mut all_numbers = true;
+                    for e in elements {
+                        match self.get_number_value(e).result() {
+                            // Java `Number.byteValue()` narrows double -> int
+                            // (truncate toward zero, saturating) then wraps to
+                            // byte; `as i32` then `as i8` replicates that.
+                            Some(n) => buffer.push(((*n as i32) as i8) as u8),
+                            None => {
+                                all_numbers = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_numbers {
+                        DataResult::success(buffer)
+                    } else {
+                        DataResult::error(format!(
+                            "Some elements are not bytes: {}",
+                            crate::string_tag_visitor::StringTagVisitor::to_string(input)
+                        ))
+                    }
+                },
+                |error| {
+                    DataResult::error_with_lifecycle(error.message().to_string(), error.lifecycle())
+                },
+            ),
         }
     }
 
@@ -378,10 +409,35 @@ impl DynamicOps for NbtOps {
     fn get_int_stream(&self, input: &Tag) -> DataResult<Vec<i32>> {
         match input {
             Tag::IntArray(t) => DataResult::success(t.data.clone()),
-            _ => DataResult::error(format!(
-                "Not an int stream: {}",
-                crate::string_tag_visitor::StringTagVisitor::to_string(input)
-            )),
+            // Java `NbtOps.getIntStream` falls back to
+            // `DynamicOps.super.getIntStream` for non-IntArray inputs — same
+            // shape as `get_byte_buffer` but casting to int.
+            _ => self.get_stream(input).map_or_else(
+                |elements| {
+                    let mut stream = Vec::with_capacity(elements.len());
+                    let mut all_numbers = true;
+                    for e in elements {
+                        match self.get_number_value(e).result() {
+                            Some(n) => stream.push(*n as i32),
+                            None => {
+                                all_numbers = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_numbers {
+                        DataResult::success(stream)
+                    } else {
+                        DataResult::error(format!(
+                            "Some elements are not ints: {}",
+                            crate::string_tag_visitor::StringTagVisitor::to_string(input)
+                        ))
+                    }
+                },
+                |error| {
+                    DataResult::error_with_lifecycle(error.message().to_string(), error.lifecycle())
+                },
+            ),
         }
     }
 
@@ -392,10 +448,35 @@ impl DynamicOps for NbtOps {
     fn get_long_stream(&self, input: &Tag) -> DataResult<Vec<i64>> {
         match input {
             Tag::LongArray(t) => DataResult::success(t.data.clone()),
-            _ => DataResult::error(format!(
-                "Not a long stream: {}",
-                crate::string_tag_visitor::StringTagVisitor::to_string(input)
-            )),
+            // Java `NbtOps.getLongStream` falls back to
+            // `DynamicOps.super.getLongStream` for non-LongArray inputs — same
+            // shape as `get_byte_buffer` but casting to long.
+            _ => self.get_stream(input).map_or_else(
+                |elements| {
+                    let mut stream = Vec::with_capacity(elements.len());
+                    let mut all_numbers = true;
+                    for e in elements {
+                        match self.get_number_value(e).result() {
+                            Some(n) => stream.push(*n as i64),
+                            None => {
+                                all_numbers = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_numbers {
+                        DataResult::success(stream)
+                    } else {
+                        DataResult::error(format!(
+                            "Some elements are not longs: {}",
+                            crate::string_tag_visitor::StringTagVisitor::to_string(input)
+                        ))
+                    }
+                },
+                |error| {
+                    DataResult::error_with_lifecycle(error.message().to_string(), error.lifecycle())
+                },
+            ),
         }
     }
 
@@ -466,7 +547,9 @@ struct NbtRecordBuilder;
 impl rivet_serialization::RecordBuilder for NbtRecordBuilder {
     type Output = Tag;
 
-    fn build(&self, prefix: Option<Tag>) -> DataResult<Tag> {
+    // STUB(dfu.codec): `&mut self` matches the ported
+    // `rivet_serialization::RecordBuilder::build(&mut self, ...)` signature.
+    fn build(&mut self, prefix: Option<Tag>) -> DataResult<Tag> {
         // This reduced builder accumulates nothing itself; the concrete
         // `NbtRecordBuilder` in the full port appends into a builder. Here we
         // only support the merge-from-prefix shape used by `CompoundTag.store`

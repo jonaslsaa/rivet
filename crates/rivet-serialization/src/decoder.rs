@@ -9,6 +9,7 @@
 
 use crate::data_result::DataResult;
 use crate::dynamic_ops::DynamicOps;
+use crate::functions::DecoderFn;
 use crate::map_decoder::MapDecoder;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -22,8 +23,7 @@ pub trait Decoder<A, Ops: DynamicOps + 'static>: Debug {
     /// `Decoder.parse(DynamicOps<T> ops, T input)` — `decode(ops, input)
     /// .map(Pair::getFirst)`.
     fn parse(&self, ops: &Ops, input: &Ops::Output) -> DataResult<A> {
-        self.decode(ops, input)
-            .flat_map(|pair| DataResult::success(pair.0))
+        self.decode(ops, input).map_owned(|pair| pair.0)
     }
 }
 
@@ -42,7 +42,7 @@ where
 /// DataResult<? extends B>>`; takes the value by reference.
 pub fn flat_map<A, B, Ops: DynamicOps + 'static>(
     inner: Arc<dyn Decoder<A, Ops>>,
-    function: Arc<dyn Fn(&A) -> DataResult<B>>,
+    function: DecoderFn<A, B>,
 ) -> Arc<dyn Decoder<B, Ops>>
 where
     A: 'static,
@@ -115,7 +115,7 @@ where
 
 /// `Decoder.flatMap(Function)` result.
 pub struct FlatMappedDecoder<A, B, Ops: DynamicOps + 'static> {
-    function: Arc<dyn Fn(&A) -> DataResult<B>>,
+    function: DecoderFn<A, B>,
     inner: Arc<dyn Decoder<A, Ops>>,
 }
 impl<A, B, Ops: DynamicOps + 'static> std::fmt::Debug for FlatMappedDecoder<A, B, Ops> {
@@ -126,9 +126,11 @@ impl<A, B, Ops: DynamicOps + 'static> std::fmt::Debug for FlatMappedDecoder<A, B
 
 impl<A, B, Ops: DynamicOps + 'static> Decoder<B, Ops> for FlatMappedDecoder<A, B, Ops> {
     fn decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(B, Ops::Output)> {
+        // Java: `decode(ops, input).flatMap(p -> function.apply(p.getFirst())
+        // .map(r -> Pair.of(r, p.getSecond())))`.
         self.inner
             .decode(ops, input)
-            .flat_map(|p| (self.function)(&p.0).flat_map(|r| DataResult::success((r, p.1))))
+            .flat_map(|p| (self.function)(&p.0).map_owned(|r| (r, p.1)))
     }
 }
 
@@ -145,9 +147,10 @@ impl<A, B, Ops: DynamicOps + 'static> std::fmt::Debug for MappedDecoder<A, B, Op
 
 impl<A, B, Ops: DynamicOps + 'static> Decoder<B, Ops> for MappedDecoder<A, B, Ops> {
     fn decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(B, Ops::Output)> {
+        // Java: `decode(ops, input).map(p -> p.mapFirst(function))`.
         self.inner
             .decode(ops, input)
-            .flat_map(|p| DataResult::success(((self.function)(&p.0), p.1)))
+            .map_owned(|p| ((self.function)(&p.0), p.1))
     }
 }
 

@@ -12,6 +12,7 @@
 //! curried fallback of `ap2`/`ap3` (which applies the function to partial
 //! values) can own its captured values (`Box<dyn Fn>` is not cloneable).
 
+use crate::functions::{Fn1, Fn2, Fn3, Fn4};
 use crate::lifecycle::Lifecycle;
 use std::fmt;
 use std::sync::Arc;
@@ -193,13 +194,9 @@ impl<T> DataResult<T> {
         match &self.value {
             DataResultValue::Success(v) => v,
             DataResultValue::Error {
-                message: e,
-                partial: Some(p),
+                partial: Some(p), ..
             } => p,
-            DataResultValue::Error {
-                message: e,
-                partial: None,
-            } => panic!("{}: {}", message.into(), e),
+            DataResultValue::Error { message: e, .. } => panic!("{}: {}", message.into(), e),
         }
     }
 
@@ -217,6 +214,20 @@ impl<T> DataResult<T> {
             }
             DataResultValue::Error { message, partial } => {
                 DataResult::error_raw(message, partial.map(|p| f(&p)), self.lifecycle)
+            }
+        }
+    }
+
+    /// `DataResult.map(Function)` over the owned value — identical to Java's
+    /// `map` (maps the success and the partial, preserves the lifecycle) but
+    /// consumes the value so the function can move fields out without a
+    /// `Clone` bound. Used where the mapped result is built from the owned
+    /// fields (e.g. wrapping a decoded `Pair` into `Either`).
+    pub fn map_owned<U, F: FnOnce(T) -> U>(self, f: F) -> DataResult<U> {
+        match self.value {
+            DataResultValue::Success(v) => DataResult::success_with_lifecycle(f(v), self.lifecycle),
+            DataResultValue::Error { message, partial } => {
+                DataResult::error_raw(message, partial.map(f), self.lifecycle)
             }
         }
     }
@@ -265,8 +276,11 @@ impl<T> DataResult<T> {
     }
 
     /// `DataResult.flatMap(Function)` — applies the function to a full result,
-    /// and to the partial value of an error, concatenating messages when both
-    /// are errors (the accumulate-and-retry semantics).
+    /// and to the partial value of an error. When the outer is an error-with-
+    /// partial, the result ALWAYS stays an error: a success continuation keeps
+    /// the original error message with the continuation value as the new
+    /// partial (`Java Error.flatMap`), and an error continuation concatenates
+    /// the two messages and keeps the second partial.
     pub fn flat_map<U, F: FnOnce(T) -> DataResult<U>>(self, f: F) -> DataResult<U> {
         match self.value {
             DataResultValue::Success(v) => f(v).add_lifecycle(self.lifecycle),
@@ -281,7 +295,9 @@ impl<T> DataResult<T> {
                 let second = f(p);
                 let combined = self.lifecycle.add(second.lifecycle());
                 match second.value {
-                    DataResultValue::Success(v) => DataResult::success_with_lifecycle(v, combined),
+                    DataResultValue::Success(v) => {
+                        DataResult::error_raw(message, Some(v), combined)
+                    }
                     DataResultValue::Error {
                         message: m2,
                         partial: p2,
@@ -292,7 +308,7 @@ impl<T> DataResult<T> {
     }
 
     /// `DataResult.ap(DataResult<Function<R, R2>>)`.
-    pub fn ap<U>(self, function_result: DataResult<Arc<dyn Fn(&T) -> U>>) -> DataResult<U> {
+    pub fn ap<U>(self, function_result: DataResult<Fn1<T, U>>) -> DataResult<U> {
         let combined = self.lifecycle.add(function_result.lifecycle());
         match (self.value, function_result.value) {
             (DataResultValue::Success(v), DataResultValue::Success(func)) => {
@@ -332,7 +348,7 @@ impl<T> DataResult<T> {
         R2: Clone + 'static,
         S: 'static,
     {
-        let fr: DataResult<Arc<dyn Fn(&T, &R2) -> S>> =
+        let fr: DataResult<Fn2<T, R2, S>> =
             DataResult::success_with_lifecycle(Arc::new(function), Lifecycle::experimental());
         ap2(fr, self, second)
     }
@@ -348,7 +364,7 @@ impl<T> DataResult<T> {
         R2: Clone + 'static,
         S: 'static,
     {
-        let fr: DataResult<Arc<dyn Fn(&T, &R2) -> S>> =
+        let fr: DataResult<Fn2<T, R2, S>> =
             DataResult::success_with_lifecycle(Arc::new(function), Lifecycle::stable());
         ap2(fr, self, second)
     }
@@ -366,7 +382,7 @@ impl<T> DataResult<T> {
         R3: Clone + 'static,
         S: 'static,
     {
-        let fr: DataResult<Arc<dyn Fn(&T, &R2, &R3) -> S>> =
+        let fr: DataResult<Fn3<T, R2, R3, S>> =
             DataResult::success_with_lifecycle(Arc::new(function), Lifecycle::experimental());
         ap3(fr, self, second, third)
     }
@@ -447,7 +463,7 @@ impl<T> DataResult<T> {
 /// `DataResult.INSTANCE.ap2` — the `Applicative` fast path with the curried
 /// fallback.
 pub fn ap2<T: Clone + 'static, R2: Clone + 'static, S: 'static>(
-    fr: DataResult<Arc<dyn Fn(&T, &R2) -> S>>,
+    fr: DataResult<Fn2<T, R2, S>>,
     a: DataResult<T>,
     b: DataResult<R2>,
 ) -> DataResult<S> {
@@ -459,9 +475,9 @@ pub fn ap2<T: Clone + 'static, R2: Clone + 'static, S: 'static>(
 
     // Applicative.super.ap2: ap(ap(map(curry, func), a), b)
     // Function2.curry: x -> y -> f(x, y)
-    let curried: DataResult<Arc<dyn Fn(&T) -> Arc<dyn Fn(&R2) -> S>>> = fr.map(|f| {
+    let curried: DataResult<Fn1<T, Fn1<R2, S>>> = fr.map(|f| {
         let f = f.clone();
-        let curried_fn: Arc<dyn Fn(&T) -> Arc<dyn Fn(&R2) -> S>> = Arc::new(move |x: &T| {
+        let curried_fn: Fn1<T, Fn1<R2, S>> = Arc::new(move |x: &T| {
             let f = f.clone();
             let x = x.clone();
             let inner: Arc<dyn Fn(&R2) -> S> = Arc::new(move |y: &R2| f(&x, y));
@@ -476,7 +492,7 @@ pub fn ap2<T: Clone + 'static, R2: Clone + 'static, S: 'static>(
 /// `DataResult.INSTANCE.ap3` — fast path when all four results are present,
 /// otherwise `ap2(ap(map(Function3.curry, func), t1), t2, t3)`.
 pub fn ap3<T: Clone + 'static, R2: Clone + 'static, R3: Clone + 'static, S: 'static>(
-    fr: DataResult<Arc<dyn Fn(&T, &R2, &R3) -> S>>,
+    fr: DataResult<Fn3<T, R2, R3, S>>,
     a: DataResult<T>,
     b: DataResult<R2>,
     c: DataResult<R3>,
@@ -495,18 +511,49 @@ pub fn ap3<T: Clone + 'static, R2: Clone + 'static, R3: Clone + 'static, S: 'sta
 
     // Applicative.super.ap3: ap2(ap(map(Function3::curry, func), t1), t2, t3)
     // Function3.curry: x -> (y, z) -> f(x, y, z)
-    let curried: DataResult<Arc<dyn Fn(&T) -> Arc<dyn Fn(&R2, &R3) -> S>>> = fr.map(|f| {
+    let curried: DataResult<Fn1<T, Fn2<R2, R3, S>>> = fr.map(|f| {
         let f = f.clone();
-        let curried_fn: Arc<dyn Fn(&T) -> Arc<dyn Fn(&R2, &R3) -> S>> = Arc::new(move |x: &T| {
+        let curried_fn: Fn1<T, Fn2<R2, R3, S>> = Arc::new(move |x: &T| {
             let f = f.clone();
             let x = x.clone();
-            let inner: Arc<dyn Fn(&R2, &R3) -> S> = Arc::new(move |y: &R2, z: &R3| f(&x, y, z));
+            let inner: Fn2<R2, R3, S> = Arc::new(move |y: &R2, z: &R3| f(&x, y, z));
             inner
         });
         curried_fn
     });
     let step1 = a.ap(curried);
     ap2(step1, b, c)
+}
+
+/// `Applicative.super.ap4` — Java's default:
+/// `ap2(ap2(map(Function4::curry2, func), t1, t2), t3, t4)`.
+/// `Function4.curry2`: `(t1, t2) -> (t3, t4) -> f(t1, t2, t3, t4)`.
+pub fn ap4<
+    T1: Clone + 'static,
+    T2: Clone + 'static,
+    T3: Clone + 'static,
+    T4: Clone + 'static,
+    R: 'static,
+>(
+    fr: DataResult<Fn4<T1, T2, T3, T4, R>>,
+    a: DataResult<T1>,
+    b: DataResult<T2>,
+    c: DataResult<T3>,
+    d: DataResult<T4>,
+) -> DataResult<R> {
+    let curried: DataResult<Fn2<T1, T2, Fn2<T3, T4, R>>> = fr.map(|f| {
+        let f = f.clone();
+        let curried_fn: Fn2<T1, T2, Fn2<T3, T4, R>> = Arc::new(move |x1: &T1, x2: &T2| {
+            let f = f.clone();
+            let x1 = x1.clone();
+            let x2 = x2.clone();
+            let inner: Fn2<T3, T4, R> = Arc::new(move |y1: &T3, y2: &T4| f(&x1, &x2, y1, y2));
+            inner
+        });
+        curried_fn
+    });
+    let step1 = ap2(curried, a, b);
+    ap2(step1, c, d)
 }
 
 /// `DataResult.appendMessages(String, String)`.
@@ -522,16 +569,19 @@ impl<T> From<T> for DataResult<T> {
 
 impl<T: fmt::Display> fmt::Display for DataResult<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Java `Success.toString()` = "DataResult.Success[" + value + "]";
+        // `Error.toString()` = "DataResult.Error['" + message + "'" + (partial
+        // present ? ": " + value : "") + "]".
         match &self.value {
-            DataResultValue::Success(v) => write!(f, "Success[{}]", v),
+            DataResultValue::Success(v) => write!(f, "DataResult.Success[{}]", v),
             DataResultValue::Error {
                 message,
                 partial: Some(p),
-            } => write!(f, "Error['{}': {}]", message, p),
+            } => write!(f, "DataResult.Error['{}': {}]", message, p),
             DataResultValue::Error {
                 message,
                 partial: None,
-            } => write!(f, "Error['{}']", message),
+            } => write!(f, "DataResult.Error['{}']", message),
         }
     }
 }

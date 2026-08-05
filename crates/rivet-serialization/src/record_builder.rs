@@ -14,13 +14,23 @@
 //! composes the per-field `MapDecoder`s.
 
 use crate::codec::Codec;
-use crate::data_result::DataResult;
+use crate::data_result::{DataResult, ap3, ap4};
 use crate::dynamic_ops::{DynamicOps, Keyable, MapLike, RecordBuilder};
+use crate::functions::{DecoderFn, Fn3, Fn4};
 use crate::lifecycle::Lifecycle;
 use crate::map_codec::MapCodec;
 use crate::map_decoder::MapDecoder;
 use std::fmt::Debug;
 use std::sync::Arc;
+
+/// `RecordCodecBuilder` encode half — applies the getters to `&O` and writes
+/// each field via `RecordBuilder`.
+/// The `Ops: DynamicOps` bound is needed on the RHS (`RecordBuilder::Output`)
+/// but is not enforced at alias usage sites, so the `type_alias_bounds` lint
+/// is allowed here.
+#[allow(type_alias_bounds)]
+type EncoderFn<O, Ops: DynamicOps + 'static> =
+    Arc<dyn Fn(&O, &Ops, &mut dyn RecordBuilder<Output = Ops::Output>)>;
 
 /// `com.mojang.serialization.codecs.RecordCodecBuilder<O, F>`.
 pub struct RecordCodecBuilder<O, Ops: DynamicOps + 'static, F> {
@@ -28,7 +38,7 @@ pub struct RecordCodecBuilder<O, Ops: DynamicOps + 'static, F> {
     getter: Arc<dyn Fn(&O) -> F>,
     /// `Function<O, MapEncoder<F>>` applied at encode time — encodes the field
     /// by pulling `getter(o)` out of the input `O`.
-    encoder: Arc<dyn Fn(&O, &Ops, &mut dyn RecordBuilder<Output = Ops::Output>)>,
+    encoder: EncoderFn<O, Ops>,
     /// The `MapDecoder<F>` half.
     decoder: Arc<dyn MapDecoder<F, Ops>>,
 }
@@ -102,12 +112,14 @@ impl<O: 'static, Ops: DynamicOps + 'static, F> RecordCodecBuilder<O, Ops, F> {
         F: Clone + 'static,
     {
         let instance_enc = instance.clone();
-        let instance_enc_encoder = instance_enc.clone();
         let instance_enc_unit = instance_enc.clone();
         RecordCodecBuilder {
             getter: Arc::new(move |_o| instance.clone()),
-            encoder: Arc::new(move |_o, _ops, _prefix| {
-                let _ = &instance_enc_encoder;
+            // Java `point(instance, lifecycle)`: `Encoder.<F>empty().withLifecycle(lifecycle)`
+            // — the empty encoder applies `setLifecycle` to the builder.
+            encoder: Arc::new(move |_o, _ops, prefix| {
+                prefix.set_lifecycle(lifecycle);
+                let _ = &instance_enc;
             }),
             decoder: crate::map_decoder::with_lifecycle::<F, Ops>(
                 crate::map_decoder::unit_with::<F, Ops>(Arc::new(move || {
@@ -121,11 +133,6 @@ impl<O: 'static, Ops: DynamicOps + 'static, F> RecordCodecBuilder<O, Ops, F> {
     /// The `MapDecoder` half.
     pub fn decoder(&self) -> Arc<dyn MapDecoder<F, Ops>> {
         self.decoder.clone()
-    }
-
-    /// The `MapEncoder`-shaped getter-driven encoder.
-    fn encode(&self, o: &O, ops: &Ops, prefix: &mut dyn RecordBuilder<Output = Ops::Output>) {
-        (self.encoder)(o, ops, prefix)
     }
 }
 
@@ -308,17 +315,31 @@ fn compose1<O: 'static, Ops: DynamicOps + 'static, T: Clone + 'static, R: 'stati
     // getter: getter.andThen(func)
     let getter = Arc::new(move |o: &O| function_enc(t_getter(o)));
 
-    // encoder: fEnc.encode(a1 -> input, ...) then aEnc.encode(aFromO, ...);
-    // fEnc is an empty encoder, so only the field encoder runs.
+    // encoder: fEnc.encode(a1 -> input, ...) then aEnc.encode(aFromO, ...).
+    // Java `instance.point(function)` (the 1-arg `Applicative.point` used by
+    // `Products.Pn.apply`) = `RecordCodecBuilder.point(function)` =
+    // `o -> Encoder.empty()` — a NO-OP MapEncoder with no lifecycle. Only the
+    // explicit 2-arg `point(a, lifecycle)` would wrap in `withLifecycle`, which
+    // the Products apply path never uses. So the encode side runs just the
+    // field encoder, exactly as the Rust closure below does.
     let encoder = Arc::new(
         move |o: &O, ops: &Ops, prefix: &mut dyn RecordBuilder<Output = Ops::Output>| {
             t_enc(o, ops, prefix)
         },
     );
 
-    // decoder: t.decode(ops, input).map(func)
-    let function_map: Arc<dyn Fn(&T) -> R> = Arc::new(move |t: &T| function(t.clone()));
-    let decoder = crate::map_decoder::map(t_dec, function_map);
+    // decoder: Java `lift1` builds `f` = `instance.point(function)`, so
+    // `f.decoder` = `Decoder.unit(function)` whose decode returns
+    // `DataResult.success(...)` (experimental), and the composed decoder is
+    // `a.decode(ops, input).flatMap(ar -> f.decode(ops, input).map(fr ->
+    // fr.apply(ar)))`. `DataResult.flatMap` ADDS lifecycles, so the result is
+    // experimental even when the field decode is stable. `MapDecoder.flatMap`
+    // with an experimental unit-function result replicates Java's semantics
+    // (a `map` through `t_dec` would preserve the field lifecycle instead).
+    let function_map: DecoderFn<T, R> = Arc::new(move |t: &T| {
+        DataResult::success_with_lifecycle(function(t.clone()), Lifecycle::experimental())
+    });
+    let decoder = crate::map_decoder::flat_map(t_dec, function_map);
 
     RecordCodecBuilder {
         getter,
@@ -509,17 +530,23 @@ impl<O, Ops: DynamicOps + 'static, T, U, R> Keyable<Ops> for MapDecoderComposed2
 impl<O, Ops: DynamicOps + 'static, T, U, R> MapDecoder<R, Ops>
     for MapDecoderComposed2<O, Ops, T, U, R>
 where
-    T: Clone,
-    U: Clone,
+    T: Clone + 'static,
+    U: Clone + 'static,
+    R: 'static,
 {
     fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<R> {
+        // Java `Instance.ap2`: `DataResult.instance().ap2(
+        //   function.decoder.decode(ops, input),   // point(func) -> experimental
+        //   fa.decoder.decode(ops, input),
+        //   fb.decoder.decode(ops, input))` — every field is decoded and
+        //   errors accumulate (no short-circuit).
         let t = self.t.clone();
         let u = self.u.clone();
         let function = self.function.clone();
-        t.decode(ops, input).flat_map(move |tv| {
-            let tv = tv.clone();
-            u.decode(ops, input).map(move |uv| function(tv, uv.clone()))
-        })
+        t.decode(ops, input).apply2(
+            move |tv: &T, uv: &U| function(tv.clone(), uv.clone()),
+            u.decode(ops, input),
+        )
     }
 }
 
@@ -553,23 +580,28 @@ impl<O, Ops: DynamicOps + 'static, T, U, V, R> Keyable<Ops>
 impl<O, Ops: DynamicOps + 'static, T, U, V, R> MapDecoder<R, Ops>
     for MapDecoderComposed3<O, Ops, T, U, V, R>
 where
-    T: Clone,
-    U: Clone,
-    V: Clone,
+    T: Clone + 'static,
+    U: Clone + 'static,
+    V: Clone + 'static,
+    R: 'static,
 {
     fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<R> {
+        // Java `Instance.ap3`: `DataResult.instance().ap3(...)` — every field
+        // is decoded and errors accumulate.
         let t = self.t.clone();
         let u = self.u.clone();
         let v = self.v.clone();
         let function = self.function.clone();
-        t.decode(ops, input).flat_map(move |tv| {
-            let tv = tv.clone();
-            u.decode(ops, input).flat_map(move |uv| {
-                let uv = uv.clone();
-                v.decode(ops, input)
-                    .map(move |vv| function(tv, uv, vv.clone()))
-            })
-        })
+        let fr: DataResult<Fn3<T, U, V, R>> = DataResult::success_with_lifecycle(
+            Arc::new(move |tv: &T, uv: &U, vv: &V| function(tv.clone(), uv.clone(), vv.clone())),
+            Lifecycle::experimental(),
+        );
+        ap3(
+            fr,
+            t.decode(ops, input),
+            u.decode(ops, input),
+            v.decode(ops, input),
+        )
     }
 }
 
@@ -605,28 +637,33 @@ impl<O, Ops: DynamicOps + 'static, T, U, V, W, R> Keyable<Ops>
 impl<O, Ops: DynamicOps + 'static, T, U, V, W, R> MapDecoder<R, Ops>
     for MapDecoderComposed4<O, Ops, T, U, V, W, R>
 where
-    T: Clone,
-    U: Clone,
-    V: Clone,
-    W: Clone,
+    T: Clone + 'static,
+    U: Clone + 'static,
+    V: Clone + 'static,
+    W: Clone + 'static,
+    R: 'static,
 {
     fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<R> {
+        // Java `Instance.ap4` (`Applicative.super.ap4`): every field is decoded
+        // and errors accumulate.
         let t = self.t.clone();
         let u = self.u.clone();
         let v = self.v.clone();
         let w = self.w.clone();
         let function = self.function.clone();
-        t.decode(ops, input).flat_map(move |tv| {
-            let tv = tv.clone();
-            u.decode(ops, input).flat_map(move |uv| {
-                let uv = uv.clone();
-                v.decode(ops, input).flat_map(move |vv| {
-                    let vv = vv.clone();
-                    w.decode(ops, input)
-                        .map(move |wv| function(tv, uv, vv, wv.clone()))
-                })
-            })
-        })
+        let fr: DataResult<Fn4<T, U, V, W, R>> = DataResult::success_with_lifecycle(
+            Arc::new(move |tv: &T, uv: &U, vv: &V, wv: &W| {
+                function(tv.clone(), uv.clone(), vv.clone(), wv.clone())
+            }),
+            Lifecycle::experimental(),
+        );
+        ap4(
+            fr,
+            t.decode(ops, input),
+            u.decode(ops, input),
+            v.decode(ops, input),
+            w.decode(ops, input),
+        )
     }
 }
 
@@ -650,7 +687,7 @@ where
 /// applying the getters to the input `O`.
 pub struct BuiltEncoder<O, Ops: DynamicOps + 'static> {
     getter: Arc<dyn Fn(&O) -> O>,
-    encoder: Arc<dyn Fn(&O, &Ops, &mut dyn RecordBuilder<Output = Ops::Output>)>,
+    encoder: EncoderFn<O, Ops>,
 }
 impl<O, Ops: DynamicOps + 'static> std::fmt::Debug for BuiltEncoder<O, Ops> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -24,20 +24,19 @@ where
         let second = self.second.clone();
         let first_read: DataResult<(Either<F, S>, Ops::Output)> = first
             .decode(ops, input)
-            .flat_map(|vo| DataResult::success((Either::left(vo.0), vo.1)));
+            .map_owned(|vo| (Either::left(vo.0), vo.1));
         let second_read: DataResult<(Either<F, S>, Ops::Output)> = second
             .decode(ops, input)
-            .flat_map(|vo| DataResult::success((Either::right(vo.0), vo.1)));
+            .map_owned(|vo| (Either::right(vo.0), vo.1));
         let first_result = first_read.result().cloned();
         let second_result = second_read.result().cloned();
-        if first_result.is_some() && second_result.is_some() {
+        if let (Some(first), Some(second)) = (first_result.as_ref(), second_result.as_ref()) {
             return DataResult::error_with_partial(
                 format!(
                     "Both alternatives read successfully, can not pick the correct one; first: {:?} second: {:?}",
-                    first_result.as_ref().unwrap(),
-                    second_result.as_ref().unwrap()
+                    first, second
                 ),
-                first_result.unwrap(),
+                first.clone(),
             );
         }
         if first_result.is_some() {

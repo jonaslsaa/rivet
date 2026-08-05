@@ -25,6 +25,7 @@ pub mod dynamic;
 pub mod dynamic_ops;
 pub mod either;
 pub mod encoder;
+pub mod functions;
 pub mod lifecycle;
 pub mod map_codec;
 pub mod map_decoder;

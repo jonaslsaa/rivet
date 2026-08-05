@@ -12,11 +12,20 @@
 use crate::codec::Codec;
 use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, Keyable, MapLike, RecordBuilder};
+use crate::functions::DecoderFn;
 use crate::lifecycle::Lifecycle;
 use crate::map_decoder::MapDecoder;
 use crate::map_encoder::MapEncoder;
 use std::fmt::Debug;
 use std::sync::Arc;
+
+/// `MapCodec.recursive` wrapper — `Function<Codec<A>, MapCodec<A>>`.
+/// The `Ops: DynamicOps` bound is needed on the RHS (`Codec<A, Ops>`) but is
+/// not enforced at alias usage sites, so the `type_alias_bounds` lint is
+/// allowed here.
+#[allow(type_alias_bounds)]
+type RecursiveMapFn<A, Ops: DynamicOps + 'static> =
+    Arc<dyn Fn(Arc<dyn Codec<A, Ops>>) -> Arc<dyn MapCodec<A, Ops>>>;
 
 /// `com.mojang.serialization.MapCodec<A>`.
 pub trait MapCodec<A, Ops: DynamicOps + 'static>: Debug + Keyable<Ops> {
@@ -165,7 +174,7 @@ where
 /// `RecursiveMapCodec`.
 pub fn recursive<A, Ops: DynamicOps + 'static>(
     name: String,
-    wrapped: Arc<dyn Fn(Arc<dyn Codec<A, Ops>>) -> Arc<dyn MapCodec<A, Ops>>>,
+    wrapped: RecursiveMapFn<A, Ops>,
 ) -> Arc<dyn MapCodec<A, Ops>>
 where
     A: 'static,
@@ -244,8 +253,8 @@ where
 /// `MapCodec.flatXmap(Function, Function)`.
 pub fn flat_xmap<A, B, Ops: DynamicOps + 'static>(
     inner: Arc<dyn MapCodec<A, Ops>>,
-    to: Arc<dyn Fn(&A) -> DataResult<B>>,
-    from: Arc<dyn Fn(&B) -> DataResult<A>>,
+    to: DecoderFn<A, B>,
+    from: DecoderFn<B, A>,
 ) -> Arc<dyn MapCodec<B, Ops>>
 where
     A: 'static + Clone,
@@ -261,7 +270,7 @@ where
 /// `MapCodec.validate(Function)`.
 pub fn validate<A, Ops: DynamicOps + 'static>(
     inner: Arc<dyn MapCodec<A, Ops>>,
-    checker: Arc<dyn Fn(&A) -> DataResult<A>>,
+    checker: DecoderFn<A, A>,
 ) -> Arc<dyn MapCodec<A, Ops>>
 where
     A: 'static + Clone,
@@ -290,9 +299,14 @@ where
     A: 'static + Clone,
 {
     let v = value.clone();
+    // `DataFixUtils.consumerToFunction`: invoke the callback and return the
+    // message unchanged.
     or_else_get_map_error(
         inner,
-        Arc::new(move |_e: String| String::new()),
+        Arc::new(move |e: String| {
+            on_error(&e);
+            e
+        }),
         Arc::new(move || v.clone()),
     )
 }
@@ -306,7 +320,14 @@ pub fn or_else_get<A, Ops: DynamicOps + 'static>(
 where
     A: 'static + Clone,
 {
-    or_else_get_map_error(inner, Arc::new(move |_e: String| String::new()), value)
+    or_else_get_map_error(
+        inner,
+        Arc::new(move |e: String| {
+            on_error(&e);
+            e
+        }),
+        value,
+    )
 }
 
 /// `MapCodec.orElseGet(UnaryOperator<String>, Supplier<A>)`.
@@ -507,7 +528,7 @@ pub struct OfMapCodec<A, Ops: DynamicOps + 'static> {
 }
 impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for OfMapCodec<A, Ops> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "OfMapCodec")
+        write!(f, "OfMapCodec[{}]", (self.name)())
     }
 }
 
@@ -541,14 +562,20 @@ impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for MapCodecCodec<A, Ops> {
 
 impl<A, Ops: DynamicOps + 'static> crate::Decoder<A, Ops> for MapCodecCodec<A, Ops> {
     fn decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(A, Ops::Output)> {
+        // Java `MapCodecCodec.decode`: `codec.compressedDecode(ops, input).map(r
+        // -> Pair.of(r, input))`.
         self.codec
             .compressed_decode(ops, input)
-            .flat_map(|r| DataResult::success((r, input.clone())))
+            .map_owned(|r| (r, input.clone()))
     }
 }
 
 impl<A, Ops: DynamicOps + 'static> crate::Encoder<A, Ops> for MapCodecCodec<A, Ops> {
     fn encode(&self, input: &A, ops: &Ops, prefix: &Ops::Output) -> DataResult<Ops::Output> {
+        // STUB(mc.nbt): Java uses `codec.compressedBuilder(ops)` (a
+        // `KeyCompressor`-backed builder when `ops.compressMaps()`); the
+        // compressed branch is not ported, so we always build via
+        // `ops.map_builder()`.
         let mut builder = ops.map_builder();
         self.codec.encode(input, ops, &mut *builder);
         builder.build(Some(prefix.clone()))
@@ -652,7 +679,7 @@ impl<A, Ops: DynamicOps + 'static> Codec<A, Ops> for UnitCodec<A, Ops> {}
 /// `MapCodec.recursive(...)` result — Java's `RecursiveMapCodec`.
 pub struct RecursiveMapCodec<A, Ops: DynamicOps + 'static> {
     name: String,
-    wrapped: Arc<dyn Fn(Arc<dyn Codec<A, Ops>>) -> Arc<dyn MapCodec<A, Ops>>>,
+    wrapped: RecursiveMapFn<A, Ops>,
     cell: std::cell::OnceCell<Arc<dyn MapCodec<A, Ops>>>,
     weak: std::sync::Weak<RecursiveMapCodec<A, Ops>>,
 }
@@ -689,7 +716,7 @@ impl<A, Ops: DynamicOps + 'static> crate::Decoder<A, Ops> for RecursiveMapCodecC
         self.parent
             .get()
             .compressed_decode(ops, input)
-            .flat_map(|r| DataResult::success((r, input.clone())))
+            .map_owned(|r| (r, input.clone()))
     }
 }
 

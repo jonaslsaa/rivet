@@ -7,7 +7,6 @@
 use crate::data_result::DataResult;
 use crate::dynamic::Dynamic;
 use crate::dynamic_ops::DynamicOps;
-use crate::pair::Pair;
 
 /// `com.mojang.serialization.OptionalDynamic<T>`.
 #[derive(Debug, Clone)]
@@ -55,9 +54,8 @@ impl<O> OptionalDynamic<O> {
     /// `OptionalDynamic.get(String)`.
     pub fn get_field(&self, ops: &impl DynamicOps<Output = O>, key: &str) -> OptionalDynamic<O>
     where
-        O: Clone,
+        O: Clone + std::fmt::Debug,
     {
-        let ops = ops;
         let delegate = self.delegate.clone().flat_map(move |k| {
             let inner = k.get(ops, key);
             inner.delegate
@@ -68,14 +66,16 @@ impl<O> OptionalDynamic<O> {
         }
     }
 
-    /// `OptionalDynamic.orElseEmptyMap()`.
+    /// `OptionalDynamic.orElseEmptyMap()` — `result().orElseGet(this::emptyMap)`
+    /// where `emptyMap()` = `new Dynamic<>(ops, ops.emptyMap())` (the empty MAP,
+    /// not the raw empty element).
     pub fn or_else_empty_map(&self, ops: &impl DynamicOps<Output = O>) -> Dynamic<O>
     where
         O: Clone,
     {
         match self.result() {
             Some(d) => d.clone(),
-            None => Dynamic::empty(ops),
+            None => Dynamic::new(ops, ops.empty_map()),
         }
     }
 
