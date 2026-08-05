@@ -52,7 +52,7 @@ Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/
 
 ## Workflow catalog (`.claude/workflows/`)
 
-`translate-wave` and `check-burndown` exist as executable scripts in `.claude/workflows/` — invoke them by name with `args` built from MANIFEST.tsv rows (the controller selects units and passes them in; scripts never read the manifest themselves). The rest below are designs to be scripted when their phase begins.
+`translate-wave`, `check-burndown`, and `review-pr` exist as executable scripts in `.claude/workflows/` — invoke them by name with `args` built from MANIFEST.tsv rows (the controller selects units and passes them in; scripts never read the manifest themselves). The rest below are designs to be scripted when their phase begins.
 
 | Workflow | Shape | Purpose |
 |---|---|---|
@@ -60,6 +60,7 @@ Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/
 | `scaffold` | serial | Crate skeletons, mod trees, stub files, Cargo.toml — run once per crate wave, before fan-out |
 | `translate-wave` | pipeline per unit | The core loop (below) |
 | `check-burndown` | loop until clean | Compiler-error work queue, partitioned by module |
+| `review-pr` | single max-effort agent | Pre-merge "nuke": whole-PR cross-unit review, then `gate.sh` |
 | `verify-oracle` | parallel scenarios | Differential tests vs vanilla/Paper; failures → new manifest rows |
 | `shim-gen` | pipeline per API class | JVM adapter codegen (below) |
 | `doc-drift` | small panel | After each wave: mine review findings for systemic patterns → proposed PORTING.md edits |
@@ -68,32 +69,20 @@ Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/
 
 Args: `{ waveId, units: [...manifest rows...] }` (topo-ready units only, ~10–30 per wave; concurrency caps at 16 anyway).
 
-```js
-export const meta = {
-  name: 'translate-wave',
-  description: 'Translate a wave of manifest units from Java to Rust with adversarial review',
-  phases: [{ title: 'Translate' }, { title: 'Review' }, { title: 'Fix' }],
-}
-const results = await pipeline(
-  args.units,
-  // Stage 1 — implementer: full context (Java source, PORTING.md, OWNERSHIP.md section, stub files)
-  u => agent(implementPrompt(u), { label: `impl:${u.id}`, phase: 'Translate', schema: IMPL_REPORT }),
-  // Stage 2 — two adversarial reviewers: diff + Java original + drift checklist ONLY
-  (impl, u) => parallel([
-    () => agent(reviewPrompt(u, impl, 'semantic-drift'), { label: `rev1:${u.id}`, phase: 'Review', schema: FINDINGS, effort: 'high' }),
-    () => agent(reviewPrompt(u, impl, 'ownership-and-api'), { label: `rev2:${u.id}`, phase: 'Review', schema: FINDINGS, effort: 'high' }),
-  ]).then(f => ({ impl, findings: f.filter(Boolean).flatMap(r => r.findings) })),
-  // Stage 3 — fixer: applies confirmed findings, returns final report
-  (r, u) => r.findings.length
-    ? agent(fixPrompt(u, r.findings), { label: `fix:${u.id}`, phase: 'Fix', schema: IMPL_REPORT })
-    : r.impl
-)
-return { waveId: args.waveId, results }
-```
+Per unit (see `.claude/workflows/translate-wave.js` for the real script):
+
+1. **Implement** — full context: Java source, PORTING.md, OWNERSHIP.md section, stub conventions.
+2. **Review→fix convergence loop** ("golden loop"), max 3 rounds:
+   - Round 1: **two** fresh diff-only reviewers with different lenses (semantic drift / ownership+API) — first contact has the highest yield.
+   - Rounds 2–3: **one** fresh full-lens reviewer per round, blind to prior findings, reviewing the post-fix state.
+   - Zero findings → converged. Findings → fixer applies them, next round re-verifies.
+   - After round 3: minor-only findings get one blind fix and pass as `converged: with-unverified-minor-fixes`; anything critical/major → `blocked` for controller triage. The loop's verdict comes from agents that never met the implementer — the implementer never judges its own convergence.
+3. **Per-PR "thermo-nuclear" review** (`review-pr`, `effort: max`) runs once per PR after burndown, before `gate.sh` — it hunts what per-unit reviews structurally can't see: cross-unit stub conflicts, aggregate OWNERSHIP.md violations, API-surface incoherence, process violations (weakened tests, smuggled doc edits).
 
 Notes:
-- **pipeline(), not phase barriers** — unit A gets reviewed while unit B is still translating.
-- The two reviewers get **different lenses**, not identical prompts: one hunts semantic drift (checklist below), one audits ownership decisions against `OWNERSHIP.md` and API-shape fidelity.
+- **pipeline(), not phase barriers** — unit A runs its review loop while unit B is still translating.
+- Reviewers are **fresh instances every round** and see only code + Java originals, never the implementer's reasoning or previous findings (anchoring kills adversarial yield).
+- Review catches drift early; the oracle is the truth. "Zero findings" never substitutes for parity fixtures — the merge gate stays `review-pr` + `gate.sh` + oracle scoreboard.
 - Agents return structured reports; the **main session** updates MANIFEST.tsv and commits per wave. Agents never `git commit`, never `git stash/reset` (forbidden in every prompt — Bun learned this the hard way).
 - Implementer prompt hard rules: no TODO-and-skip, no inventing APIs, wrapping arithmetic everywhere Java arithmetic exists, `blocked` verdict with reason if the unit can't translate faithfully.
 

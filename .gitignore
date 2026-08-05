@@ -3,3 +3,6 @@
 .DS_Store
 *.jar
 /fixtures/large/
+
+# Project .claude (workflows, settings) is repo content — override global ignore
+!.claude/
