@@ -7,6 +7,7 @@ paper_libraries="${RIVET_PAPER_LIBRARIES:-$repo_dir/tools/rivet-oracle/work/run/
 paper_runtime_jar="${RIVET_PAPER_RUNTIME_JAR:-$(dirname "$paper_libraries")/versions/26.2/paper-26.2.jar}"
 classes_dir="$tool_dir/target/classes"
 source_file="$tool_dir/src/RivetReferenceOracle.java"
+oracle_manifest="${RIVET_ORACLE_MANIFEST:-$repo_dir/tools/rivet-oracle/fixtures/manifest.json}"
 
 java_cmd=""
 javac_cmd=""
@@ -67,6 +68,11 @@ if [[ ! -f "$paper_runtime_jar" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$oracle_manifest" ]]; then
+    echo "Committed oracle manifest not found at $oracle_manifest" >&2
+    exit 1
+fi
+
 paper_sha256="$(shasum -a 256 "$paper_jar" | awk '{print $1}')"
 runtime_sha256="$(shasum -a 256 "$paper_runtime_jar" | awk '{print $1}')"
 if [[ "$paper_sha256" != "$runtime_sha256" ]]; then
@@ -82,6 +88,17 @@ paper_implementation="$(printf '%s\n' "$manifest" | awk -F': ' '$1 == "Implement
 paper_commit="$(printf '%s\n' "$manifest" | awk -F': ' '$1 == "Git-Commit" {gsub("\\r", "", $2); print $2; exit}')"
 if [[ "$paper_specification" != 26.2* || -z "$paper_implementation" || -z "$paper_commit" ]]; then
     echo "Expected a Paper 26.2 server jar, got specification '$paper_specification'" >&2
+    exit 1
+fi
+expected_paper="$(sed -n 's/.*"paper": "\([^"]*\)".*/\1/p' "$oracle_manifest" | head -1)"
+expected_commit="${expected_paper##*@}"
+if [[ -z "$expected_paper" || "$expected_commit" == "$expected_paper" ]]; then
+    echo "Oracle manifest does not contain a valid pinned Paper revision" >&2
+    exit 1
+fi
+if [[ "$paper_commit" != "$expected_commit" ]]; then
+    echo "Paper commit $paper_commit does not match oracle pin $expected_commit" >&2
+    echo "Regenerate and deliberately re-pin fixtures before changing the reference server" >&2
     exit 1
 fi
 

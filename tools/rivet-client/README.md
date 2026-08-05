@@ -22,7 +22,7 @@ tools/rivet-client/run.sh -- \
 ```
 
 Exit codes are `0` after a successful spawn, `2` when the Minecraft login or
-spawn phase times out, `1` after a TCP preflight failure or disconnect before
+spawn phase times out, `1` after the actual Azalea connection attempt fails or disconnects before
 spawning, and `64` for invalid CLI
 arguments. Cargo writes build diagnostics to stderr; the client protocol on
 stdout remains JSON Lines.

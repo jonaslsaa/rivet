@@ -1,12 +1,17 @@
 use std::env;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use azalea::app::{App, Plugin, Update};
+use azalea::ecs::message::MessageReader;
+use azalea::ecs::prelude::{Res, Resource};
+use azalea::ecs::schedule::IntoScheduleConfigs;
+use azalea::join::{ConnectionFailedEvent, poll_create_connection_task};
 use azalea::prelude::*;
 use serde_json::{Value, json};
-use tokio::net::TcpStream;
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:25599";
 const DEFAULT_USERNAME: &str = "RivetProbe";
@@ -92,6 +97,36 @@ fn emit(mut value: Value) {
     println!("{value}");
 }
 
+#[derive(Clone, Resource)]
+struct ConnectionFailure(Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>);
+
+struct ConnectionFailurePlugin(ConnectionFailure);
+
+impl Plugin for ConnectionFailurePlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(self.0.clone()).add_systems(
+            Update,
+            capture_connection_failure.after(poll_create_connection_task),
+        );
+    }
+}
+
+fn capture_connection_failure(
+    mut failures: MessageReader<ConnectionFailedEvent>,
+    captured: Res<ConnectionFailure>,
+) {
+    for failure in failures.read() {
+        if let Some(sender) = captured
+            .0
+            .lock()
+            .expect("connection failure lock poisoned")
+            .take()
+        {
+            let _ = sender.send(failure.error.to_string());
+        }
+    }
+}
+
 async fn handle(bot: Client, event: Event, state: State) {
     match event {
         Event::Init => emit(json!({ "event": "init" })),
@@ -106,13 +141,6 @@ async fn handle(bot: Client, event: Event, state: State) {
                     "y": position.y,
                     "z": position.z,
                 })),
-            }));
-            bot.exit();
-        }
-        Event::ConnectionFailed(error) => {
-            emit(json!({
-                "event": "connection_failed",
-                "reason": error.to_string(),
             }));
             bot.exit();
         }
@@ -146,40 +174,35 @@ async fn main() -> ExitCode {
         "azalea_revision": AZALEA_REVISION,
     }));
 
-    let preflight_timeout = args.timeout.min(Duration::from_secs(3));
-    match tokio::time::timeout(preflight_timeout, TcpStream::connect(&args.address)).await {
-        Ok(Ok(connection)) => drop(connection),
-        Ok(Err(error)) => {
-            emit(json!({
-                "event": "connection_failed",
-                "phase": "tcp_preflight",
-                "reason": error.to_string(),
-            }));
-            return ExitCode::FAILURE;
-        }
-        Err(_) => {
-            emit(json!({
-                "event": "connection_failed",
-                "phase": "tcp_preflight",
-                "reason": format!("TCP preflight exceeded {} seconds", preflight_timeout.as_secs()),
-            }));
-            return ExitCode::FAILURE;
-        }
-    }
-
     let state = State::default();
     let spawned = Arc::clone(&state.spawned);
+    let (failure_tx, failure_rx) = tokio::sync::oneshot::channel();
+    let connection_failure = ConnectionFailure(Arc::new(Mutex::new(Some(failure_tx))));
     let account = Account::offline(&args.username);
     let client = ClientBuilder::new()
         .reconnect_after(None)
+        .add_plugins(ConnectionFailurePlugin(connection_failure))
         .set_handler(handle)
         .set_state(state)
         .start(account, args.address);
 
-    match tokio::time::timeout(args.timeout, client).await {
-        Ok(_) if spawned.load(Ordering::Acquire) => ExitCode::SUCCESS,
-        Ok(_) => ExitCode::FAILURE,
-        Err(_) => {
+    tokio::select! {
+        reason = failure_rx => {
+            let reason = reason.unwrap_or_else(|_| "connection failure channel closed".to_owned());
+            emit(json!({
+                "event": "connection_failed",
+                "reason": reason,
+            }));
+            ExitCode::FAILURE
+        }
+        _ = client => {
+            if spawned.load(Ordering::Acquire) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        _ = tokio::time::sleep(args.timeout) => {
             emit(json!({
                 "event": "timeout",
                 "timeout_seconds": args.timeout.as_secs(),
