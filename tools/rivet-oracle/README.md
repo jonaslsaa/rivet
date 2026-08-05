@@ -151,6 +151,7 @@ the system temp dir, printed on FAIL) are the diagnostic artifacts.
 
 - Never weaken fixtures to pass; regenerate them from a clean run instead.
 - `work/` is scratch — never commit it.
-- This crate is deliberately std-only-plus-{serde,serde_json,sha2}; adding
-  deps here does not touch the shared workspace `Cargo.toml`/`Cargo.lock`
-  (other tracks edit those).
+- This crate is deliberately std-only-plus-{serde,serde_json,sha2}. Its deps
+  live in this crate's `Cargo.toml` (not the shared `[workspace.dependencies]`),
+  but like any workspace member the resolve still updates the shared
+  `Cargo.lock` — expect that when adding deps here.
