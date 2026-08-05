@@ -7,7 +7,6 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-bytes = { workspace = true }
 cesu8 = { workspace = true }
 flate2 = { workspace = true }
 rivet-core = { workspace = true }

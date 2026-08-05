@@ -240,7 +240,7 @@ mc.gizmos	net.minecraft.gizmos	minecraft	15	552	rivet-server	3	27	yes	net.minecr
 mc.locale	net.minecraft.locale	minecraft	3	176	rivet-server	3	27	yes	com.mojang.serialization,net.minecraft.network.chat,net.minecraft.util	pending	0	
 mc.nbt	net.minecraft.nbt	minecraft	27	3109	rivet-nbt	3	27		com.mojang.serialization,net.minecraft,net.minecraft.util	done	1	
 mc.nbt.io	net.minecraft.nbt	minecraft	1	211	rivet-nbt	4			net.minecraft.nbt,net.minecraft,net.minecraft.util	done	1	
-mc.nbt.ops	net.minecraft.nbt	minecraft	1	508	rivet-nbt	4			net.minecraft.nbt,com.mojang.datafixers.util,com.mojang.serialization,net.minecraft.util	pending	0	
+mc.nbt.ops	net.minecraft.nbt	minecraft	1	508	rivet-nbt	4			net.minecraft.nbt,com.mojang.datafixers.util,com.mojang.serialization,net.minecraft.util	done	0	
 mc.nbt.snbt	net.minecraft.nbt	minecraft	5	1515	rivet-nbt	4			net.minecraft.nbt,com.mojang.brigadier,com.mojang.brigadier.exceptions,com.mojang.serialization,net.minecraft.core,net.minecraft.network.chat,net.minecraft.util,net.minecraft.util.parsing.packrat,net.minecraft.util.parsing.packrat.commands	done	1	
 mc.nbt.text	net.minecraft.nbt	minecraft	1	423	rivet-nbt	4			net.minecraft.nbt,net.minecraft,net.minecraft.network.chat	done	1	
 mc.nbt.utils	net.minecraft.nbt	minecraft	1	560	rivet-nbt	4			net.minecraft.nbt,com.mojang.brigadier.exceptions,com.mojang.serialization,net.minecraft,net.minecraft.core,net.minecraft.core.registries,net.minecraft.network.chat,net.minecraft.resources,net.minecraft.util,net.minecraft.world.level.block,net.minecraft.world.level.block.state,net.minecraft.world.level.block.state.properties,net.minecraft.world.level.material,net.minecraft.world.level.storage	done	1	

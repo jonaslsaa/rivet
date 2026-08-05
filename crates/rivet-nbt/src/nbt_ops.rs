@@ -226,7 +226,7 @@ impl DynamicOps for NbtOps {
                 .map(crate::string_tag_visitor::StringTagVisitor::to_string)
                 .collect();
             DataResult::error_with_partial(
-                format!("some keys are not strings: {missed_snbt:?}"),
+                format!("some keys are not strings: [{}]", missed_snbt.join(", ")),
                 Tag::Compound(output),
             )
         } else {
