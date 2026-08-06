@@ -237,6 +237,56 @@ impl DynamicOps for NbtOps {
         }
     }
 
+    fn merge_to_map_like(&self, map: &Tag, values: &dyn MapLike<Tag>) -> DataResult<Tag> {
+        // Java `NbtOps.mergeToMap(Tag, MapLike)` — a `MapLike` source with the
+        // same shape as `mergeToMap(Tag, Map<Tag, Tag>)`: the empty-prefix
+        // special case (`empty()` -> `emptyMap()`), a shallow copy for a
+        // `CompoundTag` prefix, and `some keys are not strings: [<snbt>]` for
+        // non-string keys.
+        if !matches!(map, Tag::Compound(_) | Tag::End(_)) {
+            return DataResult::error_with_partial(
+                format!(
+                    "mergeToMap called with not a map: {}",
+                    crate::string_tag_visitor::StringTagVisitor::to_string(map)
+                ),
+                map.clone(),
+            );
+        }
+        let mut entries = values.entries().into_iter();
+        let Some(first) = entries.next() else {
+            return if *map == self.empty() {
+                DataResult::success(self.empty_map())
+            } else {
+                DataResult::success(map.clone())
+            };
+        };
+        let mut output = match map {
+            Tag::Compound(t) => t.shallow_copy(),
+            _ => CompoundTag::new(),
+        };
+        let mut missed = Vec::new();
+        for entry in std::iter::once(first).chain(entries) {
+            match entry.first {
+                Tag::String(s) => {
+                    output.put(s.value, entry.second);
+                }
+                key => missed.push(key),
+            }
+        }
+        if !missed.is_empty() {
+            let missed_snbt: Vec<String> = missed
+                .iter()
+                .map(crate::string_tag_visitor::StringTagVisitor::to_string)
+                .collect();
+            DataResult::error_with_partial(
+                format!("some keys are not strings: [{}]", missed_snbt.join(", ")),
+                Tag::Compound(output),
+            )
+        } else {
+            DataResult::success(Tag::Compound(output))
+        }
+    }
+
     fn get_map_values(&self, input: &Tag) -> DataResult<Vec<Pair<Tag, Tag>>> {
         match input {
             Tag::Compound(t) => DataResult::success(
