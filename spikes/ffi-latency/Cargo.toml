@@ -2,6 +2,7 @@
 name = "ffi-latency-spike"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 
 # This is a standalone cdylib crate, intentionally NOT part of the rivet cargo
 # workspace (see WORKFLOWS.md: cross-track isolation). It exists only to

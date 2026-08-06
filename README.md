@@ -30,4 +30,4 @@ Start with [`GOAL.md`](GOAL.md) — it indexes every design doc and the rules of
 
 ## License & provenance
 
-Private, source-available-to-collaborators for now. Rivet is an independent project, not affiliated with Mojang, Microsoft, or PaperMC. It references Paper's sources (GPL-3/MIT for Paper's own code) as porting ground truth; see `DECISIONS.md` for the full provenance posture.
+Rivet is published under the [GPL-3.0-or-later](LICENSE). It is an independent project, not affiliated with Mojang, Microsoft, or PaperMC. The license covers Rivet's own contributions and grants no rights to Mojang-owned material; Rivet references Paper's sources (GPL-3/MIT for Paper's own code) as porting ground truth. See `DECISIONS.md` for the full provenance posture.

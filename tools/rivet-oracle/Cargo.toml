@@ -2,6 +2,7 @@
 name = "rivet-oracle"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Differential-test harness: runs the Java Paper server, extracts golden fixtures"
 
 [dependencies]

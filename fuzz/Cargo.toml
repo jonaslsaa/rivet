@@ -12,6 +12,7 @@ name = "rivet-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+license.workspace = true
 
 [package.metadata]
 cargo-fuzz = true
