@@ -10,7 +10,8 @@
 //! MANIFEST class-cluster units (one module per Java class, PORTING.md naming):
 //!
 //!   mc.network.buf     -> friendly_byte_buf, utf8_string, var_int, var_long
-//!   mc.network.framing -> varint21_frame_decoder, varint21_length_field_prepender
+//!   mc.network.framing -> varint21_frame_decoder, varint21_length_field_prepender,
+//!                         compression_encoder, compression_decoder
 //!   mc.network.codec   -> codec (StreamCodec family, ByteBufCodecs, IdDispatchCodec)
 //!   mc.network.protocol -> protocol (Packet/PacketType/ProtocolInfoBuilder/
 //!                         ProtocolCodecBuilder/SimpleUnboundProtocol/UnboundProtocol/
@@ -31,6 +32,8 @@
 pub mod generated;
 
 pub mod codec;
+pub mod compression_decoder;
+pub mod compression_encoder;
 pub mod friendly_byte_buf;
 pub mod utf8_string;
 pub mod var_int;
