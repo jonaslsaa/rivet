@@ -109,7 +109,11 @@ pub fn write(output: &mut impl BufMut, value: &str, max_length: i32) {
 /// overlong/out-of-range sequences consume one byte per replacement so trailing
 /// ASCII survives intact, and a lone 3-byte surrogate consumes all three bytes
 /// into a single U+FFFD.
-fn decode_utf8(input: &[u8]) -> String {
+///
+/// Public so protocol consumers (e.g. the server's handshake listener) can run
+/// the same WHATWG decode without reimplementing it; keep the differential-test
+/// guarantee in place.
+pub fn decode_utf8(input: &[u8]) -> String {
     let mut out = String::with_capacity(input.len());
     let mut bytes_needed = 0u32;
     let mut code_point: u32 = 0;
