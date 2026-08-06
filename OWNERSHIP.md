@@ -39,11 +39,58 @@ Rust can't hold `&mut entity` (inside the arena) and `&mut level` (owning the ar
 ## Chunks & blocks
 Chunks owned by `ChunkMap` by value. Block state = palette index into generated global state table (`rivet-registry`), copy `u32`-ish IDs, no references. BlockEntities live in their chunk; ticking uses the same take-tick-putback pattern with a `BlockEntityCtx`. Chunk gen/lighting runs on `rayon` on detached `ProtoChunk` values, results merged into `ChunkMap` on the tick thread via channel. *(refine: light engine threading before world wave)*
 
+`ChunkPos`/`SectionPos` live in `rivet-registry::core` as pure value types, resolved by ID — `ChunkPyramid.MAX_CHUNK_COORDINATE_VALUE` moves to a `const` there so `ChunkPos` stays value-only. (Java puts `ChunkPos` in `world.level`; the module mirror is a convenience and cycle-breaking justifies the one-line move.)
+
 ## Network
 Per-connection tokio task owns the socket, encryption, and framing; decoded packets flow to the tick thread over bounded channels keyed by `ConnectionId`; outbound is the reverse. Handshake/status/login handled entirely on the tokio side; play-state packets are game state and cross to the tick thread. Packets are plain owned structs — no lifetimes in packet types (accept the copies; optimize later with `bytes::Bytes` for blobs).
 
 ## Registries, tags, recipes
-Loaded/generated at startup, frozen, `Arc<GameData>` shared everywhere including worker pools. Interior mutability forbidden after freeze.
+
+Loaded/generated at startup, frozen, `Arc<GameData>` shared everywhere including
+worker pools. Interior mutability forbidden after freeze.
+
+Registry model (decided #107, implemented in rivet-registry):
+
+- **One concrete `Registry<T>`** (no trait): owns `Vec<T>` by insertion order
+  (append-only; **element id == holder id == network id == insertion index**),
+  plus `by_location`/`by_key` (`FxHashMap<_, u32>`). `DefaultedRegistry` is
+  `Option<u32> default_id` with its asymmetric fallbacks preserved. Frozen
+  registries are immutable value tables.
+- **Builder → freeze:** mutable `RegistryBuilder<T>` (pre-freeze `register`,
+  `get_or_create_holder`, `create_intrusive_holder`, `bind_tags`) is consumed by
+  `freeze()` → `Registry<T>`; `freeze()` panics with sorted unbound keys like
+  `MappedRegistry.freeze()`. The `frozen` boolean + `validateWrite()` are
+  compile-time (phase types), not runtime checks.
+- **`Holder<T>` is an ID, not a value:** `Direct(T)` (unregistered, decode-only)
+  or `Reference{ registry: RegistryId, id: u32 }` (Copy, 8 bytes). All
+  `holder.value()/is(tag)/key()/tags()` resolve through the owning
+  `&Registry<T>` / `&HolderLookup<T>` — OWNERSHIP's back-reference rule. No
+  stored `Arc`/`&Registry` in game state (FFI marshal IDs).
+- **Registry identity is `RegistryId` (a per-instance u32), distinct from the
+  `ResourceKey<Registry<T>>` key** — one key can have many instances (per-world
+  registries); holder serialization-owner checks compare `RegistryId`.
+- **`ResourceKey<T>`/`TagKey<T>` are value types** (`PhantomData<fn() -> T>`,
+  no `T` bound on Eq/Hash). Java's weak interning makes its `==` equivalent to
+  value equality; Rust derives it. No interning, no pointer comparisons.
+- **Heterogeneous registry sets (`RegistryAccess`, the ROOT registry) use
+  `trait AnyRegistry: Any` + `Box<dyn AnyRegistry>`**, downcast at those two
+  erased boundaries only.
+- **Reload = rebuild + swap:** datapack reload builds a fresh `Registry`/
+  `GameData` (via `RegistrySetBuilder.buildPatch`) and atomically replaces the
+  old. No in-place tag rebind on frozen registries; code holding a `&Registry`
+  across a reload sees the old table (document per site).
+- **Protocol codecs live in `rivet-protocol`, never `rivet-registry`:**
+  `StreamCodec` impls for Identifier/ResourceKey/TagKey/Holder/HolderSet live in
+  `rivet-protocol`. The pure value types (BlockPos/Vec3i/SectionPos/UUIDUtil/
+  Direction/GlobalPos/BlockBox/Rotations) stay in `rivet-registry::core`, with
+  only their `StreamCodec` impls crossing to `rivet-protocol`. The network-sync
+  `RegistrySynchronization` and `ClientAsset` (both `net.minecraft.network.codec`-
+  dependent) move to `rivet-protocol` outright. Dependency direction:
+  `rivet-protocol → rivet-registry`; `rivet-registry` never depends on
+  `rivet-protocol`.
+- `GameData` owns the provider; `Level` may hold a per-dimension provider
+  (layer order STATIC → WORLDGEN → DIMENSIONS → RELOADABLE is observable —
+  keep an explicit ordered vec).
 
 ## Events (Bukkit/Paper layer)
 Events dispatch synchronously on the tick thread at the same call sites as Paper's patches. Handlers (Rust or JVM-bridged) receive `&mut` access via the same ctx objects — no event queue, ordering matches Bukkit.
