@@ -12,8 +12,15 @@
 //! - **#124 registry SCC** (M1-A) — the strongly-connected `net.minecraft.core`/
 //!   `net.minecraft.resources`/`net.minecraft.tags` key + registry types. Owned
 //!   by the #124 units per the ownership map in `Cargo.toml`. Each module is a
-//!   full Java-faithful port of its `mc.*` package with its own tests; #126
-//!   (holder codecs) is the only deferred surface and is called out per site.
+//!   full Java-faithful port of its `mc.*` package with its own tests.
+//! - **#126 holder codecs** (M1-A, sub-issue of #10) — the `Holder<T>`/
+//!   `HolderSet<T>`/`HolderLookup`/`HolderGetter`/`HolderOwner` value surface
+//!   (`holder.rs`/`holder_set.rs`/`holder_lookup.rs`), the `RegistryOps` codec
+//!   context (`registry_ops.rs`), and `RegistryFileCodec`/`RegistryFixedCodec`/
+//!   `HolderSetCodec` (`registry_file_codec.rs`). Protocol `StreamCodec`s
+//!   (Identifier/ResourceKey/TagKey/Holder/HolderSet/GlobalPos) live in
+//!   `rivet-protocol` — `rivet-registry` never depends on `rivet-protocol`
+//!   (OWNERSHIP.md §Registries).
 //!
 //! `core` (issue #125) ports the registry-independent position/value
 //! primitives of `net.minecraft.core`: `Vec3i`/`BlockPos`/`SectionPos`/
@@ -21,8 +28,8 @@
 //! `AxisCycle`, `Cursor3D` and `Rotation` value types. These are pure value
 //! types, resolved by ID per OWNERSHIP.md; their `StreamCodec` impls live in
 //! `rivet-protocol`, not here. `GlobalPos`'s `ResourceKey<Level>` component
-//! uses the world-unit `Level` placeholder from `registries`; its codecs are
-//! still deferred to the protocol crates (#126/#82/#83).
+//! uses the world-unit `Level` placeholder from `registries`; its `StreamCodec`
+//! is #126 in `rivet-protocol`.
 
 /// Compile-time block registry + block-state tables.
 ///
@@ -56,9 +63,13 @@ pub mod tag_key;
 
 /// `RegistryBuilder<T>` + `freeze()` (pre-freeze phase of `MappedRegistry`).
 pub mod builder;
-/// Minimal Copy holder-reference shape (`RegistryId`, `HolderId`) that the
-/// registry internals need. The full `Holder<T>`/`HolderSet<T>` is #126.
+/// `Holder<T>` + `RegistryId`/`HolderId` (`net.minecraft.core`, #126).
 pub mod holder;
+/// `HolderOwner`/`HolderGetter`/`HolderLookup`/`RegistryLookup`/`Provider` +
+/// the codec views `RegistryOwner`/`RegistryGetter` (#126).
+pub mod holder_lookup;
+/// `HolderSet<T>` (`net.minecraft.core.HolderSet`, #126).
+pub mod holder_set;
 /// `net.minecraft.core.IdMap<T>` — the id <-> value contract.
 pub mod id_map;
 /// `net.minecraft.core.Registry<T>` — the frozen registry surface.
@@ -98,9 +109,10 @@ pub mod static_builtin_tests;
 // Ownership D — serialization context (`net.minecraft.resources`)
 // ---------------------------------------------------------------------------
 
-/// `RegistryOps<T>` + the `DelegatingOps<T>` pieces #124 needs. The
-/// `RegistryFileCodec`/`HolderSetCodec` codecs and all protocol `StreamCodec`s
-/// are #126 (holder codecs), not here.
+/// `RegistryFileCodec`/`RegistryFixedCodec`/`HolderSetCodec` (#126 holder
+/// codecs, `net.minecraft.resources`).
+pub mod registry_file_codec;
+/// `RegistryOps<T>` + the `DelegatingOps<T>` pieces #124 needs.
 pub mod registry_ops;
 
 // ---------------------------------------------------------------------------
@@ -113,7 +125,12 @@ pub mod core;
 
 pub use access::RegistryAccess;
 pub use builder::RegistryBuilder;
-pub use holder::RegistryId;
+pub use holder::{Holder, HolderId, HolderKind, RegistryId};
+pub use holder_lookup::{
+    HolderGetter, HolderLookup, HolderLookupProvider, HolderOwner, RegistryGetter, RegistryLookup,
+    RegistryOwner,
+};
+pub use holder_set::HolderSet;
 pub use id_map::IdMap;
 pub use identifier::{Identifier, IdentifierParseError};
 pub use registration_info::RegistrationInfo;

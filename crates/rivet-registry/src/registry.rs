@@ -23,9 +23,11 @@
 //!   value tables.
 //! - `Holder<T>` is an ID resolved through the owning registry — the *minimal
 //!   holder reference shape* this SCC needs is `RegistryId` + `u32 id` (Copy).
-//!   The full `Holder<T>`/`HolderSet<T>` value/codec surface is **#126
-//!   (holder codecs)**; this module only exposes the registry-internal holder
-//!   ID type and does not implement holder codecs.
+//!   The full `Holder<T>`/`HolderSet<T>`/`RegistryLookup` value surface is
+//!   **#126 (holder codecs)** (`holder.rs`/`holder_set.rs`/`holder_lookup.rs`);
+//!   this module exposes only the registry-internal `HolderId` and the #126
+//!   `impl RegistryLookup<T> for Registry<T>` (in `holder_lookup.rs`, which uses
+//!   only these public methods) lands on top.
 
 use crate::holder::{HolderId, RegistryId};
 use crate::id_map::{DEFAULT_ID, IdMap};
@@ -50,13 +52,11 @@ use std::sync::Arc;
 /// `create_registry_key`. If a real wrapper is ever needed it belongs elsewhere.
 pub type RegistryKey<T> = ResourceKey<Registry<T>>;
 
-/// A minimal registry-held holder reference — the Copy ID the #124 SCC uses
-/// internally before #126 defines the full `Holder<T>`.
-///
-/// `RegistryId` is defined in `holder.rs` (ownership B, minimal shape required
-/// by registry internals). #126 (holder codecs) replaces this placeholder with
-/// the real `Holder<T>` (`Direct(T)` | `Reference { registry, id }`). Do NOT
-/// implement full holder codecs here.
+/// The registry-internal holder reference — the Copy ID the #124 SCC's
+/// `Registry<T>`/`RegistryBuilder<T>` return. The full #126 `Holder<T>`
+/// (`Direct(T)` | `Reference { registry, id }`) lives in `holder.rs`; the SCC's
+/// id space (element id == holder id == network id == insertion index) is
+/// already the contract, so this alias is the registry-side handle.
 pub type HolderReference = HolderId;
 
 /// `net.minecraft.core.Registry<T>` — the frozen registry surface.

@@ -17,6 +17,7 @@
 use crate::Identifier;
 use crate::ResourceKey;
 use crate::builder::RegistryBuilder;
+use crate::holder::RegistryId;
 use crate::registry::{Registry, RegistryKey};
 
 use rivet_serialization::lifecycle::Lifecycle;
@@ -50,6 +51,11 @@ pub trait AnyRegistry: Any + Debug + Send + Sync {
     /// lifecycle without a downcast. (`Registry<T>: Debug` is hand-written, so
     /// no `T: Debug` bound is needed on the blanket impl.)
     fn registry_lifecycle(&self) -> Lifecycle;
+
+    /// The registry's per-instance `RegistryId` — exposed through the erased
+    /// boundary so `RegistryOps`'s owner view (`RegistryOwner`) and the holder
+    /// owner checks can read it without a downcast (#126).
+    fn registry_id(&self) -> RegistryId;
 }
 
 impl<T: Send + Sync + 'static> AnyRegistry for Registry<T> {
@@ -59,6 +65,10 @@ impl<T: Send + Sync + 'static> AnyRegistry for Registry<T> {
 
     fn registry_lifecycle(&self) -> Lifecycle {
         Registry::registry_lifecycle(self)
+    }
+
+    fn registry_id(&self) -> RegistryId {
+        Registry::registry_id(self)
     }
 }
 
