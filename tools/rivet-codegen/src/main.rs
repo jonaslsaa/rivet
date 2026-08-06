@@ -15,6 +15,7 @@ mod extract;
 mod generate;
 mod model;
 mod mth_gen;
+mod packets;
 mod reports;
 
 use std::path::Path;
@@ -33,7 +34,9 @@ fn main() -> Result<()> {
         Some("generate") => {
             let input = flag(&args, "--input");
             let output = flag(&args, "--output");
-            generate::run(input, output)
+            let packets = flag(&args, "--packets");
+            let packets_output = flag(&args, "--packets-output");
+            generate::run(input, output, packets, packets_output)
         }
         Some("mth-gen") => {
             let bundler = flag(&args, "--bundler");
@@ -77,9 +80,12 @@ fn print_usage() {
          \x20             Flags: --bundler <path>   path to paper-bundler-26.2*.jar\n\
          \x20                     --output <path>   output JSON (default data/block_states.json)\n\
          \x20   generate  Read data/block_states.json and emit Rust registry source\n\
-         \x20             into crates/rivet-registry/src/generated/ (committed).\n\
-         \x20             Flags: --input <path>    input JSON (default data/block_states.json)\n\
-         \x20                     --output <dir>   output dir (default generated/)\n\
+         \x20             into crates/rivet-registry/src/generated/ (committed) and\n\
+         \x20             crates/rivet-protocol/src/generated/ (committed).\n\
+         \x20             Flags: --input <path>    block registry input (default data/block_states.json)\n\
+         \x20                     --output <dir>   registry output dir (default crates/rivet-registry/src/generated)\n\
+         \x20                     --packets <path> packet report input (default data/reports/packets.json)\n\
+         \x20                     --packets-output <dir>  protocol output dir (default crates/rivet-protocol/src/generated)\n\
          \x20   mth-gen   Regenerate the Mth tables + golden tests in crates/rivet-util/src\n\
          \x20             from the real Paper Mth class (SIN/ASIN_TAB/COS_TAB + all\n\
          \x20             1156 golden vectors). Idempotent: `git diff` stays clean.\n\

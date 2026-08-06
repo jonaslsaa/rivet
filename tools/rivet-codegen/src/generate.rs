@@ -1,5 +1,7 @@
 //! `rivet-codegen generate` — read the extracted block-state JSON and emit Rust
-//! registry source directly into `crates/rivet-registry/src/generated/`.
+//! registry source directly into `crates/rivet-registry/src/generated/`, and
+//! consume the pinned `data/reports/packets.json` to emit the `rivet-protocol`
+//! packet-ID tables (see [`crate::packets`]).
 
 use std::collections::HashMap;
 use std::fs;
@@ -19,7 +21,17 @@ pub fn default_output(repo_root: &Path) -> PathBuf {
     repo_root.join("crates/rivet-registry/src/generated")
 }
 
-pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> {
+pub fn run(
+    input_flag: Option<&Path>,
+    output_flag: Option<&Path>,
+    packets_flag: Option<&Path>,
+    packets_output_flag: Option<&Path>,
+) -> Result<()> {
+    run_blocks(input_flag, output_flag)?;
+    crate::packets::run(packets_flag, packets_output_flag)
+}
+
+fn run_blocks(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> {
     let repo_root = crate::extract::find_repo_root()?;
     let input = match input_flag {
         Some(p) => p.to_path_buf(),
@@ -274,8 +286,9 @@ mod drift_tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let committed = repo_root.join("crates/rivet-registry/src/generated");
         let tmp = tempfile::tempdir().unwrap();
+        let packets_tmp = tempfile::tempdir().unwrap();
 
-        run(None, Some(tmp.path())).unwrap();
+        run(None, Some(tmp.path()), None, Some(packets_tmp.path())).unwrap();
 
         let files: Vec<_> = GENERATED_FILES.iter().map(|f| tmp.path().join(f)).collect();
         let status = Command::new("rustfmt")
