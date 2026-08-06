@@ -12,6 +12,10 @@
 //!   mc.network.buf     -> friendly_byte_buf, utf8_string, var_int, var_long
 //!   mc.network.framing -> varint21_frame_decoder, varint21_length_field_prepender
 //!   mc.network.codec   -> codec (StreamCodec family, ByteBufCodecs, IdDispatchCodec)
+//!   mc.network.protocol -> protocol (Packet/PacketType/ProtocolInfoBuilder/
+//!                         ProtocolCodecBuilder/SimpleUnboundProtocol/UnboundProtocol/
+//!                         BundlerInfo/BundlePacket/BundleDelimiterPacket), issue #84
+//!   mc.network          -> protocol_info (ProtocolInfo/Details)
 //!
 //! `friendly_byte_buf` carries the registry-independent `FriendlyByteBuf`
 //! surface (the registry/JOML/codec paths are blocked on later units);
@@ -33,3 +37,22 @@ pub mod var_int;
 pub mod var_long;
 pub mod varint21_frame_decoder;
 pub mod varint21_length_field_prepender;
+
+/// `net.minecraft.network.protocol` — packet registration (issue #84):
+/// `Packet`/`PacketType`, `ProtocolInfoBuilder`/`ProtocolCodecBuilder`,
+/// `SimpleUnboundProtocol`/`UnboundProtocol`, and the bundle trio
+/// (`BundlerInfo`/`BundlePacket`/`BundleDelimiterPacket`).
+///
+/// Gated behind `packets`: the builder assigns network ids in `addPacket`
+/// registration order and validates `PacketType.flow` against the protocol's
+/// direction, both mirroring `ProtocolInfoBuilder`/`ProtocolCodecBuilder` — and
+/// both live on the generated `ConnectionProtocol`/`PacketFlow`/`PacketType`
+/// tables that the feature gates.
+#[cfg(feature = "packets")]
+pub mod protocol;
+
+/// `net.minecraft.network.ProtocolInfo` (issue #84) — the bound protocol value
+/// produced by a template's `bind`: state, direction, the id-dispatch codec, and
+/// the optional bundle info. See [`protocol`].
+#[cfg(feature = "packets")]
+pub mod protocol_info;

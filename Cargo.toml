@@ -6,6 +6,7 @@ exclude = ["tools/rivet-codegen", "working"]
 [workspace.package]
 version = "0.1.0-dev+mc26.2"
 edition = "2024"
+license = "GPL-3.0-or-later"
 
 # Library choices are documented in CRATES.md — add dependencies there first.
 [workspace.dependencies]

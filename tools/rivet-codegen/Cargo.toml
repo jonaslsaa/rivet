@@ -2,6 +2,7 @@
 name = "rivet-codegen"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
 description = "Vanilla data extraction + registry codegen for Rivet (epic #8). Excluded from the cargo workspace."
 
 [dependencies]
