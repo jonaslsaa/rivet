@@ -283,7 +283,10 @@ mod drift_tests {
             .args(&files)
             .status()
             .expect("failed to run rustfmt");
-        assert!(status.success(), "rustfmt failed on freshly generated output");
+        assert!(
+            status.success(),
+            "rustfmt failed on freshly generated output"
+        );
 
         let mut committed_files: Vec<String> = fs::read_dir(&committed)
             .unwrap()
