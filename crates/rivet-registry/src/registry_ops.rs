@@ -3,23 +3,17 @@
 //! PROVENANCE: `RegistryOps.java` (139 lines) and `DelegatingOps.java` (363
 //! lines), both leaves of the `mc.resources` manifest unit.
 //!
-//! #124 scope (ownership D — serialization context): implemented. The unit
-//! owns `DelegatingOps` (the delegating `DynamicOps` base with the
-//! `DelegateListBuilder`/`DelegateRecordBuilder`), `RegistryOps<T>` (the ops
-//! that carries a `RegistryInfoLookup`), `RegistryInfo<T>`,
-//! `RegistryInfoLookup` (dyn-compatible), `HolderLookupAdapter` (the lazy
-//! `computeIfAbsent` adapter), and the `retrieve_getter`/`retrieve_element`
-//! context codecs (built on `rivet_serialization::extra_codecs::retrieve_context`).
-//!
-//! Boundary (issue #107 decision E/G):
-//! - **#124 only**: everything in this module. The holder-view types
-//!   (`HolderOwner<T>`/`HolderGetter<T>`) are the SCC's minimal placeholders
-//!   wrapping the owning `RegistryAccess`; **#126 (holder codecs)** replaces
-//!   them with the real holder types.
-//! - **#126 (holder codecs), NOT here**: `RegistryFileCodec` /
-//!   `RegistryDataLoader` / `HolderSetCodec` / `RegistryFixedCodec` codecs, and
-//!   all protocol `StreamCodec`s (Identifier/ResourceKey/TagKey/Holder/HolderSet
-//!   -> `rivet-protocol`). `rivet-registry` never depends on `rivet-protocol`.
+//! #124 scope (ownership D — serialization context): the `DelegatingOps` base,
+//! `RegistryOps<T>`, `RegistryInfo<T>`, `RegistryInfoLookup`,
+//! `HolderLookupAdapter`, and the `retrieve_getter`/`retrieve_element` context
+//! codecs. **#126 (holder codecs)**: the holder-view placeholders
+//! (`HolderOwner<T>`/`HolderGetter<T>` structs) are replaced by the real
+//! `holder_lookup` views (`RegistryOwner`/`RegistryGetter<E>`), and
+//! `retrieve_element` now returns `Holder.Reference<E>` (a `Holder<E>`) instead
+//! of the narrowed element value. `RegistryFileCodec`/`RegistryDataLoader`/
+//! `HolderSetCodec`/`RegistryFixedCodec` and all protocol `StreamCodec`s are
+//! #126 and live in `registry_file_codec.rs` / `rivet-protocol` respectively —
+//! `rivet-registry` never depends on `rivet-protocol`.
 //!
 //! Binding-model deviations (documented, see PORTING.md drift checklist):
 //! - Rust `DynamicOps` is not object-safe, so `RegistryOps<T, D>` is generic
@@ -45,7 +39,9 @@
 
 use crate::ResourceKey;
 use crate::access::RegistryAccess;
-use crate::registry::{Registry, RegistryKey};
+use crate::holder::{Holder, RegistryId};
+use crate::holder_lookup::{HolderGetter, RegistryGetter, RegistryOwner};
+use crate::registry::RegistryKey;
 
 use rivet_serialization::Number;
 use rivet_serialization::Pair;
@@ -379,27 +375,34 @@ impl<'a, T> RecordBuilder for DelegateRecordBuilder<'a, T> {
 /// `RegistryOps.RegistryInfo<T>` — `(owner, getter, elementsLifecycle)`.
 ///
 /// `owner`/`getter` are the `HolderOwner`/`HolderGetter` views of the owning
-/// registry. #126 widens those to the real holder types; the SCC's minimal form
-/// exposes the lifecycle + the owning `RegistryAccess` so `RegistryOps` can
-/// construct from an access. `access` is the whole owning access (the
-/// holder-owner seam): the registry itself is resolved through it at the erased
-/// boundary (`RegistryAccess::lookup_erased`).
+/// registry. #126: `owner` is the `RegistryOwner` (the per-instance
+/// `RegistryId`, for the O(1) `canSerializeIn` check) and `getter` is the
+/// `RegistryGetter<E>` view over the owning `RegistryAccess`. `access` is the
+/// whole owning access: the getter resolves the frozen registry through it at
+/// the sanctioned erased boundary (`RegistryAccess::lookup`).
 #[derive(Debug, Clone)]
 pub struct RegistryInfo<T> {
     /// `RegistryInfo.elementsLifecycle()` — the registry's lifecycle.
     pub elements_lifecycle: Lifecycle,
-    /// The owning `RegistryAccess` (holder-owner seam; #126 widens to the real
-    /// holder types).
+    /// The owning registry's per-instance `RegistryId` (the owner view).
+    pub registry_id: RegistryId,
+    /// The owning `RegistryAccess` (the getter view resolves through it).
     pub access: RegistryAccess,
     _marker: PhantomData<fn() -> T>,
 }
 
 impl<T> RegistryInfo<T> {
-    /// `RegistryInfo(HolderOwner, HolderGetter, Lifecycle)` — the SCC's
-    /// constructor from an owning access (the owner/getter views are #126).
-    pub fn new(elements_lifecycle: Lifecycle, access: RegistryAccess) -> Self {
+    /// `RegistryInfo(HolderOwner, HolderGetter, Lifecycle)` — built by
+    /// `HolderLookupAdapter` from the erased registry's id + lifecycle and the
+    /// owning access.
+    pub fn new(
+        elements_lifecycle: Lifecycle,
+        registry_id: RegistryId,
+        access: RegistryAccess,
+    ) -> Self {
         RegistryInfo {
             elements_lifecycle,
+            registry_id,
             access,
             _marker: PhantomData,
         }
@@ -462,9 +465,13 @@ impl HolderLookupAdapter {
             .map(|registry| {
                 // Java `RegistryInfo.fromRegistryLookup` (RegistryOps.java:129-131):
                 // `registry.registryLifecycle()`. The erased `&dyn AnyRegistry` exposes
-                // it directly (root.rs), so the real lifecycle is reported — no
-                // placeholder, no downcast.
-                RegistryInfo::new(registry.registry_lifecycle(), self.lookup_provider.clone())
+                // the real lifecycle and the per-instance `RegistryId` (root.rs), so
+                // the owner view and lifecycle are reported without a downcast.
+                RegistryInfo::new(
+                    registry.registry_lifecycle(),
+                    registry.registry_id(),
+                    self.lookup_provider.clone(),
+                )
             })
     }
 
@@ -557,37 +564,48 @@ impl<T, D: DynamicOps<Output = T>> RegistryOps<T, D> {
     }
 
     /// `RegistryOps.owner(ResourceKey)` — `Optional<HolderOwner<E>>`.
-    pub fn owner<E>(&self, registry_key: &RegistryKey<E>) -> Option<HolderOwner<E>> {
+    ///
+    /// The #126 owner view is the type-erased `RegistryOwner` carrying the
+    /// registry's per-instance `RegistryId` (the O(1) `canSerializeIn` check).
+    pub fn owner<E>(&self, registry_key: &RegistryKey<E>) -> Option<RegistryOwner> {
         let erased = erase_registry_key(registry_key);
         self.owner_for_erased(&erased)
     }
 
-    /// `RegistryOps.owner` for a pre-erased registry key (the #124 test seam;
-    /// the public method erases through the key's identifier).
-    pub(crate) fn owner_for_erased<E>(&self, erased: &RegistryKey<()>) -> Option<HolderOwner<E>> {
+    /// `RegistryOps.owner` for a pre-erased registry key (the test seam; the
+    /// public method erases through the key's identifier). `RegistryOwner` is
+    /// type-erased, so the erased form carries no element type.
+    pub(crate) fn owner_for_erased(&self, erased: &RegistryKey<()>) -> Option<RegistryOwner> {
         self.lookup_provider
             .lookup_erased(erased)
-            .map(|info| HolderOwner {
-                access: info.access.clone(),
-                _marker: PhantomData,
+            .map(|info| RegistryOwner {
+                registry_id: info.registry_id,
             })
     }
 
     /// `RegistryOps.getter(ResourceKey)` — `Optional<HolderGetter<E>>`.
-    pub fn getter<E>(&self, registry_key: &RegistryKey<E>) -> Option<HolderGetter<E>> {
+    ///
+    /// The #126 getter view is the `RegistryGetter<E>` over the owning access,
+    /// resolving the frozen registry through the sanctioned erased downcast.
+    pub fn getter<E>(&self, registry_key: &RegistryKey<E>) -> Option<RegistryGetter<E>>
+    where
+        E: Send + Sync + 'static,
+    {
         let erased = erase_registry_key(registry_key);
         self.getter_for_erased(&erased)
     }
 
-    /// `RegistryOps.getter` for a pre-erased registry key (see
-    /// `owner_for_erased`).
-    pub(crate) fn getter_for_erased<E>(&self, erased: &RegistryKey<()>) -> Option<HolderGetter<E>> {
-        self.lookup_provider
-            .lookup_erased(erased)
-            .map(|info| HolderGetter {
-                access: info.access.clone(),
-                _marker: PhantomData,
-            })
+    /// `RegistryOps.getter` for a pre-erased registry key (see `owner_for_erased`).
+    pub(crate) fn getter_for_erased<E>(&self, erased: &RegistryKey<()>) -> Option<RegistryGetter<E>>
+    where
+        E: Send + Sync + 'static,
+    {
+        self.lookup_provider.lookup_erased(erased).map(|info| {
+            RegistryGetter::new(
+                info.access.clone(),
+                ResourceKey::create_registry_key(erased.identifier().clone()),
+            )
+        })
     }
 }
 
@@ -762,30 +780,6 @@ impl<T, D: DynamicOps<Output = T>> RegistryOpsLookup for RegistryOps<T, D> {
 }
 
 // ---------------------------------------------------------------------------
-// Holder-view placeholders (the SCC's minimal shape; #126 replaces these)
-// ---------------------------------------------------------------------------
-
-/// `net.minecraft.core.HolderOwner<T>` — #126. The SCC's placeholder wraps the
-/// owning `RegistryAccess` (owner identity = the access that owns the registry);
-/// #126 (holder codecs) replaces it with the real holder-owner view.
-#[derive(Debug, Clone)]
-pub struct HolderOwner<T> {
-    /// The owning `RegistryAccess`.
-    pub access: RegistryAccess,
-    _marker: PhantomData<fn() -> T>,
-}
-
-/// `net.minecraft.core.HolderGetter<T>` — #126. The SCC's placeholder wraps the
-/// owning `RegistryAccess` (the getter resolves elements through it); #126
-/// replaces it with the real holder-getter view.
-#[derive(Debug, Clone)]
-pub struct HolderGetter<T> {
-    /// The owning `RegistryAccess`.
-    pub access: RegistryAccess,
-    _marker: PhantomData<fn() -> T>,
-}
-
-// ---------------------------------------------------------------------------
 // retrieveGetter / retrieveElement
 // ---------------------------------------------------------------------------
 
@@ -798,37 +792,37 @@ fn erase_registry_key<E>(key: &RegistryKey<E>) -> RegistryKey<()> {
 
 /// `RegistryOps.retrieveGetter(ResourceKey)` — the context codec.
 ///
-/// Decodes the owning `HolderGetter<E>` straight from the ops' lookup provider;
-/// `"Unknown registry: <key>"` when the registry is absent. The decode result
-/// carries the registry's `elementsLifecycle` (Java
+/// Decodes the owning `HolderGetter<E>` (`RegistryGetter<E>`) straight from the
+/// ops' lookup provider; `"Unknown registry: <key>"` when the registry is
+/// absent. The decode result carries the registry's `elementsLifecycle` (Java
 /// `DataResult.success(r.getter(), r.elementsLifecycle())`).
 pub fn retrieve_getter<E, Ops>(
     registry_key: &RegistryKey<E>,
-) -> Arc<dyn MapCodec<HolderGetter<E>, Ops>>
+) -> Arc<dyn MapCodec<RegistryGetter<E>, Ops>>
 where
-    E: 'static,
+    E: Send + Sync + 'static,
     Ops: DynamicOps + 'static + RegistryOpsLookup,
 {
     retrieve_getter_for_erased(erase_registry_key(registry_key))
 }
 
-/// `retrieveGetter` for a pre-erased registry key — the #124 test seam (the
-/// public wrapper erases through the key's identifier; the decode logic below
-/// is the real behavior).
+/// `retrieveGetter` for a pre-erased registry key — the test seam (the public
+/// wrapper erases through the key's identifier; the decode logic below is the
+/// real behavior).
 pub(crate) fn retrieve_getter_for_erased<E, Ops>(
     erased_registry_key: RegistryKey<()>,
-) -> Arc<dyn MapCodec<HolderGetter<E>, Ops>>
+) -> Arc<dyn MapCodec<RegistryGetter<E>, Ops>>
 where
-    E: 'static,
+    E: Send + Sync + 'static,
     Ops: DynamicOps + 'static + RegistryOpsLookup,
 {
     extra_codecs::retrieve_context(Arc::new(move |ops: &Ops| {
         match ops.lookup_provider().lookup_erased(&erased_registry_key) {
             Some(info) => DataResult::success_with_lifecycle(
-                HolderGetter {
-                    access: info.access.clone(),
-                    _marker: PhantomData,
-                },
+                RegistryGetter::new(
+                    info.access.clone(),
+                    ResourceKey::create_registry_key(erased_registry_key.identifier().clone()),
+                ),
                 info.elements_lifecycle,
             ),
             None => DataResult::error(format!("Unknown registry: {}", erased_registry_key)),
@@ -838,15 +832,15 @@ where
 
 /// `RegistryOps.retrieveElement(ResourceKey<E>)` — the context codec.
 ///
-/// Decodes a single element by resolving it through the owning access's frozen
-/// registry. Java returns `Holder.Reference<E>`; the SCC narrows that to the
-/// element value `E` (the holder types are #126). Either an unknown registry or
-/// a missing element reports Java's `"Can't find value: <key>"` — Java's
-/// `flatMap(r -> r.getter().get(key)).orElseGet(...)` collapses both to the same
-/// message.
-pub fn retrieve_element<E, Ops>(key: &ResourceKey<E>) -> Arc<dyn MapCodec<E, Ops>>
+/// Decodes a single element, returning its **`Holder.Reference<E>`** (Java
+/// `retrieveElement` returns `Holder.Reference<E>`; #126 widens the SCC's
+/// narrowed element-value form). Either an unknown registry or a missing
+/// element reports Java's `"Can't find value: <key>"` — Java's
+/// `flatMap(r -> r.getter().get(key)).orElseGet(...)` collapses both to the
+/// same message.
+pub fn retrieve_element<E, Ops>(key: &ResourceKey<E>) -> Arc<dyn MapCodec<Holder<E>, Ops>>
 where
-    E: Clone + 'static,
+    E: Send + Sync + 'static,
     Ops: DynamicOps + 'static + RegistryOpsLookup,
 {
     let registry_key: RegistryKey<E> = ResourceKey::create_registry_key(key.registry().clone());
@@ -858,27 +852,25 @@ where
 pub(crate) fn retrieve_element_for_erased<E, Ops>(
     erased_registry_key: RegistryKey<()>,
     key: ResourceKey<E>,
-) -> Arc<dyn MapCodec<E, Ops>>
+) -> Arc<dyn MapCodec<Holder<E>, Ops>>
 where
-    E: Clone + 'static,
+    E: Send + Sync + 'static,
     Ops: DynamicOps + 'static + RegistryOpsLookup,
 {
     extra_codecs::retrieve_context(Arc::new(move |ops: &Ops| {
         let lookup = ops.lookup_provider();
         match lookup.lookup_erased(&erased_registry_key) {
             Some(info) => {
-                // `RegistryInfo.getter().get(key)` — the SCC resolves through the
+                // `RegistryInfo.getter().get(key)` — resolve the holder through the
                 // owning access's frozen registry at the sanctioned erased
-                // boundary (`lookup_erased` + downcast, as `RegistryAccess::lookup`
-                // does). The frozen `Registry<T>` hands back `&T`; the element
-                // must be `Clone` to own the decode result.
-                let value = info
-                    .access
-                    .lookup_erased(&erased_registry_key)
-                    .and_then(|registry| registry.as_any().downcast_ref::<Registry<E>>())
-                    .and_then(|registry| registry.get_value(&key));
-                match value {
-                    Some(value) => DataResult::success(value.clone()),
+                // boundary (`RegistryAccess::lookup`, the sole downcast). The
+                // result is the `Holder::Reference` value (holder id == element
+                // id, OWNERSHIP.md).
+                let registry = info.access.lookup::<E>(&ResourceKey::create_registry_key(
+                    erased_registry_key.identifier().clone(),
+                ));
+                match registry.and_then(|registry| HolderGetter::get(registry, &key)) {
+                    Some(holder) => DataResult::success(holder),
                     None => DataResult::error(format!("Can't find value: {}", key)),
                 }
             }
@@ -892,6 +884,7 @@ mod tests {
     use super::*;
     use crate::Identifier;
     use crate::builder::RegistryBuilder;
+    use crate::registry::Registry;
     use crate::root::AnyBox;
 
     use rivet_serialization::data_result::DataResult;
@@ -1306,32 +1299,31 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn owner_and_getter_return_the_owning_access() {
+    fn owner_and_getter_reflect_the_owning_registry() {
         let access = access_with_one_registry();
         let ops = ops_over(access.clone());
         let erased = erased_key("test");
-        let owner = ops.owner_for_erased::<TestElement>(&erased);
+        let owner = ops.owner_for_erased(&erased);
         let getter = ops.getter_for_erased::<TestElement>(&erased);
         assert!(owner.is_some());
         assert!(getter.is_some());
-        // Both views wrap the owning access (same registry keys).
-        assert_eq!(
-            owner.unwrap().access.list_registry_keys(),
-            access.list_registry_keys()
-        );
-        assert_eq!(
-            getter.unwrap().access.list_registry_keys(),
-            access.list_registry_keys()
-        );
+        // The owner is the registry's per-instance RegistryId (Java `context ==
+        // this`, OWNERSHIP.md §Registries).
+        let registered_id = access
+            .lookup(&element_key())
+            .expect("frozen registry")
+            .registry_id();
+        assert_eq!(owner.unwrap().registry_id, registered_id);
+        // The getter resolves the same registry through the owning access: the
+        // frozen registry is the shared instance.
+        let getter = getter.unwrap();
+        assert_eq!(getter.registry().unwrap().registry_id(), registered_id);
     }
 
     #[test]
     fn owner_and_getter_return_none_for_an_unknown_access() {
         let ops = empty_ops();
-        assert!(
-            ops.owner_for_erased::<TestElement>(&erased_key("test"))
-                .is_none()
-        );
+        assert!(ops.owner_for_erased(&erased_key("test")).is_none());
         assert!(
             ops.getter_for_erased::<TestElement>(&erased_key("test"))
                 .is_none()
@@ -1353,10 +1345,12 @@ mod tests {
         // erased `&dyn AnyRegistry` boundary, Java's `registryLifecycle()`).
         assert_eq!(decoded.lifecycle(), Lifecycle::Stable);
         let getter = decoded.get_or_throw("decode");
-        assert_eq!(
-            getter.access.list_registry_keys(),
-            access.list_registry_keys()
-        );
+        // The getter resolves the same frozen registry through the owning access.
+        let registered_id = access
+            .lookup(&element_key())
+            .expect("frozen registry")
+            .registry_id();
+        assert_eq!(getter.registry().unwrap().registry_id(), registered_id);
     }
 
     #[test]

@@ -228,8 +228,9 @@ impl<T> RegistryBuilder<T> {
     /// stand-alone holder placeholder; if never registered, `freeze()` panics
     /// with it as an unbound value. The returned `HolderId` is provisional
     /// (`values.len()` at creation) and stable across repeat calls
-    /// (`computeIfAbsent`); the full stand-alone `Holder.Reference` semantics
-    /// are #126.
+    /// (`computeIfAbsent`). The #126 `Holder::Reference` is built on demand by
+    /// `RegistryLookup::get` once the key registers — the builder's placeholder
+    /// is a bare key, not a `Holder`.
     ///
     /// Java's `getOrCreateHolderOrThrow` (MappedRegistry.java:198-207) throws
     /// `"This registry can't create new holders without value"` on an intrusive
@@ -277,15 +278,17 @@ impl<T> RegistryBuilder<T> {
 
     /// `WritableRegistry.createRegistrationLookup()`.
     ///
-    /// Java (MappedRegistry.java:395-418) returns a real `HolderGetter<T>` whose
+    /// Java (MappedRegistry.java:395-418) returns a live `HolderGetter<T>` whose
     /// `get`/`getOrThrow` create holders on demand and throw on intrusive
-    /// registries. The full `HolderGetter<T>` is #126 (holder codecs); a
-    /// placeholder count would be a plausible-but-wrong holder, so this fails
-    /// loudly instead.
+    /// registries. #126 (holder codecs): the frozen `Registry<T>`'s
+    /// `RegistryLookup` (`holder_lookup.rs`) covers the post-freeze getter; the
+    /// pre-freeze registration-lookup (a live builder getter) is not ported —
+    /// a placeholder would be a plausible-but-wrong holder, so this fails
+    /// loudly.
     pub fn create_registration_lookup(&self) -> BuilderHolder {
         panic!(
-            "createRegistrationLookup's HolderGetter is #126 (holder codecs); \
-             not implemented in #124 scope"
+            "createRegistrationLookup's pre-freeze HolderGetter is #126 (holder \
+             codecs); not implemented"
         )
     }
 
@@ -485,11 +488,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "createRegistrationLookup's HolderGetter is #126")]
+    #[should_panic(expected = "pre-freeze HolderGetter is #126 (holder codecs)")]
     fn create_registration_lookup_is_deferred_to_126() {
         // Java returns a real HolderGetter (MappedRegistry.java:395-418); the
         // SCC must not return a plausible-but-wrong holder placeholder, so the
-        // deferred surface fails loudly instead.
+        // deferred surface fails loudly instead. #126 delivers the frozen
+        // `RegistryLookup` (`holder_lookup.rs`); the pre-freeze live builder
+        // getter stays deferred.
         let mut builder = RegistryBuilder::new(&key());
         register(&mut builder, "one", 1);
         let _ = builder.create_registration_lookup();
