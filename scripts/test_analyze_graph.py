@@ -140,13 +140,9 @@ def main() -> None:
 
         # Same-package references from buf/framing into the residual are
         # deliberately NOT dep edges (the residual is not translated in M1, so
-        # recording them would deadlock the wave). They are recorded as notes so
-        # the M1 translate-wave absorbs the residual class as a STUB instead of
-        # being surprised by it.
-        check("buf note warns M1 to STUB residual PacketEncoder reference",
-              "PacketEncoder" in by_id["mc.network.buf"]["notes"])
-        check("framing note warns M1 to STUB residual BandwidthDebugMonitor",
-              "BandwidthDebugMonitor" in by_id["mc.network.framing"]["notes"])
+        # recording them would deadlock the wave); the delivered modules model
+        # the residual touchpoints themselves (BandwidthDebugMonitor as an fn
+        # callback, ADVENTURE_LOCALE absent), so no STUB note is authored.
 
         def file_set(r: dict) -> set[str]:
             return {p.rsplit("/", 1)[-1] for p in r["java_paths"].split(",")}
@@ -220,8 +216,8 @@ def main() -> None:
         regen = tmpd / "regen.tsv"
         run_analyze("--split-network", out=regen, prev=seeded)
         regen_rows = rows_of(regen)
-        # The seeded human note must survive; buf/framing additionally carry the
-        # authored M1-STUB note (append-only, never clobbering the human note).
+        # The seeded human note must survive regeneration (append-only, never
+        # clobbering the human note).
         for unit_id in ("mc.network", "mc.network.buf", "mc.network.framing"):
             r = next(x for x in regen_rows if x["id"] == unit_id)
             check(f"carry: {unit_id} keeps status/attempts/notes",
