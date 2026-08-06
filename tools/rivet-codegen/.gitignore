@@ -1,3 +1,7 @@
 # Build output and extraction scratch space — regenerable by `extract`
 /target
 /.cache
+
+# Python helper scripts
+__pycache__/
+*.pyc

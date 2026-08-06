@@ -15,6 +15,12 @@ for `crates/rivet-registry`. It is excluded from the cargo workspace
 - **`generate`** — reads that JSON and emits the registry tables directly into
   `crates/rivet-registry/src/generated/` (a `BlockId` registry + a block-state
   property enum structure).
+- **`mth-gen`** — regenerates the Mth tables + golden tests
+  (`crates/rivet-util/src/mth_sin_table.rs`, `mth_atan_tables.rs`,
+  `mth_golden_tests.rs`) from the real Paper `Mth` class. These files are
+  `GENERATED — do not hand-edit`; this is the checked-in generator that makes
+  regeneration possible. Idempotent: over the current committed files it
+  reproduces them byte-for-byte (`git diff` stays clean).
 - **`reports`** — runs the vanilla `net.minecraft.data.Main --reports` datagen
   against the materialized Paper 26.2 server jar and pins the canonical
   `packets.json` / `registries.json` / `blocks.json` reports (with provenance)
@@ -23,13 +29,14 @@ for `crates/rivet-registry`. It is excluded from the cargo workspace
 ```
 rivet-codegen extract  [--bundler <path>] [--output <path>]
 rivet-codegen generate [--input <path>]  [--output <dir>]
+rivet-codegen mth-gen  [--bundler <path>] [--output <dir>]
 rivet-codegen reports  [--jar <path>] [--output <dir>] [--verify]
 ```
 
 ## How to run
 
-Requirements: a JVM (`java` + `javac` on `PATH`, or `JAVA_HOME` set) and
-`unzip`. The default bundler path is
+Requirements: a JVM (`java` + `javac` on `PATH`, or `JAVA_HOME` set), `unzip`,
+and `rustfmt` (for `mth-gen`). The default bundler path is
 `working/Paper/paper-server/build/libs/paper-bundler-26.2.local-SNAPSHOT.jar`
 (the artifact of a Paper `build` — run `./gradlew :paper-server:build` in
 `working/Paper` if it is missing). You cannot build that jar in this read-only
@@ -39,11 +46,48 @@ checkout; the tool needs a jar produced elsewhere.
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
 target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs}
+target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
-`extract` caches the unpacked classpath in `.cache/` (gitignored) so reruns are
-fast. Pass `--bundler` to point at a different jar.
+`extract` and `mth-gen` cache the unpacked classpath in `.cache/` (gitignored)
+so reruns are fast. Pass `--bundler` to point at a different jar.
+
+## How the Mth tables + golden tests are generated (`mth-gen`)
+
+`crates/rivet-util/src/mth_sin_table.rs` / `mth_atan_tables.rs` /
+`mth_golden_tests.rs` are marked `GENERATED — do not hand-edit` but had no
+checked-in generator (regeneration was impossible). `mth-gen` is that
+generator. The Mth tables and every golden expected value are computed by the
+**real compiled Paper `Mth` class** — nothing is hand-copied:
+
+1. unpack the bundler classpath (same `extract` machinery);
+2. compile `src/java/MthGen.java` against it. `MthGen.java` is itself generated
+   by `scripts/gen_mth_gen.py` from `data/mth_vectors.tsv` (the `(lhs => rhs)`
+   pairs extracted from the committed golden file) — it calls the exact Java
+   overload each Rust fn mirrors and prints each result as the committed Rust
+   literal;
+3. `MthGen` prints the `SIN`/`ASIN_TAB`/`COS_TAB` arrays and the 1156 vectors;
+4. `mth_gen.rs` substitutes those values into `data/mth_golden_skeleton.rs`
+   (the committed golden file with every expected `rhs` replaced by a `@@N@@`
+   placeholder) and emits the two table files, then pipes everything through
+   `rustfmt` — the committed files are rustfmt-idempotent, so the output
+   matches them byte-for-byte.
+
+Regeneration is **idempotent**: `git diff` stays clean when run over the
+current committed files. Regenerate after bumping the Paper version or
+correcting a golden expectation; a value that diverges from Java shows up as a
+`git diff` hunk to review.
+
+### Authoring a change to the golden file
+
+1. Edit `crates/rivet-util/src/mth_golden_tests.rs` directly (add/change an
+   `assert_eq!(lhs, rhs)`), or fix a wrong committed `rhs`.
+2. Re-run `scripts/mth_skeletonize.py` to rebuild `data/mth_golden_skeleton.rs`
+   and `scripts/mth_vectors.py` to rebuild `data/mth_vectors.tsv`.
+3. Re-run `scripts/gen_mth_gen.py` to rebuild `src/java/MthGen.java`, then
+   `rivet-codegen mth-gen` to regenerate. The regenerated file must match your
+   edit (a mismatch means the Java oracle computes something different).
 
 ## The `reports` subcommand
 

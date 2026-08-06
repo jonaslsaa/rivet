@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 /// Canonical output path for the extracted block-state registry.
 pub fn default_output(repo_root: &Path) -> PathBuf {
@@ -18,7 +18,7 @@ pub fn default_output(repo_root: &Path) -> PathBuf {
 }
 
 /// Default bundler jar produced by a Paper `build` in the working tree.
-fn default_bundler(repo_root: &Path) -> PathBuf {
+pub(crate) fn default_bundler(repo_root: &Path) -> PathBuf {
     repo_root.join("working/Paper/paper-server/build/libs/paper-bundler-26.2.local-SNAPSHOT.jar")
 }
 
@@ -49,8 +49,14 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
     extract_bundler(&bundler, &classpath_dir)?;
 
     let (version, server_jar_rel) = read_versions_list(&bundler, &classpath_dir)?;
-    let server_jar = classpath_dir.join("META-INF/versions").join(&server_jar_rel);
-    anyhow::ensure!(server_jar.is_file(), "server jar not found at {}", server_jar.display());
+    let server_jar = classpath_dir
+        .join("META-INF/versions")
+        .join(&server_jar_rel);
+    anyhow::ensure!(
+        server_jar.is_file(),
+        "server jar not found at {}",
+        server_jar.display()
+    );
 
     let classpath = build_classpath(&classpath_dir, &server_jar)?;
 
@@ -73,7 +79,13 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
 
     run_cmd(
         &javac,
-        &["-cp", &classpath, "-d", helper_dir.to_str().unwrap(), helper_file.to_str().unwrap()],
+        &[
+            "-cp",
+            &classpath,
+            "-d",
+            helper_dir.to_str().unwrap(),
+            helper_file.to_str().unwrap(),
+        ],
         "compile BlockDataExtractor.java",
     )?;
 
@@ -103,7 +115,9 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
 
     println!(
         "Wrote block registry ({} blocks, MC {}) to {}",
-        serde_json::from_str::<crate::model::BlockRegistry>(&fs::read_to_string(&output)?)?.blocks.len(),
+        serde_json::from_str::<crate::model::BlockRegistry>(&fs::read_to_string(&output)?)?
+            .blocks
+            .len(),
         version,
         output.display()
     );
@@ -112,9 +126,12 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
 
 /// Locate the repo root (the dir whose Cargo.toml declares the `[workspace]`).
 pub(crate) fn find_repo_root() -> Result<PathBuf> {
-    // Anchor at the source dir of this binary: <repo>/tools/rivet-codegen.
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let mut dir = manifest_dir.as_path();
+    find_repo_root_from(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Search upward from `start` for the dir whose Cargo.toml has `[workspace]`.
+pub(crate) fn find_repo_root_from(start: PathBuf) -> Result<PathBuf> {
+    let mut dir = start.as_path();
     loop {
         let workspace_toml = dir.join("Cargo.toml");
         if workspace_toml.is_file()
@@ -126,7 +143,7 @@ pub(crate) fn find_repo_root() -> Result<PathBuf> {
         }
         dir = dir
             .parent()
-            .ok_or_else(|| anyhow!("could not find rivet repo root from {}", manifest_dir.display()))?;
+            .ok_or_else(|| anyhow!("could not find rivet repo root from {}", start.display()))?;
     }
 }
 
@@ -143,10 +160,19 @@ fn extract_bundler(bundler: &Path, classpath_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    fs::create_dir_all(classpath_dir).with_context(|| format!("create {}", classpath_dir.display()))?;
+    fs::create_dir_all(classpath_dir)
+        .with_context(|| format!("create {}", classpath_dir.display()))?;
     run_cmd(
         &PathBuf::from("unzip"),
-        &["-o", "-q", bundler.to_str().unwrap(), "-d", classpath_dir.to_str().unwrap(), "META-INF/versions/*", "META-INF/libraries/*"],
+        &[
+            "-o",
+            "-q",
+            bundler.to_str().unwrap(),
+            "-d",
+            classpath_dir.to_str().unwrap(),
+            "META-INF/versions/*",
+            "META-INF/libraries/*",
+        ],
         "extract server + libraries from bundler jar",
     )
 }
@@ -169,11 +195,20 @@ fn read_versions_list(bundler: &Path, classpath_dir: &Path) -> Result<(String, S
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
 
-    let line = contents.lines().next().context("empty META-INF/versions.list")?;
+    let line = contents
+        .lines()
+        .next()
+        .context("empty META-INF/versions.list")?;
     let mut fields = line.split_whitespace();
     let _sha1 = fields.next().context("missing sha1 in versions.list")?;
-    let version = fields.next().context("missing version in versions.list")?.to_string();
-    let rel_path = fields.next().context("missing server path in versions.list")?.to_string();
+    let version = fields
+        .next()
+        .context("missing version in versions.list")?
+        .to_string();
+    let rel_path = fields
+        .next()
+        .context("missing server path in versions.list")?
+        .to_string();
     Ok((version, rel_path))
 }
 
@@ -214,7 +249,34 @@ pub(crate) fn resolve_java() -> Result<(PathBuf, PathBuf)> {
     Ok((PathBuf::from("java"), PathBuf::from("javac")))
 }
 
-fn run_cmd(program: &Path, args: &[&str], what: &str) -> Result<()> {
+/// Unpack the bundler classpath + resolve java/javac, shared by `extract` and
+/// `mth-gen`. Returns (classpath, java, javac).
+pub(crate) fn prepare_runtime(
+    repo_root: &Path,
+    bundler: &Path,
+) -> Result<(String, PathBuf, PathBuf)> {
+    let cache = repo_root.join("tools/rivet-codegen/.cache");
+    fs::create_dir_all(&cache).context("create codegen cache dir")?;
+
+    let classpath_dir = cache.join("classpath");
+    extract_bundler(bundler, &classpath_dir)?;
+
+    let (_, server_jar_rel) = read_versions_list(bundler, &classpath_dir)?;
+    let server_jar = classpath_dir
+        .join("META-INF/versions")
+        .join(&server_jar_rel);
+    anyhow::ensure!(
+        server_jar.is_file(),
+        "server jar not found at {}",
+        server_jar.display()
+    );
+
+    let classpath = build_classpath(&classpath_dir, &server_jar)?;
+    let (java, javac) = resolve_java()?;
+    Ok((classpath, java, javac))
+}
+
+pub(crate) fn run_cmd(program: &Path, args: &[&str], what: &str) -> Result<()> {
     let status = Command::new(program)
         .args(args)
         .status()
@@ -223,4 +285,21 @@ fn run_cmd(program: &Path, args: &[&str], what: &str) -> Result<()> {
         bail!("{what} failed with {status}");
     }
     Ok(())
+}
+
+/// Capture stdout of a command (used by mth-gen to read the oracle's printed
+/// tables/vectors).
+pub(crate) fn run_cmd_capture(program: &Path, args: &[&str], what: &str) -> Result<String> {
+    let out = Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("spawn {program:?} for {what}"))?;
+    if !out.status.success() {
+        bail!(
+            "{what} failed with {}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

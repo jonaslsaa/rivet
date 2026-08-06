@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::model::{BlockDef, BlockRegistry};
 
@@ -30,9 +30,10 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
         None => default_output(&repo_root),
     };
 
-    let data: BlockRegistry =
-        serde_json::from_str(&fs::read_to_string(&input).with_context(|| format!("read {}", input.display()))?)
-            .with_context(|| format!("parse {}", input.display()))?;
+    let data: BlockRegistry = serde_json::from_str(
+        &fs::read_to_string(&input).with_context(|| format!("read {}", input.display()))?,
+    )
+    .with_context(|| format!("parse {}", input.display()))?;
 
     // Deduplicate (name, values) property types globally, preserving order of
     // first appearance. Ordering of values is preserved from the jar.
@@ -74,11 +75,17 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
 
     fs::write(output.join("mod.rs"), format!("{header}{}", render_mod()))
         .context("write generated/mod.rs")?;
-    fs::write(output.join("blocks.rs"), format!("{header}{}", render_blocks(&data)?))
-        .context("write generated/blocks.rs")?;
+    fs::write(
+        output.join("blocks.rs"),
+        format!("{header}{}", render_blocks(&data)?),
+    )
+    .context("write generated/blocks.rs")?;
     fs::write(
         output.join("block_properties.rs"),
-        format!("{header}{}", render_block_properties(&prop_names, &prop_values, &prop_variants, &block_shapes)),
+        format!(
+            "{header}{}",
+            render_block_properties(&prop_names, &prop_values, &prop_variants, &block_shapes)
+        ),
     )
     .context("write generated/block_properties.rs")?;
 
@@ -131,7 +138,10 @@ fn render_blocks(data: &BlockRegistry) -> Result<String> {
     ids.sort_unstable();
     for (i, id) in ids.iter().enumerate() {
         if *id as usize != i {
-            bail!("block registry ids are not contiguous (expected {} at index {i}); adjust the generator", id);
+            bail!(
+                "block registry ids are not contiguous (expected {} at index {i}); adjust the generator",
+                id
+            );
         }
     }
 
@@ -160,11 +170,15 @@ fn render_blocks(data: &BlockRegistry) -> Result<String> {
     out.push_str("];\n\n");
 
     out.push_str("impl BlockId {\n");
-    out.push_str("    #[inline]\n    pub const fn from_id(id: u16) -> Self {\n        Self(id)\n    }\n\n");
+    out.push_str(
+        "    #[inline]\n    pub const fn from_id(id: u16) -> Self {\n        Self(id)\n    }\n\n",
+    );
     out.push_str("    pub fn from_name(name: &str) -> Option<Self> {\n");
     out.push_str("        BLOCK_BY_NAME.get(name).copied().map(Self)\n    }\n\n");
     out.push_str("    pub fn name(self) -> &'static str {\n");
-    out.push_str("        BLOCK_BY_ID.get(self.0 as usize).copied().unwrap_or(\"minecraft:air\")\n    }\n\n");
+    out.push_str(
+        "        BLOCK_BY_ID.get(self.0 as usize).copied().unwrap_or(\"minecraft:air\")\n    }\n\n",
+    );
     out.push_str("    #[inline]\n    pub const fn id(self) -> u16 {\n        self.0\n    }\n}\n");
 
     Ok(out)
@@ -185,7 +199,11 @@ fn render_block_properties(
     out.push_str("#[repr(u16)]\n");
     out.push_str("pub enum BlockPropertyId {\n");
     for (i, v) in prop_variants.iter().enumerate() {
-        let doc = format!("    /// `{}`: [{}]", prop_names[i], prop_values[i].join(", "));
+        let doc = format!(
+            "    /// `{}`: [{}]",
+            prop_names[i],
+            prop_values[i].join(", ")
+        );
         out.push_str(&format!("{doc}\n    {v} = {i},\n"));
     }
     out.push_str("}\n\n");
@@ -217,7 +235,9 @@ fn render_block_properties(
     out.push_str("    pub fn values(self) -> &'static [&'static str] {\n");
     out.push_str("        BLOCK_PROPERTY_VALUES[self as usize]\n    }\n}\n\n");
 
-    out.push_str("/// Per-block state shape: `(block_id, &[property ids in declaration order])`.\n");
+    out.push_str(
+        "/// Per-block state shape: `(block_id, &[property ids in declaration order])`.\n",
+    );
     out.push_str("/// Blocks with no properties are omitted.\n");
     out.push_str("pub static BLOCK_STATE_SHAPES: &[(u16, &[u16])] = &[\n");
     for (block_id, shape) in block_shapes {
@@ -294,7 +314,10 @@ mod tests {
     #[test]
     fn variant_names_are_upper_camel() {
         assert_eq!(variant_name("axis", &[]), "Axis");
-        assert_eq!(variant_name("creaking_heart_state", &[]), "CreakingHeartState");
+        assert_eq!(
+            variant_name("creaking_heart_state", &[]),
+            "CreakingHeartState"
+        );
         assert_eq!(variant_name("waterlogged", &[]), "Waterlogged");
     }
 
@@ -302,6 +325,9 @@ mod tests {
     fn variant_name_collisions_get_suffix() {
         assert_eq!(variant_name("facing", &[]), "Facing");
         assert_eq!(variant_name("facing", &["Facing".to_string()]), "Facing2");
-        assert_eq!(variant_name("facing", &["Facing".to_string(), "Facing2".to_string()]), "Facing3");
+        assert_eq!(
+            variant_name("facing", &["Facing".to_string(), "Facing2".to_string()]),
+            "Facing3"
+        );
     }
 }
