@@ -242,11 +242,10 @@ pub fn shuffled_copy<T: Clone>(array: &[T], random: &mut impl RandomSource) -> V
 
 /// `Util.createIndexLookup(List<T>)` — returns a function `T -> int`. For
 /// fewer than 8 values this is `List.indexOf` (a linear scan); at 8+ it builds
-/// a `Object2IntOpenHashMap` with `defaultReturnValue(-1)`. The port uses an
-/// `index_of` over the slice (linear) or a `HashMap<&T, usize>` keyed by value
-/// identity — the fastutil map is keyed by object identity in Java
-/// (`Object2IntOpenHashMap` uses `Object.equals`, but for the enum-constant
-/// call sites the values are interned, so equality and identity coincide).
+/// a fastutil `Object2IntOpenHashMap` with `defaultReturnValue(-1)`. The port
+/// mirrors both: a linear `index_of` over the slice, or a `HashMap<&T, usize>`
+/// keyed by value equality (fastutil hashes with `Object.equals`, so the
+/// `Eq`-keyed port is the faithful analogue).
 ///
 /// MISSING-VALUE SEMANTICS: a value not present maps to `-1` (`usize::MAX` in
 /// the hash branch, `None` in the linear branch).
