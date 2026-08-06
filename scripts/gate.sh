@@ -4,7 +4,8 @@
 #
 # Scope: pass crate names or crates/... paths as arguments (or set SCOPE to a
 # space/comma-separated list) to gate only those crates (fmt/clippy/test). The
-# unused-deps check (cargo machete) and the default full gate stay workspace-wide.
+# unused-deps check (cargo machete, including the workspace-excluded codegen
+# tool's own manifest) and the default full gate stay workspace-wide.
 #
 #   ./scripts/gate.sh                     # full gate: fmt, clippy, tests, oracle, scenario, machete
 #   ./scripts/gate.sh crates/rivet-nbt     # fmt+clippy+test for rivet-nbt only
@@ -33,7 +34,7 @@
 # We always pass --require-oracle so a dead oracle exits 3 immediately and never degrades
 # to a Rust-only run that could be mistaken for a green.
 #
-#   ./scripts/gate.sh                        # full gate: fmt, clippy, tests, oracle, scenario, machete
+#   ./scripts/gate.sh                        # full gate: fmt, clippy, tests, codegen, oracle, scenario, machete
 #   ./scripts/gate.sh --require-oracle       # full gate; missing oracle prereqs hard-fail
 #   ./scripts/gate.sh crates/rivet-nbt       # fmt+clippy+test for rivet-nbt only
 #   SCOPE="rivet-nbt, rivet-serialization" ./scripts/gate.sh
@@ -374,6 +375,28 @@ main() {
     cargo test --workspace
   fi
 
+  # --- rivet-codegen (workspace-excluded tool) fmt/clippy/test ------------------
+  # tools/rivet-codegen is excluded from the cargo workspace, so --workspace
+  # fmt/clippy/test never touch it. Its golden drift test
+  # (generate::drift_tests::generated_output_matches_committed) enforces that
+  # freshly regenerated output is byte-identical to the committed
+  # crates/rivet-registry/src/generated/ — a stale regeneration must fail the
+  # gate. Regeneration happens in a temp dir, so committed sources are not
+  # mutated. A missing toolchain component or fetch failure here fails loudly
+  # under `set -e` rather than being skipped.
+  # Skipped when gating a crate subset (scoped gates check a specific workspace
+  # crate, not the excluded tool's generated output) — same rule as oracle/scenario.
+  if [ "$FULL_GATE" = true ]; then
+    echo "==> rivet-codegen (workspace-excluded tool) fmt/clippy/test"
+    cargo fmt --manifest-path tools/rivet-codegen/Cargo.toml -- --check
+    RUSTFLAGS=-Dwarnings cargo clippy --manifest-path tools/rivet-codegen/Cargo.toml --all-targets
+    if command -v cargo-nextest >/dev/null 2>&1; then
+      cargo nextest run --manifest-path tools/rivet-codegen/Cargo.toml
+    else
+      cargo test --manifest-path tools/rivet-codegen/Cargo.toml
+    fi
+  fi
+
   # --- oracle steps (full gate only; the oracle verifies the whole server) -----
   if [ "$FULL_GATE" = true ]; then
     run_oracle_verify
@@ -397,12 +420,15 @@ main() {
   fi
 
   # --- unused dependencies (cargo-machete) -------------------------------------
+  # machete stays workspace-wide (even on scoped gates); also cover the
+  # workspace-excluded codegen tool's own manifest.
   echo "==> cargo machete (unused deps)"
   if ! command -v cargo-machete >/dev/null 2>&1; then
     echo "    cargo-machete not found; installing (cargo install cargo-machete --locked)"
     cargo install cargo-machete --locked
   fi
   cargo machete
+  cargo machete tools/rivet-codegen
 
   # --- final verdict ------------------------------------------------------------
   if [ "$ORACLE_UNVERIFIED" = 1 ]; then
