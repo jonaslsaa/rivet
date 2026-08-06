@@ -1,0 +1,61 @@
+# cargo-fuzz target crate for the rivet parser crates (rivet-nbt, rivet-serialization).
+#
+# These targets feed untrusted bytes into the SNBT `TagParser`, the binary NBT
+# readers (`NbtIo`), and the DFU codec combinators over `NbtOps`. Fuzzers run
+# only on the nightly toolchain via `cargo fuzz` (the workspace itself pins
+# stable 1.97.1 in rust-toolchain.toml — `cargo fuzz` overrides that for this
+# crate). This crate is a workspace member, so `cargo fuzz build` does not need
+# the `--no-default-features` / excluded-member dance.
+
+[package]
+name = "rivet-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rivet-nbt = { path = "../crates/rivet-nbt" }
+rivet-serialization = { path = "../crates/rivet-serialization" }
+rivet-util = { path = "../crates/rivet-util" }
+
+[package.metadata.cargo-machete]
+ignored = ["libfuzzer-sys"]
+
+[[bin]]
+name = "snbt"
+path = "fuzz_targets/snbt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nbt_binary"
+path = "fuzz_targets/nbt_binary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nbt_binary_visitor"
+path = "fuzz_targets/nbt_binary_visitor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snbt_roundtrip"
+path = "fuzz_targets/snbt_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_decode"
+path = "fuzz_targets/codec_decode.rs"
+test = false
+doc = false
+bench = false
