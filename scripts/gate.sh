@@ -231,14 +231,26 @@ oracle_prereq_check() {
 # ---- oracle steps (full gate only) -------------------------------------------
 
 # NOTE: oracle verify PASS depends on the local working/Paper matching the commit
-# pinned in tools/rivet-oracle/fixtures/manifest.json (26.2-DEV-main@0a99345). If
-# working/Paper advances, regenerate the fixtures (scripts/extract_fixtures.py)
-# and re-pin the manifest before relying on this step again.
+# pinned in tools/rivet-oracle/fixtures/manifest.json (26.2-DEV-main@0a99345). verify
+# ENFORCES that pin: after the boot it compares the Git-Commit attribute of the
+# server jar the paperclip actually materialized (work/verify/run/versions/26.2/
+# paper-26.2.jar) to the manifest's `paper` provenance and fails loudly on
+# mismatch/unavailable — a stale Paper never passes green. If working/Paper
+# advances, regenerate the fixtures (scripts/extract_fixtures.py) and re-pin the
+# manifest before relying on this step again. `verify --expect-fail` (run as the
+# negative-control stage below) is the same pipeline's negative test: it diffs a
+# fresh boot against a deliberately corrupted temp copy of the baseline and
+# requires the tampered chunk to be detected and named — proving the
+# boot->extract->diff chain is not vacuously green. A nonzero exit aborts the
+# gate like any other oracle stage; the tamper never touches the committed
+# fixtures.
 run_oracle_verify() {
   echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
     cargo run -q -p rivet-oracle -- verify
     echo "    VERIFIED — fresh Paper boot is byte-identical to the committed golden baseline"
+    echo "==> oracle negative control (verify --expect-fail: detects tamper)"
+    cargo run -q -p rivet-oracle -- verify --expect-fail
   else
     echo "    UNVERIFIED — oracle verify did not run (see the prereq report above)"
     ORACLE_UNVERIFIED=1
