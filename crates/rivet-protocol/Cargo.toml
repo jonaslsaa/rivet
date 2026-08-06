@@ -38,5 +38,11 @@ name = "protocol_registration"
 # when the packet tables (the state/direction enums) are on.
 required-features = ["packets"]
 
+[[test]]
+name = "serversbound_play"
+# Exercises the issue #97 serverbound play packet bodies (game module), which
+# live behind the packets feature.
+required-features = ["packets"]
+
 [lints]
 workspace = true

@@ -55,6 +55,15 @@ pub mod varint21_length_field_prepender;
 #[cfg(feature = "packets")]
 pub mod protocol;
 
+/// `net.minecraft.network.protocol.game` — the game protocol packet bodies
+/// (issue #97). Currently the join-critical serverbound play slice
+/// (`mc.network.protocol.game.serverbound`): bodies, `STREAM_CODEC`s, and
+/// `Packet::packet_type()`; `handle` (listener dispatch) is deferred with the
+/// `ServerGamePacketListener` hierarchy. Lives behind `packets` like
+/// `generated`/`protocol` (it depends on the `Packet`/`PacketType` surface).
+#[cfg(feature = "packets")]
+pub mod game;
+
 /// `net.minecraft.network.ProtocolInfo` (issue #84) — the bound protocol value
 /// produced by a template's `bind`: state, direction, the id-dispatch codec, and
 /// the optional bundle info. See [`protocol`].
