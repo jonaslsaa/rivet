@@ -549,6 +549,7 @@ dependencies = [
  "cesu8",
  "phf",
  "rivet-nbt",
+ "rivet-registry",
  "rivet-serialization",
  "rivet-util",
 ]
