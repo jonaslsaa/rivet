@@ -185,6 +185,24 @@ pub trait HolderLookupProvider {
 // Registry<T>: the per-registry lookup + owner
 // ---------------------------------------------------------------------------
 
+/// Strict by-id lookup for holder resolution — **no** `DefaultedRegistry`
+/// fallback.
+///
+/// `Registry::by_id` (ownership B) inherits `DefaultedRegistry`'s asymmetric
+/// fallback: an out-of-range id on a defaulted registry returns the *default*
+/// element. A `Holder.Reference`'s id is only meaningful within the range the
+/// registry actually holds — Java's `Reference` stores its own key/value and an
+/// unresolvable reference is *unbound* (null), never the default element. So
+/// holder resolution (`value_of`/`key_of`, and through them the codec encode
+/// path) must treat an out-of-range id as absent, exactly like a non-defaulted
+/// `by_id`. Built from the public `size()`/`by_id()` surface (ownership B stays
+/// untouched). Lookup-constructed references always resolve; a hand-built
+/// out-of-range id reports `None`, matching Java's unbound-reference state.
+fn by_id_strict<T>(registry: &Registry<T>, id: u32) -> Option<&T> {
+    let in_range = (id as usize) < registry.size() as usize;
+    in_range.then(|| registry.by_id(id as i32)).flatten()
+}
+
 impl<T: Send + Sync + 'static> HolderOwner<T> for Registry<T> {
     fn registry_id(&self) -> RegistryId {
         Registry::registry_id(self)
@@ -228,7 +246,7 @@ impl<T: Send + Sync + 'static> HolderLookup<T> for Registry<T> {
     fn value_of<'a>(&'a self, holder: &'a Holder<T>) -> Option<&'a T> {
         match holder {
             Holder::Direct(value) => Some(value),
-            Holder::Reference { id, .. } => self.by_id(*id as i32),
+            Holder::Reference { id, .. } => by_id_strict(self, *id),
         }
     }
 
@@ -236,7 +254,7 @@ impl<T: Send + Sync + 'static> HolderLookup<T> for Registry<T> {
         match holder {
             Holder::Direct(_) => None,
             Holder::Reference { id, .. } => {
-                let value = self.by_id(*id as i32)?;
+                let value = by_id_strict(self, *id)?;
                 Registry::get_resource_key(self, value)
             }
         }
@@ -492,6 +510,41 @@ mod tests {
             holder.get_registered_name(&registry),
             "minecraft:b".to_string()
         );
+    }
+
+    #[test]
+    fn holder_resolution_does_not_inherit_the_defaulted_registry_fallback() {
+        // Java `Reference` stores its own key/value: an unresolvable reference
+        // is *unbound*, never the default element. `Registry::by_id` inherits
+        // `DefaultedRegistry`'s asymmetric fallback (out-of-range → default), so
+        // holder resolution (`value_of`/`key_of`, and through them the codec
+        // encode path) must bypass it: an out-of-range reference id on a
+        // defaulted registry resolves to `None`, not the default's value/key.
+        let mut builder = RegistryBuilder::new_defaulted(
+            &Identifier::with_default_namespace("air"),
+            &registry_key(),
+        );
+        builder.register(
+            &element_key("air"),
+            Arc::new(TestElement(0)),
+            RegistrationInfo::BUILT_IN,
+        );
+        builder.register(
+            &element_key("stone"),
+            Arc::new(TestElement(1)),
+            RegistrationInfo::BUILT_IN,
+        );
+        let registry = builder.freeze();
+        // The defaulted fallback is live for the raw by-id surface...
+        assert_eq!(registry.by_id(99), Some(&TestElement(0)));
+        // ...but holder resolution reports the out-of-range reference unbound.
+        let reference: Holder<TestElement> = Holder::reference(registry.registry_id(), 99);
+        assert_eq!(registry.value_of(&reference), None);
+        assert_eq!(registry.key_of(&reference), None);
+        // An in-range id still resolves normally.
+        let in_range: Holder<TestElement> = Holder::reference(registry.registry_id(), 0);
+        assert_eq!(registry.value_of(&in_range), Some(&TestElement(0)));
+        assert_eq!(registry.key_of(&in_range), Some(element_key("air")));
     }
 
     #[test]

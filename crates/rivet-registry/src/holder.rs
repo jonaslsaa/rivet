@@ -31,6 +31,15 @@
 //!   holder's registry id against the owner's (`context == this` pointer
 //!   identity preserved via the per-instance `RegistryId`).
 //!
+//! - **Panic-message rendering:** `value()`/`key()` panic with
+//!   `"Trying to access unbound value/key '<render>' from registry <id>"`.
+//!   Java prints the holder's *stored* key (`'null'` for a truly keyless
+//!   reference); the Rust `(RegistryId, id)` reference stores no key, so
+//!   `render_holder` resolves through the lookup and yields `''` when the id is
+//!   unresolvable (the only state that panics). The message *shape* matches;
+//!   the embedded `''`-vs-`'null'` rendering is a recorded, deliberate
+//!   deviation (PORTING.md drift checklist).
+//!
 //! STUB: `components`/`are_components_bound` — `DataComponentMap` is not
 //! ported yet (later `mc.core.component` scope); the variants exist without a
 //! component payload. `Reference.Type` (STAND_ALONE vs INTRUSIVE) is not
@@ -65,6 +74,17 @@ pub enum HolderKind {
     Reference,
     /// `Holder.Kind.DIRECT` — an unregistered inline value.
     Direct,
+}
+
+/// `Holder.Kind.toString()` — the upper-case enum name, embedded in
+/// `ExtraCodecs.ensureHomogenous`'s `"Mixed type list: ..."` message.
+impl std::fmt::Display for HolderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HolderKind::Reference => write!(f, "REFERENCE"),
+            HolderKind::Direct => write!(f, "DIRECT"),
+        }
+    }
 }
 
 /// `net.minecraft.core.Holder<T>` — `Direct(T)` or `Reference { registry, id }`.
@@ -108,12 +128,14 @@ impl<T> Holder<T> {
 
     /// `Holder.isBound()`.
     ///
-    /// `Direct` is always bound. A `Reference` is bound iff it resolves in its
-    /// registry; in the pure-ID model every constructed `Reference` points at a
-    /// registered element (lookups build them only for registered ids), so this
-    /// returns `true`. The transient Java unbound-reference state
-    /// (`createStandAlone` before `bindValue`) is not representable — the SCC's
-    /// builder creates unbound holders as bare keys, never as `Holder`s.
+    /// Constant-true stub (like `are_components_bound` reports Java's steady
+    /// state). Java `Reference.isBound()` = `key != null && value != null`, a
+    /// runtime check on the holder's stored key/value; the pure-ID model stores
+    /// neither, so a truthful lookup-free check is impossible. `Direct` is
+    /// always bound, and a reference that cannot resolve its key/value is
+    /// already an unresolvable/panic state (`value()`/`key()`), so this
+    /// reports Java's normal-case `true`. A hand-built out-of-range reference
+    /// is not distinguished here (resolving it would need the owning lookup).
     pub fn is_bound(&self) -> bool {
         true
     }
@@ -353,8 +375,9 @@ mod tests {
 
     #[test]
     fn binding_model_flags() {
-        // `isBound()` — true in the pure-ID model (lookups build references
-        // only for registered ids).
+        // `isBound()` — constant-true stub (Java's runtime key/value null-check
+        // is unrepresentable in the pure-ID model; a reference that cannot
+        // resolve is already an unresolvable/panic state, see `value()`).
         let direct = Holder::direct(TestElement(5));
         let reference: Holder<TestElement> = Holder::reference(RegistryId(1), 0);
         assert!(direct.is_bound());
@@ -402,6 +425,8 @@ mod tests {
 
     #[test]
     fn reference_value_panics_on_unresolvable_id_with_java_message() {
+        // `''` (the lookup-free render of an unresolvable id) is the recorded
+        // drift vs Java's `'null'` — see the module doc's panic-message bullet.
         let lookup = NullLookup;
         let reference: Holder<TestElement> = Holder::reference(RegistryId(9), 4);
         let err =
@@ -415,6 +440,7 @@ mod tests {
 
     #[test]
     fn reference_key_panics_on_unresolvable_id_with_java_message() {
+        // Same `''`-vs-`'null'` drift as the value panic above (module doc).
         let lookup = NullLookup;
         let reference: Holder<TestElement> = Holder::reference(RegistryId(9), 4);
         let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reference.key(&lookup)));
