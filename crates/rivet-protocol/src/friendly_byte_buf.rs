@@ -70,6 +70,35 @@ impl FriendlyByteBuf {
         self.inner.as_ref()
     }
 
+    /// Reads exactly `len` bytes into a fresh `Vec`, advancing the cursor.
+    /// Used by the codec layer's slice-based combinators (`length_prefixed`,
+    /// bounded byte arrays).
+    ///
+    /// Guards the allocation up front: a negative or oversized `len` would
+    /// otherwise become a huge/zeroed `usize` allocation. This is a Rust-only
+    /// defensive guard (Java's `ByteBuf.readBytes` throws an
+    /// `IndexOutOfBounds` on a short read); the message is this helper's own.
+    /// Callers that must return `Err` instead (the codec boundary) pre-check
+    /// against their own bound.
+    pub fn read_slice(&mut self, len: i32) -> Vec<u8> {
+        let len_usize = len as usize;
+        if len < 0 || len_usize > self.readable_bytes() {
+            panic!(
+                "read_slice: {len} bytes requested, but only {} readable",
+                self.readable_bytes()
+            );
+        }
+        let mut bytes = vec![0u8; len_usize];
+        self.inner.copy_to_slice(&mut bytes);
+        bytes
+    }
+
+    /// Appends raw bytes, advancing the cursor.
+    pub fn write_bytes(&mut self, bytes: &[u8]) -> &mut Self {
+        self.inner.put_slice(bytes);
+        self
+    }
+
     // ---- scalars (netty big-endian) ---------------------------------------
 
     /// `readBoolean()`.
@@ -945,6 +974,26 @@ mod tests {
     }
 
     // ---- arrays -----------------------------------------------------------
+
+    #[test]
+    fn read_slice_guards_negative_and_oversized_lengths() {
+        // A negative `len` must not become a huge `usize` allocation.
+        let mut b = buf();
+        b.write_var_int(5);
+        let msg = panic_message(|| b.read_slice(-1));
+        assert_eq!(msg, "read_slice: -1 bytes requested, but only 1 readable");
+        // An oversized `len` (positive, but beyond the readable bytes) must not
+        // allocate `len` bytes either.
+        let mut b = buf();
+        b.write_bytes(&[1, 2, 3]);
+        let msg = panic_message(|| b.read_slice(100));
+        assert_eq!(msg, "read_slice: 100 bytes requested, but only 3 readable");
+        // The happy path still reads exactly `len` bytes.
+        let mut b = buf();
+        b.write_bytes(&[1, 2, 3]);
+        assert_eq!(b.read_slice(2), vec![1, 2]);
+        assert_eq!(b.readable_bytes(), 1);
+    }
 
     #[test]
     fn byte_array_round_trips() {

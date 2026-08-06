@@ -11,6 +11,7 @@
 //!
 //!   mc.network.buf     -> friendly_byte_buf, utf8_string, var_int, var_long
 //!   mc.network.framing -> varint21_frame_decoder, varint21_length_field_prepender
+//!   mc.network.codec   -> codec (StreamCodec family, ByteBufCodecs, IdDispatchCodec)
 //!
 //! `friendly_byte_buf` carries the registry-independent `FriendlyByteBuf`
 //! surface (the registry/JOML/codec paths are blocked on later units);
@@ -25,6 +26,7 @@
 #[cfg(feature = "packets")]
 pub mod generated;
 
+pub mod codec;
 pub mod friendly_byte_buf;
 pub mod utf8_string;
 pub mod var_int;
