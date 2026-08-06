@@ -15,6 +15,27 @@ without stubs) plus the downstream layers (io, ops, snbt, text, utils,
 visitors). The split used to live in scripts/split_nbt_units.py; it is folded
 here so re-running the analyzer is idempotent with the split.
 
+`--split-network` refines the net.minecraft.network package (issue #65, M1): the
+existing mc.network row is split into mc.network.buf (VarInt, VarLong, Utf8String,
+FriendlyByteBuf), mc.network.framing (Varint21FrameDecoder,
+Varint21LengthFieldPrepender) and a residual mc.network unit holding every
+remaining file of the package. The residual is computed as the complement of the
+buf/framing file lists within the package scan, so the split can never lose or
+duplicate a file. Deps are computed per file from each file's imports (the nbt
+split hand-authors deps because its class clusters are authored; the network
+package's external deps are ordinary imports and are read straight from source),
+with only the same-package sibling edges authored as unit ids (buf <- framing <-
+residual). All three units keep the package's wave and cycle: they remain inside
+the giant SCC (FriendlyByteBuf <-> net.minecraft.network.codec is a class-level
+back-edge), so the split right-sizes file ownership without claiming the units
+are cycle-free. The residual unit stays flagged needs_split=yes (it still owns
+36 files and is cyclic); the small buf/framing cluster units are the M1 protocol
+wave's deliverable and are not flagged.
+
+Both splits are opt-in flags; pass neither to get the flat package-level
+manifest. The default output and previous-manifest locations can be overridden
+with `--output` and `--prev-manifest` (used by the regression tests).
+
 Every unit also gets a `java_paths` column (comma-joined file paths) and a
 `source_root` column naming the source roots those files live under. A package
 can span several roots (e.g. io.papermc.paper code under both paper-api and
@@ -180,6 +201,50 @@ NBT_UNITS = {
 NBT_SPLIT_PACKAGES = {"net.minecraft.nbt", "net.minecraft.nbt.visitors"}
 NBT_DIR = Path("net/minecraft/nbt")
 
+# Class-cluster split of net.minecraft.network (issue #65, M1): unit id -> file
+# names (relative to the network package dir). mc.network.buf and mc.network.framing
+# are the byte-buffer/varint codecs and the varint21 frame codec the first protocol
+# wave needs; the residual mc.network unit is computed as the complement of the
+# package scan (never hand-enumerated), so the split cannot lose or duplicate a
+# file. Unlike the nbt split, only the file lists and the same-package sibling
+# edges are authored here: each unit's external deps are read from its own files'
+# imports (see file_deps), and all three units keep the package's wave/cycle — they
+# remain inside the giant SCC (FriendlyByteBuf <-> net.minecraft.network.codec is a
+# class-level back-edge), so this right-sizes file ownership, it does not claim the
+# units are cycle-free. The residual mc.network unit stays needs_split=yes (still
+# oversized and cyclic); buf/framing are the M1 protocol wave's deliverable and are
+# not flagged.
+#
+# Same-package references from buf/framing back into the residual are NOT dep
+# edges (see the same-package note in unit_row below): the residual is not
+# translated in M1, so recording them would deadlock the wave.
+# NETWORK_UNIT_NOTES records each such residual reference so the M1
+# translate-wave absorbs the residual class as a STUB instead of being surprised
+# by it.
+NETWORK_SPLIT_PACKAGES = {"net.minecraft.network"}
+NETWORK_UNITS = {
+    "mc.network.buf": [
+        "VarInt.java", "VarLong.java", "Utf8String.java", "FriendlyByteBuf.java",
+    ],
+    "mc.network.framing": [
+        "Varint21FrameDecoder.java", "Varint21LengthFieldPrepender.java",
+    ],
+}
+# Authored structural notes for the split units (carried into the notes column,
+# never clobbering a human triage note). These name the residual classes the M1
+# wave must absorb as STUBs because the residual is not translated in M1.
+NETWORK_UNIT_NOTES = {
+    "mc.network.buf": (
+        "M1 STUB: FriendlyByteBuf reads PacketEncoder.ADVENTURE_LOCALE (residual "
+        "mc.network); translate-wave absorbs PacketEncoder as a stub"
+    ),
+    "mc.network.framing": (
+        "M1 STUB: Varint21FrameDecoder takes @Nullable BandwidthDebugMonitor "
+        "(residual mc.network); translate-wave absorbs BandwidthDebugMonitor "
+        "as a stub"
+    ),
+}
+
 
 def crate_for(pkg: str) -> str:
     if pkg == "net.minecraft":  # root-package classes only; subpackages match CRATE_RULES
@@ -253,6 +318,19 @@ def main() -> None:
         "--split-nbt", action="store_true",
         help="split net.minecraft.nbt into class-cluster units (idempotent)",
     )
+    parser.add_argument(
+        "--split-network", action="store_true",
+        help="split net.minecraft.network into class-cluster units (idempotent)",
+    )
+    parser.add_argument(
+        "--output", type=Path, default=None,
+        help="write the manifest here instead of MANIFEST.tsv (tests)",
+    )
+    parser.add_argument(
+        "--prev-manifest", type=Path, default=None,
+        help="read durable status/attempts/notes from here instead of "
+        "MANIFEST.tsv (tests)",
+    )
     args = parser.parse_args()
 
     # A package can span several source roots (e.g. moonrise code appears under
@@ -261,6 +339,8 @@ def main() -> None:
     pkg_files: dict[str, list[tuple[str, Path]]] = defaultdict(list)
     pkg_loc: dict[str, int] = defaultdict(int)
     pkg_deps: dict[str, set[str]] = defaultdict(set)
+    file_deps: dict[Path, set[str]] = {}
+    file_loc: dict[Path, int] = {}
 
     for root_name, root in ROOTS.items():
         if not root.is_dir():
@@ -273,9 +353,16 @@ def main() -> None:
             pkg = m.group(1)
             pkg_files[pkg].append((root_name, f))
             pkg_loc[pkg] += text.count("\n")
-            for imp in IMP_RE.findall(text):
-                if imp.startswith(INTERNAL_PREFIXES):
-                    pkg_deps[pkg].add(imp.rsplit(".", 1)[0])
+            file_loc[f] = text.count("\n")
+            # Per-file internal deps feed the network class-cluster split: each
+            # split unit's deps are the union over its own files' imports, so the
+            # residual's deps are derived from source, never hand-enumerated.
+            file_deps[f] = {
+                imp.rsplit(".", 1)[0]
+                for imp in IMP_RE.findall(text)
+                if imp.startswith(INTERNAL_PREFIXES)
+            }
+            pkg_deps[pkg].update(file_deps[f])
 
     known = set(pkg_files)
     deps = {p: {d for d in pkg_deps[p] if d in known and d != p} for p in known}
@@ -313,7 +400,7 @@ def main() -> None:
     # Durable workflow state from the previous manifest: id -> (status, attempts,
     # notes). Regeneration rewrites structure only; it never resets ported work.
     prev_state: dict[str, tuple[str, str, str]] = {}
-    prev_manifest = REPO / "MANIFEST.tsv"
+    prev_manifest = args.prev_manifest or (REPO / "MANIFEST.tsv")
     if prev_manifest.exists():
         with prev_manifest.open(newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh, delimiter="\t"):
@@ -378,28 +465,111 @@ def main() -> None:
             ])
         return rows
 
+    def network_split_rows() -> list[list[str]]:
+        root_dir = ROOTS["minecraft"]
+        network_dir = root_dir / "net/minecraft/network"
+        all_files = sorted(p.name for p in network_dir.glob("*.java"))
+        # Each file must be declared in exactly one unit: a cross-unit duplicate
+        # would otherwise be double-counted (a set collapses it) and silently
+        # drop out of the residual. Fail fast before any row is emitted.
+        owned_by: dict[str, str] = {}
+        for unit_id, files in NETWORK_UNITS.items():
+            for f in files:
+                if f not in all_files:
+                    sys.exit(f"--split-network: missing file for unit {unit_id}: "
+                             f"{network_dir / f}")
+                if f in owned_by:
+                    sys.exit(f"--split-network: {f} is declared in both "
+                             f"{owned_by[f]} and {unit_id}; each file must belong "
+                             f"to exactly one unit")
+                owned_by[f] = unit_id
+        residual_files = [f for f in all_files if f not in owned_by]
+        pkg = "net.minecraft.network"
+        in_cycle = scc_of[pkg] if scc_of[pkg] in cycle_members else ""
+        wave_n = wave[scc_of[pkg]]
+
+        def unit_row(unit_id: str, files: list[str]) -> list[str]:
+            paths: list[str] = []
+            loc = 0
+            deps: set[str] = set()
+            for f in files:
+                path = network_dir / f
+                paths.append(Path("net/minecraft/network") / f)
+                loc += file_loc[path]
+                deps.update(file_deps[path])
+            # Only real packages can be file-derived deps (mirror the base scan's
+            # `d in known` filter); then drop the same-package self-edge. Sibling
+            # units in the same package are named by unit id so the wave-picker
+            # resolves them exactly (same mechanism as the nbt split). A unit may
+            # still depend on the sibling package net.minecraft.network.codec,
+            # which is a separate package row and stays a package dep.
+            dep_tokens = {d for d in deps if d in known and d != pkg}
+            # The residual depends on buf and framing (same-package classes need
+            # no import). buf and framing in turn reference residual classes
+            # (FriendlyByteBuf reads PacketEncoder.ADVENTURE_LOCALE;
+            # Varint21FrameDecoder takes @Nullable BandwidthDebugMonitor), but
+            # those two reverse edges are deliberately NOT recorded: the residual
+            # is not translated in M1, so recording them would deadlock the wave.
+            # The M1 translate-wave absorbs PacketEncoder and
+            # BandwidthDebugMonitor as STUBs instead (see NETWORK_UNIT_NOTES and
+            # each unit's notes column).
+            if unit_id == "mc.network.framing":
+                dep_tokens.add("mc.network.buf")
+            elif unit_id == "mc.network":
+                dep_tokens.add("mc.network.buf")
+                dep_tokens.add("mc.network.framing")
+            # The residual stays needs_split=yes: it still owns 36 files (well
+            # over SPLIT_FILE_THRESHOLD) and remains inside the giant SCC, so it
+            # is still a splitting candidate and must not be silently pickable.
+            # The small buf/framing cluster units are the M1 protocol wave's
+            # actual deliverable, so they are not flagged.
+            needs_split = "yes" if len(files) > SPLIT_FILE_THRESHOLD else ""
+            status, attempts, notes = carry(unit_id, NETWORK_UNIT_NOTES.get(unit_id, ""))
+            return [
+                unit_id, pkg, ",".join(sorted(p.as_posix() for p in paths)),
+                source_root(pkg), str(len(files)), str(loc), crate_for(pkg),
+                str(wave_n), str(in_cycle), needs_split,
+                ",".join(sorted(dep_tokens)), status, attempts, notes,
+            ]
+
+        rows: list[list[str]] = []
+        for unit_id in ("mc.network.buf", "mc.network.framing", "mc.network"):
+            files = NETWORK_UNITS[unit_id] if unit_id != "mc.network" else residual_files
+            rows.append(unit_row(unit_id, files))
+        return rows
+
     rows = [
         r for pkg in sorted(known)
         if not (args.split_nbt and pkg in NBT_SPLIT_PACKAGES)
+        if not (args.split_network and pkg in NETWORK_SPLIT_PACKAGES)
         for r in [package_row(pkg)]
     ]
     if args.split_nbt:
         rows.extend(split_row())
+    if args.split_network:
+        rows.extend(network_split_rows())
 
     # Stable ordering: wave, then unit id.
     rows.sort(key=lambda r: (int(r[7]), r[0]))
 
-    out = REPO / "MANIFEST.tsv"
+    out = args.output or (REPO / "MANIFEST.tsv")
     with out.open("w", encoding="utf-8") as fh:
         fh.write(header + "\n")
         for r in rows:
             fh.write("\t".join(r) + "\n")
 
-    n_split = len(NBT_UNITS) if args.split_nbt else 0
+    n_split = (len(NBT_UNITS) if args.split_nbt else 0) + (
+        len(NETWORK_UNITS) + 1 if args.split_network else 0
+    )
+    split_flags = " + ".join(
+        flag for flag, on in (("nbt", args.split_nbt), ("network", args.split_network))
+        if on
+    )
     n_cycles = len(cycle_members)
     biggest = max(cycle_members.values(), key=len, default=[])
-    print(f"{len(rows)} units -> {out} (nbt split: {n_split} class-cluster units)"
-          if args.split_nbt else f"{len(rows)} units -> {out}")
+    print(f"{len(rows)} units -> {out}"
+          + (f" ({split_flags} split: {n_split} class-cluster units)" if split_flags
+             else ""))
     print(f"waves: 0..{max(wave.values())}, cycles: {n_cycles} "
           f"(largest {len(biggest)} pkgs), needs_split: "
           f"{sum(1 for r in rows if r[9] == 'yes')}")
