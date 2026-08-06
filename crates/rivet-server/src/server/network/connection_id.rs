@@ -2,8 +2,9 @@ use std::fmt;
 
 /// `ConnectionId` — the per-connection registration key. OWNERSHIP §Network:
 /// decoded play-state packets cross to the tick thread over bounded channels
-/// keyed by `ConnectionId` (sub-issue #93). This slice only assigns and tracks
-/// ids through the connection registry; the channel handoff is not built yet.
+/// keyed by `ConnectionId`. The accept loop assigns ids; the tick thread's
+/// [`ConnectionRegistry`](crate::server::tick::registry::ConnectionRegistry)
+/// keys its per-connection channel ends by them (sub-issue #93).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionId(pub u64);
 

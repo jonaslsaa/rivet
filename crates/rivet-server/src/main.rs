@@ -1,10 +1,10 @@
 //! `rivet-server` binary. Mirrors `DedicatedServer`/`MinecraftServer.runServer`
 //! boot in the smallest end-to-end form: read the bind config, construct the
-//! `Server`, and run the accept loop forever.
+//! `Server`, and run the accept loop + sync tick thread (issues #145/#93).
 //!
-//! The full boot sequence (world/level load, registry/data load, sync tick loop)
-//! is M1 sub-issues #93/#100/#101; this binary only brings up the TCP listener
-//! and pre-play connection state machines.
+//! The full boot sequence (world/level load, registry/data load, tick-phase
+//! systems) is M1 sub-issues #100/#101; this binary brings up the TCP listener,
+//! pre-play connection state machines, and the empty tick spine.
 
 use tracing_subscriber::EnvFilter;
 
