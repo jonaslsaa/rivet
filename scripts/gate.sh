@@ -6,7 +6,7 @@
 # space/comma-separated list) to gate only those crates (fmt/clippy/test). The
 # unused-deps check (cargo machete) and the default full gate stay workspace-wide.
 #
-#   ./scripts/gate.sh                     # full gate: fmt, clippy, tests, oracle, machete
+#   ./scripts/gate.sh                     # full gate: fmt, clippy, tests, oracle, scenario, machete
 #   ./scripts/gate.sh crates/rivet-nbt     # fmt+clippy+test for rivet-nbt only
 #   SCOPE="rivet-nbt, rivet-serialization" ./scripts/gate.sh
 set -euo pipefail
@@ -74,6 +74,22 @@ if [ ${#PKG_FLAGS[@]} -eq 0 ]; then
   if [ -n "${RIVET_ORACLE_JAR:-}" ] || [ -f tools/rivet-oracle/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar ] || \
      ls working/Paper/paper-server/build/libs/paper-paperclip*.jar >/dev/null 2>&1; then
     cargo run -q -p rivet-oracle -- verify
+  else
+    echo "    SKIPPED (no paperclip jar: set RIVET_ORACLE_JAR or materialize working/Paper first)"
+  fi
+fi
+
+# --- scenario runner (M0 join harness: Paper-vs-Paper + negative case) --------
+# The Paper-vs-Paper join harness boots local Paper twice, joins each with the
+# Azalea headless client, and requires identical normalized transcripts, plus a
+# negative case proving the comparator detects a tampered position. Runs only
+# when a paperclip jar is materialized (same guard style as oracle verify);
+# skipped when gating a crate subset (the scenario drives a whole server).
+if [ ${#PKG_FLAGS[@]} -eq 0 ]; then
+  echo "==> scenario runner (join: Paper-vs-Paper + negative case)"
+  if [ -n "${RIVET_ORACLE_JAR:-}" ] || [ -f tools/rivet-client/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar ] || \
+     ls working/Paper/paper-server/build/libs/paper-paperclip*.jar >/dev/null 2>&1; then
+    tools/rivet-client/run-scenario.sh join
   else
     echo "    SKIPPED (no paperclip jar: set RIVET_ORACLE_JAR or materialize working/Paper first)"
   fi
