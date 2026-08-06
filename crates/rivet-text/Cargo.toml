@@ -2,9 +2,15 @@
 name = "rivet-text"
 version.workspace = true
 edition.workspace = true
-
-[lints]
-workspace = true
+description = "Port of net.minecraft.network.chat components + Style + ComponentSerialization JSON codec (M1 slice of epic #12)"
 
 [dependencies]
 rivet-core = { workspace = true }
+rivet-serialization = { workspace = true }
+rivet-util = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
