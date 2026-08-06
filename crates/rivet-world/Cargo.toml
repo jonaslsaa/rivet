@@ -3,6 +3,20 @@ name = "rivet-world"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "net.minecraft.world.level — chunks, sections, paletted containers (wire formats; #108 M1)"
 
 [lints]
 workspace = true
+
+[dependencies]
+rivet-protocol = { workspace = true }
+rivet-registry = { workspace = true }
+rivet-util = { workspace = true }
+
+[dev-dependencies]
+# Tests build real containers (BytesMut-backed FriendlyByteBuf).
+bytes = { workspace = true }
+# The PalettedContainer<StateId> golden tests drive the real global
+# block-state table (rivet-registry `blocks` feature). Dev-only: normal
+# builds of rivet-world stay feature-free.
+rivet-registry = { workspace = true, features = ["blocks"] }
