@@ -456,22 +456,26 @@ main() {
     # GlobalPaletteProbe boots the real Paper block-state registry and
     # cross-checks the emitted global-id table: size 32366,
     # per-block contiguous ranges, defaults in range, and the representative
-    # anchor ids. Requires the paperclip bundler jar (same prereq as the oracle
-    # steps); when absent the fixture-pinned conformance test still guards the
-    # table, so this skips cleanly instead of failing (mirrors the oracle guard).
-    local PROBE_BUNDLER="${RIVET_ORACLE_JAR:-}"
+    # anchor ids. The probe compiles/runs against the full server classpath, so
+    # it needs the paper-bundler jar (the artifact of a Paper build, which
+    # carries the patched paper-<mc>.jar + libraries) — the tool's own default
+    # (tools/rivet-codegen/README.md). The paperclip launcher jar is NOT a
+    # substitute: it only ships the patch, not the server jar. When absent the
+    # fixture-pinned conformance test still guards the table, so this skips
+    # cleanly instead of failing (mirrors the oracle guard).
+    local PROBE_BUNDLER=""
     if [ -z "$PROBE_BUNDLER" ] || [ ! -f "$PROBE_BUNDLER" ]; then
-      PROBE_BUNDLER="$REPO_DIR/tools/rivet-oracle/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar"
+      PROBE_BUNDLER="$REPO_DIR/working/Paper/paper-server/build/libs/paper-bundler-26.2.local-SNAPSHOT.jar"
     fi
     if [ -z "$PROBE_BUNDLER" ] || [ ! -f "$PROBE_BUNDLER" ]; then
-      PROBE_BUNDLER="$REPO_DIR/working/Paper/paper-server/build/libs/paper-paperclip-26.2.local-SNAPSHOT.jar"
+      PROBE_BUNDLER="$REPO_DIR/tools/rivet-oracle/work/jars/paper-bundler-26.2.local-SNAPSHOT.jar"
     fi
     if [ -f "$PROBE_BUNDLER" ]; then
       echo "==> rivet-codegen probe-block-states (live Paper block-state registry)"
       cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
         probe-block-states --bundler "$PROBE_BUNDLER"
     else
-      echo "    SKIPPED (no Paper bundler jar: build working/Paper or set RIVET_ORACLE_JAR)"
+      echo "    SKIPPED (no Paper bundler jar: build working/Paper (paper-bundler-*.jar) or place it in tools/rivet-oracle/work/jars/)"
     fi
   fi
 
