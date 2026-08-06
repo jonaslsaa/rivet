@@ -8,3 +8,6 @@ serde_json = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rivet-nbt = { workspace = true }
