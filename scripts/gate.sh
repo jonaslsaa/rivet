@@ -7,7 +7,7 @@
 # unused-deps check (cargo machete, including the workspace-excluded codegen
 # tool's own manifest) and the default full gate stay workspace-wide.
 #
-#   ./scripts/gate.sh                     # full gate: fmt, clippy, tests, oracle, scenario, machete
+#   ./scripts/gate.sh                     # full gate: fmt, clippy, tests, manifest, codegen, oracle, scenario, machete
 #   ./scripts/gate.sh crates/rivet-nbt     # fmt+clippy+test for rivet-nbt only
 # The full gate also runs both oracle steps against the Paper Java oracle, plus the
 # scenario runner:
@@ -34,7 +34,7 @@
 # We always pass --require-oracle so a dead oracle exits 3 immediately and never degrades
 # to a Rust-only run that could be mistaken for a green.
 #
-#   ./scripts/gate.sh                        # full gate: fmt, clippy, tests, codegen, oracle, scenario, machete
+#   ./scripts/gate.sh                        # full gate: fmt, clippy, tests, manifest, codegen, oracle, scenario, machete
 #   ./scripts/gate.sh --require-oracle       # full gate; missing oracle prereqs hard-fail
 #   ./scripts/gate.sh crates/rivet-nbt       # fmt+clippy+test for rivet-nbt only
 #   SCOPE="rivet-nbt, rivet-serialization" ./scripts/gate.sh
@@ -373,6 +373,20 @@ main() {
     cargo nextest run --workspace
   else
     cargo test --workspace
+  fi
+
+  # --- manifest regression suite (full gate only) --------------------------------
+  # scripts/test_analyze_graph.py proves MANIFEST.tsv generation is deterministic
+  # and conserved (nbt + network class-cluster splits, byte-idempotent
+  # regeneration, carry of status/attempts/notes, dep resolution, fail-fast on
+  # cross-unit duplicate declarations). Requires the real Paper tree under
+  # working/ (analyze_graph.py hard-exits if the source roots are absent) —
+  # same prerequisite as the oracle steps. Skipped when gating a crate subset —
+  # the manifest is a repo-wide artifact, not a workspace crate — same rule as
+  # oracle/scenario.
+  if [ "$FULL_GATE" = true ]; then
+    echo "==> manifest regression suite (scripts/test_analyze_graph.py)"
+    python3 scripts/test_analyze_graph.py
   fi
 
   # --- rivet-codegen (workspace-excluded tool) fmt/clippy/test ------------------
