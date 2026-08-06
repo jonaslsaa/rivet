@@ -179,10 +179,16 @@ fn out_of_range_enum_panics_with_java_aioobe_message() {
 }
 
 #[test]
-fn trailing_body_bytes_are_rejected() {
-    // client_tick_end has a unit body; one trailing byte is an error.
+fn trailing_body_bytes_are_rejected_with_java_message() {
+    // client_tick_end has a unit body; one trailing byte is an error. The text
+    // mirrors Java's `PacketDecoder.decode` (the `({class})` slot reuses the
+    // packet name, since the harness does not track Java class names).
     let err = decode_frame(&[0x0d, 0x00]).unwrap_err();
-    assert!(err.contains("trailing bytes"), "got {err}");
+    assert_eq!(
+        err,
+        "Packet play/minecraft:client_tick_end (minecraft:client_tick_end) was larger \
+         than I expected, found 1 bytes extra whilst reading packet minecraft:client_tick_end"
+    );
 }
 
 #[test]
@@ -230,6 +236,85 @@ fn mutation_matrix_matches_expected_outcomes() {
     }
     assert!(mutate::all_ok(&reports));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mutation_matrix_reports_skipped_when_no_target_frame() {
+    // A corpus without client_command (id 12) leaves the enum_out_of_range rows
+    // unapplied and reports them as skipped, never as a silent pass.
+    let payloads: Vec<(i32, Vec<u8>)> = reference_payloads()
+        .into_iter()
+        .filter(|(id, _, _)| *id != 12)
+        .map(|(id, _, payload)| (id, payload))
+        .collect();
+    let reports = mutate::run(&payloads);
+    let client_cmd = reports
+        .iter()
+        .find(|r| r.kind == "enum_out_of_range" && r.target_id == 12)
+        .expect("client_command enum row present");
+    assert!(!client_cmd.applied, "client_command row must be skipped");
+    assert_eq!(client_cmd.outcome, "skipped");
+    assert!(mutate::all_ok(&reports), "skipped rows never fail the run");
+}
+
+#[test]
+fn encode_packet_surfaces_panics_as_err() {
+    // Passing a PlayPacket variant mismatched to the entry id hits the table
+    // map's `unreachable!()`; encode_packet must surface that panic as an Err
+    // (matching decode_frame), never let it escape the crate surface.
+    let err = encode_packet(
+        13, // client_tick_end
+        &PlayPacket::ClientCommand(rivet_protocol::game::ServerboundClientCommandPacket::new(
+            rivet_protocol::game::serversbound_client_command_packet::Action::PerformRespawn,
+        )),
+    )
+    .unwrap_err();
+    assert!(err.contains("unreachable"), "got {err}");
+}
+
+#[test]
+fn truncated_raw_slot_is_rejected_by_framing() {
+    // A truncated unported packet (keep_alive body missing bytes) still passes
+    // through the raw slot as a Raw capture — the raw passthrough is honest
+    // about not interpreting unported bodies. Its frame-level truncation is
+    // instead caught by the varint21 frame decoder (mid-frame leftover).
+    let full = frame::frame_full(&[0x1c, 0x2a]).unwrap(); // id 28, 1 body byte
+    let mut stream = full.clone();
+    stream.truncate(full.len() - 1); // cut the last body byte
+    let split = frame::split_stream(&stream).unwrap();
+    assert!(split.frames.is_empty(), "no complete frame");
+    assert!(
+        !split.leftover.is_empty(),
+        "the truncated frame is held back"
+    );
+}
+
+#[test]
+fn committed_corpus_manifest_packet_count_is_validated() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus");
+    // The committed fixture must report 9 files.
+    let entries = corpus::read_corpus(&dir).unwrap();
+    assert_eq!(entries.len(), 9);
+    // A manifest whose packet_count disagrees with its files must be rejected.
+    let manifest_path = dir.join("manifest.json");
+    let text = std::fs::read_to_string(&manifest_path).unwrap();
+    let bad = text.replace("\"packet_count\": 9", "\"packet_count\": 8");
+    let tmp = std::env::temp_dir().join(format!("rivet-decode-count-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(tmp.join("manifest.json"), bad).unwrap();
+    for name in [
+        "0000_accept_teleportation.frame",
+        "0001_chunk_batch_received.frame",
+    ] {
+        std::fs::copy(dir.join(name), tmp.join(name)).unwrap();
+    }
+    let err = corpus::read_corpus(&tmp).unwrap_err();
+    assert!(
+        err.contains("packet_count"),
+        "packet_count mismatch must be reported, got: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
@@ -347,4 +432,60 @@ fn committed_corpus_fixture_is_byte_stable() {
             entry.id
         );
     }
+}
+
+#[test]
+fn frag_reports_mid_frame_stream_as_err() {
+    // A stream that ends mid-frame (a frame length header with no payload)
+    // must be surfaced as an error, not silently truncated.
+    let mut stream = frame::frame_full(&[0x0b, 0x40, 0x60, 0x00, 0x00]).unwrap();
+    // Append a length header claiming 5 more bytes that never arrive.
+    stream.push(5);
+    let err = frag::run(&stream).unwrap_err();
+    assert!(err.contains("mid-frame"), "got {err}");
+}
+
+#[test]
+fn binary_exit_codes_match_the_gate_contract() {
+    // The `rivet-oracle` gate contract: 0 = VERIFIED, 1 = FAILED, 3 =
+    // UNVERIFIED (a required input is missing or unreadable).
+    let bin = env!("CARGO_BIN_EXE_rivet-decode");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/corpus");
+    let fixture = fixture.to_str().unwrap();
+
+    // verify/mutate against the committed fixture succeed (exit 0).
+    for sub in ["verify", "mutate"] {
+        let out = std::process::Command::new(bin)
+            .arg(sub)
+            .arg(fixture)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{sub} on the fixture must exit 0:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // A missing corpus is UNVERIFIED (exit 3), not a silent pass.
+    let missing = std::process::Command::new(bin)
+        .args(["verify", "/nonexistent/rivet-decode-corpus"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(3));
+
+    // A capture that ends mid-frame is FAILED (exit 1).
+    let tmp = std::env::temp_dir().join(format!("rivet-decode-bin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let mid = tmp.join("mid.bin");
+    std::fs::write(&mid, [0x05]).unwrap(); // length header claims 5 bytes; none follow
+    let mid = mid.to_str().unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["decode", mid])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(&tmp);
 }

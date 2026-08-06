@@ -51,8 +51,8 @@ that records a *real* client join lives in `rivet-oracle`.
 ### `verify`
 
 Reads a corpus, checks every file's SHA-256 and byte count against the
-manifest, then re-decodes every frame (a decode failure or a re-encode that
-diverges from the corpus bytes fails the run).
+manifest, then re-decodes every frame and re-encodes it (a decode failure or a
+re-encode that diverges from the corpus bytes fails the run).
 
 ### `mutate`
 
@@ -61,8 +61,10 @@ Applies the hostile-input mutation matrix to the captured frames:
   `Received unknown packet id n`.
 - `enum_out_of_range` — `client_command`/`player_action` ordinal past its
   range → must reject with Java's `ArrayIndexOutOfBoundsException` text.
-- `nan_inf` — float/double bits set to NaN/Inf → the raw-bit codecs must still
-  decode (benign) and round-trip byte-identically.
+- `nan_inf` — the first four body bytes overwritten with quiet-NaN bits. For a
+  `chunk_batch_received` float that is a true NaN; for a `move_player_*` double
+  it is a finite, huge value (the bits only cover the high half). Either way
+  the raw-bit codecs must still decode (benign).
 - `varint_boundary` — a 5-byte continuation varint → must reject (`VarInt too
   big`).
 - `truncation` — body cut short → must reject.

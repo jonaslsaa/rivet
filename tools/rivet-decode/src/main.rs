@@ -22,7 +22,7 @@ use rivet_decode::corpus;
 use rivet_decode::frag;
 use rivet_decode::frame;
 use rivet_decode::mutate;
-use rivet_decode::protocol::{decode_frame, encode_packet, hex, unhex};
+use rivet_decode::protocol::{decode_frame, encode_packet, unhex};
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -62,7 +62,8 @@ fn eprintln_err(msg: &str) {
 
 fn stdout_line(line: &str) -> io::Result<()> {
     let mut out = io::BufWriter::new(io::stdout());
-    writeln!(out, "{line}")
+    writeln!(out, "{line}")?;
+    out.flush()
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +100,11 @@ fn cmd_decode(args: &[String]) -> ExitCode {
     for (seq, frame) in split.frames.iter().enumerate() {
         match decode_frame(frame) {
             Ok(decoded) => {
-                let _ = stdout_line(&rivet_decode::protocol::transcript_line(seq, &decoded));
+                if let Err(e) = stdout_line(&rivet_decode::protocol::transcript_line(seq, &decoded))
+                {
+                    eprintln_err(&format!("seq {seq}: cannot write transcript: {e}"));
+                    return ExitCode::from(1);
+                }
             }
             Err(e) => {
                 ok = false;
@@ -214,9 +219,33 @@ fn cmd_verify(args: &[String]) -> ExitCode {
         };
         match decode_frame(&payload) {
             Ok(decoded) => {
-                let _ = stdout_line(&rivet_decode::protocol::transcript_line(
+                // Re-encode must reproduce the exact corpus bytes (byte-exact
+                // round-trip), matching the `verify` README guarantee.
+                match encode_packet(entry.id, &decoded.packet) {
+                    Ok(reencoded) if reencoded == payload => {}
+                    Ok(_) => {
+                        ok = false;
+                        eprintln_err(&format!(
+                            "seq {} (id {}): re-encode diverged from corpus bytes",
+                            entry.seq, entry.id
+                        ));
+                        continue;
+                    }
+                    Err(e) => {
+                        ok = false;
+                        eprintln_err(&format!(
+                            "seq {} (id {}): re-encode failed: {e}",
+                            entry.seq, entry.id
+                        ));
+                        continue;
+                    }
+                }
+                if let Err(e) = stdout_line(&rivet_decode::protocol::transcript_line(
                     entry.seq, &decoded,
-                ));
+                )) {
+                    eprintln_err(&format!("seq {}: cannot write transcript: {e}", entry.seq));
+                    return ExitCode::from(1);
+                }
             }
             Err(e) => {
                 ok = false;
@@ -322,12 +351,4 @@ fn cmd_frag(args: &[String]) -> ExitCode {
     } else {
         ExitCode::from(1)
     }
-}
-
-// Keep the encode path referenced from the crate surface (used by re-encode
-// checks in tests); silence dead-code if the binary never calls it directly.
-#[allow(dead_code)]
-fn _encode_marker() {
-    let _ = encode_packet(0, &rivet_decode::protocol::PlayPacket::ClientTickEnd);
-    let _ = hex(&[]);
 }

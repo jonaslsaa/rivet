@@ -14,9 +14,12 @@
 //! Java fidelity notes:
 //! - `IdDispatchCodec.decode` rejects an id out of the registered range with
 //!   `"Received unknown packet id {n}"`; here the registered range is the full
-//!   `0..69` vanilla table, so an unknown id is `>= 69` (or negative).
+//!   vanilla table, so an unknown id is `>= 69` (or negative).
 //! - `PacketDecoder.decode` requires the whole body to be consumed; a real
-//!   codec that leaves trailing bytes is an error, not silently accepted.
+//!   codec that leaves trailing bytes is an error, not silently accepted, and
+//!   the message mirrors Java's `"was larger than I expected ... bytes extra"`.
+//!   The harness does not track Java simple class names, so the `({class})`
+//!   slot in the Java message is filled with the packet name.
 //! - Unchecked Java exceptions (`ArrayIndexOutOfBoundsException` from
 //!   `readEnum`, `RuntimeException("VarInt too big")`, the bytes-buffer short
 //!   read) map to panics in this port. [`decode_frame`] catches them and
@@ -38,7 +41,7 @@ use rivet_protocol::game::{
     ServerboundAcceptTeleportationPacket, ServerboundChunkBatchReceivedPacket,
     ServerboundClientCommandPacket, ServerboundClientTickEndPacket, ServerboundPlayerActionPacket,
 };
-use rivet_protocol::generated::packets::play::serverbound::PacketType as PlayServerbound;
+use rivet_protocol::generated::packets::play::serverbound::{ALL, PacketType as PlayServerbound};
 use serde_json::{Value, json};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::LazyLock;
@@ -68,8 +71,10 @@ struct Entry {
     real: bool,
 }
 
-/// The full 69-entry serverbound-play table, indexed by vanilla protocol id.
-static TABLE: LazyLock<Vec<Entry>> = LazyLock::new(build_table);
+/// The full serverbound-play table, indexed by vanilla protocol id. An id the
+/// generated table does not cover maps to `None` (a codegen gap degrades to
+/// "unknown packet id" instead of panicking at init).
+static TABLE: LazyLock<Vec<Option<Entry>>> = LazyLock::new(build_table);
 
 /// A raw slot: decode consumes the whole body and records it; encode writes it
 /// back verbatim (the id is written by the caller).
@@ -89,10 +94,15 @@ fn raw_codec(id: i32) -> StreamCodec<FriendlyByteBuf, PlayPacket> {
     )
 }
 
-fn build_table() -> Vec<Entry> {
-    let mut table = Vec::with_capacity(69);
-    for id in 0..69u32 {
-        let name = PlayServerbound::from_id(id).unwrap().name();
+fn build_table() -> Vec<Option<Entry>> {
+    // Size by the highest generated id so a gap yields `None` (an unknown
+    // packet id) rather than an out-of-bounds panic. Iterating `ALL` instead of
+    // a hardcoded `0..69` keeps the table self-synced with the generated enum.
+    let max_id = ALL.iter().map(|t| t.id()).max().unwrap_or(0);
+    let mut table: Vec<Option<Entry>> = (0..=max_id as usize).map(|_| None).collect();
+    for packet_type in ALL {
+        let id = packet_type.id();
+        let name = packet_type.name();
         let entry = match id {
             0 => Entry {
                 name,
@@ -208,7 +218,7 @@ fn build_table() -> Vec<Entry> {
                 real: false,
             },
         };
-        table.push(entry);
+        table[id as usize] = Some(entry);
     }
     table
 }
@@ -246,7 +256,7 @@ fn payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
 fn decode_frame_inner(body: &[u8]) -> Result<Decoded, String> {
     let mut input = FriendlyByteBuf::new(BytesMut::from(body));
     let id = input.read_var_int();
-    let entry = match TABLE.get(id as usize) {
+    let entry = match TABLE.get(id as usize).and_then(|e| e.as_ref()) {
         Some(e) if id >= 0 => e,
         _ => return Err(format!("Received unknown packet id {id}")),
     };
@@ -257,9 +267,14 @@ fn decode_frame_inner(body: &[u8]) -> Result<Decoded, String> {
             .decode(&mut input)
             .map_err(|e| format!("Failed to decode packet '{}': {}", entry.name, e.message))?;
         if input.readable_bytes() != 0 {
+            // Java's `PacketDecoder.decode`:
+            //   `Packet {protocol}/{packetType} ({simpleClassName}) was larger
+            //   than I expected, found {n} bytes extra whilst reading packet
+            //   {packetType}`. This harness does not track Java simple class
+            //   names, so the class slot reuses the packet name.
+            let name = entry.name;
             return Err(format!(
-                "Failed to decode packet '{}': {} trailing bytes",
-                entry.name,
+                "Packet play/{name} ({name}) was larger than I expected, found {} bytes extra whilst reading packet {name}",
                 input.readable_bytes()
             ));
         }
@@ -278,9 +293,18 @@ fn decode_frame_inner(body: &[u8]) -> Result<Decoded, String> {
     })
 }
 
-/// Encode a packet (id varint + body) for corpus capture.
+/// Encode a packet (id varint + body) for corpus capture. Like [`decode_frame`],
+/// unchecked Java exceptions (e.g. the `IllegalStateException` a mismatched
+/// `StreamCodec.unit` encode panics with) are caught and returned as `Err`.
 pub fn encode_packet(id: i32, packet: &PlayPacket) -> Result<Vec<u8>, String> {
-    let entry = match TABLE.get(id as usize) {
+    match catch_unwind(AssertUnwindSafe(|| encode_packet_inner(id, packet))) {
+        Ok(result) => result,
+        Err(payload) => Err(payload_message(payload)),
+    }
+}
+
+fn encode_packet_inner(id: i32, packet: &PlayPacket) -> Result<Vec<u8>, String> {
+    let entry = match TABLE.get(id as usize).and_then(|e| e.as_ref()) {
         Some(e) => e,
         None => return Err(format!("no table entry for id {id}")),
     };

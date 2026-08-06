@@ -15,7 +15,7 @@
 //!   ...
 //! ```
 
-use crate::frame::{frame_full, frame_payload};
+use crate::frame::frame_payload;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -99,7 +99,8 @@ pub fn write_corpus(
 }
 
 /// Read and validate a corpus directory against its manifest. Returns
-/// `Err` for a missing/corrupt manifest or a SHA-256/bytes mismatch.
+/// `Err` for a missing/corrupt manifest, a `packet_count`/files mismatch, or a
+/// SHA-256/bytes mismatch.
 pub fn read_corpus(dir: &Path) -> Result<Vec<CorpusEntry>, String> {
     let manifest_path = dir.join(MANIFEST);
     let manifest_text = fs::read_to_string(&manifest_path)
@@ -110,6 +111,16 @@ pub fn read_corpus(dir: &Path) -> Result<Vec<CorpusEntry>, String> {
         .get("files")
         .and_then(|f| f.as_object())
         .ok_or_else(|| "manifest has no files object".to_string())?;
+    let packet_count = manifest
+        .get("packet_count")
+        .and_then(|v| v.as_i64())
+        .ok_or("missing packet_count")?;
+    if packet_count != files.len() as i64 {
+        return Err(format!(
+            "manifest packet_count {packet_count} does not match {} files",
+            files.len()
+        ));
+    }
 
     let mut entries = Vec::new();
     for (file, meta) in files {
@@ -163,11 +174,4 @@ pub fn read_corpus(dir: &Path) -> Result<Vec<CorpusEntry>, String> {
 /// Read a single frame payload from a full-frame entry.
 pub fn payload_of(entry: &CorpusEntry) -> Result<Vec<u8>, String> {
     frame_payload(&entry.full_frame)
-}
-
-/// Build a full frame from a packet payload (`[id varint][body]`).
-pub fn full_from_payload(id: i32, name: &str, payload: &[u8]) -> Result<Vec<u8>, String> {
-    let _ = id;
-    let _ = name;
-    frame_full(payload)
 }

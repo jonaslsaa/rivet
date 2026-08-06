@@ -21,7 +21,7 @@
 //! result.
 
 use crate::protocol::{decode_frame, packet_name};
-use serde_json::{Value, json};
+use serde_json::json;
 
 /// One applied mutation.
 #[derive(Debug)]
@@ -68,6 +68,37 @@ fn decode(payload: &[u8]) -> Result<(), String> {
     decode_frame(payload).map(|_| ())
 }
 
+/// The byte length of the leading packet-id varint of a payload
+/// (`[id varint][body]`). All current [`MATRIX`] target ids are single-byte
+/// varints, but the mutators must stay correct if a two-byte id is ever
+/// targeted.
+fn id_varint_len(payload: &[u8]) -> usize {
+    let mut len = 0;
+    for byte in payload {
+        len += 1;
+        if byte & 0x80 == 0 || len == 5 {
+            break;
+        }
+    }
+    len
+}
+
+/// Encode a non-negative value as a varint.
+fn encode_varint(mut value: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5);
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            return out;
+        }
+    }
+}
+
 /// Build the report for one applied mutation.
 fn report_for(
     row: &MatrixRow,
@@ -96,10 +127,8 @@ fn report_for(
 
 /// Replace the packet-id varint with an id outside the 0..69 table.
 fn mutate_unknown_id(id: i32, payload: Vec<u8>, row: &MatrixRow) -> MutationReport {
-    let mut mutated = payload.clone();
-    if let Some(first) = mutated.first_mut() {
-        *first = 100;
-    }
+    let mut mutated = encode_varint(100);
+    mutated.extend_from_slice(&payload[id_varint_len(&payload)..]);
     report_for(
         row,
         id,
@@ -112,9 +141,10 @@ fn mutate_unknown_id(id: i32, payload: Vec<u8>, row: &MatrixRow) -> MutationRepo
 /// Bump the enum ordinal varint that starts a `client_command` body.
 fn mutate_client_command_enum(id: i32, payload: Vec<u8>, row: &MatrixRow) -> MutationReport {
     let mut mutated = payload.clone();
-    // id varint (1 byte) then the action varint (1 byte).
-    if let Some(b) = mutated.get_mut(1) {
-        *b = 3; // out of range for Action[3]
+    // The action varint starts after the id varint; 3 is a single-byte varint.
+    let at = id_varint_len(&payload);
+    if at < mutated.len() {
+        mutated[at] = 3; // out of range for Action[3]
     }
     report_for(
         row,
@@ -128,9 +158,9 @@ fn mutate_client_command_enum(id: i32, payload: Vec<u8>, row: &MatrixRow) -> Mut
 /// Bump the enum ordinal varint that starts a `player_action` body.
 fn mutate_player_action_enum(id: i32, payload: Vec<u8>, row: &MatrixRow) -> MutationReport {
     let mut mutated = payload.clone();
-    // id varint (1 byte) then the action ordinal varint (1 byte).
-    if let Some(b) = mutated.get_mut(1) {
-        *b = 8; // out of range for Action[8]
+    let at = id_varint_len(&payload);
+    if at < mutated.len() {
+        mutated[at] = 8; // out of range for Action[8]
     }
     report_for(
         row,
@@ -141,13 +171,15 @@ fn mutate_player_action_enum(id: i32, payload: Vec<u8>, row: &MatrixRow) -> Muta
     )
 }
 
-/// Set the first body float's bits to a quiet NaN. Benign for the raw-bit
-/// float/double codecs (`chunk_batch_received` body, `move_player_*` leading
-/// coords).
+/// Overwrite the first four body bytes with quiet-NaN bits. For a single-byte
+/// id that is the leading float of `chunk_batch_received` (a true NaN) or the
+/// leading double of `move_player_*` (a finite, huge value — NaN bits only
+/// cover the high half of a double). Either way the raw-bit codecs accept the
+/// frame, so the mutation must be benign.
 fn mutate_nan_inf(id: i32, payload: Vec<u8>, row: &MatrixRow) -> MutationReport {
     let mut mutated = payload.clone();
     let nan_bits = 0x7fc0_0000u32.to_be_bytes();
-    let start = 1.min(mutated.len());
+    let start = id_varint_len(&payload);
     for (i, b) in nan_bits.iter().enumerate() {
         let at = start + i;
         if at < mutated.len() {
@@ -165,7 +197,8 @@ fn mutate_nan_inf(id: i32, payload: Vec<u8>, row: &MatrixRow) -> MutationReport 
 
 /// Replace the body with a 5-byte continuation varint (`VarInt too big`).
 fn mutate_varint_boundary(id: i32, _payload: Vec<u8>, row: &MatrixRow) -> MutationReport {
-    let mutated = vec![id as u8, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01];
+    let mut mutated = encode_varint(id as u32);
+    mutated.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]);
     report_for(
         row,
         id,
@@ -254,8 +287,3 @@ pub fn all_ok(reports: &[MutationReport]) -> bool {
         r.outcome == "rejected" || r.outcome == "accepted"
     })
 }
-
-/// Keep `Value` referenced (mutation_line uses `json!` which needs the import
-/// reachable); silence an unused-import lint on some toolchains.
-#[allow(dead_code)]
-fn _value_marker(_v: Value) {}

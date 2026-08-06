@@ -522,7 +522,6 @@ dependencies = [
  "bytes",
  "rivet-protocol",
  "rivet-registry",
- "serde",
  "serde_json",
  "sha2",
 ]
