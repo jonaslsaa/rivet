@@ -48,7 +48,7 @@ pub trait PacketListener: Send {
 /// Paper's disconnect messages (`DisconnectionDetails`). Packet-body reasons
 /// that Paper would transmit (outdated client/server, transfers disabled, ...)
 /// carry the translation key in [`DisconnectReason::Unsupported`].
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DisconnectReason {
     /// `disconnect.endOfStream` — peer closed the connection.
     #[error("disconnect.endOfStream")]
@@ -63,4 +63,15 @@ pub enum DisconnectReason {
     /// not-yet-ported protocol issue, or a deliberately-rejected intention).
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// `multiplayer.disconnect.server_shutdown` — the tick thread is stopping.
+    #[error("multiplayer.disconnect.server_shutdown")]
+    ServerShutdown,
+    /// Slice-local outbound-overload disconnect: the tick side dropped this
+    /// connection's tick→network channel when it overflowed (the bounded-channel
+    /// backpressure policy of sub-issue #93). Paper's netty outbound buffer is
+    /// unbounded, so there is no Java analog; the observable behavior is the
+    /// same — the socket closes. Kept distinct from [`DisconnectReason::ServerShutdown`]
+    /// so a client that cannot keep up is not misreported as a server stop.
+    #[error("outbound overflow")]
+    Overflow,
 }

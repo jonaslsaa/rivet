@@ -16,8 +16,10 @@ use crate::server::ServerConfig;
 /// `net.minecraft.network.Connection` that matter before the play state: the
 /// VarInt21 frame decoder, the outbound protocol, and the packet listener that
 /// dispatches each fully-framed inbound packet. Play-state packets cross to the
-/// tick thread over channels keyed by `ConnectionId` (OWNERSHIP §Network) — that
-/// handoff is sub-issue #93 and is not built here.
+/// tick thread over channels keyed by `ConnectionId` (OWNERSHIP §Network); the
+/// per-connection task owns those channel ends (sub-issue #93). The tick thread
+/// can also queue already-encoded frames here via [`Connection::queue_raw_frame`]
+/// (drained to the socket by `flush_out`).
 ///
 /// The socket write half lives here so `send_packet` can append to a pending
 /// outbound buffer without holding the task's read loop; the per-connection task
@@ -125,6 +127,13 @@ impl Connection {
         let frame = encode_frame(&payload).map_err(|e| e.message)?;
         self.out_buf.extend_from_slice(&frame);
         Ok(())
+    }
+
+    /// Append an already-encoded VarInt21 frame produced by the tick thread to
+    /// the outbound buffer; `flush_out` writes it to the socket. Queue order is
+    /// preserved for frames from the tick thread's per-connection channel.
+    pub fn queue_raw_frame(&mut self, frame: Bytes) {
+        self.out_buf.extend_from_slice(&frame);
     }
 
     /// Flush pending outbound frames to the socket.

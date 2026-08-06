@@ -40,6 +40,11 @@ fn default_config() -> ServerConfig {
         port: 0,
         max_connections: 16,
         read_timeout: Duration::from_secs(30),
+        tick_interval: Duration::from_millis(50),
+        catchup_ticks: 5,
+        inbound_channel_capacity: 64,
+        outbound_channel_capacity: 64,
+        lifecycle_capacity: 64,
     }
 }
 
