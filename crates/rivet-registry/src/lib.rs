@@ -14,6 +14,14 @@
 //!   by the #124 units per the ownership map in `Cargo.toml`. Each module is a
 //!   full Java-faithful port of its `mc.*` package with its own tests; #126
 //!   (holder codecs) is the only deferred surface and is called out per site.
+//!
+//! `core` (issue #125) ports the registry-independent position/value
+//! primitives of `net.minecraft.core`: `Vec3i`/`BlockPos`/`SectionPos`/
+//! `ChunkPos` plus the tightly coupled `Position`, `Direction`, `AxisCycle`,
+//! `Cursor3D` and `Rotation` value types. These are pure value types, resolved
+//! by ID per OWNERSHIP.md; their `StreamCodec` impls live in `rivet-protocol`,
+//! not here. `GlobalPos` is deferred (needs `ResourceKey` from the #124
+//! registry SCC) and is not declared in this crate.
 
 /// Compile-time block registry + block-state tables.
 ///
@@ -85,6 +93,14 @@ pub mod block_id_tests;
 /// `RegistryFileCodec`/`HolderSetCodec` codecs and all protocol `StreamCodec`s
 /// are #126 (holder codecs), not here.
 pub mod registry_ops;
+
+// ---------------------------------------------------------------------------
+// Ownership E — position/value SCC (`net.minecraft.core`, issue #125)
+// ---------------------------------------------------------------------------
+
+/// Registry-independent position/value primitives of `net.minecraft.core`
+/// (issue #125) — see the crate doc for the ownership split.
+pub mod core;
 
 pub use access::RegistryAccess;
 pub use builder::RegistryBuilder;
