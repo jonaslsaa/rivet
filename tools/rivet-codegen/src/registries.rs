@@ -127,7 +127,7 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
     // Validate structurally first: a malformed/sparse fixture fails fast on
     // its own, before the provenance link pulls in the sibling manifest.
     let surfaces = validate(root)?;
-    let provenance = load_provenance(&input)?;
+    let provenance = load_provenance(&input, "registries.json")?;
 
     fs::create_dir_all(&output).with_context(|| format!("create {}", output.display()))?;
     fs::write(output.join("registries.rs"), render(&surfaces, &provenance))
@@ -145,8 +145,9 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
 
 /// Parse JSON, rejecting duplicate object keys at any depth (a hand-inserted
 /// duplicate element name must fail, not silently reshape the table). Mirrors
-/// the strict parser in [`crate::packets`].
-fn parse_strict(json: &str) -> Result<Value, serde_json::Error> {
+/// the strict parser in [`crate::packets`]. `pub(crate)` so the block-state
+/// half ([`crate::block_states`]) can validate `blocks.json` the same way.
+pub(crate) fn parse_strict(json: &str) -> Result<Value, serde_json::Error> {
     serde_json::from_str::<StrictValue>(json).map(|strict| strict.0)
 }
 
@@ -367,8 +368,9 @@ fn validate_surface(key: &'static str, value: &Value) -> Result<Surface> {
 /// `[a-z0-9_.-]`, path chars `[a-z0-9/._-]` — `:` is never valid inside either,
 /// and the first `:` is the only separator. A name that Java could not parse
 /// must fail generation, not silently emit a lookup key the runtime can never
-/// see.
-fn validate_name(registry: &str, name: &str) -> Result<()> {
+/// see. `pub(crate)` so the block-state half ([`crate::block_states`]) can
+/// validate `blocks.json` block names the same way.
+pub(crate) fn validate_name(registry: &str, name: &str) -> Result<()> {
     let Some((namespace, path)) = name.split_once(':') else {
         bail!("element `{name}` in `{registry}` is not a namespaced identifier (`namespace:path`)");
     };
@@ -460,16 +462,19 @@ fn entry_ident(name: &str) -> String {
     }
 }
 
-/// Link the consumed fixture to its pinned provenance (`manifest.json`): the
-/// registry report's recorded sha256 must match the file actually being read.
-fn load_provenance(input: &Path) -> Result<SourceProvenance> {
+/// Link a consumed fixture to its pinned provenance (`manifest.json`): the
+/// report's recorded sha256 must match the file actually being read.
+/// `pub(crate)` so the block-state half ([`crate::block_states`]) can pin
+/// `blocks.json` the same way; the fixture is identified by its manifest
+/// `path` (e.g. `"registries.json"`, `"blocks.json"`).
+pub(crate) fn load_provenance(input: &Path, report_name: &str) -> Result<SourceProvenance> {
     let manifest_path = input
         .parent()
         .map(|p| p.join("manifest.json"))
-        .with_context(|| format!("registries.json has no parent dir: {}", input.display()))?;
+        .with_context(|| format!("{report_name} has no parent dir: {}", input.display()))?;
     let manifest_json = fs::read_to_string(&manifest_path).with_context(|| {
         format!(
-            "read {} (expected next to the pinned registries.json fixture)",
+            "read {} (expected next to the pinned {report_name} fixture)",
             manifest_path.display()
         )
     })?;
@@ -478,10 +483,10 @@ fn load_provenance(input: &Path) -> Result<SourceProvenance> {
     let entry = manifest
         .reports
         .iter()
-        .find(|e| e.path == "registries.json")
+        .find(|e| e.path == report_name)
         .with_context(|| {
             format!(
-                "manifest {} has no registries.json entry",
+                "manifest {} has no {report_name} entry",
                 manifest_path.display()
             )
         })?;
@@ -489,7 +494,7 @@ fn load_provenance(input: &Path) -> Result<SourceProvenance> {
     let actual = crate::reports::sha256_hex(&bytes);
     if actual != entry.sha256 {
         bail!(
-            "registries.json does not match the provenance manifest (expected sha256 {}, got {}) — \
+            "{report_name} does not match the provenance manifest (expected sha256 {}, got {}) — \
              run `rivet-codegen reports` to refresh the pinned fixture",
             entry.sha256,
             actual

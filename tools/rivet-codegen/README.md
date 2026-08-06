@@ -16,8 +16,10 @@ JVM and to use `anyhow`/`serde`.
   `crates/rivet-registry/src/generated/` (a `BlockId` registry + a block-state
   property enum structure), consumes `data/reports/registries.json` to emit the
   static-builtin registry tables into the same `src/generated/` (see
-  `registries` below), and consumes `data/reports/packets.json` to emit the
-  packet-ID tables into `crates/rivet-protocol/src/generated/`.
+  `registries` below), consumes `data/reports/blocks.json` to emit the
+  block-state global-id table (see `block_states.rs`, issue #154), and consumes
+  `data/reports/packets.json` to emit the packet-ID tables into
+  `crates/rivet-protocol/src/generated/`.
 - **`registries`** — reads the pinned vanilla `data/reports/registries.json`
   (`RegistryDumpReport`) and emits the id-indexed static-builtin tables for the
   ordered registries M1 touches into
@@ -30,6 +32,12 @@ JVM and to use `anyhow`/`serde`.
   `GENERATED — do not hand-edit`; this is the checked-in generator that makes
   regeneration possible. Idempotent: over the current committed files it
   reproduces them byte-for-byte (`git diff` stays clean).
+- **`probe-block-states`** — compiles and runs `java/GlobalPaletteProbe.java`
+  against the real Paper jar and cross-checks the emitted block-state global-id
+  table (issue #154): size 32366, per-block contiguous ranges partitioning the
+  id space, defaults in range, and the representative anchor ids. This is the
+  live half of the fixture-pinned conformance test in `generate`'s
+  `block_states.rs` tests.
 - **`reports`** — runs the vanilla `net.minecraft.data.Main --reports` datagen
   against the materialized Paper 26.2 server jar and pins the canonical
   `packets.json` / `registries.json` / `blocks.json` reports (with provenance)
@@ -41,6 +49,7 @@ rivet-codegen generate   [--input <path>]  [--output <dir>]
                          [--packets <path>] [--packets-output <dir>]
 rivet-codegen registries [--input <path>]  [--output <dir>]
 rivet-codegen mth-gen    [--bundler <path>] [--output <dir>]
+rivet-codegen probe-block-states [--bundler <path>]
 rivet-codegen reports    [--jar <path>] [--output <dir>] [--verify]
 ```
 
@@ -56,19 +65,22 @@ checkout; the tool needs a jar produced elsewhere.
 ```
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
-target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, registries.rs} + crates/rivet-protocol/src/generated/
+target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_states.rs, registries.rs} + crates/rivet-protocol/src/generated/
 target/release/rivet-codegen registries       # -> crates/rivet-registry/src/generated/registries.rs (report-driven half only)
 target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
+target/release/rivet-codegen probe-block-states  # verify the emitted block-state global ids against live Paper
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
-`generate` emits three independent outputs: the block registry (from
+`generate` emits four independent outputs: the block registry (from
 `data/block_states.json`), the static-builtin registry tables (from
-`data/reports/registries.json`, the `RegistryDumpReport` fixture), and the
-packet-ID tables (from `data/reports/packets.json`, the `PacketReport`
-fixture). Regenerate all three with a single `generate` run; `--input`/`--output`
-control the block half, `--packets`/`--packets-output` control the packet half.
-(The `registries` subcommand emits just the report-driven registry tables.)
+`data/reports/registries.json`, the `RegistryDumpReport` fixture), the
+block-state global-id table (from `data/reports/blocks.json`, the
+`BlockListReport` fixture), and the packet-ID tables (from
+`data/reports/packets.json`, the `PacketReport` fixture). Regenerate all four
+with a single `generate` run; `--input`/`--output` control the block half,
+`--packets`/`--packets-output` control the packet half. (The `registries`
+subcommand emits just the report-driven registry tables.)
 
 `extract` and `mth-gen` cache the unpacked classpath in `.cache/` (gitignored)
 so reruns are fast. Pass `--bundler` to point at a different jar.

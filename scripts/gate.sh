@@ -451,6 +451,28 @@ main() {
     else
       cargo test --manifest-path tools/rivet-codegen/Cargo.toml
     fi
+
+    # --- block-state global-id probe (full gate; needs the Paper bundler) ------
+    # GlobalPaletteProbe boots the real Paper block-state registry and
+    # cross-checks the emitted global-id table: size 32366,
+    # per-block contiguous ranges, defaults in range, and the representative
+    # anchor ids. Requires the paperclip bundler jar (same prereq as the oracle
+    # steps); when absent the fixture-pinned conformance test still guards the
+    # table, so this skips cleanly instead of failing (mirrors the oracle guard).
+    local PROBE_BUNDLER="${RIVET_ORACLE_JAR:-}"
+    if [ -z "$PROBE_BUNDLER" ] || [ ! -f "$PROBE_BUNDLER" ]; then
+      PROBE_BUNDLER="$REPO_DIR/tools/rivet-oracle/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar"
+    fi
+    if [ -z "$PROBE_BUNDLER" ] || [ ! -f "$PROBE_BUNDLER" ]; then
+      PROBE_BUNDLER="$REPO_DIR/working/Paper/paper-server/build/libs/paper-paperclip-26.2.local-SNAPSHOT.jar"
+    fi
+    if [ -f "$PROBE_BUNDLER" ]; then
+      echo "==> rivet-codegen probe-block-states (live Paper block-state registry)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+        probe-block-states --bundler "$PROBE_BUNDLER"
+    else
+      echo "    SKIPPED (no Paper bundler jar: build working/Paper or set RIVET_ORACLE_JAR)"
+    fi
   fi
 
   # --- oracle steps (full gate only; the oracle verifies the whole server) -----

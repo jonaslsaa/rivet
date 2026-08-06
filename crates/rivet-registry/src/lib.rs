@@ -94,6 +94,12 @@ pub mod block_id_tests;
 #[path = "static_builtin_tests.rs"]
 pub mod static_builtin_tests;
 
+/// Generated block-state global-id table integration tests (issue #154). Same
+/// pattern: outside `src/generated/`, only under the `blocks` feature + test.
+#[cfg(all(feature = "blocks", test))]
+#[path = "block_state_tests.rs"]
+pub mod block_state_tests;
+
 // ---------------------------------------------------------------------------
 // Ownership D — serialization context (`net.minecraft.resources`)
 // ---------------------------------------------------------------------------
