@@ -1,8 +1,8 @@
-//! Java `Double.toString` / `Float.toString` formatting for the numeric argument
-//! types.
+//! Java `Double.toString` / `Float.toString` formatting.
 //!
 //! Java's `DoubleArgumentType.toString()`/`FloatArgumentType.toString()` stringify
-//! their bounds with the JDK's `Double.toString`/`Float.toString`. That format is
+//! their bounds with the JDK's `Double.toString`/`Float.toString`, and
+//! `TranslatableContents` renders `Double` arguments the same way. That format is
 //! not Rust's `Display`: Java always keeps a decimal point (plain form `100.0`,
 //! `0.05`, `0.001` in the `10^-3 <= |v| < 10^7` range, else computerized
 //! scientific `2.147483648E9`, `1.0E-4`), with the shortest round-trip digits.
@@ -13,7 +13,7 @@
 //! modern JDK (19+) prints the shortest form, which is what this port reproduces.
 
 /// Java `Double.toString(double)` for the finite, non-`NaN` range used by the
-/// argument types.
+/// argument types and translatable-argument rendering.
 pub fn java_double_to_string(value: f64) -> String {
     java_format(
         value,

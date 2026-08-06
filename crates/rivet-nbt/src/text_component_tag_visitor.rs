@@ -465,21 +465,21 @@ impl RichStyling {
     }
 
     fn new() -> Self {
-        let number_type = Style::EMPTY.with_color(ChatFormatting::Red);
+        let number_type = Style::EMPTY.with_color_format(ChatFormatting::Red);
         let mut tokens = HashMap::new();
 
         Self::override_token(
             &mut tokens,
             Token::Folded,
-            Style::EMPTY.with_color(ChatFormatting::Gray),
+            Style::EMPTY.with_color_format(ChatFormatting::Gray),
         );
-        Self::override_token(&mut tokens, Token::ByteSuffix, number_type);
-        Self::override_token(&mut tokens, Token::ByteArrayPrefix, number_type);
-        Self::override_token(&mut tokens, Token::ShortSuffix, number_type);
-        Self::override_token(&mut tokens, Token::IntArrayPrefix, number_type);
-        Self::override_token(&mut tokens, Token::LongSuffix, number_type);
-        Self::override_token(&mut tokens, Token::LongArrayPrefix, number_type);
-        Self::override_token(&mut tokens, Token::FloatSuffix, number_type);
+        Self::override_token(&mut tokens, Token::ByteSuffix, number_type.clone());
+        Self::override_token(&mut tokens, Token::ByteArrayPrefix, number_type.clone());
+        Self::override_token(&mut tokens, Token::ShortSuffix, number_type.clone());
+        Self::override_token(&mut tokens, Token::IntArrayPrefix, number_type.clone());
+        Self::override_token(&mut tokens, Token::LongSuffix, number_type.clone());
+        Self::override_token(&mut tokens, Token::LongArrayPrefix, number_type.clone());
+        Self::override_token(&mut tokens, Token::FloatSuffix, number_type.clone());
         Self::override_token(&mut tokens, Token::DoubleSuffix, number_type);
 
         for value in Token::VALUES {
@@ -499,15 +499,15 @@ impl RichStyling {
 
 impl Styling for RichStyling {
     fn key_style(&self) -> Style {
-        Style::EMPTY.with_color(ChatFormatting::Aqua)
+        Style::EMPTY.with_color_format(ChatFormatting::Aqua)
     }
 
     fn string_style(&self) -> Style {
-        Style::EMPTY.with_color(ChatFormatting::Green)
+        Style::EMPTY.with_color_format(ChatFormatting::Green)
     }
 
     fn number_style(&self) -> Style {
-        Style::EMPTY.with_color(ChatFormatting::Gold)
+        Style::EMPTY.with_color_format(ChatFormatting::Gold)
     }
 
     fn token(&self, token: Token) -> Component {

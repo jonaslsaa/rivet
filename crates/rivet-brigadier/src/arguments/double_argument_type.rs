@@ -62,8 +62,8 @@ impl ArgumentType<f64> for DoubleArgumentType {
                 .double_too_low()
                 .create_with_context(
                     reader,
-                    &crate::java_float_format::java_double_to_string(result),
-                    &crate::java_float_format::java_double_to_string(self.minimum),
+                    &rivet_util::java_float_format::java_double_to_string(result),
+                    &rivet_util::java_float_format::java_double_to_string(self.minimum),
                 ));
         }
         if result > self.maximum {
@@ -72,15 +72,15 @@ impl ArgumentType<f64> for DoubleArgumentType {
                 .double_too_high()
                 .create_with_context(
                     reader,
-                    &crate::java_float_format::java_double_to_string(result),
-                    &crate::java_float_format::java_double_to_string(self.maximum),
+                    &rivet_util::java_float_format::java_double_to_string(result),
+                    &rivet_util::java_float_format::java_double_to_string(self.maximum),
                 ));
         }
         Ok(result)
     }
 
     fn to_string(&self) -> String {
-        let fmt = crate::java_float_format::java_double_to_string;
+        let fmt = rivet_util::java_float_format::java_double_to_string;
         if self.minimum == -f64::MAX && self.maximum == f64::MAX {
             "double()".to_string()
         } else if self.maximum == f64::MAX {

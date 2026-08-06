@@ -485,6 +485,9 @@ version = "0.1.0-dev+mc26.2"
 [[package]]
 name = "rivet-brigadier"
 version = "0.1.0-dev+mc26.2"
+dependencies = [
+ "rivet-util",
+]
 
 [[package]]
 name = "rivet-core"
@@ -590,6 +593,9 @@ name = "rivet-text"
 version = "0.1.0-dev+mc26.2"
 dependencies = [
  "rivet-core",
+ "rivet-serialization",
+ "rivet-util",
+ "serde_json",
 ]
 
 [[package]]

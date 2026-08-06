@@ -24,7 +24,6 @@ pub mod command_dispatcher;
 pub mod context;
 pub mod exceptions;
 pub mod immutable_string_reader;
-pub mod java_float_format;
 pub mod java_hash;
 pub mod literal_message;
 pub mod message;

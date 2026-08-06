@@ -4,8 +4,10 @@
 //! `Long.hashCode` in `equals`/`hashCode` implementations and in `CommandNode`'s
 //! `LinkedHashMap` keys (via `HashMap.hash`). These are only observable when hashes
 //! are compared across Rust/Java (equality tests); PORTING.md keeps Java hash
-//! algorithms in `rivet-util::java_hash`, but brigadier is a leaf crate with no
-//! workspace deps, so the few needed ones live here.
+//! algorithms in `rivet-util::java_hash`, but the `java_hash` variants needed by
+//! brigadier are a distinct set from `rivet-util`'s (`string_hash` overlaps, the
+//! `objects_hash`/`long_hash`/... chains do not), so they live here rather than
+//! coupling brigadier to `rivet-util::java_hash`.
 
 /// Java `String.hashCode()`: `s[0]*31^(n-1) + s[1]*31^(n-2) + ... + s[n-1]`,
 /// wrapping `i32` arithmetic. Java iterates UTF-16 code units (each char /
