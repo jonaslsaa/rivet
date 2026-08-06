@@ -1,0 +1,20 @@
+[package]
+name = "ffi-latency-spike"
+version = "0.1.0"
+edition = "2021"
+
+# This is a standalone cdylib crate, intentionally NOT part of the rivet cargo
+# workspace (see WORKFLOWS.md: cross-track isolation). It exists only to
+# de-risk the JVM adapter FFI boundary for epic #14. Keep it out of `crates/`.
+[workspace]
+
+[lib]
+name = "ffi_latency_spike"
+crate-type = ["cdylib"]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
