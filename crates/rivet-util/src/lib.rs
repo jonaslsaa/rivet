@@ -14,6 +14,7 @@
 //! slice (issue #107 / #122); `string_representable` and `by_id_map` are full
 //! ports of their `mc.util` classes. See each module's provenance header.
 
+pub mod bit_storage;
 pub mod by_id_map;
 pub mod data_io;
 pub mod delegate_data_output;
@@ -25,9 +26,12 @@ pub mod mth_atan_tables;
 pub mod mth_sin_table;
 pub mod mth_stubs;
 pub mod random;
+pub mod simple_bit_storage;
 pub mod string_representable;
 pub mod util;
+pub mod zero_bit_storage;
 
+pub use bit_storage::BitStorage;
 pub use by_id_map::{OutOfBoundsStrategy, continuous, sparse};
 pub use data_io::{DataInput, DataInputStream, DataOutput, DataOutputStream};
 pub use delegate_data_output::DelegateDataOutput;
