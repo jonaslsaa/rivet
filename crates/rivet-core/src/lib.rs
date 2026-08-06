@@ -7,6 +7,8 @@
 
 pub mod chat_formatting;
 pub mod crash_report;
+pub mod identifier_exception;
 
 pub use chat_formatting::ChatFormatting;
 pub use crash_report::{CrashReport, CrashReportCategory, ReportedException};
+pub use identifier_exception::IdentifierException;
