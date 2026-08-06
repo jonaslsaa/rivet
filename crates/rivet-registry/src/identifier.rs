@@ -217,9 +217,14 @@ impl Identifier {
         }
     }
 
-    /// The `Result`-returning `bySeparator`, so `read` can build the
-    /// `DataResult` error instead of panicking.
-    fn by_separator_result(identifier: &str, separator: char) -> Result<Self, IdentifierException> {
+    /// `Identifier.bySeparator` as a `Result` — the fallible parse. `read`
+    /// uses it to build the `DataResult` error instead of panicking, and
+    /// `rivet-protocol`'s `Identifier.STREAM_CODEC` uses it to surface the
+    /// `IdentifierException` message as a `CodecError` at the codec boundary.
+    pub fn by_separator_result(
+        identifier: &str,
+        separator: char,
+    ) -> Result<Self, IdentifierException> {
         if let Some(separator_index) = identifier.find(separator) {
             let path = &identifier[separator_index + separator.len_utf8()..];
             if separator_index != 0 {

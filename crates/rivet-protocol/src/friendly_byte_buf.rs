@@ -10,11 +10,21 @@
 //! adapters for `BytesMut`).
 //!
 //! Deliberately absent (reported blocked by later work, not stubbed):
-//! `Identifier`/`ResourceKey`/registry paths, `BlockPos`/`ChunkPos`/`GlobalPos`,
+//! `ResourceKey`/registry paths, `BlockPos`/`ChunkPos`/`GlobalPos`,
 //! `Vector3f`/`Quaternionf` (JOML), `PublicKey` (crypto), the JsonOps/codec
-//! paths, `readEnum`-by-class (a Rust enum-ordinal trait would be speculative;
-//! [`FriendlyByteBuf::read_by_id`]/[`FriendlyByteBuf::write_by_id`] provide the
-//! same mechanism), `Instant`, and the `BitSet`-based set helpers.
+//! paths, `Instant`, and the `BitSet`-based set helpers.
+//!
+//! `readEnum`-by-class (`clazz.getEnumConstants()[readVarInt()]`) is ported
+//! at the call site: the value-table `read_var_int` + `by_id` pattern, because
+//! the codec boundary surfaces an out-of-range ordinal as `Err` (Java's
+//! `ArrayIndexOutOfBoundsException`) — a generic `Fn(i32) -> T` cannot express
+//! that. `writeEnum` is [`FriendlyByteBuf::write_enum`]. `Identifier` on the wire
+//! goes through [`crate::protocol::stream_codecs::identifier_codec`] (the
+//! `Err`-returning boundary over `STRING_UTF8` + `Identifier.parse`); there is
+//! no raw `readIdentifier`/`writeIdentifier` helper because every codec boundary
+//! must surface a malformed identifier as `Err`, and the raw helper would panic.
+//! `read_resource_key`/`read_registry_key` stay deferred with the registry-wired
+//! units.
 //!
 //! Netty's `ByteBuf` big-endian scalar contract maps onto `bytes::Buf`/`BufMut`
 //! exactly (24-bit medium, signed/unsigned variants, raw NaN-preserving float/
@@ -598,6 +608,14 @@ impl FriendlyByteBuf {
     pub fn write_by_id<T>(&mut self, converter: impl Fn(&T) -> i32, value: &T) -> &mut Self {
         let id = converter(value);
         self.write_var_int(id)
+    }
+
+    // ---- enum / identifier -------------------------------------------------
+
+    /// `writeEnum(Enum<?>)` — `writeVarInt(value.ordinal())`. The ordinal is
+    /// exactly `writeById(Enum::ordinal)`.
+    pub fn write_enum<T>(&mut self, ordinal: impl Fn(&T) -> i32, value: &T) -> &mut Self {
+        self.write_by_id(ordinal, value)
     }
 
     // ---- NBT bridge --------------------------------------------------------

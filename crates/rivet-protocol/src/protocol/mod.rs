@@ -17,13 +17,25 @@
 //! registry-wired codecs (#126/#109) — documented in `protocol_info_builder`.
 //! `PacketUtils` (thread-confinement helpers) is server-side and deferred with
 //! the state machines.
+//!
+//! Packet-body units (issue #86, join-path slice): the crossover bodies shared
+//! by play and configuration — [`common`] (`net.minecraft.network.protocol.common`),
+//! [`cookie`] (`...protocol.cookie`), [`ping`] (`...protocol.ping`) — and the
+//! shared [`stream_codecs`] (e.g. `Identifier.STREAM_CODEC`). Each body is a
+//! value type + `stream_codec()` + `Packet` impl (the `PacketType` constants
+//! live in each package's `packet_types` module). `handle()` stays deferred with
+//! the listener hierarchy; the game.join/serverbound bodies are #148 (M1.1).
 
 pub mod bundle;
+pub mod common;
+pub mod cookie;
 pub mod packet;
 pub mod packet_type;
+pub mod ping;
 pub mod protocol_codec_builder;
 pub mod protocol_info_builder;
 pub mod simple_unbound_protocol;
+pub mod stream_codecs;
 pub mod unbound_protocol;
 
 pub use bundle::{BundleDelimiterPacket, BundlePacket, BundlerInfo};
