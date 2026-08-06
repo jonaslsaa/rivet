@@ -15,6 +15,12 @@
 //!   `create_intrusive_holder`, `bind_tags`, `create_registration_lookup`.
 //!   Duplicate-key / duplicate-value checks panic with Java's exact messages
 //!   (`"Adding duplicate key '...' to registry"`).
+//! - **Holder ids are assigned at `register` time, never at holder-creation
+//!   time.** The returned id is `values.len()` — Java's `newId = byId.size()`
+//!   (MappedRegistry.java:136) — for stand-alone and intrusive holders alike.
+//!   An intrusive holder or an unbound-created holder carries no pre-assigned
+//!   id; only `register` decides the id, so element id == holder id == network
+//!   id == insertion index for every interleaving of create/register.
 //! - `freeze()` consumes the builder → `Registry<T>`, binding values to
 //!   holders, and **panics with sorted unbound keys** like
 //!   `MappedRegistry.freeze()` (`"Unbound values in registry ...: [...]"`),
@@ -86,11 +92,13 @@ pub struct RegistryBuilder<T> {
     /// Tag -> bound member holder ids (pre-freeze; `HolderSet.Named` is #126).
     tags: HashMap<TagKey<T>, Vec<HolderId>>,
     /// `MappedRegistry.unregisteredIntrusiveHolders` — element identity ->
-    /// (held Arc, intrusive holder placeholder). The builder OWNS the value
-    /// until `register` moves it into `values` (Java's map holds the value
-    /// itself, keeping its identity stable); only the pointer is keyed, so
-    /// leaving the holder unregistered keeps the allocation alive.
-    intrusive: Option<HashMap<usize, (Arc<T>, HolderId)>>,
+    /// held Arc. The builder OWNS the value until `register` moves it into
+    /// `values` (Java's map holds the value itself, keeping its identity
+    /// stable), and only the pointer is keyed so leaving the holder
+    /// unregistered keeps the allocation alive. **No id is stored**: Java
+    /// assigns a `Holder.Reference`'s numeric id at `register` time
+    /// (`byId.size()`), so `register` — never this map — decides the id.
+    intrusive: Option<HashMap<usize, Arc<T>>>,
     /// Stand-alone holders created via `get_or_create_holder` but not yet
     /// registered — key -> provisional holder id. `computeIfAbsent` semantics:
     /// a repeat call returns the same provisional id, and `freeze()` reports
@@ -162,6 +170,15 @@ impl<T> RegistryBuilder<T> {
     /// reproduces by passing `Arc::clone`s (same allocation, same
     /// `Arc::as_ptr`).
     ///
+    /// The returned holder id is **always `values.len()`** — the registration
+    /// insertion index, Java's `newId = byId.size()` (MappedRegistry.java:136)
+    /// — for intrusive and stand-alone holders alike. An intrusive holder
+    /// created earlier contributes no pre-assigned id: `register` only removes
+    /// its value from the unregistered map (liveness + identity check) and the
+    /// id is the index where it lands. Interleaved
+    /// `create(A); create(B); register(A); register(B)` therefore yields
+    /// `A -> 0`, `B -> 1`, never two holders aliasing one placeholder.
+    ///
     /// Panics with Java's exact duplicate messages:
     /// `"Adding duplicate key '<key>' to registry"` /
     /// `"Adding duplicate value '<value>' to registry"` (identity-sensitive: a
@@ -183,16 +200,13 @@ impl<T> RegistryBuilder<T> {
             panic!("Adding duplicate value to registry");
         }
 
-        let holder = if let Some(intrusive) = &mut self.intrusive {
-            // The intrusive map holds the Arc (same allocation as `arc` — the
-            // identity matched), so the value moves from the map into `values`.
-            match intrusive.remove(&identity) {
-                Some((_held, holder)) => holder,
-                None => panic!("Missing intrusive holder for {}:{}", key, "value"),
-            }
-        } else {
-            HolderId(self.values.len() as u32)
-        };
+        // The intrusive map holds the Arc (same allocation as `arc` — the
+        // identity matched), so the value moves from the map into `values`.
+        if let Some(intrusive) = &mut self.intrusive
+            && intrusive.remove(&identity).is_none()
+        {
+            panic!("Missing intrusive holder for {}:{}", key, "value");
+        }
 
         let id = self.values.len() as u32;
         self.values.push(arc);
@@ -206,7 +220,7 @@ impl<T> RegistryBuilder<T> {
             self.default_id = Some(id);
         }
         self.pending_unbound.remove(key);
-        holder
+        HolderId(id)
     }
 
     /// `WritableRegistry.getOrCreateHolder(ResourceKey<T>)` — the builder-side
@@ -239,17 +253,26 @@ impl<T> RegistryBuilder<T> {
     /// `WritableRegistry.createIntrusiveHolder(Arc<T>)` — pre-registers a value
     /// as an intrusive holder; the value must later be `register`ed with the
     /// same allocation (Java panics "Missing intrusive holder" otherwise).
+    ///
+    /// **No id is assigned here.** Java's `createIntrusiveHolder`
+    /// (MappedRegistry.java:347-354) builds a `Holder.Reference` via
+    /// `computeIfAbsent` and returns it WITHOUT binding an id — the numeric id
+    /// does not exist until `register` adds the holder to `byId`. Returning a
+    /// `HolderId(self.values.len())` snapshot here would alias later holders
+    /// (interleaved create/register), so the returned placeholder id is always
+    /// `0` and the real id is decided by `register` (`values.len()`). Callers
+    /// of `create_intrusive_holder` must not treat the return as a final id —
+    /// match `register`'s return, as Java callers match `register`'s.
     pub fn create_intrusive_holder(&mut self, value: Arc<T>) -> BuilderHolder {
         let intrusive = self
             .intrusive
             .as_mut()
             .expect("This registry can't create intrusive holders");
         let identity = Self::identity(&value);
-        let placeholder = HolderId(self.values.len() as u32);
         // Java keeps the value itself (by identity) in the map, so the object
         // stays alive until registered; we hold the Arc for the same reason.
-        intrusive.insert(identity, (value, placeholder));
-        placeholder
+        intrusive.insert(identity, value);
+        HolderId(0)
     }
 
     /// `WritableRegistry.createRegistrationLookup()`.
@@ -315,10 +338,14 @@ impl<T> RegistryBuilder<T> {
             && !intrusive.is_empty()
         {
             // Java prints the leftover `Holder.Reference` values; the SCC's
-            // minimal shape prints the holder ids (T is unbounded, so the
-            // values themselves are not renderable).
-            let leftover: Vec<u32> = intrusive.values().map(|(_, holder)| holder.0).collect();
-            panic!("Some intrusive holders were not registered: {:?}", leftover);
+            // minimal shape prints a per-entry count (the intrusive map no
+            // longer stores ids — Java assigns them at register time — and T
+            // is unbounded, so the values themselves are not renderable).
+            let leftover = intrusive.len();
+            panic!(
+                "Some intrusive holders were not registered: {} leftover",
+                leftover
+            );
         }
 
         Registry::from_builder(
@@ -472,22 +499,145 @@ mod tests {
     fn intrusive_holders_are_bound_to_the_registered_value() {
         // Java: Block calls `createIntrusiveHolder(this)`, then `register(key,
         // this, ...)`. The same object flows through both — Rust reproduces it
-        // with Arc::clone (same allocation, same identity).
+        // with Arc::clone (same allocation, same identity). The id is assigned
+        // by `register` (`values.len()`), not by `create_intrusive_holder`.
         let mut builder = RegistryBuilder::new_with_intrusive(&key());
         let value = Arc::new(TestElement(7));
-        let holder = builder.create_intrusive_holder(value.clone());
-        assert_eq!(holder, HolderId(0));
-        builder.register(
+        let placeholder = builder.create_intrusive_holder(value.clone());
+        // The placeholder carries no final id — only register's return matters.
+        assert_eq!(placeholder, HolderId(0));
+        let registered = builder.register(
             &element_key("seven"),
             value.clone(),
             RegistrationInfo::BUILT_IN,
         );
+        assert_eq!(registered, HolderId(0));
         let frozen = builder.freeze();
         assert_eq!(frozen.get_id(Arc::as_ref(&value)), 0);
         assert_eq!(
             frozen.get_value(&element_key("seven")),
             Some(&TestElement(7))
         );
+    }
+
+    #[test]
+    fn interleaved_intrusive_creates_and_registers_assign_distinct_ids() {
+        // The regression: create(A); create(B); register(A); register(B) must
+        // yield A -> 0, B -> 1. A holder created before B must not pin the
+        // stale `values.len()` snapshot so B aliases A's id.
+        let mut builder = RegistryBuilder::new_with_intrusive(&key());
+        let a = Arc::new(TestElement(1));
+        let b = Arc::new(TestElement(2));
+        let placeholder_a = builder.create_intrusive_holder(a.clone());
+        let placeholder_b = builder.create_intrusive_holder(b.clone());
+        // Both placeholders are equal (no id yet) — Java's `createIntrusiveHolder`
+        // returns an id-less `Holder.Reference`.
+        assert_eq!(placeholder_a, placeholder_b);
+        assert_eq!(placeholder_a, HolderId(0));
+
+        let registered_a =
+            builder.register(&element_key("a"), a.clone(), RegistrationInfo::BUILT_IN);
+        let registered_b =
+            builder.register(&element_key("b"), b.clone(), RegistrationInfo::BUILT_IN);
+        assert_eq!(registered_a, HolderId(0));
+        assert_eq!(registered_b, HolderId(1));
+
+        let frozen = builder.freeze();
+        assert_eq!(frozen.get_id(Arc::as_ref(&a)), 0);
+        assert_eq!(frozen.get_id(Arc::as_ref(&b)), 1);
+        assert_eq!(frozen.get_any(), Some(HolderId(0)));
+        assert_eq!(
+            frozen.get_key(Arc::as_ref(&b)),
+            Some(Identifier::with_default_namespace("b"))
+        );
+    }
+
+    #[test]
+    fn reversed_intrusive_create_and_register_order_still_uses_insertion_index() {
+        // create(A); create(B); register(B); register(A): the id is the
+        // insertion index at REGISTER time, not the creation order.
+        let mut builder = RegistryBuilder::new_with_intrusive(&key());
+        let a = Arc::new(TestElement(1));
+        let b = Arc::new(TestElement(2));
+        builder.create_intrusive_holder(a.clone());
+        builder.create_intrusive_holder(b.clone());
+        let registered_b =
+            builder.register(&element_key("b"), b.clone(), RegistrationInfo::BUILT_IN);
+        let registered_a =
+            builder.register(&element_key("a"), a.clone(), RegistrationInfo::BUILT_IN);
+        assert_eq!(registered_b, HolderId(0));
+        assert_eq!(registered_a, HolderId(1));
+        let frozen = builder.freeze();
+        assert_eq!(frozen.get_id(Arc::as_ref(&b)), 0);
+        assert_eq!(frozen.get_id(Arc::as_ref(&a)), 1);
+    }
+
+    #[test]
+    fn interleaved_intrusive_registration_tag_bind_freeze_and_lookups() {
+        // Full lifecycle over the interleaved order: tag/bind, freeze, and
+        // every lookup sees the same id space.
+        let mut builder = RegistryBuilder::new_with_intrusive(&key());
+        let a = Arc::new(TestElement(1));
+        let b = Arc::new(TestElement(2));
+        builder.create_intrusive_holder(a.clone());
+        builder.create_intrusive_holder(b.clone());
+        let registered_a =
+            builder.register(&element_key("a"), a.clone(), RegistrationInfo::BUILT_IN);
+        let registered_b =
+            builder.register(&element_key("b"), b.clone(), RegistrationInfo::BUILT_IN);
+        let tag = TagKey::create(&key(), Identifier::with_default_namespace("group"));
+        builder.bind_tags(vec![(tag.clone(), vec![registered_a, registered_b])]);
+
+        let frozen = builder.freeze();
+        assert_eq!(frozen.size(), 2);
+        // element id == holder id == network id == insertion index.
+        assert_eq!(frozen.get_id(Arc::as_ref(&a)), 0);
+        assert_eq!(frozen.get_id(Arc::as_ref(&b)), 1);
+        assert_eq!(frozen.get_tag(&tag), Some(&[HolderId(0), HolderId(1)][..]));
+        assert_eq!(frozen.get_tag_or_empty(&tag), &[HolderId(0), HolderId(1)]);
+        assert_eq!(frozen.list_tags(), vec![tag.clone()]);
+        assert_eq!(frozen.get_value(&element_key("a")), Some(&TestElement(1)));
+        assert_eq!(frozen.get_value(&element_key("b")), Some(&TestElement(2)));
+        assert_eq!(frozen.by_id(0), Some(&TestElement(1)));
+        assert_eq!(frozen.by_id(1), Some(&TestElement(2)));
+        assert_eq!(
+            frozen.key_set(),
+            vec![
+                Identifier::with_default_namespace("a"),
+                Identifier::with_default_namespace("b")
+            ]
+        );
+        assert_eq!(
+            frozen.registry_key_set(),
+            vec![element_key("a"), element_key("b")]
+        );
+        assert_eq!(frozen.get_any(), Some(HolderId(0)));
+    }
+
+    #[test]
+    fn interleaved_unbound_holder_and_registrations_assign_insertion_index_ids() {
+        // An unbound-created holder (stand-alone, via get_or_create_holder)
+        // carries no pre-assigned id either: the key registered LAST lands at
+        // the insertion index at register time. create(x); register(a);
+        // register(x) => x -> 1, not 0.
+        let mut builder = RegistryBuilder::new(&key());
+        let x = builder.get_or_create_holder(&element_key("x"));
+        // Placeholder equals 0 (values.len() at creation), but that is NOT the
+        // final id.
+        assert_eq!(x, HolderId(0));
+        register(&mut builder, "a", 1);
+        let registered_x = builder.register(
+            &element_key("x"),
+            Arc::new(TestElement(2)),
+            RegistrationInfo::BUILT_IN,
+        );
+        assert_eq!(registered_x, HolderId(1));
+        // get_or_create_holder now resolves to the registered id.
+        assert_eq!(builder.get_or_create_holder(&element_key("x")), HolderId(1));
+        let frozen = builder.freeze();
+        assert_eq!(frozen.get_any(), Some(HolderId(0)));
+        assert_eq!(frozen.by_id(1), Some(&TestElement(2)));
+        assert_eq!(frozen.by_id(0), Some(&TestElement(1)));
     }
 
     #[test]
