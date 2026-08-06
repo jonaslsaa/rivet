@@ -8,6 +8,12 @@ A unit is ready when:
     --include-needs-split,
   - every dep in its `deps` column is done.
 
+`needs_split` is the actionable pre-translation split state (issue #173): `yes`
+only for units that are not done and own more than 15 files. It is a derived
+view of the structural `cycle`/`files` columns, not a second structural fact —
+under `--include-cycles` alone, a small cyclic unit is pickable even if it was
+previously excluded by `needs_split`, because its cycle is what gates it.
+
 Deps are resolved to units robustly, so the nbt class-cluster split never
 self-depends even though its units share the `net.minecraft.nbt` java_package.
 Each dep token is resolved to exactly one unit in this order:
