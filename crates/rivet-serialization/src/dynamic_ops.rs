@@ -703,8 +703,9 @@ pub trait DynamicOps: Debug {
     /// `createList(Stream<T> input)`.
     fn create_list(&self, input: Vec<Self::Output>) -> Self::Output;
 
-    /// `getByteBuffer(T input)` — STUB(mc.nbt): Java returns a `ByteBuffer`;
-    /// narrowed to `Vec<u8>`.
+    /// `getByteBuffer(T input)` — Java returns a `ByteBuffer`; the port narrows
+    /// it to `Vec<u8>` (the byte-width `Number.byteValue()` narrowing is
+    /// preserved, and the port never exposes buffer position/limit state).
     fn get_byte_buffer(&self, input: &Self::Output) -> DataResult<Vec<u8>>;
 
     /// `createByteList(ByteBuffer input)`.

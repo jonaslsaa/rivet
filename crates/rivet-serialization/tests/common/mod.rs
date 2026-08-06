@@ -388,6 +388,60 @@ impl Canonical for JsonValue {
     }
 }
 
+/// `NbtOps` output (`net.minecraft.nbt.Tag`) canonicalization.
+///
+/// Mirrors Java `Tag.equals`/`NumericTag.equals` at the int/float level only:
+/// integer-typed tags (`ByteTag`/`ShortTag`/`IntTag`/`LongTag`) all collapse
+/// to `Canon::Number(Integer)` and float-typed tags (`FloatTag`/`DoubleTag`)
+/// to `Canon::Number(Float)`. Individual NBT widths are not preserved — Java
+/// distinguishes `IntTag(1)` from `ByteTag(1)` by class, this canonical form
+/// does not — but the int/float split keeps a Double-widened encode
+/// (`NbtOps.createNumeric` → `DoubleTag`) distinguishable from an `IntTag`.
+/// Byte arrays map to a `Canon::List` of
+/// bytes, so a byte array and a plain list of byte tags compare equal — the
+/// same observable value (both are a sequence of signed bytes; `NbtOps`/DFU
+/// treat `ByteArrayTag` and a `ListTag` of `ByteTag` interchangeably in the
+/// stream/byte-buffer surface).
+impl Canonical for rivet_nbt::tag::Tag {
+    fn canon(&self) -> Canon {
+        use rivet_nbt::tag::Tag;
+        match self {
+            Tag::Byte(v) => Canon::Number(CanonNumber::Integer(v.value as i64)),
+            Tag::Short(v) => Canon::Number(CanonNumber::Integer(v.value as i64)),
+            Tag::Int(v) => Canon::Number(CanonNumber::Integer(v.value as i64)),
+            Tag::Long(v) => Canon::Number(CanonNumber::Integer(v.value)),
+            Tag::Float(v) => Canon::Number(CanonNumber::Float(v.value as f64)),
+            Tag::Double(v) => Canon::Number(CanonNumber::Float(v.value)),
+            Tag::ByteArray(v) => Canon::List(
+                v.data
+                    .iter()
+                    .map(|b| Canon::Number(CanonNumber::Integer(*b as i64)))
+                    .collect(),
+            ),
+            Tag::String(v) => Canon::Str(v.value.clone()),
+            Tag::List(v) => Canon::List(v.list.iter().map(|t| t.canon()).collect()),
+            Tag::Compound(v) => Canon::Map(
+                v.entry_set()
+                    .map(|(k, tag)| (k.clone(), tag.canon()))
+                    .collect(),
+            ),
+            Tag::IntArray(v) => Canon::List(
+                v.data
+                    .iter()
+                    .map(|i| Canon::Number(CanonNumber::Integer(*i as i64)))
+                    .collect(),
+            ),
+            Tag::LongArray(v) => Canon::List(
+                v.data
+                    .iter()
+                    .map(|l| Canon::Number(CanonNumber::Integer(*l)))
+                    .collect(),
+            ),
+            Tag::End(_) => Canon::Null,
+        }
+    }
+}
+
 /// Convenience bound for the DFU suite: a `DynamicOps` whose output is
 /// canonicalizable (and therefore comparable across backends).
 pub trait CanonOps: DynamicOps
