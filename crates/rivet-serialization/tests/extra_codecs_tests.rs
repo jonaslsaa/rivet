@@ -1,6 +1,7 @@
 //! Focused tests for the partial `net.minecraft.util.ExtraCodecs` port
 //! (`rivet_serialization::extra_codecs`): `overrideLifecycle`,
-//! `retrieveContext`, `orCompressed`, `idResolverCodec`.
+//! `retrieveContext`, `orCompressed`, `idResolverCodec`, `nonEmptyList`,
+//! `orCompressed(MapCodec)`, and `LateBoundIdMapper`.
 //!
 //! Semantics are grounded in `ExtraCodecs.java` (Paper 26.2):
 //! - `overrideLifecycle` sets the decode lifecycle from the decoded value on a
@@ -11,6 +12,9 @@
 //!   `ops.compressMaps()` is true (JsonOps COMPRESSED vs INSTANCE).
 //! - `idResolverCodec` round-trips via int and errors with Java's exact
 //!   messages `"Unknown element id: N"` / `"Element with unknown id: X"`.
+//! - `nonEmptyList` rejects an empty decoded list with "List must have contents".
+//! - `orCompressed(MapCodec)` reports only the compressed half's keys.
+//! - `LateBoundIdMapper.codec(Codec<I>)` resolves ids to values by equality.
 
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
@@ -195,6 +199,83 @@ fn or_compressed_routes_by_ops_compress_maps() {
 
 // ---------------------------------------------------------------------------
 // idResolverCodec
+// ---------------------------------------------------------------------------
+
+#[test]
+fn or_compressed_map_keys_come_from_compressed() {
+    // Java `orCompressed(MapCodec)` returns `compressed.keys()` (the MapCodec
+    // overload delegates `keys` to the compressed half, unlike the Codec
+    // overload which has no keys). Observable here: the compressed half's key
+    // is present and the normal half's is absent. (The field codec reports its
+    // own key twice — encoder+decoder halves — which is a pre-existing quirk of
+    // `field_of`'s keys and not under test.)
+    let ops = JsonOps::INSTANCE;
+    let normal = codec::field_of(codec::string_codec::<JsonOps>(), "normal_key".to_string());
+    let compressed = codec::field_of(
+        codec::string_codec::<JsonOps>(),
+        "compressed_key".to_string(),
+    );
+    let codec = extra_codecs::or_compressed_map(normal, compressed);
+    let keys = codec.keys(&ops);
+    let compressed_key = ops.create_string("compressed_key".to_string());
+    let normal_key = ops.create_string("normal_key".to_string());
+    assert!(
+        keys.contains(&compressed_key),
+        "compressed key must be reported: {keys:?}"
+    );
+    assert!(
+        !keys.contains(&normal_key),
+        "normal key must NOT be reported: {keys:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LateBoundIdMapper + idResolverCodec (typed overload)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn late_bound_id_mapper_codec_round_trip() {
+    // `LateBoundIdMapper<String, V>.codec(Codec.STRING)` is the typed overload
+    // of `idResolverCodec` used by `ComponentSerialization`'s discriminator:
+    // decode maps an id string to its registered value, encode maps a value
+    // back to its id (by value equality, like Java's BiMap).
+    let ops = JsonOps::INSTANCE;
+    let mapper = extra_codecs::LateBoundIdMapper::new();
+    mapper.put("a".to_string(), 1);
+    mapper.put("b".to_string(), 2);
+    let codec: std::sync::Arc<dyn Codec<i32, JsonOps>> = mapper.codec(codec::string_codec());
+
+    let encoded = codec.encode_start(&ops, &1).unwrap_result("encode");
+    assert_eq!(encoded, json!("a"));
+    let (decoded, _) = codec.decode(&ops, &json!("b")).unwrap_result("decode");
+    assert_eq!(decoded, 2);
+}
+
+#[test]
+fn late_bound_id_mapper_unknown_id_and_value_errors() {
+    // Java's `idResolverCodec` error messages, via the typed overload.
+    let ops = JsonOps::INSTANCE;
+    let mapper = extra_codecs::LateBoundIdMapper::new();
+    mapper.put("a".to_string(), 1);
+    let codec: std::sync::Arc<dyn Codec<i32, JsonOps>> = mapper.codec(codec::string_codec());
+
+    let unknown_id = codec.decode(&ops, &json!("z"));
+    assert!(unknown_id.is_error());
+    assert_eq!(
+        unknown_id.error_ref().unwrap().message(),
+        "Unknown element id: z"
+    );
+
+    let unknown_value = codec.encode_start(&ops, &42);
+    assert!(unknown_value.is_error());
+    assert_eq!(
+        unknown_value.error_ref().unwrap().message(),
+        "Element with unknown id: 42"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// idResolverCodec (int overload)
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -28,6 +28,7 @@ pub mod encoder;
 pub mod extra_codecs;
 pub mod functions;
 pub mod json_ops;
+pub mod key_dispatch_codec;
 pub mod lifecycle;
 pub mod map_codec;
 pub mod map_decoder;
