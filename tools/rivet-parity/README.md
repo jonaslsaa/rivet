@@ -50,11 +50,30 @@ Useful flags:
 
 - `--limit-fixtures=N` — cap the fixture corpus for a fast smoke run.
 - `--no-oracle` — skip the oracle (only Rust-internal `idem` checks run; every
-  oracle-dependent check is emitted with `"skipped": true`).
+  oracle-dependent check is emitted with `"skipped": true`). The run is
+  UNVERIFIED (exit 3) because nothing was compared against Paper.
+- `--require-oracle` — a dead oracle (boot failure) is UNVERIFIED (exit 3) and
+  the run stops immediately instead of degrading to Rust-only checks. The merge
+  gate always passes this flag. Mutually exclusive with `--no-oracle`.
 - `--scoreboard` — emit/refresh the checked-in `PARITY.md` scoreboard at the
   workspace root from the live run's stats (see below). Rows are rendered only
   for checks that actually ran; an oracle-less run therefore records only the
   `idem` row instead of claiming a parity failure.
+
+### Exit codes (machine-stable status)
+
+`scripts/gate.sh` classifies the parity step purely from the exit code — never
+by scraping stderr text:
+
+| exit | status | meaning |
+| --- | --- | --- |
+| 0 | `VERIFIED` | the oracle booted and ran; no hard mismatches |
+| 1 | `FAILED` | the oracle ran but parity diverged (hard mismatches) |
+| 3 | `UNVERIFIED` | the oracle did not boot / did not run; nothing was compared against Paper |
+| other (e.g. 101) | `FAILED` | the tool crashed or errored |
+
+Keep `EXIT_UNVERIFIED` in `src/main.rs` in sync with
+`ORACLE_EXIT_UNVERIFIED` in `scripts/gate.sh`.
 
 ### Reading the transcript
 
@@ -81,7 +100,7 @@ fields (e.g. error text on rejected inputs) are informational and do not flip
 `ok`. Checks with `"divergences"` are `ok` but carry the documented
 divergence; only checks with a failing non-soft field are hard mismatches.
 
-The exit code is 0 when there are no hard mismatches, 1 otherwise.
+The exit code encodes the status — see the exit-code table above.
 
 ## Output on the M0 corpus
 

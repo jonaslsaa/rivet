@@ -37,6 +37,15 @@ use serde_json::{Value, json};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
+/// Exit code for "UNVERIFIED": the oracle did not run, so no Paper comparison
+/// happened. Machine-stable contract with `scripts/gate.sh`:
+///   0 = VERIFIED (oracle booted and ran, no hard mismatches)
+///   1 = FAILED (oracle ran; parity diverged)
+///   3 = UNVERIFIED (oracle did not boot / not attempted)
+/// Any other nonzero exit (e.g. a panic) is a tool failure, which the gate
+/// treats as FAILED. Keep in sync with gate.sh's ORACLE_EXIT_UNVERIFIED.
+const EXIT_UNVERIFIED: i32 = 3;
+
 /// One checked comparison between the oracle and Rust.
 struct Check {
     kind: &'static str,
@@ -560,19 +569,29 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut limit_fixtures: Option<usize> = None;
     let mut no_oracle = false;
+    let mut require_oracle = false;
     let mut write_scoreboard_flag = false;
     for arg in &args[1..] {
         match arg.as_str() {
             "--no-oracle" => no_oracle = true,
+            "--require-oracle" => require_oracle = true,
             "--scoreboard" => write_scoreboard_flag = true,
             "--help" | "-h" => {
                 eprintln!(
                     "rivet-parity: byte-for-byte NBT/SNBT parity diff vs the Paper Java oracle\n\
                      \n\
-                     usage: cargo run -p rivet-parity [--no-oracle] [--scoreboard] [--limit-fixtures N]\n\
+                     usage: cargo run -p rivet-parity [--no-oracle | --require-oracle] [--scoreboard] [--limit-fixtures N]\n\
                      \n\
                      JSON-Lines transcript on stdout, human summary on stderr.\n\
-                     --scoreboard also emits/refreshes PARITY.md at the workspace root.\n\
+                     Exit codes: 0 VERIFIED (oracle ran, no hard mismatches);\n\
+                     1 FAILED (oracle ran; parity diverged); 3 UNVERIFIED\n\
+                     (oracle did not run — not a Paper comparison).\n\
+                     --no-oracle      run the Rust-only checks without spawning the\n\
+                                      oracle (the run is UNVERIFIED, exit 3)\n\
+                     --require-oracle oracle boot failure is UNVERIFIED (exit 3) and\n\
+                                      the run stops immediately instead of degrading.\n\
+                                      The merge gate always passes this flag.\n\
+                     --scoreboard     also emit/refresh PARITY.md at the workspace root.\n\
                      The oracle needs the M0 Paper runtime; point RIVET_PAPER_JAR,\n\
                      RIVET_PAPER_LIBRARIES, RIVET_PAPER_RUNTIME_JAR at it."
                 );
@@ -588,15 +607,23 @@ fn main() {
             }
         }
     }
+    if no_oracle && require_oracle {
+        eprintln!("--no-oracle and --require-oracle are mutually exclusive");
+        std::process::exit(2);
+    }
 
     let mut summary = Summary::default();
     let mut transcript: Vec<Value> = Vec::new();
+    // Whether any Paper comparison actually ran. Decides VERIFIED vs
+    // UNVERIFIED at the end — an oracle that could not boot never exits 0.
+    let mut oracle_ran = false;
 
     let mut oracle_handle = if no_oracle {
         None
     } else {
         match oracle::Oracle::spawn() {
             Ok(mut o) => {
+                oracle_ran = true;
                 match o.provenance() {
                     Ok(p) => eprintln!(
                         "[rivet-parity] oracle: Paper {} ({}) sha256 {}",
@@ -614,6 +641,12 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("[rivet-parity] ORACLE BLOCKER: {e}");
+                if require_oracle {
+                    eprintln!(
+                        "[rivet-parity] --require-oracle: oracle boot failure is UNVERIFIED (exit {EXIT_UNVERIFIED})"
+                    );
+                    std::process::exit(EXIT_UNVERIFIED);
+                }
                 eprintln!(
                     "[rivet-parity] continuing with Rust-only checks (idem + internal round-trips)"
                 );
@@ -806,9 +839,17 @@ fn main() {
         for id in &summary.hard_ids {
             eprintln!("    - {id}");
         }
+        eprintln!();
+        eprintln!("  STATUS: FAILED (parity diverged vs Paper)");
         std::process::exit(1);
+    }
+    if !oracle_ran {
+        eprintln!();
+        eprintln!("  STATUS: UNVERIFIED (oracle did not run; no Paper comparison was made)");
+        std::process::exit(EXIT_UNVERIFIED);
     }
     if summary.mismatched.values().sum::<usize>() == 0 {
         eprintln!("  RESULT: byte-for-byte parity holds (within documented divergences)");
     }
+    eprintln!("  STATUS: VERIFIED (all oracle checks ran)");
 }
