@@ -107,7 +107,9 @@ pub fn run_builtin(op: BuiltinOp, ops: &NbtOps, arguments: &[Tag]) -> Result<Tag
 /// null (→ error).
 fn run_bool(ops: &NbtOps, arguments: &[Tag]) -> Result<Tag, BuiltinError> {
     let arg = &arguments[0];
-    match arg.as_number() {
+    // Java `SnbtOperations` bool: `getNumberValue(arg).result().map(n ->
+    // n.doubleValue() != 0.0)`.
+    match arg.as_number_f64() {
         Some(n) => Ok(ops.create_boolean(n != 0.0)),
         None => Err(BuiltinError::ExpectedNumberOrBoolean),
     }

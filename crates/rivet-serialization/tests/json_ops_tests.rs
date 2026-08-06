@@ -8,6 +8,7 @@
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::{DynamicOps, MapLike};
 use rivet_serialization::json_ops::JsonOps;
+use rivet_serialization::number::Number as TypedNumber;
 use rivet_serialization::pair::Pair;
 use serde_json::{Number, Value, json};
 use std::collections::HashMap;
@@ -208,7 +209,10 @@ fn compressed_accepts_numeric_strings_in_get_number_value() {
     // Java `JsonOps.COMPRESSED.getNumberValue("5")` → `Integer.parseInt`.
     let ops = JsonOps::COMPRESSED;
     let result = ops.get_number_value(&Value::String("42".to_string()));
-    assert_eq!(result.result().copied(), Some(42.0));
+    assert_eq!(
+        result.result().copied(),
+        Some(rivet_serialization::number::Number::Int(42))
+    );
 
     // Out of i32 range → parse error (Java `Integer.parseInt`, not long).
     let result = ops.get_number_value(&Value::String("99999999999999".to_string()));
@@ -248,14 +252,23 @@ fn create_and_empty_forms() {
     assert_eq!(ops.empty(), Value::Null);
     assert_eq!(ops.empty_map(), json!({}));
     assert_eq!(ops.empty_list(), json!([]));
-    assert_eq!(ops.create_numeric(3.5), json!(3.5));
+    assert_eq!(
+        ops.create_numeric(rivet_serialization::number::Number::Double(3.5)),
+        json!(3.5)
+    );
     assert_eq!(ops.create_boolean(true), json!(true));
     assert_eq!(ops.create_string("s".to_string()), json!("s"));
 
     // JSON cannot represent NaN/Infinity → Gson can, but the port narrows to
     // `Null` (documented deviation, see json_ops.rs).
-    assert_eq!(ops.create_numeric(f64::NAN), Value::Null);
-    assert_eq!(ops.create_numeric(f64::INFINITY), Value::Null);
+    assert_eq!(
+        ops.create_numeric(rivet_serialization::number::Number::Double(f64::NAN)),
+        Value::Null
+    );
+    assert_eq!(
+        ops.create_numeric(rivet_serialization::number::Number::Double(f64::INFINITY)),
+        Value::Null
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -611,4 +624,102 @@ fn default_stream_narrowing_over_json() {
 fn compress_maps_flag() {
     assert!(!JsonOps::INSTANCE.compress_maps());
     assert!(JsonOps::COMPRESSED.compress_maps());
+}
+
+// ---------------------------------------------------------------------------
+// Typed Number boundary semantics (DFU 10.0.21)
+// ---------------------------------------------------------------------------
+
+/// `getNumberValue` of an integer JSON literal.
+#[test]
+fn get_number_value_returns_typed_integer_variants() {
+    let ops = JsonOps::INSTANCE;
+    // i32 range → Int.
+    assert_eq!(
+        ops.get_number_value(&json!(42)).result().copied(),
+        Some(TypedNumber::Int(42))
+    );
+    // i64 range → Long.
+    assert_eq!(
+        ops.get_number_value(&json!(9_000_000_000i64))
+            .result()
+            .copied(),
+        Some(TypedNumber::Long(9_000_000_000))
+    );
+    // Out of i64 range (u64 → beyond) → Double.
+    assert_eq!(
+        ops.get_number_value(&json!(18_446_744_073_709_551_615u64))
+            .result()
+            .copied(),
+        Some(TypedNumber::Double(18_446_744_073_709_551_615.0))
+    );
+    // Non-integral literal → Double.
+    assert_eq!(
+        ops.get_number_value(&json!(3.5)).result().copied(),
+        Some(TypedNumber::Double(3.5))
+    );
+    // Compressed string form → Integer.parseInt.
+    assert_eq!(
+        JsonOps::COMPRESSED
+            .get_number_value(&Value::String("42".into()))
+            .result()
+            .copied(),
+        Some(TypedNumber::Int(42))
+    );
+}
+
+/// `Codec.LONG` round-trips i64 min/max and 2^53 ± 1 exactly through JSON.
+#[test]
+fn long_codec_preserves_i64_precision_through_json() {
+    let ops = JsonOps::INSTANCE;
+    let long = rivet_serialization::codec::long_codec::<JsonOps>();
+    let cases = [
+        i64::MIN,
+        i64::MAX,
+        (1i64 << 53) - 1,
+        (1i64 << 53) + 1,
+        9_000_000_000,
+        -9_000_000_000,
+    ];
+    for value in cases {
+        let rt = round_trip(&ops, &long, value);
+        assert_eq!(rt, value, "Codec.LONG did not round-trip {value}");
+    }
+}
+
+/// The JSON round-trip keeps the full i64 value (serde_json stores integral
+/// literals exactly; the old f64 surface would have truncated above 2^53).
+#[test]
+fn json_encodes_i64_max_exactly() {
+    let ops = JsonOps::INSTANCE;
+    let long = rivet_serialization::codec::long_codec::<JsonOps>();
+    let encoded = long.encode_start(&ops, &i64::MAX).unwrap_result("encode");
+    assert_eq!(encoded, json!(i64::MAX));
+    // The old f64 path would have lost the low bits.
+    assert_ne!(encoded, json!(i64::MAX as f64));
+}
+
+/// Float/double codecs read the JSON number via `Number.floatValue`/`doubleValue`.
+#[test]
+fn float_double_codecs_round_trip_through_json() {
+    let ops = JsonOps::INSTANCE;
+    let float = rivet_serialization::codec::float_codec::<JsonOps>();
+    assert_eq!(round_trip(&ops, &float, 3.5f32), 3.5f32);
+    assert_eq!(round_trip(&ops, &float, -0.25f32), -0.25f32);
+
+    let double = rivet_serialization::codec::double_codec::<JsonOps>();
+    assert_eq!(round_trip(&ops, &double, 0.1), 0.1);
+    assert_eq!(round_trip(&ops, &double, 1.0 / 3.0), 1.0 / 3.0);
+}
+
+/// Signed narrowing through the byte codec: reading a JSON number as a byte
+/// wraps via `(int)` then `(byte)`.
+#[test]
+fn byte_codec_narrows_through_json() {
+    let ops = JsonOps::INSTANCE;
+    let byte = rivet_serialization::codec::byte_codec::<JsonOps>();
+    // `300 -> (int)300 -> (byte)300 == 44`.
+    assert_eq!(byte.parse(&ops, &json!(300)).unwrap_result("parse"), 44i8);
+    assert_eq!(byte.parse(&ops, &json!(-300)).unwrap_result("parse"), -44i8);
+    assert_eq!(byte.parse(&ops, &json!(42)).unwrap_result("parse"), 42i8);
 }

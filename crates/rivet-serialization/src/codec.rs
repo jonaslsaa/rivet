@@ -346,7 +346,8 @@ pub fn bool_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<bool, Ops>> {
 /// `Codec.BYTE`.
 pub fn byte_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i8, Ops>> {
     Arc::new(PrimitiveCodecImpl::<i8, Ops> {
-        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| *n as i8)),
+        // Java `PrimitiveCodec<Byte>`: `getNumberValue(input).map(Number::byteValue)`.
+        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| n.byte_value())),
         write: Arc::new(|ops, value| ops.create_byte(*value)),
         name: "Byte",
     })
@@ -355,7 +356,8 @@ pub fn byte_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i8, Ops>> {
 /// `Codec.SHORT`.
 pub fn short_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i16, Ops>> {
     Arc::new(PrimitiveCodecImpl::<i16, Ops> {
-        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| *n as i16)),
+        // Java `PrimitiveCodec<Short>`: `.map(Number::shortValue)`.
+        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| n.short_value())),
         write: Arc::new(|ops, value| ops.create_short(*value)),
         name: "Short",
     })
@@ -364,7 +366,8 @@ pub fn short_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i16, Ops>> {
 /// `Codec.INT`.
 pub fn int_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i32, Ops>> {
     Arc::new(PrimitiveCodecImpl::<i32, Ops> {
-        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| *n as i32)),
+        // Java `PrimitiveCodec<Integer>`: `.map(Number::intValue)`.
+        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| n.int_value())),
         write: Arc::new(|ops, value| ops.create_int(*value)),
         name: "Int",
     })
@@ -373,7 +376,8 @@ pub fn int_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i32, Ops>> {
 /// `Codec.LONG`.
 pub fn long_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i64, Ops>> {
     Arc::new(PrimitiveCodecImpl::<i64, Ops> {
-        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| *n as i64)),
+        // Java `PrimitiveCodec<Long>`: `.map(Number::longValue)`.
+        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| n.long_value())),
         write: Arc::new(|ops, value| ops.create_long(*value)),
         name: "Long",
     })
@@ -382,7 +386,8 @@ pub fn long_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i64, Ops>> {
 /// `Codec.FLOAT`.
 pub fn float_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<f32, Ops>> {
     Arc::new(PrimitiveCodecImpl::<f32, Ops> {
-        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| *n as f32)),
+        // Java `PrimitiveCodec<Float>`: `.map(Number::floatValue)`.
+        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| n.float_value())),
         write: Arc::new(|ops, value| ops.create_float(*value)),
         name: "Float",
     })
@@ -391,7 +396,8 @@ pub fn float_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<f32, Ops>> {
 /// `Codec.DOUBLE`.
 pub fn double_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<f64, Ops>> {
     Arc::new(PrimitiveCodecImpl::<f64, Ops> {
-        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| *n)),
+        // Java `PrimitiveCodec<Double>`: `.map(Number::doubleValue)`.
+        read: Arc::new(|ops, input| ops.get_number_value(input).map(|n| n.double_value())),
         write: Arc::new(|ops, value| ops.create_double(*value)),
         name: "Double",
     })

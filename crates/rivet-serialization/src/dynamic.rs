@@ -192,8 +192,11 @@ impl<O> Dynamic<O> {
         })
     }
 
-    /// `Dynamic.asNumber()`.
-    pub fn as_number(&self, ops: &impl DynamicOps<Output = O>) -> DataResult<f64> {
+    /// `Dynamic.asNumber()` — the boxed `Number`.
+    pub fn as_number(
+        &self,
+        ops: &impl DynamicOps<Output = O>,
+    ) -> DataResult<crate::number::Number> {
         ops.get_number_value(&self.value)
     }
 

@@ -173,25 +173,19 @@ impl Tag {
         }
     }
 
-    /// `Tag.asNumber()` — boxed `Number`, exposed as f64 (matches the numeric
-    /// tags' `doubleValue()` exactly).
-    ///
-    /// Fidelity note: Java returns the typed boxed `Number` (Byte/Short/Int/
-    /// Long/Float/Double), so the exact type and full precision are preserved.
-    /// Returning `f64` here loses precision above 2^53 (e.g. `LongTag(2^63-1)`)
-    /// and the type. Not observable through the current stubbed DFU surface,
-    /// but codec `long` round-trips will need a typed `Number` enum (mirroring
-    /// `NumericTag`/`box()`) when the DFU port lands.
-    pub fn as_number(&self) -> Option<f64> {
-        match self {
-            Tag::Byte(t) => Some(t.value as f64),
-            Tag::Short(t) => Some(t.value as f64),
-            Tag::Int(t) => Some(t.value as f64),
-            Tag::Long(t) => Some(t.value as f64),
-            Tag::Float(t) => Some(t.value as f64),
-            Tag::Double(t) => Some(t.value),
-            _ => None,
-        }
+    /// `Tag.asNumber()` — the boxed `Number` (`NumericTag.box()`).
+    pub fn as_number(&self) -> Option<rivet_serialization::number::Number> {
+        crate::numeric_tag::NumericTag::try_from(self)
+            .ok()
+            .map(|n| n.boxed())
+    }
+
+    /// The boxed `Number` as its `doubleValue()` — `asNumber().map(Number::doubleValue)`.
+    /// Fidelity note: Java narrows via `Number.doubleValue()` (exact for
+    /// integral tags up to 2^53, rounded beyond). Kept as a convenience for the
+    /// SNBT `bool` operation's `doubleValue() != 0.0` check.
+    pub fn as_number_f64(&self) -> Option<f64> {
+        self.as_number().map(|n| n.double_value())
     }
 
     /// `Tag.asByte()`.

@@ -41,7 +41,7 @@ fn dynamic_get_and_as_number() {
     assert_eq!(
         got.result()
             .and_then(|d| d.as_number(&ops).result().copied()),
-        Some(7.0)
+        Some(rivet_serialization::number::Number::Double(7.0))
     );
 }
 
@@ -152,7 +152,7 @@ fn optional_dynamic_get_field_chains() {
         inner
             .result()
             .and_then(|d| d.as_number(&ops).result().copied()),
-        Some(5.0)
+        Some(rivet_serialization::number::Number::Double(5.0))
     );
 }
 
@@ -181,7 +181,8 @@ fn optional_dynamic_flat_map_through_delegate() {
     let dynamic = Dynamic::new(&ops, Value::Map(vec![("a".to_string(), Value::Num(4.0))]));
     let field: OptionalDynamic<Value> = dynamic.get(&ops, "a");
     // `flatMap` over the inner `Dynamic` result.
-    let doubled: DataResult<f64> = field.flat_map(|d| d.as_number(&ops).map(|n| *n * 2.0));
+    let doubled: DataResult<f64> =
+        field.flat_map(|d| d.as_number(&ops).map(|n| n.double_value() * 2.0));
     assert_eq!(doubled.result(), Some(&8.0));
 }
 

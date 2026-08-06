@@ -12,12 +12,19 @@
 //!   retained there; the *absence* signal is only honored where `Option` can
 //!   express it (`MapLike.get`/`get_string` return `None` for a `Null` value,
 //!   matching Java's `getMap().get(key)` → `null`).
-//! - Java `getNumberValue` returns a boxed `Number` (f64-incompatible
-//!   precision); the STUB(mc.nbt) surface narrows it to `f64` (see
-//!   `dynamic_ops.rs`).
-//! - `createNumeric` and the `createDouble`/`createFloat` paths go through
-//!   `Number::from_f64`, which rejects NaN/Infinity (JSON cannot represent
-//!   them); such values fall back to `Value::Null`. Finite values match Gson.
+//! - Java `getNumberValue` returns a boxed `Number`; ported as the typed
+//!   [`Number`] enum. Gson stores an integer-literal `JsonPrimitive` as a
+//!   `LazilyParsedNumber` whose `intValue()`/`longValue()` parse the literal
+//!   (`Integer.parseInt` for `intValue`, `Long.parseLong` for `longValue`);
+//!   `Number::Int`/`Number::Long` reproduce the parsed values, and
+//!   `Number::Double` covers non-integral literals (`LazilyParsedNumber.doubleValue`
+//!   is a plain `Double.parseDouble`).
+//! - `createNumeric` wraps a Gson `JsonPrimitive(Number)`. Integral variants
+//!   become exact `serde_json::Number`s; `Float`/`Double` go through
+//!   `serde_json::Number::from_f64`, which rejects NaN/Infinity (JSON cannot
+//!   represent them) — such values fall back to `Value::Null` (documented
+//!   deviation; Gson would emit a `JsonPrimitive` that serializes as
+//!   `NaN`/`Infinity`).
 //! - `serde_json` is built with `preserve_order`, so `Value::Object` keeps
 //!   insertion order like Gson's `LinkedTreeMap`.
 //! - Java's `JsonOps` has no "pretty" variant in DFU 10.0.21 (`INSTANCE` and
@@ -32,7 +39,9 @@
 use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, MapLike, Pair, RecordBuilder};
 use crate::lifecycle::Lifecycle;
-use serde_json::{Map, Number, Value};
+use crate::number::Number;
+use serde_json::Number as JsonNumber;
+use serde_json::{Map, Value};
 
 /// `JsonOps.INSTANCE` / `JsonOps.COMPRESSED` — a `DynamicOps` over
 /// `serde_json::Value`, faithful to `com.mojang.serialization.JsonOps`.
@@ -167,58 +176,45 @@ impl DynamicOps for JsonOps {
         }
     }
 
-    fn get_number_value(&self, input: &Value) -> DataResult<f64> {
+    fn get_number_value(&self, input: &Value) -> DataResult<Number> {
         match input {
-            Value::Number(n) => match n.as_f64() {
-                Some(v) => DataResult::success(v),
-                None => DataResult::error(format!("Not a number: {input}")),
-            },
+            Value::Number(n) => DataResult::success(number_from_json(n)),
             Value::String(s) if self.compressed => match s.parse::<i32>() {
                 // Java `Integer.parseInt` (not long) for the compressed
                 // string form.
-                Ok(v) => DataResult::success(v as f64),
+                Ok(v) => DataResult::success(Number::Int(v)),
                 Err(e) => DataResult::error(format!("Not a number: {e} {input}")),
             },
             _ => DataResult::error(format!("Not a number: {input}")),
         }
     }
 
-    fn create_numeric(&self, value: f64) -> Value {
-        match Number::from_f64(value) {
-            Some(n) => Value::Number(n),
-            // JSON cannot represent NaN/Infinity (Gson can, via `JsonPrimitive`).
-            None => Value::Null,
-        }
+    fn create_numeric(&self, value: Number) -> Value {
+        json_from_number(value)
     }
 
     fn create_byte(&self, value: i8) -> Value {
-        Value::Number(Number::from(value))
+        Value::Number(JsonNumber::from(value))
     }
 
     fn create_short(&self, value: i16) -> Value {
-        Value::Number(Number::from(value))
+        Value::Number(JsonNumber::from(value))
     }
 
     fn create_int(&self, value: i32) -> Value {
-        Value::Number(Number::from(value))
+        Value::Number(JsonNumber::from(value))
     }
 
     fn create_long(&self, value: i64) -> Value {
-        Value::Number(Number::from(value))
+        Value::Number(JsonNumber::from(value))
     }
 
     fn create_float(&self, value: f32) -> Value {
-        match Number::from_f64(value as f64) {
-            Some(n) => Value::Number(n),
-            None => Value::Null,
-        }
+        json_from_number(Number::Float(value))
     }
 
     fn create_double(&self, value: f64) -> Value {
-        match Number::from_f64(value) {
-            Some(n) => Value::Number(n),
-            None => Value::Null,
-        }
+        json_from_number(Number::Double(value))
     }
 
     fn get_boolean_value(&self, input: &Value) -> DataResult<bool> {
@@ -436,7 +432,8 @@ impl DynamicOps for JsonOps {
                 let mut all_numbers = true;
                 for e in elements {
                     match self.get_number_value(e).result() {
-                        Some(n) => buffer.push(((*n as i32) as i8) as u8),
+                        // Java `Number.byteValue()`.
+                        Some(n) => buffer.push(n.byte_value() as u8),
                         None => {
                             all_numbers = false;
                             break;
@@ -468,7 +465,8 @@ impl DynamicOps for JsonOps {
                 let mut all_numbers = true;
                 for e in elements {
                     match self.get_number_value(e).result() {
-                        Some(n) => stream.push(*n as i32),
+                        // Java `Number.intValue()`.
+                        Some(n) => stream.push(n.int_value()),
                         None => {
                             all_numbers = false;
                             break;
@@ -500,7 +498,8 @@ impl DynamicOps for JsonOps {
                 let mut all_numbers = true;
                 for e in elements {
                     match self.get_number_value(e).result() {
-                        Some(n) => stream.push(*n as i64),
+                        // Java `Number.longValue()`.
+                        Some(n) => stream.push(n.long_value()),
                         None => {
                             all_numbers = false;
                             break;
@@ -686,7 +685,7 @@ impl<'a> RecordBuilder for JsonRecordBuilder<'a> {
 /// `BigDecimal.longValueExact()` for a `serde_json::Number`: `Some(i64)` when
 /// the value is integral and within long range, else `None` (Java throws
 /// `ArithmeticException`, falling through to the double path).
-fn exact_integral(number: &Number) -> Option<i64> {
+fn exact_integral(number: &JsonNumber) -> Option<i64> {
     if number.is_f64() {
         let d = number.as_f64()?;
         // `i64::MAX as f64` rounds up to 2^63, so `d < i64::MAX as f64`
@@ -704,4 +703,64 @@ fn exact_integral(number: &Number) -> Option<i64> {
     number
         .as_u64()
         .and_then(|u| (u <= i64::MAX as u64).then_some(u as i64))
+}
+
+/// `getNumberValue` on a `serde_json::Number` → typed `Number`.
+///
+/// Mirrors Gson `JsonPrimitive.getAsNumber()`: an integer literal yields a
+/// `LazilyParsedNumber` whose `intValue()`/`longValue()` are
+/// `Integer.parseInt`/`Long.parseLong` of the literal, and `doubleValue()` is
+/// `Double.parseDouble`. serde_json parses integer literals as `i64`/`u64`
+/// exactly and floats as `f64`, so:
+/// - integral value in i32 range → `Number::Int` (matches `LazilyParsedNumber.intValue`)
+/// - integral value in i64 range → `Number::Long` (matches `longValue`)
+/// - otherwise (float, or out-of-i64-range integral) → `Number::Double`.
+///
+/// Gson wraps the *original* literal so `longValue()` of a value stored as a
+/// float literal returns the parse of that literal; here a float-literal
+/// `JsonNumber` is `f64`, so `longValue()` goes through `f64 → i64` — the same
+/// value Java's `doubleValue()` then `longValue()` would yield for the double,
+/// but Java's `LazilyParsedNumber` would parse the literal exactly. This
+/// matches how the DFU suite round-trips numbers (integral literals are parsed
+/// exactly by serde_json).
+fn number_from_json(number: &JsonNumber) -> Number {
+    if let Some(i) = number.as_i64() {
+        return if i32::try_from(i).is_ok() {
+            Number::Int(i as i32)
+        } else {
+            Number::Long(i)
+        };
+    }
+    if let Some(u) = number.as_u64() {
+        return if u <= i64::MAX as u64 {
+            Number::Long(u as i64)
+        } else {
+            Number::Double(u as f64)
+        };
+    }
+    Number::Double(number.as_f64().unwrap_or(f64::NAN))
+}
+
+/// `createNumeric(Number)` — typed `Number` → `serde_json::Number` in a `Value`.
+///
+/// Java `JsonOps.createNumeric` is `new JsonPrimitive(Number)`, which stores
+/// the exact `Number`. Integral variants become the exact `serde_json::Number`;
+/// `Float`/`Double` go through `serde_json::Number::from_f64`, which returns
+/// `None` for NaN/Infinity — those fall back to `Value::Null` (documented
+/// deviation, see module docs).
+fn json_from_number(number: Number) -> Value {
+    match number {
+        Number::Byte(v) => Value::Number(JsonNumber::from(v)),
+        Number::Short(v) => Value::Number(JsonNumber::from(v)),
+        Number::Int(v) => Value::Number(JsonNumber::from(v)),
+        Number::Long(v) => Value::Number(JsonNumber::from(v)),
+        Number::Float(v) => Value::Number(match JsonNumber::from_f64(v as f64) {
+            Some(n) => n,
+            None => return Value::Null,
+        }),
+        Number::Double(v) => Value::Number(match JsonNumber::from_f64(v) {
+            Some(n) => n,
+            None => return Value::Null,
+        }),
+    }
 }
