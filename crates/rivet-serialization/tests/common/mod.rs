@@ -1,9 +1,20 @@
 //! Shared test harness for the DFU-mirroring integration tests.
 //!
 //! `Value`/`TestOps` form a minimal JSON-like `DynamicOps` (the same shape the
-//! crate's existing `codec_tests.rs` uses) so the ported codec surface can be
-//! exercised without depending on `rivet-nbt`. Kept in `tests/common/` so each
-//! integration test crate includes it via `mod common;`.
+//! crate's existing `codec_tests.rs` uses); the suite also runs against
+//! `JsonOps::INSTANCE`/`COMPRESSED`. All assertion helpers are ops-parametric
+//! (`OpsTestExt`, implemented for every `DynamicOps` whose output is
+//! `Canonical`), so a test body written against `&O: CanonOps` runs unchanged
+//! against each backend.
+//!
+//! Expected/input values are built through the ops (`v_str`/`v_num`/`v_int`/
+//! `v_list`/`v_map`), never by pattern-matching a concrete output type. Number
+//! equality preserves the int/float distinction (`v_int` for integer-typed
+//! fields, `v_num` for floats), matching Java's `JsonElement.equals`. Map
+//! equality is order-insensitive (`Canon::sorted`) where Java/Gson semantics
+//! require it (encoding a `HashMap`-backed source iterates nondeterministically);
+//! ordered keys remain available via `ordered_map_keys` for field-order
+//! assertions.
 //!
 //! Each integration test crate compiles this module on its own, so the helpers
 //! are individually used by only one test file at a time; `dead_code` is
@@ -11,13 +22,15 @@
 
 #![allow(dead_code)]
 
+use rivet_serialization::codec::Codec;
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::{DynamicOps, MapLike};
 use rivet_serialization::pair::Pair;
+use serde_json::Value as JsonValue;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-/// Minimal JSON-like value for exercising the codec surface.
+/// Minimal JSON-like value for exercising the `TestOps` backend.
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum Value {
     Null,
@@ -281,19 +294,176 @@ impl DynamicOps for TestOps {
     }
 }
 
-/// Test helpers mirroring the `CodecTests` assertions.
+// ---------------------------------------------------------------------------
+// Cross-ops value comparison
+// ---------------------------------------------------------------------------
+
+/// JSON number kind. Preserves the int/float typing Java's `JsonElement.equals`
+/// distinguishes (`JsonPrimitive(1)` != `JsonPrimitive(1.0)`), so a codec that
+/// emits an integer as a float (a Double NBT tag downstream) is caught by the
+/// round-trip assertions. `TestOps` is f64-only and maps every number to
+/// `Float`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CanonNumber {
+    /// An integral JSON number (serde_json `PosInt`/`NegInt`).
+    Integer(i64),
+    /// A JSON float (serde_json `Float`).
+    Float(f64),
+}
+
+/// Canonical tree used for cross-ops value equality.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Canon {
+    Null,
+    Bool(bool),
+    Number(CanonNumber),
+    Str(String),
+    List(Vec<Canon>),
+    /// Map entries in insertion order; `sorted` reorders by key.
+    Map(Vec<(String, Canon)>),
+}
+
+impl Canon {
+    /// Recursively sort map entries by key — order-insensitive equality, which
+    /// Java/Gson semantics require for map values (iteration order of a
+    /// `HashMap`-backed source is not deterministic).
+    pub fn sorted(self) -> Canon {
+        match self {
+            Canon::List(items) => Canon::List(items.into_iter().map(Canon::sorted).collect()),
+            Canon::Map(mut entries) => {
+                for value in entries.iter_mut().map(|(_, v)| v) {
+                    *value = std::mem::replace(value, Canon::Null).sorted();
+                }
+                entries.sort_by(|l, r| l.0.cmp(&r.0));
+                Canon::Map(entries)
+            }
+            other => other,
+        }
+    }
+}
+
+/// A `DynamicOps` output that can be normalized to `Canon` for comparison.
+pub trait Canonical: Clone + Debug + PartialEq {
+    fn canon(&self) -> Canon;
+}
+
+impl Canonical for Value {
+    fn canon(&self) -> Canon {
+        match self {
+            Value::Null => Canon::Null,
+            Value::Bool(b) => Canon::Bool(*b),
+            Value::Num(n) => Canon::Number(CanonNumber::Float(*n)),
+            Value::Str(s) => Canon::Str(s.clone()),
+            Value::List(items) => Canon::List(items.iter().map(|i| i.canon()).collect()),
+            Value::Map(entries) => Canon::Map(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.canon()))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl Canonical for JsonValue {
+    fn canon(&self) -> Canon {
+        match self {
+            JsonValue::Null => Canon::Null,
+            JsonValue::Bool(b) => Canon::Bool(*b),
+            // serde_json stores integer literals as `PosInt`/`NegInt` and floats
+            // as `Float`; keep the distinction (Java `JsonElement.equals` does),
+            // so an integer emitted as a float is not silently equal.
+            JsonValue::Number(n) => Canon::Number(
+                n.as_i64()
+                    .or_else(|| n.as_u64().map(|u| u as i64))
+                    .map(CanonNumber::Integer)
+                    .unwrap_or_else(|| CanonNumber::Float(n.as_f64().unwrap_or(f64::NAN))),
+            ),
+            JsonValue::String(s) => Canon::Str(s.clone()),
+            JsonValue::Array(items) => Canon::List(items.iter().map(|i| i.canon()).collect()),
+            JsonValue::Object(map) => {
+                Canon::Map(map.iter().map(|(k, v)| (k.clone(), v.canon())).collect())
+            }
+        }
+    }
+}
+
+/// Convenience bound for the DFU suite: a `DynamicOps` whose output is
+/// canonicalizable (and therefore comparable across backends).
+pub trait CanonOps: DynamicOps
+where
+    Self::Output: Canonical,
+{
+}
+impl<O: DynamicOps> CanonOps for O where O::Output: Canonical {}
+
+// ---------------------------------------------------------------------------
+// Ops-parametric value builders
+// ---------------------------------------------------------------------------
+
+/// `ops.create_boolean(value)`.
+pub fn v_bool<O: DynamicOps>(ops: &O, value: bool) -> O::Output {
+    ops.create_boolean(value)
+}
+
+/// `ops.create_numeric(value)` — the float form.
+pub fn v_num<O: DynamicOps>(ops: &O, value: f64) -> O::Output {
+    ops.create_numeric(value)
+}
+
+/// `ops.create_int(value)` — the integer form. `JsonOps` distinguishes int
+/// from float (`create_int(1)` vs `create_numeric(1.0)`), so int-typed codec
+/// fields must build their expected values with `v_int`, matching Java's
+/// `JsonElement.equals`; `TestOps` is f64-only and collapses both.
+pub fn v_int<O: DynamicOps>(ops: &O, value: i32) -> O::Output {
+    ops.create_int(value)
+}
+
+/// `ops.create_string(value)`.
+pub fn v_str<O: DynamicOps>(ops: &O, value: &str) -> O::Output {
+    ops.create_string(value.to_string())
+}
+
+/// `ops.create_list(items)`.
+pub fn v_list<O: DynamicOps>(ops: &O, items: Vec<O::Output>) -> O::Output {
+    ops.create_list(items)
+}
+
+/// `ops.create_map(entries)` — string keys, values in insertion order.
+pub fn v_map<O: DynamicOps>(ops: &O, entries: Vec<(&str, O::Output)>) -> O::Output {
+    ops.create_map(
+        entries
+            .into_iter()
+            .map(|(k, v)| Pair::of(ops.create_string(k.to_string()), v))
+            .collect(),
+    )
+}
+
+/// The map keys in insertion order (panics if `output` is not a map).
+pub fn ordered_map_keys<O: Canonical>(output: &O) -> Vec<String> {
+    match output.canon() {
+        Canon::Map(entries) => entries.into_iter().map(|(k, _)| k).collect(),
+        other => panic!("expected a map, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ops-parametric assertion helpers
+// ---------------------------------------------------------------------------
+
+/// Assertion helpers mirroring the upstream `CodecTests` free functions
+/// (`fromJava`, `assertFromJavaFails`, ...), implemented for any ops whose
+/// output is `Canonical`.
 ///
-/// The helper names mirror the upstream `CodecTests` free functions (`fromJava`,
-/// `assertFromJavaFails`, ...) but the `from_*` ones take `&self` (they read
-/// through the `TestOps`), so clippy's `wrong_self_convention` is allowed for
-/// the three that carry the `from_` prefix.
-impl TestOps {
+/// The `from_*` methods take `&self` (they read through the ops), so clippy's
+/// `wrong_self_convention` is allowed for the three that carry the `from_`
+/// prefix.
+pub trait OpsTestExt: DynamicOps + Sized + 'static
+where
+    Self::Output: Canonical,
+{
     /// `codec.parse(ops, value)` → unwrapped decoded value.
-    pub fn parse_or_throw<A>(
-        &self,
-        codec: &Arc<dyn rivet_serialization::Codec<A, TestOps>>,
-        value: &Value,
-    ) -> A
+    fn parse_or_throw<A>(&self, codec: &Arc<dyn Codec<A, Self>>, value: &Self::Output) -> A
     where
         A: 'static + Clone,
     {
@@ -302,11 +472,7 @@ impl TestOps {
 
     /// `codec.parse(ops, value).getPartialOrThrow(...)`.
     #[allow(clippy::wrong_self_convention)]
-    pub fn from_java_or_partial<A>(
-        &self,
-        codec: &Arc<dyn rivet_serialization::Codec<A, TestOps>>,
-        value: &Value,
-    ) -> A
+    fn from_java_or_partial<A>(&self, codec: &Arc<dyn Codec<A, Self>>, value: &Self::Output) -> A
     where
         A: 'static + Clone,
     {
@@ -319,10 +485,10 @@ impl TestOps {
 
     /// `codec.parse(ops, value).error().message()`.
     #[allow(clippy::wrong_self_convention)]
-    pub fn from_java_error_message<A>(
+    fn from_java_error_message<A>(
         &self,
-        codec: &Arc<dyn rivet_serialization::Codec<A, TestOps>>,
-        value: &Value,
+        codec: &Arc<dyn Codec<A, Self>>,
+        value: &Self::Output,
     ) -> String
     where
         A: 'static,
@@ -336,11 +502,8 @@ impl TestOps {
     }
 
     /// `assertFromJavaFails` — the parse must be an error.
-    pub fn assert_from_java_fails<A>(
-        &self,
-        codec: &Arc<dyn rivet_serialization::Codec<A, TestOps>>,
-        value: &Value,
-    ) where
+    fn assert_from_java_fails<A>(&self, codec: &Arc<dyn Codec<A, Self>>, value: &Self::Output)
+    where
         A: 'static + Debug,
     {
         assert!(
@@ -352,10 +515,10 @@ impl TestOps {
 
     /// `assertFromJavaFailsPartial` — the parse must be an error with NO
     /// result-or-partial.
-    pub fn assert_from_java_fails_partial<A>(
+    fn assert_from_java_fails_partial<A>(
         &self,
-        codec: &Arc<dyn rivet_serialization::Codec<A, TestOps>>,
-        value: &Value,
+        codec: &Arc<dyn Codec<A, Self>>,
+        value: &Self::Output,
     ) where
         A: 'static + Clone,
     {
@@ -370,11 +533,8 @@ impl TestOps {
     }
 
     /// `assertToJavaFails` — the encode must be an error.
-    pub fn assert_to_java_fails<A>(
-        &self,
-        codec: &Arc<dyn rivet_serialization::Codec<A, TestOps>>,
-        value: &A,
-    ) where
+    fn assert_to_java_fails<A>(&self, codec: &Arc<dyn Codec<A, Self>>, value: &A)
+    where
         A: 'static + Clone,
     {
         assert!(
@@ -386,40 +546,25 @@ impl TestOps {
 
     /// `assertRoundTrip` — encode then decode reproduce both ends.
     ///
-    /// Map equality is order-insensitive (the underlying `HashMap` iteration
-    /// order is not deterministic, matching Java's own unordered map values).
-    pub fn assert_round_trip<A>(
-        &self,
-        codec: &Arc<dyn rivet_serialization::Codec<A, TestOps>>,
-        value: A,
-        encoded: Value,
-    ) where
+    /// The encode half is compared order-insensitively (a `HashMap`-backed
+    /// source iterates nondeterministically, matching Java's unordered map
+    /// values); the decode half compares the value directly.
+    fn assert_round_trip<A>(&self, codec: &Arc<dyn Codec<A, Self>>, value: A, encoded: Self::Output)
+    where
         A: 'static + Clone + PartialEq + Debug,
     {
         let to = codec
             .encode_start(self, &value)
             .get_or_throw("encodeStart")
             .clone();
-        assert_map_eq(
-            &to,
-            &encoded,
-            "encodeStart did not match the expected value",
+        assert_eq!(
+            to.canon().sorted(),
+            encoded.canon().sorted(),
+            "encodeStart did not match the expected value"
         );
         let from = codec.parse(self, &encoded).get_or_throw("parse").clone();
         assert_eq!(from, value, "parse did not round-trip the value");
     }
 }
 
-/// `assert_eq!` on two `Value`s, treating `Map` entries as an unordered set.
-fn assert_map_eq(actual: &Value, expected: &Value, context: &str) {
-    match (actual, expected) {
-        (Value::Map(a), Value::Map(b)) => {
-            let mut a = a.clone();
-            a.sort_by(|l, r| l.0.cmp(&r.0));
-            let mut b = b.clone();
-            b.sort_by(|l, r| l.0.cmp(&r.0));
-            assert_eq!(a, b, "{context}");
-        }
-        _ => assert_eq!(actual, expected, "{context}"),
-    }
-}
+impl<O: DynamicOps + 'static> OpsTestExt for O where O::Output: Canonical {}
