@@ -406,9 +406,13 @@ pub fn v_bool<O: DynamicOps>(ops: &O, value: bool) -> O::Output {
     ops.create_boolean(value)
 }
 
-/// `ops.create_numeric(value)` — the float form.
+/// `ops.create_numeric(Number::Double(value))` — the float form.
+///
+/// `JsonOps` distinguishes an integer from a float (`create_int(1)` vs
+/// `create_numeric(Double(1.0))`), so the float form must wrap in
+/// `Number::Double`; `TestOps` collapses every number to `Value::Num`.
 pub fn v_num<O: DynamicOps>(ops: &O, value: f64) -> O::Output {
-    ops.create_numeric(value)
+    ops.create_numeric(rivet_serialization::number::Number::Double(value))
 }
 
 /// `ops.create_int(value)` — the integer form. `JsonOps` distinguishes int

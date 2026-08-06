@@ -70,7 +70,7 @@ fn dynamic_get_and_as_number_through_json() {
         assert_eq!(
             got.result()
                 .and_then(|d| d.as_number(&ops).result().copied()),
-            Some(7.0)
+            Some(rivet_serialization::number::Number::Double(7.0))
         );
     }
 }
@@ -290,7 +290,7 @@ fn optional_dynamic_get_field_chains_through_json() {
             inner
                 .result()
                 .and_then(|d| d.as_number(&ops).result().copied()),
-            Some(5.0)
+            Some(rivet_serialization::number::Number::Double(5.0))
         );
     }
 }
@@ -349,7 +349,8 @@ fn optional_dynamic_flat_map_through_delegate_through_json() {
         let dynamic = Dynamic::new(&ops, v_map(&ops, vec![("a", v_num(&ops, 4.0))]));
         let field: OptionalDynamic<serde_json::Value> = dynamic.get(&ops, "a");
         // `flatMap` over the inner `Dynamic` result.
-        let doubled: DataResult<f64> = field.flat_map(|d| d.as_number(&ops).map(|n| *n * 2.0));
+        let doubled: DataResult<f64> =
+            field.flat_map(|d| d.as_number(&ops).map(|n| n.double_value() * 2.0));
         assert_eq!(doubled.result(), Some(&8.0));
     }
 }
