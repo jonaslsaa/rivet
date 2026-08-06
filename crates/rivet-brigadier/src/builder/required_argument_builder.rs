@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use crate::arguments::ArgumentType;
-use crate::builder::argument_builder::{ArgumentBuilder, ArgumentBuilderBehavior};
+use crate::builder::argument_builder::{ArgumentBuilder, ArgumentBuilderBehavior, Predicate};
+use crate::command::Command;
+use crate::redirect_modifier::RedirectModifier;
 use crate::suggestion::SuggestionProvider;
 use crate::tree::{ArgumentCommandNode, CommandNode};
 
@@ -16,7 +18,7 @@ pub struct RequiredArgumentBuilder<S, T> {
     suggestions_provider: Option<Arc<dyn SuggestionProvider<S>>>,
 }
 
-impl<S: 'static, T: 'static> RequiredArgumentBuilder<S, T> {
+impl<S: 'static, T: 'static + Send + Sync> RequiredArgumentBuilder<S, T> {
     /// Java `argument(String name, ArgumentType<T> type)`.
     pub fn argument(name: impl Into<String>, type_: Arc<dyn ArgumentType<T>>) -> Self {
         RequiredArgumentBuilder {
@@ -27,9 +29,11 @@ impl<S: 'static, T: 'static> RequiredArgumentBuilder<S, T> {
         }
     }
 
-    /// Java `suggests(SuggestionProvider<S>)`.
-    pub fn suggests(&mut self, provider: Arc<dyn SuggestionProvider<S>>) -> &mut Self {
-        self.suggestions_provider = Some(provider);
+    /// Java `suggests(SuggestionProvider<S>)`. Java's `createBuilder` passes
+    /// `getCustomSuggestions()` which may be null; `provider` is the nullable
+    /// `Option` equivalent.
+    pub fn suggests(&mut self, provider: Option<Arc<dyn SuggestionProvider<S>>>) -> &mut Self {
+        self.suggestions_provider = provider;
         self
     }
 
@@ -43,13 +47,33 @@ impl<S: 'static, T: 'static> RequiredArgumentBuilder<S, T> {
         &self.type_
     }
 
+    /// Java `build()` — same node as `build()`, but already wrapped in an `Arc`.
+    pub fn build_arc(&self) -> Arc<ArgumentCommandNode<S, T>> {
+        let result = ArgumentCommandNode::new(
+            self.name.clone(),
+            Arc::clone(&self.type_),
+            self.argument_builder.get_command(),
+            self.argument_builder.get_requirement(),
+            self.argument_builder.get_redirect(),
+            self.argument_builder.get_redirect_modifier(),
+            self.argument_builder.is_fork(),
+            self.get_suggestions_provider().cloned(),
+        );
+        for argument in &self.argument_builder.get_arguments() {
+            result.add_child(Arc::clone(argument));
+        }
+        Arc::new(result)
+    }
+
     /// Java `getName()`.
     pub fn get_name(&self) -> &str {
         &self.name
     }
 }
 
-impl<S: 'static, T: 'static> ArgumentBuilderBehavior<S> for RequiredArgumentBuilder<S, T> {
+impl<S: 'static, T: 'static + Send + Sync> ArgumentBuilderBehavior<S>
+    for RequiredArgumentBuilder<S, T>
+{
     fn base(&self) -> &ArgumentBuilder<S> {
         &self.argument_builder
     }
@@ -60,7 +84,7 @@ impl<S: 'static, T: 'static> ArgumentBuilderBehavior<S> for RequiredArgumentBuil
 
     /// Java `build()`.
     fn build(&self) -> Box<dyn CommandNode<S>> {
-        let mut result = ArgumentCommandNode::new(
+        let result = ArgumentCommandNode::new(
             self.name.clone(),
             Arc::clone(&self.type_),
             self.argument_builder.get_command(),
@@ -70,9 +94,37 @@ impl<S: 'static, T: 'static> ArgumentBuilderBehavior<S> for RequiredArgumentBuil
             self.argument_builder.is_fork(),
             self.get_suggestions_provider().cloned(),
         );
-        for argument in self.argument_builder.get_arguments() {
+        for argument in &self.argument_builder.get_arguments() {
             result.add_child(Arc::clone(argument));
         }
         Box::new(result)
+    }
+}
+
+/// `createBuilder()` result — Java's `RequiredArgumentBuilder` implements the
+/// `NodeBuilder` surface so the node's `createBuilder()` can return it boxed.
+impl<S: 'static, T: 'static> crate::tree::NodeBuilder<S> for RequiredArgumentBuilder<S, T> {
+    fn get_requirement(&self) -> Predicate<S> {
+        self.argument_builder.get_requirement()
+    }
+
+    fn get_command(&self) -> Option<Arc<dyn Command<S>>> {
+        self.argument_builder.get_command()
+    }
+
+    fn get_redirect(&self) -> Option<Arc<dyn CommandNode<S>>> {
+        self.argument_builder.get_redirect()
+    }
+
+    fn get_redirect_modifier(&self) -> Option<Arc<dyn RedirectModifier<S>>> {
+        self.argument_builder.get_redirect_modifier()
+    }
+
+    fn is_fork(&self) -> bool {
+        self.argument_builder.is_fork()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

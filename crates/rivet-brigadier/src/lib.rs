@@ -5,6 +5,10 @@
 //! Paper-patched files) plus the upstream `brigadier-1.3.10` sources jar for the
 //! remaining classes of the package. This is a direct port (MIT), not Paper-derived;
 //! Paper patches that depend on Minecraft types are stubbed and noted `// STUB(brigadier)`.
+//! (The two dependency-blocked Paper-only features are `ENABLE_COMMAND_STACK_TRACES`
+//! and `componentMessage()` in the exceptions package; the `minecraft:` prefix
+//! prioritization and the `TagParseCommandSyntaxException` short-circuit in the
+//! dispatcher/tree packages are likewise not ported — all four need Minecraft types.)
 //!
 //! Naming follows PORTING.md: one Rust module per Java class, snake_case, names
 //! translated only by case convention. The Java `S` source type parameter is kept
@@ -20,6 +24,7 @@ pub mod command_dispatcher;
 pub mod context;
 pub mod exceptions;
 pub mod immutable_string_reader;
+pub mod java_float_format;
 pub mod java_hash;
 pub mod literal_message;
 pub mod message;
@@ -33,10 +38,32 @@ pub mod tree;
 
 /// `com.mojang.brigadier.AmbiguityConsumer<S>`.
 pub use ambiguity_consumer::AmbiguityConsumer;
+/// `com.mojang.brigadier.arguments.BoolArgumentType` etc.
+pub use arguments::ArgumentType;
+pub use arguments::BoolArgumentType;
+pub use arguments::DoubleArgumentType;
+pub use arguments::FloatArgumentType;
+pub use arguments::IntegerArgumentType;
+pub use arguments::LongArgumentType;
+pub use arguments::StringArgumentType;
 /// `com.mojang.brigadier.Command` — functional interface returning an `int` result.
 pub use command::{Command, CommandFn};
 /// `com.mojang.brigadier.CommandDispatcher<S>`.
 pub use command_dispatcher::CommandDispatcher;
+/// `com.mojang.brigadier.context.CommandContext<S>`.
+pub use context::CommandContext;
+/// `com.mojang.brigadier.context.CommandContextBuilder<S>`.
+pub use context::CommandContextBuilder;
+/// `com.mojang.brigadier.context.ContextChain<S>`.
+pub use context::ContextChain;
+/// `com.mojang.brigadier.context.ParsedArgument`.
+pub use context::ParsedArgument;
+/// `com.mojang.brigadier.context.ParsedCommandNode<S>`.
+pub use context::ParsedCommandNode;
+/// `com.mojang.brigadier.context.StringRange`.
+pub use context::StringRange;
+/// `com.mojang.brigadier.context.SuggestionContext<S>`.
+pub use context::SuggestionContext;
 /// `com.mojang.brigadier.ImmutableStringReader`.
 pub use immutable_string_reader::ImmutableStringReader;
 /// `com.mojang.brigadier.LiteralMessage`.
@@ -53,6 +80,20 @@ pub use result_consumer::ResultConsumer;
 pub use single_redirect_modifier::SingleRedirectModifier;
 /// `com.mojang.brigadier.StringReader`.
 pub use string_reader::StringReader;
+/// `com.mojang.brigadier.suggestion.Suggestion`.
+pub use suggestion::Suggestion;
+/// `com.mojang.brigadier.suggestion.SuggestionProvider<S>`.
+pub use suggestion::SuggestionProvider;
+/// `com.mojang.brigadier.suggestion.Suggestions`.
+pub use suggestion::Suggestions;
+/// `com.mojang.brigadier.suggestion.SuggestionsBuilder`.
+pub use suggestion::SuggestionsBuilder;
 
+#[cfg(test)]
+mod command_dispatcher_tests;
+#[cfg(test)]
+mod command_dispatcher_usages_tests;
+#[cfg(test)]
+mod command_suggestions_tests;
 #[cfg(test)]
 mod tests;

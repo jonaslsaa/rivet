@@ -1,20 +1,31 @@
-//! Port of `com.mojang.brigadier.suggestion.SuggestionProvider` (upstream).
+//! Port of the `com.mojang.brigadier.suggestion` package (upstream brigadier-1.3.10).
 //!
-//! // STUB(brigadier.builder): full port is the `com.mojang.brigadier.suggestion`
-//! unit; this is the surface the builder cluster references.
+//! Java's `getCompletionSuggestions` returns a `CompletableFuture<Suggestions>`.
+//! All suggestion sources here are synchronous (the built-in argument types and the
+//! node suggestions build immediately), so the future is modelled as a plain
+//! `Suggestions` value — no async machinery is needed. `SuggestionProvider`
+//! accordingly returns `Suggestions` directly.
+//!
+//! `IntegerSuggestion` (Java) is folded into `Suggestion` as an optional integer
+//! kind — see `suggestion.rs`.
 
-use crate::context::CommandContext;
+// `suggestion::suggestion` mirrors the Java package layout
+// (`com.mojang.brigadier.suggestion.Suggestion`), so the module-inception name is
+// intentional.
+#[allow(clippy::module_inception)]
+pub mod suggestion;
+pub mod suggestion_provider;
+pub mod suggestions;
+pub mod suggestions_builder;
 
-/// Java `SuggestionProvider<S>` — produces suggestions for a command context.
-pub trait SuggestionProvider<S>: Send + Sync {
-    /// Java `getSuggestions(CommandContext<S>, SuggestionsBuilder) throws CommandSyntaxException`.
-    fn get_suggestions(
-        &self,
-        context: &CommandContext<S>,
-        builder: &mut dyn crate::suggestion::SuggestionsBuilder,
-    ) -> Result<(), crate::exceptions::CommandSyntaxException<'static>>;
-}
+#[cfg(test)]
+mod suggestion_tests;
+#[cfg(test)]
+mod suggestions_builder_tests;
+#[cfg(test)]
+mod suggestions_tests;
 
-/// Java `SuggestionsBuilder` — STUB trait so the provider signature above can name
-/// it. Full port is the `suggestion` unit.
-pub trait SuggestionsBuilder: Send + Sync {}
+pub use suggestion::Suggestion;
+pub use suggestion_provider::SuggestionProvider;
+pub use suggestions::Suggestions;
+pub use suggestions_builder::SuggestionsBuilder;

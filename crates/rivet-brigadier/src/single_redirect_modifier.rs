@@ -1,7 +1,4 @@
-//! Port of `com.mojang.brigadier.SingleRedirectModifier` (upstream).
-//!
-//! // STUB(brigadier.builder): full port is the root `com.mojang.brigadier` unit; this
-//! is the surface the builder cluster references.
+//! Port of `com.mojang.brigadier.SingleRedirectModifier` (upstream brigadier-1.3.10).
 
 use crate::context::CommandContext;
 use crate::exceptions::CommandSyntaxException;

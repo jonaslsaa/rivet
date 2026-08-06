@@ -27,3 +27,18 @@ pub use dynamic2_command_exception_type::Dynamic2CommandExceptionType;
 pub use dynamic3_command_exception_type::Dynamic3CommandExceptionType;
 pub use dynamic4_command_exception_type::Dynamic4CommandExceptionType;
 pub use simple_command_exception_type::SimpleCommandExceptionType;
+
+/// Java's `type == other` identity comparison over `CommandExceptionType`
+/// references (`getType() is type`). Rust `std::ptr::eq` compares the full fat
+/// pointer, and the vtable pointer is not guaranteed to be deduplicated across
+/// coercion sites; comparing only the data pointer reproduces the Java object
+/// identity.
+pub fn exception_type_eq(a: &dyn CommandExceptionType, b: &dyn CommandExceptionType) -> bool {
+    (a as *const dyn CommandExceptionType as *const ())
+        == (b as *const dyn CommandExceptionType as *const ())
+}
+
+#[cfg(test)]
+mod dynamic_command_syntax_exception_type_tests;
+#[cfg(test)]
+mod simple_command_syntax_exception_type_tests;

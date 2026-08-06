@@ -40,11 +40,7 @@ impl StringReader {
 
     /// `StringReader(StringReader)` copy constructor.
     pub fn new_with_reader(other: &StringReader) -> Self {
-        StringReader {
-            string: other.string.clone(),
-            units: other.units.clone(),
-            cursor: other.cursor,
-        }
+        other.clone()
     }
 
     /// `setCursor(int)`.
@@ -338,6 +334,19 @@ fn decode_char(units: &[u16], index: usize) -> (char, usize) {
         return (char::from_u32(scalar).unwrap_or('\u{FFFD}'), 2);
     }
     (char::from_u32(unit as u32).unwrap_or('\u{FFFD}'), 1)
+}
+
+/// `StringReader(StringReader)` — the Java copy constructor; `Clone` makes the
+/// dispatcher's per-child reader copies (Java `new StringReader(originalReader)`)
+/// share the input string cheaply.
+impl Clone for StringReader {
+    fn clone(&self) -> Self {
+        StringReader {
+            string: self.string.clone(),
+            units: self.units.clone(),
+            cursor: self.cursor,
+        }
+    }
 }
 
 impl ImmutableStringReader for StringReader {

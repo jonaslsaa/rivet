@@ -14,7 +14,7 @@ use crate::exceptions::{
 /// initialized by `LazyLock` so the per-object identity that downstream code
 /// relies on (e.g. `ex.getType() is type`) is a single shared instance, matching
 /// Java. The exception types implement no `PartialEq`; identity is compared by
-/// reference with `std::ptr::eq` on the `&dyn CommandExceptionType` refs.
+/// data pointer with `exception_type_eq` (see the note on vtable dedup there).
 pub struct BuiltInExceptions {
     double_too_small: Dynamic2CommandExceptionType,
     double_too_big: Dynamic2CommandExceptionType,

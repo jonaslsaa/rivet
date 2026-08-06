@@ -70,7 +70,7 @@ impl<S: 'static> ArgumentBuilder<S> {
     }
 
     /// Java `getArguments()` — `arguments.getChildren()`.
-    pub fn get_arguments(&self) -> &[Arc<dyn CommandNode<S>>] {
+    pub fn get_arguments(&self) -> Vec<Arc<dyn CommandNode<S>>> {
         self.arguments.get_children()
     }
 
@@ -117,7 +117,7 @@ pub trait ArgumentBuilderBehavior<S: 'static> {
     fn build(&self) -> Box<dyn CommandNode<S>>;
 
     /// Java `getArguments()` (inherited public getter).
-    fn get_arguments(&self) -> &[Arc<dyn CommandNode<S>>] {
+    fn get_arguments(&self) -> Vec<Arc<dyn CommandNode<S>>> {
         self.base().get_arguments()
     }
 
@@ -182,7 +182,7 @@ pub trait ArgumentBuilderBehavior<S: 'static> {
 
     /// Java `redirect(CommandNode<S>)`.
     fn redirect(&mut self, target: Arc<dyn CommandNode<S>>) -> &mut Self {
-        self.forward(target, None, false)
+        self.forward(Some(target), None, false)
     }
 
     /// Java `redirect(CommandNode<S>, SingleRedirectModifier<S>)`.
@@ -196,7 +196,7 @@ pub trait ArgumentBuilderBehavior<S: 'static> {
                 Arc::new(SingleRedirectModifierAdapter { inner: m });
             adapter
         });
-        self.forward(target, modifier, false)
+        self.forward(Some(target), modifier, false)
     }
 
     /// Java `fork(CommandNode<S>, RedirectModifier<S>)`.
@@ -205,21 +205,23 @@ pub trait ArgumentBuilderBehavior<S: 'static> {
         target: Arc<dyn CommandNode<S>>,
         modifier: Arc<dyn RedirectModifier<S>>,
     ) -> &mut Self {
-        self.forward(target, Some(modifier), true)
+        self.forward(Some(target), Some(modifier), true)
     }
 
-    /// Java `forward(CommandNode<S>, RedirectModifier<S>, boolean)`.
+    /// Java `forward(CommandNode<S>, RedirectModifier<S>, boolean)`. Java passes
+    /// `getRedirect()` which may be null (a node without a redirect); `target` is
+    /// the nullable `Option` equivalent.
     fn forward(
         &mut self,
-        target: Arc<dyn CommandNode<S>>,
+        target: Option<Arc<dyn CommandNode<S>>>,
         modifier: Option<Arc<dyn RedirectModifier<S>>>,
         fork: bool,
     ) -> &mut Self {
-        if !self.base().arguments.get_children().is_empty() {
+        if !self.base().get_arguments().is_empty() {
             panic!("Cannot forward a node with children");
         }
         let base = self.base_mut();
-        base.target = Some(target);
+        base.target = target;
         base.modifier = modifier;
         base.forks = fork;
         self

@@ -29,6 +29,14 @@ impl ArgumentType<i32> for IntegerArgumentType {
     ) -> Result<i32, crate::exceptions::CommandSyntaxException<'static>> {
         reader.read_int()
     }
+
+    fn to_string(&self) -> String {
+        "integer()".to_string()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 fn integer() -> Arc<dyn ArgumentType<i32>> {
@@ -73,9 +81,10 @@ impl crate::suggestion::SuggestionProvider<i32> for EmptySuggestionProvider {
     fn get_suggestions(
         &self,
         _context: &CommandContext<i32>,
-        _builder: &mut dyn crate::suggestion::SuggestionsBuilder,
-    ) -> Result<(), crate::exceptions::CommandSyntaxException<'static>> {
-        Ok(())
+        builder: &mut crate::suggestion::SuggestionsBuilder,
+    ) -> Result<crate::suggestion::Suggestions, crate::exceptions::CommandSyntaxException<'static>>
+    {
+        Ok(builder.build())
     }
 }
 
@@ -316,7 +325,7 @@ fn test_required_build_preserves_custom_suggestions() {
     let mut builder = RequiredArgumentBuilder::<i32, i32>::argument("foo", integer());
     let provider: Arc<dyn crate::suggestion::SuggestionProvider<i32>> =
         Arc::new(EmptySuggestionProvider);
-    builder.suggests(Arc::clone(&provider));
+    builder.suggests(Some(Arc::clone(&provider)));
 
     let node = builder.build();
     let node = node
