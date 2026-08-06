@@ -97,56 +97,6 @@ pub trait Palette<T: Clone + PartialEq + Send + 'static>: Send {
     fn copy_palette(&self) -> Box<dyn Palette<T>>;
 }
 
-// ---------------------------------------------------------------------------
-
-/// `Palette.Factory` — `create(bits, entries)`.
-pub trait PaletteFactory {
-    fn create<T: Clone + PartialEq + Send + 'static>(
-        &self,
-        bits: i32,
-        entries: Vec<T>,
-    ) -> Box<dyn Palette<T>>;
-}
-
-/// `Strategy.SINGLE_VALUE_PALETTE_FACTORY`.
-pub struct SingleValueFactory;
-
-impl PaletteFactory for SingleValueFactory {
-    fn create<T: Clone + PartialEq + Send + 'static>(
-        &self,
-        _bits: i32,
-        entries: Vec<T>,
-    ) -> Box<dyn Palette<T>> {
-        Box::new(SingleValuePalette::new(entries))
-    }
-}
-
-/// `Strategy`'s private `LINEAR_PALETTE_FACTORY`.
-pub struct LinearFactory;
-
-impl PaletteFactory for LinearFactory {
-    fn create<T: Clone + PartialEq + Send + 'static>(
-        &self,
-        bits: i32,
-        entries: Vec<T>,
-    ) -> Box<dyn Palette<T>> {
-        Box::new(LinearPalette::new(bits, entries))
-    }
-}
-
-/// `Strategy`'s private `HASHMAP_PALETTE_FACTORY`.
-pub struct HashMapFactory;
-
-impl PaletteFactory for HashMapFactory {
-    fn create<T: Clone + PartialEq + Send + 'static>(
-        &self,
-        bits: i32,
-        entries: Vec<T>,
-    ) -> Box<dyn Palette<T>> {
-        Box::new(HashMapPalette::new(bits, entries))
-    }
-}
-
 /// `Mth.ceillog2` — the palette-width function (`minimumBitsRequiredForDistinctValues`).
 pub fn ceillog2(count: i32) -> i32 {
     mth::ceillog2(count)
@@ -216,7 +166,9 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for SingleValuePalette<T>
     fn value_for(&self, index: i32) -> T {
         match &self.value {
             Some(v) if index == 0 => v.clone(),
-            _ => missing_palette_entry(index),
+            // Java `SingleValuePalette.valueFor` throws IllegalStateException
+            // with the "id" wording (not MissingPaletteEntryException's "index").
+            _ => panic!("Missing Palette entry for id {}.", index),
         }
     }
 
@@ -331,6 +283,11 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for LinearPalette<T> {
     }
 
     fn read(&mut self, buffer: &mut FriendlyByteBuf, global_map: &dyn GlobalIdMap<T>) {
+        // Java-faithful: `read` sets `size` from the wire and writes
+        // `values[i]` for `i < size` without a bounds check against the
+        // `1 << bits` array (Java panics with `ArrayIndexOutOfBoundsException`
+        // on the same input). Accepted as a faithful decode; a hostile wire
+        // buffer is rejected at the M2 packet-decode boundary, not here.
         self.size = buffer.read_var_int();
         for i in 0..self.size as usize {
             let id = buffer.read_var_int();
@@ -444,6 +401,9 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for HashMapPalette<T> {
     }
 
     fn read(&mut self, buffer: &mut FriendlyByteBuf, global_map: &dyn GlobalIdMap<T>) {
+        // Java-faithful: `read` grows the identity map without a capacity bound
+        // (bounded only by readable bytes; Java grows identically). A hostile
+        // wire buffer is rejected at the M2 packet-decode boundary.
         self.values.clear();
         let size = buffer.read_var_int();
         for _ in 0..size {

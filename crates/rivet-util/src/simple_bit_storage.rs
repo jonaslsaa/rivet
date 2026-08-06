@@ -124,6 +124,13 @@ impl SimpleBitStorage {
         if data.len() != required_length {
             return Err(InitializationException::new(data.len(), required_length));
         }
+        if size > 4096 {
+            // Paper addition: caps the index space the magic multiply-shift is
+            // valid for. Java throws IllegalStateException from the
+            // data-adoption constructor (`SimpleBitStorage(bits, size, long[])`)
+            // after the length check too, so the error surface matches exactly.
+            panic!("Size > 4096 not supported");
+        }
         Ok(SimpleBitStorage {
             data: data.to_vec(),
             bits,
@@ -376,6 +383,14 @@ mod tests {
             "Invalid length given for storage, got: 255 but expected: 256"
         );
         assert!(SimpleBitStorage::from_raw(4, 4096, &[0i64; 256]).is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "Size > 4096 not supported")]
+    fn from_raw_rejects_size_over_4096() {
+        // 4097 entries at 4 bits -> ceil(4097/16) = 257 longs, so the length
+        // check passes first (Java order) and the size guard fires.
+        let _ = SimpleBitStorage::from_raw(4, 4097, &[0i64; 257]);
     }
 
     #[test]

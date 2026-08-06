@@ -76,7 +76,10 @@ fn single_value_requests_resize_on_different_value() {
 fn single_value_value_for_out_of_range_panics() {
     let p = SingleValuePalette::new(vec![StateId(0)]);
     let err = std::panic::catch_unwind(|| p.value_for(1));
-    assert!(err.is_err());
+    // Java `SingleValuePalette.valueFor` message: "Missing Palette entry for id 1."
+    let payload = err.unwrap_err();
+    let msg = payload.downcast_ref::<String>().map(String::as_str);
+    assert_eq!(msg, Some("Missing Palette entry for id 1."));
 }
 
 #[test]

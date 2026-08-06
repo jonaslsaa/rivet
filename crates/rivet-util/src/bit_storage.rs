@@ -20,7 +20,7 @@
 ///   the layout produced by Java's constructor (`value[cell*vpl + k]` in the
 ///   `k`-th `bits`-wide slot, slot 0 in the low bits).
 /// - [`ZeroBitStorage`]: zero-width entries, no backing storage.
-pub trait BitStorage {
+pub trait BitStorage: Send {
     /// `getAndSet(int index, int value)` — writes `value`, returns the prior
     /// entry. Java arithmetic on `int`/`long` is wrapping; the bit masks here
     /// are applied on `u64` with logical shifts.
