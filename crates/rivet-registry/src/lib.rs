@@ -86,6 +86,14 @@ pub mod root;
 #[path = "block_id_tests.rs"]
 pub mod block_id_tests;
 
+/// Generated static-builtin-table integration tests (issue #124 phase F). The
+/// file sits OUTSIDE the codegen-owned `generated/` dir (the golden drift test
+/// asserts `src/generated/` contains exactly the generated files); same pattern
+/// as `block_id_tests`.
+#[cfg(all(feature = "blocks", test))]
+#[path = "static_builtin_tests.rs"]
+pub mod static_builtin_tests;
+
 // ---------------------------------------------------------------------------
 // Ownership D — serialization context (`net.minecraft.resources`)
 // ---------------------------------------------------------------------------

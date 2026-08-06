@@ -391,6 +391,32 @@ main() {
     cargo test --workspace
   fi
 
+  # --- feature-gated generated registry tables (rivet-registry `blocks`) ----------
+  # rivet-registry's compile-time block + static-builtin tables (src/generated)
+  # and their semantic tests (block_id_tests, static_builtin_tests) live behind
+  # the crate's `blocks` cargo feature, so the `cargo test --workspace` step above
+  # never builds or executes them. Enable the feature for exactly this one crate
+  # and run clippy + tests, so the codegen-owned tables are compiled, linted, and
+  # executed on every full merge gate. Never use `--workspace --features blocks`
+  # or `--workspace --all-features`: `blocks` is per-crate (and rivet-protocol's
+  # `packets` feature would leak in under --all-features). Re-running this one
+  # crate's fast tests with the feature is deliberate — cargo cannot run only the
+  # feature-gated in-module tests, and the whole crate is a ~0.1s test run.
+  # Scoped gates for rivet-registry also get the feature (same gap otherwise).
+  local GATE_BLOCKS=false
+  for p in ${PKGS[@]+"${PKGS[@]}"}; do
+    [ "$p" = "rivet-registry" ] && GATE_BLOCKS=true
+  done
+  if [ "$FULL_GATE" = true ] || [ "$GATE_BLOCKS" = true ]; then
+    echo "==> rivet-registry --features blocks (generated registry tables)"
+    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-registry --features blocks --all-targets
+    if command -v cargo-nextest >/dev/null 2>&1; then
+      cargo nextest run -p rivet-registry --features blocks
+    else
+      cargo test -p rivet-registry --features blocks
+    fi
+  fi
+
   # --- manifest regression suite (full gate only) --------------------------------
   # scripts/test_analyze_graph.py proves MANIFEST.tsv generation is deterministic
   # and conserved (nbt + network class-cluster splits, byte-idempotent

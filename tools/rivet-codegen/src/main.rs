@@ -16,6 +16,7 @@ mod generate;
 mod model;
 mod mth_gen;
 mod packets;
+mod registries;
 mod reports;
 
 use std::path::Path;
@@ -37,6 +38,11 @@ fn main() -> Result<()> {
             let packets = flag(&args, "--packets");
             let packets_output = flag(&args, "--packets-output");
             generate::run(input, output, packets, packets_output)
+        }
+        Some("registries") => {
+            let input = flag(&args, "--input");
+            let output = flag(&args, "--output");
+            registries::run(input, output)
         }
         Some("mth-gen") => {
             let bundler = flag(&args, "--bundler");
@@ -72,7 +78,7 @@ fn print_usage() {
         "rivet-codegen — vanilla data extraction + registry codegen\n\
          \n\
          USAGE:\n\
-         \x20   rivet-codegen <extract|generate|mth-gen|reports> [flags]\n\
+         \x20   rivet-codegen <extract|generate|registries|mth-gen|reports> [flags]\n\
          \n\
          SUBCOMMANDS:\n\
          \x20   extract   Extract the block registry + block states from the Paper 26.2\n\
@@ -86,6 +92,11 @@ fn print_usage() {
          \x20                     --output <dir>   registry output dir (default crates/rivet-registry/src/generated)\n\
          \x20                     --packets <path> packet report input (default data/reports/packets.json)\n\
          \x20                     --packets-output <dir>  protocol output dir (default crates/rivet-protocol/src/generated)\n\
+         \x20   registries  Read data/reports/registries.json and emit the static-builtin\n\
+         \x20             id tables for the ordered registry surfaces M1 touches into\n\
+         \x20             crates/rivet-registry/src/generated/registries.rs.\n\
+         \x20             Flags: --input <path>    registry report (default data/reports/registries.json)\n\
+         \x20                     --output <dir>   registry output dir (default crates/rivet-registry/src/generated)\n\
          \x20   mth-gen   Regenerate the Mth tables + golden tests in crates/rivet-util/src\n\
          \x20             from the real Paper Mth class (SIN/ASIN_TAB/COS_TAB + all\n\
          \x20             1156 golden vectors). Idempotent: `git diff` stays clean.\n\

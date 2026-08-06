@@ -58,6 +58,12 @@ printf '[package]\nname = "rivet-codegen"\nversion = "0.1.0"\nedition = "2024"\n
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
 chmod +x "$SANDBOX/scripts/gate.sh"
 
+# The full gate runs `python3 scripts/test_analyze_graph.py` (the manifest
+# regression suite, added in #65 M1). The sandbox has no real Paper tree, so
+# stub it to pass — the suite's own behaviour is covered elsewhere; here it only
+# needs to not abort the gate on its pass path.
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/test_analyze_graph.py"
+
 # --- satisfy the oracle pre-check ---------------------------------------------
 # oracle_prereq_check (gate.sh, full gate only) probes for java 25+, python3,
 # free disk, a paperclip jar, a Java 25 JDK, a Paper compile jar, and the
