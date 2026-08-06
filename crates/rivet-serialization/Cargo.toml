@@ -3,5 +3,8 @@ name = "rivet-serialization"
 version.workspace = true
 edition.workspace = true
 
+[dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true
