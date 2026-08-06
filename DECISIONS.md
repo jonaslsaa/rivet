@@ -32,3 +32,14 @@ Work is organized as GitHub **epics → agent-created sub-issues → PRs**, mile
 
 ## D10 — No hosted CI
 No GitHub Actions (or any hosted CI). The merge gate is `scripts/gate.sh` (fmt → clippy `-Dwarnings` → tests → oracle steps: `rivet-oracle verify` and the byte-for-byte `rivet-parity` diff vs the Paper Java oracle), run locally by the controller before merging any PR and at the end of every wave. Oracle verification is never silently skipped: missing prerequisites make the gate exit nonzero with an UNVERIFIED status and a per-item fix list; `--require-oracle` turns any missing oracle prerequisite into a hard failure. A red gate blocks the merge; enforcement is by process (PR checklist + controller), not by GitHub.
+
+## D11 — JVM-adapter FFI design: GO (in-process FFM)
+De-risking spike for epic #14 / sub-issue #81 (the `spikes/ffi-latency/` crate + Java FFM benchmark) concluded **GO** on the in-process Java FFM/Panama bridge design (D6). The C-ABI spike measures: scalar downcall, per-call handle-table re-resolution, batched event publish, a Rust→Java→Rust callback round-trip, and back-to-back callback storms. Reproduce with `spikes/ffi-latency/run.sh`, which builds the cdylib, compiles the Java harness, runs the correctness assertions (including exception containment), benchmarks, and writes the machine-readable report to `spikes/ffi-latency/results/benchmark.json`. That report is a **regenerable artifact**: it is gitignored and never committed; any claim in this decision is backed by the recorded run in issue #81, not by a checked-in result file.
+
+Recorded numbers (release build, Temurin 25.0.2 arm64; representative measured ranges across recorded runs, bracketing the exact run in issue #81):
+- per-event callback cadence during a 100k storm ~100-120 ns → **~41k-50k events/tick fit the 5 ms dispatch budget** (10% of a 50 ms tick), vs a realistic assumption of ~10k plugin events/tick → **GO**.
+- single callback round-trip (Rust→Java→Rust) ~215-250 ns; bulk state mutation via `rfv_apply_events` is far cheaper per event (~0.5-0.56 ns/event at n=4096) and should stay on the batched path.
+- the worst-case single 100k-event storm (~10-12.1 ms) does NOT fit the 5 ms budget — recorded honestly; the go/no-go is driven by realistic per-tick volume, not the synthetic storm.
+- exception containment is proven: the Java upcall target catches every plugin `Throwable` and returns an explicit ABI-safe status; Rust surfaces it as an error result (`ERR_CALLBACK`), so a foreign exception can never unwind through Rust.
+
+Decisions locked: `rivet-ffi` C ABI with marshal-only u64 IDs (never pointers across the boundary); batched event publishing for bulk state, per-plugin handler dispatch on the callback path; plugin code on a dedicated tick-synchronized thread (D5).

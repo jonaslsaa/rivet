@@ -1,0 +1,8 @@
+# Rust build output (binaries) — never committed
+/target
+
+# Compiled Java classes — regenerable from java/ sources
+/java/out
+
+# Benchmark output — regenerable by ./run.sh, never committed
+/results/*.json
