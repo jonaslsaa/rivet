@@ -419,7 +419,7 @@ main() {
 
   # --- manifest regression suite (full gate only) --------------------------------
   # scripts/test_analyze_graph.py proves MANIFEST.tsv generation is deterministic
-  # and conserved (nbt + network class-cluster splits, byte-idempotent
+  # and conserved (nbt + network + game class-cluster splits, byte-idempotent
   # regeneration, carry of status/attempts/notes, dep resolution, fail-fast on
   # cross-unit duplicate declarations). Requires the real Paper tree under
   # working/ (analyze_graph.py hard-exits if the source roots are absent) —

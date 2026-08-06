@@ -32,7 +32,27 @@ are cycle-free. The residual unit stays flagged needs_split=yes (it still owns
 36 files and is cyclic); the small buf/framing cluster units are the M1 protocol
 wave's deliverable and are not flagged.
 
-Both splits are opt-in flags; pass neither to get the flat package-level
+`--split-game` refines the net.minecraft.network.protocol.game package (issue
+#152, M1): the single 194-file / 11,497-LOC game row is split into the
+join-critical sub-units that unblock the three M1 protocol tracks —
+mc.network.protocol.game.join (#87 join clientbound send-set),
+mc.network.protocol.game.chunk (#94 chunk send packet bodies) and
+mc.network.protocol.game.serverbound (#97 serverbound play essentials) — plus a
+residual mc.network.protocol.game unit computed as the complement of the
+authored sub-unit file lists within the package scan, so the split can never
+lose or duplicate a file. Same mechanics as the network split: sub-unit deps are
+read per file from each file's imports, the four units keep the package's
+wave/cycle (they remain inside the giant SCC), the residual depends on the three
+sub-units (same-package classes need no import: GameProtocols/GamePacketTypes/
+the listeners all reference the sub-unit packets), and the sub-units' references
+back into the residual (ClientGamePacketListener, ServerGamePacketListener,
+GamePacketTypes) are deliberately NOT recorded — the residual is not translated
+in M1, so recording them would deadlock the wave; the M1 translate-wave absorbs
+those residual classes as STUBs (see GAME_UNIT_NOTES). The residual keeps
+needs_split=yes (still 167 files and cyclic); the three sub-units are the M1
+protocol wave's deliverable and are not flagged.
+
+All three splits are opt-in flags; pass none to get the flat package-level
 manifest. The default output and previous-manifest locations can be overridden
 with `--output` and `--prev-manifest` (used by the regression tests).
 
@@ -231,6 +251,78 @@ NETWORK_UNITS = {
     ],
 }
 
+# Class-cluster split of net.minecraft.network.protocol.game (issue #152, M1):
+# the single 194-file game package row is split into the join-critical sub-units
+# that unblock the three M1 protocol tracks (#87 join clientbound send-set, #94
+# chunk send, #97 serverbound play essentials) plus a residual computed as the
+# complement of the authored sub-unit file lists within the package scan (never
+# hand-enumerated), so the split cannot lose or duplicate a file. Same mechanics
+# as the network split: sub-unit deps are read from each file's imports, all four
+# units keep the package's wave/cycle (they remain inside the giant SCC), and the
+# residual depends on the three sub-units (same-package classes need no import:
+# GameProtocols/GamePacketTypes/the listeners all reference the sub-unit
+# packets). The sub-units' references back into the residual
+# (ClientGamePacketListener, ServerGamePacketListener, GamePacketTypes) are NOT
+# dep edges (see the same-package note in unit_row below): the residual is not
+# translated in M1, so recording them would deadlock the wave — the M1
+# translate-wave absorbs those residual classes as STUBs instead. The residual
+# keeps needs_split=yes (still 167 files and cyclic); the three sub-units are the
+# M1 protocol wave's deliverable and are not flagged.
+GAME_SPLIT_PACKAGES = {"net.minecraft.network.protocol.game"}
+GAME_DIR = Path("net/minecraft/network/protocol/game")
+GAME_UNITS = {
+    "mc.network.protocol.game.join": [
+        "ClientboundLoginPacket.java", "CommonPlayerSpawnInfo.java",
+        "ClientboundChangeDifficultyPacket.java",
+        "ClientboundPlayerAbilitiesPacket.java",
+        "ClientboundSetHeldSlotPacket.java",
+        "ClientboundUpdateRecipesPacket.java",
+        "ClientboundInitializeBorderPacket.java",
+        "ClientboundSetDefaultSpawnPositionPacket.java",
+        "ClientboundSetTimePacket.java", "ClientboundGameEventPacket.java",
+        "ClientboundPlayerInfoUpdatePacket.java",
+        "ClientboundPlayerInfoRemovePacket.java",
+        "ClientboundBundlePacket.java", "ClientboundBundleDelimiterPacket.java",
+        "ClientboundPlayerPositionPacket.java",
+    ],
+    "mc.network.protocol.game.chunk": [
+        "ClientboundLevelChunkWithLightPacket.java",
+        "ClientboundLevelChunkPacketData.java",
+        "ClientboundLightUpdatePacket.java",
+        "ClientboundLightUpdatePacketData.java",
+        "ClientboundChunkBatchStartPacket.java",
+        "ClientboundChunkBatchFinishedPacket.java",
+    ],
+    "mc.network.protocol.game.serverbound": [
+        "ServerboundMovePlayerPacket.java",
+        "ServerboundChunkBatchReceivedPacket.java",
+        "ServerboundAcceptTeleportationPacket.java",
+        "ServerboundClientCommandPacket.java",
+        "ServerboundClientTickEndPacket.java",
+        "ServerboundPlayerActionPacket.java",
+    ],
+}
+# Authored structural notes for the game split units (carried into the notes
+# column, never clobbering a human triage note). These name the residual classes
+# the M1 wave must absorb as STUBs because the residual is not translated in M1.
+GAME_UNIT_NOTES = {
+    "mc.network.protocol.game.join": (
+        "M1 STUB: join packets implement Packet<ClientGamePacketListener> and "
+        "register in GamePacketTypes (residual mc.network.protocol.game); "
+        "translate-wave absorbs ClientGamePacketListener + GamePacketTypes as stubs"
+    ),
+    "mc.network.protocol.game.chunk": (
+        "M1 STUB: chunk packets implement Packet<ClientGamePacketListener> and "
+        "register in GamePacketTypes (residual mc.network.protocol.game); "
+        "translate-wave absorbs ClientGamePacketListener + GamePacketTypes as stubs"
+    ),
+    "mc.network.protocol.game.serverbound": (
+        "M1 STUB: serverbound packets implement Packet<ServerGamePacketListener> "
+        "and register in GamePacketTypes (residual mc.network.protocol.game); "
+        "translate-wave absorbs ServerGamePacketListener + GamePacketTypes as stubs"
+    ),
+}
+
 
 def crate_for(pkg: str) -> str:
     if pkg == "net.minecraft":  # root-package classes only; subpackages match CRATE_RULES
@@ -307,6 +399,11 @@ def main() -> None:
     parser.add_argument(
         "--split-network", action="store_true",
         help="split net.minecraft.network into class-cluster units (idempotent)",
+    )
+    parser.add_argument(
+        "--split-game", action="store_true",
+        help="split net.minecraft.network.protocol.game into join-critical "
+        "class-cluster units (idempotent)",
     )
     parser.add_argument(
         "--output", type=Path, default=None,
@@ -521,16 +618,88 @@ def main() -> None:
             rows.append(unit_row(unit_id, files))
         return rows
 
+    def game_split_rows() -> list[list[str]]:
+        root_dir = ROOTS["minecraft"]
+        game_dir = root_dir / GAME_DIR
+        all_files = sorted(p.name for p in game_dir.glob("*.java"))
+        # Each file must be declared in exactly one unit: a cross-unit duplicate
+        # would otherwise be double-counted (a set collapses it) and silently
+        # drop out of the residual. Fail fast before any row is emitted.
+        owned_by: dict[str, str] = {}
+        for unit_id, files in GAME_UNITS.items():
+            for f in files:
+                if f not in all_files:
+                    sys.exit(f"--split-game: missing file for unit {unit_id}: "
+                             f"{game_dir / f}")
+                if f in owned_by:
+                    sys.exit(f"--split-game: {f} is declared in both "
+                             f"{owned_by[f]} and {unit_id}; each file must belong "
+                             f"to exactly one unit")
+                owned_by[f] = unit_id
+        residual_files = [f for f in all_files if f not in owned_by]
+        pkg = "net.minecraft.network.protocol.game"
+        in_cycle = scc_of[pkg] if scc_of[pkg] in cycle_members else ""
+        wave_n = wave[scc_of[pkg]]
+
+        def unit_row(unit_id: str, files: list[str]) -> list[str]:
+            paths: list[str] = []
+            loc = 0
+            deps: set[str] = set()
+            for f in files:
+                path = game_dir / f
+                paths.append(GAME_DIR / f)
+                loc += file_loc[path]
+                deps.update(file_deps[path])
+            # Only real packages can be file-derived deps (mirror the base scan's
+            # `d in known` filter); then drop the same-package self-edge. Sibling
+            # units in the same package are named by unit id so the wave-picker
+            # resolves them exactly (same mechanism as the nbt/network splits).
+            dep_tokens = {d for d in deps if d in known and d != pkg}
+            # The residual depends on the three join-critical sub-units
+            # (same-package classes need no import: GameProtocols/GamePacketTypes/
+            # the listeners all reference the sub-unit packets). The sub-units'
+            # references back into the residual (ClientGamePacketListener,
+            # ServerGamePacketListener, GamePacketTypes) are deliberately NOT
+            # recorded: the residual is not translated in M1, so recording them
+            # would deadlock the wave. The M1 translate-wave absorbs those
+            # residual classes as STUBs instead (see GAME_UNIT_NOTES and each
+            # unit's notes column).
+            if unit_id == "mc.network.protocol.game":
+                dep_tokens.update(GAME_UNITS.keys())
+            # The residual stays needs_split=yes: it still owns 167 files (well
+            # over SPLIT_FILE_THRESHOLD) and remains inside the giant SCC, so it
+            # is still a splitting candidate and must not be silently pickable.
+            # The three join-critical sub-units are the M1 protocol wave's actual
+            # deliverable, so they are not flagged.
+            needs_split = "yes" if len(files) > SPLIT_FILE_THRESHOLD else ""
+            status, attempts, notes = carry(unit_id, GAME_UNIT_NOTES.get(unit_id, ""))
+            return [
+                unit_id, pkg, ",".join(sorted(p.as_posix() for p in paths)),
+                source_root(pkg), str(len(files)), str(loc), crate_for(pkg),
+                str(wave_n), str(in_cycle), needs_split,
+                ",".join(sorted(dep_tokens)), status, attempts, notes,
+            ]
+
+        rows: list[list[str]] = []
+        for unit_id in (*GAME_UNITS.keys(), "mc.network.protocol.game"):
+            files = GAME_UNITS[unit_id] if unit_id != "mc.network.protocol.game" \
+                else residual_files
+            rows.append(unit_row(unit_id, files))
+        return rows
+
     rows = [
         r for pkg in sorted(known)
         if not (args.split_nbt and pkg in NBT_SPLIT_PACKAGES)
         if not (args.split_network and pkg in NETWORK_SPLIT_PACKAGES)
+        if not (args.split_game and pkg in GAME_SPLIT_PACKAGES)
         for r in [package_row(pkg)]
     ]
     if args.split_nbt:
         rows.extend(split_row())
     if args.split_network:
         rows.extend(network_split_rows())
+    if args.split_game:
+        rows.extend(game_split_rows())
 
     # Stable ordering: wave, then unit id.
     rows.sort(key=lambda r: (int(r[7]), r[0]))
@@ -543,9 +712,12 @@ def main() -> None:
 
     n_split = (len(NBT_UNITS) if args.split_nbt else 0) + (
         len(NETWORK_UNITS) + 1 if args.split_network else 0
+    ) + (
+        len(GAME_UNITS) + 1 if args.split_game else 0
     )
     split_flags = " + ".join(
-        flag for flag, on in (("nbt", args.split_nbt), ("network", args.split_network))
+        flag for flag, on in (("nbt", args.split_nbt), ("network", args.split_network),
+                              ("game", args.split_game))
         if on
     )
     n_cycles = len(cycle_members)
