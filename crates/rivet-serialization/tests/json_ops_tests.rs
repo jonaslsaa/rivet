@@ -364,9 +364,11 @@ fn merge_to_map_like_reports_non_string_keys() {
     let result = ops.merge_to_map_like(&ops.empty(), &map_like);
     assert!(result.is_error());
     // Partial contains the merged output with the stringified "good" key.
+    // The message renders missed keys via Gson's compact `JsonElement.toString`
+    // (`JsonPrimitive(7)` → `"7"`), matching Java's output exactly.
     assert_eq!(
         result.error_ref().unwrap().message(),
-        "some keys are not strings: [Number(7)]"
+        "some keys are not strings: [7]"
     );
 
     // COMPRESSED coerces both keys.

@@ -331,8 +331,13 @@ impl DynamicOps for JsonOps {
             }
         }
         if !missed.is_empty() {
+            // Java: `"some keys are not strings: " + missed` where `missed` is
+            // `List<JsonElement>`; each key renders via Gson's compact
+            // `JsonElement.toString()` (`JsonPrimitive(7)` → `"7"`), which
+            // `Value`'s `Display` matches for every primitive kind.
+            let rendered: Vec<String> = missed.iter().map(|k| k.to_string()).collect();
             DataResult::error_with_partial(
-                format!("some keys are not strings: {missed:?}"),
+                format!("some keys are not strings: [{}]", rendered.join(", ")),
                 Value::Object(output),
             )
         } else {
