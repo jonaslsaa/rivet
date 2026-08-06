@@ -129,14 +129,17 @@ pub(crate) fn find_repo_root() -> Result<PathBuf> {
     find_repo_root_from(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
-/// Search upward from `start` for the dir whose Cargo.toml has `[workspace]`.
+/// Search upward from `start` for the dir whose Cargo.toml declares the real
+/// `[workspace]` — one with members/excludes. A standalone `[workspace]` marker
+/// (rivet-codegen's own manifest, an empty table used to root cargo in nested
+/// worktrees) does not count, so this keeps walking up to the repository root.
 pub(crate) fn find_repo_root_from(start: PathBuf) -> Result<PathBuf> {
     let mut dir = start.as_path();
     loop {
         let workspace_toml = dir.join("Cargo.toml");
         if workspace_toml.is_file()
             && fs::read_to_string(&workspace_toml)
-                .map(|t| t.contains("[workspace]"))
+                .map(|t| t.contains("[workspace]") && t.contains("members"))
                 .unwrap_or(false)
         {
             return Ok(dir.to_path_buf());

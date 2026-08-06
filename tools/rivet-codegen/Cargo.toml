@@ -13,3 +13,9 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Standalone workspace root (cargo's recommended fix for a package excluded from
+# the parent workspace). Without this, cargo in a nested git worktree
+# (`.claude/worktrees/...`) walks past this crate to the repository root's
+# workspace, whose `exclude` glob does not match the nested path, and errors.
+[workspace]
