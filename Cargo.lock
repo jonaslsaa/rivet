@@ -512,6 +512,7 @@ version = "0.1.0-dev+mc26.2"
 dependencies = [
  "cesu8",
  "md5",
+ "rivet-serialization",
 ]
 
 [[package]]
