@@ -29,8 +29,8 @@ residual). All three units keep the package's wave and cycle: they remain inside
 the giant SCC (FriendlyByteBuf <-> net.minecraft.network.codec is a class-level
 back-edge), so the split right-sizes file ownership without claiming the units
 are cycle-free. The residual unit stays flagged needs_split=yes (it still owns
-36 files and is cyclic); the small buf/framing cluster units are the M1 protocol
-wave's deliverable and are not flagged.
+36 files and is not done); the small buf/framing cluster units are the M1
+protocol wave's deliverable and are not flagged.
 
 `--split-game` refines the net.minecraft.network.protocol.game package (issue
 #152, M1): the single 194-file / 11,497-LOC game row is split into the
@@ -49,24 +49,39 @@ back into the residual (ClientGamePacketListener, ServerGamePacketListener,
 GamePacketTypes) are deliberately NOT recorded — the residual is not translated
 in M1, so recording them would deadlock the wave; the M1 translate-wave absorbs
 those residual classes as STUBs (see GAME_UNIT_NOTES). The residual keeps
-needs_split=yes (still 167 files and cyclic); the three sub-units are the M1
+needs_split=yes (still 167 files and not done); the three sub-units are the M1
 protocol wave's deliverable and are not flagged.
 
 All three splits are opt-in flags; pass none to get the flat package-level
 manifest. The default output and previous-manifest locations can be overridden
 with `--output` and `--prev-manifest` (used by the regression tests).
 
-Every unit also gets a `java_paths` column (comma-joined file paths) and a
-`source_root` column naming the source roots those files live under. A package
-can span several roots (e.g. io.papermc.paper code under both paper-api and
-paper-server, or moonrise code under both minecraft/java and main/java), so each
-file carries its own root and `source_root` is the comma-joined list of the
-distinct roots the unit's files span — each `java_paths` entry is relative to
-the root it was found under. This gives each split unit its concrete file set,
-so a unit's dep on a package it shares (net.minecraft.nbt) is a real dep on the
-sibling unit that owns those files — never a self-dependency. Cross-unit deps
-within a shared package are authored as unit ids (e.g. `mc.nbt.snbt`), which the
-wave-picker resolves by exact id.
+`needs_split` is the *actionable* pre-translation split state: `yes` iff the
+unit is not done and owns more than SPLIT_FILE_THRESHOLD files. Structural SCC
+pressure lives in the separate `cycle` column (a non-empty cycle id means the
+unit is a member of an SCC that must move together) and in `files`/`loc` — these
+are graph facts that persist even for done units. `needs_split` is deliberately
+the derived boolean the wave-picker gates on (unless --include-needs-split),
+so a completed unit never advertises itself as a pre-translation splitting
+candidate: it loses the flag on the next regeneration regardless of graph shape,
+while its `cycle` membership (if any) stays visible. The split rows below
+follow the same rule, gated on their own status.
+
+Every unit also gets a `java_paths` column (comma-joined `root:relpath`
+identifiers) and a `source_root` column naming the source roots those files live
+under. Each `java_paths` entry is prefixed with the source root the file was
+found under (`minecraft:`, `paper-server:` or `paper-api:`), so a physical file
+is identified unambiguously even when the same relative path exists under two
+roots (e.g. io.papermc.paper code under both paper-api and paper-server, or
+moonrise code under both minecraft/java and main/java). `source_root` is the
+comma-joined list of the distinct roots the unit's files span. The root prefix
+is the unit of ownership: every physical file must appear exactly once across
+the whole manifest, which main() validates against the on-disk inventory. This
+gives each split unit its concrete file set, so a unit's dep on a package it
+shares (net.minecraft.nbt) is a real dep on the sibling unit that owns those
+files — never a self-dependency. Cross-unit deps within a shared package are
+authored as unit ids (e.g. `mc.nbt.snbt`), which the wave-picker resolves by
+exact id.
 
 The nbt core is *not* cycle-free: the Tag classes' `toString()` uses
 `StringTagVisitor` (snbt) and `StringTag` uses `SnbtGrammar` (snbt), while
@@ -390,6 +405,42 @@ def tarjan_scc(nodes: list[str], edges: dict[str, set[str]]) -> list[list[str]]:
     return sccs
 
 
+def validate_ownership(rows: list[list[str]], roots: dict[str, Path]) -> None:
+    """Fail fast unless every on-disk Java source is owned exactly once.
+
+    Each java_paths entry is `root:relpath`. The multiset of those tokens over
+    the whole manifest must equal the set of physical (root, relpath) files
+    scanned: no duplicate ownership (a file declared in two units would be
+    double-counted and silently dropped from a residual) and no file lost. This
+    is the global invariant behind the per-split owned_by checks — it is what
+    makes the four paper-api/paper-server package-info.java pairs (same relative
+    path, two physical files) unambiguous.
+    """
+    owned: dict[str, str] = {}
+    for r in rows:
+        unit_id = r[0]
+        for token in r[2].split(","):
+            if token in owned:
+                sys.exit(
+                    f"duplicate physical ownership: {token} is declared in both "
+                    f"{owned[token]} and {unit_id}; each file must be owned by "
+                    f"exactly one unit"
+                )
+            owned[token] = unit_id
+    expected = {
+        f"{root}:{f.relative_to(roots[root]).as_posix()}"
+        for root in roots
+        for f in roots[root].rglob("*.java")
+    }
+    missing = expected - set(owned)
+    if missing:
+        sys.exit(
+            "physical source not owned by any unit: "
+            + ", ".join(sorted(missing)[:10])
+            + ("" if len(missing) <= 10 else f" (+{len(missing) - 10} more)")
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -504,8 +555,12 @@ def main() -> None:
         return status, attempts, notes
 
     def java_paths(pkg: str) -> str:
+        # Root-qualified: `root:relpath`, sorted by (root, relpath), so a file
+        # that physically exists under two roots is never ambiguous and the
+        # ordering is deterministic even when two roots share a relative path.
         return ",".join(
-            sorted(f.relative_to(ROOTS[root]).as_posix() for root, f in pkg_files[pkg])
+            sorted(f"{root}:{f.relative_to(ROOTS[root]).as_posix()}"
+                   for root, f in pkg_files[pkg])
         )
 
     def source_root(pkg: str) -> str:
@@ -514,10 +569,14 @@ def main() -> None:
     def package_row(pkg: str) -> list[str]:
         unit_id = derive_id(pkg)
         in_cycle = scc_of[pkg] if scc_of[pkg] in cycle_members else ""
-        needs_split = "yes" if (
-            len(pkg_files[pkg]) > SPLIT_FILE_THRESHOLD or in_cycle != ""
-        ) else ""
+        # needs_split is actionable pre-translation split state: only oversized
+        # units that are not yet done are candidates. Structural SCC pressure
+        # stays visible in the cycle column, so a done unit never advertises
+        # itself as needing a split (see the module docstring).
         status, attempts, notes = carry(unit_id, "")
+        needs_split = "yes" if (
+            status != "done" and len(pkg_files[pkg]) > SPLIT_FILE_THRESHOLD
+        ) else ""
         return [
             unit_id, pkg, java_paths(pkg), source_root(pkg),
             str(len(pkg_files[pkg])), str(pkg_loc[pkg]), crate_for(pkg),
@@ -537,13 +596,19 @@ def main() -> None:
                 if not path.is_file():
                     sys.exit(f"--split-nbt: missing file for unit {unit_id}: {path}")
                 loc += sum(1 for _ in path.open(encoding="utf-8", errors="replace"))
-                paths.append((NBT_DIR / f).as_posix())
+                paths.append(f"minecraft:{(NBT_DIR / f).as_posix()}")
             # deps may be java packages or unit ids (mc.nbt.snbt); both are kept.
             dep_str = ",".join(sorted(d for d in deps_list if d in known or d in NBT_UNITS))
             status, attempts, notes = carry(unit_id, authored_notes)
+            # Same actionable gate as the base rows and the network/game splits:
+            # only oversized units that are not yet done are splitting candidates
+            # (all nbt units are done today, so the flag is empty in MANIFEST).
+            needs_split = "yes" if (
+                status != "done" and len(files) > SPLIT_FILE_THRESHOLD
+            ) else ""
             rows.append([
                 unit_id, pkg, ",".join(sorted(paths)), "minecraft",
-                str(len(files)), str(loc), "rivet-nbt", str(wv), cyc, "",
+                str(len(files)), str(loc), "rivet-nbt", str(wv), cyc, needs_split,
                 dep_str, status, attempts, notes,
             ])
         return rows
@@ -577,7 +642,7 @@ def main() -> None:
             deps: set[str] = set()
             for f in files:
                 path = network_dir / f
-                paths.append(Path("net/minecraft/network") / f)
+                paths.append(f"minecraft:{Path('net/minecraft/network') / f}")
                 loc += file_loc[path]
                 deps.update(file_deps[path])
             # Only real packages can be file-derived deps (mirror the base scan's
@@ -599,14 +664,17 @@ def main() -> None:
                 dep_tokens.add("mc.network.buf")
                 dep_tokens.add("mc.network.framing")
             # The residual stays needs_split=yes: it still owns 36 files (well
-            # over SPLIT_FILE_THRESHOLD) and remains inside the giant SCC, so it
-            # is still a splitting candidate and must not be silently pickable.
-            # The small buf/framing cluster units are the M1 protocol wave's
-            # actual deliverable, so they are not flagged.
-            needs_split = "yes" if len(files) > SPLIT_FILE_THRESHOLD else ""
+            # over SPLIT_FILE_THRESHOLD) and is not done, so it is still a
+            # splitting candidate and must not be silently pickable. The small
+            # buf/framing cluster units are the M1 protocol wave's actual
+            # deliverable, so they are not flagged. Gated on status like the
+            # base rows: a done unit is never an actionable split candidate.
             status, attempts, notes = carry(unit_id, "")
+            needs_split = "yes" if (
+                status != "done" and len(files) > SPLIT_FILE_THRESHOLD
+            ) else ""
             return [
-                unit_id, pkg, ",".join(sorted(p.as_posix() for p in paths)),
+                unit_id, pkg, ",".join(sorted(paths)),
                 source_root(pkg), str(len(files)), str(loc), crate_for(pkg),
                 str(wave_n), str(in_cycle), needs_split,
                 ",".join(sorted(dep_tokens)), status, attempts, notes,
@@ -647,7 +715,7 @@ def main() -> None:
             deps: set[str] = set()
             for f in files:
                 path = game_dir / f
-                paths.append(GAME_DIR / f)
+                paths.append(f"minecraft:{GAME_DIR / f}")
                 loc += file_loc[path]
                 deps.update(file_deps[path])
             # Only real packages can be file-derived deps (mirror the base scan's
@@ -667,14 +735,17 @@ def main() -> None:
             if unit_id == "mc.network.protocol.game":
                 dep_tokens.update(GAME_UNITS.keys())
             # The residual stays needs_split=yes: it still owns 167 files (well
-            # over SPLIT_FILE_THRESHOLD) and remains inside the giant SCC, so it
-            # is still a splitting candidate and must not be silently pickable.
-            # The three join-critical sub-units are the M1 protocol wave's actual
-            # deliverable, so they are not flagged.
-            needs_split = "yes" if len(files) > SPLIT_FILE_THRESHOLD else ""
+            # over SPLIT_FILE_THRESHOLD) and is not done, so it is still a
+            # splitting candidate and must not be silently pickable. The three
+            # join-critical sub-units are the M1 protocol wave's actual
+            # deliverable, so they are not flagged. Gated on status like the
+            # base rows: a done unit is never an actionable split candidate.
             status, attempts, notes = carry(unit_id, GAME_UNIT_NOTES.get(unit_id, ""))
+            needs_split = "yes" if (
+                status != "done" and len(files) > SPLIT_FILE_THRESHOLD
+            ) else ""
             return [
-                unit_id, pkg, ",".join(sorted(p.as_posix() for p in paths)),
+                unit_id, pkg, ",".join(sorted(paths)),
                 source_root(pkg), str(len(files)), str(loc), crate_for(pkg),
                 str(wave_n), str(in_cycle), needs_split,
                 ",".join(sorted(dep_tokens)), status, attempts, notes,
@@ -703,6 +774,8 @@ def main() -> None:
 
     # Stable ordering: wave, then unit id.
     rows.sort(key=lambda r: (int(r[7]), r[0]))
+
+    validate_ownership(rows, ROOTS)
 
     out = args.output or (REPO / "MANIFEST.tsv")
     with out.open("w", encoding="utf-8") as fh:
