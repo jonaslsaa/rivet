@@ -1,0 +1,64 @@
+{
+  "tool": "rivet-decode",
+  "format": "serverbound_play_capture",
+  "state": "play",
+  "flow": "serverbound",
+  "protocol": 776,
+  "packet_count": 9,
+  "files": {
+    "0000_accept_teleportation.frame": {
+      "sha256": "070b13c004e9475fa155cd84d90de9f87db1b7dea6707329638a6ce66043d246",
+      "bytes": 3,
+      "packet_id": 0,
+      "packet_name": "accept_teleportation"
+    },
+    "0001_chunk_batch_received.frame": {
+      "sha256": "4a9bbef49cf4efc82f0284d58b68c415faf4d55a3953dc0d130323a8a52bbe1b",
+      "bytes": 6,
+      "packet_id": 11,
+      "packet_name": "chunk_batch_received"
+    },
+    "0002_client_command.frame": {
+      "sha256": "94a9964053c051db20446323bb1c28df4a85ee6200201ae8e9c964290ea0c22c",
+      "bytes": 3,
+      "packet_id": 12,
+      "packet_name": "client_command"
+    },
+    "0003_client_tick_end.frame": {
+      "sha256": "c7b89cfb9abf2c4cb212a4840b37d762f4c880b8517b0dadb0c310ded24dd86d",
+      "bytes": 2,
+      "packet_id": 13,
+      "packet_name": "client_tick_end"
+    },
+    "0004_move_player_pos.frame": {
+      "sha256": "0d3d231c63ce1b677f015e5576cf3bd0c1d29d63ac18e8b7baff9c5f6414ef5a",
+      "bytes": 27,
+      "packet_id": 30,
+      "packet_name": "move_player_pos"
+    },
+    "0005_move_player_pos_rot.frame": {
+      "sha256": "5369847e910e1bbf42a0d064e929d92fd099c228eada1b716378d53ddc6160d6",
+      "bytes": 35,
+      "packet_id": 31,
+      "packet_name": "move_player_pos_rot"
+    },
+    "0006_move_player_rot.frame": {
+      "sha256": "d09be227652db71b75abf091f0b9c881265e1ca863bbb46f44c7b667e76c840d",
+      "bytes": 11,
+      "packet_id": 32,
+      "packet_name": "move_player_rot"
+    },
+    "0007_move_player_status_only.frame": {
+      "sha256": "e0cbff704765104800fe75ca6ed204c2a36b112d762de028c158dd484fdb86a4",
+      "bytes": 3,
+      "packet_id": 33,
+      "packet_name": "move_player_status_only"
+    },
+    "0008_player_action.frame": {
+      "sha256": "534d46d9fc809aa686b8d06220b4083e73632fc6f9b6cec449a13f21a8b14d16",
+      "bytes": 13,
+      "packet_id": 41,
+      "packet_name": "player_action"
+    }
+  }
+}
