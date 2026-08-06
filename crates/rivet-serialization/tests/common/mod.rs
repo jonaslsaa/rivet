@@ -397,8 +397,8 @@ impl Canonical for JsonValue {
 /// distinguishes `IntTag(1)` from `ByteTag(1)` by class, this canonical form
 /// does not — but the int/float split keeps a Double-widened encode
 /// (`NbtOps.createNumeric` → `DoubleTag`) distinguishable from an `IntTag`.
-/// Byte arrays map to a `Canon::List` of
-/// bytes, so a byte array and a plain list of byte tags compare equal — the
+/// Byte arrays map to a `Canon::List` of bytes, so a byte array and a plain
+/// list of byte tags compare equal — the
 /// same observable value (both are a sequence of signed bytes; `NbtOps`/DFU
 /// treat `ByteArrayTag` and a `ListTag` of `ByteTag` interchangeably in the
 /// stream/byte-buffer surface).
