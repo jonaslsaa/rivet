@@ -21,6 +21,7 @@
 //! - `registry(reg)`: varint id; decode `byIdOrThrow(id)`, encode
 //!   `getIdOrThrow(value)` (the registry's own `IdMap<T>` — on a defaulted
 //!   registry an out-of-range decode id falls back to the default element).
+//!   Element type `Arc<T>` (the stored allocation, see the codec doc).
 //! - `holderRegistry(reg)`: varint id; decode `byIdOrThrow(id)`, encode
 //!   `getIdOrThrow(holder)`, through the `Registry.asHolderIdMap()` view whose
 //!   `byId` is `Registry.get(int)` — the **strict** bounds-checked range
@@ -57,6 +58,8 @@ use rivet_registry::holder_set::HolderSet;
 use rivet_registry::id_map::IdMap;
 use rivet_registry::registry::{Registry, RegistryKey};
 use rivet_registry::{Identifier, ResourceKey, TagKey};
+
+use std::sync::Arc;
 
 /// Lift a `StreamCodec<FriendlyByteBuf, T>` to run over [`RegistryFriendlyByteBuf`]
 /// by delegating to the inner buffer — the Rust stand-in for Java's
@@ -140,28 +143,37 @@ pub fn global_pos_stream_codec() -> StreamCodec<RegistryFriendlyByteBuf, GlobalP
 /// `ByteBufCodecs.registry(registryKey)` — a varint element id mapped through
 /// the registry's own `IdMap<T>`.
 ///
-/// Decode returns a value-equal clone of the stored element (`Registry<T>`
-/// stores `Arc<T>`; the codec boundary cannot hand out references). Encode uses
-/// `getIdOrThrow`, which is identity-sensitive (`Registry::get_id` keys by
-/// `Arc::as_ptr`), so like Java only elements the registry holds (or a
-/// defaulted registry's default) encode.
-pub fn registry<T>(registry_key: &RegistryKey<T>) -> StreamCodec<RegistryFriendlyByteBuf, T>
+/// The element type is `Arc<T>` — the Rust stand-in for Java's *stored object
+/// reference*. `Registry<T>` stores `Arc<T>` and keys `getId` by `Arc::as_ptr`
+/// identity, so the codec must carry the `Arc` for the round trip to be a real
+/// one: decode returns a clone of the stored `Arc` (same allocation), and encode
+/// resolves `getIdOrThrow` off that allocation. Like Java, an element the
+/// registry does not hold encodes only via a defaulted registry's asymmetric
+/// `getId` fallback (silently the default id, `DefaultedMappedRegistry.getId`);
+/// on a non-defaulted registry it cannot encode (Java throws
+/// `IllegalArgumentException`, the Rust port panics with the same message). A
+/// fresh `Arc<T>` is *not* the stored reference, so re-encoding one resolves to
+/// the default id on a defaulted registry — callers must keep the `Arc` from
+/// decode/`by_id_arc` to re-encode the original element.
+pub fn registry<T>(registry_key: &RegistryKey<T>) -> StreamCodec<RegistryFriendlyByteBuf, Arc<T>>
 where
-    T: Clone + Send + Sync + 'static,
+    T: Send + Sync + 'static,
 {
     let encoder_key = registry_key.clone();
     let decoder_key = registry_key.clone();
     of(
-        move |output: &mut RegistryFriendlyByteBuf, value: &T| {
+        move |output: &mut RegistryFriendlyByteBuf, value: &Arc<T>| {
             let registry = output.registry_access().lookup_or_throw(&encoder_key);
-            let id = IdMap::get_id_or_throw(registry, value);
+            let id = IdMap::get_id_or_throw(registry, value.as_ref());
             output.write_var_int(id);
             Ok(())
         },
         move |input: &mut RegistryFriendlyByteBuf| {
             let id = input.read_var_int();
             let registry = input.registry_access().lookup_or_throw(&decoder_key);
-            Ok(registry.by_id_or_throw(id).clone())
+            Ok(registry.by_id_arc(id).cloned().unwrap_or_else(|| {
+                panic!("No value with id {id}");
+            }))
         },
     )
 }
@@ -462,10 +474,11 @@ mod tests {
     }
 
     /// Alias of `super::registry` so tests can name it while a local variable
-    /// shadows the imported function name.
-    fn registry_codec<T: Clone + Send + Sync + 'static>(
+    /// shadows the imported function name. The element type is `Arc<T>` — the
+    /// stored-allocation identity the round trip depends on (see the codec doc).
+    fn registry_codec<T: Send + Sync + 'static>(
         registry_key: &RegistryKey<T>,
-    ) -> StreamCodec<RegistryFriendlyByteBuf, T> {
+    ) -> StreamCodec<RegistryFriendlyByteBuf, Arc<T>> {
         super::registry(registry_key)
     }
 
@@ -575,17 +588,59 @@ mod tests {
         let registry = tagged_registry();
         let access = access(registry);
         let codec = registry_codec::<TestElement>(&registry_key());
-        // Encode needs the value reference the registry holds (identity map).
+        // Encode needs the stored `Arc<T>` the registry holds (identity map).
         let value = access
             .lookup(&registry_key())
             .unwrap()
-            .get_value(&element_key("stone"))
+            .by_id_arc(1)
             .unwrap();
         assert_eq!(written(&access, &codec, value), vec![1]); // element id 1
-        // Decode the wire id back to the value.
+        // Decode the wire id back to the stored element.
         let mut input =
             RegistryFriendlyByteBuf::new(BytesMut::from(vec![1].as_slice()), access.clone());
-        assert_eq!(codec.decode(&mut input).unwrap(), TestElement(1));
+        let decoded = codec.decode(&mut input).unwrap();
+        assert_eq!(decoded.as_ref(), &TestElement(1));
+        // The decoded `Arc` aliases the stored allocation (decode -> encode id).
+        assert_eq!(written(&access, &codec, &decoded), vec![1]);
+    }
+
+    #[test]
+    fn registry_codec_decoded_value_reencodes_its_own_id() {
+        // MAJOR-1 regression: decode must hand back the *stored* element so a
+        // decode-then-encode round trip resolves the real id, exactly like Java
+        // (`byId` returns the stored object reference). A decoded clone whose
+        // pointer is absent from `by_value` would panic here.
+        let access = access(tagged_registry());
+        let codec = registry_codec::<TestElement>(&registry_key());
+        for id in 0..3u8 {
+            let mut input =
+                RegistryFriendlyByteBuf::new(BytesMut::from([id].as_slice()), access.clone());
+            let decoded = codec.decode(&mut input).unwrap();
+            assert_eq!(written(&access, &codec, &decoded), vec![id]);
+        }
+    }
+
+    #[test]
+    fn registry_codec_decoded_value_reencodes_its_own_id_on_defaulted_registry() {
+        // MAJOR-1 regression, the silent-corruption case: `getId` on a defaulted
+        // registry falls back to the default id for a value `by_value` misses.
+        // A decoded *clone* would silently re-encode as varint 0 (the default);
+        // the stored `Arc` re-encodes to its real id.
+        let access = access(defaulted_registry());
+        let codec = registry_codec::<TestElement>(&registry_key());
+        // stone is id 1; decoding must hand back stone, not the default air.
+        let mut input =
+            RegistryFriendlyByteBuf::new(BytesMut::from([1u8].as_slice()), access.clone());
+        let decoded = codec.decode(&mut input).unwrap();
+        assert_eq!(decoded.as_ref(), &TestElement(1));
+        assert_eq!(written(&access, &codec, &decoded), vec![1]);
+        // The default fallback itself still works: out-of-range decodes to the
+        // default element and that element re-encodes to the default's id (0).
+        let mut input =
+            RegistryFriendlyByteBuf::new(BytesMut::from([99u8].as_slice()), access.clone());
+        let default = codec.decode(&mut input).unwrap();
+        assert_eq!(default.as_ref(), &TestElement(0)); // the default "air"
+        assert_eq!(written(&access, &codec, &default), vec![0]);
     }
 
     #[test]
@@ -602,13 +657,13 @@ mod tests {
 
     #[test]
     fn registry_codec_unregistered_value_panics_get_id_or_throw() {
-        // `Registry.getId` is identity-sensitive: a fresh value was never
+        // `Registry.getId` is identity-sensitive: a fresh allocation was never
         // registered, so `getIdOrThrow` panics with the registry in the message.
         let access = access(tagged_registry());
         let codec = registry_codec::<TestElement>(&registry_key());
         let mut out = buffer(&access);
         let msg = panic_message(|| {
-            let _ = codec.encode(&mut out, &TestElement(9));
+            let _ = codec.encode(&mut out, &Arc::new(TestElement(9)));
         });
         assert_eq!(
             msg,
@@ -627,7 +682,23 @@ mod tests {
         let codec = registry_codec::<TestElement>(&registry_key());
         let mut input = buffer(&access);
         input.write_var_int(99);
-        assert_eq!(codec.decode(&mut input).unwrap(), TestElement(0)); // the default "air"
+        assert_eq!(codec.decode(&mut input).unwrap().as_ref(), &TestElement(0)); // the default "air"
+    }
+
+    #[test]
+    fn registry_codec_fresh_arc_on_defaulted_registry_encodes_the_default_id() {
+        // Java-faithful: `DefaultedMappedRegistry.getId` falls back to the
+        // default's id for any value `toId` misses. A fresh `Arc<T>` (never
+        // registered, and distinct from any stored allocation) therefore encodes
+        // varint 0 — silently the default element, exactly like Java. This is
+        // Java's behavior, not a corruption: callers who re-encode a decoded
+        // element must keep the stored `Arc` (see the codec doc), as the decode
+        // path now guarantees.
+        let access = access(defaulted_registry());
+        let codec = registry_codec::<TestElement>(&registry_key());
+        let mut out = buffer(&access);
+        codec.encode(&mut out, &Arc::new(TestElement(9))).unwrap();
+        assert_eq!(out.into_inner().to_vec(), vec![0]); // the default id
     }
 
     #[test]
