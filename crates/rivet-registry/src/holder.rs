@@ -31,14 +31,14 @@
 //!   holder's registry id against the owner's (`context == this` pointer
 //!   identity preserved via the per-instance `RegistryId`).
 //!
-//! - **Panic-message rendering:** `value()`/`key()` panic with
-//!   `"Trying to access unbound value/key '<render>' from registry <id>"`.
-//!   Java prints the holder's *stored* key (`'null'` for a truly keyless
-//!   reference); the Rust `(RegistryId, id)` reference stores no key, so
-//!   `render_holder` resolves through the lookup and yields `''` when the id is
-//!   unresolvable (the only state that panics). The message *shape* matches;
-//!   the embedded `''`-vs-`'null'` rendering is a recorded, deliberate
-//!   deviation (PORTING.md drift checklist).
+//! - **Panic-message rendering:** both `value()` and `key()` panic with
+//!   `"Trying to access unbound value '<render>' from registry <id>"` — Java's
+//!   `Reference.value()`/`key()` both throw that literal message (a Mojang
+//!   copy-paste quirk), `value()` rendering the holder's *key*, `key()`
+//!   rendering its *value*. The Rust `(RegistryId, id)` reference stores
+//!   neither, so `render_holder` resolves through the lookup and yields
+//!   `"null"` when the id is unresolvable — byte-identical to Java's null
+//!   key/value string concatenation.
 //!
 //! STUB: `components`/`are_components_bound` — `DataComponentMap` is not
 //! ported yet (later `mc.core.component` scope); the variants exist without a
@@ -191,8 +191,12 @@ impl<T> Holder<T> {
     pub fn key(&self, lookup: &dyn HolderLookup<T>) -> ResourceKey<T> {
         match self {
             Holder::Reference { registry, .. } => lookup.key_of(self).unwrap_or_else(|| {
+                // Java `Reference.key()` throws "Trying to access unbound value"
+                // (the same literal as `value()` — a Mojang copy-paste), rendering
+                // the holder's value. Both key and value are unresolvable in the
+                // panic state, so `render_holder` yields Java's "null".
                 panic!(
-                    "Trying to access unbound key '{}' from registry {}",
+                    "Trying to access unbound value '{}' from registry {}",
                     render_holder(self, lookup),
                     registry.0
                 )
@@ -287,13 +291,17 @@ impl<T: std::fmt::Debug> std::fmt::Display for Holder<T> {
 /// Render a holder for a panic message, resolving the key through the lookup
 /// when possible. Only ever reached with a `Reference` (a `Direct` holder's
 /// value/key never panic), so the `Direct` arm needs no `T: Debug`.
+///
+/// An unresolvable reference renders `"null"` — Java's `Reference.value()`/
+/// `key()` string-concatenate the null key/value into the message, so the
+/// byte-identical panic text is `"... unbound value 'null' from registry <id>"`.
 fn render_holder<T>(holder: &Holder<T>, lookup: &dyn HolderLookup<T>) -> String {
     match holder {
         Holder::Direct(_) => "Direct".to_string(),
         Holder::Reference { .. } => lookup
             .key_of(holder)
             .map(|key| key.to_string())
-            .unwrap_or_default(),
+            .unwrap_or_else(|| "null".to_string()),
     }
 }
 
@@ -425,8 +433,9 @@ mod tests {
 
     #[test]
     fn reference_value_panics_on_unresolvable_id_with_java_message() {
-        // `''` (the lookup-free render of an unresolvable id) is the recorded
-        // drift vs Java's `'null'` — see the module doc's panic-message bullet.
+        // Java `Reference.value()` throws "Trying to access unbound value '<key>'
+        // from registry <owner>"; the unresolvable reference's key is null, which
+        // string-concatenates as "null" — byte-identical here.
         let lookup = NullLookup;
         let reference: Holder<TestElement> = Holder::reference(RegistryId(9), 4);
         let err =
@@ -434,20 +443,22 @@ mod tests {
         let msg = err.unwrap_err().downcast_ref::<String>().cloned().unwrap();
         assert_eq!(
             msg,
-            "Trying to access unbound value '' from registry 9".to_string()
+            "Trying to access unbound value 'null' from registry 9".to_string()
         );
     }
 
     #[test]
     fn reference_key_panics_on_unresolvable_id_with_java_message() {
-        // Same `''`-vs-`'null'` drift as the value panic above (module doc).
+        // Java `Reference.key()` throws the same literal "Trying to access
+        // unbound value '<value>'" message as `value()` (a Mojang copy-paste),
+        // rendering the null value as "null".
         let lookup = NullLookup;
         let reference: Holder<TestElement> = Holder::reference(RegistryId(9), 4);
         let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reference.key(&lookup)));
         let msg = err.unwrap_err().downcast_ref::<String>().cloned().unwrap();
         assert_eq!(
             msg,
-            "Trying to access unbound key '' from registry 9".to_string()
+            "Trying to access unbound value 'null' from registry 9".to_string()
         );
     }
 
