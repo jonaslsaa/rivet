@@ -554,20 +554,21 @@ fn component_json_score_round_trip() {
 fn component_json_empty_extra_field_is_omitted() {
     // `optionalFieldOf("extra", List.of())`: encoding a component with no
     // siblings must NOT write an `extra` key (Java `OptionalFieldCodec` writes
-    // only when present). `"extra":[]` must fail with "List must have contents".
+    // only when present). This is observable on the full-record encode path —
+    // a plain literal with no siblings collapses to the string form, so use a
+    // styled literal (cannot collapse) and assert no `extra` key appears.
     let ops = JsonOps::INSTANCE;
     let codec = component_codec();
 
-    let mut component = Component::literal("a");
-    component.append_component(Component::literal("b"));
+    let styled = Component::literal("a").with_style(Style::EMPTY.with_bold(Some(true)));
     let encoded = codec
-        .encode_start(&ops, &component)
+        .encode_start(&ops, &styled)
         .get_or_throw("encode")
         .clone();
-    // A literal with siblings encodes as the full record with an `extra` list.
-    assert_eq!(encoded, serde_json::json!({"text": "a", "extra": ["b"]}));
+    assert_eq!(encoded, serde_json::json!({"text": "a", "bold": true}));
 
-    // A full typed object with an empty extra array is rejected by nonEmptyList.
+    // A full typed object with a present-but-empty `extra` array is rejected
+    // by `nonEmptyList` ("List must have contents").
     let empty_extra = serde_json::json!({
         "type": "text",
         "text": "hi",

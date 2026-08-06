@@ -40,9 +40,8 @@ impl ClickEvent {
 
 impl std::fmt::Display for ClickEvent {
     /// `ClickEvent.toString()`. The concrete `Action` model is deferred, so
-    /// this is the placeholder `"ClickEvent"` — unreachable today because the
-    /// opaque struct cannot be constructed (only `Style`'s `Display` needs the
-    /// trait).
+    /// this is the placeholder `"ClickEvent"` (only `Style`'s `Display` needs
+    /// the trait).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ClickEvent")
     }

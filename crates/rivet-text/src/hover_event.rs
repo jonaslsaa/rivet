@@ -39,9 +39,8 @@ impl HoverEvent {
 
 impl std::fmt::Display for HoverEvent {
     /// `HoverEvent.toString()`. The concrete `Action` model is deferred, so
-    /// this is the placeholder `"HoverEvent"` — unreachable today because the
-    /// opaque struct cannot be constructed (only `Style`'s `Display` needs the
-    /// trait).
+    /// this is the placeholder `"HoverEvent"` (only `Style`'s `Display` needs
+    /// the trait).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HoverEvent")
     }
