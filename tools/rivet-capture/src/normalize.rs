@@ -1,0 +1,680 @@
+//! Byte-level normalization of the raw join-path capture into a deterministic
+//! canonical form.
+//!
+//! The Paper server randomizes a handful of wire fields on every boot (see the
+//! provenance docs in the fixture manifest for the full justification):
+//!
+//! - the player's spawn X/Z offset (PlayerSpawnFinder picks a random candidate
+//!   around the fixed world spawn), which shifts the spawn position, the chunk
+//!   view square, and every entity/position coordinate;
+//! - the player entity id (a server-side counter);
+//! - keepalive ids (the server picks a random long, the client echoes it);
+//! - the `set_time` body (tick-dependent world clock state).
+//!
+//! Everything else on the join path is byte-deterministic for a fixed seed +
+//! superflat config + offline bot identity (verified across fresh boots by
+//! `verify`). This module rewrites exactly those nondeterministic fields,
+//! leaving every other byte untouched, and records each rewrite with a
+//! justification so the fixture manifest stays self-documenting.
+//!
+//! `Direction` uses the protocol's own naming: clientbound packets travel
+//! server → client, serverbound packets travel client → server.
+
+use std::collections::BTreeMap;
+
+use crate::frame;
+use crate::packet::{CapturedPacket, Direction, State};
+use crate::structured;
+
+/// A normalized packet: the raw (state, direction, id) plus the normalized body
+/// and a human-readable note describing any rewrite applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedPacket {
+    pub state: State,
+    pub direction: Direction,
+    pub id: i32,
+    pub body: Vec<u8>,
+    /// Human-readable justification; empty when the body was unchanged.
+    pub note: String,
+}
+
+/// Context discovered from the raw capture before per-packet normalization.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpawnCtx {
+    /// Player spawn X (absolute, from the first `player_position` body).
+    pub x: f64,
+    /// Player spawn Z (absolute, from the first `player_position` body).
+    pub z: f64,
+    /// Chunk column containing the spawn position.
+    pub chunk_x: i32,
+    pub chunk_z: i32,
+}
+
+/// Derive the spawn context from the raw capture: the first `player_position`
+/// body carries the player's spawn coordinates.
+pub fn find_spawn(packets: &[CapturedPacket]) -> Option<SpawnCtx> {
+    for p in packets {
+        if p.state == State::Play
+            && p.direction == Direction::Clientbound
+            && p.id == 72
+            && let Some((x, z)) = parse_player_position(&p.body)
+        {
+            return Some(SpawnCtx {
+                x,
+                z,
+                chunk_x: (x / 16.0).floor() as i32,
+                chunk_z: (z / 16.0).floor() as i32,
+            });
+        }
+    }
+    None
+}
+
+/// Parse `(x, z)` out of a `player_position` body
+/// (`[VarInt id][x f64][y f64][z f64]...`).
+fn parse_player_position(body: &[u8]) -> Option<(f64, f64)> {
+    let mut off = 0;
+    frame::read_varint(body, &mut off)?;
+    let x = frame::read_f64(body, &mut off)?;
+    frame::read_f64(body, &mut off)?;
+    let z = frame::read_f64(body, &mut off)?;
+    Some((x, z))
+}
+
+/// Rewrite the leading VarInt entity id to `1`. Used for every packet whose
+/// first field is the (per-boot randomized) server-assigned entity id.
+fn rewrite_entity_id(body: &[u8], id: i32) -> Vec<u8> {
+    let mut off = 0;
+    let id_len = frame::read_varint(body, &mut off).map(|_| off).unwrap_or(0);
+    let mut out = Vec::with_capacity(body.len());
+    frame::write_varint(&mut out, id);
+    out.extend_from_slice(&body[id_len..]);
+    out
+}
+
+/// Zero a big-endian field in `body` if it fits.
+fn zero_f64(body: &mut [u8], off: usize) {
+    if body.len() >= off + 8 {
+        body[off..off + 8].copy_from_slice(&0.0f64.to_be_bytes());
+    }
+}
+
+fn zero_f32(body: &mut [u8], off: usize) {
+    if body.len() >= off + 4 {
+        body[off..off + 4].copy_from_slice(&0.0f32.to_be_bytes());
+    }
+}
+
+fn zero_bytes(body: &mut [u8], off: usize, n: usize) {
+    if body.len() >= off + n {
+        body[off..off + n].fill(0);
+    }
+}
+
+/// Normalize a single packet body. Returns the normalized body plus a note.
+///
+/// Every rewrite here is a field the Paper server randomizes per boot (spawn
+/// offset, entity ids, teleport ids, keepalive ids, tick-dependent set_time),
+/// documented with a one-line justification so the fixture manifest stays
+/// self-describing.
+pub fn normalize_packet(packet: &CapturedPacket, spawn: Option<SpawnCtx>) -> NormalizedPacket {
+    let (body, note) = match (packet.state, packet.direction, packet.id) {
+        // login_finished: [UUID playerUUID][String username][VarInt props]
+        // [UUID sessionId]. The sessionId is a per-login random UUID; zero it.
+        (State::Login, Direction::Clientbound, 2) => {
+            let mut body = packet.body.clone();
+            zero_bytes(&mut body, 28, 16);
+            (
+                body,
+                "login_finished sessionId (per-login random UUID) -> 0".into(),
+            )
+        }
+        // Handshake intention: zero the proxy's ephemeral listen port.
+        // Body: [VarInt protocol][String address][u16 port][VarInt next_state].
+        (State::Handshake, Direction::Serverbound, 0) => {
+            let mut body = packet.body.clone();
+            let mut off = 0;
+            if frame::read_varint(&body, &mut off).is_some() {
+                let addr_len = frame::read_varint(&body, &mut off).unwrap_or(0) as usize;
+                if addr_len > 0 && body.len() >= off + addr_len + 2 {
+                    off += addr_len;
+                    body[off..off + 2].copy_from_slice(&0u16.to_be_bytes());
+                }
+            }
+            (
+                body,
+                "handshake port (proxy's ephemeral listen port) -> 0".into(),
+            )
+        }
+        // login: playerId is a writeInt at the head of the body.
+        (State::Play, Direction::Clientbound, 49) => {
+            let mut body = packet.body.clone();
+            if body.len() >= 4 {
+                body[0..4].copy_from_slice(&1i32.to_be_bytes());
+            }
+            (
+                body,
+                "player entity id (server-assigned counter) -> 1".into(),
+            )
+        }
+        // player_position: rewrite the teleport id, x/z, delta dx/dz and the
+        // rotation floats; keep y (superflat spawn height is deterministic).
+        // Body: [VarInt id][x][y][z][dx][dy][dz][yaw][pitch][flags...]
+        (State::Play, Direction::Clientbound, 72) => {
+            let mut off = 0;
+            let id_len = frame::read_varint(&packet.body, &mut off)
+                .map(|_| off)
+                .unwrap_or(0);
+            let mut body = Vec::with_capacity(packet.body.len());
+            frame::write_varint(&mut body, 0); // teleport id -> 0
+            body.extend_from_slice(&packet.body[id_len..]);
+            // body = [0][x][y][z][dx][dy][dz][yaw][pitch][flags...]
+            zero_f64(&mut body, 1); // x
+            // y at 9..17 kept (deterministic spawn height).
+            zero_f64(&mut body, 17); // z
+            zero_f64(&mut body, 25); // dx
+            // dy at 33..41 kept (vertical delta).
+            zero_f64(&mut body, 41); // dz
+            zero_f32(&mut body, 49); // yaw
+            zero_f32(&mut body, 53); // pitch
+            (
+                body,
+                "teleport id, position x/z, delta dx/dz, yaw/pitch (spawn offset randomized) -> canonical".into(),
+            )
+        }
+        // set_chunk_cache_center: [VarInt chunkX][VarInt chunkZ] — translate to
+        // the spawn-relative origin (0,0) so the view square is deterministic.
+        (State::Play, Direction::Clientbound, 94) => {
+            let mut body = Vec::with_capacity(packet.body.len());
+            let (sx, sz) = spawn.map(|s| (s.chunk_x, s.chunk_z)).unwrap_or((0, 0));
+            let mut off = 0;
+            let cx = frame::read_varint(&packet.body, &mut off).unwrap_or(0) - sx;
+            let cz = frame::read_varint(&packet.body, &mut off).unwrap_or(0) - sz;
+            frame::write_varint(&mut body, cx);
+            frame::write_varint(&mut body, cz);
+            (
+                body,
+                "chunk-cache center translated to spawn-chunk origin".into(),
+            )
+        }
+        // level_chunk_with_light: chunkX/chunkZ are writeInts at the head
+        // (translated to the spawn chunk), and the heightmap map iterates in a
+        // per-boot order, so its entries are sorted by type id. The section
+        // buffer and block-entity list are untouched.
+        (State::Play, Direction::Clientbound, 45) => {
+            let mut body = packet.body.clone();
+            if body.len() >= 8 {
+                let cx = i32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+                let cz = i32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+                let (sx, sz) = spawn.map(|s| (s.chunk_x, s.chunk_z)).unwrap_or((0, 0));
+                body[0..4].copy_from_slice(&(cx - sx).to_be_bytes());
+                body[4..8].copy_from_slice(&(cz - sz).to_be_bytes());
+            }
+            match structured::canon_chunk(&body) {
+                Some(c) => (
+                    c,
+                    "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical".into(),
+                ),
+                None => (body, "chunk canonicalization FAILED — raw body kept".into()),
+            }
+        }
+        // registry_data: entries and NBT compound fields iterate per-boot
+        // (HashMap-backed); sort both.
+        (State::Configuration, Direction::Clientbound, 7) => {
+            match structured::canon_registry_data(&packet.body) {
+                Some(body) => (
+                    body,
+                    "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+                        .into(),
+                ),
+                None => (
+                    packet.body.clone(),
+                    "registry_data canonicalization FAILED — raw body kept".into(),
+                ),
+            }
+        }
+        // update_tags: registries, tags, and tag entry ids iterate per-boot;
+        // sort all three levels.
+        (State::Configuration, Direction::Clientbound, 13) => {
+            match structured::canon_update_tags(&packet.body) {
+                Some(body) => (
+                    body,
+                    "tag registries/tags/ids sorted (per-boot HashMap order) -> canonical".into(),
+                ),
+                None => (
+                    packet.body.clone(),
+                    "update_tags canonicalization FAILED — raw body kept".into(),
+                ),
+            }
+        }
+        // keep_alive: body is an 8-byte random long (server → client) or the
+        // client's echo (client → server).
+        (State::Play, Direction::Clientbound, 44) | (State::Play, Direction::Serverbound, 28) => {
+            let mut body = packet.body.clone();
+            zero_bytes(&mut body, 0, 8);
+            (body, "keepalive id (server-random long) -> 0".into())
+        }
+        // set_entity_data: entity id VarInt at the head.
+        (State::Play, Direction::Clientbound, 99) => {
+            let body = rewrite_entity_id(&packet.body, 1);
+            (body, "entity id (server-assigned counter) -> 1".into())
+        }
+        // add_entity: [id VarInt][uuid 16][type VarInt][x][y][z][yRot][xRot][yHeadRot][data][vel...]
+        (State::Play, Direction::Clientbound, 1) => {
+            let mut body = rewrite_entity_id(&packet.body, 1);
+            let mut type_off = 1 + 16;
+            if let Some(type_end) = frame::read_varint(&body, &mut type_off).map(|_| type_off) {
+                let x_off = type_end;
+                // y at x_off+8 kept (deterministic spawn height).
+                let z_off = type_end + 16;
+                let yaw_off = type_end + 24;
+                let pitch_off = type_end + 25;
+                let head_off = type_end + 26;
+                let mut data_off = type_end + 27;
+                if let Some(data_end) = frame::read_varint(&body, &mut data_off).map(|_| data_off) {
+                    let vx_off = data_end;
+                    let vz_off = data_end + 4;
+                    zero_f64(&mut body, x_off); // x
+                    zero_f64(&mut body, z_off); // z
+                    body[yaw_off] = 0; // yRot
+                    body[pitch_off] = 0; // xRot
+                    body[head_off] = 0; // yHeadRot
+                    zero_bytes(&mut body, vx_off, 2); // velX
+                    zero_bytes(&mut body, vz_off, 2); // velZ
+                }
+            }
+            (
+                body,
+                "entity id -> 1; position x/z, rotation, velocity -> 0".into(),
+            )
+        }
+        // entity_event: [Int entityId][Byte eventId] — Paper's
+        // `ClientboundEntityEventPacket` uses `writeInt` for the entity id (not a
+        // VarInt), then `writeByte` for the event.
+        (State::Play, Direction::Clientbound, 34) => {
+            let mut body = packet.body.clone();
+            if body.len() >= 5 {
+                body[0..4].copy_from_slice(&1i32.to_be_bytes()); // entity id -> 1
+                body[4] = 0; // event id
+            }
+            (body, "entity id -> 1; event id -> 0".into())
+        }
+        // entity_position_sync: [id VarInt][x][y][z][dx][dy][dz][yaw][pitch][onGround].
+        (State::Play, Direction::Clientbound, 35) => {
+            let mut body = rewrite_entity_id(&packet.body, 1);
+            zero_f64(&mut body, 1); // x
+            // y at 9..17 kept.
+            zero_f64(&mut body, 17); // z
+            zero_f64(&mut body, 25); // dx
+            zero_f64(&mut body, 41); // dz
+            zero_f32(&mut body, 49); // yaw
+            zero_f32(&mut body, 53); // pitch
+            (body, "entity id -> 1; position x/z, yaw/pitch -> 0".into())
+        }
+        // move_entity_pos: [id][xa short][ya short][za short][onGround].
+        (State::Play, Direction::Clientbound, 53) => {
+            let mut body = rewrite_entity_id(&packet.body, 1);
+            zero_bytes(&mut body, 1, 2); // xa
+            zero_bytes(&mut body, 5, 2); // za
+            (body, "entity id -> 1; horizontal deltas -> 0".into())
+        }
+        // move_entity_pos_rot: [id][xa][ya][za][yRot][xRot][onGround].
+        (State::Play, Direction::Clientbound, 54) => {
+            let mut body = rewrite_entity_id(&packet.body, 1);
+            zero_bytes(&mut body, 1, 2); // xa
+            zero_bytes(&mut body, 5, 2); // za
+            zero_bytes(&mut body, 7, 2); // yRot xRot
+            (
+                body,
+                "entity id -> 1; horizontal deltas, rotation -> 0".into(),
+            )
+        }
+        // move_entity_rot: [id][yRot][xRot][onGround].
+        (State::Play, Direction::Clientbound, 56) => {
+            let mut body = rewrite_entity_id(&packet.body, 1);
+            zero_bytes(&mut body, 1, 2); // yRot xRot
+            (body, "entity id -> 1; rotation -> 0".into())
+        }
+        // rotate_head: [id][yHeadRot byte].
+        (State::Play, Direction::Clientbound, 83) => {
+            let mut body = rewrite_entity_id(&packet.body, 1);
+            zero_bytes(&mut body, 1, 1);
+            (body, "entity id -> 1; head yaw -> 0".into())
+        }
+        // set_entity_motion: [id][velX short][velY short][velZ short].
+        (State::Play, Direction::Clientbound, 101) => {
+            let mut body = rewrite_entity_id(&packet.body, 1);
+            zero_bytes(&mut body, 1, 6);
+            (body, "entity id -> 1; velocity -> 0".into())
+        }
+        // update_attributes: [id VarInt][list...] — attribute values for the
+        // player are deterministic; the entity id and the snapshot list order
+        // vary per boot.
+        (State::Play, Direction::Clientbound, 131) => {
+            let body = rewrite_entity_id(&packet.body, 1);
+            match structured::canon_update_attributes(&body) {
+                Some(c) => (
+                    c,
+                    "entity id -> 1; attribute snapshots sorted by id (per-boot collection order) -> canonical".into(),
+                ),
+                None => (body, "entity id (server-assigned counter) -> 1".into()),
+            }
+        }
+        // update_advancements: the added/removed/progress lists iterate per-boot
+        // (HashMap/HashSet-backed); sort all three and zero the obtained
+        // instants (wall-clock when the fresh-join advancements were granted).
+        (State::Play, Direction::Clientbound, 130) => {
+            match structured::canon_update_advancements(&packet.body) {
+                Some(body) => (
+                    body,
+                    "advancement added/removed/progress + criteria sorted; obtained instants -> 0 (per-boot) -> canonical".into(),
+                ),
+                None => (packet.body.clone(), "update_advancements canonicalization FAILED — raw body kept".into()),
+            }
+        }
+        // update_recipes: the property-set map and each set's item list iterate
+        // per-boot (HashMap/HashSet-backed); sort both.
+        (State::Play, Direction::Clientbound, 133) => {
+            match structured::canon_update_recipes(&packet.body) {
+                Some(body) => (
+                    body,
+                    "recipe property-set map + item lists sorted (per-boot map order) -> canonical"
+                        .into(),
+                ),
+                None => (
+                    packet.body.clone(),
+                    "update_recipes canonicalization FAILED — raw body kept".into(),
+                ),
+            }
+        }
+        // set_time: entire body is tick-dependent clock state.
+        (State::Play, Direction::Clientbound, 113) => (
+            canonical_set_time(),
+            "set_time body is tick-dependent; canonicalized (gameTime=0, clocks at 0/1.0)".into(),
+        ),
+        // accept_teleportation: [VarInt teleport id] (echo of player_position).
+        (State::Play, Direction::Serverbound, 0) => {
+            (vec![0u8], "teleport id (server counter) -> 0".into())
+        }
+        // move_player_pos (movement sample): x/z doubles, keep y.
+        (State::Play, Direction::Serverbound, 30) => {
+            let mut body = packet.body.clone();
+            zero_f64(&mut body, 0); // x
+            // y at 8..16 kept.
+            zero_f64(&mut body, 16); // z
+            (body, "movement x/z (spawn offset randomized) -> 0".into())
+        }
+        // move_player_pos_rot: x/z doubles + yaw/pitch floats, keep y.
+        (State::Play, Direction::Serverbound, 31) => {
+            let mut body = packet.body.clone();
+            zero_f64(&mut body, 0); // x
+            // y at 8..16 kept.
+            zero_f64(&mut body, 16); // z
+            zero_f32(&mut body, 24); // yRot
+            zero_f32(&mut body, 28); // xRot
+            (
+                body,
+                "movement x/z, yaw/pitch (spawn offset randomized) -> 0".into(),
+            )
+        }
+        // move_player_rot: yaw/pitch floats.
+        (State::Play, Direction::Serverbound, 32) => {
+            let mut body = packet.body.clone();
+            zero_f32(&mut body, 0); // yRot
+            zero_f32(&mut body, 4); // xRot
+            (body, "movement yaw/pitch -> 0".into())
+        }
+        _ => (packet.body.clone(), String::new()),
+    };
+    NormalizedPacket {
+        state: packet.state,
+        direction: packet.direction,
+        id: packet.id,
+        body,
+        note,
+    }
+}
+
+/// The canonical `set_time` body: gameTime = 0, two clock entries (overworld
+/// holder id 0, the_end holder id 1) each at totalTicks=0, partialTick=0.0,
+/// rate=1.0. This is valid wire format, so a ported codec round-trips it.
+fn canonical_set_time() -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&0i64.to_be_bytes()); // gameTime
+    frame::write_varint(&mut body, 2); // map count: overworld + the_end
+    for holder_id in 0..2i32 {
+        frame::write_varint(&mut body, holder_id); // WorldClock holder
+        // ClockNetworkState: VarLong totalTicks, float partialTick, float rate.
+        frame::write_varint(&mut body, 0); // totalTicks (small → 1-byte VarLong)
+        body.extend_from_slice(&0.0f32.to_be_bytes()); // partialTick
+        body.extend_from_slice(&1.0f32.to_be_bytes()); // rate
+    }
+    body
+}
+
+/// Racy packet ids: their per-boot COUNT or exact placement in the stream is
+/// timing-dependent, so the canonical form keeps only the first occurrence as a
+/// deterministic sample (compared for byte identity, not count).
+fn is_racy(state: State, direction: Direction, id: i32) -> bool {
+    matches!(
+        (state, direction, id),
+        // keepalives arrive at a server-chosen instant, possibly interleaved.
+        (State::Play, Direction::Clientbound, 44)
+            | (State::Play, Direction::Serverbound, 28)
+            | (State::Configuration, Direction::Clientbound, 4)
+            | (State::Configuration, Direction::Serverbound, 4)
+            // per-tick client traffic: count depends on tick alignment.
+            | (State::Play, Direction::Serverbound, 33) // move_player_status_only
+            | (State::Play, Direction::Serverbound, 13) // client_tick_end
+            // the movement sample: the first position packet after spawn.
+            | (State::Play, Direction::Serverbound, 30) // move_player_pos
+            // chunk-batch acks: one per batch, timing-dependent.
+            | (State::Play, Direction::Serverbound, 11) // chunk_batch_received
+            // set_time: canonicalized, so a single sample suffices.
+            | (State::Play, Direction::Clientbound, 113)
+    )
+}
+
+/// Build the canonical, deterministic packet list from a raw capture.
+///
+/// Grouping is by (state, direction, id); within a group, racy ids are reduced
+/// to their first occurrence and chunk packets are sorted by their (now
+/// spawn-relative) coordinates. The output is a stable, ordered list suitable
+/// for byte-for-byte fixture comparison.
+pub fn canonicalize(packets: &[CapturedPacket]) -> Vec<NormalizedPacket> {
+    let spawn = find_spawn(packets);
+    let normalized: Vec<NormalizedPacket> =
+        packets.iter().map(|p| normalize_packet(p, spawn)).collect();
+
+    // Group by (state, direction, id), preserving capture order.
+    let mut groups: BTreeMap<(u8, u8, i32), Vec<NormalizedPacket>> = BTreeMap::new();
+    for p in normalized {
+        let state = state_rank(p.state);
+        let dir = direction_rank(p.direction);
+        groups.entry((state, dir, p.id)).or_default().push(p);
+    }
+
+    let mut out = Vec::new();
+    for (_key, group) in groups {
+        if is_racy(group[0].state, group[0].direction, group[0].id) {
+            // Sample the first occurrence only.
+            if let Some(first) = group.first() {
+                out.push(first.clone());
+            }
+        } else if group[0].id == 45 && group[0].state == State::Play {
+            // Sort chunk packets by translated coordinates for a deterministic
+            // order (the receive order is not part of the parity contract).
+            let mut chunks: Vec<NormalizedPacket> = group;
+            chunks.sort_by_key(|c| {
+                let mut off = 0;
+                let cx = frame::read_i32(&c.body, &mut off).unwrap_or(i32::MAX);
+                let cz = frame::read_i32(&c.body, &mut off).unwrap_or(i32::MAX);
+                (cx, cz)
+            });
+            out.extend(chunks);
+        } else {
+            out.extend(group);
+        }
+    }
+    out
+}
+
+fn state_rank(s: State) -> u8 {
+    match s {
+        State::Handshake => 0,
+        State::Status => 1,
+        State::Login => 2,
+        State::Configuration => 3,
+        State::Play => 4,
+    }
+}
+
+fn direction_rank(d: Direction) -> u8 {
+    match d {
+        Direction::Serverbound => 0,
+        Direction::Clientbound => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::test_helpers::{read_f32, read_i64};
+    use crate::frame::write_varint;
+
+    fn pkt(state: State, direction: Direction, id: i32, body: Vec<u8>) -> CapturedPacket {
+        CapturedPacket {
+            state,
+            direction,
+            id,
+            body,
+        }
+    }
+
+    #[test]
+    fn find_spawn_from_player_position() {
+        let mut body = Vec::new();
+        write_varint(&mut body, 0); // teleport id
+        body.extend_from_slice(&8.5f64.to_be_bytes());
+        body.extend_from_slice(&(-60.0f64).to_be_bytes());
+        body.extend_from_slice(&(-3.5f64).to_be_bytes());
+        let packets = vec![pkt(State::Play, Direction::Clientbound, 72, body)];
+        let spawn = find_spawn(&packets).expect("spawn");
+        assert_eq!(spawn.chunk_x, 0);
+        assert_eq!(spawn.chunk_z, -1);
+    }
+
+    #[test]
+    fn normalize_login_player_id() {
+        let body = 42i32.to_be_bytes().to_vec();
+        let n = normalize_packet(&pkt(State::Play, Direction::Clientbound, 49, body), None);
+        assert_eq!(&n.body[0..4], &1i32.to_be_bytes());
+        assert!(!n.note.is_empty());
+    }
+
+    #[test]
+    fn normalize_chunk_coords_translate() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&3i32.to_be_bytes());
+        body.extend_from_slice(&(-2i32).to_be_bytes());
+        body.extend_from_slice(&[0xAB; 10]);
+        let spawn = SpawnCtx {
+            x: 0.0,
+            z: 0.0,
+            chunk_x: 3,
+            chunk_z: -2,
+        };
+        let n = normalize_packet(
+            &pkt(State::Play, Direction::Clientbound, 45, body),
+            Some(spawn),
+        );
+        let mut off = 0;
+        assert_eq!(frame::read_i32(&n.body, &mut off), Some(0));
+        assert_eq!(frame::read_i32(&n.body, &mut off), Some(0));
+    }
+
+    #[test]
+    fn normalize_keepalive_zeroes_long() {
+        let body = 0xDEADBEEFCAFEBABEu64 as i64 as i128;
+        let body = (body as i64).to_be_bytes().to_vec();
+        for (state, dir, id) in [
+            (State::Play, Direction::Clientbound, 44),
+            (State::Play, Direction::Serverbound, 28),
+        ] {
+            let n = normalize_packet(&pkt(state, dir, id, body.clone()), None);
+            assert_eq!(&n.body[0..8], &0i64.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn normalize_set_time_is_canonical_and_parseable() {
+        let n = normalize_packet(
+            &pkt(State::Play, Direction::Clientbound, 113, vec![0xFF; 32]),
+            None,
+        );
+        let mut off = 0;
+        assert_eq!(read_i64(&n.body, &mut off), Some(0)); // gameTime
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(2)); // 2 clocks
+        // entry 1
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(0)); // overworld
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(0)); // totalTicks
+        assert_eq!(read_f32(&n.body, &mut off), Some(0.0));
+        assert_eq!(read_f32(&n.body, &mut off), Some(1.0));
+        // entry 2
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(1)); // the_end
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(0));
+        assert_eq!(read_f32(&n.body, &mut off), Some(0.0));
+        assert_eq!(read_f32(&n.body, &mut off), Some(1.0));
+        assert_eq!(off, n.body.len(), "no trailing bytes");
+    }
+
+    #[test]
+    fn canonicalize_reduces_racy_ids_to_first_occurrence() {
+        let packets = vec![
+            pkt(State::Play, Direction::Serverbound, 13, vec![]),
+            pkt(State::Play, Direction::Serverbound, 13, vec![]),
+            pkt(State::Play, Direction::Serverbound, 13, vec![]),
+        ];
+        let canon = canonicalize(&packets);
+        assert_eq!(canon.len(), 1);
+        assert_eq!(canon[0].id, 13);
+    }
+
+    #[test]
+    fn normalize_entity_event_rewrites_int_id_and_event() {
+        // Paper's ClientboundEntityEventPacket uses writeInt for the entity id
+        // (not a VarInt) followed by a writeByte event. Raw: Int 0 + Byte 0x18.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0i32.to_be_bytes());
+        body.push(0x18);
+        let n = normalize_packet(&pkt(State::Play, Direction::Clientbound, 34, body), None);
+        assert_eq!(&n.body[0..4], &1i32.to_be_bytes(), "entity id (Int) -> 1");
+        assert_eq!(n.body[4], 0, "event id -> 0");
+        assert_eq!(n.body.len(), 5);
+        assert!(!n.note.is_empty());
+    }
+
+    #[test]
+    fn normalize_add_entity_rewrites_id_and_position() {
+        let mut body = Vec::new();
+        write_varint(&mut body, 5); // entity id
+        body.extend_from_slice(&[0xAA; 16]); // uuid
+        write_varint(&mut body, 63); // type (player)
+        body.extend_from_slice(&8.5f64.to_be_bytes()); // x
+        body.extend_from_slice(&(-60.0f64).to_be_bytes()); // y
+        body.extend_from_slice(&(-3.5f64).to_be_bytes()); // z
+        body.extend_from_slice(&[0u8; 9]); // yaw/pitch/headYaw/data/velocity...
+        let n = normalize_packet(&pkt(State::Play, Direction::Clientbound, 1, body), None);
+        let mut off = 0;
+        assert_eq!(
+            frame::read_varint(&n.body, &mut off),
+            Some(1),
+            "entity id -> 1"
+        );
+        off += 16; // uuid
+        let type_end = frame::read_varint(&n.body, &mut off).unwrap();
+        let _ = type_end; // type value
+        let x = frame::read_f64(&n.body, &mut off).unwrap();
+        assert_eq!(x, 0.0, "x normalized to 0");
+    }
+}
