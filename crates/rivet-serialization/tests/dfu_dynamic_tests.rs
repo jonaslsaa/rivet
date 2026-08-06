@@ -6,19 +6,13 @@
 //! `JsonOps::INSTANCE`/`COMPRESSED`. Value equality is canonicalized (via the
 //! `Canon` tree), so map iteration order never leaks into the assertions.
 //!
-//! `JsonOps::COMPRESSED` sets `compressMaps()`, but the port's compressed-map
-//! path is `STUB(dfu.compressed-map)`: a faithful COMPRESSED record encode goes
-//! through `MapEncoder.compressedBuilder` (a `KeyCompressor`-backed builder
-//! producing a packed array) and decode through `MapDecoder.compressedDecode`
-//! (`getList` + `KeyCompressor`), neither of which is ported — the port always
-//! builds via `ops.map_builder()` and reads via `get_map`. Record/map codec
-//! tests whose faithful Java path requires `KeyCompressor`/`compressedBuilder`/
-//! `compressedDecode` therefore run only against the non-compressed `INSTANCE`
-//! backend, and each such COMPRESSED omission is marked
-//! `// STUB(dfu.compressed-map)`, tracked by the dedicated compressed-map
-//! sub-issue (epic #6). Surfaces that use the compressed path faithfully without
-//! a `KeyCompressor` (`unitCodec` checks `getList` when `compressMaps()`) are
-//! exercised against both backends.
+//! `JsonOps::COMPRESSED` sets `compressMaps()`. The compressed-map path is
+//! faithful: COMPRESSED record encode goes through `MapEncoder.compressedBuilder`
+//! (a `KeyCompressor`-backed builder producing a packed array) and decode
+//! through `MapDecoder.compressedDecode` (`getList` + `KeyCompressor`).
+//! `assumeMapUnsafe`/`unit`/field-codec tests assert the packed-list form under
+//! COMPRESSED and the object-map form under INSTANCE. `unitCodec` (checks
+//! `getList` when `compressMaps()`) is exercised against both backends.
 
 mod common;
 
@@ -424,15 +418,12 @@ fn assume_map_unsafe_record_codec() {
 
 #[test]
 fn assume_map_unsafe_record_codec_through_json() {
-    // STUB(dfu.compressed-map): faithful `JsonOps.COMPRESSED` encodes through
-    // `MapEncoder.compressedBuilder` (a `KeyCompressor`-backed packed array)
-    // and decodes via `compressedDecode` (`getList` + `KeyCompressor`), and the
-    // wrapped `AssumeMapCodec` adds the value under the `value` key to that
-    // compressed builder. Neither is ported, so the object-map flatten/wrap
-    // round trip is exercised only against the non-compressed `INSTANCE`
-    // backend; the COMPRESSED case is tracked by the dedicated compressed-map
-    // sub-issue (epic #6).
-    let ops = JsonOps::INSTANCE;
+    // INSTANCE: the object-map form — the wrapped record's fields are
+    // flattened into the object on encode and rebuilt on decode. COMPRESSED:
+    // `assumeMapUnsafe`'s keys are just `["value"]`, so the compressed builder
+    // has one slot; `AssumeMapCodec.encode` adds the record's packed list under
+    // `value`, yielding `[[...record fields...]]` (Java's exact form), and
+    // `AssumeMapCodec.decode` reads `input.get("value")` → the packed list.
     #[derive(Debug, Clone, PartialEq)]
     struct Simple {
         string: String,
@@ -467,26 +458,33 @@ fn assume_map_unsafe_record_codec_through_json() {
         string: "hello".into(),
         integer: 1,
     };
-    let encoded = assumed
-        .encode_start(&ops, &value)
-        .get_or_throw("encodeStart")
-        .clone();
-    assert_eq!(
-        encoded.canon(),
-        v_map(
-            &ops,
-            vec![
-                ("string", v_str(&ops, "hello")),
-                ("integer", v_int(&ops, 1))
-            ]
-        )
-        .canon()
-    );
-    let decoded = assumed.parse(&ops, &encoded).get_or_throw("parse").clone();
-    assert_eq!(decoded, value);
+    for ops in JSON_BACKENDS {
+        let encoded = assumed
+            .encode_start(&ops, &value)
+            .get_or_throw("encodeStart")
+            .clone();
+        let expected = if ops.compress_maps() {
+            // One slot (`value`) holding the record's own packed list.
+            v_list(
+                &ops,
+                vec![v_list(&ops, vec![v_str(&ops, "hello"), v_int(&ops, 1)])],
+            )
+        } else {
+            v_map(
+                &ops,
+                vec![
+                    ("string", v_str(&ops, "hello")),
+                    ("integer", v_int(&ops, 1)),
+                ],
+            )
+        };
+        assert_eq!(encoded.canon(), expected.canon());
+        let decoded = assumed.parse(&ops, &encoded).get_or_throw("parse").clone();
+        assert_eq!(decoded, value);
 
-    // The wrapped codec expects a map; a non-map fails.
-    ops.assert_from_java_fails(&assumed, &v_str(&ops, "not a map"));
+        // The wrapped codec expects a map; a non-map fails.
+        ops.assert_from_java_fails(&assumed, &v_str(&ops, "not a map"));
+    }
 }
 
 #[test]
@@ -501,20 +499,32 @@ fn assume_map_unsafe_primitive_codec_fails() {
 
 #[test]
 fn assume_map_unsafe_primitive_codec_fails_through_json() {
-    // STUB(dfu.compressed-map): a faithful `JsonOps.COMPRESSED` encode goes
-    // through `compressedBuilder` (`AssumeMapCodec.encode` under `compressMaps()`
-    // adds the value under the `value` key to the `KeyCompressor`-backed packed
-    // builder), so the encoded form is a packed list, not an object — the port
-    // instead falls back to `ops.map_builder()`. Only the non-compressed
-    // `INSTANCE` behavior is asserted (decode of a bare number fails, encode of
-    // a non-map fails); the COMPRESSED case is tracked by the dedicated
-    // compressed-map sub-issue (epic #6).
     let int: Arc<dyn rivet_serialization::Codec<i32, JsonOps>> = int_codec();
     let codec = map_codec::codec_of(map_codec::assume_map_unsafe(int));
 
+    // INSTANCE: decode of a bare number fails (not a map), and encode of a
+    // non-map fails (`getMap` of the encoded number fails).
     let ops = JsonOps::INSTANCE;
     ops.assert_from_java_fails(&codec, &v_num(&ops, 123.0));
     ops.assert_to_java_fails(&codec, &123);
+
+    // COMPRESSED: `AssumeMapCodec` routes under `compressMaps()` — decode of a
+    // bare number fails at `getList` ("Input is not a list"), but encode of a
+    // primitive SUCCEEDS, adding it under the single `value` key to the packed
+    // builder (`[123]`), which round-trips.
+    let ops = JsonOps::COMPRESSED;
+    ops.assert_from_java_fails(&codec, &v_num(&ops, 123.0));
+    let encoded = codec
+        .encode_start(&ops, &123)
+        .get_or_throw("encodeStart")
+        .clone();
+    assert_eq!(
+        encoded.canon(),
+        v_list(&ops, vec![v_int(&ops, 123)]).canon(),
+        "COMPRESSED must encode a primitive under the single 'value' slot"
+    );
+    let decoded = *codec.parse(&ops, &encoded).get_or_throw("parse");
+    assert_eq!(decoded, 123);
 }
 
 #[test]

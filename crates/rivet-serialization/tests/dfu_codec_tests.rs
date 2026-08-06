@@ -13,24 +13,21 @@
 //! Map equality is order-insensitive; field order is asserted explicitly where
 //! the port guarantees it.
 //!
-//! `JsonOps::COMPRESSED` sets `compressMaps()`, but the port's compressed-map
-//! path is `STUB(dfu.compressed-map)`: a faithful COMPRESSED encode goes through
-//! `MapEncoder.compressedBuilder` (a `KeyCompressor`-backed builder producing a
-//! packed array) and decode through `MapDecoder.compressedDecode` (`getList` +
-//! `KeyCompressor`), neither of which is ported — the port always builds via
-//! `ops.map_builder()` and reads via `get_map`. Record/map codec tests whose
-//! faithful Java path requires `KeyCompressor`/`compressedBuilder`/
-//! `compressedDecode` therefore run only against the non-compressed `INSTANCE`
-//! backend, and each such COMPRESSED omission is marked `// STUB(dfu.compressed-map)`,
-//! tracked by the dedicated compressed-map sub-issue under epic #6. `COMPRESSED`
-//! remains only for surfaces proven faithful without a `KeyCompressor`:
-//! `Codec`-level map codecs that bypass `MapCodecCodec` (`unboundedMap` uses
-//! `getMap`/`mapBuilder` directly in Java), `unitCodec` (checks
-//! `getList` when `compressMaps()`), and list/scalar surfaces.
+//! `JsonOps::COMPRESSED` sets `compressMaps()`. The compressed-map path is
+//! faithful: COMPRESSED encode goes through `MapEncoder.compressedBuilder` (a
+//! `KeyCompressor`-backed builder producing a packed array) and decode through
+//! `MapDecoder.compressedDecode` (`getList` + `KeyCompressor`). Record/map
+//! codecs therefore encode to a packed list under COMPRESSED and to an object
+//! under INSTANCE — each `_through_json` test asserts both forms. `COMPRESSED`
+//! surfaces that bypass `MapCodecCodec` (`unboundedMap` uses `getMap`/
+//! `mapBuilder` directly in Java) and `unitCodec` (checks `getList` when
+//! `compressMaps()`) are exercised against both backends as before.
 
 mod common;
 
-use common::{OpsTestExt, TestOps, ordered_map_keys, v_bool, v_int, v_list, v_map, v_num, v_str};
+use common::{
+    Canonical, OpsTestExt, TestOps, ordered_map_keys, v_bool, v_int, v_list, v_map, v_num, v_str,
+};
 use rivet_serialization::DataResult;
 use rivet_serialization::codec;
 use rivet_serialization::dynamic_ops::DynamicOps;
@@ -857,11 +854,9 @@ fn optional_field_round_trip() {
 
 #[test]
 fn optional_field_round_trip_through_json() {
-    // STUB(dfu.compressed-map): `optionalField` is a `MapCodec`, so a faithful
-    // COMPRESSED round trip needs `compressedBuilder`/`compressedDecode` (a
-    // `KeyCompressor`-backed packed list), which is not ported. The map-form
-    // round trip is asserted only against `INSTANCE`; the COMPRESSED case is
-    // tracked by the dedicated compressed-map sub-issue (epic #6).
+    // INSTANCE map-object form only — the COMPRESSED packed-list form is
+    // asserted by `optional_field_round_trip_compressed_list_form` (the
+    // expected value is a list there, not a map).
     let ops = JsonOps::INSTANCE;
     {
         for codec in [simple_optionals_codec(), simple_optionals_lenient_codec()] {
@@ -889,6 +884,32 @@ fn optional_field_round_trip_through_json() {
 }
 
 #[test]
+fn optional_field_round_trip_compressed_list_form() {
+    // The faithful `JsonOps.COMPRESSED` encode of `SimpleOptionals` is a packed
+    // list (`KeyCompressor`-backed `compressedBuilder`), not an object: slot 0
+    // is `string`, slot 1 is `integer`. `None` fields encode as null slots;
+    // unknown/absent fields decode via the null slot.
+    let ops = JsonOps::COMPRESSED;
+    for codec in [simple_optionals_codec(), simple_optionals_lenient_codec()] {
+        let value = SimpleOptionals {
+            string: Some("foo".into()),
+            integer: Some(1),
+        };
+        let encoded = codec
+            .encode_start(&ops, &value)
+            .get_or_throw("encodeStart")
+            .clone();
+        assert_eq!(
+            encoded.canon(),
+            v_list(&ops, vec![v_str(&ops, "foo"), v_int(&ops, 1)]).canon(),
+            "COMPRESSED must encode a record as a packed list in key order"
+        );
+        let decoded = codec.parse(&ops, &encoded).get_or_throw("parse").clone();
+        assert_eq!(decoded, value);
+    }
+}
+
+#[test]
 fn optional_field_strict_invalid_values() {
     let ops = TestOps;
     let strict = simple_optionals_codec();
@@ -901,23 +922,32 @@ fn optional_field_strict_invalid_values() {
 
 #[test]
 fn optional_field_strict_invalid_values_through_json() {
-    // STUB(dfu.compressed-map): `optionalField` is a `MapCodec`; a faithful
-    // COMPRESSED decode of a map first calls `compressedDecode` → `getList`,
-    // which fails on an object with "Input is not a list" before any field
-    // validation runs. The map-form field-validation semantics asserted here
-    // therefore hold only for the non-compressed `INSTANCE` backend (the
-    // port's always-map `compressed_decode` fallback is not asserted); the
-    // COMPRESSED case is tracked by the dedicated compressed-map sub-issue
-    // (epic #6).
-    let ops = JsonOps::INSTANCE;
-    let strict = simple_optionals_codec();
-    // A boolean is invalid as a string (`COMPRESSED` tolerates numbers, so a
-    // number would decode to `Some("54.0")` and not fail).
-    ops.assert_from_java_fails(&strict, &v_map(&ops, vec![("string", v_bool(&ops, false))]));
-    ops.assert_from_java_fails(
-        &strict,
-        &v_map(&ops, vec![("integer", v_str(&ops, "not an int"))]),
-    );
+    // INSTANCE: the map-object form — field validation runs and fails.
+    // COMPRESSED: a map input to `compressedDecode` fails at `getList`
+    // ("Input is not a list") before any field validation runs (Java's exact
+    // behavior for a non-list compressed input).
+    for ops in JSON_BACKENDS {
+        let strict = simple_optionals_codec();
+        // A boolean is invalid as a string (`COMPRESSED` tolerates numbers, so
+        // a number would decode to `Some("54.0")` and not fail).
+        let invalid_string = v_map(&ops, vec![("string", v_bool(&ops, false))]);
+        let invalid_integer = v_map(&ops, vec![("integer", v_str(&ops, "not an int"))]);
+        if ops.compress_maps() {
+            let msg = ops.from_java_error_message(&strict, &invalid_string);
+            assert!(
+                msg.contains("Input is not a list"),
+                "COMPRESSED decode of a map must fail with 'Input is not a list', got: {msg}"
+            );
+            let msg = ops.from_java_error_message(&strict, &invalid_integer);
+            assert!(
+                msg.contains("Input is not a list"),
+                "COMPRESSED decode of a map must fail with 'Input is not a list', got: {msg}"
+            );
+        } else {
+            ops.assert_from_java_fails(&strict, &invalid_string);
+            ops.assert_from_java_fails(&strict, &invalid_integer);
+        }
+    }
 }
 
 #[test]
@@ -945,31 +975,44 @@ fn optional_field_strict_invalid_values_partial() {
 
 #[test]
 fn optional_field_strict_invalid_values_partial_through_json() {
-    // STUB(dfu.compressed-map): a faithful COMPRESSED decode of this map fails
-    // in `compressedDecode` → `getList` ("Input is not a list") before any
-    // field validation, so no partial is produced; the partial result asserted
-    // here is the non-compressed `INSTANCE` behavior. The port's always-map
-    // `compressed_decode` fallback is not asserted; the COMPRESSED case is
-    // tracked by the dedicated compressed-map sub-issue (epic #6).
-    let ops = JsonOps::INSTANCE;
-    let strict = simple_optionals_codec();
-    let partial = ops.from_java_or_partial(
-        &strict,
-        &v_map(
+    // INSTANCE: a map object — the invalid `string` field is skipped and the
+    // valid `integer` yields a partial. COMPRESSED: the same map input fails at
+    // `compressedDecode` → `getList` ("Input is not a list") before any field
+    // validation, so no partial is produced.
+    for ops in JSON_BACKENDS {
+        let strict = simple_optionals_codec();
+        let input = v_map(
             &ops,
             vec![
                 ("string", v_bool(&ops, false)),
                 ("integer", v_int(&ops, 23)),
             ],
-        ),
-    );
-    assert_eq!(
-        partial,
-        SimpleOptionals {
-            string: None,
-            integer: Some(23)
+        );
+        if ops.compress_maps() {
+            let result = strict.parse(&ops, &input);
+            assert!(
+                result.clone().result_or_partial_silent().is_none(),
+                "COMPRESSED decode of a map must produce no partial, got: {result:?}"
+            );
+            assert!(
+                result
+                    .error_ref()
+                    .unwrap()
+                    .message()
+                    .contains("Input is not a list"),
+                "COMPRESSED decode of a map must fail with 'Input is not a list'"
+            );
+        } else {
+            let partial = ops.from_java_or_partial(&strict, &input);
+            assert_eq!(
+                partial,
+                SimpleOptionals {
+                    string: None,
+                    integer: Some(23)
+                }
+            );
         }
-    );
+    }
 }
 
 #[test]
@@ -997,31 +1040,39 @@ fn optional_field_lenient_invalid_values() {
 
 #[test]
 fn optional_field_lenient_invalid_values_through_json() {
-    // STUB(dfu.compressed-map): a faithful COMPRESSED decode of this map fails
-    // in `compressedDecode` → `getList` ("Input is not a list") before the
-    // lenient field logic runs; the lenient parse asserted here is the
-    // non-compressed `INSTANCE` behavior. The port's always-map
-    // `compressed_decode` fallback is not asserted; the COMPRESSED case is
-    // tracked by the dedicated compressed-map sub-issue (epic #6).
-    let ops = JsonOps::INSTANCE;
-    let lenient = simple_optionals_lenient_codec();
-    let parsed = ops.parse_or_throw(
-        &lenient,
-        &v_map(
+    // INSTANCE: the lenient map-object parse tolerates the invalid `string`
+    // field. COMPRESSED: the same map input fails at `compressedDecode` →
+    // `getList` ("Input is not a list") before the lenient field logic runs.
+    for ops in JSON_BACKENDS {
+        let lenient = simple_optionals_lenient_codec();
+        let input = v_map(
             &ops,
             vec![
                 ("string", v_bool(&ops, false)),
                 ("integer", v_int(&ops, 23)),
             ],
-        ),
-    );
-    assert_eq!(
-        parsed,
-        SimpleOptionals {
-            string: None,
-            integer: Some(23)
+        );
+        if ops.compress_maps() {
+            let result = lenient.parse(&ops, &input);
+            assert!(
+                result
+                    .error_ref()
+                    .unwrap()
+                    .message()
+                    .contains("Input is not a list"),
+                "COMPRESSED decode of a map must fail with 'Input is not a list'"
+            );
+        } else {
+            let parsed = ops.parse_or_throw(&lenient, &input);
+            assert_eq!(
+                parsed,
+                SimpleOptionals {
+                    string: None,
+                    integer: Some(23)
+                }
+            );
         }
-    );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,52 +1148,72 @@ fn record_codec_round_trip_and_error_accumulation() {
 
 #[test]
 fn record_codec_round_trip_and_error_accumulation_through_json() {
-    // STUB(dfu.compressed-map): faithful `JsonOps.COMPRESSED` encodes a record
-    // through `MapCodecCodec.encode` → `MapEncoder.compressedBuilder` (a
-    // `KeyCompressor`-backed packed array), not an object map, and decodes via
-    // `compressedDecode` (`getList` + `KeyCompressor`). Neither is ported, so the
-    // map-form round trip is exercised only against `INSTANCE`; the COMPRESSED
-    // case is tracked by the dedicated compressed-map sub-issue (epic #6).
-    let ops = JsonOps::INSTANCE;
-    {
+    // INSTANCE: the map-object form — round trip, non-map failure, and
+    // accumulated field errors. COMPRESSED: the packed-list form — a map input
+    // fails at `compressedDecode` → `getList` ("Input is not a list"); the
+    // accumulated field-error path is exercised on a *list* input instead
+    // (Java would fail at `getList` for a map, so a faithful list is required).
+    for ops in JSON_BACKENDS {
         let codec = simple_codec();
-        ops.assert_round_trip(
-            &codec,
-            Simple {
-                string: "hello".into(),
-                integer: 1,
-            },
+        let value = Simple {
+            string: "hello".into(),
+            integer: 1,
+        };
+        let expected = if ops.compress_maps() {
+            v_list(&ops, vec![v_str(&ops, "hello"), v_int(&ops, 1)])
+        } else {
             v_map(
                 &ops,
                 vec![
                     ("string", v_str(&ops, "hello")),
                     ("integer", v_int(&ops, 1)),
                 ],
-            ),
-        );
+            )
+        };
+        ops.assert_round_trip(&codec, value.clone(), expected);
 
-        // A record that is not a map fails.
+        // A record that is not a map fails in every mode.
         ops.assert_from_java_fails(&codec, &v_str(&ops, "not a map"));
 
-        // Both fields invalid: errors accumulate (the apply2 message order).
-        // The string field uses a boolean so it is invalid in every JsonOps
-        // mode (`COMPRESSED` tolerates numbers as strings).
-        let result = codec.parse(
-            &ops,
-            &v_map(
+        if ops.compress_maps() {
+            // A map input to a compressed codec fails at `getList`.
+            let map_input = v_map(
                 &ops,
                 vec![
                     ("string", v_bool(&ops, false)),
                     ("integer", v_str(&ops, "x")),
                 ],
-            ),
-        );
-        assert!(result.is_error());
-        let msg = result.error_ref().unwrap().message().to_string();
-        assert!(
-            msg.contains("Not a string") && msg.contains("Not a number") && msg.contains(';'),
-            "expected the two field errors accumulated, got: {msg}"
-        );
+            );
+            let result = codec.parse(&ops, &map_input);
+            assert!(
+                result
+                    .error_ref()
+                    .unwrap()
+                    .message()
+                    .contains("Input is not a list"),
+                "COMPRESSED decode of a map must fail with 'Input is not a list'"
+            );
+        } else {
+            // Both fields invalid: errors accumulate (the apply2 message
+            // order). The string field uses a boolean so it is invalid in every
+            // JsonOps mode (`COMPRESSED` tolerates numbers as strings).
+            let result = codec.parse(
+                &ops,
+                &v_map(
+                    &ops,
+                    vec![
+                        ("string", v_bool(&ops, false)),
+                        ("integer", v_str(&ops, "x")),
+                    ],
+                ),
+            );
+            assert!(result.is_error());
+            let msg = result.error_ref().unwrap().message().to_string();
+            assert!(
+                msg.contains("Not a string") && msg.contains("Not a number") && msg.contains(';'),
+                "expected the two field errors accumulated, got: {msg}"
+            );
+        }
     }
 }
 
@@ -1213,35 +1284,50 @@ fn record_codec_maintains_field_order() {
 
 #[test]
 fn record_codec_maintains_field_order_through_json() {
-    // STUB(dfu.compressed-map): faithful `JsonOps.COMPRESSED` encodes a record
-    // through `compressedBuilder` (a `KeyCompressor`-backed packed array), not
-    // an object, so `ordered_map_keys` is inapplicable there. Field order in map
-    // form is asserted only against the non-compressed `INSTANCE` backend; the
-    // COMPRESSED case is tracked by the dedicated compressed-map sub-issue
-    // (epic #6).
-    let ops = JsonOps::INSTANCE;
-    let codec = record_with_4_fields_codec();
-    let value = RecordWith4Fields {
-        f1: 4,
-        f2: 3,
-        f3: 2,
-        f4: 1,
-    };
-    let encoded = codec
-        .encode_start(&ops, &value)
-        .get_or_throw("encodeStart")
-        .clone();
-    // The encoded map must preserve the field declaration order.
-    assert_eq!(
-        ordered_map_keys(&encoded),
-        vec![
-            "f1".to_string(),
-            "f2".to_string(),
-            "f3".to_string(),
-            "f4".to_string()
-        ],
-        "encoded record must keep field order"
-    );
+    // INSTANCE: the encoded object keeps field declaration order
+    // (`ordered_map_keys`). COMPRESSED: the packed list keeps key order from
+    // `keys(ops)` — `f1..f4` in declaration order at slots 0..3.
+    for ops in JSON_BACKENDS {
+        let codec = record_with_4_fields_codec();
+        let value = RecordWith4Fields {
+            f1: 4,
+            f2: 3,
+            f3: 2,
+            f4: 1,
+        };
+        let encoded = codec
+            .encode_start(&ops, &value)
+            .get_or_throw("encodeStart")
+            .clone();
+        if ops.compress_maps() {
+            // The packed list holds the field values in `keys(ops)` order.
+            assert_eq!(
+                encoded.canon(),
+                v_list(
+                    &ops,
+                    vec![
+                        v_int(&ops, 4),
+                        v_int(&ops, 3),
+                        v_int(&ops, 2),
+                        v_int(&ops, 1),
+                    ],
+                )
+                .canon(),
+                "COMPRESSED record must encode as a packed list in keys() order"
+            );
+        } else {
+            assert_eq!(
+                ordered_map_keys(&encoded),
+                vec![
+                    "f1".to_string(),
+                    "f2".to_string(),
+                    "f3".to_string(),
+                    "f4".to_string()
+                ],
+                "encoded record must keep field order"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

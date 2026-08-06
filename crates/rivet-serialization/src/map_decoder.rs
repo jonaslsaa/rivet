@@ -6,8 +6,9 @@
 //! `withLifecycle`, `unit`, `error`) are free functions.
 
 use crate::data_result::DataResult;
-use crate::dynamic_ops::{DynamicOps, Keyable, MapLike};
+use crate::dynamic_ops::{DynamicOps, Keyable, MapLike, compressed_map_like};
 use crate::functions::DecoderFn;
+use crate::lifecycle::Lifecycle;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -16,19 +17,22 @@ pub trait MapDecoder<A, Ops: DynamicOps + 'static>: Debug + Keyable<Ops> {
     /// `MapDecoder.decode(DynamicOps<T> ops, MapLike<T> input)`.
     fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<A>;
 
-    /// `MapDecoder.compressedDecode(DynamicOps<T> ops, T input)` — default:
-    /// non-compressed (`ops.getMap(input)`), using the lifecycle of `decode`.
+    /// `MapDecoder.compressedDecode(DynamicOps<T> ops, T input)`.
     ///
-    /// STUB(mc.nbt): Java's `compressMaps() == true` branch (a
-    /// `KeyCompressor`-backed `MapLike` over a packed list of entries) is not
-    /// ported. Any ops that overrides `compressMaps()` to return `true` will
-    /// decode through the non-compressed `getMap` path instead of the packed
-    /// list form.
+    /// With `compressMaps()` the input must be a list — the entries are read
+    /// positionally through a `KeyCompressor`-backed `MapLike` (unknown keys
+    /// read slot 0, absent fields are null slots). Otherwise the non-compressed
+    /// `ops.getMap(input)` path is used with the lifecycle of `decode`.
     fn compressed_decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<A> {
-        let map = ops
-            .get_map(input)
-            .set_lifecycle(crate::lifecycle::Lifecycle::stable());
-        map.flat_map(|m| self.decode(ops, m.as_ref()))
+        if ops.compress_maps() {
+            match compressed_map_like(ops, self.keys(ops), input) {
+                Some(map) => self.decode(ops, &map),
+                None => DataResult::error("Input is not a list".to_string()),
+            }
+        } else {
+            let map = ops.get_map(input).set_lifecycle(Lifecycle::stable());
+            map.flat_map(|m| self.decode(ops, m.as_ref()))
+        }
     }
 }
 
