@@ -51,6 +51,10 @@ Useful flags:
 - `--limit-fixtures=N` — cap the fixture corpus for a fast smoke run.
 - `--no-oracle` — skip the oracle (only Rust-internal `idem` checks run; every
   oracle-dependent check is emitted with `"skipped": true`).
+- `--scoreboard` — emit/refresh the checked-in `PARITY.md` scoreboard at the
+  workspace root from the live run's stats (see below). Rows are rendered only
+  for checks that actually ran; an oracle-less run therefore records only the
+  `idem` row instead of claiming a parity failure.
 
 ### Reading the transcript
 
@@ -94,3 +98,23 @@ With the pinned Paper 26.2 (`0a99345`) and all 432 fixtures:
 `snbt.parse` and `nbt.decode` are byte-for-byte identical to Paper. Every
 `nbt.encode` divergence is the documented `compound_key_order` (semantic
 re-read equality holds for all of them).
+
+## Scoreboard
+
+`--scoreboard` writes a `PARITY.md` at the workspace root with one row per
+check kind — `inputs | matched | diverged | mismatched | date` — derived from
+the run's stats. Run it after a milestone run so the checked-in numbers stay
+current:
+
+```sh
+cargo run -p rivet-parity -- --scoreboard
+```
+
+The scoreboard is driven purely by the live run, so a check that stops being
+exercised disappears and a red gate (hard mismatches) shows up in the
+`mismatched` column instead of being papered over. `diverged` counts only
+`ok` checks carrying the documented `compound_key_order` divergence. The file
+is written in place at the workspace root (the crate resolves it relative to
+`CARGO_MANIFEST_DIR`), so it works from any worktree. A run with
+`--limit-fixtures=N` appends a `_Snapshot:_` note recording the cap, so a
+capped snapshot is not mistaken for full-corpus coverage.

@@ -34,7 +34,7 @@ Module paths inside crates mirror Java packages (PORTING.md). Crate boundaries e
 
 **Errors/logging:** `thiserror` (per-crate error enums), `anyhow` (tools only), `tracing` + `tracing-subscriber`.
 
-**Testing/tooling:** `cargo-nextest`, `criterion`, cargo-fuzz on all parsers, `azalea` (dev-dep of `tools/rivet-oracle` — bot driver, current with 26.2), `tempfile`.
+**Testing/tooling:** `cargo-nextest`, `criterion`, cargo-fuzz on all parsers, `azalea` (dev-dep of `tools/rivet-oracle` — bot driver, current with 26.2), `tempfile`, `chrono` (date stamps in `tools/rivet-parity`'s `--scoreboard`).
 
 **JVM adapter:** no `jni` crate — `rivet-ffi` exposes plain `extern "C"`; the Java side binds via FFM (Panama). Java shims live in `adapter/` (Gradle), not in the cargo workspace.
 

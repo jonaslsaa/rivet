@@ -21,6 +21,7 @@ mod oracle;
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use rivet_nbt::compound_tag::CompoundTag;
@@ -485,20 +486,93 @@ fn check_idem(id: &str, label: &str, bytes: &[u8]) -> Value {
 
 // ---- main ----
 
+/// Workspace-root `PARITY.md` scoreboard path. Points at the workspace root
+/// (this crate is `tools/rivet-parity`, two levels down), so the file is
+/// written in-place even when run from a worktree.
+fn scoreboard_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("rivet-parity is exactly two levels under the workspace root")
+        .join("PARITY.md")
+}
+
+/// Emit or refresh the workspace-root `PARITY.md` scoreboard.
+///
+/// Sections are driven purely by the live run's stats, so a check that stops
+/// being exercised disappears from the scoreboard and a red gate (hard
+/// mismatches) leaves the `mismatched` column visibly nonzero instead of
+/// writing a green-washed table. When `fixture_cap` is set, a provenance note
+/// is appended so a capped snapshot is not mistaken for full-corpus coverage.
+fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
+    let mut rows: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
+    for kind in ["snbt.parse", "nbt.decode", "nbt.encode", "idem"] {
+        let total = summary.totals.get(kind).copied().unwrap_or(0);
+        let skipped = summary.skipped.get(kind).copied().unwrap_or(0);
+        // Skipped checks (e.g. oracle unavailable) were not measured; a row of
+        // zeros would read as a total parity failure. Render only what ran.
+        if total == 0 || total == skipped {
+            continue;
+        }
+        rows.insert(
+            format!("rivet-nbt:{kind}"),
+            (
+                total - skipped,
+                summary.matched.get(kind).copied().unwrap_or(0),
+                summary.diverged.get(kind).copied().unwrap_or(0),
+                summary.mismatched.get(kind).copied().unwrap_or(0),
+            ),
+        );
+    }
+
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut md = String::new();
+    md.push_str("# PARITY scoreboard\n\n");
+    md.push_str(&format!(
+        "Differential parity vs the pinned Paper Java oracle. Refreshed by the \
+         `rivet-parity` tool (`cargo run -p rivet-parity -- --scoreboard`). \
+         _Run date: {date}_\n\n"
+    ));
+    md.push_str("| crate/check | inputs | matched | diverged | mismatched | date |\n");
+    md.push_str("|---|---|---|---|---|---|\n");
+    for (check, (total, matched, diverged, mismatched)) in &rows {
+        md.push_str(&format!(
+            "| {check} | {total} | {matched} | {diverged} | {mismatched} | {date} |\n"
+        ));
+    }
+    if let Some(cap) = fixture_cap {
+        md.push_str(&format!(
+            "\n_Snapshot: fixture-backed rows above were generated with `--limit-fixtures={cap}` \
+             (a deliberate capped run); the full corpus is the 432 committed M0 chunk-NBT fixtures._\n"
+        ));
+    }
+    md.push_str("\n### Divergences\n\n");
+    md.push_str("`compound_key_order` is the documented HashMap-iteration-order divergence; all such checks remain `ok` and are counted under `diverged`, never under `mismatched`.\n");
+
+    let path = scoreboard_path();
+    match std::fs::write(&path, md) {
+        Ok(()) => eprintln!("[rivet-parity] scoreboard written to {}", path.display()),
+        Err(e) => eprintln!("[rivet-parity] scoreboard write failed: {e}"),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut limit_fixtures: Option<usize> = None;
     let mut no_oracle = false;
+    let mut write_scoreboard_flag = false;
     for arg in &args[1..] {
         match arg.as_str() {
             "--no-oracle" => no_oracle = true,
+            "--scoreboard" => write_scoreboard_flag = true,
             "--help" | "-h" => {
                 eprintln!(
                     "rivet-parity: byte-for-byte NBT/SNBT parity diff vs the Paper Java oracle\n\
                      \n\
-                     usage: cargo run -p rivet-parity [--no-oracle] [--limit-fixtures N]\n\
+                     usage: cargo run -p rivet-parity [--no-oracle] [--scoreboard] [--limit-fixtures N]\n\
                      \n\
                      JSON-Lines transcript on stdout, human summary on stderr.\n\
+                     --scoreboard also emits/refreshes PARITY.md at the workspace root.\n\
                      The oracle needs the M0 Paper runtime; point RIVET_PAPER_JAR,\n\
                      RIVET_PAPER_LIBRARIES, RIVET_PAPER_RUNTIME_JAR at it."
                 );
@@ -694,6 +768,13 @@ fn main() {
         serde_json::to_string(&json!({"kind": "stats", "stats": stats})).expect("stats")
     );
     let _ = out.flush();
+
+    // Refresh the checked-in PARITY.md scoreboard (in place, at the workspace
+    // root) when asked. Runs regardless of hard mismatches so a red gate is
+    // reflected in the committed numbers.
+    if write_scoreboard_flag {
+        write_scoreboard(&summary, limit_fixtures);
+    }
 
     // Human summary on stderr.
     eprintln!();
