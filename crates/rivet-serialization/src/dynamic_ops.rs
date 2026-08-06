@@ -81,13 +81,13 @@ where
 
 /// `com.mojang.serialization.RecordBuilder<T>`.
 ///
-/// Backward-compatible with the STUB(mc.nbt) shape that `rivet-nbt`'s
-/// `NbtRecordBuilder` implements (`build(&mut self, Option<Output>)`). The
-/// mutating `add`/`withErrorsFrom`/`setLifecycle`/`mapError` conveniences
-/// default to no-ops (STUB(mc.nbt)) so existing implementors keep compiling —
-/// an implementor that does not override them silently swallows encode output
-/// until `rivet-nbt`'s full `MapBuilder` port lands. The accumulating
-/// reference builder is `RecordBuilderImpl` (the Java `MapBuilder` port).
+/// The mutating `add`/`withErrorsFrom`/`setLifecycle`/`mapError` conveniences
+/// default to no-ops so an implementor that only needs the accumulate-and-build
+/// shape keeps compiling; one that does not override them silently swallows
+/// encode output. The concrete builders override them: `rivet-nbt`'s
+/// `NbtRecordBuilder` (the ported `AbstractStringBuilder<Tag, CompoundTag>`,
+/// `build(&mut self, Option<Output>)`) and the accumulating `RecordBuilderImpl`
+/// (the Java `MapBuilder` port).
 pub trait RecordBuilder: Debug {
     type Output;
 
@@ -109,8 +109,8 @@ pub trait RecordBuilder: Debug {
     /// `RecordBuilder.add(DataResult<T> key, DataResult<T> value)` — Java's
     /// `AbstractUniversalBuilder.add(DataResult, DataResult)`: resolves the key
     /// through the ops and appends when both are present. The default is a
-    /// STUB(mc.nbt) no-op for the reduced `NbtRecordBuilder` shape; the full
-    /// `RecordBuilderImpl` implements it.
+    /// no-op; `NbtRecordBuilder` (key resolved via `getStringValue`) and
+    /// `RecordBuilderImpl` override it.
     fn add_result_result(
         &mut self,
         _key: DataResult<Self::Output>,

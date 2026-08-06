@@ -19,6 +19,7 @@ use crate::string_tag::StringTag;
 use crate::tag::Tag;
 use rivet_serialization::DataResult;
 use rivet_serialization::dynamic_ops::{DynamicOps, MapLike, Pair};
+use rivet_serialization::lifecycle::Lifecycle;
 
 /// `NbtOps.INSTANCE`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -500,7 +501,7 @@ impl DynamicOps for NbtOps {
     }
 
     fn map_builder(&self) -> Box<dyn rivet_serialization::RecordBuilder<Output = Tag>> {
-        Box::new(NbtRecordBuilder)
+        Box::new(NbtRecordBuilder::new(*self))
     }
 
     fn convert_to<U: DynamicOps>(&self, out_ops: &U, input: &Tag) -> U::Output {
@@ -539,25 +540,153 @@ impl DynamicOps for NbtOps {
     }
 }
 
-/// `AbstractStringBuilder<Tag, CompoundTag>` — builds a compound from string
-/// keyed entries, merging into a prefix.
-#[derive(Debug, Clone, Copy)]
-struct NbtRecordBuilder;
+/// `NbtOps.NbtRecordBuilder` — `AbstractStringBuilder<Tag, CompoundTag>`:
+/// accumulates string-keyed entries into a `CompoundTag`, then merges them into
+/// the build prefix (see `NbtOps.java:475-507`). Mirrors the
+/// `JsonRecordBuilder` port of the same `AbstractStringBuilder` base: the
+/// builder state is a `DataResult<CompoundTag>` so key resolution failures (via
+/// `ops.getStringValue`) and field-level errors (via `add_result`) propagate
+/// through `DataResult.flatMap`/`apply2stable` and are visible to `build`.
+#[derive(Debug, Clone)]
+struct NbtRecordBuilder {
+    /// `new NbtRecordBuilder(NbtOps.this)` — the enclosing ops (zero-sized).
+    ops: NbtOps,
+    /// `AbstractBuilder.builder` — `DataResult.success(initBuilder(),
+    /// Lifecycle.stable())`.
+    builder: DataResult<CompoundTag>,
+}
+
+impl NbtRecordBuilder {
+    /// `new NbtRecordBuilder(NbtOps.this)` — `initBuilder()` returns a fresh
+    /// `CompoundTag`.
+    fn new(ops: NbtOps) -> Self {
+        NbtRecordBuilder {
+            ops,
+            builder: DataResult::success_with_lifecycle(CompoundTag::new(), Lifecycle::stable()),
+        }
+    }
+
+    /// `AbstractStringBuilder.add(T key, ...)` key resolution —
+    /// `ops().getStringValue(key)` ("Not a string" for a non-string key).
+    fn resolve_key(&self, key: &Tag) -> DataResult<String> {
+        self.ops.get_string_value(key)
+    }
+
+    /// `NbtRecordBuilder.append(String key, Tag value, CompoundTag builder)` —
+    /// `builder.put(key, value); return builder;`.
+    fn append(key: String, value: Tag, builder: CompoundTag) -> CompoundTag {
+        let mut builder = builder;
+        builder.put(key, value);
+        builder
+    }
+
+    /// `NbtRecordBuilder.build(CompoundTag builder, Tag prefix)`.
+    fn build_inner(builder: CompoundTag, prefix: Option<Tag>) -> DataResult<Tag> {
+        match prefix {
+            None | Some(Tag::End(_)) => DataResult::success(Tag::Compound(builder)),
+            Some(Tag::Compound(prefix)) => {
+                // `CompoundTag result = compound.shallowCopy();` then overlay the
+                // builder entries so builder wins on key collisions.
+                let mut result = prefix.shallow_copy();
+                for (key, value) in builder.entry_set() {
+                    result.put(key.clone(), value.clone());
+                }
+                DataResult::success(Tag::Compound(result))
+            }
+            Some(other) => DataResult::error_with_partial(
+                format!(
+                    "mergeToMap called with not a map: {}",
+                    crate::string_tag_visitor::StringTagVisitor::to_string(&other)
+                ),
+                other,
+            ),
+        }
+    }
+}
 
 impl rivet_serialization::RecordBuilder for NbtRecordBuilder {
     type Output = Tag;
 
-    // STUB(dfu.codec): `&mut self` matches the ported
-    // `rivet_serialization::RecordBuilder::build(&mut self, ...)` signature.
+    /// `AbstractBuilder.build(T prefix)` — `builder.flatMap(b ->
+    /// build(b, prefix))`, then reset the accumulated state.
     fn build(&mut self, prefix: Option<Tag>) -> DataResult<Tag> {
-        // This reduced builder accumulates nothing itself; the concrete
-        // `NbtRecordBuilder` in the full port appends into a builder. Here we
-        // only support the merge-from-prefix shape used by `CompoundTag.store`
-        // via `MapCodec` — see `compound_tag.rs`.
-        let _ = prefix;
-        DataResult::error(
-            "NbtRecordBuilder.build not yet implemented (DFU RecordBuilder port pending)",
-        )
+        let builder = self.builder.clone();
+        let result = builder.flat_map(|b| Self::build_inner(b, prefix));
+        self.builder = DataResult::success_with_lifecycle(CompoundTag::new(), Lifecycle::stable());
+        result
+    }
+
+    /// `AbstractStringBuilder.add(T key, T value)` — the key must resolve
+    /// through `getStringValue`; a failing key replaces the builder state with
+    /// the error (Java `ops().getStringValue(key).flatMap(...)`).
+    fn add(&mut self, key: Tag, value: Tag) {
+        let key_result = self.resolve_key(&key);
+        let prev = self.builder.clone();
+        self.builder = key_result
+            .flat_map(move |k| prev.map_owned(move |b| Self::append(k, value.clone(), b)));
+    }
+
+    /// `AbstractStringBuilder.add(String key, T value)`.
+    fn add_string(&mut self, key: &str, value: Tag) {
+        let prev = self.builder.clone();
+        let k = key.to_string();
+        self.builder = prev.map_owned(move |b| Self::append(k, value, b));
+    }
+
+    /// `AbstractStringBuilder.add(T key, DataResult<T> value)` — the key must
+    /// resolve through `getStringValue`; the value is combined with the builder
+    /// state via `apply2stable` (stable function, so a stable field value does
+    /// not downgrade the accumulated lifecycle).
+    fn add_result(&mut self, key: Tag, value: DataResult<Tag>) {
+        let key_result = self.resolve_key(&key);
+        let prev = self.builder.clone();
+        self.builder = key_result.flat_map(move |k| {
+            prev.apply2_stable(
+                move |b: &CompoundTag, v: &Tag| Self::append(k.clone(), v.clone(), b.clone()),
+                value,
+            )
+        });
+    }
+
+    /// `AbstractStringBuilder.add(DataResult<T> key, DataResult<T> value)` —
+    /// resolves the key through `getStringValue` (Java
+    /// `key.flatMap(ops()::getStringValue)`), then defers to `add(k, value)`.
+    fn add_result_result(&mut self, key: DataResult<Tag>, value: DataResult<Tag>) {
+        let ops = self.ops;
+        let key_string = key.flat_map(move |k| ops.get_string_value(&k));
+        let prev = self.builder.clone();
+        self.builder = key_string.flat_map(move |k| {
+            prev.apply2_stable(
+                move |b: &CompoundTag, v: &Tag| Self::append(k.clone(), v.clone(), b.clone()),
+                value,
+            )
+        });
+    }
+
+    /// `AbstractStringBuilder.add(String key, DataResult<T> value)`.
+    fn add_string_result(&mut self, key: &str, value: DataResult<Tag>) {
+        let prev = self.builder.clone();
+        let k = key.to_string();
+        self.builder = prev.apply2_stable(
+            move |b: &CompoundTag, v: &Tag| Self::append(k.clone(), v.clone(), b.clone()),
+            value,
+        );
+    }
+
+    /// `AbstractBuilder.withErrorsFrom(DataResult<?>)`.
+    fn with_errors_from(&mut self, result: &DataResult<()>) {
+        let r = result.clone();
+        self.builder = self.builder.clone().flat_map(|v| r.map(|_| v));
+    }
+
+    /// `AbstractBuilder.setLifecycle(Lifecycle)`.
+    fn set_lifecycle(&mut self, lifecycle: Lifecycle) {
+        self.builder = self.builder.clone().set_lifecycle(lifecycle);
+    }
+
+    /// `AbstractBuilder.mapError(UnaryOperator<String>)`.
+    fn map_error(&mut self, on_error: Box<dyn Fn(String) -> String>) {
+        self.builder = self.builder.clone().map_error(on_error);
     }
 }
 

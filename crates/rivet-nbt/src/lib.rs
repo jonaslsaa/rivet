@@ -44,5 +44,6 @@ pub mod visitors;
 #[cfg(test)]
 mod tests {
     pub mod nbt_io;
+    pub mod nbt_ops;
     pub mod round_trip;
 }
