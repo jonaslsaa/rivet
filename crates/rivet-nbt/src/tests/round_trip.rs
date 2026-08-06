@@ -343,15 +343,46 @@ fn nbt_accounter_depth_limits() {
 }
 
 #[test]
-fn as_number_matches_numeric_tag_double_value() {
-    assert_eq!(Tag::Byte(ByteTag::new(7)).as_number(), Some(7.0));
-    assert_eq!(Tag::Int(IntTag::new(7)).as_number(), Some(7.0));
-    assert_eq!(Tag::Long(LongTag::new(7)).as_number(), Some(7.0));
-    assert_eq!(Tag::Float(FloatTag::new(7.5)).as_number(), Some(7.5));
-    assert_eq!(Tag::Double(DoubleTag::new(7.5)).as_number(), Some(7.5));
+fn as_number_matches_numeric_tag_box() {
+    use rivet_serialization::number::Number;
+    assert_eq!(
+        Tag::Byte(ByteTag::new(7)).as_number(),
+        Some(Number::Byte(7))
+    );
+    assert_eq!(
+        Tag::Short(ShortTag::new(7)).as_number(),
+        Some(Number::Short(7))
+    );
+    assert_eq!(Tag::Int(IntTag::new(7)).as_number(), Some(Number::Int(7)));
+    assert_eq!(
+        Tag::Long(LongTag::new(7)).as_number(),
+        Some(Number::Long(7))
+    );
+    assert_eq!(
+        Tag::Float(FloatTag::new(7.5)).as_number(),
+        Some(Number::Float(7.5))
+    );
+    assert_eq!(
+        Tag::Double(DoubleTag::new(7.5)).as_number(),
+        Some(Number::Double(7.5))
+    );
     assert_eq!(
         Tag::String(StringTag::value_of("x".to_string())).as_number(),
         None
     );
     assert_eq!(Tag::Compound(CompoundTag::new()).as_number(), None);
+}
+
+#[test]
+fn as_number_f64_matches_double_value() {
+    assert_eq!(Tag::Byte(ByteTag::new(7)).as_number_f64(), Some(7.0));
+    assert_eq!(Tag::Int(IntTag::new(7)).as_number_f64(), Some(7.0));
+    assert_eq!(Tag::Long(LongTag::new(7)).as_number_f64(), Some(7.0));
+    assert_eq!(Tag::Float(FloatTag::new(7.5)).as_number_f64(), Some(7.5));
+    assert_eq!(Tag::Double(DoubleTag::new(7.5)).as_number_f64(), Some(7.5));
+    assert_eq!(
+        Tag::String(StringTag::value_of("x".to_string())).as_number_f64(),
+        None
+    );
+    assert_eq!(Tag::Compound(CompoundTag::new()).as_number_f64(), None);
 }

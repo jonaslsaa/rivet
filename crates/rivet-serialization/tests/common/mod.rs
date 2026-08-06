@@ -79,15 +79,15 @@ impl DynamicOps for TestOps {
         })
     }
 
-    fn get_number_value(&self, input: &Value) -> DataResult<f64> {
+    fn get_number_value(&self, input: &Value) -> DataResult<rivet_serialization::number::Number> {
         match input {
-            Value::Num(n) => DataResult::success(*n),
+            Value::Num(n) => DataResult::success(rivet_serialization::number::Number::Double(*n)),
             other => DataResult::error(format!("Not a number: {other:?}")),
         }
     }
 
-    fn create_numeric(&self, value: f64) -> Value {
-        Value::Num(value)
+    fn create_numeric(&self, value: rivet_serialization::number::Number) -> Value {
+        Value::Num(value.double_value())
     }
 
     fn get_boolean_value(&self, input: &Value) -> DataResult<bool> {

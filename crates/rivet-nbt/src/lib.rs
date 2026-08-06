@@ -45,5 +45,6 @@ pub mod visitors;
 mod tests {
     pub mod nbt_io;
     pub mod nbt_ops;
+    pub mod nbt_ops_number;
     pub mod round_trip;
 }

@@ -72,19 +72,18 @@ impl DynamicOps for NbtOps {
         Tag::Compound(CompoundTag::new())
     }
 
-    fn get_number_value(&self, input: &Tag) -> DataResult<f64> {
-        // Fidelity note: Java `NbtOps.getNumberValue` returns the typed boxed
-        // `Number` (see `Tag.asNumber`). The DFU stub surfaces `f64`, losing
-        // the exact type and precision above 2^53; a typed `Number` enum lands
-        // with the real DFU port.
+    fn get_number_value(&self, input: &Tag) -> DataResult<rivet_serialization::number::Number> {
+        // Java `NbtOps.getNumberValue`: `input.asNumber()` — the typed boxed
+        // `Number` from `NumericTag.box()`.
         match input.as_number() {
             Some(n) => DataResult::success(n),
             None => DataResult::error("Not a number"),
         }
     }
 
-    fn create_numeric(&self, value: f64) -> Tag {
-        Tag::Double(DoubleTag::value_of(value))
+    fn create_numeric(&self, value: rivet_serialization::number::Number) -> Tag {
+        // Java `NbtOps.createNumeric`: `DoubleTag.valueOf(i.doubleValue())`.
+        Tag::Double(DoubleTag::value_of(value.double_value()))
     }
 
     fn create_byte(&self, value: i8) -> Tag {
@@ -112,7 +111,10 @@ impl DynamicOps for NbtOps {
     }
 
     fn get_boolean_value(&self, input: &Tag) -> DataResult<bool> {
-        self.get_number_value(input).map(|v| *v != 0.0)
+        // Java `NbtOps.getBooleanValue`: `getNumberValue(input).map(v ->
+        // v.doubleValue() != 0.0)`.
+        self.get_number_value(input)
+            .map(|v| v.double_value() != 0.0)
     }
 
     fn create_boolean(&self, value: bool) -> Tag {
@@ -377,10 +379,8 @@ impl DynamicOps for NbtOps {
                     let mut all_numbers = true;
                     for e in elements {
                         match self.get_number_value(e).result() {
-                            // Java `Number.byteValue()` narrows double -> int
-                            // (truncate toward zero, saturating) then wraps to
-                            // byte; `as i32` then `as i8` replicates that.
-                            Some(n) => buffer.push(((*n as i32) as i8) as u8),
+                            // Java `Number.byteValue()`.
+                            Some(n) => buffer.push(n.byte_value() as u8),
                             None => {
                                 all_numbers = false;
                                 break;
@@ -419,7 +419,8 @@ impl DynamicOps for NbtOps {
                     let mut all_numbers = true;
                     for e in elements {
                         match self.get_number_value(e).result() {
-                            Some(n) => stream.push(*n as i32),
+                            // Java `Number.intValue()`.
+                            Some(n) => stream.push(n.int_value()),
                             None => {
                                 all_numbers = false;
                                 break;
@@ -458,7 +459,8 @@ impl DynamicOps for NbtOps {
                     let mut all_numbers = true;
                     for e in elements {
                         match self.get_number_value(e).result() {
-                            Some(n) => stream.push(*n as i64),
+                            // Java `Number.longValue()`.
+                            Some(n) => stream.push(n.long_value()),
                             None => {
                                 all_numbers = false;
                                 break;

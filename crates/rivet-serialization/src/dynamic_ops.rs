@@ -3,10 +3,12 @@
 //! `KeyCompressor`).
 //!
 //! `DynamicOps<T>` in Java has the element type as a type parameter and every
-//! method returns `DataResult<Number>`/`createNumeric(Number)` etc. Following
-//! the existing STUB(mc.nbt) surface, `getNumberValue`/`createNumeric` here use
-//! `f64` (see `nbt_ops.rs` fidelity note); the primitive `create*` methods keep
-//! their exact Java types.
+//! method returns `DataResult<Number>`/`createNumeric(Number)` etc.
+//! `getNumberValue` returns a boxed `Number` — ported here as the typed
+//! [`Number`] enum (`Byte`/`Short`/`Int`/`Long`/`Float`/`Double`, see
+//! `number.rs`) with Java `intValue`/`longValue`/`floatValue`/`doubleValue`
+//! narrowing semantics. `createNumeric` takes that `Number`. The primitive
+//! `create*` methods keep their exact Java types.
 //!
 //! `DynamicOps` is not object-safe in Java (`convertTo` is generic over the
 //! *other* ops), so `&dyn DynamicOps` is impossible in Rust. The codec traits
@@ -19,6 +21,7 @@ pub use crate::pair::Pair;
 
 use crate::data_result::DataResult;
 use crate::lifecycle::Lifecycle;
+use crate::number::Number;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -418,15 +421,11 @@ pub trait DynamicOps: Debug {
     /// `convertTo(DynamicOps<U>, T input)`.
     fn convert_to<U: DynamicOps>(&self, out_ops: &U, input: &Self::Output) -> U::Output;
 
-    /// `getNumberValue(T input)`.
-    ///
-    /// STUB(mc.nbt): Java returns a `Number` (capable of `BigInteger`/
-    /// `BigDecimal`); the STUB(mc.nbt) surface narrows it to `f64`, so values
-    /// larger than f64/i64 truncate or error where Java would not.
-    fn get_number_value(&self, input: &Self::Output) -> DataResult<f64>;
+    /// `getNumberValue(T input)` — the boxed `Number`.
+    fn get_number_value(&self, input: &Self::Output) -> DataResult<Number>;
 
     /// `getNumberValue(T input, Number defaultValue)`.
-    fn get_number_value_or(&self, input: &Self::Output, default_value: f64) -> f64 {
+    fn get_number_value_or(&self, input: &Self::Output, default_value: Number) -> Number {
         self.get_number_value(input)
             .result()
             .copied()
@@ -434,36 +433,36 @@ pub trait DynamicOps: Debug {
     }
 
     /// `createNumeric(Number)`.
-    fn create_numeric(&self, value: f64) -> Self::Output;
+    fn create_numeric(&self, value: Number) -> Self::Output;
 
     /// `createByte(byte)`.
     fn create_byte(&self, value: i8) -> Self::Output {
-        self.create_numeric(value as f64)
+        self.create_numeric(Number::Byte(value))
     }
 
     /// `createShort(short)`.
     fn create_short(&self, value: i16) -> Self::Output {
-        self.create_numeric(value as f64)
+        self.create_numeric(Number::Short(value))
     }
 
     /// `createInt(int)`.
     fn create_int(&self, value: i32) -> Self::Output {
-        self.create_numeric(value as f64)
+        self.create_numeric(Number::Int(value))
     }
 
     /// `createLong(long)`.
     fn create_long(&self, value: i64) -> Self::Output {
-        self.create_numeric(value as f64)
+        self.create_numeric(Number::Long(value))
     }
 
     /// `createFloat(float)`.
     fn create_float(&self, value: f32) -> Self::Output {
-        self.create_numeric(value as f64)
+        self.create_numeric(Number::Float(value))
     }
 
     /// `createDouble(double)`.
     fn create_double(&self, value: f64) -> Self::Output {
-        self.create_numeric(value)
+        self.create_numeric(Number::Double(value))
     }
 
     /// `getBooleanValue(T)`.

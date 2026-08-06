@@ -2,7 +2,8 @@
 //! ShortTag, IntTag, LongTag, FloatTag, DoubleTag`.
 //!
 //! The `byteValue`..`doubleValue` conversion surface lives on the leaf structs
-//! and on `Tag::as_*`. Kept as a marker enum to preserve the class name.
+//! and on `Tag::as_*`. `box()` (Java returns the boxed `Number`) maps to
+//! `boxed` — `box` is a Rust keyword — and `Tag::as_number` delegates to it.
 
 /// A `NumericTag` — one of the six numeric leaves.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +86,19 @@ impl NumericTag {
             NumericTag::Long(t) => t.value as f64,
             NumericTag::Float(t) => t.value as f64,
             NumericTag::Double(t) => t.value,
+        }
+    }
+
+    /// `NumericTag.box()` — the boxed `Number` (the `box` name is a Rust
+    /// keyword, hence `boxed`).
+    pub fn boxed(&self) -> rivet_serialization::number::Number {
+        match self {
+            NumericTag::Byte(t) => rivet_serialization::number::Number::Byte(t.value),
+            NumericTag::Short(t) => rivet_serialization::number::Number::Short(t.value),
+            NumericTag::Int(t) => rivet_serialization::number::Number::Int(t.value),
+            NumericTag::Long(t) => rivet_serialization::number::Number::Long(t.value),
+            NumericTag::Float(t) => rivet_serialization::number::Number::Float(t.value),
+            NumericTag::Double(t) => rivet_serialization::number::Number::Double(t.value),
         }
     }
 }
