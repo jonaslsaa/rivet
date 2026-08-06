@@ -339,7 +339,7 @@ fn collect_jars_into(dir: &Path, out: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::Digest;
     use std::fmt::Write;
     let digest = sha2::Sha256::digest(data);
@@ -351,33 +351,33 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ProvenanceManifest {
+pub(crate) struct ProvenanceManifest {
     format: u64,
     /// The vanilla entrypoint that produced the reports.
     generator: String,
-    source: SourceProvenance,
-    reports: Vec<ReportEntry>,
+    pub(crate) source: SourceProvenance,
+    pub(crate) reports: Vec<ReportEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct SourceProvenance {
+pub(crate) struct SourceProvenance {
     /// The jar path passed/used at capture time (repo-relative when default).
     jar: String,
-    jar_sha256: String,
+    pub(crate) jar_sha256: String,
     /// Paper commit the jar was built from (best-effort; `working/` may be a
     /// plain checkout without git metadata).
     #[serde(skip_serializing_if = "Option::is_none")]
     paper_git: Option<String>,
-    minecraft_version: String,
-    protocol_version: u32,
-    world_version: u32,
+    pub(crate) minecraft_version: String,
+    pub(crate) protocol_version: u32,
+    pub(crate) world_version: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ReportEntry {
-    path: String,
+pub(crate) struct ReportEntry {
+    pub(crate) path: String,
     bytes: u64,
-    sha256: String,
+    pub(crate) sha256: String,
 }
 
 fn capture_source(jar: &Path, repo_root: &Path) -> Result<SourceProvenance> {

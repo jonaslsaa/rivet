@@ -4,9 +4,9 @@ Vanilla data extraction + registry codegen for Rivet (epic #8).
 
 Per `PORTING.md`: registries/data-driven content are **generated, not
 hand-ported**. This tool reads the real Paper 26.2 data and emits Rust source
-for `crates/rivet-registry`. It is excluded from the cargo workspace
-(`Cargo.toml` `exclude`), so it is free to shell out to the JVM and to use
-`anyhow`/`serde`.
+for `crates/rivet-registry` and `crates/rivet-protocol`. It is excluded from
+the cargo workspace (`Cargo.toml` `exclude`), so it is free to shell out to the
+JVM and to use `anyhow`/`serde`.
 
 ## What it does
 
@@ -14,7 +14,8 @@ for `crates/rivet-registry`. It is excluded from the cargo workspace
   Paper 26.2 bundler jar and writes `data/block_states.json`.
 - **`generate`** — reads that JSON and emits the registry tables directly into
   `crates/rivet-registry/src/generated/` (a `BlockId` registry + a block-state
-  property enum structure).
+  property enum structure), and consumes `data/reports/packets.json` to emit the
+  packet-ID tables into `crates/rivet-protocol/src/generated/` (see below).
 - **`mth-gen`** — regenerates the Mth tables + golden tests
   (`crates/rivet-util/src/mth_sin_table.rs`, `mth_atan_tables.rs`,
   `mth_golden_tests.rs`) from the real Paper `Mth` class. These files are
@@ -29,6 +30,7 @@ for `crates/rivet-registry`. It is excluded from the cargo workspace
 ```
 rivet-codegen extract  [--bundler <path>] [--output <path>]
 rivet-codegen generate [--input <path>]  [--output <dir>]
+                       [--packets <path>] [--packets-output <dir>]
 rivet-codegen mth-gen  [--bundler <path>] [--output <dir>]
 rivet-codegen reports  [--jar <path>] [--output <dir>] [--verify]
 ```
@@ -45,10 +47,16 @@ checkout; the tool needs a jar produced elsewhere.
 ```
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
-target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs}
+target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs} + crates/rivet-protocol/src/generated/
 target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
+
+`generate` emits two independent outputs: the block registry (from
+`data/block_states.json`) and the packet-ID tables (from
+`data/reports/packets.json`, the `PacketReport` fixture). Regenerate both with a
+single `generate` run; `--input`/`--output` control the block half,
+`--packets`/`--packets-output` control the packet half.
 
 `extract` and `mth-gen` cache the unpacked classpath in `.cache/` (gitignored)
 so reruns are fast. Pass `--bundler` to point at a different jar.
@@ -190,3 +198,31 @@ The codegen test `generated_output_matches_committed` enforces the golden
 no-drift invariant: it regenerates to a temp dir, rustfmts the temp copy, and
 asserts byte-equality with the committed `src/generated/` — without touching
 repository source.
+
+## Packet-ID tables (`rivet-protocol`)
+
+`generate` consumes the pinned `data/reports/packets.json` (issue #50) and emits
+`crates/rivet-protocol/src/generated/`, committed and gated behind the crate's
+`"packets"` cargo feature:
+
+- `mod.rs` — declares the two generated submodules.
+- `protocol.rs` — `ConnectionProtocol` and `PacketFlow` enums mirroring the
+  vanilla enums (declaration order, string `id()`/`from_id()`, `PacketFlow`
+  `opposite()`), with `ALL` arrays.
+- `packets.rs` — a module per connection state (`handshake`, `play`, `status`,
+  `login`, `configuration`) and flow (`serverbound`/`clientbound`). Each module
+  holds a `#[repr(u32)] PacketType` enum whose discriminant is the vanilla
+  `protocol_id` (the `addPacket` index in the corresponding `*Protocols.TEMPLATE`),
+  a `PACKET_BY_ID` name table (id == index), a `phf` `PACKET_BY_NAME` map, and
+  `PacketType::id()/name()/from_id()/from_name()` plus an `ALL` array.
+
+The ids are **not re-extracted or hand-authored**: they come straight from the
+`PacketReport` fixture (`protocol_id` values), sorted within each flow by
+`protocol_id` to recover the exact `addPacket` registration order. The generator
+validates the fixture strictly (duplicate packet names/ids, non-contiguous ids,
+unknown states/flows, malformed entries all fail) and links each run to the
+provenance in `data/reports/manifest.json` by sha256 — a stale fixture aborts
+generation. After regenerating, run `cargo fmt -p rivet-protocol` and
+`cargo check -p rivet-protocol --features packets`. The codegen test
+`generated_packets_match_committed` enforces the same golden no-drift invariant
+as the block tables.
