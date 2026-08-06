@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use rivet_protocol::compression_decoder::CompressionDecoder;
+use rivet_protocol::compression_encoder::CompressionEncoder;
 use rivet_protocol::generated::protocol::ConnectionProtocol;
 use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
 use rivet_protocol::varint21_length_field_prepender::encode_frame;
@@ -11,6 +13,38 @@ use tokio::net::tcp::OwnedWriteHalf;
 use super::connection_id::ConnectionId;
 use super::packet_listener::{DisconnectReason, ListenerOutcome, PacketListener};
 use crate::server::ServerConfig;
+
+/// The enabled compression handlers for one connection: the
+/// `CompressionDecoder`/`CompressionEncoder` pair Paper's
+/// `Connection.setupCompression` inserts between the VarInt21 frame codec and
+/// the packet codec. Present only while compression is enabled
+/// (`threshold >= 0`); `Connection::setup_compression` creates it on first
+/// enable and reconfigures it on subsequent calls (mirrors `setThreshold` on
+/// the existing handlers).
+struct CompressionState {
+    threshold: i32,
+    validate_decompressed: bool,
+    decoder: CompressionDecoder,
+    encoder: CompressionEncoder,
+}
+
+impl CompressionState {
+    fn new(threshold: i32, validate_decompressed: bool) -> Self {
+        CompressionState {
+            threshold,
+            validate_decompressed,
+            decoder: CompressionDecoder::new(threshold, validate_decompressed),
+            encoder: CompressionEncoder::new(threshold),
+        }
+    }
+
+    fn set_threshold(&mut self, threshold: i32, validate_decompressed: bool) {
+        self.threshold = threshold;
+        self.validate_decompressed = validate_decompressed;
+        self.decoder.set_threshold(threshold, validate_decompressed);
+        self.encoder.set_threshold(threshold);
+    }
+}
 
 /// The per-connection state machine on the tokio side. Mirrors the parts of
 /// `net.minecraft.network.Connection` that matter before the play state: the
@@ -35,6 +69,8 @@ pub struct Connection {
     /// Encoded frames pending on the wire (netty `channel.write` queue).
     out_buf: BytesMut,
     decoder: Varint21FrameDecoder,
+    /// The compression pipeline stage, when enabled (`setupCompression`).
+    compression: Option<CompressionState>,
     outbound_protocol: Option<ConnectionProtocol>,
 }
 
@@ -53,6 +89,9 @@ impl Connection {
             read_buf: BytesMut::new(),
             out_buf: BytesMut::new(),
             decoder: Varint21FrameDecoder::new(None),
+            // Paper's pipeline has no COMPRESS/DECOMPRESS handlers until
+            // `setupCompression` is called at login.
+            compression: None,
             outbound_protocol: None,
         }
     }
@@ -76,6 +115,10 @@ impl Connection {
     /// listener rejection; the per-connection task then closes the socket.
     /// A `ListenerOutcome::Switch` replaces the listener (the handshake→
     /// status/login boundary).
+    ///
+    /// When compression is enabled, each VarInt21 frame payload is run through
+    /// the compression decoder before dispatch — the netty pipeline order
+    /// SPLITTER → DECOMPRESS → DECODER.
     pub fn process_inbound(
         &mut self,
         data: &[u8],
@@ -93,8 +136,14 @@ impl Connection {
                     )));
                 }
             };
+            let packet = match &mut self.compression {
+                Some(compression) => compression.decoder.decode(&frame).map_err(|e| {
+                    DisconnectReason::Malformed(format!("compression: {}", e.message))
+                })?,
+                None => frame,
+            };
             let config = Arc::clone(&self.config);
-            match listener.handle_frame(frame, self, &config) {
+            match listener.handle_frame(packet, self, &config) {
                 Ok(ListenerOutcome::Keep) => {}
                 Ok(ListenerOutcome::Switch(next)) => *listener = next,
                 Err(reason) => return Err(reason),
@@ -103,10 +152,53 @@ impl Connection {
         Ok(())
     }
 
+    /// `Connection.setupCompression(int, boolean)` — enables, reconfigures, or
+    /// disables the compression pipeline stage.
+    ///
+    /// Mirrors Paper: `threshold >= 0` inserts (on first call) or reconfigures
+    /// (on later calls) the COMPRESS/DECOMPRESS handlers; `threshold < 0`
+    /// removes them. The login flow calls this *after* queuing the
+    /// `ClientboundLoginCompressionPacket`, so that packet itself goes out
+    /// uncompressed and the client learns the threshold before the encoder
+    /// starts compressing.
+    pub fn setup_compression(&mut self, threshold: i32, validate_decompressed: bool) {
+        if threshold >= 0 {
+            match &mut self.compression {
+                Some(compression) => {
+                    compression.set_threshold(threshold, validate_decompressed);
+                }
+                None => {
+                    self.compression =
+                        Some(CompressionState::new(threshold, validate_decompressed));
+                }
+            }
+        } else {
+            self.compression = None;
+        }
+    }
+
+    /// Whether the compression pipeline stage is currently enabled.
+    pub fn compression_enabled(&self) -> bool {
+        self.compression.is_some()
+    }
+
+    /// The current compression threshold (the value `ClientboundLoginCompressionPacket`
+    /// carries), or `-1` when compression is disabled.
+    pub fn compression_threshold(&self) -> i32 {
+        self.compression
+            .as_ref()
+            .map(|compression| compression.threshold)
+            .unwrap_or(-1)
+    }
+
     /// `connection.send(Packet)` — encodes `packet_id ++ body` as one VarInt21
     /// frame and queues it. The write half is only touched by `flush_out`, so the
     /// encode/queue step is synchronous (mirrors netty queueing a write on the
     /// event loop).
+    ///
+    /// When compression is enabled, the packet is run through the compression
+    /// encoder first (netty outbound order COMPRESS → PREPENDER), so the wire
+    /// form is `varint21(varint(declaredLen) ++ payload)`.
     pub fn send_packet(
         &mut self,
         protocol: ConnectionProtocol,
@@ -124,7 +216,14 @@ impl Connection {
         let mut payload = Vec::with_capacity(5 + body.len());
         rivet_protocol::var_int::write(&mut payload, packet_id as i32);
         payload.extend_from_slice(body);
-        let frame = encode_frame(&payload).map_err(|e| e.message)?;
+        let wire = match &mut self.compression {
+            Some(compression) => compression
+                .encoder
+                .encode(&payload)
+                .map_err(|e| e.message)?,
+            None => BytesMut::from(&payload[..]),
+        };
+        let frame = encode_frame(&wire).map_err(|e| e.message)?;
         self.out_buf.extend_from_slice(&frame);
         Ok(())
     }
@@ -132,6 +231,14 @@ impl Connection {
     /// Append an already-encoded VarInt21 frame produced by the tick thread to
     /// the outbound buffer; `flush_out` writes it to the socket. Queue order is
     /// preserved for frames from the tick thread's per-connection channel.
+    ///
+    /// The frame is passed through opaque: the tick thread owns the play-state
+    /// wire format, so when compression is enabled it must produce
+    /// `varint21(varint(declaredLen) ++ payload)` frames itself (the play-state
+    /// outbound path, sub-issue #96, learns the threshold from
+    /// [`Connection::compression_threshold`]). Handshake/status/login packets,
+    /// which this task encodes directly, go through [`Connection::send_packet`]
+    /// and are compressed here.
     pub fn queue_raw_frame(&mut self, frame: Bytes) {
         self.out_buf.extend_from_slice(&frame);
     }
@@ -150,5 +257,300 @@ impl Connection {
     pub async fn close(&mut self) {
         let _ = self.flush_out().await;
         let _ = self.write.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivet_protocol::compression_encoder::CompressionEncoder;
+    use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
+    use rivet_protocol::varint21_length_field_prepender::encode_frame;
+
+    fn test_config() -> Arc<ServerConfig> {
+        Arc::new(ServerConfig::default())
+    }
+
+    /// A throwaway connected `Connection` (the write half never actually writes
+    /// unless `flush_out` is called, which these tests do not).
+    async fn new_connection() -> Connection {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server_sock, _) = server.await.unwrap();
+        let (_read, write) = server_sock.into_split();
+        let mut conn = Connection::new(ConnectionId(1), addr, test_config(), write);
+        conn.set_outbound_protocol(ConnectionProtocol::Login);
+        conn
+    }
+
+    /// A listener that records every decoded packet frame, so tests can assert
+    /// what `process_inbound` delivered after decompression. The frames land in a
+    /// shared log the test reads directly (a `Box<dyn PacketListener>` is not
+    /// `Any`, so the log is shared by handle instead of downcast).
+    struct RecordingListener {
+        frames: Arc<std::sync::Mutex<Vec<Bytes>>>,
+    }
+
+    impl PacketListener for RecordingListener {
+        fn protocol(&self) -> ConnectionProtocol {
+            ConnectionProtocol::Login
+        }
+
+        fn handle_frame(
+            &mut self,
+            frame: Bytes,
+            _conn: &mut Connection,
+            _config: &ServerConfig,
+        ) -> Result<ListenerOutcome, DisconnectReason> {
+            self.frames.lock().unwrap().push(frame);
+            Ok(ListenerOutcome::Keep)
+        }
+    }
+
+    fn recording() -> (Box<dyn PacketListener>, Arc<std::sync::Mutex<Vec<Bytes>>>) {
+        let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&frames);
+        (Box::new(RecordingListener { frames }), log)
+    }
+
+    /// Encode a packet the way the outbound path does and frame it (the helper
+    /// for building inbound wire bytes).
+    fn wire_frame(encoder: &mut CompressionEncoder, packet: &[u8]) -> Bytes {
+        let payload = encoder.encode(packet).unwrap();
+        Bytes::from(encode_frame(&payload).unwrap().to_vec())
+    }
+
+    #[tokio::test]
+    async fn compression_disabled_by_default() {
+        let conn = new_connection().await;
+        assert!(!conn.compression_enabled());
+        assert_eq!(conn.compression_threshold(), -1);
+    }
+
+    #[tokio::test]
+    async fn setup_compression_enables_and_reports_threshold() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        assert!(conn.compression_enabled());
+        assert_eq!(conn.compression_threshold(), 256);
+    }
+
+    #[tokio::test]
+    async fn setup_compression_negative_disables() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        assert!(conn.compression_enabled());
+        conn.setup_compression(-1, true);
+        assert!(!conn.compression_enabled());
+        assert_eq!(conn.compression_threshold(), -1);
+    }
+
+    #[tokio::test]
+    async fn setup_compression_reconfigures_existing() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        conn.setup_compression(0, true); // re-run with a new threshold
+        assert_eq!(conn.compression_threshold(), 0);
+        // The reconfiguration is applied to the live encoder: a 4-byte payload
+        // is now above the 0 threshold and compresses.
+        conn.send_packet(ConnectionProtocol::Login, 1, b"aaaa")
+            .unwrap();
+        assert_ne!(&conn.out_buf[0..1], &[0x00]);
+    }
+
+    #[tokio::test]
+    async fn send_packet_below_threshold_is_uncompressed_on_the_wire() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        conn.send_packet(ConnectionProtocol::Login, 1, b"0123456789")
+            .unwrap();
+        // varint21(12) ++ varint(0) ++ packetId(1) ++ body — the outer length is
+        // 1 (header) + 1 (packet id) + 10 (body).
+        assert_eq!(
+            &conn.out_buf[..],
+            &[
+                0x0C, 0x00, 0x01, b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9'
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_packet_at_threshold_is_compressed() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        // packet id (1 byte) + 255-byte body = 256 bytes, exactly at threshold.
+        let body = vec![0x42u8; 255];
+        conn.send_packet(ConnectionProtocol::Login, 1, &body)
+            .unwrap();
+        // The outer frame's payload starts with varint(256) then a zlib stream
+        // (the exact outer length depends on the compressed size, which is not
+        // asserted; the compression header is).
+        assert_eq!(&conn.out_buf[1..3], &[0x80, 0x02]); // varint(256)
+        assert_eq!(conn.out_buf[3], 0x78); // zlib CMF byte
+        // And it round-trips through the protocol decoder.
+        let frame_decoder = Varint21FrameDecoder::new(None);
+        let mut buf = BytesMut::from(&conn.out_buf[..]);
+        let frame = frame_decoder.decode(&mut buf).unwrap().unwrap();
+        let mut decoder = rivet_protocol::compression_decoder::CompressionDecoder::new(256, true);
+        let packet = decoder.decode(&frame).unwrap();
+        let mut expected = Vec::with_capacity(1 + body.len());
+        rivet_protocol::var_int::write(&mut expected, 1);
+        expected.extend_from_slice(&body);
+        assert_eq!(&packet[..], &expected[..]);
+    }
+
+    #[tokio::test]
+    async fn login_packet_sent_before_setup_is_not_compressed() {
+        // The login flow's ordering: `ClientboundLoginCompressionPacket` is
+        // queued *before* `setupCompression`, so it must go out as a plain
+        // VarInt21 frame (the client cannot decompress yet).
+        let mut conn = new_connection().await;
+        conn.send_packet(ConnectionProtocol::Login, 3, &[0x00, 0x01])
+            .unwrap();
+        // Plain varint21 frame, no inner compression header.
+        assert_eq!(&conn.out_buf[..], &[0x03, 0x03, 0x00, 0x01]);
+        // After setup, the same send is compressed.
+        conn.setup_compression(256, true);
+        conn.out_buf.clear();
+        conn.send_packet(ConnectionProtocol::Login, 3, &[0x00, 0x01])
+            .unwrap();
+        // varint(0) ++ packet — uncompressed because 3 bytes < 256. The wire is
+        // varint21(4) ++ varint(0) ++ varint(3) ++ body.
+        assert_eq!(&conn.out_buf[..], &[0x04, 0x00, 0x03, 0x00, 0x01]);
+    }
+
+    #[tokio::test]
+    async fn process_inbound_decompresses_compressed_frame() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (mut listener, log) = recording();
+
+        // The client compresses its packet (packet id + body) and frames it.
+        let packet: Vec<u8> = vec![0x02, 0xAB, 0xCD, 0xEF]; // varint(2) ++ 3-byte body
+        let mut encoder = CompressionEncoder::new(256);
+        let wire = wire_frame(&mut encoder, &packet);
+
+        conn.process_inbound(&wire, &mut listener).unwrap();
+        assert_eq!(&*log.lock().unwrap(), &[Bytes::from(packet)]);
+    }
+
+    #[tokio::test]
+    async fn process_inbound_below_threshold_compressed_is_malformed() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (mut listener, log) = recording();
+
+        // A client sending a compressed frame with declared length 10 (below the
+        // 256 threshold) is protocol-nonconforming; Paper's validateDecompressed
+        // rejects it and closes the connection. Wire: varint21(11) frame payload
+        // = varint(10) declared + 10 payload bytes.
+        let mut wire = vec![0x0B];
+        wire.push(0x0A); // varint(10) declared
+        wire.extend_from_slice(&[0x78, 0x9C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let err = conn.process_inbound(&wire, &mut listener).unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::Malformed(ref m) if m.contains("below server threshold of 256"))
+        );
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_inbound_uncompressed_frame_passes_through() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (mut listener, log) = recording();
+
+        // varint(0) ++ packet — the client sends a below-threshold packet
+        // uncompressed, which the decoder passes through verbatim.
+        let packet: Vec<u8> = vec![0x05, 0x01, 0x02, 0x03, 0x04];
+        let mut wire = vec![0x06]; // varint21(5) ++ varint(0)
+        wire.push(0x00);
+        wire.extend_from_slice(&packet);
+
+        conn.process_inbound(&wire, &mut listener).unwrap();
+        assert_eq!(&*log.lock().unwrap(), &[Bytes::from(packet)]);
+    }
+
+    #[tokio::test]
+    async fn process_inbound_negative_declared_length_closes_malformed() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (mut listener, log) = recording();
+        // varint21(7) ++ varint(-1) ++ body — a hostile but well-formed frame.
+        // With validation on the threshold check fires first (as in Java), and
+        // the close must be a clean Malformed, never a panic on the `usize` wrap.
+        let wire = [0x07, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x01, 0x02];
+        let err = conn.process_inbound(&wire, &mut listener).unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::Malformed(ref m) if m.contains("below server threshold")),
+            "unexpected error: {err:?}"
+        );
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_inbound_negative_declared_length_validation_off_closes_malformed() {
+        // Finding-1 regression: with `validate=false` the threshold check is
+        // skipped, and a negative-wrapped declared length previously hit a
+        // capacity-overflow panic. It must close as a clean Malformed instead.
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, false);
+        let (mut listener, log) = recording();
+        let wire = [0x07, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x01, 0x02];
+        let err = conn.process_inbound(&wire, &mut listener).unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::Malformed(ref m) if m.contains("negative declared length")),
+            "unexpected error: {err:?}"
+        );
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_inbound_huge_declared_length_closes_malformed() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (mut listener, log) = recording();
+        // varint21(6) ++ varint(2^31-1) ++ body.
+        let wire = [0x06, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0x01];
+        let err = conn.process_inbound(&wire, &mut listener).unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::Malformed(ref m) if m.contains("larger than protocol maximum")),
+            "unexpected error: {err:?}"
+        );
+        assert!(log.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_inbound_compression_disabled_passes_frames_through() {
+        let mut conn = new_connection().await;
+        let (mut listener, log) = recording();
+
+        // Without setup_compression, inbound frames are not decompressed: a
+        // VarInt21 frame's payload passes through to the listener verbatim.
+        let wire = Bytes::from_static(&[0x02, 0x02, 0xAB]); // varint21(2) ++ [0x02, 0xAB]
+        conn.process_inbound(&wire, &mut listener).unwrap();
+        assert_eq!(&*log.lock().unwrap(), &[Bytes::from_static(&[0x02, 0xAB])]);
+    }
+
+    #[tokio::test]
+    async fn process_inbound_fragmented_compressed_wire() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (mut listener, log) = recording();
+
+        let packet: Vec<u8> = vec![0x02, 0xAB, 0xCD, 0xEF];
+        let mut encoder = CompressionEncoder::new(256);
+        let wire = wire_frame(&mut encoder, &packet);
+
+        // Feed one byte at a time; only the final byte completes a frame.
+        for (i, b) in wire.iter().enumerate() {
+            conn.process_inbound(&[*b], &mut listener).unwrap();
+            let n = log.lock().unwrap().len();
+            let complete = i + 1 == wire.len();
+            assert_eq!(n, complete as usize, "frame delivered at byte {i}");
+        }
+        assert_eq!(&*log.lock().unwrap(), &[Bytes::from(packet)]);
     }
 }

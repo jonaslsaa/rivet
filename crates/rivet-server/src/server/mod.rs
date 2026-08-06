@@ -40,6 +40,11 @@ pub struct ServerConfig {
     pub max_connections: usize,
     /// Per-connection read timeout (Paper `new ReadTimeoutHandler(30)` seconds).
     pub read_timeout: Duration,
+    /// Compression threshold — Paper `MinecraftServer.getCompressionThreshold()`
+    /// returns `256`; a negative value disables compression. Sent to the client
+    /// in `ClientboundLoginCompressionPacket` and applied by
+    /// `Connection::setupCompression` at login.
+    pub compression_threshold: i32,
     /// Tick interval — Paper `TickRateManager.nanosecondsPerTick()` = 1s / 20.
     pub tick_interval: Duration,
     /// Max backlogged ticks the schedule catches up before dropping (Paper
@@ -60,6 +65,7 @@ impl Default for ServerConfig {
             port: 25565,
             max_connections: 100,
             read_timeout: Duration::from_secs(30),
+            compression_threshold: 256,
             tick_interval: Duration::from_millis(50),
             catchup_ticks: 5,
             inbound_channel_capacity: 1024,
