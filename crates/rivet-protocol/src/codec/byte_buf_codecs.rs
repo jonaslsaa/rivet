@@ -31,8 +31,11 @@
 //! - `fromCodec`/`fromCodecTrusted`/`fromCodecWithRegistries*` — need a DFU
 //!   `Codec<T>` wired through `StreamCodec` via `NbtOps` (rivet-serialization
 //!   port slice, epic #6/#10).
-//! - `registry`/`holderRegistry`/`holder`/`holderSet`/`registryFriendlyLengthPrefixed`
-//!   — need `RegistryFriendlyByteBuf` + registry lookup (epic #10, #126).
+//! - `registryFriendlyLengthPrefixed` — needs the buffer-preserving decorator
+//!   form of `lengthPrefixed` (the `RegistryFriendlyByteBuf` slice keeps the
+//!   `RegistryAccess`; #126). `registry`/`holderRegistry`/`holder`/`holderSet`
+//!   are ported in [`crate::codec::registry_byte_buf_codecs`] (they live there
+//!   because their buffer is `RegistryFriendlyByteBuf`, not `FriendlyByteBuf`).
 //! - `GAME_PROFILE`/`GAME_PROFILE_PROPERTIES` — need authlib `GameProfile`/
 //!   `PropertyMap` (`PLAYER_NAME` is ported: it is just `stringUtf8(16)`).
 //! - `VECTOR3F`/`QUATERNIONF` — need JOML.
