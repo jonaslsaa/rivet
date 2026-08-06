@@ -70,15 +70,9 @@ impl Suggestions {
         for suggestion in suggestions {
             texts.push(suggestion.expand(command, range));
         }
-        // Java sorts with `List.sort` (TimSort). The comparator `compareToIgnoreCase`
-        // is NOT transitive when integer and text suggestions mix (Java's
-        // `IntegerSuggestion.compareToIgnoreCase` uses the case-sensitive compare
-        // against a plain `Suggestion`, while `Suggestion.compareToIgnoreCase` is
-        // case-insensitive — together they cycle: 30 < 3a < 4 < 30). Java's exact
-        // order is an artifact of its `HashSet` iteration + TimSort; Rust's stable
-        // merge sort resolves the cycle deterministically but differently. The
-        // comparator itself is a faithful port; only this pathological mixed ordering
-        // diverges (documented in `suggestions_builder_tests::sort_mixed`).
+        // Java sorts with `List.sort` (TimSort). The Paper-patched
+        // `compareToIgnoreCase` is transitive (any integer sorts before any text), so
+        // the order is deterministic and Rust's stable merge sort reproduces it.
         texts.sort_by(|a, b| a.compare_to_ignore_case(b));
         // Java dedups via a HashSet before sorting; equal suggestions collapse. After
         // expand, equal elements are adjacent under the total order, so a dedup pass

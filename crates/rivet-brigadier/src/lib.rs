@@ -5,6 +5,10 @@
 //! Paper-patched files) plus the upstream `brigadier-1.3.10` sources jar for the
 //! remaining classes of the package. This is a direct port (MIT), not Paper-derived;
 //! Paper patches that depend on Minecraft types are stubbed and noted `// STUB(brigadier)`.
+//! (The two dependency-blocked Paper-only features are `ENABLE_COMMAND_STACK_TRACES`
+//! and `componentMessage()` in the exceptions package; the `minecraft:` prefix
+//! prioritization and the `TagParseCommandSyntaxException` short-circuit in the
+//! dispatcher/tree packages are likewise not ported — all four need Minecraft types.)
 //!
 //! Naming follows PORTING.md: one Rust module per Java class, snake_case, names
 //! translated only by case convention. The Java `S` source type parameter is kept

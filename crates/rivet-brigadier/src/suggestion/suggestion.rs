@@ -3,10 +3,11 @@
 //!
 //! Java has `Suggestion` as a base class and `IntegerSuggestion extends Suggestion`.
 //! Rust models both with one struct carrying an optional `Integer(i32)` kind: the
-//! two only differ in `equals`/`hashCode` (subclass checks) and the `compareTo`
-//! family (numeric vs text). The kind is preserved through `expand` only when the
-//! range is unchanged — Java's `expand` returns a plain `Suggestion` (`new
-//! Suggestion(...)`) when the range differs, dropping the integer subclass.
+//! two differ in `equals`/`hashCode` (subclass checks) and in how the Paper-patched
+//! `compare0` orders them (integers sort before text). The kind is preserved through
+//! `expand` only when the range is unchanged — Java's `expand` returns a plain
+//! `Suggestion` (`new Suggestion(...)`) when the range differs, dropping the integer
+//! subclass.
 
 use std::sync::Arc;
 
@@ -160,23 +161,18 @@ impl Suggestion {
         }
     }
 
-    /// Java `compareTo(Suggestion)`. For a plain `Suggestion`: text compare. For an
-    /// `IntegerSuggestion`: numeric when the other is an integer suggestion, else the
-    /// inherited text compare.
+    /// Java `Suggestion.compareTo(Suggestion)` — Paper's `compare0` with the natural
+    /// text order. Paper's "fix unstable Suggestion comparison" makes the order
+    /// transitive and deterministic: any `IntegerSuggestion` sorts before any text
+    /// suggestion; two integers compare numerically; two texts by code unit.
     pub fn compare_to(&self, other: &Suggestion) -> std::cmp::Ordering {
-        if let (Kind::Integer(self_value), Kind::Integer(other_value)) = (self.kind, other.kind) {
-            return self_value.cmp(&other_value);
-        }
-        utf16_compare(&self.text, &other.text)
+        compare0(self, other, utf16_compare)
     }
 
-    /// Java `compareToIgnoreCase(Suggestion)`. For an `IntegerSuggestion` this
-    /// delegates to `compareTo`; a plain `Suggestion` compares text ignoring case.
+    /// Java `Suggestion.compareToIgnoreCase(Suggestion)` — Paper's `compare0` with
+    /// `String.CASE_INSENSITIVE_ORDER` as the text order.
     pub fn compare_to_ignore_case(&self, other: &Suggestion) -> std::cmp::Ordering {
-        if matches!(self.kind, Kind::Integer(_)) {
-            return self.compare_to(other);
-        }
-        compare_ignore_case(&self.text, &other.text)
+        compare0(self, other, compare_ignore_case)
     }
 
     /// Java `hashCode()`. Plain: `Objects.hash(range, text, tooltip)`.
@@ -196,6 +192,23 @@ impl Suggestion {
             Kind::Integer(value) => crate::java_hash::objects_hash(&[base, value]),
             Kind::Text => base,
         }
+    }
+}
+
+/// Paper's `Suggestion.compare0` — the single transitive order backing both
+/// `compareTo` and `compareToIgnoreCase`. Paper neutralized the `IntegerSuggestion`
+/// overrides (`if (false && ...)`) so a mixed integer/text sort can't cycle:
+/// integers sort before any text, and only two integers compare numerically.
+fn compare0(
+    a: &Suggestion,
+    b: &Suggestion,
+    text: fn(&str, &str) -> std::cmp::Ordering,
+) -> std::cmp::Ordering {
+    match (a.kind, b.kind) {
+        (Kind::Integer(x), Kind::Integer(y)) => x.cmp(&y),
+        (Kind::Integer(_), Kind::Text) => std::cmp::Ordering::Less,
+        (Kind::Text, Kind::Integer(_)) => std::cmp::Ordering::Greater,
+        (Kind::Text, Kind::Text) => text(&a.text, &b.text),
     }
 }
 

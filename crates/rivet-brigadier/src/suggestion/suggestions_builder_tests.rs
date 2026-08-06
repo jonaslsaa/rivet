@@ -132,18 +132,13 @@ fn sort_mixed() {
         .iter()
         .map(|s| s.get_text().to_string())
         .collect();
-    // Java's `compareToIgnoreCase` is non-transitive when integer and text
-    // suggestions mix (`IntegerSuggestion.compareToIgnoreCase` is case-sensitive
-    // against a plain Suggestion, `Suggestion.compareToIgnoreCase` is
-    // case-insensitive; together: 30 < 3a < 4 < 30). Java's TimSort over a
-    // `HashSet` iteration places `3a` after `33`; Rust's stable merge sort places
-    // it after `32`. The comparator is a faithful port — only this pathological
-    // cyclic order diverges (see `suggestions.rs`). The integer-only subset keeps
-    // Java's exact numeric order.
-    let ints: Vec<String> = actual
-        .iter()
-        .filter(|t| t.chars().all(|c| c.is_ascii_digit()))
-        .cloned()
-        .collect();
-    assert_eq!(ints, ["11", "2", "22", "33", "4", "6", "8", "30", "32"]);
+    // Paper's `compareToIgnoreCase` sorts every integer suggestion before any text
+    // suggestion, then the text case-insensitively — the mixed order is deterministic
+    // (upstream 1.3.10's non-transitive comparator is replaced by Paper's `compare0`).
+    assert_eq!(
+        actual,
+        [
+            "2", "4", "6", "8", "30", "32", "11", "22", "33", "3a", "a", "a3", "b", "c"
+        ]
+    );
 }

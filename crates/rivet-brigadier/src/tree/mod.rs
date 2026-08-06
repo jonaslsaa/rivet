@@ -575,6 +575,9 @@ impl<S: 'static> CommandNode<S> for LiteralCommandNode<S> {
         }
     }
     fn get_relevant_nodes(&self, reader: &mut StringReader) -> Vec<Arc<dyn CommandNode<S>>> {
+        // STUB(brigadier): Paper's "prioritize mc commands in function parsing" —
+        // a `minecraft:`-prefixed literal matches its unprefixed `nonPrefixed` twin
+        // on a second pass — is not ported; it depends on the Minecraft `CommandSourceStack`.
         self.children
             .read()
             .expect("lock")
