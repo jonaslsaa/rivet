@@ -4,8 +4,9 @@
 //! Java: `ClientboundTransferPacket.java` in `working/Paper`. A `utf` host and a
 //! `VarInt` port. Registered in play and configuration clientbound.
 
-use crate::codec::{StreamCodec, of};
-use crate::friendly_byte_buf::FriendlyByteBuf;
+use crate::codec::byte_buf_codecs;
+use crate::codec::{StreamCodec, StreamDecoder, StreamEncoder, of};
+use crate::friendly_byte_buf::{FriendlyByteBuf, MAX_STRING_LENGTH};
 use crate::protocol::common::packet_types::clientbound_transfer;
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
@@ -34,18 +35,22 @@ impl ClientboundTransferPacket {
     }
 
     /// `ClientboundTransferPacket.STREAM_CODEC`.
+    ///
+    /// The `utf` host goes through the `Err`-returning `string_utf8` codec
+    /// (Java's `readUtf`/`writeUtf` at the `MAX_STRING_LENGTH` bound): an
+    /// over-length host is a `CodecError`, not a panic.
     pub fn stream_codec() -> StreamCodec<FriendlyByteBuf, ClientboundTransferPacket> {
+        let host_codec = byte_buf_codecs::string_utf8(MAX_STRING_LENGTH);
+        let host_codec_decode = host_codec.clone();
         of(
-            |output: &mut FriendlyByteBuf, value: &ClientboundTransferPacket| {
-                output.write_utf(&value.host);
+            move |output: &mut FriendlyByteBuf, value: &ClientboundTransferPacket| {
+                host_codec.encode(output, &value.host)?;
                 output.write_var_int(value.port);
                 Ok(())
             },
-            |input: &mut FriendlyByteBuf| {
-                Ok(ClientboundTransferPacket::new(
-                    input.read_utf(),
-                    input.read_var_int(),
-                ))
+            move |input: &mut FriendlyByteBuf| {
+                let host = host_codec_decode.decode(input)?;
+                Ok(ClientboundTransferPacket::new(host, input.read_var_int()))
             },
         )
     }

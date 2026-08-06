@@ -19,7 +19,7 @@
 
 use crate::codec::{StreamCodec, map};
 use crate::friendly_byte_buf::FriendlyByteBuf;
-use crate::protocol::common::custom::CustomPacketPayload;
+use crate::protocol::common::custom::{BrandPayload, CustomPacketPayload};
 use crate::protocol::common::packet_types::clientbound_custom_payload;
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
@@ -49,7 +49,7 @@ impl ClientboundCustomPayloadPacket {
     /// and the 1 MiB `DiscardedPayload` fallback.
     pub fn config_stream_codec() -> StreamCodec<FriendlyByteBuf, ClientboundCustomPayloadPacket> {
         map(
-            CustomPacketPayload::codec(MAX_PAYLOAD_SIZE),
+            CustomPacketPayload::codec(&[BrandPayload::TYPE().id().clone()], MAX_PAYLOAD_SIZE),
             |p: &CustomPacketPayload| ClientboundCustomPayloadPacket::new(p.clone()),
             |p: &ClientboundCustomPayloadPacket| p.payload.clone(),
         )

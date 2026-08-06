@@ -5,11 +5,12 @@
 //! `Identifier` key; the client replies with `ServerboundCookieResponsePacket`.
 //! Registered in play, configuration, and login clientbound.
 
-use crate::codec::{StreamCodec, of};
+use crate::codec::{StreamCodec, StreamDecoder, StreamEncoder, of};
 use crate::friendly_byte_buf::FriendlyByteBuf;
 use crate::protocol::cookie::packet_types::clientbound_cookie_request;
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
+use crate::protocol::stream_codecs::identifier_codec;
 use rivet_registry::Identifier;
 
 /// `net.minecraft.network.protocol.cookie.ClientboundCookieRequestPacket`.
@@ -31,13 +32,16 @@ impl ClientboundCookieRequestPacket {
 
     /// `ClientboundCookieRequestPacket.STREAM_CODEC`.
     pub fn stream_codec() -> StreamCodec<FriendlyByteBuf, ClientboundCookieRequestPacket> {
+        let key_codec = identifier_codec();
+        let key_codec_decode = key_codec.clone();
         of(
-            |output: &mut FriendlyByteBuf, value: &ClientboundCookieRequestPacket| {
-                output.write_identifier(&value.key);
-                Ok(())
+            move |output: &mut FriendlyByteBuf, value: &ClientboundCookieRequestPacket| {
+                key_codec.encode(output, &value.key)
             },
-            |input: &mut FriendlyByteBuf| {
-                Ok(ClientboundCookieRequestPacket::new(input.read_identifier()))
+            move |input: &mut FriendlyByteBuf| {
+                Ok(ClientboundCookieRequestPacket::new(
+                    key_codec_decode.decode(input)?,
+                ))
             },
         )
     }

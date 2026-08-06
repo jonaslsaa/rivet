@@ -38,10 +38,12 @@ impl ServerboundCustomPayloadPacket {
         &self.payload
     }
 
-    /// `ServerboundCustomPayloadPacket.STREAM_CODEC`.
+    /// `ServerboundCustomPayloadPacket.STREAM_CODEC` — the empty known-types
+    /// list is `Collections.emptyList()` (CraftBukkit's "treat all serverbound
+    /// payloads the same"), so every id falls back to `DiscardedPayload`.
     pub fn stream_codec() -> StreamCodec<FriendlyByteBuf, ServerboundCustomPayloadPacket> {
         map(
-            CustomPacketPayload::codec(MAX_PAYLOAD_SIZE),
+            CustomPacketPayload::codec(&[], MAX_PAYLOAD_SIZE),
             |p: &CustomPacketPayload| ServerboundCustomPayloadPacket::new(p.clone()),
             |p: &ServerboundCustomPayloadPacket| p.payload.clone(),
         )
@@ -82,6 +84,44 @@ mod tests {
             CustomPacketPayload::Discarded(d) => {
                 assert_eq!(d.id(), &Identifier::with_default_namespace("register"));
                 assert_eq!(d.data(), &[1u8, 2]);
+            }
+            other => panic!("expected Discarded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_key_errors_not_panics() {
+        // A hostile `minecraft:aA` key is `Err` (Java `IdentifierException`)
+        // through the dispatch codec — not a panic.
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        out.write_utf("minecraft:aA");
+        out.write_bytes(&[1u8, 2]);
+        let mut input = FriendlyByteBuf::new(out.into_inner());
+        let err = ServerboundCustomPayloadPacket::stream_codec()
+            .decode(&mut input)
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "Non [a-z0-9/._-] character in path of location: minecraft:aA"
+        );
+    }
+
+    #[test]
+    fn serverbound_brand_payload_decodes_as_discarded() {
+        // With the empty known-types list, a serverbound `minecraft:brand` is
+        // kept as DiscardedPayload (raw bytes: varint length + brand string),
+        // exactly like every other id — CraftBukkit treats them all the same.
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        out.write_utf("minecraft:brand");
+        out.write_bytes(b"\x05Paper");
+        let mut input = FriendlyByteBuf::new(out.into_inner());
+        let decoded = ServerboundCustomPayloadPacket::stream_codec()
+            .decode(&mut input)
+            .unwrap();
+        match decoded.payload() {
+            CustomPacketPayload::Discarded(d) => {
+                assert_eq!(d.id(), &Identifier::with_default_namespace("brand"));
+                assert_eq!(d.data(), &b"\x05Paper".to_vec());
             }
             other => panic!("expected Discarded, got {other:?}"),
         }

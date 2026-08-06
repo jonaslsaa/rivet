@@ -12,6 +12,7 @@ use crate::friendly_byte_buf::FriendlyByteBuf;
 use crate::protocol::common::packet_types::clientbound_store_cookie;
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
+use crate::protocol::stream_codecs::identifier_codec;
 use rivet_registry::Identifier;
 
 /// `ClientboundStoreCookiePacket.MAX_PAYLOAD_SIZE`.
@@ -48,16 +49,18 @@ impl ClientboundStoreCookiePacket {
 
     /// `ClientboundStoreCookiePacket.STREAM_CODEC`.
     pub fn stream_codec() -> StreamCodec<FriendlyByteBuf, ClientboundStoreCookiePacket> {
+        let key_codec = identifier_codec();
+        let key_codec_decode = key_codec.clone();
         let payload_codec = Self::payload_stream_codec();
         let payload_codec_decode = payload_codec.clone();
         of(
             move |output: &mut FriendlyByteBuf, value: &ClientboundStoreCookiePacket| {
-                output.write_identifier(&value.key);
+                key_codec.encode(output, &value.key)?;
                 payload_codec.encode(output, &value.payload)?;
                 Ok(())
             },
             move |input: &mut FriendlyByteBuf| {
-                let key = input.read_identifier();
+                let key = key_codec_decode.decode(input)?;
                 let payload = payload_codec_decode.decode(input)?;
                 Ok(ClientboundStoreCookiePacket::new(key, payload))
             },
@@ -124,6 +127,39 @@ mod tests {
         assert_eq!(
             err.message,
             "ByteArray with size 5121 is bigger than allowed 5120"
+        );
+    }
+
+    #[test]
+    fn oversize_payload_decode_errors() {
+        // A hostile length varint over 5120 on decode is `Err`, not a panic.
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        out.write_utf("minecraft:brand");
+        out.write_var_int(5121);
+        out.write_bytes(&[0u8; 5121]);
+        let mut input = FriendlyByteBuf::new(out.into_inner());
+        let err = ClientboundStoreCookiePacket::stream_codec()
+            .decode(&mut input)
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "ByteArray with size 5121 is bigger than allowed 5120"
+        );
+    }
+
+    #[test]
+    fn malformed_key_errors_not_panics() {
+        // A hostile `minecraft:aA` key is `Err` (Java `IdentifierException`).
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        out.write_utf("minecraft:aA");
+        out.write_var_int(0);
+        let mut input = FriendlyByteBuf::new(out.into_inner());
+        let err = ClientboundStoreCookiePacket::stream_codec()
+            .decode(&mut input)
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "Non [a-z0-9/._-] character in path of location: minecraft:aA"
         );
     }
 }

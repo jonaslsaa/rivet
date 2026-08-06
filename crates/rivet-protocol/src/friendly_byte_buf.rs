@@ -14,15 +14,17 @@
 //! `Vector3f`/`Quaternionf` (JOML), `PublicKey` (crypto), the JsonOps/codec
 //! paths, `Instant`, and the `BitSet`-based set helpers.
 //!
-//! `readEnum`-by-class (`clazz.getEnumConstants()[readVarInt()]`) is ported as
-//! [`FriendlyByteBuf::read_enum`] with an explicit value table — Java's
-//! `Enum.values()` order (declaration order, ordinal == index) — mirroring how
-//! the project's existing enums enumerate their own constants (e.g.
-//! `rivet-registry::core::Direction`). `readIdentifier`/`writeIdentifier`
-//! port `Identifier.read`/`write` (a `MAX_STRING_LENGTH`-bounded UTF string
-//! parsed through `Identifier.parse`), which the common/cookie/ping packet
-//! bodies in #86 need; `read_resource_key`/`read_registry_key` stay deferred
-//! with the registry-wired units.
+//! `readEnum`-by-class (`clazz.getEnumConstants()[readVarInt()]`) is ported
+//! at the call site: the value-table `read_var_int` + `by_id` pattern, because
+//! the codec boundary surfaces an out-of-range ordinal as `Err` (Java's
+//! `ArrayIndexOutOfBoundsException`) — a generic `Fn(i32) -> T` cannot express
+//! that. `writeEnum` is [`FriendlyByteBuf::write_enum`]. `Identifier` on the wire
+//! goes through [`crate::protocol::stream_codecs::identifier_codec`] (the
+//! `Err`-returning boundary over `STRING_UTF8` + `Identifier.parse`); there is
+//! no raw `readIdentifier`/`writeIdentifier` helper because every codec boundary
+//! must surface a malformed identifier as `Err`, and the raw helper would panic.
+//! `read_resource_key`/`read_registry_key` stay deferred with the registry-wired
+//! units.
 //!
 //! Netty's `ByteBuf` big-endian scalar contract maps onto `bytes::Buf`/`BufMut`
 //! exactly (24-bit medium, signed/unsigned variants, raw NaN-preserving float/
@@ -41,7 +43,6 @@ use rivet_nbt::end_tag::EndTag;
 use rivet_nbt::nbt_accounter::NbtAccounter;
 use rivet_nbt::nbt_io;
 use rivet_nbt::tag::Tag;
-use rivet_registry::Identifier;
 use rivet_util::data_io::{DataInput, DataOutput};
 use rivet_util::mth::Uuid;
 
@@ -611,31 +612,10 @@ impl FriendlyByteBuf {
 
     // ---- enum / identifier -------------------------------------------------
 
-    /// `readEnum(Class<T>)` — `clazz.getEnumConstants()[readVarInt()]`.
-    ///
-    /// Java's `Enum.values()` returns the constants in declaration order, so the
-    /// ordinal == the array index; `by_id` maps a varint id to the constant at
-    /// that index. Out-of-range ids are the caller's Java-equivalent
-    /// `ArrayIndexOutOfBounds` — the caller's codec decides how to surface it.
-    pub fn read_enum<T>(&mut self, by_id: impl Fn(i32) -> T) -> T {
-        let id = self.read_var_int();
-        by_id(id)
-    }
-
     /// `writeEnum(Enum<?>)` — `writeVarInt(value.ordinal())`. The ordinal is
     /// exactly `writeById(Enum::ordinal)`.
     pub fn write_enum<T>(&mut self, ordinal: impl Fn(&T) -> i32, value: &T) -> &mut Self {
         self.write_by_id(ordinal, value)
-    }
-
-    /// `readIdentifier()` — `Identifier.parse(readUtf(MAX_STRING_LENGTH))`.
-    pub fn read_identifier(&mut self) -> Identifier {
-        Identifier::parse(&self.read_utf())
-    }
-
-    /// `writeIdentifier(Identifier)` — `writeUtf(identifier.toString())`.
-    pub fn write_identifier(&mut self, identifier: &Identifier) -> &mut Self {
-        self.write_utf(&identifier.to_string())
     }
 
     // ---- NBT bridge --------------------------------------------------------

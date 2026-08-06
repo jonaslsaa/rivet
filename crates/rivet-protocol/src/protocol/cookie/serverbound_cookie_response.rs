@@ -12,6 +12,7 @@ use crate::protocol::common::clientbound_store_cookie::ClientboundStoreCookiePac
 use crate::protocol::cookie::packet_types::serverbound_cookie_response;
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
+use crate::protocol::stream_codecs::identifier_codec;
 use rivet_registry::Identifier;
 
 /// `net.minecraft.network.protocol.cookie.ServerboundCookieResponsePacket`.
@@ -46,18 +47,23 @@ impl ServerboundCookieResponsePacket {
     /// panic) — `FriendlyByteBuf::read_nullable` cannot return a `Result`, so
     /// the boolean + payload are read here directly.
     pub fn stream_codec() -> StreamCodec<FriendlyByteBuf, ServerboundCookieResponsePacket> {
+        let key_codec = identifier_codec();
+        let key_codec_decode = key_codec.clone();
         let payload_codec = ClientboundStoreCookiePacket::payload_stream_codec();
         let payload_codec_decode = payload_codec.clone();
         of(
             move |output: &mut FriendlyByteBuf, value: &ServerboundCookieResponsePacket| {
-                output.write_identifier(&value.key);
-                output.write_nullable(value.payload.as_ref(), |out, payload| {
-                    payload_codec.encode(out, payload).unwrap();
-                });
+                key_codec.encode(output, &value.key)?;
+                output.write_boolean(value.payload.is_some());
+                if let Some(payload) = value.payload.as_ref() {
+                    payload_codec.encode(output, payload)?;
+                }
                 Ok(())
             },
             move |input: &mut FriendlyByteBuf| {
-                let key = input.read_identifier();
+                // The key is read through `identifier_codec` (server-reachable
+                // hostile wire): a malformed identifier is `Err`, not a panic.
+                let key = key_codec_decode.decode(input)?;
                 let payload = if input.read_boolean() {
                     Some(payload_codec_decode.decode(input)?)
                 } else {
@@ -139,5 +145,43 @@ mod tests {
                 packet
             );
         }
+    }
+
+    #[test]
+    fn malformed_key_errors_not_panics() {
+        // A hostile `minecraft:aA` key is a Java `IdentifierException`; the
+        // packet codec surfaces it as `Err` (the server closes the connection),
+        // not a panic.
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        out.write_utf("minecraft:aA");
+        out.write_boolean(true);
+        out.write_var_int(1);
+        out.write_bytes(&[1u8]);
+        let mut input = FriendlyByteBuf::new(out.into_inner());
+        let err = ServerboundCookieResponsePacket::stream_codec()
+            .decode(&mut input)
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "Non [a-z0-9/._-] character in path of location: minecraft:aA"
+        );
+    }
+
+    #[test]
+    fn oversize_payload_encode_errors_not_panics() {
+        // A 5121-byte payload is over `byteArray(5120)`: encode returns `Err`
+        // (Java `EncoderException`) instead of panicking through `unwrap`.
+        let packet = ServerboundCookieResponsePacket::new(
+            Identifier::with_default_namespace("brand"),
+            Some(vec![0u8; 5121]),
+        );
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        let err = ServerboundCookieResponsePacket::stream_codec()
+            .encode(&mut out, &packet)
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "ByteArray with size 5121 is bigger than allowed 5120"
+        );
     }
 }

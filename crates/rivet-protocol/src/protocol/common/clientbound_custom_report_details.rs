@@ -43,7 +43,10 @@ impl ClientboundCustomReportDetailsPacket {
         byte_buf_codecs::map(
             |capacity: i32| {
                 if capacity < 0 {
-                    panic!("Illegal Capacity: {capacity}");
+                    // Java: `new HashMap<>(-1)` -> `IllegalArgumentException:
+                    // Illegal initial capacity: -1` (a hostile count that passes
+                    // the max check surfaces here, at the ctor).
+                    panic!("Illegal initial capacity: {capacity}");
                 }
                 HashMap::new()
             },
@@ -75,6 +78,16 @@ mod tests {
     use super::*;
     use crate::codec::{StreamDecoder, StreamEncoder};
     use bytes::BytesMut;
+    use std::panic::catch_unwind;
+
+    fn panic_message<F: FnOnce() -> R, R: std::fmt::Debug>(f: F) -> String {
+        let err = catch_unwind(std::panic::AssertUnwindSafe(f))
+            .expect_err("expected the closure to panic");
+        err.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "non-string panic payload".to_string())
+    }
 
     #[test]
     fn round_trips_map() {
@@ -106,5 +119,19 @@ mod tests {
             .encode(&mut out, &packet)
             .unwrap_err();
         assert_eq!(err.message, "33 elements exceeded max size of: 32");
+    }
+
+    #[test]
+    fn negative_count_panics_like_java_map_ctor() {
+        // A hostile count of -1 passes `readCount` (only `> maxSize` is
+        // checked) and reaches the ctor `new HashMap<>(-1)` ->
+        // `IllegalArgumentException("Illegal initial capacity: -1")`.
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        out.write_var_int(-1);
+        let mut input = FriendlyByteBuf::new(out.into_inner());
+        let msg = panic_message(|| {
+            let _ = ClientboundCustomReportDetailsPacket::stream_codec().decode(&mut input);
+        });
+        assert_eq!(msg, "Illegal initial capacity: -1");
     }
 }

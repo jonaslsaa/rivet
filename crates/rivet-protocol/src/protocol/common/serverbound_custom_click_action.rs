@@ -118,4 +118,38 @@ mod tests {
             packet
         );
     }
+
+    #[test]
+    fn malformed_key_errors_not_panics() {
+        // A hostile `minecraft:aA` key is `Err` (Java `IdentifierException`).
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        out.write_utf("minecraft:aA");
+        out.write_var_int(0);
+        let mut input = FriendlyByteBuf::new(out.into_inner());
+        let err = ServerboundCustomClickActionPacket::stream_codec()
+            .decode(&mut input)
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "Non [a-z0-9/._-] character in path of location: minecraft:aA"
+        );
+    }
+
+    #[test]
+    fn oversize_length_prefixed_payload_errors() {
+        // The untrusted tag is length-prefixed at 65536: a hostile length over
+        // the cap is `Err` (`length_prefixed`), not a panic.
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        out.write_utf("minecraft:button");
+        out.write_var_int(65_537);
+        out.write_bytes(&[0u8; 65_537]);
+        let mut input = FriendlyByteBuf::new(out.into_inner());
+        let err = ServerboundCustomClickActionPacket::stream_codec()
+            .decode(&mut input)
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "Buffer size 65537 is larger than allowed limit of 65536"
+        );
+    }
 }

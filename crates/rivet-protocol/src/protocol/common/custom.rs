@@ -25,8 +25,9 @@
 //! (CraftBukkit treats all serverbound payloads the same, so every id falls
 //! back to `DiscardedPayload`). See the two packet bodies.
 
+use crate::codec::byte_buf_codecs;
 use crate::codec::{CodecError, StreamCodec, dispatch, map, of};
-use crate::friendly_byte_buf::FriendlyByteBuf;
+use crate::friendly_byte_buf::{FriendlyByteBuf, MAX_STRING_LENGTH};
 use crate::protocol::stream_codecs::identifier_codec;
 use rivet_registry::Identifier;
 
@@ -85,17 +86,22 @@ impl CustomPacketPayload {
     /// `CustomPacketPayload.codec(FallbackProvider fallback, List<TypeAndCodec>
     /// types)` — the identifier-dispatched codec.
     ///
-    /// `known` maps each known type id to its codec; an id not in the map falls
-    /// back to `fallback(id)`. Mirroring `ClientboundCustomPayloadPacket`
-    /// (`1048576`) and `ServerboundCustomPayloadPacket` (`32767`), the fallback
-    /// is a `DiscardedPayload` capped at `max_payload_size`.
-    pub fn codec(max_payload_size: i32) -> StreamCodec<FriendlyByteBuf, CustomPacketPayload> {
-        let brand_id = BrandPayload::TYPE().id().clone();
+    /// `known_types` holds the type ids that decode as the vanilla `BrandPayload`
+    /// (Java's `List<TypeAndCodec>`); an id not in the list falls back to
+    /// `DiscardedPayload`. Mirroring `ClientboundCustomPayloadPacket`
+    /// (`[BrandPayload.TYPE]`, `1048576`) and `ServerboundCustomPayloadPacket`
+    /// (`Collections.emptyList()`, `32767`), the fallback is a `DiscardedPayload`
+    /// capped at `max_payload_size`.
+    pub fn codec(
+        known_types: &[Identifier],
+        max_payload_size: i32,
+    ) -> StreamCodec<FriendlyByteBuf, CustomPacketPayload> {
+        let known_types: Vec<Identifier> = known_types.to_vec();
         dispatch(
             identifier_codec(),
             |value: &CustomPacketPayload| value.type_id(),
             move |id: &Identifier| {
-                if id == &brand_id {
+                if known_types.contains(id) {
                     map(
                         BrandPayload::stream_codec(),
                         |b: &BrandPayload| CustomPacketPayload::Brand(b.clone()),
@@ -154,14 +160,15 @@ impl BrandPayload {
     }
 
     /// `BrandPayload.STREAM_CODEC` — `Packet.codec(BrandPayload::write,
-    /// BrandPayload::new)` over a `utf` string.
+    /// BrandPayload::new)` over a `utf` string (`ByteBufCodecs.STRING_UTF8`,
+    /// capped at `MAX_STRING_LENGTH`). Built over the `Err`-returning
+    /// `string_utf8` codec so an over-length brand payload (hostile wire) is a
+    /// `CodecError`, not a panic.
     pub fn stream_codec() -> StreamCodec<FriendlyByteBuf, BrandPayload> {
-        of(
-            |output: &mut FriendlyByteBuf, value: &BrandPayload| {
-                output.write_utf(&value.brand);
-                Ok(())
-            },
-            |input: &mut FriendlyByteBuf| Ok(BrandPayload::new(input.read_utf())),
+        map(
+            byte_buf_codecs::string_utf8(MAX_STRING_LENGTH),
+            |s: &String| BrandPayload::new(s.clone()),
+            |b: &BrandPayload| b.brand().to_string(),
         )
     }
 }
@@ -244,7 +251,9 @@ mod tests {
 
     #[test]
     fn custom_payload_dispatch_round_trips_brand() {
-        let codec = CustomPacketPayload::codec(32767);
+        // The known-types list mirrors `ClientboundCustomPayloadPacket`'s
+        // `List.of(new TypeAndCodec<>(BrandPayload.TYPE, ...))`.
+        let codec = CustomPacketPayload::codec(&[BrandPayload::TYPE().id().clone()], 32767);
         let value = CustomPacketPayload::Brand(BrandPayload::new("Paper".to_string()));
         let mut out = FriendlyByteBuf::new(BytesMut::new());
         codec.encode(&mut out, &value).unwrap();
@@ -256,8 +265,28 @@ mod tests {
     }
 
     #[test]
+    fn empty_known_types_round_trips_brand_as_discarded() {
+        // The serverbound list is empty (`Collections.emptyList()`), so a
+        // `minecraft:brand` payload decodes as DiscardedPayload, not Brand.
+        let codec = CustomPacketPayload::codec(&[], 32767);
+        let mut input = FriendlyByteBuf::new(BytesMut::from(
+            b"\x0Fminecraft:brand\x05Paper".to_vec().as_slice(),
+        ));
+        let decoded = codec.decode(&mut input).unwrap();
+        match decoded {
+            CustomPacketPayload::Discarded(d) => {
+                assert_eq!(d.id(), &Identifier::with_default_namespace("brand"));
+                // The raw bytes are the varint length prefix + the brand string
+                // (Paper's raw-byte fallback with no length prefix).
+                assert_eq!(d.data(), &b"\x05Paper".to_vec());
+            }
+            other => panic!("expected Discarded, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn custom_payload_dispatch_falls_back_to_discarded() {
-        let codec = CustomPacketPayload::codec(32767);
+        let codec = CustomPacketPayload::codec(&[], 32767);
         let mut out = FriendlyByteBuf::new(BytesMut::new());
         codec
             .encode(
@@ -287,7 +316,7 @@ mod tests {
 
     #[test]
     fn discarded_payload_over_max_size_errors() {
-        let codec = CustomPacketPayload::codec(2);
+        let codec = CustomPacketPayload::codec(&[], 2);
         let mut out = FriendlyByteBuf::new(BytesMut::new());
         // A brand payload is well under the size cap, but decoding a discarded
         // payload whose readable bytes exceed the cap errors with Java's message.
@@ -296,5 +325,21 @@ mod tests {
         let mut input = FriendlyByteBuf::new(BytesMut::from(written(out).as_slice()));
         let err = codec.decode(&mut input).unwrap_err();
         assert_eq!(err.message, "Payload may not be larger than 2 bytes");
+    }
+
+    #[test]
+    fn oversize_brand_payload_errors_not_panics() {
+        // A hostile brand string longer than `MAX_STRING_LENGTH` (32767) must
+        // surface as `Err` from `string_utf8`, not panic.
+        let codec = CustomPacketPayload::codec(&[BrandPayload::TYPE().id().clone()], 32767);
+        let mut input = FriendlyByteBuf::new(BytesMut::new());
+        input.write_utf("minecraft:brand");
+        input.write_var_int(32_768);
+        input.write_bytes(&b"a".repeat(32_768));
+        let err = codec.decode(&mut input).unwrap_err();
+        assert_eq!(
+            err.message,
+            "The received string length is longer than maximum allowed (32768 > 32767)"
+        );
     }
 }
