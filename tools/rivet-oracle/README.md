@@ -193,10 +193,12 @@ The negative control reuses the exact `verify` boot and extract steps, so it
 cannot pass if `verify` itself is broken: a boot/extract failure, a pin
 mismatch, or an unverifiable pin all exit nonzero before the diff runs.
 
-`scripts/gate.sh` runs `verify --expect-fail` right after `verify` (behind the
-same paperclip guard, accepting the extra boot) so a future change that breaks
-the acceptance logic or the tamper is caught by the gate, not only by a manual
-run.
+`scripts/gate.sh` runs `verify --expect-fail` right after `verify` as a
+required oracle stage (whenever the verify prereqs are present, accepting the
+extra boot) so a future change that breaks the acceptance logic or the tamper
+is caught by the gate, not only by a manual run. A nonzero exit — boot/extract
+failure, pin mismatch, or a tamper not detected and named — aborts the gate
+under `set -e` exactly like any other oracle step.
 
 ## Conventions
 

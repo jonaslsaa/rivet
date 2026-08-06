@@ -13,6 +13,10 @@
 # scenario runner:
 #   - rivet-oracle verify  M0 sanity gate: boot a fresh Paper server and diff its
 #                          chunk-NBT slice against the committed golden baseline.
+#                          Also runs verify --expect-fail, the negative control:
+#                          a fresh boot diffed against a corrupted temp baseline
+#                          copy that must be detected and named (proves the
+#                          boot->extract->diff chain is not vacuously green).
 #   - rivet-parity         byte-for-byte NBT/SNBT diff of rivet-nbt against the Paper
 #                          reference oracle — the only gate step that exercises real
 #                          Rivet code against Paper.
