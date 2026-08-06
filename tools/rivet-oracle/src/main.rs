@@ -29,7 +29,7 @@
 //! Usage:
 //!   cargo run -p rivet-oracle                    # verify tools/rivet-oracle/fixtures
 //!   cargo run -p rivet-oracle -- <dir>           # verify <dir> against its manifest
-//!   cargo run -p rivet-oracle -- verify          # full M0 gate: boot -> extract -> diff
+//!   cargo run -p rivet-oracle -- verify          # full M0 gate: boot -> extract -> pin-check -> diff
 //!   cargo run -p rivet-oracle -- verify [dir]    # gate against a custom baseline dir
 //!   cargo run -p rivet-oracle -- verify --expect-fail [dir]
 //!                              # negative control: boot -> extract -> diff against a
