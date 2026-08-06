@@ -192,9 +192,20 @@ pub trait CompressorHolder<Ops: DynamicOps + 'static>: Compressable<Ops> {}
 
 /// `com.mojang.serialization.KeyCompressor<T>`.
 ///
-/// Java uses fastutil `Int2ObjectArrayMap`/`Object2IntArrayMap` with
-/// `defaultReturnValue(-1)`; a `Vec` preserves the same dense index space and
-/// the `usize::MAX` sentinel mirrors `-1` for a missing key.
+/// Java uses fastutil `Int2ObjectArrayMap`/`Object2IntArrayMap`. The two maps
+/// have *different* missing-key defaults, both reproduced here:
+/// - `compress` (the T-key `Object2IntArrayMap`) defaults to `0` — fastutil's
+///   plain int default, which DFU deliberately does not override. An unknown
+///   key therefore compresses to slot 0 (the compressed decode reads the first
+///   entry for it).
+/// - `compressString` (`Object2IntArrayMap`) is explicitly
+///   `defaultReturnValue(-1)` so `compress(String)` can detect absence and fall
+///   back to `compress(ops.createString(key))`.
+/// - `decompress` (`Int2ObjectArrayMap`) is object-valued and defaults to
+///   `null` for a missing index (`Option::None`).
+///
+/// A `Vec` preserves the same dense index space; `usize::MAX` mirrors the `-1`
+/// sentinel.
 #[derive(Debug, Clone)]
 pub struct KeyCompressor<T> {
     decompress: Vec<T>,
@@ -209,8 +220,8 @@ impl<T> KeyCompressor<T> {
     /// Java's constructor also fills `compressString` from
     /// `ops.getStringValue(key)`; without the ops (and an empty-string
     /// placeholder would be wrong), use `new_with_strings` when the string
-    /// table is needed. The `compressString` table starts empty so
-    /// `compress_string` returns the `usize::MAX` sentinel for a real key.
+    /// table is needed. The `compressString` table starts empty so the `-1`
+    /// sentinel is returned for a real key.
     pub fn new(keys: Vec<T>) -> KeyCompressor<T>
     where
         T: Clone + PartialEq,
@@ -253,27 +264,48 @@ impl<T> KeyCompressor<T> {
         compressor
     }
 
-    /// `KeyCompressor.decompress(int)`.
+    /// `KeyCompressor.decompress(int)` — `Int2ObjectArrayMap.get`, `null` for a
+    /// missing index.
     pub fn decompress(&self, key: usize) -> Option<&T> {
         self.decompress.get(key)
     }
 
-    /// `KeyCompressor.compress(String)`.
-    pub fn compress_string(&self, key: &str) -> usize {
+    /// `compressString.getInt(String)` — the raw string-table lookup; `-1`
+    /// (mirrored as `usize::MAX`) for a key absent from the table. Prefer
+    /// [`KeyCompressor::compress_string`], which applies Java's fallback.
+    pub fn compress_string_table(&self, key: &str) -> usize {
         match self.compress_string.iter().find(|(k, _)| k == key) {
             Some((_, id)) => *id,
             None => usize::MAX,
         }
     }
 
-    /// `KeyCompressor.compress(T)`.
+    /// `KeyCompressor.compress(String)` — the string-table lookup, falling back
+    /// to `compress(ops.createString(key))` (the T-key table, default `0`) when
+    /// the string is absent from `compressString` — Java's exact
+    /// `id == -1 ? compress(ops.createString(key)) : id`.
+    pub fn compress_string<O: DynamicOps<Output = T>>(&self, ops: &O, key: &str) -> usize
+    where
+        T: Clone + PartialEq,
+    {
+        let id = self.compress_string_table(key);
+        if id == usize::MAX {
+            self.compress_key(&ops.create_string(key.to_string()))
+        } else {
+            id
+        }
+    }
+
+    /// `KeyCompressor.compress(T)` — `Object2IntArrayMap.getInt`. The fastutil
+    /// default return value for a missing key is `0` (deliberately not
+    /// overridden by DFU — an unknown key compresses to slot 0).
     pub fn compress_key(&self, key: &T) -> usize
     where
         T: PartialEq,
     {
         match self.compress.iter().find(|(k, _)| *k == *key) {
             Some((_, id)) => *id,
-            None => usize::MAX,
+            None => 0,
         }
     }
 
@@ -281,6 +313,104 @@ impl<T> KeyCompressor<T> {
     pub fn size(&self) -> usize {
         self.size
     }
+}
+
+/// The `MapLike` built by `MapDecoder.compressedDecode` over a packed list of
+/// entries (Java's anonymous `MapLike` in `compressedDecode`):
+/// `entries.get(compressor.compress(key))` with null slots for absent fields,
+/// and `entries()` null-filtered by value.
+///
+/// Java reads the slot at the compressed index; the index is `0` for an unknown
+/// key (the fastutil default). An out-of-range index throws
+/// `IndexOutOfBoundsException` (mirrored here as a panic), and a slot holding
+/// the ops' null (`JsonNull` for JSON) reads as absent.
+pub struct CompressedMapLike<'a, O: DynamicOps> {
+    pub ops: &'a O,
+    pub compressor: KeyCompressor<O::Output>,
+    pub entries: Vec<O::Output>,
+}
+
+impl<'a, O: DynamicOps> std::fmt::Debug for CompressedMapLike<'a, O> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CompressedMapLike[{} entries]", self.entries.len())
+    }
+}
+
+impl<'a, O: DynamicOps> MapLike<O::Output> for CompressedMapLike<'a, O> {
+    /// `MapLike.get(T key)` — `entries.get(compressor.compress(key))`.
+    fn get(&self, key: &O::Output) -> Option<O::Output> {
+        let idx = self.compressor.compress_key(key);
+        self.value_at(idx)
+    }
+
+    /// `MapLike.get(String key)` — `entries.get(compressor.compress(key))`.
+    fn get_string(&self, key: &str) -> Option<O::Output> {
+        let idx = self.compressor.compress_string(self.ops, key);
+        self.value_at(idx)
+    }
+
+    /// `MapLike.entries()` — `IntStream.range(0, entries.size())` keyed by
+    /// `compressor.decompress(i)`, dropping null (absent) values.
+    fn entries(&self) -> Vec<Pair<O::Output, O::Output>> {
+        (0..self.entries.len())
+            .filter_map(|i| {
+                let value = self.entries[i].clone();
+                if value == self.ops.empty() {
+                    return None;
+                }
+                // `compressor.decompress(i)` is `null` for `i >= size` (Java
+                // keeps such pairs with a null key when the value is present);
+                // `ops.empty()` is the Rust analog of that null key.
+                let key = self
+                    .compressor
+                    .decompress(i)
+                    .cloned()
+                    .unwrap_or_else(|| self.ops.empty());
+                Some(Pair::of(key, value))
+            })
+            .collect()
+    }
+}
+
+impl<'a, O: DynamicOps> CompressedMapLike<'a, O> {
+    /// `ArrayList.get` — an out-of-range index throws (Java
+    /// `IndexOutOfBoundsException`); a slot holding the ops' null (an absent
+    /// field) reads as absent (`None`), mirroring Java's `null` from `getList`.
+    fn value_at(&self, idx: usize) -> Option<O::Output> {
+        let value = match self.entries.get(idx) {
+            Some(v) => v,
+            None => panic!(
+                "Index {idx} out of bounds for compressed-map list of length {}",
+                self.entries.len()
+            ),
+        };
+        if *value == self.ops.empty() {
+            None
+        } else {
+            Some(value.clone())
+        }
+    }
+}
+
+/// Build the `KeyCompressor`-backed [`CompressedMapLike`] for
+/// `MapDecoder.compressedDecode` / `MapCodec.compressedDecode`. `None` when
+/// `input` is not a list (Java `ops.getList(input).result()` absent → the
+/// caller returns `DataResult.error("Input is not a list")`).
+pub fn compressed_map_like<'a, O: DynamicOps>(
+    ops: &'a O,
+    keys: Vec<O::Output>,
+    input: &O::Output,
+) -> Option<CompressedMapLike<'a, O>> {
+    let list_result = ops.get_list(input);
+    let input_list = list_result.result()?;
+    let compressor = KeyCompressor::new_with_strings(ops, keys);
+    let mut entries = Vec::new();
+    input_list(&mut |e| entries.push(e.clone()));
+    Some(CompressedMapLike {
+        ops,
+        compressor,
+        entries,
+    })
 }
 
 /// The Java `RecordBuilder.MapBuilder` — an accumulating record builder over a
@@ -597,10 +727,12 @@ pub trait DynamicOps: Debug {
 
     /// `compressMaps()`.
     ///
-    /// STUB(mc.nbt): the `true` branch (packed list-of-entries form via
-    /// `KeyCompressor`) is not ported — `MapDecoder.compressedDecode`,
-    /// `MapEncoder.encoder()` and `MapCodecCodec.encode` all fall back to the
-    /// non-compressed map form when an ops overrides this to return `true`.
+    /// The `true` branch (packed list-of-entries form via `KeyCompressor`) is
+    /// ported: `MapDecoder.compressedDecode` / `MapCodec.compressedDecode`
+    /// route through `compressed_map_like` (a `KeyCompressor`-backed
+    /// `CompressedMapLike`), and `MapEncoderAsEncoder::encode` /
+    /// `MapCodecCodec.encode` / `RecursiveMapCodecCodec.encode` build into a
+    /// `CompressedRecordBuilder` via `map_encoder::compressed_builder`.
     fn compress_maps(&self) -> bool {
         false
     }

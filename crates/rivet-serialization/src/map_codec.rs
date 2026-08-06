@@ -35,11 +35,20 @@ pub trait MapCodec<A, Ops: DynamicOps + 'static>: Debug + Keyable<Ops> {
     /// `MapCodec.encode(A input, DynamicOps<T> ops, RecordBuilder<T> prefix)`.
     fn encode(&self, input: &A, ops: &Ops, prefix: &mut dyn RecordBuilder<Output = Ops::Output>);
 
-    /// `MapCodec.compressedDecode(DynamicOps<T> ops, T input)` — default:
-    /// non-compressed (`ops.getMap(input)`).
+    /// `MapCodec.compressedDecode(DynamicOps<T> ops, T input)` — same default
+    /// as `MapDecoder.compressedDecode`: with `compressMaps()` the input must
+    /// be a list read through a `KeyCompressor`-backed `MapLike`, otherwise the
+    /// non-compressed `getMap` path.
     fn compressed_decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<A> {
-        let map = ops.get_map(input).set_lifecycle(Lifecycle::stable());
-        map.flat_map(|m| self.decode(ops, m.as_ref()))
+        if ops.compress_maps() {
+            match crate::dynamic_ops::compressed_map_like(ops, self.keys(ops), input) {
+                Some(map) => self.decode(ops, &map),
+                None => DataResult::error("Input is not a list".to_string()),
+            }
+        } else {
+            let map = ops.get_map(input).set_lifecycle(Lifecycle::stable());
+            map.flat_map(|m| self.decode(ops, m.as_ref()))
+        }
     }
 }
 
@@ -572,11 +581,9 @@ impl<A, Ops: DynamicOps + 'static> crate::Decoder<A, Ops> for MapCodecCodec<A, O
 
 impl<A, Ops: DynamicOps + 'static> crate::Encoder<A, Ops> for MapCodecCodec<A, Ops> {
     fn encode(&self, input: &A, ops: &Ops, prefix: &Ops::Output) -> DataResult<Ops::Output> {
-        // STUB(mc.nbt): Java uses `codec.compressedBuilder(ops)` (a
-        // `KeyCompressor`-backed builder when `ops.compressMaps()`); the
-        // compressed branch is not ported, so we always build via
-        // `ops.map_builder()`.
-        let mut builder = ops.map_builder();
+        // Java `MapCodecCodec.encode`:
+        // `codec.encode(input, ops, codec.compressedBuilder(ops)).build(prefix)`.
+        let mut builder = crate::map_encoder::compressed_builder(&*self.codec, ops);
         self.codec.encode(input, ops, &mut *builder);
         builder.build(Some(prefix.clone()))
     }
@@ -722,8 +729,9 @@ impl<A, Ops: DynamicOps + 'static> crate::Decoder<A, Ops> for RecursiveMapCodecC
 
 impl<A, Ops: DynamicOps + 'static> crate::Encoder<A, Ops> for RecursiveMapCodecCodec<A, Ops> {
     fn encode(&self, input: &A, ops: &Ops, prefix: &Ops::Output) -> DataResult<Ops::Output> {
-        let mut builder = ops.map_builder();
-        self.parent.get().encode(input, ops, &mut *builder);
+        let inner = self.parent.get();
+        let mut builder = crate::map_encoder::compressed_builder(&**inner, ops);
+        inner.encode(input, ops, &mut *builder);
         builder.build(Some(prefix.clone()))
     }
 }
