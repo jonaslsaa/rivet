@@ -2,6 +2,7 @@
 name = "rivet-parity"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Byte-for-byte NBT/SNBT parity diff between rivet-nbt and the Paper Java oracle"
 
 [dependencies]

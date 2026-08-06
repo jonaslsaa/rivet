@@ -9,7 +9,8 @@ Port the Minecraft server **and** Paper's layer on top of it to Rust, faithfully
 Minecraft/Paper **26.2** (the version in `working/Paper`). No version bumps until M4. The registry/data layer is codegen so future bumps are mechanical.
 
 ## D3 — Legal posture
-Reference-based port of proprietary vanilla sources (the Pumpkin posture), **private repo** while this is the case. Mojang's MIT libraries (Brigadier, DataFixerUpper) and Paper's GPL/MIT code are ported directly. No Mojang-derived source (`working/`) is ever committed or pushed. Distribution/publication decisions are deferred and human-only.
+
+Human decision (2026-08-06): Rivet is published under GPL-3.0-or-later (see `LICENSE`). The license covers Rivet's own contributions only and grants no rights to Mojang-owned material; Mojang's MIT libraries (Brigadier, DataFixerUpper) and Paper's GPL/MIT code are ported directly. No Mojang-derived source (`working/`) is ever committed or pushed.
 
 ## D4 — Memory architecture
 No garbage collector to lean on, so: **index/arena storage, IDs over references** (see `OWNERSHIP.md`). No full ECS framework — feather died of architecture golf; we keep Paper's structure at module level with arenas underneath.
