@@ -15,6 +15,9 @@ tools/rivet-oracle/work/
 # rivet-codegen scratch space (extracted bundler classpath, compiled helper) — regenerable
 tools/rivet-codegen/.cache/
 
+# rivet-codegen standalone workspace build output (own [workspace] root)
+tools/rivet-codegen/target/
+
 # Project .claude (workflows, settings) is repo content — override global ignore
 !.claude/
 .claude/settings.local.json

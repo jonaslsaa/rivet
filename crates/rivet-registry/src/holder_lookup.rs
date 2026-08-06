@@ -44,6 +44,7 @@ use crate::access::RegistryAccess;
 use crate::holder::{Holder, RegistryId};
 use crate::holder_set::HolderSet;
 use crate::registry::{Registry, RegistryKey};
+use crate::root::AnyBox;
 
 use rivet_serialization::lifecycle::Lifecycle;
 
@@ -313,6 +314,23 @@ impl RegistryAccess {
         parent: &Ops,
     ) -> crate::registry_ops::RegistryOps<Ops::Output, Ops> {
         crate::registry_ops::RegistryOps::create_from_access(parent, self.clone())
+    }
+
+    /// Build an access from a single frozen typed registry — the minimal
+    /// construction path for the #126 protocol codecs in `rivet-protocol` (a
+    /// `RegistryFriendlyByteBuf` resolves the codec's registry key through the
+    /// access's sanctioned erased downcast) and their tests. `key` is erased to
+    /// the stored `RegistryKey<()>` form (`lookup` re-erases a typed key the
+    /// same way), so `access.lookup(&key)` resolves it back.
+    ///
+    /// `T: Send + Sync + 'static` is the erased-boundary requirement
+    /// (`Registry<T>: AnyRegistry`), same as `lookup`.
+    pub fn from_single_registry<T: Send + Sync + 'static>(
+        key: RegistryKey<T>,
+        registry: Registry<T>,
+    ) -> Self {
+        let erased = ResourceKey::create_registry_key(key.identifier().clone());
+        RegistryAccess::from_pairs(vec![(erased, Box::new(registry) as AnyBox)])
     }
 }
 

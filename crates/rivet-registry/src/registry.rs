@@ -186,6 +186,17 @@ impl<T> Registry<T> {
         self.by_id_inner(id).map(Arc::as_ref)
     }
 
+    /// `Registry.byId(int)` with the stored `Arc<T>` handle, not the deref.
+    ///
+    /// Java's `byId` hands out the stored element object, and the `Arc` is that
+    /// stored element (the allocation `by_value` keys on). The registry element
+    /// codec decodes through this so a decoded element re-encodes to its own id
+    /// (`getId` is identity-sensitive); the plain `&T` deref cannot. Same
+    /// `DefaultedRegistry` fallback as `by_id`.
+    pub fn by_id_arc(&self, id: i32) -> Option<&Arc<T>> {
+        self.by_id_inner(id)
+    }
+
     /// In-range element, else the default element (asymmetric fallback).
     ///
     /// A defaulted registry that froze without its default key registered
@@ -575,6 +586,20 @@ mod tests {
         let registered = registry.get_value(&element_key("one")).unwrap();
         let copy = TestElement(1);
         assert_ne!(registry.get_id(&copy), registry.get_id(registered));
+    }
+
+    #[test]
+    fn by_id_arc_returns_the_stored_allocation_that_resolves_by_identity() {
+        // `by_id_arc` hands out the stored `Arc<T>` — the exact allocation the
+        // identity-keyed `by_value`/`getId` map keys on, the element-codec round
+        // trip's guarantee (decode -> re-encode must resolve the same id).
+        let registry = registry_of(&[("air", 0), ("stone", 1)]);
+        for id in 0..2 {
+            let arc = registry.by_id_arc(id).expect("in-range");
+            assert_eq!(registry.get_id(arc.as_ref()), id);
+        }
+        assert_eq!(registry.by_id_arc(-1), None);
+        assert_eq!(registry.by_id_arc(2), None);
     }
 
     #[test]
