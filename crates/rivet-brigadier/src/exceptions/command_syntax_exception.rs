@@ -124,6 +124,25 @@ impl CommandSyntaxException<'_> {
     pub fn built_in_exceptions() -> &'static BuiltInExceptions {
         &BUILT_IN_EXCEPTIONS
     }
+
+    /// Access to the message `Arc` for `Clone` (the message is shared by reference
+    /// in Java; cloning the exception shares it).
+    pub fn get_raw_message_arc(&self) -> &Arc<dyn Message> {
+        &self.message
+    }
+}
+
+/// Java exceptions are `Throwable` references, freely shared. The Rust exception
+/// holds a borrowed type instance and an `Arc` message; cloning shares both.
+impl Clone for CommandSyntaxException<'_> {
+    fn clone(&self) -> Self {
+        CommandSyntaxException {
+            exception_type: self.exception_type,
+            message: Arc::clone(&self.message),
+            input: self.input.clone(),
+            cursor: self.cursor,
+        }
+    }
 }
 
 impl std::fmt::Display for CommandSyntaxException<'_> {

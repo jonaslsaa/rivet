@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::builder::argument_builder::{ArgumentBuilder, ArgumentBuilderBehavior};
+use crate::builder::argument_builder::{ArgumentBuilder, ArgumentBuilderBehavior, Predicate};
+use crate::command::Command;
+use crate::redirect_modifier::RedirectModifier;
 use crate::tree::{CommandNode, LiteralCommandNode};
 
 /// Java `LiteralArgumentBuilder<S>`.
@@ -24,6 +26,24 @@ impl<S: 'static> LiteralArgumentBuilder<S> {
     pub fn get_literal(&self) -> &str {
         &self.literal
     }
+
+    /// Java `build()` — same node as `build()`, but already wrapped in an `Arc` so
+    /// `CommandDispatcher.register` can return the `Arc<LiteralCommandNode>` handle
+    /// Java returns.
+    pub fn build_arc(&self) -> Arc<LiteralCommandNode<S>> {
+        let result = LiteralCommandNode::new(
+            self.literal.clone(),
+            self.argument_builder.get_command(),
+            self.argument_builder.get_requirement(),
+            self.argument_builder.get_redirect(),
+            self.argument_builder.get_redirect_modifier(),
+            self.argument_builder.is_fork(),
+        );
+        for argument in &self.argument_builder.get_arguments() {
+            result.add_child(Arc::clone(argument));
+        }
+        Arc::new(result)
+    }
 }
 
 impl<S: 'static> ArgumentBuilderBehavior<S> for LiteralArgumentBuilder<S> {
@@ -35,11 +55,8 @@ impl<S: 'static> ArgumentBuilderBehavior<S> for LiteralArgumentBuilder<S> {
         &mut self.argument_builder
     }
 
-    /// Java `build()` — constructs a `LiteralCommandNode` sharing this builder's
-    /// command, requirement, redirect, modifier and forks, then re-adds each child
-    /// (the same node references the builder's `RootCommandNode` holds).
     fn build(&self) -> Box<dyn CommandNode<S>> {
-        let mut result = LiteralCommandNode::new(
+        let result = LiteralCommandNode::new(
             self.literal.clone(),
             self.argument_builder.get_command(),
             self.argument_builder.get_requirement(),
@@ -47,9 +64,37 @@ impl<S: 'static> ArgumentBuilderBehavior<S> for LiteralArgumentBuilder<S> {
             self.argument_builder.get_redirect_modifier(),
             self.argument_builder.is_fork(),
         );
-        for argument in self.argument_builder.get_arguments() {
+        for argument in &self.argument_builder.get_arguments() {
             result.add_child(Arc::clone(argument));
         }
         Box::new(result)
+    }
+}
+
+/// `createBuilder()` result — Java's `LiteralArgumentBuilder` implements the
+/// `NodeBuilder` surface so the node's `createBuilder()` can return it boxed.
+impl<S: 'static> crate::tree::NodeBuilder<S> for LiteralArgumentBuilder<S> {
+    fn get_requirement(&self) -> Predicate<S> {
+        self.argument_builder.get_requirement()
+    }
+
+    fn get_command(&self) -> Option<Arc<dyn Command<S>>> {
+        self.argument_builder.get_command()
+    }
+
+    fn get_redirect(&self) -> Option<Arc<dyn CommandNode<S>>> {
+        self.argument_builder.get_redirect()
+    }
+
+    fn get_redirect_modifier(&self) -> Option<Arc<dyn RedirectModifier<S>>> {
+        self.argument_builder.get_redirect_modifier()
+    }
+
+    fn is_fork(&self) -> bool {
+        self.argument_builder.is_fork()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }

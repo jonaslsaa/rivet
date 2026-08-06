@@ -1,10 +1,9 @@
-//! Port of `com.mojang.brigadier.ResultConsumer` (upstream).
-//!
-//! // STUB(brigadier): full port is the root `com.mojang.brigadier` unit; this is a
-//! placeholder so the `command_dispatcher` module can reference it.
+//! Port of `com.mojang.brigadier.ResultConsumer` (upstream brigadier-1.3.10).
 
-/// Java `ResultConsumer<S>`.
+use crate::context::CommandContext;
+
+/// Java `ResultConsumer<S>` — notified of the result of every executed command.
 pub trait ResultConsumer<S>: Send + Sync {
-    /// Java `onCommandComplete(...)`.
-    fn on_command_complete(&self);
+    /// Java `onCommandComplete(CommandContext<S>, boolean success, int result)`.
+    fn on_command_complete(&self, context: &CommandContext<S>, success: bool, result: i32);
 }
