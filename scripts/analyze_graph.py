@@ -217,10 +217,10 @@ NBT_DIR = Path("net/minecraft/nbt")
 #
 # Same-package references from buf/framing back into the residual are NOT dep
 # edges (see the same-package note in unit_row below): the residual is not
-# translated in M1, so recording them would deadlock the wave.
-# NETWORK_UNIT_NOTES records each such residual reference so the M1
-# translate-wave absorbs the residual class as a STUB instead of being surprised
-# by it.
+# translated in M1, so recording them would deadlock the wave. The delivered
+# modules model the residual touchpoints themselves (Varint21FrameDecoder takes
+# an optional BandwidthDebugMonitor fn callback; FriendlyByteBuf's
+# ADVENTURE_LOCALE/registry paths are simply absent — see module docs).
 NETWORK_SPLIT_PACKAGES = {"net.minecraft.network"}
 NETWORK_UNITS = {
     "mc.network.buf": [
@@ -229,20 +229,6 @@ NETWORK_UNITS = {
     "mc.network.framing": [
         "Varint21FrameDecoder.java", "Varint21LengthFieldPrepender.java",
     ],
-}
-# Authored structural notes for the split units (carried into the notes column,
-# never clobbering a human triage note). These name the residual classes the M1
-# wave must absorb as STUBs because the residual is not translated in M1.
-NETWORK_UNIT_NOTES = {
-    "mc.network.buf": (
-        "M1 STUB: FriendlyByteBuf reads PacketEncoder.ADVENTURE_LOCALE (residual "
-        "mc.network); translate-wave absorbs PacketEncoder as a stub"
-    ),
-    "mc.network.framing": (
-        "M1 STUB: Varint21FrameDecoder takes @Nullable BandwidthDebugMonitor "
-        "(residual mc.network); translate-wave absorbs BandwidthDebugMonitor "
-        "as a stub"
-    ),
 }
 
 
@@ -510,9 +496,6 @@ def main() -> None:
             # Varint21FrameDecoder takes @Nullable BandwidthDebugMonitor), but
             # those two reverse edges are deliberately NOT recorded: the residual
             # is not translated in M1, so recording them would deadlock the wave.
-            # The M1 translate-wave absorbs PacketEncoder and
-            # BandwidthDebugMonitor as STUBs instead (see NETWORK_UNIT_NOTES and
-            # each unit's notes column).
             if unit_id == "mc.network.framing":
                 dep_tokens.add("mc.network.buf")
             elif unit_id == "mc.network":
@@ -524,7 +507,7 @@ def main() -> None:
             # The small buf/framing cluster units are the M1 protocol wave's
             # actual deliverable, so they are not flagged.
             needs_split = "yes" if len(files) > SPLIT_FILE_THRESHOLD else ""
-            status, attempts, notes = carry(unit_id, NETWORK_UNIT_NOTES.get(unit_id, ""))
+            status, attempts, notes = carry(unit_id, "")
             return [
                 unit_id, pkg, ",".join(sorted(p.as_posix() for p in paths)),
                 source_root(pkg), str(len(files)), str(loc), crate_for(pkg),
