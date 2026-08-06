@@ -500,6 +500,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivet-capture"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "rivet-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "rivet-core"
 version = "0.1.0-dev+mc26.2"
 

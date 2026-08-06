@@ -1,0 +1,21 @@
+# Paper world-defaults override for the join-capture scenario (#153).
+#
+# MC 26.2 removed the vanilla `spawn-animals`/`spawn-monsters`/`spawn-npcs`
+# server.properties keys; Paper reads per-category spawn limits from
+# `config/paper-world-defaults.yml` instead. Every category is capped at 0 so
+# the superflat world holds exactly one entity — the joining player — and the
+# join capture is free of RNG-driven mob tracking packets (slime hopping,
+# item drops, ...) that no field normalization can make byte-deterministic.
+#
+# Only the `spawn-limits` subtree is specified; Paper merges the rest from its
+# defaults. Missing keys are filled in on first boot.
+entities:
+  spawning:
+    spawn-limits:
+      ambient: 0
+      axolotls: 0
+      creature: 0
+      monster: 0
+      underground_water_creature: 0
+      water_ambient: 0
+      water_creature: 0

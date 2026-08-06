@@ -23,6 +23,11 @@
 #   - scenario runner      join: boots Paper twice via the Azalea client and requires
 #                          identical normalized transcripts, plus a negative case.
 #                          Guarded by the paperclip jar, like oracle verify.
+#   - join capture         rivet-capture: boots Paper, joins via the Azalea client
+#                          through a byte-transparent proxy, and diffs the normalized
+#                          join packets byte-for-byte against the committed fixture,
+#                          plus a negative control. Guarded by the paperclip jar + the
+#                          rivet-client binary, like oracle verify.
 # Oracle verification is never silently skipped. When its prerequisites are missing
 # the pre-check below names each missing item with a fix, the steps report UNVERIFIED,
 # and the gate exits with a distinct nonzero code (3). (One path is red but not
@@ -53,6 +58,7 @@ ORACLE_UNVERIFIED=0
 # by main's final verdict).
 VERIFY_RUNNABLE=0
 PARITY_RUNNABLE=0
+CAPTURE_RUNNABLE=0
 
 # Directory of this script via bash builtins only (no external tools at load
 # time — sourcing must stay side-effect-free so tests can shim PATH).
@@ -72,8 +78,9 @@ oracle_prereq_check() {
   local missing=0
   JAVA_BARE_OK=0; PYTHON3_OK=0; DISK_OK=0; JAVAC25_OK=0
   PAPERCLIP_JAR=""; COMPILE_JAR=""; LIBRARIES_DIR=""; RUNTIME_JAR=""
-  # VERIFY_RUNNABLE / PARITY_RUNNABLE are globals (the step runners read them).
-  VERIFY_RUNNABLE=0; PARITY_RUNNABLE=0
+  # VERIFY_RUNNABLE / PARITY_RUNNABLE / CAPTURE_RUNNABLE are globals (the step
+  # runners read them).
+  VERIFY_RUNNABLE=0; PARITY_RUNNABLE=0; CAPTURE_RUNNABLE=0
 
   # rivet-oracle verify boots `java` directly, so bare java 25+ must be on PATH.
   if command -v java >/dev/null 2>&1; then
@@ -139,6 +146,23 @@ oracle_prereq_check() {
     echo "  [ok]      paperclip jar ($(basename "$PAPERCLIP_JAR"))"
   else
     echo "  [MISSING] paperclip jar (paper-paperclip-26.2.local-SNAPSHOT.jar) — build working/Paper, copy it to tools/rivet-oracle/work/jars/, or set RIVET_ORACLE_JAR"
+    missing=$((missing + 1))
+  fi
+
+  # rivet-client (the offline Azalea bot the join-capture harness drives). The
+  # scenario runner and rivet-capture both need it; the gate never runs the
+  # capture step against a missing client binary.
+  if [ -n "${RIVET_CLIENT_BIN:-}" ] && [ -f "${RIVET_CLIENT_BIN}" ]; then
+    CLIENT_BIN="$RIVET_CLIENT_BIN"
+  elif [ -f "$REPO_DIR/tools/rivet-client/target/debug/rivet-client" ]; then
+    CLIENT_BIN="$REPO_DIR/tools/rivet-client/target/debug/rivet-client"
+  else
+    CLIENT_BIN=""
+  fi
+  if [ -n "$CLIENT_BIN" ]; then
+    echo "  [ok]      rivet-client binary ($CLIENT_BIN)"
+  else
+    echo "  [MISSING] rivet-client binary — build it first (cd tools/rivet-client && cargo build --locked) or set RIVET_CLIENT_BIN"
     missing=$((missing + 1))
   fi
 
@@ -213,6 +237,11 @@ oracle_prereq_check() {
 
   if [ "$JAVA_BARE_OK" = 1 ] && [ "$PYTHON3_OK" = 1 ] && [ "$DISK_OK" = 1 ] && [ -n "$PAPERCLIP_JAR" ]; then
     VERIFY_RUNNABLE=1
+  fi
+  # The join-capture harness boots Paper (java + paperclip) AND drives the
+  # Azalea client binary.
+  if [ "$JAVA_BARE_OK" = 1 ] && [ "$DISK_OK" = 1 ] && [ -n "$PAPERCLIP_JAR" ] && [ -n "$CLIENT_BIN" ]; then
+    CAPTURE_RUNNABLE=1
   fi
   if [ "$JAVAC25_OK" = 1 ] && [ -n "$COMPILE_JAR" ] && [ -n "$LIBRARIES_DIR" ] && [ -n "$RUNTIME_JAR" ]; then
     PARITY_RUNNABLE=1
@@ -308,6 +337,28 @@ run_rivet_parity() {
     rm -f "$tmp"
   else
     echo "    UNVERIFIED — rivet-parity did not run (see the prereq report above)"
+    ORACLE_UNVERIFIED=1
+  fi
+}
+
+# NOTE: the join-capture gate (rivet-capture verify) enforces the Paper pin in
+# tools/rivet-capture/fixtures/join/manifest.json (26.2-DEV-main@0a99345) the
+# same way oracle verify enforces the rivet-oracle pin: after the boot it
+# compares the Git-Commit attribute of the server jar the paperclip actually
+# materialized to the fixture's `paper` provenance and fails loudly on
+# mismatch/unavailable. `verify --expect-fail` (run as the negative-control
+# stage below) corrupts a copy of the committed join fixture and requires the
+# tampered packet to be detected AND named — proving the capture->normalize->
+# byte-compare chain is not vacuously green.
+run_join_capture() {
+  echo "==> join capture (rivet-capture verify: byte-identity against vanilla join)"
+  if [ "$CAPTURE_RUNNABLE" = 1 ]; then
+    cargo run -q -p rivet-capture -- verify
+    echo "    VERIFIED — fresh Paper join is byte-identical to the committed join fixture"
+    echo "==> join capture negative control (rivet-capture verify --expect-fail: detects tamper)"
+    cargo run -q -p rivet-capture -- verify --expect-fail
+  else
+    echo "    UNVERIFIED — join capture did not run (see the prereq report above)"
     ORACLE_UNVERIFIED=1
   fi
 }
@@ -483,6 +534,7 @@ main() {
   if [ "$FULL_GATE" = true ]; then
     run_oracle_verify
     run_rivet_parity
+    run_join_capture
   fi
 
   # --- scenario runner (full gate only; M0 join harness: Paper-vs-Paper + negative case) --

@@ -1,0 +1,1856 @@
+{
+  "format": 1,
+  "scenario": "join",
+  "protocol": 776,
+  "paper": "26.2-DEV-main@0a99345",
+  "bot_identity": "RivetProbe",
+  "server_config": "seed=42; level-type=minecraft:flat; online-mode=false; view-distance=4; simulation-distance=4; network-compression-threshold=256; spawn-limits all 0 (paper-world-defaults.yml)",
+  "azalea_revision": "6249c295d353b9b3ef68f665b311cba39211fd19",
+  "captured": [
+    {
+      "state": "handshake",
+      "direction": "serverbound",
+      "id": 0,
+      "id_name": "minecraft:intention",
+      "sha256": "1fae931a59f3daadbc45c98f35d4abe2a165274144b11f55292e32b748960f91",
+      "bytes": 15,
+      "note": "handshake port (proxy's ephemeral listen port) -> 0"
+    },
+    {
+      "state": "login",
+      "direction": "serverbound",
+      "id": 0,
+      "id_name": "minecraft:hello",
+      "sha256": "d90376229aeabbfe2c7c3451cd80cfc3f2c2d54883188e94aa38dbb489bc5eed",
+      "bytes": 27,
+      "note": ""
+    },
+    {
+      "state": "login",
+      "direction": "serverbound",
+      "id": 3,
+      "id_name": "minecraft:login_acknowledged",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "note": ""
+    },
+    {
+      "state": "login",
+      "direction": "clientbound",
+      "id": 2,
+      "id_name": "minecraft:login_finished",
+      "sha256": "312892bafd2bdbda545fc463af63204db34f85f75e901319fee62e99cee4748c",
+      "bytes": 44,
+      "note": "login_finished sessionId (per-login random UUID) -> 0"
+    },
+    {
+      "state": "login",
+      "direction": "clientbound",
+      "id": 3,
+      "id_name": "minecraft:login_compression",
+      "sha256": "d404b24986b2963deb3378e98664bfe617910d92095df1f0bdb40d7c2d813e21",
+      "bytes": 2,
+      "note": ""
+    },
+    {
+      "state": "configuration",
+      "direction": "serverbound",
+      "id": 0,
+      "id_name": "minecraft:client_information",
+      "sha256": "ef0169ba80f3681e83105697c1796872aa86fb6cf285d9d4f8de011523608a3a",
+      "bytes": 14,
+      "note": ""
+    },
+    {
+      "state": "configuration",
+      "direction": "serverbound",
+      "id": 2,
+      "id_name": "minecraft:custom_payload",
+      "sha256": "cc5fc2907d8768f85026bc28f4458ce61f275b92a43749b2c3b50d35f1c5e187",
+      "bytes": 24,
+      "note": ""
+    },
+    {
+      "state": "configuration",
+      "direction": "serverbound",
+      "id": 3,
+      "id_name": "minecraft:finish_configuration",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "note": ""
+    },
+    {
+      "state": "configuration",
+      "direction": "serverbound",
+      "id": 7,
+      "id_name": "minecraft:select_known_packs",
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "bytes": 1,
+      "note": ""
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 1,
+      "id_name": "minecraft:custom_payload",
+      "sha256": "b20154686d9faca8b4f73dda843e33ec677ccf3bab8ff11b7507bd198d31e839",
+      "bytes": 22,
+      "note": ""
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 3,
+      "id_name": "minecraft:finish_configuration",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "note": ""
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "9003d23cb750f586b2a71c07a9804dcea7c8c608507d3c0fed2edc54c6c23650",
+      "bytes": 20238,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "0583bc4e82afd94717801d90c851280f83837edffbf786f763fd59fbf1f65d84",
+      "bytes": 1670,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "0901e6983fbfa20b25e2a8a5415de7dbd125c22bf46c29cd9d4b1eb2271e5fd5",
+      "bytes": 2046,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "98d746130a56985ad07a1f143ad0bb59c61549e679088d59278bba2039c5e03b",
+      "bytes": 1616,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "a9444214db066daf7271cc4b1a6dd218be1b81ba4ac52ea2184f640ff7b3d08e",
+      "bytes": 2997,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "1830b81ca2aa0522ee06f5d73e779bc790d30f423ae97fc3457941cee75dc2be",
+      "bytes": 5008,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "bba99302d49b6f65c9ae669e2542071624d413ec38b57321007b2812ad223f2b",
+      "bytes": 388,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "12ef71e2c20ddbe81834bfd33b819a59b21b1069e6357c38519c2943944d1d73",
+      "bytes": 1525,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "d9af027d59dbf297fd899b1a44a77a48225537836529d071cb1b1973e7917872",
+      "bytes": 220,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "bc5b892b18072091c8c280dec8e5abd1ba12ad0b95f846558962c496cd5a2273",
+      "bytes": 1354,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "e1bb48e157833e6d009150d0350756d31b2539b71bc61f0137b01a5a42f60727",
+      "bytes": 1899,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "8b54552244c1cb85f05bed7065baa3f1245665bacfbe45079e016aaa9483240e",
+      "bytes": 429,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "8f915fbfa1937666a9821916ed887e49a5d9f3d18ead4751406ce0557906e85b",
+      "bytes": 402,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "955a100122095e584fd4b9956be72e1f12953a602722c1cf69ffd0d6856ea862",
+      "bytes": 929,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "b8bba397e6c3fc7d9fe2d1598a3a99c18bf0b7449bf1dcc5a5c7636992402b5f",
+      "bytes": 440,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "31a11bfe967aa93ee11fd1f124fa880a8762abfb83907fd834f292f154d29099",
+      "bytes": 204,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "63a82f71f7af0bf94a6d10b55b386059a803c12384d114c0181944bd50cbaf89",
+      "bytes": 10730,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "e3bad8363d174c8ac4ee54b27d69df56277a3945a0699a066b98ca2e63295c07",
+      "bytes": 12822,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "6ae73a720d52b792a45cb4e591088841182c7d2ad261656d3902e3ca638c3508",
+      "bytes": 3672,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "ff9c190a1ffd5b26e2a4f1d80f095b29be5111742e6d6ba8b49371f901f5e848",
+      "bytes": 5764,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "81c6299a851c5d39bbccc4dd409862b5a2d7bb9a0f2ac5a87a98762e077764a5",
+      "bytes": 4945,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "03d7e4d44b586a7bb323aa64e5625e41377f13b93289fffd781d1c47814864a5",
+      "bytes": 32084,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "78396cc60d400dc4e2fe297e9e49160236a8d2c1b59f786bb78535d43f7e9ebc",
+      "bytes": 3727,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "fa2e00e1a624f39e479fe89cace17e6e900ac5af58d02fc63c15b03f776d02dd",
+      "bytes": 1402,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "ec64c5232000329b403083405dbe7daecf6887904d5f1807b14c95250decf150",
+      "bytes": 93,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "29545d2db9ecdd3652f28b58da9b7d64512b764ac662d0d3d28eaf75e9a46079",
+      "bytes": 219,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "0ee5c15c6c3c4c0acaac687797e237515604d8ac4e1e2f3f3364eabd035d533e",
+      "bytes": 835,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "8e807101d88dc4507f38cd43e4260ea431a5b8dd4c689557be9990f5cf47063b",
+      "bytes": 67,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 7,
+      "id_name": "minecraft:registry_data",
+      "sha256": "b0112ea4c60959dc3248bd17e11d40dccc33555b1e814e5feeab1d63adfe1cba",
+      "bytes": 4126,
+      "note": "registry entries + NBT fields sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 12,
+      "id_name": "minecraft:update_enabled_features",
+      "sha256": "77dae5f6d821757486b2af93050102274d4d008de84228ccc8dad83bcb7b82bc",
+      "bytes": 19,
+      "note": ""
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 13,
+      "id_name": "minecraft:update_tags",
+      "sha256": "63d56671ee1bccd0193de0dc4275271d32cf6d9fdb247734e68ff6479c666681",
+      "bytes": 35203,
+      "note": "tag registries/tags/ids sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "configuration",
+      "direction": "clientbound",
+      "id": 14,
+      "id_name": "minecraft:select_known_packs",
+      "sha256": "cb2b6c537a3b553c10cf5c14a81e3a1132a30233405dba44fff2e8a922adee6d",
+      "bytes": 21,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "serverbound",
+      "id": 0,
+      "id_name": "minecraft:accept_teleportation",
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "bytes": 1,
+      "note": "teleport id (server counter) -> 0"
+    },
+    {
+      "state": "play",
+      "direction": "serverbound",
+      "id": 13,
+      "id_name": "minecraft:client_tick_end",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "serverbound",
+      "id": 28,
+      "id_name": "minecraft:keep_alive",
+      "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "bytes": 8,
+      "note": "keepalive id (server-random long) -> 0"
+    },
+    {
+      "state": "play",
+      "direction": "serverbound",
+      "id": 30,
+      "id_name": "minecraft:move_player_pos",
+      "sha256": "b1ac3d9e565d4aa037fdb1a799112e530b287700484f2a3169de1ef2c5086820",
+      "bytes": 25,
+      "note": "movement x/z (spawn offset randomized) -> 0"
+    },
+    {
+      "state": "play",
+      "direction": "serverbound",
+      "id": 31,
+      "id_name": "minecraft:move_player_pos_rot",
+      "sha256": "e5b67cfd1f86d87b3eb75fecd17ea2422b0dca32f3383caf394feb37d9cf8699",
+      "bytes": 33,
+      "note": "movement x/z, yaw/pitch (spawn offset randomized) -> 0"
+    },
+    {
+      "state": "play",
+      "direction": "serverbound",
+      "id": 33,
+      "id_name": "minecraft:move_player_status_only",
+      "sha256": "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+      "bytes": 1,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "serverbound",
+      "id": 44,
+      "id_name": "minecraft:player_loaded",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 10,
+      "id_name": "minecraft:change_difficulty",
+      "sha256": "47dc540c94ceb704a23875c11273e16bb0b8a87aed84de911f2133568115f254",
+      "bytes": 2,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 16,
+      "id_name": "minecraft:commands",
+      "sha256": "707d6344782f050b69762443fbcb6ae92513128a782bc26b568e3c8ef76b4ee7",
+      "bytes": 715,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 18,
+      "id_name": "minecraft:container_set_content",
+      "sha256": "84236afe67418de23b5013b1d9d1981e23bb90e983a79a9ee8f2abc8be51eed0",
+      "bytes": 50,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 18,
+      "id_name": "minecraft:container_set_content",
+      "sha256": "019bc7874c6ad97e2e884e7ce51d3c662216823aee9f0d72b16cc4f2fbac9735",
+      "bytes": 50,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 20,
+      "id_name": "minecraft:container_set_slot",
+      "sha256": "448d2ad9febb3c6aa63db54edf996336c489b467af8460ad6b8068775b07dd52",
+      "bytes": 5,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 20,
+      "id_name": "minecraft:container_set_slot",
+      "sha256": "7c47fe2ce2b0841891557ff9843208057ddc1ba664dbd91cb1dbddc1022d566f",
+      "bytes": 5,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 34,
+      "id_name": "minecraft:entity_event",
+      "sha256": "060dc63e5595dffbd161c9ec98bc06fcf67cb22e2e75ecdf0003821388aeee4d",
+      "bytes": 5,
+      "note": "entity id -> 1; event id -> 0"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 38,
+      "id_name": "minecraft:game_event",
+      "sha256": "3c8f1b104592e3ebb2b2602b3979a27e77f586fb4c655369fa4eccb6d545a0f8",
+      "bytes": 5,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 38,
+      "id_name": "minecraft:game_event",
+      "sha256": "3c8f1b104592e3ebb2b2602b3979a27e77f586fb4c655369fa4eccb6d545a0f8",
+      "bytes": 5,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 43,
+      "id_name": "minecraft:initialize_border",
+      "sha256": "e286f6d4e6d5940e349ab3c901cb834c82bd1cbf98906b7c4b75568271567b94",
+      "bytes": 40,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 43,
+      "id_name": "minecraft:initialize_border",
+      "sha256": "e286f6d4e6d5940e349ab3c901cb834c82bd1cbf98906b7c4b75568271567b94",
+      "bytes": 40,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 44,
+      "id_name": "minecraft:keep_alive",
+      "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "bytes": 8,
+      "note": "keepalive id (server-random long) -> 0"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "69e5379bac9b054939440cf90464d7540f3af140b4ef441a50aa0db86584766e",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "36ba21c0f9cbaf08704a77f3b0a04a8a4887e93c28182c398d4317caa28dd196",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "2a7ea2699973bd8c54208cc688d66b78d10b28fe6ef980ce78de320955ebd602",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "8d1879536d6b57570adbd0d20664989d9bad94bb4e7ccd86539e6091b480cde2",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "66dc37ca4146db2cff5ecff9e945cbd071bf9d4d8f22417c8f75c9a09350df3e",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "b095ed9b6c99f4cedfbc04ac4d3dae4640ff2b41476eecc05f5d0b0d0e6a1487",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "b9cb8686b8e31dcfa8462a2dad0571889f0c2f1b8becc92148294dc3f8a2713e",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "d2d361926e4f6f9068881d3ecc8a26fca856ad40a2aca78fd2d9330c785df823",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "89ac4bec869cb4084ec67a9fb44262568800b39ea275bec34b67e9e61ed82024",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "ab760c2b4d9ce902a98993b742e44f03cb099093936dda4d471ef479d01626ce",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "3b157cf0ed89eaf6384e38f26c8587baa3a8da99417ab03ef70e4be19e25cffc",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "d0c2272207aefeacb0bd078b877d6751f152a759db7c33660874822295ef29a8",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "22eff64781b40526c67be5a6a9be89c8c3f45ca5c36953af925e2cbce9dea37c",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "a2b15ac5b9fc8c6cc1690ba64cf1fb7b6e22b9c4f057067295d99f91e2cf1f6d",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "a3bec5706f6f406d91c0b6f81a91761b831572c87103201d7a3a6618ca75053d",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "3c7efcb2ad4de579cb29e7d580707b894355d71e749784723efb1660625abacc",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "3c5ade9f9fc0947f26ad07dfae09f9274dc012099be23b1bfb60a7655e5bec3f",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "d30aa7445ac19a0a6f0a21485b264417cdc4f38ef806cf0968ffa1dc88cdb332",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "ca6db0b1ab4f574f3fc4aa17f2baf456812dcffc7dcb0a9bf30c71456b61935b",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "67ace31df1b916a16ac08cb66a2b58d863baf7077f4d3d3aea0c23252546a067",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "de9e23cac85ba343ea90436a5edc8abc343aaf773bfb95ea51f56aacc7f264ca",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "85f0a7784a60d39f239109c6b1e9502ef05e8a5bebebb230fb542b89e11ac73b",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "81d68dcface507c0189dfda1944a0bcd22a1dcac9b6409de09bbfb9cf31930b6",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "8ce25afc958fb79d0b7797b9496c583b4e8a02a39c4ad9b517c853f5117c5762",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "90da1d6e6fd90829fc6eae2de4eb059be418832b323f7892839573f593ad0db8",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "877fd98535f697e38549fc4a8aac3f3fe98f1719ed84d7cf266e8475ce329935",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "ff8c3a085f0643f2f77a335b2f6f3c7207f456694f10bb0a656d3b3aaa46cdb8",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "4b47202ae80330aaa06187bfb9198ba8e6fbfc7bfa2230144d2b8a671510d13a",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "24176ae8ae6aff7456c7ce9c56758e7d8acfbf302d0c28d07344febaf5da0166",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "a840727cdd9a183f16fd98f7dee4be09ab0c7caa6d2112ed53505383e573f99e",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "04a2e4b477fdad59b6f85fa0e416b284ee25ea6af5dd7b83f2a313c58b2d49a0",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "12d9b40dd7a008dee00071d10dcc02265b98ebecfe6edf0b481dcb9e651dbc5c",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "8b22144abcc71007ec370d302769747d663abb895f195935a756f06830007c24",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "761e12edd06687f1ab9a214405c6f5834c00b8e5bb1d21d528f619e5da346796",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "1c229ee28a770d3e80be5e746d35cfe41188a2cea501770efd93b5095d1711e8",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "4a418a27dfa736a6876f6690d0387d24f07fc742677f5e24ba7582a08c6a1c82",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "2c482a9d7d0847296c9462eaf51e345da6618a190850bbb1f639f0df1085d0c0",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "7b44f6df0b0ff79bee7a3734938727833508a01ea778de21a5b0576879fb6f78",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "360e1e204aa1d27cb462784ed515ffd00c492ed6067c1d9b98fe50e8eff9dda4",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "3b2152385136e9d9018fc10ff45d4714a0a7ac4386497d37ee326d49a0001ba5",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "a872111fead7bc1412253ed128a0f49917e36ebf868eea0fb1c4d58bb70c1666",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "1d648a86bf76b37d75969669d51f29c811c10a7e8b14e624dbbf883841dfdc77",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "6099b401a1bb585fe6d539172c70486433ca86c797796a07536704a726f9b9c6",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "9a9dcab40ee509fae50ce0837f19274c583c18131350da446d5252e32830e435",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "c826a565be8b21bf42d890fe28e37a269c77a92d2efbd9a8336f926aea8953b2",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "30cb4d7d7d3a15efdc55442b176df8f92e19e25f6d2eaca9899174fdcfae25d9",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "56e5b6632849cd15da69ca8612fdddaf4f35c2747e041c3ef94cd9df22571505",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "12fed5888f9e298db0f8bbee603e462742b180f6d4a95e72fd764871f68216f3",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "dd4022be5ea6ef0a872bfbbebd3eb24e47c527ad095b701c38b5ec21a9e6a782",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "75872b567714d94ffb3f4ae6791007d040cc6a6b0801e9b6fa3ac42040356834",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "414237ee50d63defa285b8d1a5ccfa4a32cb8b969417dc1fd1685f9144a359b4",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "a21d2c64256edd261b20825279ccc34767bdbe3cd4f956cc049865af7a674637",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "c127c29752a4ffbb12955619d789f579be36818f95baaa9bd57fc489c0192220",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "c5025e966076fed6ea050b8fb58649b4238d4de79dce0d830ac7db96c777ca41",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "acbdd44c7da33f14ed4b7e55e67bf1398a23e086d702dcb9bcdb966e52cadaee",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "278dd050b99aa46a13e8e52812e163d875373e166eacab2d27b1d2a68851bc90",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "15dddb74ef96fa9e90aae2089edb9314c33db3f397aeb16316f96ac8b4a08fe8",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "ed645db35b8dad303c26b623ff82d48f513127674c86432a7e1051c624df263d",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "ca09b15f69dbc9bdeb38f65fd2f9be7604c24de5fbc05e1cfc5100232e20bb9a",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "0aeded9aac7db5fd874af44671dc3a2179613b6aa61084e024cef12db164c759",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "61195b20abc16d3fd6805f1297646364bdee15958e20f18e9ac2d67891a18b73",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "2ce307c06eb6ed0090bee3bc982ab868745b4cfac8e07fd44116461db4c46170",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "0be28bccbdf0beb7b90415d4805474061a7db34434c79496bf6338813752b2b6",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "105e2c33e263a9120af7e7e6362a3cc0a54c14889356c763bf4b1589ba2becb5",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "0c9cb0f701c68a2e531d10f24e5a82cf455745fcf5df26f18068fa48f0fc2456",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "df37286473a4f6abc3a0a9f7360d4a8dd46c8aa990e39cb2c6492a6ab7b9cc2e",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "be149229bd6aba9060db3a546d70ef16dc4773da915aea4732fa56cb032440b1",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "f95881f86ad284cc38fbf9ad953b560987e00fbe66a747f1e4ad16c068d4129f",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "73c5b5de0ee7628fe7e584ccc2487670de4e8a61ebf1fde3843c552cb65a0432",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "1e1577135ab18501a2c65eb0d1ce187f39bb8e371a0abe5ff14116f3ee057998",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "ce1efa880a7fe95c0063764a04d51ea4e222fda36fe9cea864fc2d889e03b23e",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "33931c3209745147312b90f57e4ef807f04bcd0934486fb1ecbb190c0faa3eb8",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "aba758e2e934c0d572e1bba17089419c41fcc622ff68437d07342acacdaeff61",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "b0fb7e453f1fb61c836906de2727bd2c1c4d8796b97c5c7c9a25c06547629318",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "c7a5c3eb2f484220bbf5ed3e792c0b76e60d9c9e75a075e09dfcad2543240c96",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "0e7eafd53bcc8dfcd092778db24aec3cfb7b621df16ee8b5d4086ef811c996d9",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "2ce75d767dc59d0f4faddc2d6e510687a8b0aaef16b52b5c0b68e1695b09dcee",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "b82c176d33b22a1a3211b88067f24b2c40fc0a5bb9aca655e43f0f8beb656b7c",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "b370f22bdfabd512807008a051e79ad725f0730b9a6115c7009a38653169e819",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "e6df9a5ff0367941bcd5eb2d194e84d1456657b6172cd96678fcff54464fd192",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "90e3edfbffaf4d83112f92a76cf7dcc5e8a29fcc8dc5e6a6d2942e19faf1ee4a",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "752956f8457039012323ef53abc55ddff2e4de37bdd6d337ab4649453b650777",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "dae1c823f2ca960d7a6807306f36ab12def4d105d42e82b4566e7bab9bfb16eb",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "32355149a2bb585d4677ddebd590ba1a046355ae94237db3631a3950ad233fe6",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "f1a1157300eb7a126f0907195d83306caf75cca19da78817983ce050be2752cb",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "9a72966b66c9ba957021d7a901877dc5097741f60cd243a08e1502a83972ee20",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "71c78826ddb52f010a2abe60e1a4ae29182a078f63f78a3c35a02938f12f85d4",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "1298625f565758e53224e127ac8f4106ed605e6d521542da009adc090dd066f7",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "a2474232f6b8a7f28d116c92b09288260c19a92e9e5a75c3e2349c693bf8f27f",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "8fc92efc5cc407d76112f0590b34f7b660d313c71e75cdea1a7c643a0c1c6a01",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "66ce4bdd1a39a009a99390ff72a918f8bee21ff27fef02f10c98676582b18123",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "3ef807a767496b87d7b761efe53ec833afb8a9193497bd13f6ff3f8b8c5c4ead",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "077b1edcf993562fc51ce91480398fc7366e2b2748066ce5aea6ee22cd1d3928",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "eecca0945e7128d058e795cc80ae4a9b7896b286b0d00cba1d25a8a10fdb60d3",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "303ccc691bf303cb53cbabad03cdf36e70fbe171f719cf25848d21e77233a942",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "f10e91ac53ca0f22620fc381a40c1da9b639856e6b170e819b00284c0fcf479a",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "0bc6a070f851c5a9a760d1041cdd740196b47d7c21be0fd9604dd814578e539b",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "520b02ecbf75b0b50cb32e8dadb6339b91c3c245acf22455c6f408ee21f7d077",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "3baec6df37fd38b23c8008b72deca1f7088733140e64d4fd090966dc545a8b94",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "d1154eec51b12e665d1a18a85d303f515be2bb8896e5220d8a7618dd71c82470",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "bd17f37886ee4ea9130a5aa236913772652f1d4b1d2f0ee06bc9aaadf5ea9391",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "e4030edead94f80e37bfcf301fa9a2280272f7fffaf6ef7aef92cc8be29cfb5b",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "87841b90a05a6f05ea4fd1aa3eaac54dfbfeb1bffabe78917081f0e6a6c5f1fc",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "7f1ace224b1c5958669934433955ae98982b4e7211333b326e980ad3979645ff",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "25fd947b4ee9aaccb5313bba5321de0b43f592544034d632948ca25eadb901c9",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "c36cfde0fce0b0172d275f15f7f724dd28aeb0378632df247b8e39d84a8a1555",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "4208b247e3b29a699f6f490f76ab0592f0a02a3e6cebce61abd120b6fbf618ab",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "a07e11db9866c6034066fd9c42bef2754f4fb1079590aaaf1e36cf192861d7f3",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "24d9db93897293c23e422fea69ebc56f58c20158912bc6e6630d9309d092cfcd",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "18039f1bc8b79914212b37116b13315312e96cc4cb5567f3912d5d6f0d99743a",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "8e739551e110ffb301804624532508d59401320fcb81e1c7037a14d56083b03d",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "d0e406a5a4ce234af65d4d25221ad5c42415c6ae412df5559d4fdcb18a78b0d6",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "d3b695d4e61c37cc92b082d1120606fe0b5cf90acc079a5145cec21e1cc2fcf5",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "22e5112e043f69398f35c64eb8e273d627d4436ba00669723fea3f2bc52d6092",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "ba25606afa2916daac5bb1d1b08645ec7df37a2306798d9d2e547585c43f0d61",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "7dddd736294a32269a549a65b421dfc874157ce4fc493d46a19af0ac93906608",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 45,
+      "id_name": "minecraft:level_chunk_with_light",
+      "sha256": "a7ea817749246c479a6cec163cb9c14ec2ac246ebf12814702ac63a1abdbf727",
+      "bytes": 7278,
+      "note": "chunk coords -> spawn origin; heightmaps + block/biome palettes sorted (per-boot HashMap order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 49,
+      "id_name": "minecraft:login",
+      "sha256": "ae94d792db6f57c48983e15f86a5f28bf7ea0f3d5048776547f2c84d171cf1c8",
+      "bytes": 113,
+      "note": "player entity id (server-assigned counter) -> 1"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 64,
+      "id_name": "minecraft:player_abilities",
+      "sha256": "a25859a922f04059b2924bb750954b3a28250e9edf95be625f4ed561aaabc85b",
+      "bytes": 9,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 70,
+      "id_name": "minecraft:player_info_update",
+      "sha256": "fc2ec920a88bd266cad8cd0751d9331b0846adc9a0585573d27b1d6ee4ab78e8",
+      "bytes": 37,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 72,
+      "id_name": "minecraft:player_position",
+      "sha256": "19134d90a075f1c4bd76f0e20028c931116acd82b8eb6ffa7889537d0966397c",
+      "bytes": 61,
+      "note": "teleport id, position x/z, delta dx/dz, yaw/pitch (spawn offset randomized) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 74,
+      "id_name": "minecraft:recipe_book_add",
+      "sha256": "b413f47d13ee2fe6c845b2ee141af81de858df4ec549a58b7970bb96645bc8d2",
+      "bytes": 2,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 74,
+      "id_name": "minecraft:recipe_book_add",
+      "sha256": "08d1bad59e8cb797476246a1e6dc1e796391c4e9db5f78d7c521d4225a39cd71",
+      "bytes": 166,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 76,
+      "id_name": "minecraft:recipe_book_settings",
+      "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "bytes": 8,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 86,
+      "id_name": "minecraft:server_data",
+      "sha256": "80a4244e9afbd0ce1f917616c6069544b53e1e93a16f200f2ab6f8a9318e6a61",
+      "bytes": 27,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 94,
+      "id_name": "minecraft:set_chunk_cache_center",
+      "sha256": "96a296d224f285c67bee93c30f8a309157f0daa35dc5b87e410b78630a09cfc7",
+      "bytes": 2,
+      "note": "chunk-cache center translated to spawn-chunk origin"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 95,
+      "id_name": "minecraft:set_chunk_cache_radius",
+      "sha256": "e52d9c508c502347344d8c07ad91cbd6068afc75ff6292f062a09ca381c89e71",
+      "bytes": 1,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 97,
+      "id_name": "minecraft:set_default_spawn_position",
+      "sha256": "1df0fae23eeeadd106d11b22b60120c172e9a8782d47575d1d18519c4309217d",
+      "bytes": 36,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 97,
+      "id_name": "minecraft:set_default_spawn_position",
+      "sha256": "1df0fae23eeeadd106d11b22b60120c172e9a8782d47575d1d18519c4309217d",
+      "bytes": 36,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 99,
+      "id_name": "minecraft:set_entity_data",
+      "sha256": "986470db4a0c3933fdba08d010b353395f6d58e24eaefd5cdec751151d56ca6d",
+      "bytes": 11,
+      "note": "entity id (server-assigned counter) -> 1"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 103,
+      "id_name": "minecraft:set_experience",
+      "sha256": "b0f66adc83641586656866813fd9dd0b8ebb63796075661ba45d1aa8089e1d44",
+      "bytes": 6,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 104,
+      "id_name": "minecraft:set_health",
+      "sha256": "bf6310d7180737c07d92099cc5b91eabf8ef748f56cc5aecc8870fa6e94ed3b4",
+      "bytes": 9,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 105,
+      "id_name": "minecraft:set_held_slot",
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "bytes": 1,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 111,
+      "id_name": "minecraft:set_simulation_distance",
+      "sha256": "e52d9c508c502347344d8c07ad91cbd6068afc75ff6292f062a09ca381c89e71",
+      "bytes": 1,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 113,
+      "id_name": "minecraft:set_time",
+      "sha256": "8c9368ddb84479e80871a913c06a5890fdd985c2f1e14a5e06bbd99f014a7de3",
+      "bytes": 29,
+      "note": "set_time body is tick-dependent; canonicalized (gameTime=0, clocks at 0/1.0)"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 121,
+      "id_name": "minecraft:system_chat",
+      "sha256": "c8f3b67426b8457edac7eebf164d124e3351c7662ea956bd4a1de65a70fb7a19",
+      "bytes": 290,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 127,
+      "id_name": "minecraft:ticking_state",
+      "sha256": "9e68b6b30dc5915fa29c383f07995a7320faf2600e65a4e48fb967156a655c96",
+      "bytes": 5,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 127,
+      "id_name": "minecraft:ticking_state",
+      "sha256": "9e68b6b30dc5915fa29c383f07995a7320faf2600e65a4e48fb967156a655c96",
+      "bytes": 5,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 128,
+      "id_name": "minecraft:ticking_step",
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "bytes": 1,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 128,
+      "id_name": "minecraft:ticking_step",
+      "sha256": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "bytes": 1,
+      "note": ""
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 130,
+      "id_name": "minecraft:update_advancements",
+      "sha256": "be3369e35421acc1978e69d15062e585bfc69013e900748efdf8167000195c68",
+      "bytes": 275,
+      "note": "advancement added/removed/progress + criteria sorted; obtained instants -> 0 (per-boot) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 131,
+      "id_name": "minecraft:update_attributes",
+      "sha256": "942a4e5105cd0bce2dde64939ef762c80359417c222d9c3fbe7e5de98862112b",
+      "bytes": 32,
+      "note": "entity id -> 1; attribute snapshots sorted by id (per-boot collection order) -> canonical"
+    },
+    {
+      "state": "play",
+      "direction": "clientbound",
+      "id": 133,
+      "id_name": "minecraft:update_recipes",
+      "sha256": "bed2c4820d4233826606b9c7a7c0da3cd2401b0e38a89ff591b7408e7ea5416c",
+      "bytes": 3360,
+      "note": "recipe property-set map + item lists sorted (per-boot map order) -> canonical"
+    }
+  ]
+}

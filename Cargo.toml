@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/rivet-oracle", "tools/rivet-parity", "fuzz"]
+members = ["crates/*", "tools/rivet-oracle", "tools/rivet-parity", "tools/rivet-capture", "fuzz"]
 exclude = ["tools/rivet-codegen", "working"]
 
 [workspace.package]

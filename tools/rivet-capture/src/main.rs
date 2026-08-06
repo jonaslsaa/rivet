@@ -1,0 +1,723 @@
+//! rivet-capture — the join-path packet-capture harness (#153).
+//!
+//! Boots a real Java Paper server headlessly (the `verify` pattern from
+//! `tools/rivet-oracle`), joins it with the Azalea headless client through a
+//! byte-transparent TCP proxy, and records every packet as
+//! `(state, direction, packet id, body bytes)` at the framing boundary. The raw
+//! capture is normalized (`normalize::canonicalize`) into a deterministic
+//! canonical form — only the fields the server randomizes per boot are
+//! rewritten, each with a documented justification — and compared byte-for-byte
+//! against the committed fixture (`fixtures/join/`).
+//!
+//! Subcommands:
+//!
+//!   rivet-capture capture            boot one Paper, join, print the normalized
+//!                                    transcript and packet summary (debugging).
+//!   rivet-capture capture --runs N   boot N Papers, require identical normalized
+//!                                    captures (Paper-vs-Paper determinism check).
+//!   rivet-capture fixture            capture once and (re)write the committed
+//!                                    fixture under fixtures/join/.
+//!   rivet-capture verify             boot fresh, capture, normalize, and diff
+//!                                    against the committed fixture (PASS/FAIL).
+//!   rivet-capture verify --expect-fail
+//!                                    negative control: boot fresh, diff against a
+//!                                    deliberately corrupted copy of the fixture;
+//!                                    exits 0 only when the tampered packet is
+//!                                    detected AND named.
+//!
+//! Both verify modes enforce the pinned Paper commit (fixtures/join/manifest.json
+//! `paper` provenance) against the Git-Commit attribute of the server jar the
+//! paperclip actually materialized and booted, exactly like `rivet-oracle
+//! verify` — a stale or unverifiable Paper fails loudly.
+
+mod fixture;
+mod frame;
+mod normalize;
+mod packet;
+mod proxy;
+mod server;
+mod structured;
+
+use std::env;
+use std::fs;
+use std::io;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Stdio};
+
+use crate::fixture::Manifest;
+use crate::normalize::{NormalizedPacket, canonicalize};
+use crate::packet::{Direction, State};
+
+const DEFAULT_USERNAME: &str = "RivetProbe";
+const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
+const AZALEA_REVISION: &str = "6249c295d353b9b3ef68f665b311cba39211fd19";
+/// Distinct from the oracle's 25599 so the capture never collides with a
+/// concurrently-running oracle boot (the offline join only needs a local port).
+const SERVER_PORT: u16 = 25600;
+/// Env var naming the rivet-client binary (built in the nested tools/rivet-client
+/// workspace under nightly).
+const CLIENT_BIN_ENV: &str = "RIVET_CLIENT_BIN";
+/// The paperclip jar env var shared with rivet-oracle.
+const ORACLE_JAR_ENV: &str = "RIVET_ORACLE_JAR";
+
+fn crate_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn state_str(s: State) -> &'static str {
+    match s {
+        State::Handshake => "handshake",
+        State::Status => "status",
+        State::Login => "login",
+        State::Configuration => "configuration",
+        State::Play => "play",
+    }
+}
+
+/// Locate the rivet-client binary (offline Azalea bot) the harness drives.
+fn client_binary() -> Result<PathBuf, String> {
+    if let Ok(p) = env::var(CLIENT_BIN_ENV) {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Ok(p);
+        }
+        return Err(format!(
+            "{CLIENT_BIN_ENV} is set to {} but it is not a file",
+            p.display()
+        ));
+    }
+    let sibling = crate_root().join("../rivet-client/target/debug/rivet-client");
+    if sibling.is_file() {
+        return Ok(sibling);
+    }
+    Err(format!(
+        "rivet-client binary not found at {} — build it first (tools/rivet-client/run.sh or \
+         `cd tools/rivet-client && cargo build --locked`) or set {CLIENT_BIN_ENV}",
+        sibling.display()
+    ))
+}
+
+/// Pick a free localhost port for the proxy (bind-then-release; fine for a harness).
+fn free_port() -> io::Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
+struct ClientRun {
+    stdout_text: String,
+}
+
+/// Run the headless client against the proxy once and preserve its stdout.
+fn run_client(
+    binary: &Path,
+    proxy_port: u16,
+    work: &Path,
+    idx: usize,
+) -> Result<ClientRun, String> {
+    let address = format!("127.0.0.1:{proxy_port}");
+    let stdout_path = work.join(format!("client{idx}.stdout.jsonl"));
+    let stderr_path = work.join(format!("client{idx}.stderr.log"));
+    let output = Command::new(binary)
+        .args([
+            "--address",
+            &address,
+            "--username",
+            DEFAULT_USERNAME,
+            "--timeout-seconds",
+            &DEFAULT_TIMEOUT_SECONDS.to_string(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to run rivet-client ({}): {e}", binary.display()))?;
+    fs::write(&stdout_path, &output.stdout).map_err(|e| e.to_string())?;
+    fs::write(&stderr_path, &output.stderr).map_err(|e| e.to_string())?;
+    let code = output.status.code().unwrap_or(-1);
+    if code != 0 {
+        return Err(format!(
+            "rivet-client exited with code {code} before the join completed (raw transcript in \
+             {}, stderr in {}). A successful offline join must exit 0.",
+            stdout_path.display(),
+            stderr_path.display()
+        ));
+    }
+    Ok(ClientRun {
+        stdout_text: String::from_utf8_lossy(&output.stdout).into_owned(),
+    })
+}
+
+fn client_joined(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|l| l.contains("\"event\":\"joined\"") || l.contains("\"event\": \"joined\""))
+}
+
+/// The canonical packet list from one full boot→join→capture pipeline.
+async fn capture_one(work: &Path, idx: usize) -> Result<Vec<NormalizedPacket>, String> {
+    let jar = server::ensure_jar(&crate_root()).map_err(|e| e.to_string())?;
+    let client_bin = client_binary()?;
+    // The capture's own server config (seed 42 / superflat / offline, mob
+    // spawning disabled so the world is empty apart from the player — the
+    // deterministic join scenario). This is a deliberate, documented deviation
+    // from the M0 config: random mob spawns would break the byte identity of
+    // the join capture (see fixtures/server.properties,
+    // fixtures/paper-world-defaults.yml and the manifest provenance).
+    let server_properties = crate_root().join("fixtures/server.properties");
+    if !server_properties.is_file() {
+        return Err(format!(
+            "server.properties not found at {} (rivet-capture fixtures)",
+            server_properties.display()
+        ));
+    }
+    let world_defaults = crate_root().join("fixtures/paper-world-defaults.yml");
+    if !world_defaults.is_file() {
+        return Err(format!(
+            "paper-world-defaults.yml not found at {} (rivet-capture fixtures)",
+            world_defaults.display()
+        ));
+    }
+
+    let run_dir = work.join(format!("run{idx}"));
+    let log_path = work.join(format!("boot{idx}.log"));
+    println!("[boot {idx}] fresh Paper world in {}", run_dir.display());
+    let mut srv = server::boot(
+        &run_dir,
+        &log_path,
+        &jar,
+        &server_properties,
+        &world_defaults,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let proxy_port = free_port().map_err(|e| e.to_string())?;
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}")
+        .parse()
+        .expect("proxy addr");
+    let server_addr: SocketAddr = format!("127.0.0.1:{SERVER_PORT}")
+        .parse()
+        .expect("server addr");
+    println!("[proxy {idx}] 127.0.0.1:{proxy_port} -> 127.0.0.1:{SERVER_PORT}");
+
+    let proxy_task = tokio::spawn(proxy::run(proxy_addr, server_addr));
+
+    println!("[run   {idx}] joining via rivet-client through the proxy ...");
+    let work_owned = work.to_path_buf();
+    let client_run =
+        tokio::task::spawn_blocking(move || run_client(&client_bin, proxy_port, &work_owned, idx))
+            .await
+            .map_err(|e| e.to_string())??;
+    if !client_joined(&client_run.stdout_text) {
+        return Err(
+            "client did not emit a `joined` record — the join path did not complete".into(),
+        );
+    }
+    println!("[run   {idx}] client joined; shutting down Paper cleanly (SIGTERM)...");
+    server::shutdown(&mut srv).map_err(|e| e.to_string())?;
+
+    let shared = proxy_task
+        .await
+        .map_err(|e| format!("proxy task failed: {e}"))?
+        .map_err(|e| format!("proxy io error: {e}"))?;
+    let raw = shared.lock().expect("proxy lock poisoned").packets.clone();
+    if raw.is_empty() {
+        return Err("proxy captured no packets — the connection did not reach the server".into());
+    }
+
+    // Preserve the raw (pre-normalization) capture for diagnostics, exactly as
+    // the scenario runner preserves raw client stdout.
+    {
+        let mut lines = String::new();
+        for p in &raw {
+            let line = serde_json::json!({
+                "state": state_str(p.state),
+                "direction": p.direction.flow(),
+                "id": p.id,
+                "name": crate::packet::packet_name(p.state, p.direction, p.id),
+                "body_hex": fixture::hex(&p.body),
+            });
+            lines.push_str(&line.to_string());
+            lines.push('\n');
+        }
+        let raw_path = work.join(format!("raw{idx}.jsonl"));
+        fs::write(&raw_path, lines).map_err(|e| format!("cannot write raw capture: {e}"))?;
+    }
+
+    let canon = canonicalize(&raw);
+    if canon.is_empty() {
+        return Err("normalized capture is empty".into());
+    }
+    Ok(canon)
+}
+
+/// Shared paper/provenance for the fixture manifest.
+fn manifest_provenance() -> Manifest {
+    Manifest {
+        format: fixture::FORMAT,
+        scenario: "join".into(),
+        protocol: fixture::PROTOCOL,
+        paper: "26.2-DEV-main@0a99345".into(),
+        bot_identity: DEFAULT_USERNAME.into(),
+        server_config: "seed=42; level-type=minecraft:flat; online-mode=false; \
+                        view-distance=4; simulation-distance=4; \
+                        network-compression-threshold=256; \
+                        spawn-limits all 0 (paper-world-defaults.yml)"
+            .into(),
+        azalea_revision: AZALEA_REVISION.into(),
+        captured: Vec::new(),
+    }
+}
+
+/// Write the fixture under fixtures/join/ from a canonical capture.
+fn write_fixture(packets: &[NormalizedPacket]) -> io::Result<PathBuf> {
+    let dir = crate_root().join("fixtures/join");
+    let mut manifest = manifest_provenance();
+    manifest.captured = fixture::build_captured(packets);
+    fixture::write_fixture(&dir, packets, &manifest)?;
+    Ok(dir)
+}
+
+/// Verify the committed fixture's capture.jsonl matches its manifest SHA-256s.
+fn verify_committed_fixture(dir: &Path) -> Result<usize, String> {
+    let manifest_path = dir.join("manifest.json");
+    let raw = fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
+    let manifest: Manifest =
+        serde_json::from_str(&raw).map_err(|e| format!("invalid manifest.json: {e}"))?;
+    if manifest.format != fixture::FORMAT {
+        return Err(format!(
+            "unsupported fixture format {} (expected {})",
+            manifest.format,
+            fixture::FORMAT
+        ));
+    }
+    let packets = fixture::read_capture(dir).map_err(|e| e.to_string())?;
+    let mut count = 0;
+    for (entry, packet) in manifest.captured.iter().zip(packets.iter()) {
+        if entry.sha256 != fixture::sha256_hex(&packet.body) {
+            return Err(format!(
+                "fixture manifest sha256 mismatch for {}:{}/{} — re-run `rivet-capture fixture`",
+                entry.state, entry.direction, entry.id
+            ));
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Enforce the pinned Paper commit (manifest `paper` provenance) against the
+/// Git-Commit attribute of the server jar the paperclip materialized.
+fn check_pin(fixtures_dir: &Path, run_dir: &Path) -> Result<(), String> {
+    let raw = fs::read_to_string(fixtures_dir.join("manifest.json"))
+        .map_err(|e| format!("cannot read fixture manifest: {e}"))?;
+    let manifest: Manifest = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let expected = manifest
+        .paper
+        .rsplit_once('@')
+        .map(|(_, c)| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| "fixture manifest carries no `@<commit>` Paper pin".to_string())?;
+
+    let jar = run_dir.join("versions/26.2/paper-26.2.jar");
+    let out = Command::new("unzip")
+        .arg("-p")
+        .arg(&jar)
+        .arg("META-INF/MANIFEST.MF")
+        .output()
+        .map_err(|e| format!("failed to run unzip on {}: {e}", jar.display()))?;
+    let actual = if out.status.success() {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("Git-Commit:")
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+            })
+    } else {
+        None
+    }
+    .ok_or_else(|| "the materialized server jar carries no readable Git-Commit".to_string())?;
+
+    if expected != actual {
+        return Err(format!(
+            "Paper commit mismatch: the server jar that actually booted carries Git-Commit \
+             {actual}, but the fixture baseline (fixtures/join/manifest.json) is pinned to \
+             {expected}. Regenerate the fixture against the pinned Paper and re-pin the manifest \
+             before relying on this gate — never fudge fixtures to pass."
+        ));
+    }
+    println!(
+        "   paper pin      : {} (fixtures/join provenance) — enforced (booted jar is Git-Commit {actual})",
+        manifest.paper
+    );
+    Ok(())
+}
+
+/// Print a packet-summary transcript for a canonical capture (debugging).
+fn print_summary(packets: &[NormalizedPacket]) {
+    let mut by_key: Vec<(&NormalizedPacket, usize)> = Vec::new();
+    for p in packets {
+        match by_key
+            .iter_mut()
+            .find(|(e, _)| e.state == p.state && e.direction == p.direction && e.id == p.id)
+        {
+            Some((_, n)) => *n += 1,
+            None => by_key.push((p, 1)),
+        }
+    }
+    println!("captured {} canonical packets:", packets.len());
+    for (p, count) in by_key {
+        let name =
+            crate::packet::packet_name(p.state, p.direction, p.id).unwrap_or("minecraft:unknown");
+        println!(
+            "  {:>3}  {:<13} {:<11} {:>3}  {}  {:>6} bytes",
+            count,
+            p.state.to_string(),
+            p.direction.flow(),
+            p.id,
+            name,
+            p.body.len()
+        );
+        if !p.note.is_empty() {
+            println!("         normalize: {}", p.note);
+        }
+    }
+}
+
+fn usage() -> String {
+    format!(
+        "rivet-capture — join-path packet-capture harness (#153)\n\
+         \n\
+         USAGE:\n\
+         \x20 rivet-capture capture [--runs N]      boot+join one or more Papers, print the\n\
+         \x20                                     normalized packet summary (Paper-vs-Paper\n\
+         \x20                                     determinism when --runs >= 2)\n\
+         \x20 rivet-capture fixture                boot+join once and (re)write fixtures/join/\n\
+         \x20 rivet-capture verify                boot+join, normalize, diff against the\n\
+         \x20                                     committed fixture (PASS/FAIL)\n\
+         \x20 rivet-capture verify --expect-fail  negative control: boot+join, diff against a\n\
+         \x20                                     deliberately corrupted fixture copy; exits 0\n\
+         \x20                                     only when the tampered packet is detected AND\n\
+         \x20                                     named\n\
+         \n\
+         ENV:\n\
+         \x20 {ORACLE_JAR_ENV}          path to the paperclip jar (default: work/jars/ or working/Paper/)\n\
+         \x20 {CLIENT_BIN_ENV}   path to the rivet-client binary (default: ../rivet-client/target/debug/rivet-client)"
+    )
+}
+
+enum Subcommand {
+    Capture { runs: usize },
+    Fixture,
+    Verify { expect_fail: bool },
+}
+
+fn parse_args() -> Result<Subcommand, String> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("capture") => {
+            let mut runs = 1usize;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--runs" => {
+                        i += 1;
+                        runs = args
+                            .get(i)
+                            .ok_or("missing value for --runs")?
+                            .parse()
+                            .map_err(|_| "invalid --runs value")?;
+                    }
+                    "--help" | "-h" => return Err(usage()),
+                    other => return Err(format!("unknown argument: {other}\n\n{}", usage())),
+                }
+                i += 1;
+            }
+            if runs == 0 {
+                return Err("--runs must be >= 1".into());
+            }
+            Ok(Subcommand::Capture { runs })
+        }
+        Some("fixture") => Ok(Subcommand::Fixture),
+        Some("verify") => {
+            let expect_fail = args.get(1).map(String::as_str) == Some("--expect-fail");
+            if expect_fail && args.len() > 2 {
+                return Err(format!("unexpected trailing arguments\n\n{}", usage()));
+            }
+            Ok(Subcommand::Verify { expect_fail })
+        }
+        Some("--help") | Some("-h") | None => Err(usage()),
+        Some(other) => Err(format!("unknown subcommand: {other}\n\n{}", usage())),
+    }
+}
+
+/// The negative control: copy the committed fixture, corrupt one packet body
+/// and its manifest SHA-256 (so the copy is internally consistent), then boot
+/// fresh and require the divergence to name the tampered packet.
+async fn run_negative_control() -> Result<(), String> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/verify");
+    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let baseline = crate_root.join("fixtures/join");
+
+    println!("negative control: verify --expect-fail");
+    println!("   baseline fixture : {}", baseline.display());
+
+    // Copy the fixture and corrupt one packet's body + manifest sha.
+    let scratch = env::temp_dir().join(format!("rivet-capture-negcontrol-{}", std::process::id()));
+    if scratch.exists() {
+        fs::remove_dir_all(&scratch).map_err(|e| e.to_string())?;
+    }
+    copy_dir_recursive(&baseline, &scratch).map_err(|e| e.to_string())?;
+    let (tampered_index, tampered_identity) = tamper_fixture_copy(&scratch)?;
+    println!(
+        "   fixture copied to {} and packet [{tampered_index}] ({tampered_identity}) corrupted",
+        scratch.display()
+    );
+
+    let canon = capture_one(&work, 1).await?;
+
+    // The corrupted copy is the "expected" baseline; the fresh boot is the
+    // "actual". If the fresh capture reproduces the original bytes, the only
+    // divergence is at the tampered packet.
+    let corrupted_packets = fixture::read_capture(&scratch).map_err(|e| e.to_string())?;
+    let diff = fixture::diff_packets(&corrupted_packets, &canon);
+
+    // The negative control passes only when the tampered packet is the one
+    // named in the mismatch list. A clean diff (false negative) or a divergence
+    // naming a different packet must fail.
+    let names: Vec<usize> = diff
+        .mismatched
+        .iter()
+        .filter(|(i, _, _, _)| *i == tampered_index)
+        .map(|(i, _, _, _)| *i)
+        .collect();
+    if !names.is_empty() {
+        println!();
+        println!(
+            "PASS: the fresh capture differs from the corrupted copy at exactly the tampered \
+             packet [{tampered_index}] ({tampered_identity})."
+        );
+        let _ = fs::remove_dir_all(&scratch);
+        Ok(())
+    } else if diff.is_clean() {
+        let _ = fs::remove_dir_all(&scratch);
+        Err(format!(
+            "negative control FAILED: the pipeline reported ZERO divergence against a fixture \
+             copy whose packet [{tampered_index}] ({tampered_identity}) was corrupted — the \
+             capture->normalize->diff chain is vacuously green."
+        ))
+    } else {
+        let _ = fs::remove_dir_all(&scratch);
+        Err(format!(
+            "negative control FAILED: the pipeline diverged but did not name the tampered packet \
+             [{tampered_index}] ({tampered_identity}); mismatched: {diff}"
+        ))
+    }
+}
+
+/// Copy a directory tree (used by the negative control so the tamper never
+/// touches the committed fixture).
+fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Corrupt one packet body in a copy of the fixture and its manifest SHA-256,
+/// returning (index, identity) of the tampered packet.
+///
+/// The tamper deliberately lands in a packet the normalizer does NOT rewrite
+/// (a `note`-less manifest entry), so the negative control proves the
+/// byte-compare detects drift in a field that is genuinely compared — not in a
+/// field that would have been normalized to a fixed value anyway.
+fn tamper_fixture_copy(dir: &Path) -> Result<(usize, String), String> {
+    let mut manifest: Manifest = serde_json::from_str(
+        &fs::read_to_string(dir.join("manifest.json")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut packets = fixture::read_capture(dir).map_err(|e| e.to_string())?;
+
+    let normalized: Vec<bool> = manifest
+        .captured
+        .iter()
+        .map(|e| !e.note.is_empty())
+        .collect();
+    let idx = packets
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| p.body.len() > 1 && !normalized.get(*i).copied().unwrap_or(false))
+        .map(|(i, _)| i)
+        .next()
+        .or_else(|| {
+            packets
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.body.len() > 1)
+                .map(|(i, _)| i)
+                .next()
+        })
+        .ok_or("fixture has no tamperable packet (all bodies are empty or length 1)")?;
+
+    let identity = {
+        let p = &packets[idx];
+        format!("{}/{} id {}", p.state, p.direction.flow(), p.id)
+    };
+    let i = packets[idx].body.len() / 2;
+    packets[idx].body[i] ^= 0xFF;
+
+    // Rewrite the tampered packet's body in capture.jsonl and its sha/bytes in
+    // the manifest so the copy is internally consistent (a plausible but wrong
+    // baseline).
+    fs::write(dir.join("capture.jsonl"), fixture::capture_lines(&packets))
+        .map_err(|e| e.to_string())?;
+    let entry = manifest
+        .captured
+        .get_mut(idx)
+        .ok_or("tampered packet has no manifest entry")?;
+    entry.sha256 = fixture::sha256_hex(&packets[idx].body);
+    entry.bytes = packets[idx].body.len();
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((idx, identity))
+}
+
+async fn run_verify() -> Result<(), String> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/verify");
+    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let baseline = crate_root.join("fixtures/join");
+
+    println!("verify (join packet-capture fixture)");
+    println!("   baseline fixture : {}", baseline.display());
+
+    verify_committed_fixture(&baseline)?;
+    println!("   committed fixture verifies against its manifest");
+
+    let canon = capture_one(&work, 1).await?;
+    let baseline_packets = fixture::read_capture(&baseline).map_err(|e| e.to_string())?;
+
+    check_pin(&baseline, &work.join("run1"))?;
+
+    let diff = fixture::diff_packets(&baseline_packets, &canon);
+    if diff.is_clean() {
+        println!();
+        println!(
+            "PASS: {} normalized packets are byte-identical to the committed join fixture \
+             (seed 42 / superflat / offline RivetProbe) — green against vanilla itself.",
+            baseline_packets.len()
+        );
+        Ok(())
+    } else {
+        println!();
+        println!("FAIL: the fresh normalized capture diverges from the committed fixture:");
+        print!("{diff}");
+        Err("join-capture fixture divergence".into())
+    }
+}
+
+async fn run_capture(runs: usize) -> Result<(), String> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/capture");
+    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+
+    let mut captures = Vec::with_capacity(runs);
+    for idx in 1..=runs {
+        let canon = capture_one(&work, idx).await?;
+        print_summary(&canon);
+        if canon
+            .iter()
+            .any(|p| p.state == State::Play && p.direction == Direction::Clientbound && p.id == 49)
+        {
+            println!("    (login packet present — join path reached play)");
+        }
+        captures.push(canon);
+    }
+
+    if runs >= 2 {
+        println!();
+        println!("Paper-vs-Paper comparison ({} boots)", runs);
+        let mut identical = true;
+        for (i, pair) in captures.windows(2).enumerate() {
+            let a = fixture::capture_lines(&pair[0]);
+            let b = fixture::capture_lines(&pair[1]);
+            if a == b {
+                println!(
+                    "    boot {} vs boot {}: IDENTICAL ({} bytes)",
+                    i + 1,
+                    i + 2,
+                    a.len()
+                );
+            } else {
+                identical = false;
+                let d = fixture::diff_packets(&pair[0], &pair[1]);
+                println!("    boot {} vs boot {}: DIFFERS", i + 1, i + 2);
+                print!("{d}");
+            }
+        }
+        if identical {
+            println!(
+                "VERDICT: PASS — all {runs} Paper boots produced identical normalized captures."
+            );
+        } else {
+            return Err("Paper-vs-Paper captures differ".into());
+        }
+    }
+    Ok(())
+}
+
+async fn run_fixture() -> Result<(), String> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/fixture");
+    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let canon = capture_one(&work, 1).await?;
+    let dir = write_fixture(&canon).map_err(|e| e.to_string())?;
+    println!("wrote fixture to {}", dir.display());
+    print_summary(&canon);
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    let command = match parse_args() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(64);
+        }
+    };
+    let runtime = tokio::runtime::Runtime::new().expect("build tokio runtime");
+    let result = runtime.block_on(async move {
+        match command {
+            Subcommand::Capture { runs } => run_capture(runs).await,
+            Subcommand::Fixture => run_fixture().await,
+            Subcommand::Verify { expect_fail } => {
+                if expect_fail {
+                    run_negative_control().await
+                } else {
+                    run_verify().await
+                }
+            }
+        }
+    });
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("rivet-capture: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
