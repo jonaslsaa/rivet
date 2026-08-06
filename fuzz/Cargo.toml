@@ -22,9 +22,6 @@ rivet-nbt = { path = "../crates/rivet-nbt" }
 rivet-serialization = { path = "../crates/rivet-serialization" }
 rivet-util = { path = "../crates/rivet-util" }
 
-[package.metadata.cargo-machete]
-ignored = ["libfuzzer-sys"]
-
 [[bin]]
 name = "snbt"
 path = "fuzz_targets/snbt.rs"
