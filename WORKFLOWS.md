@@ -48,7 +48,7 @@ Caveats: each worktree gets its own cargo `target/` (disk + cold builds — do n
 
 ## GitHub process wiring
 
-Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/rivet. Agents decompose epics into sub-issues using the **port-unit issue template**, work them via small PRs (PR template carries the fidelity checklist), and update `MANIFEST.tsv` in the same PR. **No hosted CI (D10)**: the controller runs `scripts/gate.sh` (fmt → clippy -Dwarnings → test) on every PR before merging — a red gate blocks the merge. `blocked` label = controller triage; `regression`/`parity` labels come from `verify-oracle` runs.
+Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/rivet. Agents decompose epics into sub-issues using the **port-unit issue template**, work them via small PRs (PR template carries the fidelity checklist), and update `MANIFEST.tsv` in the same PR. **No hosted CI (D10)**: the controller runs `scripts/gate.sh` (fmt → clippy -Dwarnings → tests → oracle verify → rivet-parity → Paper-vs-Paper scenario → machete) on every PR before merging — a red gate blocks the merge. The oracle steps never silently skip: missing prerequisites make the gate exit nonzero with an UNVERIFIED status (distinct exit code 3) and a per-item fix list; `--require-oracle` turns any missing oracle prerequisite into a hard failure (exit 1). `blocked` label = controller triage; `regression`/`parity` labels come from `verify-oracle` runs.
 
 ## Workflow catalog (`.claude/workflows/`)
 
