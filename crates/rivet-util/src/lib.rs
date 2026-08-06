@@ -18,6 +18,7 @@ pub mod by_id_map;
 pub mod data_io;
 pub mod delegate_data_output;
 pub mod fast_buffered_input_stream;
+pub mod java_float_format;
 pub mod java_hash;
 pub mod mth;
 pub mod mth_atan_tables;
