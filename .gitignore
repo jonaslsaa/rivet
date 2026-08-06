@@ -11,6 +11,7 @@ __pycache__/
 
 # Oracle harness scratch space (server runs, worlds, logs) — never committed
 tools/rivet-oracle/work/
+tools/rivet-capture/work/
 
 # rivet-codegen scratch space (extracted bundler classpath, compiled helper) — regenerable
 tools/rivet-codegen/.cache/
