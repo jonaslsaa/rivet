@@ -162,3 +162,69 @@ impl RegistryFriendlyByteBuf {
         self.write_block_pos(&pos.pos());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+
+    /// A fresh buffer with an empty access — the convenience methods only touch
+    /// the raw bytes (their registry keys are passed in / statically known), so
+    /// no `RegistryAccess` content is needed.
+    fn empty_buffer() -> RegistryFriendlyByteBuf {
+        RegistryFriendlyByteBuf::new(BytesMut::new(), RegistryAccess::empty())
+    }
+
+    #[test]
+    fn read_identifier_wire_form_and_round_trip() {
+        let mut buf = empty_buffer();
+        buf.write_identifier(&Identifier::parse("minecraft:stone"));
+        // Wire form: `STRING_UTF8` — varint byte-length then the UTF-8 bytes.
+        assert_eq!(buf.as_slice(), b"\x0fminecraft:stone");
+        assert_eq!(buf.read_identifier(), Identifier::parse("minecraft:stone"));
+    }
+
+    #[test]
+    fn write_read_resource_key_round_trips() {
+        let mut buf = empty_buffer();
+        let key = ResourceKey::create(
+            &*registries::DIMENSION,
+            Identifier::with_default_namespace("overworld"),
+        );
+        buf.write_resource_key(&key);
+        // Wire form is just the location identifier (the registry key is not on
+        // the wire).
+        assert_eq!(buf.as_slice(), b"\x13minecraft:overworld");
+        assert_eq!(buf.read_resource_key(&*registries::DIMENSION), key);
+    }
+
+    #[test]
+    fn read_block_pos_wire_form_and_round_trip() {
+        let mut buf = empty_buffer();
+        let pos = BlockPos::new(1, -2, 3);
+        buf.write_block_pos(&pos);
+        // Wire form: `BlockPos.asLong()` big-endian.
+        assert_eq!(buf.as_slice(), &pos.as_long().to_be_bytes());
+        assert_eq!(buf.read_block_pos(), pos);
+    }
+
+    #[test]
+    fn write_read_global_pos_round_trips_with_wire_form() {
+        let mut buf = empty_buffer();
+        let pos = GlobalPos::of(
+            ResourceKey::create(
+                &*registries::DIMENSION,
+                Identifier::with_default_namespace("overworld"),
+            ),
+            BlockPos::new(10, 64, -20),
+        );
+        buf.write_global_pos(&pos);
+        // Wire: the dimension resource key (identifier string) then the packed
+        // long. "minecraft:overworld" is 19 chars.
+        let mut expected = vec![19];
+        expected.extend_from_slice(b"minecraft:overworld");
+        expected.extend_from_slice(&BlockPos::new(10, 64, -20).as_long().to_be_bytes());
+        assert_eq!(buf.as_slice(), &expected);
+        assert_eq!(buf.read_global_pos(), pos);
+    }
+}

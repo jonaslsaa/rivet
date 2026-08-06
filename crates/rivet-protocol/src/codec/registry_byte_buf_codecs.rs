@@ -264,9 +264,16 @@ where
         move |input: &mut RegistryFriendlyByteBuf| {
             let count = input.read_var_int().wrapping_sub(1);
             if count == -1 {
-                // Java evaluates `Identifier.STREAM_CODEC.decode(input)` before
-                // `registry.get(...)`, so decode the location (which needs `&mut
-                // input`) before borrowing the registry through the access.
+                // Java evaluates `lookupOrThrow(registryKey)` first, then
+                // `registry.get(TagKey.create(registryKey,
+                // Identifier.STREAM_CODEC.decode(input)))` — the identifier decode
+                // runs while evaluating the `get` argument. Rust cannot hold the
+                // `&Registry` from the access while the decode needs `&mut input`,
+                // so the location is decoded first and the lookup deferred. On
+                // input that is BOTH registry-missing AND identifier-malformed the
+                // reported error therefore differs from Java's ("Missing registry:
+                // ..." vs the identifier error), though either way the packet is
+                // rejected.
                 let location = identifier_stream_codec().decode(input)?;
                 let registry = input.registry_access().lookup_or_throw(&decoder_key);
                 let tag = TagKey::create(&decoder_key, location);
