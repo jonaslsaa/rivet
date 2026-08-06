@@ -20,8 +20,10 @@
 #                          Guarded by the paperclip jar, like oracle verify.
 # Oracle verification is never silently skipped. When its prerequisites are missing
 # the pre-check below names each missing item with a fix, the steps report UNVERIFIED,
-# and the gate exits with a distinct nonzero code (3) — an unverified merge never looks
-# green. Pass --require-oracle (or RIVET_REQUIRE_ORACLE=1) to make any missing oracle
+# and the gate exits with a distinct nonzero code (3). (One path is red but not
+# normalized to 3: a cargo failure inside oracle verify aborts the gate via errexit
+# with that command's own exit code.) An unverified merge never looks green. Pass
+# --require-oracle (or RIVET_REQUIRE_ORACLE=1) to make any missing oracle
 # prereq a hard failure (exit 1) right at the pre-check. The Paper jar SHA-256 / git-commit
 # pin guards live in tools/rivet-reference-oracle/run.sh (compile jar == runtime jar SHA,
 # Paper commit == manifest pin, exit 1 on mismatch) and stay authoritative; the pre-check
@@ -405,9 +407,10 @@ main() {
   # --- final verdict ------------------------------------------------------------
   if [ "$ORACLE_UNVERIFIED" = 1 ]; then
     echo
-    echo "GATE: ORACLE UNVERIFIED — the oracle steps did not run, so nothing above compared Rivet"
-    echo "      against Paper. See the prereq report for what was missing and how to fix it, or"
-    echo "      pass --require-oracle to make this a hard failure instead."
+    echo "GATE: ORACLE UNVERIFIED — the Rivet-vs-Paper comparison did not run to completion, so"
+    echo "      nothing above checked real Rivet code against Paper. See the prereq report for"
+    echo "      what was missing and how to fix it, or pass --require-oracle to make this a hard"
+    echo "      failure instead."
     exit "$ORACLE_EXIT_UNVERIFIED"
   fi
   echo "GATE GREEN"
