@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for scripts/analyze_graph.py's mc.network class-cluster split.
+"""Regression tests for scripts/analyze_graph.py's manifest generation.
 
 Run with: python3 scripts/test_analyze_graph.py
 
@@ -28,12 +28,18 @@ Java), so this suite requires the same working/ setup as the merge gate:
      units (so the later protocol PR's status transitions survive a rerun).
   6. every dep token in the split manifest resolves to a unit via the
      wave-picker's rules (exact unit id, derived package id, or package match).
+  7. Every java_paths entry is `root:relpath` (issue #173): the 4
+     paper-api/paper-server package-info.java pairs are distinct, the rooted
+     path multiset over the whole manifest has no duplicates, and it equals the
+     on-disk (root, relpath) inventory. Duplicate physical ownership fails fast
+     with an actionable diagnostic, and done units lose needs_split.
 """
 
 import csv
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -210,11 +216,104 @@ def main() -> None:
                   f"owned={len(owned)} dup={sorted(dup)}")
 
         base = rows_of(MANIFEST)
-        base_paths = {p for r in base for p in r["java_paths"].split(",")}
-        split_paths = {p for r in split for p in r["java_paths"].split(",")}
-        check("whole manifest: Java inventory conserved (no loss, no duplication)",
+        # Every java_paths entry is root-qualified (`root:relpath`, issue #173).
+        # Compare multisets so a genuine duplicate would be caught, not just a
+        # lost file: the analyzer's global ownership fail-fast guarantees no
+        # duplicates ever reach the output, so this pins that property.
+        def path_multiset(rs: list[dict]) -> Counter:
+            return Counter(p for r in rs for p in r["java_paths"].split(","))
+
+        base_paths = path_multiset(base)
+        split_paths = path_multiset(split)
+        check("whole manifest: Java inventory conserved (root-qualified, no loss, no duplication)",
               base_paths == split_paths,
               f"base={len(base_paths)} split={len(split_paths)}")
+
+        # ---- 7. root-qualified ownership (issue #173) ----------------------------
+        all_tokens = [p for r in base for p in r["java_paths"].split(",")]
+        check("every java_paths entry is root-qualified",
+              all(p.startswith(("minecraft:", "paper-server:", "paper-api:"))
+                  for p in all_tokens))
+        check("rooted java_paths have no duplicates",
+              len(all_tokens) == len(set(all_tokens)),
+              f"{len(all_tokens)} tokens, {len(set(all_tokens))} distinct")
+
+        # The four io.papermc.paper.registry package-info.java pairs physically
+        # exist under both paper-api and paper-server; root-qualification makes
+        # each a distinct (root, relpath) token instead of a colliding path.
+        ROOTS = {
+            "minecraft": REPO / "working/Paper/paper-server/src/minecraft/java",
+            "paper-server": REPO / "working/Paper/paper-server/src/main/java",
+            "paper-api": REPO / "working/Paper/paper-api/src/main/java",
+        }
+        disk_inventory = {
+            f"{root}:{f.relative_to(r).as_posix()}"
+            for root, r in ROOTS.items()
+            for f in r.rglob("*.java")
+        }
+        check("rooted java_paths equal the on-disk (root, relpath) inventory",
+              set(all_tokens) == disk_inventory,
+              f"manifest={len(set(all_tokens))} disk={len(disk_inventory)} "
+              f"missing={sorted(disk_inventory - set(all_tokens))[:5]} "
+              f"extra={sorted(set(all_tokens) - disk_inventory)[:5]}")
+        for unit_id in ("paper.registry.data", "paper.registry.event",
+                        "paper.registry.event.type", "paper.registry.set"):
+            r = next(x for x in base if x["id"] == unit_id)
+            infos = sorted(p for p in r["java_paths"].split(",")
+                           if p.endswith("package-info.java"))
+            check(f"{unit_id} owns both paper-api: and paper-server: package-info",
+                  infos == [
+                      f"paper-api:io/papermc/paper/registry/"
+                      f"{unit_id.removeprefix('paper.registry.').replace('.', '/')}/"
+                      f"package-info.java",
+                      f"paper-server:io/papermc/paper/registry/"
+                      f"{unit_id.removeprefix('paper.registry.').replace('.', '/')}/"
+                      f"package-info.java",
+                  ], repr(infos))
+
+        # needs_split is actionable pre-translation state (issue #173): done
+        # units lose it on regeneration regardless of graph shape, while the
+        # oversized pending residual units keep it and the acyclic oversized
+        # versions unit keeps it.
+        brigadier = [r for r in base if r["id"].startswith("com.mojang.brigadier")]
+        check("done Brigadier units lose needs_split (structural cycle remains in `cycle`)",
+              all(r["needs_split"] == "" for r in brigadier)
+              and all(r["cycle"] == "3" for r in brigadier))
+        versions = next(r for r in base if r["id"] == "ca.spottedleaf.dataconverter.minecraft.versions")
+        check("acyclic oversized versions unit keeps needs_split=yes",
+              versions["needs_split"] == "yes")
+        check("needs_split=yes iff pending/translated and > 15 files",
+              all(
+                  (r["needs_split"] == "yes") == (r["status"] != "done" and int(r["files"]) > 15)
+                  for r in base
+              ))
+
+        # Global duplicate-ownership fail-fast: make the scan visit every file
+        # twice so each (root, relpath) is declared twice, and require a nonzero
+        # exit naming a concrete (root, relpath) token.
+        dup_src2 = ANALYZE.read_text(encoding="utf-8").replace(
+            "for f in root.rglob(\"*.java\"):",
+            "for f in list(root.rglob(\"*.java\")) * 2:",
+        ).replace(
+            "REPO = Path(__file__).resolve().parent.parent",
+            f"REPO = Path({str(REPO)!r})",
+        )
+        dup2_script = tmpd / "analyze_graph_owndup.py"
+        dup2_script.write_text(dup_src2, encoding="utf-8")
+        dup2_proc = subprocess.run(
+            [sys.executable, str(dup2_script), "--output",
+             str(tmpd / "owndup.tsv"), "--prev-manifest", str(MANIFEST)],
+            capture_output=True, text=True,
+        )
+        check("duplicate physical ownership exits nonzero (fail-fast)",
+              dup2_proc.returncode != 0)
+        check("duplicate physical ownership names a concrete root:relpath and both units",
+              "duplicate physical ownership:" in dup2_proc.stderr
+              and any(prefix in dup2_proc.stderr
+                      for prefix in ("minecraft:", "paper-server:", "paper-api:"))
+              and "is declared in both" in dup2_proc.stderr
+              and ".java" in dup2_proc.stderr)
+
         check("network split: file counts conserved",
               sum(int(r["files"]) for r in network_units)
               == sum(int(r["files"]) for r in base if r["java_package"] == NETWORK_PKG))
