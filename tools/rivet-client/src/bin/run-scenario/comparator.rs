@@ -103,7 +103,13 @@ pub fn diff(expected: &Value, actual: &Value) -> TranscriptDiff {
     result
 }
 
-fn diff_at(path: &str, expected: &Value, actual: &Value, excluded: &BTreeSet<String>, out: &mut Vec<FieldDiff>) {
+fn diff_at(
+    path: &str,
+    expected: &Value,
+    actual: &Value,
+    excluded: &BTreeSet<String>,
+    out: &mut Vec<FieldDiff>,
+) {
     // Never recurse into an excluded subtree: record a single diff at the
     // excluded path (if the values differ at all) and stop.
     if !path.is_empty() && excluded.contains(path) {
@@ -196,7 +202,10 @@ mod tests {
         let a = sample();
         let b = sample();
         let d = diff(&a, &b);
-        assert!(d.is_identical(), "identical transcripts must diff clean: {d:?}");
+        assert!(
+            d.is_identical(),
+            "identical transcripts must diff clean: {d:?}"
+        );
         assert!(d.excluded.is_empty());
         assert!(d.excluded_policy_diffs.is_empty());
     }
@@ -237,7 +246,10 @@ mod tests {
         b["position"]["x"] = json!(-4.5);
         b["position"]["z"] = json!(-5.5);
         let d = diff(&a, &b);
-        assert!(d.is_identical(), "excluded diffs must not fail parity: {d:?}");
+        assert!(
+            d.is_identical(),
+            "excluded diffs must not fail parity: {d:?}"
+        );
         assert!(d.diffs.is_empty());
         assert_eq!(d.excluded.len(), 2);
         let paths: Vec<&str> = d.excluded.iter().map(|f| f.path.as_str()).collect();

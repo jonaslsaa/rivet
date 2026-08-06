@@ -488,7 +488,9 @@ main() {
   # --- scenario runner (full gate only; M0 join harness: Paper-vs-Paper + negative case) --
   # The Paper-vs-Paper join harness boots local Paper twice, joins each with the
   # Azalea headless client, and requires identical normalized transcripts, plus a
-  # negative case proving the comparator detects a tampered position. Runs only
+  # negative case proving the comparator detects a tampered position. The runner
+  # also runs its own unit tests first (port isolation, ServerKind, process-
+  # lifecycle cleanup, exit-code classification — issue #155). Runs only
   # when a paperclip jar is materialized (same guard style as oracle verify);
   # skipped when gating a crate subset (the scenario drives a whole server).
   if [ "$FULL_GATE" = true ]; then
