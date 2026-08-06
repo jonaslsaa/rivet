@@ -14,8 +14,16 @@ JVM and to use `anyhow`/`serde`.
   Paper 26.2 bundler jar and writes `data/block_states.json`.
 - **`generate`** — reads that JSON and emits the registry tables directly into
   `crates/rivet-registry/src/generated/` (a `BlockId` registry + a block-state
-  property enum structure), and consumes `data/reports/packets.json` to emit the
-  packet-ID tables into `crates/rivet-protocol/src/generated/` (see below).
+  property enum structure), consumes `data/reports/registries.json` to emit the
+  static-builtin registry tables into the same `src/generated/` (see
+  `registries` below), and consumes `data/reports/packets.json` to emit the
+  packet-ID tables into `crates/rivet-protocol/src/generated/`.
+- **`registries`** — reads the pinned vanilla `data/reports/registries.json`
+  (`RegistryDumpReport`) and emits the id-indexed static-builtin tables for the
+  ordered registries M1 touches into
+  `crates/rivet-registry/src/generated/registries.rs`. This is the same
+  report-driven half `generate` runs; the standalone subcommand regenerates just
+  those tables.
 - **`mth-gen`** — regenerates the Mth tables + golden tests
   (`crates/rivet-util/src/mth_sin_table.rs`, `mth_atan_tables.rs`,
   `mth_golden_tests.rs`) from the real Paper `Mth` class. These files are
@@ -28,11 +36,12 @@ JVM and to use `anyhow`/`serde`.
   under `data/reports/`.
 
 ```
-rivet-codegen extract  [--bundler <path>] [--output <path>]
-rivet-codegen generate [--input <path>]  [--output <dir>]
-                       [--packets <path>] [--packets-output <dir>]
-rivet-codegen mth-gen  [--bundler <path>] [--output <dir>]
-rivet-codegen reports  [--jar <path>] [--output <dir>] [--verify]
+rivet-codegen extract    [--bundler <path>] [--output <path>]
+rivet-codegen generate   [--input <path>]  [--output <dir>]
+                         [--packets <path>] [--packets-output <dir>]
+rivet-codegen registries [--input <path>]  [--output <dir>]
+rivet-codegen mth-gen    [--bundler <path>] [--output <dir>]
+rivet-codegen reports    [--jar <path>] [--output <dir>] [--verify]
 ```
 
 ## How to run
@@ -47,16 +56,19 @@ checkout; the tool needs a jar produced elsewhere.
 ```
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
-target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs} + crates/rivet-protocol/src/generated/
+target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, registries.rs} + crates/rivet-protocol/src/generated/
+target/release/rivet-codegen registries       # -> crates/rivet-registry/src/generated/registries.rs (report-driven half only)
 target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
-`generate` emits two independent outputs: the block registry (from
-`data/block_states.json`) and the packet-ID tables (from
-`data/reports/packets.json`, the `PacketReport` fixture). Regenerate both with a
-single `generate` run; `--input`/`--output` control the block half,
-`--packets`/`--packets-output` control the packet half.
+`generate` emits three independent outputs: the block registry (from
+`data/block_states.json`), the static-builtin registry tables (from
+`data/reports/registries.json`, the `RegistryDumpReport` fixture), and the
+packet-ID tables (from `data/reports/packets.json`, the `PacketReport`
+fixture). Regenerate all three with a single `generate` run; `--input`/`--output`
+control the block half, `--packets`/`--packets-output` control the packet half.
+(The `registries` subcommand emits just the report-driven registry tables.)
 
 `extract` and `mth-gen` cache the unpacked classpath in `.cache/` (gitignored)
 so reruns are fast. Pass `--bundler` to point at a different jar.
@@ -184,12 +196,14 @@ the block-state index layout and must not be sorted during codegen.
 Wired into `crates/rivet-registry/src/generated/`, committed, and gated behind
 the crate's `"blocks"` cargo feature:
 
-- `mod.rs` — declares the two generated submodules.
+- `mod.rs` — declares the generated submodules (`block_properties`, `blocks`,
+  `registries`).
 - `blocks.rs` — `BlockId(pub u16)`, a `phf::Map<&'static str, u16>`
   (`BLOCK_BY_NAME`), an id-indexed `BLOCK_BY_ID` array, and lookup methods.
 - `block_properties.rs` — `BlockPropertyId`, an enum with one variant per
   distinct `(name, values)` property type, plus the value tables and a per-block
   `BLOCK_STATE_SHAPES` table (ordered property ids by block id).
+- `registries.rs` — the report-driven static-builtin tables (see below).
 
 The generator asserts block ids are contiguous `0..n` (true for vanilla 26.2).
 After regenerating, run `cargo fmt -p rivet-registry` (the phf macro output is
@@ -198,6 +212,51 @@ The codegen test `generated_output_matches_committed` enforces the golden
 no-drift invariant: it regenerates to a temp dir, rustfmts the temp copy, and
 asserts byte-equality with the committed `src/generated/` — without touching
 repository source.
+
+## Static-builtin registry tables (`registries`)
+
+Both `generate` and the standalone `registries` subcommand consume the pinned
+`data/reports/registries.json` (the vanilla `RegistryDumpReport`, issue #124
+phase F) and emit `crates/rivet-registry/src/generated/registries.rs`, committed
+and gated behind the crate's `"blocks"` cargo feature.
+
+The report covers only `BuiltInRegistries.REGISTRY` — the 95 static registries,
+each element mapped to its `protocol_id` (the `MappedRegistry.byId` insertion
+index). The generator emits tables for the **minimal** subset whose element ids
+are on the M1 wire: `minecraft:item`, `minecraft:entity_type`,
+`minecraft:data_component_type` (ItemStack / `ClientboundAddEntity` /
+`DataComponentPatch`), and `minecraft:fluid`, `minecraft:game_event`,
+`minecraft:potion`, `minecraft:point_of_interest_type` (static registries whose
+vanilla tags ride the config-sync `UpdateTags` payload). Datapack-loaded
+registries (`dimension_type`, `biome`, `worldgen/*`, …) are not in the report
+and are not emitted. `minecraft:block` is on the wire but is already covered by
+the extract-driven `blocks.rs`; a drift test asserts the two captures agree.
+
+Each surface is a dense `0..n` bijection — element id == holder id == network id
+== insertion index (OWNERSHIP.md §Registries):
+
+- `{PREFIX}_BY_NAME` — a `phf::Map<&'static str, u16>` (name -> id), mirroring
+  `BLOCK_BY_NAME`.
+- `{PREFIX}_BY_ID` — an id-indexed `&[&str]` (id == index), mirroring
+  `BLOCK_BY_ID`.
+- `{PREFIX}_DEFAULT` — the `DefaultedRegistry` fold (`&str` name) for the four
+  defaulted surfaces (item/entity_type/fluid/game_event); `Option<&str> = None`
+  for the plain registries.
+
+The JSON keys are alphabetically sorted by GsonHelper's stable writer, so the
+generator never trusts key order — it re-orders entries by `protocol_id` to
+recover Java registration order (deterministic, byte-idempotent output). The
+`protocol_id` u16 space is validated strictly: generation fails on sparse or
+non-contiguous ids, duplicate ids, duplicate names, non-integer/negative/
+overflowing ids, a `default` naming no element, unexpected registry/entry
+fields, malformed `Identifier` names, and Rust-identifier collisions among
+element names. The fixture is linked to `data/reports/manifest.json` by sha256 —
+a stale fixture aborts generation.
+
+`crates/rivet-registry/src/static_builtin_tests.rs` (feature-gated `blocks` +
+`cfg(test)`, outside `src/generated/` so it does not collide with the golden
+drift test) asserts every emitted `*_BY_NAME`/`*_BY_ID` pair is a dense
+bijection and that the `DefaultedRegistry` folds line up with the tables.
 
 ## Packet-ID tables (`rivet-protocol`)
 
