@@ -5,7 +5,7 @@
 //! fixture slice (chunk NBT + world metadata) that later milestones diff
 //! Rivet's output against.
 //!
-//! The binary has two modes:
+//! The binary has three modes:
 //!
 //!   1. **default** — verify a fixtures dir against its `manifest.json`
 //!      SHA-256s (the committed golden baseline).
@@ -14,6 +14,10 @@
 //!      down cleanly (SIGTERM), extract the deterministic chunk-NBT slice,
 //!      and diff its SHA-256s against the committed baseline. Prints PASS
 //!      ("green against vanilla itself") or FAIL (nonzero exit).
+//!   3. **`verify --expect-fail`** — the negative control: the same pipeline,
+//!      diffed against a deliberately corrupted *copy* of the baseline. Exits
+//!      0 only when the tampered chunk is detected and named — proving the
+//!      pipeline is not vacuously green (see README).
 //!
 //! Note on determinism (see scripts/extract_fixtures.py): raw region files
 //! are NOT byte-stable across boots (framing/timestamps), but the decompressed
@@ -27,7 +31,20 @@
 //!   cargo run -p rivet-oracle -- <dir>           # verify <dir> against its manifest
 //!   cargo run -p rivet-oracle -- verify          # full M0 gate: boot -> extract -> diff
 //!   cargo run -p rivet-oracle -- verify [dir]    # gate against a custom baseline dir
+//!   cargo run -p rivet-oracle -- verify --expect-fail [dir]
+//!                              # negative control: boot -> extract -> diff against a
+//!                              # deliberately corrupted copy of the baseline; exits 0
+//!                              # only when the pipeline detects AND names the tamper
 //!   RIVET_ORACLE_JAR=/path/jar.jar cargo run -p rivet-oracle -- verify
+//!
+//! Both gate modes enforce the Paper pin recorded in `fixtures/manifest.json`
+//! (`paper: 26.2-DEV-main@0a99345`): after the boot, the `Git-Commit` attribute
+//! of the server jar the paperclip actually materialized and the JVM loaded
+//! (`work/verify/run/versions/26.2/paper-26.2.jar`) must match the manifest pin.
+//! The pin is read from what actually boots — never from a proxy build
+//! (co-located/`working/Paper` jars that can sit at a different commit than the
+//! resolved paperclip). A stale, swapped, or unverifiable Paper never passes
+//! silently (see gate.sh).
 
 use std::collections::BTreeMap;
 use std::env;
@@ -68,6 +85,23 @@ enum Error {
     Gate(String),
     /// The fresh boot's chunk hashes differ from the committed baseline.
     Diff(ChunkDiff),
+    /// The server jar that actually booted is not at the commit the committed
+    /// golden baseline was captured against.
+    PinMismatch {
+        expected: String,
+        actual: String,
+    },
+    /// The pinned Paper commit could not be confirmed (no manifest pin, or the
+    /// materialized server jar has no Git-Commit attribute to inspect).
+    PinUnavailable {
+        reason: String,
+    },
+    /// The `verify --expect-fail` negative control failed: the boot -> extract
+    /// -> pin-check -> diff pipeline did not detect (and name) the deliberately
+    /// corrupted baseline chunk.
+    NegativeControl {
+        message: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -90,6 +124,26 @@ impl fmt::Display for Error {
                 d.matched(),
                 d.expected
             ),
+            Error::PinMismatch { expected, actual } => write!(
+                f,
+                "Paper commit mismatch: the server jar that actually booted \
+                 (work/verify/run/versions/26.2/paper-26.2.jar) carries Git-Commit {actual}, \
+                 but the committed golden baseline (fixtures/manifest.json) is pinned to \
+                 {expected}.\n\
+                 The baseline must match the Paper it was captured against. Regenerate the \
+                 fixtures against the pinned Paper and re-pin fixtures/manifest.json \
+                 (python3 scripts/extract_fixtures.py, then edit the manifest's `paper` \
+                 field) before relying on this gate — never fudge fixtures to pass."
+            ),
+            Error::PinUnavailable { reason } => write!(
+                f,
+                "Paper pin unavailable: {reason}.\n\
+                 The M0 oracle gate never passes silently when the pinned Paper commit \
+                 cannot be confirmed — the resolved paperclip must be built from the pinned \
+                 Paper (build working/Paper at 0a99345 into a paperclip, and materialize \
+                 tools/rivet-oracle/work/jars/)."
+            ),
+            Error::NegativeControl { message } => write!(f, "{message}"),
         }
     }
 }
@@ -210,6 +264,143 @@ fn verify_fixtures(dir: &Path) -> Result<Manifest, Error> {
         }
     }
     Ok(manifest)
+}
+
+/// Extract the pinned Paper commit from the manifest's `paper` provenance
+/// string (`"26.2-DEV-main@0a99345"` -> `"0a99345"`). `None` when the manifest
+/// carries no `@<commit>` pin (a broken/old manifest, never silently accepted).
+fn parse_paper_pin(paper: Option<&str>) -> Option<String> {
+    let paper = paper?;
+    let (_, commit) = paper.rsplit_once('@')?;
+    let commit = commit.trim();
+    if commit.is_empty() {
+        None
+    } else {
+        Some(commit.to_string())
+    }
+}
+
+/// Extract `Git-Commit: <sha>` from a jar MANIFEST.MF text.
+fn parse_manifest_commit(manifest_text: &str) -> Option<String> {
+    manifest_text.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("Git-Commit:")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+/// Read the `Git-Commit` attribute out of a compiled paper-server jar by
+/// shelling out to `unzip -p` (the crate stays dependency-minimal; `unzip` is
+/// a standard utility on the macOS/Linux dev machines this oracle runs on).
+fn read_jar_git_commit(jar: &Path) -> Result<Option<String>, Error> {
+    let out = Command::new("unzip")
+        .arg("-p")
+        .arg(jar)
+        .arg("META-INF/MANIFEST.MF")
+        .output()
+        .map_err(|e| {
+            Error::Gate(format!(
+                "failed to run unzip {}: {e} (needed to read the Paper Git-Commit)",
+                jar.display()
+            ))
+        })?;
+    if !out.status.success() {
+        // No MANIFEST.MF entry (e.g. a paperclip wrapper, not a compiled server).
+        return Ok(None);
+    }
+    Ok(parse_manifest_commit(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// The server jar path the paperclip materializes at run dir on first boot
+/// (its checksum is recorded in the paperclip's `META-INF/versions.list`).
+fn materialized_server_jar(run_dir: &Path) -> PathBuf {
+    run_dir.join("versions/26.2/paper-26.2.jar")
+}
+
+/// Verdict of comparing the pinned baseline commit against the commit of the
+/// server jar that actually booted.
+#[derive(Debug, PartialEq, Eq)]
+enum PinVerdict {
+    Match,
+    Mismatch {
+        expected: String,
+        actual: String,
+    },
+    /// No manifest pin or no readable commit — never a silent pass.
+    Unavailable {
+        reason: String,
+    },
+}
+
+fn classify_pin(expected: Option<String>, actual: Option<String>) -> PinVerdict {
+    let Some(expected) = expected else {
+        return PinVerdict::Unavailable {
+            reason:
+                "fixtures/manifest.json has no pinned Paper revision (missing `paper` field or `@<commit>`)"
+                    .into(),
+        };
+    };
+    let Some(actual) = actual else {
+        return PinVerdict::Unavailable {
+            reason: "the materialized server jar (work/verify/run/versions/26.2/paper-26.2.jar) \
+                 carries no Git-Commit manifest attribute"
+                .into(),
+        };
+    };
+    if expected == actual {
+        PinVerdict::Match
+    } else {
+        PinVerdict::Mismatch { expected, actual }
+    }
+}
+
+/// Verify the pinned baseline Paper commit (fixtures/manifest.json `paper`
+/// provenance) against the server jar that actually booted.
+///
+/// The source of truth is the materialized server jar the resolved paperclip
+/// produced into the run dir and the JVM loaded. This is intentionally NOT read
+/// from a co-located/`working/Paper` proxy jar: that proxy can sit at a
+/// different commit than the resolved paperclip (see the RIVET_ORACLE_JAR /
+/// stale `work/jars/` shadowing cases), and checking it would let a
+/// wrong-commit boot pass green.
+fn check_pin(baseline_dir: &Path, run_dir: &Path) -> Result<(), Error> {
+    let manifest = load_manifest(baseline_dir)?;
+    let expected = parse_paper_pin(manifest.paper.as_deref());
+    let actual = read_jar_git_commit(&materialized_server_jar(run_dir))?;
+    let actual_display = actual.clone().unwrap_or_else(|| "<none>".into());
+    match classify_pin(expected, actual) {
+        PinVerdict::Match => {
+            println!(
+                "   paper pin      : {} (fixtures/manifest.json provenance) — enforced (booted \
+                 jar is Git-Commit {actual_display})",
+                manifest.paper.as_deref().unwrap_or("?")
+            );
+            Ok(())
+        }
+        PinVerdict::Mismatch { expected, actual } => Err(Error::PinMismatch { expected, actual }),
+        PinVerdict::Unavailable { reason } => Err(Error::PinUnavailable { reason }),
+    }
+}
+
+/// Recursively copy a fixtures tree into `dst` (which is created). Used by the
+/// negative control so the tamper never touches the committed fixtures.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), Error> {
+    if dst.exists() {
+        fs::remove_dir_all(dst)?;
+    }
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Group captured chunks by dimension for the summary.
@@ -496,6 +687,155 @@ fn extract_fresh_fixtures(world_dir: &Path, out_dir: &Path) -> Result<(), Error>
     Ok(())
 }
 
+/// Boot a fresh Paper run in `run_dir` and extract its deterministic chunk-NBT
+/// slice into a temp dir. Returns the temp extraction dir (caller owns
+/// cleanup). Shared by `verify` and `verify --expect-fail`.
+fn fresh_extraction(run_dir: &Path, jar: &Path) -> Result<PathBuf, Error> {
+    let log_path = run_dir.with_file_name("boot.log");
+    prepare_run_dir(run_dir)?;
+    boot_and_shutdown(run_dir, &log_path, jar)?;
+    let tmp = env::temp_dir().join(format!("rivet-oracle-verify-{}", std::process::id()));
+    if tmp.exists() {
+        fs::remove_dir_all(&tmp)?;
+    }
+    extract_fresh_fixtures(&run_dir.join("world"), &tmp)?;
+    Ok(tmp)
+}
+
+/// Make a scratch copy of a baseline fixtures dir and corrupt one known chunk
+/// payload (flip a byte) *and* that chunk's recorded SHA-256, so the copy is
+/// internally consistent (a plausible but wrong baseline). Returns the
+/// repo-relative path of the tampered chunk.
+fn tamper_baseline_copy(baseline_dir: &Path, scratch: &Path) -> Result<String, Error> {
+    copy_dir_recursive(baseline_dir, scratch)?;
+    let mut root: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(scratch.join("manifest.json"))?)
+            .map_err(|e| Error::Gate(format!("corrupted-copy manifest is unparsable: {e}")))?;
+    let captured = root
+        .get_mut("captured")
+        .and_then(|c| c.as_array_mut())
+        .ok_or_else(|| Error::Gate("corrupted-copy manifest has no `captured` list".into()))?;
+    let idx = captured
+        .iter()
+        .position(|e| e.get("dim").is_some())
+        .ok_or_else(|| Error::Gate("baseline has no chunk fixtures to tamper".into()))?;
+    let rel = captured[idx]
+        .get("path")
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| Error::Gate("chunk entry has no path".into()))?
+        .to_string();
+
+    let file = scratch.join(&rel);
+    let payload = fs::read(&file)?;
+    if payload.is_empty() {
+        return Err(Error::Gate(format!(
+            "chunk {rel} is empty — cannot tamper a payload to prove divergence"
+        )));
+    }
+    let mut tampered = payload.clone();
+    let i = (tampered.len() / 2).min(tampered.len().saturating_sub(1));
+    tampered[i] ^= 0xFF;
+    fs::write(&file, &tampered)?;
+
+    captured[idx]["sha256"] = serde_json::Value::String(sha256_hex(&tampered));
+    captured[idx]["bytes"] = serde_json::Value::Number(tampered.len().into());
+    fs::write(
+        scratch.join("manifest.json"),
+        serde_json::to_string_pretty(&root)
+            .map_err(|e| Error::Gate(format!("cannot serialize corrupted-copy manifest: {e}")))?,
+    )?;
+    Ok(rel)
+}
+
+/// The `--expect-fail` negative control passes only when the boot -> extract ->
+/// diff pipeline detected *and named* the tampered chunk. A clean diff (false
+/// negative — pipeline missed the tamper) or a divergence that does not name
+/// the tampered chunk (e.g. an unrelated worldgen drift, or a boot/gate error
+/// masquerading as divergence) must NOT satisfy the control.
+fn negative_control_accepts(diff: &ChunkDiff, tampered_path: &str) -> bool {
+    diff.mismatched.iter().any(|(p, _, _)| p == tampered_path)
+}
+
+/// `verify --expect-fail`: the end-to-end negative control for the M0 gate.
+///
+/// Proves the full boot -> extract -> pin-check -> diff pipeline is not
+/// vacuously green: it diffs a fresh Paper boot against a *deliberately
+/// corrupted* copy of the committed baseline (never the committed fixtures
+/// themselves) and exits 0 only when the divergence is detected and the
+/// tampered chunk is named. Any other outcome — clean diff, unnamed
+/// divergence, pin mismatch/unavailable, boot or extraction failure — exits
+/// nonzero with a distinct message.
+fn run_verify_negative_control(baseline_dir: &Path) -> Result<(), Error> {
+    let crate_root = crate_dir();
+    let jar = ensure_jar()?;
+    let run_dir = crate_root.join("work/verify/run");
+
+    println!("M0 negative control: verify --expect-fail");
+    println!("   baseline fixtures : {}", baseline_dir.display());
+    println!("   paperclip jar     : {}", jar.display());
+    println!();
+
+    let scratch = env::temp_dir().join(format!("rivet-oracle-negcontrol-{}", std::process::id()));
+    let tampered = tamper_baseline_copy(baseline_dir, &scratch)?;
+    println!(
+        "[0/4] baseline copied to {} and chunk {tampered} corrupted (byte flipped)",
+        scratch.display()
+    );
+
+    println!(
+        "[1/4] booting a fresh Paper run (scratch world in {})...",
+        run_dir.display()
+    );
+    let tmp = fresh_extraction(&run_dir, &jar)?;
+    println!("[2/4] world saved cleanly; extracted deterministic chunk slice.");
+
+    // The control is meaningless against a stale/unverifiable Paper (the pin
+    // check would already fail `verify`, so a nonzero here proves nothing).
+    // Checked after the boot so the pin is read from the jar that actually ran.
+    check_pin(baseline_dir, &run_dir)?;
+
+    println!("[3/4] diffing fresh chunk-NBT hashes against the corrupted baseline...");
+    let baseline = load_manifest(&scratch)?;
+    let fresh = load_manifest(&tmp)?;
+    let diff = diff_chunk_hashes(&baseline, &fresh);
+
+    println!();
+    if negative_control_accepts(&diff, &tampered) {
+        println!(
+            "PASS: the boot->extract->diff pipeline detected the tampered chunk {tampered} \
+             ({} of {} chunks matched the corrupted baseline).",
+            diff.matched(),
+            diff.expected
+        );
+        let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(&scratch);
+        Ok(())
+    } else if diff.is_clean() {
+        let _ = fs::remove_dir_all(&scratch);
+        Err(Error::NegativeControl {
+            message: format!(
+                "negative control FAILED: the pipeline reported ZERO divergence against a \
+                 baseline whose chunk {tampered} was corrupted — the boot->extract->diff \
+                 chain is vacuously green and cannot be trusted.\n\
+                 fresh extraction (kept for inspection): {}",
+                tmp.display()
+            ),
+        })
+    } else {
+        let named: Vec<String> = diff.mismatched.iter().map(|(p, _, _)| p.clone()).collect();
+        let _ = fs::remove_dir_all(&scratch);
+        Err(Error::NegativeControl {
+            message: format!(
+                "negative control FAILED: the pipeline diverged but did not name the \
+                 tampered chunk {tampered} (mismatched: {named:?}) — the divergence was \
+                 detected for the wrong reason.\n\
+                 fresh extraction (kept for inspection): {}",
+                tmp.display()
+            ),
+        })
+    }
+}
+
 /// Compare the chunk-NBT payload hashes of a fresh boot against a baseline.
 ///
 /// Only entries carrying a `dim` field are compared — those are the
@@ -570,13 +910,11 @@ fn print_chunk_diff(diff: &ChunkDiff, baseline: &Manifest) {
     println!("fresh extraction dir).");
 }
 
-/// The one-command M0 sanity gate: boot -> extract -> diff -> verdict.
+/// The one-command M0 sanity gate: boot -> extract -> pin-check -> diff -> verdict.
 fn run_verify_gate(baseline_dir: &Path) -> Result<(), Error> {
     let crate_root = crate_dir();
     let jar = ensure_jar()?;
     let run_dir = crate_root.join("work/verify/run");
-    let log_path = crate_root.join("work/verify/boot.log");
-    let tmp = env::temp_dir().join(format!("rivet-oracle-verify-{}", std::process::id()));
 
     println!("M0 sanity gate: green against vanilla itself");
     println!("   baseline fixtures : {}", baseline_dir.display());
@@ -587,14 +925,10 @@ fn run_verify_gate(baseline_dir: &Path) -> Result<(), Error> {
         "[1/4] booting a fresh Paper run (scratch world in {})...",
         run_dir.display()
     );
-    prepare_run_dir(&run_dir)?;
-    boot_and_shutdown(&run_dir, &log_path, &jar)?;
+    let tmp = fresh_extraction(&run_dir, &jar)?;
+    println!("[2/4] world saved cleanly; extracted deterministic chunk slice.");
 
-    println!("[2/4] world saved cleanly; extracting deterministic chunk slice...");
-    if tmp.exists() {
-        fs::remove_dir_all(&tmp)?;
-    }
-    extract_fresh_fixtures(&run_dir.join("world"), &tmp)?;
+    check_pin(baseline_dir, &run_dir)?;
 
     println!("[3/4] diffing fresh chunk-NBT hashes against the baseline...");
     let baseline = load_manifest(baseline_dir)?;
@@ -635,6 +969,23 @@ fn print_usage() {
     println!(
         "                                             (optional 2nd arg: baseline fixtures dir)"
     );
+    println!("  cargo run -p rivet-oracle -- verify --expect-fail [dir]");
+    println!(
+        "                                             negative control: diff against a corrupted"
+    );
+    println!(
+        "                                             copy of the baseline; exits 0 only when the"
+    );
+    println!("                                             tampered chunk is detected AND named");
+    println!();
+    println!("Both gate modes enforce the manifest's pinned Paper commit (fixtures/manifest.json");
+    println!(
+        "paper: ...@<commit>) against the Git-Commit attribute of the server jar the paperclip"
+    );
+    println!(
+        "actually materialized and booted (work/verify/run/versions/26.2/paper-26.2.jar); a stale"
+    );
+    println!("or unverifiable Paper fails loudly, never silently.");
     println!();
     println!("ENV:");
     println!("  RIVET_ORACLE_JAR   path to the paperclip jar");
@@ -645,6 +996,13 @@ fn run() -> Result<(), Error> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("verify") => {
+            if args.get(1).map(String::as_str) == Some("--expect-fail") {
+                let baseline = args
+                    .get(2)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| crate_dir().join("fixtures"));
+                return run_verify_negative_control(&baseline);
+            }
             let baseline = args
                 .get(1)
                 .map(PathBuf::from)
@@ -793,5 +1151,157 @@ mod tests {
         assert_eq!(d.missing.len(), 0);
         assert_eq!(d.extra.len(), 0);
         assert_eq!(d.mismatched[0].0, m2.captured[idx].path);
+    }
+
+    /// The manifest's `paper` provenance string carries the pinned commit.
+    #[test]
+    fn pin_provenance_match() {
+        assert_eq!(
+            parse_paper_pin(Some("26.2-DEV-main@0a99345")),
+            Some("0a99345".into())
+        );
+        assert_eq!(
+            parse_paper_pin(Some("26.2-DEV-main@abc1234")),
+            Some("abc1234".into())
+        );
+        // A manifest without an `@<commit>` pin carries no enforceable commit.
+        assert_eq!(parse_paper_pin(Some("26.2-DEV-main")), None);
+        assert_eq!(parse_paper_pin(Some("26.2-DEV-main@")), None);
+        assert_eq!(parse_paper_pin(None), None);
+    }
+
+    /// A pinned commit matching the server jar's Git-Commit is a Match.
+    #[test]
+    fn pin_match_when_commits_agree() {
+        assert_eq!(
+            classify_pin(Some("0a99345".into()), Some("0a99345".into())),
+            PinVerdict::Match
+        );
+    }
+
+    /// A server jar at a different commit is a loud mismatch, never a pass.
+    #[test]
+    fn pin_mismatch_names_both_commits() {
+        match classify_pin(Some("0a99345".into()), Some("deadbeef".into())) {
+            PinVerdict::Mismatch { expected, actual } => {
+                assert_eq!(expected, "0a99345");
+                assert_eq!(actual, "deadbeef");
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    /// Missing pin OR missing commit are both Unavailable — a verify run that
+    /// cannot confirm the pin must fail loudly, never pass silently.
+    #[test]
+    fn pin_unavailable_when_either_side_missing() {
+        assert!(matches!(
+            classify_pin(None, Some("0a99345".into())),
+            PinVerdict::Unavailable { .. }
+        ));
+        assert!(matches!(
+            classify_pin(Some("0a99345".into()), None),
+            PinVerdict::Unavailable { .. }
+        ));
+        assert!(matches!(
+            classify_pin(None, None),
+            PinVerdict::Unavailable { .. }
+        ));
+    }
+
+    /// `Git-Commit` extraction handles the exact MANIFEST.MF shape (trailing
+    /// CRLF, leading space after the colon) and absent attributes.
+    #[test]
+    fn manifest_commit_extraction() {
+        let mf = "Manifest-Version: 1.0\r\nGit-Commit: 0a99345\r\nSpecification-Version: 26.2\r\n";
+        assert_eq!(parse_manifest_commit(mf), Some("0a99345".into()));
+        assert_eq!(parse_manifest_commit("Manifest-Version: 1.0\r\n"), None);
+        assert_eq!(parse_manifest_commit(""), None);
+    }
+
+    /// The negative control must NOT pass on a clean diff: a pipeline that
+    /// reports zero divergence against a corrupted baseline is vacuously green
+    /// and must be rejected (false-pass prevention).
+    #[test]
+    fn negative_control_rejects_clean_diff() {
+        let clean = ChunkDiff::default();
+        assert!(!negative_control_accepts(
+            &clean,
+            "chunk/overworld/0.0/0.0.nbt"
+        ));
+        // A diff naming only *other* chunks is divergence detected for the
+        // wrong reason — the tampered chunk was not the one named.
+        let wrong = ChunkDiff {
+            expected: 432,
+            actual: 432,
+            mismatched: vec![(
+                "chunk/overworld/0.0/1.1.nbt".into(),
+                "deadbeef".into(),
+                "cafebabe".into(),
+            )],
+            ..Default::default()
+        };
+        assert!(!negative_control_accepts(
+            &wrong,
+            "chunk/overworld/0.0/0.0.nbt"
+        ));
+    }
+
+    /// The negative control accepts a diff that names the tampered chunk.
+    #[test]
+    fn negative_control_accepts_when_tampered_chunk_named() {
+        let d = ChunkDiff {
+            expected: 432,
+            actual: 432,
+            mismatched: vec![(
+                "chunk/overworld/0.0/0.0.nbt".into(),
+                "aaaa".into(),
+                "bbbb".into(),
+            )],
+            ..Default::default()
+        };
+        assert!(negative_control_accepts(&d, "chunk/overworld/0.0/0.0.nbt"));
+    }
+
+    /// `tamper_baseline_copy` corrupts a copy of the committed fixtures (never
+    /// the committed ones) and updates the copy's manifest consistently, so the
+    /// copy is a *plausible but wrong* baseline: it verifies clean statically,
+    /// but the boot->extract->diff pipeline (fresh boot reproduces the original
+    /// chunk hashes) must surface exactly the tampered chunk as the one
+    /// divergence.
+    #[test]
+    fn tamper_baseline_copy_detects_and_leaves_committed_intact() {
+        let dir = fixtures_dir();
+        let manifest_path = dir.join("manifest.json");
+        if !manifest_path.is_file() {
+            return;
+        }
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-tamper2-{}", std::process::id()));
+        let tampered_path = tamper_baseline_copy(&dir, &scratch).expect("copy+tamper succeeds");
+        assert!(
+            tampered_path.starts_with("chunk/"),
+            "must tamper a chunk, got {tampered_path}"
+        );
+
+        // The corrupted copy is internally consistent — it passes a static
+        // verify against its own manifest. The negative control catches the
+        // divergence through the pipeline diff, not a trivially broken copy.
+        verify_fixtures(&scratch).expect("corrupted copy is internally consistent");
+
+        // The committed fixtures must still verify clean (never mutated).
+        verify_fixtures(&dir).expect("committed fixtures must be untouched");
+
+        // A deterministic fresh boot reproduces the committed (original) chunk
+        // hashes, so diffing committed-vs-corrupted yields exactly the tampered
+        // chunk as a single mismatch — the divergence the pipeline must name.
+        let committed = load_manifest(&dir).unwrap();
+        let corrupted = load_manifest(&scratch).unwrap();
+        let d = diff_chunk_hashes(&committed, &corrupted);
+        assert!(!d.is_clean(), "tamper must produce a divergence");
+        assert_eq!(d.mismatched.len(), 1, "exactly one chunk diverged");
+        assert_eq!(d.mismatched[0].0, tampered_path);
+
+        let _ = fs::remove_dir_all(&scratch);
     }
 }

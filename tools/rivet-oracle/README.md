@@ -108,7 +108,8 @@ size mismatch.
 
 ## One-command M0 sanity gate: `verify`
 
-The whole boot → extract → diff → verdict loop is a single command:
+The whole boot → extract → pin-check → diff → verdict loop is a single
+command:
 
 ```bash
 cargo run -p rivet-oracle -- verify
@@ -133,10 +134,23 @@ It does, in order:
 3. **Extract the deterministic slice** by calling
    `scripts/extract_fixtures.py` (kept as the subprocess; it's small,
    already-tested, and needs no Rust port).
-4. **Diff chunk-NBT SHA-256s** against the baseline manifest. Only the
+4. **Enforce the pinned Paper commit.** `verify` never passes silently against
+   a stale or unverifiable Paper: the manifest's `paper` provenance
+   (`26.2-DEV-main@0a99345`) pins the commit the golden baseline was captured
+   against, and the gate compares it to the `Git-Commit` attribute of the
+   server jar the paperclip **actually materialized and booted**
+   (`work/verify/run/versions/26.2/paper-26.2.jar`). The pin is read from what
+   actually ran — never from a proxy build (a co-located/`working/Paper`
+   `paper-server-*.jar` can sit at a different commit than the resolved
+   paperclip; a stale `work/jars/` sibling shadows the source build silently).
+   A **mismatch** fails with the expected and actual commits and points at the
+   regeneration path; an **unavailable** pin (no manifest pin, or the booted
+   jar carries no readable Git-Commit) also fails loudly — the gate never
+   passes when the pin cannot be confirmed.
+5. **Diff chunk-NBT SHA-256s** against the baseline manifest. Only the
    chunk-NBT layer is compared — level.dat / server.properties contain
    wall-clock timestamps and are expected to differ.
-5. **Verdict**: `PASS: 432/432 chunk NBT payloads are byte-identical to the
+6. **Verdict**: `PASS: 432/432 chunk NBT payloads are byte-identical to the
    committed golden baseline (seed 42 / minecraft:flat) — green against vanilla
    itself.` or a FAIL report (per-chunk expected/actual hashes, missing/extra
    chunks). Nonzero exit on any failure.
@@ -145,7 +159,44 @@ A fresh-boot worldgen diff is a real result — investigate, never fudge
 fixtures to pass. `work/verify/boot.log` and the kept fresh-extraction dir (in
 the system temp dir, printed on FAIL) are the diagnostic artifacts.
 
-## Conventions
+## Negative control: `verify --expect-fail`
+
+Tamper detection used to exist only as Rust unit tests on the pure diff
+function. `verify --expect-fail` closes that hole: it proves the *full*
+boot → extract → diff pipeline is not vacuously green by diffing a fresh boot
+against a **deliberately corrupted** baseline and requiring the divergence to
+be detected *and named*.
+
+```bash
+cargo run -p rivet-oracle -- verify --expect-fail
+# or against a custom baseline fixtures dir:
+cargo run -p rivet-oracle -- verify --expect-fail <fixtures-dir>
+```
+
+It runs the same pipeline as `verify` (including the pin check), but instead
+of diffing against the committed fixtures it:
+
+1. Copies the baseline fixtures to a scratch dir in the system temp and
+   **corrupts one known chunk payload** (flips a byte) *and* that chunk's
+   recorded SHA-256 in the copy's manifest, so the copy is internally
+   consistent — a plausible but wrong baseline. The committed fixtures are
+   never touched.
+2. Boots a fresh Paper run, extracts the deterministic slice, and diffs it
+   against the corrupted copy.
+3. Passes (exit 0) **only** when the tampered chunk is the one named in the
+   mismatch list. It rejects a clean diff (false negative — the pipeline
+   missed the tamper) and any divergence that names a *different* chunk
+   (detected for the wrong reason), both with distinct nonzero exits and the
+   kept fresh-extraction dir for inspection.
+
+The negative control reuses the exact `verify` boot and extract steps, so it
+cannot pass if `verify` itself is broken: a boot/extract failure, a pin
+mismatch, or an unverifiable pin all exit nonzero before the diff runs.
+
+`scripts/gate.sh` runs `verify --expect-fail` right after `verify` (behind the
+same paperclip guard, accepting the extra boot) so a future change that breaks
+the acceptance logic or the tamper is caught by the gate, not only by a manual
+run.
 
 ## Conventions
 
