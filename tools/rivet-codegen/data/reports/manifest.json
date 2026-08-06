@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "generator": "net.minecraft.data.Main --reports",
+  "source": {
+    "jar": "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar",
+    "jar_sha256": "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda",
+    "paper_git": "0a993450f129c4942c2a9ed45ba047412b4667cf",
+    "minecraft_version": "26.2",
+    "protocol_version": 776,
+    "world_version": 4903
+  },
+  "reports": [
+    {
+      "path": "packets.json",
+      "bytes": 18734,
+      "sha256": "02ab88951f242b28cc91e77c9f05815982b155ce8ab8b93af54aab48f4d4cb57"
+    },
+    {
+      "path": "registries.json",
+      "bytes": 529716,
+      "sha256": "1e443815cabff92ae5c38a62910fef9c6f9856466a79e5fab721cdbc28060715"
+    },
+    {
+      "path": "blocks.json",
+      "bytes": 6807038,
+      "sha256": "dec22eb9547b0bbea396cbf35569f7ec81b7be662775ce03dc2236227473af7b"
+    }
+  ]
+}

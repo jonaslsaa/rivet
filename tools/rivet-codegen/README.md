@@ -15,10 +15,15 @@ for `crates/rivet-registry`. It is excluded from the cargo workspace
 - **`generate`** — reads that JSON and emits the registry tables directly into
   `crates/rivet-registry/src/generated/` (a `BlockId` registry + a block-state
   property enum structure).
+- **`reports`** — runs the vanilla `net.minecraft.data.Main --reports` datagen
+  against the materialized Paper 26.2 server jar and pins the canonical
+  `packets.json` / `registries.json` / `blocks.json` reports (with provenance)
+  under `data/reports/`.
 
 ```
-rivet-codegen extract [--bundler <path>] [--output <path>]
+rivet-codegen extract  [--bundler <path>] [--output <path>]
 rivet-codegen generate [--input <path>]  [--output <dir>]
+rivet-codegen reports  [--jar <path>] [--output <dir>] [--verify]
 ```
 
 ## How to run
@@ -34,10 +39,51 @@ checkout; the tool needs a jar produced elsewhere.
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
 target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs}
+target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
 `extract` caches the unpacked classpath in `.cache/` (gitignored) so reruns are
 fast. Pass `--bundler` to point at a different jar.
+
+## The `reports` subcommand
+
+`reports` runs the **real vanilla** `net.minecraft.data.Main --reports` datagen
+against the materialized Paper 26.2 server jar and copies the three canonical
+report artifacts byte-for-byte into `data/reports/`:
+
+- `packets.json` — every protocol/flow packet name -> `protocol_id`, in the
+  exact `addPacket` registration order of the `*Protocols.TEMPLATE` definitions
+  (`PacketReport`). This is the canonical enumeration `IdDispatchCodec` assigns
+  ids from, so it is the oracle for `rivet-protocol`'s packet-ID tables.
+- `registries.json` — every `BuiltInRegistries` registry with numeric protocol
+  ids (`RegistryDumpReport`; `Bootstrap.bootStrap()` runs in `DataGenerator`
+  static init, so this is a fully-populated real-server dump).
+- `blocks.json` — per-block ordered state properties, all state ids, the default
+  marker, and the `BlockTypes.CODEC` definition (`BlockListReport`).
+
+No extraction logic is invented — these are the same generators vanilla's own
+`Main --reports` ships, so the fixtures can never drift from upstream's canonical
+data. The datagen output is deterministic (verified byte-identical across
+independent runs), so the committed files are the no-drift baseline.
+
+Source pinning is recorded in `data/reports/manifest.json`: the source jar's
+sha256, the Paper git commit it was built from, and the MC/protocol/world
+versions read straight out of the jar's `version.json`. The jar path is stored
+repo-relative (machine-independent); the jar identity is the sha256.
+
+The source jar is the oracle's materialization at
+`tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar` (gitignored; absent
+from committed checkouts). Resolve it with `--jar <path>`, or
+`RIVET_CODEGEN_JAR=/path/to/paper-26.2.jar` (mirrors the oracle's
+`RIVET_ORACLE_JAR`), or boot the oracle once (`cargo run -p rivet-oracle --
+verify`) to materialize it at the default location.
+
+`reports --verify` is the no-drift gate: it runs the datagen **twice** fresh
+(proving cross-run determinism), requires both runs byte-identical to the
+committed fixtures, and re-checks the committed files against the manifest's
+recorded hashes. A changed source jar whose reports are still byte-identical
+prints a provenance note rather than failing — the fixtures are canonical, but
+`reports` should be re-run to refresh the manifest.
 
 ## Data source decision
 

@@ -202,7 +202,7 @@ fn collect_jars(dir: &Path, out: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn resolve_java() -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn resolve_java() -> Result<(PathBuf, PathBuf)> {
     if let Ok(home) = std::env::var("JAVA_HOME") {
         let bin = Path::new(&home).join("bin");
         let java = bin.join("java");
