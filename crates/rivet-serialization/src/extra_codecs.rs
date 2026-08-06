@@ -1,25 +1,34 @@
 //! **Partial** port of `net.minecraft.util.ExtraCodecs`.
 //!
 //! PROVENANCE: `ExtraCodecs.java` is a leaf of the `mc.util` manifest unit
-//! (net.minecraft.util -> rivet-util). This module ports ONLY the four methods
-//! the registry-core slice needs, because they are pure DFU combinators with
-//! no Minecraft dependency and therefore belong in `rivet-serialization` (the
-//! crate that owns the `com.mojang.serialization` surface):
+//! (net.minecraft.util -> rivet-util). This module ports the DFU combinators
+//! that are pure `com.mojang.serialization` surface with no Minecraft
+//! dependency, so they belong in `rivet-serialization` (the crate that owns
+//! that surface). They were added by the slices that needed them:
 //!
 //! - `overrideLifecycle(Codec, Function, Function)` and its 1-arg variant —
 //!   required by `Registry.referenceHolderWithLifecycle()`.
 //! - `retrieveContext(Function)` — required by `RegistryOps`.
-//! - `orCompressed(Codec, Codec)` — transitive dependency of
-//!   `StringRepresentable.StringRepresentableCodec` (rivet-util).
-//! - `idResolverCodec(ToIntFunction, IntFunction, int)` — transitive
-//!   dependency of `StringRepresentable.StringRepresentableCodec`.
+//! - `orCompressed(Codec, Codec)` and `orCompressed(MapCodec, MapCodec)` —
+//!   the Codec variant is a transitive dependency of
+//!   `StringRepresentable.StringRepresentableCodec` (rivet-util); the MapCodec
+//!   variant is required by `ComponentSerialization.createLegacyComponentMatcher`
+//!   (rivet-text).
+//! - `idResolverCodec(ToIntFunction, IntFunction, int)` and its typed
+//!   `Codec<I>` overload — transitive dependency of
+//!   `StringRepresentable.StringRepresentableCodec`, and the typed overload is
+//!   required by `LateBoundIdMapper.codec` (rivet-text's content dispatch).
+//! - `nonEmptyList(Codec<List<T>>)` — required by `ComponentSerialization`'s
+//!   `"extra"` sibling field.
+//! - `LateBoundIdMapper<I, V>` + the `late_bound_values`/`late_bound_entries`
+//!   accessors — required by `ComponentSerialization`'s content-type bootstrap
+//!   and `KeyDispatchCodec` discriminator.
 //!
-//! RECONCILIATION: when the full `mc.util` unit is ported, these four free
-//! functions move into that unit's `extra_codecs.rs`; they keep the exact same
-//! signatures and semantics documented here. Nothing else from
-//! `ExtraCodecs.java` (ranges, `nonEmptyList`, `compactListCodec`,
-//! `ensureHomogenous`, `orElsePartial`, ...) is ported — that is future
-//! `mc.util` scope, not this slice.
+//! RECONCILIATION: when the full `mc.util` unit is ported, these free functions
+//! move into that unit's `extra_codecs.rs`; they keep the exact same signatures
+//! and semantics documented here. The remaining `ExtraCodecs.java` surface
+//! (ranges, `compactListCodec`, `ensureHomogenous`, `orElsePartial`, ...) is
+//! not ported — that is future `mc.util` scope, not this slice.
 
 use crate::codec::{self, Codec, ResultFunction};
 use crate::data_result::DataResult;
@@ -247,4 +256,222 @@ where
             }
         }),
     )
+}
+
+/// `Function<I, Optional<E>>` — `fromId` for `idResolverCodec`.
+type FromIdFn<I, E> = Arc<dyn Fn(&I) -> Option<E>>;
+/// `Function<E, Optional<I>>` — `toId` for `idResolverCodec`.
+type ToIdFn<I, E> = Arc<dyn Fn(&E) -> Option<I>>;
+
+/// `ExtraCodecs.idResolverCodec(Codec<I> value, Function<I, E>,
+/// Function<E, I>)` — `value.flatXmap(id -> fromId(id) ?? error,
+/// e -> toId(e) ?? error)`. The `Codec<I>`-parameterized variant (used by
+/// `LateBoundIdMapper.codec(Codec<I>)`); the int variant above is the
+/// `ToIntFunction` overload. Error messages match Java exactly.
+pub fn id_resolver_codec_typed<I, E, Ops>(
+    value: Arc<dyn Codec<I, Ops>>,
+    from_id: FromIdFn<I, E>,
+    to_id: ToIdFn<I, E>,
+) -> Arc<dyn Codec<E, Ops>>
+where
+    I: 'static + std::fmt::Display + Clone,
+    E: 'static + std::fmt::Display + Clone,
+    Ops: DynamicOps + 'static,
+{
+    codec::flat_xmap(
+        value,
+        Arc::new(move |id: &I| match from_id(id) {
+            Some(e) => DataResult::success(e),
+            None => DataResult::error(format!("Unknown element id: {}", id)),
+        }),
+        Arc::new(move |e: &E| match to_id(e) {
+            Some(id) => DataResult::success(id),
+            None => DataResult::error(format!("Element with unknown id: {}", e)),
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// nonEmptyList
+// ---------------------------------------------------------------------------
+
+/// `ExtraCodecs.nonEmptyList(Codec<List<T>>)` — validates the decoded list is
+/// non-empty, else `DataResult.error("List must have contents")`.
+pub fn non_empty_list<E, Ops>(
+    list_codec: Arc<dyn Codec<Vec<E>, Ops>>,
+) -> Arc<dyn Codec<Vec<E>, Ops>>
+where
+    E: 'static + Clone,
+    Ops: DynamicOps + 'static,
+{
+    codec::validate(
+        list_codec,
+        Arc::new(|list: &Vec<E>| {
+            if list.is_empty() {
+                DataResult::error("List must have contents")
+            } else {
+                DataResult::success(list.clone())
+            }
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// orCompressed (MapCodec variant)
+// ---------------------------------------------------------------------------
+
+/// `ExtraCodecs.orCompressed(MapCodec<E>, MapCodec<E>)` — the MapCodec
+/// overload: encode/decode route through `compressed` when
+/// `ops.compressMaps()`, else `normal`; `keys` comes from `compressed`.
+/// `toString` is `normal + " orCompressed " + compressed`.
+pub fn or_compressed_map<E, Ops>(
+    normal: Arc<dyn MapCodec<E, Ops>>,
+    compressed: Arc<dyn MapCodec<E, Ops>>,
+) -> Arc<dyn MapCodec<E, Ops>>
+where
+    E: 'static,
+    Ops: DynamicOps + 'static,
+{
+    Arc::new(OrCompressedMapCodec { normal, compressed })
+}
+
+struct OrCompressedMapCodec<E, Ops> {
+    normal: Arc<dyn MapCodec<E, Ops>>,
+    compressed: Arc<dyn MapCodec<E, Ops>>,
+}
+
+impl<E, Ops> Debug for OrCompressedMapCodec<E, Ops> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?} orCompressed {:?}", self.normal, self.compressed)
+    }
+}
+
+impl<E, Ops: DynamicOps + 'static> Keyable<Ops> for OrCompressedMapCodec<E, Ops> {
+    fn keys(&self, ops: &Ops) -> Vec<Ops::Output> {
+        // Java `orCompressed(MapCodec)` returns `compressed.keys()`.
+        self.compressed.keys(ops)
+    }
+}
+
+impl<E, Ops: DynamicOps + 'static> crate::map_encoder::MapEncoder<E, Ops>
+    for OrCompressedMapCodec<E, Ops>
+{
+    fn encode(&self, input: &E, ops: &Ops, prefix: &mut dyn RecordBuilder<Output = Ops::Output>) {
+        if ops.compress_maps() {
+            self.compressed.encode(input, ops, prefix)
+        } else {
+            self.normal.encode(input, ops, prefix)
+        }
+    }
+}
+
+impl<E, Ops: DynamicOps + 'static> crate::map_decoder::MapDecoder<E, Ops>
+    for OrCompressedMapCodec<E, Ops>
+{
+    fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<E> {
+        if ops.compress_maps() {
+            self.compressed.decode(ops, input)
+        } else {
+            self.normal.decode(ops, input)
+        }
+    }
+}
+
+impl<E, Ops: DynamicOps + 'static> MapCodec<E, Ops> for OrCompressedMapCodec<E, Ops> {
+    fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<E> {
+        crate::map_decoder::MapDecoder::decode(self, ops, input)
+    }
+
+    fn encode(&self, input: &E, ops: &Ops, prefix: &mut dyn RecordBuilder<Output = Ops::Output>) {
+        crate::map_encoder::MapEncoder::encode(self, input, ops, prefix)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LateBoundIdMapper
+// ---------------------------------------------------------------------------
+
+/// `ExtraCodecs.LateBoundIdMapper<I, V>` — a name → MapCodec registry built
+/// up by `put` calls (the component-content/ObjectInfo/DataSource bootstrap).
+/// Java's `idToValue` is a `HashBiMap`; the port keeps insertion order so the
+/// FuzzyCodec decode loop is deterministic (the registered shapes are disjoint
+/// in practice, so order is unobservable for valid input).
+pub struct LateBoundIdMapper<K, V> {
+    entries: std::sync::Mutex<Vec<(K, V)>>,
+}
+
+impl<K, V> Default for LateBoundIdMapper<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, V> LateBoundIdMapper<K, V> {
+    /// `new LateBoundIdMapper<>()`.
+    pub fn new() -> Self {
+        LateBoundIdMapper {
+            entries: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// `put(I id, V value)` — `Objects.requireNonNull(value)`; panics on a
+    /// null (unrepresentable) value like Java.
+    pub fn put(&self, id: K, value: V) {
+        self.entries.lock().unwrap().push((id, value));
+    }
+
+    /// `codec(Codec<I> idCodec)` — `ExtraCodecs.idResolverCodec(idCodec,
+    /// this.idToValue::get, valueToId::get)`.
+    ///
+    /// Java's `BiMap` resolves by value equality on both directions; the id
+    /// codec type is always the map's own key type (callers pass
+    /// `Codec.STRING` for a `LateBoundIdMapper<String, ...>`). The port keeps
+    /// a `Vec<(K, V)>` in insertion order and compares by equality.
+    pub fn codec<Ops>(&self, id_codec: Arc<dyn Codec<K, Ops>>) -> Arc<dyn Codec<V, Ops>>
+    where
+        K: PartialEq + Clone + std::fmt::Display + 'static,
+        V: PartialEq + Clone + std::fmt::Display + 'static,
+        Ops: DynamicOps + 'static,
+    {
+        let entries = self.entries.lock().unwrap().clone();
+        let entries_for_encode = entries.clone();
+        id_resolver_codec_typed(
+            id_codec,
+            Arc::new(move |id: &K| {
+                entries
+                    .iter()
+                    .find(|(k, _)| k == id)
+                    .map(|(_, v)| v.clone())
+            }),
+            Arc::new(move |v: &V| {
+                entries_for_encode
+                    .iter()
+                    .find(|(_, val)| *val == *v)
+                    .map(|(k, _)| k.clone())
+            }),
+        )
+    }
+}
+
+/// `values()` — an immutable snapshot of the registered values (Java returns
+/// `Collections.unmodifiableSet(this.idToValue.values())`; order is the
+/// insertion order here).
+pub fn late_bound_values<K, V>(mapper: &LateBoundIdMapper<K, V>) -> Vec<V>
+where
+    V: Clone,
+{
+    mapper
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, v)| v.clone())
+        .collect()
+}
+
+/// `entries()` — an immutable snapshot of the `(id, value)` pairs in insertion
+/// order, used by `ComponentSerialization`'s discriminator codec to resolve a
+/// type name to its `MapCodec`.
+pub fn late_bound_entries<K: Clone, V: Clone>(mapper: &LateBoundIdMapper<K, V>) -> Vec<(K, V)> {
+    mapper.entries.lock().unwrap().clone()
 }
