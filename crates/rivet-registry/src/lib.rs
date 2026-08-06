@@ -17,11 +17,12 @@
 //!
 //! `core` (issue #125) ports the registry-independent position/value
 //! primitives of `net.minecraft.core`: `Vec3i`/`BlockPos`/`SectionPos`/
-//! `ChunkPos` plus the tightly coupled `Position`, `Direction`, `AxisCycle`,
-//! `Cursor3D` and `Rotation` value types. These are pure value types, resolved
-//! by ID per OWNERSHIP.md; their `StreamCodec` impls live in `rivet-protocol`,
-//! not here. `GlobalPos` is deferred (needs `ResourceKey` from the #124
-//! registry SCC) and is not declared in this crate.
+//! `ChunkPos`/`GlobalPos` plus the tightly coupled `Position`, `Direction`,
+//! `AxisCycle`, `Cursor3D` and `Rotation` value types. These are pure value
+//! types, resolved by ID per OWNERSHIP.md; their `StreamCodec` impls live in
+//! `rivet-protocol`, not here. `GlobalPos`'s `ResourceKey<Level>` component
+//! uses the world-unit `Level` placeholder from `registries`; its codecs are
+//! still deferred to the protocol crates (#126/#82/#83).
 
 /// Compile-time block registry + block-state tables.
 ///

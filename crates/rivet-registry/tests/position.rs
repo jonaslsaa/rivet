@@ -12,9 +12,11 @@
 
 use rivet_registry::core::MAX_CHUNK_COORDINATE_VALUE;
 use rivet_registry::core::{
-    Axis, AxisCycle, AxisDirection, BlockPos, ChunkPos, Direction, MutableBlockPos, Plane,
-    Position, Rotation, SectionPos, TraversalNodeStatus, Vec3i,
+    Axis, AxisCycle, AxisDirection, BlockPos, ChunkPos, Direction, GlobalPos, MutableBlockPos,
+    Plane, Position, Rotation, SectionPos, TraversalNodeStatus, Vec3i,
 };
+use rivet_registry::registries::DIMENSION;
+use rivet_registry::{Identifier, ResourceKey};
 use rivet_util::random::LegacyRandomSource;
 
 // ---------------------------------------------------------------------------
@@ -993,4 +995,95 @@ fn rotation_rotate_direction() {
         Direction::West
     );
     assert_eq!(Rotation::Clockwise90.rotate(&Direction::Up), Direction::Up);
+}
+
+// ---------------------------------------------------------------------------
+// GlobalPos
+// ---------------------------------------------------------------------------
+
+fn overworld() -> ResourceKey<rivet_registry::registries::Level> {
+    ResourceKey::create(&DIMENSION, Identifier::parse("minecraft:overworld"))
+}
+
+#[test]
+fn global_pos_of_and_accessors() {
+    let dim = overworld();
+    let pos = BlockPos::new(1, 2, 3);
+    let g = GlobalPos::of(dim.clone(), pos);
+    assert_eq!(g.dimension(), &dim);
+    assert_eq!(g.pos(), pos);
+}
+
+#[test]
+fn global_pos_is_close_enough() {
+    // Java `GlobalPos.isCloseEnough`: dimensions equal AND
+    // `pos.distChessboard(pos) <= maxDistance`.
+    let dim = overworld();
+    let g = GlobalPos::of(dim.clone(), BlockPos::new(0, 0, 0));
+    // Chessboard distance max(|dx|,|dy|,|dz|) = max(3, 2, 1) = 3 <= 3.
+    assert!(g.is_close_enough(&dim, &BlockPos::new(3, -2, 1), 3));
+    // max(4, 0, 0) = 4 > 3.
+    assert!(!g.is_close_enough(&dim, &BlockPos::new(4, 0, 0), 3));
+    // Dimension mismatch never matches, regardless of distance.
+    let other_dim = ResourceKey::create(&DIMENSION, Identifier::parse("minecraft:the_nether"));
+    assert!(!g.is_close_enough(&other_dim, &BlockPos::new(0, 0, 0), 100));
+}
+
+#[test]
+fn global_pos_to_string_matches_java() {
+    // Java `GlobalPos.toString()` = `dimension + " " + pos`; `ResourceKey`
+    // renders `ResourceKey[registry / identifier]`, `BlockPos` renders
+    // `BlockPos{x=…, y=…, z=…}`.
+    let dim = overworld();
+    let g = GlobalPos::of(dim, BlockPos::new(1, 2, 3));
+    assert_eq!(
+        g.to_string(),
+        "ResourceKey[minecraft:dimension / minecraft:overworld] BlockPos{x=1, y=2, z=3}"
+    );
+}
+
+#[test]
+fn global_pos_value_semantics() {
+    // Java record value semantics: `equals` compares both components.
+    let dim = overworld();
+    assert_eq!(
+        GlobalPos::of(dim.clone(), BlockPos::new(1, 2, 3)),
+        GlobalPos::of(dim.clone(), BlockPos::new(1, 2, 3))
+    );
+    // A different `BlockPos` is unequal.
+    assert_ne!(
+        GlobalPos::of(dim.clone(), BlockPos::new(1, 2, 3)),
+        GlobalPos::of(dim.clone(), BlockPos::new(1, 2, 4))
+    );
+    // A different dimension key is unequal even for the same position.
+    let nether = ResourceKey::create(&DIMENSION, Identifier::parse("minecraft:the_nether"));
+    assert_ne!(
+        GlobalPos::of(dim.clone(), BlockPos::new(1, 2, 3)),
+        GlobalPos::of(nether, BlockPos::new(1, 2, 3))
+    );
+    // `Hash` agrees with `Eq` (equal values hash identically).
+    use std::collections::HashSet;
+    let set: HashSet<GlobalPos> = [
+        GlobalPos::of(dim.clone(), BlockPos::new(1, 2, 3)),
+        GlobalPos::of(dim.clone(), BlockPos::new(1, 2, 3)),
+        GlobalPos::of(dim.clone(), BlockPos::new(9, 9, 9)),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(set.len(), 2);
+}
+
+#[test]
+fn block_pos_dist_chessboard() {
+    // `Vec3i.distChessboard` on a `BlockPos` — max of the axis deltas.
+    let a = BlockPos::new(0, 0, 0);
+    assert_eq!(a.dist_chessboard(&BlockPos::new(3, -2, 1)), 3);
+    assert_eq!(a.dist_chessboard(&BlockPos::new(0, 0, 0)), 0);
+    // Wrapping subtraction matches Java: `Integer.MIN_VALUE -
+    // Integer.MAX_VALUE` wraps to 1 in Java's int arithmetic (and in the
+    // Rust port), so `distChessboard` = max(1, 0, 0) = 1.
+    assert_eq!(
+        BlockPos::new(i32::MIN, 0, 0).dist_chessboard(&BlockPos::new(i32::MAX, 0, 0)),
+        1
+    );
 }

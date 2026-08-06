@@ -114,6 +114,18 @@ impl BlockPos {
         compare_coords(self.x, self.y, self.z, pos.x, pos.y, pos.z)
     }
 
+    /// `Vec3i.distChessboard(Vec3i)` — the max of the axis deltas (`Chebyshev`).
+    ///
+    /// Re-declared on `BlockPos` like the other Java-inherited `Vec3i` methods
+    /// so `GlobalPos::is_close_enough` (Java `GlobalPos.isCloseEnough`) can call
+    /// `pos.distChessboard(pos)` on a `BlockPos`.
+    pub fn dist_chessboard(&self, pos: &BlockPos) -> i32 {
+        let xd = self.x.wrapping_sub(pos.x).wrapping_abs();
+        let yd = self.y.wrapping_sub(pos.y).wrapping_abs();
+        let zd = self.z.wrapping_sub(pos.z).wrapping_abs();
+        xd.max(yd).max(zd)
+    }
+
     /// `BlockPos.asLong()`.
     pub fn as_long(&self) -> i64 {
         Self::as_long_coords(self.x, self.y, self.z)

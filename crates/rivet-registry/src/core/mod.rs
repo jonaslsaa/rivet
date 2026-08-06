@@ -13,9 +13,7 @@
 //! convenience and cycle-breaking justifies the one-line move).
 //!
 //! Deliberately absent (blocked by later work; no declarations emitted):
-//! `GlobalPos` (record `(ResourceKey<Level>, BlockPos)` — needs `ResourceKey`
-//! /`Level.RESOURCE_KEY_CODEC` from the #124 registry SCC, a sibling
-//! worktree); `BlockBox`, `Direction8`, `Rotations` (also `net.minecraft.core`
+//! `BlockBox`, `Direction8`, `Rotations` (also `net.minecraft.core`
 //! value types named in OWNERSHIP.md §Registries as staying in
 //! `rivet-registry::core` — not yet ported; issue-tracked); the `Position`
 //! trait's sole Java implementors are JOML `Vec3`/`Vector3d` which are
@@ -31,6 +29,7 @@ mod block_pos;
 mod chunk_pos;
 mod cursor3d;
 mod direction;
+mod global_pos;
 mod position;
 mod rotation;
 mod section_pos;
@@ -41,6 +40,7 @@ pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus};
 pub use chunk_pos::ChunkPos;
 pub use cursor3d::Cursor3D;
 pub use direction::{Axis, AxisDirection, Direction, Plane};
+pub use global_pos::GlobalPos;
 pub use position::Position;
 pub use rotation::Rotation;
 pub use section_pos::SectionPos;
