@@ -47,6 +47,7 @@ use crate::ResourceKey;
 use crate::access::RegistryAccess;
 use crate::registry::{Registry, RegistryKey};
 
+use rivet_serialization::Number;
 use rivet_serialization::Pair;
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::{DynamicOps, ListBuilder, MapLike, RecordBuilder};
@@ -126,11 +127,11 @@ where
         self.delegate.convert_to(out_ops, input)
     }
 
-    fn get_number_value(&self, input: &T) -> DataResult<f64> {
+    fn get_number_value(&self, input: &T) -> DataResult<Number> {
         self.delegate.get_number_value(input)
     }
 
-    fn create_numeric(&self, value: f64) -> T {
+    fn create_numeric(&self, value: Number) -> T {
         self.delegate.create_numeric(value)
     }
 
@@ -613,11 +614,11 @@ where
         self.base.convert_to(out_ops, input)
     }
 
-    fn get_number_value(&self, input: &T) -> DataResult<f64> {
+    fn get_number_value(&self, input: &T) -> DataResult<Number> {
         self.base.get_number_value(input)
     }
 
-    fn create_numeric(&self, value: f64) -> T {
+    fn create_numeric(&self, value: Number) -> T {
         self.base.create_numeric(value)
     }
 
@@ -959,7 +960,7 @@ mod tests {
 
         fn convert_to<U: DynamicOps>(&self, out_ops: &U, input: &TestVal) -> U::Output {
             match input {
-                TestVal::Num(n) => out_ops.create_numeric(*n),
+                TestVal::Num(n) => out_ops.create_numeric(Number::Double(*n)),
                 TestVal::Str(s) => out_ops.create_string(s.clone()),
                 TestVal::Bool(b) => out_ops.create_boolean(*b),
                 TestVal::Map(entries) => out_ops.create_map(
@@ -977,15 +978,15 @@ mod tests {
             }
         }
 
-        fn get_number_value(&self, input: &TestVal) -> DataResult<f64> {
+        fn get_number_value(&self, input: &TestVal) -> DataResult<Number> {
             match input {
-                TestVal::Num(n) => DataResult::success(*n),
+                TestVal::Num(n) => DataResult::success(Number::Double(*n)),
                 _ => DataResult::error(format!("Not a number: {:?}", input)),
             }
         }
 
-        fn create_numeric(&self, value: f64) -> TestVal {
-            TestVal::Num(value)
+        fn create_numeric(&self, value: Number) -> TestVal {
+            TestVal::Num(value.double_value())
         }
 
         fn get_boolean_value(&self, input: &TestVal) -> DataResult<bool> {
@@ -1106,7 +1107,11 @@ mod tests {
             self.get_stream(input).map(|items| {
                 items
                     .iter()
-                    .filter_map(|v| self.get_number_value(v).result().map(|n| *n as u8))
+                    .filter_map(|v| {
+                        self.get_number_value(v)
+                            .result()
+                            .map(|n| n.byte_value() as u8)
+                    })
                     .collect()
             })
         }
@@ -1119,7 +1124,7 @@ mod tests {
             self.get_stream(input).map(|items| {
                 items
                     .iter()
-                    .filter_map(|v| self.get_number_value(v).result().map(|n| *n as i32))
+                    .filter_map(|v| self.get_number_value(v).result().map(|n| n.int_value()))
                     .collect()
             })
         }
@@ -1132,7 +1137,7 @@ mod tests {
             self.get_stream(input).map(|items| {
                 items
                     .iter()
-                    .filter_map(|v| self.get_number_value(v).result().map(|n| *n as i64))
+                    .filter_map(|v| self.get_number_value(v).result().map(|n| n.long_value()))
                     .collect()
             })
         }
@@ -1207,7 +1212,7 @@ mod tests {
         assert_eq!(ops.create_int(7), TestVal::Num(7.0));
         assert_eq!(
             ops.get_number_value(&TestVal::Num(2.5)).result(),
-            Some(&2.5)
+            Some(&Number::Double(2.5))
         );
         assert_eq!(
             ops.get_string_value(&ops.create_string("hi".to_string()))
