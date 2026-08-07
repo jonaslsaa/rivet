@@ -9,14 +9,23 @@
 #
 #   ./scripts/gate.sh                     # full gate: fmt, clippy, tests, manifest, codegen, oracle, scenario, machete
 #   ./scripts/gate.sh crates/rivet-nbt     # fmt+clippy+test for rivet-nbt only
-# The full gate also runs both oracle steps against the Paper Java oracle, plus the
+# The full gate also runs the oracle steps against the Paper Java oracle, plus the
 # scenario runner:
+#   - rivet-oracle (default)  verifies ALL committed fixture kinds: the M0 chunk
+#                          slice, the M2 worldgen semantic samples, and the M2
+#                          normal-overworld none-compression region payloads
+#                          (each against its own manifest.json SHA-256s).
 #   - rivet-oracle verify  M0 sanity gate: boot a fresh Paper server and diff its
 #                          chunk-NBT slice against the committed golden baseline.
 #                          Also runs verify --expect-fail, the negative control:
 #                          a fresh boot diffed against a corrupted temp baseline
 #                          copy that must be detected and named (proves the
 #                          boot->extract->diff chain is not vacuously green).
+#   - rivet-oracle verify --m2  M2 region gate: boot a fresh normal-overworld
+#                          server (region-file-compression=none, D13) and diff its
+#                          chunk-NBT slice against the committed region baseline
+#                          (proves two fresh boots match). Also runs the
+#                          --m2 --expect-fail negative control.
 #   - rivet-parity         byte-for-byte NBT/SNBT diff of rivet-nbt against the Paper
 #                          reference oracle — the only gate step that exercises real
 #                          Rivet code against Paper.
@@ -278,12 +287,19 @@ oracle_prereq_check() {
 # gate like any other oracle stage; the tamper never touches the committed
 # fixtures.
 run_oracle_verify() {
-  echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
+  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions)"
+  cargo run -q -p rivet-oracle
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
+    echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
     cargo run -q -p rivet-oracle -- verify
     echo "    VERIFIED — fresh Paper boot is byte-identical to the committed golden baseline"
     echo "==> oracle negative control (verify --expect-fail: detects tamper)"
     cargo run -q -p rivet-oracle -- verify --expect-fail
+    echo "==> oracle verify (M2 region gate: normal-overworld none-compression region parity)"
+    cargo run -q -p rivet-oracle -- verify --m2
+    echo "    VERIFIED — fresh normal-overworld boot is byte-identical to the committed region baseline"
+    echo "==> oracle negative control (verify --m2 --expect-fail: detects tamper)"
+    cargo run -q -p rivet-oracle -- verify --m2 --expect-fail
   else
     echo "    UNVERIFIED — oracle verify did not run (see the prereq report above)"
     ORACLE_UNVERIFIED=1

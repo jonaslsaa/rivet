@@ -117,6 +117,12 @@ def main() -> int:
         default=Path(__file__).resolve().parent.parent / "fixtures",
         help="fixtures output dir (default: tools/rivet-oracle/fixtures)",
     )
+    ap.add_argument(
+        "--chunks-only", action="store_true",
+        help="capture only the deterministic chunk-NBT payloads (skip level.dat / "
+             "server.properties, which carry wall-clock timestamps). Used for the "
+             "M2 normal-overworld region fixture so regeneration is git-clean.",
+    )
     args = ap.parse_args()
 
     world: Path = args.world_dir
@@ -137,26 +143,34 @@ def main() -> int:
     chunk_count = 0
 
     # --- server.properties ---
+    # Always parsed for the manifest provenance fields (seed / level-type /
+    # region-file-compression). The M2 region fixtures are regenerated in-place;
+    # level.dat carries wall-clock timestamps, so chunks-only captures skip the
+    # level.dat copy and the server.properties copy (provenance lives in the
+    # manifest + the committed fixtures/server-normal.properties) to stay
+    # git-clean.
     props_src = world.parent / "server.properties"
     if props_src.is_file():
         props = parse_server_properties(props_src)
-        dst = out / "server.properties"
-        shutil.copyfile(props_src, dst)
-        captured.append(
-            {"path": "server.properties", "sha256": sha256_file(dst), "bytes": dst.stat().st_size}
-        )
+        if not args.chunks_only:
+            dst = out / "server.properties"
+            shutil.copyfile(props_src, dst)
+            captured.append(
+                {"path": "server.properties", "sha256": sha256_file(dst), "bytes": dst.stat().st_size}
+            )
     else:
         props = {}
 
     # --- level.dat / level.dat_old (raw gzip-NBT world metadata) ---
-    for fn in ("level.dat", "level.dat_old"):
-        src = world / fn
-        if src.is_file():
-            dst = out / fn
-            shutil.copyfile(src, dst)
-            captured.append(
-                {"path": fn, "sha256": sha256_file(dst), "bytes": dst.stat().st_size}
-            )
+    if not args.chunks_only:
+        for fn in ("level.dat", "level.dat_old"):
+            src = world / fn
+            if src.is_file():
+                dst = out / fn
+                shutil.copyfile(src, dst)
+                captured.append(
+                    {"path": fn, "sha256": sha256_file(dst), "bytes": dst.stat().st_size}
+                )
 
     # --- chunk NBT payloads from the spawn region of each dimension ---
     for dim_name, dim_dir in dims.items():
@@ -191,6 +205,7 @@ def main() -> int:
         "seed": props.get("level-seed"),
         "level-type": props.get("level-type"),
         "level-name": props.get("level-name"),
+        "region-file-compression": props.get("region-file-compression", "deflate"),
         "server-properties": props,
         "spawn-region": f"{SPAWN_REGION[0]}.{SPAWN_REGION[1]}",
         "chunk-count": chunk_count,

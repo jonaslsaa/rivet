@@ -1,0 +1,209 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "sample-position-schema": "per-section nibble at (x,z) corners + interior, y absolute within chunk",
+  "samples": [
+    {
+      "blocklight_state": 1,
+      "chunk": "0.0",
+      "dim": "overworld",
+      "region": "0.0",
+      "sectionY": -4,
+      "skylight": {
+        "-4,0,0": 0,
+        "-4,15,15": 0,
+        "0,0,0": 15,
+        "0,15,15": 15,
+        "11,8,8": 15,
+        "4,7,7": 15,
+        "8,0,15": 15,
+        "8,15,0": 15
+      },
+      "skylight_state": 2
+    },
+    {
+      "blocklight_state": 1,
+      "chunk": "0.0",
+      "dim": "overworld",
+      "region": "0.0",
+      "sectionY": -3,
+      "skylight": {
+        "-3,0,0": 15,
+        "-3,15,15": 15,
+        "1,0,0": 15,
+        "1,15,15": 15,
+        "12,8,8": 15,
+        "5,7,7": 15,
+        "9,0,15": 15,
+        "9,15,0": 15
+      },
+      "skylight_state": 2
+    },
+    {
+      "blocklight_state": 1,
+      "chunk": "0.0",
+      "dim": "the_end",
+      "region": "0.0",
+      "sectionY": 3,
+      "skylight": {
+        "11,7,7": 0,
+        "15,0,15": 0,
+        "15,15,0": 0,
+        "18,8,8": 15,
+        "3,0,0": 0,
+        "3,15,15": 0,
+        "7,0,0": 0,
+        "7,15,15": 0
+      },
+      "skylight_state": 2
+    },
+    {
+      "blocklight_state": 1,
+      "chunk": "0.0",
+      "dim": "the_end",
+      "region": "0.0",
+      "sectionY": 4,
+      "skylight": {
+        "12,7,7": 15,
+        "16,0,15": 15,
+        "16,15,0": 15,
+        "19,8,8": 15,
+        "4,0,0": 15,
+        "4,15,15": 15,
+        "8,0,0": 15,
+        "8,15,15": 15
+      },
+      "skylight_state": 2
+    },
+    {
+      "blocklight": {
+        "0,0,0": 0,
+        "0,15,15": 0,
+        "12,0,15": 15,
+        "12,15,0": 0,
+        "15,8,8": 0,
+        "4,0,0": 0,
+        "4,15,15": 15,
+        "8,7,7": 0
+      },
+      "blocklight_state": 2,
+      "chunk": "0.0",
+      "dim": "the_nether",
+      "region": "0.0",
+      "sectionY": 0,
+      "skylight_state": null
+    },
+    {
+      "blocklight": {
+        "1,0,0": 0,
+        "1,15,15": 15,
+        "13,0,15": 15,
+        "13,15,0": 0,
+        "16,8,8": 15,
+        "5,0,0": 0,
+        "5,15,15": 15,
+        "9,7,7": 15
+      },
+      "blocklight_state": 2,
+      "chunk": "0.0",
+      "dim": "the_nether",
+      "region": "0.0",
+      "sectionY": 1,
+      "skylight_state": null
+    },
+    {
+      "blocklight": {
+        "10,7,7": 0,
+        "14,0,15": 0,
+        "14,15,0": 1,
+        "17,8,8": 0,
+        "2,0,0": 14,
+        "2,15,15": 14,
+        "6,0,0": 10,
+        "6,15,15": 10
+      },
+      "blocklight_state": 2,
+      "chunk": "0.0",
+      "dim": "the_nether",
+      "region": "0.0",
+      "sectionY": 2,
+      "skylight_state": null
+    },
+    {
+      "blocklight": {
+        "11,7,7": 0,
+        "15,0,15": 0,
+        "15,15,0": 0,
+        "18,8,8": 0,
+        "3,0,0": 0,
+        "3,15,15": 0,
+        "7,0,0": 0,
+        "7,15,15": 0
+      },
+      "blocklight_state": 2,
+      "chunk": "0.0",
+      "dim": "the_nether",
+      "region": "0.0",
+      "sectionY": 3,
+      "skylight_state": null
+    },
+    {
+      "blocklight": {
+        "12,7,7": 0,
+        "16,0,15": 0,
+        "16,15,0": 0,
+        "19,8,8": 0,
+        "4,0,0": 0,
+        "4,15,15": 0,
+        "8,0,0": 0,
+        "8,15,15": 0
+      },
+      "blocklight_state": 2,
+      "chunk": "0.0",
+      "dim": "the_nether",
+      "region": "0.0",
+      "sectionY": 4,
+      "skylight_state": null
+    },
+    {
+      "blocklight": {
+        "13,7,7": 0,
+        "17,0,15": 0,
+        "17,15,0": 0,
+        "20,8,8": 0,
+        "5,0,0": 0,
+        "5,15,15": 0,
+        "9,0,0": 0,
+        "9,15,15": 0
+      },
+      "blocklight_state": 2,
+      "chunk": "0.0",
+      "dim": "the_nether",
+      "region": "0.0",
+      "sectionY": 5,
+      "skylight_state": null
+    },
+    {
+      "blocklight": {
+        "10,0,0": 0,
+        "10,15,15": 0,
+        "14,7,7": 0,
+        "18,0,15": 0,
+        "18,15,0": 0,
+        "21,8,8": 0,
+        "6,0,0": 0,
+        "6,15,15": 0
+      },
+      "blocklight_state": 2,
+      "chunk": "0.0",
+      "dim": "the_nether",
+      "region": "0.0",
+      "sectionY": 6,
+      "skylight_state": null
+    }
+  ],
+  "source": "M0 FULL-status superflat chunk NBT (fixtures/chunk) \u2014 Starlight arrays",
+  "starlight.light_version": [
+    "10"
+  ]
+}
