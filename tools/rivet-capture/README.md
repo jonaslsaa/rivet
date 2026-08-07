@@ -39,6 +39,8 @@ cargo run -p rivet-capture -- capture --runs 3     # 3 boots; require identical 
 cargo run -p rivet-capture -- fixture              # boot+join once and (re)write fixtures/join/
 cargo run -p rivet-capture -- verify               # boot+join, diff against the committed fixture
 cargo run -p rivet-capture -- verify --expect-fail # negative control (see below)
+cargo run -p rivet-capture -- verify --mutate KIND # detector discrimination (see below)
+cargo run -p rivet-capture -- audit --runs 3       # report raw-field variance across boots
 ```
 
 The rivet-client binary must be built first (nightly workspace):
@@ -47,6 +49,9 @@ The rivet-client binary must be built first (nightly workspace):
 cd tools/rivet-client && cargo build --locked
 # or set RIVET_CLIENT_BIN to an existing rivet-client binary
 ```
+
+`verify --mutate KIND` accepts one of `reorder`, `delete`, `insert`, `field`,
+`canon`, `relabel`, `burst`, `entity-id`, or `set-time-absent`.
 
 ## Fixture layout
 
@@ -75,6 +80,40 @@ normalizer rewrites (spawn X/Z, entity ids, keepalive ids, `set_time`, chunk
 coordinates) are exactly the ones the server randomizes per boot; everything
 else is compared and must match.
 
+## Independent detectors (#195)
+
+`normalize` groups the raw capture by `(state, direction, id)` and rewrites the
+per-boot-randomized fields, so a **reordering** of required packets, a
+**cross-direction causality** violation, or **content corruption that keeps the
+canonical form self-consistent** all still byte-match the fixture. To close that
+hole, `verify` runs a set of read-only detectors on the raw capture (and, for
+the canonical form, on the normalized one) before the byte-compare. They are
+deliberately implemented only against `frame.rs` leaf primitives + generated
+registry tables — they never call the normalizer — so a normalizer that
+silently drops, duplicates, or alters content is caught here:
+
+- `ordering.rs` — replays the proxy state machine: within-direction emit order,
+  response chains, the non-decreasing handshake → login → configuration → play
+  rank, the deterministic play burst total order (the join's fixed send order,
+  which the `(state, dir, id)` grouping would otherwise erase), and the
+  configuration send order. Catches reorderings the `(state, dir, id)` grouping
+  erases.
+- `relationships.rs` — id/content-matched cross-direction causality: teleport →
+  ack (every `accept_teleportation` id echoes an issued `player_position` id, in
+  order), keepalive request → echo (every serverbound body equals a prior
+  clientbound body), spawn consistency (movement y, `set_default_spawn_position`
+  block pos, chunk-cache center), and entity id agreement across every
+  entity-id packet (login, entity_event, set_entity_data, update_attributes,
+  set_entity_motion, the move_entity_* trio, rotate_head, add_entity).
+- `semantic.rs` — content shape: superflat chunk structure + state-id validity,
+  the 11×11-minus-corners chunk grid, registry/tag id-range + coverage, and
+  `set_time` structural validity (including failing when the canonical capture
+  drops the packet entirely).
+- `preservation` — raw↔canonical content agreement (chunk block histogram,
+  tag-id multiset, registry entry-name set), so a self-consistent normalizer
+  that changes content trips a detector even though the fixture still
+  round-trips.
+
 ## Negative control: `verify --expect-fail`
 
 Tamper detection exists as Rust unit tests on the pure diff function, but
@@ -88,12 +127,40 @@ in a genuinely compared field. A clean diff (false negative) or a divergence
 naming a different packet both fail with distinct nonzero exits. The committed
 fixtures are never touched.
 
+## Detector discrimination: `verify --mutate KIND`
+
+`--expect-fail` proves the byte-compare catches a content change, but it cannot
+prove the detectors catch reorderings, deletions, insertions, field edits, or a
+corrupt canonical form. `verify --mutate KIND` closes that gap: it boots a fresh
+Paper, runs every detector on the clean capture (which must pass), applies a
+controlled mutation to the raw (or canonical) capture, re-runs the detectors,
+and **requires the expected `Failure` kind(s) to fire and name the defect**. Each
+kind is a deterministic transform whose required detector(s) are observed on the
+real raw capture:
+
+| `--mutate` | transform | required detector(s) |
+|---|---|---|
+| `reorder` | swaps two adjacent distinct packets | `ordering` |
+| `delete` | drops the `accept_teleportation` | `teleport-ack` |
+| `insert` | duplicates a `level_chunk_with_light` | `chunk` |
+| `field` | rewrites the `accept_teleportation` teleport id | `teleport-ack` |
+| `canon` | truncates the canonical `set_time` body | `set_time` |
+| `relabel` | flips a chunk's direction to serverbound | `ordering` / `chunk` |
+| `burst` | swaps two mid-burst packets | `ordering` |
+| `entity-id` | corrupts the `update_attributes` entity id | `entity-id` |
+| `set-time-absent` | drops every canonical `set_time` | `set_time` |
+
+A clean run on a mutated capture (false negative) exits nonzero — the detectors
+must never be vacuous.
+
 ## Gate integration
 
 `scripts/gate.sh` runs this harness as a required oracle stage after
 `rivet-oracle verify` (guarded by the same paperclip jar prerequisite). A
 nonzero exit — boot/extract failure, pin mismatch, or a tamper not detected and
-named — aborts the gate under `set -e` exactly like any other oracle step.
+named — aborts the gate under `set -e` exactly like any other oracle step. After
+`verify` and `verify --expect-fail` it runs `verify --mutate` for all nine kinds,
+so every detector must stay discriminating on every gate.
 
 ## Conventions
 

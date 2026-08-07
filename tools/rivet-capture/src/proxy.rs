@@ -108,6 +108,12 @@ fn intention_next_state(body: &[u8]) -> Option<i32> {
     frame::read_varint(body, &mut off)
 }
 
+/// The largest frame the join capture will legitimately carry: the full
+/// 117-chunk superflat view stream fits comfortably under this cap. A corrupted
+/// or hostile stream must fail loudly rather than attempt a multi-GB allocation
+/// (the frame length VarInt alone can encode up to 2^35).
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+
 /// Read one complete raw frame (`[VarInt length][payload]`) from `reader`.
 /// Returns `Ok(None)` on clean EOF at a frame boundary.
 async fn read_frame_raw<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
@@ -136,6 +142,12 @@ async fn read_frame_raw<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Opti
                 "oversized length varint",
             ));
         }
+    }
+    if length > MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("frame length {length} exceeds the {MAX_FRAME_BYTES}-byte capture cap"),
+        ));
     }
     let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload).await?;
