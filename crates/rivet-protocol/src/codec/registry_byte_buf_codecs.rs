@@ -66,7 +66,7 @@ use std::sync::Arc;
 /// by delegating to the inner buffer — the Rust stand-in for Java's
 /// `StreamCodec<ByteBuf, T>` values composing over both buffers through the
 /// `? super B` wildcards.
-fn lift<T: 'static>(
+pub(crate) fn lift<T: 'static>(
     codec: StreamCodec<FriendlyByteBuf, T>,
 ) -> StreamCodec<RegistryFriendlyByteBuf, T> {
     let encoder = codec.clone();

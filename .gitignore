@@ -21,4 +21,7 @@ tools/rivet-codegen/target/
 
 # Project .claude (workflows, settings) is repo content — override global ignore
 !.claude/
+# Agent worktree scratch (worktree-task preserves runs under .claude/worktrees/) —
+# never scanned by cargo-machete and never tracked.
+.claude/worktrees/
 .claude/settings.local.json

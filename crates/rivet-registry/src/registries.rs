@@ -93,6 +93,20 @@ pub static DIMENSION_TYPE: LazyLock<ResourceKey<Registry<DimensionType>>> = Lazy
     ResourceKey::create_registry_key(Identifier::with_default_namespace("dimension_type"))
 });
 
+/// `Registries.ATTRIBUTE` — `createRegistryKey("attribute")`, the
+/// `net.minecraft.world.entity.ai.attributes.Attribute` registry key (entity
+/// unit placeholder). Added for #90: `ClientboundUpdateAttributesPacket`'s
+/// snapshot codec is `Attribute.STREAM_CODEC` =
+/// `ByteBufCodecs.holderRegistry(Registries.ATTRIBUTE)`.
+///
+/// RivetTodo(#90): the real `Attribute` element type is owned by the
+/// `mc.world.entity.ai.attributes` unit (M3 entity wave); the wire codec only
+/// resolves the holder *id* against the registry size, so the placeholder value
+/// is never decoded.
+pub static ATTRIBUTE: LazyLock<ResourceKey<Registry<Attribute>>> = LazyLock::new(|| {
+    ResourceKey::create_registry_key(Identifier::with_default_namespace("attribute"))
+});
+
 /// The `Block` registry element — a placeholder for
 /// `net.minecraft.world.level.block.Block` (owned by the world/block unit).
 #[derive(Debug)]
@@ -143,6 +157,13 @@ pub struct DimensionType;
 /// type of a registry codec element (`Arc<T>` derives compare through `T`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockEntityType;
+/// `net.minecraft.world.entity.ai.attributes.Attribute` — the entity unit's
+/// registry element placeholder (see the `ATTRIBUTE` key above, #90).
+/// `Clone`/`PartialEq`/`Eq` are required by `Holder<Attribute>` (the wire codec
+/// carries holders); the entity unit replaces the placeholder with the real
+/// element and its derives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribute;
 
 /// `Registries.registryDirPath` (private in Java) — the registry key's path.
 pub fn registry_dir_path(registry_key: &ResourceKey<Registry<()>>) -> String {

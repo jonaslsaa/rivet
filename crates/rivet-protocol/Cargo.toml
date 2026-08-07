@@ -51,5 +51,12 @@ name = "client_information_registration"
 # tables pin its configuration id 0 / play id 14 slots.
 required-features = ["packets"]
 
+[[test]]
+name = "entity_pairing_packets"
+# Exercises the issue #90 clientbound entity-pairing packet bodies + the
+# syncher wire model (game + syncher modules), which live behind the packets
+# feature.
+required-features = ["packets"]
+
 [lints]
 workspace = true
