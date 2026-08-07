@@ -11,4 +11,5 @@ workspace = true
 cesu8 = { workspace = true }
 crc32c = { workspace = true }
 md5 = { workspace = true }
+sha2 = { workspace = true }
 rivet-serialization = { workspace = true }

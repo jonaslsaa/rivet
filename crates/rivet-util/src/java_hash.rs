@@ -32,6 +32,25 @@ pub fn string_hash(s: &str) -> i32 {
     h
 }
 
+/// `BiomeManager.obfuscateSeed(long seed)` — `Hashing.sha256().hashLong(seed).asLong()`,
+/// the world-seed obfuscation the spawn-info path sends in
+/// `CommonPlayerSpawnInfo.seed` (`ServerPlayer.createCommonSpawnInfo`).
+///
+/// Guava's `hashLong` feeds the long's **little-endian** 8 bytes into the SHA-256
+/// `PrimitiveSink`, and `HashCode.asLong()` returns the digest's **first 8 bytes
+/// as a little-endian long**. The golden value below is the pinned #153 capture's
+/// login seed (`0xC6F218BC089104ED` for the flat world seed 42), so a byte-exact
+/// join can derive it from the raw seed.
+pub fn obfuscate_seed(seed: i64) -> i64 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(seed.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&digest[..8]);
+    i64::from_le_bytes(out)
+}
+
 /// `Mth.murmurHash3Mixer(int hash)` — the 32-bit murmur3 finalizer used as an
 /// identity-hash mixer (e.g. `CrudeIncrementalIntIdentityHashBiMap.hash`).
 ///
@@ -68,7 +87,7 @@ pub fn get_seed(x: i32, y: i32, z: i32) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_seed, murmur_hash3_mixer, string_hash};
+    use super::{get_seed, murmur_hash3_mixer, obfuscate_seed, string_hash};
 
     /// Golden values produced by running the reference algorithms on OpenJDK
     /// 25 (see the class comment in the Java `Mth.java` / `String.hashCode`).
@@ -119,6 +138,19 @@ mod tests {
         assert_eq!(murmur_hash3_mixer(i32::MAX), -104067416);
         assert_eq!(murmur_hash3_mixer(i32::MIN), 1832674720);
         assert_eq!(murmur_hash3_mixer(99162322), 837524112);
+    }
+
+    #[test]
+    fn obfuscate_seed_golden() {
+        // Golden values computed from the reference algorithm
+        // (`Hashing.sha256().hashLong(seed).asLong()`, little-endian long into
+        // SHA-256, first 8 digest bytes as little-endian long) on OpenJDK 25.
+        // `obfuscateSeed(42)` = `0xC6F218BC089104ED` is additionally pinned to
+        // the #153 capture's login seed for the flat world seed 42.
+        assert_eq!(obfuscate_seed(42), 0xC6F218BC089104EDu64 as i64);
+        assert_eq!(obfuscate_seed(0), 0x7A0B81A1F57055AFu64 as i64);
+        assert_eq!(obfuscate_seed(-1), 0x5DCE615644AEA312u64 as i64);
+        assert_eq!(obfuscate_seed(1), 0xA63F41D436A19F7Cu64 as i64);
     }
 
     #[test]
