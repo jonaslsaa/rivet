@@ -491,11 +491,12 @@ main() {
   # --- rivet-fuzz packet-decode targets (`packets` feature) ----------------------
   # The five packet fuzz targets (fuzz/fuzz_targets/packet_*.rs) are gated behind
   # the rivet-fuzz `packets` feature (forwards to rivet-protocol/packets) via
-  # `required-features`, so the `cargo fmt/clippy/test --workspace` steps above
-  # never build or lint them. The fuzz crate is a workspace member and compiles
-  # on the pinned stable toolchain (cargo-fuzz/nightly is only needed to RUN the
-  # fuzzers), so the gate type-checks and lints them explicitly — a broken packet
-  # target must fail the merge. Never use `--all-features` or
+  # `required-features`, so the generic workspace compile/lint/test steps do not
+  # type-check or lint the feature-gated packet bins (fmt still checks their
+  # formatting). The fuzz crate is a workspace member and compiles on the pinned
+  # stable toolchain (cargo-fuzz/nightly is only needed to RUN the fuzzers), so
+  # the gate type-checks and lints them explicitly — a broken packet target must
+  # fail the merge. Never use `--all-features` or
   # `--workspace --features` (they would enable rivet-protocol's `packets`
   # feature workspace-wide, or fail on crates without the feature).
   local GATE_FUZZ=false

@@ -1,8 +1,11 @@
-# cargo-fuzz target crate for the rivet parser crates (rivet-nbt, rivet-serialization).
+# cargo-fuzz target crate for rivet parsers (rivet-nbt, rivet-serialization) and the
+# rivet-protocol packet decode paths.
 #
 # These targets feed untrusted bytes into the SNBT `TagParser`, the binary NBT
-# readers (`NbtIo`), and the DFU codec combinators over `NbtOps`. Fuzzers run
-# only on the nightly toolchain via `cargo fuzz` (the workspace itself pins
+# readers (`NbtIo`), and the DFU codec combinators over `NbtOps`. The packet
+# targets (fuzz/fuzz_targets/packet_*.rs) exercise the protocol-layer packet
+# decode codecs and are gated behind the `packets` feature (see below). Fuzzers
+# run only on the nightly toolchain via `cargo fuzz` (the workspace itself pins
 # stable 1.97.1 in rust-toolchain.toml — `cargo fuzz` overrides that for this
 # crate). This crate is a workspace member, so `cargo fuzz build` does not need
 # the `--no-default-features` / excluded-member dance.
