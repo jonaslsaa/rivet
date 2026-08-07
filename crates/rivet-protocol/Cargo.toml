@@ -65,5 +65,12 @@ name = "login_packets"
 # LoginProtocols addPacket-order ids.
 required-features = ["packets"]
 
+[[test]]
+name = "configuration_packets"
+# Exercises the issue #109 configuration-phase packet bodies (configuration +
+# common modules), which live behind the packets feature. Decodes the pinned
+# #194/#219 golden capture bodies and pins the registration ids.
+required-features = ["packets"]
+
 [lints]
 workspace = true

@@ -21,6 +21,7 @@ pub mod delegate_data_output;
 pub mod fast_buffered_input_stream;
 pub mod java_float_format;
 pub mod java_hash;
+pub mod known_pack;
 pub mod mth;
 pub mod mth_atan_tables;
 pub mod mth_sin_table;
@@ -36,6 +37,7 @@ pub use by_id_map::{OutOfBoundsStrategy, continuous, sparse};
 pub use data_io::{DataInput, DataInputStream, DataOutput, DataOutputStream};
 pub use delegate_data_output::DelegateDataOutput;
 pub use fast_buffered_input_stream::FastBufferedInputStream;
+pub use known_pack::KnownPack;
 // `BitRandomSource` is deliberately NOT re-exported at the root: it declares
 // `next_int`/`next_long`/... (same names as `RandomSource`), so importing both
 // makes every LCG call ambiguous (E0034). It lives at `rivet_util::random`.
