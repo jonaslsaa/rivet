@@ -36,6 +36,7 @@ pub mod compression_decoder;
 pub mod compression_encoder;
 pub mod friendly_byte_buf;
 pub mod registry_friendly_byte_buf;
+pub mod syncher;
 pub mod utf8_string;
 pub mod var_int;
 pub mod var_long;
