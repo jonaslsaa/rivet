@@ -795,6 +795,32 @@ async fn config_client_information_malformed_enum_closes() {
 }
 
 #[tokio::test]
+async fn play_packet_before_finish_configuration_closes() {
+    // Hostile ordering: a play keep_alive (id 28) sent while the configuration
+    // listener is still current is an unknown configuration packet id — Java's
+    // `PacketDecoder` finds no handler and closes deterministically. Only after
+    // `finish_configuration` does the connection hand off and forward play
+    // frames (see `play_frame_after_finish_is_forwarded_to_tick_thread`).
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&7i64.to_be_bytes());
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write play keep_alive during configuration");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn config_registry_sync_opening_frames() {
     // The configuration sync opening: brand, then update_enabled_features
     // (`{minecraft:vanilla}`), then select_known_packs (`[minecraft:core:26.2]`).
