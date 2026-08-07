@@ -72,6 +72,18 @@ pub fn clientbound_player_info_update() -> PacketType {
 pub fn clientbound_player_position() -> PacketType {
     PacketType::clientbound("player_position")
 }
+/// `GamePacketTypes.CLIENTBOUND_SET_CHUNK_CACHE_CENTER`.
+pub fn clientbound_set_chunk_cache_center() -> PacketType {
+    PacketType::clientbound("set_chunk_cache_center")
+}
+/// `GamePacketTypes.CLIENTBOUND_SET_CHUNK_CACHE_RADIUS`.
+pub fn clientbound_set_chunk_cache_radius() -> PacketType {
+    PacketType::clientbound("set_chunk_cache_radius")
+}
+/// `GamePacketTypes.CLIENTBOUND_SET_SIMULATION_DISTANCE`.
+pub fn clientbound_set_simulation_distance() -> PacketType {
+    PacketType::clientbound("set_simulation_distance")
+}
 /// `GamePacketTypes.CLIENTBOUND_SET_DEFAULT_SPAWN_POSITION`.
 pub fn clientbound_set_default_spawn_position() -> PacketType {
     PacketType::clientbound("set_default_spawn_position")
@@ -152,6 +164,18 @@ mod tests {
                 "minecraft:player_info_update",
             ),
             (clientbound_player_position(), "minecraft:player_position"),
+            (
+                clientbound_set_chunk_cache_center(),
+                "minecraft:set_chunk_cache_center",
+            ),
+            (
+                clientbound_set_chunk_cache_radius(),
+                "minecraft:set_chunk_cache_radius",
+            ),
+            (
+                clientbound_set_simulation_distance(),
+                "minecraft:set_simulation_distance",
+            ),
             (
                 clientbound_set_default_spawn_position(),
                 "minecraft:set_default_spawn_position",

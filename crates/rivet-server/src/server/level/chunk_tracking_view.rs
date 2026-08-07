@@ -157,6 +157,14 @@ impl ChunkTrackingView {
             }
         }
     }
+
+    /// The number of chunks `for_each` emits — the fixed view square size (117
+    /// for the M1 view-distance-4 send-set).
+    pub fn chunk_count(&self) -> usize {
+        let mut count = 0;
+        self.for_each(|_| count += 1);
+        count
+    }
 }
 
 #[cfg(test)]
@@ -253,7 +261,7 @@ mod tests {
         assert!(!view.contains(0, 0, true));
         assert!(!view.contains(1, 0, true));
         assert!(!view.contains(0, 1, true));
-        assert_eq!(view.for_each_count(), 0);
+        assert_eq!(view.chunk_count(), 0);
     }
 
     #[test]
@@ -273,13 +281,5 @@ mod tests {
         // Near center: contained.
         assert!(view.contains(0, 0, true));
         assert!(view.contains(-1, 0, true));
-    }
-
-    impl ChunkTrackingView {
-        fn for_each_count(&self) -> usize {
-            let mut count = 0;
-            self.for_each(|_| count += 1);
-            count
-        }
     }
 }
