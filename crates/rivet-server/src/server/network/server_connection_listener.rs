@@ -182,12 +182,19 @@ async fn run_connection(
     }
 
     let reason = conn_loop(&mut conn, &mut listener, &config, read, out_rx, shutdown).await;
+    // `Connection.handleDisconnection` fires `onDisconnect(DisconnectionDetails)`
+    // on the current listener when the channel closes. The loop ending IS the
+    // channel close, so the last-installed listener gets its disconnect hook
+    // before the socket is torn down (all current listeners no-op, but the hook
+    // is the faithful call site).
+    listener.on_disconnect();
     match &reason {
         DisconnectReason::EndOfStream => debug!(%id, %remote, "EOF"),
         DisconnectReason::Timeout => warn!(%id, %remote, "read timeout"),
         DisconnectReason::Malformed(msg) => warn!(%id, %remote, "malformed: {msg}"),
         DisconnectReason::Unsupported(msg) => info!(%id, %remote, "unsupported: {msg}"),
         DisconnectReason::ServerShutdown => debug!(%id, %remote, "server shutdown"),
+        DisconnectReason::RequestHandled => info!(%id, %remote, "status request handled"),
         DisconnectReason::Overflow => warn!(%id, %remote, "outbound overflow, disconnected"),
     }
     // Best-effort: tell the tick side the connection is gone. If the lifecycle
@@ -344,6 +351,14 @@ async fn conn_loop(
                 return DisconnectReason::Timeout;
             }
         };
+        // Decode panics (a truncated scalar read — `FriendlyByteBuf.readLong`
+        // on a short body) are caught at the decode boundary in
+        // [`decode_packet`], which returns a clean `DisconnectReason::Malformed`
+        // (Java's `PacketDecoder` turning the unchecked `IndexOutOfBoundsException`
+        // into a close). Nothing here panics on hostile input: the frame decoder,
+        // the compression decoder, and every listener body path return `Err`
+        // deterministically, so the task tail in `run_connection` (cap decrement,
+        // `on_disconnect`, `connection_closed`) always runs.
         if let Err(reason) = conn.process_inbound(&chunk[..n], listener) {
             return reason;
         }

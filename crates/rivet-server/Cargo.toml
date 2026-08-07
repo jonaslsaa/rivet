@@ -14,6 +14,7 @@ rivet-protocol = { workspace = true, features = ["packets"] }
 # consumes (`generated::synchronized`, `generated::tags`, `generated::biomes`,
 # `generated::blocks`, `generated::registries` — OWNERSHIP.md §Registries).
 rivet-registry = { workspace = true, features = ["blocks"] }
+rivet-text = { workspace = true }
 rivet-util = { workspace = true }
 rivet-world = { workspace = true }
 thiserror = { workspace = true }
