@@ -120,6 +120,12 @@ pub mod static_builtin_tests;
 #[path = "block_state_tests.rs"]
 pub mod block_state_tests;
 
+/// Generated biome id table + tag network-content integration tests (issue #49).
+/// Same pattern: outside `src/generated/`, only under the `blocks` feature + test.
+#[cfg(all(feature = "blocks", test))]
+#[path = "biomes_tags_tests.rs"]
+pub mod biomes_tags_tests;
+
 // ---------------------------------------------------------------------------
 // Ownership D — serialization context (`net.minecraft.resources`)
 // ---------------------------------------------------------------------------

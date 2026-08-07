@@ -180,7 +180,7 @@ fn extract_bundler(bundler: &Path, classpath_dir: &Path) -> Result<()> {
     )
 }
 
-fn read_versions_list(bundler: &Path, classpath_dir: &Path) -> Result<(String, String)> {
+pub(crate) fn read_versions_list(bundler: &Path, classpath_dir: &Path) -> Result<(String, String)> {
     let marker = classpath_dir.join("META-INF/versions.list");
     let contents = if marker.is_file() {
         fs::read_to_string(&marker)?

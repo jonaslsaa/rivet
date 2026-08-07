@@ -11,12 +11,15 @@
 //!
 //! The tool is excluded from the cargo workspace (see root `Cargo.toml`).
 
+mod biomes_tags;
 mod block_states;
 mod extract;
+mod extract_biomes_tags;
 mod generate;
 mod model;
 mod mth_gen;
 mod packets;
+mod probe_biomes_tags;
 mod probe_block_states;
 mod registries;
 mod reports;
@@ -55,6 +58,15 @@ fn main() -> Result<()> {
             let bundler = flag(&args, "--bundler");
             probe_block_states::run(bundler)
         }
+        Some("extract-biomes-tags") => {
+            let bundler = flag(&args, "--bundler");
+            let output = flag(&args, "--output");
+            extract_biomes_tags::run(bundler, output)
+        }
+        Some("probe-biomes-tags") => {
+            let bundler = flag(&args, "--bundler");
+            probe_biomes_tags::run(bundler)
+        }
         Some("reports") => {
             let jar = flag(&args, "--jar");
             let output = flag(&args, "--output");
@@ -84,7 +96,7 @@ fn print_usage() {
         "rivet-codegen — vanilla data extraction + registry codegen\n\
          \n\
          USAGE:\n\
-         \x20   rivet-codegen <extract|generate|registries|mth-gen|probe-block-states|reports> [flags]\n\
+         \x20   rivet-codegen <extract|generate|registries|mth-gen|probe-block-states|extract-biomes-tags|probe-biomes-tags|reports> [flags]\n\
          \n\
          SUBCOMMANDS:\n\
          \x20   extract   Extract the block registry + block states from the Paper 26.2\n\
@@ -112,6 +124,14 @@ fn print_usage() {
          \x20             Paper jar and cross-check the emitted block-state global-id table\n\
          \x20             (issue #154): live size/contiguity/defaults + the representative\n\
          \x20             anchor ids. Flags: --bundler <path>  path to paper-bundler-26.2*.jar\n\
+         \x20   extract-biomes-tags  Dump the deterministic biome id table + tag network\n\
+         \x20             content from a live Paper registry load (BiomeTagExtractor.java)\n\
+         \x20             into data/biomes_tags.json (+ provenance manifest), issue #49.\n\
+         \x20             Flags: --bundler <path>   path to paper-bundler-26.2*.jar\n\
+         \x20                     --output <path>   output JSON (default data/biomes_tags.json)\n\
+         \x20   probe-biomes-tags  Re-run the biome+tag extractor against the real Paper jar\n\
+         \x20             and require byte-identity with the committed data/biomes_tags.json,\n\
+         \x20             plus the anchor counts (issue #49). Flags: --bundler <path>\n\
          \x20   reports   Run the vanilla net.minecraft.data.Main --reports datagen against the\n\
          \x20             materialized Paper 26.2 server jar and pin packets.json, registries.json,\n\
          \x20             blocks.json with provenance under data/reports/.\n\
