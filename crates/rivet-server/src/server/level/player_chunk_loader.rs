@@ -188,6 +188,10 @@ pub struct PlayerChunkLoader {
     last_send_distance: i32,
     /// `this.lastTickDistance` — the simulation distance sent to the client.
     last_tick_distance: i32,
+    /// Test seam (issue #100): forces a view-chunk encode failure in
+    /// `add_and_send_chunks` (compiled out of non-test builds).
+    #[cfg(test)]
+    fail_chunk_encoding: bool,
 }
 
 impl PlayerChunkLoader {
@@ -198,6 +202,8 @@ impl PlayerChunkLoader {
             last_chunk_z: center.z(),
             last_send_distance: i32::MIN,
             last_tick_distance: i32::MIN,
+            #[cfg(test)]
+            fail_chunk_encoding: false,
         }
     }
 
@@ -290,15 +296,15 @@ impl PlayerChunkLoader {
         let view = ChunkTrackingView::of(ChunkPos::new(self.last_chunk_x, self.last_chunk_z), send);
         let mut bodies = Vec::with_capacity(view.chunk_count());
         view.for_each(|pos| bodies.push(encode_chunk_with_light(pos, world)));
+        // Test seam (issue #100): the M1 superflat slice has no reachable
+        // chunk-encode failure, so the ordering regression injects one here.
+        #[cfg(test)]
+        if self.fail_chunk_encoding {
+            bodies.push(Err(
+                "forced view-chunk encode failure (test seam)".to_string()
+            ));
+        }
         let bodies: Vec<Vec<u8>> = bodies.into_iter().collect::<Result<_, _>>()?;
-        // The `collect` preserves the view's emission count; this asserts the
-        // invariant that every view chunk contributed exactly one body — a guard
-        // against a future change that silently drops a chunk on encode error.
-        debug_assert_eq!(
-            bodies.len(),
-            view.chunk_count(),
-            "every view chunk produced exactly one body"
-        );
 
         for body in bodies {
             packets.push(PlayPacket::new(
@@ -320,6 +326,13 @@ impl PlayerChunkLoader {
     /// emitted by the last `add`.
     pub fn last_tick_distance(&self) -> i32 {
         self.last_tick_distance
+    }
+
+    /// Test seam (issue #100): force the view-chunk encode step of the next
+    /// `add_and_send_chunks` call to fail. Compiles out of non-test builds.
+    #[cfg(test)]
+    fn set_fail_chunk_encoding(&mut self, fail: bool) {
+        self.fail_chunk_encoding = fail;
     }
 }
 
@@ -579,5 +592,34 @@ mod tests {
         let frame = encode_play_frame(&packets[0], -1).unwrap();
         // payload = varint(95) ++ [0x04]; length 2 -> varint21 header 0x02.
         assert_eq!(frame.to_vec(), vec![0x02, 0x5F, 0x04]);
+    }
+
+    #[test]
+    fn chunk_encode_error_returns_err_after_the_java_state_commit() {
+        // Regression (issue #100 review): Java `PlayerChunkLoaderData.add()`
+        // commits `lastSendDistance`/`lastTickDistance` right after the three
+        // cache packets and BEFORE the async chunk queue drain. The M1 drain is
+        // folded synchronously into this call, so a chunk-encode failure returns
+        // `Err` only after the distances are committed — the Java ordering, not a
+        // transactional all-or-nothing commit. The `Err` carries no send-set: the
+        // cache packets built so far are dropped, never returned as a partial set.
+        let world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.set_fail_chunk_encoding(true);
+        let err = loader.add_and_send_chunks(&world, None).unwrap_err();
+        assert!(
+            err.contains("chunk"),
+            "error names the chunk encode step: {err}"
+        );
+        // Distances committed before the drain — the exact Java ordering.
+        assert_eq!(loader.last_send_distance(), 4);
+        assert_eq!(loader.last_tick_distance(), 4);
+
+        // Clearing the seam restores the full 117-chunk send-set.
+        loader.set_fail_chunk_encoding(false);
+        let packets = loader.add_and_send_chunks(&world, None).unwrap();
+        assert_eq!(packets.len(), 3 + 117);
+        assert_eq!(loader.last_send_distance(), 4);
+        assert_eq!(loader.last_tick_distance(), 4);
     }
 }

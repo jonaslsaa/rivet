@@ -311,6 +311,38 @@ mod tests {
     }
 
     #[test]
+    fn extreme_center_wraps_to_small_delta_and_contains() {
+        // When the view is centered ON an i32 extreme, `chunk - center` wraps:
+        // center = i32::MAX, chunk = i32::MIN gives `MIN - MAX = 1` (mod 2³²),
+        // so `max(0, |1| - bufferRange) = 0` and the chunk is contained. A
+        // non-wrapping i64 port computes a ~4.3e9 delta and excludes it, so this
+        // distinguishes Java's wrapping ints from a widened implementation.
+        let max_center = ChunkTrackingView::of(ChunkPos::new(i32::MAX, 0), 32);
+        assert!(
+            max_center.contains(i32::MIN, 0, true),
+            "X-axis wrap-to-small"
+        );
+        let max_center_z = ChunkTrackingView::of(ChunkPos::new(0, i32::MAX), 32);
+        assert!(
+            max_center_z.contains(0, i32::MIN, true),
+            "Z-axis wrap-to-small"
+        );
+        // Both axes at once.
+        let max_both = ChunkTrackingView::of(ChunkPos::new(i32::MAX, i32::MAX), 32);
+        assert!(
+            max_both.contains(i32::MIN, i32::MIN, true),
+            "both-axes wrap-to-small"
+        );
+        // Reverse sign: center = i32::MIN, chunk = i32::MAX wraps to -1, also
+        // clamped to delta 0.
+        let min_center = ChunkTrackingView::of(ChunkPos::new(i32::MIN, 0), 32);
+        assert!(
+            min_center.contains(i32::MAX, 0, true),
+            "reverse X-axis wrap-to-small"
+        );
+    }
+
+    #[test]
     fn min_max_bounds_wrap_like_java_ints() {
         // Calibration: these exact wrapped values are the wrapping regression
         // guard. In debug builds a revert to plain `-`/`+` panics on i32
