@@ -131,6 +131,18 @@ impl RegistryFriendlyByteBuf {
         self.inner.write_long(value);
     }
 
+    /// `readNbt()` — inherited onto the registry buffer (Java's
+    /// `RegistryFriendlyByteBuf extends FriendlyByteBuf`), so the block-entity
+    /// list in `ClientboundLevelChunkPacketData` can read its tag.
+    pub fn read_nbt(&mut self) -> Option<rivet_nbt::compound_tag::CompoundTag> {
+        self.inner.read_nbt()
+    }
+
+    /// `writeNbt(@Nullable Tag)` — inherited onto the registry buffer.
+    pub fn write_nbt(&mut self, tag: Option<&rivet_nbt::tag::Tag>) {
+        self.inner.write_nbt(tag);
+    }
+
     /// `readOptional(StreamDecoder)` — a boolean presence prefix, then the
     /// value via the reader closure. The closure takes this buffer so the
     /// registry-aware value readers (`readGlobalPos`) can be passed directly:

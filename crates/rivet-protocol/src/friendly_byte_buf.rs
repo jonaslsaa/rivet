@@ -10,9 +10,9 @@
 //! adapters for `BytesMut`).
 //!
 //! Deliberately absent (reported blocked by later work, not stubbed):
-//! `ResourceKey`/registry paths, `BlockPos`/`ChunkPos`/`GlobalPos`,
+//! `ResourceKey`/registry paths, `BlockPos`/`GlobalPos`,
 //! `Vector3f`/`Quaternionf` (JOML), `PublicKey` (crypto), the JsonOps/codec
-//! paths, `Instant`, and the `BitSet`-based set helpers.
+//! paths, and `Instant`.
 //!
 //! `readEnum`-by-class (`clazz.getEnumConstants()[readVarInt()]`) is ported
 //! at the call site: the value-table `read_var_int` + `by_id` pattern, because
@@ -43,6 +43,7 @@ use rivet_nbt::end_tag::EndTag;
 use rivet_nbt::nbt_accounter::NbtAccounter;
 use rivet_nbt::nbt_io;
 use rivet_nbt::tag::Tag;
+use rivet_registry::core::ChunkPos;
 use rivet_util::data_io::{DataInput, DataOutput};
 use rivet_util::mth::Uuid;
 
@@ -402,6 +403,49 @@ impl FriendlyByteBuf {
         for l in longs {
             self.write_long(*l);
         }
+        self
+    }
+
+    // ---- chunk positions and bitsets ---------------------------------------
+
+    /// `readChunkPos()` — `ChunkPos.unpack(readLong())`.
+    pub fn read_chunk_pos(&mut self) -> ChunkPos {
+        ChunkPos::unpack(self.read_long())
+    }
+
+    /// `writeChunkPos(ChunkPos)` — `writeLong(pos.pack())`.
+    pub fn write_chunk_pos(&mut self, pos: &ChunkPos) -> &mut Self {
+        self.write_long(pos.pack());
+        self
+    }
+
+    /// `readBitSet()` — `BitSet.valueOf(readLongArray())`.
+    pub fn read_bit_set(&mut self) -> Vec<u64> {
+        let longs = self.read_long_array();
+        // Java's `BitSet` stores `long[]` words little-endian within each word;
+        // on the wire each word is a big-endian `i64`. The `read_long_array`
+        // helper already yields the signed words; reinterpret as `u64`.
+        let mut words: Vec<u64> = longs.into_iter().map(|w| w as u64).collect();
+        // `BitSet.valueOf(long[])` drops trailing zero words (`Arrays.copyOf` up
+        // to the last nonzero), and `toLongArray()` re-strips them on encode.
+        // Drop them here so a decode -> re-encode round trip writes Java's
+        // canonical mask even on a hostile wire that padded the high words.
+        while words.last() == Some(&0) {
+            words.pop();
+        }
+        words
+    }
+
+    /// `writeBitSet(BitSet)` — `writeLongArray(bitSet.toLongArray())`.
+    pub fn write_bit_set(&mut self, words: &[u64]) -> &mut Self {
+        // `BitSet.toLongArray()` omits trailing zero words, so a value carrying
+        // a padded high word encodes the same canonical form Java would.
+        let mut trimmed: &[u64] = words;
+        while trimmed.last() == Some(&0) {
+            trimmed = &trimmed[..trimmed.len() - 1];
+        }
+        let longs: Vec<i64> = trimmed.iter().map(|w| *w as i64).collect();
+        self.write_long_array(&longs);
         self
     }
 
@@ -1095,6 +1139,74 @@ mod tests {
         r.read_fixed_size_long_array(&mut out);
         assert_eq!(out, vec![10, 20, 30]);
         assert_eq!(r.readable_bytes(), 0);
+    }
+
+    // ---- chunk positions / bitsets ------------------------------------------
+
+    #[test]
+    fn chunk_pos_round_trips_and_wire_form() {
+        let pos = ChunkPos::new(10, -20);
+        let mut b = buf();
+        b.write_chunk_pos(&pos);
+        // Wire: `ChunkPos.pack()` big-endian.
+        assert_eq!(&b.into_inner()[..], &pos.pack().to_be_bytes());
+        let mut b = buf();
+        b.write_chunk_pos(&pos);
+        let mut r = FriendlyByteBuf::new(written(b));
+        assert_eq!(r.read_chunk_pos(), pos);
+        assert_eq!(r.readable_bytes(), 0);
+    }
+
+    #[test]
+    fn chunk_pos_round_trips_negative_and_extremes() {
+        for (x, z) in [(-5, -4), (0, 0), (i32::MIN, i32::MAX), (2097061, -2097061)] {
+            let pos = ChunkPos::new(x, z);
+            let mut b = buf();
+            b.write_chunk_pos(&pos);
+            let mut r = FriendlyByteBuf::new(written(b));
+            assert_eq!(r.read_chunk_pos(), pos);
+        }
+    }
+
+    #[test]
+    fn bit_set_round_trips_and_wire_form() {
+        // Bit 0 in word 0, bit 33 in word 0 (33 mod 64), bit 64 in word 1.
+        let words = vec![0x0000_0002_0000_0001u64, 1u64];
+        let mut b = buf();
+        b.write_bit_set(&words);
+        // Wire: `writeLongArray` — varint count, then big-endian longs.
+        let bytes = b.into_inner();
+        assert_eq!(bytes[0], 2);
+        assert_eq!(&bytes[1..9], &words[0].to_be_bytes());
+        assert_eq!(&bytes[9..17], &words[1].to_be_bytes());
+        let mut r = FriendlyByteBuf::new(bytes);
+        assert_eq!(r.read_bit_set(), words);
+        assert_eq!(r.readable_bytes(), 0);
+    }
+
+    #[test]
+    fn bit_set_empty_round_trips() {
+        let mut b = buf();
+        b.write_bit_set(&[]);
+        let mut r = FriendlyByteBuf::new(written(b));
+        assert_eq!(r.read_bit_set(), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn bit_set_strips_trailing_zero_words_like_java() {
+        // `BitSet.valueOf(long[])` and `toLongArray()` drop trailing zero words,
+        // so `[0x06, 0x00]` is the same BitSet as `[0x06]` and re-encodes with
+        // count 1, exactly like Java round-tripping the padded form.
+        let mut b = buf();
+        b.write_long_array(&[0x06, 0x00]);
+        let mut r = FriendlyByteBuf::new(written(b));
+        assert_eq!(r.read_bit_set(), vec![0x06]);
+        // And a value padded on the high word encodes count 1.
+        let mut b = buf();
+        b.write_bit_set(&[0x06, 0x00]);
+        let bytes = b.into_inner();
+        assert_eq!(bytes[0], 1);
+        assert_eq!(&bytes[1..9], &0x06u64.to_be_bytes());
     }
 
     // ---- UUID -------------------------------------------------------------
