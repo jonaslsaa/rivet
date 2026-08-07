@@ -17,9 +17,13 @@
 //! id, air = 0, stone = 1) and `BiomeId(pub u16)` (the alphabetically dense
 //! biome registry id, plains = 40). This is the same value pair the
 //! `rivet-world` golden test drives, so the wire bytes of the M1 spawn chunk
-//! byte-compare against the committed #153 capture fixture. `rivet-server`
-//! stays feature-free (no `blocks` feature), mirroring the `BiomeId` pattern
-//! from `rivet-world/tests/superflat_chunk_golden.rs`.
+//! byte-compare against the committed #153 capture fixture. The local
+//! `StateId` mirrors `rivet-registry::generated::StateId` (which PR #244 made
+//! available to `rivet-server` via the `blocks` feature) and `BiomeId` has no
+//! generated newtype equivalent — the generated `biomes.rs` exposes only a
+//! name→id map — so the pair stays local, exactly as in
+//! `rivet-world/tests/superflat_chunk_golden.rs`, until the owning unit replaces
+//! them.
 //!
 //! RivetTodo(#183): the `ChunkAccess` base surface (`getBlockState` at absolute
 //! height, section accessors, `setSectionIndex`), the block-entity map, and the
@@ -37,17 +41,19 @@ use rivet_world::superflat::{
 /// A dense global block-state id (index into the global palette). `rivet-registry`
 ///'s generated table is the canonical source (`BLOCK_STATE_COUNT = 32366`, air =
 /// state 0, stone = state 1 — the default states); the M1 superflat content is
-/// built against this thin wrapper so `rivet-server` stays feature-free. The
-/// owning chunk.access unit replaces it with the real `StateId`.
+/// built against this thin wrapper, identical in shape to the generated
+/// `rivet-registry::generated::StateId` (available to `rivet-server` since
+/// #244 enabled `blocks`), so the slice stays coupled to the same value until
+/// the owning chunk.access unit replaces it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct StateId(pub u16);
 
 /// A dense biome global id. The `minecraft:worldgen/biome` registry is
 /// alphabetically dense (`0..66`; plains = 40) — the generated `biomes.rs`
-/// table is the canonical source, but `rivet-server` does not enable the
-/// `blocks` feature, so the superflat content (a single plains biome, id 40)
-/// is built against this thin wrapper. The `mc.world.level.biome.core` unit
-/// replaces it with the real `Holder<Biome>` container.
+/// table is the canonical source, but it exposes a name→id map, not a newtype,
+/// so the superflat content (a single plains biome, id 40) is built against
+/// this thin wrapper. The `mc.world.level.biome.core` unit replaces it with
+/// the real `Holder<Biome>` container.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BiomeId(pub u16);
 
