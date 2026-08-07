@@ -32,6 +32,19 @@ JVM and to use `anyhow`/`serde`.
   `GENERATED — do not hand-edit`; this is the checked-in generator that makes
   regeneration possible. Idempotent: over the current committed files it
   reproduces them byte-for-byte (`git diff` stays clean).
+- **`extract-biomes-tags`** — compiles and runs `java/BiomeTagExtractor.java`
+  against the real Paper jar, reproducing `WorldLoader.load`
+  (vanilla pack -> STATIC layer -> `TagLoader.loadTagsForExistingRegistries`
+  -> `RegistryDataLoader.load(WORLDGEN_REGISTRIES)` ->
+  `serializeTagsToNetwork`), and writes the deterministic biome id table + tag
+  network-serialization content to `data/biomes_tags.json` (issue #49). The
+  helper writes a `probe` object with the live-load counts into the fixture
+  because `Bootstrap.wrapStreams()` redirects `System.out` into the logger.
+- **`probe-biomes-tags`** — re-runs `BiomeTagExtractor` against the real Paper
+  jar and requires byte-identity with the committed `data/biomes_tags.json`
+  plus the anchor counts (66 biomes / 15 tag-carrying registries / 697 tags).
+  This is the live half of the fixture-pinned conformance test in `generate`'s
+  `biomes_tags.rs` tests.
 - **`probe-block-states`** — compiles and runs `java/GlobalPaletteProbe.java`
   against the real Paper jar and cross-checks the emitted block-state global-id
   table (issue #154): size 32366, per-block contiguous ranges partitioning the
@@ -49,6 +62,8 @@ rivet-codegen generate   [--input <path>]  [--output <dir>]
                          [--packets <path>] [--packets-output <dir>]
 rivet-codegen registries [--input <path>]  [--output <dir>]
 rivet-codegen mth-gen    [--bundler <path>] [--output <dir>]
+rivet-codegen extract-biomes-tags [--bundler <path>] [--output <path>]
+rivet-codegen probe-biomes-tags  [--bundler <path>]
 rivet-codegen probe-block-states [--bundler <path>]
 rivet-codegen reports    [--jar <path>] [--output <dir>] [--verify]
 ```
@@ -68,7 +83,9 @@ target/release/rivet-codegen extract          # -> data/block_states.json
 target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_states.rs, registries.rs} + crates/rivet-protocol/src/generated/
 target/release/rivet-codegen registries       # -> crates/rivet-registry/src/generated/registries.rs (report-driven half only)
 target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
-target/release/rivet-codegen probe-block-states  # verify the emitted block-state global ids against live Paper
+target/release/rivet-codegen extract-biomes-tags  # -> data/biomes_tags.json + manifest
+target/release/rivet-codegen probe-biomes-tags    # verify biome ids + tag network content against live Paper
+target/release/rivet-codegen probe-block-states   # verify the emitted block-state global ids against live Paper
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
@@ -216,6 +233,15 @@ the crate's `"blocks"` cargo feature:
   distinct `(name, values)` property type, plus the value tables and a per-block
   `BLOCK_STATE_SHAPES` table (ordered property ids by block id).
 - `registries.rs` — the report-driven static-builtin tables (see below).
+- `biomes.rs` — the biome id/name table (`BIOME_BY_NAME`/`BIOME_BY_ID`, dense
+  `0..n`, `BIOME_COUNT`), the element table a `PalettedContainer<Holder<Biome>>`
+  global palette indexes into (issue #49).
+- `tags.rs` — the tag network-serialization content: every registry on the
+  `ClientboundUpdateTagsPacket` wire, each mapped to tag-location -> element
+  names in the tag file's value order (issue #49). For the 7 datapack
+  registries the report cannot cover it also emits the element table; the other
+  8 resolve through the existing `blocks.rs`/`registries.rs`/`biomes.rs`
+  surfaces. See "Biome + tag tables" below.
 
 The generator asserts block ids are contiguous `0..n` (true for vanilla 26.2).
 After regenerating, run `cargo fmt -p rivet-registry` (the phf macro output is
@@ -269,6 +295,52 @@ a stale fixture aborts generation.
 `cfg(test)`, outside `src/generated/` so it does not collide with the golden
 drift test) asserts every emitted `*_BY_NAME`/`*_BY_ID` pair is a dense
 bijection and that the `DefaultedRegistry` folds line up with the tables.
+
+## Biome + tag tables (`biomes.rs`, `tags.rs`)
+
+`generate` consumes `data/biomes_tags.json` (issue #49) — produced by
+`extract-biomes-tags` from a live Paper load — and emits
+`crates/rivet-registry/src/generated/biomes.rs` + `tags.rs`, committed and gated
+behind the crate's `"blocks"` cargo feature.
+
+The biome registry is **datapack-loaded** (not in `BuiltInRegistries`), so its
+ids are assigned at runtime by `ResourceManagerRegistryLoadTask` from a
+`TreeMap<Identifier, Resource>` sorted by `Identifier` compareTo (path first,
+then namespace): id 0 = `minecraft:badlands`, 66 biomes, alphabetical. The tag
+content is exactly what `TagNetworkSerialization.serializeTagsToNetwork` emits
+for the `ClientboundUpdateTagsPacket` — every `networkSafeRegistries` registry
+(WORLDGEN networkable + STATIC) that carries at least one bound tag, mapped to
+tag-location -> element ids in the tag JSON file's value order.
+
+- `biomes.rs` — `BIOME_BY_NAME` (phf, name -> id) / `BIOME_BY_ID`
+  (id-indexed `&[&str]`) / `BIOME_COUNT` = 66.
+- `tags.rs` — `TAG_REGISTRIES` (the 15 tag-carrying registry keys in
+  deterministic order) + per-registry `{PREFIX}_TAG_BY_NAME` phf maps
+  (tag-location -> element names in the tag file's value order). For the 7
+  datapack registries the report cannot cover (`enchantment`, `dialog`,
+  `painting_variant`, `timeline`, `instrument`, `banner_pattern`, `damage_type`)
+  `tags.rs` also emits the element table; the other 8 (`block`, `item`,
+  `entity_type`, `fluid`, `game_event`, `potion`, `point_of_interest_type`,
+  `worldgen/biome`) resolve their element names through the existing
+  `blocks.rs`/`registries.rs`/`biomes.rs` surfaces.
+
+The validator is strict: every fixture top-level/registry/probe field is
+allow-listed; element tables must be dense `0..n` bijections (sparse ids,
+duplicate names/ids, non-integer/overflowing ids, malformed identifiers all
+fail); every tag element must resolve against its registry's element table; the
+15-registry set and each registry size plus the 697-tag total must match the
+live-Paper anchors; the runtime element tables for the report-backed surfaces
+are cross-checked against `data/reports/registries.json`; the `probe` counts
+must be internally consistent and match the anchors; and the fixture must match
+the sha256 in `data/biomes_tags.manifest.json` (pinned provenance). Regeneration
+is byte-idempotent.
+
+`crates/rivet-registry/src/biomes_tags_tests.rs` (feature-gated `blocks` +
+`cfg(test)`, outside `src/generated/`) exercises the generated tables: the
+biome table round-trips, tag elements resolve against the shared tables, the
+tag-registry surface is complete, and the `is_overworld`/`is_nether` biome tags
+(superflat presets) exist. The live `probe-biomes-tags` is the counterpart gate
+that re-derives the fixture from a fresh Paper load.
 
 ## Packet-ID tables (`rivet-protocol`)
 
