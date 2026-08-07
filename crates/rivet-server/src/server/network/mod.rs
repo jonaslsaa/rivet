@@ -6,6 +6,7 @@
 
 pub mod connection;
 pub mod connection_id;
+pub mod keepalive;
 pub mod packet_listener;
 pub mod server_configuration_packet_listener;
 pub mod server_connection_listener;
