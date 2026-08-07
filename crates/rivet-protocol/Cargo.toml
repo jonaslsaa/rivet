@@ -58,5 +58,12 @@ name = "entity_pairing_packets"
 # feature.
 required-features = ["packets"]
 
+[[test]]
+name = "login_packets"
+# Exercises the issue #99 offline login packet bodies (login module), which
+# live behind the packets feature. Pins the captured golden bodies and the
+# LoginProtocols addPacket-order ids.
+required-features = ["packets"]
+
 [lints]
 workspace = true

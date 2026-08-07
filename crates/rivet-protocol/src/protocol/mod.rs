@@ -30,6 +30,7 @@ pub mod bundle;
 pub mod common;
 pub mod cookie;
 pub mod game;
+pub mod login;
 pub mod packet;
 pub mod packet_type;
 pub mod ping;
@@ -41,6 +42,10 @@ pub mod unbound_protocol;
 
 pub use bundle::{BundleDelimiterPacket, BundlePacket, BundlerInfo};
 pub use game::common_player_spawn_info::CommonPlayerSpawnInfo;
+pub use login::clientbound_login_compression_packet::ClientboundLoginCompressionPacket;
+pub use login::clientbound_login_finished_packet::ClientboundLoginFinishedPacket;
+pub use login::serverbound_hello_packet::ServerboundHelloPacket;
+pub use login::serverbound_login_acknowledged_packet::ServerboundLoginAcknowledgedPacket;
 pub use packet::{Packet, codec};
 pub use packet_type::PacketType;
 pub use protocol_codec_builder::ProtocolCodecBuilder;
