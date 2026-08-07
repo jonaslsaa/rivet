@@ -1,5 +1,5 @@
 //! Normalization of a client run's raw JSONL transcript into a canonical
-//! observable-outcome object for the `join` scenario.
+//! observable-outcome object for the `join` and `move` scenarios.
 //!
 //! The client emits a JSON-lines stream on stdout (`protocol:1`). Not every
 //! line is an observable outcome: `starting` is launch metadata and
@@ -43,6 +43,52 @@ pub const PROTOCOL: u64 = 1;
 
 /// Events that count as the observable join lifecycle, in emit order.
 const LIFECYCLE_EVENTS: [&str; 3] = ["init", "login", "spawn"];
+
+/// Nondeterministic fields of the `move` transcript, with justification.
+///
+/// The client already normalizes per-tick positions to spawn-relative `dx/dz`
+/// deltas at full precision, so the sampled walk (position, velocity,
+/// on-ground) is byte-identical across boots. Teleport ids are deterministic
+/// too — Paper's `awaitingTeleport` counter (ServerGamePacketListenerImpl) is
+/// per-connection and starts at 0, so on a fresh boot the spawn teleport is
+/// always the first teleport (id 1) — so `walk.teleports` / `walk.teleport_acks`
+/// are compared, and the teleport->ack echo relationship is additionally
+/// checked structurally. What is genuinely per-boot nondeterministic and must
+/// be excluded:
+///
+/// - `walk.keepalives` / `walk.keepalive_echoes`: Paper's keepalive challengeId
+///   is `Util.getMillis()` wall-clock (ServerCommonPacketListenerImpl), so the
+///   raw ids differ every boot. The relationship — every keepalive has exactly
+///   one matching echo — is compared structurally via `keepalive_echo` set.
+/// - `walk.corrections` / `walk.corrections_count`: `entity_position_sync`
+///   packets are a timing-dependent server observation — how many client
+///   position packets land before each server tick decides how often the server
+///   re-syncs the player entity. Both the count and the coordinates (which
+///   wander far outside the +x walk line) vary across fresh boots. Azalea is
+///   client-authoritative for the player, so these corrections never move the
+///   client and the sampled walk above is unaffected; they are recorded as a
+///   diagnostic so the invariant "server corrections occurred while walking"
+///   stays observable, but they are excluded from parity.
+fn excluded_move_fields() -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "walk.keepalives".to_owned(),
+        json!("Paper's keepalive challengeId is Util.getMillis() wall-clock (ServerCommonPacketListenerImpl), so raw keepalive ids differ per boot; the keepalive->echo relationship is compared structurally via keepalive_echo set equality"),
+    );
+    map.insert(
+        "walk.keepalive_echoes".to_owned(),
+        json!("echo of the per-boot keepalive ids; relationship compared structurally via keepalive_echo set equality"),
+    );
+    map.insert(
+        "walk.corrections".to_owned(),
+        json!("entity_position_sync coordinates carry the server's per-boot entity context and timing, so both the coordinates and the count vary per boot; recorded as a diagnostic, excluded from parity"),
+    );
+    map.insert(
+        "walk.corrections_count".to_owned(),
+        json!("the number of entity_position_sync packets is timing-dependent (how many client position packets land before each server tick), verified to vary across fresh boots (e.g. 110 vs 96); recorded as a diagnostic, excluded from parity"),
+    );
+    map
+}
 
 /// Nondeterministic fields of the join transcript, with justification. The
 /// Paper server randomizes the player's spawn X/Z offset around the (fixed)
@@ -218,6 +264,93 @@ pub fn normalize_join(raw: &str) -> Result<Value, String> {
     Ok(transcript)
 }
 
+/// Multiset equality of two JSON scalar arrays (as sorted multisets). Used to
+/// compare the teleport->ack and keepalive->echo relationships on the raw ids:
+/// every request must have exactly one matching echo, and every echo must have
+/// exactly one matching request. The keepalive ids are per-boot and excluded
+/// from parity, so the echo relationship is what carries the signal there; the
+/// teleport ids are deterministic and compared directly as well.
+fn set_equality(a: &Value, b: &Value) -> bool {
+    // Compare scalar arrays as sorted multisets by their canonical JSON
+    // serialization (serde_json::Value is not PartialOrd).
+    let key = |v: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = v
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        keys.sort();
+        keys
+    };
+    key(a) == key(b)
+}
+
+/// Project a client run onto the canonical `move` transcript.
+///
+/// The client's `moved` record already carries per-tick spawn-relative deltas
+/// (so the sampled walk is invariant to the server's randomized spawn X/Z), the
+/// teleport and keepalive request ids, their echoes, and any server
+/// corrections. This normalizer projects that record onto the canonical shape,
+/// adds the structural echo-relationship flags (set equality on the raw ids —
+/// every teleport/keepalive must have exactly one matching echo) and the
+/// correction count, and attaches the explicit nondeterminism declaration
+/// (keepalive ids and corrections are per-boot; teleport ids are deterministic).
+///
+/// A `move` run that never reaches spawn (timeout / connection_failed /
+/// disconnect before `moved`) normalizes to the same outcome shapes as `join`,
+/// minus the movement observables — so a failed move run cannot accidentally
+/// pass parity against a successful one.
+pub fn normalize_move(raw: &str) -> Result<Value, String> {
+    let records = parse_records(raw)?;
+
+    let lifecycle: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.get("event").and_then(Value::as_str))
+        .filter(|e| LIFECYCLE_EVENTS.contains(e))
+        .map(str::to_owned)
+        .collect();
+
+    let moved = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("moved")))
+        .cloned();
+
+    let mut transcript = json!({
+        "protocol": PROTOCOL,
+        "scenario": "move",
+        "outcome": if moved.is_some() { "moved" } else { outcome(&records) },
+        "lifecycle": lifecycle,
+        "excluded": excluded_move_fields(),
+    });
+
+    if let Some(moved) = moved {
+        let walk = moved.get("walk").cloned().unwrap_or(Value::Null);
+        let teleports = walk.get("teleports").cloned().unwrap_or(json!([]));
+        let teleport_acks = walk.get("teleport_acks").cloned().unwrap_or(json!([]));
+        let keepalives = walk.get("keepalives").cloned().unwrap_or(json!([]));
+        let keepalive_echoes = walk.get("keepalive_echoes").cloned().unwrap_or(json!([]));
+        let corrections = walk.get("corrections").cloned().unwrap_or(json!([]));
+
+        transcript["walk"] = json!({
+            "ticks": walk.get("ticks").cloned().unwrap_or(Value::Null),
+            "heading_degrees": walk.get("heading_degrees").cloned().unwrap_or(Value::Null),
+            "samples": walk.get("samples").cloned().unwrap_or(json!([])),
+            "teleport_ack_echo": set_equality(&teleports, &teleport_acks),
+            "keepalive_echo": set_equality(&keepalives, &keepalive_echoes),
+            "corrections_count": corrections.as_array().map(|a| a.len()).unwrap_or(0),
+            "teleports": teleports,
+            "teleport_acks": teleport_acks,
+            "keepalives": keepalives,
+            "keepalive_echoes": keepalive_echoes,
+            "corrections": corrections,
+        });
+    }
+
+    Ok(transcript)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +364,82 @@ mod tests {
             r#"{"event":"joined","position":{"x":9.5,"y":-59.0,"z":-3.5},"world":"minecraft:overworld","gamemode":"survival","health":{"health":20.0,"food":20,"saturation":5.0},"experience":{"level":0,"progress":0.0,"total":0},"inventory":{"selected_slot":0,"items":[]},"chunk_count":81,"chunks":[[-4,-4],[-4,-3],[0,0]],"observation_ms":4123,"protocol":1}"#,
         ]
         .join("\n")
+    }
+
+    fn move_records() -> String {
+        [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":40,"mode":"move","azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":9.5,"y":-60.0,"z":-3.5},"protocol":1}"#,
+            r#"{"event":"moved","walk":{"ticks":120,"heading_degrees":-90.0,"samples":[{"dx":0.0,"y":-60.0,"dz":0.0,"vx":0.0,"vy":0.0,"vz":0.0,"on_ground":true},{"dx":0.098,"y":-60.0,"dz":0.0,"vx":0.098,"vy":0.0,"vz":0.0,"on_ground":true}],"teleports":[3],"teleport_acks":[3],"keepalives":[1874340021547],"keepalive_echoes":[1874340021547],"corrections":[]},"protocol":1}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn normalizes_a_successful_move() {
+        let t = normalize_move(&move_records()).expect("normalize");
+        assert_eq!(t["outcome"], "moved");
+        assert_eq!(t["scenario"], "move");
+        assert_eq!(t["lifecycle"], json!(["init", "login", "spawn"]));
+        assert_eq!(t["walk"]["ticks"], json!(120));
+        assert_eq!(t["walk"]["heading_degrees"], json!(-90.0));
+        assert_eq!(t["walk"]["samples"][1]["dx"], json!(0.098));
+        // Structural echo relationships on the raw ids.
+        assert_eq!(t["walk"]["teleport_ack_echo"], json!(true));
+        assert_eq!(t["walk"]["keepalive_echo"], json!(true));
+        assert_eq!(t["walk"]["corrections_count"], json!(0));
+        // Teleport ids are deterministic on a fresh boot (Paper's per-connection
+        // awaitingTeleport starts at 0), so they are compared, not excluded;
+        // keepalive ids are per-boot and excluded but still recorded as
+        // diagnostics.
+        assert!(t["walk"]["teleports"].is_array());
+        assert!(t["walk"]["keepalives"].is_array());
+        assert!(t["excluded"].get("walk.teleports").is_none());
+        assert!(t["excluded"]["walk.keepalives"].is_string());
+        assert!(t["excluded"]["walk.corrections"].is_string());
+        assert!(t["excluded"]["walk.corrections_count"].is_string());
+    }
+
+    #[test]
+    fn move_echo_relationship_detects_a_missing_ack() {
+        // A keepalive with no matching echo is a relationship violation: the
+        // transcript must report keepalive_echo: false.
+        let raw = move_records().replace(
+            "\"keepalive_echoes\":[1874340021547]",
+            "\"keepalive_echoes\":[]",
+        );
+        let t = normalize_move(&raw).expect("normalize");
+        assert_eq!(t["walk"]["keepalive_echo"], json!(false));
+        assert_eq!(t["walk"]["teleport_ack_echo"], json!(true));
+    }
+
+    #[test]
+    fn move_echo_relationship_detects_a_mismatched_id() {
+        let raw = move_records().replace("\"teleport_acks\":[3]", "\"teleport_acks\":[7]");
+        let t = normalize_move(&raw).expect("normalize");
+        assert_eq!(t["walk"]["teleport_ack_echo"], json!(false));
+    }
+
+    #[test]
+    fn failed_move_normalizes_without_movement_observables() {
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"mode":"move","azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"connection_failed","reason":"failed to create connection","protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_move(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "connection_failed");
+        assert_eq!(t["lifecycle"], json!(["init"]));
+        assert!(t.get("walk").is_none());
+    }
+
+    #[test]
+    fn move_rejects_unknown_protocol() {
+        let raw = r#"{"event":"starting","protocol":999}"#;
+        assert!(normalize_move(raw).is_err());
     }
 
     #[test]

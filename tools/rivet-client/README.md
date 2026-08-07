@@ -38,6 +38,7 @@ transcripts with a field-level comparator.
 ```sh
 tools/rivet-client/run-scenario.sh join            # Paper-vs-Paper self-check: 2 fresh Paper boots, must be identical
 tools/rivet-client/run-scenario.sh join --runs 3  # more Paper boots
+tools/rivet-client/run-scenario.sh move           # Paper-vs-Paper movement self-check: bounded walk, identical movement transcripts
 tools/rivet-client/run-scenario.sh join --server rivet            # Rivet headless boot + pre-play transcript
 tools/rivet-client/run-scenario.sh join --server both --pairs paper:rivet  # Paper-vs-Rivet pre-play scenario
 tools/rivet-client/run-scenario.sh capture        # one boot; print the normalized transcript
@@ -47,9 +48,10 @@ Modes (`--server` selects which servers boot, `--pairs` selects the comparison):
 
 | `--server` | `--pairs` | What runs |
 |---|---|---|
-| `paper` (default) | `paper:paper` (default) | Paper-vs-Paper self-check: `--runs` Paper boots must produce identical transcripts, plus the tamper negative case. Behavior unchanged from before #155. |
-| `rivet` | `paper:rivet` | Rivet headless boot: `--runs` rivet-servers, each must reach `RIVET_READY`, accept the client at the pre-play boundary, and shut down cleanly on SIGTERM. Reports the pre-play limitation honestly (issue #96). |
-| `both` | `paper:rivet` | Paper-vs-Rivet pre-play scenario: Paper and Rivet boot on isolated ports, the client joins each, and the harness reports the controlled pre-play transcript divergence. `--runs` is rejected here (it always boots exactly one Paper + one Rivet). |
+| `paper` (default) | `paper:paper` (default) | `join` Paper-vs-Paper self-check: `--runs` Paper boots must produce identical transcripts, plus the tamper negative case. Behavior unchanged from before #155. |
+| `paper` | `paper:paper` | `move` Paper-vs-Paper movement self-check (issue #53): each boot drives the client's bounded forward walk (`move` mode) and `--runs` Paper boots must produce identical normalized movement transcripts (per-tick spawn-relative deltas, velocity, on-ground, teleport/keepalive echo relationships), plus the tamper negative case. This validates the movement harness against Paper; a Rivet-vs-Paper comparison is deferred until Rivet's movement listener lands (issue #158). |
+| `rivet` | `paper:rivet` | `join` Rivet headless boot: `--runs` rivet-servers, each must reach `RIVET_READY`, accept the client at the pre-play boundary, and shut down cleanly on SIGTERM. Reports the pre-play limitation honestly (issue #96). |
+| `both` | `paper:rivet` | `join` Paper-vs-Rivet pre-play scenario: Paper and Rivet boot on isolated ports, the client joins each, and the harness reports the controlled pre-play transcript divergence. `--runs` is rejected here (it always boots exactly one Paper + one Rivet). |
 
 Rivet readiness is a machine-readable `RIVET_READY` marker on `rivet-server`
 stdout (crates/rivet-server/src/main.rs); the harness waits for it as a hard
@@ -73,31 +75,39 @@ The runner:
 1. Boots a fresh world per run (fixed seed 42 / superflat from
    `rivet-oracle`'s fixtures, `online-mode=false`) and waits for the server's
    READY marker (`Done (...)!` for Paper, `RIVET_READY` for Rivet).
-2. Runs the headless client and waits for the stable `joined` record (chunk
-   stream quiesced) — or, for Rivet, records the honest pre-play outcome
-   (`disconnected`, never `spawned`; `connection_failed`/`timeout` are rejected
-   as "client never completed a session").
+2. Runs the headless client in the requested mode (`join` waits for the stable
+   `joined` record after the chunk stream quiesces; `move` drives the bounded
+   forward walk and waits for the `moved` record) — or, for Rivet, records the
+   honest pre-play outcome (`disconnected`, never `spawned`;
+   `connection_failed`/`timeout` are rejected as "client never completed a
+   session").
 3. SIGTERM-shuts the server down cleanly and preserves raw diagnostics under
-   `work/scenario-join/`, `work/scenario-rivet/`, or `work/scenario-both/`
-   (`boot*.log`, `client*.stdout.jsonl`, `client*.stderr.log`,
-   `transcript*.json`).
+   `work/scenario-join/`, `work/scenario-move/`, `work/scenario-rivet/`, or
+   `work/scenario-both/` (`boot*.log`, `client*.stdout.jsonl`,
+   `client*.stderr.log`, `transcript*.json`).
 4. Diffs the normalized transcripts field-by-field; requires identical
    transcripts Paper-vs-Paper.
-5. Runs a controlled negative case (tampers `position.y`) proving the
-   comparator detects a known difference, so the harness cannot pass vacuously.
+5. Runs a controlled negative case (tampers `position.y` for `join`, or a
+   sampled position `walk.samples[60].dx` for `move`) proving the comparator
+   detects a known difference, so the harness cannot pass vacuously.
 
 Exit codes are machine-stable and consumed by gate.sh: `0` PASS, `1` FAIL
 (scenario comparison failed, negative case failed, harness error), `3`
 UNVERIFIED (missing prereq — paperclip jar / rivet-server binary — or a server
 did not reach READY within its boot timeout), `64` invalid CLI arguments.
 
-The normalized `join` transcript shape is documented in
+The normalized `join` and `move` transcript shapes are documented in
 `src/bin/run-scenario/transcript.rs`. The comparator
 (`src/bin/run-scenario/comparator.rs`) reports every differing field with its
 path and both values, and only skips fields explicitly declared in the
-transcript's `excluded` map. The Paper server randomizes the player spawn X/Z
-offset per boot, and the received chunk coordinate list is centered on that
-randomized spawn chunk, so `position.x`, `position.z`, and `chunks` are
+transcript's `excluded` map. For `join`, the Paper server randomizes the player
+spawn X/Z offset per boot, and the received chunk coordinate list is centered
+on that randomized spawn chunk, so `position.x`, `position.z`, and `chunks` are
 excluded with justification; `position.y` (superflat spawn height), the chunk
 count (117), and all other observables are compared and are identical across
-fresh boots.
+fresh boots. For `move`, the per-tick sampled walk is normalized to
+spawn-relative `dx/dz` deltas (so it is identical across boots); the
+keepalive ids (Paper's `Util.getMillis()` challengeId) and the
+`entity_position_sync` corrections (timing-dependent) are excluded with
+justification, while the teleport ids (deterministic per fresh boot), the
+echo-relationship flags, and the sampled walk are compared.
