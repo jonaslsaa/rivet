@@ -46,24 +46,37 @@ impl ChunkTrackingView {
         self.view_distance
     }
 
-    /// `Positioned.minX()` — `center.x() - viewDistance - 1`.
+    /// `Positioned.minX()` — `center.x() - viewDistance - 1` in wrapping int
+    /// arithmetic (PORTING.md: Java `int` arithmetic wraps on overflow).
     fn min_x(&self) -> i32 {
-        self.center.x() - self.view_distance - 1
+        self.center
+            .x()
+            .wrapping_sub(self.view_distance)
+            .wrapping_sub(1)
     }
 
     /// `Positioned.minZ()`.
     fn min_z(&self) -> i32 {
-        self.center.z() - self.view_distance - 1
+        self.center
+            .z()
+            .wrapping_sub(self.view_distance)
+            .wrapping_sub(1)
     }
 
     /// `Positioned.maxX()`.
     fn max_x(&self) -> i32 {
-        self.center.x() + self.view_distance + 1
+        self.center
+            .x()
+            .wrapping_add(self.view_distance)
+            .wrapping_add(1)
     }
 
     /// `Positioned.maxZ()`.
     fn max_z(&self) -> i32 {
-        self.center.z() + self.view_distance + 1
+        self.center
+            .z()
+            .wrapping_add(self.view_distance)
+            .wrapping_add(1)
     }
 
     /// `ChunkTrackingView.isWithinDistance(centerX, centerZ, viewDistance,
@@ -281,5 +294,44 @@ mod tests {
         // Near center: contained.
         assert!(view.contains(0, 0, true));
         assert!(view.contains(-1, 0, true));
+    }
+
+    #[test]
+    fn min_max_bounds_wrap_like_java_ints() {
+        // `Positioned.minX()` is `center.x() - viewDistance - 1` and `maxX()` is
+        // `center.x() + viewDistance + 1`, each step a wrapping int
+        // operation. At i32 extremes the subtraction/addition wraps.
+        // Center = i32::MIN, view 1: minX = (i32::MIN - 1) - 1 = i32::MAX - 1;
+        // maxX = (i32::MIN + 1) + 1 = i32::MIN + 2.
+        let min_center = ChunkTrackingView::of(ChunkPos::new(i32::MIN, 0), 1);
+        assert_eq!(min_center.min_x(), i32::MAX - 1);
+        assert_eq!(min_center.max_x(), i32::MIN + 2);
+        assert_eq!(min_center.min_z(), -2);
+        assert_eq!(min_center.max_z(), 2);
+        // Center = i32::MAX, view 1: minX = (i32::MAX - 1) - 1 = i32::MAX - 2;
+        // maxX = (i32::MAX + 1) + 1 = i32::MIN + 1.
+        let max_center = ChunkTrackingView::of(ChunkPos::new(i32::MAX, 0), 1);
+        assert_eq!(max_center.min_x(), i32::MAX - 2);
+        assert_eq!(max_center.max_x(), i32::MIN + 1);
+        assert_eq!(max_center.min_z(), -2);
+        assert_eq!(max_center.max_z(), 2);
+        // View 0 stays exact (no overflow): (-1, 1) both axes.
+        let zero = ChunkTrackingView::of(ChunkPos::ZERO, 0);
+        assert_eq!(zero.min_x(), -1);
+        assert_eq!(zero.max_x(), 1);
+        assert_eq!(zero.min_z(), -1);
+        assert_eq!(zero.max_z(), 1);
+    }
+
+    #[test]
+    fn wrapped_empty_view_iterates_nothing() {
+        // When the wrapped bounds put minX > maxX (Java `for` loops simply do
+        // not run), `for_each` must iterate zero chunks rather than panic on the
+        // debug-build overflow or loop forever. Both i32::MIN and i32::MAX
+        // centers with view 1 wrap to an empty X range.
+        let min_center = ChunkTrackingView::of(ChunkPos::new(i32::MIN, 0), 1);
+        assert_eq!(min_center.chunk_count(), 0);
+        let max_center = ChunkTrackingView::of(ChunkPos::new(i32::MAX, 0), 1);
+        assert_eq!(max_center.chunk_count(), 0);
     }
 }
