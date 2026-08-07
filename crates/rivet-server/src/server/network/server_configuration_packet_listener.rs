@@ -372,7 +372,10 @@ impl PacketListener for ServerConfigurationPacketListener {
                 // out-of-order / no-challenge TIMEOUT disconnects, 30 s kick) are
                 // not driven here. The pure state machine + `KeepaliveSink` seam
                 // live in `server::keepalive` / `server::network::keepalive`; the
-                // configuration tick hook that drives them is #96.
+                // configuration tick hook that drives them needs a tick source for
+                // the tokio-side listener (Paper ticks `keepConnectionAlive` from
+                // the server thread) — the `PacketListener::tick` driver, shared
+                // with #157's play listener.
                 Ok(ListenerOutcome::Keep)
             }
             PONG_PACKET_ID => {
