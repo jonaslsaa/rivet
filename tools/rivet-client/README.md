@@ -109,8 +109,9 @@ fresh boots. For `move`, the per-tick sampled walk is normalized to
 spawn-relative `dx/dz` deltas (so it is identical across boots); the walk
 geometry (`walk_ticks`, `movement_ticks`, `sampled_ticks`), the teleport ids
 (deterministic per fresh boot), the echo-relationship flags, and the sampled
-walk are compared. The keepalive ids (Paper's `Util.getMillis()` challengeId)
-and the `entity_position_sync` corrections (timing-dependent) are excluded with
+walk are compared. The keepalive ids (Paper's `Util.getMillis()` challengeId —
+`System.nanoTime()/1e6`, monotonic milliseconds since JVM start) and the
+`entity_position_sync` corrections (timing-dependent) are excluded with
 justification. A `moved` record whose sampled walk shows no meaningful forward
 progress is classified as `noop` and fails the run rather than passing a
 vacuous Paper-vs-Paper comparison.

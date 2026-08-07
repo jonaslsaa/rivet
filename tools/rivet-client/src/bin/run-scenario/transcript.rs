@@ -57,9 +57,10 @@ const LIFECYCLE_EVENTS: [&str; 3] = ["init", "login", "spawn"];
 /// be excluded:
 ///
 /// - `walk.keepalives` / `walk.keepalive_echoes`: Paper's keepalive challengeId
-///   is `Util.getMillis()` wall-clock (ServerCommonPacketListenerImpl), so the
-///   raw ids differ every boot. The relationship — every keepalive has exactly
-///   one matching echo — is compared structurally via `keepalive_echo` set.
+///   is `Util.getMillis()` — `System.nanoTime() / 1e6`, monotonic milliseconds
+///   since the JVM started (ServerCommonPacketListenerImpl), so the raw ids
+///   differ every boot. The relationship — every keepalive has exactly one
+///   matching echo — is compared structurally via `keepalive_echo` set.
 /// - `walk.corrections` / `walk.corrections_count`: `entity_position_sync`
 ///   packets are a timing-dependent server observation — how many client
 ///   position packets land before each server tick decides how often the server
@@ -73,7 +74,7 @@ fn excluded_move_fields() -> serde_json::Map<String, Value> {
     let mut map = serde_json::Map::new();
     map.insert(
         "walk.keepalives".to_owned(),
-        json!("Paper's keepalive challengeId is Util.getMillis() wall-clock (ServerCommonPacketListenerImpl), so raw keepalive ids differ per boot; the keepalive->echo relationship is compared structurally via keepalive_echo set equality"),
+        json!("Paper's keepalive challengeId is Util.getMillis() — System.nanoTime()/1e6, monotonic milliseconds since JVM start (ServerCommonPacketListenerImpl) — so raw keepalive ids differ per boot; the keepalive->echo relationship is compared structurally via keepalive_echo set equality"),
     );
     map.insert(
         "walk.keepalive_echoes".to_owned(),
@@ -460,8 +461,11 @@ mod tests {
                 "samples": samples,
                 "teleports": [1],
                 "teleport_acks": [1],
-                "keepalives": [1874340021547i64],
-                "keepalive_echoes": [1874340021547i64],
+                // A keepalive challengeId from the stored observed boots
+                // (client1.stdout.jsonl): Util.getMillis() = System.nanoTime()/1e6,
+                // monotonic ms since the Paper JVM started.
+                "keepalives": [266783496i64],
+                "keepalive_echoes": [266783496i64],
                 "corrections": [],
             },
             "protocol": 1,
@@ -539,7 +543,7 @@ mod tests {
         // A keepalive with no matching echo is a relationship violation: the
         // transcript must report keepalive_echo: false.
         let raw = move_records().replace(
-            "\"keepalive_echoes\":[1874340021547]",
+            "\"keepalive_echoes\":[266783496]",
             "\"keepalive_echoes\":[]",
         );
         let t = normalize_move(&raw).expect("normalize");
