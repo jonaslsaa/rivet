@@ -25,8 +25,8 @@ pub trait BaseMapCodec<K, V, Ops: DynamicOps + 'static> {
     /// input: ".
     fn decode_map(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<HashMap<K, V>>
     where
-        K: Clone + std::hash::Hash + Eq + std::fmt::Display + 'static,
-        V: Clone + 'static,
+        K: Clone + std::hash::Hash + Eq + std::fmt::Display + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
     {
         let mut read: HashMap<K, V> = HashMap::new();
         let mut failed: Vec<Pair<Ops::Output, Ops::Output>> = Vec::new();
@@ -120,8 +120,8 @@ impl<K, V, Ops: DynamicOps + 'static> Keyable<Ops> for SimpleMapCodec<K, V, Ops>
 
 impl<K, V, Ops: DynamicOps + 'static> MapDecoder<HashMap<K, V>, Ops> for SimpleMapCodec<K, V, Ops>
 where
-    K: Clone + std::hash::Hash + Eq + std::fmt::Display + 'static,
-    V: Clone + 'static,
+    K: Clone + std::hash::Hash + Eq + std::fmt::Display + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<HashMap<K, V>> {
         self.decode_map(ops, input)
@@ -130,8 +130,8 @@ where
 
 impl<K, V, Ops: DynamicOps + 'static> MapEncoder<HashMap<K, V>, Ops> for SimpleMapCodec<K, V, Ops>
 where
-    K: Clone + 'static,
-    V: Clone + 'static,
+    K: Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     fn encode(
         &self,
@@ -145,8 +145,8 @@ where
 
 impl<K, V, Ops: DynamicOps + 'static> MapCodec<HashMap<K, V>, Ops> for SimpleMapCodec<K, V, Ops>
 where
-    K: Clone + std::hash::Hash + Eq + std::fmt::Display + 'static,
-    V: Clone + 'static,
+    K: Clone + std::hash::Hash + Eq + std::fmt::Display + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<HashMap<K, V>> {
         self.decode_map(ops, input)

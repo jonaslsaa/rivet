@@ -13,7 +13,12 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 /// `com.mojang.serialization.MapDecoder<A>`.
-pub trait MapDecoder<A, Ops: DynamicOps + 'static>: Debug + Keyable<Ops> {
+///
+/// `Send + Sync` mirrors Paper: the game's codecs are `static final` values
+/// shared across netty threads (and the packet `StreamCodec` a status response
+/// is built from is itself `Send + Sync`), so a codec must be usable from any
+/// connection thread.
+pub trait MapDecoder<A, Ops: DynamicOps + 'static>: Debug + Keyable<Ops> + Send + Sync {
     /// `MapDecoder.decode(DynamicOps<T> ops, MapLike<T> input)`.
     fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<A>;
 
@@ -75,7 +80,7 @@ where
 /// `MapDecoder.map(Function)`.
 pub fn map<A, B, Ops: DynamicOps + 'static>(
     inner: Arc<dyn MapDecoder<A, Ops>>,
-    function: Arc<dyn Fn(&A) -> B>,
+    function: Arc<dyn Fn(&A) -> B + Send + Sync>,
 ) -> Arc<dyn MapDecoder<B, Ops>>
 where
     A: 'static,
@@ -87,7 +92,7 @@ where
 /// `MapDecoder.ap(MapDecoder<Function<A, E>>)`.
 pub fn ap<A, E, Ops: DynamicOps + 'static>(
     first: Arc<dyn MapDecoder<A, Ops>>,
-    decoder: Arc<dyn MapDecoder<Arc<dyn Fn(A) -> E>, Ops>>,
+    decoder: Arc<dyn MapDecoder<Arc<dyn Fn(A) -> E + Send + Sync>, Ops>>,
 ) -> Arc<dyn MapDecoder<E, Ops>>
 where
     A: 'static,
@@ -108,7 +113,7 @@ where
 }
 
 /// `MapDecoder.unit(A)`.
-pub fn unit<A: Clone + 'static, Ops: DynamicOps + 'static>(
+pub fn unit<A: Clone + Send + Sync + 'static, Ops: DynamicOps + 'static>(
     instance: A,
 ) -> Arc<dyn MapDecoder<A, Ops>> {
     unit_with(Arc::new(move || instance.clone()))
@@ -116,7 +121,7 @@ pub fn unit<A: Clone + 'static, Ops: DynamicOps + 'static>(
 
 /// `MapDecoder.unit(Supplier<A>)`.
 pub fn unit_with<A: 'static, Ops: DynamicOps + 'static>(
-    instance: Arc<dyn Fn() -> A>,
+    instance: Arc<dyn Fn() -> A + Send + Sync>,
 ) -> Arc<dyn MapDecoder<A, Ops>> {
     Arc::new(MapUnitDecoder {
         instance,
@@ -213,7 +218,7 @@ impl<A, B, Ops: DynamicOps + 'static> MapDecoder<B, Ops> for FlatMappedMapDecode
 
 /// `MapDecoder.map(Function)` result.
 pub struct MappedMapDecoder<A, B, Ops: DynamicOps + 'static> {
-    function: Arc<dyn Fn(&A) -> B>,
+    function: Arc<dyn Fn(&A) -> B + Send + Sync>,
     inner: Arc<dyn MapDecoder<A, Ops>>,
 }
 impl<A, B, Ops: DynamicOps + 'static> std::fmt::Debug for MappedMapDecoder<A, B, Ops> {
@@ -237,7 +242,7 @@ impl<A, B, Ops: DynamicOps + 'static> MapDecoder<B, Ops> for MappedMapDecoder<A,
 /// `MapDecoder.ap(MapDecoder<Function<A, E>>)` result.
 pub struct AppliedMapDecoder<A, E, Ops: DynamicOps + 'static> {
     first: Arc<dyn MapDecoder<A, Ops>>,
-    decoder: Arc<dyn MapDecoder<Arc<dyn Fn(A) -> E>, Ops>>,
+    decoder: Arc<dyn MapDecoder<Arc<dyn Fn(A) -> E + Send + Sync>, Ops>>,
 }
 impl<A, E, Ops: DynamicOps + 'static> std::fmt::Debug for AppliedMapDecoder<A, E, Ops> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -287,7 +292,7 @@ impl<A, Ops: DynamicOps + 'static> MapDecoder<A, Ops> for WithLifecycleMapDecode
 
 /// `MapDecoder.unit(Supplier)` result.
 pub struct MapUnitDecoder<A, Ops: DynamicOps + 'static> {
-    instance: Arc<dyn Fn() -> A>,
+    instance: Arc<dyn Fn() -> A + Send + Sync>,
     _ops: std::marker::PhantomData<Ops>,
 }
 impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for MapUnitDecoder<A, Ops> {

@@ -8,11 +8,11 @@
 //! suppliers exist).
 //!
 //! The Java `Applicative` `Instance` (`ap`/`ap2`/`ap3`) is ported as
-//! associated functions. Multi-argument functions are `Arc<dyn Fn>` so the
+//! associated functions. Multi-argument functions are `Arc<dyn Fn + Send + Sync>` so the
 //! curried fallback of `ap2`/`ap3` (which applies the function to partial
 //! values) can own its captured values (`Box<dyn Fn>` is not cloneable).
 
-use crate::functions::{Fn1, Fn2, Fn3, Fn4};
+use crate::functions::{Fn1, Fn2, Fn3, Fn4, Fn5};
 use crate::lifecycle::Lifecycle;
 use std::fmt;
 use std::sync::Arc;
@@ -340,12 +340,12 @@ impl<T> DataResult<T> {
     /// `DataResult.apply2(BiFunction, DataResult<R2>)`.
     pub fn apply2<R2, S>(
         self,
-        function: impl Fn(&T, &R2) -> S + 'static,
+        function: impl Fn(&T, &R2) -> S + Send + Sync + 'static,
         second: DataResult<R2>,
     ) -> DataResult<S>
     where
-        T: Clone + 'static,
-        R2: Clone + 'static,
+        T: Clone + Send + Sync + 'static,
+        R2: Clone + Send + Sync + 'static,
         S: 'static,
     {
         let fr: DataResult<Fn2<T, R2, S>> =
@@ -356,12 +356,12 @@ impl<T> DataResult<T> {
     /// `DataResult.apply2stable(BiFunction, DataResult<R2>)`.
     pub fn apply2_stable<R2, S>(
         self,
-        function: impl Fn(&T, &R2) -> S + 'static,
+        function: impl Fn(&T, &R2) -> S + Send + Sync + 'static,
         second: DataResult<R2>,
     ) -> DataResult<S>
     where
-        T: Clone + 'static,
-        R2: Clone + 'static,
+        T: Clone + Send + Sync + 'static,
+        R2: Clone + Send + Sync + 'static,
         S: 'static,
     {
         let fr: DataResult<Fn2<T, R2, S>> =
@@ -372,14 +372,14 @@ impl<T> DataResult<T> {
     /// `DataResult.apply3(Function3, DataResult<R2>, DataResult<R3>)`.
     pub fn apply3<R2, R3, S>(
         self,
-        function: impl Fn(&T, &R2, &R3) -> S + 'static,
+        function: impl Fn(&T, &R2, &R3) -> S + Send + Sync + 'static,
         second: DataResult<R2>,
         third: DataResult<R3>,
     ) -> DataResult<S>
     where
-        T: Clone + 'static,
-        R2: Clone + 'static,
-        R3: Clone + 'static,
+        T: Clone + Send + Sync + 'static,
+        R2: Clone + Send + Sync + 'static,
+        R3: Clone + Send + Sync + 'static,
         S: 'static,
     {
         let fr: DataResult<Fn3<T, R2, R3, S>> =
@@ -462,7 +462,7 @@ impl<T> DataResult<T> {
 
 /// `DataResult.INSTANCE.ap2` — the `Applicative` fast path with the curried
 /// fallback.
-pub fn ap2<T: Clone + 'static, R2: Clone + 'static, S: 'static>(
+pub fn ap2<T: Clone + Send + Sync + 'static, R2: Clone + Send + Sync + 'static, S: 'static>(
     fr: DataResult<Fn2<T, R2, S>>,
     a: DataResult<T>,
     b: DataResult<R2>,
@@ -480,7 +480,7 @@ pub fn ap2<T: Clone + 'static, R2: Clone + 'static, S: 'static>(
         let curried_fn: Fn1<T, Fn1<R2, S>> = Arc::new(move |x: &T| {
             let f = f.clone();
             let x = x.clone();
-            let inner: Arc<dyn Fn(&R2) -> S> = Arc::new(move |y: &R2| f(&x, y));
+            let inner: Arc<dyn Fn(&R2) -> S + Send + Sync> = Arc::new(move |y: &R2| f(&x, y));
             inner
         });
         curried_fn
@@ -491,7 +491,12 @@ pub fn ap2<T: Clone + 'static, R2: Clone + 'static, S: 'static>(
 
 /// `DataResult.INSTANCE.ap3` — fast path when all four results are present,
 /// otherwise `ap2(ap(map(Function3.curry, func), t1), t2, t3)`.
-pub fn ap3<T: Clone + 'static, R2: Clone + 'static, R3: Clone + 'static, S: 'static>(
+pub fn ap3<
+    T: Clone + Send + Sync + 'static,
+    R2: Clone + Send + Sync + 'static,
+    R3: Clone + Send + Sync + 'static,
+    S: 'static,
+>(
     fr: DataResult<Fn3<T, R2, R3, S>>,
     a: DataResult<T>,
     b: DataResult<R2>,
@@ -529,10 +534,10 @@ pub fn ap3<T: Clone + 'static, R2: Clone + 'static, R3: Clone + 'static, S: 'sta
 /// `ap2(ap2(map(Function4::curry2, func), t1, t2), t3, t4)`.
 /// `Function4.curry2`: `(t1, t2) -> (t3, t4) -> f(t1, t2, t3, t4)`.
 pub fn ap4<
-    T1: Clone + 'static,
-    T2: Clone + 'static,
-    T3: Clone + 'static,
-    T4: Clone + 'static,
+    T1: Clone + Send + Sync + 'static,
+    T2: Clone + Send + Sync + 'static,
+    T3: Clone + Send + Sync + 'static,
+    T4: Clone + Send + Sync + 'static,
     R: 'static,
 >(
     fr: DataResult<Fn4<T1, T2, T3, T4, R>>,
@@ -554,6 +559,43 @@ pub fn ap4<
     });
     let step1 = ap2(curried, a, b);
     ap2(step1, c, d)
+}
+
+/// `Applicative.super.ap5` — Java's default, chaining `ap4`:
+/// `ap2(ap2(map(Function5::curry2, func), t1, t2), t3, ap2(t4, t5))` — in the
+/// Rust port the inner `ap4` yields a two-element `Fn2` for `(t1..t4)` whose
+/// remaining pair `(t4, t5)` still has the last two arguments to apply.
+#[allow(clippy::type_complexity)] // nested `Fn2<_, _, Fn3<...>>` mirror Java's `Function` curry
+pub fn ap5<
+    T1: Clone + Send + Sync + 'static,
+    T2: Clone + Send + Sync + 'static,
+    T3: Clone + Send + Sync + 'static,
+    T4: Clone + Send + Sync + 'static,
+    T5: Clone + Send + Sync + 'static,
+    R: 'static,
+>(
+    fr: DataResult<Fn5<T1, T2, T3, T4, T5, R>>,
+    a: DataResult<T1>,
+    b: DataResult<T2>,
+    c: DataResult<T3>,
+    d: DataResult<T4>,
+    e: DataResult<T5>,
+) -> DataResult<R> {
+    // `curry2` on the 5-arg function: `(t1, t2) -> (t3, t4, t5) -> f(t1..t5)`.
+    let curried: DataResult<Fn2<T1, T2, Fn3<T3, T4, T5, R>>> = fr.map(|f| {
+        let f = f.clone();
+        let curried_fn: Fn2<T1, T2, Fn3<T3, T4, T5, R>> = Arc::new(move |x1: &T1, x2: &T2| {
+            let f = f.clone();
+            let x1 = x1.clone();
+            let x2 = x2.clone();
+            let inner: Fn3<T3, T4, T5, R> =
+                Arc::new(move |y1: &T3, y2: &T4, y3: &T5| f(&x1, &x2, y1, y2, y3));
+            inner
+        });
+        curried_fn
+    });
+    let step1 = ap2(curried, a, b);
+    ap3(step1, c, d, e)
 }
 
 /// `DataResult.appendMessages(String, String)`.

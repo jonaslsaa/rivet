@@ -17,11 +17,13 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 /// `Function<V, DataResult<K>>` — the discriminator-key producer.
-pub type TypeFn<K, V> = Arc<dyn Fn(&V) -> DataResult<K>>;
+pub type TypeFn<K, V> = Arc<dyn Fn(&V) -> DataResult<K> + Send + Sync>;
 /// `Function<K, DataResult<MapCodec<V>>>` — the key-to-codec lookup.
-pub type CodecFn<K, V, Ops> = Arc<dyn Fn(&K) -> DataResult<Arc<dyn MapCodec<V, Ops>>>>;
+pub type CodecFn<K, V, Ops> =
+    Arc<dyn Fn(&K) -> DataResult<Arc<dyn MapCodec<V, Ops>>> + Send + Sync>;
 /// `Function<V, DataResult<MapEncoder<V>>>` — the encoder lookup.
-pub type EncoderFn<V, Ops> = Arc<dyn Fn(&V) -> DataResult<Arc<dyn MapEncoder<V, Ops>>>>;
+pub type EncoderFn<V, Ops> =
+    Arc<dyn Fn(&V) -> DataResult<Arc<dyn MapEncoder<V, Ops>>> + Send + Sync>;
 
 /// `com.mojang.serialization.codecs.KeyDispatchCodec<K, V>`.
 pub struct KeyDispatchCodec<K, V, Ops: DynamicOps + 'static> {

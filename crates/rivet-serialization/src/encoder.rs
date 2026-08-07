@@ -14,7 +14,12 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 /// `com.mojang.serialization.Encoder<A>`.
-pub trait Encoder<A, Ops: DynamicOps + 'static>: Debug {
+///
+/// `Send + Sync` mirrors Paper: the game's codecs are `static final` values
+/// shared across netty threads (and the packet `StreamCodec` a status response
+/// is built from is itself `Send + Sync`), so a codec must be usable from any
+/// connection thread.
+pub trait Encoder<A, Ops: DynamicOps + 'static>: Debug + Send + Sync {
     /// `Encoder.encode(A input, DynamicOps<T> ops, T prefix)`.
     fn encode(&self, input: &A, ops: &Ops, prefix: &Ops::Output) -> DataResult<Ops::Output>;
 
@@ -39,7 +44,7 @@ where
 /// `Encoder.comap(Function)`.
 pub fn comap<A, B, Ops: DynamicOps + 'static>(
     inner: Arc<dyn Encoder<A, Ops>>,
-    function: Arc<dyn Fn(&B) -> A>,
+    function: Arc<dyn Fn(&B) -> A + Send + Sync>,
 ) -> Arc<dyn Encoder<B, Ops>>
 where
     A: 'static,
@@ -90,7 +95,7 @@ pub fn error<A: Debug + 'static, Ops: DynamicOps + 'static>(
 
 /// `Encoder.comap(Function)` result.
 pub struct ComappedEncoder<B, A, Ops: DynamicOps + 'static> {
-    function: Arc<dyn Fn(&B) -> A>,
+    function: Arc<dyn Fn(&B) -> A + Send + Sync>,
     inner: Arc<dyn Encoder<A, Ops>>,
 }
 impl<B, A, Ops: DynamicOps + 'static> std::fmt::Debug for ComappedEncoder<B, A, Ops> {

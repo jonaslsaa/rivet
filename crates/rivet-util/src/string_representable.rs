@@ -31,7 +31,7 @@ pub const PRE_BUILT_MAP_THRESHOLD: usize = 16;
 
 /// A `String -> value` lookup — `create_name_lookup`'s return type (Java's
 /// `Function<String, @Nullable T>`).
-type NameLookup<'a, T> = Arc<dyn Fn(&str) -> Option<&'a T> + 'a>;
+type NameLookup<'a, T> = Arc<dyn Fn(&str) -> Option<&'a T> + Send + Sync + 'a>;
 
 /// `StringRepresentable.getSerializedName()`.
 pub trait StringRepresentable {
@@ -51,7 +51,10 @@ pub trait EnumOrdinal {
 // ---------------------------------------------------------------------------
 
 /// `StringRepresentable.createNameLookup(T[])` — via the serialized name.
-pub fn create_name_lookup<'a, T: StringRepresentable>(values: &'a [T]) -> NameLookup<'a, T> {
+pub fn create_name_lookup<'a, T>(values: &'a [T]) -> NameLookup<'a, T>
+where
+    T: StringRepresentable + Send + Sync + 'a,
+{
     create_name_lookup_with_converter(values, |v| v.get_serialized_name().to_string())
 }
 
@@ -61,8 +64,11 @@ pub fn create_name_lookup<'a, T: StringRepresentable>(values: &'a [T]) -> NameLo
 /// throws `IllegalStateException("Duplicate key ...")`.
 pub fn create_name_lookup_with_converter<'a, T>(
     values: &'a [T],
-    converter: impl Fn(&T) -> String + 'a,
-) -> NameLookup<'a, T> {
+    converter: impl Fn(&T) -> String + Send + Sync + 'a,
+) -> NameLookup<'a, T>
+where
+    T: Send + Sync + 'a,
+{
     if values.len() > PRE_BUILT_MAP_THRESHOLD {
         let mut map: HashMap<String, &'a T> = HashMap::new();
         for value in values {
@@ -103,8 +109,8 @@ impl<S: StringRepresentable + std::fmt::Display + Clone + 'static, Ops: DynamicO
     /// null`), which is where Java's `valueArray` is captured.
     pub fn build(
         name_lookup: NameLookup<'static, S>,
-        id_resolver: Arc<dyn Fn(&S) -> i32>,
-        from_int: Arc<dyn Fn(i32) -> Option<S>>,
+        id_resolver: Arc<dyn Fn(&S) -> i32 + Send + Sync>,
+        from_int: Arc<dyn Fn(i32) -> Option<S> + Send + Sync>,
     ) -> Self {
         let string_part = codec::string_resolver::<S, Ops>(
             Arc::new(|s: &S| Some(s.get_serialized_name().to_string())),
@@ -138,7 +144,7 @@ impl<S, Ops: DynamicOps + 'static> Codec<S, Ops> for StringRepresentableCodec<S,
 /// `StringRepresentable.EnumCodec<E>` — a `StringRepresentableCodec` built with
 /// `idResolver = Enum.ordinal()`, plus the `byName` resolver.
 /// The `EnumCodec.byName` resolver — `Function<String, @Nullable E>`.
-type NameResolver<E> = Arc<dyn Fn(&str) -> Option<E>>;
+type NameResolver<E> = Arc<dyn Fn(&str) -> Option<E> + Send + Sync>;
 
 pub struct EnumCodec<E, Ops: DynamicOps + 'static> {
     codec: StringRepresentableCodec<E, Ops>,
@@ -152,7 +158,7 @@ impl<E, Ops: DynamicOps + 'static> std::fmt::Debug for EnumCodec<E, Ops> {
 }
 
 impl<
-    E: StringRepresentable + EnumOrdinal + std::fmt::Display + Copy + 'static,
+    E: StringRepresentable + EnumOrdinal + std::fmt::Display + Copy + Send + Sync + 'static,
     Ops: DynamicOps + 'static,
 > EnumCodec<E, Ops>
 {
@@ -221,7 +227,7 @@ impl<E, Ops: DynamicOps + 'static> Codec<E, Ops> for EnumCodec<E, Ops> {}
 /// `from_enum_with_mapping`.
 pub fn from_enum<E, Ops>(values: &'static [E]) -> EnumCodec<E, Ops>
 where
-    E: StringRepresentable + EnumOrdinal + std::fmt::Display + Copy + 'static,
+    E: StringRepresentable + EnumOrdinal + std::fmt::Display + Copy + Send + Sync + 'static,
     Ops: DynamicOps + 'static,
 {
     from_enum_with_mapping(values, Arc::new(|s: &str| s.to_string()))
@@ -232,10 +238,10 @@ where
 /// before it enters `create_name_lookup`.
 pub fn from_enum_with_mapping<E, Ops>(
     values: &'static [E],
-    converter: Arc<dyn Fn(&str) -> String>,
+    converter: Arc<dyn Fn(&str) -> String + Send + Sync>,
 ) -> EnumCodec<E, Ops>
 where
-    E: StringRepresentable + EnumOrdinal + std::fmt::Display + Copy + 'static,
+    E: StringRepresentable + EnumOrdinal + std::fmt::Display + Copy + Send + Sync + 'static,
     Ops: DynamicOps + 'static,
 {
     let per_value = converter.clone();
@@ -249,7 +255,15 @@ where
 /// `Util.createIndexLookup` (position-based), not ordinal.
 pub fn from_values<T, Ops>(values: &'static [T]) -> Arc<dyn Codec<T, Ops>>
 where
-    T: StringRepresentable + std::fmt::Display + Copy + PartialEq + Eq + std::hash::Hash + 'static,
+    T: StringRepresentable
+        + std::fmt::Display
+        + Copy
+        + PartialEq
+        + Eq
+        + std::hash::Hash
+        + Send
+        + Sync
+        + 'static,
     Ops: DynamicOps + 'static,
 {
     let name_lookup = create_name_lookup(values);
@@ -279,7 +293,7 @@ pub struct StringRepresentableKeys<T: 'static>(pub &'static [T]);
 
 impl<T, Ops: DynamicOps + 'static> Keyable<Ops> for StringRepresentableKeys<T>
 where
-    T: StringRepresentable + 'static,
+    T: StringRepresentable + Send + Sync + 'static,
 {
     fn keys(&self, ops: &Ops) -> Vec<Ops::Output> {
         self.0

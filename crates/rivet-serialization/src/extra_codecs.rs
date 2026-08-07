@@ -49,8 +49,8 @@ use std::sync::Arc;
 /// `coApply` overrides the encode lifecycle from the input value.
 pub fn override_lifecycle<E, Ops>(
     codec: Arc<dyn Codec<E, Ops>>,
-    decode_lifecycle: Arc<dyn Fn(&E) -> Lifecycle>,
-    encode_lifecycle: Arc<dyn Fn(&E) -> Lifecycle>,
+    decode_lifecycle: Arc<dyn Fn(&E) -> Lifecycle + Send + Sync>,
+    encode_lifecycle: Arc<dyn Fn(&E) -> Lifecycle + Send + Sync>,
 ) -> Arc<dyn Codec<E, Ops>>
 where
     E: 'static,
@@ -69,7 +69,7 @@ where
 /// halves share `lifecycleGetter`.
 pub fn override_lifecycle_single<E, Ops>(
     codec: Arc<dyn Codec<E, Ops>>,
-    lifecycle_getter: Arc<dyn Fn(&E) -> Lifecycle>,
+    lifecycle_getter: Arc<dyn Fn(&E) -> Lifecycle + Send + Sync>,
 ) -> Arc<dyn Codec<E, Ops>>
 where
     E: 'static,
@@ -81,8 +81,8 @@ where
 /// `overrideLifecycle`'s `ResultFunction` — `toString` is
 /// `"WithLifecycle[" + decodeLifecycle + " " + encodeLifecycle + "]"`.
 struct OverrideLifecycleResultFunction<E> {
-    decode_lifecycle: Arc<dyn Fn(&E) -> Lifecycle>,
-    encode_lifecycle: Arc<dyn Fn(&E) -> Lifecycle>,
+    decode_lifecycle: Arc<dyn Fn(&E) -> Lifecycle + Send + Sync>,
+    encode_lifecycle: Arc<dyn Fn(&E) -> Lifecycle + Send + Sync>,
 }
 
 impl<E> Debug for OverrideLifecycleResultFunction<E> {
@@ -124,7 +124,7 @@ impl<E, Ops: DynamicOps + 'static> ResultFunction<E, Ops> for OverrideLifecycleR
 // ---------------------------------------------------------------------------
 
 /// The `retrieveContext` getter — `Function<DynamicOps<?>, DataResult<E>>`.
-type ContextGetter<E, Ops> = Arc<dyn Fn(&Ops) -> DataResult<E>>;
+type ContextGetter<E, Ops> = Arc<dyn Fn(&Ops) -> DataResult<E> + Send + Sync>;
 
 /// `ExtraCodecs.retrieveContext(Function<DynamicOps<?>, DataResult<E>>)` —
 /// a `MapCodec` that ignores its input and derives the value purely from the
@@ -233,8 +233,8 @@ impl<E, Ops: DynamicOps + 'static> Codec<E, Ops> for OrCompressedCodec<E, Ops> {
 /// sentinel. Error messages match Java exactly: `"Unknown element id: " + id`
 /// and `"Element with unknown id: " + e`.
 pub fn id_resolver_codec<E, Ops>(
-    to_int: Arc<dyn Fn(&E) -> i32>,
-    from_int: Arc<dyn Fn(i32) -> Option<E>>,
+    to_int: Arc<dyn Fn(&E) -> i32 + Send + Sync>,
+    from_int: Arc<dyn Fn(i32) -> Option<E> + Send + Sync>,
     unknown_id: i32,
 ) -> Arc<dyn Codec<E, Ops>>
 where
@@ -259,9 +259,9 @@ where
 }
 
 /// `Function<I, Optional<E>>` — `fromId` for `idResolverCodec`.
-type FromIdFn<I, E> = Arc<dyn Fn(&I) -> Option<E>>;
+type FromIdFn<I, E> = Arc<dyn Fn(&I) -> Option<E> + Send + Sync>;
 /// `Function<E, Optional<I>>` — `toId` for `idResolverCodec`.
-type ToIdFn<I, E> = Arc<dyn Fn(&E) -> Option<I>>;
+type ToIdFn<I, E> = Arc<dyn Fn(&E) -> Option<I> + Send + Sync>;
 
 /// `ExtraCodecs.idResolverCodec(Codec<I> value, Function<I, E>,
 /// Function<E, I>)` — `value.flatXmap(id -> fromId(id) ?? error,
@@ -274,8 +274,8 @@ pub fn id_resolver_codec_typed<I, E, Ops>(
     to_id: ToIdFn<I, E>,
 ) -> Arc<dyn Codec<E, Ops>>
 where
-    I: 'static + std::fmt::Display + Clone,
-    E: 'static + std::fmt::Display + Clone,
+    I: 'static + std::fmt::Display + Clone + Send + Sync,
+    E: 'static + std::fmt::Display + Clone + Send + Sync,
     Ops: DynamicOps + 'static,
 {
     codec::flat_xmap(
@@ -429,8 +429,8 @@ impl<K, V> LateBoundIdMapper<K, V> {
     /// a `Vec<(K, V)>` in insertion order and compares by equality.
     pub fn codec<Ops>(&self, id_codec: Arc<dyn Codec<K, Ops>>) -> Arc<dyn Codec<V, Ops>>
     where
-        K: PartialEq + Clone + std::fmt::Display + 'static,
-        V: PartialEq + Clone + std::fmt::Display + 'static,
+        K: PartialEq + Clone + Send + Sync + std::fmt::Display + 'static,
+        V: PartialEq + Clone + Send + Sync + std::fmt::Display + 'static,
         Ops: DynamicOps + 'static,
     {
         let entries = self.entries.lock().unwrap().clone();

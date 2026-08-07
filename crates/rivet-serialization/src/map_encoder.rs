@@ -12,7 +12,12 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 /// `com.mojang.serialization.MapEncoder<A>`.
-pub trait MapEncoder<A, Ops: DynamicOps + 'static>: Debug + Keyable<Ops> {
+///
+/// `Send + Sync` mirrors Paper: the game's codecs are `static final` values
+/// shared across netty threads (and the packet `StreamCodec` a status response
+/// is built from is itself `Send + Sync`), so a codec must be usable from any
+/// connection thread.
+pub trait MapEncoder<A, Ops: DynamicOps + 'static>: Debug + Keyable<Ops> + Send + Sync {
     /// `MapEncoder.encode(A input, DynamicOps<T> ops, RecordBuilder<T> prefix)`.
     fn encode(&self, input: &A, ops: &Ops, prefix: &mut dyn RecordBuilder<Output = Ops::Output>);
 }
@@ -20,7 +25,7 @@ pub trait MapEncoder<A, Ops: DynamicOps + 'static>: Debug + Keyable<Ops> {
 /// `MapEncoder.comap(Function)`.
 pub fn comap<A, B, Ops: DynamicOps + 'static>(
     inner: Arc<dyn MapEncoder<A, Ops>>,
-    function: Arc<dyn Fn(&B) -> A>,
+    function: Arc<dyn Fn(&B) -> A + Send + Sync>,
 ) -> Arc<dyn MapEncoder<B, Ops>>
 where
     A: 'static,
@@ -184,7 +189,7 @@ impl<'a, O: DynamicOps> RecordBuilder for CompressedRecordBuilder<'a, O> {
         let value_unit = value.map(|_| ());
         let combined: DataResult<()> = key_unit.apply2_stable(|_, _| (), value_unit);
         let builder = self.builder.clone();
-        let noop: Arc<dyn Fn(&())> = Arc::new(|_| {});
+        let noop: Arc<dyn Fn(&()) + Send + Sync> = Arc::new(|_| {});
         self.builder = builder.ap(combined.map(|_| noop));
     }
 
@@ -251,7 +256,7 @@ where
 
 /// `MapEncoder.comap(Function)` result.
 pub struct ComappedMapEncoder<B, A, Ops: DynamicOps + 'static> {
-    function: Arc<dyn Fn(&B) -> A>,
+    function: Arc<dyn Fn(&B) -> A + Send + Sync>,
     inner: Arc<dyn MapEncoder<A, Ops>>,
 }
 impl<B, A, Ops: DynamicOps + 'static> std::fmt::Debug for ComappedMapEncoder<B, A, Ops> {

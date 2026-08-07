@@ -55,7 +55,7 @@ use std::sync::Arc;
 
 /// `ComponentContents::codec` — resolves a contents value to its registered
 /// `MapCodec` (Java's `codecGetter` in `ComponentSerialization`).
-type CodecGetter<T, Ops> = Arc<dyn Fn(&T) -> Arc<dyn MapCodec<T, Ops>>>;
+type CodecGetter<T, Ops> = Arc<dyn Fn(&T) -> Arc<dyn MapCodec<T, Ops>> + Send + Sync>;
 
 /// `ComponentSerialization.CODEC`.
 pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Component, Ops>> {

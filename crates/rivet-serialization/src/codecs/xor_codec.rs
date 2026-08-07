@@ -16,8 +16,8 @@ pub struct XorCodec<F, S, Ops: DynamicOps + 'static> {
 
 impl<F, S, Ops: DynamicOps + 'static> crate::Decoder<Either<F, S>, Ops> for XorCodec<F, S, Ops>
 where
-    F: Clone + Debug + 'static,
-    S: Clone + Debug + 'static,
+    F: Clone + Debug + Send + Sync + 'static,
+    S: Clone + Debug + Send + Sync + 'static,
 {
     fn decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(Either<F, S>, Ops::Output)> {
         let first = self.first.clone();
@@ -72,8 +72,8 @@ impl<F, S, Ops: DynamicOps + 'static> crate::Encoder<Either<F, S>, Ops> for XorC
 
 impl<F, S, Ops: DynamicOps + 'static> Codec<Either<F, S>, Ops> for XorCodec<F, S, Ops>
 where
-    F: Clone + Debug + 'static,
-    S: Clone + Debug + 'static,
+    F: Clone + Debug + Send + Sync + 'static,
+    S: Clone + Debug + Send + Sync + 'static,
 {
 }
 
