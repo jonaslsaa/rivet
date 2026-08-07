@@ -28,6 +28,7 @@
 
 pub mod bundle;
 pub mod common;
+pub mod configuration;
 pub mod cookie;
 pub mod game;
 pub mod login;
@@ -41,6 +42,13 @@ pub mod stream_codecs;
 pub mod unbound_protocol;
 
 pub use bundle::{BundleDelimiterPacket, BundlePacket, BundlerInfo};
+pub use configuration::clientbound_finish_configuration::ClientboundFinishConfigurationPacket;
+pub use configuration::clientbound_registry_data::ClientboundRegistryDataPacket;
+pub use configuration::clientbound_select_known_packs::ClientboundSelectKnownPacks;
+pub use configuration::clientbound_update_enabled_features::ClientboundUpdateEnabledFeaturesPacket;
+pub use configuration::packed_registry_entry::PackedRegistryEntry;
+pub use configuration::serverbound_finish_configuration::ServerboundFinishConfigurationPacket;
+pub use configuration::serverbound_select_known_packs::ServerboundSelectKnownPacks;
 pub use game::common_player_spawn_info::CommonPlayerSpawnInfo;
 pub use login::clientbound_login_compression_packet::ClientboundLoginCompressionPacket;
 pub use login::clientbound_login_finished_packet::ClientboundLoginFinishedPacket;

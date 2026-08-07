@@ -44,3 +44,4 @@ pub mod serverbound_custom_payload;
 pub mod serverbound_keep_alive;
 pub mod serverbound_pong;
 pub mod serverbound_resource_pack;
+pub mod tag_network_payload;
