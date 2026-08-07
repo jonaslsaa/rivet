@@ -486,9 +486,11 @@ impl ServerConfigurationPacketListener {
     /// Java: when the accepted packs equal the requested packs, the elements
     /// whose `RegistrationInfo.knownPackInfo` is in the accepted set skip their
     /// content (`Optional.empty()`); otherwise every element is fully encoded.
-    /// The M1 vanilla client accepts `minecraft:core:26.2`, so every element is
-    /// skipped. A client that does NOT accept cannot be served faithfully (the
-    /// full NBT element codecs are unported) — see [`registry_sync::pack_registries`].
+    /// The M1 vanilla client accepts `minecraft:core:26.2`, so every vanilla
+    /// element is skipped. A client that does NOT accept the pack is served the
+    /// deterministic pre-baked full NBT: the canonical join capture's per-element
+    /// payloads, decoded back into `Tag`s and re-encoded — see
+    /// [`registry_sync::pack_registries`].
     fn handle_sync_response(
         &mut self,
         packet: &ServerboundSelectKnownPacks,

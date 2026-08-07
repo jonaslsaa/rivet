@@ -390,6 +390,10 @@ fn decode_registry_key(payload: &[u8]) -> String {
         .to_string()
 }
 
+// The `registry_data_capture.json` hex decoder, shared with the `registry_sync`
+// unit tests via a single `include!` (see the helper's header comment).
+include!("support/registry_data_capture.rs");
+
 /// Reply to `select_known_packs` with the accepting `minecraft:core:26.2`
 /// pack, consume the 29 `registry_data` packets + the `update_tags` trailer,
 /// and assert the `finish_configuration` frame that `JoinWorldTask` then sends
@@ -692,12 +696,13 @@ async fn unknown_login_packet_id_closes() {
 }
 
 #[tokio::test]
-async fn select_known_packs_rejects_non_accepting_client() {
+async fn select_known_packs_empty_reply_serves_full_content() {
     // A client that does NOT accept `minecraft:core:26.2` (here: an empty pack
     // list, the RivetProbe capture's reply) forces Paper's full-content path —
-    // every element NBT-encoded. The element codecs are unported, so this
-    // cannot be served faithfully (#109) and the connection closes
-    // deterministically.
+    // every element NBT-encoded. Rivet serves the pre-baked capture payloads
+    // (`registry_sync::pack_registries`); each `ClientboundRegistryDataPacket`
+    // body must match the committed capture fixture byte-for-byte, and the
+    // `update_tags` trailer follows.
     let (addr, server_task) = start_server(config_with_threshold(256)).await;
     let mut client = TcpStream::connect(addr).await.expect("connect");
 
@@ -719,7 +724,31 @@ async fn select_known_packs_rejects_non_accepting_client() {
         .await
         .expect("write empty select_known_packs reply");
 
-    expect_eof(&mut client).await;
+    let expected_bodies = registry_data_capture_bodies();
+    let mut seen_keys = Vec::new();
+    for (i, expected_key) in SYNCHRONIZED_KEYS.iter().enumerate() {
+        let (_, payload) = read_compressed_packet(&mut client).await;
+        let (id, used) = decode_varint(&payload);
+        assert_eq!(id, 7, "registry_data id");
+        let body = &payload[used..];
+        let key = decode_registry_key(&payload);
+        assert_eq!(key, *expected_key, "registry_data {i} key");
+        assert_eq!(
+            body,
+            expected_bodies
+                .get(&key)
+                .expect("fixture covers every registry"),
+            "registry_data {key} body must match the capture byte-for-byte"
+        );
+        seen_keys.push(key);
+    }
+    assert_eq!(seen_keys, SYNCHRONIZED_KEYS.to_vec());
+
+    // The update_tags trailer (id 13), exactly as in the accepting-client path.
+    let (_, payload) = read_compressed_packet(&mut client).await;
+    let (id, _) = decode_varint(&payload);
+    assert_eq!(id, 13, "update_tags id");
+
     server_task.abort();
 }
 
