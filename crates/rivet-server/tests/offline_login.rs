@@ -11,7 +11,9 @@
 use std::io::Read;
 use std::time::Duration;
 
+use bytes::Bytes;
 use flate2::read::ZlibDecoder;
+use rivet_server::server::tick::channels::OutboundEvent;
 use rivet_server::server::{Server, ServerConfig};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -38,6 +40,12 @@ const CLIENTBOUND_LOGIN_COMPRESSION_ID: i32 = 3;
 const CONFIG_CLIENT_INFORMATION_ID: i32 = 0;
 /// Configuration clientbound id for `custom_payload` (the brand).
 const CONFIG_CLIENTBOUND_CUSTOM_PAYLOAD_ID: i32 = 1;
+/// Configuration clientbound id for `finish_configuration` (0-byte body).
+const CONFIG_CLIENTBOUND_FINISH_CONFIGURATION_ID: i32 = 3;
+
+/// Play serverbound id for `keep_alive` (a long body) — the play packet this
+/// slice forwards to the tick thread after the configuration→play handoff.
+const PLAY_KEEP_ALIVE_PACKET_ID: i32 = 28;
 
 /// The pinned capture fixture's offline profile for the test player
 /// (`UUID.nameUUIDFromBytes("OfflinePlayer:RivetProbe")`, issue #198): most
@@ -302,6 +310,15 @@ fn expected_select_known_packs_frame() -> Vec<u8> {
     wire
 }
 
+/// The expected `ClientboundFinishConfigurationPacket` frame payload: config
+/// clientbound id 3, 0-byte body (`StreamCodec.unit(INSTANCE)`), with the
+/// `varint(0)` declaredLength prefix (sub-threshold, uncompressed).
+fn expected_finish_configuration_frame() -> Vec<u8> {
+    let mut wire = varint(0); // declaredLength 0 → raw payload
+    wire.extend_from_slice(&varint(CONFIG_CLIENTBOUND_FINISH_CONFIGURATION_ID));
+    wire
+}
+
 /// Consume the two configuration packets the server sends right after the
 /// brand: `update_enabled_features` (id 12) then `select_known_packs` (id 14).
 /// Returns the two frame payloads (what `read_frame_payload` yields).
@@ -373,6 +390,43 @@ fn decode_registry_key(payload: &[u8]) -> String {
     std::str::from_utf8(&rest[used..used + len as usize])
         .expect("registry key utf8")
         .to_string()
+}
+
+/// Reply to `select_known_packs` with the accepting `minecraft:core:26.2`
+/// pack, consume the 29 `registry_data` packets + the `update_tags` trailer,
+/// and assert the `finish_configuration` frame that `JoinWorldTask` then sends
+/// (the task starts as soon as the sync finishes). Returns the finish frame
+/// payload.
+async fn complete_sync_and_consume_finish(stream: &mut TcpStream) -> Vec<u8> {
+    stream
+        .write_all(&serverbound_select_known_packs_reply(&[(
+            "minecraft",
+            "core",
+            "26.2",
+        )]))
+        .await
+        .expect("write accepting select_known_packs reply");
+
+    for (i, expected_key) in SYNCHRONIZED_KEYS.iter().enumerate() {
+        let (_, payload) = read_compressed_packet(stream).await;
+        let (id, _) = decode_varint(&payload);
+        assert_eq!(id, 7, "registry_data id");
+        let key = decode_registry_key(&payload);
+        assert_eq!(key, *expected_key, "registry_data {i} key");
+    }
+    let (_, payload) = read_compressed_packet(stream).await;
+    let (id, _) = decode_varint(&payload);
+    assert_eq!(id, 13, "update_tags id");
+
+    // `JoinWorldTask` starts the moment the sync finishes, sending the
+    // fieldless `ClientboundFinishConfigurationPacket` (id 3).
+    let finish = read_frame_payload(stream).await;
+    assert_eq!(
+        finish,
+        expected_finish_configuration_frame(),
+        "finish_configuration frame"
+    );
+    finish
 }
 
 /// Drive handshake + hello, and assert the login response: the compression
@@ -743,6 +797,32 @@ async fn config_client_information_malformed_enum_closes() {
 }
 
 #[tokio::test]
+async fn play_packet_before_finish_configuration_closes() {
+    // Hostile ordering: a play keep_alive (id 28) sent while the configuration
+    // listener is still current is an unknown configuration packet id — Java's
+    // `PacketDecoder` finds no handler and closes deterministically. Only after
+    // `finish_configuration` does the connection hand off and forward play
+    // frames (see `play_frame_after_finish_is_forwarded_to_tick_thread`).
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&7i64.to_be_bytes());
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write play keep_alive during configuration");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn config_registry_sync_opening_frames() {
     // The configuration sync opening: brand, then update_enabled_features
     // (`{minecraft:vanilla}`), then select_known_packs (`[minecraft:core:26.2]`).
@@ -763,75 +843,282 @@ async fn config_registry_sync_opening_frames() {
 #[tokio::test]
 async fn select_known_packs_accepting_core_sends_registries_and_tags() {
     // The M1 vanilla client accepts `minecraft:core:26.2`. The server then sends
-    // the 29 `ClientboundRegistryDataPacket`s (each element `data` skipped) and
-    // the `ClientboundUpdateTagsPacket`, in `SYNCHRONIZED_REGISTRIES` order.
+    // the 29 `ClientboundRegistryDataPacket`s (each element `data` skipped), the
+    // `ClientboundUpdateTagsPacket`, and — once the sync task finishes — the
+    // `JoinWorldTask`'s `ClientboundFinishConfigurationPacket`, in
+    // `SYNCHRONIZED_REGISTRIES` order.
     let (addr, server_task) = start_server(config_with_threshold(256)).await;
     let mut client = TcpStream::connect(addr).await.expect("connect");
 
     login_and_assert_response(&mut client, 256).await;
     consume_config_sync_opening(&mut client).await;
 
-    client
-        .write_all(&serverbound_select_known_packs_reply(&[(
-            "minecraft",
-            "core",
-            "26.2",
-        )]))
-        .await
-        .expect("write accepting select_known_packs reply");
-
-    // 29 registry_data packets (small registries stay sub-threshold and come
-    // through `read_compressed_packet` with declaredLength 0; large ones are
-    // zlib-compressed — the helper handles both).
-    let mut seen_keys = Vec::new();
-    for (i, expected_key) in SYNCHRONIZED_KEYS.iter().enumerate() {
-        let (_, payload) = read_compressed_packet(&mut client).await;
-        let (id, _) = decode_varint(&payload);
-        assert_eq!(id, 7, "registry_data id");
-        let key = decode_registry_key(&payload);
-        assert_eq!(key, *expected_key, "registry_data {i} key");
-        seen_keys.push(key);
-    }
-    assert_eq!(seen_keys, SYNCHRONIZED_KEYS.to_vec());
-
-    // The update_tags trailer (id 13).
-    let (_, payload) = read_compressed_packet(&mut client).await;
-    let (id, _) = decode_varint(&payload);
-    assert_eq!(id, 13, "update_tags id");
+    let finish = complete_sync_and_consume_finish(&mut client).await;
+    // The finish frame carries the fieldless config packet (id 3).
+    let (declared, used) = decode_varint(&finish);
+    assert_eq!(declared, 0, "sub-threshold finish is not zlib-compressed");
+    assert_eq!(
+        decode_varint(&finish[used..]),
+        (CONFIG_CLIENTBOUND_FINISH_CONFIGURATION_ID, 1),
+        "finish_configuration id"
+    );
 
     server_task.abort();
 }
 
+/// A `ServerboundFinishConfigurationPacket` frame (config serverbound id 3,
+/// 0-byte body) compressed (varint(0) declaredLength prefix — sub-threshold).
+fn finish_configuration_reply_frame() -> Vec<u8> {
+    let mut wire = varint(0);
+    wire.extend_from_slice(&varint(3)); // finish_configuration
+    frame(&wire)
+}
+
 #[tokio::test]
-async fn finish_configuration_after_sync_closes() {
-    // After the registry sync finishes (client accepted the core pack), the
-    // queue is empty — `JoinWorldTask` (#100/#101) is never queued, so a
-    // `finish_configuration` still mismatches `finishCurrentTask` and closes.
+async fn finish_configuration_after_sync_reaches_play() {
+    // Issue #96: after the registry sync finishes and `JoinWorldTask` sends
+    // `ClientboundFinishConfigurationPacket`, the client's `finish_configuration`
+    // reply finishes the task, the outbound protocol flips to play, and the
+    // connection reaches the play state — it no longer mismatches and closes.
     let (addr, server_task) = start_server(config_with_threshold(256)).await;
     let mut client = TcpStream::connect(addr).await.expect("connect");
 
     login_and_assert_response(&mut client, 256).await;
     consume_config_sync_opening(&mut client).await;
-    client
-        .write_all(&serverbound_select_known_packs_reply(&[(
-            "minecraft",
-            "core",
-            "26.2",
-        )]))
-        .await
-        .expect("write accepting select_known_packs reply");
-    for _ in 0..29 {
-        read_compressed_packet(&mut client).await;
-    }
-    read_compressed_packet(&mut client).await; // update_tags
+    complete_sync_and_consume_finish(&mut client).await;
 
-    let mut wire = varint(0);
-    wire.extend_from_slice(&varint(3)); // finish_configuration
     client
-        .write_all(&frame(&wire))
+        .write_all(&finish_configuration_reply_frame())
         .await
         .expect("write finish_configuration");
 
-    expect_eof(&mut client).await;
+    // The handoff is silent: `spawnPlayer` (#101) is deferred, so nothing is
+    // sent in play yet — but the connection stays open (no deterministic close).
+    expect_silent_open(&mut client).await;
     server_task.abort();
+}
+
+/// Drive handshake → hello → registry sync → `JoinWorldTask` → handoff, write
+/// `post_sync_writes` to the client socket, and return every decoded frame the
+/// tick thread observed in `ctx.inbound` (a recording tickable on the real tick
+/// thread). This is the load-bearing assertion for the play handoff: the frame
+/// must cross the OWNERSHIP §Network boundary and land in the tick context, not
+/// merely "keep the connection open".
+async fn handoff_and_collect_play_frames(post_sync_writes: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let seen_clone = std::sync::Arc::clone(&seen);
+    let server = Server::new(config_with_threshold(256)).with_tickable(move |ctx| {
+        for (_id, frame) in &ctx.inbound {
+            seen_clone.lock().unwrap().push(frame.bytes.to_vec());
+        }
+    });
+    let listener = server.bind().await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_task = tokio::spawn(async move { server.serve(listener).await });
+
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    for w in post_sync_writes {
+        client.write_all(w).await.expect("write post-sync frames");
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let got = seen.lock().unwrap().len();
+        if got >= 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for play frames on the tick thread"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let result = seen.lock().unwrap().clone();
+    serve_task.abort();
+    result
+}
+
+#[tokio::test]
+async fn play_frame_after_finish_is_forwarded_to_tick_thread() {
+    // The seam: once in play, decoded frames are forwarded to the tick thread
+    // over the connection's bounded inbound channel instead of being parsed by
+    // a listener. The tickable observes the decoded `keep_alive` frame directly
+    // in `ctx.inbound` — the forwarding/buffer-drain is load-bearing, not just
+    // "the connection stays open".
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&7i64.to_be_bytes());
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+
+    // finish_configuration (the handoff) then the play keep_alive, in separate
+    // writes — the play frame crosses to the tick thread after the handoff.
+    let observed =
+        handoff_and_collect_play_frames(&[finish_configuration_reply_frame(), frame(&wire)]).await;
+    assert_eq!(
+        observed,
+        vec![body],
+        "the play frame crosses to the tick thread after the handoff"
+    );
+}
+
+#[tokio::test]
+async fn finish_and_play_coalesced_in_one_write_reaches_tick() {
+    // A client that coalesces `finish_configuration` with its first play packet
+    // into one TCP chunk: the finish frame triggers the handoff and the already
+    // buffered play frame is drained into the tick channel — no frame is lost at
+    // the seam. The tickable observes the coalesced play frame directly.
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&42i64.to_be_bytes());
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    let mut coalesced = finish_configuration_reply_frame();
+    coalesced.extend_from_slice(&frame(&wire));
+
+    let observed = handoff_and_collect_play_frames(&[coalesced]).await;
+    assert_eq!(
+        observed,
+        vec![body],
+        "the coalesced play frame reaches the tick thread (no loss at the seam)"
+    );
+}
+
+#[tokio::test]
+async fn play_frame_crosses_to_tick_thread_tickable() {
+    // The full OWNERSHIP §Network seam: after `finish_configuration` hands the
+    // connection to the play state, decoded frames cross to the tick thread over
+    // the connection's bounded inbound channel and land in the tick context's
+    // `inbound` — where #101's play listener will consume them. A tickable
+    // observes the `(ConnectionId, ServerboundFrame)` pair.
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    /// A tick's `(tick number, forwarded frame bytes)` pair.
+    type TickSeen = Vec<(u64, Vec<u8>)>;
+    let seen: Arc<Mutex<TickSeen>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_clone = Arc::clone(&seen);
+    let server = Server::new(config_with_threshold(256)).with_tickable(move |ctx| {
+        for (_id, frame) in &ctx.inbound {
+            seen_clone
+                .lock()
+                .unwrap()
+                .push((ctx.tick, frame.bytes.to_vec()));
+        }
+    });
+    let listener = server.bind().await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_task = tokio::spawn(async move { server.serve(listener).await });
+
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    client
+        .write_all(&finish_configuration_reply_frame())
+        .await
+        .expect("write finish_configuration");
+
+    // Play keep_alive (id 28, long 1234567890), sub-threshold.
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&1_234_567_890i64.to_be_bytes());
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write play keep_alive");
+
+    // The tick thread's next tick drains the channel and delivers the frame.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let got = seen.lock().unwrap().clone();
+        if got.iter().any(|(_, f)| f == &body) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for the play frame on the tick thread, got {got:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    serve_task.abort();
+}
+
+#[tokio::test]
+async fn play_state_exit_flushes_queued_outbound_to_the_client() {
+    // The play-state exit contract (drain_to_close): once the connection is in
+    // play and the tick thread shuts down (closing the inbound channel, so
+    // `forward_play` fails with ServerShutdown), the queued outbound channel is
+    // drained to completion — a frame the tick queued *before* the stop reaches
+    // the client before the socket closes, mirroring the pre-play shutdown
+    // paths. Positive control: the tickable queues a distinctive frame when it
+    // sees the forwarded play packet.
+    let queued = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let queued_c = std::sync::Arc::clone(&queued);
+    let server = Server::new(config_with_threshold(256)).with_tickable(move |ctx| {
+        for (id, _frame) in &ctx.inbound {
+            let mut q = queued_c.lock().unwrap();
+            if !*q {
+                // A fully-encoded VarInt21 frame (the tick thread owns the
+                // play-state wire format). Queued, not yet flushed.
+                let _ = ctx.connections.send(
+                    *id,
+                    OutboundEvent::Packet {
+                        frame: Bytes::from(frame(b"PLAYEXIT-CONTROL")),
+                    },
+                );
+                *q = true;
+            }
+        }
+    });
+    let shutdown = server.shutdown_handle();
+    let listener = server.bind().await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_task = tokio::spawn(async move { server.serve(listener).await });
+
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    client
+        .write_all(&finish_configuration_reply_frame())
+        .await
+        .expect("write finish_configuration");
+
+    // A play keep_alive (id 28) that the tickable observes, queueing the
+    // positive-control outbound frame.
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&7i64.to_be_bytes());
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write play keep_alive");
+
+    // Wait for the tickable to queue the control frame, then stop the server:
+    // the play-exit path must flush that queued frame to the client before
+    // closing (Paper's `send(disconnect, thenRun(disconnect))` ordering).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !*queued.lock().unwrap() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "tickable never queued the positive-control frame"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    shutdown.request();
+
+    // The queued frame reaches the client (drain_to_close flushes it), then the
+    // connection closes.
+    let payload = read_frame_payload(&mut client).await;
+    assert_eq!(
+        payload, b"PLAYEXIT-CONTROL",
+        "the tick-queued outbound frame must reach the client before the play-state close"
+    );
+    expect_eof(&mut client).await;
+    serve_task.abort();
 }

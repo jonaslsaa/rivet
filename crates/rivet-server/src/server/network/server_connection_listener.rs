@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use super::connection::Connection;
+use super::connection::{Connection, InboundOutcome};
 use super::connection_id::ConnectionId;
 use super::packet_listener::{DisconnectReason, PacketListener};
 use super::server_handshake_packet_listener::ServerHandshakePacketListener;
@@ -181,7 +181,18 @@ async fn run_connection(
         return;
     }
 
-    let reason = conn_loop(&mut conn, &mut listener, &config, read, out_rx, shutdown).await;
+    let reason = conn_loop(
+        &mut conn,
+        &mut listener,
+        &config,
+        read,
+        out_rx,
+        in_tx
+            .as_ref()
+            .expect("inbound sender kept for the play handoff"),
+        shutdown,
+    )
+    .await;
     // `Connection.handleDisconnection` fires `onDisconnect(DisconnectionDetails)`
     // on the current listener when the channel closes. The loop ending IS the
     // channel close, so the last-installed listener gets its disconnect hook
@@ -196,6 +207,9 @@ async fn run_connection(
         DisconnectReason::ServerShutdown => debug!(%id, %remote, "server shutdown"),
         DisconnectReason::RequestHandled => info!(%id, %remote, "status request handled"),
         DisconnectReason::Overflow => warn!(%id, %remote, "outbound overflow, disconnected"),
+        DisconnectReason::InboundOverflow(msg) => {
+            warn!(%id, %remote, "inbound overflow, disconnected: {msg}")
+        }
     }
     // Best-effort: tell the tick side the connection is gone. If the lifecycle
     // channel is full, the registry self-heals when it next drains the closed
@@ -286,18 +300,55 @@ async fn drain_to_close(
     }
 }
 
+/// The play-state forwarding exit: `forward_play` failed. A
+/// [`DisconnectReason::ServerShutdown`] error means the tick-side inbound
+/// channel is gone — the tick thread stopped, or pruned this connection — so
+/// the queued-outbound flush contract applies exactly like the
+/// `shutdown.wait_async()` branch: drain the outbound channel to completion
+/// (the tick's final frames and its in-band `ServerShutdown` Disconnect) before
+/// closing, so queued frames reach the client. Any other error (a corrupted
+/// frame, the inbound drain budget) is a terminal protocol close; the caller's
+/// `conn.close()` flushes `out_buf`.
+///
+/// When the drain observes the channel close without a server stop (an
+/// outbound-overload prune), the low reason is [`DisconnectReason::Overflow`],
+/// not `ServerShutdown` — mirroring the `out_rx.recv() == None` branch.
+async fn forward_play_failed(
+    conn: &mut Connection,
+    out_rx: &mut mpsc::Receiver<OutboundEvent>,
+    reason: DisconnectReason,
+    shutdown: &Shutdown,
+    drain_timeout: Duration,
+) -> DisconnectReason {
+    if reason != DisconnectReason::ServerShutdown {
+        return reason;
+    }
+    let drained = drain_to_close(conn, out_rx, drain_timeout).await;
+    if drained == DisconnectReason::ServerShutdown && !shutdown.is_requested() {
+        return DisconnectReason::Overflow;
+    }
+    drained
+}
+
 /// The per-connection read/dispatch loop. Reads a chunk under the configured
 /// timeout, decodes frames, dispatches to the listener, drains the tick→network
-/// outbound channel into the socket, and flushes. Returns the disconnect reason
-/// that ends the loop; the connection is closed by the caller.
+/// outbound channel into the socket, and flushes. On the configuration→play
+/// handoff ([`InboundOutcome::Play`]) the loop stops dispatching to a listener
+/// and forwards every decoded frame to the tick thread over `in_tx` — the
+/// OWNERSHIP §Network play boundary. Returns the disconnect reason that ends
+/// the loop; the connection is closed by the caller.
 async fn conn_loop(
     conn: &mut Connection,
     listener: &mut Box<dyn PacketListener>,
     config: &ServerConfig,
     mut read: OwnedReadHalf,
     mut out_rx: mpsc::Receiver<OutboundEvent>,
+    in_tx: &mpsc::Sender<ServerboundFrame>,
     shutdown: Arc<Shutdown>,
 ) -> DisconnectReason {
+    // Whether the connection has crossed the configuration→play boundary and
+    // frames are now forwarded to the tick thread instead of a listener.
+    let mut in_play = false;
     let mut chunk = [0u8; 4096];
     loop {
         // Non-blocking drain of whatever the tick thread has queued.
@@ -359,8 +410,40 @@ async fn conn_loop(
         // the compression decoder, and every listener body path return `Err`
         // deterministically, so the task tail in `run_connection` (cap decrement,
         // `on_disconnect`, `connection_closed`) always runs.
-        if let Err(reason) = conn.process_inbound(&chunk[..n], listener) {
-            return reason;
+        if in_play {
+            // Play state: forward decoded frames to the tick thread. No
+            // listener; the tick thread owns play-state dispatch (#101).
+            if let Err(reason) = conn.forward_play(Some(&chunk[..n]), in_tx).await {
+                return forward_play_failed(
+                    conn,
+                    &mut out_rx,
+                    reason,
+                    &shutdown,
+                    config.read_timeout,
+                )
+                .await;
+            }
+        } else {
+            match conn.process_inbound(&chunk[..n], listener) {
+                Ok(InboundOutcome::Keep) => {}
+                Ok(InboundOutcome::Play) => {
+                    in_play = true;
+                    // Frames already buffered when the handoff fired (a client
+                    // that coalesced `finish_configuration` with a play packet)
+                    // are drained into the tick channel now.
+                    if let Err(reason) = conn.forward_play(None, in_tx).await {
+                        return forward_play_failed(
+                            conn,
+                            &mut out_rx,
+                            reason,
+                            &shutdown,
+                            config.read_timeout,
+                        )
+                        .await;
+                    }
+                }
+                Err(reason) => return reason,
+            }
         }
     }
 }

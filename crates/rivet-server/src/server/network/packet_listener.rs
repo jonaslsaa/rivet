@@ -94,6 +94,14 @@ pub enum DisconnectReason {
     /// so a client that cannot keep up is not misreported as a server stop.
     #[error("outbound overflow")]
     Overflow,
+    /// Slice-local inbound-overload disconnect: a hostile client decoded more
+    /// inbound frames/decompressed bytes in one inbound drain (or play-state
+    /// forwarding window) than the per-connection budget allows — the
+    /// compressed-frame memory-amplification bound. No Java analog; the
+    /// observable behavior is the same as any deterministic close — the socket
+    /// closes.
+    #[error("inbound overflow: {0}")]
+    InboundOverflow(String),
 }
 
 /// Read the packet-id varint off the front of a frame (dispatch helper). Bounds
