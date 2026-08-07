@@ -127,6 +127,10 @@ pub struct ServerLevelConfig {
     pub respawn_data: RespawnData,
     /// The view distance (the `view-distance=4` fixture).
     pub view_distance: i32,
+    /// The simulation distance (the `simulation-distance=4` fixture) — the
+    /// tick-thread driver of `ClientboundSetSimulationDistancePacket` and the
+    /// Moonrise `tickViewDistance` (issue #100).
+    pub simulation_distance: i32,
 }
 
 impl Default for ServerLevelConfig {
@@ -142,6 +146,7 @@ impl Default for ServerLevelConfig {
             spawn_chunk: ChunkPos::containing(&spawn_pos),
             respawn_data: RespawnData::of(dimension.clone(), spawn_pos, 0.0, 0.0),
             view_distance: 4,
+            simulation_distance: 4,
         }
     }
 }
@@ -164,6 +169,9 @@ pub struct ServerLevel {
     /// The world's view — the view-distance-4 square centered on the spawn
     /// chunk (the 117-chunk `Event::ReceiveChunk` shape, issue #100).
     view: ChunkTrackingView,
+    /// The simulation distance (the Moonrise world `tickViewDistance` driver;
+    /// the M1 world pins it to the `simulation-distance=4` fixture).
+    simulation_distance: i32,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
     /// would cross threads.
@@ -190,6 +198,7 @@ impl ServerLevel {
             respawn_data: config.respawn_data,
             chunk_map,
             view,
+            simulation_distance: config.simulation_distance,
             _confinement: std::marker::PhantomData,
         }
     }
@@ -245,6 +254,35 @@ impl ServerLevel {
     pub fn view(&self) -> &ChunkTrackingView {
         &self.view
     }
+
+    /// `Level.getSimulationDistance()` — the world's simulation distance (the
+    /// Moonrise world `tickViewDistance` driver; the M1 world pins 4). Java's
+    /// `DistanceManager.updateSimulationDistance` clamps to
+    /// `[0, MoonriseConstants.MAX_VIEW_DISTANCE]` before `setTickDistance`; the
+    /// M1 fixture value 4 is in range, so the clamp is deferred to the config
+    /// wiring.
+    pub fn get_simulation_distance(&self) -> i32 {
+        self.simulation_distance
+    }
+
+    /// `ChunkMap.setServerViewDistance` → Moonrise `setLoadDistance(view+1)` —
+    /// the world's Moonrise load view distance (api view distance + 1).
+    pub fn load_view_distance(&self) -> i32 {
+        self.view.view_distance() + 1
+    }
+
+    /// The world's Moonrise `sendViewDistance` holder value. Paper leaves it
+    /// `-1` (unset) until a `World#setSendViewDistance` Bukkit call (the
+    /// `ViewDistances` record default `(-1, -1, -1)`); each player's send
+    /// distance is auto-configured per-player (`auto-config-send-distance`), so
+    /// the world value stays `-1` on the M1 boot path.
+    ///
+    /// RivetTodo(#236): the Bukkit `World#setSendViewDistance` world-config
+    /// wiring that sets this holder; until then it is hardcoded to the Paper
+    /// unset default.
+    pub fn send_view_distance(&self) -> i32 {
+        -1
+    }
 }
 
 #[cfg(test)]
@@ -296,6 +334,17 @@ mod tests {
         assert_eq!(r.yaw(), 10.0); // wrapDegrees(370) = 10
         assert_eq!(r.pitch(), 90.0); // clamp(100, -90, 90)
         assert_eq!(r.pos(), pos);
+    }
+
+    #[test]
+    fn moonrise_view_distances_from_the_m1_fixture() {
+        // `view-distance=4` → the Moonrise world distances the chunk loader
+        // derives from: load = 5 (api view + 1), send = -1 (the unset world
+        // holder — Paper auto-configures each player), simulation = 4.
+        let world = overworld();
+        assert_eq!(world.get_simulation_distance(), 4);
+        assert_eq!(world.load_view_distance(), 5);
+        assert_eq!(world.send_view_distance(), -1);
     }
 
     #[test]

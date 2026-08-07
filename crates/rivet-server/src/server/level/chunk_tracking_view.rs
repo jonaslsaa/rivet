@@ -46,24 +46,37 @@ impl ChunkTrackingView {
         self.view_distance
     }
 
-    /// `Positioned.minX()` — `center.x() - viewDistance - 1`.
+    /// `Positioned.minX()` — `center.x() - viewDistance - 1` in wrapping int
+    /// arithmetic (PORTING.md: Java `int` arithmetic wraps on overflow).
     fn min_x(&self) -> i32 {
-        self.center.x() - self.view_distance - 1
+        self.center
+            .x()
+            .wrapping_sub(self.view_distance)
+            .wrapping_sub(1)
     }
 
     /// `Positioned.minZ()`.
     fn min_z(&self) -> i32 {
-        self.center.z() - self.view_distance - 1
+        self.center
+            .z()
+            .wrapping_sub(self.view_distance)
+            .wrapping_sub(1)
     }
 
     /// `Positioned.maxX()`.
     fn max_x(&self) -> i32 {
-        self.center.x() + self.view_distance + 1
+        self.center
+            .x()
+            .wrapping_add(self.view_distance)
+            .wrapping_add(1)
     }
 
     /// `Positioned.maxZ()`.
     fn max_z(&self) -> i32 {
-        self.center.z() + self.view_distance + 1
+        self.center
+            .z()
+            .wrapping_add(self.view_distance)
+            .wrapping_add(1)
     }
 
     /// `ChunkTrackingView.isWithinDistance(centerX, centerZ, viewDistance,
@@ -148,6 +161,13 @@ impl ChunkTrackingView {
     /// over the inclusive `min..max` bounds, emitting only contained chunks.
     /// Deterministic order: the `-5..5` × `-5..5` raster skips the four
     /// corners, yielding the exact 117-chunk square the M1 send-set needs.
+    ///
+    /// **Termination deviation (deliberate):** Rust's `RangeInclusive` always
+    /// terminates. Java's `for (int x = minX; x <= maxX; x++)` can loop forever
+    /// when a bound is `i32::MAX` — the increment wraps to `i32::MIN`, which is
+    /// still `<= maxX`. That edge is unreachable on the M1 join path (world view
+    /// distances clamp to `[2, 32]`, so `±(view + 1)` never approaches
+    /// `i32::MAX`); this port deliberately does not reproduce the hang.
     pub fn for_each(&self, mut f: impl FnMut(ChunkPos)) {
         for x in self.min_x()..=self.max_x() {
             for z in self.min_z()..=self.max_z() {
@@ -156,6 +176,14 @@ impl ChunkTrackingView {
                 }
             }
         }
+    }
+
+    /// The number of chunks `for_each` emits — the fixed view square size (117
+    /// for the M1 view-distance-4 send-set).
+    pub fn chunk_count(&self) -> usize {
+        let mut count = 0;
+        self.for_each(|_| count += 1);
+        count
     }
 }
 
@@ -253,33 +281,112 @@ mod tests {
         assert!(!view.contains(0, 0, true));
         assert!(!view.contains(1, 0, true));
         assert!(!view.contains(0, 1, true));
-        assert_eq!(view.for_each_count(), 0);
+        assert_eq!(view.chunk_count(), 0);
     }
 
     #[test]
     fn extreme_coordinates_wrap_like_java_ints_not_panic() {
         // Java computes `Math.abs(chunk - center) - bufferRange` in wrapping int
         // arithmetic (so `Math.abs(i32::MIN)` stays negative, and the subtract
-        // can wrap). The port must not panic on i32 overflow in debug builds and
-        // must match the Java int-wrap result: the huge long distance is never
-        // `< radius²`, so the result is always `false` for i32 extremes.
+        // can wrap). This view is centered on (0,0) with radius 32, so every
+        // i32-extreme coordinate wraps to a huge delta and `distance² < radius²`
+        // is false — `contains` returns false without panicking on the
+        // debug-build overflow. The "always false at extremes" reading is
+        // specific to this near-zero center; a view centered on an extreme
+        // coordinate could wrap into a small delta and return true.
         let view = ChunkTrackingView::of(ChunkPos::ZERO, 32);
-        // Far coordinates: the huge long distance is never `< radius²`, so the
-        // result is `false` even when the int math wraps.
+        // Extreme coordinates on both axes: single-axis X, single-axis Z, and
+        // both axes together.
         assert!(!view.contains(i32::MAX, 0, true));
-        assert!(!view.contains(i32::MIN, i32::MIN, true));
+        assert!(!view.contains(i32::MIN, 0, true));
+        assert!(!view.contains(0, i32::MAX, true));
         assert!(!view.contains(0, i32::MIN, true));
+        assert!(!view.contains(i32::MIN, i32::MIN, true));
         assert!(!view.contains(i32::MAX, i32::MAX, true));
+        assert!(!view.contains(i32::MIN, i32::MAX, true));
+        assert!(!view.contains(i32::MAX, i32::MIN, true));
         // Near center: contained.
         assert!(view.contains(0, 0, true));
         assert!(view.contains(-1, 0, true));
     }
 
-    impl ChunkTrackingView {
-        fn for_each_count(&self) -> usize {
-            let mut count = 0;
-            self.for_each(|_| count += 1);
-            count
-        }
+    #[test]
+    fn extreme_center_wraps_to_small_delta_and_contains() {
+        // When the view is centered ON an i32 extreme, `chunk - center` wraps:
+        // center = i32::MAX, chunk = i32::MIN gives `MIN - MAX = 1` (mod 2³²),
+        // so `max(0, |1| - bufferRange) = 0` and the chunk is contained. A
+        // non-wrapping i64 port computes a ~4.3e9 delta and excludes it, so this
+        // distinguishes Java's wrapping ints from a widened implementation.
+        let max_center = ChunkTrackingView::of(ChunkPos::new(i32::MAX, 0), 32);
+        assert!(
+            max_center.contains(i32::MIN, 0, true),
+            "X-axis wrap-to-small"
+        );
+        let max_center_z = ChunkTrackingView::of(ChunkPos::new(0, i32::MAX), 32);
+        assert!(
+            max_center_z.contains(0, i32::MIN, true),
+            "Z-axis wrap-to-small"
+        );
+        // Both axes at once.
+        let max_both = ChunkTrackingView::of(ChunkPos::new(i32::MAX, i32::MAX), 32);
+        assert!(
+            max_both.contains(i32::MIN, i32::MIN, true),
+            "both-axes wrap-to-small"
+        );
+        // Reverse sign: center = i32::MIN, chunk = i32::MAX wraps to -1, also
+        // clamped to delta 0.
+        let min_center = ChunkTrackingView::of(ChunkPos::new(i32::MIN, 0), 32);
+        assert!(
+            min_center.contains(i32::MAX, 0, true),
+            "reverse X-axis wrap-to-small"
+        );
+    }
+
+    #[test]
+    fn min_max_bounds_wrap_like_java_ints() {
+        // Calibration: these exact wrapped values are the wrapping regression
+        // guard. In debug builds a revert to plain `-`/`+` panics on i32
+        // overflow, so the normal debug gate catches it. Release builds wrap
+        // silently (like Java), so release tests would NOT distinguish
+        // `wrapping_sub` from `-` — the debug gate (not release) pins the
+        // wrapping.
+        //
+        // `Positioned.minX()` is `center.x() - viewDistance - 1` and `maxX()` is
+        // `center.x() + viewDistance + 1`, each step a wrapping int
+        // operation. At i32 extremes the subtraction/addition wraps.
+        // Center = i32::MIN, view 1: minX = (i32::MIN - 1) - 1 = i32::MAX - 1;
+        // maxX = (i32::MIN + 1) + 1 = i32::MIN + 2.
+        let min_center = ChunkTrackingView::of(ChunkPos::new(i32::MIN, 0), 1);
+        assert_eq!(min_center.min_x(), i32::MAX - 1);
+        assert_eq!(min_center.max_x(), i32::MIN + 2);
+        assert_eq!(min_center.min_z(), -2);
+        assert_eq!(min_center.max_z(), 2);
+        // Center = i32::MAX, view 1: minX = (i32::MAX - 1) - 1 = i32::MAX - 2;
+        // maxX = (i32::MAX + 1) + 1 = i32::MIN + 1.
+        let max_center = ChunkTrackingView::of(ChunkPos::new(i32::MAX, 0), 1);
+        assert_eq!(max_center.min_x(), i32::MAX - 2);
+        assert_eq!(max_center.max_x(), i32::MIN + 1);
+        assert_eq!(max_center.min_z(), -2);
+        assert_eq!(max_center.max_z(), 2);
+        // View 0 stays exact (no overflow): (-1, 1) both axes.
+        let zero = ChunkTrackingView::of(ChunkPos::ZERO, 0);
+        assert_eq!(zero.min_x(), -1);
+        assert_eq!(zero.max_x(), 1);
+        assert_eq!(zero.min_z(), -1);
+        assert_eq!(zero.max_z(), 1);
+    }
+
+    #[test]
+    fn wrapped_empty_view_iterates_nothing() {
+        // When the wrapped bounds put minX > maxX, Rust's `RangeInclusive` is an
+        // empty iteration — zero chunks, no panic, no off-by-one. (The
+        // infinite-loop hazard of Java's `for (int x = minX; x <= maxX; x++)`
+        // is a separate, deliberately-not-reproduced edge — see `for_each`.)
+        // Both i32::MIN and i32::MAX centers with view 1 wrap to an empty X
+        // range.
+        let min_center = ChunkTrackingView::of(ChunkPos::new(i32::MIN, 0), 1);
+        assert_eq!(min_center.chunk_count(), 0);
+        let max_center = ChunkTrackingView::of(ChunkPos::new(i32::MAX, 0), 1);
+        assert_eq!(max_center.chunk_count(), 0);
     }
 }
