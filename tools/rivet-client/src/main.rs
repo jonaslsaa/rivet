@@ -279,9 +279,12 @@ struct State {
     /// Serverbound `keep_alive` ids (the echo), observed by the outbound packet
     /// observer (azalea auto-echoes every keepalive).
     keepalive_echoes: Arc<Mutex<Vec<u64>>>,
-    /// Server-issued position corrections (`entity_position_sync`): positions
-    /// the server told us to snap to. Expected empty on a flat unobstructed
-    /// walk; any entry must match the client's own simulation around that point.
+    /// Server-issued position corrections (`entity_position_sync`) observed
+    /// during the walk: Paper re-syncs the player entity periodically, so both
+    /// the count and the coordinates vary per boot (46-118 across test boots).
+    /// Azalea is client-authoritative for the local player, so these never move
+    /// the client and the sampled walk is unaffected; they are recorded as a
+    /// diagnostic and excluded from parity (see `excluded_move_fields`).
     corrections: Arc<Mutex<Vec<azalea::Vec3>>>,
     /// The player's position at `Event::Spawn` (the server's randomized spawn
     /// point). Move samples are normalized to deltas from this origin at full
@@ -567,10 +570,14 @@ async fn move_and_emit(bot: Client, state: State) {
     // Let the last sent positions and any trailing server correction flush.
     tokio::time::sleep(MOVE_DRAIN).await;
 
-    // Atomic snapshot: acquire every observables lock and clone the values while
-    // holding them all, so the request->echo sets cannot diverge by a packet
-    // arriving between two reads (each event handler holds exactly one lock, so
-    // holding all five for the clone is deadlock-free and race-free).
+    // Snapshot the observables. Each lock is taken and released per value (never
+    // all at once). The walk finished earlier and MOVE_DRAIN let the write side
+    // quiesce: no further teleports/corrections arrive once the player stops
+    // moving, and the keepalive cadence (1s) is far longer than the drain
+    // (200ms), so in practice these reads observe the final sets. If a keepalive
+    // somehow landed between two reads, the echo relationship below would report
+    // false and the run would FAIL — a spurious failure, never a false pass,
+    // which is the honest direction for a differential harness.
     let (samples, teleports, teleport_acks, keepalives, keepalive_echoes, corrections, origin) = {
         let samples = state
             .move_samples

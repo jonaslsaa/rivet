@@ -85,7 +85,7 @@ fn excluded_move_fields() -> serde_json::Map<String, Value> {
     );
     map.insert(
         "walk.corrections_count".to_owned(),
-        json!("the number of entity_position_sync packets is timing-dependent (how many client position packets land before each server tick), verified to vary across fresh boots (e.g. 110 vs 96); recorded as a diagnostic, excluded from parity"),
+        json!("the number of entity_position_sync packets is timing-dependent (how many client position packets land before each server tick), verified to vary across fresh boots (46-118 across test boots); recorded as a diagnostic, excluded from parity"),
     );
     map
 }
