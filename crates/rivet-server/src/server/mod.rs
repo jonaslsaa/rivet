@@ -8,6 +8,7 @@
 //! shared mutable structure — the OWNERSHIP "connection registry" exception.
 
 pub mod keepalive;
+pub mod level;
 pub mod network;
 pub mod tick;
 

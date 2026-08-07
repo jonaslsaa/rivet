@@ -15,6 +15,7 @@ rivet-protocol = { workspace = true, features = ["packets"] }
 # `generated::blocks`, `generated::registries` — OWNERSHIP.md §Registries).
 rivet-registry = { workspace = true, features = ["blocks"] }
 rivet-util = { workspace = true }
+rivet-world = { workspace = true }
 thiserror = { workspace = true }
 # `signal` is only used by the binary (SIGTERM clean shutdown); the library's
 # own tests do not need it.
