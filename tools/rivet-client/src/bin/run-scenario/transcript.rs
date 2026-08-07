@@ -291,17 +291,21 @@ fn set_equality(a: &Value, b: &Value) -> bool {
 ///
 /// The client's `moved` record already carries per-tick spawn-relative deltas
 /// (so the sampled walk is invariant to the server's randomized spawn X/Z), the
-/// teleport and keepalive request ids, their echoes, and any server
-/// corrections. This normalizer projects that record onto the canonical shape,
-/// adds the structural echo-relationship flags (set equality on the raw ids —
-/// every teleport/keepalive must have exactly one matching echo) and the
-/// correction count, and attaches the explicit nondeterminism declaration
-/// (keepalive ids and corrections are per-boot; teleport ids are deterministic).
+/// walk geometry (`walk_ticks` / `movement_ticks` / `sampled_ticks`), the
+/// teleport and keepalive request ids, their echoes, and any server corrections.
+/// This normalizer projects that record onto the canonical shape, adds the
+/// structural echo-relationship flags (set equality on the raw ids — every
+/// teleport/keepalive must have exactly one matching echo) and the correction
+/// count, and attaches the explicit nondeterminism declaration (keepalive ids
+/// and corrections are per-boot; teleport ids are deterministic).
 ///
 /// A `move` run that never reaches spawn (timeout / connection_failed /
 /// disconnect before `moved`) normalizes to the same outcome shapes as `join`,
 /// minus the movement observables — so a failed move run cannot accidentally
-/// pass parity against a successful one.
+/// pass parity against a successful one. A run that *does* emit `moved` but
+/// whose samples show no meaningful forward progress is classified as `noop`
+/// (see [`walk_moved`]) so that identical all-zero Paper boots FAIL the
+/// Paper-vs-Paper self-check instead of passing it vacuously.
 pub fn normalize_move(raw: &str) -> Result<Value, String> {
     let records = parse_records(raw)?;
 
@@ -332,11 +336,15 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
         let keepalives = walk.get("keepalives").cloned().unwrap_or(json!([]));
         let keepalive_echoes = walk.get("keepalive_echoes").cloned().unwrap_or(json!([]));
         let corrections = walk.get("corrections").cloned().unwrap_or(json!([]));
+        let samples = walk.get("samples").cloned().unwrap_or(json!([]));
+        let sampled_ticks = samples.as_array().map(|a| a.len()).unwrap_or(0);
 
         transcript["walk"] = json!({
-            "ticks": walk.get("ticks").cloned().unwrap_or(Value::Null),
+            "walk_ticks": walk.get("walk_ticks").cloned().unwrap_or(Value::Null),
+            "movement_ticks": walk.get("movement_ticks").cloned().unwrap_or(Value::Null),
+            "sampled_ticks": sampled_ticks,
             "heading_degrees": walk.get("heading_degrees").cloned().unwrap_or(Value::Null),
-            "samples": walk.get("samples").cloned().unwrap_or(json!([])),
+            "samples": samples,
             "teleport_ack_echo": set_equality(&teleports, &teleport_acks),
             "keepalive_echo": set_equality(&keepalives, &keepalive_echoes),
             "corrections_count": corrections.as_array().map(|a| a.len()).unwrap_or(0),
@@ -346,9 +354,37 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
             "keepalive_echoes": keepalive_echoes,
             "corrections": corrections,
         });
+
+        // Semantic invariant: the sampled walk must show meaningful forward
+        // progress. A no-op boot (the walk direction was never applied, or the
+        // player never actually moved) is a harness failure, not a valid `moved`
+        // outcome — reporting it as `noop` makes the runner FAIL rather than
+        // compare two identically frozen walks.
+        if !walk_moved(&transcript["walk"]["samples"]) {
+            transcript["outcome"] = json!("noop");
+        }
     }
 
     Ok(transcript)
+}
+
+/// Minimum forward progress (in blocks) a `move` walk must show across its
+/// sampled ticks to count as having actually moved. A real 100-tick walk
+/// travels ~21 blocks; a no-op boot shows ~0.
+const MOVED_DISTANCE_BLOCKS: f64 = 0.5;
+
+/// Forward progress of the sampled walk, in blocks: the last sample's
+/// spawn-relative `dx` minus the first's. The samples are ordered by tick and
+/// `dx` grows monotonically on the +x walk, so this is the net displacement.
+fn walk_progress(samples: &[Value]) -> f64 {
+    let dx = |v: &Value| v.get("dx").and_then(Value::as_f64).unwrap_or(0.0);
+    samples.last().map(dx).unwrap_or(0.0) - samples.first().map(dx).unwrap_or(0.0)
+}
+
+/// Whether the sampled walk actually moved a meaningful distance.
+fn walk_moved(samples: &Value) -> bool {
+    let samples = samples.as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    walk_progress(samples) >= MOVED_DISTANCE_BLOCKS
 }
 
 #[cfg(test)]
@@ -366,15 +402,83 @@ mod tests {
         .join("\n")
     }
 
-    fn move_records() -> String {
+    fn r3(v: f64) -> f64 {
+        (v * 1000.0).round() / 1000.0
+    }
+
+    fn r4(v: f64) -> f64 {
+        (v * 10000.0).round() / 10000.0
+    }
+
+    /// A synthetic but realistic sampled walk: 100 moving ticks advancing +x at
+    /// ~0.214 blocks/tick to ~21 blocks total, velocity ramping 0.05 -> 0.12
+    /// blocks/tick, standing on the superflat surface (y -60, dz 0, on_ground).
+    fn realistic_samples() -> Vec<Value> {
+        (0..100)
+            .map(|i| {
+                let i = i as f64;
+                json!({
+                    "dx": r3(0.098 + i * 0.2139),
+                    "y": -60.0,
+                    "dz": 0.0,
+                    "vx": r4(0.05 + i * 0.0007),
+                    "vy": -0.0784,
+                    "vz": 0.0,
+                    "on_ground": true,
+                })
+            })
+            .collect()
+    }
+
+    /// A no-op walk: 100 samples that never move (the walk direction was never
+    /// applied, or movement is broken).
+    fn noop_samples() -> Vec<Value> {
+        (0..100)
+            .map(|_| {
+                json!({
+                    "dx": 0.0,
+                    "y": -60.0,
+                    "dz": 0.0,
+                    "vx": 0.0,
+                    "vy": 0.0,
+                    "vz": 0.0,
+                    "on_ground": true,
+                })
+            })
+            .collect()
+    }
+
+    /// Raw move-mode client records with the given sampled walk.
+    fn move_records_with(samples: &[Value]) -> String {
+        let moved = json!({
+            "event": "moved",
+            "walk": {
+                "walk_ticks": 120,
+                "movement_ticks": 119,
+                "sampled_ticks": samples.len(),
+                "heading_degrees": -90.0,
+                "samples": samples,
+                "teleports": [1],
+                "teleport_acks": [1],
+                "keepalives": [1874340021547i64],
+                "keepalive_echoes": [1874340021547i64],
+                "corrections": [],
+            },
+            "protocol": 1,
+        });
+        let moved = moved.to_string();
         [
             r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":40,"mode":"move","azalea_revision":"x","protocol":1}"#,
             r#"{"event":"init","protocol":1}"#,
             r#"{"event":"login","protocol":1}"#,
             r#"{"event":"spawn","position":{"x":9.5,"y":-60.0,"z":-3.5},"protocol":1}"#,
-            r#"{"event":"moved","walk":{"ticks":120,"heading_degrees":-90.0,"samples":[{"dx":0.0,"y":-60.0,"dz":0.0,"vx":0.0,"vy":0.0,"vz":0.0,"on_ground":true},{"dx":0.098,"y":-60.0,"dz":0.0,"vx":0.098,"vy":0.0,"vz":0.0,"on_ground":true}],"teleports":[3],"teleport_acks":[3],"keepalives":[1874340021547],"keepalive_echoes":[1874340021547],"corrections":[]},"protocol":1}"#,
+            &moved,
         ]
         .join("\n")
+    }
+
+    fn move_records() -> String {
+        move_records_with(&realistic_samples())
     }
 
     #[test]
@@ -383,9 +487,15 @@ mod tests {
         assert_eq!(t["outcome"], "moved");
         assert_eq!(t["scenario"], "move");
         assert_eq!(t["lifecycle"], json!(["init", "login", "spawn"]));
-        assert_eq!(t["walk"]["ticks"], json!(120));
+        // Walk geometry: 120 observed ticks, 119 moving (the first observed tick
+        // is a setup tick that does not move), 100 sampled.
+        assert_eq!(t["walk"]["walk_ticks"], json!(120));
+        assert_eq!(t["walk"]["movement_ticks"], json!(119));
+        assert_eq!(t["walk"]["sampled_ticks"], json!(100));
         assert_eq!(t["walk"]["heading_degrees"], json!(-90.0));
-        assert_eq!(t["walk"]["samples"][1]["dx"], json!(0.098));
+        assert_eq!(t["walk"]["samples"].as_array().unwrap().len(), 100);
+        // Sample 0 is the first *moving* tick — there is no pre-movement sample.
+        assert_eq!(t["walk"]["samples"][0]["dx"], json!(0.098));
         // Structural echo relationships on the raw ids.
         assert_eq!(t["walk"]["teleport_ack_echo"], json!(true));
         assert_eq!(t["walk"]["keepalive_echo"], json!(true));
@@ -403,6 +513,28 @@ mod tests {
     }
 
     #[test]
+    fn move_noop_walk_is_classified_as_noop() {
+        // A boot that emits `moved` but never actually moved must not pass as a
+        // valid walk: two identical no-op boots would otherwise compare
+        // identically and the Paper-vs-Paper self-check would pass vacuously.
+        let raw = move_records_with(&noop_samples());
+        let t = normalize_move(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "noop");
+        assert_eq!(t["walk"]["sampled_ticks"], json!(100));
+        assert_eq!(t["walk"]["samples"][0]["dx"], json!(0.0));
+    }
+
+    #[test]
+    fn walk_progress_measures_forward_displacement() {
+        let realistic = realistic_samples();
+        let noop = noop_samples();
+        assert!(walk_progress(&realistic) >= 20.0);
+        assert_eq!(walk_progress(&noop), 0.0);
+        assert!(walk_moved(&json!(realistic)));
+        assert!(!walk_moved(&json!(noop)));
+    }
+
+    #[test]
     fn move_echo_relationship_detects_a_missing_ack() {
         // A keepalive with no matching echo is a relationship violation: the
         // transcript must report keepalive_echo: false.
@@ -417,7 +549,7 @@ mod tests {
 
     #[test]
     fn move_echo_relationship_detects_a_mismatched_id() {
-        let raw = move_records().replace("\"teleport_acks\":[3]", "\"teleport_acks\":[7]");
+        let raw = move_records().replace("\"teleport_acks\":[1]", "\"teleport_acks\":[7]");
         let t = normalize_move(&raw).expect("normalize");
         assert_eq!(t["walk"]["teleport_ack_echo"], json!(false));
     }

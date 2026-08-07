@@ -106,8 +106,11 @@ on that randomized spawn chunk, so `position.x`, `position.z`, and `chunks` are
 excluded with justification; `position.y` (superflat spawn height), the chunk
 count (117), and all other observables are compared and are identical across
 fresh boots. For `move`, the per-tick sampled walk is normalized to
-spawn-relative `dx/dz` deltas (so it is identical across boots); the
-keepalive ids (Paper's `Util.getMillis()` challengeId) and the
-`entity_position_sync` corrections (timing-dependent) are excluded with
-justification, while the teleport ids (deterministic per fresh boot), the
-echo-relationship flags, and the sampled walk are compared.
+spawn-relative `dx/dz` deltas (so it is identical across boots); the walk
+geometry (`walk_ticks`, `movement_ticks`, `sampled_ticks`), the teleport ids
+(deterministic per fresh boot), the echo-relationship flags, and the sampled
+walk are compared. The keepalive ids (Paper's `Util.getMillis()` challengeId)
+and the `entity_position_sync` corrections (timing-dependent) are excluded with
+justification. A `moved` record whose sampled walk shows no meaningful forward
+progress is classified as `noop` and fails the run rather than passing a
+vacuous Paper-vs-Paper comparison.

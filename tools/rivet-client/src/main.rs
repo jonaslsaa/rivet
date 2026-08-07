@@ -9,14 +9,18 @@ use std::time::{Duration, Instant};
 
 use azalea::WalkDirection;
 use azalea::app::{App, Plugin, Update};
+use azalea::attack::handle_attack_queued;
 use azalea::core::game_type::GameMode;
 use azalea::core::tick::GameTick;
 use azalea::ecs::message::MessageReader;
 use azalea::ecs::observer::On;
 use azalea::ecs::prelude::{Query, Res, Resource};
 use azalea::ecs::schedule::IntoScheduleConfigs;
-use azalea::entity::Physics;
+use azalea::entity::{EntityGeometryUpdateSystems, Physics};
 use azalea::join::{ConnectionFailedEvent, poll_create_connection_task};
+use azalea::movement::{
+    send_player_input_packet, send_position, send_sprinting_if_needed, update_pose,
+};
 use azalea::packet::game::SendGamePacketEvent;
 use azalea::physics::PhysicsSystems;
 use azalea::physics::client_movement::ClientMovementState;
@@ -177,16 +181,19 @@ struct MoveSample {
 /// The sampler owns the walk itself: on the first tick it observes it snaps
 /// `ClientMovementState.move_direction` to `WalkDirection::Forward`, so the walk
 /// start is exactly aligned to a real tick boundary (there is no async
-/// start-walk race). It records the first `SAMPLE_TICKS` ticks' post-physics
-/// state and, on the `MOVE_TICKS`th tick, snaps the player back to
-/// `WalkDirection::None` and notifies the async driver that the window is
-/// complete. Each run of the system is exactly one game tick, so the internal
-/// `tick_count` is a true tick count.
+/// start-walk race). That first observed tick records no sample — its physics
+/// already ran without a direction, so the player did not move and there is no
+/// pre-movement state to capture. The subsequent `SAMPLE_TICKS` ticks are the
+/// walk's moving ticks and each is sampled post-physics; on the `MOVE_TICKS`th
+/// observed tick the sampler snaps the player back to `WalkDirection::None` and
+/// notifies the async driver that the window is complete. Each run of the system
+/// is exactly one game tick, so the internal `tick_count` is a true tick count.
 #[derive(Component)]
 struct MoveSampler {
-    /// Number of ticks this sampler has observed so far. The walk window is
-    /// `[0, MOVE_TICKS)`: the first tick starts the walk and records the
-    /// pre-movement sample, and each subsequent tick records the moved state.
+    /// Number of game ticks this sampler has observed, in `[0, MOVE_TICKS]`.
+    /// Tick 0 starts the walk and records no sample; ticks `1..=SAMPLE_TICKS`
+    /// each record the post-movement state; the walk stops once the count
+    /// reaches `MOVE_TICKS`.
     tick_count: u32,
     /// Signals the async driver once the walk window has fully elapsed.
     notify: Arc<tokio::sync::Notify>,
@@ -196,12 +203,13 @@ struct MoveSampler {
 
 /// A [`GameTick`] system that drives the move-walk sampler synchronously.
 ///
-/// Runs after [`PhysicsSystems`], so the observed state is the post-tick
-/// physics the server would have seen (the physics for the current tick already
-/// ran with the previous `move_direction`). On its first observed tick it sets
-/// the walk direction, which the *next* tick's physics then applies. It samples
-/// `SAMPLE_TICKS` post-movement ticks — the walk's 1st..=100th tick — and on the
-/// `MOVE_TICKS`th tick stops the walk and wakes the driver. Exactly
+/// Ordered after [`PhysicsSystems`] and the movement/send chain by
+/// [`MoveSamplerPlugin`], so the observed state is the tick's final post-physics
+/// state (the physics for the current tick already ran with the previous
+/// `move_direction`). On its first observed tick it sets the walk direction,
+/// which the *next* tick's physics then applies. It samples `SAMPLE_TICKS`
+/// post-movement ticks — the walk's 1st..=100th moving tick — and on the
+/// `MOVE_TICKS`th observed tick stops the walk and wakes the driver. Exactly
 /// `SAMPLE_TICKS` samples are recorded, matching the old async sampler's
 /// transcript contract (sample 0 is the first tick the walk moved).
 fn move_sampler_system(
@@ -250,7 +258,27 @@ struct MoveSamplerPlugin;
 
 impl Plugin for MoveSamplerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(GameTick, move_sampler_system.after(PhysicsSystems));
+        // The sampler must observe the local player's final state for the tick.
+        // Order it after every azalea GameTick system that reads or writes the
+        // sampled data (`Position`, `Physics`, `ClientMovementState`): the
+        // physics sets (which move the player), the movement/send chain (input,
+        // pose, sprinting, position send), the geometry update that rewrites the
+        // bounding box, and the attack system that mutates `Physics`. The
+        // explicit edges keep the sampled timing deterministic even if azalea's
+        // internal chain order changes, and suppress the schedule-ambiguity
+        // warnings azalea's AmbiguityLoggerPlugin otherwise reports for this
+        // system.
+        app.add_systems(
+            GameTick,
+            move_sampler_system
+                .after(PhysicsSystems)
+                .after(EntityGeometryUpdateSystems)
+                .after(send_position)
+                .after(send_sprinting_if_needed)
+                .after(update_pose)
+                .after(send_player_input_packet)
+                .after(handle_attack_queued),
+        );
     }
 }
 
@@ -535,21 +563,24 @@ async fn observe_and_emit(bot: Client, state: State) {
 /// Faces +x (yaw -90), then hands the walk to the [`MoveSampler`] component:
 /// a [`GameTick`] system (registered by [`MoveSamplerPlugin`]) starts the walk
 /// on a real tick boundary, samples the client's own post-physics state
-/// (position, velocity, on-ground) for the first `SAMPLE_TICKS` ticks, stops the
-/// walk after `MOVE_TICKS` and wakes this task. Sampling is synchronous on the
-/// tick thread — one sample per real game tick, immune to the dropped-tick race
-/// of the broadcast-based `get_tick_broadcaster()` approach — so the
-/// position/velocity sequence is deterministic across boots.
+/// (position, velocity, on-ground) for the first `SAMPLE_TICKS` moving ticks,
+/// stops the walk after `MOVE_TICKS` observed ticks and wakes this task.
+/// Sampling is synchronous on the tick thread — one sample per real game tick,
+/// immune to the dropped-tick race of the broadcast-based `get_tick_broadcaster()`
+/// approach — so the position/velocity sequence is deterministic across boots.
 ///
 /// After the walk this task drains briefly so the final sent positions and any
 /// trailing server correction land before the record is emitted.
 ///
-/// The walk continues for `MOVE_TICKS - SAMPLE_TICKS` unsampled ticks after the
+/// The walk's first observed tick is a setup tick (direction set, no movement),
+/// so the walk spans `MOVE_TICKS` observed ticks of which `MOVE_TICKS - 1` move
+/// the player. The first `SAMPLE_TICKS` moving ticks are sampled; the remaining
+/// `MOVE_TICKS - 1 - SAMPLE_TICKS` moving ticks continue unsampled after the
 /// last sample: if the server re-syncs the player (`player_position`, which
 /// azalea applies directly to local physics) at an arbitrary tick, the
 /// perturbation lands in the unsampled tail and cannot corrupt the sampled
-/// sequence. The emitted `ticks` reports the full walk length while `samples`
-/// holds the sampled prefix.
+/// sequence. The emitted `walk_ticks`, `movement_ticks` and `sampled_ticks`
+/// report these three counts while `samples` holds the sampled prefix.
 async fn move_and_emit(bot: Client, state: State) {
     // yaw -90 = facing +x (azalea: forward input (0,1) rotated by yaw).
     let _ = bot.set_direction(-90.0, 0.0);
@@ -645,7 +676,13 @@ async fn move_and_emit(bot: Client, state: State) {
     emit(json!({
         "event": "moved",
         "walk": {
-            "ticks": MOVE_TICKS,
+            // The walk spans MOVE_TICKS observed game ticks; the first is the
+            // setup tick (direction set, no movement), so the player actually
+            // moves for MOVE_TICKS - 1 of them. The first SAMPLE_TICKS moving
+            // ticks are sampled into `samples`.
+            "walk_ticks": MOVE_TICKS,
+            "movement_ticks": MOVE_TICKS - 1,
+            "sampled_ticks": samples.len(),
             "heading_degrees": -90.0,
             "samples": samples.iter().map(sample_json).collect::<Vec<_>>(),
             "teleports": teleports,
