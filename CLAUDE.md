@@ -17,7 +17,7 @@ Faithful Rust port of the Paper Minecraft server (pinned MC 26.2), plus a JVM ad
 - `crates/` — cargo workspace (`rivet-*`); module paths mirror Java packages.
 - `tools/rivet-oracle` — differential-test harness; `tools/rivet-codegen` — data extraction/codegen (excluded from workspace).
 - `working/` — Paper (source of truth) and Pumpkin (reference only, never copy). **Never committed; never push anything from it.**
-- `MANIFEST.tsv` — the work queue (regenerate: `python3 scripts/analyze_graph.py --split-nbt --split-network --split-game --split-world`).
+- `MANIFEST.tsv` — the work queue (regenerate: `python3 scripts/analyze_graph.py --split-nbt --split-network --split-game --split-world --split-server`).
 
 ## Commands
 

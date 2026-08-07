@@ -31,6 +31,13 @@ Java), so this suite requires the same working/ setup as the merge gate:
       authored files, inventory is conserved, every on-disk file is owned
       exactly once, wave/cycle is preserved (all stay wave=3/cycle=27), dep
       tokens resolve, carry holds, and a cross-unit duplicate fails fast.
+  3d. The net.minecraft.server.level package (issue #227) splits into the
+      11 pipeline clusters + a mc.server.level residual that keeps the pre-split
+      id (the 200+ external dependents resolve to one hub); the residual is the
+      complement, every on-disk file is owned exactly once, all 12 units stay
+      wave=3/cycle=27, needs_split is cleared (all clusters and the residual are
+      under the threshold), dep tokens resolve, durable state carries from the
+      flat row onto the residual, and a cross-unit duplicate fails fast.
   4. wave/cycle metadata is preserved: all split units keep the package's
      wave and cycle (they remain inside the giant SCC).
   5. status/attempts/notes carry across regeneration, including on the split
@@ -277,6 +284,43 @@ LIGHTING_CORE_FILES = {
     "LayerLightEventListener.java", "LeveledPriorityQueue.java",
     "LightEventListener.java", "SpatialLongSet.java", "package-info.java",
 }
+
+# ---- issue #227: mc.server.level.* class-cluster split ---------------------
+SERVER_PKG = "net.minecraft.server.level"
+# The residual mc.server.level owns the complement: ServerLevel/ServerPlayer +
+# the entity surface + the player/session value types + package-info.
+SERVER_RESIDUAL_FILES = {
+    "BlockDestructionProgress.java", "ChunkLoadCounter.java",
+    "ClientInformation.java", "ColumnPos.java", "DemoMode.java",
+    "ParticleStatus.java", "PlayerMap.java", "PlayerSpawnFinder.java",
+    "ServerBossEvent.java", "ServerEntity.java", "ServerEntityGetter.java",
+    "ServerLevel.java", "ServerPlayer.java", "ServerPlayerGameMode.java",
+    "package-info.java",
+}
+SERVER_CLUSTERS = {
+    "mc.server.level.pipeline.chunkmap": {"ChunkMap.java"},
+    "mc.server.level.pipeline.holder": {
+        "ChunkHolder.java", "GenerationChunkHolder.java",
+        "GeneratingChunkMap.java", "ChunkGenerationTask.java",
+    },
+    "mc.server.level.pipeline.distance": {"DistanceManager.java"},
+    "mc.server.level.pipeline.task": {
+        "ChunkTaskDispatcher.java", "ChunkTaskPriorityQueue.java",
+        "ThrottlingChunkTaskDispatcher.java",
+    },
+    "mc.server.level.pipeline.level": {
+        "ChunkLevel.java", "FullChunkStatus.java", "ChunkResult.java",
+    },
+    "mc.server.level.pipeline.tracker": {
+        "ChunkTracker.java", "LoadingChunkTracker.java",
+        "SimulationChunkTracker.java", "SectionTracker.java",
+    },
+    "mc.server.level.pipeline.view": {"ChunkTrackingView.java"},
+    "mc.server.level.pipeline.servercache": {"ServerChunkCache.java"},
+    "mc.server.level.pipeline.light": {"ThreadedLevelLightEngine.java"},
+    "mc.server.level.pipeline.ticket": {"Ticket.java", "TicketType.java"},
+    "mc.server.level.pipeline.region": {"WorldGenRegion.java"},
+}
 LIGHTING_ENGINE_FILES = {
     "BlockLightEngine.java", "BlockLightSectionStorage.java",
     "ChunkSkyLightSources.java", "LayerLightSectionStorage.java",
@@ -331,7 +375,7 @@ def main() -> None:
         # ---- 2. baseline: the committed manifest is reproducible byte-for-byte --
         base = tmpd / "base.tsv"
         run_analyze("--split-nbt", "--split-network", "--split-game",
-                    "--split-world", out=base, prev=MANIFEST)
+                    "--split-world", "--split-server", out=base, prev=MANIFEST)
         check("baseline: all splits reproduce committed MANIFEST.tsv",
               base.read_bytes() == MANIFEST.read_bytes())
 
@@ -661,7 +705,7 @@ def main() -> None:
         # ---- all flags compose ---------------------------------------------------
         both = tmpd / "both.tsv"
         run_analyze("--split-nbt", "--split-network", "--split-game",
-                    "--split-world", out=both, prev=MANIFEST)
+                    "--split-world", "--split-server", out=both, prev=MANIFEST)
         both_rows = rows_of(both)
         both_ids = {r["id"] for r in both_rows}
         check("all flags compose: nbt + network + game + world split units present",
@@ -677,6 +721,18 @@ def main() -> None:
                "mc.world.level.levelgen.blockpredicates.core",
                "mc.world.level.levelgen.placement.core",
                "mc.world.level.lighting.engine"} <= both_ids)
+        check("all flags compose: server split units present",
+              {"mc.server.level", "mc.server.level.pipeline.chunkmap",
+               "mc.server.level.pipeline.holder",
+               "mc.server.level.pipeline.distance",
+               "mc.server.level.pipeline.task",
+               "mc.server.level.pipeline.level",
+               "mc.server.level.pipeline.tracker",
+               "mc.server.level.pipeline.view",
+               "mc.server.level.pipeline.servercache",
+               "mc.server.level.pipeline.light",
+               "mc.server.level.pipeline.ticket",
+               "mc.server.level.pipeline.region"} <= both_ids)
         check("all flags compose: world residuals present where expected",
               {"mc.world.level.levelgen.structure",
                "mc.world.level.levelgen.structure.structures",
@@ -1048,6 +1104,155 @@ def main() -> None:
               wb["status"] == "translated" and wb["attempts"] == "2"
               and "random-wave note" in wb["notes"])
 
+        # ---- 3d. server split (#227): right-sized class clusters -----------------
+        server1 = tmpd / "server1.tsv"
+        server2 = tmpd / "server2.tsv"
+        run_analyze("--split-server", out=server1, prev=MANIFEST)
+        run_analyze("--split-server", out=server2, prev=server1)
+        check("server split: two regenerations byte-identical",
+              server1.read_bytes() == server2.read_bytes())
+        ssplit = rows_of(server1)
+        s_by_id = {r["id"]: r for r in ssplit}
+        s_by_pkg: dict[str, list[dict]] = {}
+        for r in ssplit:
+            s_by_pkg.setdefault(r["java_package"], []).append(r)
+        s_file_set = lambda r: {p.rsplit("/", 1)[-1] for p in r["java_paths"].split(",")}  # noqa: E731
+
+        # The residual keeps the pre-split id; the 11 authored clusters split off.
+        server_units = [r for r in ssplit if r["java_package"] == SERVER_PKG]
+        check("server split: exactly 12 units (residual + 11 clusters)",
+              sorted(r["id"] for r in server_units) == sorted(
+                  ["mc.server.level"] + list(SERVER_CLUSTERS)))
+        check("server split: source_root preserved (minecraft)",
+              all(r["source_root"] == "minecraft" for r in server_units))
+        # Every authored cluster owns exactly its file list.
+        for unit_id, files in sorted(SERVER_CLUSTERS.items()):
+            check(f"server cluster {unit_id} owns exactly its authored files",
+                  s_file_set(s_by_id[unit_id]) == files)
+        # The residual owns the complement (never an authored file, and together
+        # with the clusters every on-disk file is owned exactly once).
+        check("server residual owns the complement (no authored file in it)",
+              s_file_set(s_by_id["mc.server.level"]) == SERVER_RESIDUAL_FILES)
+        server_dir = (REPO / "working/Paper/paper-server/src/minecraft/java"
+                      / "net/minecraft/server/level")
+        if server_dir.is_dir():
+            owned = set()
+            dup = set()
+            for r in server_units:
+                for f in s_file_set(r):
+                    (dup if f in owned else owned).add(f)
+            check("server package: every on-disk *.java owned exactly once",
+                  owned == {p.name for p in server_dir.glob("*.java")} and not dup,
+                  f"owned={len(owned)} dup={sorted(dup)}")
+        # The residual is right-sized (< 15 files), so needs_split is cleared.
+        check("server clusters and residual are not needs_split",
+              all(s_by_id[u]["needs_split"] == "" for u in
+                  ["mc.server.level"] + list(SERVER_CLUSTERS)))
+        # wave/cycle preserved: every unit stays in the giant SCC (wave=3,
+        # cycle=27) — the split right-sizes ownership, it does not claim
+        # acyclicity.
+        check("server split: wave preserved (all wave=3)",
+              all(int(r["wave"]) == 3 for r in server_units))
+        check("server split: cycle preserved (all cycle=27)",
+              all(r["cycle"] == "27" for r in server_units))
+        # All server dep tokens resolve via the wave-picker rules.
+        s_unresolved = []
+        for r in ssplit:
+            for tok in (t.strip() for t in r["deps"].split(",") if t.strip()):
+                if resolve_dep(tok, s_by_id, s_by_pkg) is None:
+                    s_unresolved.append((r["id"], tok))
+        check("all dep tokens in the server split manifest resolve to a unit",
+              not s_unresolved, s_unresolved[:5])
+        # The residual carries STUB notes for the 11 cluster back-references into
+        # the untranslated tail; each cluster names its issue + STUBs.
+        check("server residual carries the #227 residual note",
+              "#227 residual" in s_by_id["mc.server.level"]["notes"])
+        for unit_id in ("mc.server.level.pipeline.chunkmap",
+                        "mc.server.level.pipeline.holder",
+                        "mc.server.level.pipeline.distance",
+                        "mc.server.level.pipeline.servercache",
+                        "mc.server.level.pipeline.light",
+                        "mc.server.level.pipeline.region"):
+            check(f"server cluster {unit_id} carries a #185 STUB note",
+                  "M2 STUB:" in s_by_id[unit_id]["notes"])
+        # Server-split carry: seed the residual + one cluster, regenerate with
+        # --split-server, and verify status/attempts/notes survive alongside the
+        # authored note.
+        s_seeded = tmpd / "s_seeded.tsv"
+        s_carry_rows = []
+        for r in ssplit:
+            if r["id"] in ("mc.server.level", "mc.server.level.pipeline.chunkmap"):
+                r["status"] = "translated"
+                r["attempts"] = "2"
+                r["notes"] = "pipeline-wave note"
+            s_carry_rows.append(r)
+        with s_seeded.open("w", encoding="utf-8") as fh:
+            fh.write("\t".join(s_carry_rows[0].keys()) + "\n")
+            for r in s_carry_rows:
+                fh.write("\t".join(r.values()) + "\n")
+        s_regen = tmpd / "s_regen.tsv"
+        run_analyze("--split-server", out=s_regen, prev=s_seeded)
+        s_regen_rows = rows_of(s_regen)
+        s_regen_by_id = {r["id"]: r for r in s_regen_rows}
+        for unit_id in ("mc.server.level", "mc.server.level.pipeline.chunkmap"):
+            r = s_regen_by_id[unit_id]
+            check(f"server carry: {unit_id} keeps status/attempts/notes",
+                  r["status"] == "translated" and r["attempts"] == "2"
+                  and "pipeline-wave note" in r["notes"])
+        check("server carry: residual keeps authored #227 note",
+              "#227 residual" in s_regen_by_id["mc.server.level"]["notes"])
+        check("server carry: chunkmap keeps authored STUB note",
+              "M2 STUB:" in s_regen_by_id["mc.server.level.pipeline.chunkmap"]["notes"])
+        # Residual durability: seeding durable state on the flat mc.server.level
+        # row survives onto the residual (which keeps the pre-split id), and
+        # every external dependent still resolves net.minecraft.server.level to
+        # the hub — not to the lowest-id cluster.
+        s_flat = tmpd / "s_flat.tsv"
+        run_analyze(out=s_flat, prev=MANIFEST)
+        s_state = tmpd / "s_state.tsv"
+        s_rows = list(csv.DictReader(s_flat.open(newline=""), delimiter="\t"))
+        for r in s_rows:
+            if r["id"] == "mc.server.level":
+                r["status"] = "translated"
+                r["attempts"] = "2"
+                r["notes"] = "server-residual wave note"
+        with s_state.open("w", encoding="utf-8") as fh:
+            fh.write("\t".join(s_rows[0].keys()) + "\n")
+            for r in s_rows:
+                fh.write("\t".join(r.values()) + "\n")
+        s_carry = tmpd / "s_carry.tsv"
+        run_analyze("--split-server", out=s_carry, prev=s_state)
+        s_carry_rows = rows_of(s_carry)
+        s_carry_by_id = {r["id"]: r for r in s_carry_rows}
+        sr = s_carry_by_id["mc.server.level"]
+        check("server residual carry: status/attempts/notes survive onto the residual",
+              sr["status"] == "translated" and sr["attempts"] == "2"
+              and "server-residual wave note" in sr["notes"])
+        s_carry_by_pkg: dict[str, list[dict]] = {}
+        for r in s_carry_rows:
+            s_carry_by_pkg.setdefault(r["java_package"], []).append(r)
+        s_misresolved = []
+        for r in s_carry_rows:
+            for tok in (t.strip() for t in r["deps"].split(",") if t.strip()):
+                if tok == "net.minecraft.server.level":
+                    if resolve_dep(tok, s_carry_by_id, s_carry_by_pkg)["id"] != "mc.server.level":
+                        s_misresolved.append(r["id"])
+        check("server residual carry: all dependents resolve server.level token to the residual",
+              not s_misresolved, s_misresolved[:5])
+        # Server-split inventory conserved against the flat manifest: the
+        # root-qualified multiset over the package is unchanged.
+        ssplit_paths = Counter(
+            p for r in ssplit if r["java_package"] == SERVER_PKG
+            for p in r["java_paths"].split(",")
+        )
+        base_server_paths = Counter(
+            p for r in base if r["java_package"] == SERVER_PKG
+            for p in r["java_paths"].split(",")
+        )
+        check("server split: Java inventory conserved",
+              ssplit_paths == base_server_paths,
+              f"base={len(base_server_paths)} split={len(ssplit_paths)}")
+
         # ---- fail-fast on cross-unit duplicate declarations -----------------------
         # A file listed in two units would be double-counted and silently dropped
         # from the residual; the analyzer must refuse to emit rows. Simulate the
@@ -1126,6 +1331,32 @@ def main() -> None:
               "NoiseBasedChunkGenerator.java is declared in both "
               "mc.world.level.levelgen.noisegen and "
               "mc.world.level.levelgen.surface" in wdup_proc.stderr)
+
+        # Server-split fail-fast: declare ChunkMap.java in both the chunkmap and
+        # holder clusters and require a nonzero exit naming both owning units.
+        sdup_src = ANALYZE.read_text(encoding="utf-8").replace(
+            '            "ChunkHolder.java", "GenerationChunkHolder.java",\n'
+            '            "GeneratingChunkMap.java", "ChunkGenerationTask.java",',
+            '            "ChunkHolder.java", "GenerationChunkHolder.java",\n'
+            '            "GeneratingChunkMap.java", "ChunkGenerationTask.java",\n'
+            '            "ChunkMap.java",',
+        ).replace(
+            "REPO = Path(__file__).resolve().parent.parent",
+            f"REPO = Path({str(REPO)!r})",
+        )
+        sdup_script = tmpd / "analyze_graph_sdup.py"
+        sdup_script.write_text(sdup_src, encoding="utf-8")
+        sdup_proc = subprocess.run(
+            [sys.executable, str(sdup_script), "--split-server",
+             "--output", str(tmpd / "sdup.tsv"), "--prev-manifest", str(MANIFEST)],
+            capture_output=True, text=True,
+        )
+        check("server duplicate declaration exits nonzero (fail-fast)",
+              sdup_proc.returncode != 0)
+        check("server duplicate declaration names both owning units",
+              "ChunkMap.java is declared in both "
+              "mc.server.level.pipeline.chunkmap and "
+              "mc.server.level.pipeline.holder" in sdup_proc.stderr)
 
         # Planned-id uniqueness (A3): a sub-unit id that shadows a package-
         # derived row must fail fast, not silently clobber. Simulate a cluster
@@ -1337,15 +1568,15 @@ def main() -> None:
               not misresolved, misresolved[:5])
 
         # All-mode determinism (D-all-flags): two fresh runs of the canonical
-        # --split-nbt --split-network --split-game --split-world must be
-        # byte-identical (the committed-anchored `both` above only pins one run
-        # against the artifact; this pins two independent regenerations).
+        # --split-nbt --split-network --split-game --split-world --split-server
+        # must be byte-identical (the committed-anchored `both` above only pins
+        # one run against the artifact; this pins two independent regenerations).
         allf1 = tmpd / "allf1.tsv"
         allf2 = tmpd / "allf2.tsv"
         run_analyze("--split-nbt", "--split-network", "--split-game",
-                    "--split-world", out=allf1, prev=MANIFEST)
+                    "--split-world", "--split-server", out=allf1, prev=MANIFEST)
         run_analyze("--split-nbt", "--split-network", "--split-game",
-                    "--split-world", out=allf2, prev=allf1)
+                    "--split-world", "--split-server", out=allf2, prev=allf1)
         check("all flags: two regenerations byte-identical",
               allf1.read_bytes() == allf2.read_bytes())
 
