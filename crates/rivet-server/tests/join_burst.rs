@@ -471,7 +471,9 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
             },
         )
         .expect("lifecycle fits");
-    let _ = in_tx;
+    // Keep the network-side inbound sender alive: the tick drain prunes a
+    // connection whose inbound channel is closed before the burst fires.
+    let _in_tx = in_tx;
 
     // Advance the tick; the burst fires on the first tick.
     sim.advance(NANOS_PER_TICK);
