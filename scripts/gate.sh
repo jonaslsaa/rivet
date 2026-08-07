@@ -488,6 +488,26 @@ main() {
     fi
   fi
 
+  # --- rivet-fuzz packet-decode targets (`packets` feature) ----------------------
+  # The five packet fuzz targets (fuzz/fuzz_targets/packet_*.rs) are gated behind
+  # the rivet-fuzz `packets` feature (forwards to rivet-protocol/packets) via
+  # `required-features`, so the `cargo fmt/clippy/test --workspace` steps above
+  # never build or lint them. The fuzz crate is a workspace member and compiles
+  # on the pinned stable toolchain (cargo-fuzz/nightly is only needed to RUN the
+  # fuzzers), so the gate type-checks and lints them explicitly — a broken packet
+  # target must fail the merge. Never use `--all-features` or
+  # `--workspace --features` (they would enable rivet-protocol's `packets`
+  # feature workspace-wide, or fail on crates without the feature).
+  local GATE_FUZZ=false
+  for p in ${PKGS[@]+"${PKGS[@]}"}; do
+    [ "$p" = "rivet-fuzz" ] && GATE_FUZZ=true
+  done
+  if [ "$FULL_GATE" = true ] || [ "$GATE_FUZZ" = true ]; then
+    echo "==> rivet-fuzz --features packets (protocol packet-decode fuzz targets)"
+    cargo check -p rivet-fuzz --features packets --bins
+    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-fuzz --features packets --all-targets
+  fi
+
   # --- manifest regression suite (full gate only) --------------------------------
   # scripts/test_analyze_graph.py proves MANIFEST.tsv generation is deterministic
   # and conserved (nbt + network + game + world class-cluster splits,

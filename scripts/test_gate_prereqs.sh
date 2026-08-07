@@ -60,9 +60,11 @@ mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/jars"
 mkdir -p "$FAKE_FULL/working/Paper/paper-server/build/libs"
 mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/run/libraries"
 mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/run/versions/26.2"
+mkdir -p "$FAKE_FULL/tools/rivet-client/target/debug"
 touch "$FAKE_FULL/tools/rivet-oracle/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar"
 touch "$FAKE_FULL/working/Paper/paper-server/build/libs/paper-server-26.2.local-SNAPSHOT.jar"
 touch "$FAKE_FULL/tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
+touch "$FAKE_FULL/tools/rivet-client/target/debug/rivet-client"
 
 # Neutralise host JDK discovery via absolute paths (SDKMAN / JAVA_HOME) so the
 # test controls the Java 25 JDK check entirely through the shimmed PATH.

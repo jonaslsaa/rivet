@@ -26,9 +26,10 @@ rivet-serialization = { path = "../crates/rivet-serialization" }
 rivet-util = { path = "../crates/rivet-util" }
 
 # The `packets` feature forwards to `rivet-protocol/packets` (the generated
-# packet-ID tables + packet bodies). `cargo fuzz build` does not enable it by
-# default, so the workspace build (gate.sh `--workspace`) is unchanged; the
-# packet targets opt in with `cargo fuzz build --features packets`.
+# packet-ID tables + packet bodies). The generic workspace invocation
+# (gate.sh `--workspace`) does not enable it; the packet targets opt in with
+# `cargo fuzz build --features packets`, and the gate type-checks/lints them
+# explicitly via `cargo check/clippy -p rivet-fuzz --features packets`.
 [features]
 packets = ["rivet-protocol/packets"]
 

@@ -55,8 +55,11 @@ cargo fuzz run packet_play --features packets -- -runs=10000
 
 Crashes are written to `fuzz/artifacts/<target>/`; the reproducing input and the
 stack trace are printed. Corpora accumulate in `fuzz/corpus/<target>/`. The
-workspace build (gate.sh `--workspace`) leaves `packets` off, so the fuzz
-package does not change what the gate compiles.
+generic workspace invocation (gate.sh `--workspace`) does not enable the
+`rivet-fuzz` package's `packets` feature — it is that package feature, not
+`rivet-protocol`'s `packets` workspace-wide, that stays off — so the plain
+workspace build is unchanged. The merge gate type-checks and lints the packet
+targets explicitly via `cargo check/clippy -p rivet-fuzz --features packets`.
 
 ## Faithful panics and the panic filter
 
