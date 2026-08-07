@@ -22,6 +22,7 @@ mod packets;
 mod probe_biomes_tags;
 mod probe_block_states;
 mod registries;
+mod registry_data;
 mod reports;
 mod synchronized;
 
