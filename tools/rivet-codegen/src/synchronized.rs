@@ -36,8 +36,9 @@ use crate::reports::SourceProvenance;
 
 /// `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` in order (MC 26.2). The wire
 /// order of the 29 `ClientboundRegistryDataPacket`s; a drift in which registry
-/// or how many fails generation.
-const SYNCHRONIZED_KEYS: &[&str] = &[
+/// or how many fails generation. Shared with `registry_data` (the pre-baked
+/// NBT payloads must be served in the same packet order).
+pub(crate) const SYNCHRONIZED_KEYS: &[&str] = &[
     "minecraft:worldgen/biome",
     "minecraft:chat_type",
     "minecraft:trim_pattern",
