@@ -13,6 +13,7 @@ use tokio::net::tcp::OwnedWriteHalf;
 use super::connection_id::ConnectionId;
 use super::packet_listener::{DisconnectReason, ListenerOutcome, PacketListener};
 use crate::server::ServerConfig;
+use crate::server::tick::channels::ServerboundFrame;
 
 /// The enabled compression handlers for one connection: the
 /// `CompressionDecoder`/`CompressionEncoder` pair Paper's
@@ -44,6 +45,18 @@ impl CompressionState {
         self.decoder.set_threshold(threshold, validate_decompressed);
         self.encoder.set_threshold(threshold);
     }
+}
+
+/// Outcome of [`Connection::process_inbound`]: whether the per-connection loop
+/// keeps dispatching to the listener or must hand the connection to the play
+/// state (forwarding decoded frames to the tick thread).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundOutcome {
+    /// The listener stayed in place; the connection remains in its pre-play state.
+    Keep,
+    /// The listener transitioned the connection to play; subsequent frames are
+    /// forwarded to the tick thread (OWNERSHIP §Network).
+    Play,
 }
 
 /// The per-connection state machine on the tokio side. Mirrors the parts of
@@ -110,11 +123,28 @@ impl Connection {
         self.outbound_protocol = Some(protocol);
     }
 
+    /// The protocol the outbound direction is currently in (`None` before the
+    /// first `set_outbound_protocol`). The configuration→play handoff flips it
+    /// to [`ConnectionProtocol::Play`] before handing the connection off.
+    pub fn outbound_protocol(&self) -> Option<ConnectionProtocol> {
+        self.outbound_protocol
+    }
+
+    /// The encoded frames queued for the wire (netty `channel.write` queue).
+    /// `flush_out` writes them to the socket; unit tests inspect the queue to
+    /// assert what a listener queued without a live socket.
+    #[cfg(test)]
+    pub(crate) fn outbound_bytes(&self) -> &[u8] {
+        &self.out_buf
+    }
+
     /// Append inbound bytes, decode every complete frame, and dispatch it to the
     /// current listener. Returns `Err(reason)` on the first corrupted frame or
     /// listener rejection; the per-connection task then closes the socket.
     /// A `ListenerOutcome::Switch` replaces the listener (the handshake→
-    /// status/login boundary).
+    /// status/login boundary); a `ListenerOutcome::Play` ends the pre-play
+    /// dispatch and reports [`InboundOutcome::Play`] so the caller hands the
+    /// connection to the play state (forwarding to the tick thread).
     ///
     /// When compression is enabled, each VarInt21 frame payload is run through
     /// the compression decoder before dispatch — the netty pipeline order
@@ -123,30 +153,79 @@ impl Connection {
         &mut self,
         data: &[u8],
         listener: &mut Box<dyn PacketListener>,
-    ) -> Result<(), DisconnectReason> {
+    ) -> Result<InboundOutcome, DisconnectReason> {
         self.read_buf.extend_from_slice(data);
         loop {
-            let frame: Bytes = match self.decoder.decode(&mut self.read_buf) {
-                Ok(Some(frame)) => frame,
-                Ok(None) => break, // need more bytes
-                Err(e) => {
-                    return Err(DisconnectReason::Malformed(format!(
-                        "corrupted frame: {}",
-                        e.message
-                    )));
-                }
-            };
-            let packet = match &mut self.compression {
-                Some(compression) => compression.decoder.decode(&frame).map_err(|e| {
-                    DisconnectReason::Malformed(format!("compression: {}", e.message))
-                })?,
-                None => frame,
+            let Some(packet) = self.next_frame()? else {
+                break; // need more bytes
             };
             let config = Arc::clone(&self.config);
             match listener.handle_frame(packet, self, &config) {
                 Ok(ListenerOutcome::Keep) => {}
                 Ok(ListenerOutcome::Switch(next)) => *listener = next,
+                Ok(ListenerOutcome::Play) => return Ok(InboundOutcome::Play),
                 Err(reason) => return Err(reason),
+            }
+        }
+        Ok(InboundOutcome::Keep)
+    }
+
+    /// Decode the next complete frame from `read_buf`, decompressing it when the
+    /// compression stage is enabled. `Ok(None)` means the buffer does not yet
+    /// hold a full frame. Shared by the pre-play dispatch ([`Self::process_inbound`])
+    /// and the play-state forwarding ([`Self::forward_play`]); mirrors the netty
+    /// pipeline order SPLITTER → DECOMPRESS → DECODER.
+    fn next_frame(&mut self) -> Result<Option<Bytes>, DisconnectReason> {
+        let frame = match self.decoder.decode(&mut self.read_buf) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                return Err(DisconnectReason::Malformed(format!(
+                    "corrupted frame: {}",
+                    e.message
+                )));
+            }
+        };
+        let packet = match &mut self.compression {
+            Some(compression) => compression
+                .decoder
+                .decode(&frame)
+                .map_err(|e| DisconnectReason::Malformed(format!("compression: {}", e.message)))?,
+            None => frame,
+        };
+        Ok(Some(packet))
+    }
+
+    /// Forward decoded play-state frames to the tick thread — the OWNERSHIP
+    /// §Network play boundary. The per-connection task stops parsing packets
+    /// into a listener and sends the raw decoded frames over the connection's
+    /// bounded inbound channel; the tick thread owns play-state dispatch.
+    ///
+    /// `data` is appended to the inbound buffer first; `None` drains frames
+    /// already buffered (a play packet coalesced with the `finish_configuration`
+    /// that triggered the handoff — the same TCP chunk can carry both).
+    ///
+    /// Backpressure is the bounded channel: a full channel blocks until the tick
+    /// thread drains it (each tick), and a closed channel (the tick thread is
+    /// gone) is a server stop, reported as [`DisconnectReason::ServerShutdown`].
+    pub async fn forward_play(
+        &mut self,
+        data: Option<&[u8]>,
+        in_tx: &tokio::sync::mpsc::Sender<ServerboundFrame>,
+    ) -> Result<(), DisconnectReason> {
+        if let Some(data) = data {
+            self.read_buf.extend_from_slice(data);
+        }
+        loop {
+            let Some(packet) = self.next_frame()? else {
+                break;
+            };
+            if in_tx
+                .send(ServerboundFrame { bytes: packet })
+                .await
+                .is_err()
+            {
+                return Err(DisconnectReason::ServerShutdown);
             }
         }
         Ok(())
@@ -432,7 +511,10 @@ mod tests {
         let mut encoder = CompressionEncoder::new(256);
         let wire = wire_frame(&mut encoder, &packet);
 
-        conn.process_inbound(&wire, &mut listener).unwrap();
+        assert_eq!(
+            conn.process_inbound(&wire, &mut listener).unwrap(),
+            InboundOutcome::Keep
+        );
         assert_eq!(&*log.lock().unwrap(), &[Bytes::from(packet)]);
     }
 
@@ -469,7 +551,10 @@ mod tests {
         wire.push(0x00);
         wire.extend_from_slice(&packet);
 
-        conn.process_inbound(&wire, &mut listener).unwrap();
+        assert_eq!(
+            conn.process_inbound(&wire, &mut listener).unwrap(),
+            InboundOutcome::Keep
+        );
         assert_eq!(&*log.lock().unwrap(), &[Bytes::from(packet)]);
     }
 
@@ -530,7 +615,10 @@ mod tests {
         // Without setup_compression, inbound frames are not decompressed: a
         // VarInt21 frame's payload passes through to the listener verbatim.
         let wire = Bytes::from_static(&[0x02, 0x02, 0xAB]); // varint21(2) ++ [0x02, 0xAB]
-        conn.process_inbound(&wire, &mut listener).unwrap();
+        assert_eq!(
+            conn.process_inbound(&wire, &mut listener).unwrap(),
+            InboundOutcome::Keep
+        );
         assert_eq!(&*log.lock().unwrap(), &[Bytes::from_static(&[0x02, 0xAB])]);
     }
 
@@ -546,11 +634,97 @@ mod tests {
 
         // Feed one byte at a time; only the final byte completes a frame.
         for (i, b) in wire.iter().enumerate() {
-            conn.process_inbound(&[*b], &mut listener).unwrap();
+            assert_eq!(
+                conn.process_inbound(&[*b], &mut listener).unwrap(),
+                InboundOutcome::Keep
+            );
             let n = log.lock().unwrap().len();
             let complete = i + 1 == wire.len();
             assert_eq!(n, complete as usize, "frame delivered at byte {i}");
         }
         assert_eq!(&*log.lock().unwrap(), &[Bytes::from(packet)]);
+    }
+
+    /// A listener that immediately transitions the connection to the play state.
+    struct PlayListener;
+
+    impl PacketListener for PlayListener {
+        fn protocol(&self) -> ConnectionProtocol {
+            ConnectionProtocol::Play
+        }
+
+        fn handle_frame(
+            &mut self,
+            _frame: Bytes,
+            _conn: &mut Connection,
+            _config: &ServerConfig,
+        ) -> Result<ListenerOutcome, DisconnectReason> {
+            Ok(ListenerOutcome::Play)
+        }
+    }
+
+    #[tokio::test]
+    async fn process_inbound_play_outcome_hands_off_to_the_caller() {
+        let mut conn = new_connection().await;
+        let mut listener: Box<dyn PacketListener> = Box::new(PlayListener);
+
+        // A listener returning `Play` propagates the handoff so the connection
+        // loop stops dispatching and forwards frames to the tick thread.
+        let wire = Bytes::from(encode_frame(&[0x00]).unwrap().to_vec());
+        assert_eq!(
+            conn.process_inbound(&wire, &mut listener).unwrap(),
+            InboundOutcome::Play
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_play_sends_decoded_frames_to_the_channel() {
+        let mut conn = new_connection().await;
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(4);
+
+        // A complete uncompressed VarInt21 frame: `[id 0][0xDE 0xAD]`.
+        let packet: Vec<u8> = vec![0x00, 0xDE, 0xAD];
+        let wire = Bytes::from(encode_frame(&packet).unwrap().to_vec());
+        conn.forward_play(Some(&wire), &in_tx).await.unwrap();
+
+        let got = in_rx.recv().await.expect("forwarded play frame");
+        assert_eq!(got.bytes, Bytes::from(packet));
+        assert!(in_rx.try_recv().is_err(), "no extra frames");
+    }
+
+    #[tokio::test]
+    async fn forward_play_drains_frames_buffered_at_the_handoff() {
+        let mut conn = new_connection().await;
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(4);
+
+        // Two play frames already buffered by `process_inbound` (a client that
+        // coalesced `finish_configuration` with the first play packet in one TCP
+        // chunk): the `None` data drains them so no frame is lost at the seam.
+        let f1 = Bytes::from(encode_frame(&[0x01]).unwrap().to_vec());
+        let f2 = Bytes::from(encode_frame(&[0x02]).unwrap().to_vec());
+        conn.read_buf.extend_from_slice(&f1);
+        conn.read_buf.extend_from_slice(&f2);
+
+        conn.forward_play(None, &in_tx).await.unwrap();
+        assert_eq!(
+            in_rx.recv().await.unwrap().bytes,
+            Bytes::from_static(&[0x01])
+        );
+        assert_eq!(
+            in_rx.recv().await.unwrap().bytes,
+            Bytes::from_static(&[0x02])
+        );
+        assert!(in_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn forward_play_closed_channel_reports_server_shutdown() {
+        let mut conn = new_connection().await;
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(4);
+        drop(in_rx); // the tick thread is gone
+
+        let wire = Bytes::from(encode_frame(&[0x01]).unwrap().to_vec());
+        let err = conn.forward_play(Some(&wire), &in_tx).await.unwrap_err();
+        assert_eq!(err, DisconnectReason::ServerShutdown);
     }
 }

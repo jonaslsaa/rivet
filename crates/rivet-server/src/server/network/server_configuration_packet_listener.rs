@@ -13,6 +13,9 @@ use rivet_protocol::protocol::common::serverbound_custom_payload::ServerboundCus
 use rivet_protocol::protocol::common::serverbound_keep_alive::ServerboundKeepAlivePacket;
 use rivet_protocol::protocol::common::serverbound_pong::ServerboundPongPacket;
 use rivet_protocol::protocol::common::serverbound_resource_pack::ServerboundResourcePackPacket;
+use rivet_protocol::protocol::configuration::clientbound_finish_configuration::{
+    ClientboundFinishConfigurationPacket, stream_codec as finish_configuration_stream_codec,
+};
 use rivet_protocol::protocol::configuration::clientbound_registry_data::ClientboundRegistryDataPacket;
 use rivet_protocol::protocol::configuration::clientbound_select_known_packs::ClientboundSelectKnownPacks;
 use rivet_protocol::protocol::configuration::clientbound_update_enabled_features::ClientboundUpdateEnabledFeaturesPacket;
@@ -49,6 +52,7 @@ const ACCEPT_CODE_OF_CONDUCT_PACKET_ID: i32 = 9;
 /// `registry_data` 7, `update_enabled_features` 12, `update_tags` 13,
 /// `select_known_packs` 14).
 const CLIENTBOUND_CUSTOM_PAYLOAD_ID: u32 = 1;
+const CLIENTBOUND_FINISH_CONFIGURATION_ID: u32 = 3;
 const CLIENTBOUND_REGISTRY_DATA_ID: u32 = 7;
 const CLIENTBOUND_UPDATE_ENABLED_FEATURES_ID: u32 = 12;
 const CLIENTBOUND_UPDATE_TAGS_ID: u32 = 13;
@@ -64,8 +68,9 @@ const SERVER_BRAND: &str = "Rivet";
 /// `ConfigurationTask.Type` id for `SynchronizeRegistriesTask` — the only task
 /// this slice queues.
 const SYNCHRONIZE_REGISTRIES_TASK_TYPE: &str = "synchronize_registries";
-/// `ConfigurationTask.Type` id for `JoinWorldTask` — never queued here (the
-/// finish→play handoff is #100/#101), so finishing it always mismatches.
+/// `ConfigurationTask.Type` id for `JoinWorldTask` — queued last so the client's
+/// `finish_configuration` reply finishes it and the connection hands off to play
+/// (issue #96). `PrepareSpawnTask` (#100) and `spawnPlayer` (#101) are deferred.
 const JOIN_WORLD_TASK_TYPE: &str = "join_world";
 
 /// `net.minecraft.server.network.ConfigurationTask` — one deferred step of the
@@ -128,6 +133,38 @@ impl ConfigurationTask for SynchronizeRegistriesTask {
     }
 }
 
+/// `net.minecraft.server.network.config.JoinWorldTask` — the terminal
+/// configuration task (issue #96).
+///
+/// Java: `JoinWorldTask.java` in `working/Paper`. `start` sends the fieldless
+/// `ClientboundFinishConfigurationPacket.INSTANCE`; the client's
+/// `ServerboundFinishConfigurationPacket` reply finishes the task in
+/// `handleConfigurationFinished`, after which the connection hands off to the
+/// play state. In Paper, `PrepareSpawnTask` (the spawn-chunk load, #100) runs
+/// immediately before this task; that task is deferred, so configuration
+/// completes and reaches play without a spawn-chunk load and without the join
+/// burst (`spawnPlayer`, #101).
+struct JoinWorldTask;
+
+impl ConfigurationTask for JoinWorldTask {
+    fn type_id(&self) -> &'static str {
+        JOIN_WORLD_TASK_TYPE
+    }
+
+    fn start(&mut self, conn: &mut Connection) -> Result<(), String> {
+        // `connection.accept(ClientboundFinishConfigurationPacket.INSTANCE)`.
+        let body = encode_body(
+            finish_configuration_stream_codec(),
+            &ClientboundFinishConfigurationPacket,
+        );
+        conn.send_packet(
+            ConnectionProtocol::Configuration,
+            CLIENTBOUND_FINISH_CONFIGURATION_ID,
+            &body,
+        )
+    }
+}
+
 /// `net.minecraft.server.network.ServerConfigurationPacketListenerImpl` —
 /// configuration phase, offline slice (issue #109).
 ///
@@ -136,12 +173,16 @@ impl ConfigurationTask for SynchronizeRegistriesTask {
 /// wrapping `BrandPayload`) and `update_enabled_features`
 /// (`FeatureFlags.REGISTRY.toNames(worldData.enabledFeatures())` — `{minecraft:vanilla}`
 /// on the M1 offline world), then queues the configuration tasks and starts the
-/// first. The registry-sync task (`SynchronizeRegistriesTask`) is the ONLY
-/// deferred step on the M1 join path; `PrepareSpawnTask`/`JoinWorldTask` (the
-/// finish→play handoff) are #100/#101 and are NOT queued, so after the sync
-/// task finishes the queue is empty and the connection stays in configuration
-/// until `finish_configuration` (which — with no `JoinWorldTask` current —
-/// mismatches `finishCurrentTask` exactly like Java and closes).
+/// first. The registry-sync task (`SynchronizeRegistriesTask`) and the terminal
+/// `JoinWorldTask` are the M1 queue; the spawn-chunk load (`PrepareSpawnTask`,
+/// #100) that Paper runs between them and the join burst (`spawnPlayer`, #101)
+/// are deferred. The queue is [sync, join_world]: the client replies to
+/// `select_known_packs`, the server sends the registry/tag data and finishes
+/// the sync, `JoinWorldTask` sends `ClientboundFinishConfigurationPacket`, and
+/// the client's `finish_configuration` reply finishes it — the connection then
+/// hands off to the play state (`ListenerOutcome::Play`), where frames are
+/// forwarded to the tick thread. A `finish_configuration` with any other task
+/// current mismatches `finishCurrentTask` exactly like Java and closes.
 ///
 /// The task queue is Java-shaped (`configurationTasks` FIFO drained by
 /// `startNextTask` into `currentTask`, finished by `finishCurrentTask`).
@@ -178,8 +219,8 @@ impl ServerConfigurationPacketListener {
     /// `update_enabled_features`, then queues the configuration tasks and starts
     /// the first (`startNextTask`).
     ///
-    /// This slice queues only the registry sync; the finish→play handoff
-    /// (`PrepareSpawnTask`/`JoinWorldTask`) is #100/#101.
+    /// This slice queues the registry sync + `JoinWorldTask` (the finish→play
+    /// seam); `PrepareSpawnTask` (#100) and `spawnPlayer` (#101) are deferred.
     pub fn start_configuration(&mut self, conn: &mut Connection) -> Result<(), String> {
         // `send(new ClientboundCustomPayloadPacket(new BrandPayload(server
         // .getServerModName())))`.
@@ -214,18 +255,26 @@ impl ServerConfigurationPacketListener {
 
         // `this.synchronizeRegistriesTask = new SynchronizeRegistriesTask(...);
         // this.configurationTasks.add(this.synchronizeRegistriesTask);
-        // this.addOptionalTasks(); ... this.returnToWorld();` — the optional
-        // tasks (code of conduct, resource pack) are #236, and
-        // `PrepareSpawnTask`/`JoinWorldTask` are the finish→play handoff.
-        // RivetTodo(#100): `PrepareSpawnTask`/`JoinWorldTask` and the
-        // finish→play handoff (`finish_configuration` → `ClientboundFinish
-        // ConfigurationPacket` + `spawnPlayer`).
-        // RivetTodo(#101): the play-state listener
-        // (`ServerGamePacketListenerImpl`) that follows `finish_configuration`.
+        // this.addOptionalTasks(); this.configurationTasks.add(
+        //   new PaperConfigurationTask(this)); this.returnToWorld();`
+        // `returnToWorld` queues `PrepareSpawnTask` (the spawn-chunk load, #100)
+        // then `JoinWorldTask`. `PrepareSpawnTask` is deferred, so the queue is
+        // [sync, join_world]: configuration completes and the connection reaches
+        // the play handoff, but no spawn chunk is loaded and no join burst is
+        // sent — both are #100/#101.
+        // RivetTodo(#100): `PrepareSpawnTask` — the spawn-chunk load that in
+        // Paper gates `JoinWorldTask` (and `spawnPlayer`); it belongs between
+        // the sync and `JoinWorldTask` in the queue.
+        // RivetTodo(#101): `spawnPlayer` → `PlayerList.placeNewPlayer` +
+        // `sendLevelInfo` and the play-state listener
+        // (`ServerGamePacketListenerImpl`) that consumes the tick-thread frames
+        // the handoff forwards.
         // RivetTodo(#236): `addOptionalTasks` — the code-of-conduct and
-        // resource-pack configuration tasks.
+        // resource-pack configuration tasks, and the Paper configuration event
+        // task (`AsyncPlayerConnectionConfigureEvent`).
         self.configuration_tasks
             .push_back(Box::new(SynchronizeRegistriesTask::new()));
+        self.configuration_tasks.push_back(Box::new(JoinWorldTask));
         self.start_next_task(conn)
     }
 
@@ -384,20 +433,24 @@ impl PacketListener for ServerConfigurationPacketListener {
                 Ok(ListenerOutcome::Keep)
             }
             FINISH_CONFIGURATION_PACKET_ID => {
-                // `handleConfigurationFinished` — `finishCurrentTask(
-                // JoinWorldTask.TYPE)`. `JoinWorldTask` is never queued in this
-                // slice (#100/#101), so the type never matches and Java throws
-                // `IllegalStateException` — surfaced here as a Malformed close.
-                // RivetTodo(#100): the finish→play handoff
-                // (`ClientboundFinishConfigurationPacket` + the
-                // `PrepareSpawnTask`/`JoinWorldTask` queue + `spawnPlayer`).
-                // RivetTodo(#101): play-state listener (`ServerGamePacketListenerImpl`).
+                // `handleConfigurationFinished` — finish the current
+                // `JoinWorldTask` (whose `start` sent
+                // `ClientboundFinishConfigurationPacket`), then swap the
+                // outbound protocol to play and hand the connection off to the
+                // tick thread. Paper then runs the duplicate-login / can-login
+                // gates and `prepareSpawnTask.spawnPlayer(...)` (the join
+                // burst) — those are #101, so the seam is exposed here and the
+                // play-state listener consumes the forwarded frames there.
+                // RivetTodo(#101): the duplicate-login / canPlayerLogin gates
+                // and `spawnPlayer` → `placeNewPlayer`/`sendLevelInfo`, and the
+                // `ServerGamePacketListenerImpl` that follows the handoff.
                 let _: ServerboundFinishConfigurationPacket = decode_packet(
                     frame,
                     rivet_protocol::protocol::configuration::serverbound_finish_configuration::stream_codec(),
                 )?;
                 self.finish_current_task(JOIN_WORLD_TASK_TYPE, conn)?;
-                Ok(ListenerOutcome::Keep)
+                conn.set_outbound_protocol(ConnectionProtocol::Play);
+                Ok(ListenerOutcome::Play)
             }
             ACCEPT_CODE_OF_CONDUCT_PACKET_ID => {
                 // `handleAcceptCodeOfConduct` → `finishCurrentTask(
@@ -485,6 +538,129 @@ mod tests {
         assert_eq!(
             listener.client_information,
             ClientInformation::create_default()
+        );
+    }
+
+    /// Protocol VarInt encode (the wire-frame builder for the handoff tests).
+    fn varint(value: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut v = value as u32;
+        loop {
+            let mut byte = (v & 0x7F) as u8;
+            v >>= 7;
+            if v != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if v == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// A throwaway `Connection` in the configuration outbound state (the write
+    /// half never writes unless `flush_out` is called, which these tests do not).
+    async fn config_connection() -> Connection {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server_sock, _) = server.await.unwrap();
+        let (_read, write) = server_sock.into_split();
+        let mut conn = Connection::new(
+            super::super::connection_id::ConnectionId(1),
+            addr,
+            std::sync::Arc::new(crate::server::ServerConfig::default()),
+            write,
+        );
+        conn.set_outbound_protocol(ConnectionProtocol::Configuration);
+        conn
+    }
+
+    #[tokio::test]
+    async fn start_configuration_queues_sync_then_join_world() {
+        // The M1 queue is [synchronize_registries, join_world]: the sync starts
+        // first; `PrepareSpawnTask` (#100) is deferred. Finishing the sync starts
+        // `JoinWorldTask`, whose `start` sends the finish_configuration packet.
+        let mut conn = config_connection().await;
+        let mut listener = ServerConfigurationPacketListener::new();
+        listener.start_configuration(&mut conn).unwrap();
+
+        assert_eq!(
+            listener.current_task.as_ref().map(|t| t.type_id()),
+            Some(SYNCHRONIZE_REGISTRIES_TASK_TYPE),
+            "the registry sync starts first"
+        );
+        assert_eq!(listener.configuration_tasks.len(), 1);
+        assert_eq!(
+            listener.configuration_tasks.front().map(|t| t.type_id()),
+            Some(JOIN_WORLD_TASK_TYPE),
+            "JoinWorldTask is queued after the sync"
+        );
+
+        // Finish the sync: JoinWorldTask becomes current and sends its packet.
+        listener
+            .finish_current_task(SYNCHRONIZE_REGISTRIES_TASK_TYPE, &mut conn)
+            .unwrap();
+        assert_eq!(
+            listener.current_task.as_ref().map(|t| t.type_id()),
+            Some(JOIN_WORLD_TASK_TYPE)
+        );
+        assert!(listener.configuration_tasks.is_empty());
+        // The finish_configuration frame was queued (the `JoinWorldTask.start`).
+        // The test connection has no compression stage, so the frame is the
+        // plain VarInt21 `[len 1][id 3]` (no declaredLength prefix).
+        assert_eq!(
+            &conn.outbound_bytes()[conn.outbound_bytes().len() - 2..],
+            &[0x01, 0x03]
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_configuration_frame_hands_off_to_play() {
+        // `handleConfigurationFinished` finishes `JoinWorldTask`, flips the
+        // outbound protocol to play, and reports `ListenerOutcome::Play` — the
+        // seam the per-connection task uses to start forwarding frames to the
+        // tick thread.
+        let mut conn = config_connection().await;
+        let mut listener = ServerConfigurationPacketListener::new();
+        listener.start_configuration(&mut conn).unwrap();
+        listener
+            .finish_current_task(SYNCHRONIZE_REGISTRIES_TASK_TYPE, &mut conn)
+            .unwrap();
+
+        // The client's `finish_configuration` reply: `[id 3]` (0-byte body) —
+        // the decompressed packet payload `handle_frame` receives (the VarInt21
+        // frame + compression header were already stripped).
+        let frame = Bytes::from(varint(3));
+        let outcome = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap();
+        assert!(matches!(outcome, ListenerOutcome::Play));
+        // The outbound protocol flipped so the play-state path can send.
+        assert_eq!(conn.outbound_protocol(), Some(ConnectionProtocol::Play));
+        assert!(
+            listener.current_task.is_none(),
+            "JoinWorldTask finished and the queue is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_configuration_wrong_task_closes() {
+        // A `finish_configuration` while the registry sync is current mismatches
+        // `finishCurrentTask(JoinWorldTask.TYPE)` — Java's
+        // `IllegalStateException` — surfaced as a deterministic Malformed close.
+        let mut conn = config_connection().await;
+        let mut listener = ServerConfigurationPacketListener::new();
+        listener.start_configuration(&mut conn).unwrap();
+
+        let frame = Bytes::from(varint(3));
+        let err = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::Malformed(ref m) if m.contains("Unexpected request for task finish"))
         );
     }
 }

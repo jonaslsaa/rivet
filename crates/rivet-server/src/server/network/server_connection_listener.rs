@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use super::connection::Connection;
+use super::connection::{Connection, InboundOutcome};
 use super::connection_id::ConnectionId;
 use super::packet_listener::{DisconnectReason, PacketListener};
 use super::server_handshake_packet_listener::ServerHandshakePacketListener;
@@ -181,7 +181,18 @@ async fn run_connection(
         return;
     }
 
-    let reason = conn_loop(&mut conn, &mut listener, &config, read, out_rx, shutdown).await;
+    let reason = conn_loop(
+        &mut conn,
+        &mut listener,
+        &config,
+        read,
+        out_rx,
+        in_tx
+            .as_ref()
+            .expect("inbound sender kept for the play handoff"),
+        shutdown,
+    )
+    .await;
     match &reason {
         DisconnectReason::EndOfStream => debug!(%id, %remote, "EOF"),
         DisconnectReason::Timeout => warn!(%id, %remote, "read timeout"),
@@ -281,16 +292,23 @@ async fn drain_to_close(
 
 /// The per-connection read/dispatch loop. Reads a chunk under the configured
 /// timeout, decodes frames, dispatches to the listener, drains the tick→network
-/// outbound channel into the socket, and flushes. Returns the disconnect reason
-/// that ends the loop; the connection is closed by the caller.
+/// outbound channel into the socket, and flushes. On the configuration→play
+/// handoff ([`InboundOutcome::Play`]) the loop stops dispatching to a listener
+/// and forwards every decoded frame to the tick thread over `in_tx` — the
+/// OWNERSHIP §Network play boundary. Returns the disconnect reason that ends
+/// the loop; the connection is closed by the caller.
 async fn conn_loop(
     conn: &mut Connection,
     listener: &mut Box<dyn PacketListener>,
     config: &ServerConfig,
     mut read: OwnedReadHalf,
     mut out_rx: mpsc::Receiver<OutboundEvent>,
+    in_tx: &mpsc::Sender<ServerboundFrame>,
     shutdown: Arc<Shutdown>,
 ) -> DisconnectReason {
+    // Whether the connection has crossed the configuration→play boundary and
+    // frames are now forwarded to the tick thread instead of a listener.
+    let mut in_play = false;
     let mut chunk = [0u8; 4096];
     loop {
         // Non-blocking drain of whatever the tick thread has queued.
@@ -344,8 +362,26 @@ async fn conn_loop(
                 return DisconnectReason::Timeout;
             }
         };
-        if let Err(reason) = conn.process_inbound(&chunk[..n], listener) {
-            return reason;
+        if in_play {
+            // Play state: forward decoded frames to the tick thread. No
+            // listener; the tick thread owns play-state dispatch (#101).
+            if let Err(reason) = conn.forward_play(Some(&chunk[..n]), in_tx).await {
+                return reason;
+            }
+        } else {
+            match conn.process_inbound(&chunk[..n], listener) {
+                Ok(InboundOutcome::Keep) => {}
+                Ok(InboundOutcome::Play) => {
+                    in_play = true;
+                    // Frames already buffered when the handoff fired (a client
+                    // that coalesced `finish_configuration` with a play packet)
+                    // are drained into the tick channel now.
+                    if let Err(reason) = conn.forward_play(None, in_tx).await {
+                        return reason;
+                    }
+                }
+                Err(reason) => return reason,
+            }
         }
     }
 }
