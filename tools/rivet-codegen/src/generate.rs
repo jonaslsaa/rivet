@@ -45,6 +45,7 @@ pub fn run(
     crate::registries::run(None, Some(&output))?;
     crate::block_states::run(None, None, Some(&output))?;
     crate::biomes_tags::run(None, Some(&output))?;
+    crate::synchronized::run(None, Some(&output))?;
     crate::packets::run(packets_flag, packets_output_flag)?;
 
     let header = format!(
@@ -141,11 +142,12 @@ fn run_blocks(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<S
 
 /// The generated module file: declares the codegen-owned `src/generated/`
 /// modules. `registries.rs` (the report-driven static-builtin tables),
-/// `block_states.rs` (the report-driven block-state global-id table), and
-/// `biomes.rs`/`tags.rs` (the biome id table + tag network content) are added
+/// `block_states.rs` (the report-driven block-state global-id table),
+/// `biomes.rs`/`tags.rs` (the biome id table + tag network content), and
+/// `synchronized.rs` (the configuration-sync element tables) are added
 /// alongside the extract-driven block tables.
 fn render_mod() -> String {
-    "pub mod biomes;\npub mod block_properties;\npub mod blocks;\npub mod block_states;\npub mod registries;\npub mod tags;\n"
+    "pub mod biomes;\npub mod block_properties;\npub mod block_states;\npub mod blocks;\npub mod registries;\npub mod synchronized;\npub mod tags;\n"
         .to_string()
 }
 
@@ -305,13 +307,14 @@ mod drift_tests {
 
     use super::run;
 
-    const GENERATED_FILES: [&str; 7] = [
+    const GENERATED_FILES: [&str; 8] = [
         "biomes.rs",
         "block_properties.rs",
         "block_states.rs",
         "blocks.rs",
         "mod.rs",
         "registries.rs",
+        "synchronized.rs",
         "tags.rs",
     ];
 
