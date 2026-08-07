@@ -13,6 +13,11 @@ __pycache__/
 tools/rivet-oracle/work/
 tools/rivet-capture/work/
 
+# M2 worldgen sampler scratch: javac output for WorldGenSampler + Paper's
+# server-log dir created when the sampler boots the vanilla registries.
+tools/rivet-oracle/.cache/
+tools/rivet-oracle/logs/
+
 # rivet-codegen scratch space (extracted bundler classpath, compiled helper) — regenerable
 tools/rivet-codegen/.cache/
 

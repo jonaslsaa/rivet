@@ -1,39 +1,63 @@
-# rivet-oracle — the M0 differential-test harness
+# rivet-oracle — the M0/M2 differential-test harness
 
 Runs the real Java Paper server (the oracle), captures golden fixtures, and
-verifies them. This is the harness's M0 foundation; the full differential
-logic (azalea bots, worldgen chunk-hash diffs vs Rivet, packet round-trips)
-builds on top of it later.
+verifies them. M0 is the harness's foundation: a fixed-seed superflat world
+with a deterministic chunk-NBT fixture slice. M2 extends the same harness to
+the normal-overworld generator: semantic worldgen samples (density / biome /
+surface) plus a none-compression region chunk capture, per issue #51. The full
+differential logic (worldgen chunk-hash diffs vs Rivet, packet round-trips)
+builds on top of these fixtures later.
 
-## M0 status: what works
+## Status: what works
 
 - The Paper 26.2 server **boots headless** from the built paperclip bundler
   jar and reaches `Done (...)!` in ~5s.
 - A fixed-seed superflat world is generated and a **deterministic golden
   fixture slice** is captured from the spawn region of all three dimensions.
 - **Reproducibility is verified**: 432/432 chunk NBT payloads are
-  byte-identical across two independent boots (seed 42, superflat).
-- The Rust runner `cargo run -p rivet-oracle` verifies the fixtures against
-  the manifest's SHA-256s and prints a summary.
+  byte-identical across two independent boots (seed 42, superflat); the M2
+  normal-overworld none-compression region capture is 408/408 byte-identical
+  across boots (region-file-compression=none per DECISIONS D13).
+- **M2 worldgen semantic samples**: a Paper-side Java sampler
+  (`src/java/WorldGenSampler.java`) boots the vanilla registries directly (no
+  full server boot) and emits stable density/biome/surface samples for the
+  normal-overworld generator; a companion script extracts Starlight light
+  samples from the M0 FULL superflat chunks. Byte-identical across boots.
+- The Rust runner `cargo run -p rivet-oracle` verifies every committed
+  fixture kind against its manifest's SHA-256s and prints a summary.
 
 ## Directory layout
 
 ```
 rivet-oracle/
   Cargo.toml            # rust crate (the runner)
-  src/main.rs           # verifies fixtures + prints M0 summary
-  scripts/extract_fixtures.py   # captures fixtures from a server run
-  fixtures/             # golden fixtures (committed)
-    manifest.json       # seed, server.properties, per-file SHA-256s
-    server.properties   # exact config used
+  src/main.rs           # verify / sample / regenerate / gate commands
+  src/java/WorldGenSampler.java    # Paper-side M2 worldgen sampler (semantic)
+  scripts/extract_fixtures.py      # captures chunk-NBT fixtures from a run
+  scripts/run_worldgen_sampler.sh  # compiles+runs WorldGenSampler on the runtime
+  scripts/extract_light_samples.py # Starlight light samples from M0 chunks
+  fixtures/             # golden fixtures (committed), one manifest per kind
+    manifest.json       # M0 superflat slice: seed, config, per-file SHA-256s
+    server.properties   # exact M0 config (superflat, seed 42)
     level.dat           # world metadata (gzip-NBT)
     level.dat_old
     chunk/<dim>/0.0/<cx>.<cz>.nbt   # decompressed chunk NBT payloads
+    server-normal.properties        # exact M2 config (normal overworld, seed 42)
+    worldgen/           # M2 semantic worldgen samples (kind: worldgen-samples)
+      manifest.json     # hashes of samples.json + light.json
+      samples.json      # 25 density + 22 biome + 16 surface entries
+      light.json        # Starlight skylight/blocklight nibbles (M0 FULL chunks)
+    regions/overworld-normal/       # M2 normal-overworld region payloads
+      manifest.json     # 408 chunk NBT payloads, region-file-compression=none
+      chunk/<dim>/0.0/<cx>.<cz>.nbt # decompressed normal-overworld chunk NBT
   work/                 # scratch space — gitignored, never commit
-    run/                # a completed server run
+    run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
     logs/               # server stdout logs
 ```
+
+Every fixture kind has its own `manifest.json`, so kinds grow independently
+without a format migration.
 
 ## Boot procedure (exact commands that worked)
 
@@ -88,8 +112,10 @@ The raw region files (`.mca`) are **not** byte-stable across boots: the
 offset/timestamp tables and sector padding vary (timestamps are wall-clock).
 Only the **decompressed chunk NBT** is deterministic for a fixed seed +
 generator settings. That is exactly what we capture, so the fixture SHA-256s
-are the right parity baseline. This was verified empirically (432/432 across
-two boots).
+are the right parity baseline. This was verified empirically (432/432 M0
+superflat and 408/408 M2 normal-overworld chunks across two boots each). The
+worldgen semantic samples are emitted by the Java sampler directly and are
+byte-identical across boots for a fixed seed + generator settings.
 
 Region chunk compression on this build: `compression=2` is **zlib-wrapped
 deflate** (`zlib.decompress`, wbits=15) — not raw deflate — and `1` is gzip.
@@ -98,13 +124,18 @@ deflate** (`zlib.decompress`, wbits=15) — not raw deflate — and `1` is gzip.
 ## Verify
 
 ```bash
-cargo run -p rivet-oracle                # checks fixtures/ against manifest
-cargo run -p rivet-oracle -- <dir>       # check a different fixtures dir
+cargo run -p rivet-oracle                # checks ALL committed fixture kinds
+cargo run -p rivet-oracle -- <dir>       # check a specific fixtures dir
 ```
 
-Prints `OK: all N captured files match manifest SHA-256s` and the M0 summary
-(seed, level-type, per-dimension chunk counts). Exits nonzero on any hash or
-size mismatch.
+The no-arg form discovers every `manifest.json` under `fixtures/` — the M0
+superflat slice (`fixtures/`), the worldgen semantic samples
+(`fixtures/worldgen/`), and the normal-overworld region payloads
+(`fixtures/regions/overworld-normal/`) — and verifies each against its own
+manifest. Prints `OK: all N captured files match manifest SHA-256s` and a
+summary per kind (seed, level-type, region-file-compression, per-dimension
+chunk counts). Exits nonzero on any hash or size mismatch, or if any kind
+fails.
 
 ## One-command M0 sanity gate: `verify`
 
@@ -199,6 +230,55 @@ extra boot) so a future change that breaks the acceptance logic or the tamper
 is caught by the gate, not only by a manual run. A nonzero exit — boot/extract
 failure, pin mismatch, or a tamper not detected and named — aborts the gate
 under `set -e` exactly like any other oracle step.
+
+## M2 region gate: `verify --m2`
+
+The M2 gate proves two fresh boots of the **normal-overworld** none-compression
+region capture match byte-for-byte (the foundation for the density/biome/surface
+waves). It runs the same boot → extract → pin-check → diff pipeline as `verify`,
+but with the normal-overworld config (`fixtures/server-normal.properties`:
+`level-type=minecraft:normal`, `region-file-compression=none` per DECISIONS D13,
+seed 42, view/simulation-distance 2, port 25599) and diffed against
+`fixtures/regions/overworld-normal`.
+
+```bash
+cargo run -p rivet-oracle -- verify --m2
+cargo run -p rivet-oracle -- verify --m2 --expect-fail   # negative control
+```
+
+`--expect-fail` corrupts a copy of the region baseline and requires the tampered
+chunk to be detected and named — the same vacuous-green guard as the M0 control.
+A custom baseline dir can be passed as the final argument.
+
+## M2 worldgen semantic samples: `sample`
+
+The `worldgen/` fixtures are regenerated without a full server boot — the
+Paper-side sampler (`scripts/run_worldgen_sampler.sh`) boots the vanilla
+registries against the materialized runtime
+(`work/run/versions/26.2/paper-26.2.jar` + library jars) and emits
+`samples.json`; `scripts/extract_light_samples.py` re-extracts the Starlight
+light samples from the M0 FULL superflat chunks; the manifest is re-hashed.
+
+```bash
+cargo run -p rivet-oracle -- sample
+```
+
+The manifest is serialized in committed field order, so regeneration is
+byte-identical (git-clean) for unchanged samples — verified by a unit test.
+
+## Regenerate: `regenerate`
+
+Full regeneration of every fixture kind (boots Paper where a boot is required):
+
+```bash
+cargo run -p rivet-oracle -- regenerate            # all kinds
+cargo run -p rivet-oracle -- regenerate --m0       # M0 superflat slice only
+cargo run -p rivet-oracle -- regenerate --m2       # M2 region payloads only
+cargo run -p rivet-oracle -- regenerate --samples  # worldgen samples only
+```
+
+The gate's hash verification is the safety net against a bad regeneration.
+Never hand-edit fixtures; regenerate from a clean run instead.
 
 ## Conventions
 
