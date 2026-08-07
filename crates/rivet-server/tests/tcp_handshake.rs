@@ -188,33 +188,12 @@ async fn coalesced_frames_decode_in_one_batch() {
 }
 
 #[tokio::test]
-async fn login_intention_then_any_frame_closes() {
+async fn login_intention_alone_stays_open_until_hello() {
     let (addr, server_task) = start_server(default_config()).await;
     let mut client = TcpStream::connect(addr).await.expect("connect");
 
-    client
-        .write_all(&handshake_frame(
-            PROTOCOL_VERSION,
-            "localhost",
-            25565,
-            LOGIN_INTENT,
-        ))
-        .await
-        .expect("write");
-    // Login stub closes on any frame (login bodies are #96/epoch #10 territory).
-    client.write_all(&frame(&varint(0))).await.expect("write");
-
-    expect_eof(&mut client).await;
-    server_task.abort();
-}
-
-#[tokio::test]
-async fn login_intention_alone_stays_open_then_frame_closes() {
-    let (addr, server_task) = start_server(default_config()).await;
-    let mut client = TcpStream::connect(addr).await.expect("connect");
-
-    // Login handshake alone (no second frame) stays open briefly — the state
-    // transition itself is accepted; only a subsequent login frame is refused.
+    // Login handshake alone (no hello yet) stays open — the state transition to
+    // the login listener is accepted; only a frame is refused.
     client
         .write_all(&handshake_frame(
             PROTOCOL_VERSION,
@@ -230,8 +209,15 @@ async fn login_intention_alone_stays_open_then_frame_closes() {
         "login state should not close before any frame arrives"
     );
 
-    // Then a status-shaped frame (id 0) is refused by the login stub → EOF.
-    client.write_all(&frame(&varint(0))).await.expect("write");
+    // The login listener is reached, so a handshake-shaped frame (id 0) is now
+    // the `ServerboundHelloPacket` dispatch — a hello with an over-length name
+    // is malformed (`Utf8String.read(16)`), closing deterministically.
+    let mut body = varint(0);
+    body.extend_from_slice(&varint(17)); // declared name length > 16 units
+    body.extend_from_slice(&[b'a'; 17]);
+    body.extend_from_slice(&[0u8; 16]); // profile uuid
+    client.write_all(&frame(&body)).await.expect("write");
+
     expect_eof(&mut client).await;
     server_task.abort();
 }

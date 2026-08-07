@@ -8,9 +8,10 @@
 //! generated table).
 //!
 //! The listener behavior (`handleHello` — the `HELLO → VERIFYING` offline
-//! state-machine entry) is deferred with the login state machine (#96); the RSA
-//! challenge this packet *can* trigger (`ClientboundHello`/`ServerboundKey`) is
-//! the online-auth path (#88), never exercised in M1 offline mode.
+//! state-machine entry) is consumed by the `rivet-server` login listener
+//! (`ServerLoginPacketListener`); the RSA challenge this packet *can* trigger
+//! (`ClientboundHello`/`ServerboundKey`) is the online-auth path (#88), never
+//! exercised in M1 offline mode.
 
 use crate::codec::byte_buf_codecs;
 use crate::codec::{StreamCodec, StreamDecoder, StreamEncoder, of};
