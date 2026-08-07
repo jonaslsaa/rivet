@@ -54,7 +54,7 @@ const SERVER_BRAND: &str = "Rivet";
 /// that sends one packet. This slice's only task is the honest brand followed by
 /// [`RegistrySyncUnavailable`]; the full queue (registry sync, join world, spawn,
 /// code of conduct, resource pack) and the client-response `finishCurrentTask`
-/// machinery land with their owning units (#109/#100/#258).
+/// machinery land with their owning units (#109/#100/#236).
 trait ConfigurationTask: Send {
     /// `ConfigurationTask.start(Consumer<Packet>)` — send the task's opening
     /// packet(s). Java returns void; a task that awaits a client response (the
@@ -204,7 +204,7 @@ impl PacketListener for ServerConfigurationPacketListener {
                 let packet: ServerboundCustomPayloadPacket =
                     decode_packet(frame, ServerboundCustomPayloadPacket::stream_codec())?;
                 let _ = packet;
-                // RivetTodo(#258): the serverbound custom-payload handling —
+                // RivetTodo(#236): the serverbound custom-payload handling —
                 // `minecraft:register`/`unregister` channel tracking and the
                 // `minecraft:brand` decode (`clientBrand`). The body decodes as
                 // `DiscardedPayload` here and is otherwise ignored.
@@ -234,11 +234,11 @@ impl PacketListener for ServerConfigurationPacketListener {
                 // `handleResourcePackResponse` — `super.handleResourcePackResponse`
                 // (the resource-pack-required kick + callbacks) plus the
                 // `finishCurrentTask(ServerResourcePackConfigurationTask.TYPE)`.
-                // No resource pack is ever pushed (#258), so no task finish fires.
+                // No resource pack is ever pushed (#236), so no task finish fires.
                 let packet: ServerboundResourcePackPacket =
                     decode_packet(frame, ServerboundResourcePackPacket::stream_codec())?;
                 let _ = packet;
-                // RivetTodo(#258): `handleResourcePackResponse` — the
+                // RivetTodo(#236): `handleResourcePackResponse` — the
                 // resource-pack-required disconnect and the adventure pack
                 // callbacks; no pack is pushed in this slice so there is no
                 // current `ServerResourcePackConfigurationTask` to finish.
@@ -250,7 +250,7 @@ impl PacketListener for ServerConfigurationPacketListener {
                 let packet: ServerboundCustomClickActionPacket =
                     decode_packet(frame, ServerboundCustomClickActionPacket::stream_codec())?;
                 let _ = packet;
-                // RivetTodo(#258): `handleCustomClickAction` — the server-side
+                // RivetTodo(#236): `handleCustomClickAction` — the server-side
                 // custom-click-action routing (server handler + click-callback
                 // managers); the packet decodes here and is otherwise ignored.
                 Ok(ListenerOutcome::Keep)
@@ -290,8 +290,8 @@ impl PacketListener for ServerConfigurationPacketListener {
             ACCEPT_CODE_OF_CONDUCT_PACKET_ID => {
                 // `handleAcceptCodeOfConduct` → `finishCurrentTask(
                 // ServerCodeOfConductConfigurationTask.TYPE)`. No code-of-conduct
-                // task is ever queued (#258), so any response is unexpected.
-                // RivetTodo(#258): `ServerCodeOfConductConfigurationTask` and the
+                // task is ever queued (#236), so any response is unexpected.
+                // RivetTodo(#236): `ServerCodeOfConductConfigurationTask` and the
                 // `accept_code_of_conduct` handshake — no CodeOfConduct packet is
                 // ever sent in this slice, so the response is unsupported.
                 Err(DisconnectReason::Unsupported(
