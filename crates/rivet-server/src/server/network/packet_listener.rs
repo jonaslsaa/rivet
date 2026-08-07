@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use bytes::{Bytes, BytesMut};
 
 use rivet_protocol::codec::StreamDecoder;
@@ -93,6 +95,14 @@ pub enum DisconnectReason {
     /// `multiplayer.disconnect.server_shutdown` — the tick thread is stopping.
     #[error("multiplayer.disconnect.server_shutdown")]
     ServerShutdown,
+    /// `multiplayer.status.request_handled` — a status-protocol request was
+    /// served and the connection closed on purpose: `ServerStatusPacketListenerImpl`
+    /// disconnects with this reason after a ping (pong sent, then close) and on a
+    /// second `status_request`. A normal terminal close, distinct from
+    /// [`DisconnectReason::Unsupported`] (which reports a state/packet the server
+    /// does not handle).
+    #[error("multiplayer.status.request_handled")]
+    RequestHandled,
     /// Slice-local outbound-overload disconnect: the tick side dropped this
     /// connection's tick→network channel when it overflowed (the bounded-channel
     /// backpressure policy of sub-issue #93). Paper's netty outbound buffer is
@@ -125,13 +135,16 @@ pub(crate) fn packet_id(frame: &Bytes) -> Result<i32, DisconnectReason> {
 /// "was larger than I expected, found X bytes extra" IOException — a close, not
 /// a leak into the next packet.
 ///
-/// Truncated scalar reads deliberately panic here (Java's unchecked
-/// `IndexOutOfBoundsException` on an empty buffer): the `StreamCodec` scalars
-/// (`read_uuid`, `read_var_int`, `read_long`, …) are not wrapped by the codec
-/// boundary. `PacketDecoder` turns that netty `IndexOutOfBoundsException` into
-/// a `CorruptedFrameException` that also closes the connection, so the panic
-/// aborts the per-connection task — the Rust-side close for the same hostile
-/// input.
+/// Truncated scalar reads deliberately panic inside the codec (Java's unchecked
+/// `IndexOutOfBoundsException` on an empty buffer: the `StreamCodec` scalars
+/// `read_uuid`, `read_var_int`, `read_long`, … are not wrapped by the codec
+/// boundary). `PacketDecoder` turns that netty `IndexOutOfBoundsException` into
+/// a close; the panic is caught here — at the decode boundary, the Rust analog
+/// of `PacketDecoder.decode`'s try/catch — and returned as a clean
+/// `DisconnectReason::Malformed`. The decode never panics out of this boundary:
+/// hostile input (a truncated ping long, a short UUID, …) closes the connection
+/// deterministically and the per-connection task's tail (cap decrement,
+/// `on_disconnect`, `connection_closed`) always runs.
 pub(crate) fn decode_packet<T, C>(frame: Bytes, codec: C) -> Result<T, DisconnectReason>
 where
     C: StreamDecoder<FriendlyByteBuf, T>,
@@ -139,13 +152,21 @@ where
     let mut buf = BytesMut::from(&frame[..]);
     super::server_handshake_packet_listener::read_packet_id(&mut buf)?;
     let mut input = FriendlyByteBuf::new(buf);
-    let value = codec.decode(&mut input).map_err(|e| {
-        DisconnectReason::Malformed(format!(
-            "decoding {}: {}",
-            std::any::type_name::<T>(),
-            e.message
-        ))
-    })?;
+    let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.decode(&mut input)))
+        .map_err(|payload| {
+            DisconnectReason::Malformed(format!(
+                "decoding {} panicked: {}",
+                std::any::type_name::<T>(),
+                panic_message(payload)
+            ))
+        })?
+        .map_err(|e| {
+            DisconnectReason::Malformed(format!(
+                "decoding {}: {}",
+                std::any::type_name::<T>(),
+                e.message
+            ))
+        })?;
     if input.readable_bytes() != 0 {
         return Err(DisconnectReason::Malformed(format!(
             "packet was larger than expected, {} bytes extra",
@@ -153,4 +174,19 @@ where
         )));
     }
     Ok(value)
+}
+
+/// Extract the message from a `catch_unwind` panic payload (a `&str` or
+/// `String`, as `panic!` produces) for the malformed-close log line. Shared by
+/// the decode boundary ([`decode_packet`]) and the encode boundary
+/// (`super::server_login_packet_listener::encode_body`), which both turn a
+/// `StreamCodec` panic into a `DisconnectReason` close.
+pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(msg) = payload.downcast_ref::<&str>() {
+        msg.to_string()
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "non-string panic".to_string()
+    }
 }

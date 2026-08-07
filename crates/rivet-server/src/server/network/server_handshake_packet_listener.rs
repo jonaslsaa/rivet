@@ -1,6 +1,8 @@
 use bytes::{Buf, Bytes, BytesMut};
 
 use rivet_protocol::generated::protocol::ConnectionProtocol;
+use rivet_protocol::protocol::status::server_status::{Players, ServerStatus, Version};
+use rivet_text::Component;
 
 use super::connection::Connection;
 use super::packet_listener::{DisconnectReason, ListenerOutcome, PacketListener};
@@ -93,12 +95,28 @@ impl PacketListener for ServerHandshakePacketListener {
             ClientIntent::Status => {
                 // Vanilla skips the protocol-version check for STATUS (a wrong-version
                 // client may still ping).
-                // `setupOutboundProtocol(StatusProtocols.CLIENTBOUND)` then
-                // `setupInboundProtocol(SERVERBOUND, ServerStatusPacketListenerImpl)`.
+                // `setupOutboundProtocol(StatusProtocols.CLIENTBOUND)` then, when the
+                // server replies to status (`repliesToStatus()` is unconditionally true
+                // in Paper 26.2 — `MinecraftServer` has no branch) and the status is
+                // non-null, `setupInboundProtocol(SERVERBOUND,
+                // ServerStatusPacketListenerImpl)` with the built status; otherwise
+                // `disconnect(IGNORE_STATUS_REASON)`.
+                // RivetTodo(#95): `LegacyQueryHandler` — Paper's legacy (pre-1.7)
+                // status protocol on UDP 25565, a separate `QueryHandler`/`QueryThread`
+                // surface in `com.destroystokyo.paper.network` — is deferred with the
+                // rest of the status unit; the modern TCP STATUS handshake is ported
+                // here, the legacy UDP query protocol is not.
                 conn.set_outbound_protocol(ConnectionProtocol::Status);
-                Ok(ListenerOutcome::Switch(Box::new(
-                    ServerStatusPacketListener::new(),
-                )))
+                let status = build_server_status();
+                if replies_to_status() {
+                    Ok(ListenerOutcome::Switch(Box::new(
+                        ServerStatusPacketListener::new(status),
+                    )))
+                } else {
+                    Err(DisconnectReason::Unsupported(
+                        "disconnect.ignoring_status_request".into(),
+                    ))
+                }
             }
             ClientIntent::Login => {
                 // `beginLogin` → the three-way protocol-version gate. The *message*
@@ -148,6 +166,50 @@ impl ClientIntent {
     const STATUS_ID: i32 = 1;
     const LOGIN_ID: i32 = 2;
     const TRANSFER_ID: i32 = 3;
+}
+
+/// `MinecraftServer.repliesToStatus()` — Paper 26.2 returns true unconditionally
+/// (the base class has no branch), so the STATUS handshake always installs the
+/// status listener. Kept as a function to mirror the Java guard shape.
+fn replies_to_status() -> bool {
+    true
+}
+
+/// The status served to status clients. `MinecraftServer.buildServerStatus()`
+/// would build `(motd, players, Version.current(), statusIcon,
+/// enforceSecureProfile())` from live server state; Rivet has no motd config, no
+/// world/players, and no icon yet, so the status is the deterministic minimal
+/// form:
+///   - description: a fixed motd literal (Paper's motd comes from
+///     `server.properties`; there is no motd config knob in this slice);
+///   - players: `Players(max=20, online=0, sample=[])` — the Paper default
+///     max-players and an honest empty player list (no invented player state);
+///   - version: `Version("26.2", 776)` — `Version.current()` for the pinned
+///     release (`version.json`, protocol 776 — `PROTOCOL_VERSION`);
+///   - favicon: `None` (no server icon loaded);
+///   - enforcesSecureChat: `false` (`MinecraftServer.enforceSecureProfile()` is
+///     false in the base class; the offline server does not enforce it).
+///
+/// The wire JSON this encodes is `{"description":"A Rivet Server",
+/// "players":{"max":20,"online":0},"version":{"name":"26.2","protocol":776}}`
+/// (`players`/`version` present, `sample`/`favicon`/`enforcesSecureChat`
+/// omitted — the `lenientOptionalFieldOf` defaults), pinned by the integration
+/// tests.
+///
+/// RivetTodo(#96): the per-server `MinecraftServer.getStatus()` cached status
+/// (rebuilt every 5s, `STATUS_EXPIRE_TIME_NANOS`), the motd/favicon config
+/// knobs, and `Version.current()` (needs `WorldVersion`/`SharedConstants`, the
+/// `mc.server` unit) — the deterministic constant is the placeholder until the
+/// server surface exists.
+fn build_server_status() -> ServerStatus {
+    const MAX_PLAYERS: i32 = 20;
+    ServerStatus::new(
+        Component::literal("A Rivet Server"),
+        Some(Players::new(MAX_PLAYERS, 0, Vec::new())),
+        Some(Version::new("26.2".to_string(), PROTOCOL_VERSION)),
+        None,
+        false,
+    )
 }
 
 /// Read the packet-id varint off the front of a frame. `VarInt.read` panics on a
