@@ -516,6 +516,17 @@ name = "rivet-core"
 version = "0.1.0-dev+mc26.2"
 
 [[package]]
+name = "rivet-decode"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "rivet-protocol",
+ "rivet-registry",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "rivet-entity"
 version = "0.1.0-dev+mc26.2"
 
