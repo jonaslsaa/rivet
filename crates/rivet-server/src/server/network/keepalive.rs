@@ -218,6 +218,7 @@ mod tests {
                 crate::server::network::connection_id::ConnectionId(1),
                 addr,
                 config,
+                std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new()),
                 write,
             );
 

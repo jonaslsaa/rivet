@@ -97,9 +97,11 @@ pub enum DisconnectReason {
     /// Slice-local inbound-overload disconnect: a hostile client decoded more
     /// inbound frames/decompressed bytes in one inbound drain (or play-state
     /// forwarding window) than the per-connection budget allows — the
-    /// compressed-frame memory-amplification bound. No Java analog; the
-    /// observable behavior is the same as any deterministic close — the socket
-    /// closes.
+    /// compressed-frame memory-amplification bound. This is deliberate anti-flood
+    /// policy that fires before socket-level TCP backpressure (which would not
+    /// protect the bounded tick channel from decompressed-frame amplification).
+    /// No Java analog; the observable behavior is the same as any deterministic
+    /// close — the socket closes.
     #[error("inbound overflow: {0}")]
     InboundOverflow(String),
 }

@@ -27,7 +27,8 @@ use tokio::sync::mpsc;
 use crate::server::network::connection_id::ConnectionId;
 use crate::server::network::packet_listener::DisconnectReason;
 use channels::{
-    LifecycleEvent, MAX_INBOUND_BYTES_PER_TICK, MAX_INBOUND_FRAMES_PER_TICK, ServerboundFrame,
+    LifecycleEvent, MAX_INBOUND_BYTES_PER_TICK, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
+    MAX_INBOUND_FRAMES_PER_DRAIN, MAX_INBOUND_FRAMES_PER_TICK, ServerboundFrame,
 };
 use registry::{ConnectionRegistry, DrainOutcome};
 use shutdown::Shutdown;
@@ -146,10 +147,14 @@ impl ServerTickLoop {
             if remaining_frames == 0 || remaining_bytes == 0 {
                 break;
             }
-            match self
-                .registry
-                .drain_one_bounded(id, remaining_frames, remaining_bytes)
-            {
+            // Clamp the per-connection budget with whatever aggregate remains:
+            // one connection can never consume more than its per-connection
+            // allowance (1024 frames / 16 MiB) even when the aggregate budget is
+            // untouched, because `drain_one_bounded` treats its arguments as the
+            // authoritative caps.
+            let cap_frames = remaining_frames.min(MAX_INBOUND_FRAMES_PER_DRAIN);
+            let cap_bytes = remaining_bytes.min(MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN);
+            match self.registry.drain_one_bounded(id, cap_frames, cap_bytes) {
                 DrainOutcome::Drained(frames) => {
                     aggregate_frames += frames.len();
                     aggregate_bytes += frames.iter().map(|f| f.bytes.len()).sum::<usize>();
@@ -180,5 +185,141 @@ impl ServerTickLoop {
         self.stats
             .connected
             .store(self.registry.len(), Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use channels::ServerboundFrame;
+    use scheduler::TickScheduler;
+    use shutdown::Shutdown;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use time::SimTime;
+
+    const REMOTE: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 25565);
+
+    fn frame(byte: u8) -> ServerboundFrame {
+        ServerboundFrame {
+            bytes: Bytes::from(vec![byte]),
+        }
+    }
+
+    /// Build a `ServerTickLoop` whose tickable records every delivered inbound
+    /// frame (the production-path observation: `run_tick` → `TickContext.inbound`).
+    fn test_loop(
+        recorded: Arc<Mutex<Vec<Vec<u8>>>>,
+    ) -> (ServerTickLoop, tokio::sync::mpsc::Sender<LifecycleEvent>) {
+        let (lifecycle_tx, lifecycle_rx) = tokio::sync::mpsc::channel(64);
+        let shutdown = Arc::new(Shutdown::new());
+        let sim = Arc::new(SimTime::with_shutdown(Arc::clone(&shutdown)));
+        let time: Arc<dyn time::TickTime> = sim;
+        let scheduler = TickScheduler::new(NANOS_PER_TICK, 5, 0);
+        let recorded_c = Arc::clone(&recorded);
+        let tickables: Vec<Tickable> = vec![Box::new(move |ctx| {
+            for (_id, frame) in &ctx.inbound {
+                recorded_c.lock().unwrap().push(frame.bytes.to_vec());
+            }
+        })];
+        let loop_ = ServerTickLoop::new(
+            scheduler,
+            time,
+            shutdown,
+            lifecycle_rx,
+            tickables,
+            Arc::new(TickStats::default()),
+        );
+        (loop_, lifecycle_tx)
+    }
+
+    /// Production-path regression: even with the aggregate budget untouched
+    /// (only one connection), a single connection never consumes more than its
+    /// per-connection allowance in one tick, and the retained remainder is
+    /// delivered on a later tick.
+    #[test]
+    fn run_tick_clamps_to_per_connection_budget() {
+        let recorded = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let (mut loop_, lifecycle_tx) = test_loop(Arc::clone(&recorded));
+
+        // One connection prefilled with more than the per-connection frame cap
+        // (1024) but far below the aggregate cap (8192). The channel capacity is
+        // above the cap so the cap, not the channel depth, is binding.
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel(8192);
+        let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+        let id = ConnectionId(1);
+        lifecycle_tx
+            .try_send(LifecycleEvent::Connect {
+                id,
+                remote: REMOTE,
+                in_rx,
+                out_tx,
+            })
+            .unwrap();
+        for _ in 0..(MAX_INBOUND_FRAMES_PER_DRAIN + 76) {
+            in_tx.try_send(frame(0)).unwrap();
+        }
+
+        // Tick 1: exactly the per-connection allowance (1024), not the aggregate.
+        loop_.run_tick();
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            MAX_INBOUND_FRAMES_PER_DRAIN,
+            "one connection must not exceed its per-connection allowance"
+        );
+
+        // Tick 2: the retained remainder is delivered.
+        loop_.run_tick();
+        assert_eq!(
+            recorded.lock().unwrap().len(),
+            MAX_INBOUND_FRAMES_PER_DRAIN + 76,
+            "the retained remainder is delivered on a later tick"
+        );
+    }
+
+    /// The same production-path clamp applies to the byte budget: one connection
+    /// prefilled with 3 × 8 MiB frames delivers 16 MiB (the per-connection byte
+    /// allowance) on the first tick and the retained third frame later.
+    #[test]
+    fn run_tick_clamps_to_per_connection_byte_budget() {
+        let recorded = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let (mut loop_, lifecycle_tx) = test_loop(Arc::clone(&recorded));
+
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel(64);
+        let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+        let id = ConnectionId(1);
+        lifecycle_tx
+            .try_send(LifecycleEvent::Connect {
+                id,
+                remote: REMOTE,
+                in_rx,
+                out_tx,
+            })
+            .unwrap();
+        for _ in 0..3 {
+            in_tx
+                .try_send(ServerboundFrame {
+                    bytes: Bytes::from(vec![0x42u8; 8 * 1024 * 1024]),
+                })
+                .unwrap();
+        }
+
+        loop_.run_tick();
+        let first: usize = recorded.lock().unwrap().iter().map(|f| f.len()).sum();
+        assert_eq!(
+            first,
+            2 * 8 * 1024 * 1024,
+            "16 MiB per-connection byte allowance"
+        );
+
+        loop_.run_tick();
+        let total: usize = recorded.lock().unwrap().iter().map(|f| f.len()).sum();
+        assert_eq!(
+            total,
+            3 * 8 * 1024 * 1024,
+            "retained third frame delivered later"
+        );
     }
 }

@@ -34,6 +34,12 @@ use crate::server::network::packet_listener::DisconnectReason;
 /// but it also never funnels frames into a fixed-depth bounded channel the way
 /// this slice does, so the bound is the Rust-side analog of the existing
 /// `MAXIMUM_UNCOMPRESSED_LENGTH` safety cap.
+///
+/// Disconnecting a client that exceeds the budget (see
+/// [`Connection::forward_play`](crate::server::network::connection::Connection::forward_play))
+/// is deliberate anti-flood policy, not TCP backpressure: the budget exists to
+/// stop decompressed-frame memory amplification in the bounded channel, so it
+/// kicks in before socket-level backpressure would.
 pub const MAX_INBOUND_FRAMES_PER_DRAIN: usize = 1024;
 
 /// Slice-local inbound drain budget, decompressed-bytes half: the maximum

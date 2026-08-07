@@ -16,6 +16,7 @@ use crate::server::ServerConfig;
 use crate::server::tick::channels::{
     MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN, MAX_INBOUND_FRAMES_PER_DRAIN, ServerboundFrame,
 };
+use crate::server::tick::shutdown::Shutdown;
 
 /// The enabled compression handlers for one connection: the
 /// `CompressionDecoder`/`CompressionEncoder` pair Paper's
@@ -97,6 +98,10 @@ pub struct Connection {
     /// The play-state inbound drain window, frame-count half (see
     /// [`Self::inbound_window_bytes`]).
     inbound_window_frames: usize,
+    /// The server-stop signal. `flush_out` races it so an outbound write that
+    /// backpressures (a slow or non-reading peer) is aborted on shutdown instead
+    /// of wedging the per-connection task and `serve()`'s shutdown drain.
+    shutdown: Arc<Shutdown>,
 }
 
 impl Connection {
@@ -104,6 +109,7 @@ impl Connection {
         id: ConnectionId,
         remote_addr: SocketAddr,
         config: Arc<ServerConfig>,
+        shutdown: Arc<Shutdown>,
         write: OwnedWriteHalf,
     ) -> Self {
         Connection {
@@ -120,6 +126,7 @@ impl Connection {
             outbound_protocol: None,
             inbound_window_bytes: 0,
             inbound_window_frames: 0,
+            shutdown,
         }
     }
 
@@ -388,16 +395,39 @@ impl Connection {
 
     /// Flush pending outbound frames to the socket.
     ///
-    /// The write is bounded by the connection's read-timeout liveness window
-    /// (`config.read_timeout`), so a client that stops reading cannot wedge the
-    /// per-connection task — or `serve()`'s shutdown drain — in `write_all`
-    /// forever once the socket send buffer fills. On timeout the flush is
-    /// aborted and the caller closes the socket (Paper's read-timeout handler
-    /// disconnects the same client).
+    /// Ordinary outbound writes backpressure: a slow-but-live peer is never
+    /// disconnected for taking longer than the read timeout to drain — the write
+    /// simply blocks until the peer reads (the socket send window refills). The
+    /// only bound is shutdown: the write races the server-stop signal and is
+    /// aborted when shutdown is requested, so a non-reading peer cannot wedge
+    /// the per-connection task (or `serve()`'s shutdown drain) forever.
     pub async fn flush_out(&mut self) -> std::io::Result<()> {
         let pending = std::mem::take(&mut self.out_buf);
         if !pending.is_empty() {
-            tokio::time::timeout(self.config.read_timeout, self.write.write_all(&pending))
+            let write = self.write.write_all(&pending);
+            tokio::pin!(write);
+            tokio::select! {
+                result = write.as_mut() => result?,
+                _ = self.shutdown.wait_async() => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "outbound flush aborted: server shutting down",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Flush pending outbound frames, bounding the write with a wall-clock
+    /// timeout. Used by the shutdown drain ([`drain_to_close`]) where shutdown
+    /// is already requested, so the shutdown-signal race of [`Self::flush_out`]
+    /// would abort immediately; the timeout is what prevents a non-reading peer
+    /// from stalling the drain.
+    pub async fn flush_out_bounded(&mut self, timeout: std::time::Duration) -> std::io::Result<()> {
+        let pending = std::mem::take(&mut self.out_buf);
+        if !pending.is_empty() {
+            tokio::time::timeout(timeout, self.write.write_all(&pending))
                 .await
                 .map_err(|_| {
                     std::io::Error::new(
@@ -432,9 +462,14 @@ mod tests {
     use rivet_protocol::compression_encoder::CompressionEncoder;
     use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
     use rivet_protocol::varint21_length_field_prepender::encode_frame;
+    use tokio::io::AsyncReadExt;
 
     fn test_config() -> Arc<ServerConfig> {
         Arc::new(ServerConfig::default())
+    }
+
+    fn test_shutdown() -> Arc<Shutdown> {
+        Arc::new(Shutdown::new())
     }
 
     /// A throwaway connected `Connection` (the write half never actually writes
@@ -446,7 +481,8 @@ mod tests {
         let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (server_sock, _) = server.await.unwrap();
         let (_read, write) = server_sock.into_split();
-        let mut conn = Connection::new(ConnectionId(1), addr, test_config(), write);
+        let mut conn =
+            Connection::new(ConnectionId(1), addr, test_config(), test_shutdown(), write);
         conn.set_outbound_protocol(ConnectionProtocol::Login);
         conn
     }
@@ -815,15 +851,73 @@ mod tests {
         assert_eq!(err, DisconnectReason::ServerShutdown);
     }
 
-    /// A peer that stops reading cannot wedge `flush_out`: the write is bounded
-    /// by `config.read_timeout` and aborts with a timeout error, so the
-    /// per-connection task (and `serve()`'s shutdown drain) always proceeds to
-    /// close. Deterministic: a 64 MiB pending frame far exceeds the maximum
-    /// kernel send/receive window on any supported OS (Linux autotunes to a few
-    /// MiB at most), so `write_all` cannot complete against a non-reading peer
-    /// and the timeout fires.
+    /// Ordinary outbound backpressure never disconnects a slow-but-live peer:
+    /// `flush_out` blocks until the peer drains, even when that takes far longer
+    /// than the read timeout. The client here reads 1 MiB every 5 ms while the
+    /// frame is 64 MiB, so the flush necessarily takes well over
+    /// `read_timeout` (50 ms) yet must succeed (not time out).
     #[tokio::test]
-    async fn flush_out_times_out_when_peer_stops_reading() {
+    async fn flush_out_backpressures_without_timing_out_on_slow_reader() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (_read, write) = server_sock.into_split();
+
+        let config = ServerConfig {
+            read_timeout: std::time::Duration::from_millis(50),
+            ..ServerConfig::default()
+        };
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::new(config),
+            test_shutdown(),
+            write,
+        );
+        conn.set_outbound_protocol(ConnectionProtocol::Login);
+        // 64 MiB >> any kernel socket buffer, so the write can only make
+        // progress as the client drains.
+        let frame_len = 64 * 1024 * 1024;
+        conn.queue_raw_frame(Bytes::from(vec![0x42u8; frame_len]));
+
+        // The slow-but-live reader: drain the full frame in 1 MiB chunks with a
+        // 5 ms pause between chunks (~320 ms total, far above the 50 ms
+        // read_timeout). Dropping the client early would close the peer and make
+        // write_all error, so it must read to the end.
+        let reader = tokio::spawn(async move {
+            let mut total = 0usize;
+            let mut buf = vec![0u8; 1024 * 1024];
+            while total < frame_len {
+                let n = client.read(&mut buf).await.unwrap();
+                assert!(n > 0, "peer closed early");
+                total += n;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            total
+        });
+
+        let start = std::time::Instant::now();
+        let result = conn.flush_out().await;
+        assert!(
+            result.is_ok(),
+            "a slow-but-live reader must not be disconnected, got {result:?}"
+        );
+        assert!(
+            start.elapsed() > std::time::Duration::from_millis(50),
+            "flush should have taken longer than read_timeout under backpressure"
+        );
+        assert_eq!(
+            reader.await.unwrap(),
+            frame_len,
+            "client read the full frame"
+        );
+    }
+
+    /// A non-reading peer cannot wedge `flush_out` once shutdown is requested:
+    /// the write races the shutdown signal and aborts.
+    #[tokio::test]
+    async fn flush_out_aborts_on_shutdown_with_stuck_write() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -831,27 +925,62 @@ mod tests {
         let (server_sock, _) = listener.accept().await.unwrap();
         let (_read, write) = server_sock.into_split();
 
-        let config = ServerConfig {
-            read_timeout: std::time::Duration::from_millis(100),
-            ..ServerConfig::default()
-        };
-        let mut conn = Connection::new(ConnectionId(1), addr, Arc::new(config), write);
+        let shutdown = test_shutdown();
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            test_config(),
+            Arc::clone(&shutdown),
+            write,
+        );
         conn.set_outbound_protocol(ConnectionProtocol::Login);
-        // 64 MiB >> any kernel socket buffer, so write_all must block.
+        // 64 MiB >> any kernel socket buffer, and the client never reads, so the
+        // write can only complete via the shutdown abort.
         conn.queue_raw_frame(Bytes::from(vec![0x42u8; 64 * 1024 * 1024]));
 
-        let start = std::time::Instant::now();
-        let result = conn.flush_out().await;
+        let flush = tokio::spawn(async move { conn.flush_out().await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        shutdown.request();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), flush)
+            .await
+            .expect("flush did not abort on shutdown")
+            .unwrap();
         assert!(
             result.is_err(),
-            "flush must abort on a non-reading peer, got {result:?}"
-        );
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(2),
-            "flush must be bounded by the read timeout"
+            "flush must abort when shutdown fires during a stuck write"
         );
         // Keep the client socket alive (dropping it would close the peer and
         // make write_all error instead of block).
+        assert!(client.local_addr().is_ok());
+    }
+
+    /// `flush_out_bounded` bounds a stuck write with a wall-clock timeout even
+    /// when shutdown has already fired (the shutdown-race flush would abort
+    /// immediately, so the shutdown drain uses the bounded variant).
+    #[tokio::test]
+    async fn flush_out_bounded_times_out_a_stuck_write() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (_read, write) = server_sock.into_split();
+
+        let mut conn =
+            Connection::new(ConnectionId(1), addr, test_config(), test_shutdown(), write);
+        conn.set_outbound_protocol(ConnectionProtocol::Login);
+        conn.queue_raw_frame(Bytes::from(vec![0x42u8; 64 * 1024 * 1024]));
+
+        let start = std::time::Instant::now();
+        let result = conn
+            .flush_out_bounded(std::time::Duration::from_millis(50))
+            .await;
+        assert!(
+            result.is_err(),
+            "bounded flush must time out on a non-reading peer"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
         assert!(client.local_addr().is_ok());
     }
 
