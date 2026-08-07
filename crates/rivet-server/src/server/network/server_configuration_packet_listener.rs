@@ -156,7 +156,7 @@ impl ConfigurationTask for JoinWorldTask {
         let body = encode_body(
             finish_configuration_stream_codec(),
             &ClientboundFinishConfigurationPacket,
-        );
+        )?;
         conn.send_packet(
             ConnectionProtocol::Configuration,
             CLIENTBOUND_FINISH_CONFIGURATION_ID,
