@@ -3,8 +3,8 @@
 //! the session, and `place_new_player`/`send_level_info` emit the Paper-faithful
 //! play join burst.
 //!
-//! Ground truth: the `tools/rivet-capture/fixtures/join/capture.jsonl` second
-//! join (protocol 776, Paper `26.2-DEV-main@0a99345`, offline superflat world,
+//! Ground truth: the `tools/rivet-capture/fixtures/join/capture.jsonl` join
+//! (protocol 776, Paper `26.2-DEV-main@0a99345`, offline superflat world,
 //! seed 42, view distance 4). The packet bodies are the raw packet bodies the
 //! capture proxy strips (packet id + compression prefix already removed), so the
 //! byte-exact assertions compare an encoded burst member against the capture's
@@ -15,7 +15,10 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use bytes::BytesMut;
 use rivet_protocol::generated::packets::play::clientbound::PacketType;
+use rivet_protocol::var_int;
+use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
 use rivet_registry::Identifier;
 use rivet_registry::ResourceKey;
 use rivet_registry::core::{GameProfile, GameType, Vec3, create_offline_player_uuid};
@@ -178,6 +181,23 @@ fn protocol_fixture(name: &str) -> Vec<u8> {
     hex_bytes(hex.trim())
 }
 
+/// Decode one outbound `frame` back to `(packet_id, body)` using the real
+/// VarInt21 frame decoder and VarInt readers — no fixed 1-byte offset
+/// assumptions, so future >=128-byte bodies or packet ids decode correctly.
+fn decode_frame(frame: &[u8]) -> (u32, Vec<u8>) {
+    let mut buf = BytesMut::from(frame);
+    let wire = Varint21FrameDecoder::new(None)
+        .decode(&mut buf)
+        .expect("frame decodes")
+        .expect("frame present");
+    let mut wire = BytesMut::from(&wire[..]);
+    // Below-threshold frames are uncompressed: `varint(0) ++ varint(packet_id) ++ body`.
+    let declared_len = var_int::read(&mut wire);
+    assert_eq!(declared_len, 0, "below-threshold frame is uncompressed");
+    let packet_id = var_int::read(&mut wire) as u32;
+    (packet_id, wire.to_vec())
+}
+
 /// The `PacketType` id constants the burst asserts against.
 mod ids {
     use super::*;
@@ -234,6 +254,19 @@ fn play_sender_frames_below_threshold_are_uncompressed() {
     assert_eq!(frame[1], 0, "below-threshold frames carry the raw prefix");
     assert_eq!(frame[2], ids::LOGIN as u8);
     assert_eq!(&frame[3..], &body[..]);
+}
+
+#[test]
+fn decode_frame_round_trips_multibyte_varints() {
+    // A body >= 128 bytes (still below the 256 compression threshold) forces a
+    // two-byte VarInt21 length prefix; a packet id >= 128 forces a two-byte id
+    // varint. `decode_frame` must round-trip both (no 1-byte assumptions).
+    let mut sender = play_sender();
+    let body = vec![0xcd; 200];
+    let frame = sender.encode_frame(300, &body).expect("encode");
+    let (packet_id, decoded_body) = decode_frame(&frame);
+    assert_eq!(packet_id, 300);
+    assert_eq!(decoded_body, body);
 }
 
 #[test]
@@ -315,13 +348,7 @@ fn run_burst() -> Vec<(u32, Vec<u8>)> {
     while let Ok(event) = out_rx.try_recv() {
         match event {
             rivet_server::server::tick::channels::OutboundEvent::Packet { frame } => {
-                // Strip the VarInt21 length prefix and the uncompressed
-                // `varint(0)` compression prefix.
-                let mut offset = 1; // VarInt21 length is 1 byte for short frames
-                offset += 1; // compression prefix varint(0)
-                let packet_id = frame[offset] as u32;
-                offset += 1;
-                packets.push((packet_id, frame[offset..].to_vec()));
+                packets.push(decode_frame(&frame));
             }
             rivet_server::server::tick::channels::OutboundEvent::Disconnect { .. } => break,
         }
@@ -382,8 +409,7 @@ fn send_level_info_order_and_bodies() {
     while let Ok(event) = out_rx.try_recv() {
         match event {
             rivet_server::server::tick::channels::OutboundEvent::Packet { frame } => {
-                let offset = 2; // VarInt21 length + compression prefix
-                packets.push((frame[offset] as u32, frame[offset + 1..].to_vec()));
+                packets.push(decode_frame(&frame));
             }
             rivet_server::server::tick::channels::OutboundEvent::Disconnect { .. } => break,
         }
@@ -478,22 +504,30 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
     // Advance the tick; the burst fires on the first tick.
     sim.advance(NANOS_PER_TICK);
 
-    // Drain the outbound channel until the burst's ten frames arrive.
+    // Drain the outbound channel until the burst's ten frames arrive. The
+    // deadline is checked on every recv attempt (not only after a successful
+    // `blocking_recv`), so a burst that never fires fails boundedly instead of
+    // hanging the test.
     let mut got: Vec<u32> = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while got.len() < slice_a_order().len() {
-        match out_rx.blocking_recv() {
-            Some(OutboundEvent::Packet { frame }) => {
-                let offset = 2;
-                got.push(frame[offset] as u32);
-            }
-            Some(OutboundEvent::Disconnect { .. }) => break,
-            None => panic!("outbound channel closed before the burst completed"),
-        }
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out waiting for burst"
+            "timed out waiting for burst (got {got:?})"
         );
+        match out_rx.try_recv() {
+            Ok(OutboundEvent::Packet { frame }) => {
+                let (packet_id, _) = decode_frame(&frame);
+                got.push(packet_id);
+            }
+            Ok(OutboundEvent::Disconnect { .. }) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                panic!("outbound channel closed before the burst completed");
+            }
+        }
     }
     assert_eq!(got, slice_a_order());
 

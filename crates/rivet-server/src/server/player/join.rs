@@ -2,17 +2,23 @@
 //! play join burst (Slice A of #101), in Paper's send order.
 //!
 //! Java source: `working/Paper/paper-server/src/minecraft/java/net/minecraft/
-//! server/players/PlayerList.java` (`placeNewPlayer` lines 158–231,
+//! server/players/PlayerList.java` (`placeNewPlayer` lines 158–338,
 //! `sendLevelInfo` lines 994–1015). The send order matches the `PLAY_BURST_ORDER`
 //! constant in `tools/rivet-capture/src/ordering.rs` (the pinned
-//! `26.2-DEV-main@0a99345` fixture):
+//! `26.2-DEV-main@0a99345` fixture).
 //!
-//! `login` → `change_difficulty` → `player_abilities` → `set_held_slot` →
-//! `player_position` (the `teleport`) → `sendLevelInfo` (`initialize_border` →
-//! `set_time` → `set_default_spawn_position` → `game_event`) →
-//! `player_info_update`. This is `PLAY_BURST_ORDER` restricted to the Slice A
-//! members — the ten members Paper sends in between are deferred, keeping the
-//! relative order of the members that are sent:
+//! Paper calls `sendLevelInfo` TWICE inside `placeNewPlayer` (lines 231 and
+//! 294). The burst below is the FIRST occurrence, emitted before the
+//! `player_info_update` broadcast; Slice A ports only this first-occurrence
+//! foundation. The second block re-sends the same four members
+//! (`initialize_border` → `set_time` → `set_default_spawn_position` →
+//! `game_event`) after `player_info_update` (and after the entity pairing at
+//! line 291); it is deferred to Slice B. Its ordering is unambiguous: it is the
+//! LAST burst member — nothing in the burst follows it in `placeNewPlayer`.
+//!
+//! This burst is `PLAY_BURST_ORDER` restricted to the Slice A members — the
+//! ten members Paper sends in between are deferred, keeping the relative order
+//! of the members that are sent:
 //!
 //! - `update_recipes` (133) — RivetTodo(#87), body not ported.
 //! - `entity_event` (34) — RivetTodo(#222), self add-entity pairing.
@@ -84,7 +90,8 @@ const PLAYER_INFO_UPDATE_ID: u32 = PacketType::PlayerInfoUpdate.id();
 /// The `WorldBorder` snapshot the M1 superflat world's border defaults to:
 /// `new StaticBorderExtent(5.999997E7F)`, absolute max `29999984`, warnings
 /// (blocks `5` / time `300`), centered on the spawn `(0, 0)`. The capture's
-/// `join_clientbound_initialize_border` golden body pins these exact values.
+/// id-43 `initialize_border` line pins these exact values (asserted inline in
+/// `join_burst.rs`'s `border_body`; there is no dedicated fixture file).
 ///
 /// Paper's `WorldBorder.MAX_SIZE` literal is the *float* `5.999997E7F`, which
 /// as a double is exactly `59999968.0` (floats near 6E7 step by 8) — the
@@ -117,9 +124,11 @@ pub struct JoinConfig {
 }
 
 /// `PlayerList.placeNewPlayer(connection, player, cookie)` — the deterministic
-/// play join burst. Encode + queue each packet in Paper's send order (the Slice
-/// A subset of `PLAY_BURST_ORDER`) and return the ordered packet ids that were
-/// sent, for the ordering tests.
+/// play join burst, through Paper's FIRST `sendLevelInfo` occurrence (the
+/// pre-`player_info_update` foundation; the second block is Slice B). Encode +
+/// queue each packet in Paper's send order (the Slice A subset of
+/// `PLAY_BURST_ORDER`) and return the ordered packet ids that were sent, for
+/// the ordering tests.
 ///
 /// `update_recipes` is intentionally omitted: its body is not ported
 /// (RivetTodo(#87)); the burst keeps Paper's order otherwise. Entity pairing
@@ -135,6 +144,9 @@ pub fn place_new_player(
     let mut sent = Vec::with_capacity(10);
 
     // `playerConnection.send(new ClientboundLoginPacket(player.getId(), ...))`.
+    // `createCommonSpawnInfo` resolves the level's dimension-type holder; the M1
+    // capture pins holder id 0 (the overworld), and the general resolution is
+    // RivetTodo(#126).
     let spawn_info = CommonPlayerSpawnInfo::new(
         dimension_type_holder(sender, 0),
         level.dimension().clone(),
@@ -320,8 +332,11 @@ pub fn send_level_info(
 }
 
 /// The `Holder<DimensionType>` the spawn info carries — a reference to holder id
-/// `id` in the connection's `DIMENSION_TYPE` registry (the capture's
-/// `CommonPlayerSpawnInfo` carries holder id 0 = the overworld dimension type).
+/// `id` in the connection's `DIMENSION_TYPE` registry. The M1 capture's
+/// `CommonPlayerSpawnInfo` carries holder id 0 (the overworld dimension type);
+/// the general level→holder resolution (`ServerLevel.dimensionType()`, which
+/// needs a runtime `RegistryAccess`) is RivetTodo(#126), so Slice A pins the
+/// capture's fixed id 0.
 fn dimension_type_holder(sender: &PlaySender, id: u32) -> Holder<DimensionType> {
     let registry_id = sender
         .dimension_type_access()
