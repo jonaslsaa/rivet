@@ -54,6 +54,7 @@ use bytes::BytesMut;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::nbt_accounter::NbtAccounter;
 use rivet_nbt::tag::Tag;
+use rivet_registry::core::GameType;
 use rivet_serialization::Either;
 use rivet_util::mth::{pack_degrees, unpack_degrees};
 use std::sync::Arc;
@@ -800,6 +801,17 @@ pub fn length_prefixed<V: 'static>(max_size: i32) -> CodecOperation<FriendlyByte
     })
 }
 
+/// `GameType.STREAM_CODEC` — `ByteBufCodecs.idMapper(BY_ID, GameType::getId)`.
+///
+/// A varint id through the `ByIdMap.continuous` `BY_ID` (ZERO fallback for any
+/// id outside `[0, 4)`), encoding the value's `getId`. Java's declaration is
+/// `StreamCodec<ByteBuf, GameType>`; Rust monomorphizes the buffer to
+/// `FriendlyByteBuf`. Not used by `CommonPlayerSpawnInfo` (which reads raw
+/// signed bytes), but it is the class's declared `STREAM_CODEC` (#108).
+pub fn game_type_stream_codec() -> StreamCodec<FriendlyByteBuf, GameType> {
+    id_mapper(GameType::by_id, GameType::get_id)
+}
+
 /// `ByteBufCodecs.idMapper(IntFunction<T> byId, ToIntFunction<T> toId)` — a
 /// varint id in, the mapped value out.
 pub fn id_mapper<T: 'static>(
@@ -1321,6 +1333,37 @@ mod tests {
         assert_eq!(
             err.message,
             "Length-prefixed payload of 50 bytes exceeds 0 readable bytes"
+        );
+    }
+
+    #[test]
+    fn game_type_stream_codec_round_trips_and_wire_form() {
+        // `idMapper(BY_ID, getId)`: a varint id, ZERO fallback on decode.
+        let codec = game_type_stream_codec();
+        for (game_type, id) in [
+            (rivet_registry::core::GameType::Survival, 0),
+            (rivet_registry::core::GameType::Creative, 1),
+            (rivet_registry::core::GameType::Adventure, 2),
+            (rivet_registry::core::GameType::Spectator, 3),
+        ] {
+            let mut out = buf();
+            codec.encode(&mut out, &game_type).unwrap();
+            assert_eq!(written(out), vec![id]);
+            let mut input = FriendlyByteBuf::new(BytesMut::from(vec![id].as_slice()));
+            assert_eq!(codec.decode(&mut input).unwrap(), game_type);
+        }
+        // Out-of-range id -> the ZERO fallback SURVIVAL (Java `BY_ID.apply`).
+        let mut input = FriendlyByteBuf::new(BytesMut::from(vec![99u8].as_slice()));
+        assert_eq!(
+            codec.decode(&mut input).unwrap(),
+            rivet_registry::core::GameType::Survival
+        );
+        // A negative varint id -> SURVIVAL too (Java `BY_ID.apply(-1)`).
+        let mut input = FriendlyByteBuf::new(BytesMut::new());
+        input.write_var_int(-1);
+        assert_eq!(
+            codec.decode(&mut input).unwrap(),
+            rivet_registry::core::GameType::Survival
         );
     }
 

@@ -56,8 +56,9 @@ use rivet_registry::holder::Holder;
 use rivet_registry::holder_lookup::HolderGetter;
 use rivet_registry::holder_set::HolderSet;
 use rivet_registry::id_map::IdMap;
+use rivet_registry::registries::DimensionType;
 use rivet_registry::registry::{Registry, RegistryKey};
-use rivet_registry::{Identifier, ResourceKey, TagKey};
+use rivet_registry::{Identifier, ResourceKey, TagKey, registries};
 
 use std::sync::Arc;
 
@@ -138,6 +139,19 @@ pub fn global_pos_stream_codec() -> StreamCodec<RegistryFriendlyByteBuf, GlobalP
         |pos: &GlobalPos| pos.pos(),
         GlobalPos::of,
     )
+}
+
+/// `DimensionType.STREAM_CODEC` — `ByteBufCodecs.holderRegistry(Registries.DIMENSION_TYPE)`.
+///
+/// The wire form of the `Holder<DimensionType>` in `CommonPlayerSpawnInfo`
+/// (#108): a varint holder id through the `DIMENSION_TYPE` registry's
+/// `asHolderIdMap()` view (strict bounds — an out-of-range id panics
+/// `"No value with id {id}"`, never the default). The `DimensionType` value
+/// record is the deferred `mc.world.level.dimension` unit; only the registry
+/// key and the `Holder` wire form are owned here.
+pub fn dimension_type_stream_codec() -> StreamCodec<RegistryFriendlyByteBuf, Holder<DimensionType>>
+{
+    holder_registry(&*registries::DIMENSION_TYPE)
 }
 
 /// `ByteBufCodecs.registry(registryKey)` — a varint element id mapped through
@@ -921,6 +935,73 @@ mod tests {
             .encode(&mut out, &Holder::Direct(TestElement(5)))
             .unwrap();
         assert_eq!(out.into_inner().to_vec(), vec![0, 5]);
+    }
+
+    // -----------------------------------------------------------------------
+    // dimension_type_stream_codec() — the #108 DimensionType.STREAM_CODEC
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dimension_type_stream_codec_round_trips() {
+        let mut builder = RegistryBuilder::new(&*rivet_registry::registries::DIMENSION_TYPE);
+        let _overworld = builder.register(
+            &ResourceKey::create(
+                &*rivet_registry::registries::DIMENSION_TYPE,
+                Identifier::with_default_namespace("overworld"),
+            ),
+            Arc::new(rivet_registry::registries::DimensionType),
+            RegistrationInfo::BUILT_IN,
+        );
+        let _nether = builder.register(
+            &ResourceKey::create(
+                &*rivet_registry::registries::DIMENSION_TYPE,
+                Identifier::with_default_namespace("the_nether"),
+            ),
+            Arc::new(rivet_registry::registries::DimensionType),
+            RegistrationInfo::BUILT_IN,
+        );
+        let registry = builder.freeze();
+        let access = RegistryAccess::from_single_registry(
+            (*rivet_registry::registries::DIMENSION_TYPE).clone(),
+            registry,
+        );
+        let codec = dimension_type_stream_codec();
+        // Encode resolves the holder's id off the DIMENSION_TYPE registry.
+        let overworld_holder = access
+            .lookup(&*rivet_registry::registries::DIMENSION_TYPE)
+            .unwrap()
+            .get(&ResourceKey::create(
+                &*rivet_registry::registries::DIMENSION_TYPE,
+                Identifier::with_default_namespace("overworld"),
+            ))
+            .unwrap();
+        assert_eq!(written(&access, &codec, &overworld_holder), vec![0]);
+        // Decode id 1 -> the the_nether reference.
+        let mut input =
+            RegistryFriendlyByteBuf::new(BytesMut::from(vec![1].as_slice()), access.clone());
+        let registry = access
+            .lookup(&*rivet_registry::registries::DIMENSION_TYPE)
+            .unwrap();
+        assert_eq!(
+            codec.decode(&mut input).unwrap(),
+            Holder::Reference {
+                registry: registry.registry_id(),
+                id: 1
+            }
+        );
+        // Strict bounds: an out-of-range id panics "No value with id {id}".
+        let mut input = buffer(&access);
+        input.write_var_int(99);
+        let msg = panic_message(|| {
+            let _ = codec.decode(&mut input);
+        });
+        assert_eq!(msg, "No value with id 99");
+    }
+
+    #[test]
+    fn dimension_type_codec_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<StreamCodec<RegistryFriendlyByteBuf, Holder<DimensionType>>>();
     }
 
     // -----------------------------------------------------------------------
