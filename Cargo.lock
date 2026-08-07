@@ -630,6 +630,7 @@ version = "0.1.0-dev+mc26.2"
 dependencies = [
  "bytes",
  "flate2",
+ "phf",
  "rivet-protocol",
  "rivet-registry",
  "rivet-util",

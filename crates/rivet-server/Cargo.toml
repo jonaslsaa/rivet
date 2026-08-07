@@ -6,8 +6,14 @@ license.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
+# `phf` names the generated `*_TAG_BY_NAME`/`*_BY_NAME` table types in
+# `registry_sync` (the tables themselves live in rivet-registry behind `blocks`).
+phf = { workspace = true }
 rivet-protocol = { workspace = true, features = ["packets"] }
-rivet-registry = { workspace = true }
+# `blocks` enables the generated element tables the configuration registry sync
+# consumes (`generated::synchronized`, `generated::tags`, `generated::biomes`,
+# `generated::blocks`, `generated::registries` — OWNERSHIP.md §Registries).
+rivet-registry = { workspace = true, features = ["blocks"] }
 rivet-util = { workspace = true }
 rivet-world = { workspace = true }
 thiserror = { workspace = true }
