@@ -56,6 +56,27 @@ pub fn read_varint(buf: &[u8], offset: &mut usize) -> Option<i32> {
     }
 }
 
+/// Read a signed VarLong from `buf` starting at `*offset`, advancing the offset.
+/// Java's `writeVarLong` uses the same base-128 scheme as `writeVarInt` but over
+/// 64 bits (up to 10 bytes). `set_time` totalTicks is the only VarLong on the
+/// join path; the plain VarInt reader must not be used on it.
+pub fn read_varlong(buf: &[u8], offset: &mut usize) -> Option<i64> {
+    let mut value: i64 = 0;
+    let mut shift = 0;
+    loop {
+        let byte = *buf.get(*offset)?;
+        *offset += 1;
+        value |= i64::from(byte & 0x7F).wrapping_shl(shift);
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+        if shift >= 70 {
+            return None;
+        }
+    }
+}
+
 /// Append the VarInt encoding of `value` to `out`.
 pub fn write_varint(out: &mut Vec<u8>, value: i32) {
     let mut v = u32::from_le_bytes(value.to_le_bytes());
@@ -83,6 +104,11 @@ pub enum Compression {
     On,
 }
 
+/// The largest uncompressed packet the join capture will legitimately carry. The
+/// `dataLength` field is a VarInt capable of encoding up to 2^31, so a corrupted
+/// stream could otherwise demand a 2 GiB allocation before decompression.
+const MAX_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+
 /// Parse one framed packet from a complete `raw` frame (`[VarInt length][payload]`),
 /// given the negotiated compression state.
 ///
@@ -101,8 +127,12 @@ pub fn parse_frame(raw: &[u8], compression: Compression) -> Option<PacketFrame> 
             if data_length == 0 {
                 (data.to_vec(), inner)
             } else {
+                let data_length = data_length as usize;
+                if data_length > MAX_DECOMPRESSED_BYTES {
+                    return None;
+                }
                 let mut decoder = flate2::read::ZlibDecoder::new(data);
-                let mut out = Vec::with_capacity(data_length as usize);
+                let mut out = Vec::with_capacity(data_length);
                 decoder.read_to_end(&mut out).ok()?;
                 (out, inner)
             }
@@ -165,6 +195,20 @@ pub fn read_i32(buf: &[u8], offset: &mut usize) -> Option<i32> {
     Some(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
+/// Read a big-endian f32 (Java `writeFloat`).
+pub fn read_f32(buf: &[u8], offset: &mut usize) -> Option<f32> {
+    let b = read_bytes(buf, offset, 4)?;
+    Some(f32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Read a big-endian i64 (Java `writeLong`).
+pub fn read_i64(buf: &[u8], offset: &mut usize) -> Option<i64> {
+    let b = read_bytes(buf, offset, 8)?;
+    Some(i64::from_be_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+    ]))
+}
+
 #[cfg(test)]
 pub mod test_helpers {
     /// Size in bytes of the VarInt encoding of `value`.
@@ -178,24 +222,25 @@ pub mod test_helpers {
         size
     }
 
-    /// Read a big-endian f32 (Java `writeFloat`).
-    pub fn read_f32(buf: &[u8], offset: &mut usize) -> Option<f32> {
-        let b = super::read_bytes(buf, offset, 4)?;
-        Some(f32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-    }
-
-    /// Read a big-endian i64 (Java `writeLong`).
-    pub fn read_i64(buf: &[u8], offset: &mut usize) -> Option<i64> {
-        let b = super::read_bytes(buf, offset, 8)?;
-        Some(i64::from_be_bytes([
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        ]))
+    /// Append the VarLong (base-128, up to 10 bytes) encoding of `value`.
+    pub fn write_varlong(out: &mut Vec<u8>, value: i64) {
+        let mut v = u64::from_le_bytes(value.to_le_bytes());
+        loop {
+            let byte = (v & 0x7F) as u8;
+            v >>= 7;
+            if v != 0 {
+                out.push(byte | 0x80);
+            } else {
+                out.push(byte);
+                return;
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_helpers::{read_f32, read_i64, varint_len};
+    use super::test_helpers::{varint_len, write_varlong};
     use super::*;
 
     #[test]
@@ -230,6 +275,17 @@ mod tests {
         let mut off = 0;
         assert_eq!(read_f32(&buf, &mut off), Some(1.5));
         assert_eq!(read_i64(&buf, &mut off), Some(-7));
+    }
+
+    #[test]
+    fn varlong_round_trip() {
+        for value in [0i64, 1, 127, 128, 16_777_215, i32::MAX as i64, -1, -300] {
+            let mut buf = Vec::new();
+            write_varlong(&mut buf, value);
+            let mut off = 0;
+            assert_eq!(super::read_varlong(&buf, &mut off), Some(value));
+            assert_eq!(off, buf.len());
+        }
     }
 
     #[test]

@@ -24,6 +24,10 @@
 //!                                    deliberately corrupted copy of the fixture;
 //!                                    exits 0 only when the tampered packet is
 //!                                    detected AND named.
+//!   rivet-capture verify --mutate KIND
+//!                                    detector discrimination: apply a controlled
+//!                                    mutation and require the named detector to trip.
+//!   rivet-capture audit --runs N     raw-field variance evidence across boots.
 //!
 //! Both verify modes enforce the pinned Paper commit (fixtures/join/manifest.json
 //! `paper` provenance) against the Git-Commit attribute of the server jar the
@@ -32,11 +36,17 @@
 
 mod fixture;
 mod frame;
+mod invariants;
+mod mutate;
 mod normalize;
+mod ordering;
 mod packet;
 mod proxy;
+mod relationships;
+mod semantic;
 mod server;
 mod structured;
+mod variance;
 
 use std::env;
 use std::fs;
@@ -47,7 +57,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use crate::fixture::Manifest;
 use crate::normalize::{NormalizedPacket, canonicalize};
-use crate::packet::{Direction, State};
+use crate::packet::{CapturedPacket, Direction, State};
 
 const DEFAULT_USERNAME: &str = "RivetProbe";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
@@ -154,8 +164,13 @@ fn client_joined(stdout: &str) -> bool {
         .any(|l| l.contains("\"event\":\"joined\"") || l.contains("\"event\": \"joined\""))
 }
 
-/// The canonical packet list from one full boot→join→capture pipeline.
-async fn capture_one(work: &Path, idx: usize) -> Result<Vec<NormalizedPacket>, String> {
+/// The raw + canonical packet lists from one full boot→join→capture pipeline.
+/// Both are returned: the detectors run on the raw (order/relationships) and on
+/// the canonical (content preservation) sides.
+async fn capture_one(
+    work: &Path,
+    idx: usize,
+) -> Result<(Vec<CapturedPacket>, Vec<NormalizedPacket>), String> {
     let jar = server::ensure_jar(&crate_root()).map_err(|e| e.to_string())?;
     let client_bin = client_binary()?;
     // The capture's own server config (seed 42 / superflat / offline, mob
@@ -248,7 +263,7 @@ async fn capture_one(work: &Path, idx: usize) -> Result<Vec<NormalizedPacket>, S
     if canon.is_empty() {
         return Err("normalized capture is empty".into());
     }
-    Ok(canon)
+    Ok((raw, canon))
 }
 
 /// Shared paper/provenance for the fixture manifest.
@@ -388,7 +403,7 @@ fn print_summary(packets: &[NormalizedPacket]) {
 
 fn usage() -> String {
     format!(
-        "rivet-capture — join-path packet-capture harness (#153)\n\
+        "rivet-capture — join-path packet-capture harness (#153, #195)\n\
          \n\
          USAGE:\n\
          \x20 rivet-capture capture [--runs N]      boot+join one or more Papers, print the\n\
@@ -396,11 +411,19 @@ fn usage() -> String {
          \x20                                     determinism when --runs >= 2)\n\
          \x20 rivet-capture fixture                boot+join once and (re)write fixtures/join/\n\
          \x20 rivet-capture verify                boot+join, normalize, diff against the\n\
-         \x20                                     committed fixture (PASS/FAIL)\n\
+         \x20                                     committed fixture AND run the #195 semantic/\n\
+         \x20                                     order detectors (PASS/FAIL)\n\
          \x20 rivet-capture verify --expect-fail  negative control: boot+join, diff against a\n\
          \x20                                     deliberately corrupted fixture copy; exits 0\n\
          \x20                                     only when the tampered packet is detected AND\n\
          \x20                                     named\n\
+         \x20 rivet-capture verify --mutate KIND  boot+join, apply a controlled mutation\n\
+         \x20                                     (reorder|delete|insert|field|canon|relabel|burst|entity-id|set-time-absent)\n\
+         \x20                                     to the capture and REQUIRE the named detector\n\
+         \x20                                     failure — a clean run is itself a failure\n\
+         \x20 rivet-capture audit --runs N        boot N Papers, report per-packet raw-body\n\
+         \x20                                     variance (the evidence behind each normalize\n\
+         \x20                                     rewrite)\n\
          \n\
          ENV:\n\
          \x20 {ORACLE_JAR_ENV}          path to the paperclip jar (default: work/jars/ or working/Paper/)\n\
@@ -409,9 +432,17 @@ fn usage() -> String {
 }
 
 enum Subcommand {
-    Capture { runs: usize },
+    Capture {
+        runs: usize,
+    },
     Fixture,
-    Verify { expect_fail: bool },
+    Verify {
+        expect_fail: bool,
+        mutate: Option<crate::mutate::MutationKind>,
+    },
+    Audit {
+        runs: usize,
+    },
 }
 
 fn parse_args() -> Result<Subcommand, String> {
@@ -442,11 +473,54 @@ fn parse_args() -> Result<Subcommand, String> {
         }
         Some("fixture") => Ok(Subcommand::Fixture),
         Some("verify") => {
-            let expect_fail = args.get(1).map(String::as_str) == Some("--expect-fail");
-            if expect_fail && args.len() > 2 {
-                return Err(format!("unexpected trailing arguments\n\n{}", usage()));
+            let mut expect_fail = false;
+            let mut mutate = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--expect-fail" => expect_fail = true,
+                    "--mutate" => {
+                        i += 1;
+                        let name = args.get(i).ok_or("missing value for --mutate")?;
+                        mutate = Some(
+                            crate::mutate::MutationKind::from_name(name)
+                                .ok_or_else(|| format!("unknown --mutate kind: {name}"))?,
+                        );
+                    }
+                    other => return Err(format!("unknown argument: {other}\n\n{}", usage())),
+                }
+                i += 1;
             }
-            Ok(Subcommand::Verify { expect_fail })
+            if expect_fail && mutate.is_some() {
+                return Err("--expect-fail and --mutate are mutually exclusive".into());
+            }
+            Ok(Subcommand::Verify {
+                expect_fail,
+                mutate,
+            })
+        }
+        Some("audit") => {
+            let mut runs = 2usize;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--runs" => {
+                        i += 1;
+                        runs = args
+                            .get(i)
+                            .ok_or("missing value for --runs")?
+                            .parse()
+                            .map_err(|_| "invalid --runs value")?;
+                    }
+                    "--help" | "-h" => return Err(usage()),
+                    other => return Err(format!("unknown argument: {other}\n\n{}", usage())),
+                }
+                i += 1;
+            }
+            if runs < 2 {
+                return Err("audit --runs must be >= 2".into());
+            }
+            Ok(Subcommand::Audit { runs })
         }
         Some("--help") | Some("-h") | None => Err(usage()),
         Some(other) => Err(format!("unknown subcommand: {other}\n\n{}", usage())),
@@ -477,7 +551,7 @@ async fn run_negative_control() -> Result<(), String> {
         scratch.display()
     );
 
-    let canon = capture_one(&work, 1).await?;
+    let (_raw, canon) = capture_one(&work, 1).await?;
 
     // The corrupted copy is the "expected" baseline; the fresh boot is the
     // "actual". If the fresh capture reproduces the original bytes, the only
@@ -602,19 +676,37 @@ async fn run_verify() -> Result<(), String> {
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let baseline = crate_root.join("fixtures/join");
 
-    println!("verify (join packet-capture fixture)");
+    println!("verify (join packet-capture fixture + semantic/order invariants)");
     println!("   baseline fixture : {}", baseline.display());
 
     verify_committed_fixture(&baseline)?;
     println!("   committed fixture verifies against its manifest");
 
-    let canon = capture_one(&work, 1).await?;
+    let (raw, canon) = capture_one(&work, 1).await?;
     let baseline_packets = fixture::read_capture(&baseline).map_err(|e| e.to_string())?;
 
     check_pin(&baseline, &work.join("run1"))?;
 
+    let mut failures = crate::invariants::check(&raw, &canon);
+    if !failures.is_empty() {
+        failures.sort_by(|a, b| (a.kind, &a.identity).cmp(&(b.kind, &b.identity)));
+        println!();
+        println!(
+            "FAIL: {} invariant violation(s) in the fresh capture:",
+            failures.len()
+        );
+        for f in &failures {
+            println!("  - {f}");
+        }
+        return Err("join-capture semantic/order invariants violated".into());
+    }
+    println!("   semantic + order invariants pass on the fresh capture");
+
     let diff = fixture::diff_packets(&baseline_packets, &canon);
-    if diff.is_clean() {
+    // The identity diff names missing/extra packets by their stable identity
+    // (chunk coordinates, registry ordinals) instead of a shifted index.
+    let (mismatched, missing, extra) = fixture::identity_diff(&baseline_packets, &canon);
+    if diff.is_clean() && mismatched.is_empty() && missing.is_empty() && extra.is_empty() {
         println!();
         println!(
             "PASS: {} normalized packets are byte-identical to the committed join fixture \
@@ -626,8 +718,157 @@ async fn run_verify() -> Result<(), String> {
         println!();
         println!("FAIL: the fresh normalized capture diverges from the committed fixture:");
         print!("{diff}");
+        for (id, want, got) in &mismatched {
+            println!("    mismatched {id}\n      expected {want}\n      actual   {got}");
+        }
+        for id in &missing {
+            println!("    missing    {id}");
+        }
+        for id in &extra {
+            println!("    extra      {id}");
+        }
         Err("join-capture fixture divergence".into())
     }
+}
+
+/// Read a raw `rawN.jsonl` capture back into `CapturedPacket`s. The raw file is
+/// the diagnostic artifact `capture_one` writes (`{state, direction, id, name,
+/// body_hex}` per line).
+#[cfg(test)]
+fn read_raw_jsonl(path: &Path) -> Result<Vec<CapturedPacket>, String> {
+    #[derive(serde::Deserialize)]
+    struct RawLine {
+        state: String,
+        direction: String,
+        id: i32,
+        #[serde(default)]
+        body_hex: String,
+    }
+    let raw =
+        fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let l: RawLine = serde_json::from_str(line)
+            .map_err(|e| format!("invalid raw line in {}: {e}", path.display()))?;
+        let state = match l.state.as_str() {
+            "handshake" => State::Handshake,
+            "status" => State::Status,
+            "login" => State::Login,
+            "configuration" => State::Configuration,
+            _ => State::Play,
+        };
+        let direction = match l.direction.as_str() {
+            "serverbound" => Direction::Serverbound,
+            _ => Direction::Clientbound,
+        };
+        out.push(CapturedPacket {
+            state,
+            direction,
+            id: l.id,
+            body: fixture::unhex_pub(&l.body_hex).map_err(|e| e.to_string())?,
+        });
+    }
+    Ok(out)
+}
+
+/// `verify --mutate <kind>`: apply a controlled mutation to the fresh raw
+/// capture (or its canonical form) and require the named detector failure. A
+/// clean run is itself a failure (false-negative trap).
+async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), String> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/verify-mutate");
+    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let baseline = crate_root.join("fixtures/join");
+    println!(
+        "verify --mutate {} (negative control for the #195 detectors)",
+        kind.name()
+    );
+
+    // The committed fixture is the canonical baseline. Boot a fresh Paper, run
+    // the detectors on its clean raw+canon, then apply the mutation and require
+    // the detectors to trip with the expected kinds.
+    let (raw, canon) = capture_one(&work, 1).await?;
+    check_pin(&baseline, &work.join("run1"))?;
+
+    // The clean capture must pass every detector.
+    let clean_failures = crate::invariants::check(&raw, &canon);
+    if !clean_failures.is_empty() {
+        return Err(format!(
+            "verify --mutate {}: the clean capture already fails {} invariant(s) — fix the harness before testing the mutation:\n  {clean_failures:?}",
+            kind.name(),
+            clean_failures.len()
+        ));
+    }
+
+    let mutated = crate::mutate::mutate_raw(kind, &raw);
+    let mut mutated_canon = canonicalize(&mutated);
+    if kind == crate::mutate::MutationKind::Canon {
+        crate::mutate::mutate_canon(&mut mutated_canon);
+    } else if kind == crate::mutate::MutationKind::SetTimeAbsent {
+        crate::mutate::mutate_set_time_absent(&mut mutated_canon);
+    }
+
+    let failures = crate::invariants::check(&mutated, &mutated_canon);
+    let expected = kind.expected_kinds();
+    let hit: Vec<&str> = expected
+        .iter()
+        .filter(|k| failures.iter().any(|f| f.kind == **k))
+        .copied()
+        .collect();
+
+    if hit.is_empty() {
+        return Err(format!(
+            "verify --mutate {} FAILED (false negative): the mutation produced NO failure of the expected kinds {expected:?} — the detectors are not discriminating.\n  actual failures: {failures:?}",
+            kind.name()
+        ));
+    }
+    let _ = expected;
+    println!();
+    println!(
+        "PASS: verify --mutate {} detected and named the defect ({}) — the #195 detectors are discriminating.",
+        kind.name(),
+        hit.join(", ")
+    );
+    for f in &failures {
+        println!("  - {f}");
+    }
+    Ok(())
+}
+
+/// `audit --runs N`: boot N Papers, collect the raw captures, and report per
+/// packet identity how many distinct raw bodies were observed (the multi-boot
+/// field-variance evidence that justifies each normalization rewrite).
+async fn run_audit(runs: usize) -> Result<(), String> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/audit");
+    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let mut raws = Vec::with_capacity(runs);
+    for idx in 1..=runs {
+        let (raw, _canon) = capture_one(&work, idx).await?;
+        raws.push(raw);
+    }
+    let report = crate::variance::analyze(&raws);
+    println!("raw-field variance across {runs} Paper boots:");
+    println!("  {:>5}  packet identity", "distinct");
+    for (identity, distinct, _hexes) in &report.fields {
+        let marker = if *distinct == 1 {
+            " (deterministic)"
+        } else {
+            ""
+        };
+        println!("  {distinct:>5}  {identity}{marker}");
+    }
+    let varying = report.fields.iter().filter(|(_, d, _)| *d > 1).count();
+    println!();
+    println!(
+        "{} of {} packet identities vary across the {runs} boots (the rest are byte-deterministic).",
+        varying,
+        report.fields.len()
+    );
+    Ok(())
 }
 
 async fn run_capture(runs: usize) -> Result<(), String> {
@@ -637,7 +878,7 @@ async fn run_capture(runs: usize) -> Result<(), String> {
 
     let mut captures = Vec::with_capacity(runs);
     for idx in 1..=runs {
-        let canon = capture_one(&work, idx).await?;
+        let (_raw, canon) = capture_one(&work, idx).await?;
         print_summary(&canon);
         if canon
             .iter()
@@ -684,7 +925,7 @@ async fn run_fixture() -> Result<(), String> {
     let crate_root = crate_root();
     let work = crate_root.join("work/fixture");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    let canon = capture_one(&work, 1).await?;
+    let (_raw, canon) = capture_one(&work, 1).await?;
     let dir = write_fixture(&canon).map_err(|e| e.to_string())?;
     println!("wrote fixture to {}", dir.display());
     print_summary(&canon);
@@ -704,13 +945,19 @@ fn main() -> ExitCode {
         match command {
             Subcommand::Capture { runs } => run_capture(runs).await,
             Subcommand::Fixture => run_fixture().await,
-            Subcommand::Verify { expect_fail } => {
-                if expect_fail {
+            Subcommand::Verify {
+                expect_fail,
+                mutate,
+            } => {
+                if let Some(kind) = mutate {
+                    run_verify_mutate(kind).await
+                } else if expect_fail {
                     run_negative_control().await
                 } else {
                     run_verify().await
                 }
             }
+            Subcommand::Audit { runs } => run_audit(runs).await,
         }
     });
     match result {
@@ -718,6 +965,136 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("rivet-capture: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Validate every #195 detector against a committed raw capture (no Paper boot):
+/// run the full invariant set over `work/capture/rawN.jsonl` when present. This
+/// is the ground-truth false-positive check — the two real raw captures from the
+/// research (`raw1`/`raw2`) must pass every detector cleanly.
+#[cfg(test)]
+mod real_capture_tests {
+    use super::*;
+
+    fn raw_path() -> PathBuf {
+        crate_root().join("work/capture/raw1.jsonl")
+    }
+
+    #[test]
+    fn real_raw_capture_passes_all_detectors() {
+        let path = raw_path();
+        if !path.is_file() {
+            eprintln!("skipping: no committed raw capture at {}", path.display());
+            return;
+        }
+        let raw = read_raw_jsonl(&path).expect("parse raw capture");
+        let canon = canonicalize(&raw);
+        let failures = crate::invariants::check(&raw, &canon);
+        assert!(
+            failures.is_empty(),
+            "real raw capture violated {} invariant(s):\n  {failures:?}",
+            failures.len()
+        );
+    }
+
+    #[test]
+    fn real_raw_capture_reproaches_committed_fixture() {
+        let path = raw_path();
+        if !path.is_file() {
+            eprintln!("skipping: no committed raw capture at {}", path.display());
+            return;
+        }
+        let raw = read_raw_jsonl(&path).expect("parse raw capture");
+        let canon = canonicalize(&raw);
+        let baseline = crate_root().join("fixtures/join");
+        let baseline_packets = fixture::read_capture(&baseline).expect("read fixture");
+        let (mismatched, missing, extra) = fixture::identity_diff(&baseline_packets, &canon);
+        assert!(
+            mismatched.is_empty() && missing.is_empty() && extra.is_empty(),
+            "committed raw capture does not canonicalize to the committed fixture: \
+             mismatched={mismatched:?} missing={missing:?} extra={extra:?}"
+        );
+    }
+
+    #[test]
+    fn real_raw1_raw2_canonicalize_set_time_identically() {
+        let p1 = crate_root().join("work/capture/raw1.jsonl");
+        let p2 = crate_root().join("work/capture/raw2.jsonl");
+        if !p1.is_file() || !p2.is_file() {
+            eprintln!(
+                "skipping: raw captures not both present ({} and {})",
+                p1.display(),
+                p2.display()
+            );
+            return;
+        }
+        let set_time_bodies = |p: PathBuf| {
+            let raw = read_raw_jsonl(&p).expect("parse raw capture");
+            let canon = canonicalize(&raw);
+            let bodies: Vec<Vec<u8>> = canon
+                .iter()
+                .filter(|q| {
+                    q.state == State::Play && q.direction == Direction::Clientbound && q.id == 113
+                })
+                .map(|q| q.body.clone())
+                .collect();
+            assert!(
+                !bodies.is_empty(),
+                "raw capture {} carries no canonical set_time",
+                p.display()
+            );
+            bodies
+        };
+        let a = set_time_bodies(p1.clone());
+        let b = set_time_bodies(p2.clone());
+        assert_eq!(
+            a, b,
+            "raw1 and raw2 canonicalize set_time to different bodies — the holder order is \
+             boot-varying and was not sorted deterministically"
+        );
+    }
+
+    /// Every controlled mutation must trip its expected detector (the DoD for
+    /// #195): a mutation the detectors miss is a false negative — the harness is
+    /// not discriminating. Runs offline on the committed raw capture, mirroring
+    /// exactly what `verify --mutate <kind>` does against a fresh Paper boot.
+    #[test]
+    fn each_mutation_trips_its_expected_detector() {
+        let path = raw_path();
+        if !path.is_file() {
+            eprintln!("skipping: no committed raw capture at {}", path.display());
+            return;
+        }
+        let raw = read_raw_jsonl(&path).expect("parse raw capture");
+        let clean_canon = canonicalize(&raw);
+        let clean_failures = crate::invariants::check(&raw, &clean_canon);
+        assert!(
+            clean_failures.is_empty(),
+            "clean real raw capture already fails detectors (false positive):\n  {clean_failures:?}"
+        );
+
+        for kind in crate::mutate::MutationKind::all() {
+            let mutated = crate::mutate::mutate_raw(kind, &raw);
+            let mut canon = canonicalize(&mutated);
+            if kind == crate::mutate::MutationKind::Canon {
+                crate::mutate::mutate_canon(&mut canon);
+            } else if kind == crate::mutate::MutationKind::SetTimeAbsent {
+                crate::mutate::mutate_set_time_absent(&mut canon);
+            }
+            let failures = crate::invariants::check(&mutated, &canon);
+            let expected = kind.expected_kinds();
+            let hit: Vec<&str> = expected
+                .iter()
+                .filter(|k| failures.iter().any(|f| f.kind == **k))
+                .copied()
+                .collect();
+            assert!(
+                !hit.is_empty(),
+                "mutate {:?} produced NO failure of expected kinds {expected:?} on the real raw \
+                 capture — the detectors are not discriminating. Actual failures: {failures:?}",
+                kind.name()
+            );
         }
     }
 }

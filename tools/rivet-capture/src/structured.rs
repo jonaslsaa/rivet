@@ -305,9 +305,12 @@ pub fn canon_registry_data(body: &[u8]) -> Option<Vec<u8>> {
 /// Parse one advancement value (`[String id][parent?][display?]
 /// [requirements][bool]`), returning `(id, canonical_raw_bytes)`.
 /// The requirement sets (inner string lists) are order-insensitive and sorted.
-/// Display info is preserved verbatim — the join fixture's advancements carry no
-/// display, and its nested ItemStack/DataComponentPatch would need their own
-/// per-component canonicalizer.
+/// RivetTodo(#195): display info is preserved verbatim — a capture whose
+/// advancement display carries per-boot-ordered NBT fields (or ItemStack
+/// DataComponentPatch components) would not canonicalize identically across
+/// boots. The join fixture carries no display data, so this is usable; remove
+/// the marker when the display/component canonicalizer lands or the fixture
+/// grows such data.
 fn parse_advancement(body: &[u8], off: &mut usize) -> Option<(String, Vec<u8>)> {
     let id = read_string(body, off)?;
     // Capture the verbatim bytes of the parent + display fields (they have no
@@ -659,9 +662,14 @@ pub fn canon_update_tags(body: &[u8]) -> Option<Vec<u8>> {
 const BLOCK_ENTRY_COUNT: usize = 4096;
 /// Number of biome entries in a 4×4×4 section (biome container).
 const BIOME_ENTRY_COUNT: usize = 64;
-/// Local palettes use bits ≤ 8; anything larger is the global palette (no
-/// palette on the wire, indices are already global state ids).
-const GLOBAL_BITS: usize = 9;
+/// The wire threshold above which a `PalettedContainer` is the global palette
+/// (no palette on the wire; the packed indices are already global state ids).
+/// This must equal the generated `GLOBAL_PALETTE_BITS` (`ceillog2(BLOCK_STATE_COUNT)`
+/// = 15) — a local palette can hold up to 2^bits local ids, so a section whose
+/// live state count exceeds 2^8 = 256 distinct states (e.g. any real world with
+/// more than one biome's blocks in a section) would otherwise be misread as a
+/// global palette by a threshold of 9.
+const GLOBAL_BITS: usize = rivet_registry::generated::block_states::GLOBAL_PALETTE_BITS as usize;
 
 /// Canonicalize one `PalettedContainer` (block states or biomes) starting at
 /// `off`: sort the local palette by state id ascending and re-pack the data so

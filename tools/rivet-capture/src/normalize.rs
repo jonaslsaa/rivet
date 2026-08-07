@@ -387,11 +387,21 @@ pub fn normalize_packet(packet: &CapturedPacket, spawn: Option<SpawnCtx>) -> Nor
                 ),
             }
         }
-        // set_time: entire body is tick-dependent clock state.
-        (State::Play, Direction::Clientbound, 113) => (
-            canonical_set_time(),
-            "set_time body is tick-dependent; canonicalized (gameTime=0, clocks at 0/1.0)".into(),
-        ),
+        // set_time: gameTime and the clock totalTicks are tick-dependent, but the
+        // clock COUNT and holder ids are structurally fixed by the world's clock
+        // registry. Re-encode the body structurally (gameTime/ticks -> 0) so the
+        // canonical form is valid wire format while retaining the holder set.
+        (State::Play, Direction::Clientbound, 113) => match canonical_set_time(&packet.body) {
+            Some(body) => (
+                body,
+                "set_time tick-dependent (gameTime + clock ticks) -> 0; holder ids kept, sorted"
+                    .into(),
+            ),
+            None => (
+                packet.body.clone(),
+                "set_time canonicalization FAILED — raw body kept".into(),
+            ),
+        },
         // accept_teleportation: [VarInt teleport id] (echo of player_position).
         (State::Play, Direction::Serverbound, 0) => {
             (vec![0u8], "teleport id (server counter) -> 0".into())
@@ -435,21 +445,44 @@ pub fn normalize_packet(packet: &CapturedPacket, spawn: Option<SpawnCtx>) -> Nor
     }
 }
 
-/// The canonical `set_time` body: gameTime = 0, two clock entries (overworld
-/// holder id 0, the_end holder id 1) each at totalTicks=0, partialTick=0.0,
-/// rate=1.0. This is valid wire format, so a ported codec round-trips it.
-fn canonical_set_time() -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(&0i64.to_be_bytes()); // gameTime
-    frame::write_varint(&mut body, 2); // map count: overworld + the_end
-    for holder_id in 0..2i32 {
-        frame::write_varint(&mut body, holder_id); // WorldClock holder
-        // ClockNetworkState: VarLong totalTicks, float partialTick, float rate.
-        frame::write_varint(&mut body, 0); // totalTicks (small → 1-byte VarLong)
-        body.extend_from_slice(&0.0f32.to_be_bytes()); // partialTick
-        body.extend_from_slice(&1.0f32.to_be_bytes()); // rate
+/// Re-encode a `set_time` body structurally: keep the clock count, holder ids,
+/// `partialTick`, and `rate` from the raw body (the world's clock registry and
+/// the join-time clock state, stable across boots) but zero the tick-dependent
+/// fields (`gameTime`, each clock's `totalTicks`). The raw body is `[i64
+/// gameTime][VarInt count][count × (VarInt holder][VarLong totalTicks][f32
+/// partialTick][f32 rate])]`; the re-encoded form is valid wire format, so a
+/// ported codec round-trips it. The clock list is written sorted by holder id —
+/// Java serializes the world-clock map per boot — so two boots canonicalize to
+/// identical bytes. Returns `None` when the body is not structurally parseable;
+/// the caller keeps the raw body and records a note so the fixture surfaces the
+/// malformation.
+fn canonical_set_time(body: &[u8]) -> Option<Vec<u8>> {
+    let mut off = 0;
+    frame::read_i64(body, &mut off)?; // gameTime (zeroed below)
+    let count = frame::read_varint(body, &mut off)?;
+    let mut holders = Vec::with_capacity(count.max(0) as usize);
+    for _ in 0..count.max(0) {
+        let holder = frame::read_varint(body, &mut off)?;
+        frame::read_varlong(body, &mut off)?; // totalTicks (zeroed below)
+        let partial = frame::read_f32(body, &mut off)?;
+        let rate = frame::read_f32(body, &mut off)?;
+        holders.push((holder, partial, rate));
     }
-    body
+    if off != body.len() {
+        return None;
+    }
+    holders.sort_by_key(|(holder, _, _)| *holder);
+
+    let mut out = Vec::with_capacity(body.len());
+    out.extend_from_slice(&0i64.to_be_bytes()); // gameTime -> 0
+    frame::write_varint(&mut out, holders.len() as i32);
+    for (holder, partial, rate) in holders {
+        frame::write_varint(&mut out, holder); // holder id kept
+        frame::write_varint(&mut out, 0); // totalTicks -> 0
+        out.extend_from_slice(&partial.to_be_bytes());
+        out.extend_from_slice(&rate.to_be_bytes());
+    }
+    Some(out)
 }
 
 /// Racy packet ids: their per-boot COUNT or exact placement in the stream is
@@ -539,8 +572,8 @@ fn direction_rank(d: Direction) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frame::test_helpers::{read_f32, read_i64};
     use crate::frame::write_varint;
+    use crate::frame::{read_f32, read_i64};
 
     fn pkt(state: State, direction: Direction, id: i32, body: Vec<u8>) -> CapturedPacket {
         CapturedPacket {
@@ -608,24 +641,98 @@ mod tests {
 
     #[test]
     fn normalize_set_time_is_canonical_and_parseable() {
-        let n = normalize_packet(
-            &pkt(State::Play, Direction::Clientbound, 113, vec![0xFF; 32]),
-            None,
-        );
+        // A real full-sync body: gameTime 16, holders {0,1} at ticks 16.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&16i64.to_be_bytes());
+        frame::write_varint(&mut raw, 2);
+        for h in [0, 1] {
+            frame::write_varint(&mut raw, h);
+            raw.push(16); // totalTicks (1-byte VarLong)
+            raw.extend_from_slice(&0.0f32.to_be_bytes());
+            raw.extend_from_slice(&1.0f32.to_be_bytes());
+        }
+        let n = normalize_packet(&pkt(State::Play, Direction::Clientbound, 113, raw), None);
         let mut off = 0;
-        assert_eq!(read_i64(&n.body, &mut off), Some(0)); // gameTime
-        assert_eq!(frame::read_varint(&n.body, &mut off), Some(2)); // 2 clocks
+        assert_eq!(read_i64(&n.body, &mut off), Some(0)); // gameTime -> 0
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(2)); // 2 clocks kept
         // entry 1
-        assert_eq!(frame::read_varint(&n.body, &mut off), Some(0)); // overworld
-        assert_eq!(frame::read_varint(&n.body, &mut off), Some(0)); // totalTicks
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(0)); // overworld holder kept
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(0)); // totalTicks -> 0
         assert_eq!(read_f32(&n.body, &mut off), Some(0.0));
         assert_eq!(read_f32(&n.body, &mut off), Some(1.0));
         // entry 2
-        assert_eq!(frame::read_varint(&n.body, &mut off), Some(1)); // the_end
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(1)); // the_end holder kept
         assert_eq!(frame::read_varint(&n.body, &mut off), Some(0));
         assert_eq!(read_f32(&n.body, &mut off), Some(0.0));
         assert_eq!(read_f32(&n.body, &mut off), Some(1.0));
         assert_eq!(off, n.body.len(), "no trailing bytes");
+    }
+
+    #[test]
+    fn normalize_set_time_sorts_holder_order_deterministically() {
+        // Two raw full-sync bodies whose clock-holder order differs across boots
+        // (Java serializes the world-clock map per boot) must canonicalize to
+        // identical bytes — this is the raw1/raw2 regression.
+        fn raw(game_time: i64, holders: &[i32]) -> Vec<u8> {
+            let mut body = Vec::new();
+            body.extend_from_slice(&game_time.to_be_bytes());
+            frame::write_varint(&mut body, holders.len() as i32);
+            for &h in holders {
+                frame::write_varint(&mut body, h);
+                frame::write_varint(&mut body, 16); // totalTicks (1-byte VarLong)
+                body.extend_from_slice(&0.0f32.to_be_bytes());
+                body.extend_from_slice(&1.0f32.to_be_bytes());
+            }
+            body
+        }
+        let a = normalize_packet(
+            &pkt(State::Play, Direction::Clientbound, 113, raw(16, &[0, 1])),
+            None,
+        );
+        let b = normalize_packet(
+            &pkt(State::Play, Direction::Clientbound, 113, raw(7, &[1, 0])),
+            None,
+        );
+        assert_eq!(
+            a.body, b.body,
+            "reversed holder order must canonicalize identically"
+        );
+        assert_eq!(a.body.len(), 29);
+
+        let mut off = 0;
+        assert_eq!(read_i64(&a.body, &mut off), Some(0)); // gameTime -> 0
+        assert_eq!(frame::read_varint(&a.body, &mut off), Some(2));
+        // Holder ids retained, written ascending.
+        assert_eq!(frame::read_varint(&a.body, &mut off), Some(0));
+        assert_eq!(frame::read_varint(&a.body, &mut off), Some(0)); // totalTicks -> 0
+        assert_eq!(read_f32(&a.body, &mut off), Some(0.0));
+        assert_eq!(read_f32(&a.body, &mut off), Some(1.0));
+        assert_eq!(frame::read_varint(&a.body, &mut off), Some(1));
+        assert_eq!(frame::read_varint(&a.body, &mut off), Some(0));
+        assert_eq!(read_f32(&a.body, &mut off), Some(0.0));
+        assert_eq!(read_f32(&a.body, &mut off), Some(1.0));
+        assert_eq!(off, a.body.len(), "no trailing bytes");
+    }
+
+    #[test]
+    fn normalize_set_time_keeps_holder_ids_from_raw() {
+        // A malformed-schema body with holder id 5 must keep holder 5.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&42i64.to_be_bytes());
+        frame::write_varint(&mut raw, 1);
+        frame::write_varint(&mut raw, 5);
+        raw.push(0);
+        raw.extend_from_slice(&0.0f32.to_be_bytes());
+        raw.extend_from_slice(&1.0f32.to_be_bytes());
+        let n = normalize_packet(&pkt(State::Play, Direction::Clientbound, 113, raw), None);
+        let mut off = 0;
+        assert_eq!(read_i64(&n.body, &mut off), Some(0));
+        assert_eq!(frame::read_varint(&n.body, &mut off), Some(1));
+        assert_eq!(
+            frame::read_varint(&n.body, &mut off),
+            Some(5),
+            "holder id kept"
+        );
     }
 
     #[test]

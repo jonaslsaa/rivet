@@ -124,6 +124,12 @@ fn unhex(s: &str) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Hex-decode for the raw-capture loader (the JSON writer's inverse).
+#[cfg(test)]
+pub fn unhex_pub(s: &str) -> io::Result<Vec<u8>> {
+    unhex(s)
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(data);
@@ -235,6 +241,85 @@ fn identity(p: &NormalizedPacket) -> String {
         p.id,
         crate::packet::packet_name(p.state, p.direction, p.id).unwrap_or("minecraft:unknown")
     )
+}
+
+/// A collision-resistant identity for a canonical packet: for unique packet
+/// types it is `state/direction/id (name)`; for repeats it appends a `#ordinal`
+/// (occurrence order); for chunks it uses the translated coordinates. Deleting
+/// one of 29 `registry_data` packets then reports the specific entry's ordinal
+/// instead of a shifted index.
+pub fn identity_key(p: &NormalizedPacket) -> String {
+    if p.state == State::Play && p.direction == Direction::Clientbound && p.id == 45 {
+        let mut off = 0;
+        let cx = crate::frame::read_i32(&p.body, &mut off).unwrap_or(i32::MAX);
+        let cz = crate::frame::read_i32(&p.body, &mut off).unwrap_or(i32::MAX);
+        return format!(
+            "{}/{} id 45 ({}) [chunk {cx},{cz}]",
+            p.state,
+            p.direction.flow(),
+            "minecraft:level_chunk_with_light"
+        );
+    }
+    identity(p)
+}
+
+/// The identity-diff result: (mismatched, missing, extra) triples, where each
+/// mismatched entry is `(identity, expected_sha, actual_sha)`.
+pub type IdentityDiff = (Vec<(String, String, String)>, Vec<String>, Vec<String>);
+
+/// A multiset-based diff over `(identity_key, body)` pairs: an identity present
+/// in both with a differing body is `mismatched`; present in the expected but
+/// not the actual is `missing`; actual-only is `extra`. Ordinals disambiguate
+/// repeated identities (e.g. the 29 `registry_data` packets) without a fragile
+/// positional index; chunk identities embed their coordinates.
+pub fn identity_diff(expected: &[NormalizedPacket], actual: &[NormalizedPacket]) -> IdentityDiff {
+    use std::collections::HashMap;
+
+    /// Multiset of identity -> body list. Ordinals are assigned per base
+    /// identity only when that identity repeats (chunk coords make them unique).
+    fn multiset(packets: &[NormalizedPacket]) -> HashMap<String, Vec<Vec<u8>>> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for p in packets {
+            let base = identity_key(p);
+            *counts.entry(base).or_default() += 1;
+        }
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut map: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
+        for p in packets {
+            let base = identity_key(p);
+            let total = counts[&base];
+            let ord = seen.entry(base.clone()).or_default();
+            let key = if total > 1 {
+                format!("{base} #{ord}")
+            } else {
+                base.clone()
+            };
+            *ord += 1;
+            map.entry(key).or_default().push(p.body.clone());
+        }
+        map
+    }
+
+    let e = multiset(expected);
+    let a = multiset(actual);
+    let mut mismatched = Vec::new();
+    let mut missing = Vec::new();
+    let mut extra = Vec::new();
+    let mut keys: Vec<&String> = e.keys().chain(a.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        match (e.get(key), a.get(key)) {
+            (Some(x), Some(y)) if x == y => {}
+            (Some(x), Some(y)) => {
+                mismatched.push((key.clone(), sha256_hex(&x[0]), sha256_hex(&y[0])))
+            }
+            (Some(_), None) => missing.push(key.clone()),
+            (None, Some(_)) => extra.push(key.clone()),
+            _ => unreachable!(),
+        }
+    }
+    (mismatched, missing, extra)
 }
 
 /// Byte-diff a fresh canonical capture against the committed one.

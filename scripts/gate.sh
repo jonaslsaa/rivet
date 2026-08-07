@@ -357,6 +357,10 @@ run_join_capture() {
     echo "    VERIFIED — fresh Paper join is byte-identical to the committed join fixture"
     echo "==> join capture negative control (rivet-capture verify --expect-fail: detects tamper)"
     cargo run -q -p rivet-capture -- verify --expect-fail
+    echo "==> join capture detector discrimination (rivet-capture verify --mutate <kind>: every injected defect must be detected AND named)"
+    for kind in reorder delete insert field canon relabel burst entity-id set-time-absent; do
+      cargo run -q -p rivet-capture -- verify --mutate "$kind"
+    done
   else
     echo "    UNVERIFIED — join capture did not run (see the prereq report above)"
     ORACLE_UNVERIFIED=1
