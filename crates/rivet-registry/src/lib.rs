@@ -30,6 +30,15 @@
 //! `rivet-protocol`, not here. `GlobalPos`'s `ResourceKey<Level>` component
 //! uses the world-unit `Level` placeholder from `registries`; its `StreamCodec`
 //! is #126 in `rivet-protocol`.
+//!
+//! `core` (issue #198) also carries the authlib login-profile value types
+//! (`GameProfile`/`Property`/`PropertyMap`, an ordered multimap whose `values()`
+//! is key-grouped — `PropertyMap::new` re-groups like guava's
+//! `ImmutableMultimap.copyOf`) and `UUIDUtil.createOfflinePlayerUUID` (the
+//! offline-login v3 name UUID). These are authlib/`net.minecraft.core` value
+//! types the login codec needs; their `StreamCodec` impls
+//! (`ByteBufCodecs.GAME_PROFILE`/`GAME_PROFILE_PROPERTIES`) live in
+//! `rivet-protocol` per the same ownership rule.
 
 /// Compile-time block registry + block-state tables.
 ///

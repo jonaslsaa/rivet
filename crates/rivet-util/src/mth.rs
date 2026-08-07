@@ -546,7 +546,13 @@ pub fn create_insecure_uuid<R: RandomSource>(random: &mut R) -> Uuid {
 
 /// RivetTodo(#206): minimal UUID value type — the full `java.util.UUID`
 /// surface is not ported (owned by `java.util.UUID`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `Hash` is derived so `GameProfile` (authlib, #198) can derive `Hash` over
+/// its record components; Java's `UUID.hashCode()` is `(int)(msb ^ (msb >>> 32))
+/// ^ (int)(lsb ^ (lsb >>> 32))`, and deriving over the two `i64` fields gives
+/// the required `a == b ⇒ hash(a) == hash(b)` contract with a different spread
+/// (hash values are not wire/equality-visible, only the consistency contract is).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Uuid {
     pub most: i64,
     pub least: i64,

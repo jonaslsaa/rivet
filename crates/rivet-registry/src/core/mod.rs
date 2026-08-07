@@ -12,6 +12,18 @@
 //! `ChunkPos::is_valid` stays value-only (OWNERSHIP.md — the module mirror is a
 //! convenience and cycle-breaking justifies the one-line move).
 //!
+//! `game_profile` (issue #198) ports the authlib profile value types —
+//! `GameProfile`/`Property`/`PropertyMap` (guava-style ordered multimap;
+//! `values()` is key-grouped, and `PropertyMap::new` re-groups like
+//! `ImmutableMultimap.copyOf`). They are not `net.minecraft.*` classes (they
+//! come from the authlib jar), but they are pure value types of the same class
+//! as the others here, and `rivet-protocol` needs them below itself; their
+//! `StreamCodec` impls live in `rivet-protocol`.
+//! `uuid_util` (issue #198) ports `UUIDUtil.createOfflinePlayerUUID`
+//! (`UUID.nameUUIDFromBytes("OfflinePlayer:" + name)`, v3/MD5); the
+//! `STREAM_CODEC` half lives in `rivet-protocol` (`FriendlyByteBuf::read_uuid`/
+//! `write_uuid`).
+//!
 //! RivetTodo(#212): `BlockBox`, `Direction8`, `Rotations` (also
 //! `net.minecraft.core` value types named in OWNERSHIP.md §Registries as
 //! staying in `rivet-registry::core`) are not yet ported; the `Position`
@@ -29,11 +41,13 @@ mod block_pos;
 mod chunk_pos;
 mod cursor3d;
 mod direction;
+mod game_profile;
 mod game_type;
 mod global_pos;
 mod position;
 mod rotation;
 mod section_pos;
+mod uuid_util;
 mod vec3i;
 
 pub use axis_cycle::AxisCycle;
@@ -41,11 +55,13 @@ pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus};
 pub use chunk_pos::ChunkPos;
 pub use cursor3d::Cursor3D;
 pub use direction::{Axis, AxisDirection, Direction, Plane};
+pub use game_profile::{GameProfile, Property, PropertyMap};
 pub use game_type::GameType;
 pub use global_pos::GlobalPos;
 pub use position::Position;
 pub use rotation::Rotation;
 pub use section_pos::SectionPos;
+pub use uuid_util::create_offline_player_uuid;
 pub use vec3i::{Vec3i, Vec3iLike};
 
 /// `ChunkPyramid.MAX_CHUNK_COORDINATE_VALUE` moved to a `const` here

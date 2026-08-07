@@ -34,9 +34,6 @@
 //!   `registry`/`holderRegistry`/`holder`/`holderSet` are ported in
 //!   [`crate::codec::registry_byte_buf_codecs`] (they live there because their
 //!   buffer is `RegistryFriendlyByteBuf`, not `FriendlyByteBuf`).
-//! - `GAME_PROFILE`/`GAME_PROFILE_PROPERTIES` — need authlib `GameProfile`/
-//!   `PropertyMap` (RivetTodo(#198); `PLAYER_NAME` is ported: it is just
-//!   `stringUtf8(16)`).
 //! - `VECTOR3F`/`QUATERNIONF` — need JOML.
 //! - `RGB_COLOR` — `ARGB.color(r, g, b)` + the `red`/`green`/`blue` accessors
 //!   (RivetTodo(#206); only the 4-arg `argb_color` entry point is ported in
@@ -55,7 +52,7 @@ use bytes::BytesMut;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::nbt_accounter::NbtAccounter;
 use rivet_nbt::tag::Tag;
-use rivet_registry::core::GameType;
+use rivet_registry::core::{GameProfile, GameType, Property, PropertyMap};
 use rivet_serialization::Either;
 use rivet_util::mth::{pack_degrees, unpack_degrees};
 use std::sync::Arc;
@@ -311,8 +308,10 @@ pub fn string() -> StreamCodec<FriendlyByteBuf, String> {
 ///
 /// Both sides perform `Utf8String`'s bounds checks at this boundary and return
 /// `Err` (the checks live here because the underlying `utf8_string` helpers
-/// still panic for the raw netty layer). UTF-16 code units are the count in
-/// every check and message, matching Java's `CharSequence.length()`.
+/// still panic for the raw netty layer). The encode side mirrors both of
+/// `Utf8String.write`'s checks: the UTF-16 code-unit count (`CharSequence
+/// .length()`) and the encoded-byte count vs `utf8MaxBytes` (3 bytes/unit); the
+/// decode side runs all of `Utf8String.read`'s checks in the same order.
 pub fn string_utf8(max_string_length: i32) -> StreamCodec<FriendlyByteBuf, String> {
     of(
         move |output: &mut FriendlyByteBuf, value: &String| {
@@ -322,7 +321,19 @@ pub fn string_utf8(max_string_length: i32) -> StreamCodec<FriendlyByteBuf, Strin
                     "String too big (was {value_length} characters, max {max_string_length})"
                 )));
             }
-            output.write_var_int(value.len() as i32);
+            // `Utf8String.write`'s second check: `bytesWritten` vs
+            // `utf8MaxBytes(maxLength)` (3 bytes/UTF-16 unit). For a valid
+            // `&str`, bytes <= 3 * units, so the unit check above already
+            // dominates — kept for exact error-ordering fidelity with
+            // `utf8_string::write`.
+            let bytes_written = value.len() as i32;
+            let max_encoded_length = crate::utf8_string::utf8_max_bytes(max_string_length);
+            if bytes_written > max_encoded_length {
+                return Err(CodecError::new(format!(
+                    "String too big (was {bytes_written} bytes encoded, max {max_encoded_length})"
+                )));
+            }
+            output.write_var_int(bytes_written);
             output.write_bytes(value.as_bytes());
             Ok(())
         },
@@ -358,11 +369,100 @@ pub fn string_utf8(max_string_length: i32) -> StreamCodec<FriendlyByteBuf, Strin
     )
 }
 
-/// `ByteBufCodecs.PLAYER_NAME` — `stringUtf8(16)`. A standalone static field
-/// (used by the deferred `GAME_PROFILE` composite); the authlib `GameProfile`
-/// value type is not ported, but the name codec itself is dependency-free.
+/// `ByteBufCodecs.PLAYER_NAME` — `stringUtf8(16)` (the profile *name* bound;
+/// the offline *player* name limit is enforced separately in the login
+/// listener, #99). A standalone static field used by the [`game_profile`]
+/// composite.
 pub fn player_name() -> StreamCodec<FriendlyByteBuf, String> {
     string_utf8(16)
+}
+
+/// `ByteBufCodecs.GAME_PROFILE_PROPERTIES` — the ordered `PropertyMap` codec.
+///
+/// Wire: `writeCount(properties.size(), 16)` then, for each property in
+/// `properties.values()` (key-grouped **insertion** order — guava
+/// `ImmutableListMultimap`, so duplicates are preserved), `name` as
+/// `Utf8String.read(64)`, `value` as `Utf8String.read(32767)`, and the
+/// nullable `signature` (bool presence prefix, then `Utf8String.read(1024)`).
+///
+/// Errors follow the `string_utf8` boundary convention: structurally
+/// detectable failures (count over 16, an over-length/negative/truncated
+/// string) return `Err(CodecError)`. As in Java, a **negative** property count
+/// passes `readCount` (only `> maxSize` is rejected) and the `for (i < count)`
+/// loop simply never runs, yielding an empty `PropertyMap` — mirrored here by
+/// `read_count` and the empty `0..count` range, not "improved" (PORTING.md).
+pub fn game_profile_properties() -> StreamCodec<FriendlyByteBuf, PropertyMap> {
+    let name_codec = string_utf8(64);
+    let value_codec = string_utf8(32767);
+    let signature_codec = string_utf8(1024);
+    let encoder_name = name_codec.clone();
+    let encoder_value = value_codec.clone();
+    let encoder_signature = signature_codec.clone();
+    of(
+        move |output: &mut FriendlyByteBuf, value: &PropertyMap| {
+            write_count(output, value.len() as i32, 16)?;
+            for property in value.values() {
+                encoder_name.encode(output, &property.name().to_string())?;
+                encoder_value.encode(output, &property.value().to_string())?;
+                // Nullable signature: bool presence prefix, then the string.
+                // Composed manually (not `write_nullable`, whose writer returns
+                // `()`) so the string codec's `EncoderException` propagates as
+                // `Err` at this boundary, like every other string here.
+                match property.signature() {
+                    Some(signature) => {
+                        output.write_boolean(true);
+                        encoder_signature.encode(output, &signature.to_string())?;
+                    }
+                    None => {
+                        output.write_boolean(false);
+                    }
+                }
+            }
+            Ok(())
+        },
+        move |input: &mut FriendlyByteBuf| {
+            let count = read_count(input, 16)?;
+            let mut properties = Vec::new();
+            for _ in 0..count {
+                let name = name_codec.decode(input)?;
+                let value = value_codec.decode(input)?;
+                let signature = if input.read_boolean() {
+                    Some(signature_codec.decode(input)?)
+                } else {
+                    None
+                };
+                properties.push(Property::new_with_signature(name, value, signature));
+            }
+            Ok(PropertyMap::new(properties))
+        },
+    )
+}
+
+/// `ByteBufCodecs.GAME_PROFILE` — `UUIDUtil.STREAM_CODEC` + `PLAYER_NAME` +
+/// `GAME_PROFILE_PROPERTIES`, in that wire order.
+///
+/// Java field order on the wire: the 16-byte UUID (two big-endian longs), the
+/// VarInt-length-prefixed UTF-8 name (max 16 code units), the property count
+/// then the properties.
+pub fn game_profile() -> StreamCodec<FriendlyByteBuf, GameProfile> {
+    let name_codec = player_name();
+    let properties_codec = game_profile_properties();
+    let encoder_name = name_codec.clone();
+    let encoder_properties = properties_codec.clone();
+    of(
+        move |output: &mut FriendlyByteBuf, value: &GameProfile| {
+            output.write_uuid(value.id());
+            encoder_name.encode(output, &value.name().to_string())?;
+            encoder_properties.encode(output, value.properties())?;
+            Ok(())
+        },
+        move |input: &mut FriendlyByteBuf| {
+            let id = input.read_uuid();
+            let name = name_codec.decode(input)?;
+            let properties = properties_codec.decode(input)?;
+            Ok(GameProfile::new(id, name, properties))
+        },
+    )
 }
 
 /// `ByteBufCodecs.CONTAINER_ID` — `FriendlyByteBuf.readContainerId`/`writeContainerId`.
@@ -1389,5 +1489,336 @@ mod tests {
         input.write_var_int(5);
         let err = read_count(&mut input, 4).unwrap_err();
         assert_eq!(err.message, "5 elements exceeded max size of: 4");
+    }
+
+    // ---- game profile / properties (issue #198) ---------------------------
+
+    fn uuid(most: i64, least: i64) -> rivet_util::mth::Uuid {
+        rivet_util::mth::Uuid { most, least }
+    }
+
+    fn property(name: &str, value: &str) -> rivet_registry::core::Property {
+        rivet_registry::core::Property::new(name.to_string(), value.to_string())
+    }
+
+    #[test]
+    fn game_profile_golden_wire_bytes_for_rivet_probe() {
+        // The pinned capture fixture's login_finished body (issue #198): the
+        // offline playerUUID for "RivetProbe", then VarInt 10 + the UTF-8 name,
+        // then a zero property count. The sessionId is NOT part of GAME_PROFILE
+        // (it is the second composite member of ClientboundLoginFinishedPacket).
+        let id = uuid(0x0a9f_fa92_a706_3e6f, 0x900c_f12f_869d_37eau64 as i64);
+        let profile = GameProfile::new_without_properties(id, "RivetProbe".to_string());
+        let mut out = buf();
+        game_profile().encode(&mut out, &profile).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&0x0a9f_fa92_a706_3e6fu64.to_be_bytes());
+        expected.extend_from_slice(&0x900c_f12f_869d_37eau64.to_be_bytes());
+        expected.push(10);
+        expected.extend_from_slice(b"RivetProbe");
+        expected.push(0); // property count
+        assert_eq!(written(out), expected);
+
+        let mut input = FriendlyByteBuf::new(BytesMut::from(expected.as_slice()));
+        assert_eq!(game_profile().decode(&mut input).unwrap(), profile);
+        assert_eq!(input.readable_bytes(), 0);
+    }
+
+    #[test]
+    fn game_profile_round_trips_properties_and_signature() {
+        let id = uuid(0x0102_0304_0506_0708, 0x1112_1314_1516_1718);
+        // Interleaved input; `PropertyMap::new` re-groups by key like guava's
+        // `ImmutableMultimap.copyOf`, so the encoded wire order is key-grouped
+        // (both textures, then capes) — the order Java would emit, which is
+        // never the raw interleaved input order.
+        let props = vec![
+            property("textures", "t1"),
+            rivet_registry::core::Property::new_with_signature(
+                "capes".to_string(),
+                "c1".to_string(),
+                Some("sig1".to_string()),
+            ),
+            property("textures", "t2"),
+        ];
+        let profile = GameProfile::new(
+            id,
+            "Player_123".to_string(),
+            rivet_registry::core::PropertyMap::new(props),
+        );
+        round_trip(&game_profile(), &profile);
+
+        // Re-encode and verify the exact wire layout: `values()` is key-grouped
+        // (textures/t1, textures/t2, capes/c1) — duplicates preserved, each
+        // key's values in insertion order. Matches guava 33.6.0 values() for
+        // the same logical multimap (live-verified).
+        let mut out = buf();
+        game_profile().encode(&mut out, &profile).unwrap();
+        let bytes = written(out);
+        let mut input = FriendlyByteBuf::new(BytesMut::from(bytes.as_slice()));
+        assert_eq!(input.read_uuid(), id);
+        // name "Player_123" — `read_utf` consumes its own varint length prefix.
+        assert_eq!(input.read_utf(), "Player_123");
+        assert_eq!(input.read_var_int(), 3); // property count
+        // Property 1: name "textures" (8), value "t1" (2), no signature.
+        assert_eq!(input.read_utf(), "textures");
+        assert_eq!(input.read_utf(), "t1");
+        assert!(!input.read_boolean());
+        // Property 2: duplicate name "textures", value "t2".
+        assert_eq!(input.read_utf(), "textures");
+        assert_eq!(input.read_utf(), "t2");
+        assert!(!input.read_boolean());
+        // Property 3: name "capes" (5), value "c1" (2), signature present.
+        assert_eq!(input.read_utf(), "capes");
+        assert_eq!(input.read_utf(), "c1");
+        assert!(input.read_boolean());
+        assert_eq!(input.read_utf(), "sig1");
+        assert_eq!(input.readable_bytes(), 0);
+    }
+
+    #[test]
+    fn game_profile_properties_oversize_count_errors() {
+        // Java `readCount(input, 16)`: 17 elements -> DecoderException
+        // "{count} elements exceeded max size of: 16".
+        let mut out = buf();
+        let mut props = Vec::new();
+        for _ in 0..17 {
+            props.push(property("k", "v"));
+        }
+        let err = game_profile_properties()
+            .encode(&mut out, &rivet_registry::core::PropertyMap::new(props))
+            .unwrap_err();
+        assert_eq!(err.message, "17 elements exceeded max size of: 16");
+
+        let mut input = buf();
+        input.write_var_int(17);
+        let err = game_profile_properties().decode(&mut input).unwrap_err();
+        assert_eq!(err.message, "17 elements exceeded max size of: 16");
+    }
+
+    #[test]
+    fn game_profile_properties_negative_count_decodes_empty() {
+        // Java `readCount` only rejects `count > maxSize`; a negative count
+        // passes and the `for (i < propertyCount)` loop never runs, so decode
+        // yields an empty `PropertyMap`. The Rust `0..count` with a negative
+        // `count` is likewise an empty range — faithful, not "improved".
+        let mut input = buf();
+        input.write_var_int(-1);
+        let map = game_profile_properties().decode(&mut input).unwrap();
+        assert!(map.is_empty());
+        assert_eq!(input.readable_bytes(), 0);
+    }
+
+    #[test]
+    fn game_profile_properties_oversize_strings_error() {
+        // name max is 64 UTF-16 units, value max 32767, signature max 1024 —
+        // each over-bound errors at the codec boundary.
+        let props = vec![rivet_registry::core::Property::new(
+            "a".repeat(65),
+            "v".to_string(),
+        )];
+        let mut out = buf();
+        let err = game_profile_properties()
+            .encode(&mut out, &rivet_registry::core::PropertyMap::new(props))
+            .unwrap_err();
+        assert_eq!(err.message, "String too big (was 65 characters, max 64)");
+
+        // Decode side: a name over the byte bound rejects before the payload.
+        let mut input = buf();
+        input.write_var_int(1); // count
+        input.write_var_int(200); // name byte length (utf8MaxBytes(64) = 192)
+        let err = game_profile_properties().decode(&mut input).unwrap_err();
+        assert_eq!(
+            err.message,
+            "The received encoded string buffer length is longer than maximum allowed (200 > 192)"
+        );
+    }
+
+    #[test]
+    fn game_profile_properties_value_and_signature_boundaries() {
+        // value max 32767 UTF-16 units, signature max 1024. Each is accepted at
+        // exactly the max and rejected one unit over (Java `Utf8String.write`).
+        // "a".repeat(32767) = 32767 ASCII units = 32767 bytes <= utf8MaxBytes
+        // (32767*3), so the unit count is the discriminating bound.
+        let at_max = rivet_registry::core::PropertyMap::new(vec![
+            rivet_registry::core::Property::new("k".to_string(), "a".repeat(32_767)),
+            rivet_registry::core::Property::new_with_signature(
+                "s".to_string(),
+                "v".to_string(),
+                Some("b".repeat(1024)),
+            ),
+        ]);
+        let mut out = buf();
+        game_profile_properties().encode(&mut out, &at_max).unwrap();
+        let mut input = FriendlyByteBuf::new(BytesMut::from(written(out).as_slice()));
+        let decoded = game_profile_properties().decode(&mut input).unwrap();
+        assert_eq!(decoded, at_max);
+        assert_eq!(input.readable_bytes(), 0);
+
+        // value 32768 units -> encode error.
+        let mut out = buf();
+        let err = game_profile_properties()
+            .encode(
+                &mut out,
+                &rivet_registry::core::PropertyMap::new(vec![rivet_registry::core::Property::new(
+                    "k".to_string(),
+                    "a".repeat(32_768),
+                )]),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "String too big (was 32768 characters, max 32767)"
+        );
+
+        // signature 1025 units -> encode error.
+        let mut out = buf();
+        let err = game_profile_properties()
+            .encode(
+                &mut out,
+                &rivet_registry::core::PropertyMap::new(vec![
+                    rivet_registry::core::Property::new_with_signature(
+                        "s".to_string(),
+                        "v".to_string(),
+                        Some("b".repeat(1025)),
+                    ),
+                ]),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.message,
+            "String too big (was 1025 characters, max 1024)"
+        );
+
+        // Astral characters count 2 UTF-16 units each: 512 emoji = 1024 units
+        // = 2048 bytes <= utf8MaxBytes(1024) — accepted at the signature max.
+        let astral_max = rivet_registry::core::PropertyMap::new(vec![
+            rivet_registry::core::Property::new_with_signature(
+                "s".to_string(),
+                "v".to_string(),
+                Some("😀".repeat(512)),
+            ),
+        ]);
+        let mut out = buf();
+        game_profile_properties()
+            .encode(&mut out, &astral_max)
+            .unwrap();
+        let mut input = FriendlyByteBuf::new(BytesMut::from(written(out).as_slice()));
+        assert_eq!(
+            game_profile_properties().decode(&mut input).unwrap(),
+            astral_max
+        );
+    }
+
+    #[test]
+    fn game_profile_properties_max_count_16_round_trips() {
+        // `readCount(input, 16)` accepts exactly 16 (the bound is inclusive);
+        // only 17 errors (covered elsewhere).
+        let mut props = Vec::new();
+        for i in 0..16 {
+            props.push(property(&format!("k{i}"), "v"));
+        }
+        let map = rivet_registry::core::PropertyMap::new(props);
+        let mut out = buf();
+        game_profile_properties().encode(&mut out, &map).unwrap();
+        let mut input = FriendlyByteBuf::new(BytesMut::from(written(out).as_slice()));
+        assert_eq!(game_profile_properties().decode(&mut input).unwrap(), map);
+        assert_eq!(input.readable_bytes(), 0);
+    }
+
+    #[test]
+    fn game_profile_properties_hostile_inputs_do_not_panic_beyond_raw_buf() {
+        // Malformed inputs fail structurally (`Err`) or at the raw-buffer layer
+        // (a panic with the same message netty raises — the established
+        // `FriendlyByteBuf`/`VarInt` contract, not a codec panic). No new panic
+        // site beyond those.
+
+        // Count present but zero element bytes: the first name's varint read
+        // hits EOF (netty `IndexOutOfBoundsException`-style panic).
+        let mut input = buf();
+        input.write_var_int(1);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = game_profile_properties().decode(&mut input);
+            }))
+            .is_err()
+        );
+
+        // Presence-bool `true` but no signature string after it.
+        let mut input = buf();
+        input.write_var_int(1); // count
+        input.write_utf_max("name", 64);
+        input.write_utf_max("value", 32767);
+        input.write_boolean(true); // signature present, but no bytes follow
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = game_profile_properties().decode(&mut input);
+            }))
+            .is_err()
+        );
+
+        // A partially-written 16-byte UUID in a GAME_PROFILE.
+        let mut input = buf();
+        input.write_long(1); // 8 bytes of the uuid, then EOF
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = game_profile().decode(&mut input);
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn game_profile_properties_invalid_utf8_value_decodes_to_replacement() {
+        // `ED A0 80` is a lone 3-byte surrogate: the WHATWG decoder yields one
+        // U+FFFD (matching `new String(bytes, UTF_8)`), not three. The property
+        // value decodes and the string round-trips through the codec (decode ->
+        // encode is deliberately not byte-identical for invalid UTF-8, as in
+        // Java). Wire: count 1, name "k", value = the 3 invalid bytes, no
+        // signature.
+        let mut input = buf();
+        input.write_var_int(1);
+        input.write_utf_max("k", 64);
+        input.write_var_int(3);
+        input.write_bytes(&[0xED, 0xA0, 0x80]);
+        input.write_boolean(false);
+        let map = game_profile_properties().decode(&mut input).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("k")[0].value(), "\u{FFFD}");
+        assert_eq!(input.readable_bytes(), 0);
+    }
+
+    #[test]
+    fn game_profile_name_bound_is_16_utf16_units() {
+        // PLAYER_NAME = stringUtf8(16): 17 ASCII chars error on decode; 16
+        // round-trips. Astral characters count as 2 units each (so 8 emoji are
+        // exactly 16 units / 32 bytes).
+        let id = uuid(0, 0);
+        let profile = GameProfile::new_without_properties(id, "😀".repeat(8));
+        round_trip(&game_profile(), &profile);
+        assert_eq!(profile.name(), &"😀".repeat(8));
+
+        let mut out = buf();
+        let over = GameProfile::new_without_properties(id, "abcdefghijklmnopq".to_string());
+        let err = game_profile().encode(&mut out, &over).unwrap_err();
+        assert_eq!(err.message, "String too big (was 17 characters, max 16)");
+    }
+
+    #[test]
+    fn game_profile_empty_strings_are_legal() {
+        // Empty names/values and a present-but-empty signature all encode and
+        // round-trip (only signature *absence* is the null flag).
+        let profile = GameProfile::new_without_properties(uuid(1, 2), String::new());
+        round_trip(&game_profile(), &profile);
+
+        let props = rivet_registry::core::PropertyMap::new(vec![
+            rivet_registry::core::Property::new(String::new(), String::new()),
+            rivet_registry::core::Property::new_with_signature(
+                "k".to_string(),
+                String::new(),
+                Some(String::new()),
+            ),
+        ]);
+        let profile = GameProfile::new(uuid(1, 2), String::new(), props);
+        round_trip(&game_profile(), &profile);
     }
 }
