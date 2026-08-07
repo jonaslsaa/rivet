@@ -387,10 +387,24 @@ impl Connection {
     }
 
     /// Flush pending outbound frames to the socket.
+    ///
+    /// The write is bounded by the connection's read-timeout liveness window
+    /// (`config.read_timeout`), so a client that stops reading cannot wedge the
+    /// per-connection task — or `serve()`'s shutdown drain — in `write_all`
+    /// forever once the socket send buffer fills. On timeout the flush is
+    /// aborted and the caller closes the socket (Paper's read-timeout handler
+    /// disconnects the same client).
     pub async fn flush_out(&mut self) -> std::io::Result<()> {
         let pending = std::mem::take(&mut self.out_buf);
         if !pending.is_empty() {
-            self.write.write_all(&pending).await?;
+            tokio::time::timeout(self.config.read_timeout, self.write.write_all(&pending))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "outbound flush timed out (peer not reading)",
+                    )
+                })??;
         }
         Ok(())
     }
@@ -799,6 +813,46 @@ mod tests {
         let wire = Bytes::from(encode_frame(&[0x01]).unwrap().to_vec());
         let err = conn.forward_play(Some(&wire), &in_tx).await.unwrap_err();
         assert_eq!(err, DisconnectReason::ServerShutdown);
+    }
+
+    /// A peer that stops reading cannot wedge `flush_out`: the write is bounded
+    /// by `config.read_timeout` and aborts with a timeout error, so the
+    /// per-connection task (and `serve()`'s shutdown drain) always proceeds to
+    /// close. Deterministic: a 64 MiB pending frame far exceeds the maximum
+    /// kernel send/receive window on any supported OS (Linux autotunes to a few
+    /// MiB at most), so `write_all` cannot complete against a non-reading peer
+    /// and the timeout fires.
+    #[tokio::test]
+    async fn flush_out_times_out_when_peer_stops_reading() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (_read, write) = server_sock.into_split();
+
+        let config = ServerConfig {
+            read_timeout: std::time::Duration::from_millis(100),
+            ..ServerConfig::default()
+        };
+        let mut conn = Connection::new(ConnectionId(1), addr, Arc::new(config), write);
+        conn.set_outbound_protocol(ConnectionProtocol::Login);
+        // 64 MiB >> any kernel socket buffer, so write_all must block.
+        conn.queue_raw_frame(Bytes::from(vec![0x42u8; 64 * 1024 * 1024]));
+
+        let start = std::time::Instant::now();
+        let result = conn.flush_out().await;
+        assert!(
+            result.is_err(),
+            "flush must abort on a non-reading peer, got {result:?}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "flush must be bounded by the read timeout"
+        );
+        // Keep the client socket alive (dropping it would close the peer and
+        // make write_all error instead of block).
+        assert!(client.local_addr().is_ok());
     }
 
     /// `MAX_INBOUND_FRAMES_PER_DRAIN + 1` tiny frames in one wire buffer: the

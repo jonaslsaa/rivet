@@ -103,39 +103,68 @@ impl ConnectionRegistry {
     /// even against a sender that concurrently refills the channel while this
     /// drains (the tokio-side admission window can race an observed-empty
     /// channel mid-drain and reset, so this cap is what actually stops a single
-    /// tick from processing a multi-GiB flood). The cap is checked before
-    /// receiving, so the drain stops exactly at the budget and the excess is
-    /// deterministically *retained* in the channel — drained on a later tick,
-    /// or pruned when the sender's admission cap disconnects the flooding
-    /// client. No frame is dropped: a frame is only dequeued when the drain is
-    /// still under both caps.
+    /// tick from processing a multi-GiB flood). No frame is dropped and the cap
+    /// is strict:
+    ///
+    /// - the frame-count cap is checked before receiving, so the excess stays
+    ///   in the channel (deterministic retention);
+    /// - the byte cap is strict: a frame that would push the drain *over* the
+    ///   budget is not delivered — it is preserved in the connection's
+    ///   [`ConnChannels::pending_frame`] slot and delivered by the next drain.
+    ///
+    /// Retained frames are drained on a later tick, or pruned when the sender's
+    /// admission cap disconnects the flooding client.
     pub fn drain_one(&mut self, id: ConnectionId) -> DrainOutcome {
+        self.drain_one_bounded(
+            id,
+            MAX_INBOUND_FRAMES_PER_DRAIN,
+            MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
+        )
+    }
+
+    /// [`Self::drain_one`] with explicit budgets. Used by the tick loop to apply
+    /// the aggregate per-tick budget (`MAX_INBOUND_FRAMES_PER_TICK` /
+    /// `MAX_INBOUND_BYTES_PER_TICK`) across all connections: the remaining
+    /// aggregate budget is passed in, so one tick never delivers more than the
+    /// aggregate cap either. Same strict byte cap / pending-frame retention as
+    /// `drain_one`.
+    pub fn drain_one_bounded(
+        &mut self,
+        id: ConnectionId,
+        max_frames: usize,
+        max_bytes: usize,
+    ) -> DrainOutcome {
         let mut frames = Vec::new();
         let mut drained_bytes = 0usize;
         let mut closed = false;
         if let Some(conn) = self.connections.get_mut(&id) {
             loop {
-                // Per-tick budget: stop before receiving more so the excess
-                // stays in the channel (deterministic retention). A single
-                // frame can never exceed the byte cap alone (the per-frame
-                // decompressed maximum is 8 MiB, below the 16 MiB budget), so
-                // this never leaves a frame permanently undeliverable.
-                if frames.len() >= MAX_INBOUND_FRAMES_PER_DRAIN
-                    || drained_bytes >= MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN
-                {
+                // Frame-count cap checked before receiving so the excess stays
+                // in the channel (deterministic retention).
+                if frames.len() >= max_frames || drained_bytes >= max_bytes {
                     break;
                 }
-                match conn.in_rx.try_recv() {
-                    Ok(frame) => {
-                        drained_bytes += frame.bytes.len();
-                        frames.push(frame);
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        closed = true;
-                        break;
-                    }
+                let frame = match conn.pending_frame.take() {
+                    Some(pending) => pending,
+                    None => match conn.in_rx.try_recv() {
+                        Ok(frame) => frame,
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            closed = true;
+                            break;
+                        }
+                    },
+                };
+                // Strict byte cap: delivering this frame would push the drain
+                // over the budget, so preserve it for the next drain instead of
+                // overshooting. A frame alone never exceeds the per-connection
+                // byte cap (8 MiB max < 16 MiB budget), so it cannot stall.
+                if drained_bytes + frame.bytes.len() > max_bytes {
+                    conn.pending_frame = Some(frame);
+                    break;
                 }
+                drained_bytes += frame.bytes.len();
+                frames.push(frame);
             }
         }
         if closed {
@@ -257,81 +286,146 @@ mod tests {
     }
 
     #[test]
-    fn drain_one_bounds_concurrent_refill_to_the_frame_budget() {
-        // A sender concurrently refills the channel while drain_one drains,
-        // racing the observed-empty reset of the tokio-side admission window.
-        // The tick-side budget is authoritative: a single drain_one call never
-        // delivers more than MAX_INBOUND_FRAMES_PER_DRAIN frames even under
-        // continuous refill (the channel capacity is above the cap so the cap,
-        // not the channel depth, is the binding constraint).
+    fn drain_one_exact_frame_count_at_budget() {
+        // Deterministic prefill: exactly MAX_INBOUND_FRAMES_PER_DRAIN frames
+        // (1-byte each, so the byte budget is far away). The drain delivers
+        // exactly the budget and the channel is empty.
         let mut reg = ConnectionRegistry::new();
         let id = ConnectionId(1);
-        // Capacity 4096 > the 1024 frame cap, so a full channel can exceed the
-        // cap — the drain must still stop at the cap.
         let (in_tx, _out_rx) = connect(&mut reg, id, 4096, 4);
-
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_c = std::sync::Arc::clone(&stop);
-        let tx = in_tx.clone();
-        let sender = std::thread::spawn(move || {
-            while !stop_c.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = tx.try_send(frame(0));
-            }
-        });
-
-        // Many drains under continuous refill: every call delivers at most the
-        // frame-count budget (1-byte frames keep the byte budget far away).
-        for _ in 0..200 {
-            match reg.drain_one(id) {
-                DrainOutcome::Drained(frames) => {
-                    assert!(
-                        frames.len() <= MAX_INBOUND_FRAMES_PER_DRAIN,
-                        "drained {} frames in one tick (budget {})",
-                        frames.len(),
-                        MAX_INBOUND_FRAMES_PER_DRAIN
-                    );
-                }
-                DrainOutcome::Closed => panic!("connection should stay open"),
-            }
+        for _ in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+            in_tx.try_send(frame(0)).unwrap();
         }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        sender.join().unwrap();
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), MAX_INBOUND_FRAMES_PER_DRAIN);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        // Second drain: empty.
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => assert!(frames.is_empty()),
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
     }
 
     #[test]
-    fn drain_one_bounds_bytes_per_tick_under_concurrent_refill() {
-        // The byte-cap half of the concurrent-refill guarantee: a sender
-        // refills continuously with 1 MiB frames while drain_one runs. The
-        // pre-receive byte check is race-free (no await between the check and
-        // the receive), so one drain_one call never delivers more than
-        // MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN bytes even under refill.
+    fn drain_one_exact_frame_count_retention() {
+        // Deterministic prefill: MAX_INBOUND_FRAMES_PER_DRAIN + 1 frames. The
+        // drain delivers exactly the budget and the 1025th is retained in the
+        // channel (never dropped) — delivered by the next drain.
         let mut reg = ConnectionRegistry::new();
         let id = ConnectionId(1);
         let (in_tx, _out_rx) = connect(&mut reg, id, 4096, 4);
-
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_c = std::sync::Arc::clone(&stop);
-        let tx = in_tx.clone();
-        let sender = std::thread::spawn(move || {
-            while !stop_c.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = tx.try_send(frame_of_size(1024 * 1024));
-            }
-        });
-
-        for _ in 0..50 {
-            match reg.drain_one(id) {
-                DrainOutcome::Drained(frames) => {
-                    let total: usize = frames.iter().map(|f| f.bytes.len()).sum();
-                    assert!(
-                        total <= MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
-                        "drained {total} bytes in one tick (budget {MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN})"
-                    );
-                }
-                DrainOutcome::Closed => panic!("connection should stay open"),
-            }
+        for _ in 0..=MAX_INBOUND_FRAMES_PER_DRAIN {
+            in_tx.try_send(frame(0)).unwrap();
         }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        sender.join().unwrap();
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), MAX_INBOUND_FRAMES_PER_DRAIN);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        // The excess frame is retained, not lost.
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].bytes.len(), 1);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+    }
+
+    #[test]
+    fn drain_one_strict_byte_cap_preserves_straddling_frame() {
+        // Deterministic straddling: three 7 MiB frames, budget 16 MiB. The
+        // third would push the drain over the strict byte cap, so it is NOT
+        // delivered — it is preserved in the pending-frame slot and delivered
+        // by the next drain. Per-drain delivery never exceeds the cap.
+        let mut reg = ConnectionRegistry::new();
+        let id = ConnectionId(1);
+        let (in_tx, _out_rx) = connect(&mut reg, id, 64, 4);
+        let frame_size = 7 * 1024 * 1024;
+        for _ in 0..3 {
+            in_tx.try_send(frame_of_size(frame_size)).unwrap();
+        }
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                let total: usize = frames.iter().map(|f| f.bytes.len()).sum();
+                assert_eq!(
+                    frames.len(),
+                    2,
+                    "third frame must be preserved, not delivered"
+                );
+                assert_eq!(total, 14 * 1024 * 1024);
+                assert!(total <= MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        // The preserved straddling frame is delivered by the next drain.
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].bytes.len(), frame_size);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+    }
+
+    #[test]
+    fn drain_one_strict_byte_cap_at_8mib_minus_one_boundary() {
+        // Two 8 MiB − 1 frames (16,777,214 bytes total) exactly fit the 16 MiB
+        // budget; a third straddles it and is preserved as pending.
+        let mut reg = ConnectionRegistry::new();
+        let id = ConnectionId(1);
+        let (in_tx, _out_rx) = connect(&mut reg, id, 64, 4);
+        let frame_size = 8 * 1024 * 1024 - 1; // 8_388_607
+        for _ in 0..3 {
+            in_tx.try_send(frame_of_size(frame_size)).unwrap();
+        }
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), 2);
+                assert!(
+                    frames.iter().map(|f| f.bytes.len()).sum::<usize>()
+                        <= MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN
+                );
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].bytes.len(), frame_size);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+    }
+
+    #[test]
+    fn drain_one_bounded_respects_smaller_budget() {
+        // The aggregate-budget path: drain_one_bounded with a remaining budget
+        // smaller than the per-connection cap must deliver at most that budget
+        // and retain the excess for a later drain.
+        let mut reg = ConnectionRegistry::new();
+        let id = ConnectionId(1);
+        let (in_tx, _out_rx) = connect(&mut reg, id, 64, 4);
+        for _ in 0..3 {
+            in_tx.try_send(frame(0)).unwrap();
+        }
+        match reg.drain_one_bounded(id, 2, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN) {
+            DrainOutcome::Drained(frames) => assert_eq!(frames.len(), 2),
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        match reg.drain_one_bounded(id, 1, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN) {
+            DrainOutcome::Drained(frames) => assert_eq!(frames.len(), 1),
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        // A zero remaining budget delivers nothing.
+        match reg.drain_one_bounded(id, 0, 0) {
+            DrainOutcome::Drained(frames) => assert!(frames.is_empty()),
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
     }
 
     #[test]

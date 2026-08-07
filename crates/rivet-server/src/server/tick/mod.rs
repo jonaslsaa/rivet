@@ -26,8 +26,9 @@ use tokio::sync::mpsc;
 
 use crate::server::network::connection_id::ConnectionId;
 use crate::server::network::packet_listener::DisconnectReason;
-use channels::LifecycleEvent;
-use channels::ServerboundFrame;
+use channels::{
+    LifecycleEvent, MAX_INBOUND_BYTES_PER_TICK, MAX_INBOUND_FRAMES_PER_TICK, ServerboundFrame,
+};
 use registry::{ConnectionRegistry, DrainOutcome};
 use shutdown::Shutdown;
 use time::TickTime;
@@ -131,12 +132,27 @@ impl ServerTickLoop {
             self.registry.apply(event);
         }
 
-        // 2. Inbound: drain every connection's channel (per-connection FIFO).
+        // 2. Inbound: drain every connection's channel (per-connection FIFO),
+        // bounded by the per-connection budget (inside drain_one_bounded) and
+        // the aggregate per-tick budget. Once the aggregate budget is exhausted
+        // the remaining frames stay retained in the channels for a later tick.
         let ids: Vec<ConnectionId> = self.registry.ids().collect();
         let mut inbound = Vec::new();
+        let mut aggregate_frames = 0usize;
+        let mut aggregate_bytes = 0usize;
         for id in ids {
-            match self.registry.drain_one(id) {
+            let remaining_frames = MAX_INBOUND_FRAMES_PER_TICK.saturating_sub(aggregate_frames);
+            let remaining_bytes = MAX_INBOUND_BYTES_PER_TICK.saturating_sub(aggregate_bytes);
+            if remaining_frames == 0 || remaining_bytes == 0 {
+                break;
+            }
+            match self
+                .registry
+                .drain_one_bounded(id, remaining_frames, remaining_bytes)
+            {
                 DrainOutcome::Drained(frames) => {
+                    aggregate_frames += frames.len();
+                    aggregate_bytes += frames.iter().map(|f| f.bytes.len()).sum::<usize>();
                     inbound.extend(frames.into_iter().map(|f| (id, f)));
                 }
                 DrainOutcome::Closed => {
