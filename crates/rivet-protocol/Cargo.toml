@@ -44,5 +44,12 @@ name = "serversbound_play"
 # live behind the packets feature.
 required-features = ["packets"]
 
+[[test]]
+name = "client_information_registration"
+# Exercises the real ServerboundClientInformationPacket body codec through the
+# id-dispatch registration machinery (issue #197); the generated packet-ID
+# tables pin its configuration id 0 / play id 14 slots.
+required-features = ["packets"]
+
 [lints]
 workspace = true
