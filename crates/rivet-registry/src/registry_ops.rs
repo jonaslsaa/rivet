@@ -54,7 +54,6 @@ use rivet_serialization::extra_codecs;
 use rivet_serialization::lifecycle::Lifecycle;
 use rivet_serialization::map_codec::MapCodec;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -98,7 +97,7 @@ impl<T, D: DynamicOps<Output = T>> DelegatingOps<T, D> {
 
 impl<T, D> DynamicOps for DelegatingOps<T, D>
 where
-    T: Debug + Clone + PartialEq,
+    T: Debug + Clone + PartialEq + Send + Sync,
     D: DynamicOps<Output = T>,
 {
     type Output = T;
@@ -417,7 +416,7 @@ impl<T> RegistryInfo<T> {
 /// The trait is dyn-compatible (no generic methods) so `RegistryOps` can hold
 /// `Box<dyn RegistryInfoLookup>`. Lookups are erased to `RegistryKey<()>`; the
 /// implementor narrows the key into its per-instance map.
-pub trait RegistryInfoLookup: std::fmt::Debug {
+pub trait RegistryInfoLookup: std::fmt::Debug + Send + Sync {
     /// `RegistryInfoLookup.lookup(ResourceKey)` — erased registry-key form.
     fn lookup_erased(&self, registry_key: &RegistryKey<()>) -> Option<RegistryInfo<()>>;
 
@@ -443,13 +442,14 @@ impl Clone for Box<dyn RegistryInfoLookup> {
 /// Java memoizes each `lookup` with `ConcurrentHashMap.computeIfAbsent` — the
 /// *lazy* behavior this port preserves: each registry key is resolved through
 /// the provider at most once, and the `Option` (including a miss) is cached.
-/// The adapter is used inside a single decode, so the single-threaded
-/// `RefCell<HashMap>` matches Java's per-instance memo map (no cross-thread
-/// sharing; OWNERSHIP's single sync tick).
+/// The memo map is a `Mutex<HashMap>` because `RegistryInfoLookup` is
+/// `Send + Sync` (codecs are shared across threads, mirroring Java's
+/// thread-safe statics); the lock is uncontended in practice — the cache is
+/// built within a single decode.
 #[derive(Debug)]
 pub struct HolderLookupAdapter {
     lookup_provider: RegistryAccess,
-    lookups: RefCell<HashMap<RegistryKey<()>, Option<RegistryInfo<()>>>>,
+    lookups: std::sync::Mutex<HashMap<RegistryKey<()>, Option<RegistryInfo<()>>>>,
 }
 
 impl HolderLookupAdapter {
@@ -457,7 +457,7 @@ impl HolderLookupAdapter {
     pub fn new(lookup_provider: RegistryAccess) -> Self {
         HolderLookupAdapter {
             lookup_provider,
-            lookups: RefCell::new(HashMap::new()),
+            lookups: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -482,18 +482,19 @@ impl HolderLookupAdapter {
     /// behavior (a key is resolved through the provider at most once).
     #[cfg(test)]
     pub(crate) fn cache_len(&self) -> usize {
-        self.lookups.borrow().len()
+        self.lookups.lock().unwrap().len()
     }
 }
 
 impl RegistryInfoLookup for HolderLookupAdapter {
     fn lookup_erased(&self, registry_key: &RegistryKey<()>) -> Option<RegistryInfo<()>> {
-        if let Some(cached) = self.lookups.borrow().get(registry_key).cloned() {
+        if let Some(cached) = self.lookups.lock().unwrap().get(registry_key).cloned() {
             return cached;
         }
         let computed = self.create_lookup(registry_key);
         self.lookups
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert(registry_key.clone(), computed.clone());
         computed
     }
@@ -504,7 +505,7 @@ impl RegistryInfoLookup for HolderLookupAdapter {
         // still resolved from the same provider).
         Box::new(HolderLookupAdapter {
             lookup_provider: self.lookup_provider.clone(),
-            lookups: RefCell::new(HashMap::new()),
+            lookups: std::sync::Mutex::new(HashMap::new()),
         })
     }
 }
@@ -614,7 +615,7 @@ impl<T, D: DynamicOps<Output = T>> RegistryOps<T, D> {
 
 impl<T, D> DynamicOps for RegistryOps<T, D>
 where
-    T: Debug + Clone + PartialEq,
+    T: Debug + Clone + PartialEq + Send + Sync,
     D: DynamicOps<Output = T>,
 {
     type Output = T;

@@ -32,27 +32,33 @@ use std::sync::Arc;
 /// allowed here.
 #[allow(type_alias_bounds)]
 type RecursiveFn<A, Ops: DynamicOps + 'static> =
-    Arc<dyn Fn(Arc<dyn Codec<A, Ops>>) -> Arc<dyn Codec<A, Ops>>>;
+    Arc<dyn Fn(Arc<dyn Codec<A, Ops>>) -> Arc<dyn Codec<A, Ops>> + Send + Sync>;
 
 /// `Codec.stringResolver` encode half — `Function<E, Optional<String>>`.
-type ToStringFn<E> = Arc<dyn Fn(&E) -> Option<String>>;
+type ToStringFn<E> = Arc<dyn Fn(&E) -> Option<String> + Send + Sync>;
 
 /// `Codec.stringResolver` decode half — `Function<String, Optional<E>>`.
-type FromStringFn<E> = Arc<dyn Fn(&String) -> Option<E>>;
+type FromStringFn<E> = Arc<dyn Fn(&String) -> Option<E> + Send + Sync>;
 
 /// `PrimitiveCodec` read half — `BiFunction<Ops, T, DataResult<A>>`.
 /// See `RecursiveFn` for why `type_alias_bounds` is allowed.
 #[allow(type_alias_bounds)]
 type PrimitiveReadFn<A, Ops: DynamicOps + 'static> =
-    Arc<dyn Fn(&Ops, &Ops::Output) -> DataResult<A>>;
+    Arc<dyn Fn(&Ops, &Ops::Output) -> DataResult<A> + Send + Sync>;
 
 /// `PrimitiveCodec` write half — `BiFunction<Ops, A, T>`.
 #[allow(type_alias_bounds)]
-type PrimitiveWriteFn<A, Ops: DynamicOps + 'static> = Arc<dyn Fn(&Ops, &A) -> Ops::Output>;
+type PrimitiveWriteFn<A, Ops: DynamicOps + 'static> =
+    Arc<dyn Fn(&Ops, &A) -> Ops::Output + Send + Sync>;
 
 /// `com.mojang.serialization.Codec<A>`.
+///
+/// `Send + Sync` mirrors Paper: the game's codecs are `static final` values
+/// shared across netty threads (and the packet `StreamCodec` a status response
+/// is built from is itself `Send + Sync`), so a codec must be usable from any
+/// connection thread.
 pub trait Codec<A, Ops: DynamicOps + 'static>:
-    crate::Encoder<A, Ops> + crate::Decoder<A, Ops>
+    crate::Encoder<A, Ops> + crate::Decoder<A, Ops> + Send + Sync
 {
 }
 
@@ -171,8 +177,8 @@ pub fn xor<F, S, Ops: DynamicOps + 'static>(
     second: Arc<dyn Codec<S, Ops>>,
 ) -> Arc<dyn Codec<Either<F, S>, Ops>>
 where
-    F: 'static + Clone + Debug,
-    S: 'static + Clone + Debug,
+    F: 'static + Clone + Send + Sync + Debug,
+    S: 'static + Clone + Send + Sync + Debug,
 {
     Arc::new(XorCodec { first, second })
 }
@@ -182,7 +188,7 @@ pub fn list<E, Ops: DynamicOps + 'static>(
     element_codec: Arc<dyn Codec<E, Ops>>,
 ) -> Arc<dyn Codec<Vec<E>, Ops>>
 where
-    E: 'static + Clone,
+    E: 'static + Clone + Send + Sync,
 {
     list_with_range(element_codec, 0, i32::MAX)
 }
@@ -194,7 +200,7 @@ pub fn list_with_range<E, Ops: DynamicOps + 'static>(
     max_size: i32,
 ) -> Arc<dyn Codec<Vec<E>, Ops>>
 where
-    E: 'static + Clone,
+    E: 'static + Clone + Send + Sync,
 {
     Arc::new(ListCodec {
         element_codec,
@@ -209,8 +215,8 @@ pub fn compound_list<K, V, Ops: DynamicOps + 'static>(
     element_codec: Arc<dyn Codec<V, Ops>>,
 ) -> Arc<dyn Codec<Vec<Pair<K, V>>, Ops>>
 where
-    K: 'static + Clone,
-    V: 'static + Clone,
+    K: 'static + Clone + Send + Sync,
+    V: 'static + Clone + Send + Sync,
 {
     Arc::new(CompoundListCodec {
         key_codec,
@@ -225,8 +231,8 @@ pub fn simple_map<K, V, Ops: DynamicOps + 'static>(
     keys: Arc<dyn Keyable<Ops>>,
 ) -> Arc<dyn MapCodec<std::collections::HashMap<K, V>, Ops>>
 where
-    K: 'static + Clone + std::hash::Hash + Eq + std::fmt::Display,
-    V: 'static + Clone,
+    K: 'static + Clone + Send + Sync + std::hash::Hash + Eq + std::fmt::Display,
+    V: 'static + Clone + Send + Sync,
 {
     Arc::new(SimpleMapCodec {
         key_codec,
@@ -241,8 +247,8 @@ pub fn unbounded_map<K, V, Ops: DynamicOps + 'static>(
     element_codec: Arc<dyn Codec<V, Ops>>,
 ) -> Arc<dyn Codec<std::collections::HashMap<K, V>, Ops>>
 where
-    K: 'static + Clone + std::hash::Hash + Eq + std::fmt::Display,
-    V: 'static + Clone,
+    K: 'static + Clone + Send + Sync + std::hash::Hash + Eq + std::fmt::Display,
+    V: 'static + Clone + Send + Sync,
 {
     Arc::new(UnboundedMapCodec {
         key_codec,
@@ -257,7 +263,7 @@ pub fn optional_field<F, Ops: DynamicOps + 'static>(
     lenient: bool,
 ) -> Arc<dyn MapCodec<Option<F>, Ops>>
 where
-    F: 'static + Clone,
+    F: 'static + Clone + Send + Sync,
 {
     Arc::new(OptionalFieldCodec {
         name,
@@ -280,14 +286,14 @@ where
     Arc::new_cyclic(|weak| RecursiveCodec {
         name,
         wrapped,
-        cell: std::cell::OnceCell::new(),
+        cell: std::sync::OnceLock::new(),
         weak: weak.clone(),
     })
 }
 
 /// `Codec.lazyInitialized(Supplier<Codec<A>>)`.
 pub fn lazy_initialized<A, Ops: DynamicOps + 'static>(
-    delegate: Arc<dyn Fn() -> Arc<dyn Codec<A, Ops>>>,
+    delegate: Arc<dyn Fn() -> Arc<dyn Codec<A, Ops>> + Send + Sync>,
 ) -> Arc<dyn Codec<A, Ops>>
 where
     A: 'static,
@@ -295,7 +301,7 @@ where
     Arc::new_cyclic(|weak| RecursiveCodec {
         name: "LazyInitialized".to_string(),
         wrapped: Arc::new(move |_self| delegate()),
-        cell: std::cell::OnceCell::new(),
+        cell: std::sync::OnceLock::new(),
         weak: weak.clone(),
     })
 }
@@ -593,8 +599,8 @@ where
 /// `Codec.xmap(Function, Function)`.
 pub fn xmap<A, S, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    to: Arc<dyn Fn(&A) -> S>,
-    from: Arc<dyn Fn(&S) -> A>,
+    to: Arc<dyn Fn(&A) -> S + Send + Sync>,
+    from: Arc<dyn Fn(&S) -> A + Send + Sync>,
 ) -> Arc<dyn Codec<S, Ops>>
 where
     A: 'static,
@@ -611,7 +617,7 @@ where
 pub fn comap_flat_map<A, S, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
     to: DecoderFn<A, S>,
-    from: Arc<dyn Fn(&S) -> A>,
+    from: Arc<dyn Fn(&S) -> A + Send + Sync>,
 ) -> Arc<dyn Codec<S, Ops>>
 where
     A: 'static,
@@ -627,7 +633,7 @@ where
 /// `Codec.flatComapMap(Function, Function)`.
 pub fn flat_comap_map<A, S, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    to: Arc<dyn Fn(&A) -> S>,
+    to: Arc<dyn Fn(&A) -> S + Send + Sync>,
     from: DecoderFn<S, A>,
 ) -> Arc<dyn Codec<S, Ops>>
 where
@@ -675,7 +681,7 @@ pub fn with_alternative<A, Ops: DynamicOps + 'static>(
     alternative: Arc<dyn Codec<A, Ops>>,
 ) -> Arc<dyn Codec<A, Ops>>
 where
-    A: 'static + Clone,
+    A: 'static + Clone + Send + Sync,
 {
     xmap(
         either(primary, alternative),
@@ -701,11 +707,11 @@ where
 /// `Codec.orElse(Consumer<String>, A)`.
 pub fn or_else<A, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    on_error: Arc<dyn Fn(&str)>,
+    on_error: Arc<dyn Fn(&str) + Send + Sync>,
     value: A,
 ) -> Arc<dyn Codec<A, Ops>>
 where
-    A: 'static + Clone,
+    A: 'static + Clone + Send + Sync + Send + Sync,
 {
     let v = value.clone();
     // `DataFixUtils.consumerToFunction`: invoke the callback and return the
@@ -723,11 +729,11 @@ where
 /// `Codec.orElseGet(Consumer<String>, Supplier<A>)`.
 pub fn or_else_get<A, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    on_error: Arc<dyn Fn(&str)>,
-    value: Arc<dyn Fn() -> A>,
+    on_error: Arc<dyn Fn(&str) + Send + Sync>,
+    value: Arc<dyn Fn() -> A + Send + Sync>,
 ) -> Arc<dyn Codec<A, Ops>>
 where
-    A: 'static + Clone,
+    A: 'static + Clone + Send + Sync + Send + Sync,
 {
     or_else_get_map_error(
         codec,
@@ -742,11 +748,11 @@ where
 /// `Codec.orElseGet(UnaryOperator<String>, Supplier<A>)`.
 pub fn or_else_get_map_error<A, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    on_error: Arc<dyn Fn(String) -> String>,
-    value: Arc<dyn Fn() -> A>,
+    on_error: Arc<dyn Fn(String) -> String + Send + Sync>,
+    value: Arc<dyn Fn() -> A + Send + Sync>,
 ) -> Arc<dyn Codec<A, Ops>>
 where
-    A: 'static + Clone,
+    A: 'static + Clone + Send + Sync + Send + Sync,
 {
     map_result(
         codec,
@@ -760,7 +766,7 @@ pub fn or_else_value<A, Ops: DynamicOps + 'static>(
     value: A,
 ) -> Arc<dyn Codec<A, Ops>>
 where
-    A: 'static + Clone,
+    A: 'static + Clone + Send + Sync + Send + Sync,
 {
     let v = value.clone();
     or_else_get_value(codec, Arc::new(move || v.clone()))
@@ -769,10 +775,10 @@ where
 /// `Codec.orElseGet(Supplier<A>)`.
 pub fn or_else_get_value<A, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    value: Arc<dyn Fn() -> A>,
+    value: Arc<dyn Fn() -> A + Send + Sync>,
 ) -> Arc<dyn Codec<A, Ops>>
 where
-    A: 'static + Clone,
+    A: 'static + Clone + Send + Sync + Send + Sync,
 {
     map_result(codec, Arc::new(OrElseValueResultFunctionCodec { value }))
 }
@@ -780,7 +786,7 @@ where
 /// `Codec.promotePartial(Consumer<String>)`.
 pub fn promote_partial<A, Ops: DynamicOps + 'static>(
     codec: Arc<dyn Codec<A, Ops>>,
-    on_error: Arc<dyn Fn(&str)>,
+    on_error: Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Arc<dyn Codec<A, Ops>>
 where
     A: 'static,
@@ -797,7 +803,10 @@ where
 // ---------------------------------------------------------------------------
 
 /// `Codec.ResultFunction` — `apply`/`coApply`.
-pub trait ResultFunction<A, Ops: DynamicOps + 'static>: Debug {
+///
+/// `Send + Sync` mirrors Paper: result functions are stored inside codecs that
+/// are shared across netty threads.
+pub trait ResultFunction<A, Ops: DynamicOps + 'static>: Debug + Send + Sync {
     fn apply(
         &self,
         ops: &Ops,
@@ -838,8 +847,8 @@ impl<A, Ops: DynamicOps + 'static> Codec<A, Ops> for MapResultCodec<A, Ops> {}
 
 /// `Codec.orElseGet(UnaryOperator<String>, Supplier<A>)` result function.
 pub struct OrElseResultFunctionCodec<A> {
-    on_error: Arc<dyn Fn(String) -> String>,
-    value: Arc<dyn Fn() -> A>,
+    on_error: Arc<dyn Fn(String) -> String + Send + Sync>,
+    value: Arc<dyn Fn() -> A + Send + Sync>,
 }
 impl<A> std::fmt::Debug for OrElseResultFunctionCodec<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -877,7 +886,7 @@ where
 
 /// `Codec.orElseGet(Supplier<A>)` result function.
 pub struct OrElseValueResultFunctionCodec<A> {
-    value: Arc<dyn Fn() -> A>,
+    value: Arc<dyn Fn() -> A + Send + Sync>,
 }
 impl<A> std::fmt::Debug for OrElseValueResultFunctionCodec<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -946,7 +955,7 @@ impl<A, Ops: DynamicOps + 'static> Codec<A, Ops> for WithLifecycleCodec<A, Ops> 
 pub struct OfCodec<A, Ops: DynamicOps + 'static> {
     encoder: Arc<dyn crate::Encoder<A, Ops>>,
     decoder: Arc<dyn crate::Decoder<A, Ops>>,
-    name: Arc<dyn Fn() -> String>,
+    name: Arc<dyn Fn() -> String + Send + Sync>,
 }
 impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for OfCodec<A, Ops> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -972,7 +981,7 @@ impl<A, Ops: DynamicOps + 'static> Codec<A, Ops> for OfCodec<A, Ops> {}
 pub struct RecursiveCodec<A, Ops: DynamicOps + 'static> {
     name: String,
     wrapped: RecursiveFn<A, Ops>,
-    cell: std::cell::OnceCell<Arc<dyn Codec<A, Ops>>>,
+    cell: std::sync::OnceLock<Arc<dyn Codec<A, Ops>>>,
     weak: std::sync::Weak<RecursiveCodec<A, Ops>>,
 }
 

@@ -28,8 +28,8 @@ impl<K, V, Ops: DynamicOps + 'static> BaseMapCodec<K, V, Ops> for UnboundedMapCo
 impl<K, V, Ops: DynamicOps + 'static> crate::Decoder<HashMap<K, V>, Ops>
     for UnboundedMapCodec<K, V, Ops>
 where
-    K: Clone + std::hash::Hash + Eq + std::fmt::Display + 'static,
-    V: Clone + 'static,
+    K: Clone + std::hash::Hash + Eq + std::fmt::Display + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     fn decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(HashMap<K, V>, Ops::Output)> {
         // `ops.getMap(input).setLifecycle(stable()).flatMap(map -> decode(ops, map))
@@ -44,8 +44,8 @@ where
 impl<K, V, Ops: DynamicOps + 'static> crate::Encoder<HashMap<K, V>, Ops>
     for UnboundedMapCodec<K, V, Ops>
 where
-    K: Clone + 'static,
-    V: Clone + 'static,
+    K: Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     fn encode(
         &self,
@@ -61,8 +61,8 @@ where
 
 impl<K, V, Ops: DynamicOps + 'static> Codec<HashMap<K, V>, Ops> for UnboundedMapCodec<K, V, Ops>
 where
-    K: Clone + std::hash::Hash + Eq + std::fmt::Display + 'static,
-    V: Clone + 'static,
+    K: Clone + std::hash::Hash + Eq + std::fmt::Display + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
 }
 

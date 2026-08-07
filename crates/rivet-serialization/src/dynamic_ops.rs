@@ -174,13 +174,13 @@ pub trait ListBuilder: Debug {
 /// Java's `Keyable.keys(DynamicOps<T>)` is generic over the ops; in Rust the
 /// ops are pinned as a trait parameter (`Keyable<Ops>`), making `keys` a
 /// concrete method so the trait is dyn-compatible.
-pub trait Keyable<Ops: DynamicOps + 'static> {
+pub trait Keyable<Ops: DynamicOps + 'static>: Send + Sync {
     /// `Keyable.keys(DynamicOps<T>)`.
     fn keys(&self, ops: &Ops) -> Vec<Ops::Output>;
 }
 
 /// `com.mojang.serialization.Compressable` — extends `Keyable`.
-pub trait Compressable<Ops: DynamicOps + 'static>: Keyable<Ops> {
+pub trait Compressable<Ops: DynamicOps + 'static>: Keyable<Ops> + Send + Sync {
     /// `Compressable.compressor(DynamicOps<T>)`.
     fn compressor(&self, ops: &Ops) -> KeyCompressor<Ops::Output>;
 }
@@ -488,12 +488,12 @@ impl<'a, O: DynamicOps> RecordBuilder for RecordBuilderImpl<'a, O> {
         }
         // Thread the combined key+value error state through `()` values (the
         // builder state is `DataResult<()>`; `O::Output` is not `'static`, so
-        // the pair cannot be carried through the `Arc<dyn Fn>` applicative).
+        // the pair cannot be carried through the `Arc<dyn Fn + Send + Sync>` applicative).
         let key_unit = key.map(|_| ());
         let value_unit = value.map(|_| ());
         let combined: DataResult<()> = key_unit.apply2_stable(|_, _| (), value_unit);
         let builder = self.builder.clone();
-        let noop: Arc<dyn Fn(&())> = Arc::new(|_| {});
+        let noop: Arc<dyn Fn(&()) + Send + Sync> = Arc::new(|_| {});
         self.builder = builder.ap(combined.map(|_| noop));
     }
 
@@ -535,9 +535,17 @@ impl<'a, O: DynamicOps> RecordBuilder for RecordBuilderImpl<'a, O> {
 ///
 /// Required methods are exactly the surface `rivet-nbt`'s `NbtOps` implements;
 /// everything added here is defaulted.
-pub trait DynamicOps: Debug {
+///
+/// `Send + Sync` mirrors Paper: codecs are `static final` values shared across
+/// netty threads, and a codec's ops (e.g. `JsonOps.INSTANCE`) is `&'static`
+/// and called from any connection thread.
+pub trait DynamicOps: Debug + Send + Sync {
     /// The ops element type — `DynamicOps<T>`'s `T`.
-    type Output: Debug + Clone + PartialEq;
+    ///
+    /// `Send + Sync` mirrors Paper: an encoded/decoded element (`JsonOps`'s
+    /// `Value`, `NbtOps`'s `Tag`, ...) is plain data that flows through codecs
+    /// shared across netty threads.
+    type Output: Debug + Clone + PartialEq + Send + Sync;
 
     /// `empty()`.
     fn empty(&self) -> Self::Output;

@@ -15,7 +15,7 @@
 //!   `Dynamic`/`DynamicLike` methods take the ops as a parameter.
 //! - Java's anonymous-codec/`ComposerHolder` sharing is value-semantic here;
 //!   codec combinators hold owned trait objects (`Box<dyn Codec<..>>`), so
-//!   multi-argument functions are `Arc<dyn Fn>` to allow currying.
+//!   multi-argument functions are `Arc<dyn Fn + Send + Sync>` to allow currying.
 
 pub mod codec;
 pub mod codecs;

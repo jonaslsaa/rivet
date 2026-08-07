@@ -15,7 +15,12 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 /// `com.mojang.serialization.Decoder<A>`.
-pub trait Decoder<A, Ops: DynamicOps + 'static>: Debug {
+///
+/// `Send + Sync` mirrors Paper: the game's codecs are `static final` values
+/// shared across netty threads (and the packet `StreamCodec` a status response
+/// is built from is itself `Send + Sync`), so a codec must be usable from any
+/// connection thread.
+pub trait Decoder<A, Ops: DynamicOps + 'static>: Debug + Send + Sync {
     /// `Decoder.decode(DynamicOps<T> ops, T input)` — returns the value plus
     /// the unconsumed remainder (`Pair<A, T>`).
     fn decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(A, Ops::Output)>;
@@ -55,7 +60,7 @@ where
 /// the value by reference (matching `validate`'s checker shape).
 pub fn map<A, B, Ops: DynamicOps + 'static>(
     inner: Arc<dyn Decoder<A, Ops>>,
-    function: Arc<dyn Fn(&A) -> B>,
+    function: Arc<dyn Fn(&A) -> B + Send + Sync>,
 ) -> Arc<dyn Decoder<B, Ops>>
 where
     A: 'static,
@@ -67,7 +72,7 @@ where
 /// `Decoder.promotePartial(Consumer<String>)`.
 pub fn promote_partial<A, Ops: DynamicOps + 'static>(
     inner: Arc<dyn Decoder<A, Ops>>,
-    on_error: Arc<dyn Fn(&str)>,
+    on_error: Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Arc<dyn Decoder<A, Ops>>
 where
     A: 'static,
@@ -87,7 +92,7 @@ where
 }
 
 /// `Decoder.unit(A)`.
-pub fn unit<A: Clone + 'static, Ops: DynamicOps + 'static>(
+pub fn unit<A: Clone + Send + Sync + 'static, Ops: DynamicOps + 'static>(
     instance: A,
 ) -> Arc<dyn Decoder<A, Ops>> {
     unit_with(Arc::new(move || instance.clone()))
@@ -95,7 +100,7 @@ pub fn unit<A: Clone + 'static, Ops: DynamicOps + 'static>(
 
 /// `Decoder.unit(Supplier<A>)`.
 pub fn unit_with<A: 'static, Ops: DynamicOps + 'static>(
-    instance: Arc<dyn Fn() -> A>,
+    instance: Arc<dyn Fn() -> A + Send + Sync>,
 ) -> Arc<dyn Decoder<A, Ops>> {
     Arc::new(UnitDecoder {
         instance,
@@ -136,7 +141,7 @@ impl<A, B, Ops: DynamicOps + 'static> Decoder<B, Ops> for FlatMappedDecoder<A, B
 
 /// `Decoder.map(Function)` result.
 pub struct MappedDecoder<A, B, Ops: DynamicOps + 'static> {
-    function: Arc<dyn Fn(&A) -> B>,
+    function: Arc<dyn Fn(&A) -> B + Send + Sync>,
     inner: Arc<dyn Decoder<A, Ops>>,
 }
 impl<A, B, Ops: DynamicOps + 'static> std::fmt::Debug for MappedDecoder<A, B, Ops> {
@@ -156,7 +161,7 @@ impl<A, B, Ops: DynamicOps + 'static> Decoder<B, Ops> for MappedDecoder<A, B, Op
 
 /// `Decoder.promotePartial(Consumer<String>)` result.
 pub struct PromotePartialDecoder<A, Ops: DynamicOps + 'static> {
-    on_error: Arc<dyn Fn(&str)>,
+    on_error: Arc<dyn Fn(&str) + Send + Sync>,
     inner: Arc<dyn Decoder<A, Ops>>,
 }
 impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for PromotePartialDecoder<A, Ops> {
@@ -193,7 +198,7 @@ impl<A, Ops: DynamicOps + 'static> Decoder<A, Ops> for WithLifecycleDecoder<A, O
 
 /// `Decoder.unit(Supplier)` result.
 pub struct UnitDecoder<A, Ops: DynamicOps + 'static> {
-    instance: Arc<dyn Fn() -> A>,
+    instance: Arc<dyn Fn() -> A + Send + Sync>,
     _ops: std::marker::PhantomData<Ops>,
 }
 impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for UnitDecoder<A, Ops> {

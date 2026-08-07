@@ -591,6 +591,7 @@ dependencies = [
 name = "rivet-protocol"
 version = "0.1.0-dev+mc26.2"
 dependencies = [
+ "base64",
  "bytes",
  "cesu8",
  "flate2",
@@ -598,7 +599,9 @@ dependencies = [
  "rivet-nbt",
  "rivet-registry",
  "rivet-serialization",
+ "rivet-text",
  "rivet-util",
+ "serde_json",
 ]
 
 [[package]]

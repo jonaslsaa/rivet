@@ -18,8 +18,8 @@ pub struct CompoundListCodec<K, V, Ops: DynamicOps + 'static> {
 impl<K, V, Ops: DynamicOps + 'static> crate::Decoder<Vec<Pair<K, V>>, Ops>
     for CompoundListCodec<K, V, Ops>
 where
-    K: Clone + 'static,
-    V: Clone + 'static,
+    K: Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
     fn decode(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(Vec<Pair<K, V>>, Ops::Output)> {
         // `ops.getMapEntries(input).flatMap(...)`.
@@ -98,8 +98,8 @@ where
 
 impl<K, V, Ops: DynamicOps + 'static> Codec<Vec<Pair<K, V>>, Ops> for CompoundListCodec<K, V, Ops>
 where
-    K: Clone + 'static,
-    V: Clone + 'static,
+    K: Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
 {
 }
 
