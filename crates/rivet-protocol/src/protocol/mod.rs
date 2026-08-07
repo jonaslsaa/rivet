@@ -29,6 +29,7 @@
 pub mod bundle;
 pub mod common;
 pub mod cookie;
+pub mod game;
 pub mod packet;
 pub mod packet_type;
 pub mod ping;
@@ -39,6 +40,7 @@ pub mod stream_codecs;
 pub mod unbound_protocol;
 
 pub use bundle::{BundleDelimiterPacket, BundlePacket, BundlerInfo};
+pub use game::common_player_spawn_info::CommonPlayerSpawnInfo;
 pub use packet::{Packet, codec};
 pub use packet_type::PacketType;
 pub use protocol_codec_builder::ProtocolCodecBuilder;

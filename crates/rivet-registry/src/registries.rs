@@ -62,6 +62,23 @@ pub static LEVEL_STEM: LazyLock<ResourceKey<Registry<LevelStem>>> = LazyLock::ne
     ResourceKey::create_registry_key(Identifier::with_default_namespace("dimension"))
 });
 
+/// `Registries.DIMENSION_TYPE` — `createRegistryKey("dimension_type")`, the
+/// `DimensionType` registry key (world unit placeholder). The #108 spawn-info
+/// codecs resolve this key's holder wire form (`DimensionType.STREAM_CODEC` =
+/// `ByteBufCodecs.holderRegistry(Registries.DIMENSION_TYPE)`); the full
+/// `DimensionType` record value is the deferred `mc.world.level.dimension`
+/// unit in `rivet-world`.
+///
+/// Reachability note for that future unit: `rivet-protocol` consumes this key
+/// and `rivet-world → rivet-protocol` already exists, so the real
+/// `DimensionType` in `rivet-world` can never be referenced from
+/// `rivet-protocol` (that would be a cycle). This placeholder must remain a
+/// distinct wire-marker type here, or `CommonPlayerSpawnInfo` must move to a
+/// higher crate — the world unit cannot simply take over the type.
+pub static DIMENSION_TYPE: LazyLock<ResourceKey<Registry<DimensionType>>> = LazyLock::new(|| {
+    ResourceKey::create_registry_key(Identifier::with_default_namespace("dimension_type"))
+});
+
 /// The `Block` registry element — a placeholder for
 /// `net.minecraft.world.level.block.Block` (owned by the world/block unit, not
 /// #124).
@@ -99,6 +116,15 @@ pub struct Level;
 /// `net.minecraft.world.level.dimension.LevelStem` (world unit placeholder).
 #[derive(Debug)]
 pub struct LevelStem;
+/// `net.minecraft.world.level.dimension.DimensionType` (world unit placeholder).
+///
+/// Only the wire key is owned here (#108): the value type's record shape,
+/// constants, validating constructor, and `DIRECT_CODEC`/`NETWORK_CODEC` are
+/// the deferred `mc.world.level.dimension` unit in `rivet-world`. The value
+/// derives are what `Holder<T>` needs for its own derives (the holder codec
+/// tests compare `Holder::Reference` values).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DimensionType;
 
 /// `Registries.registryDirPath` (private in Java) — the registry key's path.
 pub fn registry_dir_path(registry_key: &ResourceKey<Registry<()>>) -> String {
@@ -139,6 +165,16 @@ mod tests {
         assert_eq!(tags_dir_path(&key), "tags/block");
         assert_eq!(components_dir_path(&key), "components/block");
         assert_eq!(registry_dir_path(&key), "block");
+    }
+
+    #[test]
+    fn dimension_type_key_is_dimension_type() {
+        // Java: `Registries.DIMENSION_TYPE = createRegistryKey("dimension_type")`.
+        assert_eq!(
+            DIMENSION_TYPE.identifier(),
+            &Identifier::with_default_namespace("dimension_type")
+        );
+        assert_eq!(DIMENSION_TYPE.registry(), &*ROOT_REGISTRY_NAME);
     }
 
     #[test]

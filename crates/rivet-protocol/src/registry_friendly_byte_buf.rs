@@ -101,6 +101,26 @@ impl RegistryFriendlyByteBuf {
         self.inner.write_var_int(value);
     }
 
+    /// `readByte()`.
+    pub fn read_byte(&mut self) -> i8 {
+        self.inner.read_byte()
+    }
+
+    /// `writeByte(int)`.
+    pub fn write_byte(&mut self, value: i8) {
+        self.inner.write_byte(value);
+    }
+
+    /// `readBoolean()`.
+    pub fn read_boolean(&mut self) -> bool {
+        self.inner.read_boolean()
+    }
+
+    /// `writeBoolean(boolean)`.
+    pub fn write_boolean(&mut self, value: bool) {
+        self.inner.write_boolean(value);
+    }
+
     /// `readLong()`.
     pub fn read_long(&mut self) -> i64 {
         self.inner.read_long()
@@ -109,6 +129,41 @@ impl RegistryFriendlyByteBuf {
     /// `writeLong(long)`.
     pub fn write_long(&mut self, value: i64) {
         self.inner.write_long(value);
+    }
+
+    /// `readOptional(StreamDecoder)` — a boolean presence prefix, then the
+    /// value via the reader closure. The closure takes this buffer so the
+    /// registry-aware value readers (`readGlobalPos`) can be passed directly:
+    /// Java `readOptional(FriendlyByteBuf::readGlobalPos)`.
+    pub fn read_optional<T>(
+        &mut self,
+        mut value_reader: impl FnMut(&mut RegistryFriendlyByteBuf) -> T,
+    ) -> Option<T> {
+        if self.read_boolean() {
+            Some(value_reader(self))
+        } else {
+            None
+        }
+    }
+
+    /// `writeOptional(Optional, StreamEncoder)` — a boolean presence prefix,
+    /// then the value via the writer closure. The closure takes this buffer so
+    /// the registry-aware value writers (`writeGlobalPos`) can be passed
+    /// directly: Java `writeOptional(Optional, FriendlyByteBuf::writeGlobalPos)`.
+    pub fn write_optional<T>(
+        &mut self,
+        value: Option<&T>,
+        mut value_writer: impl FnMut(&mut RegistryFriendlyByteBuf, &T),
+    ) {
+        match value {
+            Some(v) => {
+                self.write_boolean(true);
+                value_writer(self, v);
+            }
+            None => {
+                self.write_boolean(false);
+            }
+        }
     }
 
     // ---- registry-aware conveniences -------------------------------------
@@ -206,6 +261,52 @@ mod tests {
         // Wire form: `BlockPos.asLong()` big-endian.
         assert_eq!(buf.as_slice(), &pos.as_long().to_be_bytes());
         assert_eq!(buf.read_block_pos(), pos);
+    }
+
+    #[test]
+    fn byte_boolean_wire_forms_and_round_trip() {
+        let mut buf = empty_buffer();
+        buf.write_byte(-42);
+        buf.write_boolean(true);
+        buf.write_boolean(false);
+        assert_eq!(buf.as_slice(), &[0xD6, 0x01, 0x00]);
+        assert_eq!(buf.read_byte(), -42);
+        assert!(buf.read_boolean());
+        assert!(!buf.read_boolean());
+    }
+
+    #[test]
+    fn optional_wire_form_and_round_trip() {
+        // Some -> boolean 1 then the value (via the registry-aware reader);
+        // None -> boolean 0 only.
+        let mut buf = empty_buffer();
+        let pos = GlobalPos::of(
+            ResourceKey::create(
+                &*registries::DIMENSION,
+                Identifier::with_default_namespace("overworld"),
+            ),
+            BlockPos::new(10, 64, -20),
+        );
+        buf.write_optional(Some(&pos), RegistryFriendlyByteBuf::write_global_pos);
+        let mut expected = vec![1, 19];
+        expected.extend_from_slice(b"minecraft:overworld");
+        expected.extend_from_slice(&BlockPos::new(10, 64, -20).as_long().to_be_bytes());
+        assert_eq!(buf.as_slice(), &expected);
+        assert_eq!(
+            buf.read_optional(RegistryFriendlyByteBuf::read_global_pos),
+            Some(pos)
+        );
+
+        let mut empty = empty_buffer();
+        empty.write_optional(
+            None::<GlobalPos>.as_ref(),
+            RegistryFriendlyByteBuf::write_global_pos,
+        );
+        assert_eq!(empty.as_slice(), &[0]);
+        assert_eq!(
+            empty.read_optional(RegistryFriendlyByteBuf::read_global_pos),
+            None
+        );
     }
 
     #[test]
