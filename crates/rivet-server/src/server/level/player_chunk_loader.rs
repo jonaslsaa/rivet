@@ -188,14 +188,6 @@ pub struct PlayerChunkLoader {
     last_send_distance: i32,
     /// `this.lastTickDistance` — the simulation distance sent to the client.
     last_tick_distance: i32,
-    /// Test seam (issue #100): forces the view-chunk encode step of
-    /// `add_and_send_chunks` to fail, as if one chunk body could not be encoded.
-    /// The M1 superflat slice has no reachable encode failure (no block
-    /// entities, deterministic content), so the state-invariance regression
-    /// drives this instead. Compiles out of non-test builds and is never set on
-    /// the production join path.
-    #[cfg(test)]
-    fail_chunk_encoding: bool,
 }
 
 impl PlayerChunkLoader {
@@ -206,8 +198,6 @@ impl PlayerChunkLoader {
             last_chunk_z: center.z(),
             last_send_distance: i32::MIN,
             last_tick_distance: i32::MIN,
-            #[cfg(test)]
-            fail_chunk_encoding: false,
         }
     }
 
@@ -216,6 +206,10 @@ impl PlayerChunkLoader {
     /// the 117 bare `ClientboundLevelChunkWithLightPacket`s in the deterministic
     /// coordinate raster the canonical fixture byte-matches. Returns the ordered
     /// send-set.
+    ///
+    /// Like Java's `add()`, `lastSendDistance`/`lastTickDistance` are committed
+    /// right after the three cache packets and before the chunk drain — they
+    /// record the distances sent in those packets, not the chunk set's delivery.
     ///
     /// `requested_view_distance` is `ServerPlayer.requestedViewDistance()`
     /// (issue #101); the M1 callers pass `None`. Note the capture client itself
@@ -274,6 +268,16 @@ impl PlayerChunkLoader {
             )?,
         ));
 
+        // `add()` state commit — Java `PlayerChunkLoaderData.add()` assigns
+        // `lastSendDistance`/`lastTickDistance` right after sending the three
+        // cache packets and before the chunk queue drain. The fields record the
+        // cache-packet distances actually sent, not that the chunk set was
+        // delivered; the M1 drain is synchronous below, so a chunk-encode
+        // failure aborts with `Err` after this commit — the same ordering as
+        // Java, where the async queue drain follows `add()`.
+        self.last_send_distance = send;
+        self.last_tick_distance = tick;
+
         // `update()` send-set + `updateQueues()` drain: `wantChunkSent` accepts
         // exactly `ChunkTrackingView.isWithinDistance(center, send, chunk, true)`
         // within the `squareDistance <= send + 1` bound — the `for_each` raster
@@ -287,28 +291,14 @@ impl PlayerChunkLoader {
         let mut bodies = Vec::with_capacity(view.chunk_count());
         view.for_each(|pos| bodies.push(encode_chunk_with_light(pos, world)));
         let bodies: Vec<Vec<u8>> = bodies.into_iter().collect::<Result<_, _>>()?;
+        // The `collect` preserves the view's emission count; this asserts the
+        // invariant that every view chunk contributed exactly one body — a guard
+        // against a future change that silently drops a chunk on encode error.
         debug_assert_eq!(
             bodies.len(),
             view.chunk_count(),
             "every view chunk produced exactly one body"
         );
-
-        #[cfg(test)]
-        if self.fail_chunk_encoding {
-            // Test seam: as if a view chunk's body could not be encoded. Fires
-            // before the state commit below — an aborted send-set must not
-            // advance `lastSendDistance`/`lastTickDistance`.
-            return Err("forced view-chunk encode failure (test seam)".to_string());
-        }
-
-        // Only now that every fallible step above (the three cache packets and
-        // each chunk body) succeeded, commit the send state. `add_and_send_chunks`
-        // is a synchronous "produce the whole send-set" step: when it returns an
-        // error the caller receives no packets and nothing reached the client, so
-        // committing earlier would leave `lastSendDistance`/`lastTickDistance`
-        // claiming a send-set that never went out.
-        self.last_send_distance = send;
-        self.last_tick_distance = tick;
 
         for body in bodies {
             packets.push(PlayPacket::new(
@@ -330,13 +320,6 @@ impl PlayerChunkLoader {
     /// emitted by the last `add`.
     pub fn last_tick_distance(&self) -> i32 {
         self.last_tick_distance
-    }
-
-    /// Test seam (issue #100): force the view-chunk encode step of the next
-    /// `add_and_send_chunks` call to fail. Compiles out of non-test builds.
-    #[cfg(test)]
-    fn set_fail_chunk_encoding(&mut self, fail: bool) {
-        self.fail_chunk_encoding = fail;
     }
 }
 
@@ -596,38 +579,5 @@ mod tests {
         let frame = encode_play_frame(&packets[0], -1).unwrap();
         // payload = varint(95) ++ [0x04]; length 2 -> varint21 header 0x02.
         assert_eq!(frame.to_vec(), vec![0x02, 0x5F, 0x04]);
-    }
-
-    #[test]
-    fn encode_error_leaves_send_state_uncommitted() {
-        // Regression: `lastSendDistance`/`lastTickDistance` must only be
-        // committed once the whole send-set has encoded successfully. The M1
-        // superflat slice has no reachable chunk-encode failure, so the test
-        // seam drives the error path.
-        let world = overworld();
-        let mut loader = PlayerChunkLoader::new(world.view().center());
-        // No send-set has ever been produced.
-        assert_eq!(loader.last_send_distance(), i32::MIN);
-        assert_eq!(loader.last_tick_distance(), i32::MIN);
-
-        // A forced chunk-encode failure aborts the call; the distances must stay
-        // at their pre-call values — committing them here would claim a send-set
-        // that never reached the client.
-        loader.set_fail_chunk_encoding(true);
-        let err = loader.add_and_send_chunks(&world, None).unwrap_err();
-        assert!(
-            err.contains("chunk"),
-            "error names the chunk encode step: {err}"
-        );
-        assert_eq!(loader.last_send_distance(), i32::MIN);
-        assert_eq!(loader.last_tick_distance(), i32::MIN);
-
-        // Clearing the seam, the same loader still produces the full send-set
-        // and only then commits the distances.
-        loader.set_fail_chunk_encoding(false);
-        let packets = loader.add_and_send_chunks(&world, None).unwrap();
-        assert_eq!(packets.len(), 3 + 117);
-        assert_eq!(loader.last_send_distance(), 4);
-        assert_eq!(loader.last_tick_distance(), 4);
     }
 }
