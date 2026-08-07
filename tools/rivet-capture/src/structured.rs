@@ -305,7 +305,7 @@ pub fn canon_registry_data(body: &[u8]) -> Option<Vec<u8>> {
 /// Parse one advancement value (`[String id][parent?][display?]
 /// [requirements][bool]`), returning `(id, canonical_raw_bytes)`.
 /// The requirement sets (inner string lists) are order-insensitive and sorted.
-/// RivetTodo(#195): display info is preserved verbatim — a capture whose
+/// RivetTodo(#221): display info is preserved verbatim — a capture whose
 /// advancement display carries per-boot-ordered NBT fields (or ItemStack
 /// DataComponentPatch components) would not canonicalize identically across
 /// boots. The join fixture carries no display data, so this is usable; remove

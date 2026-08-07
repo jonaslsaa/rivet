@@ -19,7 +19,7 @@
 //! `set_entity_data` item whose serializer is blocked therefore fails loudly,
 //! exactly as the honest port must.
 //!
-//! RivetTodo(#90): the 41 non-BYTE/FLOAT serializer value codecs are blocked
+//! RivetTodo(#222): the 41 non-BYTE/FLOAT serializer value codecs are blocked
 //! for the M3 entity wave — their payloads are unit placeholders and read/write
 //! panic with a blocked note until the owning entity unit lands.
 //!
