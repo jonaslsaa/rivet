@@ -7,20 +7,50 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use azalea::WalkDirection;
 use azalea::app::{App, Plugin, Update};
+use azalea::attack::handle_attack_queued;
 use azalea::core::game_type::GameMode;
+use azalea::core::tick::GameTick;
 use azalea::ecs::message::MessageReader;
-use azalea::ecs::prelude::{Res, Resource};
+use azalea::ecs::observer::On;
+use azalea::ecs::prelude::{Query, Res, Resource};
 use azalea::ecs::schedule::IntoScheduleConfigs;
+use azalea::entity::{EntityGeometryUpdateSystems, Physics};
 use azalea::join::{ConnectionFailedEvent, poll_create_connection_task};
+use azalea::movement::{
+    send_player_input_packet, send_position, send_sprinting_if_needed, update_pose,
+};
+use azalea::packet::game::SendGamePacketEvent;
+use azalea::physics::PhysicsSystems;
+use azalea::physics::client_movement::ClientMovementState;
 use azalea::prelude::*;
+use azalea::protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use serde_json::{Value, json};
 
+const DEFAULT_MODE: &str = "join";
 const DEFAULT_ADDRESS: &str = "127.0.0.1:25599";
 const DEFAULT_USERNAME: &str = "RivetProbe";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const AZALEA_REVISION: &str = "6249c295d353b9b3ef68f665b311cba39211fd19";
 const TRANSCRIPT_PROTOCOL: u64 = 1;
+
+/// Move-mode walk length. 120 game ticks = 6s of walking: long enough to cross
+/// the 1s Paper keepalive cadence (proving keepalive echo while moving) and to
+/// show a few send_position deltas, short enough that the walk stays inside the
+/// spawn chunk (spawn is ~10 blocks from the chunk corner; walking +x stays
+/// well within the loaded view).
+const MOVE_TICKS: u32 = 120;
+/// Game ticks of the walk that are sampled into the transcript. Kept below
+/// `MOVE_TICKS` so the walk always continues a few unsampled ticks after the
+/// last sample: if the server re-syncs the player (`player_position`) at some
+/// arbitrary tick, the perturbation lands in the unsampled tail and cannot
+/// corrupt the deterministic sample sequence (a re-sync mid-sample was observed
+/// to knock the local player airborne for the final 3 samples on one boot).
+const SAMPLE_TICKS: u32 = 100;
+/// Wait this long after the walk stops before ending the client, so the final
+/// sent positions and any trailing correction are recorded before exit.
+const MOVE_DRAIN: Duration = Duration::from_millis(200);
 
 /// After `Event::Spawn` we keep the client alive for a short observation window
 /// so the observable outcome is stable (chunks arrived, health/inventory
@@ -30,11 +60,40 @@ const MIN_OBSERVATION: Duration = Duration::from_secs(3);
 const QUIET_PERIOD: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Join and observe the settled world state (the `join` scenario).
+    Join,
+    /// Join, then walk forward on a fixed heading for a bounded tick window,
+    /// sampling position/velocity/on-ground each tick and recording the
+    /// teleport/keepalive/correction packets observed along the way (the `move`
+    /// scenario).
+    Move,
+}
+
+impl Mode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Mode::Join => "join",
+            Mode::Move => "move",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "join" => Some(Mode::Join),
+            "move" => Some(Mode::Move),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Args {
     address: String,
     username: String,
     timeout: Duration,
+    mode: Mode,
 }
 
 impl Args {
@@ -42,6 +101,7 @@ impl Args {
         let mut address = DEFAULT_ADDRESS.to_owned();
         let mut username = DEFAULT_USERNAME.to_owned();
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
+        let mut mode = Mode::Join;
         let mut args = env::args().skip(1);
 
         while let Some(argument) = args.next() {
@@ -53,6 +113,12 @@ impl Args {
                     timeout_seconds = value
                         .parse()
                         .map_err(|_| format!("invalid --timeout-seconds value: {value}"))?;
+                }
+                "--mode" => {
+                    let value = next_value(&mut args, "--mode")?;
+                    mode = Mode::parse(&value).ok_or_else(|| {
+                        format!("invalid --mode value: {value} (expected join|move)")
+                    })?;
                 }
                 "--help" | "-h" => return Err(usage()),
                 _ => return Err(format!("unknown argument: {argument}\n\n{}", usage())),
@@ -70,6 +136,7 @@ impl Args {
             address,
             username,
             timeout: Duration::from_secs(timeout_seconds),
+            mode,
         })
     }
 }
@@ -81,28 +148,194 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: rivet-client [--address HOST:PORT] [--username NAME] [--timeout-seconds N]\n\
-         Defaults: --address {DEFAULT_ADDRESS} --username {DEFAULT_USERNAME} \
+        "Usage: rivet-client [--mode join|move] [--address HOST:PORT] [--username NAME] \
+         [--timeout-seconds N]\n\
+         Defaults: --mode {DEFAULT_MODE} --address {DEFAULT_ADDRESS} --username {DEFAULT_USERNAME} \
          --timeout-seconds {DEFAULT_TIMEOUT_SECONDS}"
     )
 }
 
+/// One per-tick movement sample collected by the move mode: the client's local
+/// physics state immediately after a game tick. `velocity` is azalea's post-tick
+/// velocity (which the server sees as the movement delta), and `on_ground` is
+/// the ground-contact flag. Both are server-independent client-side values, so
+/// they are deterministic given a deterministic server and a fixed walk.
+#[derive(Clone)]
+struct MoveSample {
+    position: azalea::Vec3,
+    velocity: azalea::Vec3,
+    on_ground: bool,
+}
+
+/// The walk-length-window sampler for `--mode move`.
+///
+/// Sampling happens in a [`GameTick`] system, not in the async driver, because
+/// the async `get_tick_broadcaster()` returns a capacity-1 broadcast that can
+/// drop ticks under scheduling pressure: the driver would then count fewer
+/// "ticks" than the ECS actually ran, misaligning samples to real game ticks
+/// (observed: one boot captured two ticks of movement in a single sample). A
+/// synchronous system runs once per real game tick on the tick thread, so it
+/// cannot drop a tick, and it reads the post-physics ECS state directly with no
+/// async lock interplay.
+///
+/// The sampler owns the walk itself: on the first tick it observes it snaps
+/// `ClientMovementState.move_direction` to `WalkDirection::Forward`, so the walk
+/// start is exactly aligned to a real tick boundary (there is no async
+/// start-walk race). That first observed tick records no sample — its physics
+/// already ran without a direction, so the player did not move and there is no
+/// pre-movement state to capture. The subsequent `SAMPLE_TICKS` ticks are the
+/// walk's moving ticks and each is sampled post-physics; on the `MOVE_TICKS`th
+/// observed tick the sampler snaps the player back to `WalkDirection::None` and
+/// notifies the async driver that the window is complete. Each run of the system
+/// is exactly one game tick, so the internal `tick_count` is a true tick count.
+#[derive(Component)]
+struct MoveSampler {
+    /// Number of game ticks this sampler has observed, in `[0, MOVE_TICKS]`.
+    /// Tick 0 starts the walk and records no sample; ticks `1..=SAMPLE_TICKS`
+    /// each record the post-movement state; the walk stops once the count
+    /// reaches `MOVE_TICKS`.
+    tick_count: u32,
+    /// Signals the async driver once the walk window has fully elapsed.
+    notify: Arc<tokio::sync::Notify>,
+    /// The samples captured so far, shared with the driver for the final record.
+    samples: Arc<Mutex<Vec<MoveSample>>>,
+}
+
+/// A [`GameTick`] system that drives the move-walk sampler synchronously.
+///
+/// Ordered after [`PhysicsSystems`] and the movement/send chain by
+/// [`MoveSamplerPlugin`], so the observed state is the tick's final post-physics
+/// state (the physics for the current tick already ran with the previous
+/// `move_direction`). On its first observed tick it sets the walk direction,
+/// which the *next* tick's physics then applies. It samples `SAMPLE_TICKS`
+/// post-movement ticks — the walk's 1st..=100th moving tick — and on the
+/// `MOVE_TICKS`th observed tick stops the walk and wakes the driver. Exactly
+/// `SAMPLE_TICKS` samples are recorded, matching the old async sampler's
+/// transcript contract (sample 0 is the first tick the walk moved).
+fn move_sampler_system(
+    mut players: Query<(
+        &azalea::entity::Position,
+        &Physics,
+        &mut ClientMovementState,
+        &mut MoveSampler,
+    )>,
+) {
+    for (position, physics, mut movement, mut sampler) in &mut players {
+        // Once the walk window has fully elapsed the sampler is inert: it no
+        // longer samples, re-stops the walk, or re-notifies the driver.
+        if sampler.tick_count >= MOVE_TICKS {
+            continue;
+        }
+        if sampler.tick_count == 0 {
+            // First tick observed: start the walk. Do not sample this tick —
+            // its physics ran before the direction was set, so it did not move.
+            movement.move_direction = WalkDirection::Forward;
+            sampler.tick_count += 1;
+            continue;
+        }
+        // A tick whose physics ran while walking: sample it.
+        if sampler.tick_count <= SAMPLE_TICKS {
+            sampler
+                .samples
+                .lock()
+                .expect("move samples lock poisoned")
+                .push(MoveSample {
+                    position: **position,
+                    velocity: physics.velocity,
+                    on_ground: physics.on_ground(),
+                });
+        }
+        sampler.tick_count += 1;
+        if sampler.tick_count >= MOVE_TICKS {
+            movement.move_direction = WalkDirection::None;
+            sampler.notify.notify_one();
+        }
+    }
+}
+
+/// Registers the move-walk sampler for `--mode move`.
+struct MoveSamplerPlugin;
+
+impl Plugin for MoveSamplerPlugin {
+    fn build(&self, app: &mut App) {
+        // The sampler must observe the local player's final state for the tick.
+        // Order it after every azalea GameTick system that reads or writes the
+        // sampled data (`Position`, `Physics`, `ClientMovementState`): the
+        // physics sets (which move the player), the movement/send chain (input,
+        // pose, sprinting, position send), the geometry update that rewrites the
+        // bounding box, and the attack system that mutates `Physics`. The
+        // explicit edges keep the sampled timing deterministic even if azalea's
+        // internal chain order changes, and suppress the schedule-ambiguity
+        // warnings azalea's AmbiguityLoggerPlugin otherwise reports for this
+        // system.
+        app.add_systems(
+            GameTick,
+            move_sampler_system
+                .after(PhysicsSystems)
+                .after(EntityGeometryUpdateSystems)
+                .after(send_position)
+                .after(send_sprinting_if_needed)
+                .after(update_pose)
+                .after(send_player_input_packet)
+                .after(handle_attack_queued),
+        );
+    }
+}
+
 #[derive(Clone, Component)]
 struct State {
+    mode: Mode,
     spawned: Arc<AtomicBool>,
     terminal_emitted: Arc<AtomicBool>,
     /// Chunk coordinates received so far (sorted at read time). Shared between
     /// the event handler (writer) and the observation task (reader).
     chunks: Arc<Mutex<BTreeSet<(i32, i32)>>>,
+    /// Per-tick movement samples, appended by the move task and read once when
+    /// it emits the canonical `moved` record.
+    move_samples: Arc<Mutex<Vec<MoveSample>>>,
+    /// Clientbound teleport ids (`player_position`), observed by the event
+    /// handler. On a fresh boot the spawn teleport is the first (id 1 — Paper's
+    /// `awaitingTeleport` is per-connection and starts at 0), so the ids are
+    /// deterministic and compared; the echo relationship is additionally
+    /// checked structurally.
+    teleports: Arc<Mutex<Vec<u32>>>,
+    /// Serverbound `accept_teleportation` ids, observed by the outbound packet
+    /// observer (azalea auto-acks every teleport).
+    teleport_acks: Arc<Mutex<Vec<u32>>>,
+    /// Clientbound keepalive ids, observed by the event handler.
+    keepalives: Arc<Mutex<Vec<u64>>>,
+    /// Serverbound `keep_alive` ids (the echo), observed by the outbound packet
+    /// observer (azalea auto-echoes every keepalive).
+    keepalive_echoes: Arc<Mutex<Vec<u64>>>,
+    /// Server-issued position corrections (`entity_position_sync`) observed
+    /// during the walk: Paper re-syncs the player entity periodically, so both
+    /// the count and the coordinates vary per boot (46-118 across test boots).
+    /// Azalea is client-authoritative for the local player, so these never move
+    /// the client and the sampled walk is unaffected; they are recorded as a
+    /// diagnostic and excluded from parity (see `excluded_move_fields`).
+    corrections: Arc<Mutex<Vec<azalea::Vec3>>>,
+    /// The player's position at `Event::Spawn` (the server's randomized spawn
+    /// point). Move samples are normalized to deltas from this origin at full
+    /// precision, so the transcript is invariant to the per-boot spawn X/Z
+    /// offset instead of excluding the whole coordinate.
+    spawn_origin: Arc<Mutex<Option<azalea::Vec3>>>,
     runtime: tokio::runtime::Handle,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
+            mode: Mode::Join,
             spawned: Arc::new(AtomicBool::new(false)),
             terminal_emitted: Arc::new(AtomicBool::new(false)),
             chunks: Arc::new(Mutex::new(BTreeSet::new())),
+            move_samples: Arc::new(Mutex::new(Vec::new())),
+            teleports: Arc::new(Mutex::new(Vec::new())),
+            teleport_acks: Arc::new(Mutex::new(Vec::new())),
+            keepalives: Arc::new(Mutex::new(Vec::new())),
+            keepalive_echoes: Arc::new(Mutex::new(Vec::new())),
+            corrections: Arc::new(Mutex::new(Vec::new())),
+            spawn_origin: Arc::new(Mutex::new(None)),
             runtime: tokio::runtime::Handle::current(),
         }
     }
@@ -156,6 +389,43 @@ impl Plugin for ConnectionFailurePlugin {
             Update,
             capture_connection_failure.after(poll_create_connection_task),
         );
+    }
+}
+
+/// Handles shared by the outbound-packet observer: it records the serverbound
+/// echoes (teleport acks, keepalive echoes) that azalea sends automatically, so
+/// the move transcript can prove the request->echo relationship on the raw ids.
+#[derive(Clone)]
+struct MoveObservation {
+    teleport_acks: Arc<Mutex<Vec<u32>>>,
+    keepalive_echoes: Arc<Mutex<Vec<u64>>>,
+}
+
+/// Registers an observer on every `SendGamePacketEvent` (any serverbound packet
+/// the client sends). Azalea's own packet handlers auto-ack teleports and
+/// auto-echo keepalives; this observer records those echoes with their ids so
+/// the `moved` transcript can verify them against the clientbound requests.
+struct MoveObservationPlugin(MoveObservation);
+
+impl Plugin for MoveObservationPlugin {
+    fn build(&self, app: &mut App) {
+        let teleport_acks = Arc::clone(&self.0.teleport_acks);
+        let keepalive_echoes = Arc::clone(&self.0.keepalive_echoes);
+        app.add_observer(move |event: On<SendGamePacketEvent>| match &event.packet {
+            ServerboundGamePacket::AcceptTeleportation(p) => {
+                teleport_acks
+                    .lock()
+                    .expect("teleport acks lock poisoned")
+                    .push(p.id);
+            }
+            ServerboundGamePacket::KeepAlive(p) => {
+                keepalive_echoes
+                    .lock()
+                    .expect("keepalive echoes lock poisoned")
+                    .push(p.id);
+            }
+            _ => {}
+        });
     }
 }
 
@@ -287,6 +557,145 @@ async fn observe_and_emit(bot: Client, state: State) {
     hard_exit(0);
 }
 
+/// Emit the canonical `moved` record — the move scenario's observable outcome —
+/// after a bounded forward walk, then end the client.
+///
+/// Faces +x (yaw -90), then hands the walk to the [`MoveSampler`] component:
+/// a [`GameTick`] system (registered by [`MoveSamplerPlugin`]) starts the walk
+/// on a real tick boundary, samples the client's own post-physics state
+/// (position, velocity, on-ground) for the first `SAMPLE_TICKS` moving ticks,
+/// stops the walk after `MOVE_TICKS` observed ticks and wakes this task.
+/// Sampling is synchronous on the tick thread — one sample per real game tick,
+/// immune to the dropped-tick race of the broadcast-based `get_tick_broadcaster()`
+/// approach — so the position/velocity sequence is deterministic across boots.
+///
+/// After the walk this task drains briefly so the final sent positions and any
+/// trailing server correction land before the record is emitted.
+///
+/// The walk's first observed tick is a setup tick (direction set, no movement),
+/// so the walk spans `MOVE_TICKS` observed ticks of which `MOVE_TICKS - 1` move
+/// the player. The first `SAMPLE_TICKS` moving ticks are sampled; the remaining
+/// `MOVE_TICKS - 1 - SAMPLE_TICKS` moving ticks continue unsampled after the
+/// last sample: if the server re-syncs the player (`player_position`, which
+/// azalea applies directly to local physics) at an arbitrary tick, the
+/// perturbation lands in the unsampled tail and cannot corrupt the sampled
+/// sequence. The emitted `walk_ticks`, `movement_ticks` and `sampled_ticks`
+/// report these three counts while `samples` holds the sampled prefix.
+async fn move_and_emit(bot: Client, state: State) {
+    // yaw -90 = facing +x (azalea: forward input (0,1) rotated by yaw).
+    let _ = bot.set_direction(-90.0, 0.0);
+
+    let samples = Arc::clone(&state.move_samples);
+    let notify = Arc::new(tokio::sync::Notify::new());
+    {
+        let mut ecs = bot.ecs.write();
+        ecs.entity_mut(bot.entity).insert(MoveSampler {
+            tick_count: 0,
+            notify: Arc::clone(&notify),
+            samples,
+        });
+    }
+    // Wait for the sampler to finish the walk window.
+    notify.notified().await;
+
+    // Let the last sent positions and any trailing server correction flush.
+    tokio::time::sleep(MOVE_DRAIN).await;
+
+    // Snapshot the observables. Each lock is taken and released per value (never
+    // all at once). The walk finished earlier and MOVE_DRAIN let the write side
+    // quiesce: no further teleports/corrections arrive once the player stops
+    // moving, and the keepalive cadence (1s) is far longer than the drain
+    // (200ms), so in practice these reads observe the final sets. If a keepalive
+    // somehow landed between two reads, the echo relationship below would report
+    // false and the run would FAIL — a spurious failure, never a false pass,
+    // which is the honest direction for a differential harness.
+    let (samples, teleports, teleport_acks, keepalives, keepalive_echoes, corrections, origin) = {
+        let samples = state
+            .move_samples
+            .lock()
+            .expect("move samples lock poisoned")
+            .clone();
+        let teleports = state
+            .teleports
+            .lock()
+            .expect("teleports lock poisoned")
+            .clone();
+        let teleport_acks = state
+            .teleport_acks
+            .lock()
+            .expect("teleport acks lock poisoned")
+            .clone();
+        let keepalives = state
+            .keepalives
+            .lock()
+            .expect("keepalives lock poisoned")
+            .clone();
+        let keepalive_echoes = state
+            .keepalive_echoes
+            .lock()
+            .expect("keepalive echoes lock poisoned")
+            .clone();
+        let corrections = state
+            .corrections
+            .lock()
+            .expect("corrections lock poisoned")
+            .clone();
+        let origin = *state
+            .spawn_origin
+            .lock()
+            .expect("spawn origin lock poisoned");
+        (
+            samples,
+            teleports,
+            teleport_acks,
+            keepalives,
+            keepalive_echoes,
+            corrections,
+            origin,
+        )
+    };
+    let origin = origin.expect("move mode requires a recorded spawn position");
+
+    // Samples are normalized to spawn-relative X/Z deltas at full precision
+    // (subtract the origin, then round), so the walk is identical across boots
+    // even though the server randomizes the spawn X/Z offset each boot. `y` is
+    // absolute: the superflat spawn height is deterministic. Velocity is already
+    // a per-tick delta (blocks/tick), hence spawn-independent.
+    let sample_json = |s: &MoveSample| {
+        json!({
+            "dx": round_to(s.position.x - origin.x, 3),
+            "y": round_to(s.position.y, 3),
+            "dz": round_to(s.position.z - origin.z, 3),
+            "vx": round_to(s.velocity.x, 4),
+            "vy": round_to(s.velocity.y, 4),
+            "vz": round_to(s.velocity.z, 4),
+            "on_ground": s.on_ground,
+        })
+    };
+
+    emit(json!({
+        "event": "moved",
+        "walk": {
+            // The walk spans MOVE_TICKS observed game ticks; the first is the
+            // setup tick (direction set, no movement), so the player actually
+            // moves for MOVE_TICKS - 1 of them. The first SAMPLE_TICKS moving
+            // ticks are sampled into `samples`.
+            "walk_ticks": MOVE_TICKS,
+            "movement_ticks": MOVE_TICKS - 1,
+            "sampled_ticks": samples.len(),
+            "heading_degrees": -90.0,
+            "samples": samples.iter().map(sample_json).collect::<Vec<_>>(),
+            "teleports": teleports,
+            "teleport_acks": teleport_acks,
+            "keepalives": keepalives,
+            "keepalive_echoes": keepalive_echoes,
+            "corrections": corrections.iter().map(|p| round_position(*p)).collect::<Vec<_>>(),
+        },
+    }));
+
+    hard_exit(0);
+}
+
 async fn handle(bot: Client, event: Event, state: State) {
     match event {
         Event::Init => emit(json!({ "event": "init" })),
@@ -300,13 +709,56 @@ async fn handle(bot: Client, event: Event, state: State) {
         }
         Event::Spawn => {
             state.spawned.store(true, Ordering::Release);
-            let position = bot.position().ok().map(round_position);
+            let raw_position = bot.position().ok();
+            let position = raw_position.map(round_position);
+            *state
+                .spawn_origin
+                .lock()
+                .expect("spawn origin lock poisoned") = raw_position;
             emit(json!({
                 "event": "spawn",
                 "position": position,
             }));
             let runtime = state.runtime.clone();
-            runtime.spawn(observe_and_emit(bot, state));
+            match state.mode {
+                Mode::Move => runtime.spawn(move_and_emit(bot, state)),
+                Mode::Join => runtime.spawn(observe_and_emit(bot, state)),
+            };
+        }
+        // Move-mode packet observables. Recorded alongside the per-tick samples
+        // so the transcript can prove the teleport->ack and keepalive->echo
+        // relationships (rivet-capture's relationships.rs patterns) on the raw
+        // ids, then normalize discards the per-boot id values.
+        Event::Packet(packet) => {
+            if state.mode != Mode::Move {
+                return;
+            }
+            match &*packet {
+                ClientboundGamePacket::PlayerPosition(p) => {
+                    state
+                        .teleports
+                        .lock()
+                        .expect("teleports lock poisoned")
+                        .push(p.id);
+                }
+                ClientboundGamePacket::EntityPositionSync(p) => {
+                    state
+                        .corrections
+                        .lock()
+                        .expect("corrections lock poisoned")
+                        .push(p.values.pos);
+                }
+                _ => {}
+            }
+        }
+        Event::KeepAlive(id) => {
+            if state.mode == Mode::Move {
+                state
+                    .keepalives
+                    .lock()
+                    .expect("keepalives lock poisoned")
+                    .push(id);
+            }
         }
         Event::Disconnect(reason) => {
             state.terminal_emitted.store(true, Ordering::Release);
@@ -334,23 +786,35 @@ async fn main() -> ExitCode {
         }
     };
 
+    let mode = args.mode;
     emit(json!({
         "event": "starting",
         "address": args.address,
         "username": args.username,
         "timeout_seconds": args.timeout.as_secs(),
+        "mode": mode.as_str(),
         "azalea_revision": AZALEA_REVISION,
     }));
 
-    let state = State::default();
+    let state = State {
+        mode,
+        ..State::default()
+    };
     let spawned = Arc::clone(&state.spawned);
     let terminal_emitted = Arc::clone(&state.terminal_emitted);
+    let teleport_acks = Arc::clone(&state.teleport_acks);
+    let keepalive_echoes = Arc::clone(&state.keepalive_echoes);
     let (failure_tx, failure_rx) = tokio::sync::oneshot::channel();
     let connection_failure = ConnectionFailure(Arc::new(Mutex::new(Some(failure_tx))));
     let account = Account::offline(&args.username);
     let client = ClientBuilder::new()
         .reconnect_after(None)
         .add_plugins(ConnectionFailurePlugin(connection_failure))
+        .add_plugins(MoveSamplerPlugin)
+        .add_plugins(MoveObservationPlugin(MoveObservation {
+            teleport_acks,
+            keepalive_echoes,
+        }))
         .set_handler(handle)
         .set_state(state)
         .start(account, args.address);

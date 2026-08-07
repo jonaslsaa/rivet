@@ -13,6 +13,12 @@
 //!   self-check. Boot `--runs` Paper servers, require identical normalized
 //!   transcripts, then prove the comparator detects a tampered position
 //!   (negative case). Behavior is unchanged from before issue #155.
+//! - `move` (Paper-vs-Paper movement self-check, issue #53): boot `--runs`
+//!   Paper servers, drive a bounded forward walk through the client's `move`
+//!   mode, require identical normalized movement transcripts (per-tick
+//!   spawn-relative position deltas, velocity, on-ground, teleport/keepalive
+//!   echo relationships), then prove the comparator detects a tampered sampled
+//!   position (negative case).
 //! - `join --server rivet --pairs paper:rivet`: the Rivet headless-boot check.
 //!   Boot `--runs` rivet-servers, wait for the machine-readable `RIVET_READY`
 //!   marker, join each with the client, shut down cleanly on SIGTERM. Reports
@@ -133,6 +139,7 @@ impl From<String> for RunnerError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Subcommand {
     Join,
+    Move,
     Capture,
     Help,
 }
@@ -215,6 +222,7 @@ impl Args {
         if let Some(sub) = args.next() {
             command = match sub.as_str() {
                 "join" => Subcommand::Join,
+                "move" => Subcommand::Move,
                 "capture" => Subcommand::Capture,
                 "--help" | "-h" | "help" => Subcommand::Help,
                 _ => return Err(format!("unknown subcommand: {sub}\n\n{}", usage())),
@@ -293,6 +301,27 @@ impl Args {
             }
         }
 
+        if command == Subcommand::Move {
+            // `move` is a Paper-vs-Paper movement self-check (issue #53): it
+            // always boots Paper and compares Paper movement transcripts.
+            match (server, pairs) {
+                (ServerSelection::Paper, Pairs::PaperPaper) => {}
+                (server, pairs) => {
+                    return Err(format!(
+                        "move only supports --server paper with --pairs paper:paper (got \
+                         --server {} --pairs {})",
+                        server.as_str(),
+                        pairs.as_str()
+                    ));
+                }
+            }
+            if runs <= 1 {
+                return Err(
+                    "--runs must be at least 2 for move (Paper-vs-Paper needs a pair)".to_owned(),
+                );
+            }
+        }
+
         Ok(Self {
             command,
             server,
@@ -312,7 +341,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: run-scenario <join|capture> [options]\n\
+        "Usage: run-scenario <join|move|capture> [options]\n\
          Options:\n\
          \x20 --server paper|rivet|both  which servers to boot (default paper)\n\
          \x20 --pairs paper:paper|paper:rivet\n\
@@ -401,11 +430,14 @@ fn run_client(
     timeout_seconds: u64,
     work: &Path,
     prefix: &str,
+    mode: &str,
 ) -> Result<ClientRun, RunnerError> {
     let stdout_path = work.join(format!("{prefix}.stdout.jsonl"));
     let stderr_path = work.join(format!("{prefix}.stderr.log"));
     let output = Command::new(binary)
         .args([
+            "--mode",
+            mode,
             "--address",
             address,
             "--username",
@@ -525,6 +557,7 @@ fn one_join(
         args.timeout_seconds,
         work,
         &format!("client{idx}"),
+        "join",
     )?;
     server::shutdown(&mut srv)?;
 
@@ -674,6 +707,197 @@ fn run_paper_self_check(args: &Args) -> Result<(), RunnerError> {
     }
 }
 
+/// Boot one Paper server, drive the client's `move` mode (a bounded forward
+/// walk sampling per-tick position/velocity/on-ground plus the teleport and
+/// keepalive echoes), shut the server down, and return the normalized movement
+/// transcript (raw artifacts preserved).
+fn one_move(
+    work: &Path,
+    jar: &Path,
+    server_properties: &Path,
+    client_bin: &Path,
+    args: &Args,
+    idx: usize,
+    address: SocketAddr,
+) -> Result<Value, RunnerError> {
+    let run_dir = work.join(format!("run{idx}"));
+    let log_path = work.join(format!("boot{idx}.log"));
+    println!("[boot {idx}] fresh Paper world in {}", run_dir.display());
+    let mut srv = server::boot(
+        server::ServerKind::Paper,
+        &run_dir,
+        &log_path,
+        jar,
+        Some(server_properties),
+        address,
+    )?;
+    println!("[run  {idx}] walking via rivet-client (move mode) ...");
+    let client_run = run_client(
+        client_bin,
+        &address.to_string(),
+        &args.username,
+        args.timeout_seconds,
+        work,
+        &format!("client{idx}"),
+        "move",
+    )?;
+    server::shutdown(&mut srv)?;
+
+    let normalized =
+        transcript::normalize_move(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+    let transcript_path = work.join(format!("transcript{idx}.json"));
+    fs::write(&transcript_path, serde_json::to_string_pretty(&normalized)?)?;
+    println!(
+        "[run  {idx}] outcome={} (transcript in {})",
+        normalized["outcome"],
+        transcript_path.display()
+    );
+    if normalized["outcome"] != "moved" {
+        return Err(RunnerError::Gate(format!(
+            "run {idx} did not move (outcome={}) — refusing to compare. Raw transcript: {}, stderr: {}",
+            normalized["outcome"],
+            client_run.stdout_path.display(),
+            client_run.stderr_path.display()
+        )));
+    }
+    Ok(normalized)
+}
+
+/// The `move` scenario: Paper-vs-Paper movement self-check (issue #53).
+///
+/// Boots `--runs` Paper servers, drives the client's bounded forward walk
+/// against each, requires identical normalized movement transcripts (per-tick
+/// spawn-relative position deltas, velocity, on-ground, the teleport/keepalive
+/// echo relationships), then proves the comparator detects a tampered sampled
+/// position (negative case).
+fn run_move_self_check(args: &Args) -> Result<(), RunnerError> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/scenario-move");
+    fs::create_dir_all(&work)?;
+    let server_properties = server_properties(&crate_root)?;
+    let jar = server::ensure_jar(&crate_root)?;
+    let client_bin = ensure_client_binary()?;
+    let base = base_address(args)?;
+
+    println!("rivet scenario runner: move (Paper-vs-Paper movement self-check)");
+    println!("    paperclip jar     : {}", jar.display());
+    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    server.properties : {}", server_properties.display());
+    println!("    address           : {}", args.address);
+    println!("    paper boots       : {}", args.runs);
+    println!();
+
+    let mut transcripts = Vec::with_capacity(args.runs);
+    for idx in 1..=args.runs {
+        let t = one_move(
+            &work,
+            &jar,
+            &server_properties,
+            &client_bin,
+            args,
+            idx,
+            base,
+        )?;
+        transcripts.push(t);
+    }
+
+    // Paper-vs-Paper: every consecutive pair must be byte-for-byte identical.
+    println!();
+    println!("Paper-vs-Paper movement comparison ({} boots)", args.runs);
+    let mut identical = true;
+    for (i, pair) in transcripts.windows(2).enumerate() {
+        let boot_a = i + 1;
+        let boot_b = i + 2;
+        let d = comparator::diff(&pair[0], &pair[1]);
+        if d.is_identical() {
+            println!("    boot {boot_a} vs boot {boot_b}: IDENTICAL");
+            if !d.excluded.is_empty() {
+                println!("      excluded from parity: {}", d.excluded.len());
+                for f in &d.excluded {
+                    println!("        {f}");
+                }
+            }
+            if !d.excluded_policy_diffs.is_empty() {
+                identical = false;
+                println!("      WARNING: exclusion policy differs between runs:");
+                for f in &d.excluded_policy_diffs {
+                    println!("        {f}");
+                }
+            }
+        } else {
+            identical = false;
+            println!(
+                "    boot {boot_a} vs boot {boot_b}: DIFFERS ({} field(s))",
+                d.diffs.len()
+            );
+            for f in &d.diffs {
+                println!("      {f}");
+            }
+        }
+    }
+
+    // Negative case: tamper a *compared* sampled position (walk.samples[60].dx,
+    // the midpoint of the walk) and require the comparator to detect it — the
+    // harness must not pass vacuously.
+    println!();
+    println!("Negative case (tamper boot 1 sampled position walk.samples[60].dx)");
+    let reference = &transcripts[0];
+    let mut tampered = reference.clone();
+    match tampered["walk"]["samples"]
+        .get(60)
+        .and_then(|sample| sample.get("dx"))
+        .and_then(Value::as_f64)
+    {
+        Some(dx) => {
+            tampered["walk"]["samples"][60]["dx"] = json!(dx + 0.5);
+            let neg = comparator::diff(reference, &tampered);
+            if neg.is_identical() {
+                return Err(RunnerError::Gate(
+                    "negative case FAILED: comparator did not detect a tampered sampled position"
+                        .to_owned(),
+                ));
+            }
+            println!(
+                "    tampered walk.samples[60].dx += 0.5 -> detected {} field diff(s):",
+                neg.diffs.len()
+            );
+            for f in &neg.diffs {
+                println!("      {f}");
+            }
+        }
+        None => {
+            return Err(RunnerError::Gate(
+                "negative case FAILED: reference transcript has no midpoint sample to tamper"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    println!();
+    println!("Reference transcript (boot 1):");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(reference).expect("transcript serializes")
+    );
+    println!();
+
+    if identical {
+        println!(
+            "VERDICT: PASS — all {} Paper boots produced identical normalized movement \
+             transcripts; the negative case confirmed the comparator detects a known difference.",
+            args.runs
+        );
+        println!("    artifacts (raw logs, transcripts): {}", work.display());
+        Ok(())
+    } else {
+        println!("VERDICT: FAIL — Paper-vs-Paper movement transcripts differ.");
+        println!("    artifacts (for diagnosis): {}", work.display());
+        Err(RunnerError::Gate(
+            "Paper-vs-Paper movement comparison failed".to_owned(),
+        ))
+    }
+}
+
 /// Mode B: Rivet headless boot + pre-play transcript (issue #155 DoD 2).
 fn run_rivet_preplay(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
@@ -718,6 +942,7 @@ fn run_rivet_preplay(args: &Args) -> Result<(), RunnerError> {
             args.timeout_seconds,
             &work,
             &prefix,
+            "join",
         )?;
         server::shutdown(&mut srv)?;
         // The client transcript is only the client-side half of the proof;
@@ -845,6 +1070,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         args.timeout_seconds,
         &work,
         "paper",
+        "join",
     )?;
     server::shutdown(&mut paper_srv)?;
     let paper_t =
@@ -879,6 +1105,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         args.timeout_seconds,
         &work,
         "rivet",
+        "join",
     )?;
     server::shutdown(&mut rivet_srv)?;
     // Server-side half of the connection proof: the rivet log must show the
@@ -994,6 +1221,7 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         args.timeout_seconds,
         &work,
         "client1",
+        "join",
     )?;
     server::shutdown(&mut srv)?;
 
@@ -1015,6 +1243,7 @@ fn main() -> ExitCode {
     };
     let result = match args.command {
         Subcommand::Join => run_join(&args),
+        Subcommand::Move => run_move_self_check(&args),
         Subcommand::Capture => run_capture(&args),
         Subcommand::Help => {
             println!("{}", usage());
@@ -1056,6 +1285,28 @@ mod tests {
         let a = parse(&["join", "--server", "both", "--pairs", "paper:rivet"]).unwrap();
         assert_eq!(a.server, ServerSelection::Both);
         assert_eq!(a.pairs, Pairs::PaperRivet);
+    }
+
+    #[test]
+    fn move_parses_and_defaults_to_paper_self_check() {
+        let a = parse(&["move"]).unwrap();
+        assert_eq!(a.command, Subcommand::Move);
+        assert_eq!(a.server, ServerSelection::Paper);
+        assert_eq!(a.pairs, Pairs::PaperPaper);
+    }
+
+    #[test]
+    fn move_rejects_non_paper_configuration() {
+        // `move` is a Paper-vs-Paper movement self-check: it must reject any
+        // server/pairs combination that would not compare Paper against Paper.
+        assert!(parse(&["move", "--server", "rivet"]).is_err());
+        assert!(parse(&["move", "--pairs", "paper:rivet"]).is_err());
+    }
+
+    #[test]
+    fn move_requires_two_runs() {
+        assert!(parse(&["move"]).is_ok());
+        assert!(parse(&["move", "--runs", "1"]).is_err(), "move needs >=2");
     }
 
     #[test]
