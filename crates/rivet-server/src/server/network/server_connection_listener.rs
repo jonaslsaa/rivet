@@ -447,3 +447,250 @@ async fn conn_loop(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use rivet_protocol::generated::protocol::ConnectionProtocol;
+    use rivet_protocol::varint21_length_field_prepender::encode_frame;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+
+    use crate::server::network::packet_listener::ListenerOutcome;
+
+    fn test_config() -> Arc<ServerConfig> {
+        Arc::new(ServerConfig::default())
+    }
+
+    /// A throwaway connected `Connection` + its client socket (the client reads
+    /// whatever the server flushes).
+    async fn conn_and_client() -> (Connection, TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (_read, write) = server_sock.into_split();
+        let conn = Connection::new(ConnectionId(1), addr, test_config(), write);
+        (conn, client)
+    }
+
+    /// Read one VarInt21 frame payload from the client socket.
+    async fn read_frame(client: &mut TcpStream) -> Vec<u8> {
+        let mut header = Vec::new();
+        loop {
+            let mut b = [0u8; 1];
+            client.read_exact(&mut b).await.unwrap();
+            header.push(b[0]);
+            if b[0] & 0x80 == 0 {
+                break;
+            }
+        }
+        let mut out: u32 = 0;
+        for (i, &byte) in header.iter().enumerate() {
+            out |= ((byte & 0x7F) as u32) << (i * 7);
+        }
+        let mut payload = vec![0u8; out as usize];
+        client.read_exact(&mut payload).await.unwrap();
+        payload
+    }
+
+    /// A listener that transitions to the play state on its first frame,
+    /// signalling a `Notify` so the test knows the handoff happened.
+    struct PlayOnFirst {
+        played: Arc<tokio::sync::Notify>,
+    }
+
+    impl PacketListener for PlayOnFirst {
+        fn protocol(&self) -> ConnectionProtocol {
+            ConnectionProtocol::Configuration
+        }
+
+        fn handle_frame(
+            &mut self,
+            _frame: Bytes,
+            _conn: &mut Connection,
+            _config: &ServerConfig,
+        ) -> Result<ListenerOutcome, DisconnectReason> {
+            self.played.notify_one();
+            Ok(ListenerOutcome::Play)
+        }
+    }
+
+    /// `forward_play_failed` passes a non-`ServerShutdown` reason straight
+    /// through without draining the outbound channel.
+    #[tokio::test]
+    async fn forward_play_failed_passes_through_non_shutdown() {
+        let (mut conn, _client) = conn_and_client().await;
+        let (out_tx, mut out_rx) = mpsc::channel::<OutboundEvent>(4);
+        // A queued outbound frame that must NOT be drained by the passthrough.
+        out_tx
+            .send(OutboundEvent::Packet {
+                frame: Bytes::from_static(b"stays"),
+            })
+            .await
+            .unwrap();
+        let shutdown = Arc::new(Shutdown::new());
+
+        let reason = forward_play_failed(
+            &mut conn,
+            &mut out_rx,
+            DisconnectReason::Malformed("bad".into()),
+            &shutdown,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(reason, DisconnectReason::Malformed("bad".into()));
+        // The outbound frame is untouched.
+        assert!(matches!(
+            out_rx.try_recv(),
+            Ok(OutboundEvent::Packet { .. })
+        ));
+    }
+
+    /// `forward_play_failed` with `ServerShutdown` and no server stop drains the
+    /// queued outbound to the client (the queued-frame flush contract) and maps
+    /// the low reason to `Overflow`, mirroring the `out_rx.recv() == None`
+    /// branch.
+    #[tokio::test]
+    async fn forward_play_failed_server_shutdown_without_stop_drains_and_overflows() {
+        let (mut conn, mut client) = conn_and_client().await;
+        let (out_tx, mut out_rx) = mpsc::channel::<OutboundEvent>(4);
+        out_tx
+            .send(OutboundEvent::Packet {
+                frame: Bytes::from(encode_frame(b"CONTROL").unwrap().to_vec()),
+            })
+            .await
+            .unwrap();
+        drop(out_tx); // drain_to_close sees None after the queued packet
+        let shutdown = Arc::new(Shutdown::new()); // NOT requested
+
+        let reason = forward_play_failed(
+            &mut conn,
+            &mut out_rx,
+            DisconnectReason::ServerShutdown,
+            &shutdown,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(reason, DisconnectReason::Overflow);
+        // The queued outbound frame reached the client before the close.
+        assert_eq!(read_frame(&mut client).await, b"CONTROL");
+    }
+
+    /// `forward_play_failed` with `ServerShutdown` during a real server stop
+    /// drains the outbound and reports `ServerShutdown`.
+    #[tokio::test]
+    async fn forward_play_failed_server_shutdown_with_stop_drains_and_reports_shutdown() {
+        let (mut conn, mut client) = conn_and_client().await;
+        let (out_tx, mut out_rx) = mpsc::channel::<OutboundEvent>(4);
+        out_tx
+            .send(OutboundEvent::Packet {
+                frame: Bytes::from(encode_frame(b"CONTROL").unwrap().to_vec()),
+            })
+            .await
+            .unwrap();
+        drop(out_tx);
+        let shutdown = Arc::new(Shutdown::new());
+        shutdown.request();
+
+        let reason = forward_play_failed(
+            &mut conn,
+            &mut out_rx,
+            DisconnectReason::ServerShutdown,
+            &shutdown,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(reason, DisconnectReason::ServerShutdown);
+        assert_eq!(read_frame(&mut client).await, b"CONTROL");
+    }
+
+    /// The deterministic play-exit regression: `conn_loop` parked inside
+    /// `forward_play` on a full inbound channel. Dropping the tick-side receiver
+    /// fails the parked `send`, `forward_play` reports `ServerShutdown`, and
+    /// `forward_play_failed` drains the queued outbound to the client before the
+    /// connection closes.
+    #[tokio::test]
+    async fn conn_loop_parked_in_forward_play_flushes_queued_outbound_on_tick_gone() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        let config = test_config();
+        let mut conn = Connection::new(ConnectionId(1), addr, Arc::clone(&config), write);
+
+        // Inbound channel capacity 1: a single forwarded frame fills it, so the
+        // second `send` parks.
+        let (in_tx, in_rx) = mpsc::channel::<ServerboundFrame>(1);
+        let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let shutdown = Arc::new(Shutdown::new());
+        let played = Arc::new(tokio::sync::Notify::new());
+        let mut listener_box: Box<dyn PacketListener> = Box::new(PlayOnFirst {
+            played: Arc::clone(&played),
+        });
+        let in_tx_for_task = in_tx.clone();
+
+        let task = tokio::spawn(async move {
+            conn_loop(
+                &mut conn,
+                &mut listener_box,
+                &config,
+                read,
+                out_rx,
+                &in_tx_for_task,
+                shutdown,
+            )
+            .await
+        });
+
+        // 1. Handoff trigger: the listener returns Play, conn_loop enters the
+        // play state (forward_play(None) drains nothing buffered).
+        client
+            .write_all(&encode_frame(&[0x00]).unwrap())
+            .await
+            .unwrap();
+        played.notified().await;
+
+        // 2. Two play frames in one write: the first fills the channel (capacity
+        // 1), the second parks `forward_play` inside `send().await`.
+        let mut ab = Vec::new();
+        ab.extend_from_slice(&encode_frame(&[0x01]).unwrap());
+        ab.extend_from_slice(&encode_frame(&[0x02]).unwrap());
+        client.write_all(&ab).await.unwrap();
+
+        // 3. Deterministically wait for the park: the channel is full (the first
+        // frame was pushed), so conn_loop is inside forward_play.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while in_tx.capacity() != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "conn_loop never filled the inbound channel"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // 4. Queue the outbound control frame, then drop the tick-side receiver
+        // and sender. The parked send fails, forward_play_failed drains the
+        // queued outbound to the client.
+        out_tx
+            .send(OutboundEvent::Packet {
+                frame: Bytes::from(encode_frame(b"CONTROL").unwrap().to_vec()),
+            })
+            .await
+            .unwrap();
+        drop(in_rx);
+        drop(out_tx);
+
+        // 5. The queued outbound reaches the client before the close; the loop
+        // exits with Overflow (ServerShutdown error, no server stop requested).
+        assert_eq!(read_frame(&mut client).await, b"CONTROL");
+        let reason = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("conn_loop did not exit")
+            .unwrap();
+        assert_eq!(reason, DisconnectReason::Overflow);
+    }
+}

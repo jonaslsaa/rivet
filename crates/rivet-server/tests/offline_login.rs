@@ -11,9 +11,7 @@
 use std::io::Read;
 use std::time::Duration;
 
-use bytes::Bytes;
 use flate2::read::ZlibDecoder;
-use rivet_server::server::tick::channels::OutboundEvent;
 use rivet_server::server::{Server, ServerConfig};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -1048,38 +1046,17 @@ async fn play_frame_crosses_to_tick_thread_tickable() {
 }
 
 #[tokio::test]
-async fn play_state_exit_flushes_queued_outbound_to_the_client() {
-    // The play-state exit contract (drain_to_close): once the connection is in
-    // play and the tick thread shuts down (closing the inbound channel, so
-    // `forward_play` fails with ServerShutdown), the queued outbound channel is
-    // drained to completion — a frame the tick queued *before* the stop reaches
-    // the client before the socket closes, mirroring the pre-play shutdown
-    // paths. Positive control: the tickable queues a distinctive frame when it
-    // sees the forwarded play packet.
-    let queued = std::sync::Arc::new(std::sync::Mutex::new(false));
-    let queued_c = std::sync::Arc::clone(&queued);
-    let server = Server::new(config_with_threshold(256)).with_tickable(move |ctx| {
-        for (id, _frame) in &ctx.inbound {
-            let mut q = queued_c.lock().unwrap();
-            if !*q {
-                // A fully-encoded VarInt21 frame (the tick thread owns the
-                // play-state wire format). Queued, not yet flushed.
-                let _ = ctx.connections.send(
-                    *id,
-                    OutboundEvent::Packet {
-                        frame: Bytes::from(frame(b"PLAYEXIT-CONTROL")),
-                    },
-                );
-                *q = true;
-            }
-        }
-    });
-    let shutdown = server.shutdown_handle();
-    let listener = server.bind().await.expect("bind");
-    let addr = listener.local_addr().expect("local_addr");
-    let serve_task = tokio::spawn(async move { server.serve(listener).await });
-
+async fn play_flood_over_inbound_budget_closes_with_eof() {
+    // The compressed-frame memory-amplification bound at the TCP level: a
+    // hostile client flooding play-state frames whose decompressed size exceeds
+    // the inbound drain byte budget (16 MiB) is disconnected with EOF. A long
+    // tick interval keeps the tick thread from draining mid-flood, so the
+    // byte budget trips deterministically in `forward_play`.
+    let mut config = config_with_threshold(256);
+    config.tick_interval = Duration::from_secs(60);
+    let (addr, server_task) = start_server(config).await;
     let mut client = TcpStream::connect(addr).await.expect("connect");
+
     login_and_assert_response(&mut client, 256).await;
     consume_config_sync_opening(&mut client).await;
     complete_sync_and_consume_finish(&mut client).await;
@@ -1088,37 +1065,22 @@ async fn play_state_exit_flushes_queued_outbound_to_the_client() {
         .await
         .expect("write finish_configuration");
 
-    // A play keep_alive (id 28) that the tickable observes, queueing the
-    // positive-control outbound frame.
-    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
-    body.extend_from_slice(&7i64.to_be_bytes());
-    let mut wire = varint(0);
-    wire.extend_from_slice(&body);
-    client
-        .write_all(&frame(&wire))
-        .await
-        .expect("write play keep_alive");
-
-    // Wait for the tickable to queue the control frame, then stop the server:
-    // the play-exit path must flush that queued frame to the client before
-    // closing (Paper's `send(disconnect, thenRun(disconnect))` ordering).
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while !*queued.lock().unwrap() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "tickable never queued the positive-control frame"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    // Three compressed frames each decompressing to 6 MiB (18 MiB total > 16 MiB
+    // budget), framed as the play-state wire (`varint21(len) ++ varint(6MiB) ++
+    // zlib`). The packet content is irrelevant — forward_play forwards the
+    // decoded frames without parsing them.
+    let mut encoder = rivet_protocol::compression_encoder::CompressionEncoder::new(256);
+    let wire = encoder.encode(&vec![0x42u8; 6 * 1024 * 1024]).unwrap();
+    let framed = frame(&wire);
+    let mut flood = Vec::new();
+    for _ in 0..3 {
+        flood.extend_from_slice(&framed);
     }
-    shutdown.request();
+    client
+        .write_all(&flood)
+        .await
+        .expect("write compressed flood");
 
-    // The queued frame reaches the client (drain_to_close flushes it), then the
-    // connection closes.
-    let payload = read_frame_payload(&mut client).await;
-    assert_eq!(
-        payload, b"PLAYEXIT-CONTROL",
-        "the tick-queued outbound frame must reach the client before the play-state close"
-    );
     expect_eof(&mut client).await;
-    serve_task.abort();
+    server_task.abort();
 }

@@ -51,6 +51,23 @@ pub const MAX_INBOUND_FRAMES_PER_DRAIN: usize = 1024;
 /// frame before it trips — a memory-retention backstop, not the per-tick bound).
 pub const MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN: usize = 16 * 1024 * 1024;
 
+/// Slice-local *aggregate* inbound budget, frame-count half: the maximum total
+/// frames the tick thread delivers across *all* connections in one tick.
+///
+/// The per-connection budget ([`MAX_INBOUND_FRAMES_PER_DRAIN`]) bounds a single
+/// connection; the aggregate bound exists because N flooding connections could
+/// otherwise deliver N × per-connection work in one tick. It is a simple
+/// aggregate cap, not a fair-share scheduler: once the budget is exhausted the
+/// tick stops draining (the excess stays retained in the channels for a later
+/// tick), and the per-connection budget is never exceeded regardless. A fair
+/// round-robin across connections is deferred (recorded in #93/#96).
+pub const MAX_INBOUND_FRAMES_PER_TICK: usize = 8 * MAX_INBOUND_FRAMES_PER_DRAIN;
+
+/// Slice-local *aggregate* inbound budget, decompressed-bytes half: the maximum
+/// total decompressed bytes the tick thread delivers across *all* connections in
+/// one tick. See [`MAX_INBOUND_FRAMES_PER_TICK`].
+pub const MAX_INBOUND_BYTES_PER_TICK: usize = 8 * MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN;
+
 /// A decoded inbound play-state packet handed to the tick thread. The packet
 /// *body* is owned by epic #10 (protocol packet bodies); this slice carries the
 /// raw encoded frame so the ordering/backpressure boundary is real.
@@ -98,6 +115,11 @@ pub struct ConnChannels {
     remote: SocketAddr,
     pub(crate) in_rx: mpsc::Receiver<ServerboundFrame>,
     pub(crate) out_tx: mpsc::Sender<OutboundEvent>,
+    /// A frame dequeued but not delivered because it would cross the strict
+    /// per-tick byte budget (see `ConnectionRegistry::drain_one_bounded`).
+    /// Preserved in FIFO order ahead of the channel and delivered by the next
+    /// drain — deterministic retention, never dropped.
+    pub(crate) pending_frame: Option<ServerboundFrame>,
 }
 
 impl ConnChannels {
@@ -112,6 +134,7 @@ impl ConnChannels {
             remote,
             in_rx,
             out_tx,
+            pending_frame: None,
         }
     }
 
