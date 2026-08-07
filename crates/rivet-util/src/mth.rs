@@ -544,8 +544,10 @@ pub fn create_insecure_uuid<R: RandomSource>(random: &mut R) -> Uuid {
     Uuid { most, least }
 }
 
-/// RivetTodo(#206): minimal UUID value type — the full `java.util.UUID`
-/// surface is not ported (owned by `java.util.UUID`).
+/// Minimal UUID value type — the `java.util.UUID` string surface only (the
+/// `most`/`least` bit layout Java's `UUID` exposes). Added by the status
+/// protocol port for `NameAndId` (`UUIDUtil.STRING_CODEC`). No version/variant
+/// validation: Java's `UUID(long, long)` constructor accepts any bit pattern.
 ///
 /// `Hash` is derived so `GameProfile` (authlib, #198) can derive `Hash` over
 /// its record components; Java's `UUID.hashCode()` is `(int)(msb ^ (msb >>> 32))
@@ -556,6 +558,69 @@ pub fn create_insecure_uuid<R: RandomSource>(random: &mut R) -> Uuid {
 pub struct Uuid {
     pub most: i64,
     pub least: i64,
+}
+
+impl Uuid {
+    /// `UUID.fromString(String)` — Java's parser, exactly. The fast path
+    /// accepts the canonical 36-char `8-4-4-4-12` dashed form with hex digits;
+    /// otherwise the general path accepts any string of at most 36 chars with
+    /// exactly 4 dashes whose (non-empty, hex) groups parse, masking each
+    /// group to its 32/16/16/16/48-bit width (short groups pad with zeros, so
+    /// e.g. `1-2-3-4-5` is valid). Braces, the `urn:uuid:` prefix, and the
+    /// undashed 32-char form are REJECTED — `UUID.fromString` never accepted
+    /// them (verified against the JDK 25 JVM Paper's oracle runs on). No value
+    /// validation: Java's `UUID(long, long)` constructor accepts any bit
+    /// pattern (the all-zero UUID parses fine).
+    pub fn from_string(name: &str) -> Option<Uuid> {
+        // Java's `UUID.fromString` rejects strings longer than 36 chars
+        // outright ("UUID string too large").
+        if name.len() > 36 {
+            return None;
+        }
+        // Locate the dashes exactly as repeated `indexOf('-', ...)` would.
+        let dash_after = |start: usize| name[start..].find('-').map(|i| start + i);
+        let dash1 = dash_after(0)?;
+        let dash2 = dash_after(dash1 + 1)?;
+        let dash3 = dash_after(dash2 + 1)?;
+        let dash4 = dash_after(dash3 + 1)?;
+        // A fifth dash means more than 4 groups ("Invalid UUID string").
+        if dash_after(dash4 + 1).is_some() {
+            return None;
+        }
+        // `Long.parseLong(segment, 16)` masked to the field width: an empty,
+        // non-hex, or overflowing group fails (`NumberFormatException`); only
+        // the masked bits matter, so a group wider than its field simply
+        // truncates the way Java's `& 0x...` masks do.
+        let group = |range: std::ops::Range<usize>, mask: u64| -> Option<u64> {
+            u64::from_str_radix(&name[range], 16).ok().map(|v| v & mask)
+        };
+        let g1 = group(0..dash1, 0xffff_ffff)?;
+        let g2 = group(dash1 + 1..dash2, 0xffff)?;
+        let g3 = group(dash2 + 1..dash3, 0xffff)?;
+        let g4 = group(dash3 + 1..dash4, 0xffff)?;
+        let g5 = group(dash4 + 1..name.len(), 0xffff_ffff_ffff)?;
+        Some(Uuid {
+            most: ((g1 << 32) | (g2 << 16) | g3) as i64,
+            least: ((g4 << 48) | g5) as i64,
+        })
+    }
+}
+
+/// `UUID.toString()` — the canonical `8-4-4-4-12` lowercase-hex form.
+impl std::fmt::Display for Uuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let most = format!("{:016x}", self.most as u64);
+        let least = format!("{:016x}", self.least as u64);
+        write!(
+            f,
+            "{}-{}-{}-{}-{}",
+            &most[0..8],
+            &most[8..12],
+            &most[12..16],
+            &least[0..4],
+            &least[4..16]
+        )
+    }
 }
 
 /// `Mth.inverseLerp(double value, double min, double max)`.

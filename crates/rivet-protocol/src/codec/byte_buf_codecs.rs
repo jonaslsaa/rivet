@@ -29,6 +29,11 @@
 //!
 //! RivetTodo(#126): the remaining registry-dependent `ByteBufCodecs` members are
 //! deferred with their owning units, not silently omitted:
+//! - `fromCodec(Codec)` / `fromCodecTrusted` / `fromCodecWithRegistries*` (the
+//!   `NbtOps`-backed variants) — need `Codec<T>` wired through `StreamCodec`
+//!   via `NbtOps`. The ops-typed `fromCodec(DynamicOps<T>, Codec<V>)` overload
+//!   IS ported (below); it is what `ClientboundStatusResponsePacket` uses
+//!   (`lenientJson(32767).apply(fromCodec(OPS, ServerStatus.CODEC))`).
 //! - `registryFriendlyLengthPrefixed` — needs the buffer-preserving decorator
 //!   form of `lengthPrefixed` over `RegistryFriendlyByteBuf`.
 //!   `registry`/`holderRegistry`/`holder`/`holderSet` are ported in
@@ -38,8 +43,6 @@
 //! - `RGB_COLOR` — `ARGB.color(r, g, b)` + the `red`/`green`/`blue` accessors
 //!   (RivetTodo(#206); only the 4-arg `argb_color` entry point is ported in
 //!   `mth.rs`).
-//! - `lenientJson` — `JsonElement` has no port (`rivet-serialization` has no Gson
-//!   value type; `json_ops` uses `ops::Output`).
 //! - `trackDepth`/`increaseDepth` (Paper depth-tracking) — connection-level
 //!   anti-DoS on the registry buffer, out of scope for the registry-independent
 //!   slice.
@@ -54,6 +57,8 @@ use rivet_nbt::nbt_accounter::NbtAccounter;
 use rivet_nbt::tag::Tag;
 use rivet_registry::core::{GameProfile, GameType, Property, PropertyMap};
 use rivet_serialization::Either;
+use rivet_serialization::codec::Codec;
+use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_util::mth::{pack_degrees, unpack_degrees};
 use std::sync::Arc;
 
@@ -463,6 +468,108 @@ pub fn game_profile() -> StreamCodec<FriendlyByteBuf, GameProfile> {
             Ok(GameProfile::new(id, name, properties))
         },
     )
+}
+
+/// `ByteBufCodecs.lenientJson(int maxStringLength)` — a JSON document carried
+/// as a UTF-8 string capped at `maxStringLength` UTF-16 code units, parsed with
+/// Gson's lenient parser and serialized with `disableHtmlEscaping()`.
+///
+/// The wire payload is exactly the `string_utf8(maxStringLength)` primitive
+/// (Java `Utf8String.read`/`Utf8String.write`); the DFU value is
+/// `serde_json::Value` (Java `JsonElement`). Encode serializes compact JSON
+/// with HTML escaping disabled (serde_json's `preserve_order` keeps insertion
+/// order like Gson's `LinkedTreeMap`, and its only HTML escape is ` `/
+/// ` `, which Gson leaves raw — see `json_ops`). Decode runs serde_json's
+/// permissive parser, which accepts the same superset Gson's lenient parser
+/// does for the payloads the status protocol produces (Java throws
+/// `DecoderException("Failed to parse JSON")` on a syntax error; here the
+/// parse error surfaces as `Err(CodecError)`).
+pub fn lenient_json(max_string_length: i32) -> StreamCodec<FriendlyByteBuf, serde_json::Value> {
+    of(
+        move |output: &mut FriendlyByteBuf, value: &serde_json::Value| {
+            let payload = serde_json::to_string(value)
+                .map_err(|e| CodecError::new(format!("Failed to encode JSON: {e}")))?;
+            string_utf8(max_string_length).encode(output, &payload)
+        },
+        move |input: &mut FriendlyByteBuf| {
+            let payload = string_utf8(max_string_length).decode(input)?;
+            serde_json::from_str::<serde_json::Value>(&payload)
+                // Java `LenientJsonParser.parse` throws `DecoderException(
+                // "Failed to parse JSON")` on a `JsonSyntaxException` — the
+                // message carries no detail, only the prefix.
+                .map_err(|_| CodecError::new("Failed to parse JSON"))
+        },
+    )
+}
+
+/// `ByteBufCodecs.fromCodec(DynamicOps<T> ops, Codec<V> codec)` — a
+/// `CodecOperation` that turns a `StreamCodec<B, T>` (raw payload) into a
+/// `StreamCodec<B, V>` (decoded value) by running the DFU codec over the
+/// payload with `ops`. On decode `codec.parse(ops, payload)` is unwrapped via
+/// `getOrThrow(msg -> new DecoderException("Failed to decode: " + msg + " " +
+/// payload))`; on encode `codec.encodeStart(ops, value)` is unwrapped via
+/// `getOrThrow(msg -> new EncoderException("Failed to encode: " + msg + " " +
+/// value))`. Java's `DecoderException`/`EncoderException` are the stream
+/// codec's checked error path, so the port returns `Err(CodecError)` with the
+/// same message (the payload/value rendering is the one deviation: `value`
+/// uses Rust `Debug`, not Java's record `toString()`).
+///
+/// `fromCodec(OPS, ServerStatus.CODEC)` in `ClientboundStatusResponsePacket`
+/// composes `lenientJson(32767).apply(fromCodec(OPS, CODEC))` — the payload is
+/// the lenient-JSON string, the ops is `RegistryAccess.EMPTY
+/// .createSerializationContext(JsonOps.INSTANCE)`, which is exactly
+/// [`rivet_serialization::json_ops::JsonOps::INSTANCE`] here (the empty
+/// registry adds no context).
+pub fn from_codec<V, Ops>(
+    ops: Ops,
+    codec: Arc<dyn Codec<V, Ops>>,
+) -> CodecOperation<FriendlyByteBuf, Ops::Output, V>
+where
+    V: 'static + Send + Sync + Clone + std::fmt::Debug,
+    Ops: DynamicOps + 'static + Clone + Send + Sync,
+    Ops::Output: 'static + Send + Sync + std::fmt::Display,
+{
+    CodecOperation::new(move |original: StreamCodec<FriendlyByteBuf, Ops::Output>| {
+        let codec_for_encode = codec.clone();
+        let ops_for_encode = ops.clone();
+        let original_for_encode = original.clone();
+        let codec_for_decode = codec.clone();
+        let ops_for_decode = ops.clone();
+        of(
+            move |output: &mut FriendlyByteBuf, value: &V| {
+                let result = codec_for_encode.encode_start(&ops_for_encode, value);
+                let payload = match result.result() {
+                    Some(payload) => payload.clone(),
+                    None => {
+                        let msg = result
+                            .error_ref()
+                            .map(|e| e.message().to_string())
+                            .unwrap_or_default();
+                        return Err(CodecError::new(format!(
+                            "Failed to encode: {msg} {value:?}"
+                        )));
+                    }
+                };
+                original_for_encode.encode(output, &payload)
+            },
+            move |input: &mut FriendlyByteBuf| {
+                let payload = original.decode(input)?;
+                let result = codec_for_decode.parse(&ops_for_decode, &payload);
+                match result.result() {
+                    Some(value) => Ok((*value).clone()),
+                    None => {
+                        let msg = result
+                            .error_ref()
+                            .map(|e| e.message().to_string())
+                            .unwrap_or_default();
+                        Err(CodecError::new(format!(
+                            "Failed to decode: {msg} {payload}"
+                        )))
+                    }
+                }
+            },
+        )
+    })
 }
 
 /// `ByteBufCodecs.CONTAINER_ID` — `FriendlyByteBuf.readContainerId`/`writeContainerId`.
