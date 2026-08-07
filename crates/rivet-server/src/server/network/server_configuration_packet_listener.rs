@@ -65,8 +65,8 @@ const DISCONNECT_UNEXPECTED_QUERY: &str = "multiplayer.disconnect.unexpected_que
 /// brand in `startConfiguration` via `ClientboundCustomPayloadPacket(Brand)`.
 const SERVER_BRAND: &str = "Rivet";
 
-/// `ConfigurationTask.Type` id for `SynchronizeRegistriesTask` — the only task
-/// this slice queues.
+/// `ConfigurationTask.Type` id for `SynchronizeRegistriesTask` — queued first;
+/// the registry-sync negotiation (`select_known_packs` reply → registry/tag data).
 const SYNCHRONIZE_REGISTRIES_TASK_TYPE: &str = "synchronize_registries";
 /// `ConfigurationTask.Type` id for `JoinWorldTask` — queued last so the client's
 /// `finish_configuration` reply finishes it and the connection hands off to play
@@ -80,7 +80,7 @@ const JOIN_WORLD_TASK_TYPE: &str = "join_world";
 /// `ServerConfigurationPacketListenerImpl.startNextTask` with a `Consumer<Packet>`
 /// that sends one packet. A task stays `currentTask` until a client response
 /// finishes it via `finishCurrentTask` (`SynchronizeRegistriesTask` awaits the
-/// `select_known_packs` reply). This slice queues only the registry sync.
+/// `select_known_packs` reply; `JoinWorldTask` awaits `finish_configuration`).
 trait ConfigurationTask: Send {
     /// `ConfigurationTask.Type.id()` — the task-type discriminator checked by
     /// `finishCurrentTask` (`ConfigurationTask.Type(String id)`).
