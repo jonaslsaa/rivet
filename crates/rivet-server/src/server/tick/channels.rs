@@ -9,6 +9,8 @@
 //! starts routing frames here; both directions are exercised by tests.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
@@ -82,6 +84,40 @@ pub struct ServerboundFrame {
     pub bytes: Bytes,
 }
 
+/// A per-connection cumulative counter of inbound frames the tick thread has
+/// drained from the connection's channel. The tick side increments it for each
+/// frame delivered by
+/// [`ConnectionRegistry::drain_one_bounded`](super::registry::ConnectionRegistry::drain_one_bounded);
+/// the connection side reads it in
+/// [`Connection::forward_play`](crate::server::network::connection::Connection::forward_play)
+/// as the authoritative "the tick is keeping up" signal for its admission window.
+///
+/// The counter is monotonic, per connection, and shared as an `Arc` between the
+/// tick thread (the only writer) and the connection task (the only reader) — an
+/// atomics-only coordination signal, not game state (OWNERSHIP). Because it
+/// counts every drained frame, it detects tick progress exactly even when the
+/// tick drains in bursts (a transient channel-capacity snapshot cannot).
+#[derive(Clone, Debug, Default)]
+pub struct InboundDrained {
+    count: Arc<AtomicUsize>,
+}
+
+impl InboundDrained {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The tick side: record `n` frames drained (delivered) from the channel.
+    pub(crate) fn record_drained(&self, n: usize) {
+        self.count.fetch_add(n, Ordering::Release);
+    }
+
+    /// The connection side: total frames the tick has drained so far.
+    pub fn drained(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+}
+
 /// A command from the tick thread to the network side of one connection. Every
 /// `Packet` precedes any `Disconnect` in the channel (mirrors Paper's
 /// `send(disconnect, thenRun(disconnect))` ordering): the per-connection task
@@ -105,6 +141,9 @@ pub enum LifecycleEvent {
         remote: SocketAddr,
         in_rx: mpsc::Receiver<ServerboundFrame>,
         out_tx: mpsc::Sender<OutboundEvent>,
+        /// The per-connection drained-frame counter shared with the connection's
+        /// admission window (see [`InboundDrained`]).
+        drained: InboundDrained,
     },
     Disconnect {
         id: ConnectionId,
@@ -121,6 +160,9 @@ pub struct ConnChannels {
     remote: SocketAddr,
     pub(crate) in_rx: mpsc::Receiver<ServerboundFrame>,
     pub(crate) out_tx: mpsc::Sender<OutboundEvent>,
+    /// Cumulative frames the tick has drained from `in_rx`, shared with the
+    /// connection's admission window (see [`InboundDrained`]).
+    pub(crate) drained: InboundDrained,
     /// A frame dequeued but not delivered because it would cross the strict
     /// per-tick byte budget (see `ConnectionRegistry::drain_one_bounded`).
     /// Preserved in FIFO order ahead of the channel and delivered by the next
@@ -134,12 +176,14 @@ impl ConnChannels {
         remote: SocketAddr,
         in_rx: mpsc::Receiver<ServerboundFrame>,
         out_tx: mpsc::Sender<OutboundEvent>,
+        drained: InboundDrained,
     ) -> Self {
         ConnChannels {
             id,
             remote,
             in_rx,
             out_tx,
+            drained,
             pending_frame: None,
         }
     }

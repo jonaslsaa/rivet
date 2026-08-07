@@ -15,7 +15,7 @@ use super::connection_id::ConnectionId;
 use super::packet_listener::{DisconnectReason, PacketListener};
 use super::server_handshake_packet_listener::ServerHandshakePacketListener;
 use crate::server::ServerConfig;
-use crate::server::tick::channels::{OutboundEvent, ServerboundFrame};
+use crate::server::tick::channels::{InboundDrained, OutboundEvent, ServerboundFrame};
 use crate::server::tick::endpoint::{NetworkEndpoint, RegisterResult};
 use crate::server::tick::shutdown::Shutdown;
 
@@ -158,12 +158,17 @@ async fn run_connection(
     info!(%id, %remote, "connection established");
 
     let (read, write) = socket.into_split();
+    // The per-connection drained-frame counter shared between this connection's
+    // admission window (`Connection::forward_play`) and the tick registry's
+    // `drain_one_bounded` (see `channels::InboundDrained`).
+    let drained = InboundDrained::new();
     let mut conn = Connection::new(
         id,
         remote,
         Arc::clone(&config),
         Arc::clone(&shutdown),
         write,
+        drained.clone(),
     );
     let mut listener: Box<dyn PacketListener> = Box::new(ServerHandshakePacketListener);
 
@@ -174,7 +179,7 @@ async fn run_connection(
     let (in_tx, in_rx) = mpsc::channel::<ServerboundFrame>(config.inbound_channel_capacity);
     let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(config.outbound_channel_capacity);
     let registered = endpoint
-        .register_connection(id, remote, in_rx, out_tx)
+        .register_connection(id, remote, in_rx, out_tx, drained)
         .await;
     let mut in_tx = Some(in_tx);
     if registered == RegisterResult::ServerShuttingDown {
@@ -546,6 +551,7 @@ mod tests {
             test_config(),
             Arc::new(Shutdown::new()),
             write,
+            InboundDrained::new(),
         );
         (conn, client)
     }
@@ -701,6 +707,7 @@ mod tests {
             Arc::clone(&config),
             Arc::clone(&shutdown),
             write,
+            InboundDrained::new(),
         );
 
         // Inbound channel capacity 1: a single forwarded frame fills it, so the
@@ -795,6 +802,7 @@ mod tests {
             Arc::clone(&config),
             Arc::clone(&shutdown),
             write,
+            InboundDrained::new(),
         );
         let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
         let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
@@ -866,6 +874,7 @@ mod tests {
             Arc::clone(&config),
             Arc::clone(&shutdown),
             write,
+            InboundDrained::new(),
         );
         let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
         let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
@@ -940,6 +949,7 @@ mod tests {
             Arc::clone(&config),
             Arc::clone(&shutdown),
             write,
+            InboundDrained::new(),
         );
         let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
         let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);

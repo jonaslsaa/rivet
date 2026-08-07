@@ -192,7 +192,7 @@ impl ServerTickLoop {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use channels::ServerboundFrame;
+    use channels::{InboundDrained, ServerboundFrame};
     use scheduler::TickScheduler;
     use shutdown::Shutdown;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -346,6 +346,7 @@ mod tests {
                 remote: REMOTE,
                 in_rx,
                 out_tx,
+                drained: InboundDrained::new(),
             })
             .unwrap();
         for _ in 0..(MAX_INBOUND_FRAMES_PER_DRAIN + 76) {
@@ -386,6 +387,7 @@ mod tests {
                 remote: REMOTE,
                 in_rx,
                 out_tx,
+                drained: InboundDrained::new(),
             })
             .unwrap();
         for _ in 0..3 {
@@ -414,10 +416,13 @@ mod tests {
     }
 
     /// Production-path aggregate frame budget: 9 flooding connections x 1024
-    /// frames each = 9216 frames. The aggregate budget (8192 = 8 x 1024) binds
-    /// across connections: exactly 8 connections are drained to their cap on
-    /// tick 1, the 9th is retained whole (never partially drained), and its
-    /// frames are delivered — in FIFO order — on tick 2.
+    /// frames each = 9216 frames. The aggregate budget (8192 = 8 x 1024) divides
+    /// evenly here, so tick 1 delivers exactly 8 connections at their per-
+    /// connection cap and the 9th is not touched (the aggregate loop breaks at
+    /// remaining == 0 before it). Its frames are delivered — in FIFO order — on
+    /// tick 2. In general a connection whose remaining aggregate budget is less
+    /// than its per-connection cap IS partially drained, with the excess retained
+    /// FIFO for a later drain — that is intentional, not a boundary violation.
     #[test]
     fn run_tick_aggregate_frame_cap_across_connections() {
         let recorded = Arc::new(Mutex::new(Vec::<(ConnectionId, Vec<u8>)>::new()));
@@ -434,6 +439,7 @@ mod tests {
                     remote: REMOTE,
                     in_rx,
                     out_tx,
+                    drained: InboundDrained::new(),
                 })
                 .unwrap();
             for seq in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
@@ -454,8 +460,10 @@ mod tests {
             MAX_INBOUND_FRAMES_PER_TICK,
             "tick 1 delivers exactly the aggregate frame budget"
         );
-        // Whole per-connection drains: 8 connections fully served, none partial
-        // (the aggregate break happens between connections, never mid-drain).
+        // Because 8192 divides evenly by 1024, exactly 8 connections drain at
+        // their full per-connection cap and the 9th is untouched (the aggregate
+        // budget is exhausted between connections). A remainder-limited
+        // connection would instead be intentionally partial, FIFO-retained.
         let fully_served = counts
             .values()
             .filter(|&&n| n == MAX_INBOUND_FRAMES_PER_DRAIN)
@@ -465,10 +473,7 @@ mod tests {
             .filter(|&&n| n != 0 && n != MAX_INBOUND_FRAMES_PER_DRAIN)
             .count();
         assert_eq!(fully_served, 8, "8 connections drained to their cap");
-        assert_eq!(
-            partially, 0,
-            "no partial drain across the aggregate boundary"
-        );
+        assert_eq!(partially, 0, "the exact division leaves no partial drain");
         for (id, frames) in &first {
             assert_fifo(*id, frames);
         }
@@ -508,6 +513,7 @@ mod tests {
                     remote: REMOTE,
                     in_rx,
                     out_tx,
+                    drained: InboundDrained::new(),
                 })
                 .unwrap();
             for _ in 0..2 {

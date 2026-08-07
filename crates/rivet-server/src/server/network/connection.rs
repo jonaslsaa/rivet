@@ -14,7 +14,8 @@ use super::connection_id::ConnectionId;
 use super::packet_listener::{DisconnectReason, ListenerOutcome, PacketListener};
 use crate::server::ServerConfig;
 use crate::server::tick::channels::{
-    MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN, MAX_INBOUND_FRAMES_PER_DRAIN, ServerboundFrame,
+    InboundDrained, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN, MAX_INBOUND_FRAMES_PER_DRAIN,
+    ServerboundFrame,
 };
 use crate::server::tick::shutdown::Shutdown;
 
@@ -93,18 +94,20 @@ pub struct Connection {
     /// progress. The frame/byte budget in [`Connection::forward_play`] is
     /// enforced against this window so a hostile client cannot let the bounded
     /// channel retain multi-GiB of decompressed frames. Reset whenever the tick
-    /// thread makes drain progress (see [`Self::inbound_window_last_capacity`]).
+    /// thread drains from this connection (see [`Self::drained`]).
     inbound_window_bytes: usize,
     /// The play-state inbound drain window, frame-count half (see
     /// [`Self::inbound_window_bytes`]).
     inbound_window_frames: usize,
-    /// The channel capacity (free slots) observed right after the previous
-    /// forward to the tick channel. [`Connection::forward_play`] resets the
-    /// admission window when the current capacity is above this — proof the tick
-    /// thread drained at least one frame since the last push, so the client is
-    /// keeping up. The fully empty channel (capacity == max) is the extreme
-    /// case.
-    inbound_window_last_capacity: usize,
+    /// The authoritative tick-drain progress signal for the admission window:
+    /// cumulative frames the tick thread has drained from this connection's
+    /// channel (incremented by
+    /// [`ConnectionRegistry::drain_one_bounded`](crate::server::tick::registry::ConnectionRegistry::drain_one_bounded)).
+    /// [`Connection::forward_play`] resets the window when this advances.
+    drained: InboundDrained,
+    /// The `drained` count observed at the previous admission-window step
+    /// (monotonic; [`Connection::forward_play`] compares the live counter to it).
+    last_drained: usize,
     /// The server-stop signal. `flush_out` races it so an outbound write that
     /// backpressures (a slow or non-reading peer) is aborted on shutdown instead
     /// of wedging the per-connection task and `serve()`'s shutdown drain.
@@ -118,6 +121,7 @@ impl Connection {
         config: Arc<ServerConfig>,
         shutdown: Arc<Shutdown>,
         write: OwnedWriteHalf,
+        drained: InboundDrained,
     ) -> Self {
         Connection {
             id,
@@ -133,7 +137,8 @@ impl Connection {
             outbound_protocol: None,
             inbound_window_bytes: 0,
             inbound_window_frames: 0,
-            inbound_window_last_capacity: 0,
+            drained,
+            last_drained: 0,
             shutdown,
         }
     }
@@ -263,27 +268,25 @@ impl Connection {
     /// The inbound budget ([`MAX_INBOUND_FRAMES_PER_DRAIN`] /
     /// [`MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN`]) is enforced here as an
     /// *admission* cap against a sliding window (`inbound_window_*`) that resets
-    /// on observed tick-drain progress: whenever the channel has more free slots
-    /// than it did after the previous push, the tick thread drained some, so the
-    /// client is keeping up and the window restarts. A client the tick observably
-    /// keeps up with is never affected, even when the channel is never fully
-    /// empty.
+    /// on the tick thread's cumulative drained-frame counter ([`InboundDrained`],
+    /// incremented by
+    /// [`ConnectionRegistry::drain_one_bounded`](crate::server::tick::registry::ConnectionRegistry::drain_one_bounded)):
+    /// whenever the tick drains anything from this connection, the counter
+    /// advances and the window restarts — the client is provably keeping up. A
+    /// client the tick keeps up with is never disconnected, even when the tick
+    /// drains in bursts and the channel never appears empty.
     ///
-    /// The anti-flood boundary is full channel saturation: a sender that refills
-    /// every drained slot before its next check (so the capacity observed at each
-    /// push never exceeds the previous push's) shows no drain progress and its
-    /// window accumulates to the budget, disconnecting it. This is deliberate:
-    /// a persistently saturated channel is exactly the memory-retention condition
-    /// the admission cap exists to bound. A no-progress flood (the tick never
-    /// drains) is the extreme of the same boundary. Exceeding the budget reports
+    /// The anti-flood boundary is a tick that never drains (no progress): the
+    /// counter never advances, the window accumulates to the budget, and the
+    /// client is disconnected — the memory-retention condition the admission cap
+    /// exists to bound. Exceeding the budget reports
     /// [`DisconnectReason::InboundOverflow`].
     ///
     /// The authoritative per-tick bound is the tick side: [`ConnectionRegistry::drain_one`]
-    /// stops draining at the same budget, so even a sender that races the window
-    /// reset (observing the channel mid-drain and refilling) cannot make one tick
-    /// deliver more than the budget. This admission cap is the memory-retention
-    /// backstop that keeps the bounded channel from holding multi-GiB before that
-    /// tick-side bound is even reached.
+    /// stops draining at the same budget, so even a sender that races the drain
+    /// cannot make one tick deliver more than the budget. This admission cap is
+    /// the memory-retention backstop that keeps the bounded channel from holding
+    /// multi-GiB before that tick-side bound is even reached.
     pub async fn forward_play(
         &mut self,
         data: Option<&[u8]>,
@@ -296,19 +299,22 @@ impl Connection {
             let Some(packet) = self.next_frame()? else {
                 break;
             };
-            // Observe the tick thread's drain progress since the previous push:
-            // if the channel has more free slots now than it did right after
-            // that push, the tick drained some — the client is keeping up, so
-            // the window restarts. A saturated sender (every drained slot
-            // refilled before the next check) never satisfies this, so its
-            // window accumulates to the budget and trips.
-            let (window_bytes, window_frames) = admission_step(
-                self.inbound_window_last_capacity,
-                in_tx.capacity(),
+            // Authoritative tick progress: the cumulative drained counter. If it
+            // advanced since the previous push, the tick drained frames from this
+            // connection — the client is provably keeping up, so the window
+            // restarts. A no-progress flood (the tick never drains) never resets
+            // and trips at the budget. The counter is exact even when the tick
+            // drains in bursts: each drained frame is accounted, not inferred
+            // from a transient capacity snapshot.
+            let current_drained = self.drained.drained();
+            let (last_drained, window_bytes, window_frames) = admission_step(
+                self.last_drained,
+                current_drained,
                 self.inbound_window_bytes,
                 self.inbound_window_frames,
                 packet.len(),
             )?;
+            self.last_drained = last_drained;
             self.inbound_window_bytes = window_bytes;
             self.inbound_window_frames = window_frames;
             if in_tx
@@ -318,7 +324,6 @@ impl Connection {
             {
                 return Err(DisconnectReason::ServerShutdown);
             }
-            self.inbound_window_last_capacity = in_tx.capacity();
         }
         Ok(())
     }
@@ -509,23 +514,24 @@ fn inbound_overflow(frames: usize, bytes: usize) -> DisconnectReason {
 }
 
 /// One admission-window step for [`Connection::forward_play`]: apply the
-/// drain-progress reset (when the channel now holds more free slots than after
-/// the previous push, the tick drained some, so the window restarts) and add the
-/// next frame, returning `Err(InboundOverflow)` when the budget would be
-/// exceeded. Pure — factored out so the saturation boundary is deterministically
-/// testable without a live channel.
+/// drain-progress reset and add the next frame. `last_drained` is the cumulative
+/// tick-drained count observed at the previous step; `current_drained` is the
+/// value now. When the tick has drained anything since the previous step
+/// (`current_drained > last_drained`), the client is provably keeping up, so the
+/// window restarts; otherwise it accumulates and trips the budget. Returns the
+/// next `last_drained`, the new window, or `Err(InboundOverflow)`.
 ///
-/// A saturated sender (the observed capacity never exceeds the previous push's —
-/// every drained slot is refilled before the next check) never resets and trips
-/// at the budget; see [`Connection::forward_play`].
+/// Pure — factored out so the keeping-up and no-progress boundaries are
+/// deterministically testable without a live channel.
 fn admission_step(
-    last_capacity: usize,
-    current_capacity: usize,
+    last_drained: usize,
+    current_drained: usize,
     window_bytes: usize,
     window_frames: usize,
     packet_len: usize,
-) -> Result<(usize, usize), DisconnectReason> {
-    let (window_bytes, window_frames) = if current_capacity > last_capacity {
+) -> Result<(usize, usize, usize), DisconnectReason> {
+    let next_last = current_drained.max(last_drained);
+    let (window_bytes, window_frames) = if current_drained > last_drained {
         (packet_len, 1)
     } else {
         (window_bytes + packet_len, window_frames + 1)
@@ -535,7 +541,7 @@ fn admission_step(
     {
         return Err(inbound_overflow(window_frames, window_bytes));
     }
-    Ok((window_bytes, window_frames))
+    Ok((next_last, window_bytes, window_frames))
 }
 
 #[cfg(test)]
@@ -563,8 +569,14 @@ mod tests {
         let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (server_sock, _) = server.await.unwrap();
         let (_read, write) = server_sock.into_split();
-        let mut conn =
-            Connection::new(ConnectionId(1), addr, test_config(), test_shutdown(), write);
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            test_config(),
+            test_shutdown(),
+            write,
+            InboundDrained::new(),
+        );
         conn.set_outbound_protocol(ConnectionProtocol::Login);
         conn
     }
@@ -956,6 +968,7 @@ mod tests {
             Arc::new(config),
             test_shutdown(),
             write,
+            InboundDrained::new(),
         );
         conn.set_outbound_protocol(ConnectionProtocol::Login);
         // 64 MiB >> any kernel socket buffer, so the write can only make
@@ -1016,6 +1029,7 @@ mod tests {
             test_config(),
             Arc::clone(&shutdown),
             write,
+            InboundDrained::new(),
         );
         conn.set_outbound_protocol(ConnectionProtocol::Login);
         // 64 MiB >> any kernel socket buffer, and the client never reads, so the
@@ -1069,8 +1083,14 @@ mod tests {
         let (server_sock, _) = listener.accept().await.unwrap();
         let (_read, write) = server_sock.into_split();
 
-        let mut conn =
-            Connection::new(ConnectionId(1), addr, test_config(), test_shutdown(), write);
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            test_config(),
+            test_shutdown(),
+            write,
+            InboundDrained::new(),
+        );
         conn.set_outbound_protocol(ConnectionProtocol::Login);
         conn.queue_raw_frame(Bytes::from(vec![0x42u8; 64 * 1024 * 1024]));
 
@@ -1107,6 +1127,7 @@ mod tests {
             test_config(),
             Arc::clone(&shutdown),
             write,
+            InboundDrained::new(),
         );
         conn.set_outbound_protocol(ConnectionProtocol::Login);
 
@@ -1279,14 +1300,18 @@ mod tests {
         let mut conn = new_connection().await;
         conn.setup_compression(256, true);
         let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(4096);
-        // The tick analog: a receiver that drains the channel continuously.
-        let drained = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let drained_clone = std::sync::Arc::clone(&drained);
+        // The tick analog: a receiver that drains the channel continuously,
+        // recording each drained frame on the shared progress counter exactly as
+        // `drain_one_bounded` does.
+        let drained = conn.drained.clone();
+        let drained_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let drained_seen_clone = std::sync::Arc::clone(&drained_seen);
         let drainer = tokio::spawn(async move {
             let mut n = 0;
             while in_rx.recv().await.is_some() {
+                drained.record_drained(1);
                 n += 1;
-                drained_clone.store(n, std::sync::atomic::Ordering::Relaxed);
+                drained_seen_clone.store(n, std::sync::atomic::Ordering::Relaxed);
             }
         });
 
@@ -1299,17 +1324,19 @@ mod tests {
         // 1024 frames in the first call: exactly the budget, succeeds.
         conn.forward_play(Some(&wire), &in_tx).await.unwrap();
         // Wait for the drainer to empty the channel, then send 1024 more: the
-        // window resets (channel observed empty) so the cumulative total far
-        // exceeds the frame limit without tripping.
+        // progress counter reset the window, so the cumulative total far exceeds
+        // the frame limit without tripping.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while drained.load(std::sync::atomic::Ordering::Relaxed) < MAX_INBOUND_FRAMES_PER_DRAIN {
+        while drained_seen.load(std::sync::atomic::Ordering::Relaxed) < MAX_INBOUND_FRAMES_PER_DRAIN
+        {
             assert!(std::time::Instant::now() < deadline, "drainer stalled");
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         conn.forward_play(Some(&wire), &in_tx).await.unwrap();
         // The drainer keeps draining; it should see 2048 total.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while drained.load(std::sync::atomic::Ordering::Relaxed) < 2 * MAX_INBOUND_FRAMES_PER_DRAIN
+        while drained_seen.load(std::sync::atomic::Ordering::Relaxed)
+            < 2 * MAX_INBOUND_FRAMES_PER_DRAIN
         {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1322,12 +1349,11 @@ mod tests {
     }
 
     /// A sustained sender the tick keeps up with is never disconnected even when
-    /// the channel never becomes fully empty: the admission window resets on
-    /// observed drain progress, not on the channel reaching zero. A small
-    /// channel (capacity 8, below the 1024 budget) with a partial drainer that
-    /// always leaves frames in the channel would, under an empty-only reset,
-    /// accumulate the window past the budget and falsely disconnect. The
-    /// progress-based reset never trips: 1200 frames (above the 1024 budget) are
+    /// the channel never becomes fully empty: the admission window resets on the
+    /// tick's cumulative drained counter, not on the channel reaching zero. A
+    /// small channel (capacity 8, below the 1024 budget) with a partial drainer
+    /// that always leaves frames in the channel keeps the counter advancing, so
+    /// the window resets every cycle: 1200 frames (above the 1024 budget) are
     /// forwarded and drained while the channel always holds frames.
     #[tokio::test]
     async fn forward_play_window_resets_on_progress_with_never_empty_small_channel() {
@@ -1350,29 +1376,32 @@ mod tests {
                 .unwrap();
         }
         // 300 cycles x 4 frames = 1200 frames forwarded, well above the 1024
-        // budget. Each cycle sends 4 (channel 4 -> 8) then drains 4 (8 -> 4), so
-        // the channel is never empty yet the tick (the test) makes progress
-        // every cycle.
+        // budget. Each cycle sends 4 (channel 4 -> 8) then drains 4, recording
+        // each drained frame on the shared counter — so the window resets even
+        // though the channel is never empty.
         for _ in 0..300 {
             conn.forward_play(Some(&batch), &in_tx).await.unwrap();
             for _ in 0..4 {
                 in_rx.try_recv().unwrap();
+                conn.drained.record_drained(1);
             }
         }
-        // 1200 sent + 4 prefilled = 1204; 1200 drained, the 4 prefilled remain.
+        // FIFO: the 4 prefilled frames were drained first (cycle 1); what
+        // remains are the final 4 sent frames.
         let mut remaining = 0;
         while in_rx.try_recv().is_ok() {
             remaining += 1;
         }
         assert_eq!(
             remaining, 4,
-            "the 4 prefilled frames are still in the channel"
+            "the final four sent frames remain (the prefilled four were drained first)"
         );
     }
 
     /// The same progress-based reset with a large channel: partial drain
-    /// progress (not a full empty) between batches resets the window, so a
-    /// sender that sustains more than the budget over time is not disconnected.
+    /// progress (not a full empty) between batches advances the counter and
+    /// resets the window, so a sender that sustains more than the budget over
+    /// time is not disconnected.
     #[tokio::test]
     async fn forward_play_window_resets_on_partial_drain_progress() {
         let mut conn = new_connection().await;
@@ -1386,12 +1415,13 @@ mod tests {
             batch.extend_from_slice(&frame);
         }
         for _ in 0..6 {
-            // 200 frames per call; the channel is never fully drained between
-            // calls (only 100 of the 200 are consumed), yet the drain progress
-            // resets the window each call.
+            // 200 frames per call; only 100 of the 200 are consumed per cycle,
+            // yet the counter advances (the drained 100 are recorded) and the
+            // window resets each call.
             conn.forward_play(Some(&batch), &in_tx).await.unwrap();
             for _ in 0..100 {
                 in_rx.try_recv().unwrap();
+                conn.drained.record_drained(1);
             }
         }
         // 1200 frames forwarded over the 1024 budget, never disconnected.
@@ -1402,33 +1432,33 @@ mod tests {
         assert_eq!(remaining, 600, "1200 sent, 600 drained, 600 retained");
     }
 
-    /// The saturation boundary, documented as anti-flood: a sender whose observed
-    /// channel capacity never exceeds the previous push's (every drained slot
-    /// refilled before the next check — full lockstep saturation) never resets,
-    /// so its window accumulates to the budget and it is disconnected. The
-    /// progress-based reset cannot fire because there is no observable progress.
+    /// The no-progress boundary, documented as anti-flood: a sender whose tick
+    /// never drains (the cumulative drained counter never advances) never resets,
+    /// so its window accumulates to the budget and it is disconnected.
     #[test]
-    fn admission_step_saturated_channel_accumulates_to_budget() {
-        // Saturated: current capacity == last capacity (0). No reset; the window
-        // accumulates. One frame under the budget is accepted.
-        let (bytes, frames) = admission_step(0, 0, 0, MAX_INBOUND_FRAMES_PER_DRAIN - 1, 1).unwrap();
+    fn admission_step_no_progress_accumulates_to_budget() {
+        // No tick progress: current drained == last drained (0). No reset; the
+        // window accumulates. One frame under the budget is accepted.
+        let (next_last, bytes, frames) =
+            admission_step(0, 0, 0, MAX_INBOUND_FRAMES_PER_DRAIN - 1, 1).unwrap();
+        assert_eq!(next_last, 0);
         assert_eq!(frames, MAX_INBOUND_FRAMES_PER_DRAIN);
         assert_eq!(bytes, 1);
         // The next frame trips the budget exactly at the per-tick cap.
         let err = admission_step(0, 0, bytes, frames, 1).unwrap_err();
         assert!(
             matches!(err, DisconnectReason::InboundOverflow(_)),
-            "saturated sender trips exactly at the per-tick cap"
+            "no-progress sender trips exactly at the per-tick cap"
         );
     }
 
-    /// The drain-progress side of the same boundary: any observed progress
-    /// (current capacity above last) resets the window, so a keeping-up sender is
-    /// never disconnected no matter how much it has sent.
+    /// The keeping-up side of the same boundary: any tick progress (the drained
+    /// counter advances) resets the window, so a keeping-up sender is never
+    /// disconnected no matter how much it has sent.
     #[test]
     fn admission_step_observed_progress_resets_window() {
-        // A window far past the budget is reset by a single observed drain.
-        let (bytes, frames) = admission_step(
+        // A window far past the budget is reset by a single drained frame.
+        let (next_last, bytes, frames) = admission_step(
             0,
             1,
             MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
@@ -1436,8 +1466,44 @@ mod tests {
             1,
         )
         .unwrap();
+        assert_eq!(next_last, 1);
         assert_eq!(bytes, 1, "window restarts at the observed frame");
         assert_eq!(frames, 1);
+    }
+
+    /// The keeping-up regression that failed the old capacity-growth heuristic:
+    /// a sender whose channel stays saturated (every drained slot refilled before
+    /// the next check) but whose tick drains one frame per blocked send shows no
+    /// *capacity* growth yet is provably keeping up. The cumulative drained
+    /// counter detects that progress exactly, so the window never accumulates.
+    #[tokio::test]
+    async fn forward_play_bursty_drain_never_trips_keeping_up_sender() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        // Capacity 1: every send blocks until the tick drains the previous frame.
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(1);
+
+        // The tick analog: drain one frame at a time and record it on the shared
+        // progress counter exactly as `drain_one_bounded` does. The channel is
+        // always refilled by the sender before it checks, so a capacity-growth
+        // heuristic never sees progress; the counter does.
+        let drained = conn.drained.clone();
+        let drainer = tokio::spawn(async move {
+            while in_rx.recv().await.is_some() {
+                drained.record_drained(1);
+            }
+        });
+
+        let mut encoder = CompressionEncoder::new(256);
+        let frame = wire_frame(&mut encoder, &[0x00]);
+        // Well over the 1024 budget; the capacity-1 channel serializes each send
+        // with a drain, so the counter advances at least once per unblocked send
+        // and the window resets. The old heuristic disconnected at exactly 1025.
+        for _ in 0..4096 {
+            conn.forward_play(Some(&frame), &in_tx).await.unwrap();
+        }
+        drop(in_tx);
+        drainer.await.unwrap();
     }
 
     /// The pre-play dispatch has the same per-call frame-count budget: a hostile

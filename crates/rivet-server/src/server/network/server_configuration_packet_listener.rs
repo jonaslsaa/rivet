@@ -583,6 +583,7 @@ mod tests {
             std::sync::Arc::new(crate::server::ServerConfig::default()),
             std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new()),
             write,
+            crate::server::tick::channels::InboundDrained::new(),
         );
         conn.set_outbound_protocol(ConnectionProtocol::Configuration);
         conn
