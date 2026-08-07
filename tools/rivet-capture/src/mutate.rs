@@ -15,11 +15,11 @@ use crate::packet::{CapturedPacket, Direction, State};
 pub enum MutationKind {
     /// Swap two adjacent packets of different identities.
     Reorder,
-    /// Drop one packet (a chunk, accept_teleportation, or a registry_data).
+    /// Drop the `accept_teleportation` (the join's required teleport ack).
     Delete,
-    /// Duplicate one packet.
+    /// Duplicate the first `level_chunk_with_light`.
     Insert,
-    /// Perturb a kept field (movement y, teleport id, keepalive long).
+    /// Rewrite the `accept_teleportation` teleport id.
     Field,
     /// Corrupt the canonical form (a buggy-normalizer simulation).
     Canon,
