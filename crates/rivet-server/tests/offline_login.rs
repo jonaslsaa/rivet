@@ -280,6 +280,101 @@ fn expected_brand_frame() -> Vec<u8> {
     wire
 }
 
+/// The expected `ClientboundUpdateEnabledFeaturesPacket` frame payload: config
+/// clientbound id 12, the `{minecraft:vanilla}` set (the M1 offline world's
+/// enabled features). `varint(0)` declaredLength prefix (sub-threshold).
+fn expected_enabled_features_frame() -> Vec<u8> {
+    let mut payload = varint(12);
+    payload.extend_from_slice(b"\x01\x11minecraft:vanilla");
+    let mut wire = varint(0);
+    wire.extend_from_slice(&payload);
+    wire
+}
+
+/// The expected `ClientboundSelectKnownPacks` frame payload: config clientbound
+/// id 14, the `[minecraft:core:26.2]` list (the capture's advertised pack).
+/// `varint(0)` declaredLength prefix.
+fn expected_select_known_packs_frame() -> Vec<u8> {
+    let mut payload = varint(14);
+    payload.extend_from_slice(b"\x01\x09minecraft\x04core\x0426.2");
+    let mut wire = varint(0);
+    wire.extend_from_slice(&payload);
+    wire
+}
+
+/// Consume the two configuration packets the server sends right after the
+/// brand: `update_enabled_features` (id 12) then `select_known_packs` (id 14).
+/// Returns the two frame payloads (what `read_frame_payload` yields).
+async fn consume_config_sync_opening(stream: &mut TcpStream) -> (Vec<u8>, Vec<u8>) {
+    let enabled = read_frame_payload(stream).await;
+    let select = read_frame_payload(stream).await;
+    (enabled, select)
+}
+
+/// The serverbound `select_known_packs` reply for the given pack triplets,
+/// compressed (varint(0) declaredLength prefix — sub-threshold). The id is
+/// configuration serverbound 7.
+fn serverbound_select_known_packs_reply(packs: &[(&str, &str, &str)]) -> Vec<u8> {
+    let mut body = varint(7);
+    body.extend_from_slice(&varint(packs.len() as i32));
+    for (ns, id, version) in packs {
+        body.extend_from_slice(&varint(ns.len() as i32));
+        body.extend_from_slice(ns.as_bytes());
+        body.extend_from_slice(&varint(id.len() as i32));
+        body.extend_from_slice(id.as_bytes());
+        body.extend_from_slice(&varint(version.len() as i32));
+        body.extend_from_slice(version.as_bytes());
+    }
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// The 29 `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` keys in wire order (the
+/// `ClientboundRegistryDataPacket` stream order).
+const SYNCHRONIZED_KEYS: &[&str] = &[
+    "minecraft:worldgen/biome",
+    "minecraft:chat_type",
+    "minecraft:trim_pattern",
+    "minecraft:trim_material",
+    "minecraft:wolf_variant",
+    "minecraft:wolf_sound_variant",
+    "minecraft:pig_variant",
+    "minecraft:pig_sound_variant",
+    "minecraft:frog_variant",
+    "minecraft:cat_variant",
+    "minecraft:cat_sound_variant",
+    "minecraft:cow_sound_variant",
+    "minecraft:cow_variant",
+    "minecraft:chicken_sound_variant",
+    "minecraft:chicken_variant",
+    "minecraft:zombie_nautilus_variant",
+    "minecraft:painting_variant",
+    "minecraft:sulfur_cube_archetype",
+    "minecraft:dimension_type",
+    "minecraft:damage_type",
+    "minecraft:banner_pattern",
+    "minecraft:enchantment",
+    "minecraft:jukebox_song",
+    "minecraft:instrument",
+    "minecraft:test_environment",
+    "minecraft:test_instance",
+    "minecraft:dialog",
+    "minecraft:world_clock",
+    "minecraft:timeline",
+];
+
+/// Decode a `registry_data` packet's registry key from a decompressed payload
+/// (`[id varint] ++ [len varint] ++ key`).
+fn decode_registry_key(payload: &[u8]) -> String {
+    let (_, used) = decode_varint(payload); // packet id
+    let rest = &payload[used..];
+    let (len, used) = decode_varint(rest);
+    std::str::from_utf8(&rest[used..used + len as usize])
+        .expect("registry key utf8")
+        .to_string()
+}
+
 /// Drive handshake + hello, and assert the login response: the compression
 /// packet (uncompressed, carrying `threshold`) followed by the finished packet
 /// (wire order: compression before finished — the compression packet is queued
@@ -545,35 +640,48 @@ async fn unknown_login_packet_id_closes() {
 }
 
 #[tokio::test]
-async fn select_known_packs_without_negotiation_closes() {
-    // With no `SynchronizeRegistriesTask` in flight, Paper throws
-    // `IllegalStateException("Unexpected response from client: received pack
-    // selection, but no negotiation ongoing")` — surfaced here as a Malformed
-    // close. The body (`List<KnownPack>`, #109) is never parsed.
+async fn select_known_packs_rejects_non_accepting_client() {
+    // A client that does NOT accept `minecraft:core:26.2` (here: an empty pack
+    // list, the RivetProbe capture's reply) forces Paper's full-content path —
+    // every element NBT-encoded. The element codecs are unported, so this
+    // cannot be served faithfully (#109) and the connection closes
+    // deterministically.
     let (addr, server_task) = start_server(config_with_threshold(256)).await;
     let mut client = TcpStream::connect(addr).await.expect("connect");
 
     login_and_assert_response(&mut client, 256).await;
+    let (enabled, select) = consume_config_sync_opening(&mut client).await;
+    assert_eq!(
+        enabled,
+        expected_enabled_features_frame(),
+        "update_enabled_features"
+    );
+    assert_eq!(
+        select,
+        expected_select_known_packs_frame(),
+        "select_known_packs"
+    );
 
-    let mut wire = varint(0); // under threshold → uncompressed
-    wire.extend_from_slice(&varint(7)); // select_known_packs
     client
-        .write_all(&frame(&wire))
+        .write_all(&serverbound_select_known_packs_reply(&[]))
         .await
-        .expect("write select_known_packs");
+        .expect("write empty select_known_packs reply");
 
     expect_eof(&mut client).await;
     server_task.abort();
 }
 
 #[tokio::test]
-async fn finish_configuration_closes_unsupported() {
-    // The finish→play handoff is #100/#101; a finish_configuration is rejected
-    // with the configuration_error key, not silently accepted.
+async fn finish_configuration_before_sync_finishes_closes() {
+    // `handleConfigurationFinished` -> `finishCurrentTask(JoinWorldTask.TYPE)`.
+    // The current task is the registry sync (not JoinWorldTask — the finish→play
+    // handoff is #100/#101), so Java throws `IllegalStateException` — a
+    // deterministic Malformed close.
     let (addr, server_task) = start_server(config_with_threshold(256)).await;
     let mut client = TcpStream::connect(addr).await.expect("connect");
 
     login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
 
     let mut wire = varint(0);
     wire.extend_from_slice(&varint(3)); // finish_configuration
@@ -589,11 +697,15 @@ async fn finish_configuration_closes_unsupported() {
 #[tokio::test]
 async fn config_client_information_valid_keeps_open() {
     // `handleClientInformation` stores the value; a valid body decodes and the
-    // connection stays open (the brand is the last packet, then silence).
+    // connection stays open (the sync opening frames are consumed, then silence).
     let (addr, server_task) = start_server(config_with_threshold(256)).await;
     let mut client = TcpStream::connect(addr).await.expect("connect");
 
     login_and_assert_response(&mut client, 256).await;
+    let (enabled, select) = consume_config_sync_opening(&mut client).await;
+    assert_eq!(enabled, expected_enabled_features_frame());
+    assert_eq!(select, expected_select_known_packs_frame());
+
     client
         .write_all(&client_information_frame(4))
         .await
@@ -612,6 +724,7 @@ async fn config_client_information_malformed_enum_closes() {
     let mut client = TcpStream::connect(addr).await.expect("connect");
 
     login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
 
     let mut body = varint(CONFIG_CLIENT_INFORMATION_ID);
     body.extend_from_slice(&varint(5));
@@ -624,6 +737,100 @@ async fn config_client_information_malformed_enum_closes() {
         .write_all(&frame(&wire))
         .await
         .expect("write malformed");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_registry_sync_opening_frames() {
+    // The configuration sync opening: brand, then update_enabled_features
+    // (`{minecraft:vanilla}`), then select_known_packs (`[minecraft:core:26.2]`).
+    // The latter two pin the capture's wire bytes (`config_update_enabled_features.hex`
+    // and `config_clientbound_select_known_packs.hex`).
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    let (enabled, select) = consume_config_sync_opening(&mut client).await;
+
+    assert_eq!(enabled, expected_enabled_features_frame());
+    assert_eq!(select, expected_select_known_packs_frame());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn select_known_packs_accepting_core_sends_registries_and_tags() {
+    // The M1 vanilla client accepts `minecraft:core:26.2`. The server then sends
+    // the 29 `ClientboundRegistryDataPacket`s (each element `data` skipped) and
+    // the `ClientboundUpdateTagsPacket`, in `SYNCHRONIZED_REGISTRIES` order.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&serverbound_select_known_packs_reply(&[(
+            "minecraft",
+            "core",
+            "26.2",
+        )]))
+        .await
+        .expect("write accepting select_known_packs reply");
+
+    // 29 registry_data packets (small registries stay sub-threshold and come
+    // through `read_compressed_packet` with declaredLength 0; large ones are
+    // zlib-compressed — the helper handles both).
+    let mut seen_keys = Vec::new();
+    for (i, expected_key) in SYNCHRONIZED_KEYS.iter().enumerate() {
+        let (_, payload) = read_compressed_packet(&mut client).await;
+        let (id, _) = decode_varint(&payload);
+        assert_eq!(id, 7, "registry_data id");
+        let key = decode_registry_key(&payload);
+        assert_eq!(key, *expected_key, "registry_data {i} key");
+        seen_keys.push(key);
+    }
+    assert_eq!(seen_keys, SYNCHRONIZED_KEYS.to_vec());
+
+    // The update_tags trailer (id 13).
+    let (_, payload) = read_compressed_packet(&mut client).await;
+    let (id, _) = decode_varint(&payload);
+    assert_eq!(id, 13, "update_tags id");
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn finish_configuration_after_sync_closes() {
+    // After the registry sync finishes (client accepted the core pack), the
+    // queue is empty — `JoinWorldTask` (#100/#101) is never queued, so a
+    // `finish_configuration` still mismatches `finishCurrentTask` and closes.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    client
+        .write_all(&serverbound_select_known_packs_reply(&[(
+            "minecraft",
+            "core",
+            "26.2",
+        )]))
+        .await
+        .expect("write accepting select_known_packs reply");
+    for _ in 0..29 {
+        read_compressed_packet(&mut client).await;
+    }
+    read_compressed_packet(&mut client).await; // update_tags
+
+    let mut wire = varint(0);
+    wire.extend_from_slice(&varint(3)); // finish_configuration
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write finish_configuration");
 
     expect_eof(&mut client).await;
     server_task.abort();

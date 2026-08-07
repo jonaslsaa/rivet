@@ -8,4 +8,5 @@ pub mod block_properties;
 pub mod block_states;
 pub mod blocks;
 pub mod registries;
+pub mod synchronized;
 pub mod tags;
