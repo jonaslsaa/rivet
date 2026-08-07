@@ -89,15 +89,22 @@ pub struct Connection {
     compression: Option<CompressionState>,
     outbound_protocol: Option<ConnectionProtocol>,
     /// The play-state inbound drain window: cumulative decompressed bytes
-    /// forwarded to the tick channel since the channel was last observed empty
-    /// (the tick thread drained it). The frame/byte budget in
-    /// [`Connection::forward_play`] is enforced against this window so a
-    /// hostile client cannot let the bounded channel retain multi-GiB of
-    /// decompressed frames. Reset when the channel is observed empty.
+    /// forwarded to the tick channel since the last observed tick-drain
+    /// progress. The frame/byte budget in [`Connection::forward_play`] is
+    /// enforced against this window so a hostile client cannot let the bounded
+    /// channel retain multi-GiB of decompressed frames. Reset whenever the tick
+    /// thread makes drain progress (see [`Self::inbound_window_last_capacity`]).
     inbound_window_bytes: usize,
     /// The play-state inbound drain window, frame-count half (see
     /// [`Self::inbound_window_bytes`]).
     inbound_window_frames: usize,
+    /// The channel capacity (free slots) observed right after the previous
+    /// forward to the tick channel. [`Connection::forward_play`] resets the
+    /// admission window when the current capacity is above this — proof the tick
+    /// thread drained at least one frame since the last push, so the client is
+    /// keeping up. The fully empty channel (capacity == max) is the extreme
+    /// case.
+    inbound_window_last_capacity: usize,
     /// The server-stop signal. `flush_out` races it so an outbound write that
     /// backpressures (a slow or non-reading peer) is aborted on shutdown instead
     /// of wedging the per-connection task and `serve()`'s shutdown drain.
@@ -126,6 +133,7 @@ impl Connection {
             outbound_protocol: None,
             inbound_window_bytes: 0,
             inbound_window_frames: 0,
+            inbound_window_last_capacity: 0,
             shutdown,
         }
     }
@@ -149,6 +157,13 @@ impl Connection {
     /// to [`ConnectionProtocol::Play`] before handing the connection off.
     pub fn outbound_protocol(&self) -> Option<ConnectionProtocol> {
         self.outbound_protocol
+    }
+
+    /// Whether the server-stop signal has fired. Callers map a failed flush to
+    /// [`DisconnectReason::ServerShutdown`] (not `EndOfStream`) when this is
+    /// set: a flush aborted by shutdown is a stop, not the peer going away.
+    pub fn shutdown_requested(&self) -> bool {
+        self.shutdown.is_requested()
     }
 
     /// The encoded frames queued for the wire (netty `channel.write` queue).
@@ -248,20 +263,20 @@ impl Connection {
     /// The inbound budget ([`MAX_INBOUND_FRAMES_PER_DRAIN`] /
     /// [`MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN`]) is enforced here as an
     /// *admission* cap against a sliding window (`inbound_window_*`) that resets
-    /// whenever the channel is observed empty (the tick thread drained it). Each
-    /// compressed frame can decompress to 8 MiB, so without the cap a hostile
-    /// client flooding 8 MiB frames faster than the tick drains could fill the
-    /// 1024-deep channel with multi-GiB of live frames; the admission cap
-    /// disconnects exactly such a client, while a client the tick keeps up with
-    /// is never affected (its window resets each drain). Exceeding the budget
-    /// reports [`DisconnectReason::InboundOverflow`].
+    /// on observed tick-drain progress: whenever the channel has more free slots
+    /// than it did after the previous push, the tick thread drained some, so the
+    /// client is keeping up and the window restarts. A client the tick keeps up
+    /// with is never affected, even when the channel is never fully empty; a
+    /// no-progress flood (the tick never drains) never resets, so the window
+    /// accumulates to the cap and the client is disconnected. Exceeding the
+    /// budget reports [`DisconnectReason::InboundOverflow`].
     ///
     /// The authoritative per-tick bound is the tick side: [`ConnectionRegistry::drain_one`]
     /// stops draining at the same budget, so even a sender that races the window
-    /// reset (observing the channel empty mid-drain and refilling) cannot make
-    /// one tick deliver more than the budget. This admission cap is the
-    /// memory-retention backstop that keeps the bounded channel from holding
-    /// multi-GiB before that tick-side bound is even reached.
+    /// reset (observing the channel mid-drain and refilling) cannot make one tick
+    /// deliver more than the budget. This admission cap is the memory-retention
+    /// backstop that keeps the bounded channel from holding multi-GiB before that
+    /// tick-side bound is even reached.
     pub async fn forward_play(
         &mut self,
         data: Option<&[u8]>,
@@ -274,10 +289,13 @@ impl Connection {
             let Some(packet) = self.next_frame()? else {
                 break;
             };
-            // The tick thread fully drained the channel since the last push:
-            // the client is keeping up, so the window restarts. `capacity()`
-            // is the number of free slots; at the max the channel is empty.
-            if in_tx.capacity() == in_tx.max_capacity() {
+            // Observe the tick thread's drain progress since the previous push:
+            // if the channel has more free slots now than it did right after
+            // that push, the tick drained some — the client is keeping up, so
+            // the window restarts. The fully-empty channel (capacity == max) is
+            // the extreme of this. A no-progress flood never satisfies the
+            // check, so its window accumulates to the budget and trips.
+            if in_tx.capacity() > self.inbound_window_last_capacity {
                 self.inbound_window_bytes = 0;
                 self.inbound_window_frames = 0;
             }
@@ -298,6 +316,7 @@ impl Connection {
             {
                 return Err(DisconnectReason::ServerShutdown);
             }
+            self.inbound_window_last_capacity = in_tx.capacity();
         }
         Ok(())
     }
@@ -397,33 +416,53 @@ impl Connection {
     ///
     /// Ordinary outbound writes backpressure: a slow-but-live peer is never
     /// disconnected for taking longer than the read timeout to drain — the write
-    /// simply blocks until the peer reads (the socket send window refills). The
-    /// only bound is shutdown: the write races the server-stop signal and is
-    /// aborted when shutdown is requested, so a non-reading peer cannot wedge
-    /// the per-connection task (or `serve()`'s shutdown drain) forever.
+    /// simply blocks until the peer reads (the socket send window refills).
+    ///
+    /// The only bound is shutdown. A flush reached after shutdown is already
+    /// requested routes through the bounded shutdown flush
+    /// ([`Self::flush_out_bounded`]): racing an already-fired signal against an
+    /// immediately-writable socket could drop the queued frames, so the
+    /// wall-clock bound is used instead (preserving and attempting them). A
+    /// shutdown that fires *mid-write* aborts the write but preserves the queued
+    /// frames in `out_buf`, so a subsequent bounded flush can still attempt
+    /// delivery. Either way the connection cannot wedge the per-connection task
+    /// (or `serve()`'s shutdown drain) forever.
     pub async fn flush_out(&mut self) -> std::io::Result<()> {
+        if self.out_buf.is_empty() {
+            return Ok(());
+        }
+        if self.shutdown.is_requested() {
+            return self.flush_out_bounded(self.config.read_timeout).await;
+        }
         let pending = std::mem::take(&mut self.out_buf);
-        if !pending.is_empty() {
-            let write = self.write.write_all(&pending);
-            tokio::pin!(write);
-            tokio::select! {
-                result = write.as_mut() => result?,
-                _ = self.shutdown.wait_async() => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "outbound flush aborted: server shutting down",
-                    ));
-                }
+        let write = self.write.write_all(&pending);
+        tokio::pin!(write);
+        tokio::select! {
+            result = write.as_mut() => result,
+            _ = self.shutdown.wait_async() => {
+                // Preserve the frames for the bounded shutdown flush (a later
+                // `flush_out_bounded` from the shutdown drain / `close`): put
+                // them back ahead of anything queued during the write so the
+                // wire order is unchanged.
+                let mut preserved = pending;
+                preserved.extend_from_slice(&self.out_buf);
+                self.out_buf = preserved;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "outbound flush aborted: server shutting down",
+                ))
             }
         }
-        Ok(())
     }
 
     /// Flush pending outbound frames, bounding the write with a wall-clock
-    /// timeout. Used by the shutdown drain ([`drain_to_close`]) where shutdown
-    /// is already requested, so the shutdown-signal race of [`Self::flush_out`]
-    /// would abort immediately; the timeout is what prevents a non-reading peer
-    /// from stalling the drain.
+    /// timeout. Used where shutdown is already requested — the shutdown drain
+    /// ([`drain_to_close`](super::server_connection_listener::drain_to_close))
+    /// and any normal-path flush reached after shutdown ([`Self::flush_out`]) —
+    /// where the shutdown-signal race of [`Self::flush_out`] would abort
+    /// immediately. The timeout is what prevents a non-reading peer from
+    /// stalling the drain; on timeout the frames are abandoned (boundedly
+    /// attempted, the peer is not reading).
     pub async fn flush_out_bounded(&mut self, timeout: std::time::Duration) -> std::io::Result<()> {
         let pending = std::mem::take(&mut self.out_buf);
         if !pending.is_empty() {
@@ -915,7 +954,9 @@ mod tests {
     }
 
     /// A non-reading peer cannot wedge `flush_out` once shutdown is requested:
-    /// the write races the shutdown signal and aborts.
+    /// the write races the shutdown signal and aborts. The aborted write must
+    /// preserve the queued frames (not drop them) so a subsequent bounded
+    /// shutdown flush can still attempt delivery.
     #[tokio::test]
     async fn flush_out_aborts_on_shutdown_with_stuck_write() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -938,11 +979,14 @@ mod tests {
         // write can only complete via the shutdown abort.
         conn.queue_raw_frame(Bytes::from(vec![0x42u8; 64 * 1024 * 1024]));
 
-        let flush = tokio::spawn(async move { conn.flush_out().await });
+        let task = tokio::spawn(async move {
+            let result = conn.flush_out().await;
+            (result, conn)
+        });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         shutdown.request();
 
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), flush)
+        let (result, mut conn) = tokio::time::timeout(std::time::Duration::from_secs(2), task)
             .await
             .expect("flush did not abort on shutdown")
             .unwrap();
@@ -950,6 +994,21 @@ mod tests {
             result.is_err(),
             "flush must abort when shutdown fires during a stuck write"
         );
+        // The frames survive the abort (mem::take put them back ahead of
+        // anything new), so a bounded shutdown flush still attempts them.
+        assert!(
+            !conn.out_buf.is_empty(),
+            "aborted flush must preserve the queued frames"
+        );
+        let start = std::time::Instant::now();
+        let bounded = conn
+            .flush_out_bounded(std::time::Duration::from_millis(50))
+            .await;
+        assert!(
+            bounded.is_err(),
+            "the bounded retry still times out on the non-reading peer"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
         // Keep the client socket alive (dropping it would close the peer and
         // make write_all error instead of block).
         assert!(client.local_addr().is_ok());
@@ -1106,6 +1165,87 @@ mod tests {
         }
         drop(in_tx);
         drainer.await.unwrap();
+    }
+
+    /// A sustained sender the tick keeps up with is never disconnected even when
+    /// the channel never becomes fully empty: the admission window resets on
+    /// observed drain progress, not on the channel reaching zero. A small
+    /// channel (capacity 8, below the 1024 budget) with a partial drainer that
+    /// always leaves frames in the channel would, under an empty-only reset,
+    /// accumulate the window past the budget and falsely disconnect. The
+    /// progress-based reset never trips: 1200 frames (above the 1024 budget) are
+    /// forwarded and drained while the channel always holds frames.
+    #[tokio::test]
+    async fn forward_play_window_resets_on_progress_with_never_empty_small_channel() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(8);
+
+        let mut encoder = CompressionEncoder::new(256);
+        let frame = wire_frame(&mut encoder, &[0x00]);
+        let mut batch = BytesMut::new();
+        for _ in 0..4 {
+            batch.extend_from_slice(&frame);
+        }
+        // Prefill 4 frames: the channel is never empty from here on.
+        for _ in 0..4 {
+            in_tx
+                .try_send(ServerboundFrame {
+                    bytes: frame.clone(),
+                })
+                .unwrap();
+        }
+        // 300 cycles x 4 frames = 1200 frames forwarded, well above the 1024
+        // budget. Each cycle sends 4 (channel 4 -> 8) then drains 4 (8 -> 4), so
+        // the channel is never empty yet the tick (the test) makes progress
+        // every cycle.
+        for _ in 0..300 {
+            conn.forward_play(Some(&batch), &in_tx).await.unwrap();
+            for _ in 0..4 {
+                in_rx.try_recv().unwrap();
+            }
+        }
+        // 1200 sent + 4 prefilled = 1204; 1200 drained, the 4 prefilled remain.
+        let mut remaining = 0;
+        while in_rx.try_recv().is_ok() {
+            remaining += 1;
+        }
+        assert_eq!(
+            remaining, 4,
+            "the 4 prefilled frames are still in the channel"
+        );
+    }
+
+    /// The same progress-based reset with a large channel: partial drain
+    /// progress (not a full empty) between batches resets the window, so a
+    /// sender that sustains more than the budget over time is not disconnected.
+    #[tokio::test]
+    async fn forward_play_window_resets_on_partial_drain_progress() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(8192);
+
+        let mut encoder = CompressionEncoder::new(256);
+        let frame = wire_frame(&mut encoder, &[0x00]);
+        let mut batch = BytesMut::new();
+        for _ in 0..200 {
+            batch.extend_from_slice(&frame);
+        }
+        for _ in 0..6 {
+            // 200 frames per call; the channel is never fully drained between
+            // calls (only 100 of the 200 are consumed), yet the drain progress
+            // resets the window each call.
+            conn.forward_play(Some(&batch), &in_tx).await.unwrap();
+            for _ in 0..100 {
+                in_rx.try_recv().unwrap();
+            }
+        }
+        // 1200 frames forwarded over the 1024 budget, never disconnected.
+        let mut remaining = 0;
+        while in_rx.try_recv().is_ok() {
+            remaining += 1;
+        }
+        assert_eq!(remaining, 600, "1200 sent, 600 drained, 600 retained");
     }
 
     /// The pre-play dispatch has the same per-call frame-count budget: a hostile

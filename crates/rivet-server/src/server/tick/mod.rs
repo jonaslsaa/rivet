@@ -202,6 +202,9 @@ mod tests {
 
     const REMOTE: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 25565);
 
+    /// The recorded-delivery log shared with a tickable: `(connection, bytes)`.
+    type Recorded = Arc<Mutex<Vec<(ConnectionId, Vec<u8>)>>>;
+
     fn frame(byte: u8) -> ServerboundFrame {
         ServerboundFrame {
             bytes: Bytes::from(vec![byte]),
@@ -233,6 +236,93 @@ mod tests {
             Arc::new(TickStats::default()),
         );
         (loop_, lifecycle_tx)
+    }
+
+    /// Like [`test_loop`], but records `(ConnectionId, bytes)` so multi-connection
+    /// tests can assert per-connection distribution and FIFO order.
+    fn test_loop_record_ids(
+        recorded: Recorded,
+    ) -> (ServerTickLoop, tokio::sync::mpsc::Sender<LifecycleEvent>) {
+        let (lifecycle_tx, lifecycle_rx) = tokio::sync::mpsc::channel(64);
+        let shutdown = Arc::new(Shutdown::new());
+        let sim = Arc::new(SimTime::with_shutdown(Arc::clone(&shutdown)));
+        let time: Arc<dyn time::TickTime> = sim;
+        let scheduler = TickScheduler::new(NANOS_PER_TICK, 5, 0);
+        let recorded_c = Arc::clone(&recorded);
+        let tickables: Vec<Tickable> = vec![Box::new(move |ctx| {
+            for (id, frame) in &ctx.inbound {
+                recorded_c.lock().unwrap().push((*id, frame.bytes.to_vec()));
+            }
+        })];
+        let loop_ = ServerTickLoop::new(
+            scheduler,
+            time,
+            shutdown,
+            lifecycle_rx,
+            tickables,
+            Arc::new(TickStats::default()),
+        );
+        (loop_, lifecycle_tx)
+    }
+
+    /// Like [`test_loop`], but sums delivered bytes instead of copying them —
+    /// the aggregate byte-budget test deals in 8 MiB frames, so it avoids the
+    /// extra copy of recording every frame.
+    fn test_loop_sum_bytes(
+        sum: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> (ServerTickLoop, tokio::sync::mpsc::Sender<LifecycleEvent>) {
+        let (lifecycle_tx, lifecycle_rx) = tokio::sync::mpsc::channel(64);
+        let shutdown = Arc::new(Shutdown::new());
+        let sim = Arc::new(SimTime::with_shutdown(Arc::clone(&shutdown)));
+        let time: Arc<dyn time::TickTime> = sim;
+        let scheduler = TickScheduler::new(NANOS_PER_TICK, 5, 0);
+        let sum_c = Arc::clone(&sum);
+        let tickables: Vec<Tickable> = vec![Box::new(move |ctx| {
+            for (_id, frame) in &ctx.inbound {
+                sum_c.fetch_add(frame.bytes.len(), std::sync::atomic::Ordering::Relaxed);
+            }
+        })];
+        let loop_ = ServerTickLoop::new(
+            scheduler,
+            time,
+            shutdown,
+            lifecycle_rx,
+            tickables,
+            Arc::new(TickStats::default()),
+        );
+        (loop_, lifecycle_tx)
+    }
+
+    /// A frame whose bytes encode `(id, seq)` so tests can verify per-connection
+    /// FIFO order across an aggregate drain (the byte budget is far away).
+    fn frame_seq(id: u8, seq: usize) -> ServerboundFrame {
+        ServerboundFrame {
+            bytes: Bytes::from(vec![id, (seq & 0xFF) as u8, ((seq >> 8) & 0xFF) as u8]),
+        }
+    }
+
+    /// Group delivered frames per connection, preserving delivery order within
+    /// each connection (the recorded log is in drain order, which is
+    /// per-connection FIFO interleaved across connections).
+    fn group_by_connection(
+        recorded: &[(ConnectionId, Vec<u8>)],
+    ) -> std::collections::HashMap<ConnectionId, Vec<Vec<u8>>> {
+        let mut map: std::collections::HashMap<ConnectionId, Vec<Vec<u8>>> =
+            std::collections::HashMap::new();
+        for (id, bytes) in recorded {
+            map.entry(*id).or_default().push(bytes.clone());
+        }
+        map
+    }
+
+    /// Assert that one connection's recorded frames arrived in the exact send
+    /// order (each frame carries its sequence in bytes 1..3).
+    fn assert_fifo(id: ConnectionId, frames: &[Vec<u8>]) {
+        for (k, f) in frames.iter().enumerate() {
+            assert_eq!(f[0], id.0 as u8, "connection {id} frames all belong to it");
+            let seq = (f[1] as usize) | ((f[2] as usize) << 8);
+            assert_eq!(seq, k, "connection {id} frames arrive in FIFO order");
+        }
     }
 
     /// Production-path regression: even with the aggregate budget untouched
@@ -320,6 +410,128 @@ mod tests {
             total,
             3 * 8 * 1024 * 1024,
             "retained third frame delivered later"
+        );
+    }
+
+    /// Production-path aggregate frame budget: 9 flooding connections x 1024
+    /// frames each = 9216 frames. The aggregate budget (8192 = 8 x 1024) binds
+    /// across connections: exactly 8 connections are drained to their cap on
+    /// tick 1, the 9th is retained whole (never partially drained), and its
+    /// frames are delivered — in FIFO order — on tick 2.
+    #[test]
+    fn run_tick_aggregate_frame_cap_across_connections() {
+        let recorded = Arc::new(Mutex::new(Vec::<(ConnectionId, Vec<u8>)>::new()));
+        let (mut loop_, lifecycle_tx) = test_loop_record_ids(Arc::clone(&recorded));
+
+        let mut senders = Vec::new();
+        for i in 0..9u64 {
+            let (in_tx, in_rx) = tokio::sync::mpsc::channel(8192);
+            let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+            let id = ConnectionId(i + 1);
+            lifecycle_tx
+                .try_send(LifecycleEvent::Connect {
+                    id,
+                    remote: REMOTE,
+                    in_rx,
+                    out_tx,
+                })
+                .unwrap();
+            for seq in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+                in_tx.try_send(frame_seq((i + 1) as u8, seq)).unwrap();
+            }
+            senders.push(in_tx);
+        }
+
+        loop_.run_tick();
+        let guard = recorded.lock().unwrap();
+        let first = group_by_connection(&guard);
+        let counts: std::collections::HashMap<ConnectionId, usize> = first
+            .iter()
+            .map(|(id, frames)| (*id, frames.len()))
+            .collect();
+        assert_eq!(
+            counts.values().sum::<usize>(),
+            MAX_INBOUND_FRAMES_PER_TICK,
+            "tick 1 delivers exactly the aggregate frame budget"
+        );
+        // Whole per-connection drains: 8 connections fully served, none partial
+        // (the aggregate break happens between connections, never mid-drain).
+        let fully_served = counts
+            .values()
+            .filter(|&&n| n == MAX_INBOUND_FRAMES_PER_DRAIN)
+            .count();
+        let partially = counts
+            .values()
+            .filter(|&&n| n != 0 && n != MAX_INBOUND_FRAMES_PER_DRAIN)
+            .count();
+        assert_eq!(fully_served, 8, "8 connections drained to their cap");
+        assert_eq!(
+            partially, 0,
+            "no partial drain across the aggregate boundary"
+        );
+        for (id, frames) in &first {
+            assert_fifo(*id, frames);
+        }
+        drop(guard);
+
+        loop_.run_tick();
+        let guard = recorded.lock().unwrap();
+        let second = group_by_connection(&guard);
+        assert_eq!(
+            second.values().map(|f| f.len()).sum::<usize>(),
+            MAX_INBOUND_FRAMES_PER_TICK + MAX_INBOUND_FRAMES_PER_DRAIN,
+            "the retained connection is delivered on a later tick"
+        );
+        assert_eq!(second.len(), 9, "all 9 connections delivered by tick 2");
+        for (id, frames) in &second {
+            assert_fifo(*id, frames);
+        }
+    }
+
+    /// Production-path aggregate byte budget: 9 connections x 2 x 8 MiB frames =
+    /// 144 MiB total. The aggregate byte budget (128 MiB = 8 x 16 MiB) binds
+    /// across connections: 8 connections deliver their full 16 MiB on tick 1,
+    /// the 9th is retained and delivered later.
+    #[test]
+    fn run_tick_aggregate_byte_cap_across_connections() {
+        let sum = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (mut loop_, lifecycle_tx) = test_loop_sum_bytes(Arc::clone(&sum));
+
+        let mut senders = Vec::new();
+        for i in 0..9u64 {
+            let (in_tx, in_rx) = tokio::sync::mpsc::channel(64);
+            let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+            let id = ConnectionId(i + 1);
+            lifecycle_tx
+                .try_send(LifecycleEvent::Connect {
+                    id,
+                    remote: REMOTE,
+                    in_rx,
+                    out_tx,
+                })
+                .unwrap();
+            for _ in 0..2 {
+                in_tx
+                    .try_send(ServerboundFrame {
+                        bytes: Bytes::from(vec![0x42u8; 8 * 1024 * 1024]),
+                    })
+                    .unwrap();
+            }
+            senders.push(in_tx);
+        }
+
+        loop_.run_tick();
+        assert_eq!(
+            sum.load(std::sync::atomic::Ordering::Relaxed),
+            MAX_INBOUND_BYTES_PER_TICK,
+            "tick 1 delivers exactly the aggregate byte budget"
+        );
+
+        loop_.run_tick();
+        assert_eq!(
+            sum.load(std::sync::atomic::Ordering::Relaxed),
+            MAX_INBOUND_BYTES_PER_TICK + MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
+            "the retained connection's bytes are delivered on a later tick"
         );
     }
 }

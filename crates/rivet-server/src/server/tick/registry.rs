@@ -101,10 +101,9 @@ impl ConnectionRegistry {
     /// tick never delivers more than `MAX_INBOUND_FRAMES_PER_DRAIN` frames or
     /// `MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN` bytes from one connection,
     /// even against a sender that concurrently refills the channel while this
-    /// drains (the tokio-side admission window can race an observed-empty
-    /// channel mid-drain and reset, so this cap is what actually stops a single
-    /// tick from processing a multi-GiB flood). No frame is dropped and the cap
-    /// is strict:
+    /// drains (the tokio-side admission window can race the drain-progress
+    /// reset mid-drain, so this cap is what actually stops a single tick from
+    /// processing a multi-GiB flood). No frame is dropped and the cap is strict:
     ///
     /// - the frame-count cap is checked before receiving, so the excess stays
     ///   in the channel (deterministic retention);
