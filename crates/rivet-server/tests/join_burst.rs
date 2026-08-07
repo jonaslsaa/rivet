@@ -300,10 +300,10 @@ fn play_sender_send_to_missing_connection_errors_gone() {
 
 // ---- Byte-exact burst bodies against the capture + fixtures -----------------
 
-/// The `initialize_border` body the capture's id-43 line records (both joins
-/// carry it): `center 0,0; old = new size = 59999968.0` (the float
-/// `5.999997E7F` promoted to double); `lerp_time 0; absolute_max_size 29999984;
-/// warning_blocks 5; warning_time 300`.
+/// The `initialize_border` body the capture's id-43 line records (both
+/// `sendLevelInfo` occurrences carry it): `center 0,0; old = new size =
+/// 59999968.0` (the float `5.999997E7F` promoted to double); `lerp_time 0;
+/// absolute_max_size 29999984; warning_blocks 5; warning_time 300`.
 fn border_body() -> Vec<u8> {
     hex_bytes("00000000000000000000000000000000418c9c3700000000418c9c370000000000f086a70e05ac02")
 }

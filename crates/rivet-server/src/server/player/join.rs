@@ -12,9 +12,11 @@
 //! `player_info_update` broadcast; Slice A ports only this first-occurrence
 //! foundation. The second block re-sends the same four members
 //! (`initialize_border` → `set_time` → `set_default_spawn_position` →
-//! `game_event`) after `player_info_update` (and after the entity pairing at
-//! line 291); it is deferred to Slice B. Its ordering is unambiguous: it is the
-//! LAST burst member — nothing in the burst follows it in `placeNewPlayer`.
+//! `game_event`) after `player_info_update` (and after the addEntity entity
+//! pairing); it is deferred to Slice B. It is the last of the Slice A
+//! level-snapshot content: the later `initInventoryMenu` re-sends
+//! `container_set_content`/`container_set_slot` (18/20), so nothing in the
+//! snapshot itself follows it.
 //!
 //! This burst is `PLAY_BURST_ORDER` restricted to the Slice A members — the
 //! ten members Paper sends in between are deferred, keeping the relative order
