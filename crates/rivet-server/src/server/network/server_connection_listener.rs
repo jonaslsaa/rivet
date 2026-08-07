@@ -158,7 +158,13 @@ async fn run_connection(
     info!(%id, %remote, "connection established");
 
     let (read, write) = socket.into_split();
-    let mut conn = Connection::new(id, remote, Arc::clone(&config), write);
+    let mut conn = Connection::new(
+        id,
+        remote,
+        Arc::clone(&config),
+        Arc::clone(&shutdown),
+        write,
+    );
     let mut listener: Box<dyn PacketListener> = Box::new(ServerHandshakePacketListener);
 
     // Own the tick-side channel ends handed over on registration. `in_tx` is
@@ -225,7 +231,16 @@ async fn run_connection(
 /// Handle one outbound event, flushing queued frames before a disconnect. Returns
 /// `Some(reason)` when the connection should close (a `Disconnect` event, or the
 /// channel being gone), `None` to keep looping.
-async fn handle_outbound(conn: &mut Connection, event: OutboundEvent) -> Option<DisconnectReason> {
+///
+/// `bound` selects the flush flavor: `None` (normal operation) uses the
+/// backpressure-then-shutdown-abort flush; `Some(timeout)` (the shutdown drain)
+/// bounds the write with a wall-clock timeout, since shutdown is already
+/// requested there.
+async fn handle_outbound(
+    conn: &mut Connection,
+    event: OutboundEvent,
+    bound: Option<Duration>,
+) -> Option<DisconnectReason> {
     match event {
         OutboundEvent::Packet { frame } => {
             conn.queue_raw_frame(frame);
@@ -234,7 +249,11 @@ async fn handle_outbound(conn: &mut Connection, event: OutboundEvent) -> Option<
         OutboundEvent::Disconnect { reason } => {
             // Paper's `send(disconnect, thenRun(disconnect))` ordering: flush
             // any frames already queued before this disconnect, then close.
-            if conn.flush_out().await.is_err() {
+            let flushed = match bound {
+                Some(timeout) => conn.flush_out_bounded(timeout).await,
+                None => conn.flush_out().await,
+            };
+            if flushed.is_err() {
                 return Some(DisconnectReason::EndOfStream);
             }
             Some(reason)
@@ -246,7 +265,7 @@ async fn handle_outbound(conn: &mut Connection, event: OutboundEvent) -> Option<
 /// they are consumed. Returns the disconnect reason when a `Disconnect` event is
 /// encountered (its own flush happens inside [`handle_outbound`]); `None` when
 /// the channel is simply empty or already gone (the caller reports the terminal
-/// reason).
+/// reason). Normal-path writes backpressure (no wall-clock timeout).
 async fn drain_outbound(
     conn: &mut Connection,
     out_rx: &mut mpsc::Receiver<OutboundEvent>,
@@ -255,7 +274,7 @@ async fn drain_outbound(
     // Disconnect event (returned by handle_outbound) already carried its own
     // close reason, and any frames are flushed below.
     while let Ok(event) = out_rx.try_recv() {
-        if let Some(reason) = handle_outbound(conn, event).await {
+        if let Some(reason) = handle_outbound(conn, event, None).await {
             return Some(reason);
         }
     }
@@ -272,8 +291,9 @@ async fn drain_outbound(
 /// waiting on `recv()` consumes that pass in order and `None` means the stop is
 /// complete. Frames are flushed as they are consumed, so they reach the client
 /// before the socket closes (Paper's `stopServer` disconnecting each player
-/// before the listener shuts down). The read timeout bounds the wait defensively
-/// in case the tick side never finishes; we flush and close either way.
+/// before the listener shuts down). The drain timeout bounds both the wait and
+/// the writes: shutdown is already requested here, so the shutdown-abort flush
+/// would never flush, and a non-reading peer would otherwise stall the drain.
 async fn drain_to_close(
     conn: &mut Connection,
     out_rx: &mut mpsc::Receiver<OutboundEvent>,
@@ -282,7 +302,7 @@ async fn drain_to_close(
     loop {
         match tokio::time::timeout(drain_timeout, out_rx.recv()).await {
             Ok(Some(event)) => {
-                if let Some(reason) = handle_outbound(conn, event).await {
+                if let Some(reason) = handle_outbound(conn, event, Some(drain_timeout)).await {
                     return reason;
                 }
                 // A packet: keep draining (the Disconnect comes after it).
@@ -291,7 +311,7 @@ async fn drain_to_close(
             Ok(None) | Err(_) => {
                 // `None`: the tick side dropped every `out_tx` — the stop is
                 // complete. Timeout: the tick side never finished; close anyway.
-                if conn.flush_out().await.is_err() {
+                if conn.flush_out_bounded(drain_timeout).await.is_err() {
                     return DisconnectReason::EndOfStream;
                 }
                 return DisconnectReason::ServerShutdown;
@@ -392,7 +412,7 @@ async fn conn_loop(
                         return DisconnectReason::Overflow;
                     }
                 };
-                if let Some(reason) = handle_outbound(conn, event).await {
+                if let Some(reason) = handle_outbound(conn, event, None).await {
                     return reason;
                 }
                 // One event handled; loop to drain the rest and flush.
@@ -472,7 +492,13 @@ mod tests {
         let client = TcpStream::connect(addr).await.unwrap();
         let (server_sock, _) = listener.accept().await.unwrap();
         let (_read, write) = server_sock.into_split();
-        let conn = Connection::new(ConnectionId(1), addr, test_config(), write);
+        let conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            test_config(),
+            Arc::new(Shutdown::new()),
+            write,
+        );
         (conn, client)
     }
 
@@ -620,13 +646,19 @@ mod tests {
         let (server_sock, _) = listener.accept().await.unwrap();
         let (read, write) = server_sock.into_split();
         let config = test_config();
-        let mut conn = Connection::new(ConnectionId(1), addr, Arc::clone(&config), write);
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+        );
 
         // Inbound channel capacity 1: a single forwarded frame fills it, so the
         // second `send` parks.
         let (in_tx, in_rx) = mpsc::channel::<ServerboundFrame>(1);
         let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
-        let shutdown = Arc::new(Shutdown::new());
         let played = Arc::new(tokio::sync::Notify::new());
         let mut listener_box: Box<dyn PacketListener> = Box::new(PlayOnFirst {
             played: Arc::clone(&played),

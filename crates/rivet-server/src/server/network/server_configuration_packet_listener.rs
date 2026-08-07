@@ -581,6 +581,7 @@ mod tests {
             super::super::connection_id::ConnectionId(1),
             addr,
             std::sync::Arc::new(crate::server::ServerConfig::default()),
+            std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new()),
             write,
         );
         conn.set_outbound_protocol(ConnectionProtocol::Configuration);
