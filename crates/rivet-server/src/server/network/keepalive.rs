@@ -17,13 +17,15 @@
 //!   - [`drive_keepalive`] — runs one `KeepaliveState::tick` and applies its
 //!     outcome through a [`KeepaliveSink`].
 //!
-//! The configuration listener owns its [`KeepaliveState`] and calls
-//! [`drive_keepalive`] from its `tick` hook; the serverbound `keep_alive`
-//! packet routes to `KeepaliveState::handle_keepalive`. When #96 lands the play
-//! listener implements the same [`KeepaliveSink`] against the play connection
-//! and reuses the exact same `KeepaliveState` + `drive_keepalive` — no new
-//! keepalive logic. Until then, no play-listener (`ServerGamePacketListenerImpl`)
-//! file is touched and no speculative play-state API is invented.
+//! This PR delivers the seam only: no listener owns a [`KeepaliveState`] yet.
+//! The configuration listener will own one and call [`drive_keepalive`] from
+//! its `tick` hook, and the serverbound `keep_alive` packet will route to
+//! `KeepaliveState::handle_keepalive`, once the configuration tick hook exists
+//! (#96). When #96 lands the play listener implements the same
+//! [`KeepaliveSink`] against the play connection and reuses the exact same
+//! `KeepaliveState` + `drive_keepalive` — no new keepalive logic. Until then,
+//! no play-listener (`ServerGamePacketListenerImpl`) file is touched and no
+//! speculative play-state API is invented.
 
 use bytes::BytesMut;
 
