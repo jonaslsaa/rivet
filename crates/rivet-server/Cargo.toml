@@ -9,6 +9,7 @@ bytes = { workspace = true }
 rivet-protocol = { workspace = true, features = ["packets"] }
 rivet-registry = { workspace = true }
 rivet-util = { workspace = true }
+rivet-world = { workspace = true }
 thiserror = { workspace = true }
 # `signal` is only used by the binary (SIGTERM clean shutdown); the library's
 # own tests do not need it.

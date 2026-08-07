@@ -633,6 +633,7 @@ dependencies = [
  "rivet-protocol",
  "rivet-registry",
  "rivet-util",
+ "rivet-world",
  "thiserror",
  "tokio",
  "tracing",
