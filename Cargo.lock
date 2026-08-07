@@ -671,6 +671,7 @@ dependencies = [
  "crc32c",
  "md5",
  "rivet-serialization",
+ "sha2",
 ]
 
 [[package]]
