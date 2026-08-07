@@ -75,5 +75,12 @@ name = "configuration_packets"
 # #194/#219 golden capture bodies and pins the registration ids.
 required-features = ["packets"]
 
+[[test]]
+name = "join_clientbound"
+# Exercises the issue #87 join clientbound packet bodies (game module), which
+# live behind the packets feature. Decodes the pinned #153 join-capture golden
+# bodies byte-exactly and pins the GamePacketTypes addPacket-order ids.
+required-features = ["packets"]
+
 [lints]
 workspace = true

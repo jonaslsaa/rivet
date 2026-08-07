@@ -40,28 +40,34 @@ mod axis_cycle;
 mod block_pos;
 mod chunk_pos;
 mod cursor3d;
+mod difficulty;
 mod direction;
 mod game_profile;
 mod game_type;
 mod global_pos;
 mod position;
+mod relative;
 mod rotation;
 mod section_pos;
 mod uuid_util;
+mod vec3;
 mod vec3i;
 
 pub use axis_cycle::AxisCycle;
 pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus};
 pub use chunk_pos::ChunkPos;
 pub use cursor3d::Cursor3D;
+pub use difficulty::Difficulty;
 pub use direction::{Axis, AxisDirection, Direction, Plane};
 pub use game_profile::{GameProfile, Property, PropertyMap};
 pub use game_type::GameType;
 pub use global_pos::GlobalPos;
 pub use position::Position;
+pub use relative::Relative;
 pub use rotation::Rotation;
 pub use section_pos::SectionPos;
 pub use uuid_util::create_offline_player_uuid;
+pub use vec3::Vec3;
 pub use vec3i::{Vec3i, Vec3iLike};
 
 /// `ChunkPyramid.MAX_CHUNK_COORDINATE_VALUE` moved to a `const` here

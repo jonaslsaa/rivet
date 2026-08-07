@@ -131,6 +131,17 @@ impl RegistryFriendlyByteBuf {
         self.inner.write_long(value);
     }
 
+    /// `readInt()` — the inherited `FriendlyByteBuf` delegate (the join slice's
+    /// `ClientboundLoginPacket` reads its big-endian `playerId` through it).
+    pub fn read_int(&mut self) -> i32 {
+        self.inner.read_int()
+    }
+
+    /// `writeInt(int)` — the inherited `FriendlyByteBuf` delegate.
+    pub fn write_int(&mut self, value: i32) {
+        self.inner.write_int(value);
+    }
+
     /// `readNbt()` — inherited onto the registry buffer (Java's
     /// `RegistryFriendlyByteBuf extends FriendlyByteBuf`), so the block-entity
     /// list in `ClientboundLevelChunkPacketData` can read its tag.
