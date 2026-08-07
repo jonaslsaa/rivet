@@ -6,9 +6,11 @@
 //! parity-tested. `java_hash` ports the JDK string hashing used by
 //! `ResourceLocation`.
 //!
-//! RivetTodo(#209): `data_io` / `delegate_data_output` /
-//! `fast_buffered_input_stream` are the byte-IO contract `NbtIo` needs; only
-//! the surface `NbtIo` uses is provided.
+//! `data_io` / `delegate_data_output` / `fast_buffered_input_stream` provide
+//! the byte-IO contract `NbtIo` needs: big-endian primitives, modified-UTF-8
+//! strings (write side through the `cesu8` Java-variant encoder, read side a
+//! direct port of OpenJDK's `readUTF` decoder), the write-delegate, and the
+//! 8KB compressed-read buffer.
 //!
 //! `util` is a partial port of `net.minecraft.util.Util` for the registry-core
 //! slice (issue #107 / #122); `string_representable` and `by_id_map` are full

@@ -2,8 +2,9 @@
 //! call to a parent. Used by `NbtIo.StringFallbackDataOutput` to override just
 //! the string-write behavior.
 //!
-//! RivetTodo(#209): minimal faithful surface for the NBT write path — only
-//! the delegate shape `NbtIo.StringFallbackDataOutput` needs is ported.
+//! Only the delegate shape the `writeUTF` override needs is ported. Java's
+//! `parent` is `private` and reached only through the delegated methods, so no
+//! accessor is ported either.
 
 use crate::data_io::DataOutput;
 use std::io;
@@ -17,11 +18,6 @@ impl<T: DataOutput> DelegateDataOutput<T> {
     /// `new DelegateDataOutput(DataOutput parent)`.
     pub fn new(parent: T) -> Self {
         DelegateDataOutput { parent }
-    }
-
-    /// Access to the parent (for `writeUTF` override logic).
-    pub fn parent(&mut self) -> &mut T {
-        &mut self.parent
     }
 }
 
