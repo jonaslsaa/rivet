@@ -1,9 +1,10 @@
 //! `java.io.DataInput` / `java.io.DataOutput` ports — the byte-level contract
 //! used by `NbtIo` (rivet-nbt) and the network codec.
 //!
-//! STUB(mc.nbt.io) — minimal faithful surface for the NBT read/write path:
+//! RivetTodo(#209): minimal faithful surface for the NBT read/write path —
 //! big-endian primitives + modified-UTF-8 strings (`writeUTF`/`readUTF`), the
-//! only string form `NbtIo` uses. Owned by unit mc.nbt.io.
+//! only string form `NbtIo` uses; the rest of the `java.io.DataOutput`/
+//! `DataInput` surface is not ported.
 
 use std::io::{self, Read, Write};
 

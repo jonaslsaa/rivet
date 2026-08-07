@@ -1,7 +1,7 @@
-// STUB(mc.nbt.text) — minimal port of `net.minecraft.ChatFormatting` for
-// `TextComponentTagVisitor`. Promoted into rivet-core with CrashReport
-// (decision 7754455) to break the rivet-server <-> rivet-nbt Cargo cycle; the
-// full enum with exact codes belongs to rivet-text.
+// RivetTodo(#85): minimal port of `net.minecraft.ChatFormatting` for
+// `TextComponentTagVisitor` — the full enum with exact codes belongs to
+// rivet-text (epic #12). Promoted into rivet-core with CrashReport
+// (decision 7754455) to break the rivet-server <-> rivet-nbt Cargo cycle.
 
 /// Port of `net.minecraft.ChatFormatting` (enum of format codes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

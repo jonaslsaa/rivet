@@ -40,9 +40,9 @@
 //!   `"null"` when the id is unresolvable — byte-identical to Java's null
 //!   key/value string concatenation.
 //!
-//! STUB: `components`/`are_components_bound` — `DataComponentMap` is not
-//! ported yet (later `mc.core.component` scope); the variants exist without a
-//! component payload. `Reference.Type` (STAND_ALONE vs INTRUSIVE) is not
+//! RivetTodo(#201): `components`/`are_components_bound` — `DataComponentMap` is
+//! not ported yet (later `mc.core.component` scope); the variants exist without
+//! a component payload. `Reference.Type` (STAND_ALONE vs INTRUSIVE) is not
 //! ported — the SCC's builder assigns ids at `register` time, so the
 //! stand-alone/intrusive distinction is unobservable in the pure-ID model.
 //! `is(Holder)` (deprecated) is omitted — its only use is identity/value
@@ -142,7 +142,7 @@ impl<T> Holder<T> {
 
     /// `Holder.areComponentsBound()`.
     ///
-    /// STUB(mc.core.component): `DataComponentMap` is not ported; the surface
+    /// RivetTodo(#201): `DataComponentMap` is not ported; the surface
     /// reports Java's steady-state values (`Direct` true, `Reference` false) but
     /// no components are tracked.
     pub fn are_components_bound(&self) -> bool {

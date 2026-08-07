@@ -1,4 +1,4 @@
-// STUB(mc.nbt.visitors) — `net.minecraft.nbt.visitors` package.
+// `net.minecraft.nbt.visitors` package — fully ported by unit mc.nbt.visitors.
 // One module per Java class (PORTING.md naming); owned by manifest unit
 // mc.nbt.visitors. Declarations are controller-owned (WORKFLOWS.md principle 2).
 

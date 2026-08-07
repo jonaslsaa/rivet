@@ -3,12 +3,12 @@
 //! (`bool(...)`, `uuid(...)`).
 //!
 //! Java holds them as a `Map<BuiltinKey, BuiltinOperation>` of anonymous
-//! classes over `DynamicOps<T>` + `ParseState`. The packrat/Grammar layer is
-//! STUB(mc.nbt.snbt) (owned by the `net.minecraft.util.parsing.packrat`
-//! package, not yet ported), so the operations are re-encoded here as a small
-//! `BuiltinOp` enum over `NbtOps` (`Tag`). The accepted syntax and the stored
-//! error messages are identical to Java; only the dispatch mechanism differs
-//! (enum match instead of a closure map).
+//! classes over `DynamicOps<T>` + `ParseState`. The packrat/Grammar layer
+//! (`net.minecraft.util.parsing.packrat`, not yet ported) is re-expressed
+//! here: the operations are encoded as a small `BuiltinOp` enum over `NbtOps`
+//! (`Tag`). The accepted syntax and the stored error messages are identical
+//! to Java; only the dispatch mechanism differs (enum match instead of a
+//! closure map).
 
 use crate::nbt_ops::NbtOps;
 use crate::tag::Tag;

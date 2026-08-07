@@ -17,8 +17,8 @@ const PING_REQUEST_PACKET_ID: i32 = 1;
 const PONG_RESPONSE_PACKET_ID: i32 = 1;
 
 /// Slice scope: the full status JSON response is a `ServerStatus` body owned by
-/// epic #10 (the `status` protocol unit) — STUB(protocol.status). Until it
-/// lands, the status listener accepts `status_request` (id 0) and stays
+/// epic #10 (the `mc.network.protocol.status` unit) — STUB(mc.network.protocol.status).
+/// Until it lands, the status listener accepts `status_request` (id 0) and stays
 /// connected, faithfully applying the Java `hasRequestedStatus` single-request
 /// guard. The ping echo (id 1) is a raw 8-byte long both ways and IS
 /// implemented, because it is fully wire-typed here and exercises the outbound
@@ -72,8 +72,9 @@ impl PacketListener for ServerStatusPacketListener {
                 self.has_requested_status = true;
                 // Paper: `StandardPaperServerListPingEventImpl.processRequest` →
                 // `ClientboundStatusResponsePacket`. The JSON body is deferred
-                // (epic #10) — STUB(protocol.status). Staying open (no response
-                // yet) keeps the ping_request path reachable, as in vanilla.
+                // (epic #10) — STUB(mc.network.protocol.status). Staying open (no
+                // response yet) keeps the ping_request path reachable, as in
+                // vanilla.
                 Ok(ListenerOutcome::Keep)
             }
             PING_REQUEST_PACKET_ID => {

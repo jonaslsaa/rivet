@@ -6,7 +6,7 @@
 //! parity-tested. `java_hash` ports the JDK string hashing used by
 //! `ResourceLocation`.
 //!
-//! STUB(mc.nbt.io): `data_io` / `delegate_data_output` /
+//! RivetTodo(#209): `data_io` / `delegate_data_output` /
 //! `fast_buffered_input_stream` are the byte-IO contract `NbtIo` needs; only
 //! the surface `NbtIo` uses is provided.
 //!

@@ -421,11 +421,12 @@ impl CompoundTag {
         CompoundTag { tags: ret }
     }
 
-    /// STUB(mc.nbt): Java's `CompoundTag.store(String, Codec, ...)`,
+    /// RivetTodo(#204): Java's `CompoundTag.store(String, Codec, ...)`,
     /// `storeNullable`, `read(String, Codec, ...)`, `readQuiet` (incl. the
-    /// `DynamicOps<Tag>` and `MapCodec` overloads) are omitted pending the DFU
-    /// `Codec`/`MapCodec` port (`comapFlatMap`, `PASSTHROUGH`, `MapCodec.decode`
-    /// over `MapLike`) in `rivet-serialization`.
+    /// `DynamicOps<Tag>` and `MapCodec` overloads) are not ported — the DFU
+    /// `Codec`/`MapCodec` surface (`comapFlatMap`, `PASSTHROUGH`,
+    /// `MapCodec.decode` over `MapLike`) now exists in `rivet-serialization`,
+    /// so the overloads are a plain omission with no consumer forcing them.
     ///
     /// `CompoundTag.merge(CompoundTag)`.
     pub fn merge(&mut self, other: &CompoundTag) -> &mut CompoundTag {

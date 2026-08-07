@@ -7,11 +7,12 @@
 //!
 //! The context-dependent half — `CodecModifier` and the 3-arg
 //! `ProtocolInfoBuilder.addPacket(type, codec, modifier)` that consumes it — is
-//! deferred with the registry-wired codecs (#126, #109): a modifier adapts a
-//! codec at bind time and needs `RegistryFriendlyByteBuf`. Until then the
-//! packet codecs registered through a context builder are context-independent,
-//! so the dispatch codec is built when the template is created and `bind`
-//! ignores the context (documented: this changes when modifiers land).
+//! deferred with the registry-wired codecs (#126; tracked at
+//! `protocol_info_builder` module scope): a modifier adapts a codec at bind
+//! time and needs `RegistryFriendlyByteBuf`. Until then the packet codecs
+//! registered through a context builder are context-independent, so the
+//! dispatch codec is built when the template is created and `bind` ignores the
+//! context (documented: this changes when modifiers land).
 
 use crate::protocol_info::{ProtocolDetails, ProtocolInfo};
 use std::marker::PhantomData;

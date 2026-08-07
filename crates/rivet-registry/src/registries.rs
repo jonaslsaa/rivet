@@ -11,6 +11,10 @@
 //! unit's responsibility; this module only declares what the SCC's own
 //! integration tests and `ResourceKey::create_registry_key` need.
 //!
+//! RivetTodo(#213): the placeholder element types here (`BlockType`, `Level`,
+//! `LevelStem`) are replaced by the real block/world/dimension types when their
+//! owning units land.
+//!
 //! The keys are `LazyLock` statics, not `const`: `Identifier` owns its
 //! `String` fields (value type, faithful to Java), and `String::from` is not a
 //! `const fn`, so no `Identifier` value can be a `const`. A `LazyLock` is
@@ -50,7 +54,7 @@ pub static BLOCK: LazyLock<ResourceKey<Registry<BlockType>>> =
     LazyLock::new(|| ResourceKey::create_registry_key(Identifier::with_default_namespace("block")));
 
 /// `Registries.DIMENSION` — `createRegistryKey("dimension")`, the `Level`
-/// registry key (world unit placeholder).
+/// registry key. `Level` is a world-unit placeholder.
 pub static DIMENSION: LazyLock<ResourceKey<Registry<Level>>> = LazyLock::new(|| {
     ResourceKey::create_registry_key(Identifier::with_default_namespace("dimension"))
 });
@@ -66,8 +70,8 @@ pub static BLOCK_ENTITY_TYPE: LazyLock<ResourceKey<Registry<BlockEntityType>>> =
     });
 
 /// `Registries.LEVEL_STEM` — `createRegistryKey("dimension")`, the `LevelStem`
-/// registry key (world unit placeholder). Java gives DIMENSION and LEVEL_STEM
-/// the SAME identifier `"dimension"`.
+/// registry key. `LevelStem` is a dimension-unit placeholder.
+/// Java gives DIMENSION and LEVEL_STEM the SAME identifier `"dimension"`.
 pub static LEVEL_STEM: LazyLock<ResourceKey<Registry<LevelStem>>> = LazyLock::new(|| {
     ResourceKey::create_registry_key(Identifier::with_default_namespace("dimension"))
 });
@@ -90,8 +94,7 @@ pub static DIMENSION_TYPE: LazyLock<ResourceKey<Registry<DimensionType>>> = Lazy
 });
 
 /// The `Block` registry element — a placeholder for
-/// `net.minecraft.world.level.block.Block` (owned by the world/block unit, not
-/// #124).
+/// `net.minecraft.world.level.block.Block` (owned by the world/block unit).
 #[derive(Debug)]
 pub struct BlockType;
 

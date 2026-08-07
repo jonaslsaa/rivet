@@ -3,10 +3,9 @@
 //! Java source:
 //! `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/level/block/Rotation.java`.
 //!
-//! Deferred (leaf types owned by other units, PORTING.md): `CODEC`/
-//! `STREAM_CODEC`/`BY_ID`/`LEGACY_CODEC` (codec surface → rivet-protocol/
-//! #holder), `rotation()`/`OctahedralGroup`, `getRandom`/`getShuffled` (RNG in
-//! rivet-util).
+//! RivetTodo(#126): `CODEC`/`STREAM_CODEC`/`BY_ID`/`LEGACY_CODEC` (codec
+//! surface → rivet-protocol). `rotation()`/`OctahedralGroup` (JOML) and
+//! `getRandom`/`getShuffled` (RNG in rivet-util) defer with their owning units.
 
 use super::direction::Direction;
 

@@ -5,10 +5,10 @@
 //! Preserves the packed-long bit layout (22-bit X/Z, 20-bit Y) and the wrapping
 //! section arithmetic exactly.
 //!
-//! Deferred (leaf types owned by other units, PORTING.md): `STREAM_CODEC`/
-//! `CODEC` (codec surface → rivet-protocol/#holder), `of(EntityAccess)` and
-//! `bottomOf(ChunkAccess)` (need `Entity`/`ChunkAccess`). `aroundChunk` is
-//! ported — it only needs the pure-value `ChunkPos`/bounds, not a level.
+//! RivetTodo(#126): `STREAM_CODEC`/`CODEC` (codec surface →
+//! rivet-protocol). `of(EntityAccess)` and `bottomOf(ChunkAccess)` need
+//! `Entity`/`ChunkAccess` and defer with them. `aroundChunk` is ported — it
+//! only needs the pure-value `ChunkPos`/bounds, not a level.
 
 use super::block_pos::BlockPos;
 use super::cursor3d::Cursor3D;

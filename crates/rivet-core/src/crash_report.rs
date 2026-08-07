@@ -1,6 +1,6 @@
 //! Minimal stub of `net.minecraft.CrashReport` / `ReportedException` for rivet-nbt.
 //!
-//! STUB(shared) — owned by the `net.minecraft` package, which lives in
+//! STUB(net.minecraft) — owned by the `net.minecraft` package, which lives in
 //! `rivet-server`. rivet-nbt must not depend on rivet-server (Cargo cycle:
 //! rivet-server → rivet-nbt), so this minimal surface is replicated here and
 //! will be replaced by the real port (via `rivet-server`/`CrashReportCategory`)

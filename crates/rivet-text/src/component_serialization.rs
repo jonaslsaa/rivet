@@ -32,10 +32,10 @@
 //!   is identical: `codec_fn` maps the name back to its registered `MapCodec`,
 //!   and the encode side still uses the value's own codec.
 //!
-//! STUB: `nbt`/`object` contents are not registered (they need `NbtOps`/path
-//! parsing and `ObjectInfo`); `ClickEvent`/`HoverEvent` codecs error on encode
-//! when a style carries those fields. `StreamCodec`s and the Adventure
-//! localization path are out of scope (epic #12).
+//! RivetTodo(#89): `nbt`/`object` contents are not registered (they need
+//! `NbtOps`/path parsing and `ObjectInfo`); `ClickEvent`/`HoverEvent` codecs
+//! error on encode when a style carries those fields. `StreamCodec`s and the
+//! Adventure localization path are out of scope (epic #12).
 
 use crate::Component;
 use crate::component_contents::ComponentContents;
@@ -144,8 +144,8 @@ fn create_from_list(list: &[Component]) -> Component {
 
 /// `bootstrap(LateBoundIdMapper<String, MapCodec<? extends ComponentContents>>)`.
 ///
-/// STUB: `nbt` and `object` are deferred; the five registered contents match
-/// the ported slice.
+/// `nbt` and `object` are deferred (RivetTodo(#89) at module scope); the five
+/// registered contents match the ported slice.
 fn bootstrap<Ops: DynamicOps + 'static>()
 -> extra_codecs::LateBoundIdMapper<String, Arc<dyn MapCodec<ComponentContents, Ops>>> {
     let mapper = extra_codecs::LateBoundIdMapper::new();

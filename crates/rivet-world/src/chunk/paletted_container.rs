@@ -14,6 +14,11 @@
 //! OWNERSHIP.md — and Java's `synchronized` is dropped with a note, as
 //! PORTING.md prescribes for tick-confined state).
 //!
+//! RivetTodo(#216): the Anti-Xray `presetValues` surface and Moonrise
+//! `FastPalette` read-path snapshot are not ported (deferred to the M2 chunk
+//! storage epic #15); the threading guards are intentionally dropped
+//! (tick-thread-confined state).
+//!
 //! The `onResize` reentrancy is ported by deferring the resize: `Palette::id_for`
 //! returns `IdForResult` and the container grows, then inserts the value. The
 //! Java `PaletteResize.noResizeExpected()` internal path maps to

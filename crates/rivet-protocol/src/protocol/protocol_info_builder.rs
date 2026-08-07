@@ -14,6 +14,9 @@
 //! `context*` helpers and [`crate::protocol::UnboundProtocol`] still exist so
 //! the play protocols can adopt them without a surface change, but until
 //! modifiers land the context is carried but unused.
+//!
+//! RivetTodo(#126): the `CodecModifier` overload + context application are not
+//! ported (registry-wired codecs); the context is carried but unused.
 
 use crate::codec::{StreamCodec, unit};
 use crate::friendly_byte_buf::FriendlyByteBuf;
@@ -128,8 +131,8 @@ impl<V: 'static, C> ProtocolInfoBuilder<V, C> {
 
     /// `buildUnbound(C context)` — freezes the builder into a
     /// [`SimpleUnboundProtocol`]. Java bakes `context` in for bind-time
-    /// modifiers; modifiers are deferred, so the codec is built now and
-    /// `context` is unused.
+    /// modifiers; modifiers are deferred (RivetTodo(#126) at module scope), so
+    /// the codec is built now and `context` is unused.
     pub fn build_unbound(&mut self, _context: C) -> SimpleUnboundProtocol<V>
     where
         V: Packet,

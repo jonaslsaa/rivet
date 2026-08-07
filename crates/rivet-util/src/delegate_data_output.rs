@@ -2,7 +2,8 @@
 //! call to a parent. Used by `NbtIo.StringFallbackDataOutput` to override just
 //! the string-write behavior.
 //!
-//! STUB(mc.nbt.io) — minimal faithful surface for the NBT write path.
+//! RivetTodo(#209): minimal faithful surface for the NBT write path — only
+//! the delegate shape `NbtIo.StringFallbackDataOutput` needs is ported.
 
 use crate::data_io::DataOutput;
 use std::io;

@@ -16,7 +16,8 @@
 //! - `Dynamic`/`OptionalDynamic` accessors (`DynamicTest`)
 //! - `assumeMapUnsafe`/`unit`/field decoder (`MapCodecTest`)
 //!
-//! Not portable (honest deferrals, marked `STUB(dfu.nbtops)`):
+//! Not portable (honest deferrals, noted in prose — test files are excluded
+//! from the `STUB`/`RivetTodo` marker convention):
 //! - `record_codec_maintains_field_order` — `NbtOps` map values are a
 //!   `HashMap`-backed `CompoundTag`; Rust's randomized SipHash iteration order
 //!   cannot pin Java's fastutil hash order (see `compound_tag.rs` drift note).
@@ -278,7 +279,7 @@ fn unbounded_map_repeated_keys() {
     );
 }
 
-// STUB(dfu.nbtops): `unbounded_map_repeated_keys_partial` (in the TestOps/
+// Deferred: `unbounded_map_repeated_keys_partial` (in the TestOps/
 // JsonOps suites) asserts which of two lowercasing-colliding keys ("foo"/"FOO")
 // wins the partial — the *first in iteration order*. NbtOps map values are a
 // `HashMap`-backed `CompoundTag`, whose iteration order is nondeterministic in
@@ -526,7 +527,7 @@ fn optional_field_lenient_invalid_values() {
 
 // ---------------------------------------------------------------------------
 // RecordCodecBuilder — round trip + error accumulation (not field order;
-// see the file doc STUB(dfu.nbtops) note)
+// see the file doc deferral note)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]

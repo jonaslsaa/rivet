@@ -8,10 +8,10 @@
 //! Deferred (leaf types owned by other units, PORTING.md): JOML (`Vec3`,
 //! `Vector3f`, `Quaternionf`, `Matrix4fc` — `getUnitVec3`, `step`, `getRotation`,
 //! `rotate(Matrix4fc, …)`), `Entity`-based methods (`orderedByNearest`,
-//! `getFacingAxis`), `RandomSource` methods (`getRandom`, `allShuffled`), the
+//! `getFacingAxis`), `RandomSource` methods (`getRandom`, `allShuffled`),
+//! `axisStepOrder` (JOML `Vec3`), and `moonrise$uniqueId`. RivetTodo(#126): the
 //! string/codec surface (`CODEC`, `VERTICAL_CODEC`, `byName`, `STREAM_CODEC`,
-//! `LEGACY_ID_CODEC_*`), `axisStepOrder` (JOML `Vec3`), and
-//! `moonrise$uniqueId`.
+//! `LEGACY_ID_CODEC_*`) defers with the protocol codec surface.
 
 use super::vec3i::Vec3i;
 use rivet_util::mth;

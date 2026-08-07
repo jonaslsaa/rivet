@@ -6,8 +6,10 @@
 //! (`net.minecraft.util.parsing.packrat`). That package is not yet ported, so
 //! per the unit notes the grammar is re-expressed here as a hand-written
 //! recursive-descent parser that reproduces the packrat grammar's accepted
-//! language and its error messages/positions (the packrat layer itself is
-//! STUB(mc.nbt.snbt)).
+//! language and its error messages/positions (only the dispatch mechanism
+//! differs; behavior is faithful). This is a deliberate permanent faithful
+//! re-encoding — the parser is complete and correct on its own, not a scaffold
+//! awaiting the packrat unit, so it is not `STUB`ped.
 //!
 //! Key fidelity points (from `SnbtGrammar.createParser`):
 //! - Number dispatch: a numeric lookahead picks the float-vs-integer path; an
@@ -24,15 +26,15 @@
 //!   `NbtFormatException` carrying the full `getMessage()` text, i.e.
 //!   `"<reason> at position <cursor>: <context><--[HERE]"`.
 //!
-//! STUB(mc.nbt.snbt): the public `Codec<CompoundTag>` surfaces
+//! RivetTodo(#203): the public `Codec<CompoundTag>` surfaces
 //! `TagParser.FLATTENED_CODEC` and `TagParser.LENIENT_CODEC`, and the public
 //! `char` constants `ELEMENT_SEPARATOR` (`,`) and `NAME_VALUE_SEPARATOR`
 //! (`:`), are not ported — they are the DFU `Codec`/`Codec.STRING` /
-//! `Codec.withAlternative` surface, which lands with the DFU port. They are
-//! called out here so the omission is explicit rather than silent. (The
-//! printer defines its own private `ELEMENT_SEPARATOR`/`NAME_VALUE_SEPARATOR`,
-//! which are a different class's constants and are ported in
-//! `snbt_printer_tag_visitor`.)
+//! `Codec.withAlternative` surface, which now exists in `rivet-serialization`.
+//! They are called out here so the omission is explicit rather than silent.
+//! (The printer defines its own private `ELEMENT_SEPARATOR`/
+//! `NAME_VALUE_SEPARATOR`, which are a different class's constants and are
+//! ported in `snbt_printer_tag_visitor`.)
 
 use crate::compound_tag::CompoundTag;
 use crate::nbt_format_exception::NbtFormatException;
@@ -1024,9 +1026,9 @@ impl SnbtParser {
     }
 
     /// `stringEscapeSequence` action — convert `\xHH`/`\uHHHH`/`\UHHHHHHHH`
-    /// hex escapes and `\N{name}`. `Character.codePointOf` (the Unicode name
-    /// database) is STUB(mc.nbt.snbt): `\N{...}` always reports an invalid
-    /// character name until the name table is ported.
+    /// hex escapes and `\N{name}`. RivetTodo(#203): `Character.codePointOf`
+    /// (the Unicode name database) is not ported, so `\N{...}` always reports
+    /// an invalid character name until the name table is ported.
     ///
     /// The escape is always 2/4/8 hex digits, so `codepoint` is at most
     /// 0xFFFFFFFF; the only invalid cases are out-of-codepoint (> 0x10FFFF,
@@ -1080,7 +1082,7 @@ impl SnbtParser {
                 self.restore(mark);
             }
         }
-        // \N{name} — STUB: Character.codePointOf is not ported.
+        // \N{name} — RivetTodo(#203): Character.codePointOf is not ported.
         if self.try_char(b'N' as u16) {
             if self.try_char(b'{' as u16)
                 && self.parse_unicode_name().is_some()

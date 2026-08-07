@@ -188,7 +188,7 @@ impl<S: 'static> CommandDispatcher<S> {
             let mut context = context_so_far.copy();
             let mut reader = original_reader.clone();
             let mut errored = false;
-            // STUB(brigadier): Paper's `TagParseCommandSyntaxException` short-circuit
+            // RivetTodo(#210): Paper's `TagParseCommandSyntaxException` short-circuit
             // (parse failure of a Minecraft tag argument aborts dispatch instead of
             // falling through) is not ported — it depends on the Paper exception type.
             if let Err(ex) = child.parse(child.clone(), &mut reader, &mut context) {

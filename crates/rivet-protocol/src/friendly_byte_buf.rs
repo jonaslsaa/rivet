@@ -24,7 +24,8 @@
 //! no raw `readIdentifier`/`writeIdentifier` helper because every codec boundary
 //! must surface a malformed identifier as `Err`, and the raw helper would panic.
 //! `read_resource_key`/`read_registry_key` stay deferred with the registry-wired
-//! units.
+//! units. RivetTodo(#126): the registry-key `FriendlyByteBuf` paths are not
+//! ported (registry-wired codecs).
 //!
 //! Netty's `ByteBuf` big-endian scalar contract maps onto `bytes::Buf`/`BufMut`
 //! exactly (24-bit medium, signed/unsigned variants, raw NaN-preserving float/

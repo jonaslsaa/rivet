@@ -31,7 +31,7 @@
 //! - `IdMap<Holder<T>>` (`Registry.asHolderIdMap()`) is **not** provided: its
 //!   `byId` must return a reference to a stored holder object, but the Rust
 //!   `Holder::Reference` is a value constructed on demand. The ByteBuf holder
-//!   codec (protocol, blocked on #83) resolves through `&Registry<T>` instead.
+//!   codec (protocol, #126) resolves through `&Registry<T>` instead.
 //!   The SCC's `HolderIdMap` (`IdMap<HolderId>`) remains the id<->holder-id
 //!   adapter.
 //! - `HolderLookup.RegistryLookup.filterFeatures`/`filterElements` (FeatureFlags)

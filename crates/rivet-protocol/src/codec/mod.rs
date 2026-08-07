@@ -20,7 +20,9 @@
 //! The remaining registry-dependent `ByteBufCodecs` methods
 //! (`registryFriendlyLengthPrefixed`, `fromCodec*`) and the authlib/JOML/Gson
 //! value types are blocked on later units and are not present here (documented
-//! in the `byte_buf_codecs` module). `Packet.codec` is [`codec`].
+//! in the `byte_buf_codecs` module). RivetTodo(#126): the registry-wired
+//! `registryFriendlyLengthPrefixed`/`fromCodec*` variants defer with the holder
+//! codecs. `Packet.codec` is [`codec`].
 //!
 //! Name shadowing note: at this root, `map` is the `StreamCodec.map` value
 //! mapper combinator (the explicit re-export below). The `ByteBufCodecs.map`

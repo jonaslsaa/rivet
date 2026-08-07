@@ -482,6 +482,23 @@ main() {
     python3 scripts/test_analyze_graph.py
   fi
 
+  # --- marker audit (full gate only) ---------------------------------------------
+  # scripts/check_markers.py validates the STUB(...) / RivetTodo(#N) comment
+  # conventions offline (git-tracked *.rs files + MANIFEST.tsv, never GitHub):
+  # canonical marker shape, STUB unit ids resolving in the manifest, stale STUBs
+  # on done units, two marker bodies on one line (cross- and same-form), empty
+  # (whitespace-only) reasons, and every todo!()/unimplemented!() carrying an
+  # adjacent RivetTodo. The workspace-excluded tools (tools/rivet-codegen,
+  # spikes/) are not governed source and are skipped alongside fuzz/tests/
+  # generated. scripts/test_check_markers.py is the sandbox suite for the
+  # checker itself. Skipped when gating a crate subset — the marker audit is
+  # repo-wide and does not target a workspace crate.
+  if [ "$FULL_GATE" = true ]; then
+    echo "==> marker audit (scripts/check_markers.py)"
+    python3 scripts/check_markers.py
+    python3 scripts/test_check_markers.py
+  fi
+
   # --- rivet-codegen (workspace-excluded tool) fmt/clippy/test ------------------
   # tools/rivet-codegen is excluded from the cargo workspace, so --workspace
   # fmt/clippy/test never touch it. Its golden drift test

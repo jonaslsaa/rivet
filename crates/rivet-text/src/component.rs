@@ -9,7 +9,7 @@
 //! in 24w14a. The three fields — `contents`, `siblings`, `style` — are exactly
 //! `MutableComponent`'s.
 //!
-//! STUB (epic #12): `visit`/`visitSelf` are not exposed as trait methods;
+//! RivetTodo(#85): `visit`/`visitSelf` are not exposed as trait methods;
 //! `get_string`/`flatten` walk the tree directly. Deferred: `getString(int
 //! limit)`, `contains`, `toFlatList`, `getVisualOrderText`, the `Iterable`/
 //! `stream` views, and the `translatable(...)` vararg factories

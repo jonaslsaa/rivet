@@ -46,14 +46,13 @@ const INDENT: i32 = 2;
 #[allow(dead_code)]
 const NOT_FOUND: i32 = -1;
 
-/// STUB(mc.nbt.utils) — `SharedConstants.getCurrentVersion().dataVersion()
-/// .version()` — 4903 in the pinned MC 26.2 build (`DetectedVersion`:
-/// `new DataVersion(4903, "main")`, `SharedConstants.WORLD_VERSION = 4903`).
-/// Stopgap local constant duplicating `SharedConstants.WORLD_VERSION` (rivet-core);
-/// rewired when that lands. Tracked here because it silently drifts if the
-/// pinned MC version changes: both this constant and the
-/// `add_current_data_version_uses_world_version` test hardcode 4903, and the
-/// oracle harness is not wired to this unit yet.
+/// RivetTodo(#202): `CURRENT_DATA_VERSION` is a stopgap local constant
+/// duplicating `SharedConstants.WORLD_VERSION` (rivet-core) — 4903 in the
+/// pinned MC 26.2 build (`DetectedVersion`: `new DataVersion(4903, "main")`,
+/// `SharedConstants.WORLD_VERSION = 4903`); it is rewired when that lands.
+/// It silently drifts if the pinned MC version changes: both this constant
+/// and the `add_current_data_version_uses_world_version` test hardcode 4903,
+/// and the oracle harness is not wired to this unit yet.
 pub const CURRENT_DATA_VERSION: i32 = 4903;
 
 /// `YXZ_LISTTAG_INT_COMPARATOR` — compare by y(1), then x(0), then z(2), each
@@ -221,13 +220,13 @@ pub fn compare_nbt(
     }
 }
 
-// STUB(mc.nbt.utils) — `NbtUtils.readBlockState(HolderGetter<Block>,
+// RivetTodo(#202): `NbtUtils.readBlockState(HolderGetter<Block>,
 // CompoundTag) -> BlockState` and its private `setValueHelper` depend on
 // `net.minecraft.world.level.block.state.BlockState`/`StateDefinition`/
 // `Property` and `net.minecraft.core.HolderGetter` (rivet-world /
 // rivet-registry), not yet ported.
 
-// STUB(mc.nbt.utils) — `NbtUtils.writeBlockState(BlockState) -> CompoundTag`
+// RivetTodo(#202): `NbtUtils.writeBlockState(BlockState) -> CompoundTag`
 // and `writeFluidState(FluidState) -> CompoundTag` (with the private
 // `writeStateProperties`) depend on `BlockState`/`FluidState` and
 // `BuiltInRegistries.BLOCK`/`FLUID` (rivet-world / rivet-registry), not yet
@@ -659,10 +658,12 @@ fn unpack_block_state(compound: &str) -> CompoundTag {
                 match (parts.next(), parts.next()) {
                     (Some(k), Some(v)) => properties.put_string(k, v),
                     _ => {
-                        // STUB(mc.nbt.utils) — Java:
+                        // RivetTodo(#202): Java logs
                         // `LOGGER.error("Something went wrong parsing:
-                        // '{}' -- incorrect gamedata!", compound)` — the logger
-                        // is not ported yet (see text_component_tag_visitor.rs).
+                        // '{}' -- incorrect gamedata!", compound)` here — the
+                        // logger is not ported yet (see
+                        // text_component_tag_visitor.rs), so the error is
+                        // silently dropped.
                     }
                 }
             }
@@ -686,7 +687,7 @@ pub fn add_data_version(tag: &mut CompoundTag, version: i32) -> &mut CompoundTag
     tag
 }
 
-// STUB(mc.nbt.utils) — `NbtUtils.addCurrentDataVersion(ValueOutput)` /
+// RivetTodo(#202): `NbtUtils.addCurrentDataVersion(ValueOutput)` /
 // `addDataVersion(ValueOutput, int)` (`output.putInt("DataVersion", version)`)
 // depend on `net.minecraft.world.level.storage.ValueOutput` (rivet-world),
 // not yet ported.

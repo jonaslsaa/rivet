@@ -31,15 +31,15 @@ pub const PROTOCOL_VERSION: i32 = 776;
 ///     true in Paper 26.2 — `MinecraftServer` has no branch).
 ///   - TRANSFER → closed immediately (Paper `MinecraftServer.acceptsTransfers()`
 ///     is false; the transfers-disabled disconnect body is a login-protocol packet
-///     owned by #96 — STUB(protocol.login) — so the connection is dropped at the
-///     handshake boundary).
+///     owned by #96 — STUB(mc.network.protocol.login) — so the connection is
+///     dropped at the handshake boundary).
 ///   - unknown intention → `IllegalArgumentException("Unknown connection intent")`.
 ///
 /// The protocol-version gate (inside `beginLogin`) applies to LOGIN only: a wrong
 /// version is disconnected. STATUS skips it (a wrong-version client may still
 /// ping). The *message* (outdated client/server) is a `ClientboundLoginDisconnectPacket`
-/// body owned by epic #10/#96 — STUB(protocol.login) — so the wrong version is
-/// closed with `DisconnectReason::Unsupported` and no body sent.
+/// body owned by epic #10/#96 — STUB(mc.network.protocol.login) — so the wrong
+/// version is closed with `DisconnectReason::Unsupported` and no body sent.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ServerHandshakePacketListener;
 
@@ -84,7 +84,7 @@ impl PacketListener for ServerHandshakePacketListener {
             // "multiplayer.disconnect.transfers_disabled", then disconnects — the
             // connection never enters the login listener and `beginLogin`'s
             // protocol-version gate never runs. The formatted disconnect body is a
-            // login-protocol packet owned by #96/epic #10 — STUB(protocol.login) —
+            // login-protocol packet owned by #96/epic #10 — STUB(mc.network.protocol.login) —
             // so this slice only records the close with the translation key.
             ClientIntent::Transfer => Err(DisconnectReason::Unsupported(
                 "multiplayer.disconnect.transfers_disabled".into(),
@@ -102,9 +102,9 @@ impl PacketListener for ServerHandshakePacketListener {
             ClientIntent::Login => {
                 // `beginLogin` → the three-way protocol-version gate. The *message*
                 // (outdated client/server) is a `ClientboundLoginDisconnectPacket`
-                // body owned by epic #10/#96 — STUB(protocol.login) — so a wrong
-                // version is closed with `DisconnectReason::Unsupported` and no body
-                // sent.
+                // body owned by epic #10/#96 — STUB(mc.network.protocol.login) — so
+                // a wrong version is closed with `DisconnectReason::Unsupported`
+                // and no body sent.
                 if intention.protocol_version != PROTOCOL_VERSION {
                     return Err(DisconnectReason::Unsupported(format!(
                         "client protocol {} != server protocol {PROTOCOL_VERSION}",

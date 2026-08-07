@@ -201,9 +201,10 @@ pub trait BitRandomSource: RandomSource {
 /// `net.minecraft.world.level.levelgen.PositionalRandomFactory` — yields a
 /// source per position / seed / name.
 ///
-/// The Java default overloads taking `BlockPos` / `Identifier` are omitted here
-/// (those types live in rivet-core / rivet-registry, not yet ported); the
-/// `at(x, y, z)` and `fromHashOf(String)` forms they delegate to are provided.
+/// RivetTodo(#208): the Java default overloads taking `BlockPos` / `Identifier`
+/// are omitted — they need `rivet-registry` (which `rivet-util` cannot depend
+/// on without a Cargo cycle); the `at(x, y, z)` and `fromHashOf(String)` forms
+/// they delegate to are provided.
 // `from_hash_of`/`from_seed` are faithful mirrors of the Java instance methods
 // `fromHashOf`/`fromSeed`, so the `from_*`-taking-`&self` convention lint is a
 // false positive here (renaming would break API fidelity).
@@ -342,8 +343,9 @@ pub mod random_support {
 /// `net.minecraft.world.level.levelgen.Xoroshiro128PlusPlus` — the underlying
 /// Xoroshiro128++ generator.
 ///
-/// The `CODEC` (DFU `Codec.LONG_STREAM` xmap) is omitted: rivet-serialization
-/// is not yet ported.
+/// RivetTodo(#208): the `CODEC` (DFU `Codec.LONG_STREAM` xmap) is omitted —
+/// the DFU `Codec` surface now exists in rivet-serialization, so this is a
+/// plain omission with no consumer forcing it.
 #[derive(Clone, Debug)]
 pub struct Xoroshiro128PlusPlus {
     seed_lo: i64,

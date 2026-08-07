@@ -13,10 +13,10 @@
 //! (`crate::generated::protocol`); `ProtocolInfo`/`ProtocolInfo.Details` are in
 //! `net.minecraft.network` and live at `crate::protocol_info`.
 //!
-//! The context-dependent `CodecModifier` overload is deferred with the
-//! registry-wired codecs (#126/#109) — documented in `protocol_info_builder`.
-//! `PacketUtils` (thread-confinement helpers) is server-side and deferred with
-//! the state machines.
+//! The context-dependent `CodecModifier` overload defers with the registry-wired
+//! codecs — tracked at `protocol_info_builder` module scope (#126).
+//! RivetTodo(#148): `PacketUtils` (thread-confinement helpers) is server-side
+//! and deferred with the state machines.
 //!
 //! Packet-body units (issue #86, join-path slice): the crossover bodies shared
 //! by play and configuration — [`common`] (`net.minecraft.network.protocol.common`),

@@ -6,7 +6,7 @@ use super::connection::Connection;
 use super::packet_listener::{DisconnectReason, ListenerOutcome, PacketListener};
 use crate::server::ServerConfig;
 
-/// STUB(protocol.login) — clean stub for
+/// STUB(mc.network.protocol.login) — clean stub for
 /// `net.minecraft.server.network.ServerLoginPacketListenerImpl`.
 ///
 /// The login state machine (hello/name, challenge/encryption, compression,

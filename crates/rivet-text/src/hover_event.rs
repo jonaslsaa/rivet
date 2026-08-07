@@ -1,4 +1,4 @@
-//! STUB(mc.text.hover_event) — `net.minecraft.network.chat.HoverEvent`.
+//! STUB(mc.network.chat) — `net.minecraft.network.chat.HoverEvent`.
 //!
 //! The full model dispatches on `HoverEvent.Action` (`show_text`/`show_item`/
 //! `show_entity`): `ShowText` needs only `ComponentSerialization.CODEC`, but
@@ -19,8 +19,9 @@ use std::sync::Arc;
 
 /// Port of `net.minecraft.network.chat.HoverEvent` (value placeholder).
 ///
-/// STUB: the concrete `Action` variants and their codecs are not ported. The
-/// struct is opaque so `Style` can carry the field with the same shape as Java.
+/// The concrete `Action` variants and their codecs are not ported (STUB at
+/// module scope). The struct is opaque so `Style` can carry the field with the
+/// same shape as Java.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HoverEvent;
 

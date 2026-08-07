@@ -1,12 +1,11 @@
 //! Port of `com.mojang.serialization.Dynamic`.
 //!
 //! Java `Dynamic<T>` extends `DynamicLike<T>` and stores its `DynamicOps<T>`.
-//! The STUB(mc.nbt) shape keeps a `pub value` field and no ops (`Dynamic<O>`
-//! is constructed from a temporary ops reference by rivet-nbt), so ops-dependent
-//! methods here take the ops as a parameter. `castTyped`/`getOps`/`equals`
-//! identity checks against the stored ops are therefore dropped (no ops is
-//! stored); the ops-dependent `convert`/`decode`/`read` methods take the ops
-//! explicitly.
+//! This port keeps a `pub value` field and no ops (`Dynamic<O>` is constructed
+//! from a temporary ops reference by rivet-nbt), so ops-dependent methods here
+//! take the ops as a parameter. `castTyped`/`getOps`/`equals` identity checks
+//! against the stored ops are therefore dropped (no ops is stored); the
+//! ops-dependent `convert`/`decode`/`read` methods take the ops explicitly.
 
 use crate::data_result::DataResult;
 use crate::dynamic_ops::DynamicOps;

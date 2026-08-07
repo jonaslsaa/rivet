@@ -10,10 +10,13 @@
 //! (`HolderOwner<T>`/`HolderGetter<T>` structs) are replaced by the real
 //! `holder_lookup` views (`RegistryOwner`/`RegistryGetter<E>`), and
 //! `retrieve_element` now returns `Holder.Reference<E>` (a `Holder<E>`) instead
-//! of the narrowed element value. `RegistryFileCodec`/`RegistryDataLoader`/
-//! `HolderSetCodec`/`RegistryFixedCodec` and all protocol `StreamCodec`s are
-//! #126 and live in `registry_file_codec.rs` / `rivet-protocol` respectively —
-//! `rivet-registry` never depends on `rivet-protocol`.
+//! of the narrowed element value. `RegistryFileCodec`/`HolderSetCodec`/
+//! `RegistryFixedCodec` and all protocol `StreamCodec`s are #126 and live in
+//! `registry_file_codec.rs` / `rivet-protocol` respectively — `rivet-registry`
+//! never depends on `rivet-protocol`. `RegistryDataLoader`
+//! (`net.minecraft.server.packs.resources.RegistryDataLoader`) is a server
+//! pack-loading class, *not* part of the #126 holder codecs, and is deferred
+//! with its owning unit.
 //!
 //! Binding-model deviations (documented, see PORTING.md drift checklist):
 //! - Rust `DynamicOps` is not object-safe, so `RegistryOps<T, D>` is generic

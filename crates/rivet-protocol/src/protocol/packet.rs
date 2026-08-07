@@ -18,6 +18,9 @@
 //!     (Paper patch on `Packet.java`) are connection-level and land with the
 //!     connection port.
 //!
+//! RivetTodo(#148): `handle`, `PacketDecoder`, and the Paper connection-level
+//! dispatch hooks are deferred with the listener hierarchy / connection port.
+//!
 //! `Packet.codec(StreamMemberEncoder writer, StreamDecoder reader)` is Java's
 //! static helper (`StreamCodec.ofMember(writer, reader)`); the Rust port is the
 //! free function [`codec`], re-exported here so call sites read

@@ -12,17 +12,17 @@
 //! `ChunkPos::is_valid` stays value-only (OWNERSHIP.md — the module mirror is a
 //! convenience and cycle-breaking justifies the one-line move).
 //!
-//! Deliberately absent (blocked by later work; no declarations emitted):
-//! `BlockBox`, `Direction8`, `Rotations` (also `net.minecraft.core`
-//! value types named in OWNERSHIP.md §Registries as staying in
-//! `rivet-registry::core` — not yet ported; issue-tracked); the `Position`
+//! RivetTodo(#212): `BlockBox`, `Direction8`, `Rotations` (also
+//! `net.minecraft.core` value types named in OWNERSHIP.md §Registries as
+//! staying in `rivet-registry::core`) are not yet ported; the `Position`
 //! trait's sole Java implementors are JOML `Vec3`/`Vector3d` which are
 //! deferred, so no in-crate type implements it and the `Position`-taking
-//! overloads are omitted; codec/`StreamCodec` impls (OWNERSHIP.md: protocol
-//! codecs live in `rivet-protocol`, `FriendlyByteBuf::read/writeBlockPos`/
-//! `read/writeChunkPos` are #82/#83); `Entity`/`ChunkAccess`/
-//! `LevelHeightAccessor`-parametered overloads; JOML (`Vec3`, `Vector3f`,
-//! `Quaternionf`, `Matrix4fc`, `OctahedralGroup`) returns.
+//! overloads are omitted. RivetTodo(#126): codec/`StreamCodec` impls — protocol
+//! codecs live in `rivet-protocol`, incl. `FriendlyByteBuf::read/writeBlockPos`/
+//! `read/writeChunkPos` (#126). `Entity`/`ChunkAccess`/`LevelHeightAccessor`-
+//! parametered overloads and JOML (`Vec3`, `Vector3f`, `Quaternionf`,
+//! `Matrix4fc`, `OctahedralGroup`) returns stay deferred with their owning
+//! units.
 
 mod axis_cycle;
 mod block_pos;
