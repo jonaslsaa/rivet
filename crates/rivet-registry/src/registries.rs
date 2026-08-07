@@ -107,6 +107,18 @@ pub static ATTRIBUTE: LazyLock<ResourceKey<Registry<Attribute>>> = LazyLock::new
     ResourceKey::create_registry_key(Identifier::with_default_namespace("attribute"))
 });
 
+/// `Registries.WORLD_CLOCK` — `createRegistryKey("world_clock")`, the
+/// `net.minecraft.world.clock.WorldClock` registry key (clock unit
+/// placeholder). Added for #87: `ClientboundSetTimePacket`'s clock-update map
+/// key codec is `WorldClock.STREAM_CODEC` =
+/// `ByteBufCodecs.holderRegistry(Registries.WORLD_CLOCK)`. The `WorldClock`
+/// record value (and the `ClockTimeMarkers`/`ClockState` key space) is owned
+/// by the deferred `mc.world.clock` unit in `rivet-world`; the wire codec only
+/// resolves the holder *id* against the registry size.
+pub static WORLD_CLOCK: LazyLock<ResourceKey<Registry<WorldClock>>> = LazyLock::new(|| {
+    ResourceKey::create_registry_key(Identifier::with_default_namespace("world_clock"))
+});
+
 /// The `Block` registry element — a placeholder for
 /// `net.minecraft.world.level.block.Block` (owned by the world/block unit).
 #[derive(Debug)]
@@ -164,6 +176,13 @@ pub struct BlockEntityType;
 /// element and its derives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribute;
+
+/// `net.minecraft.world.clock.WorldClock` — the clock unit's registry element
+/// placeholder (see the `WORLD_CLOCK` key above, #87). `Clone`/`PartialEq`/`Eq`
+/// are required by `Holder<WorldClock>` (the set-time wire codec carries
+/// holders); the clock unit replaces the placeholder with the real record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldClock;
 
 /// `Registries.registryDirPath` (private in Java) — the registry key's path.
 pub fn registry_dir_path(registry_key: &ResourceKey<Registry<()>>) -> String {
