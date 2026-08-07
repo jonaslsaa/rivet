@@ -1,10 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use bytes::Bytes;
 
 use rivet_protocol::generated::protocol::ConnectionProtocol;
 use rivet_protocol::protocol::common::client_information::ClientInformation;
 use rivet_protocol::protocol::common::clientbound_custom_payload::ClientboundCustomPayloadPacket;
+use rivet_protocol::protocol::common::clientbound_update_tags::ClientboundUpdateTagsPacket;
 use rivet_protocol::protocol::common::custom::{BrandPayload, CustomPacketPayload};
 use rivet_protocol::protocol::common::serverbound_client_information::ServerboundClientInformationPacket;
 use rivet_protocol::protocol::common::serverbound_custom_click_action::ServerboundCustomClickActionPacket;
@@ -12,11 +13,19 @@ use rivet_protocol::protocol::common::serverbound_custom_payload::ServerboundCus
 use rivet_protocol::protocol::common::serverbound_keep_alive::ServerboundKeepAlivePacket;
 use rivet_protocol::protocol::common::serverbound_pong::ServerboundPongPacket;
 use rivet_protocol::protocol::common::serverbound_resource_pack::ServerboundResourcePackPacket;
+use rivet_protocol::protocol::configuration::clientbound_registry_data::ClientboundRegistryDataPacket;
+use rivet_protocol::protocol::configuration::clientbound_select_known_packs::ClientboundSelectKnownPacks;
+use rivet_protocol::protocol::configuration::clientbound_update_enabled_features::ClientboundUpdateEnabledFeaturesPacket;
+use rivet_protocol::protocol::configuration::serverbound_finish_configuration::ServerboundFinishConfigurationPacket;
+use rivet_protocol::protocol::configuration::serverbound_select_known_packs::ServerboundSelectKnownPacks;
+use rivet_registry::Identifier;
+use rivet_util::KnownPack;
 
 use super::connection::Connection;
 use super::packet_listener::{
     DisconnectReason, ListenerOutcome, PacketListener, decode_packet, packet_id,
 };
+use super::registry_sync;
 use super::server_login_packet_listener::encode_body;
 use crate::server::ServerConfig;
 
@@ -35,9 +44,15 @@ const SELECT_KNOWN_PACKS_PACKET_ID: i32 = 7;
 const CUSTOM_CLICK_ACTION_PACKET_ID: i32 = 8;
 const ACCEPT_CODE_OF_CONDUCT_PACKET_ID: i32 = 9;
 
-/// `ConfigurationProtocols.CLIENTBOUND` id for the brand packet
-/// (`ClientboundCustomPayloadPacket`, registered at `custom_payload` 1).
+/// `ConfigurationProtocols.CLIENTBOUND` ids (`ConfigurationPacketTypes`, the
+/// generated table pins: `custom_payload` 1, `finish_configuration` 3,
+/// `registry_data` 7, `update_enabled_features` 12, `update_tags` 13,
+/// `select_known_packs` 14).
 const CLIENTBOUND_CUSTOM_PAYLOAD_ID: u32 = 1;
+const CLIENTBOUND_REGISTRY_DATA_ID: u32 = 7;
+const CLIENTBOUND_UPDATE_ENABLED_FEATURES_ID: u32 = 12;
+const CLIENTBOUND_UPDATE_TAGS_ID: u32 = 13;
+const CLIENTBOUND_SELECT_KNOWN_PACKS_ID: u32 = 14;
 
 /// `ServerCommonPacketListenerImpl.DISCONNECT_UNEXPECTED_QUERY`.
 const DISCONNECT_UNEXPECTED_QUERY: &str = "multiplayer.disconnect.unexpected_query_response";
@@ -46,66 +61,96 @@ const DISCONNECT_UNEXPECTED_QUERY: &str = "multiplayer.disconnect.unexpected_que
 /// brand in `startConfiguration` via `ClientboundCustomPayloadPacket(Brand)`.
 const SERVER_BRAND: &str = "Rivet";
 
+/// `ConfigurationTask.Type` id for `SynchronizeRegistriesTask` — the only task
+/// this slice queues.
+const SYNCHRONIZE_REGISTRIES_TASK_TYPE: &str = "synchronize_registries";
+/// `ConfigurationTask.Type` id for `JoinWorldTask` — never queued here (the
+/// finish→play handoff is #100/#101), so finishing it always mismatches.
+const JOIN_WORLD_TASK_TYPE: &str = "join_world";
+
 /// `net.minecraft.server.network.ConfigurationTask` — one deferred step of the
 /// configuration phase.
 ///
 /// Java: `ConfigurationTask.java` in `working/Paper`. Each task is started by
 /// `ServerConfigurationPacketListenerImpl.startNextTask` with a `Consumer<Packet>`
-/// that sends one packet. This slice's only task is the honest brand followed by
-/// [`RegistrySyncUnavailable`]; the full queue (registry sync, join world, spawn,
-/// code of conduct, resource pack) and the client-response `finishCurrentTask`
-/// machinery land with their owning units (#109/#100/#236).
+/// that sends one packet. A task stays `currentTask` until a client response
+/// finishes it via `finishCurrentTask` (`SynchronizeRegistriesTask` awaits the
+/// `select_known_packs` reply). This slice queues only the registry sync.
 trait ConfigurationTask: Send {
+    /// `ConfigurationTask.Type.id()` — the task-type discriminator checked by
+    /// `finishCurrentTask` (`ConfigurationTask.Type(String id)`).
+    fn type_id(&self) -> &'static str;
     /// `ConfigurationTask.start(Consumer<Packet>)` — send the task's opening
-    /// packet(s). Java returns void; a task that awaits a client response (the
-    /// registry sync, the resource pack) is later finished by `finishCurrentTask`
-    /// — none of this slice's tasks await one.
+    /// packet(s). Java returns void; a task that awaits a client response is
+    /// later finished by `finishCurrentTask`.
     fn start(&mut self, conn: &mut Connection) -> Result<(), String>;
 }
 
-/// `SynchronizeRegistriesTask`'s stand-in for the offline slice.
+/// `net.minecraft.server.network.config.SynchronizeRegistriesTask` (issue #109).
 ///
-/// The real task sends `ClientboundSelectKnownPacks`, then on the client's
-/// `handleSelectKnownPacks` reply sends the registry/tag data and finishes. All
-/// of that content — `KnownPack` negotiation,
-/// `RegistrySynchronization.packRegistries`, `TagNetworkSerialization` — is
-/// #109. This placeholder sends NOTHING on `start`, and the listener rejects an
-/// unsolicited `select_known_packs` with Java's
-/// `IllegalStateException("Unexpected response from client: received pack
-/// selection, but no negotiation ongoing")` — the honest behavior when no
-/// negotiation is in progress.
-struct RegistrySyncUnavailable;
+/// Java: `SynchronizeRegistriesTask.java` in `working/Paper`. `start` sends the
+/// server's `ClientboundSelectKnownPacks`; `handleResponse` sends the 29
+/// `ClientboundRegistryDataPacket`s + the `ClientboundUpdateTagsPacket`, then the
+/// listener finishes the task. The payload construction lives in
+/// [`registry_sync`].
+struct SynchronizeRegistriesTask {
+    /// `requestedPacks` — the packs the client should select from
+    /// (`MinecraftServer.getResourceManager().listPacks()...knownPackInfo()`).
+    requested_packs: Vec<KnownPack>,
+}
 
-impl ConfigurationTask for RegistrySyncUnavailable {
-    fn start(&mut self, _conn: &mut Connection) -> Result<(), String> {
-        // No select-known-packs/registry/tag data — the content is #109.
-        // RivetTodo(#109): `SynchronizeRegistriesTask.start` sending
-        // `ClientboundSelectKnownPacks` + `handleResponse`'s registry/tag data
-        // (`RegistrySynchronization.packRegistries`,
-        // `TagNetworkSerialization.serializeTagsToNetwork`).
-        Ok(())
+impl SynchronizeRegistriesTask {
+    /// `new SynchronizeRegistriesTask(knownPacks, registries)` — the M1 server
+    /// advertises the vanilla `minecraft:core:26.2` pack.
+    fn new() -> Self {
+        SynchronizeRegistriesTask {
+            requested_packs: registry_sync::requested_packs(),
+        }
+    }
+}
+
+impl ConfigurationTask for SynchronizeRegistriesTask {
+    fn type_id(&self) -> &'static str {
+        SYNCHRONIZE_REGISTRIES_TASK_TYPE
+    }
+
+    fn start(&mut self, conn: &mut Connection) -> Result<(), String> {
+        // `connection.accept(new ClientboundSelectKnownPacks(this.requestedPacks))`.
+        let body = encode_body(
+            ClientboundSelectKnownPacks::stream_codec(),
+            &ClientboundSelectKnownPacks::new(self.requested_packs.clone()),
+        );
+        conn.send_packet(
+            ConnectionProtocol::Configuration,
+            CLIENTBOUND_SELECT_KNOWN_PACKS_ID,
+            &body,
+        )
     }
 }
 
 /// `net.minecraft.server.network.ServerConfigurationPacketListenerImpl` —
-/// configuration phase, offline slice.
+/// configuration phase, offline slice (issue #109).
 ///
 /// Java: `ServerConfigurationPacketListenerImpl.java` in `working/Paper`.
 /// `startConfiguration` sends the brand (a `ClientboundCustomPayloadPacket`
-/// wrapping `BrandPayload`), then queues the configuration tasks and starts the
+/// wrapping `BrandPayload`) and `update_enabled_features`
+/// (`FeatureFlags.REGISTRY.toNames(worldData.enabledFeatures())` — `{minecraft:vanilla}`
+/// on the M1 offline world), then queues the configuration tasks and starts the
 /// first. The registry-sync task (`SynchronizeRegistriesTask`) is the ONLY
-/// deferred step on the M1 join path — its content is registry/`KnownPack`
-/// serialization (#109). This slice's task queue is Java-shaped (a FIFO drained
-/// by `startNextTask`), but the deferred registry task is replaced by
-/// [`RegistrySyncUnavailable`]; `currentTask`/`finishCurrentTask` arrive with
-/// the tasks that await a client response.
+/// deferred step on the M1 join path; `PrepareSpawnTask`/`JoinWorldTask` (the
+/// finish→play handoff) are #100/#101 and are NOT queued, so after the sync
+/// task finishes the queue is empty and the connection stays in configuration
+/// until `finish_configuration` (which — with no `JoinWorldTask` current —
+/// mismatches `finishCurrentTask` exactly like Java and closes).
 ///
-/// Clientbound config packets are never sent beyond the brand; the finish→play
-/// handoff (`finish_configuration` → `ClientboundFinishConfigurationPacket`,
-/// `ServerGamePacketListenerImpl`) is #100/#101 and is NOT wired here.
+/// The task queue is Java-shaped (`configurationTasks` FIFO drained by
+/// `startNextTask` into `currentTask`, finished by `finishCurrentTask`).
 pub struct ServerConfigurationPacketListener {
     /// `configurationTasks` — the FIFO of not-yet-started tasks.
     configuration_tasks: VecDeque<Box<dyn ConfigurationTask>>,
+    /// `ServerConfigurationPacketListenerImpl.currentTask` — the in-flight task
+    /// awaiting a client response (`@Nullable` when idle).
+    current_task: Option<Box<dyn ConfigurationTask>>,
     /// `ServerConfigurationPacketListenerImpl.clientInformation` — the
     /// `ServerboundClientInformationPacket` value. Java initializes it from the
     /// `CommonListenerCookie` (`ClientInformation.createDefault()`); the
@@ -117,6 +162,7 @@ impl Default for ServerConfigurationPacketListener {
     fn default() -> Self {
         ServerConfigurationPacketListener {
             configuration_tasks: VecDeque::new(),
+            current_task: None,
             client_information: ClientInformation::create_default(),
         }
     }
@@ -128,12 +174,12 @@ impl ServerConfigurationPacketListener {
         Self::default()
     }
 
-    /// `startConfiguration()` — Paper sends the brand first, then queues the
-    /// configuration tasks and starts the first (`startNextTask`).
+    /// `startConfiguration()` — Paper sends the brand first, then
+    /// `update_enabled_features`, then queues the configuration tasks and starts
+    /// the first (`startNextTask`).
     ///
-    /// This slice sends ONLY the honest brand (`Rivet`) — no server links, no
-    /// `update_enabled_features`, no `select_known_packs`/registry/tag data —
-    /// then installs [`RegistrySyncUnavailable`] as the queue's only task.
+    /// This slice queues only the registry sync; the finish→play handoff
+    /// (`PrepareSpawnTask`/`JoinWorldTask`) is #100/#101.
     pub fn start_configuration(&mut self, conn: &mut Connection) -> Result<(), String> {
         // `send(new ClientboundCustomPayloadPacket(new BrandPayload(server
         // .getServerModName())))`.
@@ -149,29 +195,81 @@ impl ServerConfigurationPacketListener {
             &body,
         )?;
 
-        // The full queue (`SynchronizeRegistriesTask` + optional tasks +
-        // `PrepareSpawnTask` + `JoinWorldTask`) is deferred; the registry sync
-        // content is #109 and the finish→play handoff is #100/#101. This slice
-        // installs only the RegistrySyncUnavailable placeholder, Java-shaped
-        // (a FIFO drained by startNextTask).
+        // `send(new ClientboundUpdateEnabledFeaturesPacket(FeatureFlags.REGISTRY
+        // .toNames(this.server.getWorldData().enabledFeatures())))` — the M1
+        // offline world enables only the vanilla feature set.
+        let enabled =
+            ClientboundUpdateEnabledFeaturesPacket::new(HashSet::from([Identifier::parse(
+                "minecraft:vanilla",
+            )]));
+        let body = encode_body(
+            ClientboundUpdateEnabledFeaturesPacket::stream_codec(),
+            &enabled,
+        );
+        conn.send_packet(
+            ConnectionProtocol::Configuration,
+            CLIENTBOUND_UPDATE_ENABLED_FEATURES_ID,
+            &body,
+        )?;
+
+        // `this.synchronizeRegistriesTask = new SynchronizeRegistriesTask(...);
+        // this.configurationTasks.add(this.synchronizeRegistriesTask);
+        // this.addOptionalTasks(); ... this.returnToWorld();` — the optional
+        // tasks (code of conduct, resource pack) are #236, and
+        // `PrepareSpawnTask`/`JoinWorldTask` are the finish→play handoff.
         // RivetTodo(#100): `PrepareSpawnTask`/`JoinWorldTask` and the
         // finish→play handoff (`finish_configuration` → `ClientboundFinish
         // ConfigurationPacket` + `spawnPlayer`).
         // RivetTodo(#101): the play-state listener
         // (`ServerGamePacketListenerImpl`) that follows `finish_configuration`.
+        // RivetTodo(#236): `addOptionalTasks` — the code-of-conduct and
+        // resource-pack configuration tasks.
         self.configuration_tasks
-            .push_back(Box::new(RegistrySyncUnavailable));
+            .push_back(Box::new(SynchronizeRegistriesTask::new()));
         self.start_next_task(conn)
     }
 
-    /// `startNextTask()` — pull the next queued task and run its `start`. Java
-    /// keeps the task as `currentTask` until a client response finishes it; no
-    /// task in this slice awaits one, so each is done the moment it starts.
+    /// `startNextTask()` — pull the next queued task, make it `currentTask`, and
+    /// run its `start`. Java throws `IllegalStateException` if a task is still
+    /// current; the registry sync is the only task here and it stays current
+    /// until its `select_known_packs` reply arrives.
     fn start_next_task(&mut self, conn: &mut Connection) -> Result<(), String> {
-        if let Some(mut task) = self.configuration_tasks.pop_front() {
-            task.start(conn)?;
+        if let Some(task) = &self.current_task {
+            return Err(format!("Task {} has not finished yet", task.type_id()));
+        }
+        if let Some(task) = self.configuration_tasks.pop_front() {
+            self.current_task = Some(task);
+            if let Err(e) = self.current_task.as_mut().unwrap().start(conn) {
+                self.current_task = None;
+                return Err(e);
+            }
         }
         Ok(())
+    }
+
+    /// `finishCurrentTask(ConfigurationTask.Type)` — verify the current task's
+    /// type matches, clear it, and start the next queued task. Java throws
+    /// `IllegalStateException("Unexpected request for task finish, current
+    /// task: ..., requested: ...")` on a mismatch — surfaced here as a Malformed
+    /// close.
+    fn finish_current_task(
+        &mut self,
+        type_id: &str,
+        conn: &mut Connection,
+    ) -> Result<(), DisconnectReason> {
+        let current = self
+            .current_task
+            .as_ref()
+            .map(|t| t.type_id())
+            .unwrap_or("null");
+        if current != type_id {
+            return Err(DisconnectReason::Malformed(format!(
+                "Unexpected request for task finish, current task: {current}, requested: {type_id}"
+            )));
+        }
+        self.current_task = None;
+        self.start_next_task(conn)
+            .map_err(DisconnectReason::Unsupported)
     }
 }
 
@@ -183,7 +281,7 @@ impl PacketListener for ServerConfigurationPacketListener {
     fn handle_frame(
         &mut self,
         frame: Bytes,
-        _conn: &mut Connection,
+        conn: &mut Connection,
         _config: &ServerConfig,
     ) -> Result<ListenerOutcome, DisconnectReason> {
         match packet_id(&frame)? {
@@ -263,29 +361,43 @@ impl PacketListener for ServerConfigurationPacketListener {
                 ))
             }
             SELECT_KNOWN_PACKS_PACKET_ID => {
-                // `handleSelectKnownPacks`: with no `SynchronizeRegistriesTask`
-                // in flight (this slice's placeholder sends nothing and finished
-                // immediately), Java throws `IllegalStateException("Unexpected
-                // response from client: received pack selection, but no
-                // negotiation ongoing")` — surfaced here as a deterministic
-                // Malformed close. The body is a `List<KnownPack>` (#109) and is
-                // never parsed.
-                Err(DisconnectReason::Malformed(
-                    "Unexpected response from client: received pack selection, but no negotiation ongoing"
-                        .into(),
-                ))
+                // `handleSelectKnownPacks` — the registry-sync negotiation
+                // reply. Java throws `IllegalStateException("Unexpected response
+                // from client: received pack selection, but no negotiation
+                // ongoing")` when `synchronizeRegistriesTask == null`; in this
+                // slice the negotiation is ongoing exactly while the sync task
+                // is current, so an unsolicited reply (before the sync starts
+                // or after it finished) is rejected the same way.
+                if self.current_task.as_ref().map(|t| t.type_id())
+                    != Some(SYNCHRONIZE_REGISTRIES_TASK_TYPE)
+                {
+                    return Err(DisconnectReason::Malformed(
+                        "Unexpected response from client: received pack selection, but no negotiation ongoing"
+                            .into(),
+                    ));
+                }
+                let packet: ServerboundSelectKnownPacks =
+                    decode_packet(frame, ServerboundSelectKnownPacks::stream_codec())?;
+                // `synchronizeRegistriesTask.handleResponse(acceptedPacks, this::send)`
+                // then `finishCurrentTask(SynchronizeRegistriesTask.TYPE)`.
+                self.handle_sync_response(&packet, conn)?;
+                Ok(ListenerOutcome::Keep)
             }
             FINISH_CONFIGURATION_PACKET_ID => {
-                // `handleConfigurationFinished` — the finish→play handoff:
-                // `setupOutboundProtocol(GameProtocols.CLIENTBOUND)`,
-                // duplicate-login check, `prepareSpawnTask.spawnPlayer(...)`.
+                // `handleConfigurationFinished` — `finishCurrentTask(
+                // JoinWorldTask.TYPE)`. `JoinWorldTask` is never queued in this
+                // slice (#100/#101), so the type never matches and Java throws
+                // `IllegalStateException` — surfaced here as a Malformed close.
                 // RivetTodo(#100): the finish→play handoff
                 // (`ClientboundFinishConfigurationPacket` + the
                 // `PrepareSpawnTask`/`JoinWorldTask` queue + `spawnPlayer`).
                 // RivetTodo(#101): play-state listener (`ServerGamePacketListenerImpl`).
-                Err(DisconnectReason::Unsupported(
-                    "multiplayer.disconnect.configuration_error".into(),
-                ))
+                let _: ServerboundFinishConfigurationPacket = decode_packet(
+                    frame,
+                    rivet_protocol::protocol::configuration::serverbound_finish_configuration::stream_codec(),
+                )?;
+                self.finish_current_task(JOIN_WORLD_TASK_TYPE, conn)?;
+                Ok(ListenerOutcome::Keep)
             }
             ACCEPT_CODE_OF_CONDUCT_PACKET_ID => {
                 // `handleAcceptCodeOfConduct` → `finishCurrentTask(
@@ -307,10 +419,56 @@ impl PacketListener for ServerConfigurationPacketListener {
     fn on_disconnect(&mut self) {}
 }
 
+impl ServerConfigurationPacketListener {
+    /// `SynchronizeRegistriesTask.handleResponse(acceptedPacks, connection)` —
+    /// send the registry/tag data and finish the task.
+    ///
+    /// Java: when the accepted packs equal the requested packs, the elements
+    /// whose `RegistrationInfo.knownPackInfo` is in the accepted set skip their
+    /// content (`Optional.empty()`); otherwise every element is fully encoded.
+    /// The M1 vanilla client accepts `minecraft:core:26.2`, so every element is
+    /// skipped. A client that does NOT accept cannot be served faithfully (the
+    /// full NBT element codecs are unported) — see [`registry_sync::pack_registries`].
+    fn handle_sync_response(
+        &mut self,
+        packet: &ServerboundSelectKnownPacks,
+        conn: &mut Connection,
+    ) -> Result<(), DisconnectReason> {
+        let registry_packets = registry_sync::pack_registries(packet.known_packs())
+            .map_err(DisconnectReason::Unsupported)?;
+        for packet in registry_packets {
+            let body = encode_body(ClientboundRegistryDataPacket::stream_codec(), &packet);
+            conn.send_packet(
+                ConnectionProtocol::Configuration,
+                CLIENTBOUND_REGISTRY_DATA_ID,
+                &body,
+            )
+            .map_err(DisconnectReason::Unsupported)?;
+        }
+        // `connection.accept(new ClientboundUpdateTagsPacket(
+        // TagNetworkSerialization.serializeTagsToNetwork(this.registries)))`.
+        let update_tags =
+            ClientboundUpdateTagsPacket::new(registry_sync::serialize_tags_to_network());
+        let body = encode_body(ClientboundUpdateTagsPacket::stream_codec(), &update_tags);
+        conn.send_packet(
+            ConnectionProtocol::Configuration,
+            CLIENTBOUND_UPDATE_TAGS_ID,
+            &body,
+        )
+        .map_err(DisconnectReason::Unsupported)?;
+
+        self.finish_current_task(SYNCHRONIZE_REGISTRIES_TASK_TYPE, conn)
+    }
+}
+
 impl std::fmt::Debug for ServerConfigurationPacketListener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerConfigurationPacketListener")
             .field("client_information", &self.client_information)
+            .field(
+                "current_task",
+                &self.current_task.as_ref().map(|t| t.type_id()),
+            )
             .finish_non_exhaustive()
     }
 }

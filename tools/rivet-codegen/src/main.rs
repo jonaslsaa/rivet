@@ -23,6 +23,7 @@ mod probe_biomes_tags;
 mod probe_block_states;
 mod registries;
 mod reports;
+mod synchronized;
 
 use std::path::Path;
 
