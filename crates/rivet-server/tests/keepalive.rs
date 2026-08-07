@@ -22,7 +22,9 @@ use rivet_server::server::keepalive::{KeepaliveResponseOutcome, KeepaliveState};
 use rivet_server::server::network::connection_id::ConnectionId;
 use rivet_server::server::network::keepalive::{KeepaliveSink, drive_keepalive};
 use rivet_server::server::network::packet_listener::DisconnectReason;
-use rivet_server::server::tick::channels::{LifecycleEvent, OutboundEvent, ServerboundFrame};
+use rivet_server::server::tick::channels::{
+    InboundDrained, LifecycleEvent, OutboundEvent, ServerboundFrame,
+};
 use rivet_server::server::tick::registry::ConnectionRegistry;
 use rivet_server::server::tick::scheduler::{NANOS_PER_TICK, TickScheduler};
 use rivet_server::server::tick::shutdown::Shutdown;
@@ -265,6 +267,7 @@ fn register_with_id(
             remote: REMOTE,
             in_rx,
             out_tx,
+            drained: InboundDrained::new(),
         })
         .expect("lifecycle channel has room");
     (in_tx, out_rx)

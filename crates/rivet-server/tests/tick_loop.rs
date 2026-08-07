@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use rivet_server::server::network::connection_id::ConnectionId;
 use rivet_server::server::network::packet_listener::DisconnectReason;
-use rivet_server::server::tick::channels::{LifecycleEvent, OutboundEvent, ServerboundFrame};
+use rivet_server::server::tick::channels::{
+    InboundDrained, LifecycleEvent, OutboundEvent, ServerboundFrame,
+};
 use rivet_server::server::tick::endpoint::{NetworkEndpoint, RegisterResult};
 use rivet_server::server::tick::registry::{ConnectionRegistry, OutboundError};
 use rivet_server::server::tick::scheduler::{NANOS_PER_TICK, TickScheduler};
@@ -90,6 +92,7 @@ fn register(
             remote: REMOTE,
             in_rx,
             out_tx,
+            drained: InboundDrained::new(),
         })
         .expect("lifecycle channel has room");
     (in_tx, out_rx)
@@ -538,6 +541,7 @@ fn registry_lifecycle_connect_then_disconnect() {
         remote: REMOTE,
         in_rx,
         out_tx,
+        drained: InboundDrained::new(),
     });
     assert!(reg.contains(id));
     assert_eq!(reg.get(id).map(|c| c.id()), Some(id));
@@ -569,12 +573,19 @@ async fn register_full_lifecycle_channel_awaits_capacity_and_succeeds() {
             remote: REMOTE,
             in_rx: in_rx0,
             out_tx: out_tx0,
+            drained: InboundDrained::new(),
         })
         .expect("first event fits");
 
     let (_in_tx, in_rx) = tokio::sync::mpsc::channel(1);
     let (out_tx, _out_rx) = tokio::sync::mpsc::channel(1);
-    let register = endpoint.register_connection(ConnectionId(1), REMOTE, in_rx, out_tx);
+    let register = endpoint.register_connection(
+        ConnectionId(1),
+        REMOTE,
+        in_rx,
+        out_tx,
+        InboundDrained::new(),
+    );
     // Poll both: the register future awaits capacity; draining the first event
     // frees it.
     let (first, result) = tokio::join!(lifecycle_rx.recv(), register);
@@ -593,7 +604,13 @@ async fn register_closed_lifecycle_channel_reports_server_shutting_down() {
     let (_in_tx, in_rx) = tokio::sync::mpsc::channel(1);
     let (out_tx, _out_rx) = tokio::sync::mpsc::channel(1);
     let result = endpoint
-        .register_connection(ConnectionId(1), REMOTE, in_rx, out_tx)
+        .register_connection(
+            ConnectionId(1),
+            REMOTE,
+            in_rx,
+            out_tx,
+            InboundDrained::new(),
+        )
         .await;
     assert_eq!(result, RegisterResult::ServerShuttingDown);
 }

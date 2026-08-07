@@ -220,6 +220,7 @@ mod tests {
                 config,
                 std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new()),
                 write,
+                crate::server::tick::channels::InboundDrained::new(),
             );
 
             // Wrong outbound protocol: the send must fail loudly.

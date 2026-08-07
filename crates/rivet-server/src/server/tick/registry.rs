@@ -78,12 +78,13 @@ impl ConnectionRegistry {
                 remote,
                 in_rx,
                 out_tx,
+                drained,
             } => {
                 // `ConnectionId`s are unique per boot, so an existing entry is
                 // a stale prune (channel ends already dropped); replacing it is
                 // the correct outcome either way.
                 self.connections
-                    .insert(id, ConnChannels::new(id, remote, in_rx, out_tx));
+                    .insert(id, ConnChannels::new(id, remote, in_rx, out_tx, drained));
             }
             LifecycleEvent::Disconnect { id, .. } => {
                 self.connections.remove(&id);
@@ -165,6 +166,11 @@ impl ConnectionRegistry {
                 drained_bytes += frame.bytes.len();
                 frames.push(frame);
             }
+            // Record delivered frames on the shared progress counter, so the
+            // connection's admission window sees this tick's progress.
+            if !frames.is_empty() {
+                conn.drained.record_drained(frames.len());
+            }
         }
         if closed {
             self.connections.remove(&id);
@@ -205,6 +211,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use crate::server::network::packet_listener::DisconnectReason;
+    use crate::server::tick::channels::InboundDrained;
     use bytes::Bytes;
     use tokio::sync::mpsc;
 
@@ -238,6 +245,7 @@ mod tests {
             remote: REMOTE,
             in_rx,
             out_tx,
+            drained: InboundDrained::new(),
         });
         (in_tx, out_rx)
     }
