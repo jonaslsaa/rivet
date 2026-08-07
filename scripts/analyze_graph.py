@@ -52,6 +52,28 @@ those residual classes as STUBs (see SPLIT_NOTES). The residual keeps
 needs_split=yes (still 167 files and not done); the three sub-units are the M1
 protocol wave's deliverable and are not flagged.
 
+`--split-server` refines the oversized net.minecraft.server.level package in
+scope of issue #227 (M2, prerequisite for #185): the 37-file / 13,246-LOC
+monolithic mc.server.level row splits into right-sized class clusters around
+the eight named pipeline targets — ServerChunkCache, ChunkMap, ChunkHolder,
+ChunkLevel, ChunkTaskDispatcher, ChunkTracker, ChunkTrackingView,
+ThreadedLevelLightEngine — plus a ticket value layer (Ticket/TicketType), a
+worldgen view (WorldGenRegion) and a residual hub. The residual is computed as
+the complement of the authored file lists within the package scan, so the split
+can never lose or duplicate a file; it keeps the pre-split id (mc.server.level)
+because 200+ external rows depend on net.minecraft.server.level and must
+resolve to a single hub, not to the lowest-id cluster. All units keep the
+package's wave/cycle (the whole package is one class-level SCC inside cycle
+27), so the split right-sizes *file ownership* — it does not claim the units
+are acyclic. Cross-cluster same-package edges are authored as unit ids in
+SPLIT_EDGES (Java same-package refs need no import); every sub-unit's
+back-references into the residual (ServerLevel/ServerPlayer/etc.) are
+deliberate STUBs recorded in SPLIT_NOTES, not dep edges (recording them would
+deadlock the wave). The intra-cluster DAG (all verified against the Java):
+level -> holder -> task -> light and holder -> tracker -> distance -> chunkmap
+-> light/servercache, with view -> chunkmap and region on holder; the residual
+depends on chunkmap/holder/servercache/ticket/view.
+
 `--split-world` refines the oversized mc.world.level.* packages in scope of
 issue #176 (M2): the levelgen root, levelgen.feature, feature.configurations,
 levelgen.blockpredicates, levelgen.placement, biome, levelgen.structure,
@@ -104,11 +126,12 @@ verified zero saveddata refs); primaryleveldata builds on leveldata + version;
 and there are zero sub-unit -> residual back-edges (uniquely clean — no STUB
 notes).
 
-The network, game and world splits share one generic package_split_rows(pkg)
-below; the three opt-in flags (--split-network, --split-game, --split-world)
-plus --split-nbt are all additive, and pass none to get the flat package-level
-manifest. The default output and previous-manifest locations can be overridden
-with `--output` and `--prev-manifest` (used by the regression tests).
+The network, game, world and server splits share one generic
+package_split_rows(pkg) below; the four opt-in flags (--split-network,
+--split-game, --split-world, --split-server) plus --split-nbt are all
+additive, and pass none to get the flat package-level manifest. The default
+output and previous-manifest locations can be overridden with `--output` and
+`--prev-manifest` (used by the regression tests).
 
 `needs_split` is the *actionable* pre-translation split state: `yes` iff the
 unit is not done and owns more than SPLIT_FILE_THRESHOLD files. Structural SCC
@@ -984,9 +1007,78 @@ PACKAGE_SPLITS: dict[str, dict[str, list[str]]] = {
             "RandomOffsetPlacement.java",
         ],
     },
+    # ---- net.minecraft.server.level (issue #227, M2 prerequisite for #185):
+    # the 37-file / 13,246-LOC monolithic mc.server.level row splits into
+    # right-sized class clusters around the eight pipeline targets (#185's
+    # minimal region-streaming spine) plus a ticket value layer and a
+    # worldgen view. Fully authored except the residual, which keeps the
+    # pre-split id because 200+ external rows depend on net.minecraft.server.
+    # level and must resolve to a single hub (mirror of the storage split). The
+    # whole package is ONE class-level SCC (verified against the Java:
+    # ChunkMap<->ServerChunkCache<->ServerLevel<->ServerPlayer and the holder/
+    # distance/task/lights back-refs), so the split right-sizes file ownership;
+    # it does not claim the units are cycle-free — every unit stays wave=3 /
+    # cycle=27.
+    #   - chunkmap (the hub): ChunkMap, the only concrete GeneratingChunkMap +
+    #     ChunkHolder.PlayerProvider; owns all eight named targets' seams.
+    #   - holder: ChunkHolder + GenerationChunkHolder + GeneratingChunkMap +
+    #     ChunkGenerationTask — the generation-task layer is its own file and
+    #     rides here (ChunkGenerationTask <-> GenerationChunkHolder is the
+    #     tightest cycle, and both are Moonrise-scheduler STUBs in #185).
+    #   - distance: DistanceManager (the ticket-priority graph + the
+    #     per-player spawn tracker), consumed by chunkmap/servercache/tracker.
+    #   - task: ChunkTaskDispatcher + ChunkTaskPriorityQueue +
+    #     ThrottlingChunkTaskDispatcher (the Moonrise scheduler slots; the
+    #     dispatcher implements ChunkHolder.LevelChangeListener).
+    #   - level: ChunkLevel + FullChunkStatus + ChunkResult — the value layer
+    #     everyone reads (level constants, status ladder, future-result
+    #     carriers); the smallest independent leaf.
+    #   - tracker: ChunkTracker + LoadingChunkTracker + SimulationChunkTracker
+    #     + SectionTracker (the section-level twin) — the ticket-level
+    #     propagation graph over DynamicGraphMinFixedPoint.
+    #   - view: ChunkTrackingView (the square view-distance containment value).
+    #   - servercache: ServerChunkCache (the ChunkSource facade + the
+    #     MainThreadExecutor), the #185 spawn/tick entry.
+    #   - light: ThreadedLevelLightEngine (the Starlight hook), feeding #184.
+    #   - ticket: Ticket + TicketType (the ticket value layer, stored into
+    #     the world-level TicketStorage seam by servercache/distance).
+    #   - region: WorldGenRegion (the worldgen chunk-view container).
+    #   - residual (mc.server.level): ServerLevel + ServerPlayer + the entity
+    #     surface (ServerEntity/ServerEntityGetter/ServerPlayerGameMode) + the
+    #     player/session value types (ServerBossEvent/DemoMode/PlayerSpawnFinder/
+    #     PlayerMap/ChunkLoadCounter/BlockDestructionProgress/ColumnPos/
+    #     ClientInformation/ParticleStatus) + package-info. The residual is the
+    #     untranslated tail: every authored cluster references it (ServerLevel/
+    #     ServerPlayer are the types the pipeline classes touch), and those
+    #     back-refs are the #185 STUBs (see SPLIT_NOTES) — never dep edges.
+    "net.minecraft.server.level": {
+        "mc.server.level.pipeline.chunkmap": ["ChunkMap.java"],
+        "mc.server.level.pipeline.holder": [
+            "ChunkHolder.java", "GenerationChunkHolder.java",
+            "GeneratingChunkMap.java", "ChunkGenerationTask.java",
+        ],
+        "mc.server.level.pipeline.distance": ["DistanceManager.java"],
+        "mc.server.level.pipeline.task": [
+            "ChunkTaskDispatcher.java", "ChunkTaskPriorityQueue.java",
+            "ThrottlingChunkTaskDispatcher.java",
+        ],
+        "mc.server.level.pipeline.level": [
+            "ChunkLevel.java", "FullChunkStatus.java", "ChunkResult.java",
+        ],
+        "mc.server.level.pipeline.tracker": [
+            "ChunkTracker.java", "LoadingChunkTracker.java",
+            "SimulationChunkTracker.java", "SectionTracker.java",
+        ],
+        "mc.server.level.pipeline.view": ["ChunkTrackingView.java"],
+        "mc.server.level.pipeline.servercache": ["ServerChunkCache.java"],
+        "mc.server.level.pipeline.light": ["ThreadedLevelLightEngine.java"],
+        "mc.server.level.pipeline.ticket": ["Ticket.java", "TicketType.java"],
+        "mc.server.level.pipeline.region": ["WorldGenRegion.java"],
+    },
 }
 
-# Packages selected by the --split-network / --split-game / --split-world flags.
+# Packages selected by the --split-network / --split-game / --split-world /
+# --split-server flags.
 WORLD_SPLIT_PACKAGES = {
     "net.minecraft.world.level.levelgen",
     "net.minecraft.world.level.levelgen.feature",
@@ -1030,6 +1122,7 @@ FLAG_PACKAGES: dict[str, set[str]] = {
     "network": {"net.minecraft.network"},
     "game": {"net.minecraft.network.protocol.game"},
     "world": WORLD_SPLIT_PACKAGES,
+    "server": {"net.minecraft.server.level"},
 }
 
 # Authored same-package sibling deps (unit ids) that the wave-picker resolves
@@ -1314,6 +1407,69 @@ SPLIT_EDGES: dict[str, set[str]] = {
         "mc.world.level.storage.leveldata",
         "mc.world.level.storage.version",
     },
+    # server.level (issue #227): the intra-cluster DAG, verified against the
+    # Java. level is the value base every pipeline class reads (ChunkLevel
+    # constants + FullChunkStatus + ChunkResult). holder builds on level
+    # (GenerationChunkHolder.UNLOADED_CHUNK is a ChunkResult; ChunkHolder reads
+    # FullChunkStatus). task builds on holder + level (ChunkTaskDispatcher
+    # implements ChunkHolder.LevelChangeListener; ChunkTaskPriorityQueue reads
+    # ChunkLevel.MAX_LEVEL). tracker builds on holder + level (LoadingChunkTracker
+    # calls DistanceManager.getChunk/updateChunkScheduling -> ChunkHolder); the
+    # tracker -> distance edge is deliberately NOT recorded (the real edge is
+    # tracker consumes the abstract DistanceManager hooks, which is the #185
+    # stub seam — see the tracker note). chunkmap builds on holder + level +
+    # view (ChunkMap.getPlayers -> ChunkTrackingView; allChunksWithAtLeastStatus
+    # -> ChunkLevel; the DistanceManager inner class is part of chunkmap).
+    # distance builds on holder + level + tracker. light builds on chunkmap +
+    # task. servercache builds on chunkmap + distance + holder + level + light +
+    # ticket. region builds on holder (WorldGenRegion holds GenerationChunkHolder
+    # references). The residual depends on chunkmap + holder + servercache +
+    # ticket + view (ServerLevel -> chunkMap/getChunkSource, ServerPlayer ->
+    # ChunkTrackingView/TicketType). Sub-unit back-refs into the residual
+    # (ChunkMap.this.level is a ServerLevel, ServerChunkCache.level, DistanceManager
+    # holds ServerPlayer, ThreadedLevelLightEngine casts to ServerLevel, ChunkHolder
+    # -> ServerPlayer, WorldGenRegion -> ServerLevel) are
+    # deliberate #185 STUBs, not dep edges — recording them would deadlock the wave.
+    "mc.server.level": {
+        "mc.server.level.pipeline.chunkmap",
+        "mc.server.level.pipeline.holder",
+        "mc.server.level.pipeline.servercache",
+        "mc.server.level.pipeline.ticket",
+        "mc.server.level.pipeline.view",
+    },
+    "mc.server.level.pipeline.holder": {"mc.server.level.pipeline.level"},
+    "mc.server.level.pipeline.chunkmap": {
+        "mc.server.level.pipeline.holder",
+        "mc.server.level.pipeline.level",
+        "mc.server.level.pipeline.view",
+        "mc.server.level.pipeline.distance",
+    },
+    "mc.server.level.pipeline.distance": {
+        "mc.server.level.pipeline.holder",
+        "mc.server.level.pipeline.level",
+        "mc.server.level.pipeline.tracker",
+    },
+    "mc.server.level.pipeline.task": {
+        "mc.server.level.pipeline.holder",
+        "mc.server.level.pipeline.level",
+    },
+    "mc.server.level.pipeline.tracker": {
+        "mc.server.level.pipeline.holder",
+        "mc.server.level.pipeline.level",
+    },
+    "mc.server.level.pipeline.servercache": {
+        "mc.server.level.pipeline.holder",
+        "mc.server.level.pipeline.level",
+        "mc.server.level.pipeline.chunkmap",
+        "mc.server.level.pipeline.distance",
+        "mc.server.level.pipeline.light",
+        "mc.server.level.pipeline.ticket",
+    },
+    "mc.server.level.pipeline.light": {
+        "mc.server.level.pipeline.chunkmap",
+        "mc.server.level.pipeline.task",
+    },
+    "mc.server.level.pipeline.region": {"mc.server.level.pipeline.holder"},
 }
 
 # Authored structural notes for split units (carried into the notes column,
@@ -1469,6 +1625,105 @@ SPLIT_NOTES: dict[str, str] = {
         "PatrolSpawner/PhantomSpawner are CustomSpawner impls (mob spawning, not "
         "surface rules); they ride with the world-tick spawner work, not #179"
     ),
+    # ---- server.level (issue #227, prerequisite for #185). The pipeline
+    # clusters are the #185 minimal region-streaming spine; every sub-unit's
+    # back-references into the residual (ServerLevel/ServerPlayer) are #185
+    # STUBs — the residual is not translated in the pipeline wave, so those
+    # edges are deliberately absent from SPLIT_EDGES.
+    "mc.server.level.pipeline.chunkmap": (
+        "#185: ChunkMap is the chunk-pipeline hub (implements GeneratingChunkMap "
+        "and ChunkHolder.PlayerProvider; owns the DistanceManager inner class, the "
+        "TrackedEntity inner class -> ServerEntity, and the region storage read/"
+        "write path). M2 STUB: ChunkMap.this.level / .playerMap are residual "
+        "types (ServerLevel/ServerPlayer) — absorbed as stubs. The .lightEngine "
+        "field (ThreadedLevelLightEngine) is a cross-cluster ref to the light "
+        "cluster, deliberately not a dep edge (light -> chunkmap is the recorded "
+        "edge; recording the reverse would cycle chunkmap<->light)"
+    ),
+    "mc.server.level.pipeline.holder": (
+        "#185: ChunkHolder + GenerationChunkHolder + the generating-map seam "
+        "(GeneratingChunkMap) + ChunkGenerationTask. The ChunkGenerationTask <-> "
+        "GenerationChunkHolder 2-node class cycle is internal (Moonrise scheduler); "
+        "#185 RivetTodos the 6k-LOC scheduler internals. M2 STUB: ChunkHolder/"
+        "GenerationChunkHolder reference residual ServerPlayer/ServerLevel — "
+        "absorbed as stubs. The ChunkMap refs (ChunkHolder.getChunkMap() -> "
+        "(ChunkMap)this.playerProvider, GenerationChunkHolder.scheduleChunkGeneration"
+        "Task(ChunkMap)) are cross-cluster reverse edges to the chunkmap cluster, "
+        "deliberately not dep edges (chunkmap -> holder is the recorded edge). "
+        "ChunkGenerationTask has no residual back-refs (only the "
+        "GeneratingChunkMap/GenerationChunkHolder seams)"
+    ),
+    "mc.server.level.pipeline.distance": (
+        "#185: DistanceManager is the ticket-priority graph (over TicketStorage) "
+        "+ the per-player spawn tracker (PositionCountingAreaMap). M2 STUB: "
+        "DistanceManager holds residual ServerPlayer — absorbed as stubs. The "
+        "moonrise$getChunkMap() calls hit the chunkmap cluster (a cross-cluster "
+        "reverse edge, deliberately not a dep: chunkmap -> distance is the "
+        "recorded edge)"
+    ),
+    "mc.server.level.pipeline.task": (
+        "#185: ChunkTaskDispatcher + ChunkTaskPriorityQueue + "
+        "ThrottlingChunkTaskDispatcher — the Moonrise scheduler slots (rayon "
+        "realization per D5); the dispatcher implements "
+        "ChunkHolder.LevelChangeListener. Pure value layer: no residual "
+        "back-refs (only the ChunkHolder.LevelChangeListener/ChunkLevel seams)"
+    ),
+    "mc.server.level.pipeline.level": (
+        "#185: the value layer (ChunkLevel constants + the FullChunkStatus "
+        "status ladder + the ChunkResult future-result carriers) every pipeline "
+        "class reads; the smallest independent leaf"
+    ),
+    "mc.server.level.pipeline.tracker": (
+        "#185: ChunkTracker/LoadingChunkTracker/SimulationChunkTracker + the "
+        "section-level twin SectionTracker — the ticket-level propagation graph "
+        "over DynamicGraphMinFixedPoint. The tracker -> distance edge is a "
+        "deliberate #185 STUB (LoadingChunkTracker calls the abstract "
+        "DistanceManager.getChunk/updateChunkScheduling hooks, which are the "
+        "chunkmap seam)"
+    ),
+    "mc.server.level.pipeline.view": (
+        "#185: ChunkTrackingView is the square view-distance containment value "
+        "(contains/forEach/difference), consumed by ChunkMap and ServerPlayer; "
+        "dependency-free leaf"
+    ),
+    "mc.server.level.pipeline.servercache": (
+        "#185: ServerChunkCache is the ChunkSource facade + the MainThreadExecutor "
+        "(BlockableEventLoop<Runnable>) + the spawn/tick entry; builds on the whole "
+        "pipeline DAG. M2 STUB: ServerChunkCache.level is residual ServerLevel and "
+        "the spawn iteration reads residual ServerPlayer (level.players()) — "
+        "absorbed as stubs"
+    ),
+    "mc.server.level.pipeline.light": (
+        "#185 + #184: ThreadedLevelLightEngine is the Starlight hook "
+        "(StarLightLightingProvider); feeds the Starlight compute units in #184. "
+        "M2 STUB: ThreadedLevelLightEngine casts to residual ServerLevel "
+        "(the starlight$getLightEngine().getWorld() world) and reads residual "
+        "ServerPlayer (the per-chunk moonrise$getPlayers list) — absorbed as "
+        "stubs. The ChunkMap ref (final ChunkMap chunkMap field) is a "
+        "cross-cluster dep on the chunkmap cluster, a real recorded edge "
+        "(light -> chunkmap), not a stub"
+    ),
+    "mc.server.level.pipeline.ticket": (
+        "#185: the ticket value layer (Ticket/TicketType); TicketType is the "
+        "static registry of ticket types. Dependency-free leaf: the TicketStorage "
+        "seam lives in net.minecraft.world.level (not this residual) and is "
+        "consumed by servercache/distance, not by these value types"
+    ),
+    "mc.server.level.pipeline.region": (
+        "#185: WorldGenRegion, the worldgen chunk-view container holding "
+        "GenerationChunkHolder references (region -> holder). M2 STUB: "
+        "WorldGenRegion.level is the residual ServerLevel seam — absorbed "
+        "as stubs"
+    ),
+    "mc.server.level": (
+        "#227 residual: the untranslated tail — ServerLevel/ServerPlayer + the "
+        "entity surface (ServerEntity/ServerEntityGetter/ServerPlayerGameMode) + "
+        "the player/session value types (ServerBossEvent/DemoMode/PlayerSpawnFinder/"
+        "PlayerMap/ChunkLoadCounter/BlockDestructionProgress/ColumnPos/"
+        "ClientInformation/ParticleStatus). Keeps the pre-split id so the 200+ "
+        "external dependents on net.minecraft.server.level resolve to this hub; "
+        "every pipeline sub-unit references it (the #185 STUB seam)"
+    ),
 }
 
 
@@ -1593,6 +1848,11 @@ def main() -> None:
         "--split-world", action="store_true",
         help="split the oversized mc.world.level.* packages (issue #176) into "
         "right-sized class-cluster units (idempotent)",
+    )
+    parser.add_argument(
+        "--split-server", action="store_true",
+        help="split the oversized net.minecraft.server.level package (issue "
+        "#227) into right-sized class-cluster units (idempotent)",
     )
     parser.add_argument(
         "--output", type=Path, default=None,
@@ -1881,7 +2141,8 @@ def main() -> None:
         flag for flag, on in (("nbt", args.split_nbt),
                               ("network", args.split_network),
                               ("game", args.split_game),
-                              ("world", args.split_world))
+                              ("world", args.split_world),
+                              ("server", args.split_server))
         if on
     }
     rows = [
@@ -1891,12 +2152,13 @@ def main() -> None:
             args.split_network and pkg in FLAG_PACKAGES["network"],
             args.split_game and pkg in FLAG_PACKAGES["game"],
             args.split_world and pkg in FLAG_PACKAGES["world"],
+            args.split_server and pkg in FLAG_PACKAGES["server"],
         ))
         for r in [package_row(pkg)]
     ]
     if args.split_nbt:
         rows.extend(split_row())
-    for flag in ("network", "game", "world"):
+    for flag in ("network", "game", "world", "server"):
         if args.__dict__[f"split_{flag}"]:
             rows.extend(package_split_rows(flag, FLAG_PACKAGES[flag]))
 
@@ -1926,7 +2188,7 @@ def main() -> None:
             fh.write("\t".join(r) + "\n")
 
     n_split = (len(NBT_UNITS) if args.split_nbt else 0)
-    for flag in ("network", "game", "world"):
+    for flag in ("network", "game", "world", "server"):
         if not args.__dict__[f"split_{flag}"]:
             continue
         # Per split package: the sub-unit rows plus the residual row, minus the
