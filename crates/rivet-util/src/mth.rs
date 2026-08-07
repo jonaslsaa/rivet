@@ -168,6 +168,21 @@ pub fn clamp_f64(value: f64, min: f64, max: f64) -> f64 {
     }
 }
 
+/// `Math.max(double a, double b)` — returns the greater of the two, and
+/// propagates NaN from *either* operand (Java `Math.max` returns NaN if either
+/// argument is NaN; Rust `f64::max` returns the non-NaN operand instead).
+/// Signed zero follows Java too: `Math.max(-0.0, 0.0)` is positive zero, which
+/// `f64::max` already produces.
+pub fn max_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else {
+        a.max(b)
+    }
+}
+
 /// `Mth.clampedLerp(double factor, double min, double max)`.
 pub fn clamped_lerp(factor: f64, min: f64, max: f64) -> f64 {
     if factor < 0.0 {
@@ -1272,3 +1287,31 @@ pub fn mul_and_truncate(fraction: &Fraction, factor: i32) -> i32 {
 #[cfg(test)]
 #[path = "mth_golden_tests.rs"]
 mod mth_golden_tests;
+
+#[cfg(test)]
+mod tests {
+    // Hand-written unit tests for JDK `Math.*` ports that are not `Mth` methods
+    // and so have no entry in the generated golden oracle.
+    use super::max_f64;
+
+    #[test]
+    fn max_f64_matches_java_math_max() {
+        assert_eq!(max_f64(3.0, 1.0), 3.0);
+        assert_eq!(max_f64(1.0, 3.0), 3.0);
+        assert_eq!(max_f64(-3.0, -1.0), -1.0);
+        assert_eq!(max_f64(-1.0, -3.0), -1.0);
+        // `Math.max(-0.0, 0.0)` is positive zero in Java, in either order.
+        assert_eq!(max_f64(-0.0, 0.0), 0.0);
+        assert!(max_f64(-0.0, 0.0).is_sign_positive());
+        assert!(max_f64(0.0, -0.0).is_sign_positive());
+    }
+
+    #[test]
+    fn max_f64_propagates_nan_from_either_operand() {
+        // Java `Math.max` returns NaN if either argument is NaN; Rust
+        // `f64::max` would return the non-NaN operand instead.
+        assert!(max_f64(f64::NAN, 1.0).is_nan());
+        assert!(max_f64(1.0, f64::NAN).is_nan());
+        assert!(max_f64(f64::NAN, f64::NAN).is_nan());
+    }
+}

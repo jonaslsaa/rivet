@@ -17,7 +17,7 @@
 //! teleport/event side effects. The too-quickly check is a pure predicate —
 //! the "permissive" M1 anti-cheat stub decides what to do with a violation.
 
-use rivet_util::mth::{clamp_f64, square_f64, wrap_degrees_f32};
+use rivet_util::mth::{clamp_f64, max_f64, square_f64, wrap_degrees_f32};
 
 /// `clampHorizontal` bound: `Mth.clamp(value, -3.0E7, 3.0E7)`.
 pub const MAX_HORIZONTAL: f64 = 3.0E7;
@@ -132,7 +132,9 @@ impl MoveState {
 /// Paper "fix large move vectors killing the server": the moved distance
 /// (squared) fed to the too-quickly check is the max over the delta from
 /// `firstGood`, the delta from the tick's starting position minus 1, and the
-/// delta from `lastGood` minus 1.
+/// delta from `lastGood` minus 1. The max is Java `Math.max`, so a NaN in any
+/// frame (e.g. a NaN packet position that slipped past the invalid-value gate)
+/// propagates through the whole chain — Rust `f64::max` would drop it.
 pub fn moved_distance_sqr(
     target: [f64; 3],
     first_good: [f64; 3],
@@ -146,13 +148,15 @@ pub fn moved_distance_sqr(
     let mut moved = sq_delta(target[0], first_good[0])
         + sq_delta(target[1], first_good[1])
         + sq_delta(target[2], first_good[2]);
-    moved = moved.max(
+    moved = max_f64(
+        moved,
         sq_delta(target[0], start[0])
             + sq_delta(target[1], start[1])
             + sq_delta(target[2], start[2])
             - 1.0,
     );
-    moved = moved.max(
+    moved = max_f64(
+        moved,
         sq_delta(target[0], last_good[0])
             + sq_delta(target[1], last_good[1])
             + sq_delta(target[2], last_good[2])
@@ -179,7 +183,9 @@ pub fn movement_speed(flying: bool, flying_speed: f32, walking_speed: f32) -> f6
 /// `deltaPackets` is expected pre-clamped to 1 by the caller when the client
 /// sends too-frequently (that clamp is the `allowedPlayerTicks` machine, out of
 /// scope here). The violation is reported, not acted on — the M1 anti-cheat
-/// stub decides the response.
+/// stub decides the response. The threshold `max` is Java `Math.max`: a NaN
+/// squared term (from a NaN `speed`/multiplier) makes the threshold NaN and the
+/// strict `>` comparison false, so the move is never flagged.
 #[allow(clippy::too_many_arguments)]
 pub fn moved_too_quickly(
     moved_dist: f64,
@@ -196,7 +202,7 @@ pub fn moved_too_quickly(
     };
     // Java: `(float) deltaPackets` then widened again for the double multiply.
     let term = moved_too_quickly_multiplier * (delta_packets as f32 as f64) * speed;
-    moved_dist - expected_dist > meters_per_tick.max(square_f64(term))
+    moved_dist - expected_dist > max_f64(meters_per_tick, square_f64(term))
 }
 
 #[cfg(test)]
@@ -467,6 +473,41 @@ mod tests {
         assert_eq!(d, 200.0 * 200.0 - 1.0);
     }
 
+    #[test]
+    fn nan_target_propagates_through_the_max_chain() {
+        // Java `Math.max` returns NaN if either operand is NaN: a NaN target
+        // component poisons the firstGood delta, and both subsequent `Math.max`
+        // calls carry it through. Rust `f64::max` would return the non-NaN
+        // operand and mask the poison.
+        let d = moved_distance_sqr(
+            [f64::NAN, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        );
+        assert!(d.is_nan());
+    }
+
+    #[test]
+    fn nan_in_start_or_last_good_frame_propagates() {
+        // A NaN in either later reference frame lands in the second `Math.max`
+        // operand and propagates (Java `Math.max(25.0, NaN)` is NaN).
+        let d = moved_distance_sqr(
+            [5.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [f64::NAN, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        );
+        assert!(d.is_nan());
+        let d = moved_distance_sqr(
+            [5.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [f64::NAN, 0.0, 0.0],
+        );
+        assert!(d.is_nan());
+    }
+
     // ---- movement_speed ----
 
     #[test]
@@ -567,6 +608,23 @@ mod tests {
         assert_eq!(big, rounded, "deltaPackets goes through a f32 cast");
     }
 
+    #[test]
+    fn nan_moved_or_expected_dist_never_flags() {
+        // Java: a NaN operand makes the strict `>` comparison false, so the
+        // move is never flagged regardless of the threshold.
+        assert!(!moved_too_quickly(f64::NAN, 0.0, false, 1, 1.0, 10.0));
+        assert!(!moved_too_quickly(1000.0, f64::NAN, false, 1, 1.0, 10.0));
+    }
+
+    #[test]
+    fn nan_speed_or_multiplier_never_flags() {
+        // A NaN speed or multiplier poisons the squared term. Java `Math.max`
+        // turns the whole threshold NaN and the strict `>` is false — Rust
+        // `f64::max` would fall back to the 100.0 floor and could flag.
+        assert!(!moved_too_quickly(1000.0, 0.0, false, 1, f64::NAN, 10.0));
+        assert!(!moved_too_quickly(1000.0, 0.0, false, 1, 1.0, f64::NAN));
+    }
+
     // ---- full-pipeline composition (Paper handleMovePlayer arithmetic) ----
 
     #[test]
@@ -605,6 +663,21 @@ mod tests {
             movement_speed(false, 0.05, 0.1),
             DEFAULT_MOVED_TOO_QUICKLY_MULTIPLIER,
         ));
+    }
+
+    #[test]
+    fn nan_position_flows_through_predicate_as_not_too_quickly() {
+        // The invalid-value gate normally filters NaN positions before this
+        // arithmetic runs; if one ever reaches it, Java's behavior is: hardened
+        // movedDist is NaN, `NaN - expected > threshold` is false → not flagged.
+        let moved = moved_distance_sqr(
+            [f64::NAN, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        );
+        assert!(moved.is_nan());
+        assert!(!moved_too_quickly(moved, 0.0, false, 1, 1.0, 10.0));
     }
 
     #[test]
