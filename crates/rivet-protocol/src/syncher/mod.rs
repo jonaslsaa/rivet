@@ -9,7 +9,7 @@
 //!   `EntityDataAccessor`, `EntityDataSerializer`, `SyncedDataHolder`), the
 //!   mutable per-entity data model ported ahead of its consumer.
 //!
-//! RivetTodo(#90): the entity-side store is not yet referenced outside this
+//! RivetTodo(#222): the entity-side store is not yet referenced outside this
 //! module — its interface embeds entity assumptions (`assign_values` returning
 //! raw ids instead of accessors) that will be re-derived against the owning
 //! `Entity` in the M3 entity wave.

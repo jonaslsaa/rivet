@@ -99,7 +99,7 @@ pub static DIMENSION_TYPE: LazyLock<ResourceKey<Registry<DimensionType>>> = Lazy
 /// snapshot codec is `Attribute.STREAM_CODEC` =
 /// `ByteBufCodecs.holderRegistry(Registries.ATTRIBUTE)`.
 ///
-/// RivetTodo(#90): the real `Attribute` element type is owned by the
+/// RivetTodo(#222): the real `Attribute` element type is owned by the
 /// `mc.world.entity.ai.attributes` unit (M3 entity wave); the wire codec only
 /// resolves the holder *id* against the registry size, so the placeholder value
 /// is never decoded.
