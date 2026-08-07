@@ -1,8 +1,11 @@
-# cargo-fuzz target crate for the rivet parser crates (rivet-nbt, rivet-serialization).
+# cargo-fuzz target crate for rivet parsers (rivet-nbt, rivet-serialization) and the
+# rivet-protocol packet decode paths.
 #
 # These targets feed untrusted bytes into the SNBT `TagParser`, the binary NBT
-# readers (`NbtIo`), and the DFU codec combinators over `NbtOps`. Fuzzers run
-# only on the nightly toolchain via `cargo fuzz` (the workspace itself pins
+# readers (`NbtIo`), and the DFU codec combinators over `NbtOps`. The packet
+# targets (fuzz/fuzz_targets/packet_*.rs) exercise the protocol-layer packet
+# decode codecs and are gated behind the `packets` feature (see below). Fuzzers
+# run only on the nightly toolchain via `cargo fuzz` (the workspace itself pins
 # stable 1.97.1 in rust-toolchain.toml — `cargo fuzz` overrides that for this
 # crate). This crate is a workspace member, so `cargo fuzz build` does not need
 # the `--no-default-features` / excluded-member dance.
@@ -18,10 +21,20 @@ license.workspace = true
 cargo-fuzz = true
 
 [dependencies]
+bytes = { workspace = true }
 libfuzzer-sys = "0.4"
 rivet-nbt = { path = "../crates/rivet-nbt" }
+rivet-protocol = { path = "../crates/rivet-protocol" }
 rivet-serialization = { path = "../crates/rivet-serialization" }
 rivet-util = { path = "../crates/rivet-util" }
+
+# The `packets` feature forwards to `rivet-protocol/packets` (the generated
+# packet-ID tables + packet bodies). The generic workspace invocation
+# (gate.sh `--workspace`) does not enable it; the packet targets opt in with
+# `cargo fuzz build --features packets`, and the gate type-checks/lints them
+# explicitly via `cargo check/clippy -p rivet-fuzz --features packets`.
+[features]
+packets = ["rivet-protocol/packets"]
 
 [[bin]]
 name = "snbt"
@@ -57,3 +70,47 @@ path = "fuzz_targets/codec_decode.rs"
 test = false
 doc = false
 bench = false
+
+# rivet-protocol packet-decode targets (issue #46). The `packets` feature
+# (rivet-protocol's generated tables + packet bodies) is enabled via this
+# package's `packets` feature; these bins build under
+# `cargo fuzz build --features packets`.
+[[bin]]
+name = "packet_status"
+path = "fuzz_targets/packet_status.rs"
+test = false
+doc = false
+bench = false
+required-features = ["packets"]
+
+[[bin]]
+name = "packet_login"
+path = "fuzz_targets/packet_login.rs"
+test = false
+doc = false
+bench = false
+required-features = ["packets"]
+
+[[bin]]
+name = "packet_configuration"
+path = "fuzz_targets/packet_configuration.rs"
+test = false
+doc = false
+bench = false
+required-features = ["packets"]
+
+[[bin]]
+name = "packet_play"
+path = "fuzz_targets/packet_play.rs"
+test = false
+doc = false
+bench = false
+required-features = ["packets"]
+
+[[bin]]
+name = "packet_client_information"
+path = "fuzz_targets/packet_client_information.rs"
+test = false
+doc = false
+bench = false
+required-features = ["packets"]

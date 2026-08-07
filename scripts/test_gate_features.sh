@@ -52,10 +52,19 @@ printf '[package]\nname = "rivet-codegen"\nversion = "0.1.0"\nedition = "2024"\n
   > "$SANDBOX/tools/rivet-codegen/Cargo.toml"
 
 # The full gate runs `python3 scripts/test_analyze_graph.py` (the manifest
-# regression suite). The sandbox has no real Paper tree, so stub it to pass —
-# the suite's own behaviour is covered elsewhere; here it only needs to not
-# abort the gate on its pass path.
+# regression suite), and the marker audit runs `scripts/check_markers.py` +
+# `scripts/test_check_markers.py`. The sandbox has no real Paper tree, so stub
+# them all to pass — the suites' own behaviour is covered elsewhere; here they
+# only need to not abort the gate on its pass path.
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/test_analyze_graph.py"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/check_markers.py"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/test_check_markers.py"
+
+# The oracle pre-check now requires the rivet-client binary (join-capture
+# harness); provide an existing dummy file so the pre-check reports all
+# prerequisites present.
+mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
+: > "$SANDBOX/tools/rivet-client/target/debug/rivet-client"
 
 # The real gate script under test.
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"

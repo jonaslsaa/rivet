@@ -539,8 +539,10 @@ version = "0.1.0-dev+mc26.2"
 name = "rivet-fuzz"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "libfuzzer-sys",
  "rivet-nbt",
+ "rivet-protocol",
  "rivet-serialization",
  "rivet-util",
 ]
