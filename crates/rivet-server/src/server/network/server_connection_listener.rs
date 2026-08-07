@@ -297,6 +297,27 @@ async fn drain_outbound(
     None
 }
 
+/// Route a normal-path outbound exit through the bounded shutdown drain when the
+/// server is stopping. A shutdown that interrupts a normal `drain_outbound` /
+/// `handle_outbound` flush must not return early and drop the remaining queued
+/// final events: the bounded drain consumes them in order (each event's frames
+/// get a bounded flush attempt), so the peer receives the tick's final frames and
+/// the terminal reason stays [`DisconnectReason::ServerShutdown`]. When shutdown
+/// is not requested the original reason is returned unchanged.
+async fn finish_outbound(
+    conn: &mut Connection,
+    out_rx: &mut mpsc::Receiver<OutboundEvent>,
+    shutdown: &Shutdown,
+    drain_timeout: Duration,
+    reason: DisconnectReason,
+) -> DisconnectReason {
+    if shutdown.is_requested() {
+        drain_to_close(conn, out_rx, drain_timeout).await
+    } else {
+        reason
+    }
+}
+
 /// Blocking drain of the outbound channel to completion, used once shutdown is
 /// requested. The tick thread's final pass queues its last frames — the
 /// `ServerShutdown` Disconnect it sends to every live connection, plus anything
@@ -387,7 +408,10 @@ async fn conn_loop(
     loop {
         // Non-blocking drain of whatever the tick thread has queued.
         if let Some(reason) = drain_outbound(conn, &mut out_rx).await {
-            return reason;
+            // A shutdown that interrupted the drain must not drop the remaining
+            // queued final events: route them through the bounded shutdown drain.
+            return finish_outbound(conn, &mut out_rx, &shutdown, config.read_timeout, reason)
+                .await;
         }
 
         // Block on the socket read, but wake on shutdown and on any event the
@@ -433,7 +457,11 @@ async fn conn_loop(
                     }
                 };
                 if let Some(reason) = handle_outbound(conn, event, None).await {
-                    return reason;
+                    // A shutdown that interrupted this flush must not drop the
+                    // remaining queued final events: route through the bounded
+                    // shutdown drain.
+                    return finish_outbound(conn, &mut out_rx, &shutdown, config.read_timeout, reason)
+                        .await;
                 }
                 // One event handled; loop to drain the rest and flush.
                 continue;
@@ -777,7 +805,8 @@ mod tests {
         shutdown.request();
 
         // The tick thread's final pass: a last frame, then the in-band
-        // ServerShutdown Disconnect.
+        // ServerShutdown Disconnect, and then it drops every `out_tx` (the stop
+        // is complete, so the shutdown drain's `recv()` sees `None` promptly).
         out_tx
             .send(OutboundEvent::Packet {
                 frame: Bytes::from(encode_frame(b"FINAL").unwrap().to_vec()),
@@ -790,6 +819,7 @@ mod tests {
             })
             .await
             .unwrap();
+        drop(out_tx);
 
         let reason = conn_loop(
             &mut conn,
@@ -857,6 +887,7 @@ mod tests {
             })
             .await
             .unwrap();
+        drop(out_tx); // the tick thread's final pass dropped every out_tx
 
         let start = std::time::Instant::now();
         let reason = conn_loop(
@@ -881,5 +912,123 @@ mod tests {
         // Keep the client socket alive (dropping it would close the peer and
         // make the write error instead of block).
         assert!(client.local_addr().is_ok());
+    }
+
+    /// A shutdown that interrupts a normal drain must route the remaining queued
+    /// final events through the bounded shutdown drain — never drop them. A frame
+    /// queued before the disconnect and another queued after it are both
+    /// delivered to the client in order, and the reason is `ServerShutdown`.
+    #[tokio::test]
+    async fn conn_loop_shutdown_interrupts_drain_and_routes_remaining_events() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        // The 64 MiB frame dwarfs any socket buffer, so the flush blocks almost
+        // immediately while the reader stays paused, making the interrupt land
+        // mid-write deterministically.
+        let (read, write) = server_sock.into_split();
+        let config = Arc::new(ServerConfig {
+            read_timeout: Duration::from_secs(5),
+            ..ServerConfig::default()
+        });
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+        );
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let mut listener_box: Box<dyn PacketListener> = Box::new(ServerHandshakePacketListener);
+
+        // The tick thread's final pass: a big frame BEFORE the disconnect, and a
+        // control frame AFTER it. The big frame is what the interrupted flush is
+        // partway through; the control frame proves drain_to_close consumes what
+        // was still queued behind the interrupted flush.
+        let big = Bytes::from(vec![0x41u8; 64 * 1024 * 1024]);
+        let control = Bytes::from(encode_frame(b"CTRL").unwrap().to_vec());
+        out_tx
+            .send(OutboundEvent::Packet { frame: big.clone() })
+            .await
+            .unwrap();
+        out_tx
+            .send(OutboundEvent::Disconnect {
+                reason: DisconnectReason::ServerShutdown,
+            })
+            .await
+            .unwrap();
+        out_tx
+            .send(OutboundEvent::Packet {
+                frame: control.clone(),
+            })
+            .await
+            .unwrap();
+        drop(out_tx);
+
+        // The reader stays paused until told, so the big frame's flush fills the
+        // socket buffer and blocks (the interrupt lands mid-write); it then
+        // drains the already-written prefix and the bounded retry's suffix.
+        let start_reading = Arc::new(tokio::sync::Notify::new());
+        let reader_gate = Arc::clone(&start_reading);
+        let reader = tokio::spawn(async move {
+            reader_gate.notified().await;
+            let mut received = Vec::new();
+            client.read_to_end(&mut received).await.unwrap();
+            received
+        });
+
+        let task_shutdown = Arc::clone(&shutdown);
+        let task = tokio::spawn(async move {
+            conn_loop(
+                &mut conn,
+                &mut listener_box,
+                &config,
+                read,
+                out_rx,
+                &in_tx,
+                task_shutdown,
+            )
+            .await
+        });
+
+        // Let drain_outbound block inside flush_out on the full socket buffer,
+        // then request shutdown (interrupting the flush) and start the reader so
+        // the bounded shutdown drain can deliver.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        shutdown.request();
+        start_reading.notify_one();
+
+        let reason = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("conn_loop did not exit")
+            .unwrap();
+        assert_eq!(
+            reason,
+            DisconnectReason::ServerShutdown,
+            "the terminal reason is the stop, not EOF"
+        );
+        let received = tokio::time::timeout(Duration::from_secs(10), reader)
+            .await
+            .expect("reader did not finish")
+            .unwrap();
+
+        // The client receives the whole big frame exactly once followed by the
+        // control frame: no duplicated prefix, no missing suffix.
+        let mut expected = Vec::with_capacity(big.len() + control.len());
+        expected.extend_from_slice(&big);
+        expected.extend_from_slice(&control);
+        assert_eq!(
+            received.len(),
+            expected.len(),
+            "frame stream length mismatch"
+        );
+        assert!(
+            received == expected,
+            "frame stream corrupted by the interrupted flush"
+        );
     }
 }

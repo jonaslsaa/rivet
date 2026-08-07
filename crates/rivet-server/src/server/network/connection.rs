@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use rivet_protocol::compression_decoder::CompressionDecoder;
 use rivet_protocol::compression_encoder::CompressionEncoder;
 use rivet_protocol::generated::protocol::ConnectionProtocol;
@@ -265,11 +265,18 @@ impl Connection {
     /// *admission* cap against a sliding window (`inbound_window_*`) that resets
     /// on observed tick-drain progress: whenever the channel has more free slots
     /// than it did after the previous push, the tick thread drained some, so the
-    /// client is keeping up and the window restarts. A client the tick keeps up
-    /// with is never affected, even when the channel is never fully empty; a
-    /// no-progress flood (the tick never drains) never resets, so the window
-    /// accumulates to the cap and the client is disconnected. Exceeding the
-    /// budget reports [`DisconnectReason::InboundOverflow`].
+    /// client is keeping up and the window restarts. A client the tick observably
+    /// keeps up with is never affected, even when the channel is never fully
+    /// empty.
+    ///
+    /// The anti-flood boundary is full channel saturation: a sender that refills
+    /// every drained slot before its next check (so the capacity observed at each
+    /// push never exceeds the previous push's) shows no drain progress and its
+    /// window accumulates to the budget, disconnecting it. This is deliberate:
+    /// a persistently saturated channel is exactly the memory-retention condition
+    /// the admission cap exists to bound. A no-progress flood (the tick never
+    /// drains) is the extreme of the same boundary. Exceeding the budget reports
+    /// [`DisconnectReason::InboundOverflow`].
     ///
     /// The authoritative per-tick bound is the tick side: [`ConnectionRegistry::drain_one`]
     /// stops draining at the same budget, so even a sender that races the window
@@ -292,23 +299,18 @@ impl Connection {
             // Observe the tick thread's drain progress since the previous push:
             // if the channel has more free slots now than it did right after
             // that push, the tick drained some — the client is keeping up, so
-            // the window restarts. The fully-empty channel (capacity == max) is
-            // the extreme of this. A no-progress flood never satisfies the
-            // check, so its window accumulates to the budget and trips.
-            if in_tx.capacity() > self.inbound_window_last_capacity {
-                self.inbound_window_bytes = 0;
-                self.inbound_window_frames = 0;
-            }
-            self.inbound_window_bytes += packet.len();
-            self.inbound_window_frames += 1;
-            if self.inbound_window_bytes > MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN
-                || self.inbound_window_frames > MAX_INBOUND_FRAMES_PER_DRAIN
-            {
-                return Err(inbound_overflow(
-                    self.inbound_window_frames,
-                    self.inbound_window_bytes,
-                ));
-            }
+            // the window restarts. A saturated sender (every drained slot
+            // refilled before the next check) never satisfies this, so its
+            // window accumulates to the budget and trips.
+            let (window_bytes, window_frames) = admission_step(
+                self.inbound_window_last_capacity,
+                in_tx.capacity(),
+                self.inbound_window_bytes,
+                self.inbound_window_frames,
+                packet.len(),
+            )?;
+            self.inbound_window_bytes = window_bytes;
+            self.inbound_window_frames = window_frames;
             if in_tx
                 .send(ServerboundFrame { bytes: packet })
                 .await
@@ -423,35 +425,46 @@ impl Connection {
     /// ([`Self::flush_out_bounded`]): racing an already-fired signal against an
     /// immediately-writable socket could drop the queued frames, so the
     /// wall-clock bound is used instead (preserving and attempting them). A
-    /// shutdown that fires *mid-write* aborts the write but preserves the queued
-    /// frames in `out_buf`, so a subsequent bounded flush can still attempt
-    /// delivery. Either way the connection cannot wedge the per-connection task
-    /// (or `serve()`'s shutdown drain) forever.
+    /// shutdown that fires *mid-write* aborts the write leaving exactly the
+    /// unwritten suffix in `out_buf`, so a subsequent bounded flush can attempt
+    /// only the suffix — never a duplicated prefix. Either way the connection
+    /// cannot wedge the per-connection task (or `serve()`'s shutdown drain)
+    /// forever.
     pub async fn flush_out(&mut self) -> std::io::Result<()> {
-        if self.out_buf.is_empty() {
-            return Ok(());
-        }
-        if self.shutdown.is_requested() {
-            return self.flush_out_bounded(self.config.read_timeout).await;
-        }
-        let pending = std::mem::take(&mut self.out_buf);
-        let write = self.write.write_all(&pending);
-        tokio::pin!(write);
-        tokio::select! {
-            result = write.as_mut() => result,
-            _ = self.shutdown.wait_async() => {
-                // Preserve the frames for the bounded shutdown flush (a later
-                // `flush_out_bounded` from the shutdown drain / `close`): put
-                // them back ahead of anything queued during the write so the
-                // wire order is unchanged.
-                let mut preserved = pending;
-                preserved.extend_from_slice(&self.out_buf);
-                self.out_buf = preserved;
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "outbound flush aborted: server shutting down",
-                ))
+        loop {
+            if self.out_buf.is_empty() {
+                return Ok(());
             }
+            if self.shutdown.is_requested() {
+                return self.flush_out_bounded(self.config.read_timeout).await;
+            }
+            // Single-shot write: each future reports exactly how many bytes the
+            // socket accepted (tokio's TcpStream poll_write returns Pending only
+            // when no progress is possible, so a future dropped while blocked
+            // wrote nothing). Advance the authoritative `out_buf` by that count,
+            // so on a shutdown interrupt it holds exactly the unwritten suffix.
+            let n = {
+                let write = self.write.write(&self.out_buf);
+                tokio::pin!(write);
+                tokio::select! {
+                    n = write.as_mut() => n?,
+                    _ = self.shutdown.wait_async() => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "outbound flush aborted: server shutting down",
+                        ));
+                    }
+                }
+            };
+            if n == 0 {
+                // A ready socket that accepted nothing is the peer's write side
+                // closed; anything queued cannot be delivered.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "outbound write made no progress",
+                ));
+            }
+            self.out_buf.advance(n);
         }
     }
 
@@ -493,6 +506,36 @@ fn inbound_overflow(frames: usize, bytes: usize) -> DisconnectReason {
         "drained {frames} frames / {bytes} bytes in one inbound window (limit {} frames / {} bytes)",
         MAX_INBOUND_FRAMES_PER_DRAIN, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN
     ))
+}
+
+/// One admission-window step for [`Connection::forward_play`]: apply the
+/// drain-progress reset (when the channel now holds more free slots than after
+/// the previous push, the tick drained some, so the window restarts) and add the
+/// next frame, returning `Err(InboundOverflow)` when the budget would be
+/// exceeded. Pure — factored out so the saturation boundary is deterministically
+/// testable without a live channel.
+///
+/// A saturated sender (the observed capacity never exceeds the previous push's —
+/// every drained slot is refilled before the next check) never resets and trips
+/// at the budget; see [`Connection::forward_play`].
+fn admission_step(
+    last_capacity: usize,
+    current_capacity: usize,
+    window_bytes: usize,
+    window_frames: usize,
+    packet_len: usize,
+) -> Result<(usize, usize), DisconnectReason> {
+    let (window_bytes, window_frames) = if current_capacity > last_capacity {
+        (packet_len, 1)
+    } else {
+        (window_bytes + packet_len, window_frames + 1)
+    };
+    if window_bytes > MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN
+        || window_frames > MAX_INBOUND_FRAMES_PER_DRAIN
+    {
+        return Err(inbound_overflow(window_frames, window_bytes));
+    }
+    Ok((window_bytes, window_frames))
 }
 
 #[cfg(test)]
@@ -1043,6 +1086,117 @@ mod tests {
         assert!(client.local_addr().is_ok());
     }
 
+    /// The partial-write corruption regression: `flush_out` interrupted by
+    /// shutdown must leave exactly the unwritten suffix in the authoritative
+    /// `out_buf` (never restore the full buffer, which would duplicate the
+    /// already-written prefix), and a bounded retry must send only that suffix so
+    /// the peer decodes the original frame stream exactly once.
+    #[tokio::test]
+    async fn flush_out_partial_write_retry_sends_only_the_suffix() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (_read, write) = server_sock.into_split();
+
+        let shutdown = test_shutdown();
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            test_config(),
+            Arc::clone(&shutdown),
+            write,
+        );
+        conn.set_outbound_protocol(ConnectionProtocol::Login);
+
+        // A stream of valid VarInt21 frames (each payload under the 2 MiB frame
+        // cap), totaling well above any socket buffer so one write cannot
+        // complete before the peer reads.
+        let payloads: [&[u8]; 6] = [
+            &[0x11u8; 1024 * 1024],
+            &[0x22, 0x33, 0x44],
+            &[0x55u8; 1024 * 1024],
+            &[0x66u8; 1024 * 1024],
+            &[0x77u8; 1024 * 1024],
+            &[0x88u8; 1024 * 1024],
+        ];
+        let mut stream = Vec::new();
+        for payload in payloads {
+            stream.extend_from_slice(&encode_frame(payload).unwrap());
+        }
+        conn.queue_raw_frame(Bytes::from(stream.clone()));
+
+        let task = tokio::spawn(async move {
+            let result = conn.flush_out().await;
+            (result, conn)
+        });
+
+        // Wait for the flush to fill the socket buffer and block (the client
+        // never reads yet), then interrupt it with shutdown.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        shutdown.request();
+
+        let (result, mut conn) = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("flush_out did not abort on shutdown")
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "flush_out must be interrupted by shutdown mid-write"
+        );
+        // A partial prefix reached the wire: the authoritative out_buf holds a
+        // non-empty proper suffix of the stream (never the full buffer, which
+        // would re-send the already-written prefix).
+        assert!(
+            !conn.out_buf.is_empty(),
+            "an unwritten suffix must remain after the interrupt"
+        );
+        assert!(
+            conn.out_buf.len() < stream.len(),
+            "a partial prefix must have been written before the interrupt"
+        );
+        assert!(
+            stream.ends_with(&conn.out_buf[..]),
+            "the remaining buffer must be exactly the unwritten suffix"
+        );
+
+        // Bounded retry sends only the suffix; the client drains concurrently.
+        let reader = tokio::spawn(async move {
+            let mut rest = Vec::new();
+            client.read_to_end(&mut rest).await.unwrap();
+            rest
+        });
+        conn.flush_out_bounded(std::time::Duration::from_secs(5))
+            .await
+            .expect("bounded retry must deliver the suffix to a reading peer");
+        drop(conn); // close the write half so the reader sees EOF
+        let received = reader.await.unwrap();
+
+        // The reader saw the already-buffered prefix followed by exactly the
+        // suffix the retry wrote: the whole stream, byte-for-byte, once.
+        assert_eq!(received.len(), stream.len(), "frame stream length mismatch");
+        assert!(
+            received == stream,
+            "the peer must receive the original frame stream exactly once"
+        );
+
+        // And it decodes as the three original frames (no corruption).
+        let decoder = Varint21FrameDecoder::new(None);
+        let mut buf = BytesMut::from(&received[..]);
+        let mut decoded = Vec::new();
+        while let Some(frame) = decoder.decode(&mut buf).unwrap() {
+            decoded.push(frame.to_vec());
+        }
+        assert_eq!(decoded.len(), 6, "six frames decoded");
+        assert_eq!(decoded[0], vec![0x11u8; 1024 * 1024]);
+        assert_eq!(decoded[1], vec![0x22, 0x33, 0x44]);
+        assert_eq!(decoded[2], vec![0x55u8; 1024 * 1024]);
+        assert_eq!(decoded[3], vec![0x66u8; 1024 * 1024]);
+        assert_eq!(decoded[4], vec![0x77u8; 1024 * 1024]);
+        assert_eq!(decoded[5], vec![0x88u8; 1024 * 1024]);
+    }
+
     /// `MAX_INBOUND_FRAMES_PER_DRAIN + 1` tiny frames in one wire buffer: the
     /// frame-count budget trips and disconnects the hostile client instead of
     /// forwarding thousands of frames into the channel.
@@ -1246,6 +1400,44 @@ mod tests {
             remaining += 1;
         }
         assert_eq!(remaining, 600, "1200 sent, 600 drained, 600 retained");
+    }
+
+    /// The saturation boundary, documented as anti-flood: a sender whose observed
+    /// channel capacity never exceeds the previous push's (every drained slot
+    /// refilled before the next check — full lockstep saturation) never resets,
+    /// so its window accumulates to the budget and it is disconnected. The
+    /// progress-based reset cannot fire because there is no observable progress.
+    #[test]
+    fn admission_step_saturated_channel_accumulates_to_budget() {
+        // Saturated: current capacity == last capacity (0). No reset; the window
+        // accumulates. One frame under the budget is accepted.
+        let (bytes, frames) = admission_step(0, 0, 0, MAX_INBOUND_FRAMES_PER_DRAIN - 1, 1).unwrap();
+        assert_eq!(frames, MAX_INBOUND_FRAMES_PER_DRAIN);
+        assert_eq!(bytes, 1);
+        // The next frame trips the budget exactly at the per-tick cap.
+        let err = admission_step(0, 0, bytes, frames, 1).unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::InboundOverflow(_)),
+            "saturated sender trips exactly at the per-tick cap"
+        );
+    }
+
+    /// The drain-progress side of the same boundary: any observed progress
+    /// (current capacity above last) resets the window, so a keeping-up sender is
+    /// never disconnected no matter how much it has sent.
+    #[test]
+    fn admission_step_observed_progress_resets_window() {
+        // A window far past the budget is reset by a single observed drain.
+        let (bytes, frames) = admission_step(
+            0,
+            1,
+            MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
+            MAX_INBOUND_FRAMES_PER_DRAIN,
+            1,
+        )
+        .unwrap();
+        assert_eq!(bytes, 1, "window restarts at the observed frame");
+        assert_eq!(frames, 1);
     }
 
     /// The pre-play dispatch has the same per-call frame-count budget: a hostile
