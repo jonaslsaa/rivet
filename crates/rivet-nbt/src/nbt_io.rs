@@ -64,6 +64,13 @@ use rivet_util::delegate_data_output::DelegateDataOutput;
 use rivet_util::fast_buffered_input_stream::FastBufferedInputStream;
 use rivet_util::{DataInputStream, DataOutputStream, log_and_pause_if_in_ide};
 
+// RivetTodo(#231): the region-file write path (RegionFileVersion) uses
+// `VERSION_DEFLATE`/`VERSION_LZ4` compression in general. The M2 byte-identity
+// gate pins `region-file-compression=none` (DECISIONS.md D13); only gzip (this
+// module) and `none` are written today. Deflate write parity is not `flate2`-
+// reproducible against Java `Deflater` in general (deferred), and LZ4 write
+// support is not yet ported (deferred) — both land with the chunk.storage wave.
+
 /// `NbtIo.createDecompressorStream(InputStream)` — `DataInputStream(
 /// FastBufferedInputStream(GZIPInputStream(in)))`.
 ///
@@ -587,7 +594,9 @@ fn load_compound_inner(
     accounter: &mut NbtAccounter,
 ) -> Result<Tag, io::Error> {
     accounter.account_bytes(48);
-    let mut values = std::collections::HashMap::new();
+    // IndexMap preserves on-disk field order so the binary round-trips
+    // byte-for-byte (DECISIONS.md D12).
+    let mut values = indexmap::IndexMap::new();
 
     loop {
         let tag_type_id = input.read_unsigned_byte()? as i8;
@@ -793,12 +802,13 @@ fn is_wrapper(tag: &CompoundTag) -> bool {
 
 /// `CompoundTag.write(DataOutput)`.
 ///
-/// Drift note: iteration is over `CompoundTag.tags` (a `std` `HashMap` with a
-/// fresh randomized seed per parse), so field order in the emitted bytes is
-/// non-deterministic across processes and never matches Java's fastutil
-/// `Object2ObjectOpenHashMap` order. This is the accepted divergence documented
-/// in `compound_tag.rs`; it does not affect round-trip correctness (the read
-/// side builds the same map), only byte-for-byte oracle output parity.
+/// Iterates `CompoundTag.tags`, which is an insertion-ordered `IndexMap`
+/// (DECISIONS.md D12): the field order emitted is the order the tags were
+/// inserted, so a compound that was read from binary NBT re-emits its on-disk
+/// order byte-for-byte. For hand-built compounds the order is Rust's put
+/// sequence, which differs from Java's fastutil hash order — the documented
+/// `compound_key_order` divergence counted in PARITY.md, never a byte-identity
+/// failure on read-back fixtures.
 pub fn write_compound(
     compound: &CompoundTag,
     output: &mut dyn DataOutput,

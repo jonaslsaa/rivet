@@ -1,0 +1,10 @@
+[package]
+name = "rivet-nbt-inspect"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Inspect binary NBT fixture key order (M2 gate-preflight evidence)"
+
+[dependencies]
+rivet-nbt = { path = "../../crates/rivet-nbt" }
+rivet-util = { path = "../../crates/rivet-util" }

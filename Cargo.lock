@@ -551,11 +551,20 @@ version = "0.1.0-dev+mc26.2"
 dependencies = [
  "cesu8",
  "flate2",
+ "indexmap",
  "rivet-core",
  "rivet-serialization",
  "rivet-text",
  "rivet-util",
  "ryu",
+]
+
+[[package]]
+name = "rivet-nbt-inspect"
+version = "0.1.0"
+dependencies = [
+ "rivet-nbt",
+ "rivet-util",
 ]
 
 [[package]]

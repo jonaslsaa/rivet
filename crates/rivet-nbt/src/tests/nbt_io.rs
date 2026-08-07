@@ -121,6 +121,39 @@ fn gzip_compressed_round_trip() {
     assert_eq!(decoded, original);
 }
 
+/// READ-SUPPORT PROOF (DECISIONS.md D13): `read_compressed` must read a real
+/// gzip-NBT file Paper 26.2 wrote. The committed `level.dat` fixture is gzip
+/// NBT (magic `1f 8b`); reading it to a `CompoundTag` with no error is the
+/// "rivet-nbt reads what Paper gzip-wrote" evidence. Read support is
+/// mode-separate from write: Java `Deflater` output is not `flate2`-reproducible
+/// in general, so write parity is deferred (see `RivetTodo` in `nbt_io.rs`).
+#[test]
+fn reads_real_paper_gzip_level_dat_fixture() {
+    let Some(path) = workspace_root().map(|ws| ws.join("tools/rivet-oracle/fixtures/level.dat"))
+    else {
+        eprintln!("fixtures not present — skipping gzip read-proof test");
+        return;
+    };
+    if !path.is_file() {
+        eprintln!("fixtures not present — skipping gzip read-proof test");
+        return;
+    }
+    let bytes = std::fs::read(&path).expect("level.dat readable");
+    assert_eq!(
+        &bytes[0..2],
+        &[0x1f, 0x8b],
+        "level.dat fixture must be gzip-compressed"
+    );
+    let tag = nbt_io::read_compressed(&bytes[..], &mut NbtAccounter::unlimited_heap())
+        .expect("read_compressed must read Paper's gzip level.dat");
+    // A real world metadata root: DataVersion + the Data compound are always
+    // present in a vanilla level.dat.
+    assert!(
+        tag.contains("Data"),
+        "level.dat root must carry a Data compound"
+    );
+}
+
 #[test]
 fn modified_utf8_emoji_surrogate_round_trip() {
     // U+1F600 "grinning face" is a surrogate pair in UTF-16; Java writeUTF
@@ -354,17 +387,21 @@ fn write_fallback_handles_overlong_string() {
     assert_eq!(decoded.get_string("big").map(String::as_str), Some(""));
 }
 
-/// Locate the committed M0 oracle fixtures relative to the workspace root.
+/// Resolve the workspace root from the crate manifest dir (`<ws>/crates/rivet-nbt`).
 ///
-/// The crate compiles with its manifest dir at `<ws>/crates/rivet-nbt`, so the
-/// fixtures live three levels up. Absent when the fixtures aren't checked out
-/// (CI-less local merges, pruned trees) — the test then skips.
+/// The committed oracle fixtures live under `<ws>/tools/rivet-oracle/fixtures`.
+/// Absent when the fixtures aren't checked out (CI-less local merges, pruned
+/// trees) — callers then skip.
+fn workspace_root() -> Option<std::path::PathBuf> {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()
+        .map(|p| p.to_path_buf())
+}
+
+/// Locate the committed M0 chunk-NBT oracle fixtures.
 fn fixtures_dir() -> Option<std::path::PathBuf> {
-    let ws = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .parent()?
-        .parent()?;
-    let dir = ws.join("tools/rivet-oracle/fixtures/chunk");
+    let dir = workspace_root()?.join("tools/rivet-oracle/fixtures/chunk");
     dir.is_dir().then_some(dir)
 }
 
@@ -428,6 +465,86 @@ fn all_committed_fixtures_parse_as_compounds() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// GOLDEN KEY-ORDER (DECISIONS.md D12): a committed Paper 26.2 chunk-NBT
+/// fixture must round-trip through `NbtIo.read` -> `NbtIo.write` byte-for-byte.
+///
+/// `CompoundTag` is insertion-ordered, so a compound read from binary NBT
+/// re-emits its on-disk field order exactly — this is what makes byte-identical
+/// `SerializableChunkData` NBT possible. The fixture is the committed golden
+/// evidence: the test fails (by identity) if the reader or writer stops
+/// preserving field order. A fixed seed also makes this deterministic across
+/// processes (no randomized hasher).
+#[test]
+fn committed_chunk_fixture_round_trips_byte_identical() {
+    let Some(dir) = fixtures_dir() else {
+        eprintln!("M0 fixtures not present — skipping golden key-order test");
+        return;
+    };
+    // The M0 spawn chunk (0.0, 0.0) is the canonical SerializableChunkData
+    // golden fixture. Pick a fixture deterministically, but anchor on this one.
+    let path = dir.join("overworld").join("0.0").join("0.0.nbt");
+    let bytes = std::fs::read(&path).expect("golden fixture readable");
+    let parsed = read_from_bytes(&bytes);
+    let reencoded = write_to_bytes(&parsed);
+    assert_eq!(
+        reencoded, bytes,
+        "read->write round-trip of the Paper 26.2 golden chunk must be byte-identical \
+         (insertion-order CompoundTag, DECISIONS.md D12)"
+    );
+}
+
+/// NEGATIVE CONTROL for the key-order decision: inserting keys in a different
+/// order MUST change the emitted bytes. This proves the writer is order-
+/// sensitive — a map that ignored insertion order (or a randomized hasher)
+/// would make both compounds encode identically and the test would fail.
+#[test]
+fn compound_insertion_order_is_observable_in_encoded_bytes() {
+    let mut first = CompoundTag::new();
+    first.put_int("alpha", 1);
+    first.put_int("beta", 2);
+    first.put_int("gamma", 3);
+
+    let mut second = CompoundTag::new();
+    second.put_int("gamma", 3);
+    second.put_int("alpha", 1);
+    second.put_int("beta", 2);
+
+    let a = write_to_bytes(&first);
+    let b = write_to_bytes(&second);
+    assert_ne!(
+        a, b,
+        "field order must follow insertion order (DECISIONS.md D12); \
+         identical bytes imply the key-order decision is not enforced"
+    );
+
+    // And the round-trip preserves the read side: parse the first encoding and
+    // re-encode — it must be stable (deterministic, not hash-seeded).
+    let reparsed = read_from_bytes(&a);
+    assert_eq!(write_to_bytes(&reparsed), a);
+}
+
+/// The write path's field order is deterministic across processes: two
+/// independent parses of the same bytes encode identically (a randomized
+/// `std HashMap` seed would break this).
+#[test]
+fn compound_encode_is_deterministic_across_reparse() {
+    let mut c = CompoundTag::new();
+    c.put_string("name", "value");
+    c.put("nested".to_string(), {
+        let mut n = CompoundTag::new();
+        n.put_long("ts", 1_700_000_000_000);
+        n.put_boolean("on", true);
+        Tag::Compound(n)
+    });
+    c.put_float("ratio", 0.5);
+
+    let bytes = write_to_bytes(&c);
+    for _ in 0..16 {
+        let reparsed = read_from_bytes(&bytes);
+        assert_eq!(write_to_bytes(&reparsed), bytes);
+    }
 }
 
 #[test]

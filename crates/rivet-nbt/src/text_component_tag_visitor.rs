@@ -14,14 +14,14 @@
 //!   JDK 25 output.
 //! - `sortKeys` defaults to `false`: Java reads `LOGGER.isDebugEnabled()`
 //!   (SLF4J default is INFO, so `false`). The logger is not ported yet.
-//! - Compound field order is non-deterministic vs Paper: with `sortKeys=false`
-//!   (the default) keys render in `std::collections::HashMap` iteration order,
-//!   which differs from Java's fastutil `Object2ObjectOpenHashMap` hash order
-//!   and is randomized per-process (SipHash). This is an accepted drift
-//!   (tracked in the manifest; documented in `compound_tag.rs`). Sorting would
-//!   be a behavioral change vs Java, which does not sort at INFO level.
-//!   Exclude pretty-SNBT compound field order from oracle byte-for-byte
-//!   fixtures.
+//! - Compound field order differs from Paper: with `sortKeys=false` (the
+//!   default) keys render in `CompoundTag` iteration order — Rivet's
+//!   insertion-ordered `IndexMap` (DECISIONS.md D12) — which differs from
+//!   Java's fastutil `Object2ObjectOpenHashMap` hash order. Deterministic
+//!   across processes (no randomized seed). This is the documented
+//!   `compound_key_order` divergence (PARITY.md). Sorting would be a
+//!   behavioral change vs Java, which does not sort at INFO level. Exclude
+//!   pretty-SNBT compound field order from oracle byte-for-byte fixtures.
 
 use std::collections::HashMap;
 

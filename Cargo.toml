@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/rivet-oracle", "tools/rivet-parity", "tools/rivet-capture", "tools/rivet-decode", "fuzz"]
+members = ["crates/*", "tools/rivet-oracle", "tools/rivet-parity", "tools/rivet-capture", "tools/rivet-decode", "tools/rivet-nbt-inspect", "fuzz"]
 exclude = ["tools/rivet-codegen", "working"]
 
 [workspace.package]
@@ -13,6 +13,7 @@ license = "GPL-3.0-or-later"
 bytes = "1"
 cesu8 = "1"
 flate2 = "1"
+indexmap = "2"
 md5 = "0.7"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

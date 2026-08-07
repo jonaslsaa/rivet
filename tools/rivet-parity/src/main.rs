@@ -403,11 +403,12 @@ fn check_nbt_encode(
                     }
                 } else {
                     // Multi-key compound: binary field order is the documented
-                    // HashMap-iteration-order divergence (Java fastutil order vs
-                    // Rust's randomized HashMap seed), so byte_for_byte is not
-                    // binding. It is reported as a soft field (this run may
-                    // coincidentally match), and `semantic` below — both binaries
-                    // re-read to the same canonical SNBT — is the binding check.
+                    // insertion-order divergence (DECISIONS.md D12) — Java's
+                    // fastutil hash order vs Rust's insertion-ordered IndexMap
+                    // put sequence — so byte_for_byte is not binding. It is
+                    // reported as a soft field (this run may coincidentally
+                    // match), and `semantic` below — both binaries re-read to
+                    // the same canonical SNBT — is the binding check.
                     check.divergence("compound_key_order");
                     if rbytes == &oracle_bytes {
                         check.field_soft("byte_for_byte", "match", "match");
@@ -556,7 +557,7 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
         ));
     }
     md.push_str("\n### Divergences\n\n");
-    md.push_str("`compound_key_order` is the documented HashMap-iteration-order divergence; all such checks remain `ok` and are counted under `diverged`, never under `mismatched`.\n");
+    md.push_str("`compound_key_order` is the documented insertion-order divergence (DECISIONS.md D12): Rust's `CompoundTag` is insertion-ordered, so hand-built compounds emit Rust's put sequence while Java emits fastutil hash order; read-back fixtures round-trip byte-for-byte. All such checks remain `ok` and are counted under `diverged`, never under `mismatched`.\n");
 
     let path = scoreboard_path();
     match std::fs::write(&path, md) {

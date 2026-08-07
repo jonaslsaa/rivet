@@ -44,3 +44,14 @@ Recorded numbers (release build, Temurin 25.0.2 arm64; representative measured r
 - exception containment is proven: the Java upcall target catches every plugin `Throwable` and returns an explicit ABI-safe status; Rust surfaces it as an error result (`ERR_CALLBACK`), so a foreign exception can never unwind through Rust.
 
 Decisions locked: `rivet-ffi` C ABI with marshal-only u64 IDs (never pointers across the boundary); batched event publishing for bulk state, per-plugin handler dispatch on the callback path; plugin code on a dedicated tick-synchronized thread (D5).
+
+## D12 — CompoundTag is insertion-ordered (NBT key order for byte-identical chunk NBT)
+Locked 2026-08-07 for issue #226 (M2 gate preflight). Java's `CompoundTag` wraps an `Object2ObjectOpenHashMap<String, Tag>` (fastutil) that iterates in fastutil hash order; reproducing that byte-for-byte in Rust would require a Java-identical hasher. Rivet instead stores tags in an insertion-ordered `indexmap::IndexMap`:
+- the reader (`NbtIo.read`/`load`) inserts keys in on-disk order, so any compound **read** from binary NBT re-emits its exact on-disk field order — a Paper 26.2 chunk fixture round-trips byte-for-byte (golden test `committed_chunk_fixture_round_trips_byte_identical`);
+- hand-built compounds (SNBT → binary) emit Rust's put sequence, which differs from fastutil hash order — the documented `compound_key_order` divergence in PARITY.md (soft, `diverged`, never `mismatched`);
+- deterministic across processes (no randomized seed).
+
+This makes byte-identical `SerializableChunkData` NBT possible without a fastutil hasher port. The `compound_key_order` oracle divergence is accepted and counted under `diverged`.
+
+## D13 — Region compression: byte-identity gate runs at `region-file-compression=none`
+Locked 2026-08-07 for issue #226 (M2 gate preflight). Java `Deflater` output is not `flate2`-reproducible in general, and `RegionFileVersion.DEFAULT = VERSION_DEFLATE` is volatile-selected, so deflate is not a byte-identity mode. The M2 byte-identity round-trip therefore pins **both sides** to `region-file-compression=none` (fixtures/`server.properties` + manifest now record `none`). Read support is mode-separate: `NbtIo.read_compressed` (gzip only, mirroring Java's `NbtIo.readCompressed`) is proven against Paper's own gzip `level.dat` fixture (`reads_real_paper_gzip_level_dat_fixture`); deflate/lz4 reads live in the region-file layer, which is not yet ported. Deflate/lz4 **write** parity is deferred to the chunk.storage wave (issue #231, `RivetTodo` in `nbt_io.rs`); chunk payloads are captured as decompressed NBT so the `none` pin is byte-consistent with existing fixtures.
