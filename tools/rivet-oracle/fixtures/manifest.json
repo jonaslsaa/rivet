@@ -1,9 +1,9 @@
 {
   "captured": [
     {
-      "bytes": 1828,
+      "bytes": 1825,
       "path": "server.properties",
-      "sha256": "379004dfc7c0b487032e901207fae46b98c43fcbd05dd192d6e7d118d6d49219"
+      "sha256": "0f0c23ccb4f8a4b05c6d4891c8a1a082ee07196cf0469883ed4bb7ebb3864fdc"
     },
     {
       "bytes": 468,
@@ -3535,7 +3535,7 @@
     "rate-limit": "0",
     "rcon.password": "",
     "rcon.port": "25575",
-    "region-file-compression": "deflate",
+    "region-file-compression": "none",
     "require-resource-pack": "false",
     "resource-pack": "",
     "resource-pack-id": "",

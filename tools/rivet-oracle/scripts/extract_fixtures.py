@@ -73,9 +73,12 @@ def read_region_chunks(path: Path) -> dict[tuple[int, int], bytes]:
         if base + 5 > len(data):
             continue
         length, comp = struct.unpack(">IB", data[base : base + 5])
-        if base + 5 + length > len(data):
-            length = len(data) - base - 5
-        raw = data[base + 5 : base + 5 + length]
+        # The `length` field counts the compression-type byte, so the payload is
+        # `length - 1` data bytes (5-byte chunk header: 4 length + 1 compression).
+        data_bytes = length - 1
+        if base + 5 + data_bytes > len(data):
+            data_bytes = len(data) - base - 5
+        raw = data[base + 5 : base + 5 + data_bytes]
         try:
             if comp == 1:
                 import gzip

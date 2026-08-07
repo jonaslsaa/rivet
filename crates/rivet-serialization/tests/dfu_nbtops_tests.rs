@@ -18,10 +18,11 @@
 //!
 //! Not portable (honest deferrals, noted in prose — test files are excluded
 //! from the `STUB`/`RivetTodo` marker convention):
-//! - `record_codec_maintains_field_order` — `NbtOps` map values are a
-//!   `HashMap`-backed `CompoundTag`; Rust's randomized SipHash iteration order
-//!   cannot pin Java's fastutil hash order (see `compound_tag.rs` drift note).
-//!   The order-insensitive round-trip surfaces above still fully cover the
+//! - `record_codec_maintains_field_order` — `NbtOps` map values are an
+//!   insertion-ordered `IndexMap`-backed `CompoundTag` (DECISIONS.md D12), so
+//!   Rust field order is Rust's put sequence, which differs from Java's
+//!   fastutil hash order — the `compound_key_order` divergence. The
+//!   order-insensitive round-trip surfaces above still fully cover the
 //!   record/`NbtRecordBuilder` encode+decode path.
 //! - `unbounded_map_repeated_keys_partial` — the "first colliding key wins the
 //!   partial" assertion is likewise iteration-order-dependent (only the
@@ -281,11 +282,12 @@ fn unbounded_map_repeated_keys() {
 
 // Deferred: `unbounded_map_repeated_keys_partial` (in the TestOps/
 // JsonOps suites) asserts which of two lowercasing-colliding keys ("foo"/"FOO")
-// wins the partial — the *first in iteration order*. NbtOps map values are a
-// `HashMap`-backed `CompoundTag`, whose iteration order is nondeterministic in
-// Rust (randomized SipHash), so the "first entry wins" assertion is not
-// reproducible for NbtOps. The order-insensitive surfaces
-// (`unbounded_map_simple`, `unbounded_map_invalid_entry_partial`,
+// wins the partial — the *first in iteration order*. NbtOps map values are now
+// an insertion-ordered `IndexMap`-backed `CompoundTag` (DECISIONS.md D12), so
+// Rust's "first inserted wins" order is deterministic — but the colliding-key
+// order is produced by `NbtOps`'s map-building, and this duplicate-key-partial
+// surface is out of scope for the byte-identity gate. The order-insensitive
+// surfaces (`unbounded_map_simple`, `unbounded_map_invalid_entry_partial`,
 // `unbounded_map_invalid_entry_nested_partial`, `unbounded_map_repeated_keys`)
 // still cover the unbounded-map decode path.
 

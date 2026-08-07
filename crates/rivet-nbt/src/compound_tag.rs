@@ -1,14 +1,15 @@
 //! Port of `net.minecraft.nbt.CompoundTag` — `final class` wrapping a map.
 //!
-//! Java uses an `Object2ObjectOpenHashMap<String, Tag>` (fastutil). Per
-//! PORTING.md, HashMap iteration order is not preserved; NBT serialization
-//! writes the map in iteration order. Java's fastutil map iterates in hash
-//! order — matching that order would require a Java-identical hasher. We use
-//! `std::collections::HashMap`; its randomized SipHash seed makes iteration
-//! order non-deterministic across processes, so field order is a known drift
-//! that golden tests cannot pin down (see PORTING.md drift notes). When the
-//! binary write path (`NbtIo`) lands, switch to an insertion-ordered map or
-//! port fastutil's hash order if byte-for-byte output parity requires it.
+//! Java uses an `Object2ObjectOpenHashMap<String, Tag>` (fastutil), which
+//! iterates in fastutil hash order — matching that order byte-for-byte would
+//! require a Java-identical hasher (DECISIONS.md D12, 2026-08-07). Rivet instead
+//! stores tags in an insertion-ordered `IndexMap` (DECISIONS.md D12): the reader
+//! preserves the on-disk field order and the writer emits that same order, so
+//! any binary that is *read* by Rivet round-trips byte-for-byte — including
+//! Paper's own chunk NBT. The divergence from Java is confined to hand-built
+//! compounds (SNBT → binary) where Rust's put order differs from fastutil hash
+//! order; that is the `compound_key_order` divergence counted in PARITY.md.
+//! Deterministic across processes (no randomized seed), so golden tests pin it.
 
 use crate::byte_array_tag::ByteArrayTag;
 use crate::byte_tag::ByteTag;
@@ -24,7 +25,7 @@ use crate::stream_tag_visitor::{EntryResult, StreamTagVisitor, ValueResult};
 use crate::string_tag::StringTag;
 use crate::tag::Tag;
 use crate::tag_visitor::TagVisitor;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 pub const SELF_SIZE_IN_BYTES: i32 = 48;
 pub const MAP_ENTRY_SIZE_IN_BYTES: i32 = 32;
@@ -32,19 +33,19 @@ pub const MAP_ENTRY_SIZE_IN_BYTES: i32 = 32;
 /// `CompoundTag`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CompoundTag {
-    pub tags: HashMap<String, Tag>,
+    pub tags: IndexMap<String, Tag>,
 }
 
 impl CompoundTag {
     /// `new CompoundTag()`.
     pub fn new() -> Self {
         CompoundTag {
-            tags: HashMap::new(),
+            tags: IndexMap::new(),
         }
     }
 
     /// `new CompoundTag(Map)`.
-    pub fn with_map(tags: HashMap<String, Tag>) -> Self {
+    pub fn with_map(tags: IndexMap<String, Tag>) -> Self {
         CompoundTag { tags }
     }
 
@@ -393,8 +394,11 @@ impl CompoundTag {
     }
 
     /// `CompoundTag.remove(String)`.
+    ///
+    /// `shift_remove` preserves the relative insertion order of the remaining
+    /// keys (matching Java's removal, which never reorders the map).
     pub fn remove(&mut self, name: &str) -> Option<Tag> {
-        self.tags.remove(name)
+        self.tags.shift_remove(name)
     }
 
     /// `CompoundTag.shallowCopy()` (package-private).
@@ -412,9 +416,9 @@ impl CompoundTag {
         }
     }
 
-    /// `CompoundTag.copy()` — deep copy.
+    /// `CompoundTag.copy()` — deep copy. Keeps insertion order.
     pub fn copy_tag(&self) -> CompoundTag {
-        let mut ret = HashMap::with_capacity(self.tags.len());
+        let mut ret = IndexMap::with_capacity(self.tags.len());
         for (k, v) in self.tags.iter() {
             ret.insert(k.clone(), v.copy_tag());
         }
