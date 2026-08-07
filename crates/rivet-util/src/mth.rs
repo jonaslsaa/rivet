@@ -561,48 +561,119 @@ pub struct Uuid {
 }
 
 impl Uuid {
-    /// `UUID.fromString(String)` — Java's parser, exactly. The fast path
-    /// accepts the canonical 36-char `8-4-4-4-12` dashed form with hex digits;
-    /// otherwise the general path accepts any string of at most 36 chars with
-    /// exactly 4 dashes whose (non-empty, hex) groups parse, masking each
-    /// group to its 32/16/16/16/48-bit width (short groups pad with zeros, so
-    /// e.g. `1-2-3-4-5` is valid). Braces, the `urn:uuid:` prefix, and the
-    /// undashed 32-char form are REJECTED — `UUID.fromString` never accepted
-    /// them (verified against the JDK 25 JVM Paper's oracle runs on). No value
-    /// validation: Java's `UUID(long, long)` constructor accepts any bit
-    /// pattern (the all-zero UUID parses fine).
-    pub fn from_string(name: &str) -> Option<Uuid> {
+    /// `UUID.fromString(String)` — Java's parser, exactly (JDK 25). Accepts
+    /// any string of at most 36 chars with exactly 4 dashes whose groups parse
+    /// as signed base-16 longs, masking each group to its 32/16/16/16/48-bit
+    /// width (short groups pad with zeros, so `1-2-3-4-5` is valid; a group
+    /// wider than its field truncates, so `100000000-2-3-4-5` is valid).
+    /// Braces, the `urn:uuid:` prefix, the undashed 32-char form, and a group
+    /// whose value exceeds `Long.MAX_VALUE` (e.g. `8000000000000000`) are
+    /// REJECTED — `UUID.fromString` never accepted them (verified against the
+    /// JDK 25 JVM Paper's oracle runs on). No value validation: Java's
+    /// `UUID(long, long)` constructor accepts any bit pattern (the all-zero
+    /// UUID parses fine).
+    ///
+    /// `Err` carries Java's exact exception message (`e.getMessage()` from the
+    /// `IllegalArgumentException`/`NumberFormatException` `UUID.fromString`
+    /// throws), so `UUIDUtil.STRING_CODEC` can reproduce its
+    /// `"Invalid UUID <s>: <cause>"` error verbatim.
+    pub fn from_string(name: &str) -> Result<Uuid, String> {
+        let len = name.len();
         // Java's `UUID.fromString` rejects strings longer than 36 chars
         // outright ("UUID string too large").
-        if name.len() > 36 {
-            return None;
+        if len > 36 {
+            return Err("UUID string too large".to_string());
         }
-        // Locate the dashes exactly as repeated `indexOf('-', ...)` would.
+        // Locate the dashes exactly as repeated `indexOf('-', ...)` would; a
+        // 5th dash (or fewer than 4) is "Invalid UUID string".
         let dash_after = |start: usize| name[start..].find('-').map(|i| start + i);
-        let dash1 = dash_after(0)?;
-        let dash2 = dash_after(dash1 + 1)?;
-        let dash3 = dash_after(dash2 + 1)?;
-        let dash4 = dash_after(dash3 + 1)?;
-        // A fifth dash means more than 4 groups ("Invalid UUID string").
-        if dash_after(dash4 + 1).is_some() {
-            return None;
-        }
-        // `Long.parseLong(segment, 16)` masked to the field width: an empty,
-        // non-hex, or overflowing group fails (`NumberFormatException`); only
-        // the masked bits matter, so a group wider than its field simply
-        // truncates the way Java's `& 0x...` masks do.
-        let group = |range: std::ops::Range<usize>, mask: u64| -> Option<u64> {
-            u64::from_str_radix(&name[range], 16).ok().map(|v| v & mask)
+        let d1 = dash_after(0);
+        let d2 = d1.and_then(|d| dash_after(d + 1));
+        let d3 = d2.and_then(|d| dash_after(d + 1));
+        let d4 = d3.and_then(|d| dash_after(d + 1));
+        let d5 = d4.and_then(|d| dash_after(d + 1));
+        let (d1, d2, d3, d4) = match (d1, d2, d3, d4, d5) {
+            (Some(a), Some(b), Some(c), Some(d), None) => (a, b, c, d),
+            _ => return Err(format!("Invalid UUID string: {name}")),
         };
-        let g1 = group(0..dash1, 0xffff_ffff)?;
-        let g2 = group(dash1 + 1..dash2, 0xffff)?;
-        let g3 = group(dash2 + 1..dash3, 0xffff)?;
-        let g4 = group(dash3 + 1..dash4, 0xffff)?;
-        let g5 = group(dash4 + 1..name.len(), 0xffff_ffff_ffff)?;
-        Some(Uuid {
+        // `Long.parseLong(segment, 16)` masked to the field width. Each group
+        // parses as a SIGNED long (values beyond `Long.MAX_VALUE` overflow),
+        // then masks — exactly Java's `parseLong(...) & 0x...`.
+        let g1 = (parse_long_hex(&name[..d1])? as u64) & 0xffff_ffff;
+        let g2 = (parse_long_hex(&name[d1 + 1..d2])? as u64) & 0xffff;
+        let g3 = (parse_long_hex(&name[d2 + 1..d3])? as u64) & 0xffff;
+        let g4 = (parse_long_hex(&name[d3 + 1..d4])? as u64) & 0xffff;
+        let g5 = (parse_long_hex(&name[d4 + 1..len])? as u64) & 0xffff_ffff_ffff;
+        Ok(Uuid {
             most: ((g1 << 32) | (g2 << 16) | g3) as i64,
             least: ((g4 << 48) | g5) as i64,
         })
+    }
+}
+
+/// `Long.parseLong(String, 16)` — Java's signed-base-16 parser, with the exact
+/// JDK-25 accept/reject set and `NumberFormatException` messages. Parses a
+/// segment into a signed `i64` (a value outside `[i64::MIN, i64::MAX]` — e.g. a
+/// 16-hex-digit group starting `8..f` — is rejected), accumulating negatively
+/// the way Java does so `Long.MIN_VALUE` parses. `Err` is Java's message:
+/// `For input string: "" under radix 16` for an empty segment, `Error at index
+/// N in: "..."` for a non-hex digit or overflow, and the lone-sign cases.
+fn parse_long_hex(segment: &str) -> Result<i64, String> {
+    let bytes = segment.as_bytes();
+    if bytes.is_empty() {
+        // Java `NumberFormatException.forInputString("", 16)`.
+        return Err("For input string: \"\" under radix 16".to_string());
+    }
+    let first = bytes[0];
+    let signed = first == b'-' || first == b'+';
+    let negative = first == b'-';
+    // Java's `digit` sentinel `~0xFF` when the first char is a sign. `i` is 1
+    // after the first char was consumed by `s.charAt(i++)`.
+    let mut digit: i64 = if signed { -256 } else { hex_digit_value(first) };
+    let mut i = 1;
+    if digit >= 0 || (digit == -256 && bytes.len() > 1) {
+        // `limit`: `MIN_VALUE` for a leading '-', else `MIN_VALUE + 1`.
+        let limit = if negative { i64::MIN } else { i64::MIN + 1 };
+        let multmin = limit / 16;
+        // `result = -(digit & 0xFF)`: for a sign, `digit & 0xFF` is 0, so
+        // `result` starts at 0; for a hex digit `d`, it starts at `-d`.
+        let mut result = -(digit & 0xff);
+        let mut in_range = true;
+        loop {
+            if i >= bytes.len() {
+                break;
+            }
+            digit = hex_digit_value(bytes[i]);
+            i += 1;
+            if digit < 0 {
+                // Non-hex digit: Java's `digit >= 0` loop condition fails;
+                // `inRange` keeps its previous (true) value.
+                break;
+            }
+            // `inRange = result > multmin || result == multmin && digit <= (int)(radix*multmin - limit)`.
+            let cast = (16 * multmin - limit) as i32 as i64;
+            in_range = result > multmin || (result == multmin && digit <= cast);
+            if !in_range {
+                break;
+            }
+            result = 16 * result - digit;
+        }
+        if in_range && i == bytes.len() && digit >= 0 {
+            return Ok(if negative { result } else { -result });
+        }
+    }
+    // `NumberFormatException.forCharSequence(s, 0, len, i - (digit < -1 ? 0 : 1))`.
+    let error_index = i - if digit < -1 { 0 } else { 1 };
+    Err(format!("Error at index {error_index} in: \"{segment}\""))
+}
+
+/// `Character.digit(char, 16)` for ASCII hex digits; `-1` for anything else.
+fn hex_digit_value(c: u8) -> i64 {
+    match c {
+        b'0'..=b'9' => (c - b'0') as i64,
+        b'a'..=b'f' => (c - b'a' + 10) as i64,
+        b'A'..=b'F' => (c - b'A' + 10) as i64,
+        _ => -1,
     }
 }
 

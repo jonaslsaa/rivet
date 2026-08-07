@@ -63,7 +63,7 @@ impl Packet for ClientboundStatusResponsePacket {
 mod tests {
     use super::*;
     use crate::codec::{StreamDecoder, StreamEncoder};
-    use crate::protocol::status::{Favicon, Players, ServerStatus, Version};
+    use crate::protocol::status::{Favicon, NameAndId, Players, ServerStatus, Version};
     use bytes::BytesMut;
     use rivet_text::Component;
 
@@ -110,5 +110,47 @@ mod tests {
             String::from_utf8(json.to_vec()).unwrap(),
             r#"{"description":"Hi"}"#
         );
+    }
+
+    #[test]
+    fn full_status_response_wire_is_byte_exact() {
+        // The complete status body — description + players (with a sample
+        // `NameAndId`), version, favicon (base64 PNG), enforcesSecureChat —
+        // encodes as one VarInt-prefixed UTF-8 string of the compact JSON of
+        // Java's `ServerStatus.CODEC` in field order. This pins the exact wire
+        // bytes a Paper `ClientboundStatusResponsePacket` carries (the codec
+        // field order is the same `full_status_round_trips_with_field_order`
+        // asserts, and `lenientJson` is compact, like `{"description":"Hi"}`).
+        let status = ServerStatus::new(
+            Component::literal("A Rivet Server"),
+            Some(Players::new(
+                20,
+                1,
+                vec![NameAndId::new(
+                    rivet_util::mth::Uuid {
+                        most: 0x00112233_44556677,
+                        least: 0x8899aabb_ccddeeffu64 as i64,
+                    },
+                    "Notch".to_string(),
+                )],
+            )),
+            Some(Version::new("1.21.4".to_string(), 769)),
+            Some(Favicon::new(vec![
+                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+            ])),
+            true,
+        );
+        let packet = ClientboundStatusResponsePacket::new(status);
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        ClientboundStatusResponsePacket::stream_codec()
+            .encode(&mut out, &packet)
+            .unwrap();
+        let wire = out.into_inner().to_vec();
+
+        let expected_json = r#"{"description":"A Rivet Server","players":{"max":20,"online":1,"sample":[{"id":"00112233-4455-6677-8899-aabbccddeeff","name":"Notch"}]},"version":{"name":"1.21.4","protocol":769},"favicon":"data:image/png;base64,iVBORw0KGgo=","enforcesSecureChat":true}"#;
+        let mut expected = FriendlyByteBuf::new(BytesMut::new());
+        expected.write_var_int(expected_json.len() as i32);
+        expected.write_bytes(expected_json.as_bytes());
+        assert_eq!(wire, expected.into_inner().to_vec());
     }
 }

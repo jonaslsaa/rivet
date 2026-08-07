@@ -19,8 +19,10 @@
 //! `UUIDUtil.STRING_CODEC` is `Codec.STRING.comapFlatMap(UUID::fromString,
 //! UUID::toString)` — a string codec mapped through `Uuid::from_string`, which
 //! replicates `UUID.fromString`'s accept/reject set exactly (dashed forms only,
-//! at most 36 chars; braces/`urn:uuid:`/undashed are rejected) and rejects
-//! malformed UUIDs with the Java `"Invalid UUID ..."` message.
+//! at most 36 chars; braces/`urn:uuid:`/undashed are rejected; a group whose
+//! value exceeds `Long.MAX_VALUE` is rejected too) and surfaces decode failures
+//! as Java's `"Invalid UUID <s>: <cause>"` error, with the thrown
+//! `IllegalArgumentException`/`NumberFormatException` message appended verbatim.
 
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
@@ -74,15 +76,17 @@ impl NameAndId {
 
 /// `UUIDUtil.STRING_CODEC` — `Codec.STRING.comapFlatMap(UUID::fromString,
 /// UUID::toString)`. On decode the string is parsed via `Uuid::from_string`
-/// (`UUID.fromString`, which throws `IllegalArgumentException` for a malformed
-/// UUID — surfaced here as `DataResult.error` with Java's `"Invalid UUID ..."`
-/// message prefix); on encode the canonical `UUID.toString()` form.
+/// (`UUID.fromString`, which throws for a malformed UUID) and a failure is
+/// surfaced as `DataResult.error` with Java's exact
+/// `"Invalid UUID <s>: <cause>"` message — the cause is the thrown
+/// `IllegalArgumentException`/`NumberFormatException` message, appended
+/// verbatim; on encode the canonical `UUID.toString()` form.
 fn uuid_string_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Uuid, Ops>> {
     codec::comap_flat_map(
         codec::string_codec::<Ops>(),
         Arc::new(|s: &String| match Uuid::from_string(s) {
-            Some(uuid) => DataResult::success(uuid),
-            None => DataResult::error(format!("Invalid UUID {s}")),
+            Ok(uuid) => DataResult::success(uuid),
+            Err(cause) => DataResult::error(format!("Invalid UUID {s}: {cause}")),
         }),
         Arc::new(|uuid: &Uuid| uuid.to_string()),
     )
@@ -106,54 +110,105 @@ mod tests {
         let canonical = "00112233-4455-6677-8899-aabbccddeeff";
         assert_eq!(
             Uuid::from_string(canonical),
-            Some(uuid(0x00112233_44556677, 0x8899_aabbccddeeff))
+            Ok(uuid(0x00112233_44556677, 0x8899_aabbccddeeff))
         );
         // Uppercase hex is accepted.
         assert_eq!(
             Uuid::from_string("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"),
-            Some(uuid(0xffffffff_ffffffff, 0xffff_ffffffffffff))
+            Ok(uuid(0xffffffff_ffffffff, 0xffff_ffffffffffff))
         );
         // Variable-width dashed groups pad with zeros (`fromString1`).
         assert_eq!(
             Uuid::from_string("1-2-3-4-5"),
-            Some(uuid(0x00000001_00020003, 0x0004_000000000005))
+            Ok(uuid(0x00000001_00020003, 0x0004_000000000005))
+        );
+        // `Long.parseLong` accepts a leading `+` in a group.
+        assert_eq!(
+            Uuid::from_string("1-+2-3-4-5"),
+            Ok(uuid(0x00000001_00020003, 0x0004_000000000005))
+        );
+        // A group wider than its field truncates via the mask (Java
+        // `& 0x...`), as long as the raw value fits a signed long.
+        assert_eq!(
+            Uuid::from_string("100000000-2-3-4-5"),
+            Ok(uuid(0x00000000_00020003, 0x0004_000000000005))
         );
         // The all-zero UUID parses fine (no variant validation).
         assert_eq!(
             Uuid::from_string("00000000-0000-0000-0000-000000000000"),
-            Some(uuid(0, 0))
+            Ok(uuid(0, 0))
         );
     }
 
     #[test]
     fn from_string_rejects_java_rejected_forms() {
-        // Braces, `urn:uuid:`, the undashed 32-char form, and >36 chars are
-        // all rejected by `UUID.fromString` ("UUID string too large" /
-        // "Invalid UUID string").
+        // >36 chars is `IllegalArgumentException("UUID string too large")`;
+        // braces, `urn:uuid:`, and a trailing dash all exceed 36 chars.
         assert_eq!(
             Uuid::from_string("{00112233-4455-6677-8899-aabbccddeeff}"),
-            None
+            Err("UUID string too large".to_string())
         );
         assert_eq!(
             Uuid::from_string("urn:uuid:00112233-4455-6677-8899-aabbccddeeff"),
-            None
+            Err("UUID string too large".to_string())
         );
-        assert_eq!(Uuid::from_string("00112233445566778899aabbccddeeff"), None);
         assert_eq!(
             Uuid::from_string("00112233-4455-6677-8899-aabbccddeefff"),
-            None
+            Err("UUID string too large".to_string())
         );
-        // Empty groups and non-hex digits are NumberFormatException.
-        assert_eq!(Uuid::from_string(""), None);
-        assert_eq!(Uuid::from_string("00112233--6677-8899-aabbccddeeff"), None);
-        assert_eq!(
-            Uuid::from_string("00112233-4455-6677-8899-aabbccddeefg"),
-            None
-        );
-        // A fifth dash means more than 4 groups.
         assert_eq!(
             Uuid::from_string("00112233-4455-6677-8899-aabbccddeeff-"),
-            None
+            Err("UUID string too large".to_string())
+        );
+        // The undashed 32-char form has no 4th dash.
+        assert_eq!(
+            Uuid::from_string("00112233445566778899aabbccddeeff"),
+            Err("Invalid UUID string: 00112233445566778899aabbccddeeff".to_string())
+        );
+        // A 5th dash (≤36 chars) is "Invalid UUID string".
+        assert_eq!(
+            Uuid::from_string("1-2-3-4-5-6"),
+            Err("Invalid UUID string: 1-2-3-4-5-6".to_string())
+        );
+        // Empty groups: `Long.parseLong("", 16)`.
+        assert_eq!(
+            Uuid::from_string(""),
+            Err("Invalid UUID string: ".to_string())
+        );
+        assert_eq!(
+            Uuid::from_string("00112233--6677-8899-aabbccddeeff"),
+            Err("For input string: \"\" under radix 16".to_string())
+        );
+        // Non-hex digits report Java's error index within the failing segment.
+        assert_eq!(
+            Uuid::from_string("0011223g-4455-6677-8899-aabbccddeeff"),
+            Err("Error at index 7 in: \"0011223g\"".to_string())
+        );
+        assert_eq!(
+            Uuid::from_string("00112233-4455-6677-8899-aabbccddeefg"),
+            Err("Error at index 11 in: \"aabbccddeefg\"".to_string())
+        );
+    }
+
+    #[test]
+    fn from_string_rejects_groups_above_long_max() {
+        // A 16-hex-digit group starting `8`..`f` exceeds `Long.MAX_VALUE`
+        // (`0x7fffffffffffffff`), so Java's `Long.parseLong(segment, 16)`
+        // overflows at the last digit (index 15) and `UUID.fromString`
+        // rejects the whole string. The old unsigned parse wrongly accepted
+        // these (masked to 0).
+        assert_eq!(
+            Uuid::from_string("8000000000000000-a-b-c-d"),
+            Err("Error at index 15 in: \"8000000000000000\"".to_string())
+        );
+        assert_eq!(
+            Uuid::from_string("ffffffffffffffff-a-b-c-d"),
+            Err("Error at index 15 in: \"ffffffffffffffff\"".to_string())
+        );
+        // ...and the boundary just below `Long.MAX_VALUE` still parses.
+        assert_eq!(
+            Uuid::from_string("7fffffffffffffff-a-b-c-d"),
+            Ok(uuid(0xffffffff_000a000b, 0x000c_00000000000d))
         );
     }
 
@@ -196,6 +251,32 @@ mod tests {
                 .parse(&JsonOps::INSTANCE, &json)
                 .result()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn string_codec_error_matches_java_cause_suffix() {
+        // Java `UUIDUtil.STRING_CODEC`:
+        // `DataResult.error(() -> "Invalid UUID " + s + ": " + e.getMessage())`.
+        // `UUID.fromString("nope")` throws `IllegalArgumentException("Invalid
+        // UUID string: nope")` and the codec appends that cause verbatim.
+        let result =
+            uuid_string_codec::<JsonOps>().parse(&JsonOps::INSTANCE, &serde_json::json!("nope"));
+        let err = result.error_ref().unwrap();
+        assert_eq!(
+            err.message(),
+            "Invalid UUID nope: Invalid UUID string: nope"
+        );
+        // An overflowing group throws `NumberFormatException` from
+        // `Long.parseLong` ("Error at index 15 in: ..."), appended the same way.
+        let result = uuid_string_codec::<JsonOps>().parse(
+            &JsonOps::INSTANCE,
+            &serde_json::json!("8000000000000000-a-b-c-d"),
+        );
+        let err = result.error_ref().unwrap();
+        assert_eq!(
+            err.message(),
+            "Invalid UUID 8000000000000000-a-b-c-d: Error at index 15 in: \"8000000000000000\""
         );
     }
 }

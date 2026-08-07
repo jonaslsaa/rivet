@@ -7,11 +7,13 @@
 //!
 //! The `ServerStatus` body and its nested `Players`/`Version`/`Favicon`
 //! codecs are the same DFU codecs the server uses to serialize its list-ping
-//! response, so they live here beside the packet bodies. The `StatusProtocols`
-//! registration (id order: serverbound `status_request`=0, `ping_request`=1;
-//! clientbound `status_response`=0, `pong_response`=1) is pinned by the
-//! generated `status::*` tables and the `protocol_registration` test, and the
-//! status listener in `rivet-server` drives the framing directly.
+//! response, so they live here beside the packet bodies. The status-protocol
+//! packet ids (serverbound `status_request`=0, `ping_request`=1; clientbound
+//! `status_response`=0, `pong_response`=1) are pinned by the generated
+//! `generated::packets::status` tables (the vanilla `StatusProtocols`
+//! addPacket order); the status listener in `rivet-server`
+//! (`server_status_packet_listener`) drives the framing directly against those
+//! ids.
 
 pub mod clientbound_status_response_packet;
 pub mod name_and_id;
