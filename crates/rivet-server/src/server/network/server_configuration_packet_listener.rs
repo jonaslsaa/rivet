@@ -316,10 +316,14 @@ impl PacketListener for ServerConfigurationPacketListener {
                 let packet: ServerboundKeepAlivePacket =
                     decode_packet(frame, ServerboundKeepAlivePacket::stream_codec())?;
                 let _ = packet;
-                // RivetTodo(#157): the keepalive challenge state
-                // (`KeepAlive.pendingKeepAlives`, out-of-order / no-challenge
-                // disconnects) — the periodic `ClientboundKeepAlivePacket` and
-                // the timeout/out-of-order handling are #157.
+                // RivetTodo(#157): the listener-side wiring — this listener does
+                // not yet own a `KeepaliveState`, so the periodic
+                // `ClientboundKeepAlivePacket` (1 s throttle) and the serverbound
+                // challenge matching (`handleKeepAlive`: pending queue,
+                // out-of-order / no-challenge TIMEOUT disconnects, 30 s kick) are
+                // not driven here. The pure state machine + `KeepaliveSink` seam
+                // live in `server::keepalive` / `server::network::keepalive`; the
+                // configuration tick hook that drives them is #96.
                 Ok(ListenerOutcome::Keep)
             }
             PONG_PACKET_ID => {
