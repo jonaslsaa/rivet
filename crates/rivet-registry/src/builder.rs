@@ -280,7 +280,7 @@ impl<T> RegistryBuilder<T> {
     ///
     /// Java (MappedRegistry.java:395-418) returns a live `HolderGetter<T>` whose
     /// `get`/`getOrThrow` create holders on demand and throw on intrusive
-    /// registries. #126 (holder codecs): the frozen `Registry<T>`'s
+    /// registries. RivetTodo(#126): the frozen `Registry<T>`'s
     /// `RegistryLookup` (`holder_lookup.rs`) covers the post-freeze getter; the
     /// pre-freeze registration-lookup (a live builder getter) is not ported —
     /// a placeholder would be a plausible-but-wrong holder, so this fails

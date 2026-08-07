@@ -1,6 +1,7 @@
 //! Port of `net.minecraft.nbt.ReportedNbtException` — `extends ReportedException`.
 //!
-//! `ReportedException`/`CrashReport` live in `rivet-core` (STUB(shared)).
+//! `ReportedException`/`CrashReport` live in `rivet-core` (minimal skeleton;
+//! see `crash_report.rs`).
 
 use rivet_core::{CrashReport, ReportedException};
 

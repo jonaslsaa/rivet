@@ -27,21 +27,22 @@
 //! behavior those helpers document. `DecoderException`s that are structurally
 //! detectable (a non-compound tag, a null/`EndTag`) still return `Err`.
 //!
-//! Blocked (STUB, landing with later units, not silently omitted):
-//! - `fromCodec`/`fromCodecTrusted`/`fromCodecWithRegistries*` — need a DFU
-//!   `Codec<T>` wired through `StreamCodec` via `NbtOps` (rivet-serialization
-//!   port slice, epic #6/#10).
+//! RivetTodo(#126): the remaining registry-dependent `ByteBufCodecs` members are
+//! deferred with their owning units, not silently omitted:
 //! - `registryFriendlyLengthPrefixed` — needs the buffer-preserving decorator
-//!   form of `lengthPrefixed` (the `RegistryFriendlyByteBuf` slice keeps the
-//!   `RegistryAccess`; #126). `registry`/`holderRegistry`/`holder`/`holderSet`
-//!   are ported in [`crate::codec::registry_byte_buf_codecs`] (they live there
-//!   because their buffer is `RegistryFriendlyByteBuf`, not `FriendlyByteBuf`).
+//!   form of `lengthPrefixed` over `RegistryFriendlyByteBuf`.
+//!   `registry`/`holderRegistry`/`holder`/`holderSet` are ported in
+//!   [`crate::codec::registry_byte_buf_codecs`] (they live there because their
+//!   buffer is `RegistryFriendlyByteBuf`, not `FriendlyByteBuf`).
 //! - `GAME_PROFILE`/`GAME_PROFILE_PROPERTIES` — need authlib `GameProfile`/
-//!   `PropertyMap` (`PLAYER_NAME` is ported: it is just `stringUtf8(16)`).
+//!   `PropertyMap` (RivetTodo(#198); `PLAYER_NAME` is ported: it is just
+//!   `stringUtf8(16)`).
 //! - `VECTOR3F`/`QUATERNIONF` — need JOML.
+//! - `RGB_COLOR` — `ARGB.color(r, g, b)` + the `red`/`green`/`blue` accessors
+//!   (RivetTodo(#206); only the 4-arg `argb_color` entry point is ported in
+//!   `mth.rs`).
 //! - `lenientJson` — `JsonElement` has no port (`rivet-serialization` has no Gson
 //!   value type; `json_ops` uses `ops::Output`).
-//! - `RGB_COLOR` — needs `ARGB` in `rivet-util`.
 //! - `trackDepth`/`increaseDepth` (Paper depth-tracking) — connection-level
 //!   anti-DoS on the registry buffer, out of scope for the registry-independent
 //!   slice.

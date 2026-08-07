@@ -1,6 +1,10 @@
 //! `RegistryFileCodec` / `RegistryFixedCodec` / `HolderSetCodec` — the #126
 //! holder codecs of `net.minecraft.resources` (MC 26.2).
 //!
+//! `RegistryDataLoader` (`net.minecraft.server.packs.resources.RegistryDataLoader`)
+//! is deliberately NOT here: it is the server-side pack-loading driver built on
+//! these codecs, not a codec itself, and defers with its owning unit.
+//!
 //! PROVENANCE: `RegistryFileCodec.java` (82 lines), `RegistryFixedCodec.java`
 //! (73 lines), `HolderSetCodec.java` (108 lines), all leaves of the `mc.resources`
 //! manifest unit. The two helpers come from `net.minecraft.util.ExtraCodecs.java`

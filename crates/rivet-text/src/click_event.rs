@@ -1,6 +1,6 @@
-//! STUB(mc.text.click_event) — `net.minecraft.network.chat.ClickEvent`.
+//! STUB(mc.network.chat) — `net.minecraft.network.chat.ClickEvent`.
 //!
-//! The full model is an interface dispatcing on `ClickEvent.Action`
+//! The full model is an interface dispatching on `ClickEvent.Action`
 //! (`open_url`/`run_command`/`copy_to_clipboard`/...) with a per-action record
 //! and `MapCodec`. A faithful port needs the `ExtraCodecs` URI/positive-int/
 //! chat-string codecs, and the `Custom` action needs `Identifier` + NBT `Tag`
@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 /// Port of `net.minecraft.network.chat.ClickEvent` (value placeholder).
 ///
-/// STUB: the concrete `Action` variants and their codecs are not ported. The
-/// struct is opaque so `Style` can carry the field with the same shape as Java.
+/// The concrete `Action` variants and their codecs are not ported (STUB at
+/// module scope). The struct is opaque so `Style` can carry the field with the
+/// same shape as Java.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClickEvent;
 

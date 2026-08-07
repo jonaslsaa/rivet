@@ -1,6 +1,6 @@
-//! STUB(mc.util.mth) — minimal cross-unit types referenced by `mth.rs`, owned
-//! by other units. Only the surface `Mth` actually calls is provided here.
-//! These become real ports when their owning units land.
+//! RivetTodo(#206): minimal cross-unit types referenced by `mth.rs`, owned
+//! by other units. Only the surface `Mth` actually calls is provided here;
+//! these become real ports when their owning units land.
 //!
 //! - `Vec3` / `AABB` — owned by `net.minecraft.world.phys` (rivet-util).
 //! - `Vec3f` / `Quaternionf` — owned by JOML (`org.joml`).

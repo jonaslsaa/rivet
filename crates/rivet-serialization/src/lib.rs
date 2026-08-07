@@ -10,8 +10,8 @@
 //! - Java `DataResult.Error`'s `Supplier<String>` message is stored eagerly;
 //!   the suppliers in DFU are pure string concatenations, so eager evaluation
 //!   is observationally equivalent.
-//! - `Dynamic<O>` cannot retain its `DynamicOps` (STUB(mc.nbt): rivet-nbt
-//!   constructs `Dynamic<Tag>` from a temporary ops reference); ops-dependent
+//! - `Dynamic<O>` cannot retain its `DynamicOps` (rivet-nbt constructs
+//!   `Dynamic<Tag>` from a temporary ops reference); ops-dependent
 //!   `Dynamic`/`DynamicLike` methods take the ops as a parameter.
 //! - Java's anonymous-codec/`ComposerHolder` sharing is value-semantic here;
 //!   codec combinators hold owned trait objects (`Box<dyn Codec<..>>`), so

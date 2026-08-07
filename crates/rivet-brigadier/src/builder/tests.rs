@@ -4,8 +4,8 @@
 //!
 //! Faithful-behavior tests only. Java's `Mockito.mock(CommandNode.class)` / mocks are
 //! replaced by concrete stub nodes; Java `CommandNode.equals`/`hasItem` are asserted
-//! via `get_name` because full node equality arrives with the `tree` unit (the stub
-//! nodes carry no `PartialEq`).
+//! via `get_name` because the tree nodes carry no `PartialEq` (equality is asserted
+//! by name).
 
 use std::sync::Arc;
 
@@ -137,7 +137,8 @@ fn test_arguments() {
 }
 
 /// Java `then(CommandNode<S>)` overload — appends the raw node (no merge, no
-/// `build()`). The `addChild` merge (duplicate names) is deferred to the tree unit.
+/// `build()`); the `addChild` merge (duplicate names) is exercised via the
+/// tree unit's `RootCommandNode::add_child`, which the builders funnel through.
 #[test]
 fn test_then_node_appends_raw_node() {
     let mut builder = TestableArgumentBuilder::<i32>::new();

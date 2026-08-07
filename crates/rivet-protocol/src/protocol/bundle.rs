@@ -19,6 +19,10 @@
 //!     deferred with them. Registering `withBundlePacket` is still faithful: it
 //!     puts the delimiter at network id 0 (Paper's play/clientbound `bundle_delimiter`),
 //!     which the join path depends on.
+//!
+//! RivetTodo(#148): the bundle-packet bodies and bundling/unbundling machinery
+//! (M1.1 play bodies) are not ported; the marker traits and registration value
+//! are what the join path needs today.
 
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;

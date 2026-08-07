@@ -13,11 +13,11 @@
 //! and `Registries::level_stem_to_level` use, so a `GlobalPos` can be built
 //! against a registry key directly.
 //!
-//! Deferred (codec surface → rivet-protocol, OWNERSHIP.md): `MAP_CODEC`/
-//! `CODEC` (need `Level.RESOURCE_KEY_CODEC` + the DFU map-codec surface, #126)
-//! and `STREAM_CODEC` (`ResourceKey.streamCodec(Registries.DIMENSION)` +
-//! `BlockPos.STREAM_CODEC`, #82/#83). The value type itself needs nothing else
-//! from the #124 registry SCC beyond `ResourceKey`, which has landed.
+//! RivetTodo(#126): `MAP_CODEC`/`CODEC` (need `Level.RESOURCE_KEY_CODEC` + the
+//! DFU map-codec surface) and `STREAM_CODEC` (`ResourceKey.streamCodec(
+//! Registries.DIMENSION)` + `BlockPos.STREAM_CODEC`) defer with the protocol
+//! codec surface (#126). The value type itself needs nothing else from the
+//! #124 registry SCC beyond `ResourceKey`, which has landed.
 
 use super::block_pos::BlockPos;
 use crate::ResourceKey;

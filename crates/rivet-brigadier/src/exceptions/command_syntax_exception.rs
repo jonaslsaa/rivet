@@ -24,9 +24,8 @@ pub const CONTEXT_AMOUNT: i32 = 10;
 
 /// Java `CommandSyntaxException.ENABLE_COMMAND_STACK_TRACES`. Java reads it when
 /// constructing the exception to decide whether to retain a Java stack trace; Rust
-/// has no Java stack traces, so the flag is inert, kept for API parity.
-// STUB(brigadier): setting/clearing `ENABLE_COMMAND_STACK_TRACES` has no observable
-// effect (Rust has no Java stack traces).
+/// has no Java stack traces, so the flag is inert, kept for API parity — setting
+/// or clearing it has no observable effect here.
 pub static ENABLE_COMMAND_STACK_TRACES: AtomicBool = AtomicBool::new(true);
 
 /// Java `CommandSyntaxException.BUILT_IN_EXCEPTIONS`.
@@ -164,5 +163,6 @@ impl std::fmt::Debug for CommandSyntaxException<'_> {
 impl std::error::Error for CommandSyntaxException<'_> {}
 
 // Paper - Brigadier API
-// STUB(brigadier): `componentMessage()` (via `net.kyori.adventure.util.ComponentMessageThrowable`)
-// is Paper-only and depends on Adventure text types not yet ported.
+// RivetTodo(#85): `componentMessage()` (via
+// `net.kyori.adventure.util.ComponentMessageThrowable`) is Paper-only and
+// depends on Adventure text types (rivet-text, epic #12) not yet ported.

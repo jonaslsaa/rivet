@@ -11,8 +11,8 @@
 - [ ] Existing Java tests ported alongside; no test/fixture weakened
 - [ ] `MANIFEST.tsv` status updated for the unit(s)
 - [ ] `scripts/gate.sh` green on this branch (no hosted CI — this is the gate, D10)
-- [ ] Any `// STUB(...)` items created are listed below
+- [ ] Any `// STUB(...)` or `// RivetTodo(#...)` items created are listed below
 
-## Stubs / blocked / open questions
+## Stubs / deferred / open questions
 
-<!-- List cross-unit stubs created, todo!()-with-reason sites, and reviewer disagreements. -->
+<!-- List STUB(...) markers and RivetTodo(#N) deferrals created (per WORKFLOWS.md's marker convention), and reviewer disagreements. -->

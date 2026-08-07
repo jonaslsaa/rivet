@@ -7,8 +7,8 @@
 //! `ChunkPyramid.MAX_CHUNK_COORDINATE_VALUE` to a `const` in `core/mod.rs`
 //! (OWNERSHIP.md — ChunkPos lives here as a pure value type).
 //!
-//! Deferred (leaf types owned by other units, PORTING.md): `CODEC`/
-//! `STREAM_CODEC` (codec surface → rivet-protocol/#holder).
+//! RivetTodo(#126): `CODEC`/`STREAM_CODEC` — the codec surface lives in
+//! `rivet-protocol` (issue #126 tracks the registry-wired codecs).
 
 use super::block_pos::BlockPos;
 use super::section_pos::SectionPos;

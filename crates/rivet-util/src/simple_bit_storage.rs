@@ -7,7 +7,8 @@
 //! `index / valuesPerLong` / `index % valuesPerLong` used here — the resulting
 //! packed layout and wire bytes are identical (verified against the Java
 //! constructor packing below, which is the ground truth for the layout).
-//! Paper's `moonrise$countEntries` (block counting) is deferred to M2.
+//! RivetTodo(#216): Paper's `moonrise$countEntries` (block counting) is
+//! deferred to the block-counting unit (M2 chunk storage, epic #15).
 
 use std::fmt;
 

@@ -9,10 +9,10 @@
 //! `pub(crate)` so sibling modules in `rivet_registry::core` can inline, and
 //! the getters are free functions returning the field directly.
 //!
-//! Deferred (leaf types owned by other units, PORTING.md): `CODEC`/
-//! `offsetCodec`/`STREAM_CODEC` (codec surface → rivet-protocol/#holder),
-//! `toMutable` (JOML `Vector3i`), `isInsideBuildHeightAndWorldBoundsHorizontal`
-//! (needs `Level`/`LevelHeightAccessor`).
+//! RivetTodo(#126): `CODEC`/`offsetCodec`/`STREAM_CODEC` (codec surface →
+//! rivet-protocol). `toMutable` (JOML `Vector3i`) and
+//! `isInsideBuildHeightAndWorldBoundsHorizontal` (needs
+//! `Level`/`LevelHeightAccessor`) defer with their owning units.
 
 use super::block_pos::{BlockPos, MutableBlockPos};
 use super::direction::{Axis, Direction};

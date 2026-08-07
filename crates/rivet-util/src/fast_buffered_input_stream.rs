@@ -2,7 +2,8 @@
 //! avoids refills for reads within the buffer. Faithful port of the Java class
 //! (DEFAULT_BUFFER_SIZE = 8192).
 //!
-//! STUB(mc.nbt.io) — minimal faithful surface for the compressed read path.
+//! RivetTodo(#209): minimal faithful surface for the compressed read path —
+//! only the buffering shape `NbtIo` needs is ported.
 
 use std::io::{self, Read};
 

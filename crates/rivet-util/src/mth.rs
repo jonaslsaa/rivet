@@ -21,8 +21,8 @@
 //! - Java `>>>` is a logical shift on the `u32`/`u64` view.
 //! - Java `(int)Math.floor(d)` / `(int)Math.ceil(d)` saturate and map NaN->0;
 //!   Rust `as` matches.
-//! - Cross-unit types are declared in `mth_stubs.rs` (`// STUB(mc.util.mth)`):
-//!   `RandomSource` is owned by mc.util.random, `Vec3`/`AABB` by
+//! - Cross-unit types are declared in `mth_stubs.rs` (see the `RivetTodo(#206)`
+//!   marker there): `RandomSource` is owned by mc.util.random, `Vec3`/`AABB` by
 //!   mc.world.phys, `Vec3f`/`Quaternionf` by JOML, `ARGB` by mc.util,
 //!   `Fraction` by commons-lang3. The LCG stub `SingleThreadedRandomSource` is
 //!   minimal but bit-exact (48-bit LCG + Marsaglia polar gaussian).
@@ -544,7 +544,8 @@ pub fn create_insecure_uuid<R: RandomSource>(random: &mut R) -> Uuid {
     Uuid { most, least }
 }
 
-/// Minimal UUID value type (STUB — owned by java.util.UUID).
+/// RivetTodo(#206): minimal UUID value type — the full `java.util.UUID`
+/// surface is not ported (owned by `java.util.UUID`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Uuid {
     pub most: i64,
@@ -683,8 +684,8 @@ pub fn hsv_to_argb(hue: f32, saturation: f32, value: f32, alpha: i32) -> i32 {
     )
 }
 
-/// `ARGB.color(int alpha, int red, int green, int blue)` — STUB(mc.util),
-/// owned by `net.minecraft.util.ARGB`.
+/// RivetTodo(#206): `ARGB.color(int alpha, int red, int green, int blue)` —
+/// only this one entry point of `net.minecraft.util.ARGB` is ported.
 pub fn argb_color(alpha: i32, red: i32, green: i32, blue: i32) -> i32 {
     (alpha & 0xFF) << 24 | (red & 0xFF) << 16 | (green & 0xFF) << 8 | blue & 0xFF
 }

@@ -3,7 +3,7 @@
 //! PROVENANCE: `net/minecraft/util/BitStorage.java` in `working/Paper`
 //! (vanilla 26.2 + Paper patches). The Paper `BlockCountingBitStorage`
 //! (Moonrise) extension is **not** ported — block counting is M2 scope
-//! (see #108).
+//! (tracked by #216, deferred from #108).
 //!
 //! The wire format depends on this interface's exact packed-long layout:
 //! `PalettedContainer`/`Data.write` emits `getBits()` (one byte) followed by

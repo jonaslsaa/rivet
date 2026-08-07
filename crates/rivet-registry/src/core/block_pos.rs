@@ -12,9 +12,9 @@
 //! `Iterable`s can be pulled again; Rivet returns one pass). `Rotation`,
 //! `TraversalNodeStatus`, and `RandomSource` are in `core`/`rivet-util`.
 //!
-//! Deferred (leaf types owned by other units, PORTING.md): `CODEC`/
-//! `STREAM_CODEC` (codec surface → rivet-protocol/#holder),
-//! `betweenCornersInDirection` and `clampLocationWithin` (JOML `Vec3`).
+//! RivetTodo(#126): `CODEC`/`STREAM_CODEC` (codec surface →
+//! rivet-protocol). `betweenCornersInDirection`/`clampLocationWithin` (JOML
+//! `Vec3`) defer with the JOML unit.
 
 use super::axis_cycle::AxisCycle;
 use super::direction::{Axis, Direction};

@@ -117,6 +117,17 @@ while (rounds++ < 8) {
 
 Fixer rule: errors are fixed by *correcting the translation*, never by deleting functionality or `todo!()` — a `todo!()` requires a `blocked` manifest note.
 
+## Comment markers: `STUB` vs `RivetTodo`
+
+`scripts/check_markers.py` (full gate, offline) enforces the canonical forms. The two markers are semantically distinct:
+
+- `// STUB(<manifest-unit-id>) <reason>` — **no implementation here**; a real port replaces the annotated scaffold wholesale when the owning manifest unit lands. The paren argument is the exact MANIFEST.tsv unit id owning the real port; it must exist and must NOT be `done` (a STUB on a done unit is stale — the stub should have been removed when the unit landed).
+- `// RivetTodo(#<issue>) <reason>` — **usable partial semantic port** with a known, tracked gap. The annotated code is real; only the named aspects are deferred. The paren argument is a positive GitHub issue number (format-only validated offline; existence/closure is a review-time check).
+
+Rules per comment line: a line is a marker only when its body *begins* with the token (a mid-sentence mention is prose); both forms on one line is ambiguous (error); the reason is mandatory; every `todo!()` / `unimplemented!()` must carry a `RivetTodo` on the same line or on the immediately-preceding comment line. Prefer a `RivetTodo` for a partial port you are keeping; keep `STUB` only for genuinely absent implementations.
+
+**Enforced distinction.** The `STUB` vs `RivetTodo` line ("no implementation here" vs "partial port with a tracked gap") is only fully enforced on *pending* units: a `STUB` on a `done` unit is stale (error), so on a done unit every remaining gap collapses into `RivetTodo` — a real port with a tracked gap *and* a genuinely-absent Paper-only surface both appear as `RivetTodo`. That is intentional: once a unit has landed, `STUB`'s "the owning unit will replace this" contract is void, so issue-tracked deferral is the only honest form. Reviewers should not expect a done unit to distinguish the two.
+
 ## `verify-oracle`
 
 Runs against a milestone branch, scenarios in parallel: worldgen chunk-hash diff over N seeds vs vanilla, packet round-trips vs recorded sessions, azalea bot scripts (join, move, dig, place, combat) executed against both servers with compared outcomes. Output: structured failure list → converted to manifest rows tagged `regression`. Milestones promote only on green.
