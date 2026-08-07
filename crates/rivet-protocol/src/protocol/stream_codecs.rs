@@ -19,12 +19,13 @@
 //!
 //! Deferred with the registry-wired units: `Identifier.STREAM_CODEC` variants
 //! over `RegistryFriendlyByteBuf` (none needed by the #86 bodies), and
-//! `ResourceKey`/registry-key codecs (login/CommonPlayerSpawnInfo/update_tags).
+//! `ResourceKey`/registry-key codecs (CommonPlayerSpawnInfo/update_tags).
 
 use crate::codec::byte_buf_codecs;
 use crate::codec::{CodecError, StreamCodec, StreamDecoder, StreamEncoder, of};
 use crate::friendly_byte_buf::{FriendlyByteBuf, MAX_STRING_LENGTH};
 use rivet_registry::Identifier;
+use rivet_util::mth::Uuid;
 
 /// `Identifier.STREAM_CODEC` — a `MAX_STRING_LENGTH`-bounded UTF string
 /// parsed through `Identifier.parse` on decode and rendered by
@@ -45,6 +46,22 @@ pub fn identifier_codec() -> StreamCodec<FriendlyByteBuf, Identifier> {
             Identifier::by_separator_result(&s, ':')
                 .map_err(|e| CodecError::new(e.message().to_string()))
         },
+    )
+}
+
+/// `UUIDUtil.STREAM_CODEC` — a 16-byte UUID: two big-endian longs (`most`,
+/// `least`), exactly `FriendlyByteBuf.readUUID`/`writeUUID`.
+///
+/// Java: `UUIDUtil.STREAM_CODEC` in `working/Paper` delegates straight to
+/// `FriendlyByteBuf.readUUID`/`writeUUID`. Used by
+/// `ClientboundLoginFinishedPacket` (the `sessionId` field after the profile).
+pub fn uuid_codec() -> StreamCodec<FriendlyByteBuf, Uuid> {
+    of(
+        |output: &mut FriendlyByteBuf, value: &Uuid| {
+            output.write_uuid(*value);
+            Ok(())
+        },
+        |input: &mut FriendlyByteBuf| Ok(input.read_uuid()),
     )
 }
 
