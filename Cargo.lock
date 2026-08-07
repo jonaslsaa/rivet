@@ -633,6 +633,7 @@ dependencies = [
  "phf",
  "rivet-protocol",
  "rivet-registry",
+ "rivet-text",
  "rivet-util",
  "rivet-world",
  "thiserror",
