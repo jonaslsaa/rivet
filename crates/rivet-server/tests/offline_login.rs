@@ -11,7 +11,9 @@
 use std::io::Read;
 use std::time::Duration;
 
+use bytes::Bytes;
 use flate2::read::ZlibDecoder;
+use rivet_server::server::tick::channels::OutboundEvent;
 use rivet_server::server::{Server, ServerConfig};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -896,37 +898,70 @@ async fn finish_configuration_after_sync_reaches_play() {
     server_task.abort();
 }
 
+/// Drive handshake → hello → registry sync → `JoinWorldTask` → handoff, write
+/// `post_sync_writes` to the client socket, and return every decoded frame the
+/// tick thread observed in `ctx.inbound` (a recording tickable on the real tick
+/// thread). This is the load-bearing assertion for the play handoff: the frame
+/// must cross the OWNERSHIP §Network boundary and land in the tick context, not
+/// merely "keep the connection open".
+async fn handoff_and_collect_play_frames(post_sync_writes: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let seen_clone = std::sync::Arc::clone(&seen);
+    let server = Server::new(config_with_threshold(256)).with_tickable(move |ctx| {
+        for (_id, frame) in &ctx.inbound {
+            seen_clone.lock().unwrap().push(frame.bytes.to_vec());
+        }
+    });
+    let listener = server.bind().await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_task = tokio::spawn(async move { server.serve(listener).await });
+
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    for w in post_sync_writes {
+        client.write_all(w).await.expect("write post-sync frames");
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let got = seen.lock().unwrap().len();
+        if got >= 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for play frames on the tick thread"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let result = seen.lock().unwrap().clone();
+    serve_task.abort();
+    result
+}
+
 #[tokio::test]
 async fn play_frame_after_finish_is_forwarded_to_tick_thread() {
     // The seam: once in play, decoded frames are forwarded to the tick thread
     // over the connection's bounded inbound channel instead of being parsed by
-    // a listener. A play `keep_alive` (id 28) after the handoff stays open — the
-    // tick thread drains it and the play listener (#101) is deferred.
-    let (addr, server_task) = start_server(config_with_threshold(256)).await;
-    let mut client = TcpStream::connect(addr).await.expect("connect");
-
-    login_and_assert_response(&mut client, 256).await;
-    consume_config_sync_opening(&mut client).await;
-    complete_sync_and_consume_finish(&mut client).await;
-    client
-        .write_all(&finish_configuration_reply_frame())
-        .await
-        .expect("write finish_configuration");
-
-    // Play keep_alive: `[id 28][long]`, compressed (varint(0), sub-threshold).
+    // a listener. The tickable observes the decoded `keep_alive` frame directly
+    // in `ctx.inbound` — the forwarding/buffer-drain is load-bearing, not just
+    // "the connection stays open".
     let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
     body.extend_from_slice(&7i64.to_be_bytes());
     let mut wire = varint(0);
     wire.extend_from_slice(&body);
-    client
-        .write_all(&frame(&wire))
-        .await
-        .expect("write play keep_alive");
 
-    // Forwarded to the tick thread (drained, no response yet — the keepalive
-    // state machine is #157), connection stays open.
-    expect_silent_open(&mut client).await;
-    server_task.abort();
+    // finish_configuration (the handoff) then the play keep_alive, in separate
+    // writes — the play frame crosses to the tick thread after the handoff.
+    let observed =
+        handoff_and_collect_play_frames(&[finish_configuration_reply_frame(), frame(&wire)]).await;
+    assert_eq!(
+        observed,
+        vec![body],
+        "the play frame crosses to the tick thread after the handoff"
+    );
 }
 
 #[tokio::test]
@@ -934,28 +969,20 @@ async fn finish_and_play_coalesced_in_one_write_reaches_tick() {
     // A client that coalesces `finish_configuration` with its first play packet
     // into one TCP chunk: the finish frame triggers the handoff and the already
     // buffered play frame is drained into the tick channel — no frame is lost at
-    // the seam.
-    let (addr, server_task) = start_server(config_with_threshold(256)).await;
-    let mut client = TcpStream::connect(addr).await.expect("connect");
-
-    login_and_assert_response(&mut client, 256).await;
-    consume_config_sync_opening(&mut client).await;
-    complete_sync_and_consume_finish(&mut client).await;
-
-    // finish_configuration ++ play keep_alive, back to back in one write.
+    // the seam. The tickable observes the coalesced play frame directly.
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&42i64.to_be_bytes());
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
     let mut coalesced = finish_configuration_reply_frame();
-    let mut keepalive_body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
-    keepalive_body.extend_from_slice(&42i64.to_be_bytes());
-    let mut keepalive_wire = varint(0);
-    keepalive_wire.extend_from_slice(&keepalive_body);
-    coalesced.extend_from_slice(&frame(&keepalive_wire));
-    client
-        .write_all(&coalesced)
-        .await
-        .expect("write coalesced finish + play");
+    coalesced.extend_from_slice(&frame(&wire));
 
-    expect_silent_open(&mut client).await;
-    server_task.abort();
+    let observed = handoff_and_collect_play_frames(&[coalesced]).await;
+    assert_eq!(
+        observed,
+        vec![body],
+        "the coalesced play frame reaches the tick thread (no loss at the seam)"
+    );
 }
 
 #[tokio::test]
@@ -1017,5 +1044,81 @@ async fn play_frame_crosses_to_tick_thread_tickable() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
+    serve_task.abort();
+}
+
+#[tokio::test]
+async fn play_state_exit_flushes_queued_outbound_to_the_client() {
+    // The play-state exit contract (drain_to_close): once the connection is in
+    // play and the tick thread shuts down (closing the inbound channel, so
+    // `forward_play` fails with ServerShutdown), the queued outbound channel is
+    // drained to completion — a frame the tick queued *before* the stop reaches
+    // the client before the socket closes, mirroring the pre-play shutdown
+    // paths. Positive control: the tickable queues a distinctive frame when it
+    // sees the forwarded play packet.
+    let queued = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let queued_c = std::sync::Arc::clone(&queued);
+    let server = Server::new(config_with_threshold(256)).with_tickable(move |ctx| {
+        for (id, _frame) in &ctx.inbound {
+            let mut q = queued_c.lock().unwrap();
+            if !*q {
+                // A fully-encoded VarInt21 frame (the tick thread owns the
+                // play-state wire format). Queued, not yet flushed.
+                let _ = ctx.connections.send(
+                    *id,
+                    OutboundEvent::Packet {
+                        frame: Bytes::from(frame(b"PLAYEXIT-CONTROL")),
+                    },
+                );
+                *q = true;
+            }
+        }
+    });
+    let shutdown = server.shutdown_handle();
+    let listener = server.bind().await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_task = tokio::spawn(async move { server.serve(listener).await });
+
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    client
+        .write_all(&finish_configuration_reply_frame())
+        .await
+        .expect("write finish_configuration");
+
+    // A play keep_alive (id 28) that the tickable observes, queueing the
+    // positive-control outbound frame.
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&7i64.to_be_bytes());
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write play keep_alive");
+
+    // Wait for the tickable to queue the control frame, then stop the server:
+    // the play-exit path must flush that queued frame to the client before
+    // closing (Paper's `send(disconnect, thenRun(disconnect))` ordering).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !*queued.lock().unwrap() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "tickable never queued the positive-control frame"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    shutdown.request();
+
+    // The queued frame reaches the client (drain_to_close flushes it), then the
+    // connection closes.
+    let payload = read_frame_payload(&mut client).await;
+    assert_eq!(
+        payload, b"PLAYEXIT-CONTROL",
+        "the tick-queued outbound frame must reach the client before the play-state close"
+    );
+    expect_eof(&mut client).await;
     serve_task.abort();
 }

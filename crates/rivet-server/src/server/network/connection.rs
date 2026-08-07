@@ -13,7 +13,9 @@ use tokio::net::tcp::OwnedWriteHalf;
 use super::connection_id::ConnectionId;
 use super::packet_listener::{DisconnectReason, ListenerOutcome, PacketListener};
 use crate::server::ServerConfig;
-use crate::server::tick::channels::ServerboundFrame;
+use crate::server::tick::channels::{
+    MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN, MAX_INBOUND_FRAMES_PER_DRAIN, ServerboundFrame,
+};
 
 /// The enabled compression handlers for one connection: the
 /// `CompressionDecoder`/`CompressionEncoder` pair Paper's
@@ -85,6 +87,16 @@ pub struct Connection {
     /// The compression pipeline stage, when enabled (`setupCompression`).
     compression: Option<CompressionState>,
     outbound_protocol: Option<ConnectionProtocol>,
+    /// The play-state inbound drain window: cumulative decompressed bytes
+    /// forwarded to the tick channel since the channel was last observed empty
+    /// (the tick thread drained it). The frame/byte budget in
+    /// [`Connection::forward_play`] is enforced against this window so a
+    /// hostile client cannot let the bounded channel retain multi-GiB of
+    /// decompressed frames. Reset when the channel is observed empty.
+    inbound_window_bytes: usize,
+    /// The play-state inbound drain window, frame-count half (see
+    /// [`Self::inbound_window_bytes`]).
+    inbound_window_frames: usize,
 }
 
 impl Connection {
@@ -106,6 +118,8 @@ impl Connection {
             // `setupCompression` is called at login.
             compression: None,
             outbound_protocol: None,
+            inbound_window_bytes: 0,
+            inbound_window_frames: 0,
         }
     }
 
@@ -149,16 +163,31 @@ impl Connection {
     /// When compression is enabled, each VarInt21 frame payload is run through
     /// the compression decoder before dispatch — the netty pipeline order
     /// SPLITTER → DECOMPRESS → DECODER.
+    ///
+    /// The inbound drain budget ([`MAX_INBOUND_FRAMES_PER_DRAIN`] /
+    /// [`MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN`]) is enforced per call (one
+    /// TCP read): a hostile client coalescing thousands of max-size compressed
+    /// frames into a single read is disconnected instead of letting the
+    /// dispatch loop decode and allocate multi-GiB.
     pub fn process_inbound(
         &mut self,
         data: &[u8],
         listener: &mut Box<dyn PacketListener>,
     ) -> Result<InboundOutcome, DisconnectReason> {
         self.read_buf.extend_from_slice(data);
+        let mut drained_bytes = 0usize;
+        let mut drained_frames = 0usize;
         loop {
             let Some(packet) = self.next_frame()? else {
                 break; // need more bytes
             };
+            drained_frames += 1;
+            drained_bytes += packet.len();
+            if drained_frames > MAX_INBOUND_FRAMES_PER_DRAIN
+                || drained_bytes > MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN
+            {
+                return Err(inbound_overflow(drained_frames, drained_bytes));
+            }
             let config = Arc::clone(&self.config);
             match listener.handle_frame(packet, self, &config) {
                 Ok(ListenerOutcome::Keep) => {}
@@ -208,6 +237,24 @@ impl Connection {
     /// Backpressure is the bounded channel: a full channel blocks until the tick
     /// thread drains it (each tick), and a closed channel (the tick thread is
     /// gone) is a server stop, reported as [`DisconnectReason::ServerShutdown`].
+    ///
+    /// The inbound budget ([`MAX_INBOUND_FRAMES_PER_DRAIN`] /
+    /// [`MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN`]) is enforced here as an
+    /// *admission* cap against a sliding window (`inbound_window_*`) that resets
+    /// whenever the channel is observed empty (the tick thread drained it). Each
+    /// compressed frame can decompress to 8 MiB, so without the cap a hostile
+    /// client flooding 8 MiB frames faster than the tick drains could fill the
+    /// 1024-deep channel with multi-GiB of live frames; the admission cap
+    /// disconnects exactly such a client, while a client the tick keeps up with
+    /// is never affected (its window resets each drain). Exceeding the budget
+    /// reports [`DisconnectReason::InboundOverflow`].
+    ///
+    /// The authoritative per-tick bound is the tick side: [`ConnectionRegistry::drain_one`]
+    /// stops draining at the same budget, so even a sender that races the window
+    /// reset (observing the channel empty mid-drain and refilling) cannot make
+    /// one tick deliver more than the budget. This admission cap is the
+    /// memory-retention backstop that keeps the bounded channel from holding
+    /// multi-GiB before that tick-side bound is even reached.
     pub async fn forward_play(
         &mut self,
         data: Option<&[u8]>,
@@ -220,6 +267,23 @@ impl Connection {
             let Some(packet) = self.next_frame()? else {
                 break;
             };
+            // The tick thread fully drained the channel since the last push:
+            // the client is keeping up, so the window restarts. `capacity()`
+            // is the number of free slots; at the max the channel is empty.
+            if in_tx.capacity() == in_tx.max_capacity() {
+                self.inbound_window_bytes = 0;
+                self.inbound_window_frames = 0;
+            }
+            self.inbound_window_bytes += packet.len();
+            self.inbound_window_frames += 1;
+            if self.inbound_window_bytes > MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN
+                || self.inbound_window_frames > MAX_INBOUND_FRAMES_PER_DRAIN
+            {
+                return Err(inbound_overflow(
+                    self.inbound_window_frames,
+                    self.inbound_window_bytes,
+                ));
+            }
             if in_tx
                 .send(ServerboundFrame { bytes: packet })
                 .await
@@ -337,6 +401,15 @@ impl Connection {
         let _ = self.flush_out().await;
         let _ = self.write.shutdown().await;
     }
+}
+
+/// The [`DisconnectReason::InboundOverflow`] reason for an inbound drain that
+/// exceeded the frame/byte budget, carrying the counts for the log line.
+fn inbound_overflow(frames: usize, bytes: usize) -> DisconnectReason {
+    DisconnectReason::InboundOverflow(format!(
+        "drained {frames} frames / {bytes} bytes in one inbound window (limit {} frames / {} bytes)",
+        MAX_INBOUND_FRAMES_PER_DRAIN, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN
+    ))
 }
 
 #[cfg(test)]
@@ -726,5 +799,173 @@ mod tests {
         let wire = Bytes::from(encode_frame(&[0x01]).unwrap().to_vec());
         let err = conn.forward_play(Some(&wire), &in_tx).await.unwrap_err();
         assert_eq!(err, DisconnectReason::ServerShutdown);
+    }
+
+    /// `MAX_INBOUND_FRAMES_PER_DRAIN + 1` tiny frames in one wire buffer: the
+    /// frame-count budget trips and disconnects the hostile client instead of
+    /// forwarding thousands of frames into the channel.
+    #[tokio::test]
+    async fn forward_play_exceeding_frame_budget_closes() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        // A channel the flood cannot fill (no receiver polling, so `send` must
+        // never block): the budget, not backpressure, must end the drain.
+        let (in_tx, _in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(4096);
+
+        let mut encoder = CompressionEncoder::new(256);
+        let mut wire = BytesMut::new();
+        for _ in 0..=MAX_INBOUND_FRAMES_PER_DRAIN {
+            wire.extend_from_slice(&wire_frame(&mut encoder, &[0x00]));
+        }
+        let err = conn.forward_play(Some(&wire), &in_tx).await.unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::InboundOverflow(_)),
+            "expected InboundOverflow, got {err:?}"
+        );
+    }
+
+    /// Three max-size compressed frames (each decompressing to 6 MiB, above the
+    /// 16 MiB byte budget in total): the byte half of the budget trips, so a
+    /// hostile client cannot make one drain decode multi-GiB into the channel.
+    #[tokio::test]
+    async fn forward_play_exceeding_byte_budget_closes() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (in_tx, _in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(4096);
+
+        let mut encoder = CompressionEncoder::new(256);
+        // 6 MiB each; 3 frames = 18 MiB > MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN.
+        let big = vec![0xABu8; 6 * 1024 * 1024];
+        let mut wire = BytesMut::new();
+        for _ in 0..3 {
+            wire.extend_from_slice(&wire_frame(&mut encoder, &big));
+        }
+        let err = conn.forward_play(Some(&wire), &in_tx).await.unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::InboundOverflow(_)),
+            "expected InboundOverflow, got {err:?}"
+        );
+    }
+
+    /// A legitimate multi-read burst stays under the budget: the window persists
+    /// across `forward_play` calls (no channel drain between them), but a client
+    /// that stays under the limit is never disconnected.
+    #[tokio::test]
+    async fn forward_play_under_budget_succeeds_across_calls() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(4096);
+
+        let mut encoder = CompressionEncoder::new(256);
+        let frame = wire_frame(&mut encoder, &[0x00]);
+        // Two calls, no drain between them: the window accumulates (2 × 100
+        // frames = 200 < 1024) and both succeed.
+        for _ in 0..2 {
+            let mut wire = BytesMut::new();
+            for _ in 0..100 {
+                wire.extend_from_slice(&frame);
+            }
+            conn.forward_play(Some(&wire), &in_tx).await.unwrap();
+        }
+        let mut got = 0;
+        while in_rx.try_recv().is_ok() {
+            got += 1;
+        }
+        assert_eq!(got, 200, "all frames forwarded");
+    }
+
+    /// The sliding-window reset: a client the tick thread keeps up with (the
+    /// channel is drained between reads) never trips the budget even when it
+    /// sends more frames than the limit over time — only a client that outpaces
+    /// the drain is disconnected.
+    #[tokio::test]
+    async fn forward_play_window_resets_when_channel_drained() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<ServerboundFrame>(4096);
+        // The tick analog: a receiver that drains the channel continuously.
+        let drained = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let drained_clone = std::sync::Arc::clone(&drained);
+        let drainer = tokio::spawn(async move {
+            let mut n = 0;
+            while in_rx.recv().await.is_some() {
+                n += 1;
+                drained_clone.store(n, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+
+        let mut encoder = CompressionEncoder::new(256);
+        let frame = wire_frame(&mut encoder, &[0x00]);
+        let mut wire = BytesMut::new();
+        for _ in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+            wire.extend_from_slice(&frame);
+        }
+        // 1024 frames in the first call: exactly the budget, succeeds.
+        conn.forward_play(Some(&wire), &in_tx).await.unwrap();
+        // Wait for the drainer to empty the channel, then send 1024 more: the
+        // window resets (channel observed empty) so the cumulative total far
+        // exceeds the frame limit without tripping.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while drained.load(std::sync::atomic::Ordering::Relaxed) < MAX_INBOUND_FRAMES_PER_DRAIN {
+            assert!(std::time::Instant::now() < deadline, "drainer stalled");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        conn.forward_play(Some(&wire), &in_tx).await.unwrap();
+        // The drainer keeps draining; it should see 2048 total.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while drained.load(std::sync::atomic::Ordering::Relaxed) < 2 * MAX_INBOUND_FRAMES_PER_DRAIN
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "drainer never saw all frames"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        drop(in_tx);
+        drainer.await.unwrap();
+    }
+
+    /// The pre-play dispatch has the same per-call frame-count budget: a hostile
+    /// coalesced read with more frames than the limit closes instead of running
+    /// the listener loop over an unbounded count.
+    #[tokio::test]
+    async fn process_inbound_exceeding_frame_budget_closes() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (mut listener, log) = recording();
+
+        let mut encoder = CompressionEncoder::new(256);
+        let mut wire = BytesMut::new();
+        for _ in 0..=MAX_INBOUND_FRAMES_PER_DRAIN {
+            wire.extend_from_slice(&wire_frame(&mut encoder, &[0x00]));
+        }
+        let err = conn.process_inbound(&wire, &mut listener).unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::InboundOverflow(_)),
+            "expected InboundOverflow, got {err:?}"
+        );
+        // The frames before the trip were dispatched; nothing after.
+        assert_eq!(log.lock().unwrap().len(), MAX_INBOUND_FRAMES_PER_DRAIN);
+    }
+
+    /// The pre-play dispatch byte budget: max-size frames in one read trip it
+    /// the same way the play-state window does.
+    #[tokio::test]
+    async fn process_inbound_exceeding_byte_budget_closes() {
+        let mut conn = new_connection().await;
+        conn.setup_compression(256, true);
+        let (mut listener, _log) = recording();
+
+        let mut encoder = CompressionEncoder::new(256);
+        let big = vec![0xABu8; 6 * 1024 * 1024];
+        let mut wire = BytesMut::new();
+        for _ in 0..3 {
+            wire.extend_from_slice(&wire_frame(&mut encoder, &big));
+        }
+        let err = conn.process_inbound(&wire, &mut listener).unwrap_err();
+        assert!(
+            matches!(err, DisconnectReason::InboundOverflow(_)),
+            "expected InboundOverflow, got {err:?}"
+        );
     }
 }

@@ -16,6 +16,41 @@ use tokio::sync::mpsc;
 use crate::server::network::connection_id::ConnectionId;
 use crate::server::network::packet_listener::DisconnectReason;
 
+/// Slice-local inbound drain budget, frame-count half: the maximum number of
+/// frames one inbound drain may deliver to the tick thread per tick before the
+/// connection is considered to be flooding.
+///
+/// This is the *authoritative* per-tick bound, enforced on the tick side by
+/// [`ConnectionRegistry::drain_one`](super::registry::ConnectionRegistry::drain_one):
+/// one tick never delivers more than this many frames from one connection. It is
+/// also the admission cap enforced on the tokio side by
+/// [`Connection::forward_play`](crate::server::network::connection::Connection::forward_play)
+/// between drains. Both sides use the same number so a hostile client cannot
+/// make one tick drain beyond it by racing the sender window against the drain
+/// (the window resets when the channel is observed empty, which a concurrently
+/// draining tick can allow mid-drain).
+///
+/// No Java analog: Paper's netty inbound pipeline has no per-tick frame ceiling,
+/// but it also never funnels frames into a fixed-depth bounded channel the way
+/// this slice does, so the bound is the Rust-side analog of the existing
+/// `MAXIMUM_UNCOMPRESSED_LENGTH` safety cap.
+pub const MAX_INBOUND_FRAMES_PER_DRAIN: usize = 1024;
+
+/// Slice-local inbound drain budget, decompressed-bytes half: the maximum
+/// cumulative decompressed bytes one inbound drain may deliver to the tick
+/// thread per tick before the connection is considered to be flooding.
+///
+/// Each compressed frame can decompress to up to
+/// `rivet_protocol::compression_decoder::MAXIMUM_UNCOMPRESSED_LENGTH` (8 MiB).
+/// Without this bound a single drain could deliver multi-GiB into a 1024-deep
+/// bounded channel (8 GiB of 8 MiB frames) — the compressed-frame memory
+/// amplification this budget closes. Like [`MAX_INBOUND_FRAMES_PER_DRAIN`], it
+/// is enforced authoritatively on the tick side by `drain_one` (which checks
+/// before receiving, so per-tick delivery never exceeds the budget) and as an
+/// admission cap by `Connection::forward_play` (which may overshoot by one
+/// frame before it trips — a memory-retention backstop, not the per-tick bound).
+pub const MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN: usize = 16 * 1024 * 1024;
+
 /// A decoded inbound play-state packet handed to the tick thread. The packet
 /// *body* is owned by epic #10 (protocol packet bodies); this slice carries the
 /// raw encoded frame so the ordering/backpressure boundary is real.
