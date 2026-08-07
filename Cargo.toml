@@ -10,6 +10,7 @@ license = "GPL-3.0-or-later"
 
 # Library choices are documented in CRATES.md — add dependencies there first.
 [workspace.dependencies]
+base64 = "0.22"
 bytes = "1"
 cesu8 = "1"
 flate2 = "1"
