@@ -167,7 +167,7 @@ mod tests {
         // 3 heightmaps (types 1/4/5), each 37 longs: 36 copies of the 9-bit
         // packed value 1 across the first 8 slots, then the 37th slot falling
         // in the last byte. A flat superflat chunk: the single stone layer at
-        // y=0 gives every column height 1.
+        // y=-64 (min_y) gives every column height -63, stored offset 1.
         let mut expected_heightmap = vec![0x40201008040201i64; 36];
         expected_heightmap.push(0x0000000008040201i64);
         // The three client heightmap types in EnumMap (ascending id) order,

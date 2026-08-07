@@ -9,7 +9,13 @@ description = "net.minecraft.world.level — chunks, sections, paletted containe
 workspace = true
 
 [dependencies]
-rivet-protocol = { workspace = true }
+# `FriendlyByteBuf` (and the section/data-layer buffers it fills) is BytesMut-
+# backed; the #100 superflat content builder writes sections through it.
+bytes = { workspace = true }
+# The `packets` feature unlocks the game packet bodies this crate produces
+# content for (#94): `LevelChunkPacketData`, `LightUpdatePacketData`,
+# `HeightmapType` (all feature-gated in rivet-protocol).
+rivet-protocol = { workspace = true, features = ["packets"] }
 rivet-registry = { workspace = true }
 rivet-util = { workspace = true }
 
