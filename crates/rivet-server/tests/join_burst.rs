@@ -16,7 +16,10 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use bytes::BytesMut;
+use rivet_protocol::codec::StreamDecoder;
 use rivet_protocol::generated::packets::play::clientbound::PacketType;
+use rivet_protocol::protocol::game::clientbound_login::ClientboundLoginPacket;
+use rivet_protocol::registry_friendly_byte_buf::RegistryFriendlyByteBuf;
 use rivet_protocol::var_int;
 use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
 use rivet_registry::Identifier;
@@ -75,7 +78,8 @@ fn vanilla_level_keys() -> Vec<ResourceKey<rivet_registry::registries::Level>> {
 }
 
 /// The `JoinConfig` the M1 server passes (`max_players 20`, offline, not
-/// hardcore, flat superflat world with the death screen on).
+/// hardcore, flat superflat world with the death screen on; the
+/// `reduced_debug_info`/`do_limited_crafting` game rules are off).
 fn join_config() -> JoinConfig {
     JoinConfig {
         max_players: 20,
@@ -84,6 +88,8 @@ fn join_config() -> JoinConfig {
         online_mode: false,
         enforces_secure_chat: false,
         show_death_screen: true,
+        reduced_debug_info: false,
+        do_limited_crafting: false,
         is_flat: true,
     }
 }
@@ -329,7 +335,7 @@ fn slice_a_order() -> Vec<u32> {
 /// the ordered `(packet_id, raw_packet_body)` pairs from the outbound channel.
 /// Each frame is decompressed/deframed by stripping the VarInt21 length prefix
 /// and the compression prefix (below-threshold frames are uncompressed).
-fn run_burst() -> Vec<(u32, Vec<u8>)> {
+fn run_burst_with(world: &ServerLevel, config: &JoinConfig) -> Vec<(u32, Vec<u8>)> {
     let mut sender = play_sender();
     let (mut connections, mut out_rx) = registry_with_connection();
     let sent_ids = place_new_player(
@@ -337,8 +343,8 @@ fn run_burst() -> Vec<(u32, Vec<u8>)> {
         &mut connections,
         PROBE_ID,
         &probe_player(),
-        &world(),
-        &join_config(),
+        world,
+        config,
     )
     .expect("burst encodes + queues");
 
@@ -358,6 +364,11 @@ fn run_burst() -> Vec<(u32, Vec<u8>)> {
         packets.iter().map(|(id, _)| *id).collect::<Vec<_>>()
     );
     packets
+}
+
+/// Run the burst against the default M1 world/config.
+fn run_burst() -> Vec<(u32, Vec<u8>)> {
+    run_burst_with(&world(), &join_config())
 }
 
 #[test]
@@ -394,6 +405,69 @@ fn place_new_player_sends_paper_order_and_byte_exact_bodies() {
             other => panic!("unexpected burst member {other}"),
         }
     }
+}
+
+/// Decode a captured login body back into its `ClientboundLoginPacket` (the
+/// registry-aware codec needs the same `DIMENSION_TYPE` access the sender used).
+fn decode_login_body(body: &[u8]) -> ClientboundLoginPacket {
+    let access = dimension_type_access();
+    let mut input = RegistryFriendlyByteBuf::new(BytesMut::from(body), access);
+    ClientboundLoginPacket::stream_codec()
+        .decode(&mut input)
+        .expect("login body decodes")
+}
+
+#[test]
+fn login_uses_simulation_distance_not_view_distance() {
+    // Paper: `FeatureHooks.getViewDistance(level)` for chunkRadius and
+    // `FeatureHooks.getSimulationDistance(level)` for simulationDistance — they
+    // can differ. A world with view 4 / simulation 3 must encode both fields
+    // distinctly (a regression against duplicating view_distance for both).
+    let config = ServerLevelConfig {
+        simulation_distance: 3,
+        ..ServerLevelConfig::default()
+    };
+    let world = ServerLevel::new(config);
+    assert_eq!(world.view().view_distance(), 4);
+    assert_eq!(world.get_simulation_distance(), 3);
+
+    let packets = run_burst_with(&world, &join_config());
+    let login_body = packets
+        .iter()
+        .find(|(id, _)| *id == ids::LOGIN)
+        .map(|(_, body)| body.clone())
+        .expect("login in burst");
+    let login = decode_login_body(&login_body);
+    assert_eq!(login.chunk_radius(), 4);
+    assert_eq!(login.simulation_distance(), 3);
+}
+
+#[test]
+fn login_encodes_non_default_config_booleans_distinctly() {
+    // The login booleans come from JoinConfig, not hardcoded `false`: flipping
+    // `reduced_debug_info` and `do_limited_crafting` must change the encoded
+    // body (the M1 default leaves them off).
+    let mut config = join_config();
+    config.reduced_debug_info = true;
+    config.do_limited_crafting = true;
+
+    let packets = run_burst_with(&world(), &config);
+    let login_body = packets
+        .iter()
+        .find(|(id, _)| *id == ids::LOGIN)
+        .map(|(_, body)| body.clone())
+        .expect("login in burst");
+    let login = decode_login_body(&login_body);
+    assert!(login.reduced_debug_info());
+    assert!(login.do_limited_crafting());
+
+    // The default M1 body (both false) must differ from the flipped body.
+    let default_body = run_burst()
+        .iter()
+        .find(|(id, _)| *id == ids::LOGIN)
+        .map(|(_, body)| body.clone())
+        .expect("login in default burst");
+    assert_ne!(default_body, login_body);
 }
 
 #[test]

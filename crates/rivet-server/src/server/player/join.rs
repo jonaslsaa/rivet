@@ -23,7 +23,8 @@
 //! of the members that are sent:
 //!
 //! - `update_recipes` (133) — RivetTodo(#87), body not ported.
-//! - `entity_event` (34) — RivetTodo(#222), self add-entity pairing.
+//! - `entity_event` (34) — `sendPlayerPermissionLevel`'s op-level event (body
+//!   ported per #90); the server-side send is Slice B.
 //! - `recipe_book_settings` (76) / `recipe_book_add` (74) — inventory/recipe
 //!   book (epic #22).
 //! - `server_data` (86) — `ServerStatus`, follows the teleport in
@@ -105,8 +106,11 @@ const WORLD_BORDER_ABSOLUTE_MAX_SIZE: i32 = 29_999_984;
 const WORLD_BORDER_WARNING_BLOCKS: i32 = 5;
 const WORLD_BORDER_WARNING_TIME: i32 = 300;
 
-/// The server-side values `PlayerList.placeNewPlayer` reads off the server (not
-/// the world or the player) to build the login packet. Immutable per join.
+/// The values `PlayerList.placeNewPlayer` reads off the server and the level to
+/// build the login packet — a mix of server-derived (`max_players`, `level_keys`,
+/// `online_mode`, `enforces_secure_chat`) and level/world-derived (`hardcore`,
+/// `show_death_screen`, `reduced_debug_info`, `do_limited_crafting`, `is_flat`)
+/// values. Immutable per join.
 #[derive(Debug, Clone)]
 pub struct JoinConfig {
     /// `PlayerList.getMaxPlayers()` (the capture's 20).
@@ -121,6 +125,10 @@ pub struct JoinConfig {
     pub enforces_secure_chat: bool,
     /// `showDeathScreen = !GameRules.IMMEDIATE_RESPAWN`.
     pub show_death_screen: bool,
+    /// `GameRules.REDUCED_DEBUG_INFO`.
+    pub reduced_debug_info: bool,
+    /// `GameRules.LIMITED_CRAFTING`.
+    pub do_limited_crafting: bool,
     /// `ServerLevel.isFlat()` — true for the superflat M1 world.
     pub is_flat: bool,
 }
@@ -133,8 +141,10 @@ pub struct JoinConfig {
 /// the ordering tests.
 ///
 /// `update_recipes` is intentionally omitted: its body is not ported
-/// (RivetTodo(#87)); the burst keeps Paper's order otherwise. Entity pairing
-/// (the `entity_event`/`set_entity_data` burst members) is RivetTodo(#222).
+/// (RivetTodo(#87)); the burst keeps Paper's order otherwise. The
+/// `set_entity_data` pairing member (the addEntity tracker) is RivetTodo(#222);
+/// the `entity_event` member is `sendPlayerPermissionLevel`'s op-level event
+/// (body ported per #90; the server-side send is Slice B).
 pub fn place_new_player(
     sender: &mut PlaySender,
     connections: &mut ConnectionRegistry,
@@ -167,10 +177,10 @@ pub fn place_new_player(
         join.level_keys.clone(),
         join.max_players,
         level.view().view_distance(),
-        level.view().view_distance(),
-        false, // reduced_debug_info
+        level.get_simulation_distance(),
+        join.reduced_debug_info,
         join.show_death_screen,
-        false, // do_limited_crafting
+        join.do_limited_crafting,
         spawn_info,
         join.online_mode,
         join.enforces_secure_chat,
@@ -216,6 +226,10 @@ pub fn place_new_player(
     // body is not ported; the burst omits it, keeping Paper's order otherwise.
 
     // `playerConnection.teleport(player.getX(), ...)` — the position teleport.
+    // The teleport `id 0` is the capture's canonical normalized value
+    // (normalize.rs rewrites the server's randomized per-login counter to 0);
+    // it is NOT a Paper constant. Live per-teleport counter wiring (the
+    // `awaitingTeleport` ack matching) is #158 / M3.
     let change = PositionMoveRotation::new(
         player.position(),
         Vec3::new(0.0, 0.0, 0.0),
