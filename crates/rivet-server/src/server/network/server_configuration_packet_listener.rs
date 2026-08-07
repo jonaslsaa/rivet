@@ -119,7 +119,7 @@ impl ConfigurationTask for SynchronizeRegistriesTask {
         let body = encode_body(
             ClientboundSelectKnownPacks::stream_codec(),
             &ClientboundSelectKnownPacks::new(self.requested_packs.clone()),
-        );
+        )?;
         conn.send_packet(
             ConnectionProtocol::Configuration,
             CLIENTBOUND_SELECT_KNOWN_PACKS_ID,
@@ -188,7 +188,7 @@ impl ServerConfigurationPacketListener {
             &ClientboundCustomPayloadPacket::new(CustomPacketPayload::Brand(BrandPayload::new(
                 SERVER_BRAND.to_string(),
             ))),
-        );
+        )?;
         conn.send_packet(
             ConnectionProtocol::Configuration,
             CLIENTBOUND_CUSTOM_PAYLOAD_ID,
@@ -205,7 +205,7 @@ impl ServerConfigurationPacketListener {
         let body = encode_body(
             ClientboundUpdateEnabledFeaturesPacket::stream_codec(),
             &enabled,
-        );
+        )?;
         conn.send_packet(
             ConnectionProtocol::Configuration,
             CLIENTBOUND_UPDATE_ENABLED_FEATURES_ID,
@@ -441,7 +441,8 @@ impl ServerConfigurationPacketListener {
         let registry_packets = registry_sync::pack_registries(packet.known_packs())
             .map_err(DisconnectReason::Unsupported)?;
         for packet in registry_packets {
-            let body = encode_body(ClientboundRegistryDataPacket::stream_codec(), &packet);
+            let body = encode_body(ClientboundRegistryDataPacket::stream_codec(), &packet)
+                .map_err(DisconnectReason::Unsupported)?;
             conn.send_packet(
                 ConnectionProtocol::Configuration,
                 CLIENTBOUND_REGISTRY_DATA_ID,
@@ -453,7 +454,8 @@ impl ServerConfigurationPacketListener {
         // TagNetworkSerialization.serializeTagsToNetwork(this.registries)))`.
         let update_tags =
             ClientboundUpdateTagsPacket::new(registry_sync::serialize_tags_to_network());
-        let body = encode_body(ClientboundUpdateTagsPacket::stream_codec(), &update_tags);
+        let body = encode_body(ClientboundUpdateTagsPacket::stream_codec(), &update_tags)
+            .map_err(DisconnectReason::Unsupported)?;
         conn.send_packet(
             ConnectionProtocol::Configuration,
             CLIENTBOUND_UPDATE_TAGS_ID,

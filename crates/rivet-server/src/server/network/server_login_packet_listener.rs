@@ -14,7 +14,7 @@ use rivet_util::mth::Uuid;
 
 use super::connection::Connection;
 use super::packet_listener::{
-    DisconnectReason, ListenerOutcome, PacketListener, decode_packet, packet_id,
+    DisconnectReason, ListenerOutcome, PacketListener, decode_packet, packet_id, panic_message,
 };
 use super::server_configuration_packet_listener::ServerConfigurationPacketListener;
 use crate::server::ServerConfig;
@@ -154,7 +154,8 @@ impl ServerLoginPacketListener {
             let compression_body = encode_body(
                 ClientboundLoginCompressionPacket::stream_codec(),
                 &ClientboundLoginCompressionPacket::new(config.compression_threshold),
-            );
+            )
+            .map_err(DisconnectReason::Unsupported)?;
             conn.send_packet(
                 ConnectionProtocol::Login,
                 CLIENTBOUND_LOGIN_COMPRESSION_ID,
@@ -177,7 +178,8 @@ impl ServerLoginPacketListener {
         let finished_body = encode_body(
             ClientboundLoginFinishedPacket::stream_codec(),
             &ClientboundLoginFinishedPacket::new(profile, ZERO_SESSION_ID),
-        );
+        )
+        .map_err(DisconnectReason::Unsupported)?;
         conn.send_packet(
             ConnectionProtocol::Login,
             CLIENTBOUND_LOGIN_FINISHED_ID,
@@ -224,14 +226,34 @@ impl ServerLoginPacketListener {
 
 /// Encode a packet body with a protocol `StreamCodec` (the `StreamEncoder`
 /// half). The packet-id is NOT included — the caller passes it to
-/// [`Connection::send_packet`]. A codec encode failure is a programmer error (a
-/// statically-constructed packet, never hostile input), matching Java's unchecked
-/// encoder exceptions.
-pub(crate) fn encode_body<T, C>(codec: C, value: &T) -> Vec<u8>
+/// [`Connection::send_packet`]. The encode error is surfaced as `Err` so a
+/// listener maps it to a `DisconnectReason` close — the outbound twin of the
+/// decode-boundary containment in [`decode_packet`]. Java's encoder
+/// `EncoderException` is netty-caught and closes the connection (cleanup runs);
+/// a Rust `Result` here keeps the per-connection task's tail (cap decrement,
+/// `on_disconnect`, `connection_closed`) running on every path. All current
+/// encode inputs are server-built or client-bounded, so this is a defensive
+/// boundary, not a reachable hostile path.
+///
+/// An encode panic (the unchecked scalar writes, `write_long`, `write_var_int`,
+/// … on a fixed-layout body — the netty `EncoderException` a buggy writer
+/// throws) is caught here the same way [`decode_packet`] catches a decode
+/// panic, so the boundary never unwinds past the listener into the task tail.
+pub(crate) fn encode_body<T, C>(codec: C, value: &T) -> Result<Vec<u8>, String>
 where
     C: StreamEncoder<FriendlyByteBuf, T>,
 {
     let mut out = FriendlyByteBuf::new(BytesMut::new());
-    codec.encode(&mut out, value).expect("encode packet body");
-    out.into_inner().to_vec()
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        codec.encode(&mut out, value)
+    }))
+    .map_err(|payload| {
+        format!(
+            "encoding {} panicked: {}",
+            std::any::type_name::<T>(),
+            panic_message(payload)
+        )
+    })?
+    .map_err(|e| format!("encoding {}: {}", std::any::type_name::<T>(), e.message))?;
+    Ok(out.into_inner().to_vec())
 }
