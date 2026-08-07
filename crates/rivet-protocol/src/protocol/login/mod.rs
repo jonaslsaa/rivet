@@ -13,13 +13,10 @@
 //! `ServerLoginPacketListenerImpl` with `online-mode=false`.
 //!
 //! Deferred, not stubbed (they are not on the M1 offline join path):
-//! RivetTodo(#96): `handle()` on every body — the login/configuration listener
-//! state machine (`ServerLoginPacketListenerImpl` offline path) is server-side
-//! and unwired here; removing the marker when the login state machine lands.
 //! RivetTodo(#88): the RSA online-auth pair (`ClientboundHelloPacket`/
 //! `ServerboundKeyPacket`, the `KEY` state) — M1 runs offline
-//! (`usesAuthentication()` false), so `handleHello` goes straight to
-//! `createOfflineProfile`; the cipher/RSA work is #88.
+//! (`usesAuthentication()` false), so the login listener's `handleHello` goes
+//! straight to `createOfflineProfile`; the cipher/RSA work is #88.
 //! RivetTodo(#99): the `login_disconnect`/`custom_query`/`custom_query_answer`
 //! bodies are not on the M1 offline join path; they land with their own units.
 

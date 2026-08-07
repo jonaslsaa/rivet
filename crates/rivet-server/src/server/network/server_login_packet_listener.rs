@@ -1,26 +1,76 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
+use rivet_protocol::codec::StreamEncoder;
+use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_protocol::generated::protocol::ConnectionProtocol;
+use rivet_protocol::protocol::login::clientbound_login_compression_packet::ClientboundLoginCompressionPacket;
+use rivet_protocol::protocol::login::clientbound_login_finished_packet::ClientboundLoginFinishedPacket;
+use rivet_protocol::protocol::login::serverbound_hello_packet::ServerboundHelloPacket;
+use rivet_protocol::protocol::login::serverbound_login_acknowledged_packet::{
+    ServerboundLoginAcknowledgedPacket, stream_codec,
+};
+use rivet_registry::core::{GameProfile, create_offline_player_uuid};
+use rivet_util::mth::Uuid;
 
 use super::connection::Connection;
-use super::packet_listener::{DisconnectReason, ListenerOutcome, PacketListener};
+use super::packet_listener::{
+    DisconnectReason, ListenerOutcome, PacketListener, decode_packet, packet_id,
+};
+use super::server_configuration_packet_listener::ServerConfigurationPacketListener;
 use crate::server::ServerConfig;
 
-/// STUB(mc.network.protocol.login) — clean stub for
-/// `net.minecraft.server.network.ServerLoginPacketListenerImpl`.
+/// `LoginProtocols.SERVERBOUND` packet ids (`ServerLoginPacketListenerImpl`
+/// dispatch). The generated table pins `hello` 0, `key` 1, `custom_query_answer`
+/// 2, `login_acknowledged` 3, `cookie_response` 4.
+const HELLO_PACKET_ID: i32 = 0;
+const KEY_PACKET_ID: i32 = 1;
+const CUSTOM_QUERY_ANSWER_PACKET_ID: i32 = 2;
+const LOGIN_ACKNOWLEDGED_PACKET_ID: i32 = 3;
+const COOKIE_RESPONSE_PACKET_ID: i32 = 4;
+
+/// `LoginProtocols.CLIENTBOUND` ids for the offline join path: `login_finished`
+/// 2, `login_compression` 3.
+const CLIENTBOUND_LOGIN_FINISHED_ID: u32 = 2;
+const CLIENTBOUND_LOGIN_COMPRESSION_ID: u32 = 3;
+
+/// `net.minecraft.server.network.ServerLoginPacketListenerImpl` — the offline
+/// `HELLO → VERIFYING → PROTOCOL_SWITCHING` login state machine.
 ///
-/// The login state machine (hello/name, challenge/encryption, compression,
-/// login success) is sub-issue #96; its packet bodies are epic #10 protocol-owned.
-/// Until that lands, any frame received in the LOGIN state is closed
-/// deterministically: a client cannot proceed past the handshake, and a
-/// protocol/next-state discriminant test can assert the connection is closed
-/// rather than left half-open. No packet bodies are invented here.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ServerLoginPacketListener;
+/// Java: `ServerLoginPacketListenerImpl.java` in `working/Paper`. With
+/// `online-mode=false` (`usesAuthentication()` false), `handleHello` builds the
+/// offline profile (`UUIDUtil.createOfflinePlayerUUID` of the name) and goes
+/// straight to `verifyLoginAndFinishConnectionSetup` → `finishLoginAndWaitForClient`:
+/// send `ClientboundLoginCompressionPacket` *before* `setupCompression` (so that
+/// packet goes out uncompressed), then `ClientboundLoginFinishedPacket`. The
+/// client replies `ServerboundLoginAcknowledgedPacket`, which swaps the outbound
+/// protocol to configuration and hands off to [`ServerConfigurationPacketListener`].
+///
+/// The per-server lazy session UUID (`ServerConnectionListener.getSessionId()`,
+/// `UUID.randomUUID()` on first use) is canonicalized to the zero UUID here —
+/// there is no `rand`/`uuid` crate in the workspace, and the pinned capture
+/// fixture already normalizes `sessionId -> 0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LoginState {
+    /// `State.HELLO` — awaiting `ServerboundHelloPacket`.
+    #[default]
+    Hello,
+    /// `State.VERIFYING` — offline profile built; the next step sends the
+    /// compression + finished packets. Paper transitions on its next `tick()`;
+    /// this slice has no tick driver, so the transition is synchronous.
+    Verifying,
+    /// `State.PROTOCOL_SWITCHING` — awaiting `ServerboundLoginAcknowledgedPacket`.
+    ProtocolSwitching,
+}
+
+/// `net.minecraft.server.network.ServerLoginPacketListenerImpl` (offline slice).
+#[derive(Debug, Default)]
+pub struct ServerLoginPacketListener {
+    state: LoginState,
+}
 
 impl ServerLoginPacketListener {
     pub fn new() -> Self {
-        ServerLoginPacketListener
+        Self::default()
     }
 }
 
@@ -31,16 +81,157 @@ impl PacketListener for ServerLoginPacketListener {
 
     fn handle_frame(
         &mut self,
-        _frame: Bytes,
-        _conn: &mut Connection,
-        _config: &ServerConfig,
+        frame: Bytes,
+        conn: &mut Connection,
+        config: &ServerConfig,
     ) -> Result<ListenerOutcome, DisconnectReason> {
-        // No login packet bodies are ported yet (epic #10 / #96). Any login-state
-        // frame is unsupported and the connection is closed.
-        Err(DisconnectReason::Unsupported(
-            "login state not implemented yet (issue #96)".into(),
-        ))
+        match packet_id(&frame)? {
+            HELLO_PACKET_ID => self.handle_hello(frame, conn, config),
+            LOGIN_ACKNOWLEDGED_PACKET_ID => self.handle_login_acknowledgement(frame, conn),
+            KEY_PACKET_ID => Err(DisconnectReason::Unsupported(
+                // `handleKey` is the RSA online-auth path (`ClientboundHello`/
+                // `ServerboundKey`). M1 runs offline (`usesAuthentication()`
+                // false), so a client sending `key` is unsupported.
+                // RivetTodo(#88): the RSA cipher pair (`ClientboundHelloPacket`/
+                // `ServerboundKeyPacket`, the `KEY` state) — M1 runs offline.
+                "multiplayer.disconnect.unexpected_query_response".into(),
+            )),
+            CUSTOM_QUERY_ANSWER_PACKET_ID => Err(DisconnectReason::Unsupported(
+                // `handleCustomQueryPacket0` disconnects with
+                // `DISCONNECT_UNEXPECTED_QUERY` when no query was sent (the
+                // Velocity path is out of scope; no login query is ever issued).
+                "multiplayer.disconnect.unexpected_query_response".into(),
+            )),
+            COOKIE_RESPONSE_PACKET_ID => Err(DisconnectReason::Unsupported(
+                // `handleCookieResponse` disconnects with
+                // `DISCONNECT_UNEXPECTED_QUERY` when no cookie was requested.
+                "multiplayer.disconnect.unexpected_query_response".into(),
+            )),
+            other => Err(DisconnectReason::Malformed(format!(
+                "unknown login packet id {other}"
+            ))),
+        }
     }
 
     fn on_disconnect(&mut self) {}
+}
+
+impl ServerLoginPacketListener {
+    fn handle_hello(
+        &mut self,
+        frame: Bytes,
+        conn: &mut Connection,
+        config: &ServerConfig,
+    ) -> Result<ListenerOutcome, DisconnectReason> {
+        // `Validate.validState(this.state == HELLO, "Unexpected hello packet")`.
+        if self.state != LoginState::Hello {
+            return Err(DisconnectReason::Malformed(
+                "Unexpected hello packet".into(),
+            ));
+        }
+        let hello: ServerboundHelloPacket =
+            decode_packet(frame, ServerboundHelloPacket::stream_codec())?;
+
+        // `handleHello`: `requestedUsername = packet.name()`; with
+        // `usesAuthentication()` false this slice never issues the RSA challenge,
+        // so the offline profile is built directly (`createOfflineProfile` — no
+        // spoofed UUID/profile in this slice).
+        let name = hello.name().to_string();
+        let profile = GameProfile::new_without_properties(create_offline_player_uuid(&name), name);
+
+        // Paper's `startClientVerification` sets state VERIFYING, then `tick()`
+        // calls `verifyLoginAndFinishConnectionSetup`. No tick driver exists yet,
+        // so the two transitions run inline: VERIFYING then, on success,
+        // PROTOCOL_SWITCHING (compression + finished sent).
+        self.state = LoginState::Verifying;
+
+        // `verifyLoginAndFinishConnectionSetup`: if the compression threshold is
+        // >= 0, `send(ClientboundLoginCompressionPacket(threshold), thenRun(()
+        // -> setupCompression(threshold, true)))`. The packet is queued BEFORE
+        // `setupCompression` runs, so it goes out uncompressed and the client
+        // learns the threshold before the encoder starts compressing.
+        if config.compression_threshold >= 0 {
+            let compression_body = encode_body(
+                ClientboundLoginCompressionPacket::stream_codec(),
+                &ClientboundLoginCompressionPacket::new(config.compression_threshold),
+            );
+            conn.send_packet(
+                ConnectionProtocol::Login,
+                CLIENTBOUND_LOGIN_COMPRESSION_ID,
+                &compression_body,
+            )
+            .map_err(|e| DisconnectReason::Unsupported(format!("send failed: {e}")))?;
+            conn.setup_compression(config.compression_threshold, true);
+        }
+
+        // `finishLoginAndWaitForClient`: send `ClientboundLoginFinishedPacket`
+        // with the per-server lazy session id. `getSessionId()` is
+        // `UUID.randomUUID()` cached on first use; the random value is not
+        // reproducible offline, so this slice emits the zero UUID — the capture
+        // fixture's canonicalization (`sessionId -> 0`), asserted by the
+        // integration tests.
+        // RivetTodo(#96): the per-server lazy `ServerConnectionListener
+        // .getSessionId()` random UUID (needs a `rand`/`uuid` source); the zero
+        // UUID is the fixture-canonical placeholder until then.
+        const ZERO_SESSION_ID: Uuid = Uuid { most: 0, least: 0 };
+        let finished_body = encode_body(
+            ClientboundLoginFinishedPacket::stream_codec(),
+            &ClientboundLoginFinishedPacket::new(profile, ZERO_SESSION_ID),
+        );
+        conn.send_packet(
+            ConnectionProtocol::Login,
+            CLIENTBOUND_LOGIN_FINISHED_ID,
+            &finished_body,
+        )
+        .map_err(|e| DisconnectReason::Unsupported(format!("send failed: {e}")))?;
+
+        self.state = LoginState::ProtocolSwitching;
+        Ok(ListenerOutcome::Keep)
+    }
+
+    fn handle_login_acknowledgement(
+        &mut self,
+        frame: Bytes,
+        conn: &mut Connection,
+    ) -> Result<ListenerOutcome, DisconnectReason> {
+        // `Validate.validState(this.state == PROTOCOL_SWITCHING, "Unexpected
+        // login acknowledgement packet")`.
+        if self.state != LoginState::ProtocolSwitching {
+            return Err(DisconnectReason::Malformed(
+                "Unexpected login acknowledgement packet".into(),
+            ));
+        }
+        // `ServerboundLoginAcknowledgedPacket.STREAM_CODEC` is `unit(INSTANCE)` —
+        // a 0-byte body; `decode_packet` closes on any trailing bytes (the
+        // `PacketDecoder` "was larger than I expected" close).
+        let _: ServerboundLoginAcknowledgedPacket = decode_packet(frame, stream_codec())?;
+
+        // `handleLoginAcknowledgement`: `setupOutboundProtocol(
+        // ConfigurationProtocols.CLIENTBOUND)`, build the configuration listener,
+        // `setupInboundProtocol(SERVERBOUND, configListener)`, then
+        // `configListener.startConfiguration()`. The outbound protocol flips
+        // before `startConfiguration` sends the brand, so that brand goes out as
+        // a configuration packet. (Java's final `state = ACCEPTED` is moot here:
+        // the listener is replaced by the configuration one.)
+        conn.set_outbound_protocol(ConnectionProtocol::Configuration);
+        let mut config_listener = ServerConfigurationPacketListener::new();
+        config_listener
+            .start_configuration(conn)
+            .map_err(DisconnectReason::Unsupported)?;
+        Ok(ListenerOutcome::Switch(Box::new(config_listener)))
+    }
+}
+
+/// Encode a packet body with a protocol `StreamCodec` (the `StreamEncoder`
+/// half). The packet-id is NOT included — the caller passes it to
+/// [`Connection::send_packet`]. A codec encode failure is a programmer error (a
+/// statically-constructed packet, never hostile input), matching Java's unchecked
+/// encoder exceptions.
+pub(crate) fn encode_body<T, C>(codec: C, value: &T) -> Vec<u8>
+where
+    C: StreamEncoder<FriendlyByteBuf, T>,
+{
+    let mut out = FriendlyByteBuf::new(BytesMut::new());
+    codec.encode(&mut out, value).expect("encode packet body");
+    out.into_inner().to_vec()
 }

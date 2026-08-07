@@ -7,12 +7,19 @@ license.workspace = true
 [dependencies]
 bytes = { workspace = true }
 rivet-protocol = { workspace = true, features = ["packets"] }
+rivet-registry = { workspace = true }
+rivet-util = { workspace = true }
 thiserror = { workspace = true }
 # `signal` is only used by the binary (SIGTERM clean shutdown); the library's
 # own tests do not need it.
 tokio = { workspace = true, features = ["signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# Building compressed wire frames in the offline-login integration tests
+# (zlib-encoding the client's `login_acknowledged`).
+flate2 = { workspace = true }
 
 [lints]
 workspace = true

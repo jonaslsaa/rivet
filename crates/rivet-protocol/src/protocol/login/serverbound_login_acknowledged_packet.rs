@@ -8,8 +8,8 @@
 //! inbound protocol switches to `ConfigurationProtocols.SERVERBOUND`).
 //!
 //! The server-side swap (`handleLoginAcknowledgement` — `setupOutboundProtocol`/
-//! `setupInboundProtocol` into `ConfigurationProtocols`) is deferred with the
-//! login state machine (#96).
+//! `setupInboundProtocol` into `ConfigurationProtocols`) is consumed by the
+//! `rivet-server` login listener (`ServerLoginPacketListener`).
 
 use crate::codec::StreamCodec;
 use crate::friendly_byte_buf::FriendlyByteBuf;

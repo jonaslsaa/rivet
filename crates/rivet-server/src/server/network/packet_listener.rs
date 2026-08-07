@@ -1,5 +1,7 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
+use rivet_protocol::codec::StreamDecoder;
+use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_protocol::generated::protocol::ConnectionProtocol;
 
 use crate::server::ServerConfig;
@@ -38,6 +40,14 @@ pub trait PacketListener: Send {
         config: &ServerConfig,
     ) -> Result<ListenerOutcome, DisconnectReason>;
 
+    /// `TickablePacketListener.tick()` — the per-tick driver hook, reserved for
+    /// #157 (Paper's configuration keepalive + task ticking). Not yet driven by
+    /// the connection loop, so the default is a no-op; the configuration
+    /// listener's keepalive/task tick mechanics land with #157.
+    // RivetTodo(#157): drive listener ticks from `conn_loop` (Paper ticks every
+    // listener each server tick; the per-connection task has no tick source yet).
+    fn tick(&mut self) {}
+
     /// `onDisconnect(DisconnectionDetails)` — called when the connection drops.
     /// No-ops for all listeners in this slice.
     fn on_disconnect(&mut self) {}
@@ -74,4 +84,56 @@ pub enum DisconnectReason {
     /// so a client that cannot keep up is not misreported as a server stop.
     #[error("outbound overflow")]
     Overflow,
+}
+
+/// Read the packet-id varint off the front of a frame (dispatch helper). Bounds
+/// the id via the never-panicking [`read_packet_id`]; the body is parsed
+/// afterwards by [`decode_packet`].
+pub(crate) fn packet_id(frame: &Bytes) -> Result<i32, DisconnectReason> {
+    let mut buf = BytesMut::from(&frame[..]);
+    super::server_handshake_packet_listener::read_packet_id(&mut buf)
+}
+
+/// Decode one packet body from a frame with a protocol `StreamCodec`.
+///
+/// The frame is the whole inbound packet (packet-id varint + body). The
+/// packet-id varint is consumed via the never-panicking [`read_packet_id`]
+/// (which also bounds the id), then the body is decoded by the codec's
+/// `decode` half. That returns `Err(CodecError)` for every structurally
+/// detectable failure — hostile strings, over-length buffers, out-of-range enum
+/// ordinals, `IdentifierException` — exactly the netty `DecoderException`/
+/// `IOException`s `PacketDecoder` lets surface and close the connection.
+///
+/// After the body, any bytes left in the frame are the `PacketDecoder.decode`
+/// "was larger than I expected, found X bytes extra" IOException — a close, not
+/// a leak into the next packet.
+///
+/// Truncated scalar reads deliberately panic here (Java's unchecked
+/// `IndexOutOfBoundsException` on an empty buffer): the `StreamCodec` scalars
+/// (`read_uuid`, `read_var_int`, `read_long`, …) are not wrapped by the codec
+/// boundary. `PacketDecoder` turns that netty `IndexOutOfBoundsException` into
+/// a `CorruptedFrameException` that also closes the connection, so the panic
+/// aborts the per-connection task — the Rust-side close for the same hostile
+/// input.
+pub(crate) fn decode_packet<T, C>(frame: Bytes, codec: C) -> Result<T, DisconnectReason>
+where
+    C: StreamDecoder<FriendlyByteBuf, T>,
+{
+    let mut buf = BytesMut::from(&frame[..]);
+    super::server_handshake_packet_listener::read_packet_id(&mut buf)?;
+    let mut input = FriendlyByteBuf::new(buf);
+    let value = codec.decode(&mut input).map_err(|e| {
+        DisconnectReason::Malformed(format!(
+            "decoding {}: {}",
+            std::any::type_name::<T>(),
+            e.message
+        ))
+    })?;
+    if input.readable_bytes() != 0 {
+        return Err(DisconnectReason::Malformed(format!(
+            "packet was larger than expected, {} bytes extra",
+            input.readable_bytes()
+        )));
+    }
+    Ok(value)
 }
