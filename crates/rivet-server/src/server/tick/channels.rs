@@ -27,8 +27,8 @@ use crate::server::network::packet_listener::DisconnectReason;
 /// [`Connection::forward_play`](crate::server::network::connection::Connection::forward_play)
 /// between drains. Both sides use the same number so a hostile client cannot
 /// make one tick drain beyond it by racing the sender window against the drain
-/// (the window resets when the channel is observed empty, which a concurrently
-/// draining tick can allow mid-drain).
+/// (the window resets on observed drain progress, which a concurrently draining
+/// tick can allow mid-drain).
 ///
 /// No Java analog: Paper's netty inbound pipeline has no per-tick frame ceiling,
 /// but it also never funnels frames into a fixed-depth bounded channel the way

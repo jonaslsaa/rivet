@@ -254,7 +254,14 @@ async fn handle_outbound(
                 None => conn.flush_out().await,
             };
             if flushed.is_err() {
-                return Some(DisconnectReason::EndOfStream);
+                // A failed flush: when the server is stopping the frames were
+                // boundedly attempted (or preserved for `close`'s bounded retry)
+                // and the terminal reason is the stop — never a misreported EOF.
+                return Some(if conn.shutdown_requested() {
+                    DisconnectReason::ServerShutdown
+                } else {
+                    DisconnectReason::EndOfStream
+                });
             }
             Some(reason)
         }
@@ -279,7 +286,13 @@ async fn drain_outbound(
         }
     }
     if conn.flush_out().await.is_err() {
-        return Some(DisconnectReason::EndOfStream);
+        // A flush aborted because shutdown fired mid-write (frames preserved)
+        // is a stop, not the peer going away.
+        return Some(if conn.shutdown_requested() {
+            DisconnectReason::ServerShutdown
+        } else {
+            DisconnectReason::EndOfStream
+        });
     }
     None
 }
@@ -311,9 +324,10 @@ async fn drain_to_close(
             Ok(None) | Err(_) => {
                 // `None`: the tick side dropped every `out_tx` — the stop is
                 // complete. Timeout: the tick side never finished; close anyway.
-                if conn.flush_out_bounded(drain_timeout).await.is_err() {
-                    return DisconnectReason::EndOfStream;
-                }
+                // Either way the final queued frames get one bounded attempt and
+                // the terminal reason is the stop (not EOF), since shutdown is
+                // already requested here.
+                let _ = conn.flush_out_bounded(drain_timeout).await;
                 return DisconnectReason::ServerShutdown;
             }
         }
@@ -404,7 +418,13 @@ async fn conn_loop(
                     Some(event) => event,
                     None => {
                         if conn.flush_out().await.is_err() {
-                            return DisconnectReason::EndOfStream;
+                            // A flush aborted by shutdown (frames preserved) is a
+                            // stop, not the peer going away.
+                            return if shutdown.is_requested() {
+                                DisconnectReason::ServerShutdown
+                            } else {
+                                DisconnectReason::EndOfStream
+                            };
                         }
                         if shutdown.is_requested() {
                             return DisconnectReason::ServerShutdown;
@@ -724,5 +744,142 @@ mod tests {
             .expect("conn_loop did not exit")
             .unwrap();
         assert_eq!(reason, DisconnectReason::Overflow);
+    }
+
+    /// The shutdown race regression: a normal-path flush reached after shutdown
+    /// is already requested must not race the already-fired signal against the
+    /// socket (an unbiased `select!` could pick shutdown over the immediately
+    /// writable socket, dropping the final frame and misreporting EOF). The
+    /// bounded shutdown flush delivers the final queued outbound and the loop
+    /// exits with `ServerShutdown`.
+    #[tokio::test]
+    async fn conn_loop_flushes_final_outbound_when_shutdown_already_requested() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        let config = test_config();
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+        );
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let mut listener_box: Box<dyn PacketListener> = Box::new(ServerHandshakePacketListener);
+
+        // Shutdown is requested BEFORE any flush — exactly the race the fix
+        // removes. The client socket is immediately writable (the frame is tiny).
+        shutdown.request();
+
+        // The tick thread's final pass: a last frame, then the in-band
+        // ServerShutdown Disconnect.
+        out_tx
+            .send(OutboundEvent::Packet {
+                frame: Bytes::from(encode_frame(b"FINAL").unwrap().to_vec()),
+            })
+            .await
+            .unwrap();
+        out_tx
+            .send(OutboundEvent::Disconnect {
+                reason: DisconnectReason::ServerShutdown,
+            })
+            .await
+            .unwrap();
+
+        let reason = conn_loop(
+            &mut conn,
+            &mut listener_box,
+            &config,
+            read,
+            out_rx,
+            &in_tx,
+            shutdown,
+        )
+        .await;
+
+        assert_eq!(
+            read_frame(&mut client).await,
+            b"FINAL",
+            "the final queued outbound reached the client"
+        );
+        assert_eq!(
+            reason,
+            DisconnectReason::ServerShutdown,
+            "the terminal reason is the stop, not EOF"
+        );
+    }
+
+    /// A non-reading peer during shutdown: the final queued outbound is
+    /// boundedly attempted (the bounded shutdown flush times out) and the loop
+    /// still exits with `ServerShutdown`, never `EndOfStream`.
+    #[tokio::test]
+    async fn conn_loop_boundedly_attempts_final_outbound_with_non_reading_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        let config = Arc::new(ServerConfig {
+            read_timeout: Duration::from_millis(50),
+            ..ServerConfig::default()
+        });
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+        );
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let mut listener_box: Box<dyn PacketListener> = Box::new(ServerHandshakePacketListener);
+
+        shutdown.request();
+
+        // A frame far larger than any socket buffer: the bounded flush cannot
+        // complete because the peer never reads.
+        out_tx
+            .send(OutboundEvent::Packet {
+                frame: Bytes::from(vec![0x42u8; 64 * 1024 * 1024]),
+            })
+            .await
+            .unwrap();
+        out_tx
+            .send(OutboundEvent::Disconnect {
+                reason: DisconnectReason::ServerShutdown,
+            })
+            .await
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        let reason = conn_loop(
+            &mut conn,
+            &mut listener_box,
+            &config,
+            read,
+            out_rx,
+            &in_tx,
+            shutdown,
+        )
+        .await;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the bounded flush must not run unbounded"
+        );
+        assert_eq!(
+            reason,
+            DisconnectReason::ServerShutdown,
+            "the terminal reason is the stop even when the frames are not delivered"
+        );
+        // Keep the client socket alive (dropping it would close the peer and
+        // make the write error instead of block).
+        assert!(client.local_addr().is_ok());
     }
 }
