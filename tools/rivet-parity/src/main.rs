@@ -507,14 +507,44 @@ fn scoreboard_path() -> PathBuf {
         .join("PARITY.md")
 }
 
-/// Emit or refresh the workspace-root `PARITY.md` scoreboard.
+/// The plugin-compatibility corpus section of the scoreboard. Always a planned
+/// stub: `rivet-parity --scoreboard` rebuilds PARITY.md wholesale, so real corpus
+/// rows must be emitted here by the generator (from the M4/Tier 1 sweep) and never
+/// hand-edited into the file — this section preserves the schema and the honesty
+/// contract until the sweep produces data. No results are fabricated.
 ///
-/// Sections are driven purely by the live run's stats, so a check that stops
-/// being exercised disappears from the scoreboard and a red gate (hard
-/// mismatches) leaves the `mismatched` column visibly nonzero instead of
-/// writing a green-washed table. When `fixture_cap` is set, a provenance note
-/// is appended so a capped snapshot is not mistaken for full-corpus coverage.
-fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
+/// This function is the authoritative definition of the scoreboard **row** schema
+/// (the 5-column table below), which is distinct from the corpus **manifest** schema
+/// documented in `PLUGINS.md` (the sweep's input pinning file).
+fn plugin_corpus_section() -> String {
+    "\
+### Plugin corpus (planned)\n\
+\n\
+Per-plugin Tier 1 corpus rows belong here (`PLUGINS.md`). This file is rebuilt wholesale on every \
+`rivet-parity --scoreboard` run, so the corpus table is emitted by the generator — never hand-edited \
+into the file, which the next run would silently overwrite. **Planned stub**: no corpus rows exist yet \
+and none are fabricated. Planned row schema (emitted by the generator; authoritative source: \
+`plugin_corpus_section` in `tools/rivet-parity/src/main.rs` — distinct from the corpus manifest \
+schema in `PLUGINS.md`):\n\
+\n\
+| plugin | category | paper_baseline | rivet | status |\n\
+|---|---|---|---|---|\n\
+| `<pinned version + sha256>` | `<behavior category>` | `recorded` | `pending` | `VERIFIED` / `FAILED` / `UNVERIFIED` |\n\
+\n\
+`paper_baseline`/`rivet` start as `recorded`/`pending` (or `n/a`); a row appears only once the sweep \
+produced it. `status` follows the oracle exit-code contract (scripts/gate.sh): `VERIFIED` (0), `FAILED` \
+(1), `UNVERIFIED` (3).\n"
+    .to_string()
+}
+
+/// Build the full scoreboard markdown (pure, so it is unit-testable with a fixed
+/// date). Sections are driven purely by the live run's stats: a check that stops
+/// being exercised disappears from the scoreboard and a red gate (hard mismatches)
+/// leaves the `mismatched` column visibly nonzero instead of writing a green-washed
+/// table. When `fixture_cap` is set, a provenance note is appended so a capped
+/// snapshot is not mistaken for full-corpus coverage. The plugin-corpus section is
+/// always emitted as a planned stub (see `plugin_corpus_section`).
+fn scoreboard_markdown(summary: &Summary, fixture_cap: Option<usize>, date: &str) -> String {
     let mut rows: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
     for kind in ["snbt.parse", "nbt.decode", "nbt.encode", "idem"] {
         let total = summary.totals.get(kind).copied().unwrap_or(0);
@@ -535,7 +565,6 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
         );
     }
 
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let mut md = String::new();
     md.push_str("# PARITY scoreboard\n\n");
     md.push_str(&format!(
@@ -558,6 +587,15 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
     }
     md.push_str("\n### Divergences\n\n");
     md.push_str("`compound_key_order` is the documented insertion-order divergence (DECISIONS.md D12): Rust's `CompoundTag` is insertion-ordered, so hand-built compounds emit Rust's put sequence while Java emits fastutil hash order; read-back fixtures round-trip byte-for-byte. All such checks remain `ok` and are counted under `diverged`, never under `mismatched`.\n");
+    md.push('\n');
+    md.push_str(&plugin_corpus_section());
+    md
+}
+
+/// Emit or refresh the workspace-root `PARITY.md` scoreboard.
+fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let md = scoreboard_markdown(summary, fixture_cap, &date);
 
     let path = scoreboard_path();
     match std::fs::write(&path, md) {
@@ -853,4 +891,66 @@ fn main() {
         eprintln!("  RESULT: byte-for-byte parity holds (within documented divergences)");
     }
     eprintln!("  STATUS: VERIFIED (all oracle checks ran)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Summary with exactly one kind populated; the others stay zero so only
+    /// that kind's row appears in the rendered table.
+    fn summary_with(
+        kind: &str,
+        total: usize,
+        matched: usize,
+        diverged: usize,
+        mismatched: usize,
+    ) -> Summary {
+        let mut s = Summary::default();
+        s.totals.insert(kind.to_string(), total);
+        s.matched.insert(kind.to_string(), matched);
+        s.diverged.insert(kind.to_string(), diverged);
+        s.mismatched.insert(kind.to_string(), mismatched);
+        s
+    }
+
+    #[test]
+    fn scoreboard_emits_planned_plugin_section_without_fabricated_rows() {
+        let summary = summary_with("idem", 10, 10, 0, 0);
+        let md = scoreboard_markdown(&summary, None, "2026-08-07");
+
+        // The planned plugin-corpus section and its schema are preserved by the
+        // generator, not left as hand-edited text that a --scoreboard run deletes.
+        assert!(md.contains("### Plugin corpus (planned)"));
+        assert!(md.contains("| plugin | category | paper_baseline | rivet | status |"));
+        assert!(md.contains("no corpus rows exist yet and none are fabricated"));
+        assert!(md.contains("`<pinned version + sha256>`"));
+
+        // No fabricated pass results: the only corpus row the generator may emit
+        // is the schema placeholder, so there is exactly one data row (plus the
+        // header) in the section.
+        let section = plugin_corpus_section();
+        let data_rows = section
+            .lines()
+            .filter(|l| l.starts_with('|') && !l.starts_with("|---"))
+            .count();
+        assert_eq!(
+            data_rows, 2,
+            "header + one schema placeholder row, never fabricated results"
+        );
+    }
+
+    #[test]
+    fn committed_parity_plugin_section_matches_generator_output() {
+        // The checked-in PARITY.md must end with exactly what the generator emits
+        // for the plugin section; otherwise the next --scoreboard run would
+        // overwrite it and the committed and generated files would drift.
+        let parity = std::fs::read_to_string(scoreboard_path()).expect("PARITY.md readable");
+        let start = parity
+            .find("### Plugin corpus (planned)")
+            .unwrap_or_else(|| {
+                panic!("PARITY.md must contain the generator-emitted plugin section")
+            });
+        assert_eq!(&parity[start..], plugin_corpus_section());
+    }
 }

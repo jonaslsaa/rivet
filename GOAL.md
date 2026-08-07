@@ -10,10 +10,11 @@ You are working on **Rivet**: a faithful Rust port of the Paper Minecraft server
 2. `PORTING.md` — the Java→Rust pattern map. Every translation follows it; every review checks against it.
 3. `OWNERSHIP.md` — how the GC'd object graph maps to arenas/IDs. Decided per subsystem here, never per-unit.
 4. `CRATES.md` — workspace layout and which external libraries we use (and which are rejected, and why).
-5. `WORKFLOWS.md` — how agent waves, reviews, and verification gates work; test-reuse strategy.
-6. `RESEARCH.md` — background: why this plan, Bun's methodology, how Paper differs.
-7. `LESSONS-PUMPKIN.md` — what to adopt/avoid from the Pumpkin project; consultation targets when stuck.
-8. `MANIFEST.tsv` — the work queue: units, dependencies, status.
+5. `PLUGINS.md` — plugin compatibility tiers (D14): what "plugins run on Rivet" means, per tier and corpus.
+6. `WORKFLOWS.md` — how agent waves, reviews, and verification gates work; test-reuse strategy.
+7. `RESEARCH.md` — background: why this plan, Bun's methodology, how Paper differs.
+8. `LESSONS-PUMPKIN.md` — what to adopt/avoid from the Pumpkin project; consultation targets when stuck.
+9. `MANIFEST.tsv` — the work queue: units, dependencies, status.
 
 ## Hard rules (excerpted; details in the docs)
 
@@ -26,4 +27,4 @@ You are working on **Rivet**: a faithful Rust port of the Paper Minecraft server
 
 ## Where we're going
 
-M0 oracle harness → M1 client joins an empty world → M2 worldgen parity → M3 survival gameplay → M4 Paper API + JVM plugin adapter. Milestones and epics live on GitHub; agents decompose epics into sub-issues and PRs.
+M0 oracle harness → M1 client joins an empty world → M2 worldgen parity → M3 survival gameplay → M4 Tier 1 Paper API + JVM plugin adapter (API-clean corpus) → M5 Tier 2 ecosystem compatibility (PLUGINS.md D14). Milestones and epics live on GitHub; agents decompose epics into sub-issues and PRs.

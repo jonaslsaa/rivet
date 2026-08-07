@@ -48,7 +48,7 @@ Caveats: each worktree gets its own cargo `target/` (disk + cold builds — do n
 
 ## GitHub process wiring
 
-Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/rivet. Agents decompose epics into sub-issues using the **port-unit issue template**, work them via small PRs (PR template carries the fidelity checklist), and update `MANIFEST.tsv` in the same PR. **No hosted CI (D10)**: the controller runs `scripts/gate.sh` (fmt → clippy -Dwarnings → tests → oracle verify → rivet-parity → Paper-vs-Paper scenario → machete) on every PR before merging — a red gate blocks the merge. The oracle steps never silently skip: missing prerequisites make the gate exit nonzero with an UNVERIFIED status (distinct exit code 3) and a per-item fix list; `--require-oracle` turns any missing oracle prerequisite into a hard failure (exit 1). `blocked` label = controller triage; `regression`/`parity` labels come from `verify-oracle` runs.
+Milestones M0–M5, epics (label `epic`) per track live on github.com/jonaslsaa/rivet. Agents decompose epics into sub-issues using the **port-unit issue template**, work them via small PRs (PR template carries the fidelity checklist), and update `MANIFEST.tsv` in the same PR. **No hosted CI (D10)**: the controller runs `scripts/gate.sh` (fmt → clippy -Dwarnings → tests → oracle verify → rivet-parity → Paper-vs-Paper scenario → machete) on every PR before merging — a red gate blocks the merge. The oracle steps never silently skip: missing prerequisites make the gate exit nonzero with an UNVERIFIED status (distinct exit code 3) and a per-item fix list; `--require-oracle` turns any missing oracle prerequisite into a hard failure (exit 1). `blocked` label = controller triage; `regression`/`parity` labels come from `verify-oracle` runs.
 
 ## Workflow catalog (`.claude/workflows/`)
 
@@ -153,18 +153,28 @@ Measured in the tree: 186 JUnit files (~21k LOC) in `paper-server/src/test` + `p
 
 ## The JVM plugin adapter track (`shim-gen`)
 
-Goal: real Paper plugins (jars) run against the Rust server. Architecture:
+Goal: real Paper plugins (jars) run against the Rust server, measured by tier and corpus (D14, `PLUGINS.md`). Architecture:
 
-- **Keep `paper-api` as-is** (plugins compile against it unchanged). Reimplement the *implementation* layer (`CraftServer`, `CraftWorld`, `CraftPlayer`, event dispatch, scheduler) as Java shims that call into Rust over **JNI / Java 22+ FFM (Panama)**.
+- **Keep `paper-api` as-is** (plugins compile against it unchanged). Reimplement the *implementation* layer (`CraftServer`, `CraftWorld`, `CraftPlayer`, event dispatch, scheduler) as Java shims that call into Rust over **Java 22+ FFM (Panama)** — the D11 spike proved this in-process FFM design; JNI is not in the picture.
 - JVM runs **in-process**, plugin code confined to a dedicated "main thread" that is tick-synchronized with the Rust tick loop (Bukkit's API is main-thread-confined anyway — this maps cleanly).
-- Rust side exposes a stable C ABI facade (`rivet-ffi` crate); events flow Rust → JVM dispatch → mutations back through the facade. Batch per-tick to amortize FFI cost; benchmark event-storm latency *early* (M1), because if this is too slow the whole adapter needs a redesign.
-- **Honest limit**: plugins that reflect into NMS/CraftBukkit internals (many do) cannot work; only API-clean plugins are in scope. Track a compatibility corpus (LuckPerms, EssentialsX-core-commands, Vault, PlaceholderAPI, WorldGuard as stretch) and make "corpus plugin boots and passes its smoke script" the oracle for this track.
+- Rust side exposes a stable C ABI facade (`rivet-ffi` crate); events flow Rust → JVM dispatch → mutations back through the facade. Batch per-tick to amortize FFI cost; event-storm latency is de-risked (D11), payload/allocation amplification is measured at M4 (#259).
+- **Honest limit, tiered**: plugins that reflect into NMS/CraftBukkit internals are Tier 3 (decision-gated, never universal); plugin-to-plugin/services/Adventure/library-loading are Tier 2 (M5). Tier 1 (M4) is API-clean plugins only, measured by a curated corpus and a baseline.
 
 `shim-gen` is embarrassingly parallel and highly mechanical — ideal agent work:
 
 pipeline over paper-api classes: **generate** (Java shim + Rust FFI stub from the API signatures) → **compile-gate** (javac + cargo check per class, this track *does* gate per-unit since units are tiny) → **review** (one diff reviewer, `effort: low`) — then integration-test waves that boot the corpus plugins.
 
 This track only needs the Rust core's internal API, so it starts at M1 against the minimal server, de-risking the FFI design years before M4.
+
+### Tiered corpus oracle (M4/M5)
+
+The plugin-compat oracle is **tiered and corpus-driven** (D14, `PLUGINS.md`), one gate per tier:
+
+- **Tier 1 (M4, corpus epic #27, acceptance gate #251)**: the curated ~20–30 API-clean corpus. Per-plugin boot + smoke, Rivet vs the pinned Paper 26.2 baseline. Missing artifact/prereq = **UNVERIFIED (exit 3)**, never silently skipped; a real diff = **FAILED (exit 1)** — mirroring the existing `rivet-parity` exit-code contract in `scripts/gate.sh`.
+- **Tier 2 (M5, epics #252/#253/#254)**: the broad corpus extends to plugin-to-plugin/services, scheduler-async, Adventure, library loading, custom classloaders; pass rates are published per plugin *and* per category, plus a performance dashboard (Rust tick / FFI / Java plugin CPU / Java allocations / Java GC).
+- **Tier 3 (#255)**: decision-gated; no implementation milestone exists until corpus evidence names targets.
+
+**Controlled negatives** (tamper one API result → comparator must detect it) are part of every tier gate, never faked with `--expect-fail`. Corpus results are published in `PARITY.md`, but that file is a generated artifact: `rivet-parity --scoreboard` rebuilds it wholesale, so the corpus table is emitted by the generator, never hand-edited into the file — the next `--scoreboard` run overwrites the whole file. The generator already emits the planned stub; real corpus rows are added at M4 wiring. The scoreboard row schema is emitted by the generator (`plugin_corpus_section` in `tools/rivet-parity/src/main.rs`); the corpus manifest schema and semantics live in `PLUGINS.md`, and the exit-code contract in `scripts/gate.sh`.
 
 ## Campaign control
 

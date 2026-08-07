@@ -19,7 +19,8 @@ No garbage collector to lean on, so: **index/arena storage, IDs over references*
 Single-threaded synchronous game tick owning all world state (matches vanilla's model and Bukkit's main-thread confinement — required for the plugin adapter). `tokio` for network IO at the edges, `rayon` for chunk generation/lighting worker pools; both communicate with the tick thread via channels, never locks on hot game state. Folia-style region threading is explicitly out of scope until after M4.
 
 ## D6 — Plugin story
-1. **JVM adapter first**: `paper-api` jar unchanged; the implementation layer regenerated as Java shims calling a `rivet-ffi` C ABI (Java FFM/Panama on the Java side — not JNI C glue). Plugin code runs on a dedicated tick-synchronized thread. API-clean plugins only; NMS reflection is out of scope.
+Plugin compatibility is a **tiered model** — Tier 1 API-clean (M4), Tier 2 ecosystem (M5), Tier 3 targeted CraftBukkit/internal, decision-gated and never universal NMS (binding: D14; canonical reference: `PLUGINS.md`). Mechanism:
+1. **JVM adapter first**: `paper-api` jar unchanged; the implementation layer regenerated as Java shims calling a `rivet-ffi` C ABI (Java FFM/Panama on the Java side — not JNI C glue). Plugin code runs on a dedicated tick-synchronized thread. Tier 1 covers public Paper/Bukkit API only, measured by a corpus — never asserted as universal.
 2. Native Rust plugin API second, WASM ABI later. Neither before M4.
 
 ## D7 — Pumpkin usage policy
@@ -29,7 +30,7 @@ Single-threaded synchronous game tick owning all world state (matches vanilla's 
 The Java server is the oracle; parity is measured, not asserted (`WORKFLOWS.md` → PARITY scoreboard). No agent may weaken a test, fixture, or oracle criterion to go green. `todo!()` requires a `blocked` manifest/issue note.
 
 ## D9 — Process
-Work is organized as GitHub **epics → agent-created sub-issues → PRs**, milestones M0–M4 (see `WORKFLOWS.md`). Reference docs (`PORTING.md`, `OWNERSHIP.md`) are updated via dedicated PRs, never silently mid-wave. Rust edition 2024, `rustfmt` defaults, clippy clean at wave gates.
+Work is organized as GitHub **epics → agent-created sub-issues → PRs**, milestones M0–M5 (see `WORKFLOWS.md`). Reference docs (`PORTING.md`, `OWNERSHIP.md`) are updated via dedicated PRs, never silently mid-wave. Rust edition 2024, `rustfmt` defaults, clippy clean at wave gates.
 
 ## D10 — No hosted CI
 No GitHub Actions (or any hosted CI). The merge gate is `scripts/gate.sh` (fmt → clippy `-Dwarnings` → tests → oracle steps: `rivet-oracle verify` and the byte-for-byte `rivet-parity` diff vs the Paper Java oracle), run locally by the controller before merging any PR and at the end of every wave. Oracle verification is never silently skipped: missing prerequisites make the gate exit nonzero with an UNVERIFIED status and a per-item fix list; `--require-oracle` turns any missing oracle prerequisite into a hard failure. A red gate blocks the merge; enforcement is by process (PR checklist + controller), not by GitHub.
@@ -55,3 +56,11 @@ This makes byte-identical `SerializableChunkData` NBT possible without a fastuti
 
 ## D13 — Region compression: byte-identity gate runs at `region-file-compression=none`
 Locked 2026-08-07 for issue #226 (M2 gate preflight). Java `Deflater` output is not `flate2`-reproducible in general, and `RegionFileVersion.DEFAULT = VERSION_DEFLATE` is volatile-selected, so deflate is not a byte-identity mode. The M2 byte-identity round-trip therefore pins **both sides** to `region-file-compression=none` (fixtures/`server.properties` + manifest now record `none`). Read support is mode-separate: `NbtIo.read_compressed` (gzip only, mirroring Java's `NbtIo.readCompressed`) is proven against Paper's own gzip `level.dat` fixture (`reads_real_paper_gzip_level_dat_fixture`); deflate/lz4 reads live in the region-file layer, which is not yet ported. Deflate/lz4 **write** parity is deferred to the chunk.storage wave (issue #231, `RivetTodo` in `nbt_io.rs`); chunk payloads are captured as decompressed NBT so the `none` pin is byte-consistent with existing fixtures.
+
+## D14 — Plugin compatibility tiers
+Locked 2026-08-07 (canonical reference: `PLUGINS.md`). "Paper plugins run on Rivet" is a **measured, tiered compatibility level**, never a universal claim. Three tiers: Tier 1 and Tier 2 are each gated by a corpus; Tier 3 by an evidence-driven decision:
+- **Tier 1 — API-clean (M4)**: public Paper/Bukkit API via the JVM adapter (D6), measured by a curated corpus of ~20–30 behavior-diverse API-clean plugins (epic #27; M4 acceptance #251). NMS/reflection and internals are out of scope.
+- **Tier 2 — ecosystem compatibility (M5)**: plugin-to-plugin/services, scheduler-async, Adventure, library loading, custom classloaders — measured by broad corpus pass rates (epics #252/#253/#254).
+- **Tier 3 — targeted CraftBukkit/internal compatibility, decision-gated**: a named, evidence-driven set of internal entry points discovered from corpus data; no implementation milestone exists, and epic #255 gates whether one should ever be created. **Universal NMS is explicitly never pursued**; ProtocolLib-style interception needs a separate decision.
+
+Compatibility is published as corpus pass rates in `PARITY.md` and the milestone gates (#251/#254), never as a blanket claim.

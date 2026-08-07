@@ -1,6 +1,6 @@
 # Rivet
 
-Faithful Rust port of the Paper Minecraft server (pinned MC 26.2), plus a JVM adapter for Java Paper plugins. **Read `GOAL.md` first** — it indexes all design docs (`DECISIONS.md`, `PORTING.md`, `OWNERSHIP.md`, `CRATES.md`, `WORKFLOWS.md`) and the hard rules.
+Faithful Rust port of the Paper Minecraft server (pinned MC 26.2), plus a JVM adapter for Java Paper plugins. **Read `GOAL.md` first** — it indexes all design docs (`DECISIONS.md`, `PORTING.md`, `OWNERSHIP.md`, `CRATES.md`, `PLUGINS.md`, `WORKFLOWS.md`) and the hard rules.
 
 ## General
 - Use your best judgement.

@@ -6,15 +6,15 @@
 
 ---
 
-Rivet is a faithful port of [Paper](https://papermc.io) — the world's most-used Minecraft server — to Rust. Same worlds, same gameplay, same plugins. None of the JVM's weight.
+Rivet is a faithful port of [Paper](https://papermc.io) — the world's most-used Minecraft server — to Rust. Same worlds, same gameplay, measured plugin compatibility. None of the JVM's weight.
 
 - **Drop-in.** Point it at your world, your `server.properties`, your Paper configs. Vanilla parity is measured against the real Java server, chunk by chunk, packet by packet — not promised.
-- **Your plugins still work.** Rivet embeds a JVM bridge so existing Paper plugins load unchanged. No rewrites, no forks of your favorite plugins.
+- **Plugins run by tier.** Rivet embeds a JVM bridge so API-clean Paper plugins load through it. Compatibility is tiered and measured against a corpus — Tier 1 API-clean (M4), Tier 2 ecosystem (M5), Tier 3 decision-gated CraftBukkit/internal — never universal. See [`PLUGINS.md`](PLUGINS.md).
 - **Rust underneath.** Starts in milliseconds, runs in a fraction of the memory, and whole classes of crashes are compile-time impossible.
 
 ## Status
 
-🚧 **Early development — not playable yet.** Currently pinned to Minecraft 26.2. Progress is tracked through five milestones:
+🚧 **Early development — not playable yet.** Currently pinned to Minecraft 26.2. Progress is tracked through six milestones:
 
 | | Milestone | Progress | You can… |
 |---|---|---|---|
@@ -22,7 +22,8 @@ Rivet is a faithful port of [Paper](https://papermc.io) — the world's most-use
 | M1 | [Join](https://github.com/jonaslsaa/rivet/milestone/2) | [![M1 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/2?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/2) | connect with a real client and walk around an empty world |
 | M2 | [World](https://github.com/jonaslsaa/rivet/milestone/3) | [![M2 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/3?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/3) | load and generate worlds bit-identical to vanilla |
 | M3 | [Survival](https://github.com/jonaslsaa/rivet/milestone/4) | [![M3 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/4?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/4) | play: mobs, combat, crafting, redstone |
-| M4 | [Paper](https://github.com/jonaslsaa/rivet/milestone/5) | [![M4 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/5?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/5) | run Paper plugins via the JVM bridge |
+| M4 | [Paper](https://github.com/jonaslsaa/rivet/milestone/5) | [![M4 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/5?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/5) | run Tier 1 API-clean Paper plugins via the JVM bridge |
+| M5 | [Ecosystem](https://github.com/jonaslsaa/rivet/milestone/7) | [![M5 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/7?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/7) | run Tier 2 ecosystem plugins (services, Adventure, library loading) |
 
 ## For contributors (human or agent)
 
