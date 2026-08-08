@@ -51,7 +51,7 @@ Modes (`--server` selects which servers boot, `--pairs` selects the comparison):
 | `paper` (default) | `paper:paper` (default) | `join` Paper-vs-Paper self-check: `--runs` Paper boots must produce identical transcripts, plus the tamper negative case. Behavior unchanged from before #155. |
 | `paper` | `paper:paper` | `move` Paper-vs-Paper movement self-check (issue #53): each boot drives the client's bounded forward walk (`move` mode) and `--runs` Paper boots must produce identical normalized movement transcripts (per-tick spawn-relative deltas, velocity, on-ground, teleport/keepalive echo relationships), plus the tamper negative case. This validates the movement harness against Paper; a Rivet-vs-Paper comparison is deferred until Rivet's movement listener lands (issue #158). |
 | `rivet` | `paper:rivet` | `join` Rivet headless boot (issue #192): `--runs` rivet-servers, each must reach `RIVET_READY`, take the pinned Azalea client through offline login, configuration (registry sync), the play handoff, and spawn, receiving exactly the deterministic 117-chunk send-set, and shut down cleanly on SIGTERM. |
-| `both` | `paper:rivet` | `join` Paper-vs-Rivet play scenario (issue #192): Paper and Rivet boot on isolated ports, the client joins each, and both must reach spawn. The transcripts are compared field-level and must differ only on the excluded per-boot nondeterminism plus the documented Rivet/Paper gaps (spawn height y and the health component default) — any other divergence FAILS the run. `--runs` is rejected here (it always boots exactly one Paper + one Rivet). |
+| `both` | `paper:rivet` | `join` Paper-vs-Rivet play scenario (issue #192): Paper and Rivet boot on isolated ports, the client joins each, and both must reach spawn. The transcripts are compared field-level and must differ only on the excluded per-boot nondeterminism plus the documented Rivet/Paper gaps (spawn height y and the health component default) — any other divergence FAILS the run. A controlled negative then tampers the compared `position.y` on the Paper reference and requires the real comparator/divergence path to report the tampered value, so the live acceptance cannot pass vacuously. `--runs` is rejected here (it always boots exactly one Paper + one Rivet). |
 
 Rivet readiness is a machine-readable `RIVET_READY` marker on `rivet-server`
 stdout (crates/rivet-server/src/main.rs); the harness waits for it as a hard
@@ -96,9 +96,11 @@ The runner:
    `client*.stderr.log`, `transcript*.json`).
 4. Diffs the normalized transcripts field-by-field; requires identical
    transcripts Paper-vs-Paper.
-5. Runs a controlled negative case (tampers `position.y` for `join`, or a
-   sampled position `walk.samples[60].dx` for `move`) proving the comparator
-   detects a known difference, so the harness cannot pass vacuously.
+5. Runs a controlled negative case (tampers `position.y` for `join`, a
+   sampled position `walk.samples[60].dx` for `move`, or the Paper
+   `position.y` through the real comparator/divergence path for `both`)
+   proving the comparator detects a known difference, so the harness cannot
+   pass vacuously.
 
 Exit codes are machine-stable and consumed by gate.sh: `0` PASS, `1` FAIL
 (scenario comparison failed, negative case failed, harness error), `3`
@@ -124,3 +126,18 @@ walk are compared. The keepalive ids (Paper's `Util.getMillis()` challengeId —
 justification. A `moved` record whose sampled walk shows no meaningful forward
 progress is classified as `noop` and fails the run rather than passing a
 vacuous Paper-vs-Paper comparison.
+
+## Terminal gate wiring (issue #160)
+
+The `both` mode is the #192-owned live Paper-vs-Rivet acceptance and is run
+explicitly here:
+
+```sh
+tools/rivet-client/run-scenario.sh join --server both --pairs paper:rivet
+```
+
+Wiring that live acceptance (plus the Paper-vs-Rivet `move` differential and
+the PARITY.md scoreboard rows) into `scripts/gate.sh` as a terminal gate stage
+is #160 (M1.4) scope, not #192. #192 keeps `gate.sh`'s existing scenario stage
+(the Paper-vs-Paper `join` self-check) unchanged; the coordinator gates/releases
+this exact head and wires the terminal stage when #160 lands.
