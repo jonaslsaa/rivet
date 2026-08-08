@@ -1,0 +1,21 @@
+# Pinned Paper world-defaults for deterministic oracle boots (issue #266).
+#
+# MC 26.2 removed the vanilla `spawn-animals`/`spawn-monsters`/`spawn-npcs`
+# server.properties keys — DedicatedServerProperties reads none of them, so
+# setting them is a no-op. Paper reads per-category spawn limits from
+# `config/paper-world-defaults.yml` instead. Every category is capped at 0 so
+# no entity can spawn into the save window and serialize into the captured
+# chunk 'Entities' tags — the same mechanism rivet-capture's fixture uses.
+#
+# Only the `spawn-limits` subtree is specified; Paper merges the rest from its
+# defaults and fills missing keys on first boot.
+entities:
+  spawning:
+    spawn-limits:
+      ambient: 0
+      axolotls: 0
+      creature: 0
+      monster: 0
+      underground_water_creature: 0
+      water_ambient: 0
+      water_creature: 0
