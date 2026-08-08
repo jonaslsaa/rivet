@@ -317,7 +317,15 @@ mod tests {
     }
 
     #[test]
-    fn codec_encode_emits_three_floats_with_negative_zero() {
+    fn codec_encode_preserves_negative_zero() {
+        // `Rotations::new(720.0, 45.0, -360.0)` stores `(0.0, 45.0, -0.0)`:
+        // the canonical constructor's `-360.0 % 360.0` is `-0.0`, and the sign
+        // must survive `CODEC` encoding. JsonOps keeps the sign bit in its
+        // `serde_json` numbers (read back via `as_f64`), unlike NbtOps whose
+        // `create_float` goes through `FloatTag::value_of` and collapses `-0.0`
+        // to `+0.0`. The structural equality against `create_float(-0.0)` alone
+        // cannot catch a `+0.0` emission — `serde_json::Number` compares floats
+        // with IEEE `==`, so `-0.0 == 0.0` — hence the load-bearing sign check.
         let ops = JsonOps::INSTANCE;
         let codec = rotations_codec::<JsonOps>();
         let r = Rotations::new(720.0, 45.0, -360.0);
@@ -329,6 +337,11 @@ mod tests {
                 ops.create_float(45.0),
                 ops.create_float(-0.0)
             ])
+        );
+        assert!(
+            encoded[2].as_f64().is_some_and(|f| f.is_sign_negative()),
+            "encoded z component must keep the -0.0 sign bit, got {:?}",
+            encoded[2].as_f64()
         );
     }
 }
