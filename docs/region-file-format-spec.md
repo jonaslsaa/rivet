@@ -150,7 +150,7 @@ selected.
 | `2` | deflate | `InflaterInputStream` | `DeflaterOutputStream` | yes |
 | `3` | none | identity | identity | yes |
 | `4` | lz4 | `LZ4BlockInputStream` | `LZ4BlockOutputStream` | yes |
-| `127` | custom | unwrap path reads a modified-UTF-8 string id, logs, returns null (never crashes) | never writable (output wrapper throws `UnsupportedOperationException`) | yes |
+| `127` | custom | unwrap path reads a modified-UTF-8 string id, logs, returns null — when the string reads; malformed/truncated input propagates `UTFDataFormatException`/`EOFException` | never writable (output wrapper throws `UnsupportedOperationException`) | yes |
 
 - **Selection:** `RegionFileVersion.DEFAULT = VERSION_DEFLATE`; `configure(optionName)` switches the
   selected version from `server.properties` `region-file-compression`. [Rivet] under D13 the M2
@@ -171,7 +171,10 @@ selected.
   is not ported. [Rivet] do not emit `2`/`4` before that deferral is resolved.
 - `127` custom — read path must match Paper: read a modified-UTF-8 string, log "Unrecognized custom
   compression {id}" when it parses as an identifier or "Invalid custom compression id {id}" when it
-  does not, and return null in both cases (never crash); it is never written.
+  does not, and return null in both cases. That "returns null" guarantee holds only when `readUTF`
+  succeeds: a malformed stream (bad length prefix or ill-formed encoding) throws `UTFDataFormatException`,
+  and a truncated one throws `EOFException` — both `IOException`s that propagate out of
+  `getChunkDataInputStream` instead of returning null; it is never written.
 
 ---
 
@@ -220,20 +223,23 @@ bytes; exceeding it throws `RegionFileSizeException`, which the caller converts 
 `<regionfile-base>_oversized_<x>_<z>.nbt` — i.e. the `.mca` filename minus its extension plus an
 underscore, e.g. `r.0.0_oversized_3_5.nbt` — (deflate-compressed NBT read via `InflaterInputStream`)
 and a 1024-byte meta file `<regionfile-base>.oversized.nbt` (one flag byte per slot).
-`setOversized(x, z, bool)`
-writes/removes the meta file and the per-chunk file; the flag means "when loading this chunk, also
-read `<regionfile-base>_oversized_<x>_<z>.nbt` and merge its `Entities` / `TileEntities` lists into
-the region-file record's lists". The region file still holds a real (possibly partial) chunk compound;
-the oversized file supplements it.
+`setOversized(x, z, bool)` updates the in-memory flag byte and writes/removes the meta file; it never
+writes a per-chunk oversized file — clearing (`false`) only deletes `<regionfile-base>_oversized_<x>_<z>.nbt`
+if it already exists. The flag means "when loading this chunk, also read
+`<regionfile-base>_oversized_<x>_<z>.nbt` and merge its `Entities` / `TileEntities` lists into the
+region-file record's lists". The region file still holds a real (possibly partial) chunk compound; the
+oversized file supplements it.
 
 **[Paper]** This is **legacy-write path**: the legacy `RegionFileStorage.write` explicitly calls
 `region.setOversized(..., false)` with the comment "We don't do this anymore, mojang stores
 differently, but clear old meta flag if it exists". Note the moonrise chunk-write path
 (`moonrise$startWrite`/`moonrise$finishWrite`) never touches Aikar oversized: it funnels through
 `RegionFile.write`, which performs no Aikar interaction whatsoever, so neither the moonrise path nor
-the live write path ever calls `setOversized`. The only active producers of Aikar files are old
-saves / the header-recalc path, which re-derives the meta flags from existing `*.oversized.nbt`
-files (§8).
+the live write path ever calls `setOversized`. Nothing in Paper creates the per-chunk
+`*.oversized_<x>_<z>.nbt` files anymore — the only write-side actions left are the legacy clear
+(`setOversized(..., false)` deleting a pre-existing file + meta flag) and the header-recalc path
+(§8), which re-derives the meta flags from whatever `*.oversized_<x>_<z>.nbt` files already exist on
+disk and writes only the meta file — it does not create the per-chunk files either.
 
 **[Rivet]** **[Deferred]** — implement the Aikar-side read (so old worlds don't lose chunk data) in
 the #231 wave; the write path (`setOversized` writing/clearing) is not needed for a byte-identical
@@ -309,7 +315,10 @@ by the soft-failure path above. Steps:
    the region's bounds is read by trying every registered codec; the slot is marked oversized if that
    compound's `LastUpdate` is newer than the locally-found compound (ties prefer the local record).
    Aikar `*.oversized_<x>_<z>.nbt` files (read via `InflaterInputStream`) mark the slot when their
-   `LastUpdate` **equals** the local compound's — "best we got for an id".
+   `LastUpdate` **equals** the local compound's — "best we got for an id". These per-chunk Aikar
+   files are only ever **read** here; recalc never creates them. At the end of recalc the in-memory
+   `oversized[]` flags are rewritten to the meta file (§6.2) — `writeOversizedMeta()` when any flag
+   is set, delete of the meta file when none are — so recalc is a producer of the meta file only.
 5. New locations are computed with a **fresh bitmap** (`force(0,2)` then re-allocating each slot),
    so overlapping/duplicate data gets only one owner; oversized stubs are re-emitted into newly
    allocated single sectors, each stub carrying the codec id that was detected for its `.mcc` file.
