@@ -3265,6 +3265,10 @@
       "sha256": "e1c535d03e28116c7dd98d521c885d44f1458d9de5881c6e0175edcb04a87864"
     }
   ],
+  "chunk-concurrency": {
+    "io-threads": 1,
+    "worker-threads": 1
+  },
   "chunk-count": 408,
   "format": 1,
   "level-name": "world",

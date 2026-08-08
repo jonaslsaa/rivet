@@ -37,9 +37,10 @@
 //!      `manifest.json`. Requires the materialized Paper runtime (see the
 //!      scripts; no full server boot).
 //!   7. **`regenerate`** — full regeneration of all fixture kinds: M0 chunk
-//!      slice (boot + extract), M2 region payloads (boot with the normal
-//!      config + `--chunks-only` extract), and the worldgen semantic samples.
-//!      Sub-select with `--m0` / `--m2` / `--samples`.
+//!      slice (boot + extract), M2 region payloads (twin-boot: two independent
+//!      fresh normal-overworld boots whose extracted payloads must be
+//!      byte-identical before anything is committed), and the worldgen semantic
+//!      samples. Sub-select with `--m0` / `--m2` / `--samples`.
 //!
 //! Note on determinism (see scripts/extract_fixtures.py): raw region files
 //! are NOT byte-stable across boots (framing/timestamps), but the decompressed
@@ -49,6 +50,22 @@
 //! timestamps and are expected to differ across boots. The worldgen semantic
 //! samples are emitted by the Java sampler and are byte-identical across boots
 //! for a fixed seed + generator settings.
+//!
+//! Chunk-generation concurrency is pinned for byte-determinism (issue #266):
+//! every oracle boot copies `fixtures/paper-global.yml` into the run dir's
+//! `config/`, which sets `chunk-system` to exactly 1 worker / 1 I/O thread.
+//! `boot_and_shutdown` refuses a boot whose log does not confirm that pin
+//! (missing/ineffective config), the `verify` gates enforce provenance drift
+//! between the baseline manifest and the run, and M2 region captures record
+//! their concurrency as `chunk-concurrency` manifest provenance.
+//!
+//! Entity spawning is also suppressed for deterministic chunks (issue #266):
+//! every boot copies `fixtures/paper-world-defaults.yml` into the run dir's
+//! `config/`, which caps every `entities.spawning.spawn-limits.*` category at 0
+//! so no mob spawns into the save window and into the captured chunk NBT. MC
+//! 26.2 removed the vanilla `spawn-monsters`/`spawn-animals`/`spawn-npcs`
+//! server.properties keys (DedicatedServerProperties reads none of them), so
+//! this is the effective mechanism — the same one `rivet-capture` uses.
 //!
 //! Usage:
 //!   cargo run -p rivet-oracle                          # verify all fixture kinds
@@ -184,7 +201,7 @@ impl From<io::Error> for Error {
 }
 
 /// A single captured file as recorded in `manifest.json`.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct Captured {
     path: String,
     sha256: String,
@@ -194,8 +211,32 @@ struct Captured {
     dim: Option<String>,
 }
 
+/// Recorded chunk-generation concurrency provenance in a manifest: the
+/// effective Moonrise worker/I-O thread counts the capture ran under (issue
+/// #266). A byte-identity oracle is only well-posed at 1 worker / 1 I-O thread,
+/// so any recorded concurrency other than the pin is provenance drift.
+#[derive(Debug, Clone, Copy, serde::Deserialize, PartialEq, Eq)]
+struct ChunkConcurrency {
+    #[serde(rename = "worker-threads")]
+    worker_threads: u32,
+    #[serde(rename = "io-threads")]
+    io_threads: u32,
+}
+
+impl ChunkConcurrency {
+    /// The serialized-worldgen pin: exactly one worker and one I/O thread.
+    const PINNED: ChunkConcurrency = ChunkConcurrency {
+        worker_threads: 1,
+        io_threads: 1,
+    };
+
+    fn is_pinned(self) -> bool {
+        self == Self::PINNED
+    }
+}
+
 /// The fixture manifest (subset of fields; unknown fields are ignored).
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct Manifest {
     #[serde(default)]
     format: u64,
@@ -211,6 +252,8 @@ struct Manifest {
     region_file_compression: Option<String>,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(rename = "chunk-concurrency", default)]
+    chunk_concurrency: Option<ChunkConcurrency>,
     #[serde(default)]
     captured: Vec<Captured>,
 }
@@ -344,7 +387,59 @@ fn verify_fixtures(dir: &Path) -> Result<Manifest, Error> {
             });
         }
     }
+
+    // Chunk-concurrency provenance (issue #266): a normal-overworld region
+    // capture MUST record the pinned 1 worker / 1 I-O thread it was generated
+    // under, and any recorded concurrency anywhere must be that pin. A missing
+    // provenance on such a capture, or any non-pinned value, is drift — the
+    // fixtures were made under unknown concurrency and cannot be trusted.
+    if is_region_capture(&manifest) {
+        match manifest.chunk_concurrency {
+            Some(cc) if cc.is_pinned() => {}
+            Some(cc) => {
+                return Err(Error::Manifest(format!(
+                    "manifest records chunk-concurrency {}/{} — the oracle pin is exactly 1/1 \
+                     (issue #266); this manifest drifted from the pinned provenance",
+                    cc.worker_threads, cc.io_threads
+                )));
+            }
+            None => {
+                return Err(Error::Manifest(
+                    "region-capture manifest records no chunk-concurrency provenance — it must \
+                     declare the pinned 1/1 worker/I-O threads it was generated under (issue #266)"
+                        .into(),
+                ));
+            }
+        }
+    } else if let Some(cc) = manifest.chunk_concurrency
+        && !cc.is_pinned()
+    {
+        return Err(Error::Manifest(format!(
+            "manifest records chunk-concurrency {}/{} — the oracle pin is exactly 1/1 \
+             (issue #266); this manifest drifted from the pinned provenance",
+            cc.worker_threads, cc.io_threads
+        )));
+    }
     Ok(manifest)
+}
+
+/// The normal-overworld none-compression region chunk capture — the M2
+/// fixtures (`fixtures/server-normal.properties`): `level-type=minecraft:normal`,
+/// `region-file-compression=none` per DECISIONS D13, plus a nonzero chunk count.
+///
+/// Only this capture carries the strictest determinism requirement (issue #266):
+/// its worldgen FEATURES passes race across chunk borders under concurrent
+/// Moonrise workers, so a byte-identity oracle is only well-posed at the pinned
+/// 1/1 concurrency and the manifest must record it. The M0 superflat slice
+/// (`fixtures/server.properties`, `level-type=minecraft:flat`) is ALSO
+/// none-compression but its flat worldgen is not concurrency-sensitive — it
+/// must NOT be classified here, or a `regenerate --m0` (which records
+/// `region-file-compression=none` + `chunk-count` but never injects
+/// chunk-concurrency provenance) would produce a manifest the gate rejects.
+fn is_region_capture(manifest: &Manifest) -> bool {
+    manifest.level_type.as_deref() == Some("minecraft\\:normal")
+        && manifest.region_file_compression.as_deref() == Some("none")
+        && manifest.chunk_count.unwrap_or(0) > 0
 }
 
 /// Extract the pinned Paper commit from the manifest's `paper` provenance
@@ -369,6 +464,63 @@ fn parse_manifest_commit(manifest_text: &str) -> Option<String> {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
     })
+}
+
+/// Parse the Moonrise worker/I-O thread counts out of a boot log.
+///
+/// Paper logs exactly one line, from `MoonriseCommon.adjustWorkerThreads`:
+/// `[MoonriseCommon] Paper is using N worker threads, M I/O threads`. Returns
+/// `(worker, io)` when exactly one such line is present; `None` when the line
+/// is absent or the log is ambiguous (two pin lines = something is wrong).
+fn parse_boot_thread_counts(log_text: &str) -> Option<(u32, u32)> {
+    let mut counts = None;
+    for line in log_text.lines() {
+        let Some((_, rest)) = line.split_once(" is using ") else {
+            continue;
+        };
+        let Some((worker, io)) = rest.split_once(" worker threads, ") else {
+            continue;
+        };
+        let Some(io) = io.split_once(" I/O threads") else {
+            continue;
+        };
+        let Ok(worker) = worker.trim().parse::<u32>() else {
+            continue;
+        };
+        let Ok(io) = io.0.trim().parse::<u32>() else {
+            continue;
+        };
+        if counts.is_some() {
+            return None; // more than one pin line — ambiguous, refuse.
+        }
+        counts = Some((worker, io));
+    }
+    counts
+}
+
+/// Enforce that the boot log confirms the pinned chunk concurrency: exactly
+/// one `MoonriseCommon` line reporting 1 worker thread and 1 I/O thread.
+///
+/// This is the "fail loudly unless the boot logs confirm the pin" guarantee:
+/// a missing config (Paper falls back to `-1` → `cores/2` workers) or a wrong
+/// config (e.g. `worker-threads: 2`) is a hard error, never a skip or pass,
+/// because without the pin the captured world is not byte-deterministic.
+fn check_boot_thread_pin(log_text: &str) -> Result<(), Error> {
+    match parse_boot_thread_counts(log_text) {
+        Some((1, 1)) => Ok(()),
+        Some((workers, io)) => Err(Error::Gate(format!(
+            "chunk-concurrency pin NOT enforced: the boot log reports {workers} worker threads / {io} I/O \
+             threads, but the oracle requires exactly 1 / 1 (issue #266). Check that \
+             fixtures/paper-global.yml was copied into the run dir's config/ and sets \
+             chunk-system.worker-threads=1 and chunk-system.io-threads=1."
+        ))),
+        None => Err(Error::Gate(
+            "chunk-concurrency pin NOT confirmed: the boot log has no Moonrise worker/I-O thread line \
+             ('Paper is using N worker threads, M I/O threads'). The pinned config \
+             (fixtures/paper-global.yml) is missing or ineffective — refuse to treat this run as \
+             byte-deterministic (issue #266).".into(),
+        )),
+    }
 }
 
 /// Read the `Git-Commit` attribute out of a compiled paper-server jar by
@@ -462,6 +614,73 @@ fn check_pin(baseline_dir: &Path, run_dir: &Path) -> Result<(), Error> {
         PinVerdict::Mismatch { expected, actual } => Err(Error::PinMismatch { expected, actual }),
         PinVerdict::Unavailable { reason } => Err(Error::PinUnavailable { reason }),
     }
+}
+
+/// Verify the chunk-concurrency provenance of the baseline against the boot
+/// that actually ran (issue #266).
+///
+/// The baseline manifest records the pinned concurrency its fixtures were
+/// captured under; the fresh boot's log reports what it actually ran with.
+/// They must agree — a baseline captured under unknown or wrong concurrency
+/// (or a fresh boot that drifted off the pin) is not a byte-determinism
+/// comparison. The strict requirement for region captures lives in
+/// `verify_fixtures`; this is the per-run side of the drift check.
+fn check_concurrency_provenance(baseline_dir: &Path, log_path: &Path) -> Result<(), Error> {
+    let manifest = load_manifest(baseline_dir)?;
+    let recorded = manifest.chunk_concurrency;
+    let log_text = fs::read(log_path)
+        .map_err(|e| Error::Gate(format!("cannot read boot log {}: {e}", log_path.display())))?;
+    let log_text = String::from_utf8_lossy(&log_text);
+    let observed = parse_boot_thread_counts(&log_text);
+
+    let recorded = match recorded {
+        Some(cc) if cc.is_pinned() => cc,
+        Some(cc) => {
+            return Err(Error::Manifest(format!(
+                "baseline records chunk-concurrency {}/{} — the oracle pin is exactly 1/1 \
+                 (issue #266); regenerate the fixtures under the pin",
+                cc.worker_threads, cc.io_threads
+            )));
+        }
+        None if is_region_capture(&manifest) => {
+            return Err(Error::Manifest(
+                "baseline is a region capture but records no chunk-concurrency provenance \
+                 (issue #266); regenerate it under the pin"
+                    .into(),
+            ));
+        }
+        None => ChunkConcurrency::PINNED,
+    };
+
+    let observed = match observed {
+        Some((w, i)) => ChunkConcurrency {
+            worker_threads: w,
+            io_threads: i,
+        },
+        None => {
+            return Err(Error::Gate(
+                "cannot confirm the concurrency the fresh boot ran with — no Moonrise \
+                 worker/I-O thread line in the boot log (issue #266)"
+                    .into(),
+            ));
+        }
+    };
+
+    if recorded != observed {
+        return Err(Error::Gate(format!(
+            "chunk-concurrency provenance drift: baseline recorded {}/{} but this boot ran \
+             {}/{} (issue #266)",
+            recorded.worker_threads,
+            recorded.io_threads,
+            observed.worker_threads,
+            observed.io_threads
+        )));
+    }
+    println!(
+        "   chunk concurrency: {} / {} (baseline provenance) — enforced (boot log)",
+        observed.worker_threads, observed.io_threads
+    );
+    Ok(())
 }
 
 /// Recursively copy a fixtures tree into `dst` (which is created). Used by the
@@ -710,6 +929,43 @@ fn prepare_run_dir(run_dir: &Path, server_properties_src: &Path) -> Result<(), E
 
     fs::copy(server_properties_src, run_dir.join("server.properties"))?;
     fs::write(run_dir.join("eula.txt"), EULA)?;
+
+    // Pin chunk-gen concurrency for deterministic oracle boots (issue #266):
+    // every boot runs under the committed fixtures/paper-global.yml, which sets
+    // chunk-system to exactly 1 worker / 1 I/O thread. Paper rewrites this file
+    // into the run dir with its full defaults on first boot; the committed
+    // source is re-copied every prepare so a stale run-dir config never
+    // survives to the next boot.
+    let config_dir = run_dir.join("config");
+    fs::create_dir_all(&config_dir)?;
+    let global_src = crate_dir().join("fixtures/paper-global.yml");
+    if !global_src.is_file() {
+        return Err(Error::Gate(format!(
+            "pinned Paper global config {} missing — every oracle boot must run under \
+             chunk-system io-threads=1 / worker-threads=1 (issue #266)",
+            global_src.display()
+        )));
+    }
+    fs::copy(&global_src, config_dir.join("paper-global.yml"))?;
+
+    // Pin entity spawning off for deterministic chunk payloads (issue #266): a
+    // mob that spawns into the save window would serialize into the captured
+    // chunks' 'Entities' tag, adding nondeterminism no normalization can remove.
+    // MC 26.2 removed the vanilla spawn-animals/monsters/npcs server.properties
+    // keys (DedicatedServerProperties reads none of them), so the effective
+    // switch is Paper's world-defaults spawn-limits — every category capped at
+    // 0, the same mechanism rivet-capture uses. Copied before every boot so a
+    // stale run-dir config (Paper rewrites it with its full defaults) never
+    // survives to the next run.
+    let defaults_src = crate_dir().join("fixtures/paper-world-defaults.yml");
+    if !defaults_src.is_file() {
+        return Err(Error::Gate(format!(
+            "pinned Paper world-defaults config {} missing — every oracle boot must run under \
+             spawn-limits 0 so no entity spawns into the capture window (issue #266)",
+            defaults_src.display()
+        )));
+    }
+    fs::copy(&defaults_src, config_dir.join("paper-world-defaults.yml"))?;
     Ok(())
 }
 
@@ -775,7 +1031,10 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> Result<(), Error> {
 /// stdout+stderr are teed to `log_path`. The server's world save happens both
 /// at `Done` and again on SIGTERM shutdown; we verify the post-Done log tail
 /// contains `All dimensions are saved` so an unclean save is caught, not
-/// silently diffed.
+/// silently diffed. Finally, the whole boot log is checked to confirm the
+/// pinned chunk concurrency (issue #266): every oracle boot must run under
+/// exactly 1 worker / 1 I/O thread, or the captured world is not
+/// byte-deterministic and the run is refused.
 fn boot_and_shutdown(run_dir: &Path, log_path: &Path, jar: &Path) -> Result<(), Error> {
     let log_file = fs::OpenOptions::new()
         .create(true)
@@ -817,6 +1076,10 @@ fn boot_and_shutdown(run_dir: &Path, log_path: &Path, jar: &Path) -> Result<(), 
             "server shut down without a clean save ('All dimensions are saved' missing from post-Done log tail)".into(),
         ));
     }
+
+    // Confirm the pinned chunk concurrency in the FULL boot log (the pin line
+    // is printed during startup, before `Done`).
+    check_boot_thread_pin(&String::from_utf8_lossy(&bytes))?;
     Ok(())
 }
 
@@ -828,10 +1091,15 @@ fn boot_and_shutdown(run_dir: &Path, log_path: &Path, jar: &Path) -> Result<(), 
 /// region capture passes `--chunks-only` so only the deterministic chunk-NBT
 /// payloads (no level.dat / server.properties wall-clock copies) are emitted —
 /// regeneration stays git-clean.
+///
+/// `observed` is the chunk concurrency the boot actually ran with (parsed from
+/// the boot log). For M2 region captures it is recorded into the manifest as
+/// `chunk-concurrency` provenance (issue #266); for other kinds it is ignored.
 fn extract_fresh_fixtures(
     world_dir: &Path,
     out_dir: &Path,
     chunks_only: bool,
+    observed: Option<ChunkConcurrency>,
 ) -> Result<(), Error> {
     let script = crate_dir().join("scripts/extract_fixtures.py");
     let mut cmd = Command::new("python3");
@@ -850,22 +1118,89 @@ fn extract_fresh_fixtures(
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
+
+    if chunks_only {
+        let observed = observed.ok_or_else(|| {
+            Error::Gate(
+                "M2 region extraction needs the boot's observed chunk concurrency to record \
+                 provenance (issue #266)"
+                    .into(),
+            )
+        })?;
+        inject_chunk_concurrency(out_dir, observed)?;
+    }
+    Ok(())
+}
+
+/// Record `chunk-concurrency` provenance into a manifest (issue #266).
+///
+/// `extract_fixtures.py` writes the manifest (alphabetically sorted keys,
+/// `indent=2`, trailing newline); we add the concurrency field with the same
+/// formatting so the file stays git-clean under identical input.
+fn inject_chunk_concurrency(dir: &Path, observed: ChunkConcurrency) -> Result<(), Error> {
+    let manifest_path = dir.join("manifest.json");
+    let mut root: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|e| {
+            Error::Gate(format!(
+                "cannot read {} to record chunk-concurrency: {e}",
+                manifest_path.display()
+            ))
+        })?)
+        .map_err(|e| {
+            Error::Gate(format!(
+                "manifest {} unparsable: {e}",
+                manifest_path.display()
+            ))
+        })?;
+    root["chunk-concurrency"] = serde_json::json!({
+        "worker-threads": observed.worker_threads,
+        "io-threads": observed.io_threads,
+    });
+    let mut text = serde_json::to_string_pretty(&root)
+        .map_err(|e| Error::Gate(format!("cannot serialize manifest: {e}")))?;
+    text.push('\n');
+    fs::write(&manifest_path, text)?;
     Ok(())
 }
 
 /// Boot a fresh Paper run in `run_dir` and extract its deterministic chunk-NBT
 /// slice into a temp dir. Returns the temp extraction dir (caller owns
-/// cleanup). Shared by the `verify` gates and negative controls.
-fn fresh_extraction(run_dir: &Path, jar: &Path, cfg: &BootConfig) -> Result<PathBuf, Error> {
-    let log_path = run_dir.with_file_name("boot.log");
+/// cleanup). Shared by the `verify` gates and negative controls. `tag`
+/// distinguishes concurrent/sequential extractions from the same process (the
+/// M2 twin-boot regeneration extracts two independent boots and needs both kept
+/// simultaneously). The boot always runs under the pinned `fixtures/paper-global.yml`
+/// and `boot_and_shutdown` refuses a boot that does not log the 1/1 pin (issue #266).
+///
+/// The boot log is kept at `run_dir/<parent>/boot-<tag>.log` and its path is
+/// returned with the extraction dir so callers can run the provenance drift
+/// check against the exact log that produced the extraction.
+fn fresh_extraction(
+    run_dir: &Path,
+    jar: &Path,
+    cfg: &BootConfig,
+    tag: &str,
+) -> Result<(PathBuf, PathBuf), Error> {
+    let log_path = run_dir.with_file_name(format!("boot-{tag}.log"));
     prepare_run_dir(run_dir, &cfg.props_src)?;
     boot_and_shutdown(run_dir, &log_path, jar)?;
-    let tmp = env::temp_dir().join(format!("rivet-oracle-verify-{}", std::process::id()));
+    let tmp = env::temp_dir().join(format!("rivet-oracle-verify-{}-{tag}", std::process::id()));
     if tmp.exists() {
         fs::remove_dir_all(&tmp)?;
     }
-    extract_fresh_fixtures(&run_dir.join("world"), &tmp, cfg.chunks_only)?;
-    Ok(tmp)
+    // M2 region extractions record the observed concurrency as provenance.
+    let observed = if cfg.chunks_only {
+        let log_text = fs::read(&log_path)?;
+        parse_boot_thread_counts(&String::from_utf8_lossy(&log_text)).map(|(w, i)| {
+            ChunkConcurrency {
+                worker_threads: w,
+                io_threads: i,
+            }
+        })
+    } else {
+        None
+    };
+    extract_fresh_fixtures(&run_dir.join("world"), &tmp, cfg.chunks_only, observed)?;
+    Ok((tmp, log_path))
 }
 
 /// Make a scratch copy of a baseline fixtures dir and corrupt one known chunk
@@ -956,13 +1291,14 @@ fn run_verify_negative_control(cfg: &BootConfig) -> Result<(), Error> {
         "[1/4] booting a fresh Paper run (scratch world in {})...",
         run_dir.display()
     );
-    let tmp = fresh_extraction(&run_dir, &jar, cfg)?;
+    let (tmp, boot_log) = fresh_extraction(&run_dir, &jar, cfg, "negcontrol")?;
     println!("[2/4] world saved cleanly; extracted deterministic chunk slice.");
 
     // The control is meaningless against a stale/unverifiable Paper (the pin
     // check would already fail `verify`, so a nonzero here proves nothing).
     // Checked after the boot so the pin is read from the jar that actually ran.
     check_pin(baseline_dir, &run_dir)?;
+    check_concurrency_provenance(baseline_dir, &boot_log)?;
 
     println!("[3/4] diffing fresh chunk-NBT hashes against the corrupted baseline...");
     let baseline = load_manifest(&scratch)?;
@@ -1076,7 +1412,9 @@ fn print_chunk_diff(diff: &ChunkDiff, baseline: &Manifest) {
     }
     println!();
     println!("A diff means this fresh Paper boot is NOT byte-identical to the committed golden");
-    println!("baseline. Do not fudge fixtures — investigate (see work/verify/boot.log and the");
+    println!(
+        "baseline. Do not fudge fixtures — investigate (see work/verify/boot-gate.log and the"
+    );
     println!("fresh extraction dir).");
 }
 
@@ -1101,10 +1439,11 @@ fn run_verify_gate(cfg: &BootConfig) -> Result<(), Error> {
         "[1/4] booting a fresh Paper run (scratch world in {})...",
         run_dir.display()
     );
-    let tmp = fresh_extraction(&run_dir, &jar, cfg)?;
+    let (tmp, boot_log) = fresh_extraction(&run_dir, &jar, cfg, "gate")?;
     println!("[2/4] world saved cleanly; extracted deterministic chunk slice.");
 
     check_pin(baseline_dir, &run_dir)?;
+    check_concurrency_provenance(baseline_dir, &boot_log)?;
 
     println!("[3/4] diffing fresh chunk-NBT hashes against the baseline...");
     let baseline = load_manifest(baseline_dir)?;
@@ -1236,37 +1575,156 @@ fn regenerate_samples() -> Result<(), Error> {
 /// Regenerate the M0 golden chunk slice: boot a fresh superflat run and extract
 /// the deterministic chunk-NBT payloads (+ level.dat / server.properties /
 /// manifest.json) straight into `fixtures/`. The gate's hash verification is
-/// the safety net against a bad regeneration.
+/// the safety net against a bad regeneration. The boot runs under the pinned
+/// `fixtures/paper-global.yml` (issue #266); `boot_and_shutdown` refuses a boot
+/// that does not log the 1/1 worker/I-O thread pin.
 fn regenerate_m0() -> Result<(), Error> {
     let jar = ensure_jar()?;
     let run_dir = crate_dir().join("work/verify/run");
     let props = crate_dir().join("fixtures/server.properties");
-    let log_path = run_dir.with_file_name("boot.log");
-    prepare_run_dir(&run_dir, &props)?;
-    boot_and_shutdown(&run_dir, &log_path, &jar)?;
-    extract_fresh_fixtures(&run_dir.join("world"), &crate_dir().join("fixtures"), false)?;
-    println!("regenerated M0 golden chunk slice under fixtures/");
-    Ok(())
-}
-
-/// Regenerate the M2 normal-overworld none-compression region payloads: boot a
-/// fresh run with `fixtures/server-normal.properties` (region-file-compression
-/// = none) and extract the deterministic chunk-NBT slice with `--chunks-only`
-/// into `fixtures/regions/overworld-normal/`.
-fn regenerate_m2() -> Result<(), Error> {
-    let jar = ensure_jar()?;
-    let run_dir = crate_dir().join("work/verify/run");
-    let props = crate_dir().join("fixtures/server-normal.properties");
-    let log_path = run_dir.with_file_name("boot.log");
+    let log_path = run_dir.with_file_name("boot-m0.log");
     prepare_run_dir(&run_dir, &props)?;
     boot_and_shutdown(&run_dir, &log_path, &jar)?;
     extract_fresh_fixtures(
         &run_dir.join("world"),
-        &crate_dir().join("fixtures/regions/overworld-normal"),
-        true,
+        &crate_dir().join("fixtures"),
+        false,
+        None,
     )?;
+    println!("regenerated M0 golden chunk slice under fixtures/");
+    Ok(())
+}
+
+/// Byte-for-byte compare two extraction trees (a twin-boot pair).
+///
+/// Compares every file present in either tree (relative path -> bytes). The
+/// M2 chunks-only extracts contain only the deterministic `.nbt` payloads and
+/// the manifest, so this is a strict byte-identity check — any file difference
+/// between the two independent boots means the generation is nondeterministic
+/// and the fixtures must NOT be committed.
+fn trees_byte_identical(a: &Path, b: &Path) -> Result<bool, Error> {
+    let mut a_files: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for entry in fs::read_dir(a)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let mut walk = vec![path];
+            while let Some(dir) = walk.pop() {
+                for e in fs::read_dir(&dir)? {
+                    let e = e?;
+                    if e.path().is_dir() {
+                        walk.push(e.path());
+                    } else {
+                        let rel = e
+                            .path()
+                            .strip_prefix(a)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned();
+                        a_files.insert(rel, e.path());
+                    }
+                }
+            }
+        } else {
+            let rel = path.strip_prefix(a).unwrap().to_string_lossy().into_owned();
+            a_files.insert(rel, path);
+        }
+    }
+
+    let mut b_files: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for entry in fs::read_dir(b)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let mut walk = vec![path];
+            while let Some(dir) = walk.pop() {
+                for e in fs::read_dir(&dir)? {
+                    let e = e?;
+                    if e.path().is_dir() {
+                        walk.push(e.path());
+                    } else {
+                        let rel = e
+                            .path()
+                            .strip_prefix(b)
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned();
+                        b_files.insert(rel, e.path());
+                    }
+                }
+            }
+        } else {
+            let rel = path.strip_prefix(b).unwrap().to_string_lossy().into_owned();
+            b_files.insert(rel, path);
+        }
+    }
+
+    if a_files.len() != b_files.len() {
+        return Ok(false);
+    }
+    for (rel, pa) in &a_files {
+        let Some(pb) = b_files.get(rel) else {
+            return Ok(false);
+        };
+        if fs::read(pa)? != fs::read(pb)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Regenerate the M2 normal-overworld none-compression region payloads with a
+/// twin-boot determinism proof (issue #266).
+///
+/// Performs TWO independent fresh Paper boots under the pinned concurrency and
+/// requires their extracted chunk-NBT payloads (and manifests) to be
+/// byte-identical before committing anything into
+/// `fixtures/regions/overworld-normal/`. If the pair diverges, the committed
+/// fixtures are left untouched and the two extraction trees are kept for
+/// inspection — a nondeterministic pair is never committed.
+fn regenerate_m2() -> Result<(), Error> {
+    let jar = ensure_jar()?;
+    let run_dir = crate_dir().join("work/verify/run");
+    let cfg = m2_config();
+
     println!(
-        "regenerated M2 normal-overworld region payloads under fixtures/regions/overworld-normal/"
+        "[1/3] twin-boot 1: fresh normal-overworld Paper boot under the 1/1 concurrency pin..."
+    );
+    let (boot_a, _) = fresh_extraction(&run_dir, &jar, &cfg, "m2a")?;
+    println!(
+        "[2/3] twin-boot 2: fresh normal-overworld Paper boot under the 1/1 concurrency pin..."
+    );
+    let (boot_b, _) = fresh_extraction(&run_dir, &jar, &cfg, "m2b")?;
+
+    println!("[3/3] byte-comparing the two independent extractions...");
+    if !trees_byte_identical(&boot_a, &boot_b)? {
+        eprintln!(
+            "regeneration ABORTED: the two independent Paper boots produced DIFFERENT \
+             chunk payloads — the M2 generation is not byte-deterministic, so nothing is \
+             committed (issue #266).\n\
+             boot A kept at: {}\n\
+             boot B kept at: {}\n\
+             committed fixtures under fixtures/regions/overworld-normal/ were NOT touched.",
+            boot_a.display(),
+            boot_b.display()
+        );
+        return Err(Error::Gate(
+            "M2 twin-boot byte-identity check failed — refusing to commit a nondeterministic pair"
+                .into(),
+        ));
+    }
+
+    let target = crate_dir().join("fixtures/regions/overworld-normal");
+    if target.exists() {
+        fs::remove_dir_all(&target)?;
+    }
+    fs::create_dir_all(&target)?;
+    copy_dir_recursive(&boot_a, &target)?;
+    let _ = fs::remove_dir_all(&boot_a);
+    let _ = fs::remove_dir_all(&boot_b);
+    println!(
+        "regenerated M2 normal-overworld region payloads under fixtures/regions/overworld-normal/ \
+         (twin-boot byte-identical; chunk-concurrency provenance recorded)"
     );
     Ok(())
 }
@@ -1479,6 +1937,14 @@ mod tests {
             "D13: normal-overworld region captures use region-file-compression=none"
         );
         assert_eq!(manifest.level_type.as_deref(), Some("minecraft\\:normal"));
+        // Issue #266: a none-compression region capture MUST record the pinned
+        // 1/1 worker/I-O concurrency it was generated under. Missing or drifted
+        // provenance is a hard failure, never a skip.
+        assert_eq!(
+            manifest.chunk_concurrency,
+            Some(ChunkConcurrency::PINNED),
+            "region capture must record pinned 1/1 chunk concurrency (issue #266)"
+        );
         let mut dims: BTreeMap<&str, usize> = BTreeMap::new();
         for c in &manifest.captured {
             if let Some(d) = c.dim.as_deref() {
@@ -1488,6 +1954,403 @@ mod tests {
         assert_eq!(dims.get("overworld"), Some(&120));
         assert_eq!(dims.get("the_nether"), Some(&144));
         assert_eq!(dims.get("the_end"), Some(&144));
+    }
+
+    /// The committed `fixtures/paper-global.yml` (the pinned Paper global config
+    /// every oracle boot runs under) must set chunk-system to exactly 1 worker
+    /// and 1 I/O thread (issue #266).
+    #[test]
+    fn pinned_global_config_is_serialized() {
+        let f = fixtures_dir().join("paper-global.yml");
+        if !f.is_file() {
+            return;
+        }
+        let text = fs::read_to_string(&f).unwrap();
+        assert!(
+            text.contains("io-threads: 1"),
+            "pinned paper-global.yml must set chunk-system.io-threads=1"
+        );
+        assert!(
+            text.contains("worker-threads: 1"),
+            "pinned paper-global.yml must set chunk-system.worker-threads=1"
+        );
+    }
+
+    /// `is_region_capture` discriminates on the concurrency-sensitive M2 case:
+    /// normal-overworld + none-compression + nonzero chunk count. The M0
+    /// superflat slice is ALSO none-compression + chunk-count>0 but its flat
+    /// worldgen is not concurrency-sensitive — a `regenerate --m0` produces
+    /// exactly that shape (region-file-compression=none from the props, no
+    /// chunk-concurrency provenance) and must NOT be treated as a region
+    /// capture, or the gate would reject the regenerated M0 manifest (issue
+    /// #266).
+    #[test]
+    fn region_capture_discriminates_normal_overworld() {
+        let normal = Manifest {
+            format: 1,
+            seed: Some("42".into()),
+            level_type: Some("minecraft\\:normal".into()),
+            paper: Some("26.2-DEV-main@0a99345".into()),
+            chunk_count: Some(408),
+            region_file_compression: Some("none".into()),
+            kind: None,
+            chunk_concurrency: None,
+            captured: Vec::new(),
+        };
+        assert!(
+            is_region_capture(&normal),
+            "normal + none + chunks is the M2 capture"
+        );
+
+        // M0 superflat slice: same compression + chunk count, but flat level
+        // type — must NOT be classified as the concurrency-sensitive capture.
+        let m0 = Manifest {
+            level_type: Some("minecraft\\:flat".into()),
+            chunk_count: Some(432),
+            ..normal.clone()
+        };
+        assert!(
+            !is_region_capture(&m0),
+            "M0 superflat is not a region capture"
+        );
+
+        // Non-none compression or zero chunks are not a region capture either.
+        let deflate = Manifest {
+            region_file_compression: Some("deflate".into()),
+            ..normal.clone()
+        };
+        assert!(!is_region_capture(&deflate));
+        let empty = Manifest {
+            chunk_count: Some(0),
+            ..normal
+        };
+        assert!(!is_region_capture(&empty));
+    }
+
+    /// A freshly regenerated M0 manifest has the exact shape the gate must
+    /// accept without chunk-concurrency provenance: `region-file-compression=none`
+    /// (emitted by extract_fixtures.py from the M0 props), `chunk-count`, and
+    /// `level-type=minecraft:flat`, with no `chunk-concurrency` field (the M0
+    /// path never injects it). `verify_fixtures` must accept it — this is the
+    /// documented `regenerate --m0` refresh path (issue #266).
+    #[test]
+    fn regenerated_m0_manifest_verifies_without_provenance() {
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-m0shape-{}", std::process::id()));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        fs::create_dir_all(&scratch).unwrap();
+        fs::write(
+            scratch.join("manifest.json"),
+            serde_json::json!({
+                "format": 1,
+                "paper": "26.2-DEV-main@0a99345",
+                "seed": "42",
+                "level-type": "minecraft\\:flat",
+                "level-name": "world",
+                "region-file-compression": "none",
+                "spawn-region": "0.0",
+                "chunk-count": 432,
+                "captured": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // No captured files means only the structural checks run: the format,
+        // the hashes (none), and the chunk-concurrency provenance gating. A
+        // flat slice must not be treated as a region capture.
+        verify_fixtures(&scratch).expect("regenerated-M0-shaped manifest must verify clean");
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// The committed `fixtures/paper-world-defaults.yml` (the pinned Paper
+    /// world-defaults every oracle boot runs under) must cap every
+    /// `entities.spawning.spawn-limits.*` category at 0 (issue #266). MC 26.2
+    /// removed the vanilla spawn-monsters/animals/npcs server.properties keys,
+    /// so these spawn-limits are the effective no-entity-spawn switch.
+    #[test]
+    fn pinned_world_defaults_caps_all_spawn_limits() {
+        let f = fixtures_dir().join("paper-world-defaults.yml");
+        if !f.is_file() {
+            return;
+        }
+        let text = fs::read_to_string(&f).unwrap();
+        for category in [
+            "ambient",
+            "axolotls",
+            "creature",
+            "monster",
+            "underground_water_creature",
+            "water_ambient",
+            "water_creature",
+        ] {
+            let needle = format!("{category}: 0");
+            assert!(
+                text.contains(&needle),
+                "pinned paper-world-defaults.yml must cap spawn-limit {category} at 0"
+            );
+        }
+    }
+
+    /// `prepare_run_dir` must copy BOTH pinned config files into the run dir's
+    /// `config/` before every boot: paper-global.yml (chunk-system 1/1, #266)
+    /// and paper-world-defaults.yml (spawn-limits 0, #266). A boot that misses
+    /// either is not byte-deterministic.
+    #[test]
+    fn prepare_run_dir_installs_pinned_configs() {
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-prepare-{}", std::process::id()));
+        let run_dir = scratch.join("run");
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        let props = fixtures_dir().join("server.properties");
+        prepare_run_dir(&run_dir, &props).expect("prepare_run_dir must succeed");
+
+        let config = run_dir.join("config");
+        assert!(
+            config.join("paper-global.yml").is_file(),
+            "paper-global.yml must be copied into the run config"
+        );
+        assert!(
+            config.join("paper-world-defaults.yml").is_file(),
+            "paper-world-defaults.yml must be copied into the run config"
+        );
+        // The copied files are byte-identical to the committed fixtures.
+        assert_eq!(
+            fs::read(config.join("paper-global.yml")).unwrap(),
+            fs::read(fixtures_dir().join("paper-global.yml")).unwrap()
+        );
+        assert_eq!(
+            fs::read(config.join("paper-world-defaults.yml")).unwrap(),
+            fs::read(fixtures_dir().join("paper-world-defaults.yml")).unwrap()
+        );
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// Parsing the exact Moonrise log line yields the pinned (1, 1) counts.
+    #[test]
+    fn parse_boot_thread_counts_accepts_pinned() {
+        let log =
+            "[02:08:08 INFO]: [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads\n";
+        assert_eq!(parse_boot_thread_counts(log), Some((1, 1)));
+    }
+
+    /// A boot log reporting more than one worker (the pre-pin default) is the
+    /// "wrong config" case — parsed as-is so the caller can reject it.
+    #[test]
+    fn parse_boot_thread_counts_reports_off_pin() {
+        let log =
+            "[01:05:38 INFO]: [MoonriseCommon] Paper is using 3 worker threads, 1 I/O threads\n";
+        assert_eq!(parse_boot_thread_counts(log), Some((3, 1)));
+    }
+
+    /// A log with no Moonrise thread line is the "config missing/ineffective"
+    /// case — parsed as None so the caller rejects it as unconfirmed.
+    #[test]
+    fn parse_boot_thread_counts_missing_is_none() {
+        assert_eq!(parse_boot_thread_counts("no thread line here\n"), None);
+        assert_eq!(parse_boot_thread_counts(""), None);
+    }
+
+    /// Two pin lines in one log is ambiguous — refuse to guess.
+    #[test]
+    fn parse_boot_thread_counts_ambiguous_is_none() {
+        let log = "\
+[1] Paper is using 1 worker threads, 1 I/O threads
+[2] Paper is using 1 worker threads, 1 I/O threads
+";
+        assert_eq!(parse_boot_thread_counts(log), None);
+    }
+
+    /// `check_boot_thread_pin` accepts exactly 1 worker / 1 I/O thread.
+    #[test]
+    fn boot_thread_pin_accepts_pinned() {
+        let log =
+            "[02:08:08 INFO]: [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads\n";
+        check_boot_thread_pin(log).expect("pinned log must pass the pin check");
+    }
+
+    /// `check_boot_thread_pin` rejects a boot that ran with more threads
+    /// (ineffective or overridden pin) — a hard failure, never a skip.
+    #[test]
+    fn boot_thread_pin_rejects_off_pin() {
+        let log =
+            "[01:05:38 INFO]: [MoonriseCommon] Paper is using 4 worker threads, 2 I/O threads\n";
+        match check_boot_thread_pin(log) {
+            Err(Error::Gate(m)) => {
+                assert!(
+                    m.contains("4 worker threads"),
+                    "message names the observed counts: {m}"
+                );
+            }
+            other => panic!("expected Gate error, got {other:?}"),
+        }
+    }
+
+    /// `check_boot_thread_pin` rejects a boot whose log has no thread line at
+    /// all (missing/ineffective config) — the loud-failure guarantee.
+    #[test]
+    fn boot_thread_pin_rejects_missing_line() {
+        match check_boot_thread_pin("Done (...)!") {
+            Err(Error::Gate(m)) => {
+                assert!(
+                    m.contains("no Moonrise"),
+                    "message explains the missing pin: {m}"
+                );
+            }
+            other => panic!("expected Gate error, got {other:?}"),
+        }
+    }
+
+    /// A region-capture manifest with MISSING concurrency provenance fails
+    /// static verification — never a silent pass.
+    #[test]
+    fn region_manifest_requires_concurrency_provenance() {
+        let dir = fixtures_dir().join("regions/overworld-normal");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        // Copy the committed region fixtures to scratch and strip the
+        // chunk-concurrency field, then verify must reject the drift.
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-provenance-{}", std::process::id()));
+        copy_dir_recursive(&dir, &scratch).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(scratch.join("manifest.json")).unwrap())
+                .unwrap();
+        v.as_object_mut().unwrap().remove("chunk-concurrency");
+        fs::write(
+            scratch.join("manifest.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        match verify_fixtures(&scratch) {
+            Err(Error::Manifest(m)) => {
+                assert!(
+                    m.contains("chunk-concurrency"),
+                    "message names the missing provenance: {m}"
+                );
+            }
+            other => panic!("expected Manifest error, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// A region-capture manifest with WRONG (non-1/1) concurrency provenance
+    /// fails static verification — drift is detected, never accepted.
+    #[test]
+    fn region_manifest_rejects_wrong_provenance() {
+        let dir = fixtures_dir().join("regions/overworld-normal");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-provenance2-{}", std::process::id()));
+        copy_dir_recursive(&dir, &scratch).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(scratch.join("manifest.json")).unwrap())
+                .unwrap();
+        v["chunk-concurrency"] = serde_json::json!({
+            "worker-threads": 3,
+            "io-threads": 1,
+        });
+        fs::write(
+            scratch.join("manifest.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+        match verify_fixtures(&scratch) {
+            Err(Error::Manifest(m)) => {
+                assert!(m.contains("3/1"), "message names the drifted counts: {m}");
+            }
+            other => panic!("expected Manifest error, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// Provenance drift: a baseline recorded under 1/1 but a boot that ran 3/1
+    /// is caught and named by `check_concurrency_provenance`.
+    #[test]
+    fn concurrency_provenance_detects_run_drift() {
+        let dir = fixtures_dir().join("regions/overworld-normal");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let log =
+            std::env::temp_dir().join(format!("rivet-oracle-drift-{}.log", std::process::id()));
+        fs::write(
+            &log,
+            "[01:05:38 INFO]: Paper is using 3 worker threads, 1 I/O threads\n",
+        )
+        .unwrap();
+        match check_concurrency_provenance(&dir, &log) {
+            Err(Error::Gate(m)) => {
+                assert!(
+                    m.contains("provenance drift"),
+                    "message names the drift: {m}"
+                );
+            }
+            other => panic!("expected Gate error, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&log);
+    }
+
+    /// Provenance match: a baseline and boot both under 1/1 is accepted.
+    #[test]
+    fn concurrency_provenance_accepts_match() {
+        let dir = fixtures_dir().join("regions/overworld-normal");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let log =
+            std::env::temp_dir().join(format!("rivet-oracle-match-{}.log", std::process::id()));
+        fs::write(
+            &log,
+            "[02:08:08 INFO]: Paper is using 1 worker threads, 1 I/O threads\n",
+        )
+        .unwrap();
+        check_concurrency_provenance(&dir, &log).expect("matching provenance must pass");
+        let _ = fs::remove_dir_all(&log);
+    }
+
+    /// Twin-boot byte-identity: identical trees are identical, and a single
+    /// flipped chunk byte is detected (the regeneration never commits a
+    /// nondeterministic pair).
+    #[test]
+    fn trees_byte_identical_detects_twin_boot_mismatch() {
+        let a = std::env::temp_dir().join(format!("rivet-oracle-tree-a-{}", std::process::id()));
+        let b = std::env::temp_dir().join(format!("rivet-oracle-tree-b-{}", std::process::id()));
+        for d in [&a, &b] {
+            fs::create_dir_all(d.join("chunk/overworld/0.0")).unwrap();
+            fs::write(d.join("manifest.json"), b"{\"format\":1}").unwrap();
+            fs::write(d.join("chunk/overworld/0.0/0.0.nbt"), b"payload").unwrap();
+        }
+        assert!(
+            trees_byte_identical(&a, &b).expect("identical trees compare clean"),
+            "identical trees must be byte-identical"
+        );
+
+        // Flip a byte in B's chunk — the pair is now different.
+        let flipped = b.join("chunk/overworld/0.0/0.0.nbt");
+        fs::write(&flipped, b"payloadX").unwrap();
+        assert!(
+            !trees_byte_identical(&a, &b).expect("comparison runs"),
+            "a differing chunk must be detected"
+        );
+
+        // Missing file in B is also a mismatch.
+        fs::write(&flipped, b"payload").unwrap();
+        fs::remove_file(b.join("chunk/overworld/0.0/0.0.nbt")).unwrap();
+        assert!(
+            !trees_byte_identical(&a, &b).expect("comparison runs"),
+            "a missing chunk must be detected"
+        );
+
+        for d in [&a, &b] {
+            let _ = fs::remove_dir_all(d);
+        }
     }
 
     /// The committed worldgen samples are the expected semantic shape: 25

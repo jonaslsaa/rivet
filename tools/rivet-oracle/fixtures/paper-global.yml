@@ -1,0 +1,16 @@
+# Pinned Paper global configuration for deterministic oracle boots (issue #266).
+#
+# A byte-identity oracle "from seed alone" is not well-posed while Paper's
+# Moonrise chunk system concurrently runs adjacent chunks' FEATURES passes: the
+# normal-overworld Nether vegetation placement races across chunk borders, so
+# the same seed + config can produce alternate block states depending on
+# scheduling and core count. Pinning chunk-system to exactly one worker thread
+# and one I/O thread serializes worldgen, making the same seed + config yield
+# the same chunks every boot.
+#
+# Only the keys that affect chunk-generation concurrency are set here. Paper
+# fills in every other global default on first boot (it rewrites this file in
+# the run dir), so the committed config stays minimal and version-robust.
+chunk-system:
+  io-threads: 1
+  worker-threads: 1
