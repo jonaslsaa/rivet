@@ -103,6 +103,16 @@ pub enum DisconnectReason {
     /// does not handle).
     #[error("multiplayer.status.request_handled")]
     RequestHandled,
+    /// The Paper anti-cheat kick for a play movement/teleport-ack frame that
+    /// fails validation (issue #158): a NaN position / non-finite rotation in
+    /// `handleMovePlayer` or a teleport ack whose id matches with no pending
+    /// position in `handleAcceptTeleportPacket`. The reason records Paper's
+    /// `multiplayer.disconnect.invalid_player_movement` translation key. No
+    /// clientbound disconnect body is transmitted for it yet — `ClientboundDisconnectPacket`
+    /// is still a STUB — so the observable behavior is the socket closing with
+    /// a server-side log, not the client showing the key.
+    #[error("multiplayer.disconnect.invalid_player_movement")]
+    InvalidPlayerMovement,
     /// Slice-local outbound-overload disconnect: the tick side dropped this
     /// connection's tick→network channel when it overflowed (the bounded-channel
     /// backpressure policy of sub-issue #93). Paper's netty outbound buffer is

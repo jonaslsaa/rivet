@@ -218,6 +218,9 @@ async fn run_connection(
         DisconnectReason::Unsupported(msg) => info!(%id, %remote, "unsupported: {msg}"),
         DisconnectReason::ServerShutdown => debug!(%id, %remote, "server shutdown"),
         DisconnectReason::RequestHandled => info!(%id, %remote, "status request handled"),
+        DisconnectReason::InvalidPlayerMovement => {
+            warn!(%id, %remote, "invalid player movement, disconnected")
+        }
         DisconnectReason::Overflow => warn!(%id, %remote, "outbound overflow, disconnected"),
         DisconnectReason::InboundOverflow(msg) => {
             warn!(%id, %remote, "inbound overflow, disconnected: {msg}")

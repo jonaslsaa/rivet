@@ -402,6 +402,7 @@ fn run_burst_with_requested(
         world,
         config,
         requested_view_distance,
+        1, // the spawn teleport's `awaitingTeleport` id (issue #158)
     )
     .expect("burst encodes + queues");
 
@@ -446,7 +447,12 @@ fn place_new_player_sends_paper_order_and_byte_exact_bodies() {
             ids::LOGIN => assert_eq!(body, &protocol_fixture("join_clientbound_login")),
             ids::PLAYER_ABILITIES => assert_eq!(body, &hex_bytes("003d4ccccd3dcccccd")),
             ids::PLAYER_POSITION => {
-                assert_eq!(body, &protocol_fixture("join_clientbound_player_position"))
+                // The live spawn teleport embeds `awaitingTeleport = 1` (issue
+                // #158), unlike the capture fixture's canonical id 0. The body
+                // is the fixture with the leading id varint rewritten.
+                let mut expected = protocol_fixture("join_clientbound_player_position");
+                expected[0] = 0x01;
+                assert_eq!(body, &expected, "spawn teleport id 1");
             }
             ids::SET_TIME => assert_eq!(body, &protocol_fixture("join_clientbound_set_time")),
             ids::INITIALIZE_BORDER => assert_eq!(body, &border_body()),
@@ -690,6 +696,7 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
                 &level,
                 &config,
                 None,
+                1, // spawn teleport id (issue #158)
             );
         })],
         stats.clone(),

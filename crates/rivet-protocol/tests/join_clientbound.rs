@@ -18,7 +18,12 @@
 //!   offline `RivetProbe` entry (`chatSession null`, `gameMode 0`, `listed 1`,
 //!   `latency 0`, no display name, `listOrder 0`, `showHat 1`).
 //! - `join_clientbound_player_position` (61 B): `id 0`, position
-//!   `(0, -63, 0)`, zero delta, zero rotation, empty relatives.
+//!   `(0, -63, 0)`, zero delta, zero rotation, empty relatives. The fixture's
+//!   `id 0` is the canonical capture normalization (the captured packet's
+//!   leading teleport id was rewritten to 0 for the committed corpus); the live
+//!   spawn teleport embeds a real `awaitingTeleport = 1` instead (issue #158),
+//!   which `join_burst.rs` covers by rewriting the leading id varint of this
+//!   body to `0x01`.
 //! - `join_clientbound_set_time` (29 B): `gameTime 0`, two clock updates
 //!   `{holder 0, (0, 0.0, 1.0)}`, `{holder 1, (0, 0.0, 1.0)}`.
 //!

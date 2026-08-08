@@ -1353,3 +1353,142 @@ async fn live_keepalive_unanswered_challenge_is_disconnected() {
     expect_eof_allowing_trailing(&mut client).await;
     server_task.abort();
 }
+
+// ---- issue #158: live movement + teleport-ack wiring over TCP ----
+//
+// The unit tests in `server::player::session` prove the tick-owned state
+// transitions (accepted position/rotation via the `player_position`/`player_yaw`
+// accessors). These live tests prove the wire path: a serverbound move/ack
+// frame written over a real socket reaches the tick thread, and the semantic
+// outcome is observable — a non-finite move closes the connection (the
+// `invalid_player_movement` kick), a correct/wrong ack and an ignored
+// pre-ack move keep it open. The spawn teleport (`placeNewPlayer` →
+// `teleport`) embeds `awaitingTeleport = 1`.
+
+/// Frame a serverbound play `accept_teleportation` (id 0) echoing the given
+/// teleport id, under the compression threshold (declaredLength 0).
+fn play_accept_teleport_frame(teleport_id: i32) -> Vec<u8> {
+    let mut body = varint(0);
+    body.extend_from_slice(&varint(teleport_id));
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// Frame a serverbound play `move_player_pos` (id 30) carrying a position (3
+/// doubles + the 1-byte flags, not on ground).
+fn play_move_pos_frame(x: f64, y: f64, z: f64) -> Vec<u8> {
+    let mut body = varint(30);
+    body.extend_from_slice(&x.to_be_bytes());
+    body.extend_from_slice(&y.to_be_bytes());
+    body.extend_from_slice(&z.to_be_bytes());
+    body.push(0x00);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// Frame a serverbound play `move_player_rot` (id 32) carrying a rotation (2
+/// floats + the 1-byte flags).
+fn play_move_rot_frame(y_rot: f32, x_rot: f32) -> Vec<u8> {
+    let mut body = varint(32);
+    body.extend_from_slice(&y_rot.to_be_bytes());
+    body.extend_from_slice(&x_rot.to_be_bytes());
+    body.push(0x00);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// A stale/wrong ack id is a silent no-op over the live wire: no kick (the
+/// connection stays open), and the spawn teleport survives — the subsequent
+/// correct ack (id 1) still accepts, so a movement frame after it is not
+/// rejected. A matching id with no pending position would have kicked.
+#[tokio::test]
+async fn live_wrong_ack_then_correct_ack_keeps_connection_open() {
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    client
+        .write_all(&play_accept_teleport_frame(999))
+        .await
+        .expect("write stale ack");
+    expect_silent_open(&mut client).await;
+
+    // The correct ack for the spawn teleport (id 1) is accepted, and a move
+    // after it routes through the tick-owned player without a kick.
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write correct ack");
+    client
+        .write_all(&play_move_pos_frame(5.0, -63.0, 5.0))
+        .await
+        .expect("write move after ack");
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// A move before the spawn teleport is acked is ignored (position movement is
+/// withheld while `awaitingTeleport` is pending, `updateAwaitingTeleport`): no
+/// kick, and the pending teleport survives the ignored move — the correct ack
+/// still accepts.
+#[tokio::test]
+async fn live_move_before_ack_is_ignored_and_teleport_survives() {
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    client
+        .write_all(&play_move_pos_frame(100.0, -63.0, 100.0))
+        .await
+        .expect("write move before ack");
+    expect_silent_open(&mut client).await;
+
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write ack");
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// A non-finite rotation in a live move frame fires the Paper-faithful
+/// `invalid_player_movement` kick: the tick-owned movement gate closes the
+/// connection over the real wire (EOF, tolerating any trailing keepalive
+/// frame the close flushed).
+#[tokio::test]
+async fn live_nan_rotation_move_disconnects() {
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    client
+        .write_all(&play_move_rot_frame(f32::NAN, 30.0))
+        .await
+        .expect("write NaN rotation move");
+    expect_eof_allowing_trailing(&mut client).await;
+    server_task.abort();
+}
+
+/// An `accept_teleportation` whose id matches the current `awaitingTeleport`
+/// but for which no teleport is pending is the Paper-faithful
+/// `invalid_player_movement` kick (`handleAcceptTeleportPacket`): after the
+/// spawn teleport (id 1) is acked and the pending marker cleared, a second ack
+/// with the same id matches the counter but finds no awaited position, so the
+/// connection closes. This exercises the `InvalidMovementKick` path over a real
+/// socket, not just as a state-machine unit test.
+#[tokio::test]
+async fn live_matching_ack_with_no_pending_teleport_disconnects() {
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    // Ack the spawn teleport (id 1): accepted, pending cleared.
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write first ack");
+    expect_silent_open(&mut client).await;
+
+    // A matching id with no pending position is the kick: the connection EOFs.
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write second ack");
+    expect_eof_allowing_trailing(&mut client).await;
+    server_task.abort();
+}
