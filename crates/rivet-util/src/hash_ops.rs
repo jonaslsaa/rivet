@@ -28,10 +28,11 @@
 //! - The builders are the DFU `AbstractUniversalBuilder` (map) and
 //!   `AbstractListBuilder` (list) shapes with `DataResult`-accumulated state.
 //!   Their `assert prefix.equals(empty)` is NOT ported as a runtime check:
-//!   Java assertions are off by default (Paper does not run with `-ea`), so a
-//!   non-empty build prefix is silently ignored — verified against the Java
-//!   run (`mapBuilder_nonempty_prefix`/`listBuilder_nonempty_prefix` hashes are
-//!   the entry-only hashes).
+//!   Rivet deliberately matches pinned Paper's normal runtime, which runs
+//!   without `-ea` so the `assert` is never evaluated; a non-empty build prefix
+//!   is silently ignored — verified against the Java run
+//!   (`mapBuilder_nonempty_prefix`/`listBuilder_nonempty_prefix` hashes are the
+//!   entry-only hashes).
 //!
 //! The `HashFunction` surface is modeled as the enum Guava's constructor takes;
 //! only `CRC32C_INSTANCE` is ever constructed in Minecraft. `crc32c` (the
@@ -734,9 +735,9 @@ impl RecordBuilder for MapHashBuilder {
 
     /// `AbstractBuilder.build(T prefix)` — `builder.flatMap(b -> build(b,
     /// prefix))`, then reset. `build(List, prefix)` hashes the accumulated
-    /// pairs; the Java `assert isEmpty(prefix)` is default-off, so a non-empty
-    /// prefix is ignored (see the module doc and `mapBuilder_nonempty_prefix`
-    /// golden).
+    /// pairs; the Java `assert isEmpty(prefix)` is not evaluated in pinned
+    /// Paper's runtime (no `-ea`), so a non-empty prefix is ignored (see the
+    /// module doc and `mapBuilder_nonempty_prefix` golden).
     fn build(&mut self, prefix: Option<HashCode>) -> DataResult<HashCode> {
         let _ = prefix;
         let prev = self.builder.clone();
@@ -808,8 +809,9 @@ impl ListBuilder for ListHashBuilder {
 
     /// `AbstractListBuilder.build(T prefix)` — `build(hasher, prefix)` appends
     /// the list end tag and hashes; the Java `assert prefix.equals(empty)` is
-    /// default-off, so a non-empty prefix is ignored (see the module doc and
-    /// `listBuilder_nonempty_prefix` golden).
+    /// not evaluated in pinned Paper's runtime (no `-ea`), so a non-empty
+    /// prefix is ignored (see the module doc and `listBuilder_nonempty_prefix`
+    /// golden).
     fn build(&mut self, _prefix: HashCode) -> DataResult<HashCode> {
         let prev = self.builder.clone();
         let result = prev.flat_map(|mut h| {
@@ -1080,8 +1082,9 @@ mod tests {
 
     #[test]
     fn builders_ignore_nonempty_prefix() {
-        // Java `assert prefix.equals(empty)` is off by default, so the build
-        // prefix is silently ignored: the golden hashes are the entry-only ones.
+        // Pinned Paper runs without `-ea`, so its `assert prefix.equals(empty)`
+        // is not evaluated and the build prefix is silently ignored: the golden
+        // hashes are the entry-only ones.
         let o = ops();
         let mut rb = o.map_builder();
         rb.add_string("a", o.create_int(1));
