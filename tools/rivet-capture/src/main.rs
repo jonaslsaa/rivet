@@ -49,6 +49,7 @@ mod structured;
 mod variance;
 
 use std::env;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
@@ -108,12 +109,58 @@ fn client_binary() -> Result<PathBuf, String> {
     ))
 }
 
-/// Pick a free localhost port for the proxy (bind-then-release; fine for a harness).
-fn free_port() -> io::Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+/// The capture harness's error type. Carries the machine-stable exit code so
+/// `main` can honor the shared 0 PASS / 1 FAIL / 3 UNVERIFIED contract: a
+/// missing prerequisite or a server that never booted is UNVERIFIED (nothing
+/// was compared), every other failure is FAIL.
+#[derive(Debug)]
+enum CaptureError {
+    Unverified(String),
+    Fail(String),
+}
+
+impl CaptureError {
+    fn exit_code(&self) -> u8 {
+        match self {
+            CaptureError::Unverified(_) => rivet_harness_common::exit::EXIT_UNVERIFIED,
+            CaptureError::Fail(_) => rivet_harness_common::exit::EXIT_FAIL,
+        }
+    }
+}
+
+impl fmt::Display for CaptureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CaptureError::Unverified(m) | CaptureError::Fail(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl From<String> for CaptureError {
+    fn from(m: String) -> Self {
+        CaptureError::Fail(m)
+    }
+}
+
+impl From<&str> for CaptureError {
+    fn from(m: &str) -> Self {
+        CaptureError::Fail(m.to_owned())
+    }
+}
+
+impl From<io::Error> for CaptureError {
+    fn from(e: io::Error) -> Self {
+        CaptureError::Fail(e.to_string())
+    }
+}
+
+impl From<server::Error> for CaptureError {
+    fn from(e: server::Error) -> Self {
+        match e {
+            server::Error::Unverified(m) => CaptureError::Unverified(m),
+            other => CaptureError::Fail(other.to_string()),
+        }
+    }
 }
 
 struct ClientRun {
@@ -170,8 +217,8 @@ fn client_joined(stdout: &str) -> bool {
 async fn capture_one(
     work: &Path,
     idx: usize,
-) -> Result<(Vec<CapturedPacket>, Vec<NormalizedPacket>), String> {
-    let jar = server::ensure_jar(&crate_root()).map_err(|e| e.to_string())?;
+) -> Result<(Vec<CapturedPacket>, Vec<NormalizedPacket>), CaptureError> {
+    let jar = server::ensure_jar(&crate_root())?;
     let client_bin = client_binary()?;
     // The capture's own server config (seed 42 / superflat / offline, mob
     // spawning disabled so the world is empty apart from the player — the
@@ -184,14 +231,16 @@ async fn capture_one(
         return Err(format!(
             "server.properties not found at {} (rivet-capture fixtures)",
             server_properties.display()
-        ));
+        )
+        .into());
     }
     let world_defaults = crate_root().join("fixtures/paper-world-defaults.yml");
     if !world_defaults.is_file() {
         return Err(format!(
             "paper-world-defaults.yml not found at {} (rivet-capture fixtures)",
             world_defaults.display()
-        ));
+        )
+        .into());
     }
 
     let run_dir = work.join(format!("run{idx}"));
@@ -203,10 +252,14 @@ async fn capture_one(
         &jar,
         &server_properties,
         &world_defaults,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
-    let proxy_port = free_port().map_err(|e| e.to_string())?;
+    // Reserve the proxy port and HOLD the bound listener through the (slow)
+    // server boot, so the OS cannot hand the port to another process before
+    // the proxy binds it. The listener is released only immediately before the
+    // proxy task binds the address.
+    let proxy_reservation = rivet_harness_common::port::PortReservation::bind()?;
+    let proxy_port = proxy_reservation.port();
     let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}")
         .parse()
         .expect("proxy addr");
@@ -214,6 +267,7 @@ async fn capture_one(
         .parse()
         .expect("server addr");
     println!("[proxy {idx}] 127.0.0.1:{proxy_port} -> 127.0.0.1:{SERVER_PORT}");
+    proxy_reservation.release();
 
     let proxy_task = tokio::spawn(proxy::run(proxy_addr, server_addr));
 
@@ -229,7 +283,7 @@ async fn capture_one(
         );
     }
     println!("[run   {idx}] client joined; shutting down Paper cleanly (SIGTERM)...");
-    server::shutdown(&mut srv).map_err(|e| e.to_string())?;
+    server::shutdown(&mut srv)?;
 
     let shared = proxy_task
         .await
@@ -530,7 +584,7 @@ fn parse_args() -> Result<Subcommand, String> {
 /// The negative control: copy the committed fixture, corrupt one packet body
 /// and its manifest SHA-256 (so the copy is internally consistent), then boot
 /// fresh and require the divergence to name the tampered packet.
-async fn run_negative_control() -> Result<(), String> {
+async fn run_negative_control() -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/verify");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -544,7 +598,8 @@ async fn run_negative_control() -> Result<(), String> {
     if scratch.exists() {
         fs::remove_dir_all(&scratch).map_err(|e| e.to_string())?;
     }
-    copy_dir_recursive(&baseline, &scratch).map_err(|e| e.to_string())?;
+    rivet_harness_common::negative::copy_dir_recursive(&baseline, &scratch)
+        .map_err(|e| e.to_string())?;
     let (tampered_index, tampered_identity) = tamper_fixture_copy(&scratch)?;
     println!(
         "   fixture copied to {} and packet [{tampered_index}] ({tampered_identity}) corrupted",
@@ -562,51 +617,31 @@ async fn run_negative_control() -> Result<(), String> {
     // The negative control passes only when the tampered packet is the one
     // named in the mismatch list. A clean diff (false negative) or a divergence
     // naming a different packet must fail.
-    let names: Vec<usize> = diff
+    let tampered_index = tampered_index.to_string();
+    let mismatched: Vec<String> = diff
         .mismatched
         .iter()
-        .filter(|(i, _, _, _)| *i == tampered_index)
-        .map(|(i, _, _, _)| *i)
+        .map(|(i, _, _, _)| i.to_string())
         .collect();
-    if !names.is_empty() {
-        println!();
-        println!(
-            "PASS: the fresh capture differs from the corrupted copy at exactly the tampered \
-             packet [{tampered_index}] ({tampered_identity})."
-        );
-        let _ = fs::remove_dir_all(&scratch);
-        Ok(())
-    } else if diff.is_clean() {
-        let _ = fs::remove_dir_all(&scratch);
-        Err(format!(
-            "negative control FAILED: the pipeline reported ZERO divergence against a fixture \
-             copy whose packet [{tampered_index}] ({tampered_identity}) was corrupted — the \
-             capture->normalize->diff chain is vacuously green."
-        ))
-    } else {
-        let _ = fs::remove_dir_all(&scratch);
-        Err(format!(
-            "negative control FAILED: the pipeline diverged but did not name the tampered packet \
-             [{tampered_index}] ({tampered_identity}); mismatched: {diff}"
-        ))
-    }
-}
-
-/// Copy a directory tree (used by the negative control so the tamper never
-/// touches the committed fixture).
-fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
+    match rivet_harness_common::negative::verdict(&tampered_index, &mismatched) {
+        rivet_harness_common::negative::Verdict::Detected(_) => {
+            println!();
+            println!(
+                "PASS: the fresh capture differs from the corrupted copy at exactly the tampered \
+                 packet [{tampered_index}] ({tampered_identity})."
+            );
+            let _ = fs::remove_dir_all(&scratch);
+            Ok(())
+        }
+        v => {
+            let _ = fs::remove_dir_all(&scratch);
+            Err(format!(
+                "negative control FAILED: {v} — the capture->normalize->diff chain did not name \
+                 the tampered packet [{tampered_index}] ({tampered_identity}); {diff}"
+            )
+            .into())
         }
     }
-    Ok(())
 }
 
 /// Corrupt one packet body in a copy of the fixture and its manifest SHA-256,
@@ -670,7 +705,7 @@ fn tamper_fixture_copy(dir: &Path) -> Result<(usize, String), String> {
     Ok((idx, identity))
 }
 
-async fn run_verify() -> Result<(), String> {
+async fn run_verify() -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/verify");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -777,7 +812,7 @@ fn read_raw_jsonl(path: &Path) -> Result<Vec<CapturedPacket>, String> {
 /// `verify --mutate <kind>`: apply a controlled mutation to the fresh raw
 /// capture (or its canonical form) and require the named detector failure. A
 /// clean run is itself a failure (false-negative trap).
-async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), String> {
+async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/verify-mutate");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -800,7 +835,8 @@ async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), Stri
             "verify --mutate {}: the clean capture already fails {} invariant(s) — fix the harness before testing the mutation:\n  {clean_failures:?}",
             kind.name(),
             clean_failures.len()
-        ));
+        )
+        .into());
     }
 
     let mutated = crate::mutate::mutate_raw(kind, &raw);
@@ -823,9 +859,11 @@ async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), Stri
         return Err(format!(
             "verify --mutate {} FAILED (false negative): the mutation produced NO failure of the expected kinds {expected:?} — the detectors are not discriminating.\n  actual failures: {failures:?}",
             kind.name()
-        ));
+        )
+        .into());
     }
     let _ = expected;
+
     println!();
     println!(
         "PASS: verify --mutate {} detected and named the defect ({}) — the #195 detectors are discriminating.",
@@ -841,7 +879,7 @@ async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), Stri
 /// `audit --runs N`: boot N Papers, collect the raw captures, and report per
 /// packet identity how many distinct raw bodies were observed (the multi-boot
 /// field-variance evidence that justifies each normalization rewrite).
-async fn run_audit(runs: usize) -> Result<(), String> {
+async fn run_audit(runs: usize) -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/audit");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -871,7 +909,7 @@ async fn run_audit(runs: usize) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_capture(runs: usize) -> Result<(), String> {
+async fn run_capture(runs: usize) -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/capture");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -921,7 +959,7 @@ async fn run_capture(runs: usize) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_fixture() -> Result<(), String> {
+async fn run_fixture() -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/fixture");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -964,7 +1002,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("rivet-capture: {e}");
-            ExitCode::FAILURE
+            ExitCode::from(e.exit_code())
         }
     }
 }
@@ -979,6 +1017,56 @@ mod real_capture_tests {
 
     fn raw_path() -> PathBuf {
         crate_root().join("work/capture/raw1.jsonl")
+    }
+
+    /// Offline counterfactual of the negative-control machinery (no Paper boot):
+    /// copy the committed fixture, corrupt one packet, and prove the diff names
+    /// exactly the tampered index — a clean diff or a wrong-index diff must fail
+    /// the control.
+    #[test]
+    fn tamper_fixture_copy_detects_and_names_the_tampered_packet() {
+        // The wrong-path tampering control must be load-bearing: the committed
+        // fixture (fixtures/join/capture.jsonl) is the ground truth, so a missing
+        // fixture is a hard failure, not a silent skip that would mask the control
+        // being untested.
+        let baseline = crate_root().join("fixtures/join");
+        assert!(
+            baseline.join("capture.jsonl").is_file(),
+            "no committed fixture at {} — the wrong-path tampering control is untested",
+            baseline.display()
+        );
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-capture-tamper-{}", std::process::id()));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        rivet_harness_common::negative::copy_dir_recursive(&baseline, &scratch).unwrap();
+        let (tampered_index, _identity) = tamper_fixture_copy(&scratch).unwrap();
+
+        let original = fixture::read_capture(&baseline).unwrap();
+        let corrupted = fixture::read_capture(&scratch).unwrap();
+        let mismatched: Vec<String> = fixture::diff_packets(&original, &corrupted)
+            .mismatched
+            .iter()
+            .map(|(i, _, _, _)| i.to_string())
+            .collect();
+
+        // The tamper is detected and named by index. A clean diff (the pipeline
+        // never saw the injection) or a wrong-index diff must fail the control.
+        let v = rivet_harness_common::negative::verdict(&tampered_index.to_string(), &mismatched);
+        assert!(
+            v.passed(),
+            "the tampered packet was not detected and named: {v}"
+        );
+        assert!(
+            !rivet_harness_common::negative::verdict(
+                &(tampered_index + 1).to_string(),
+                &mismatched
+            )
+            .passed(),
+            "a wrong-path verdict must not satisfy the negative control"
+        );
+        let _ = fs::remove_dir_all(&scratch);
     }
 
     #[test]

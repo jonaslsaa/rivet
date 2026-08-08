@@ -1,19 +1,21 @@
 //! Paper server boot/shutdown for the capture harness.
 //!
-//! Ported from `tools/rivet-client/src/bin/run-scenario/server.rs` (the M0
-//! `verify` pattern): boot the paperclip bundler jar headlessly, wait for
-//! `Done (...)!`, then SIGTERM and wait for the clean save. Reuses the
-//! paperclip-materialized `libraries/`/`versions/`/`cache/` across boots and
-//! wipes everything else, so each run is a fresh world at a fixed seed while
-//! staying fast on re-runs.
+//! Reuses the shared child-process lifecycle from `rivet-harness-common`
+//! (`ChildServer` + `signal`/`wait_for_ready`/`wait_for_exit`); this module
+//! owns what is Paper-specific: which command to spawn (`java -jar ... nogui`),
+//! the READY marker (`Done (...)!` + `For help`), the run-dir preparation
+//! (libraries reuse, spawn-determinism datapack, eula), and the clean-shutdown
+//! assertion (`All dimensions are saved` in the post-Done tail).
 
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use rivet_harness_common::server::ChildServer;
 
 /// Name of the paperclip bundler jar we boot through.
 pub const PAPERCLIP_JAR: &str = "paper-paperclip-26.2.local-SNAPSHOT.jar";
@@ -32,6 +34,9 @@ const EULA: &str = "#By changing the setting below to TRUE you are indicating yo
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
+    /// UNVERIFIED: the server exited or never reached `Done` within its boot
+    /// timeout. Maps to the gate's UNVERIFIED exit code 3.
+    Unverified(String),
     Gate(String),
 }
 
@@ -39,6 +44,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Io(e) => write!(f, "io error: {e}"),
+            Error::Unverified(m) => write!(f, "{m}"),
             Error::Gate(m) => write!(f, "{m}"),
         }
     }
@@ -52,40 +58,21 @@ impl From<io::Error> for Error {
     }
 }
 
-/// A running (or runnable) Paper server.
-pub struct Server {
-    child: Child,
-    log_path: PathBuf,
-    /// Byte offset in the boot log at the moment `Done` was seen; used to
-    /// inspect only the post-Done tail for the clean-save marker.
-    done_offset: usize,
-    /// Set by `shutdown` after the child has exited; `Drop` then leaves it
-    /// alone instead of killing an already-reaped process.
-    stopped: bool,
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        if self.stopped {
-            return;
+impl From<rivet_harness_common::server::Error> for Error {
+    fn from(e: rivet_harness_common::server::Error) -> Self {
+        match e {
+            rivet_harness_common::server::Error::Io(e) => Error::Io(e),
+            rivet_harness_common::server::Error::Unverified(m) => Error::Unverified(m),
+            rivet_harness_common::server::Error::Gate(m) => Error::Gate(m),
         }
-        let _ = signal_process(self.child.id(), "KILL");
-        let _ = self.child.wait();
     }
 }
 
-fn signal_process(pid: u32, signal: &str) -> io::Result<()> {
-    let status = Command::new("kill")
-        .arg(format!("-{signal}"))
-        .arg(pid.to_string())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "kill -{signal} {pid} exited with {status}"
-        )))
-    }
+/// A running (or runnable) Paper server. Kill-on-drop lives in `ChildServer`:
+/// dropping without a clean `shutdown` SIGKILLs the child so it cannot keep
+/// its port hostage.
+pub struct Server {
+    child: ChildServer,
 }
 
 /// Locate the paperclip jar: `RIVET_ORACLE_JAR` env wins, then a copy in
@@ -96,7 +83,7 @@ pub fn ensure_jar(crate_root: &Path) -> Result<PathBuf, Error> {
         if p.is_file() {
             return Ok(p);
         }
-        return Err(Error::Gate(format!(
+        return Err(Error::Unverified(format!(
             "RIVET_ORACLE_JAR is set to {} but it is not a file",
             p.display()
         )));
@@ -120,7 +107,7 @@ pub fn ensure_jar(crate_root: &Path) -> Result<PathBuf, Error> {
         );
         return Ok(local);
     }
-    Err(Error::Gate(format!(
+    Err(Error::Unverified(format!(
         "Paper paperclip jar not found. Looked at {} and {}. \
          Copy it into work/jars/ or set RIVET_ORACLE_JAR.",
         local.display(),
@@ -204,57 +191,6 @@ pub fn prepare_run_dir(
     Ok(())
 }
 
-fn wait_for_done(child: &mut Child, log_path: &Path) -> Result<usize, Error> {
-    let deadline = Instant::now() + BOOT_TIMEOUT;
-    let pid = child.id();
-    loop {
-        if Instant::now() >= deadline {
-            let _ = signal_process(pid, "KILL");
-            let _ = child.wait();
-            return Err(Error::Gate(format!(
-                "timed out after {:?} waiting for the server to reach 'Done (...)!' — see {}",
-                BOOT_TIMEOUT,
-                log_path.display()
-            )));
-        }
-        if let Some(status) = child.try_wait()? {
-            return Err(Error::Gate(format!(
-                "server process exited ({status}) before reaching 'Done' — see {}",
-                log_path.display()
-            )));
-        }
-        if let Ok(text) = fs::read_to_string(log_path)
-            && text.contains("Done (")
-            && text.contains("For help, type \"help\"")
-        {
-            let offset = fs::metadata(log_path)
-                .map(|m| m.len() as usize)
-                .unwrap_or(text.len());
-            return Ok(offset);
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
-}
-
-fn wait_for_exit(child: &mut Child, timeout: Duration) -> Result<(), Error> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait()? {
-            Some(_) => return Ok(()),
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = signal_process(child.id(), "KILL");
-                    child.wait()?;
-                    return Err(Error::Gate(format!(
-                        "server did not exit after SIGTERM within {timeout:?}; killed with SIGKILL"
-                    )));
-                }
-                thread::sleep(POLL_INTERVAL);
-            }
-        }
-    }
-}
-
 /// Spawn java, wait for `Done`, and return the running server.
 pub fn boot(
     run_dir: &Path,
@@ -265,49 +201,34 @@ pub fn boot(
 ) -> Result<Server, Error> {
     prepare_run_dir(run_dir, server_properties_src, world_defaults_src)?;
 
-    let log_file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(log_path)?;
-    let log_err = log_file.try_clone()?;
-    let mut child = Command::new("java")
+    let mut command = Command::new("java");
+    command
         .args(["-Xms512M", "-Xmx2G", "-jar"])
         .arg(jar)
         .arg("nogui")
-        .current_dir(run_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .map_err(|e| {
-            Error::Gate(format!(
-                "failed to spawn java: {e} (is a Java 25+ JRE on PATH?)"
-            ))
-        })?;
-
-    let done_offset = wait_for_done(&mut child, log_path)?;
-    Ok(Server {
-        child,
-        log_path: log_path.to_path_buf(),
-        done_offset,
-        stopped: false,
-    })
+        .current_dir(run_dir);
+    let mut child = ChildServer::spawn(&mut command, log_path).map_err(|e| {
+        Error::Gate(format!(
+            "failed to spawn java: {e} (is a Java 25+ JRE on PATH?)"
+        ))
+    })?;
+    child.wait_ready("paper server", BOOT_TIMEOUT, POLL_INTERVAL, |text| {
+        text.contains("Done (") && text.contains("For help, type \"help\"")
+    })?;
+    Ok(Server { child })
 }
 
 /// SIGTERM the server and wait for the clean save (`All dimensions are saved`
 /// must appear in the post-Done log tail).
 pub fn shutdown(server: &mut Server) -> Result<(), Error> {
-    let pid = server.child.id();
     // Let trailing delayed-init / chunk I/O settle before stopping.
     thread::sleep(Duration::from_millis(1500));
-    let _ = signal_process(pid, "TERM");
-    wait_for_exit(&mut server.child, SHUTDOWN_TIMEOUT)?;
-    server.stopped = true;
+    server.child.shutdown(SHUTDOWN_TIMEOUT, POLL_INTERVAL)?;
 
-    let bytes = fs::read(&server.log_path)?;
-    let tail = if bytes.len() > server.done_offset {
-        String::from_utf8_lossy(&bytes[server.done_offset..]).into_owned()
+    let bytes = fs::read(server.child.log_path())?;
+    let done_offset = server.child.ready_offset();
+    let tail = if bytes.len() > done_offset {
+        String::from_utf8_lossy(&bytes[done_offset..]).into_owned()
     } else {
         String::new()
     };
