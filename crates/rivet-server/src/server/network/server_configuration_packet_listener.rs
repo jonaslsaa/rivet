@@ -130,8 +130,9 @@ fn validate_register_channel(channel: &[u8]) -> Result<(), DisconnectReason> {
 const SYNCHRONIZE_REGISTRIES_TASK_TYPE: &str = "synchronize_registries";
 /// `ConfigurationTask.Type` id for `JoinWorldTask` — queued last so the client's
 /// `finish_configuration` reply finishes it and the connection hands off to play
-/// (issue #96). `PrepareSpawnTask` (#100) is deferred; the join burst
-/// (`spawnPlayer`) runs tick-side via the play listener (issue #101 Slice B).
+/// (issue #96). Rivet bypasses `PrepareSpawnTask`: chunks send via the delivered
+/// direct-send path (#100) and the join burst runs tick-side via the play
+/// listener (#101 Slice B).
 const JOIN_WORLD_TASK_TYPE: &str = "join_world";
 /// `ConfigurationTask.Type` id for `ServerCodeOfConductConfigurationTask` —
 /// never queued in this slice (`MinecraftServer.getCodeOfConducts()` is
@@ -206,11 +207,10 @@ impl ConfigurationTask for SynchronizeRegistriesTask {
 /// `ClientboundFinishConfigurationPacket.INSTANCE`; the client's
 /// `ServerboundFinishConfigurationPacket` reply finishes the task in
 /// `handleConfigurationFinished`, after which the connection hands off to the
-/// play state. In Paper, `PrepareSpawnTask` (the spawn-chunk load, #100) runs
-/// immediately before this task; that task is deferred, so configuration
-/// completes and reaches play without a spawn-chunk load. The join burst
-/// (`spawnPlayer`) is not part of the configuration phase — it runs tick-side
-/// via the play listener (issue #101 Slice B).
+/// play state. Paper runs `PrepareSpawnTask` immediately before this task. Rivet
+/// instead uses the delivered Moonrise direct-send path (#100), so configuration
+/// reaches play before the join burst runs tick-side via the play listener
+/// (issue #101 Slice B).
 struct JoinWorldTask;
 
 impl ConfigurationTask for JoinWorldTask {
@@ -601,23 +601,18 @@ impl PacketListener for ServerConfigurationPacketListener {
             }
             KEEP_ALIVE_PACKET_ID => {
                 // `handleKeepAlive` — Paper's keepalive challenge tracking. The
-                // periodic clientbound keepalive is deferred (#157); a serverbound
-                // keepalive with no pending challenge would disconnect in Java
-                // ("without matching challenge").
+                // configuration-phase challenge lifecycle is deferred (#283); a
+                // serverbound keepalive with no pending challenge would disconnect
+                // in Java ("without matching challenge").
                 let packet: ServerboundKeepAlivePacket =
                     decode_packet(frame, ServerboundKeepAlivePacket::stream_codec())?;
                 let _ = packet;
-                // RivetTodo(#157): the listener-side wiring — this listener does
-                // not yet own a `KeepaliveState`, so the periodic
-                // `ClientboundKeepAlivePacket` (1 s throttle) and the serverbound
-                // challenge matching (`handleKeepAlive`: pending queue,
-                // out-of-order / no-challenge TIMEOUT disconnects, 30 s kick) are
-                // not driven here. The pure state machine + `KeepaliveSink` seam
-                // live in `server::keepalive` / `server::network::keepalive`; the
-                // configuration tick hook that drives them needs a tick source for
-                // the tokio-side listener (Paper ticks `keepConnectionAlive` from
-                // the server thread) — the `PacketListener::tick` driver, shared
-                // with #157's play listener.
+                // RivetTodo(#283): the configuration listener does not yet own a
+                // `KeepaliveState`, so periodic challenges, reply matching, and
+                // timeout disconnects are not driven here. The play listener's
+                // delivered keepalive wiring (#157) provides the state-machine
+                // pattern; configuration still needs its own tick source and
+                // lifecycle integration.
                 Ok(ListenerOutcome::Keep)
             }
             PONG_PACKET_ID => {
@@ -1203,8 +1198,9 @@ mod tests {
         // Java's `CUSTOM_REGISTER.equals(identifier)` compares the FULL
         // identifier, so a hostile `foo:register` payload is neither a register
         // nor a brand — it falls through to the plugin dispatch (deferred, #26),
-        // no channel validation runs, and `client_brand` stays unset. (The `x:y`
-        // bytes would be a valid channel but are never parsed.)
+        // no channel validation runs, and `client_brand` stays unset. The invalid
+        // channel bytes make this load-bearing: a namespace-insensitive match
+        // would reject them.
         let mut conn = config_connection().await;
         let mut listener =
             ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
@@ -1213,7 +1209,7 @@ mod tests {
             ));
         listener.start_configuration(&mut conn).unwrap();
 
-        let frame = Bytes::from(custom_payload_frame("foo:register", b"x:y"));
+        let frame = Bytes::from(custom_payload_frame("foo:register", b"Foo:Bar"));
         listener
             .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
             .unwrap();

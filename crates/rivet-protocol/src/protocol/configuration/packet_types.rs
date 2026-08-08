@@ -10,8 +10,8 @@
 //!
 //! Every constant is plain data (a `PacketType` is a `(flow, identifier)`
 //! pair), so the full set is present; the bodies land with their own units
-//! (`reset_chat`/`code_of_conduct`/`accept_code_of_conduct` are not on the M1
-//! offline join path — the configuration listener decodes them and ignores, #236).
+//! (`reset_chat`/`code_of_conduct` are not on the M1 offline join path;
+//! `accept_code_of_conduct` is decoded and rejected when no task is current, #236).
 
 use crate::protocol::packet_type::PacketType;
 
