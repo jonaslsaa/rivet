@@ -435,6 +435,10 @@ impl MarsagliaPolarGaussian {
             }
         };
 
+        // RivetTodo(#177): Java computes `Math.log`/`Math.sqrt` (fdlibm), which
+        // on some polar `radiusSquared` inputs round 1 ULP differently from
+        // Rust's libm `ln`/`sqrt`; the resulting gaussian can differ in the last
+        // bit. Owned by the worldgen wave-1 epic, which absorbs the random unit.
         let multiplier = (-2.0 * radius_squared.ln() / radius_squared).sqrt();
         self.next_next_gaussian = y * multiplier;
         self.have_next_next_gaussian = true;
