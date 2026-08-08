@@ -23,6 +23,7 @@ Rivet is a faithful port of [Paper](https://papermc.io) — the world's most-use
 | M2 | [World](https://github.com/jonaslsaa/rivet/milestone/3) | [![M2 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/3?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/3) | load and generate worlds bit-identical to vanilla |
 | M3 | [Survival](https://github.com/jonaslsaa/rivet/milestone/4) | [![M3 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/4?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/4) | play: mobs, combat, crafting, redstone |
 | M4 | [Paper](https://github.com/jonaslsaa/rivet/milestone/5) | [![M4 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/5?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/5) | run Paper plugins via the JVM bridge |
+| M5 | [Ecosystem](https://github.com/jonaslsaa/rivet/milestone/7) | [![M4 progress](https://img.shields.io/github/milestones/progress-percent/jonaslsaa/rivet/7?style=flat-square&label=)](https://github.com/jonaslsaa/rivet/milestone/7) | compatibility layer for Paper plugins |
 
 ## For contributors (human or agent)
 
