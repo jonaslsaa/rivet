@@ -37,7 +37,10 @@ rayon = "1"
 ryu = "1.0"
 phf = "0.11"
 serde_json = { version = "1", features = ["preserve_order"] }
-xxhash-rust = "0.8"
+# xxh3_64 for the #54 chunk-hash engine (rivet-oracle). Only the xxh3 feature
+# is enabled — no xxh32/xxh64/xxh128 — so the digest family is exactly the one
+# the known-answer self-check pins.
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
 
 [workspace.lints.rust]
 unsafe_code = "warn" # rivet-ffi overrides locally; see PORTING.md

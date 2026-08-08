@@ -312,6 +312,47 @@ run_oracle_verify() {
   fi
 }
 
+# The #54 chunk-hash engine (xxh3_64 seed-hash gate). Unlike the other oracle
+# stages it does not boot Paper: `hash-self-check` pins the xxh3_64 known-answer
+# vectors (a wrong variant/endianness fails loudly, never silently corrupting
+# digests), and `hash-paper` rebuilds the committed Paper manifest from the
+# committed M2 region payloads — which must be git-clean, proving the FULL-status
+# stamping and digest table are deterministic. The Paper-vs-Rivet `hash-diff`
+# needs FULL chunks at every corpus coordinate on both sides; pre-worldgen (no
+# Rivet FULL serialization, #231/#15; #51 must capture status-FULL regions) it
+# exits 3 UNVERIFIED and is recorded so the gate never claims M2 parity it does
+# not have. The tamper negatives (`--expect-fail`) run only once that baseline
+# exists, proving block/light/heightmap/NBT-order divergences cannot pass.
+run_oracle_hash() {
+  echo "==> chunk-hash engine (issue #54: xxh3_64 seed-hash gate)"
+  echo "==> oracle hash self-check (xxh3_64 known-answer vectors)"
+  cargo run -q -p rivet-oracle -- hash-self-check
+  echo "    VERIFIED — xxh3_64 matches the pinned known-answer vectors"
+  echo "==> oracle hash-paper (rebuild committed Paper manifest; must be git-clean)"
+  cargo run -q -p rivet-oracle -- hash-paper
+  if ! git diff --exit-code -- tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json; then
+    echo "    FAILED — committed Paper hash manifest drifted from a fresh rebuild; regenerate and commit it"
+    exit 1
+  fi
+  echo "    VERIFIED — Paper manifest rebuilds byte-identically (2 FULL: the_nether/0.0 + the_end/0.0)"
+  local paper_dir="$REPO_DIR/tools/rivet-oracle/fixtures/chunk-hash/paper"
+  local rc=0
+  cargo run -q -p rivet-oracle -- hash-diff "$paper_dir" "$paper_dir" 2>&1 || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    echo "    UNVERIFIED — Paper-vs-Rivet hash-diff needs FULL chunks at every corpus coordinate on both sides"
+    echo "      (blocked on #51 capturing status-FULL regions + Rivet FULL serialization #231/#15); never green"
+    ORACLE_UNVERIFIED=1
+  elif [ "$rc" -eq 0 ]; then
+    echo "    VERIFIED — Paper-vs-Rivet FULL digests match across the corpus matrix"
+    echo "==> oracle hash-diff --expect-fail (tamper negatives: every mutation class must be detected)"
+    cargo run -q -p rivet-oracle -- hash-diff --expect-fail "$paper_dir" "$paper_dir" all
+    echo "    VERIFIED — block/light/heightmap/NBT-order tampering all detected and named"
+  else
+    echo "    FAILED — hash-diff exited $rc (see the output above)"
+    exit 1
+  fi
+}
+
 run_rivet_parity() {
   echo "==> rivet-parity (byte-for-byte NBT/SNBT vs Paper oracle)"
   if [ "$PARITY_RUNNABLE" = 1 ]; then
@@ -630,6 +671,7 @@ main() {
   # --- oracle steps (full gate only; the oracle verifies the whole server) -----
   if [ "$FULL_GATE" = true ]; then
     run_oracle_verify
+    run_oracle_hash
     run_rivet_parity
     run_join_capture
   fi

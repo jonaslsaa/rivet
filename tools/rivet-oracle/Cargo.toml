@@ -9,3 +9,11 @@ description = "Differential-test harness: runs the Java Paper server, extracts g
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# The #54 chunk-hash engine. xxhash-rust is declared at workspace scope with
+# only the xxh3 feature (the #233 dep-scope commit); this crate inherits it.
+# rivet-nbt + rivet-util are the proven byte-identical NBT codec used for the
+# canonical re-encode and the NBT-aware mutations (semantic triage + tamper
+# negatives).
+xxhash-rust = { workspace = true }
+rivet-nbt = { path = "../../crates/rivet-nbt" }
+rivet-util = { path = "../../crates/rivet-util" }
