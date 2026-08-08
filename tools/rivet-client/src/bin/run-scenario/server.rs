@@ -823,8 +823,7 @@ mod tests {
     /// forwards them (dropping without a clean shutdown kills, a clean shutdown
     /// leaves nothing to kill).
     fn sleep_server() -> Server {
-        let dir =
-            std::env::temp_dir().join(format!("rivet-scenario-srv-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-srv-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let log = dir.join("boot.log");
         let mut command = Command::new("sleep");
