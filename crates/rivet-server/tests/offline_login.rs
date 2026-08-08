@@ -1492,3 +1492,151 @@ async fn live_matching_ack_with_no_pending_teleport_disconnects() {
     expect_eof_allowing_trailing(&mut client).await;
     server_task.abort();
 }
+
+// ---- issue #53: movement trace over a live socket ----
+//
+// The unit tests in `server::player::session` prove the `RIVET_*` records'
+// contents against the tick-owned state directly. This test proves the same
+// records flow out of a real server: the process-global tracing subscriber is
+// installed once per test binary (`install_global_for_tests`), so the tick OS
+// thread's events land in the shared recorder while a raw `TcpStream` drives a
+// join → ack → move → disconnect. The subscriber composes the recording layer
+// with `tracing_subscriber::fmt::layer().with_test_writer()`, so the rendered
+// records are also captured by cargo.
+
+/// Poll `pred` until it returns true or `timeout` elapses (a stalled tick or
+/// conn_loop fails loudly instead of hanging the test).
+///
+/// The poll yields to the tokio runtime (`tokio::time::sleep`, never
+/// `std::thread::sleep`): the default single-threaded test runtime drives the
+/// server's per-connection task, so blocking the test thread would starve the
+/// conn_loop and it would never read the frames this test writes. When `client`
+/// is `Some`, a pending clientbound `keep_alive` challenge is read and echoed
+/// before each poll — a live client always replies, and without the echo the
+/// server's outbound flush would eventually backpressure (the client's receive
+/// buffer never drains), wedging the conn_loop in `flush_out` instead of
+/// reading inbound frames. The 1 ms service window never splits a frame: the
+/// server writes each keepalive as one atomic write, so the whole frame is in
+/// the receive buffer the moment the first byte is available.
+async fn wait_until(
+    mut client: Option<&mut TcpStream>,
+    timeout: Duration,
+    what: &str,
+    mut pred: impl FnMut() -> bool,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while !pred() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        // Yield so the runtime can drive the conn_loop (read + forward our
+        // frames) and observe the tick thread's channel events.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        if let Some(client) = client.as_deref_mut()
+            && let Ok(challenge) = tokio::time::timeout(
+                Duration::from_millis(1),
+                read_play_keepalive_challenge(client),
+            )
+            .await
+        {
+            client
+                .write_all(&play_keepalive_reply_frame(challenge))
+                .await
+                .expect("write keepalive reply");
+        }
+    }
+}
+
+/// The tick thread emits `RIVET_TELEPORT_ACK` + `RIVET_MOVE_ACCEPTED` for an
+/// acked move over the real socket, and `RIVET_SESSION_END` when the client
+/// drops (the peer EOF prune). The recorder is process-global and shared with
+/// the other live tests in this binary, so every content assertion filters on
+/// the distinctive `42.5` x-coordinate only this test sends.
+#[tokio::test]
+async fn live_trace_records_teleport_ack_move_and_session_end() {
+    let recorder =
+        rivet_server::server::movement_trace::test_support::install_global_for_tests(true);
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write spawn ack");
+    client
+        .write_all(&play_move_pos_frame(42.5, -63.0, -17.25))
+        .await
+        .expect("write move after ack");
+
+    // Both records are emitted from the tick thread as the ack + move are
+    // accepted; poll until the accepted ack and this test's move both land. The
+    // ack and move are written back-to-back and forwarded to the tick in order,
+    // so the ack is always processed before the move — no intermediate silence
+    // assert (a keepalive challenge could land in a silence read and be
+    // misread as data). The ack's acceptance is proven by the record's
+    // `outcome=accepted`, stronger than socket silence.
+    wait_until(
+        Some(&mut client),
+        Duration::from_secs(5),
+        "teleport-ack + move-accepted records",
+        || {
+            let snap = recorder.snapshot();
+            snap.iter()
+                .any(|r| r.tag == "RIVET_TELEPORT_ACK" && r.field("outcome") == Some("accepted"))
+                && snap
+                    .iter()
+                    .any(|r| r.tag == "RIVET_MOVE_ACCEPTED" && r.field("x") == Some("42.5"))
+        },
+    )
+    .await;
+
+    let snap = recorder.snapshot();
+    let ack = snap
+        .iter()
+        .find(|r| r.tag == "RIVET_TELEPORT_ACK" && r.field("outcome") == Some("accepted"))
+        .expect("an accepted teleport-ack record");
+    // `ConnectionId`s are assigned from 0 per server boot, and this test's
+    // connection is the first (and only) one on its server.
+    assert_eq!(ack.field("id"), Some("conn#0"));
+    assert_eq!(ack.field("ack_id"), Some("1"));
+    assert_eq!(ack.field("x"), Some("0"));
+    assert_eq!(ack.field("y"), Some("-63"));
+    assert_eq!(ack.field("z"), Some("0"));
+
+    let mv = snap
+        .iter()
+        .find(|r| r.tag == "RIVET_MOVE_ACCEPTED" && r.field("x") == Some("42.5"))
+        .expect("this test's move-accepted record");
+    assert_eq!(mv.field("id"), Some("conn#0"));
+    assert_eq!(mv.field("x"), Some("42.5"));
+    assert_eq!(mv.field("y"), Some("-63"));
+    assert_eq!(mv.field("z"), Some("-17.25"));
+    assert_eq!(mv.field("accepted_frames"), Some("1"));
+
+    // Disconnect the client: the network task sees the peer EOF, the registry
+    // records the `EndOfStream` reason, and `prune_lost` emits the final
+    // authoritative record on the next tick. The client is gone, so the wait
+    // only yields — there is no keepalive to service.
+    drop(client);
+    wait_until(None, Duration::from_secs(5), "session-end record", || {
+        recorder
+            .snapshot()
+            .iter()
+            .any(|r| r.tag == "RIVET_SESSION_END" && r.field("x") == Some("42.5"))
+    })
+    .await;
+    let end = recorder
+        .snapshot()
+        .into_iter()
+        .find(|r| r.tag == "RIVET_SESSION_END" && r.field("x") == Some("42.5"))
+        .expect("this test's session-end record");
+    assert_eq!(end.field("id"), Some("conn#0"));
+    assert_eq!(end.field("reason"), Some("disconnect.endOfStream"));
+    assert_eq!(end.field("accepted_frames"), Some("1"));
+    // The final authoritative position is the accepted move's snapped values.
+    assert_eq!(end.field("x"), Some("42.5"));
+    assert_eq!(end.field("y"), Some("-63"));
+    assert_eq!(end.field("z"), Some("-17.25"));
+
+    server_task.abort();
+}

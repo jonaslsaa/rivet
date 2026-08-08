@@ -16,7 +16,7 @@ use azalea::ecs::message::MessageReader;
 use azalea::ecs::observer::On;
 use azalea::ecs::prelude::{Query, Res, Resource};
 use azalea::ecs::schedule::IntoScheduleConfigs;
-use azalea::entity::{EntityGeometryUpdateSystems, Physics};
+use azalea::entity::{EntityGeometryUpdateSystems, LastSentPosition, Physics};
 use azalea::join::{ConnectionFailedEvent, poll_create_connection_task};
 use azalea::movement::{
     send_player_input_packet, send_position, send_sprinting_if_needed, update_pose,
@@ -199,6 +199,10 @@ struct MoveSampler {
     notify: Arc<tokio::sync::Notify>,
     /// The samples captured so far, shared with the driver for the final record.
     samples: Arc<Mutex<Vec<MoveSample>>>,
+    /// The last movement frame actually sent across the whole walk (the
+    /// `LastSentPosition` at the tick the walk stopped), shared with the driver
+    /// for the final record's `walk.last_sent`.
+    last_sent: Arc<Mutex<Option<azalea::Vec3>>>,
 }
 
 /// A [`GameTick`] system that drives the move-walk sampler synchronously.
@@ -217,10 +221,11 @@ fn move_sampler_system(
         &azalea::entity::Position,
         &Physics,
         &mut ClientMovementState,
+        &LastSentPosition,
         &mut MoveSampler,
     )>,
 ) {
-    for (position, physics, mut movement, mut sampler) in &mut players {
+    for (position, physics, mut movement, last_sent, mut sampler) in &mut players {
         // Once the walk window has fully elapsed the sampler is inert: it no
         // longer samples, re-stops the walk, or re-notifies the driver.
         if sampler.tick_count >= MOVE_TICKS {
@@ -248,6 +253,13 @@ fn move_sampler_system(
         sampler.tick_count += 1;
         if sampler.tick_count >= MOVE_TICKS {
             movement.move_direction = WalkDirection::None;
+            // This run happens after `send_position`, so `LastSentPosition` is
+            // the position the walk's final movement frame was actually sent
+            // with (the frame sent this tick — the walk still moved, direction
+            // is only cleared here). The sampled prefix stops at SAMPLE_TICKS,
+            // so the remaining `MOVE_TICKS - 1 - SAMPLE_TICKS` moving ticks are
+            // unsampled; this snapshot is the last of them.
+            *sampler.last_sent.lock().expect("last sent lock poisoned") = Some(**last_sent);
             sampler.notify.notify_one();
         }
     }
@@ -293,6 +305,9 @@ struct State {
     /// Per-tick movement samples, appended by the move task and read once when
     /// it emits the canonical `moved` record.
     move_samples: Arc<Mutex<Vec<MoveSample>>>,
+    /// The last movement frame actually sent across the walk (the sampler's
+    /// `walk.last_sent` snapshot), read once when the `moved` record is emitted.
+    last_sent: Arc<Mutex<Option<azalea::Vec3>>>,
     /// Clientbound teleport ids (`player_position`), observed by the event
     /// handler. On a fresh boot the spawn teleport is the first (id 1 — Paper's
     /// `awaitingTeleport` is per-connection and starts at 0), so the ids are
@@ -330,6 +345,7 @@ impl Default for State {
             terminal_emitted: Arc::new(AtomicBool::new(false)),
             chunks: Arc::new(Mutex::new(BTreeSet::new())),
             move_samples: Arc::new(Mutex::new(Vec::new())),
+            last_sent: Arc::new(Mutex::new(None)),
             teleports: Arc::new(Mutex::new(Vec::new())),
             teleport_acks: Arc::new(Mutex::new(Vec::new())),
             keepalives: Arc::new(Mutex::new(Vec::new())),
@@ -586,6 +602,7 @@ async fn move_and_emit(bot: Client, state: State) {
     let _ = bot.set_direction(-90.0, 0.0);
 
     let samples = Arc::clone(&state.move_samples);
+    let last_sent = Arc::clone(&state.last_sent);
     let notify = Arc::new(tokio::sync::Notify::new());
     {
         let mut ecs = bot.ecs.write();
@@ -593,6 +610,7 @@ async fn move_and_emit(bot: Client, state: State) {
             tick_count: 0,
             notify: Arc::clone(&notify),
             samples,
+            last_sent,
         });
     }
     // Wait for the sampler to finish the walk window.
@@ -609,7 +627,16 @@ async fn move_and_emit(bot: Client, state: State) {
     // somehow landed between two reads, the echo relationship below would report
     // false and the run would FAIL — a spurious failure, never a false pass,
     // which is the honest direction for a differential harness.
-    let (samples, teleports, teleport_acks, keepalives, keepalive_echoes, corrections, origin) = {
+    let (
+        samples,
+        teleports,
+        teleport_acks,
+        keepalives,
+        keepalive_echoes,
+        corrections,
+        origin,
+        last_sent,
+    ) = {
         let samples = state
             .move_samples
             .lock()
@@ -644,6 +671,7 @@ async fn move_and_emit(bot: Client, state: State) {
             .spawn_origin
             .lock()
             .expect("spawn origin lock poisoned");
+        let last_sent = *state.last_sent.lock().expect("last sent lock poisoned");
         (
             samples,
             teleports,
@@ -652,9 +680,11 @@ async fn move_and_emit(bot: Client, state: State) {
             keepalive_echoes,
             corrections,
             origin,
+            last_sent,
         )
     };
     let origin = origin.expect("move mode requires a recorded spawn position");
+    let last_sent = last_sent.expect("move mode requires the walk's last sent position");
 
     // Samples are normalized to spawn-relative X/Z deltas at full precision
     // (subtract the origin, then round), so the walk is identical across boots
@@ -679,11 +709,27 @@ async fn move_and_emit(bot: Client, state: State) {
             // The walk spans MOVE_TICKS observed game ticks; the first is the
             // setup tick (direction set, no movement), so the player actually
             // moves for MOVE_TICKS - 1 of them. The first SAMPLE_TICKS moving
-            // ticks are sampled into `samples`.
+            // ticks are sampled into `samples`; the remaining
+            // MOVE_TICKS - 1 - SAMPLE_TICKS moving ticks are unsampled.
+            //
+            // `last_sent` is the last movement frame actually sent across all
+            // MOVE_TICKS - 1 moving ticks (the `LastSentPosition` at the tick
+            // the walk stopped). It is NOT the final sampled position: the
+            // samples stop at SAMPLE_TICKS, so the last frame was sent 19
+            // moving ticks after the last sample — comparing `last_sent` to the
+            // final sample would always disagree and is not done here. Like the
+            // samples, X/Z are spawn-relative (the server randomizes the spawn
+            // offset each boot), so the record is deterministic across boots;
+            // `y` is absolute (the superflat spawn height is fixed).
             "walk_ticks": MOVE_TICKS,
             "movement_ticks": MOVE_TICKS - 1,
             "sampled_ticks": samples.len(),
             "heading_degrees": -90.0,
+            "last_sent": json!({
+                "x": round_to(last_sent.x - origin.x, 3),
+                "y": round_to(last_sent.y, 3),
+                "z": round_to(last_sent.z - origin.z, 3),
+            }),
             "samples": samples.iter().map(sample_json).collect::<Vec<_>>(),
             "teleports": teleports,
             "teleport_acks": teleport_acks,

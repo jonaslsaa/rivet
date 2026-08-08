@@ -41,6 +41,15 @@
 //! unbounded). Sessions are cleaned up when their connection is lost (the tick
 //! prunes the registry entry on disconnect/EOF, and the manager removes the
 //! player index + any pending frames on the next tick).
+//!
+//! With `RIVET_TRACE_MOVEMENT=1` (issue #53, see [`movement_trace`]) the
+//! movement/teleport paths emit stable info-level `tracing` records from here:
+//! a `RIVET_TELEPORT_ACK` per parsed ack frame (accepted/ignored/invalid),
+//! `RIVET_MOVE_ACCEPTED` on the post-ack accepted movement path with the exact
+//! values snapped into the tick-owned player, and a `RIVET_SESSION_END` from
+//! [`Self::prune_lost`] for EOF/Timeout/InboundOverflow closes with the final
+//! authoritative position and counts. The gate is one-time env read and the
+//! records flow through the existing subscriber — no new shared state.
 
 use rivet_protocol::codec::StreamDecoder;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
@@ -57,6 +66,9 @@ use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
 use crate::server::movement_math::{
     DEFAULT_MOVED_TOO_QUICKLY_MULTIPLIER, MoveState, build_move_targets, contains_invalid_values,
     moved_distance_sqr, moved_too_quickly, movement_speed,
+};
+use crate::server::movement_trace::{
+    self, AckOutcome, trace_move_accepted, trace_session_end, trace_teleport_ack,
 };
 use crate::server::network::connection_id::ConnectionId;
 use crate::server::network::keepalive::{KeepaliveSink, drive_keepalive};
@@ -132,6 +144,12 @@ pub struct PlayerSessionManager {
 struct Session {
     player: ServerPlayer,
     movement: SessionMovement,
+    /// The number of accepted post-ack movements this session routed into the
+    /// tick-owned player (each `RIVET_MOVE_ACCEPTED` record increments it). The
+    /// per-session counter is tick-owned — no shared state — and is reported in
+    /// the session's `RIVET_SESSION_END` record so the trace consumer can sum
+    /// the authoritative displacement and compare it with the final position.
+    accepted_frames: usize,
 }
 
 /// The movement/teleport half of a session: the `awaitingTeleport` ack state
@@ -376,8 +394,14 @@ impl PlayerSessionManager {
 
         // The session is live: the tick-owned player (the movement/teleport
         // write target) plus the ack/anchors state, keyed by connection.
-        self.sessions
-            .insert(connection_id, Session { player, movement });
+        self.sessions.insert(
+            connection_id,
+            Session {
+                player,
+                movement,
+                accepted_frames: 0,
+            },
+        );
 
         // The session now owns a tick-thread keepalive state (issue #157).
         // `lastKeepAliveTx` is seeded with this tick's reading so the 1s
@@ -563,15 +587,18 @@ impl PlayerSessionManager {
         };
         let player = &mut session.player;
         let movement = &mut session.movement;
-        match movement.teleport.accept(ack.get_id()) {
+        let ack_id = ack.get_id();
+        match movement.teleport.accept(ack_id) {
             TeleportAckOutcome::Accepted { x, y, z } => {
                 // `absSnapTo(awaitingPositionFromClient, player.getYRot(), ...)`:
                 // rotation is unchanged, position snaps to the awaited spawn.
                 player.abs_snap_to(x, y, z, player.yaw(), player.pitch());
                 movement.anchors.on_move_accepted(x, y, z);
+                trace_teleport_ack(id, ack_id, AckOutcome::Accepted, Some([x, y, z]));
             }
             TeleportAckOutcome::InvalidMovementKick => {
                 tracing::warn!(%id, "teleport ack with no pending teleport");
+                trace_teleport_ack(id, ack_id, AckOutcome::Invalid, None);
                 let _ = ctx.connections.send(
                     id,
                     OutboundEvent::Disconnect {
@@ -579,7 +606,9 @@ impl PlayerSessionManager {
                     },
                 );
             }
-            TeleportAckOutcome::Ignored => {}
+            TeleportAckOutcome::Ignored => {
+                trace_teleport_ack(id, ack_id, AckOutcome::Ignored, None);
+            }
         }
     }
 
@@ -685,7 +714,10 @@ impl PlayerSessionManager {
 
         // Route the accepted finite movement into the tick-owned player
         // (`absSnapTo(target, yRot, xRot)`); `lastGood` follows the accepted
-        // position.
+        // position. This is the full post-ack accepted path (the gate above
+        // already rejected invalid values and the pending-teleport snap): the
+        // record carries the exact values snapped into the player and the
+        // session's accepted-move counter.
         player.abs_snap_to(
             targets.x,
             targets.y,
@@ -696,6 +728,16 @@ impl PlayerSessionManager {
         movement
             .anchors
             .on_move_accepted(targets.x, targets.y, targets.z);
+        session.accepted_frames += 1;
+        trace_move_accepted(
+            id,
+            targets.x,
+            targets.y,
+            targets.z,
+            targets.y_rot,
+            targets.x_rot,
+            session.accepted_frames,
+        );
     }
 
     /// Remove sessions whose connection is gone (the tick pruned the registry
@@ -726,9 +768,36 @@ impl PlayerSessionManager {
         let session_ids: Vec<ConnectionId> = self.sessions.keys().copied().collect();
         for id in session_ids {
             if !ctx.connections.contains(id) {
+                // The registry recorded the reason when the connection was
+                // removed (a `Disconnect` event, a closed inbound channel, or
+                // an overflow prune). The trace reports the session end only
+                // for the EOF / Timeout / InboundOverflow paths — a deliberate
+                // close with a recorded reason — with the final authoritative
+                // position + rotation and the session's movement counts.
+                if let Some(reason) = ctx.connections.take_disconnect_reason(id)
+                    && movement_trace::is_traced_disconnect(&reason)
+                    && let Some(session) = self.sessions.get(&id)
+                {
+                    let pos = session.player.position();
+                    trace_session_end(
+                        id,
+                        reason,
+                        pos.x,
+                        pos.y,
+                        pos.z,
+                        session.player.yaw(),
+                        session.player.pitch(),
+                        session.accepted_frames,
+                        self.move_frames_seen,
+                    );
+                }
                 self.sessions.remove(&id);
             }
         }
+        // Reasons for connections this prune did not touch belong to
+        // connections that never reached play; the tick loop drains them at the
+        // tick boundary (the registry stays bounded whether or not a session
+        // manager is registered).
     }
 }
 
@@ -959,6 +1028,7 @@ fn world_clock_access() -> RegistryAccess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::movement_trace::{TAG_MOVE_ACCEPTED, TAG_SESSION_END, TAG_TELEPORT_ACK};
     use crate::server::tick::channels::{InboundDrained, LifecycleEvent, OutboundEvent};
     use crate::server::tick::registry::ConnectionRegistry;
     use bytes::Bytes;
@@ -1865,5 +1935,285 @@ mod tests {
             Some(DisconnectReason::Timeout),
             "a replayed echo after acceptance is a TIMEOUT disconnect"
         );
+    }
+
+    // ---- RIVET_TRACE_MOVEMENT (issue #53) -----------------------------------
+    //
+    // The in-process trace assertion. The subscriber is installed with
+    // `tracing_subscriber::fmt().with_test_writer()` (the schema-level
+    // assertions are made on the recording layer; the fmt layer renders the
+    // same events through the test writer so cargo captures them). The env gate
+    // is pinned per test by `movement_trace::set_trace_gate_for_tests`, and the
+    // shared lock serializes these gate-sensitive tests.
+
+    /// A malformed `move_player` frame whose body parses (the `packet_id`
+    /// varint is intact, so `dispatch` routes it) but whose declared fields are
+    /// truncated — the codec returns an error, so no acceptance is emitted.
+    fn malformed_move_pos_frame() -> ServerboundFrame {
+        let mut bytes = varint(30);
+        bytes.extend_from_slice(&5.0_f64.to_be_bytes()); // only x; y/z truncated
+        bytes.push(0x00);
+        ServerboundFrame {
+            bytes: Bytes::from(bytes),
+        }
+    }
+
+    /// A pre-ack move emits no `RIVET_MOVE_ACCEPTED` (movement is withheld
+    /// while the spawn teleport is pending) and no `RIVET_TELEPORT_ACK` (no ack
+    /// frame was sent). The gate is pinned on and the subscriber is the fmt
+    /// test writer — so a regression that emitted a record would be captured.
+    #[test]
+    fn trace_pre_ack_move_emits_no_acceptance() {
+        let _sub = crate::server::movement_trace::test_support::install_for_tests(true);
+        let (mut registry, _out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+
+        // The session spawns with the spawn teleport (id 1) pending; the move
+        // while pending is ignored (rotation-only snap), never accepted.
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(5.0, -63.0, 5.0))],
+        );
+        assert_eq!(manager.move_frames_seen(), 1, "the move body parsed");
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!(
+            (pos.x, pos.y, pos.z),
+            (0.0, -63.0, 0.0),
+            "position still at spawn"
+        );
+
+        let records = _sub.recorder.snapshot();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.tag == movement_trace::TAG_MOVE_ACCEPTED)
+                .count(),
+            0,
+            "a pre-ack move is never an accepted movement"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.tag == movement_trace::TAG_TELEPORT_ACK)
+                .count(),
+            0,
+            "no ack frame was sent, so no ack record"
+        );
+    }
+
+    /// An accepted post-ack move emits exactly one `RIVET_MOVE_ACCEPTED` with
+    /// the exact clamped/wrapped values snapped into the tick-owned player and
+    /// the session's accepted-frame counter. The same move with the gate off
+    /// emits nothing (zero behavior when unset).
+    #[test]
+    fn trace_accepted_move_is_post_ack_and_carries_snapped_values() {
+        let _sub = crate::server::movement_trace::test_support::install_for_tests(true);
+        let (mut registry, _out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+
+        // Pre-ack: nothing accepted yet.
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(5.0, -63.0, 5.0))],
+        );
+        // Ack the spawn teleport (id 1): accepted, pending cleared.
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        // Post-ack: the accepted move routes into the tick-owned player.
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(12.5, -63.0, -8.25))],
+        );
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (12.5, -63.0, -8.25));
+
+        let records = _sub.recorder.snapshot();
+        let ack: Vec<_> = records
+            .iter()
+            .filter(|r| r.tag == TAG_TELEPORT_ACK)
+            .collect();
+        assert_eq!(ack.len(), 1, "exactly one ack record");
+        assert_eq!(ack[0].field("outcome"), Some("accepted"));
+        assert_eq!(ack[0].field("ack_id"), Some("1"));
+        assert_eq!(ack[0].field("id"), Some("conn#1"));
+        assert_eq!(ack[0].field("x"), Some("0"), "awaited spawn x");
+
+        let accepted: Vec<_> = records
+            .iter()
+            .filter(|r| r.tag == TAG_MOVE_ACCEPTED)
+            .collect();
+        assert_eq!(
+            accepted.len(),
+            1,
+            "exactly one accepted move (post-ack only)"
+        );
+        assert_eq!(accepted[0].field("x"), Some("12.5"));
+        assert_eq!(accepted[0].field("y"), Some("-63"));
+        assert_eq!(accepted[0].field("z"), Some("-8.25"));
+        assert_eq!(accepted[0].field("accepted_frames"), Some("1"));
+        assert_eq!(accepted[0].field("id"), Some("conn#1"));
+
+        // The final authoritative displacement is nonzero (12.5, -63, -8.25 vs
+        // the spawn (0, -63, 0)); the trace consumer's sums must recover it.
+        let dx = pos.x - 0.0;
+        let dz = pos.z - 0.0;
+        assert!(
+            dx * dx + dz * dz > 0.0,
+            "authoritative displacement from spawn is nonzero"
+        );
+    }
+
+    /// A malformed `move_player` frame (truncated body) parses the packet id
+    /// but the codec rejects the body: no `RIVET_MOVE_ACCEPTED` is emitted, and
+    /// the session stays intact (no kick on the trace path).
+    #[test]
+    fn trace_malformed_frame_emits_no_acceptance() {
+        let _sub = crate::server::movement_trace::test_support::install_for_tests(true);
+        let (mut registry, _out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, malformed_move_pos_frame())],
+        );
+        assert_eq!(manager.move_frames_seen(), 1, "the id parsed (routed)");
+        let records = _sub.recorder.snapshot();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.tag == TAG_MOVE_ACCEPTED)
+                .count(),
+            0,
+            "a malformed move body never becomes an accepted movement"
+        );
+    }
+
+    /// With the gate off (`RIVET_TRACE_MOVEMENT` unset), the same accepted
+    /// movement emits zero trace records — the trace must be a strict no-op when
+    /// disabled.
+    #[test]
+    fn trace_zero_behavior_when_gate_off() {
+        let _sub = crate::server::movement_trace::test_support::install_for_tests(false);
+        let (mut registry, _out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(12.5, -63.0, -8.25))],
+        );
+        // The authoritative path still runs (the move is accepted into the
+        // player) — only the trace records are suppressed.
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (12.5, -63.0, -8.25));
+        assert!(
+            _sub.recorder.snapshot().is_empty(),
+            "the gate-off run emits no trace records"
+        );
+    }
+
+    /// `RIVET_SESSION_END` is emitted only for the traced close paths — EOF,
+    /// Timeout, and InboundOverflow (the client going away, or a liveness/
+    /// anti-flood kick) — carrying the final authoritative position + rotation
+    /// and the session's movement counts. A deliberate server-side close
+    /// (outbound Overflow, ServerShutdown, Malformed) is not a movement-trace
+    /// endpoint and emits nothing. Each case reconnects a fresh live session
+    /// (the previous close pruned it), disconnects with the case's reason, and
+    /// asserts on the new session-end records only (the shared recorder
+    /// accumulates across the loop). `prune_lost` consumes the recorded reason
+    /// for the live session either way, so the reason map never retains it.
+    #[test]
+    fn trace_session_end_distinguishes_close_reasons() {
+        let _sub = crate::server::movement_trace::test_support::install_for_tests(true);
+        let (mut registry, _out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let cases: &[(DisconnectReason, bool, Option<&str>)] = &[
+            (
+                DisconnectReason::EndOfStream,
+                true,
+                Some("disconnect.endOfStream"),
+            ),
+            (DisconnectReason::Timeout, true, Some("disconnect.timeout")),
+            (
+                DisconnectReason::InboundOverflow("flood".into()),
+                true,
+                Some("inbound overflow: flood"),
+            ),
+            // A deliberate server-side close is not a movement-trace endpoint.
+            (DisconnectReason::Overflow, false, None),
+            (DisconnectReason::ServerShutdown, false, None),
+            (DisconnectReason::Malformed("garbage".into()), false, None),
+        ];
+        for (reason, traced, expected_reason) in cases {
+            // Reconnect the channels (the previous close removed the entry),
+            // re-apply the handoff, and run one tick: the session spawns and
+            // the ack clears the pending teleport, so the session is post-ack.
+            let (in_tx, in_rx) = tokio::sync::mpsc::channel(4);
+            let (out_tx, _out_rx) = tokio::sync::mpsc::channel(256);
+            registry.apply(LifecycleEvent::Connect {
+                id: ID,
+                remote: "127.0.0.1:25565".parse().unwrap(),
+                in_rx,
+                out_tx,
+                drained: InboundDrained::new(),
+            });
+            let _ = in_tx;
+            apply_enter_play(&mut registry);
+            manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+            manager = run_tick(
+                manager,
+                &mut registry,
+                vec![(ID, move_pos_frame(12.5, -63.0, -8.25))],
+            );
+            assert_eq!(manager.session_count(), 1, "session live before the close");
+
+            let prior_ends = _sub
+                .recorder
+                .snapshot()
+                .iter()
+                .filter(|r| r.tag == TAG_SESSION_END)
+                .count();
+            registry.apply(LifecycleEvent::Disconnect {
+                id: ID,
+                reason: reason.clone(),
+            });
+            manager = run_tick(manager, &mut registry, vec![]);
+            assert_eq!(manager.session_count(), 0, "session pruned on close");
+            assert_eq!(
+                registry.take_disconnect_reason(ID),
+                None,
+                "prune_lost consumed the session's reason, not retained"
+            );
+
+            let ends: Vec<_> = _sub
+                .recorder
+                .snapshot()
+                .into_iter()
+                .filter(|r| r.tag == TAG_SESSION_END)
+                .collect();
+            let delta = ends.len() - prior_ends;
+            match traced {
+                true => {
+                    assert_eq!(delta, 1, "a traced close reports a session end");
+                    let end = ends.last().expect("the new session-end record");
+                    assert_eq!(end.field("reason"), *expected_reason);
+                    // The final authoritative position is the accepted move's
+                    // snapped values (the move happened before this close).
+                    assert_eq!(end.field("x"), Some("12.5"));
+                    assert_eq!(end.field("y"), Some("-63"));
+                    assert_eq!(end.field("z"), Some("-8.25"));
+                    assert_eq!(end.field("accepted_frames"), Some("1"));
+                }
+                false => assert_eq!(delta, 0, "a deliberate close emits no session end"),
+            }
+        }
     }
 }
