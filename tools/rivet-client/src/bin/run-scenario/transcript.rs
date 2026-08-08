@@ -7,6 +7,16 @@
 //! terminal states. This module projects the stream onto the canonical shape
 //! the comparator diffs:
 //!
+//! Strict JSONL policies come from `rivet-harness-common::transcript`:
+//! [`parse_lines`](rivet_harness_common::transcript::parse_lines) rejects any
+//! malformed (unparseable) line, and
+//! [`check_terminal`](rivet_harness_common::transcript::check_terminal)
+//! rejects a stream whose terminal event is duplicated (corrupt) or missing
+//! (the run never completed its outcome). The per-run terminal is derived from
+//! the outcome the records imply (`spawned`→`joined`, `moved`→`moved`,
+//! failures→their failure event) — the client emits exactly one terminal and
+//! then exits.
+//!
 //! ```json
 //! {
 //!   "protocol": 1,
@@ -138,17 +148,13 @@ fn excluded_fields() -> serde_json::Map<String, Value> {
     map
 }
 
-/// Parse a raw JSON-lines stream into records, rejecting malformed lines and
-/// unsupported protocol versions.
+/// Parse a raw JSON-lines stream into records, rejecting malformed lines
+/// (the shared blank-skip + strict-parse policy) and unsupported protocol
+/// versions.
 pub fn parse_records(raw: &str) -> Result<Vec<Value>, String> {
-    let records: Vec<Value> = raw
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str::<Value>(line)
-                .map_err(|e| format!("invalid JSON line: {e}: {line}"))
-        })
-        .collect::<Result<_, _>>()?;
+    let records = rivet_harness_common::transcript::parse_lines(raw, |line| {
+        serde_json::from_str::<Value>(line).map_err(|e| format!("invalid JSON line: {e}: {line}"))
+    })?;
     for record in &records {
         if record.get("protocol") != Some(&json!(PROTOCOL)) {
             return Err(format!(
@@ -158,6 +164,30 @@ pub fn parse_records(raw: &str) -> Result<Vec<Value>, String> {
         }
     }
     Ok(records)
+}
+
+/// Strict terminal policy for the client's transcript (shared
+/// `rivet-harness-common::transcript::check_terminal`): exactly one record
+/// must carry the terminal event the outcome implies. A duplicate is a corrupt
+/// stream (the client emits its terminal once, then exits); an absent terminal
+/// means the run never completed that outcome.
+fn check_outcome_terminal(records: &[Value], outcome: &str) -> Result<(), String> {
+    let terminal = match outcome {
+        "spawned" => "joined",
+        "moved" => "moved",
+        "timeout" => "timeout",
+        "connection_failed" => "connection_failed",
+        "disconnected" => "disconnect",
+        other => {
+            return Err(format!(
+                "transcript has no terminal event (outcome {other}) — the run never completed \
+                 an observable outcome"
+            ));
+        }
+    };
+    rivet_harness_common::transcript::check_terminal(records, terminal, |r| {
+        r.get("event").and_then(Value::as_str)
+    })
 }
 
 /// Determine the terminal outcome from the raw records.
@@ -300,6 +330,7 @@ pub fn rivet_play_verdict(t: &Value) -> Result<&'static str, String> {
 /// Project a client run onto the canonical `join` transcript.
 pub fn normalize_join(raw: &str) -> Result<Value, String> {
     let records = parse_records(raw)?;
+    check_outcome_terminal(&records, outcome(&records))?;
 
     let lifecycle: Vec<String> = records
         .iter()
@@ -409,11 +440,17 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
         .iter()
         .find(|r| r.get("event") == Some(&json!("moved")))
         .cloned();
+    let outcome = if moved.is_some() {
+        "moved"
+    } else {
+        outcome(&records)
+    };
+    check_outcome_terminal(&records, outcome)?;
 
     let mut transcript = json!({
         "protocol": PROTOCOL,
         "scenario": "move",
-        "outcome": if moved.is_some() { "moved" } else { outcome(&records) },
+        "outcome": outcome,
         "lifecycle": lifecycle,
         "excluded": excluded_move_fields(),
     });

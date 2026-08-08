@@ -2589,9 +2589,14 @@ name = "rivet-client"
 version = "0.1.0"
 dependencies = [
  "azalea",
+ "rivet-harness-common",
  "serde_json",
  "tokio",
 ]
+
+[[package]]
+name = "rivet-harness-common"
+version = "0.1.0"
 
 [[package]]
 name = "rsa"

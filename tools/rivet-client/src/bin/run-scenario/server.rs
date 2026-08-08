@@ -7,6 +7,13 @@
 //! stdout (rivet-server/src/main.rs), then SIGTERM and waits for a clean exit
 //! (code 0).
 //!
+//! The child-process lifecycle (spawn with log tee, READY poll, kill-on-drop,
+//! SIGTERM + reap) is the shared `rivet-harness-common::server` module; this
+//! module owns what is scenario-specific: which command to spawn per kind, the
+//! READY marker test, the per-kind boot timeout, the run-dir preparation, the
+//! Paper clean-save / Rivet clean-exit assertions, and the load-bearing Paper
+//! provenance check.
+//!
 //! Paper boots reuse the paperclip-downloaded `libraries/` and `cache/` (the
 //! slow ~160MB downloads) and wipe everything else, so each run is a fresh world
 //! at a fixed seed while staying fast on re-runs. `versions/` is deliberately
@@ -16,19 +23,21 @@
 //! can only ever see the jar the artifact actually being booted produced — a
 //! swapped, stale, or non-bundler artifact cannot silently stand in for the
 //! pinned reference. Paper-vs-Paper self-checks and capture do not require the
-//! pin: they compare a build against itself. Every boot gets its own port
-//! (`reserve_ports` in main.rs): the Paper run dir's `server.properties` is
-//! patched to the allocated port and `rivet-server` is passed `--host`/`--port`,
-//! so no two servers in a scenario can collide.
+//! pin: they compare a build against itself. Every boot gets its own port (held
+//! `rivet-harness-common::port` reservations from main.rs): the Paper run dir's
+//! `server.properties` is patched to the allocated port and `rivet-server` is
+//! passed `--host`/`--port`, so no two servers in a scenario can collide.
 
 use std::fmt;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use rivet_harness_common::server::ChildServer;
 
 /// Name of the paperclip bundler jar we boot through.
 pub const PAPERCLIP_JAR: &str = "paper-paperclip-26.2.local-SNAPSHOT.jar";
@@ -108,34 +117,26 @@ impl From<io::Error> for Error {
     }
 }
 
-/// A running (or runnable) server.
+impl From<rivet_harness_common::server::Error> for Error {
+    fn from(e: rivet_harness_common::server::Error) -> Self {
+        match e {
+            rivet_harness_common::server::Error::Io(e) => Error::Io(e),
+            rivet_harness_common::server::Error::Unverified(m) => Error::Unverified(m),
+            rivet_harness_common::server::Error::Gate(m) => Error::Gate(m),
+        }
+    }
+}
+
+/// A running (or runnable) server. Kill-on-drop lives in the shared
+/// `ChildServer`: dropping without a clean `shutdown` SIGKILLs the child so it
+/// cannot keep its port hostage.
 pub struct Server {
     kind: ServerKind,
-    child: Child,
-    log_path: PathBuf,
+    child: ChildServer,
     /// The run dir the server booted in. For Paper this is where the paperclip
     /// materialized the compiled server jar, so `shutdown` can verify the
     /// booted jar's provenance.
     run_dir: PathBuf,
-    /// Byte offset in the boot log at the moment READY was seen; used to
-    /// inspect only the post-READY tail for the clean-save/clean-exit marker.
-    ready_offset: usize,
-    /// Set by `shutdown` after the child has exited; `Drop` then leaves it
-    /// alone instead of killing an already-reaped process.
-    stopped: bool,
-}
-
-/// If a `Server` is dropped without a clean `shutdown` (an error or panic
-/// anywhere in the join path), kill the underlying process so it does not keep
-/// its port hostage for the next run.
-impl Drop for Server {
-    fn drop(&mut self) {
-        if self.stopped {
-            return;
-        }
-        let _ = signal_process(self.child.id(), "KILL");
-        let _ = self.child.wait();
-    }
 }
 
 impl Server {
@@ -145,21 +146,6 @@ impl Server {
     /// verify the booted jar after shutdown.
     pub fn run_dir(&self) -> &Path {
         &self.run_dir
-    }
-}
-
-/// Send a signal to `pid` via the POSIX `kill` utility (no signal crate).
-fn signal_process(pid: u32, signal: &str) -> io::Result<()> {
-    let status = Command::new("kill")
-        .arg(format!("-{signal}"))
-        .arg(pid.to_string())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "kill -{signal} {pid} exited with {status}"
-        )))
     }
 }
 
@@ -426,69 +412,20 @@ fn prepare_run_dir(
     Ok(())
 }
 
-/// Poll the boot log until the server reaches its machine-readable READY
-/// marker. Returns the byte offset at READY so the caller can inspect only the
-/// post-READY tail for the clean-shutdown marker. Kills the child and returns
-/// UNVERIFIED on timeout or premature exit.
-fn wait_for_ready(kind: ServerKind, child: &mut Child, log_path: &Path) -> Result<usize, Error> {
-    let timeout = match kind {
-        ServerKind::Paper => BOOT_TIMEOUT,
-        ServerKind::Rivet => RIVET_BOOT_TIMEOUT,
-    };
-    let deadline = Instant::now() + timeout;
-    let pid = child.id();
-    loop {
-        if Instant::now() >= deadline {
-            let _ = signal_process(pid, "KILL");
-            let _ = child.wait();
-            return Err(Error::Unverified(format!(
-                "timed out after {timeout:?} waiting for {kind} to reach READY — see {}",
-                log_path.display()
-            )));
-        }
-        if let Some(status) = child.try_wait()? {
-            return Err(Error::Unverified(format!(
-                "{kind} process exited ({status}) before reaching READY — see {}",
-                log_path.display()
-            )));
-        }
-        if let Ok(text) = fs::read_to_string(log_path) {
-            let ready = match kind {
-                ServerKind::Paper => {
-                    text.contains("Done (") && text.contains("For help, type \"help\"")
-                }
-                ServerKind::Rivet => text.lines().any(|l| l.trim() == RIVET_READY),
-            };
-            if ready {
-                let offset = fs::metadata(log_path)
-                    .map(|m| m.len() as usize)
-                    .unwrap_or(text.len());
-                return Ok(offset);
-            }
-        }
-        thread::sleep(POLL_INTERVAL);
+/// The READY marker test for a server kind (used by the shared
+/// [`ChildServer::wait_ready`]).
+fn ready_test(kind: ServerKind, text: &str) -> bool {
+    match kind {
+        ServerKind::Paper => text.contains("Done (") && text.contains("For help, type \"help\""),
+        ServerKind::Rivet => text.lines().any(|l| l.trim() == RIVET_READY),
     }
 }
 
-/// Wait for `child` to exit, SIGKILLing after `timeout`, and return its exit
-/// status. The status is load-bearing for Rivet's clean-shutdown contract (the
-/// SIGTERM handler must exit 0).
-fn wait_for_exit(child: &mut Child, timeout: Duration) -> Result<std::process::ExitStatus, Error> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait()? {
-            Some(status) => return Ok(status),
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = signal_process(child.id(), "KILL");
-                    child.wait()?;
-                    return Err(Error::Gate(format!(
-                        "server did not exit after SIGTERM within {timeout:?}; killed with SIGKILL"
-                    )));
-                }
-                thread::sleep(POLL_INTERVAL);
-            }
-        }
+/// The boot timeout for a server kind.
+fn boot_timeout(kind: ServerKind) -> Duration {
+    match kind {
+        ServerKind::Paper => BOOT_TIMEOUT,
+        ServerKind::Rivet => RIVET_BOOT_TIMEOUT,
     }
 }
 
@@ -506,60 +443,58 @@ pub fn boot(
     artifact: &Path,
     server_properties_src: Option<&Path>,
     address: SocketAddr,
+    port_reservation: Option<rivet_harness_common::port::PortReservation>,
 ) -> Result<Server, Error> {
     prepare_run_dir(run_dir, kind, server_properties_src, address.port())?;
 
-    let log_file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(log_path)?;
-    let log_err = log_file.try_clone()?;
-
-    let mut child = match kind {
-        ServerKind::Paper => Command::new("java")
-            .args(["-Xms512M", "-Xmx2G", "-jar"])
-            .arg(artifact)
-            .arg("nogui")
-            .current_dir(run_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(log_err))
-            .spawn()
-            .map_err(|e| {
-                Error::Gate(format!(
-                    "failed to spawn java: {e} (is a Java 25+ JRE on PATH?)"
-                ))
-            })?,
-        ServerKind::Rivet => Command::new(artifact)
-            .args([
+    let mut command = match kind {
+        ServerKind::Paper => {
+            let mut c = Command::new("java");
+            c.args(["-Xms512M", "-Xmx2G", "-jar"])
+                .arg(artifact)
+                .arg("nogui")
+                .current_dir(run_dir);
+            c
+        }
+        ServerKind::Rivet => {
+            let mut c = Command::new(artifact);
+            c.args([
                 "--host",
                 &address.ip().to_string(),
                 "--port",
                 &address.port().to_string(),
             ])
-            .current_dir(run_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(log_err))
-            .spawn()
-            .map_err(|e| {
-                Error::Gate(format!(
-                    "failed to spawn rivet-server ({}): {e} — build it first with: \
-                     cargo build -p rivet-server (repo root)",
-                    artifact.display()
-                ))
-            })?,
+            .current_dir(run_dir);
+            c
+        }
     };
-
-    let ready_offset = wait_for_ready(kind, &mut child, log_path)?;
+    // A held port reservation (used by the multi-server Paper-vs-Rivet mode) is
+    // released only now, immediately before the child process binds the port,
+    // so the port cannot be stolen during the (possibly slow) run-dir prep.
+    // Single-server modes pass `None` and boot on their base port.
+    if let Some(reservation) = port_reservation {
+        reservation.release();
+    }
+    let mut child = ChildServer::spawn(&mut command, log_path).map_err(|e| match kind {
+        ServerKind::Paper => Error::Gate(format!(
+            "failed to spawn java: {e} (is a Java 25+ JRE on PATH?)"
+        )),
+        ServerKind::Rivet => Error::Gate(format!(
+            "failed to spawn rivet-server ({}): {e} — build it first with: \
+             cargo build -p rivet-server (repo root)",
+            artifact.display()
+        )),
+    })?;
+    child.wait_ready(
+        &kind.to_string(),
+        boot_timeout(kind),
+        POLL_INTERVAL,
+        |text| ready_test(kind, text),
+    )?;
     Ok(Server {
         kind,
         child,
-        log_path: log_path.to_path_buf(),
         run_dir: run_dir.to_path_buf(),
-        ready_offset,
-        stopped: false,
     })
 }
 
@@ -570,19 +505,17 @@ pub fn boot(
 /// and exiting with code 0 (rivet-server/src/main.rs); Rivet persists no world
 /// state yet, so the exit status is the load-bearing assertion.
 pub fn shutdown(server: &mut Server) -> Result<(), Error> {
-    let pid = server.child.id();
     println!("    server ready; shutting down cleanly (SIGTERM)...");
     // Let trailing delayed-init / chunk I/O settle before stopping.
     thread::sleep(Duration::from_millis(1500));
-    let _ = signal_process(pid, "TERM");
-    let status = wait_for_exit(&mut server.child, SHUTDOWN_TIMEOUT)?;
-    server.stopped = true;
+    let status = server.child.shutdown(SHUTDOWN_TIMEOUT, POLL_INTERVAL)?;
 
     match server.kind {
         ServerKind::Paper => {
-            let bytes = fs::read(&server.log_path)?;
-            let tail = if bytes.len() > server.ready_offset {
-                String::from_utf8_lossy(&bytes[server.ready_offset..]).into_owned()
+            let bytes = fs::read(server.child.log_path())?;
+            let done_offset = server.child.ready_offset();
+            let tail = if bytes.len() > done_offset {
+                String::from_utf8_lossy(&bytes[done_offset..]).into_owned()
             } else {
                 String::new()
             };
@@ -609,7 +542,7 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
                 return Err(Error::Gate(format!(
                     "rivet-server exited with {status} after SIGTERM (expected a clean exit 0) — \
                      see {}",
-                    server.log_path.display()
+                    server.child.log_path().display()
                 )));
             }
         }
@@ -620,6 +553,7 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
 
     /// CRC-32 (IEEE) over `data`, matching what zip tools verify. The test
     /// builds real jar files so `unzip` reads the MANIFEST without a bad-CRC
@@ -882,28 +816,33 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A `Server` wrapping a long-lived stand-in process (`sleep 60` — a booted
+    /// server that would hold its port hostage if leaked). The kill-on-drop and
+    /// clean-shutdown behaviors now live in the shared `ChildServer` and are
+    /// exercised there with dedicated tests; here we only pin that `Server`
+    /// forwards them (dropping without a clean shutdown kills, a clean shutdown
+    /// leaves nothing to kill).
+    fn sleep_server() -> Server {
+        let dir =
+            std::env::temp_dir().join(format!("rivet-scenario-srv-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("boot.log");
+        let mut command = Command::new("sleep");
+        command.arg("60");
+        let child = ChildServer::spawn(&mut command, &log).expect("spawn sleep");
+        Server {
+            kind: ServerKind::Rivet,
+            child,
+            run_dir: dir.clone(),
+        }
+    }
+
     /// Dropping a `Server` without a clean `shutdown` must kill the underlying
     /// process (a leftover server would hold its port hostage for the next run).
     #[test]
     fn drop_kills_the_child_process() {
-        // `sleep 60` is a stand-in for a booted server: a long-lived process we
-        // can re-parent into a `Server` and then drop.
-        let child = Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn sleep");
-        let pid = child.id();
-        let server = Server {
-            kind: ServerKind::Rivet,
-            child,
-            log_path: PathBuf::from("/dev/null"),
-            run_dir: PathBuf::from("/nonexistent"),
-            ready_offset: 0,
-            stopped: false,
-        };
+        let server = sleep_server();
+        let pid = server.child.id();
         drop(server);
 
         // The process must be gone: kill -0 fails for a dead pid. Stderr is
@@ -917,30 +856,18 @@ mod tests {
         assert!(!status.success(), "dropped Server must kill its child");
     }
 
-    /// After a clean `shutdown` (child reaped, `stopped` set), dropping must not
-    /// attempt a kill: the child is already gone, so `kill -0` on its pid fails.
+    /// After a clean `shutdown` (child reaped), dropping must not attempt a
+    /// kill: the child is already gone, so `kill -0` on its pid fails. `sleep`
+    /// dies on SIGTERM, so the shared `shutdown` reaps it cleanly and marks it
+    /// stopped — exactly the code path `Server::shutdown` uses.
     #[test]
     fn clean_shutdown_then_drop_does_not_kill_a_reaped_child() {
-        let child = Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn sleep");
-        let pid = child.id();
-        let mut server = Server {
-            kind: ServerKind::Rivet,
-            child,
-            log_path: PathBuf::from("/dev/null"),
-            run_dir: PathBuf::from("/nonexistent"),
-            ready_offset: 0,
-            stopped: false,
-        };
-        // Reap the child and mark it stopped, exactly what `shutdown` does.
-        signal_process(pid, "KILL").unwrap();
-        server.child.wait().unwrap();
-        server.stopped = true;
+        let mut server = sleep_server();
+        let pid = server.child.id();
+        server
+            .child
+            .shutdown(Duration::from_secs(5), Duration::from_millis(20))
+            .expect("clean shutdown");
         drop(server);
 
         let status = Command::new("kill")
