@@ -987,10 +987,10 @@ impl<T: DataOutput> DataOutput for StringFallbackDataOutput<T> {
         // Java's StringFallbackDataOutput catches only UTFDataFormatException —
         // the string-too-long-for-modified-UTF-8 case — and writes "" instead.
         // DataOutputStream.writeUTF throws that before writing anything, so
-        // pre-checking the CESU-8 length here matches the Java condition exactly
-        // without swallowing an unrelated InvalidData I/O error from the parent
-        // (every other error propagates, as in Java).
-        if cesu8::to_java_cesu8(s).len() > u16::MAX as usize {
+        // pre-checking the modified-UTF-8 length here matches the Java condition
+        // exactly without swallowing an unrelated InvalidData I/O error from the
+        // parent (every other error propagates, as in Java).
+        if rivet_util::data_io::encoded_len(s) > u16::MAX as usize {
             log_and_pause_if_in_ide("Failed to write NBT String");
             self.parent.write_utf("")
         } else {

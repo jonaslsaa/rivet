@@ -7,7 +7,7 @@
 | `rivet-core` | `net.minecraft` root package | `CrashReport`, `ChatFormatting`, `SharedConstants`, `Util`, root exceptions. Bottom of the stack — keeps module-path mirroring clean instead of scattering root classes ad hoc. |
 | `rivet-util` | `net.minecraft.util`, `Mth`, RNG | Java-parity layer: LCG/Xoroshiro128++ RNG, `nextGaussian` quirk, md5 `seedFromHashOf`, 65536-entry sin table, `java_string_hash`. Golden-tested against Java fixtures. |
 | `rivet-serialization` | Mojang DataFixerUpper (MIT) | `Codec`/`DynamicOps`/`DataResult` shape preserved; serde only beneath external JSON. A leaf: DFU has no Minecraft deps. |
-| `rivet-nbt` | `net.minecraft.nbt` | Own port (Java modified-UTF-8 via `cesu8`); SNBT; fuzz targets. **Depends on `rivet-serialization`** — faithful to Java, where `NbtOps implements DynamicOps<Tag>`. |
+| `rivet-nbt` | `net.minecraft.nbt` | Own port (Java modified UTF-8 via `rivet-util::data_io`); SNBT; fuzz targets. **Depends on `rivet-serialization`** — faithful to Java, where `NbtOps implements DynamicOps<Tag>`. |
 | `rivet-text` | Adventure (MIT) usage in Paper | Components, legacy `§` codes. |
 | `rivet-brigadier` | Mojang Brigadier (MIT) | Direct port. |
 | `rivet-registry` | `core.registries`, `src/generated` | **Generated** by `tools/rivet-codegen` from extracted vanilla data; committed; feature-gated; prefer compact tables over huge Rust source. |
@@ -28,7 +28,7 @@ Module paths inside crates mirror Java packages (PORTING.md). Crate boundaries e
 
 **Data:** `serde` + `serde_json` (configs, datapack JSON — never packets or chunk hot paths), `toml` (config), `slotmap` (entity/holder arenas), `rustc-hash` (FxHashMap default), `indexmap` (order-observable maps), `smallvec`, `bitflags`, `phf` (generated static tables), `uuid`, `bytes`.
 
-**Formats/compression:** `flate2` (+`async-compression` for the network stream), `cesu8`, `md5` (Java seed hashing, not security), `xxhash-rust` (fixture/chunk hashing), `crc32c` (RFC 3720 CRC-32C for `HashOps`'s `DynamicOps<HashCode>` serialization adapter, issue #205 — the byte-identical checksum behind Guava's `Hashing.crc32c()`).
+**Formats/compression:** `flate2` (+`async-compression` for the network stream), `md5` (Java seed hashing, not security), `xxhash-rust` (fixture/chunk hashing), `crc32c` (RFC 3720 CRC-32C for `HashOps`'s `DynamicOps<HashCode>` serialization adapter, issue #205 — the byte-identical checksum behind Guava's `Hashing.crc32c()`). Both directions of modified UTF-8 (`DataOutputStream.writeUTF` / `DataInputStream.readUTF`) are direct in-repo ports of the OpenJDK 25 codec in `rivet-util::data_io` — the `cesu8` crate's Java-variant decoder diverges from `DataInputStream` on `C1 80`, overlong 3-byte forms, and error messages, and its Java-variant encoder would be a second source of truth for the write side (issue #265).
 
 **Crypto (protocol):** RustCrypto stable releases only — `aes`, `cfb8`, `rsa`, `sha1`, `sha2`; `rand` for non-gameplay randomness only (gameplay RNG is `rivet-util`).
 
