@@ -3265,8 +3265,13 @@
       "sha256": "e1c535d03e28116c7dd98d521c885d44f1458d9de5881c6e0175edcb04a87864"
     }
   ],
+  "chunk-concurrency": {
+    "io-threads": 1,
+    "worker-threads": 1
+  },
   "chunk-count": 408,
   "format": 1,
+  "kind": "m2",
   "level-name": "world",
   "level-type": "minecraft\\:normal",
   "paper": "26.2-DEV-main@0a99345",
@@ -3338,9 +3343,6 @@
     "server-ip": "",
     "server-port": "25599",
     "simulation-distance": "2",
-    "spawn-animals": "true",
-    "spawn-monsters": "true",
-    "spawn-npcs": "true",
     "spawn-protection": "0",
     "status-heartbeat-interval": "0",
     "sync-chunk-writes": "true",

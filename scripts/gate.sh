@@ -26,6 +26,12 @@
 #                          chunk-NBT slice against the committed region baseline
 #                          (proves two fresh boots match). Also runs the
 #                          --m2 --expect-fail negative control.
+#                          Every oracle boot is pinned to chunk-system 1 worker/1
+#                          I/O thread (issue #266): fixtures/paper-global.yml is
+#                          copied into the run dir, the boot log must report
+#                          exactly "1 worker threads, 1 I/O threads", and the M2
+#                          region baseline must carry matching chunk-concurrency
+#                          provenance — drift fails the gate loudly.
 #   - rivet-parity         byte-for-byte NBT/SNBT diff of rivet-nbt against the Paper
 #                          reference oracle — the only gate step that exercises real
 #                          Rivet code against Paper.

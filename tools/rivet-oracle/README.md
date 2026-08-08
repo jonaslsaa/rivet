@@ -39,6 +39,8 @@ rivet-oracle/
   fixtures/             # golden fixtures (committed), one manifest per kind
     manifest.json       # M0 superflat slice: seed, config, per-file SHA-256s
     server.properties   # exact M0 config (superflat, seed 42)
+    paper-global.yml    # pinned Paper global config (chunk-system 1/1, #266)
+    paper-world-defaults.yml    # pinned Paper world-defaults (spawn-limits 0, #266)
     level.dat           # world metadata (gzip-NBT)
     level.dat_old
     chunk/<dim>/0.0/<cx>.<cz>.nbt   # decompressed chunk NBT payloads
@@ -77,6 +79,12 @@ cp working/Paper/paper-server/build/libs/paper-paperclip-26.2.local-SNAPSHOT.jar
 #   exact M0 config: level-seed=42, level-type=minecraft:flat,
 #   online-mode=false, generate-structures=false, server-port=25599,
 #   view-distance=4, simulation-distance=4, enable-status=false)
+# write work/run/config/paper-global.yml from fixtures/paper-global.yml
+#   (chunk-system 1/1 — the #266 concurrency pin; see the section below)
+# write work/run/config/paper-world-defaults.yml from
+#   fixtures/paper-world-defaults.yml (spawn-limits 0 — no entity spawns into
+#   the capture window; MC 26.2 removed the vanilla spawn-* server.properties
+#   keys, so this is the effective suppression, see the section below)
 ```
 
 Boot (from inside the run dir; server creates world/ subdir):
@@ -95,6 +103,52 @@ still triggers the clean save; SIGKILL only as a last resort.)
 
 Paperclip materializes `libraries/`, `versions/`, `cache/` (~160MB) inside the
 run dir on first boot — that's why `work/` is gitignored.
+
+## Chunk-generation concurrency pin (issue #266)
+
+A byte-identity oracle "from seed alone" is not well-posed while Paper's
+Moonrise chunk system runs adjacent chunks' FEATURES passes concurrently: the
+normal-overworld Nether vegetation placement races across chunk borders, so the
+same seed + config can produce alternate block states depending on scheduling
+and core count. Every oracle boot is therefore **pinned to one worker thread
+and one I/O thread**, which serializes worldgen so the same seed + config yields
+the same chunks every boot.
+
+The pin has three layers, each verified at run time:
+
+1. **Config.** `fixtures/paper-global.yml` sets
+   `chunk-system.io-threads: 1` / `chunk-system.worker-threads: 1`. `prepare_run_dir`
+   copies it to the run dir's `config/paper-global.yml` before every boot and
+   errors if it is missing. (Paper rewrites the file in the run dir with its
+   full defaults on first boot, so the committed config stays minimal and
+   version-robust.)
+2. **Log pin.** `boot_and_shutdown` parses the boot log's
+   `[MoonriseCommon] Paper is using N worker threads, M I/O threads` line and
+   refuses to continue unless exactly `1 worker threads, 1 I/O threads` was
+   observed. A missing line (Paper renamed it, or it never appears) also fails
+   loudly — the pin can never silently lapse.
+3. **Provenance.** M2 region manifests record the observed concurrency as
+   `chunk-concurrency: {io-threads, worker-threads}` and `verify` refuses any
+   region capture whose provenance is missing or not 1/1. `verify --m2` also
+   checks the baseline's provenance against the freshly booted log each run,
+   so a committed manifest that drifts from what a run actually did is caught.
+
+   Which manifests are region captures is decided by the explicit `kind` field
+   (`kind: "m2"`), stamped by `regenerate` — never inferred from Paper's
+   level-type/compression strings, so a future change to how Paper spells
+   `level-type` cannot silently drop the provenance requirement. The old
+   pre-`kind` committed manifests are handled by a strict, named fallback
+   (none-compression `minecraft\:normal` with chunks) that is never a silent
+   skip: a kind-less manifest of that shape is still a region capture and still
+   requires the pinned provenance.
+
+Every boot also runs with **entity spawning suppressed**: `fixtures/paper-world-defaults.yml`
+sets every `entities.spawning.spawn-limits.*` category to 0, so no mob can
+spawn into the save window and serialize into the captured chunks' `Entities`
+tags (unrelated nondeterminism no normalization can remove). MC 26.2 removed
+the vanilla `spawn-monsters`/`spawn-animals`/`spawn-npcs` server.properties
+keys — `DedicatedServerProperties` reads none of them — so the world-defaults
+spawn-limits are the effective mechanism (the same one `rivet-capture` uses).
 
 ## Fixture capture
 
@@ -187,7 +241,7 @@ It does, in order:
    chunks). Nonzero exit on any failure.
 
 A fresh-boot worldgen diff is a real result — investigate, never fudge
-fixtures to pass. `work/verify/boot.log` and the kept fresh-extraction dir (in
+fixtures to pass. `work/verify/boot-gate.log` and the kept fresh-extraction dir (in
 the system temp dir, printed on FAIL) are the diagnostic artifacts.
 
 ## Negative control: `verify --expect-fail`
@@ -239,7 +293,10 @@ waves). It runs the same boot → extract → pin-check → diff pipeline as `ve
 but with the normal-overworld config (`fixtures/server-normal.properties`:
 `level-type=minecraft:normal`, `region-file-compression=none` per DECISIONS D13,
 seed 42, view/simulation-distance 2, port 25599) and diffed against
-`fixtures/regions/overworld-normal`.
+`fixtures/regions/overworld-normal`. Entity spawning is suppressed for the
+boot via `fixtures/paper-world-defaults.yml` (spawn-limits 0, per #266) — the
+vanilla `spawn-monsters/animals/npcs` keys were removed in MC 26.2 and would be
+a no-op.
 
 ```bash
 cargo run -p rivet-oracle -- verify --m2
@@ -249,6 +306,13 @@ cargo run -p rivet-oracle -- verify --m2 --expect-fail   # negative control
 `--expect-fail` corrupts a copy of the region baseline and requires the tampered
 chunk to be detected and named — the same vacuous-green guard as the M0 control.
 A custom baseline dir can be passed as the final argument.
+
+Both `verify --m2` modes additionally enforce the #266 concurrency pin on the
+baseline: the manifest must carry `chunk-concurrency: {io-threads: 1,
+worker-threads: 1}`, the freshly booted log must report exactly 1/1 threads,
+and the two must agree. Any drift — a manifest without provenance, provenance
+other than 1/1, or a run that actually used a different thread count — fails
+loudly before the diff runs.
 
 ## M2 worldgen semantic samples: `sample`
 
@@ -277,8 +341,31 @@ cargo run -p rivet-oracle -- regenerate --m2       # M2 region payloads only
 cargo run -p rivet-oracle -- regenerate --samples  # worldgen samples only
 ```
 
+M2 region regeneration (the worldgen nondeterminism case, #266) is a
+**twin-boot**: `regenerate --m2` performs two independent fresh Paper boots
+(`boot-m2a.log` / `boot-m2b.log`) and requires the two extractions to be
+byte-identical **before anything is committed**. On a mismatch it refuses to
+write the fixtures and leaves both trees (in the system temp dir, paths printed)
+for investigation — it never commits, excludes, or normalizes chunks to force
+a pass. On a match it records the boot log's observed `chunk-concurrency` into
+the region manifest (replacing any previous value) and commits the fixtures.
+
+`regenerate --m0` stamps the M0 superflat manifest with `kind: "m0"` and the
+M2 twin-boot stamps `kind: "m2"` (+ the observed concurrency). Regenerating
+into a scratch destination (`--to <dir>`) validates the produced tree before it
+is committed anywhere: `cargo run -p rivet-oracle -- regenerate --m0 --to /tmp/x`
+must produce a manifest that verifies clean and requires no M2 chunk-concurrency
+provenance (proving the regenerated M0 is not misclassified as a region capture,
+issue #266). `--to` requires exactly one of `--m0`/`--m2`: bare
+`regenerate --to /dir` and multi-kind `--m0 --m2 --to /dir` are refused (they
+would share one destination across kinds and M2's twin-boot replaces the whole
+directory, silently discarding M0's output), and `--samples` is refused with
+`--to` (worldgen samples regenerate the committed `fixtures/worldgen` tree).
+
 The gate's hash verification is the safety net against a bad regeneration.
-Never hand-edit fixtures; regenerate from a clean run instead.
+Never hand-edit fixtures; regenerate from a clean run instead. Every boot in the
+pipeline is pinned to `chunk-system` 1/1 and runs with entity spawning
+suppressed (spawn-limits 0) per the sections above.
 
 ## Conventions
 

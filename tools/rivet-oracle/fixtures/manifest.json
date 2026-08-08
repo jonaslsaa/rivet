@@ -1,19 +1,19 @@
 {
   "captured": [
     {
-      "bytes": 1825,
+      "bytes": 1770,
       "path": "server.properties",
-      "sha256": "0f0c23ccb4f8a4b05c6d4891c8a1a082ee07196cf0469883ed4bb7ebb3864fdc"
+      "sha256": "05e3761d951b470022a8635d4081a15d1f08562e0b6e48adb2df1b7ccc6ad7e6"
     },
     {
-      "bytes": 468,
+      "bytes": 466,
       "path": "level.dat",
-      "sha256": "92e6b1dfece754461e7892ab1cd4a640aeeedf3ebc7042c11fa7490991faa6a0"
+      "sha256": "01a0da033dc7a14172f1af8a148c626391ba1ad8acb4e92f187a73127b8f63f0"
     },
     {
-      "bytes": 464,
+      "bytes": 465,
       "path": "level.dat_old",
-      "sha256": "4384c2cf6bf40a2db6fd20d469312007755decb3493cbddc688c86b0abc831a2"
+      "sha256": "617151df411334403790b545eee2c053f832d8eee7a402c0d4839ca4999fa4b8"
     },
     {
       "bytes": 10680,
@@ -3474,9 +3474,11 @@
   ],
   "chunk-count": 432,
   "format": 1,
+  "kind": "m0",
   "level-name": "world",
   "level-type": "minecraft\\:flat",
   "paper": "26.2-DEV-main@0a99345",
+  "region-file-compression": "none",
   "seed": "42",
   "server-properties": {
     "accepts-transfers": "false",
@@ -3515,7 +3517,7 @@
     "management-server-enabled": "false",
     "management-server-host": "localhost",
     "management-server-port": "0",
-    "management-server-secret": "tsZUjPwd1Vb2uSp2scKYc4i8EObKid2cHoHLUkT6",
+    "management-server-secret": "",
     "management-server-tls-enabled": "true",
     "management-server-tls-keystore": "",
     "management-server-tls-keystore-password": "",
@@ -3544,9 +3546,6 @@
     "server-ip": "",
     "server-port": "25599",
     "simulation-distance": "4",
-    "spawn-animals": "true",
-    "spawn-monsters": "true",
-    "spawn-npcs": "true",
     "spawn-protection": "0",
     "status-heartbeat-interval": "0",
     "sync-chunk-writes": "true",
