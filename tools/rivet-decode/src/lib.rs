@@ -18,4 +18,5 @@ pub mod corpus;
 pub mod frag;
 pub mod frame;
 pub mod mutate;
+pub mod nbt;
 pub mod protocol;

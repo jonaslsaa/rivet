@@ -15,262 +15,37 @@
 //!   same way, because the patch is a fastutil `Reference2ObjectMap` whose
 //!   order is not stable across JVM processes (`DataComponentPatch.encode`).
 //!
-//! No value is fabricated: an unknown component type id, a non-empty patch the
-//! canonicalizer cannot bound, or a display payload with unexpected bytes
-//! makes the whole canonicalization fail (`None`), and the caller keeps the raw
-//! body. For a capture that carries no advancement display data (the pinned
-//! join fixture) that means the display is never rewritten or invented; the
-//! body can still differ from a raw capture in the pre-existing non-display
-//! ways — added/removed/progress sorting, criteria-name sorting, and
-//! obtained-instant zeroing (the fixture's `unlock_right_away` criterion is
-//! obtained=true with a wall-clock instant that canonicalizes to 0).
+//! No value is fabricated: a component id outside the registered 26.2 range, a
+//! non-empty patch with a value that does not fit its wire shape, a duplicate id
+//! in a patch, or a display payload with unexpected bytes makes the whole
+//! canonicalization fail (`None`), and the caller keeps the raw body. For a capture that carries no
+//! advancement display data (the pinned join fixture) that means the display is
+//! never rewritten or invented; the body can still differ from a raw capture in
+//! the pre-existing non-display ways — added/removed/progress sorting and
+//! criteria-name sorting. The fixture's `unlock_right_away` criterion is
+//! obtained=true with an already-zero instant, so obtained instants pass
+//! through unchanged rather than being rewritten.
 //!
-//! The value dispatch is pinned to protocol 776 and the 26.2 component set:
-//! every component value whose network form is NBT (`Component` title/
-//! description and `custom_name`/`item_name` via `tagCodec`, `CustomData`
+//! The value dispatch is pinned to protocol 776 and the 26.2 component set.
+//! The components whose network form is NBT — `Component` title/description and
+//! `custom_name`/`item_name` via `tagCodec`, `CustomData`
 //! `custom_data`/`bucket_entity_data` via `COMPOUND_TAG`, the `ItemLore` list,
-//! and the `TypedEntityData` `entity_data`/`block_entity_data`) is canonicalized
-//! structurally. The other component values — id-mapper VarInts
-//! (`Rarity`/`DyeColor`/`MapPostProcessing`), `PotionContents`/`ItemEnchantments`
-//! composites, ... — are not a bare NBT payload; a patch carrying one cannot be
-//! bounded honestly by this harness and makes the whole patch (and the
-//! advancement) fail canonicalization.
+//! and the `TypedEntityData` `entity_data`/`block_entity_data` — are
+//! canonicalized structurally (NBT compound field order). Every other
+//! registered component value is copied byte-exact: the harness walks the
+//! component's exact wire shape ([`Shape`] / the `skip_*` primitives) to bound
+//! it, then preserves the raw bytes verbatim, so a display icon carrying, say,
+//! an `item_model` identifier or a `max_stack_size` VarInt still canonicalizes
+//! (patch entries sorted by id) instead of failing the whole advancement. Only
+//! an id outside the registered 26.2 range, a duplicate positive/negative id in
+//! a patch, or a value that does not fit its shape fails canonicalization.
 //!
-//! RivetTodo(#221): this display canonicalizer is wired into the real
-//! `rivet-capture` normalize path (`normalize::normalize_packet` for packet id
-//! 130), but the pinned join fixture carries no advancement display payload, so
-//! the real-boot `rivet-capture verify` does not exercise it; the display path
-//! is proven only by synthetic display-bearing bodies in
-//! `tools/rivet-capture/src/normalize.rs`. Replace this marker when a
-//! display-bearing capture is pinned or the boot path grows one.
+//! The display path is proven by synthetic display-bearing bodies in
+//! `tools/rivet-capture/src/normalize.rs`; issue #269 tracks exercising it via
+//! a real-boot capture that carries a display-bearing advancement.
 
 use crate::frame;
-
-/// A parsed network NBT value (`writeAnyTag` format: `[byte type][payload]`,
-/// root has no name; compound fields are named `[byte type][u16 len][name]`).
-/// Compound fields are kept in parse order; re-serialization sorts them by name
-/// so the wire form is canonical.
-#[derive(Debug, Clone, PartialEq)]
-enum Nbt {
-    Byte(i8),
-    Short(i16),
-    Int(i32),
-    Long(i64),
-    Float(f32),
-    Double(f64),
-    ByteArray(Vec<u8>),
-    String(String),
-    List { elem: u8, items: Vec<Nbt> },
-    Compound(Vec<(String, Nbt)>),
-    IntArray(Vec<i32>),
-    LongArray(Vec<i64>),
-    End,
-}
-
-/// Read a bare NBT payload of `type_byte` (no name prefix).
-fn read_payload(body: &[u8], off: &mut usize, type_byte: u8) -> Option<Nbt> {
-    match type_byte {
-        0 => Some(Nbt::End),
-        1 => {
-            let v = *body.get(*off)? as i8;
-            *off += 1;
-            Some(Nbt::Byte(v))
-        }
-        2 => {
-            let b = frame::read_bytes(body, off, 2)?;
-            Some(Nbt::Short(i16::from_be_bytes([b[0], b[1]])))
-        }
-        3 => {
-            let b = frame::read_bytes(body, off, 4)?;
-            Some(Nbt::Int(i32::from_be_bytes([b[0], b[1], b[2], b[3]])))
-        }
-        4 => {
-            let b = frame::read_bytes(body, off, 8)?;
-            Some(Nbt::Long(i64::from_be_bytes([
-                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-            ])))
-        }
-        5 => {
-            let b = frame::read_bytes(body, off, 4)?;
-            Some(Nbt::Float(f32::from_be_bytes([b[0], b[1], b[2], b[3]])))
-        }
-        6 => {
-            let b = frame::read_bytes(body, off, 8)?;
-            Some(Nbt::Double(f64::from_be_bytes([
-                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-            ])))
-        }
-        7 => {
-            let n = frame::read_i32(body, off)?;
-            if n < 0 {
-                return None; // Java: DecoderException on a negative array size
-            }
-            let bytes = frame::read_bytes(body, off, n as usize)?.to_vec();
-            Some(Nbt::ByteArray(bytes))
-        }
-        8 => {
-            let n = frame::read_u16(body, off)? as usize;
-            let s = std::str::from_utf8(body.get(*off..*off + n)?)
-                .ok()?
-                .to_owned();
-            *off += n;
-            Some(Nbt::String(s))
-        }
-        9 => {
-            let elem = *body.get(*off)?;
-            *off += 1;
-            let n = frame::read_i32(body, off)?;
-            if n < 0 {
-                return None; // Java: DecoderException on a negative list size
-            }
-            let mut items = Vec::with_capacity(n as usize);
-            for _ in 0..n {
-                items.push(read_payload(body, off, elem)?);
-            }
-            Some(Nbt::List { elem, items })
-        }
-        10 => {
-            // Compound: `[field]*[type 0]`. A field whose payload fails to
-            // parse (e.g. a negative ByteArray/List/IntArray/LongArray length,
-            // which `read_payload` rejects) must fail the WHOLE compound, not
-            // be conflated with the type-0 terminator. Java's `NbtIo` throws a
-            // `DecoderException` for a negative array size; silently treating
-            // such a compound as terminated would accept wire bytes Paper
-            // rejects.
-            let mut fields = Vec::new();
-            loop {
-                let type_byte = *body.get(*off)?;
-                *off += 1;
-                if type_byte == 0 {
-                    break; // end tag
-                }
-                let name_len = frame::read_u16(body, off)? as usize;
-                let name = std::str::from_utf8(body.get(*off..*off + name_len)?)
-                    .ok()?
-                    .to_owned();
-                *off += name_len;
-                let value = read_payload(body, off, type_byte)?;
-                fields.push((name, value));
-            }
-            Some(Nbt::Compound(fields))
-        }
-        11 => {
-            let n = frame::read_i32(body, off)?;
-            if n < 0 {
-                return None; // Java: DecoderException on a negative array size
-            }
-            let mut items = Vec::with_capacity(n as usize);
-            for _ in 0..n {
-                let b = frame::read_bytes(body, off, 4)?;
-                items.push(i32::from_be_bytes([b[0], b[1], b[2], b[3]]));
-            }
-            Some(Nbt::IntArray(items))
-        }
-        12 => {
-            let n = frame::read_i32(body, off)?;
-            if n < 0 {
-                return None; // Java: DecoderException on a negative array size
-            }
-            let mut items = Vec::with_capacity(n as usize);
-            for _ in 0..n {
-                let b = frame::read_bytes(body, off, 8)?;
-                items.push(i64::from_be_bytes([
-                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                ]));
-            }
-            Some(Nbt::LongArray(items))
-        }
-        _ => None,
-    }
-}
-
-fn nbt_type_id(v: &Nbt) -> u8 {
-    match v {
-        Nbt::End => 0,
-        Nbt::Byte(_) => 1,
-        Nbt::Short(_) => 2,
-        Nbt::Int(_) => 3,
-        Nbt::Long(_) => 4,
-        Nbt::Float(_) => 5,
-        Nbt::Double(_) => 6,
-        Nbt::ByteArray(_) => 7,
-        Nbt::String(_) => 8,
-        Nbt::List { .. } => 9,
-        Nbt::Compound(_) => 10,
-        Nbt::IntArray(_) => 11,
-        Nbt::LongArray(_) => 12,
-    }
-}
-
-/// Write a named compound field (`[byte type][u16 name len][name][payload]`).
-fn write_named_field(out: &mut Vec<u8>, name: &str, value: &Nbt) {
-    out.push(nbt_type_id(value));
-    out.extend_from_slice(&(name.len() as u16).to_be_bytes());
-    out.extend_from_slice(name.as_bytes());
-    write_payload(out, value);
-}
-
-fn write_payload(out: &mut Vec<u8>, value: &Nbt) {
-    match value {
-        Nbt::End => {}
-        Nbt::Byte(v) => out.push(*v as u8),
-        Nbt::Short(v) => out.extend_from_slice(&v.to_be_bytes()),
-        Nbt::Int(v) => out.extend_from_slice(&v.to_be_bytes()),
-        Nbt::Long(v) => out.extend_from_slice(&v.to_be_bytes()),
-        Nbt::Float(v) => out.extend_from_slice(&v.to_be_bytes()),
-        Nbt::Double(v) => out.extend_from_slice(&v.to_be_bytes()),
-        Nbt::ByteArray(v) => {
-            out.extend_from_slice(&(v.len() as i32).to_be_bytes());
-            out.extend_from_slice(v);
-        }
-        Nbt::String(v) => {
-            out.extend_from_slice(&(v.len() as u16).to_be_bytes());
-            out.extend_from_slice(v.as_bytes());
-        }
-        Nbt::List { elem, items } => {
-            out.push(*elem);
-            out.extend_from_slice(&(items.len() as i32).to_be_bytes());
-            for item in items {
-                write_payload(out, item);
-            }
-        }
-        Nbt::Compound(fields) => {
-            // Always emit fields in sorted order so the serialized form is
-            // canonical no matter how the compound was constructed.
-            let mut sorted = fields.clone();
-            sorted.sort_by(|a, b| a.0.cmp(&b.0));
-            for (name, value) in &sorted {
-                write_named_field(out, name, value);
-            }
-            out.push(0);
-        }
-        Nbt::IntArray(v) => {
-            out.extend_from_slice(&(v.len() as i32).to_be_bytes());
-            for x in v {
-                out.extend_from_slice(&x.to_be_bytes());
-            }
-        }
-        Nbt::LongArray(v) => {
-            out.extend_from_slice(&(v.len() as i32).to_be_bytes());
-            for x in v {
-                out.extend_from_slice(&x.to_be_bytes());
-            }
-        }
-    }
-}
-
-/// Read a root NBT value (`[byte type][payload]`, root un-named).
-fn read_nbt(body: &[u8], off: &mut usize) -> Option<Nbt> {
-    let type_byte = *body.get(*off)?;
-    *off += 1;
-    read_payload(body, off, type_byte)
-}
-
-/// Write a root NBT value (root un-named).
-fn write_nbt(out: &mut Vec<u8>, value: &Nbt) {
-    out.push(nbt_type_id(value));
-    write_payload(out, value);
-}
+use crate::nbt::{Nbt, read_nbt, write_nbt};
 
 fn read_string(body: &[u8], off: &mut usize) -> Option<String> {
     let len = frame::read_varint(body, off)?;
@@ -292,10 +67,10 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
 /// The pinned 26.2 component type name for a network registry id, restricted to
 /// exactly the NBT-shaped components `read_component_value` can bound (a bare
 /// NBT tag, an `ItemLore` NBT list, or a `TypedEntityData` type-id + NBT tag).
-/// Every other component's network value — a scalar VarInt/Int, an id-mapper
-/// enum, an `ItemEnchantments`/`PotionContents`/`ItemAttributeModifiers`
-/// composite — is not NBT-shaped, so the harness cannot bound it honestly and
-/// `None` refuses the whole patch rather than misparse.
+/// Only these values get semantic canonicalization; every other registered
+/// component's value (a scalar VarInt/Int, an id-mapper enum, an
+/// `ItemEnchantments`/`PotionContents`/`ItemAttributeModifiers` composite) is
+/// not NBT-shaped and is instead preserved byte-exact via `skip_component_value`.
 fn component_type_name(id: u32) -> Option<&'static str> {
     match id {
         0 => Some("minecraft:custom_data"),
@@ -310,7 +85,7 @@ fn component_type_name(id: u32) -> Option<&'static str> {
 }
 
 /// Read one component value and return its canonical bytes, for the pinned
-/// 26.2 components whose network value the harness can bound honestly.
+/// 26.2 components whose network value is a bare NBT payload.
 /// Supported shapes (canonicalized, never fabricated):
 ///   - a single NBT tag: `custom_data`, `custom_name`, `item_name`,
 ///     `bucket_entity_data` — a `CustomData`/`Component` value
@@ -320,18 +95,34 @@ fn component_type_name(id: u32) -> Option<&'static str> {
 ///     `TypedEntityData` (`[type registry id VarInt][compound tag]`), with the
 ///     type id preserved verbatim.
 ///
-/// Every other component value — a scalar VarInt/Int, an id-mapper enum, an
-/// `ItemEnchantments`/`PotionContents`/`ItemAttributeModifiers` composite — is
-/// NOT a bare NBT payload, and the harness cannot bound its length honestly, so
-/// the whole patch is refused rather than misparsed or guessed at.
+/// A value that does not match the component's enforced shape (e.g. a
+/// non-compound tag where the codec is `COMPOUND_TAG`) is refused (`None`),
+/// matching Java's `DecoderException`. Values for every other component are
+/// handled by `skip_component_value` in the caller.
 fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<u8>> {
     match name {
         "minecraft:custom_data"          // CustomData.STREAM_CODEC = COMPOUND_TAG
-        | "minecraft:custom_name"        // ComponentSerialization.STREAM_CODEC = tagCodec
-        | "minecraft:item_name"          // ComponentSerialization.STREAM_CODEC = tagCodec
         | "minecraft:bucket_entity_data" // CustomData.STREAM_CODEC = COMPOUND_TAG
         => {
+            // ByteBufCodecs.COMPOUND_TAG requires the value be a CompoundTag;
+            // Java throws DecoderException("Not a compound tag: ...") otherwise.
             let value = read_nbt(body, off)?;
+            if !matches!(value, Nbt::Compound(_)) {
+                return None;
+            }
+            let mut out = Vec::with_capacity(body.len() / 8);
+            write_nbt(&mut out, &value);
+            Some(out)
+        }
+        "minecraft:custom_name" // ComponentSerialization.STREAM_CODEC = tagCodec
+        | "minecraft:item_name" // ComponentSerialization.STREAM_CODEC = tagCodec
+        => {
+            // tagCodec accepts any non-End tag (a Component serializes to an NBT
+            // compound; null/End throws but any other tag type parses).
+            let value = read_nbt(body, off)?;
+            if matches!(value, Nbt::End) {
+                return None;
+            }
             let mut out = Vec::with_capacity(body.len() / 8);
             write_nbt(&mut out, &value);
             Some(out)
@@ -346,17 +137,23 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
             frame::write_varint(&mut out, count);
             for _ in 0..count {
                 let line = read_nbt(body, off)?;
+                if matches!(line, Nbt::End) {
+                    return None;
+                }
                 write_nbt(&mut out, &line);
             }
             Some(out)
         }
         "minecraft:entity_data" | "minecraft:block_entity_data" => {
-            // TypedEntityData.streamCodec = [type registry id VarInt][tag].
+            // TypedEntityData.streamCodec = [type registry id VarInt][COMPOUND_TAG].
             let type_id = frame::read_varint(body, off)?;
             if type_id < 0 {
                 return None;
             }
             let value = read_nbt(body, off)?;
+            if !matches!(value, Nbt::Compound(_)) {
+                return None;
+            }
             let mut out = Vec::with_capacity(body.len() / 4);
             frame::write_varint(&mut out, type_id);
             write_nbt(&mut out, &value);
@@ -364,6 +161,959 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
         }
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Byte-exact preservation of every OTHER registered component value.
+//
+// Each non-NBT component's network value is a self-delimiting composition of the
+// primitives below (every length is VarInt-prefixed and bounded), so the harness
+// can walk the exact wire shape to find the value's end and copy it verbatim.
+// This is what lets a display icon carrying, e.g., an `item_model` Identifier or
+// a `max_stack_size` VarInt canonicalize (entries sorted by id) instead of
+// failing the whole advancement. The shapes are pinned to DataComponents.java
+// registration order on protocol 776; the NBT-shaped ids (0, 6, 9, 11, 58, 59,
+// 60) are NOT listed here — they go through [`read_component_value`] above.
+// ---------------------------------------------------------------------------
+
+/// The wire shape of a registered 26.2 component value that is copied verbatim.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// A scalar, registry-id, holder-registry or id-mapper VarInt
+    /// (`ByteBufCodecs.VAR_INT` / `registry` / `holderRegistry` / `idMapper`).
+    VarInt,
+    /// No bytes (`Unit`).
+    Unit,
+    /// One byte (`ByteBufCodecs.BOOL`).
+    Bool,
+    /// Four big-endian bytes (`ByteBufCodecs.FLOAT`).
+    Float,
+    /// Four big-endian bytes (`ByteBufCodecs.INT`).
+    Int,
+    /// `[VarInt byte length][UTF-8 bytes]` (`Identifier` / `Utf8String`).
+    Utf8String,
+    /// A bare NBT tag (`fromCodecWithRegistries` fallback for components without
+    /// a `networkSynchronized` stream codec, e.g. `intangible_projectile`).
+    NbtTag,
+    /// `ByteBufCodecs.holderSet(registry)` — `[VarInt count-1][named|holders]`.
+    HolderSet,
+    /// `SoundEvent.STREAM_CODEC` — `holder(SOUND_EVENT, [Identifier][?Float])`.
+    SoundEvent,
+    /// `UseEffects` — `[Bool][Bool][Float]`.
+    UseEffects,
+    /// `FoodProperties.DIRECT_STREAM_CODEC` — `[VarInt][Float][Bool]`.
+    Food,
+    /// `Weapon` — `[VarInt][Float]`.
+    Weapon,
+    /// `AttackRange` — `[Float ×6]` (minReach, maxReach, minCreativeReach,
+    /// maxCreativeReach, hitboxMargin, mobFactor).
+    AttackRange,
+    /// `SwingAnimation` — `[SwingAnimationType idMapper][VarInt]`.
+    SwingAnimation,
+    /// `UseCooldown` — `[Float][?Identifier]`.
+    UseCooldown,
+    /// `DamageResistant` — `holderSet(DAMAGE_TYPE)`.
+    DamageResistant,
+    /// `Repairable` — `holderSet(ITEM)`.
+    Repairable,
+    /// `ItemEnchantments` — `map(holderRegistry(ENCHANTMENT), VarInt)`.
+    Enchantments,
+    /// `CustomModelData` — `[list Float][list Bool][list String][list Int]`.
+    CustomModelData,
+    /// `TooltipDisplay` — `[Bool][set DataComponentType]`.
+    TooltipDisplay,
+    /// `Tool` — `[list Rule][Float][VarInt][Bool]`.
+    Tool,
+    /// `Consumable` — `[Float][ItemUseAnimation idMapper][SoundEvent][Bool][list ConsumeEffect]`.
+    Consumable,
+    /// `ItemStackTemplate` — `[Item holderRegistry][count VarInt][patch]`.
+    ItemStackTemplate,
+    /// `Equippable`.
+    Equippable,
+    /// `DeathProtection` — `list(ConsumeEffect)`.
+    DeathProtection,
+    /// `BlocksAttacks`.
+    BlocksAttacks,
+    /// `PiercingWeapon`.
+    PiercingWeapon,
+    /// `KineticWeapon`.
+    KineticWeapon,
+    /// `ArmorTrim` — `[TrimMaterial holder][TrimPattern holder]`.
+    ArmorTrim,
+    /// `LodestoneTracker` — `[?GlobalPos][Bool]`.
+    LodestoneTracker,
+    /// `FireworkExplosion`.
+    FireworkExplosion,
+    /// `Fireworks` — `[VarInt][list(256) FireworkExplosion]`.
+    Fireworks,
+    /// `ResolvableProfile` — `[either(GameProfile, Partial)][PlayerSkin.Patch]`.
+    Profile,
+    /// `JukeboxPlayable` — `holder(JUKEBOX_SONG, direct)`.
+    JukeboxSong,
+    /// `InstrumentComponent` — `holder(INSTRUMENT, direct)`.
+    Instrument,
+    /// `ProvidesTrimMaterial` — `holder(TRIM_MATERIAL, direct)`.
+    TrimMaterial,
+    /// `BannerPatternLayers` — `list(Layer)`.
+    BannerPatterns,
+    /// `PotDecorations` — `list(4)(registry ITEM)`.
+    PotDecorations,
+    /// `BlockItemStateProperties` — `map(String, String)`.
+    BlockState,
+    /// `Bees` — `list(Occupant)`.
+    Bees,
+    /// `ItemContainerContents` — `list(256)(?ItemStackTemplate)`.
+    Container,
+    /// `PotionContents`.
+    PotionContents,
+    /// `SuspiciousStewEffects`.
+    SuspiciousStewEffects,
+    /// `WritableBookContent`.
+    WritableBookContent,
+    /// `WrittenBookContent`.
+    WrittenBookContent,
+    /// `AdventureModePredicate` (`can_place_on`/`can_break`) — `list(BlockPredicate)`.
+    BlockPredicateList,
+    /// `ItemAttributeModifiers` — `list(Entry)`.
+    AttributeModifiers,
+    /// `ChargedProjectiles` — `list(1024)(ItemStackTemplate)`.
+    ChargedProjectiles,
+    /// `BundleContents` — `list(256)(ItemStackTemplate)`.
+    BundleContents,
+    /// `PaintingVariant` — `holder(PAINTING_VARIANT, direct)`.
+    PaintingVariant,
+}
+
+/// The 26.2 `DATA_COMPONENT_TYPE` registry id -> wire shape, for every component
+/// this harness copies byte-exact. Ids follow `DataComponents.java` registration
+/// order (0-based). The NBT-shaped ids handled by [`read_component_value`] are
+/// absent, and an id outside the registered range is `None` (honest failure).
+fn component_shape(id: u32) -> Option<Shape> {
+    use Shape::*;
+    Some(match id {
+        1 | 2 | 3 | 8 | 12 | 19 | 31 | 41 | 43 | 46 | 48 | 63 | 73 | 82 | 83 | 84 | 85 | 86
+        | 87 | 88 | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 100 | 101 | 102
+        | 104 | 105 | 106 | 107 | 108 | 109 | 110 => VarInt,
+        4 | 20 | 34 => Unit,
+        21 => Bool,
+        7 | 52 => Float,
+        44 | 45 => Int,
+        10 | 35 | 71 => Utf8String,
+        22 | 47 | 57 | 66 | 79 | 80 => NbtTag,
+        27 => DamageResistant,
+        33 => Repairable,
+        65 => HolderSet,
+        81 => SoundEvent,
+        5 => UseEffects,
+        23 => Food,
+        29 => Weapon,
+        30 => AttackRange,
+        40 => SwingAnimation,
+        26 => UseCooldown,
+        13 | 42 => Enchantments,
+        17 => CustomModelData,
+        18 => TooltipDisplay,
+        28 => Tool,
+        24 => Consumable,
+        25 | 78 => ItemStackTemplate,
+        32 => Equippable,
+        36 => DeathProtection,
+        37 => BlocksAttacks,
+        38 => PiercingWeapon,
+        39 => KineticWeapon,
+        56 => ArmorTrim,
+        67 => LodestoneTracker,
+        68 => FireworkExplosion,
+        69 => Fireworks,
+        70 => Profile,
+        64 => JukeboxSong,
+        61 => Instrument,
+        62 => TrimMaterial,
+        72 => BannerPatterns,
+        74 => PotDecorations,
+        76 => BlockState,
+        77 => Bees,
+        75 => Container,
+        51 => PotionContents,
+        53 => SuspiciousStewEffects,
+        54 => WritableBookContent,
+        55 => WrittenBookContent,
+        14 | 15 => BlockPredicateList,
+        16 => AttributeModifiers,
+        49 => ChargedProjectiles,
+        50 => BundleContents,
+        103 => PaintingVariant,
+        _ => return None,
+    })
+}
+
+/// A `(&[u8], &mut usize) -> Option<()>` skip function. Using a bare fn pointer
+/// (rather than a generic `Fn`) keeps every element HRTB-clean so composite
+/// skips compose without lifetime annotation; elements that need a recursion
+/// depth take it as an explicit parameter instead of capturing.
+type SkipFn = fn(&[u8], &mut usize) -> Option<()>;
+
+fn skip_bytes(body: &[u8], off: &mut usize, n: usize) -> Option<()> {
+    frame::read_bytes(body, off, n)?;
+    Some(())
+}
+
+fn skip_varint(body: &[u8], off: &mut usize) -> Option<()> {
+    frame::read_varint(body, off)?;
+    Some(())
+}
+
+fn skip_bool(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bytes(body, off, 1)
+}
+
+fn skip_float(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bytes(body, off, 4)
+}
+
+fn skip_int(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bytes(body, off, 4)
+}
+
+fn skip_long(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bytes(body, off, 8)
+}
+
+fn skip_double(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bytes(body, off, 8)
+}
+
+fn skip_uuid(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bytes(body, off, 16)
+}
+
+/// Skip `[VarInt byte length][UTF-8 bytes]` (`Utf8String` / `Identifier`).
+fn skip_utf8(body: &[u8], off: &mut usize) -> Option<()> {
+    let len = frame::read_varint(body, off)?;
+    if len < 0 {
+        return None;
+    }
+    skip_bytes(body, off, len as usize)
+}
+
+/// Skip one NBT tag (`[type byte][payload]`), reusing the strict parser so a
+/// malformed tag (negative array length, truncated payload) fails the patch.
+fn skip_nbt(body: &[u8], off: &mut usize) -> Option<()> {
+    let _ = read_nbt(body, off)?;
+    Some(())
+}
+
+/// Skip a `tagCodec` value — any non-`End` NBT tag (a `Component`).
+fn skip_component_tag(body: &[u8], off: &mut usize) -> Option<()> {
+    let value = read_nbt(body, off)?;
+    if matches!(value, Nbt::End) {
+        return None;
+    }
+    Some(())
+}
+
+/// `[Bool present][value]`.
+fn skip_optional(body: &[u8], off: &mut usize, value: SkipFn) -> Option<()> {
+    let present = *body.get(*off)?;
+    *off += 1;
+    if present != 0 {
+        value(body, off)?;
+    }
+    Some(())
+}
+
+/// `[VarInt count][count × value]`. A negative count fails (Java's encoder never
+/// writes one; the harness's other canonicalizers reject them the same way).
+fn skip_list(body: &[u8], off: &mut usize, elem: SkipFn) -> Option<()> {
+    let count = frame::read_varint(body, off)?;
+    if count < 0 {
+        return None;
+    }
+    for _ in 0..count {
+        elem(body, off)?;
+    }
+    Some(())
+}
+
+/// `[VarInt count][count × (key, value)]`.
+fn skip_map(body: &[u8], off: &mut usize, key: SkipFn, value: SkipFn) -> Option<()> {
+    let count = frame::read_varint(body, off)?;
+    if count < 0 {
+        return None;
+    }
+    for _ in 0..count {
+        key(body, off)?;
+        value(body, off)?;
+    }
+    Some(())
+}
+
+/// `ByteBufCodecs.either(left, right)` — `[readBoolean][left|right]`. Java's
+/// `readBoolean()` is `readByte() != 0`, so any nonzero byte selects the left
+/// codec and a zero byte selects the right one.
+fn skip_either(body: &[u8], off: &mut usize, left: SkipFn, right: SkipFn) -> Option<()> {
+    let which = *body.get(*off)?;
+    *off += 1;
+    if which != 0 {
+        left(body, off)
+    } else {
+        right(body, off)
+    }
+}
+
+/// `ByteBufCodecs.holder(registry, direct)` — `[VarInt id][id == 0 ? direct : nothing]`.
+fn skip_holder(body: &[u8], off: &mut usize, direct: SkipFn) -> Option<()> {
+    let id = frame::read_varint(body, off)?;
+    if id == 0 {
+        direct(body, off)?;
+    }
+    Some(())
+}
+
+/// `ByteBufCodecs.holderSet(registry)` — `[VarInt count-1][count == -1 ? named : holders]`.
+/// Java reads `VarInt.read - 1`: a value of 0 means a named set (`[Identifier]`),
+/// a positive value is `count` direct holder ids, and a negative value other than
+/// -1 is an empty direct set.
+fn skip_holder_set(body: &[u8], off: &mut usize) -> Option<()> {
+    let raw = frame::read_varint(body, off)?;
+    if raw == 0 {
+        return skip_utf8(body, off); // TagKey identifier
+    }
+    if raw < 0 {
+        return Some(()); // Java: empty direct set
+    }
+    for _ in 0..raw.saturating_sub(1) {
+        skip_varint(body, off)?;
+    }
+    Some(())
+}
+
+// -- nested composite shapes ------------------------------------------------
+
+fn skip_sound_event(body: &[u8], off: &mut usize) -> Option<()> {
+    // SoundEvent.STREAM_CODEC = holder(SOUND_EVENT, [Identifier][?Float]).
+    skip_holder(body, off, |b, o| {
+        skip_utf8(b, o)?;
+        skip_optional(b, o, skip_float)
+    })
+}
+
+fn skip_use_effects(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bool(body, off)?;
+    skip_bool(body, off)?;
+    skip_float(body, off)
+}
+
+fn skip_food(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?;
+    skip_float(body, off)?;
+    skip_bool(body, off)
+}
+
+fn skip_weapon(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?;
+    skip_float(body, off)
+}
+
+fn skip_attack_range(body: &[u8], off: &mut usize) -> Option<()> {
+    // AttackRange.STREAM_CODEC = six ByteBufCodecs.FLOAT (minReach, maxReach,
+    // minCreativeReach, maxCreativeReach, hitboxMargin, mobFactor).
+    for _ in 0..6 {
+        skip_float(body, off)?;
+    }
+    Some(())
+}
+
+fn skip_swing_animation(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?;
+    skip_varint(body, off)
+}
+
+fn skip_use_cooldown(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_float(body, off)?;
+    skip_optional(body, off, skip_utf8)
+}
+
+fn skip_enchantments(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_map(body, off, skip_varint, skip_varint)
+}
+
+fn skip_custom_model_data(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_list(body, off, skip_float)?;
+    skip_list(body, off, skip_bool)?;
+    skip_list(body, off, skip_utf8)?;
+    skip_list(body, off, skip_int)
+}
+
+fn skip_tooltip_display(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bool(body, off)?;
+    skip_list(body, off, skip_varint) // set of DataComponentType registry ids
+}
+
+fn skip_tool_rule(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_holder_set(body, off)?;
+    skip_optional(body, off, skip_float)?;
+    skip_optional(body, off, skip_bool)
+}
+
+fn skip_tool(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_list(body, off, skip_tool_rule)?;
+    skip_float(body, off)?;
+    skip_varint(body, off)?;
+    skip_bool(body, off)
+}
+
+/// `MobEffectInstance.Details` — `[VarInt][VarInt][Bool][Bool][Bool][?Details]`.
+fn skip_effect_details(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
+    if depth > 8 {
+        return None;
+    }
+    skip_varint(body, off)?; // amplifier
+    skip_varint(body, off)?; // duration
+    skip_bool(body, off)?; // ambient
+    skip_bool(body, off)?; // showParticles
+    skip_bool(body, off)?; // showIcon
+    // hiddenEffect: [Bool present][recursive Details].
+    let present = *body.get(*off)?;
+    *off += 1;
+    if present != 0 {
+        skip_effect_details(body, off, depth + 1)?;
+    }
+    Some(())
+}
+
+fn skip_mob_effect_instance(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?; // holderRegistry(MOB_EFFECT)
+    skip_effect_details(body, off, 0)
+}
+
+/// `ConsumeEffect.STREAM_CODEC` — `[registry id][subtype by id]`. The five
+/// registered subtype ids follow `ConsumeEffect.Type` registration order.
+fn skip_consume_effect(body: &[u8], off: &mut usize) -> Option<()> {
+    match frame::read_varint(body, off)? {
+        0 => {
+            // ApplyStatusEffectsConsumeEffect: [list(MobEffectInstance)][Float].
+            skip_list(body, off, skip_mob_effect_instance)?;
+            skip_float(body, off)
+        }
+        1 => skip_holder_set(body, off), // RemoveStatusEffectsConsumeEffect: holderSet(MOB_EFFECT)
+        2 => Some(()),                   // ClearAllStatusEffectsConsumeEffect: unit
+        3 => skip_float(body, off),      // TeleportRandomlyConsumeEffect
+        4 => skip_sound_event(body, off), // PlaySoundConsumeEffect
+        _ => None,
+    }
+}
+
+fn skip_consumable(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_float(body, off)?; // consumeSeconds
+    skip_varint(body, off)?; // ItemUseAnimation idMapper
+    skip_sound_event(body, off)?; // sound
+    skip_bool(body, off)?; // hasConsumeParticles
+    skip_list(body, off, skip_consume_effect)
+}
+
+/// `AttributeModifier` — `[Identifier][Double][Operation idMapper]`.
+fn skip_attribute_modifier(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_utf8(body, off)?;
+    skip_double(body, off)?;
+    skip_varint(body, off)
+}
+
+fn skip_item_stack_template(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
+    // ItemStackTemplate = [Item holderRegistry][count VarInt][DataComponentPatch].
+    skip_varint(body, off)?;
+    skip_varint(body, off)?;
+    skip_patch_value(body, off, depth)
+}
+
+/// The `DataComponentPatch` VALUE (the entry's type id has already been read):
+/// `[positive VarInt][negative VarInt][positive entries][negative entries]`.
+fn skip_patch_value(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
+    let positive = frame::read_varint(body, off)?;
+    let negative = frame::read_varint(body, off)?;
+    if positive < 0 || negative < 0 {
+        return None;
+    }
+    for _ in 0..positive {
+        let id = frame::read_varint(body, off)?;
+        if id < 0 {
+            return None;
+        }
+        skip_component_value(body, off, id as u32, depth + 1)?;
+    }
+    for _ in 0..negative {
+        skip_varint(body, off)?;
+    }
+    Some(())
+}
+
+fn skip_equippable(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?; // EquipmentSlot idMapper
+    skip_sound_event(body, off)?; // equipSound
+    skip_optional(body, off, skip_utf8)?; // assetId (ResourceKey)
+    skip_optional(body, off, skip_utf8)?; // cameraOverlay (Identifier)
+    skip_optional(body, off, skip_holder_set)?; // allowedEntities holderSet(ENTITY_TYPE)
+    skip_bool(body, off)?; // dispensable
+    skip_bool(body, off)?; // swappable
+    skip_bool(body, off)?; // damageOnHurt
+    skip_bool(body, off)?; // equipOnInteract
+    skip_bool(body, off)?; // canBeSheared
+    skip_sound_event(body, off) // shearingSound
+}
+
+fn skip_death_protection(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_list(body, off, skip_consume_effect)
+}
+
+fn skip_damage_reduction(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_float(body, off)?; // horizontalBlockingAngle
+    skip_optional(body, off, skip_holder_set)?; // type holderSet(DAMAGE_TYPE)
+    skip_float(body, off)?; // base
+    skip_float(body, off) // factor
+}
+
+fn skip_item_damage_function(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_float(body, off)?; // threshold
+    skip_float(body, off)?; // base
+    skip_float(body, off) // factor
+}
+
+fn skip_blocks_attacks(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_float(body, off)?; // blockDelaySeconds
+    skip_float(body, off)?; // disableCooldownScale
+    skip_list(body, off, skip_damage_reduction)?; // damageReductions
+    skip_item_damage_function(body, off)?; // itemDamage
+    skip_optional(body, off, skip_holder_set)?; // bypassedBy holderSet(DAMAGE_TYPE)
+    skip_optional(body, off, skip_sound_event)?; // blockSound
+    skip_optional(body, off, skip_sound_event) // disableSound
+}
+
+fn skip_piercing_weapon(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bool(body, off)?;
+    skip_bool(body, off)?;
+    skip_optional(body, off, skip_sound_event)?;
+    skip_optional(body, off, skip_sound_event)
+}
+
+fn skip_kinetic_condition(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?; // maxDurationTicks
+    skip_float(body, off)?; // minSpeed
+    skip_float(body, off) // minRelativeSpeed
+}
+
+fn skip_kinetic_weapon(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?; // contactCooldownTicks
+    skip_varint(body, off)?; // delayTicks
+    skip_optional(body, off, skip_kinetic_condition)?; // dismountConditions
+    skip_optional(body, off, skip_kinetic_condition)?; // knockbackConditions
+    skip_optional(body, off, skip_kinetic_condition)?; // damageConditions
+    skip_float(body, off)?; // forwardMovement
+    skip_float(body, off)?; // damageMultiplier
+    skip_optional(body, off, skip_sound_event)?; // sound
+    skip_optional(body, off, skip_sound_event) // hitSound
+}
+
+fn skip_material_asset_group(body: &[u8], off: &mut usize) -> Option<()> {
+    // MaterialAssetGroup = [AssetInfo STRING_UTF8][map(ResourceKey, AssetInfo)].
+    skip_utf8(body, off)?;
+    skip_map(body, off, skip_utf8, skip_utf8)
+}
+
+fn skip_trim_material_holder(body: &[u8], off: &mut usize) -> Option<()> {
+    // holder(TRIM_MATERIAL, [MaterialAssetGroup][Component tag]).
+    skip_holder(body, off, |b, o| {
+        skip_material_asset_group(b, o)?;
+        skip_component_tag(b, o)
+    })
+}
+
+fn skip_trim_pattern_holder(body: &[u8], off: &mut usize) -> Option<()> {
+    // holder(TRIM_PATTERN, [Identifier][Component tag][Bool]).
+    skip_holder(body, off, |b, o| {
+        skip_utf8(b, o)?;
+        skip_component_tag(b, o)?;
+        skip_bool(b, o)
+    })
+}
+
+fn skip_armor_trim(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_trim_material_holder(body, off)?;
+    skip_trim_pattern_holder(body, off)
+}
+
+/// `GlobalPos` — `[ResourceKey(DIMENSION) Identifier][BlockPos long]`.
+fn skip_global_pos(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_utf8(body, off)?;
+    skip_long(body, off)
+}
+
+fn skip_lodestone_tracker(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_optional(body, off, skip_global_pos)?;
+    skip_bool(body, off)
+}
+
+fn skip_firework_explosion(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?; // Shape idMapper
+    skip_list(body, off, skip_int)?; // colors
+    skip_list(body, off, skip_int)?; // fadeColors
+    skip_bool(body, off)?; // hasTrail
+    skip_bool(body, off) // hasTwinkle
+}
+
+fn skip_fireworks(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?; // flightDuration
+    skip_list(body, off, skip_firework_explosion)
+}
+
+fn skip_game_profile_properties(body: &[u8], off: &mut usize) -> Option<()> {
+    // [VarInt count][count × ([String name][String value][?String signature])].
+    let count = frame::read_varint(body, off)?;
+    if count < 0 {
+        return None;
+    }
+    for _ in 0..count {
+        skip_utf8(body, off)?;
+        skip_utf8(body, off)?;
+        skip_optional(body, off, skip_utf8)?;
+    }
+    Some(())
+}
+
+fn skip_game_profile(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_bytes(body, off, 16)?; // UUID
+    skip_utf8(body, off)?; // PLAYER_NAME
+    skip_game_profile_properties(body, off)
+}
+
+fn skip_resolvable_partial(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_optional(body, off, skip_utf8)?; // name
+    skip_optional(body, off, skip_uuid)?; // id
+    skip_game_profile_properties(body, off)
+}
+
+fn skip_player_skin_patch(body: &[u8], off: &mut usize) -> Option<()> {
+    // [ResourceTexture? ×3][PlayerModelType Bool?] — ResourceTexture = Identifier.
+    skip_optional(body, off, skip_utf8)?;
+    skip_optional(body, off, skip_utf8)?;
+    skip_optional(body, off, skip_utf8)?;
+    skip_optional(body, off, skip_bool)
+}
+
+fn skip_profile(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_either(body, off, skip_game_profile, skip_resolvable_partial)?;
+    skip_player_skin_patch(body, off)
+}
+
+fn skip_instrument_holder(body: &[u8], off: &mut usize) -> Option<()> {
+    // holder(INSTRUMENT, [SoundEvent][Float][Float][Component tag]).
+    skip_holder(body, off, |b, o| {
+        skip_sound_event(b, o)?;
+        skip_float(b, o)?;
+        skip_float(b, o)?;
+        skip_component_tag(b, o)
+    })
+}
+
+fn skip_jukebox_song_holder(body: &[u8], off: &mut usize) -> Option<()> {
+    // holder(JUKEBOX_SONG, [SoundEvent][Component tag][Float][VarInt]).
+    skip_holder(body, off, |b, o| {
+        skip_sound_event(b, o)?;
+        skip_component_tag(b, o)?;
+        skip_float(b, o)?;
+        skip_varint(b, o)
+    })
+}
+
+fn skip_banner_pattern_holder(body: &[u8], off: &mut usize) -> Option<()> {
+    // holder(BANNER_PATTERN, [Identifier][STRING_UTF8]).
+    skip_holder(body, off, |b, o| {
+        skip_utf8(b, o)?;
+        skip_utf8(b, o)
+    })
+}
+
+fn skip_banner_patterns(body: &[u8], off: &mut usize) -> Option<()> {
+    // list(Layer = [BannerPattern holder][DyeColor idMapper]).
+    skip_list(body, off, |b, o| {
+        skip_banner_pattern_holder(b, o)?;
+        skip_varint(b, o)
+    })
+}
+
+fn skip_pot_decorations(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_list(body, off, skip_varint)
+}
+
+fn skip_block_state(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_map(body, off, skip_utf8, skip_utf8)
+}
+
+/// `TypedEntityData` — `[type registry id VarInt][COMPOUND_TAG]`.
+fn skip_typed_entity_data(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?;
+    skip_nbt(body, off)
+}
+
+fn skip_beehive_occupant(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_typed_entity_data(body, off)?;
+    skip_varint(body, off)?; // ticksInHive
+    skip_varint(body, off) // minTicksInHive
+}
+
+fn skip_bees(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_list(body, off, skip_beehive_occupant)
+}
+
+fn skip_container(body: &[u8], off: &mut usize) -> Option<()> {
+    // list(256)(?ItemStackTemplate).
+    skip_list(body, off, skip_optional_item_stack)
+}
+
+fn skip_potion_contents(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_optional(body, off, skip_varint)?; // potion holderRegistry(POTION)
+    skip_optional(body, off, skip_int)?; // customColor
+    skip_list(body, off, skip_mob_effect_instance)?; // customEffects
+    skip_optional(body, off, skip_utf8) // customName
+}
+
+fn skip_suspicious_stew_effects(body: &[u8], off: &mut usize) -> Option<()> {
+    // list(Entry = [MobEffect holderRegistry][VarInt duration]).
+    skip_list(body, off, |b, o| {
+        skip_varint(b, o)?;
+        skip_varint(b, o)
+    })
+}
+
+fn skip_filterable(body: &[u8], off: &mut usize, value: SkipFn) -> Option<()> {
+    value(body, off)?;
+    skip_optional(body, off, value)
+}
+
+/// `Filterable(STRING_UTF8)` — a plain string plus an optional filtered copy.
+fn skip_filterable_utf8(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_filterable(body, off, skip_utf8)
+}
+
+/// `Filterable(ComponentSerialization.STREAM_CODEC)`.
+fn skip_filterable_component(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_filterable(body, off, skip_component_tag)
+}
+
+/// A depth-0 `ItemStackTemplate` (no deeper patch nesting is ever valid here).
+fn skip_item_stack_leaf(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_item_stack_template(body, off, 0)
+}
+
+/// `[?ItemStackTemplate]` (`Optional<ItemStackTemplate>`).
+fn skip_optional_item_stack(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_optional(body, off, skip_item_stack_leaf)
+}
+
+/// `RangedMatcher` — `[?String min][?String max]`.
+fn skip_ranged_matcher(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_optional(body, off, skip_utf8)?;
+    skip_optional(body, off, skip_utf8)
+}
+
+fn skip_writable_book_content(body: &[u8], off: &mut usize) -> Option<()> {
+    // list(100)(Filterable(STRING_UTF8(1024))).
+    skip_list(body, off, skip_filterable_utf8)
+}
+
+fn skip_written_book_content(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_filterable(body, off, skip_utf8)?; // title Filterable(string(32))
+    skip_utf8(body, off)?; // author
+    skip_varint(body, off)?; // generation
+    skip_list(body, off, skip_filterable_component)?; // pages
+    skip_bool(body, off) // resolved
+}
+
+fn skip_state_properties_predicate(body: &[u8], off: &mut usize) -> Option<()> {
+    // list(PropertyMatcher = [STRING_UTF8 name][ValueMatcher]).
+    skip_list(body, off, |b, o| {
+        skip_utf8(b, o)?;
+        // ValueMatcher = either(ExactMatcher STRING_UTF8, RangedMatcher [?String][?String]).
+        skip_either(b, o, skip_utf8, skip_ranged_matcher)
+    })
+}
+
+fn skip_nbt_predicate(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_nbt(body, off) // COMPOUND_TAG
+}
+
+/// `TypedDataComponent` — `[DataComponentType registry VarInt][value]`, where the
+/// value uses the component's own stream codec (recursing into [`skip_component_value`]).
+fn skip_typed_data_component(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
+    let id = frame::read_varint(body, off)?;
+    if id < 0 {
+        return None;
+    }
+    skip_component_value(body, off, id as u32, depth + 1)
+}
+
+fn skip_data_component_exact_predicate(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
+    // list(64)(TypedDataComponent) — inlined because the element takes `depth`.
+    let count = frame::read_varint(body, off)?;
+    if count < 0 {
+        return None;
+    }
+    for _ in 0..count {
+        skip_typed_data_component(body, off, depth)?;
+    }
+    Some(())
+}
+
+fn skip_data_component_predicate(body: &[u8], off: &mut usize, _depth: usize) -> Option<()> {
+    // list(64)(Single). Single = [Type either][value]; a concrete predicate type's
+    // value is a fromCodecWithRegistries NBT tag (fully parsed by `skip_nbt`), an
+    // `AnyValueType` (component type) value is unit — so no further depth recursion.
+    let count = frame::read_varint(body, off)?;
+    if count < 0 {
+        return None;
+    }
+    for _ in 0..count {
+        let which = *body.get(*off)?;
+        *off += 1;
+        if which == 0 {
+            skip_varint(body, off)?;
+            skip_nbt(body, off)?;
+        } else {
+            skip_varint(body, off)?;
+        }
+    }
+    Some(())
+}
+
+fn skip_data_component_matchers(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
+    skip_data_component_exact_predicate(body, off, depth)?;
+    skip_data_component_predicate(body, off, depth)
+}
+
+fn skip_block_predicate(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
+    skip_optional(body, off, skip_holder_set)?; // blocks
+    skip_optional(body, off, skip_state_properties_predicate)?; // properties
+    skip_optional(body, off, skip_nbt_predicate)?; // nbt
+    skip_data_component_matchers(body, off, depth) // components
+}
+
+/// `AdventureModePredicate` (`can_place_on`/`can_break`) — `list(BlockPredicate)`.
+fn skip_block_predicate_list(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
+    // list(BlockPredicate) — inlined because the element takes `depth`.
+    let count = frame::read_varint(body, off)?;
+    if count < 0 {
+        return None;
+    }
+    for _ in 0..count {
+        skip_block_predicate(body, off, depth)?;
+    }
+    Some(())
+}
+
+fn skip_attribute_modifiers_entry(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_varint(body, off)?; // Attribute holderRegistry
+    skip_attribute_modifier(body, off)?; // modifier
+    skip_varint(body, off)?; // EquipmentSlotGroup idMapper
+    // Display = Type idMapper (0=Default, 1=Hidden, 2=OverrideText) then dispatch.
+    match frame::read_varint(body, off)? {
+        0 | 1 => Some(()),
+        2 => skip_component_tag(body, off), // OverrideText = [Component tag]
+        _ => None,
+    }
+}
+
+fn skip_attribute_modifiers(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_list(body, off, skip_attribute_modifiers_entry)
+}
+
+fn skip_charged_projectiles(body: &[u8], off: &mut usize) -> Option<()> {
+    // list(?ItemStackTemplate).
+    skip_list(body, off, skip_optional_item_stack)
+}
+
+fn skip_bundle_contents(body: &[u8], off: &mut usize) -> Option<()> {
+    // list(?ItemStackTemplate).
+    skip_list(body, off, skip_optional_item_stack)
+}
+
+fn skip_painting_variant_holder(body: &[u8], off: &mut usize) -> Option<()> {
+    // holder(PAINTING_VARIANT, [VarInt][VarInt][Identifier][?Component][?Component]).
+    skip_holder(body, off, |b, o| {
+        skip_varint(b, o)?;
+        skip_varint(b, o)?;
+        skip_utf8(b, o)?;
+        skip_optional(b, o, skip_component_tag)?;
+        skip_optional(b, o, skip_component_tag)
+    })
+}
+
+/// Bound `shape`'s wire value, advancing `*off` past it. The depth cap guards
+/// against pathological nesting through `ItemStackTemplate`/`DataComponentMatchers`
+/// recursion on hostile input (Java tracks codec depth the same way).
+fn skip_shape(body: &[u8], off: &mut usize, shape: Shape, depth: usize) -> Option<()> {
+    use Shape::*;
+    if depth > 8 {
+        return None;
+    }
+    match shape {
+        VarInt => skip_varint(body, off),
+        Unit => Some(()),
+        Bool => skip_bool(body, off),
+        Float => skip_float(body, off),
+        Int => skip_int(body, off),
+        Utf8String => skip_utf8(body, off),
+        NbtTag => skip_nbt(body, off),
+        HolderSet => skip_holder_set(body, off),
+        SoundEvent => skip_sound_event(body, off),
+        UseEffects => skip_use_effects(body, off),
+        Food => skip_food(body, off),
+        Weapon => skip_weapon(body, off),
+        AttackRange => skip_attack_range(body, off),
+        SwingAnimation => skip_swing_animation(body, off),
+        UseCooldown => skip_use_cooldown(body, off),
+        DamageResistant => skip_holder_set(body, off),
+        Repairable => skip_holder_set(body, off),
+        Enchantments => skip_enchantments(body, off),
+        CustomModelData => skip_custom_model_data(body, off),
+        TooltipDisplay => skip_tooltip_display(body, off),
+        Tool => skip_tool(body, off),
+        Consumable => skip_consumable(body, off),
+        ItemStackTemplate => skip_item_stack_template(body, off, depth),
+        Equippable => skip_equippable(body, off),
+        DeathProtection => skip_death_protection(body, off),
+        BlocksAttacks => skip_blocks_attacks(body, off),
+        PiercingWeapon => skip_piercing_weapon(body, off),
+        KineticWeapon => skip_kinetic_weapon(body, off),
+        ArmorTrim => skip_armor_trim(body, off),
+        LodestoneTracker => skip_lodestone_tracker(body, off),
+        FireworkExplosion => skip_firework_explosion(body, off),
+        Fireworks => skip_fireworks(body, off),
+        Profile => skip_profile(body, off),
+        JukeboxSong => skip_jukebox_song_holder(body, off),
+        Instrument => skip_instrument_holder(body, off),
+        TrimMaterial => skip_trim_material_holder(body, off),
+        BannerPatterns => skip_banner_patterns(body, off),
+        PotDecorations => skip_pot_decorations(body, off),
+        BlockState => skip_block_state(body, off),
+        Bees => skip_bees(body, off),
+        Container => skip_container(body, off),
+        PotionContents => skip_potion_contents(body, off),
+        SuspiciousStewEffects => skip_suspicious_stew_effects(body, off),
+        WritableBookContent => skip_writable_book_content(body, off),
+        WrittenBookContent => skip_written_book_content(body, off),
+        BlockPredicateList => skip_block_predicate_list(body, off, depth),
+        AttributeModifiers => skip_attribute_modifiers(body, off),
+        ChargedProjectiles => skip_charged_projectiles(body, off),
+        BundleContents => skip_bundle_contents(body, off),
+        PaintingVariant => skip_painting_variant_holder(body, off),
+    }
+}
+
+/// Bound one registered component's wire value (the entry's type id has already
+/// been read), advancing `*off` past it. `None` for an id outside the registered
+/// range or a value that does not fit its shape.
+fn skip_component_value(body: &[u8], off: &mut usize, id: u32, depth: usize) -> Option<()> {
+    let shape = component_shape(id)?;
+    skip_shape(body, off, shape, depth)
 }
 
 /// One positive patch entry: the component type id plus the canonical value.
@@ -379,20 +1129,33 @@ struct PatchEntry {
 /// (`[type id VarInt]`), advancing `*off` past all of them. It returns the
 /// canonical re-serialization with the positive entries sorted by type id and
 /// the negatives sorted the same way.
+///
+/// A positive entry whose component is NBT-shaped is semantically canonicalized
+/// (NBT compound field order); every other registered component's value is
+/// copied byte-exact. A duplicate id within the positives or the negatives, a
+/// negative count, an id outside the registered 26.2 range, or a value that does
+/// not fit its shape fails the whole patch (`None`).
 fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u8>> {
     let positive = frame::read_varint(body, off)?;
     let negative = frame::read_varint(body, off)?;
     if positive < 0 || negative < 0 {
         return None;
     }
+    let mut seen = std::collections::HashSet::new();
     let mut entries = Vec::with_capacity(positive as usize);
     for _ in 0..positive {
         let type_id = frame::read_varint(body, off)?;
-        if type_id < 0 {
-            return None;
+        if type_id < 0 || !seen.insert(type_id) {
+            return None; // Java's map.put silently overwrites; a duplicate is not honest
         }
-        let name = component_type_name(type_id as u32)?;
-        let value = read_component_value(body, off, name)?;
+        let value = match component_type_name(type_id as u32) {
+            Some(name) => read_component_value(body, off, name)?,
+            None => {
+                let start = *off;
+                skip_component_value(body, off, type_id as u32, 0)?;
+                body[start..*off].to_vec()
+            }
+        };
         entries.push(PatchEntry {
             type_id: type_id as u32,
             value,
@@ -401,7 +1164,7 @@ fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u
     let mut negatives = Vec::with_capacity(negative as usize);
     for _ in 0..negative {
         let type_id = frame::read_varint(body, off)?;
-        if type_id < 0 {
+        if type_id < 0 || !seen.insert(type_id) {
             return None;
         }
         negatives.push(type_id as u32);
@@ -950,14 +1713,18 @@ mod tests {
 
         // Shared component set: custom_name(6), custom_data(0), lore(11),
         // entity_data(58). All four are NBT-shaped and must canonicalize by
-        // component type id regardless of entry order.
+        // component type id regardless of entry order. The removals are ids
+        // DISJOINT from the set-positive ids — Java's DataComponentPatch is one
+        // map keyed by component type, so a valid patch can never both set and
+        // remove the same component (a negative `map.put(type, Optional.empty())`
+        // would just overwrite the positive entry).
         let components = &[
             custom_name("x"),
             custom_data("y"),
             lore(&["L1", "L2"]),
             entity_data(7, &zombie),
         ];
-        let negatives = &[3u32, 11, 58];
+        let negatives = &[2u32, 3, 9];
 
         // body_a: story:first carries the UNSORTED title/desc compounds,
         // story:second the sorted ones. body_b swaps which advancement gets the
@@ -1172,16 +1939,67 @@ mod tests {
     }
 
     #[test]
-    fn unknown_component_value_fails_canonicalization_honestly() {
-        // item_model (id 10) is an Identifier, not an NBT payload; the harness
-        // cannot bound its value, so the whole canonicalization is refused
-        // (None) rather than misparsed or guessed at.
+    fn non_nbt_component_value_is_preserved_byte_exact() {
+        // item_model (id 10) is an Identifier, not an NBT payload. The harness
+        // cannot semantically canonicalize its value, so it must be copied
+        // byte-exact while the patch still canonicalizes (entries sorted by id).
         let title = nbt_compound(vec![("text", nbt_str("T"))]);
-        let unknown = (10u32, vec![0x0A, 0x01, 0x02]); // arbitrary bytes after the type id
+        // item_model is a Utf8String Identifier: [VarInt byte len][bytes].
+        let value = vec![0x03, 0x61, 0x62, 0x63]; // "abc"
+        let item_model = (10u32, value.clone());
         let adv = advancement(
             "story:root",
             None,
-            Some(&display_for(&title, &title, &[unknown], &[], &[0])),
+            Some(&display_for(&title, &title, &[item_model], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input).expect("patch canonicalizes");
+        // The single positive entry is the only one, so its value is verbatim.
+        assert!(canon.windows(value.len()).any(|w| w == value));
+        assert_eq!(canon_update_advancements(&canon), Some(canon.clone()));
+    }
+
+    #[test]
+    fn mixed_patch_with_non_nbt_component_sorts_and_preserves() {
+        // A patch with an NBT-shaped custom_name (id 6) AND a non-NBT item_model
+        // (id 10) fed in reverse order must canonicalize to [6, 10] with the
+        // item_model value preserved byte-exact and the custom_name value
+        // semantically canonicalized. Exercised directly on the patch so the
+        // assertion is the exact expected byte string, not a position search.
+        let model_value = vec![0x03, 0x61, 0x62, 0x63]; // [len 3]["abc"]
+        let model = (10u32, model_value.clone());
+        let name = custom_name("x");
+        let input_patch = patch(&[model, name.clone()], &[]); // id 10 before id 6
+        let mut off = 0;
+        let canon_patch =
+            canon_data_component_patch_body(&input_patch, &mut off).expect("patch canonicalizes");
+        assert_eq!(off, input_patch.len(), "whole patch consumed");
+
+        // [pos=2][neg=0][id 6][name NBT][id 10][model bytes].
+        let mut expected = Vec::new();
+        frame::write_varint(&mut expected, 2);
+        frame::write_varint(&mut expected, 0);
+        frame::write_varint(&mut expected, 6);
+        expected.extend_from_slice(&name.1);
+        frame::write_varint(&mut expected, 10);
+        expected.extend_from_slice(&model_value);
+        assert_eq!(canon_patch, expected);
+    }
+
+    #[test]
+    fn duplicate_patch_id_is_rejected() {
+        // Java's Reference2ObjectMap.put silently overwrites a duplicate id; an
+        // honest canonicalizer must reject the patch (None) rather than guess
+        // which of the two values Java kept.
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let dup_a = custom_name("a");
+        let dup_b = custom_name("b");
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[dup_a, dup_b], &[], &[0, 1])),
             &[vec!["c".into()]],
             false,
         );
@@ -1327,5 +2145,186 @@ mod tests {
         // Byte-identical to the input: everything here is already canonical
         // (single-field compounds, sorted patch, identifier passed verbatim).
         assert_eq!(canon, display);
+    }
+
+    #[test]
+    fn list_tag_with_end_elem_and_positive_count_is_rejected() {
+        // Java's `ListTag.loadList` throws "Missing type on ListTag" when the
+        // elem type is End (0) with a positive count. The strict parser must
+        // refuse the whole tag (None) rather than treat the empty `End` elem as
+        // a list of nothing.
+        let mut bad_title = Vec::new();
+        bad_title.push(9); // list tag
+        bad_title.push(0); // elem: End
+        bad_title.extend_from_slice(&1i32.to_be_bytes()); // count 1 — Java rejects
+        let mut bad_display = Vec::new();
+        bad_display.extend_from_slice(&bad_title);
+        write_nbt(
+            &mut bad_display,
+            &nbt_compound(vec![("text", nbt_str("D"))]),
+        ); // desc
+        frame::write_varint(&mut bad_display, 0); // icon item
+        frame::write_varint(&mut bad_display, 1); // icon count
+        frame::write_varint(&mut bad_display, 0); // patch positive
+        frame::write_varint(&mut bad_display, 0); // patch negative
+        frame::write_varint(&mut bad_display, 0); // frame
+        bad_display.extend_from_slice(&0i32.to_be_bytes()); // flags
+        bad_display.extend_from_slice(&0.5f32.to_be_bytes());
+        bad_display.extend_from_slice(&(-1.25f32).to_be_bytes());
+
+        let mut off = 0;
+        assert_eq!(canon_display_info(&bad_display, &mut off), None);
+    }
+
+    #[test]
+    fn compound_tag_components_enforce_compound_value() {
+        // custom_data / bucket_entity_data / entity_data / block_entity_data use
+        // ByteBufCodecs.COMPOUND_TAG: the value MUST be a CompoundTag, else Java
+        // throws DecoderException. A custom_data whose value is a plain NBT
+        // string must fail the whole advancement (None), not be re-emitted.
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        // id 0 custom_data value = [type 8][len][string] — NOT a compound.
+        let bad_custom_data = (0u32, nbt_bytes(&Nbt::String("nope".to_owned())));
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[bad_custom_data], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn modified_utf8_astral_and_nul_round_trip_through_advancement_nbt() {
+        // NBT strings (String payloads and compound field names) use
+        // DataInput.readUTF/writeUTF (modified UTF-8). An astral character
+        // encodes as a 6-byte surrogate pair and NUL as `C0 80`; both must
+        // survive a title canonicalization round-trip byte-for-byte.
+        let astral = "\u{1F600}"; // U+1F600 -> ED A0 BD ED B8 80 (6 bytes)
+        let title = nbt_compound(vec![("text", nbt_str(astral))]);
+        let desc = nbt_compound(vec![("text", nbt_str("\0"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(
+                &title,
+                &desc,
+                &[custom_name(astral)],
+                &[],
+                &[0],
+            )),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input).expect("astral/NUL title canonicalizes");
+
+        // The canonical form must decode back to the same strings.
+        let mut off = 0;
+        let reset = *canon.get(off).unwrap();
+        off += 1;
+        assert_eq!(reset, 0);
+        let added_count = frame::read_varint(&canon, &mut off).unwrap();
+        assert_eq!(added_count, 1);
+        let _id = read_string(&canon, &mut off).unwrap();
+        off += 1; // parent absent
+        assert_eq!(*canon.get(off).unwrap(), 1);
+        off += 1; // display present
+        let display = canon_display_info(&canon, &mut off).unwrap();
+
+        // Re-parse the canonical display's two NBT components.
+        let mut d_off = 0;
+        let title_tag = read_nbt(&display, &mut d_off).unwrap();
+        let desc_tag = read_nbt(&display, &mut d_off).unwrap();
+        match (title_tag, desc_tag) {
+            (Nbt::Compound(t), Nbt::Compound(d)) => {
+                let t_text = t
+                    .iter()
+                    .find(|(n, _)| n == "text")
+                    .expect("title has text field");
+                let d_text = d
+                    .iter()
+                    .find(|(n, _)| n == "text")
+                    .expect("desc has text field");
+                match (&t_text.1, &d_text.1) {
+                    (Nbt::String(ts), Nbt::String(ds)) => {
+                        assert_eq!(ts, astral);
+                        assert_eq!(ds, "\0");
+                    }
+                    other => panic!("expected two strings, got {other:?}"),
+                }
+            }
+            other => panic!("expected two compounds, got {other:?}"),
+        }
+        // Idempotence: re-canonicalizing the canonical form is stable.
+        assert_eq!(canon_update_advancements(&canon), Some(canon.clone()));
+    }
+
+    #[test]
+    fn profile_either_left_branch_is_selected_by_nonzero_byte() {
+        // ResolvableProfile (id 70) = ByteBufCodecs.either(GAME_PROFILE, Partial)
+        // + PlayerSkin.Patch. Java's `either` decode is `readBoolean() ? left :
+        // right`, i.e. a NONZERO byte selects the full GameProfile (left) and a
+        // zero byte selects the Partial (right). A regression where the branch
+        // test was inverted would mis-skip the value (reading 8 bytes instead of
+        // 23 here) and misalign the rest of the display, so the full value must
+        // round-trip byte-exact.
+        let mut profile = Vec::new();
+        profile.push(1u8); // either flag: nonzero -> GameProfile (left)
+        profile.extend_from_slice(&[0u8; 16]); // UUID (all zero)
+        profile.push(0); // name: empty
+        profile.push(0); // properties: count 0
+        profile.extend_from_slice(&[0u8; 4]); // PlayerSkin.Patch: four absent optionals
+        assert_eq!(profile.len(), 23);
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (70u32, profile.clone());
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input).expect("profile value canonicalizes");
+        assert!(
+            canon.windows(profile.len()).any(|w| w == profile),
+            "profile value must be copied byte-exact"
+        );
+        assert_eq!(canon_update_advancements(&canon), Some(canon.clone()));
+    }
+
+    #[test]
+    fn attack_range_value_is_six_floats() {
+        // AttackRange.STREAM_CODEC (id 30) = six ByteBufCodecs.FLOAT (minReach,
+        // maxReach, minCreativeReach, maxCreativeReach, hitboxMargin, mobFactor).
+        // A regression that consumed only two floats would leave the trailing
+        // four misaligned and corrupt the display; the full 24-byte value must
+        // round-trip byte-exact.
+        let mut value = Vec::new();
+        for v in [1.0f32, 4.5, 0.0, 3.0, 0.25, 1.0] {
+            value.extend_from_slice(&v.to_be_bytes());
+        }
+        assert_eq!(value.len(), 24);
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (30u32, value.clone());
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input).expect("attack_range value canonicalizes");
+        assert!(
+            canon.windows(value.len()).any(|w| w == value),
+            "attack_range value must be copied byte-exact"
+        );
+        assert_eq!(canon_update_advancements(&canon), Some(canon.clone()));
     }
 }
