@@ -3,7 +3,9 @@
 //! `mth` is a full port of `net.minecraft.util.Mth` (arithmetic, trig tables,
 //! lerp/clamp/floorDiv, packing helpers), golden-tested against Java. `random`
 //! ports `net.minecraft.util.random` (Xoroshiro/Legacy RNG), also
-//! parity-tested. `java_hash` ports the JDK string hashing used by
+//! parity-tested. `worldgen_random` ports `net.minecraft.world.level.levelgen
+//! .WorldgenRandom` (the worldgen seed decorator + `Algorithm`), on top of the
+//! `random` unit. `java_hash` ports the JDK string hashing used by
 //! `ResourceLocation`.
 //!
 //! `data_io` / `delegate_data_output` / `fast_buffered_input_stream` provide
@@ -36,6 +38,7 @@ pub mod random;
 pub mod simple_bit_storage;
 pub mod string_representable;
 pub mod util;
+pub mod worldgen_random;
 pub mod zero_bit_storage;
 
 pub use bit_storage::BitStorage;
@@ -57,6 +60,7 @@ pub use util::{
     LazyValueMap, fixed_size, fixed_size_i32, fixed_size_i64, get_random, get_random_safe,
     log_and_pause_if_in_ide, shuffle, shuffled_copy,
 };
+pub use worldgen_random::{Algorithm, WorldgenRandom};
 
 /// `Mth.floor(float v)` = `(int)Math.floor(v)`. Rust's `as` saturates and maps
 /// NaN to 0 exactly like the Java float->int cast (PORTING.md).
