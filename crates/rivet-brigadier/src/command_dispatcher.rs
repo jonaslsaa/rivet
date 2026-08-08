@@ -80,7 +80,7 @@ impl<S: 'static> CommandDispatcher<S> {
         source: S,
     ) -> Result<i32, CommandSyntaxException<'static>>
     where
-        S: Clone,
+        S: Clone + crate::tree::CommandSource,
     {
         self.execute(StringReader::new(input), source)
     }
@@ -92,7 +92,7 @@ impl<S: 'static> CommandDispatcher<S> {
         source: S,
     ) -> Result<i32, CommandSyntaxException<'static>>
     where
-        S: Clone,
+        S: Clone + crate::tree::CommandSource,
     {
         let parse = self.parse(input, source);
         self.execute_parse(parse)
@@ -104,7 +104,7 @@ impl<S: 'static> CommandDispatcher<S> {
         parse: ParseResults<S>,
     ) -> Result<i32, CommandSyntaxException<'static>>
     where
-        S: Clone,
+        S: Clone + crate::tree::CommandSource,
     {
         if parse.get_reader().can_read() {
             if parse.exceptions_len() == 1 {
@@ -141,7 +141,7 @@ impl<S: 'static> CommandDispatcher<S> {
     /// Java `parse(String, S)`.
     pub fn parse_string(&self, command: &str, source: S) -> ParseResults<S>
     where
-        S: Clone,
+        S: Clone + crate::tree::CommandSource,
     {
         self.parse(StringReader::new(command), source)
     }
@@ -149,7 +149,7 @@ impl<S: 'static> CommandDispatcher<S> {
     /// Java `parse(StringReader, S)`.
     pub fn parse(&self, command: StringReader, source: S) -> ParseResults<S>
     where
-        S: Clone,
+        S: Clone + crate::tree::CommandSource,
     {
         let context =
             CommandContextBuilder::new(source, Arc::clone(&self.root_dyn), command.get_cursor());
@@ -172,29 +172,36 @@ impl<S: 'static> CommandDispatcher<S> {
         context_so_far: CommandContextBuilder<S>,
     ) -> ParseResults<S>
     where
-        S: Clone,
+        S: Clone + crate::tree::CommandSource,
     {
-        let source = context_so_far.get_source().clone();
+        let source = context_so_far.get_source();
+        // Paper passes the `CommandSourceStack` into `getRelevantNodes`; here the
+        // source is threaded as the concrete `&S`, whose `CommandSource` impl
+        // applies the `minecraft:` prefix prioritization (#211).
         let mut errors: Vec<(Arc<dyn CommandNode<S>>, CommandSyntaxException<'static>)> =
             Vec::new();
         let mut potentials: Option<Vec<ParseResults<S>>> = None;
         let cursor = original_reader.get_cursor();
 
-        let relevant = node.get_relevant_nodes(&mut original_reader.clone());
+        let relevant =
+            node.get_relevant_nodes_with_source(&mut original_reader.clone(), Some(source));
         for child in relevant {
-            if !child.can_use(&source) {
+            if !child.can_use(source) {
                 continue;
             }
             let mut context = context_so_far.copy();
             let mut reader = original_reader.clone();
             let mut errored = false;
-            // RivetTodo(#210): Paper's `TagParseCommandSyntaxException` short-circuit
-            // (parse failure of a Minecraft tag argument aborts dispatch instead of
-            // falling through) is not ported — it depends on the Paper exception type.
             if let Err(ex) = child.parse(child.clone(), &mut reader, &mut context) {
-                errors.push((child.clone(), ex));
+                // Java records the child's error, then (for Paper's #210) aborts the
+                // dispatch if it is a `TagParseCommandSyntaxException` — Java's
+                // `stop` flag set by the nested catch and checked after `errors.put`.
+                errors.push((child.clone(), ex.clone()));
                 reader.set_cursor(cursor);
                 errored = true;
+                if crate::exceptions::is_tag_parse_exception(&ex) {
+                    return ParseResults::new(context_so_far, original_reader, errors);
+                }
             }
             if errored {
                 continue;
@@ -215,7 +222,7 @@ impl<S: 'static> CommandDispatcher<S> {
                 reader.skip();
                 if let Some(redirect) = child.get_redirect() {
                     let child_context = CommandContextBuilder::new(
-                        source.clone(),
+                        (*source).clone(),
                         Arc::clone(&redirect),
                         reader.get_cursor(),
                     );

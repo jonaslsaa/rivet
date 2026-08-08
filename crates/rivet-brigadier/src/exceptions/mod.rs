@@ -16,6 +16,7 @@ pub mod dynamic4_command_exception_type;
 pub mod dynamic_command_exception_type;
 pub mod dynamic_n_command_exception_type;
 pub mod simple_command_exception_type;
+pub mod tag_parse_command_syntax_exception;
 
 pub use built_in_exception_provider::BuiltInExceptionProvider;
 pub use built_in_exceptions::BuiltInExceptions;
@@ -27,6 +28,8 @@ pub use dynamic2_command_exception_type::Dynamic2CommandExceptionType;
 pub use dynamic3_command_exception_type::Dynamic3CommandExceptionType;
 pub use dynamic4_command_exception_type::Dynamic4CommandExceptionType;
 pub use simple_command_exception_type::SimpleCommandExceptionType;
+pub use tag_parse_command_syntax_exception::is_tag_parse_exception;
+pub use tag_parse_command_syntax_exception::tag_parse_exception;
 
 /// Java's `type == other` identity comparison over `CommandExceptionType`
 /// references (`getType() is type`). Rust `std::ptr::eq` compares the full fat
@@ -42,3 +45,5 @@ pub fn exception_type_eq(a: &dyn CommandExceptionType, b: &dyn CommandExceptionT
 mod dynamic_command_syntax_exception_type_tests;
 #[cfg(test)]
 mod simple_command_syntax_exception_type_tests;
+#[cfg(test)]
+mod tag_parse_command_syntax_exception_type_tests;
