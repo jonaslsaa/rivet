@@ -14,6 +14,14 @@ The tool currently supports:
   NBT representation as base64.
 - `nbt.decode` — decode uncompressed compound NBT from base64 and return its
   canonical SNBT representation.
+- `component.json` — decode a component JSON string through
+  `ComponentSerialization.CODEC` under non-compressed `JsonOps` and re-encode
+  it: `accept` is whether the input decodes at all, and `canonical` is the
+  exact JSON the codec re-emits (a chat/title/player-info/scoreboard wire
+  form). Malformed input (invalid JSON or an undecodable component) returns
+  `accept:false`. Consumed by the committed issue-#98 text corpus
+  (`tools/rivet-oracle/fixtures/text/`) and the `rivet-parity` differential
+  checks.
 
 It compiles against `working/Paper/paper-server/build/libs/paper-server-*.jar`
 and uses libraries materialized by the M0 Paper run under
@@ -40,7 +48,9 @@ JSON response carrying the request's optional `id`:
 
 ```json
 {"id":"example","op":"snbt.parse","input":"{answer:42,ok:true}"}
-{"id":"example","ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{answer:42,ok:1b}","pretty_snbt":"{\n    answer: 42,\n    ok: 1b\n}"},"protocol":1}
+{"id":"example","protocol":1,"ok":true,"result":{"tag_id":10,"tag_type":"COMPOUND","snbt":"{answer:42,ok:1b}","pretty_snbt":"{\n    answer: 42,\n    ok: 1b\n}"}}
+{"id":"comp","op":"component.json","input":"{\"text\":\"hello\",\"bold\":true}"}
+{"id":"comp","protocol":1,"ok":true,"result":{"accept":true,"canonical":"{\"text\":\"hello\",\"bold\":true}"}}
 ```
 
 Run the built-in smoke test without starting a persistent session:
