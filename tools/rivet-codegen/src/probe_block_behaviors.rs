@@ -4,12 +4,17 @@
 //!
 //! This is the *live* half of the block-behavior gate: it boots the real
 //! `Block.BLOCK_STATE_REGISTRY` (evaluating every one of the 32,366 states
-//! through its cached accessors) and asserts, against the running JVM, that the
-//! emitted fixture is byte-identical to a fresh dump and that the anchors
-//! (state_count 32366, run_count, and the representative air/stone/water/lava/
-//! oak_leaves/glass/torch words) reproduce. It guards against a fixture that was
-//! hand-edited or generated from a different jar without failing the drift
-//! gate.
+//! through its cached accessors) and asserts, against the running JVM, that a
+//! fresh dump is byte-identical to the committed fixture and that every anchor
+//! the probe documents (state_count 32366, run_count, and the representative
+//! air/stone/water/lava/oak_leaves/glass/torch words) is present with the
+//! pinned state_count. The anchor *values* are not re-checked here — a probe
+//! bit-packing bug would reproduce consistently — so they are pinned
+//! independently by the word-level and field-level decode tests in
+//! `rivet-registry` (`behavior_queries_match_probe_anchors` and
+//! `behavior_word_fields_match_paper_semantics`). Together these guard against
+//! a fixture that was hand-edited, generated from a different jar, or emitted
+//! by a mis-packed probe.
 //!
 //! Requires the same runtime as `extract`: the bundler jar (`--bundler`,
 //! default `working/Paper`), java + javac on PATH or JAVA_HOME, and unzip.

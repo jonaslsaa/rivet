@@ -95,10 +95,18 @@ impl BlockState {
         Self(id)
     }
 
-    /// The block's default state (`block.defaultBlockState()` in Paper).
+    /// The block's default state (`block.defaultBlockState()` in Paper). A block
+    /// id past the block table (the registry's `idToT.size()` boundary) degrades
+    /// to air, mirroring `Block.stateById`, which reads `BLOCK_STATE_REGISTRY`
+    /// (an `IdMapper`) and falls back to `Blocks.AIR.defaultBlockState()` when
+    /// `byId` returns null for an out-of-range id.
     #[inline]
     pub fn of(block: BlockId) -> Self {
-        Self(default_state(block))
+        if (block.0 as usize) < crate::generated::block_states::BLOCK_STATE_BASES.len() {
+            Self(default_state(block))
+        } else {
+            Self(StateId(0)) // air's default state is id 0
+        }
     }
 
     /// The underlying dense global state id.
@@ -427,6 +435,76 @@ mod tests {
     }
 
     #[test]
+    fn behavior_word_fields_match_paper_semantics() {
+        // The whole-word anchor test above pins the probe's raw words; this
+        // test independently decodes every field of those same words through the
+        // documented bit layout and asserts Paper's semantic values. It guards
+        // against a systematic probe bit-packing/accessor bug: if the probe
+        // packed a flag into the wrong bit, `behavior_of` would read the
+        // mis-packed bit and one of these fields would come back wrong for an
+        // anchor where the two swapped flags differ (e.g. oak_leaves and glass
+        // have blocks_motion != solid_render, so a motion/render swap fails).
+        // Note the anchors do not distinguish the correlated solid_render and
+        // can_occlude bits, which are equal on every anchor.
+        let state = |name: &str| BlockState::of(BlockId::from_name(name).unwrap());
+        let fields = |s: BlockState| {
+            (
+                s.is_air(),
+                s.blocks_motion(),
+                s.solid_render(),
+                s.can_occlude(),
+                s.use_shape_for_light_occlusion(),
+                s.propagates_skylight_down(),
+                s.random_ticking(),
+                s.fluid_empty(),
+                s.light_dampening(),
+                s.light_emission(),
+                s.map_color_id(),
+            )
+        };
+        // Paper 26.2 semantics for the probe anchors. Map colors are the
+        // `MapColor` enum ids (STONE=11, WATER=12, FIRE/lava=4, PLANT/leaves=7).
+        // Air, glass, and torch all propagate skylight down (bit 5): a
+        // non-occluding block lets sky light pass straight through.
+        assert_eq!(
+            fields(state("minecraft:air")),
+            (true, false, false, false, false, true, false, true, 0, 0, 0)
+        );
+        assert_eq!(
+            fields(state("minecraft:stone")),
+            (
+                false, true, true, true, false, false, false, true, 15, 0, 11
+            )
+        );
+        assert_eq!(
+            fields(state("minecraft:water")),
+            (
+                false, false, false, false, false, false, false, false, 1, 0, 12
+            )
+        );
+        assert_eq!(
+            fields(state("minecraft:lava")),
+            (
+                false, false, false, false, false, false, true, false, 1, 15, 4
+            )
+        );
+        assert_eq!(
+            fields(state("minecraft:oak_leaves")),
+            (false, true, false, false, false, false, true, true, 1, 0, 7)
+        );
+        assert_eq!(
+            fields(state("minecraft:glass")),
+            (false, true, false, false, false, true, false, true, 0, 0, 0)
+        );
+        assert_eq!(
+            fields(state("minecraft:torch")),
+            (
+                false, false, false, false, false, true, false, true, 0, 14, 0
+            )
+        );
+    }
+
+    #[test]
     fn tag_membership_reads_owning_block() {
         let planks = BlockState::of(BlockId::from_name("minecraft:oak_planks").unwrap());
         assert!(planks.is_in_tag("minecraft:planks"));
@@ -442,6 +520,20 @@ mod tests {
         let bad = BlockState::new(StateId(crate::generated::block_states::BLOCK_STATE_COUNT));
         assert!(!bad.is_valid());
         // Mirror Block.stateById's AIR fallback.
+        assert_eq!(bad.block(), BlockId::from_name("minecraft:air").unwrap());
+        assert!(bad.is_air());
+    }
+
+    #[test]
+    fn out_of_range_block_defaults_to_air() {
+        // A block id past the table falls back to air's default state, matching
+        // Paper's `stateById` (IdMapper.byId returns null out of range and
+        // stateById substitutes Blocks.AIR.defaultBlockState()). `of` must not
+        // index past BLOCK_STATE_BASES.
+        let air = BlockState::of(BlockId::from_name("minecraft:air").unwrap());
+        let bad = BlockState::of(BlockId::from_id(u16::MAX));
+        assert!(bad.is_valid());
+        assert_eq!(bad, air);
         assert_eq!(bad.block(), BlockId::from_name("minecraft:air").unwrap());
         assert!(bad.is_air());
     }
