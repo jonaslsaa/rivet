@@ -179,9 +179,13 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
 /// The wire shape of a registered 26.2 component value that is copied verbatim.
 #[derive(Clone, Copy)]
 enum Shape {
-    /// A scalar, registry-id, holder-registry or id-mapper VarInt
-    /// (`ByteBufCodecs.VAR_INT` / `registry` / `holderRegistry` / `idMapper`).
+    /// A scalar or id-mapper VarInt that accepts any signed value
+    /// (`ByteBufCodecs.VAR_INT` / `idMapper`). `idMapper` maps an out-of-range id
+    /// through its `ByIdMap` strategy rather than rejecting it.
     VarInt,
+    /// A `ByteBufCodecs.holderRegistry` VarInt — `byIdOrThrow(id)`, which rejects
+    /// a negative id (the only registry-independent case this harness can detect).
+    HolderRegistry,
     /// No bytes (`Unit`).
     Unit,
     /// One byte (`ByteBufCodecs.BOOL`).
@@ -291,9 +295,9 @@ enum Shape {
 fn component_shape(id: u32) -> Option<Shape> {
     use Shape::*;
     Some(match id {
-        1 | 2 | 3 | 8 | 12 | 19 | 31 | 41 | 43 | 46 | 48 | 63 | 73 | 82 | 83 | 84 | 85 | 86
-        | 87 | 88 | 89 | 90 | 91 | 92 | 93 | 94 | 95 | 96 | 97 | 98 | 99 | 100 | 101 | 102
-        | 104 | 105 | 106 | 107 | 108 | 109 | 110 => VarInt,
+        1 | 2 | 3 | 12 | 19 | 31 | 41 | 43 | 46 | 48 | 63 | 73 | 85 | 86 | 87 | 88 | 89 | 90
+        | 91 | 92 | 93 | 102 | 104 | 105 | 108 | 109 | 110 => VarInt,
+        8 | 82 | 83 | 84 | 94 | 95 | 96 | 97 | 98 | 99 | 100 | 101 | 106 | 107 => HolderRegistry,
         4 | 20 | 34 => Unit,
         21 => Bool,
         7 | 52 => Float,
@@ -461,26 +465,42 @@ fn skip_either(body: &[u8], off: &mut usize, left: SkipFn, right: SkipFn) -> Opt
     }
 }
 
+/// `ByteBufCodecs.holderRegistry(registry)` — a single registry id stored
+/// as-is (`Registry.byIdOrThrow(id)`); id 0 is an ordinary registry entry, and
+/// a negative id is rejected.
+fn skip_holder_registry(body: &[u8], off: &mut usize) -> Option<()> {
+    let id = frame::read_varint(body, off)?;
+    if id < 0 {
+        return None;
+    }
+    Some(())
+}
+
 /// `ByteBufCodecs.holder(registry, direct)` — `[VarInt id][id == 0 ? direct : nothing]`.
+/// A non-direct id maps through `byIdOrThrow(id - 1)`, which rejects negative ids.
 fn skip_holder(body: &[u8], off: &mut usize, direct: SkipFn) -> Option<()> {
     let id = frame::read_varint(body, off)?;
+    if id < 0 {
+        return None;
+    }
     if id == 0 {
         direct(body, off)?;
     }
     Some(())
 }
 
-/// `ByteBufCodecs.holderSet(registry)` — `[VarInt count-1][count == -1 ? named : holders]`.
-/// Java reads `VarInt.read - 1`: a value of 0 means a named set (`[Identifier]`),
-/// a positive value is `count` direct holder ids, and a negative value other than
-/// -1 is an empty direct set.
+/// `ByteBufCodecs.holderSet(registry)` — `[VarInt count-1]`. Java reads
+/// `count = VarInt.read - 1`: `count == -1` (raw 0) is a named set
+/// (`[TagKey Identifier]`); any other `count` is that many direct holder-registry
+/// ids (`raw 1` = empty direct set). A raw value below 0 makes `count < -1`,
+/// which Java rejects with `NegativeArraySizeException`.
 fn skip_holder_set(body: &[u8], off: &mut usize) -> Option<()> {
     let raw = frame::read_varint(body, off)?;
-    if raw == 0 {
-        return skip_utf8(body, off); // TagKey identifier
-    }
     if raw < 0 {
-        return Some(()); // Java: empty direct set
+        return None;
+    }
+    if raw == 0 {
+        return skip_utf8(body, off); // named set: TagKey identifier
     }
     for _ in 0..raw.saturating_sub(1) {
         skip_varint(body, off)?;
@@ -535,7 +555,7 @@ fn skip_use_cooldown(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 fn skip_enchantments(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_map(body, off, skip_varint, skip_varint)
+    skip_map(body, off, skip_holder_registry, skip_varint)
 }
 
 fn skip_custom_model_data(body: &[u8], off: &mut usize) -> Option<()> {
@@ -583,7 +603,7 @@ fn skip_effect_details(body: &[u8], off: &mut usize, depth: usize) -> Option<()>
 }
 
 fn skip_mob_effect_instance(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_varint(body, off)?; // holderRegistry(MOB_EFFECT)
+    skip_holder_registry(body, off)?; // MobEffect holderRegistry
     skip_effect_details(body, off, 0)
 }
 
@@ -621,7 +641,7 @@ fn skip_attribute_modifier(body: &[u8], off: &mut usize) -> Option<()> {
 
 fn skip_item_stack_template(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
     // ItemStackTemplate = [Item holderRegistry][count VarInt][DataComponentPatch].
-    skip_varint(body, off)?;
+    skip_holder_registry(body, off)?;
     skip_varint(body, off)?;
     skip_patch_value(body, off, depth)
 }
@@ -870,7 +890,7 @@ fn skip_container(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 fn skip_potion_contents(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_optional(body, off, skip_varint)?; // potion holderRegistry(POTION)
+    skip_optional(body, off, skip_holder_registry)?; // potion holderRegistry(POTION)
     skip_optional(body, off, skip_int)?; // customColor
     skip_list(body, off, skip_mob_effect_instance)?; // customEffects
     skip_optional(body, off, skip_utf8) // customName
@@ -879,7 +899,7 @@ fn skip_potion_contents(body: &[u8], off: &mut usize) -> Option<()> {
 fn skip_suspicious_stew_effects(body: &[u8], off: &mut usize) -> Option<()> {
     // list(Entry = [MobEffect holderRegistry][VarInt duration]).
     skip_list(body, off, |b, o| {
-        skip_varint(b, o)?;
+        skip_holder_registry(b, o)?;
         skip_varint(b, o)
     })
 }
@@ -1014,7 +1034,7 @@ fn skip_block_predicate_list(body: &[u8], off: &mut usize, depth: usize) -> Opti
 }
 
 fn skip_attribute_modifiers_entry(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_varint(body, off)?; // Attribute holderRegistry
+    skip_holder_registry(body, off)?; // Attribute holderRegistry
     skip_attribute_modifier(body, off)?; // modifier
     skip_varint(body, off)?; // EquipmentSlotGroup idMapper
     // Display = Type idMapper (0=Default, 1=Hidden, 2=OverrideText) then dispatch.
@@ -1061,6 +1081,7 @@ fn skip_shape(body: &[u8], off: &mut usize, shape: Shape, depth: usize) -> Optio
     }
     match shape {
         VarInt => skip_varint(body, off),
+        HolderRegistry => skip_holder_registry(body, off),
         Unit => Some(()),
         Bool => skip_bool(body, off),
         Float => skip_float(body, off),
@@ -2512,5 +2533,81 @@ mod tests {
             "attack_range value must be copied byte-exact"
         );
         assert_eq!(canon_update_advancements(&canon), Some(canon.clone()));
+    }
+
+    #[test]
+    fn holder_set_with_negative_count_is_rejected() {
+        // ByteBufCodecs.holderSet(registry): `count = VarInt.read - 1`; only
+        // `count == -1` (raw 0) is a named set, and any other `count` is that many
+        // direct holder ids (`raw 1` = empty). A raw value < 0 makes `count < -1`,
+        // which Java rejects with NegativeArraySizeException before reading any
+        // holder. The walker must refuse the whole body (None) — a lenient skip
+        // would accept wire bytes Java cannot decode.
+        //
+        // Drive it through a registered holderSet-shaped component so the
+        // dispatch path is exercised end to end. id 65 = provides_banner_patterns
+        // (`ByteBufCodecs.holderSet(Registries.BANNER_PATTERN)`).
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, -2); // raw count-1 = -2 -> NegativeArraySizeException
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (65u32, value);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn holder_with_negative_id_is_rejected() {
+        // ByteBufCodecs.holder(registry, direct): a non-direct id maps through
+        // byIdOrThrow(id - 1), which throws on a negative id. The walker must
+        // refuse rather than accept the unknown id. id 8 = damage_type
+        // (`DamageType.STREAM_CODEC = holderRegistry(DAMAGE_TYPE)`).
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, -1); // byIdOrThrow(-2) throws
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (8u32, value);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn holder_registry_with_negative_id_is_rejected() {
+        // holderRegistry/registry decode through byIdOrThrow(id), which throws on
+        // a negative id. This is distinct from `idMapper`/plain VAR_INT, which map
+        // out-of-range ids through their ByIdMap strategy instead of throwing.
+        // Drive it through a nested composite so the holderRegistry skip runs:
+        // id 13 enchantments = ItemEnchantments STREAM_CODEC =
+        // map(holderRegistry(ENCHANTMENT), VarInt).
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 1); // map entry count
+        frame::write_varint(&mut value, -1); // enchantment holderRegistry id -> byIdOrThrow(-1)
+        frame::write_varint(&mut value, 5); // level
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (13u32, value);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
     }
 }
