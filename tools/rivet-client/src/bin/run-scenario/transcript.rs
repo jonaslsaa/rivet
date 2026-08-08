@@ -518,6 +518,36 @@ fn walk_moved(samples: &Value) -> bool {
     walk_progress(samples) >= MOVED_DISTANCE_BLOCKS
 }
 
+/// Semantic verdict for the Paper-vs-Paper movement self-check: every boot must
+/// have actually moved (`outcome == "moved"`).
+///
+/// The differential comparator can only prove two boots *agree*; a movement
+/// self-check must additionally prove the walk actually moved. Two Paper boots
+/// that both normalize to `noop` (the client emitted `moved` but the sampled
+/// walk shows no forward progress), or both fail to complete the walk
+/// (`timeout` / `connection_failed` / `disconnected` / `spawned`-without-`moved`),
+/// are *identically wrong*: the comparator reports them identical and a
+/// differential-only verdict would PASS vacuously. Requiring the semantic
+/// `moved` outcome on every boot is the general invariant that refuses PASS in
+/// that case — without weakening the differential comparison, which still
+/// catches a real divergence between two genuinely-`moved` walks.
+pub fn move_outcome_verdict(transcripts: &[Value]) -> Result<(), String> {
+    for (i, t) in transcripts.iter().enumerate() {
+        let outcome = t
+            .get("outcome")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if outcome != "moved" {
+            return Err(format!(
+                "boot {} did not move (outcome={outcome}): a movement self-check must prove each \
+                 boot actually walked, not merely that both boots agree",
+                i + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,6 +745,73 @@ mod tests {
         assert_eq!(walk_progress(&noop), 0.0);
         assert!(walk_moved(&json!(realistic)));
         assert!(!walk_moved(&json!(noop)));
+    }
+
+    fn move_transcript(outcome: &str) -> Value {
+        json!({
+            "protocol": 1,
+            "scenario": "move",
+            "outcome": outcome,
+            "lifecycle": ["init", "login", "spawn"],
+        })
+    }
+
+    #[test]
+    fn move_outcome_verdict_accepts_boots_that_all_moved() {
+        let t = [move_transcript("moved"), move_transcript("moved")];
+        assert!(move_outcome_verdict(&t).is_ok());
+    }
+
+    #[test]
+    fn move_outcome_verdict_rejects_identical_noop_boots() {
+        // Two Paper boots that both normalize to `noop` are identically wrong:
+        // the differential comparison would report them identical and PASS, so
+        // the semantic verdict is what refuses PASS on "both sides identically
+        // wrong" movement (the false-green this invariant closes).
+        let t = [move_transcript("noop"), move_transcript("noop")];
+        let err = move_outcome_verdict(&t).expect_err("identical noop boots must fail");
+        assert!(
+            err.contains("boot 1") && err.contains("noop"),
+            "error must name the first noop boot and its outcome, got {err}"
+        );
+    }
+
+    #[test]
+    fn move_outcome_verdict_rejects_a_mismatched_boot() {
+        // One moved boot, one noop boot: the differential comparison reports a
+        // real divergence AND the verdict rejects the noop boot.
+        let t = [move_transcript("moved"), move_transcript("noop")];
+        let err = move_outcome_verdict(&t).expect_err("mismatched movement must fail");
+        assert!(
+            err.contains("boot 2") && err.contains("noop"),
+            "error must name boot 2 and its noop outcome, got {err}"
+        );
+    }
+
+    #[test]
+    fn move_outcome_verdict_rejects_failure_terminals() {
+        // Connection-failure terminals are distinct from `noop` but equally
+        // never complete the walk; the verdict must name each actual outcome.
+        for outcome in ["timeout", "connection_failed", "disconnected"] {
+            let t = [move_transcript("moved"), move_transcript(outcome)];
+            let err = move_outcome_verdict(&t).expect_err("terminal outcome must fail");
+            assert!(
+                err.contains("boot 2") && err.contains(outcome),
+                "error must name boot 2 and its {outcome} outcome, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn move_outcome_verdict_rejects_spawn_without_moved() {
+        // A run that reached spawn but never emitted `moved` did not walk; it
+        // is a movement failure even though it is a successful join.
+        let t = [move_transcript("moved"), move_transcript("spawned")];
+        let err = move_outcome_verdict(&t).expect_err("spawned-without-moved must fail");
+        assert!(
+            err.contains("boot 2") && err.contains("spawned"),
+            "error must name boot 2 and its spawned outcome, got {err}"
+        );
     }
 
     #[test]
