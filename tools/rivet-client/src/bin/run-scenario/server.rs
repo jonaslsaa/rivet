@@ -175,8 +175,17 @@ pub fn ensure_jar(crate_root: &Path) -> Result<PathBuf, Error> {
     )))
 }
 
-/// Locate the `rivet-server` binary: `RIVET_SERVER_BIN` env wins, then the main
-/// workspace's `target/debug/rivet-server`.
+/// Locate the `rivet-server` binary: `RIVET_SERVER_BIN` env wins, then the
+/// workspace this harness was built in (`<workspace>/target/debug/rivet-server`).
+///
+/// The fallback resolves against the harness's own manifest dir, so a harness
+/// built inside a worktree picks up that worktree's own server build — not a
+/// stale build from a different checkout. Provenance is load-bearing: the
+/// fallback is refused (UNVERIFIED) when the binary is older than the
+/// rivet-server source in the same workspace, so a stale root `target` from
+/// another commit cannot be silently mistaken for the selected tree's server.
+/// `RIVET_SERVER_BIN` remains the explicit override when the server under test
+/// lives in a different tree than the harness.
 pub fn ensure_rivet_binary(crate_root: &Path) -> Result<PathBuf, Error> {
     if let Ok(p) = std::env::var("RIVET_SERVER_BIN") {
         let p = PathBuf::from(p);
@@ -189,14 +198,34 @@ pub fn ensure_rivet_binary(crate_root: &Path) -> Result<PathBuf, Error> {
         )));
     }
     let workspace_bin = crate_root.join("../../target/debug/rivet-server");
-    if workspace_bin.is_file() {
-        return Ok(workspace_bin);
+    if !workspace_bin.is_file() {
+        return Err(Error::Unverified(format!(
+            "rivet-server binary not found at {}. Build it (cargo build -p rivet-server from \
+             the selected workspace root) or set RIVET_SERVER_BIN.",
+            workspace_bin.display()
+        )));
     }
-    Err(Error::Unverified(format!(
-        "rivet-server binary not found at {}. Build it (cargo build -p rivet-server from the \
-         repo root) or set RIVET_SERVER_BIN.",
-        workspace_bin.display()
-    )))
+    // Provenance: the fallback must be fresh relative to the rivet-server
+    // source in the same workspace. Git checkouts stamp changed files with the
+    // checkout time, so a binary built for an older commit predates the newer
+    // source; refuse it rather than booting the wrong server.
+    let src_marker = crate_root.join("../../crates/rivet-server/src/main.rs");
+    let src_modified = fs::metadata(&src_marker)
+        .ok()
+        .and_then(|m| m.modified().ok());
+    let bin_modified = fs::metadata(&workspace_bin)?.modified()?;
+    if let Some(src_modified) = src_modified
+        && bin_modified < src_modified
+    {
+        return Err(Error::Unverified(format!(
+            "rivet-server binary {} is older than its source {} — it is a stale build \
+             from a different commit. Rebuild it in this workspace (cargo build -p \
+             rivet-server) or point RIVET_SERVER_BIN at the intended binary.",
+            workspace_bin.display(),
+            src_marker.display()
+        )));
+    }
+    Ok(workspace_bin)
 }
 
 /// Rewrite `server-port=` in a run dir's `server.properties` so every boot
@@ -420,8 +449,8 @@ pub fn boot(
 ///
 /// Paper's clean shutdown is the `All dimensions are saved` marker in the
 /// post-`Done` log tail. Rivet's clean shutdown is the SIGTERM handler draining
-/// and exiting with code 0 (rivet-server/src/main.rs); pre-play there is nothing
-/// to save, so the exit status is the load-bearing assertion.
+/// and exiting with code 0 (rivet-server/src/main.rs); Rivet persists no world
+/// state yet, so the exit status is the load-bearing assertion.
 pub fn shutdown(server: &mut Server) -> Result<(), Error> {
     let pid = server.child.id();
     println!("    server ready; shutting down cleanly (SIGTERM)...");
