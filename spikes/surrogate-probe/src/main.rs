@@ -38,7 +38,7 @@ fn main() {
         }
     }
 
-    // 2. encode_modified_utf8 round-trip of what Rust CAN hold (U+FFFD etc.).
+    // 2. write_utf_body round-trip of what Rust CAN hold (U+FFFD etc.).
     for (key, s) in [
         ("rust_mutf8_encode_fffd", "\u{FFFD}"),
         ("rust_mutf8_encode_question", "?"),

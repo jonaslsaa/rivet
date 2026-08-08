@@ -118,21 +118,19 @@ public final class SurrogateProbe {
         probeUtf8Encode("jdk_utf8_encode_low", low);
         probeUtf8Encode("jdk_utf8_encode_pair", pair);
 
-        // ---- 7. Character.toString / isValidCodePoint for SNBT escapes ------
-        // ---- 8. SNBT quoteAndEscape of a lone surrogate (StringTag/SNBT printer)
+        // ---- 7. SNBT escapes: quoteAndEscape + Character helpers -----------
         out("quoteAndEscape_high", codeUnits(quoteAndEscape(high)));
         out("quoteAndEscape_low", codeUnits(quoteAndEscape(low)));
-
-        // ---- 9. Full Utf8String.write/read round trip through netty VarInt ----
-        probeNettyUtf8StringRoundTrip("netty_utf8string_roundtrip_ed_a0_80",
-            new byte[]{(byte) 0xED, (byte) 0xA0, (byte) 0x80});
-
         out("char_isValidCodePoint_d800", Character.isValidCodePoint(0xD800));
         out("char_isValidCodePoint_dfff", Character.isValidCodePoint(0xDFFF));
         out("char_isValidCodePoint_10000", Character.isValidCodePoint(0x10000));
         out("char_toString_d800_units", codeUnits(Character.toString(0xD800)));
         out("char_toString_10000_units", codeUnits(Character.toString(0x10000)));
         out("codePointOf_high_surrogates_d800", Character.codePointOf("HIGH SURROGATES D800") == 0xD800);
+
+        // ---- 8. Full Utf8String.write/read round trip through netty VarInt ----
+        probeNettyUtf8StringRoundTrip("netty_utf8string_roundtrip_ed_a0_80",
+            new byte[]{(byte) 0xED, (byte) 0xA0, (byte) 0x80});
     }
 
     /** StringTag.quoteAndEscape equivalent (the SNBT printer's string form). */
