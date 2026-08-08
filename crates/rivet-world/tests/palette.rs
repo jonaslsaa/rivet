@@ -241,6 +241,60 @@ fn global_palette_write_is_empty() {
 }
 
 // ---------------------------------------------------------------------------
+// Moonrise FastPalette snapshot: raw_palette (#216)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn single_value_raw_palette_snapshots_the_value() {
+    let p = SingleValuePalette::new(vec![StateId(85)]);
+    assert_eq!(p.raw_palette(), Some(vec![StateId(85)]));
+}
+
+#[test]
+fn single_value_uninitialized_raw_palette_is_empty() {
+    // Java `SingleValuePalette.moonrise$getRawPalette` returns
+    // `new Object[] { this.value }` with a null entry when uninitialized; the
+    // Rust snapshot models the null as an absent entry (empty Vec), which the
+    // container's read path turns into the Java null-entry read panic.
+    let p = SingleValuePalette::new(Vec::<StateId>::new());
+    assert_eq!(p.raw_palette(), Some(vec![]));
+}
+
+#[test]
+fn linear_raw_palette_covers_only_occupied_entries() {
+    let mut p = LinearPalette::new(4, Vec::<StateId>::new());
+    p.id_for(&StateId(0));
+    p.id_for(&StateId(85));
+    // Java returns the full `1 << bits` array (null beyond `size`); the port
+    // returns the occupied prefix mirroring the `value_for` domain.
+    assert_eq!(p.raw_palette(), Some(vec![StateId(0), StateId(85)]));
+    assert_eq!(p.get_size(), 2);
+}
+
+#[test]
+fn hashmap_raw_palette_is_by_id_order() {
+    let mut p = HashMapPalette::new(5, Vec::<StateId>::new());
+    for v in [StateId(9), StateId(10), StateId(85)] {
+        p.id_for(&v);
+    }
+    // Java's `moonrise$getRawPalette` forwards to the identity map's `byId`
+    // array — dense id order, exactly insertion order for the Rust port.
+    assert_eq!(
+        p.raw_palette(),
+        Some(vec![StateId(9), StateId(10), StateId(85)])
+    );
+}
+
+#[test]
+fn global_raw_palette_is_none() {
+    // Java `GlobalPalette` does not implement the materialized snapshot; its
+    // `moonrise$getRawPalette` is the interface default `null`. The container
+    // falls back to `value_for`.
+    let p = GlobalPalette::new(Box::new(TestGlobalMap));
+    assert_eq!(p.raw_palette(), None);
+}
+
+// ---------------------------------------------------------------------------
 // Strategy ladder (exact bits-per-entry transitions)
 // ---------------------------------------------------------------------------
 

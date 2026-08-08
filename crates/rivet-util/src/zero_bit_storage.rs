@@ -2,7 +2,8 @@
 //!
 //! PROVENANCE: `net/minecraft/util/ZeroBitStorage.java`. Zero-width entries,
 //! no backing storage. Java's `copy()` returns `this`; the Rust port returns a
-//! fresh value (same observable contents).
+//! fresh value (same observable contents). The Paper `moonrise$countEntries`
+//! fast path is ported as [`BitStorage::count_entries`] (issue #216).
 
 use crate::bit_storage::BitStorage;
 
@@ -61,6 +62,13 @@ impl BitStorage for ZeroBitStorage {
     fn copy_box(&self) -> Box<dyn BitStorage> {
         Box::new(*self)
     }
+
+    /// `moonrise$countEntries()` — every entry is palette id 0, so the single
+    /// list holds `0..size`. Java materializes the list directly (a wrapped
+    /// array); the Rust port builds the same ascending `i16` indices.
+    fn count_entries(&self) -> Vec<(i32, Vec<i16>)> {
+        vec![(0, (0..self.size).map(|i| i as i16).collect())]
+    }
 }
 
 #[cfg(test)]
@@ -101,5 +109,24 @@ mod tests {
         let c = z.copy_box();
         assert_eq!(c.get_size(), 4096);
         assert_eq!(c.get_bits(), 0);
+    }
+
+    /// `moonrise$countEntries` (issue #216): zero-width entries are all palette
+    /// id 0, so the single group holds every index, ascending.
+    #[test]
+    fn count_entries_single_group_of_all_indices() {
+        let z = ZeroBitStorage::new(16);
+        assert_eq!(
+            z.count_entries(),
+            vec![(0, (0..16).map(|i| i as i16).collect())]
+        );
+    }
+
+    #[test]
+    fn count_entries_empty_storage_still_has_id_zero_group() {
+        // Java's `ZeroBitStorage.moonrise$countEntries` wraps an empty array
+        // and puts it under id 0, so size 0 yields one empty group — the map
+        // always has the `{0: []}` entry.
+        assert_eq!(ZeroBitStorage::new(0).count_entries(), vec![(0, vec![])]);
     }
 }

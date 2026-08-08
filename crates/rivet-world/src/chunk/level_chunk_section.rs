@@ -10,12 +10,17 @@
 //!
 //! Ported ahead of the `mc.world.level.chunk` manifest unit because issue #100
 //! needs the wire write path to fill the `ClientboundLevelChunkPacketData`
-//! opaque sections buffer. The Moonrise block-counting lists, Anti-Xray, and
-//! the set-block/fluid accessors are deferred with the owning unit; the two
-//! wire-visible count fields (non-empty blocks, fluids) are ported.
+//! opaque sections buffer. The Moonrise block-counting fast path
+//! (`moonrise$countEntries`) is ported at the storage level
+//! (rivet-util, issue #216), but the section-level lists it feeds — the
+//! `FULL_LIST` single-value shortcut, `specialCollidingBlocks`, and the
+//! `tickingBlocks` coordinate list — and the set-block/fluid accessors are
+//! deferred with the owning unit; the two wire-visible count fields
+//! (non-empty blocks, fluids) are ported.
 //!
-//! RivetTodo(#216): the Moonrise block-counting lists (`countEntries`/
-//! `FULL_LIST`), the Anti-Xray `chunkPacketInfo`/`chunkSectionIndex` write
+//! RivetTodo(#216): the Moonrise `FULL_LIST` single-value block-counting
+//! shortcut, the `specialCollidingBlocks`/`tickingBlocks` lists fed by
+//! `countEntries`, the Anti-Xray `chunkPacketInfo`/`chunkSectionIndex` write
 //! params, and the set-block/fluid accessors are not ported (deferred to the
 //! M2 chunk-storage epic #15); the owning `mc.world.level.chunk.access` unit
 //! replaces the superflat-safe predicate defaults (including the separate
@@ -107,12 +112,15 @@ impl<
     }
 
     /// `recalcBlockCounts()` — resets the count fields, then tallies them from
-    /// the container's palette. Java's Moonrise fast path (`countEntries` /
-    /// `FULL_LIST`) is an optimization over the same per-palette-entry
-    /// summation. Two simplifications are superflat-safe and deferred with the
-    /// owning unit (#216): `is_randomly_ticking` doubles for both the block and
-    /// the fluid random-tick predicates (Paper uses `state.isRandomlyTicking()`
-    /// for the block and `fluid.isRandomlyTicking()` for the fluid), and
+    /// the container's palette via [`PalettedContainer::count`] (which mirrors
+    /// Java's per-palette-entry summation). Java's Moonrise fast path
+    /// (`moonrise$countEntries`, ported at the storage level, issue #216) is
+    /// the same summation with coordinate lists the deferred section-level
+    /// lists need; it is not wired here. Two simplifications are
+    /// superflat-safe and deferred with the owning unit (#216):
+    /// `is_randomly_ticking` doubles for both the block and the fluid
+    /// random-tick predicates (Paper uses `state.isRandomlyTicking()` for the
+    /// block and `fluid.isRandomlyTicking()` for the fluid), and
     /// `fluid_is_empty` replaces real `BlockBehaviour` fluid flags. Neither
     /// affects the wire counts (`nonEmptyBlockCount`/`fluidCount`), which are
     /// exact for the air + stone content.
