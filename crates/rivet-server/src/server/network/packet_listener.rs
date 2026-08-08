@@ -15,6 +15,23 @@ use crate::server::network::connection::Connection;
 pub enum ListenerOutcome {
     Keep,
     Switch(Box<dyn PacketListener>),
+    /// The listener transitioned the connection to the **play state**: the
+    /// per-connection task stops parsing packets into a listener and forwards
+    /// every decoded frame to the tick thread over the connection's inbound
+    /// channel (OWNERSHIP §Network "play-state packets cross to the tick
+    /// thread"). Mirrors `handleConfigurationFinished` swapping the inbound
+    /// protocol to `GameProtocols.SERVERBOUND`.
+    Play,
+}
+
+impl std::fmt::Debug for ListenerOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListenerOutcome::Keep => f.write_str("Keep"),
+            ListenerOutcome::Switch(_) => f.write_str("Switch(..)"),
+            ListenerOutcome::Play => f.write_str("Play"),
+        }
+    }
 }
 
 /// A per-state packet listener. Mirrors `net.minecraft.network.protocol`'s
@@ -94,6 +111,16 @@ pub enum DisconnectReason {
     /// so a client that cannot keep up is not misreported as a server stop.
     #[error("outbound overflow")]
     Overflow,
+    /// Slice-local inbound-overload disconnect: a hostile client decoded more
+    /// inbound frames/decompressed bytes in one inbound drain (or play-state
+    /// forwarding window) than the per-connection budget allows — the
+    /// compressed-frame memory-amplification bound. This is deliberate anti-flood
+    /// policy that fires before socket-level TCP backpressure (which would not
+    /// protect the bounded tick channel from decompressed-frame amplification).
+    /// No Java analog; the observable behavior is the same as any deterministic
+    /// close — the socket closes.
+    #[error("inbound overflow: {0}")]
+    InboundOverflow(String),
 }
 
 /// Read the packet-id varint off the front of a frame (dispatch helper). Bounds

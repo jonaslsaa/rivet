@@ -7,7 +7,10 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
-use super::channels::{ConnChannels, LifecycleEvent, OutboundEvent, ServerboundFrame};
+use super::channels::{
+    ConnChannels, LifecycleEvent, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
+    MAX_INBOUND_FRAMES_PER_DRAIN, OutboundEvent, ServerboundFrame,
+};
 use crate::server::network::connection_id::ConnectionId;
 
 /// Outcome of draining one connection's inbound channel.
@@ -75,12 +78,13 @@ impl ConnectionRegistry {
                 remote,
                 in_rx,
                 out_tx,
+                drained,
             } => {
                 // `ConnectionId`s are unique per boot, so an existing entry is
                 // a stale prune (channel ends already dropped); replacing it is
                 // the correct outcome either way.
                 self.connections
-                    .insert(id, ConnChannels::new(id, remote, in_rx, out_tx));
+                    .insert(id, ConnChannels::new(id, remote, in_rx, out_tx, drained));
             }
             LifecycleEvent::Disconnect { id, .. } => {
                 self.connections.remove(&id);
@@ -88,22 +92,84 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Drain one connection's inbound frames in FIFO order. A closed channel
-    /// (the network task dropped its sender) removes the connection — the
-    /// registry self-heals without needing a `Disconnect` event.
+    /// Drain one connection's inbound frames in FIFO order, bounded by the
+    /// per-tick inbound budget ([`MAX_INBOUND_FRAMES_PER_DRAIN`] /
+    /// [`MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN`]). A closed channel (the
+    /// network task dropped its sender) removes the connection — the registry
+    /// self-heals without needing a `Disconnect` event.
+    ///
+    /// The budget is the authoritative per-tick bound (OWNERSHIP §Network): one
+    /// tick never delivers more than `MAX_INBOUND_FRAMES_PER_DRAIN` frames or
+    /// `MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN` bytes from one connection,
+    /// even against a sender that concurrently refills the channel while this
+    /// drains (the tokio-side admission window can race the drain-progress
+    /// reset mid-drain, so this cap is what actually stops a single tick from
+    /// processing a multi-GiB flood). No frame is dropped and the cap is strict:
+    ///
+    /// - the frame-count cap is checked before receiving, so the excess stays
+    ///   in the channel (deterministic retention);
+    /// - the byte cap is strict: a frame that would push the drain *over* the
+    ///   budget is not delivered — it is preserved in the connection's
+    ///   [`ConnChannels::pending_frame`] slot and delivered by the next drain.
+    ///
+    /// Retained frames are drained on a later tick, or pruned when the sender's
+    /// admission cap disconnects the flooding client.
     pub fn drain_one(&mut self, id: ConnectionId) -> DrainOutcome {
+        self.drain_one_bounded(
+            id,
+            MAX_INBOUND_FRAMES_PER_DRAIN,
+            MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
+        )
+    }
+
+    /// [`Self::drain_one`] with explicit budgets. Used by the tick loop to apply
+    /// the aggregate per-tick budget (`MAX_INBOUND_FRAMES_PER_TICK` /
+    /// `MAX_INBOUND_BYTES_PER_TICK`) across all connections: the remaining
+    /// aggregate budget is passed in, so one tick never delivers more than the
+    /// aggregate cap either. Same strict byte cap / pending-frame retention as
+    /// `drain_one`.
+    pub fn drain_one_bounded(
+        &mut self,
+        id: ConnectionId,
+        max_frames: usize,
+        max_bytes: usize,
+    ) -> DrainOutcome {
         let mut frames = Vec::new();
+        let mut drained_bytes = 0usize;
         let mut closed = false;
         if let Some(conn) = self.connections.get_mut(&id) {
             loop {
-                match conn.in_rx.try_recv() {
-                    Ok(frame) => frames.push(frame),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        closed = true;
-                        break;
-                    }
+                // Frame-count cap checked before receiving so the excess stays
+                // in the channel (deterministic retention).
+                if frames.len() >= max_frames || drained_bytes >= max_bytes {
+                    break;
                 }
+                let frame = match conn.pending_frame.take() {
+                    Some(pending) => pending,
+                    None => match conn.in_rx.try_recv() {
+                        Ok(frame) => frame,
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            closed = true;
+                            break;
+                        }
+                    },
+                };
+                // Strict byte cap: delivering this frame would push the drain
+                // over the budget, so preserve it for the next drain instead of
+                // overshooting. A frame alone never exceeds the per-connection
+                // byte cap (8 MiB max < 16 MiB budget), so it cannot stall.
+                if drained_bytes + frame.bytes.len() > max_bytes {
+                    conn.pending_frame = Some(frame);
+                    break;
+                }
+                drained_bytes += frame.bytes.len();
+                frames.push(frame);
+            }
+            // Record delivered frames on the shared progress counter, so the
+            // connection's admission window sees this tick's progress.
+            if !frames.is_empty() {
+                conn.drained.record_drained(frames.len());
             }
         }
         if closed {
@@ -145,6 +211,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use crate::server::network::packet_listener::DisconnectReason;
+    use crate::server::tick::channels::InboundDrained;
     use bytes::Bytes;
     use tokio::sync::mpsc;
 
@@ -153,6 +220,12 @@ mod tests {
     fn frame(byte: u8) -> ServerboundFrame {
         ServerboundFrame {
             bytes: Bytes::from(vec![byte]),
+        }
+    }
+
+    fn frame_of_size(len: usize) -> ServerboundFrame {
+        ServerboundFrame {
+            bytes: Bytes::from(vec![0u8; len]),
         }
     }
 
@@ -172,6 +245,7 @@ mod tests {
             remote: REMOTE,
             in_rx,
             out_tx,
+            drained: InboundDrained::new(),
         });
         (in_tx, out_rx)
     }
@@ -216,6 +290,180 @@ mod tests {
             DrainOutcome::Closed => panic!("connection should not have closed"),
         }
         assert!(reg.contains(id));
+    }
+
+    #[test]
+    fn drain_one_exact_frame_count_at_budget() {
+        // Deterministic prefill: exactly MAX_INBOUND_FRAMES_PER_DRAIN frames
+        // (1-byte each, so the byte budget is far away). The drain delivers
+        // exactly the budget and the channel is empty.
+        let mut reg = ConnectionRegistry::new();
+        let id = ConnectionId(1);
+        let (in_tx, _out_rx) = connect(&mut reg, id, 4096, 4);
+        for _ in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+            in_tx.try_send(frame(0)).unwrap();
+        }
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), MAX_INBOUND_FRAMES_PER_DRAIN);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        // Second drain: empty.
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => assert!(frames.is_empty()),
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+    }
+
+    #[test]
+    fn drain_one_exact_frame_count_retention() {
+        // Deterministic prefill: MAX_INBOUND_FRAMES_PER_DRAIN + 1 frames. The
+        // drain delivers exactly the budget and the 1025th is retained in the
+        // channel (never dropped) — delivered by the next drain.
+        let mut reg = ConnectionRegistry::new();
+        let id = ConnectionId(1);
+        let (in_tx, _out_rx) = connect(&mut reg, id, 4096, 4);
+        for _ in 0..=MAX_INBOUND_FRAMES_PER_DRAIN {
+            in_tx.try_send(frame(0)).unwrap();
+        }
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), MAX_INBOUND_FRAMES_PER_DRAIN);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        // The excess frame is retained, not lost.
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].bytes.len(), 1);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+    }
+
+    #[test]
+    fn drain_one_strict_byte_cap_preserves_straddling_frame() {
+        // Deterministic straddling: three 7 MiB frames, budget 16 MiB. The
+        // third would push the drain over the strict byte cap, so it is NOT
+        // delivered — it is preserved in the pending-frame slot and delivered
+        // by the next drain. Per-drain delivery never exceeds the cap.
+        let mut reg = ConnectionRegistry::new();
+        let id = ConnectionId(1);
+        let (in_tx, _out_rx) = connect(&mut reg, id, 64, 4);
+        let frame_size = 7 * 1024 * 1024;
+        for _ in 0..3 {
+            in_tx.try_send(frame_of_size(frame_size)).unwrap();
+        }
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                let total: usize = frames.iter().map(|f| f.bytes.len()).sum();
+                assert_eq!(
+                    frames.len(),
+                    2,
+                    "third frame must be preserved, not delivered"
+                );
+                assert_eq!(total, 14 * 1024 * 1024);
+                assert!(total <= MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        // The preserved straddling frame is delivered by the next drain.
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].bytes.len(), frame_size);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+    }
+
+    #[test]
+    fn drain_one_strict_byte_cap_at_8mib_minus_one_boundary() {
+        // Two 8 MiB − 1 frames (16,777,214 bytes total) exactly fit the 16 MiB
+        // budget; a third straddles it and is preserved as pending.
+        let mut reg = ConnectionRegistry::new();
+        let id = ConnectionId(1);
+        let (in_tx, _out_rx) = connect(&mut reg, id, 64, 4);
+        let frame_size = 8 * 1024 * 1024 - 1; // 8_388_607
+        for _ in 0..3 {
+            in_tx.try_send(frame_of_size(frame_size)).unwrap();
+        }
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), 2);
+                assert!(
+                    frames.iter().map(|f| f.bytes.len()).sum::<usize>()
+                        <= MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN
+                );
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].bytes.len(), frame_size);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+    }
+
+    #[test]
+    fn drain_one_bounded_respects_smaller_budget() {
+        // The aggregate-budget path: drain_one_bounded with a remaining budget
+        // smaller than the per-connection cap must deliver at most that budget
+        // and retain the excess for a later drain.
+        let mut reg = ConnectionRegistry::new();
+        let id = ConnectionId(1);
+        let (in_tx, _out_rx) = connect(&mut reg, id, 64, 4);
+        for _ in 0..3 {
+            in_tx.try_send(frame(0)).unwrap();
+        }
+        match reg.drain_one_bounded(id, 2, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN) {
+            DrainOutcome::Drained(frames) => assert_eq!(frames.len(), 2),
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        match reg.drain_one_bounded(id, 1, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN) {
+            DrainOutcome::Drained(frames) => assert_eq!(frames.len(), 1),
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        // A zero remaining budget delivers nothing.
+        match reg.drain_one_bounded(id, 0, 0) {
+            DrainOutcome::Drained(frames) => assert!(frames.is_empty()),
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+    }
+
+    #[test]
+    fn drain_one_bounds_decompressed_bytes_per_tick() {
+        // Three 8 MiB frames: the byte budget (16 MiB) trips after two. The cap
+        // is checked before receiving, so exactly two (16 MiB) are delivered and
+        // the third stays retained in the channel — one tick never processes
+        // more than MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN bytes.
+        let mut reg = ConnectionRegistry::new();
+        let id = ConnectionId(1);
+        let (in_tx, _out_rx) = connect(&mut reg, id, 64, 4);
+        for _ in 0..3 {
+            in_tx.try_send(frame_of_size(8 * 1024 * 1024)).unwrap();
+        }
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                let total: usize = frames.iter().map(|f| f.bytes.len()).sum();
+                assert_eq!(frames.len(), 2);
+                assert_eq!(total, 16 * 1024 * 1024);
+                assert!(total <= MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
+        // The third frame is retained for a later drain, not lost.
+        match reg.drain_one(id) {
+            DrainOutcome::Drained(frames) => {
+                assert_eq!(frames.len(), 1);
+                assert_eq!(frames[0].bytes.len(), 8 * 1024 * 1024);
+            }
+            DrainOutcome::Closed => panic!("connection should stay open"),
+        }
     }
 
     #[test]

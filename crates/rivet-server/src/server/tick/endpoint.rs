@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
-use super::channels::{LifecycleEvent, OutboundEvent, ServerboundFrame};
+use super::channels::{InboundDrained, LifecycleEvent, OutboundEvent, ServerboundFrame};
 use super::shutdown::Shutdown;
 use crate::server::network::connection_id::ConnectionId;
 use crate::server::network::packet_listener::DisconnectReason;
@@ -50,12 +50,14 @@ impl NetworkEndpoint {
         remote: SocketAddr,
         in_rx: mpsc::Receiver<ServerboundFrame>,
         out_tx: mpsc::Sender<OutboundEvent>,
+        drained: InboundDrained,
     ) -> RegisterResult {
         let event = LifecycleEvent::Connect {
             id,
             remote,
             in_rx,
             out_tx,
+            drained,
         };
         match self.lifecycle_tx.try_send(event) {
             Ok(()) => RegisterResult::Registered,
