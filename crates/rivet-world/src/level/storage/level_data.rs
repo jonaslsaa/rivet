@@ -107,10 +107,16 @@ impl RespawnData {
 }
 
 /// `LevelData.RespawnData.DEFAULT` — `new RespawnData(GlobalPos.of(
-/// Level.OVERWORLD, BlockPos.ZERO), 0.0F, 0.0F)`. Not `const` (the dimension
-/// key is a `LazyLock`-rooted `ResourceKey`), so it is a function.
+/// Level.OVERWORLD, BlockPos.ZERO), 0.0F, 0.0F)`. Java builds `DEFAULT` with
+/// the record constructor (no angle normalization); only `RespawnData.of`
+/// normalizes. Not `const` (the dimension key is a `LazyLock`-rooted
+/// `ResourceKey`), so it is a function.
 pub fn default_respawn_data() -> RespawnData {
-    RespawnData::of(super::super::level::overworld(), BlockPos::ZERO, 0.0, 0.0)
+    RespawnData::new(
+        GlobalPos::of(super::super::level::overworld(), BlockPos::ZERO),
+        0.0,
+        0.0,
+    )
 }
 
 #[cfg(test)]
