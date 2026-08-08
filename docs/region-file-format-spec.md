@@ -229,10 +229,11 @@ the oversized file supplements it.
 **[Paper]** This is **legacy-write path**: the legacy `RegionFileStorage.write` explicitly calls
 `region.setOversized(..., false)` with the comment "We don't do this anymore, mojang stores
 differently, but clear old meta flag if it exists". Note the moonrise chunk-write path
-(`moonrise$startWrite`/`moonrise$finishWrite`) never touches Aikar oversized at all — it only does
-so indirectly by going through `RegionFile.write`, which has no Aikar interaction. The only active
-producers of Aikar files are old saves / the header-recalc path, which re-derives the meta flags
-from existing `*.oversized.nbt` files (§8).
+(`moonrise$startWrite`/`moonrise$finishWrite`) never touches Aikar oversized: it funnels through
+`RegionFile.write`, which performs no Aikar interaction whatsoever, so neither the moonrise path nor
+the live write path ever calls `setOversized`. The only active producers of Aikar files are old
+saves / the header-recalc path, which re-derives the meta flags from existing `*.oversized.nbt`
+files (§8).
 
 **[Rivet]** **[Deferred]** — implement the Aikar-side read (so old worlds don't lose chunk data) in
 the #231 wave; the write path (`setOversized` writing/clearing) is not needed for a byte-identical
@@ -316,8 +317,10 @@ by the soft-failure path above. Steps:
 7. The repaired header is **not** written back to disk: the step ends with `flush()` — which is only
    `file.force(true)` — plus an extra `file.force(true)`, and `writeHeader()` is never called (the
    "Successfully wrote new header to disk" log is misleading). The repaired `offsets`/`timestamps`
-   live only in the in-memory header buffer for the rest of the session; the on-disk header stays
-   corrupt until a later recalc re-repairs it in memory on reopen.
+   are written only into the in-memory header buffer, so recalc alone leaves the on-disk header
+   byte-identical to before (still corrupt); the repaired buffer reaches disk only when a later
+   `write`/`clear` on the same region file calls `writeHeader()`, or on reopen a fresh recalc
+   rebuilds it in memory again.
 
 After recalc the in-memory `usedSectors` is `copyFrom` the fresh bitmap.
 
@@ -325,8 +328,9 @@ After recalc the in-memory `usedSectors` is `copyFrom` the fresh bitmap.
 newest-wins tie-break, the `getChunkCoordinate` slot matching, and the "fresh bitmap" re-allocation
 — this is a data-recovery path where subtle divergence silently mis-links chunks. `roundToSectors`:
 `sectors = bytes >>> 12; rem = bytes & 4095; sectors + (rem != 0 ? 1 : 0)`. Also reproduce that recalc
-never writes the header back to disk (step 7): the repaired header is memory-only for the session,
-and a port that calls `writeHeader()` on recalc would change on-disk bytes Paper leaves untouched.
+never writes the header back to disk (step 7): the repaired header is memory-only at recalc time —
+a port that calls `writeHeader()` on recalc would write on-disk bytes Paper leaves untouched at
+that point (Paper only persists the repaired buffer later, via a subsequent `write`/`clear`).
 
 ---
 
