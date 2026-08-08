@@ -392,22 +392,28 @@ format concern; keep an equivalent toggle so the write can be split from seriali
 
 ## 11. Asynchronous I/O ordering relevant to the region-file layer
 
-**[Paper]** In Paper 26.2 the *live* chunk I/O path is **not** `IOWorker` (the vanilla async façade
-exists only for the world-upgrader — `SimpleRegionStorage` constructs `new IOWorker(...).storage`
-and keeps only the `RegionFileStorage`, and `RecreatingSimpleRegionStorage`'s `writeWorker` is the
-upgrader path). Live chunk I/O is driven by the moonrise chunk system
+**[Paper]** In Paper 26.2 the *live* chunk I/O path is **not** `IOWorker` (the vanilla async façade).
+`SimpleRegionStorage` constructs `new IOWorker(...).storage` and keeps only the `RegionFileStorage`, so
+a plain `SimpleRegionStorage` (POI, `ChunkNbt`) reads/writes straight through the `RegionFileStorage`
+and never exercises IOWorker's `PendingStore` queue; the one IOWorker whose queue actually runs is
+`RecreatingSimpleRegionStorage`'s `writeWorker`, and it is used only on the world-upgrader path.
+Live chunk I/O is driven by the moonrise chunk system
 (`ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO`):
 
 - **Per-type controller:** each `RegionDataController` (one per `RegionFileType`, e.g. chunk data,
   POI, entities) owns a `PrioritisedExecutor` for compression/serialization and an
   `AreaDependentQueue` for blocking I/O. `createRegionIoTask` keys I/O on the **region**
   (`chunkX >> 5, chunkZ >> 5`), so all disk access touching one region file is serialized.
-- **Per-chunk ordered stores:** one `ChunkIOTask` per `ChunkPos` in `chunkTasks`; a re-store pushes a
-  new `InProgressWrite` onto `allPendingWrites` (reassigning `inProgressWrite`), and every store is
-  compressed and written to disk in order — `tryCompleteWrite` returns false while a newer write is
-  pending, scheduling the next one, so intermediate stores are not dropped and the disk record is
-  always the last store's. A concurrent read of a chunk with an in-progress write is served from
-  memory.
+- **Per-chunk coalescing stores:** one `ChunkIOTask` per `ChunkPos` in `chunkTasks`; a re-store pushes
+  a new `InProgressWrite` via `pushPendingWrite`, which updates `inProgressWrite` (the latest store)
+  and adds it to `allPendingWrites`. `scheduleWriteCompress` captures the **latest** `inProgressWrite`
+  at scheduling time and compresses/writes it; `tryCompleteWrite` finishes only when `inProgressWrite
+  == written`, otherwise it returns false and `scheduleWriteCompress` is called again, re-reading the
+  latest `inProgressWrite`. A store superseded before its compress/I/O stage begins is therefore
+  **coalesced away** — stores A then B then C while A's I/O is still in flight can write A then C,
+  dropping B. Writes are not FIFO and not every store reaches disk; the later/latest store always goes
+  through, so the final disk record is the last store's. A concurrent read of a chunk with an
+  in-progress write is served from the pending in-memory value.
 - **RegionFile mutual exclusion:** `RegionFile.write` and `getChunkDataInputStream` are still
   `synchronized`, so even with multiple controllers/executors a single `RegionFile` handle is never
   touched concurrently; the queue only adds ordering, not additional locking.
@@ -416,9 +422,10 @@ upgrader path). Live chunk I/O is driven by the moonrise chunk system
   close/eviction.
 
 **[Rivet]** The ordering that matters to the region-file layer is: (a) one logical writer per region
-file (mutual exclusion over a `RegionFile` handle), (b) per-chunk write ordering so the last
-store for a chunk is what lands on disk, (c) reads of a chunk with a pending write serve the
-in-memory copy, not the disk, (d) no writes after shutdown. Replicate these invariants; the
+file (mutual exclusion over a `RegionFile` handle), (b) per-chunk store coalescing so the later/latest
+store goes through and the final disk record is the last store (a superseded intermediate store may
+never reach disk), (c) reads of a chunk with a pending write serve the in-memory copy, not the disk,
+(d) no writes after shutdown. Replicate these invariants; the
 executor mechanics (Java `Concurrent`/`Priority` threading, moonrise's `AreaDependentQueue`) are an
 implementation surface, not part of the on-disk format, and Rivet's own threading model (D5)
 governs their port.
