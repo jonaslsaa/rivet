@@ -494,6 +494,35 @@ main() {
     fi
   fi
 
+  # --- feature-gated packet tables + packet bodies (rivet-protocol `packets`) ----
+  # rivet-protocol's generated packet-ID tables (src/generated) and the packet
+  # body codecs + their registration/integration tests (protocol/* modules, e.g.
+  # issue #207 server links) live behind the crate's `packets` cargo feature, so
+  # the `cargo test --workspace` step above never builds or executes them.
+  # Enable the feature for exactly this one crate and run clippy + tests, so the
+  # packet tables and bodies are compiled, linted, and exercised on every full
+  # merge gate. Never use `--workspace --features packets` or `--all-features`:
+  # `--workspace --features packets` would also enable `packets` on every other
+  # member that declares it (rivet-fuzz forwards to rivet-protocol/packets), and
+  # `--all-features` would enable every feature of every selected package — both
+  # widen the step far beyond this one crate's feature. Re-running this one
+  # crate's tests with the feature is deliberate — cargo cannot run only the
+  # feature-gated tests, and the whole crate is a fast test run. Scoped gates
+  # for rivet-protocol also get the feature (same gap otherwise).
+  local GATE_PACKETS=false
+  for p in ${PKGS[@]+"${PKGS[@]}"}; do
+    [ "$p" = "rivet-protocol" ] && GATE_PACKETS=true
+  done
+  if [ "$FULL_GATE" = true ] || [ "$GATE_PACKETS" = true ]; then
+    echo "==> rivet-protocol --features packets (generated packet tables + packet bodies)"
+    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-protocol --features packets --all-targets
+    if command -v cargo-nextest >/dev/null 2>&1; then
+      cargo nextest run -p rivet-protocol --features packets
+    else
+      cargo test -p rivet-protocol --features packets
+    fi
+  fi
+
   # --- rivet-fuzz packet-decode targets (`packets` feature) ----------------------
   # The five packet fuzz targets (fuzz/fuzz_targets/packet_*.rs) are gated behind
   # the rivet-fuzz `packets` feature (forwards to rivet-protocol/packets) via
@@ -502,9 +531,10 @@ main() {
   # formatting). The fuzz crate is a workspace member and compiles on the pinned
   # stable toolchain (cargo-fuzz/nightly is only needed to RUN the fuzzers), so
   # the gate type-checks and lints them explicitly — a broken packet target must
-  # fail the merge. Never use `--all-features` or
-  # `--workspace --features` (they would enable rivet-protocol's `packets`
-  # feature workspace-wide, or fail on crates without the feature).
+  # fail the merge. Never use `--all-features` or `--workspace --features`:
+  # `--workspace --features packets` would also enable rivet-protocol's `packets`
+  # (blurring this step into the rivet-protocol packets step), and
+  # `--all-features` would enable every feature of every selected package.
   local GATE_FUZZ=false
   for p in ${PKGS[@]+"${PKGS[@]}"}; do
     [ "$p" = "rivet-fuzz" ] && GATE_FUZZ=true

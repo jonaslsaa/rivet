@@ -88,6 +88,13 @@ impl ServerStatus {
 
     /// `ServerStatus.CODEC` — the 5-field `RecordCodecBuilder` group (field
     /// order above).
+    ///
+    /// The `description` field is the recursive `ComponentSerialization.CODEC`
+    /// (a permanent strong `Arc` cycle), so this is a registration-time
+    /// constructor: build once per process and reuse (Java's `static final
+    /// CODEC`). The status listener serves one response per ping, so
+    /// [`crate::protocol::status::clientbound_status_response_packet::ClientboundStatusResponsePacket::stream_codec`]
+    /// caches it behind a `static OnceLock` — do not call `codec()` per use.
     pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<ServerStatus, Ops>> {
         rivet_serialization::record_builder::create(move |instance| {
             let description = map_codec::for_getter(

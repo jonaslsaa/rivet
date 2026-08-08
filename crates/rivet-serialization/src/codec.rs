@@ -280,9 +280,14 @@ pub fn recursive<A, Ops: DynamicOps + 'static>(
 where
     A: 'static,
 {
-    // `Arc::new_cyclic` lets the self-referential `RecursiveSelf` hold an
-    // `Arc<RecursiveCodec>` back to the parent (Java's `RecursiveSelf` holds the
-    // parent reference; a `Weak`/`new_cyclic` avoids leaking to `'static`).
+    // `Arc::new_cyclic` supplies the parent `Arc<RecursiveCodec>` that the
+    // `RecursiveSelf` handed to `wrapped` holds. This is the same strong
+    // self-capture the pinned DFU `RecursiveCodec` makes: the lazily-built inner
+    // codec embeds a `RecursiveSelf` holding a strong reference back to the
+    // parent, so the graph is a strong `Arc` cycle. Java's GC collects
+    // unreachable cycles; `Arc` cannot, so here the cycle is permanent.
+    // `recursive` is a registration-time constructor: build the codec once per
+    // process and reuse it, never per connection.
     Arc::new_cyclic(|weak| RecursiveCodec {
         name,
         wrapped,

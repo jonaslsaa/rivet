@@ -1,28 +1,29 @@
 #!/bin/bash
-# Focused test for the rivet-registry `blocks`-feature gate step (issue #124
-# phase F). The generated registry tables (crates/rivet-registry/src/generated/)
-# and their semantic tests (block_id_tests, static_builtin_tests) live behind
-# the crate's `blocks` cargo feature, so `cargo test --workspace` never builds
-# or executes them. gate.sh must run them explicitly on every merge — this test
-# proves that step exists, runs, and can never silently disappear or skip.
+# Focused test for the rivet-protocol `packets`-feature gate step (issue #207).
+# The generated packet-ID tables (src/generated), the packet body codecs
+# (protocol/* modules), and their registration/integration tests (e.g. the
+# server-links registration tests) live behind the crate's `packets` cargo
+# feature, so `cargo test --workspace` never builds or executes them. gate.sh
+# must run them explicitly on every merge — this test proves that step exists,
+# runs, and can never silently disappear or skip.
 #
 # Properties under test (each run in both the cargo-nextest and cargo-test
 # profiles, matching how the step branches on nextest availability):
-#   0. A green full gate invokes both the blocks-feature clippy AND test
+#   0. A green full gate invokes both the packets-feature clippy AND test
 #      commands, and reaches GATE GREEN.
-#   1. A failing blocks-feature TEST makes the full gate red (set -e aborts).
-#   2. A failing blocks-feature CLIPPY makes the full gate red.
-#   3. A scoped gate for crates/rivet-registry still runs the blocks step (the
-#      feature tables are part of that crate, so a rivet-registry-scoped gate
-#      must cover them the same way).
+#   1. A failing packets-feature TEST makes the full gate red (set -e aborts).
+#   2. A failing packets-feature CLIPPY makes the full gate red.
+#   3. A scoped gate for crates/rivet-protocol still runs the packets step (the
+#      feature tables/bodies are part of that crate, so a rivet-protocol-scoped
+#      gate must cover them the same way).
 #   4. A scoped gate for an unrelated crate (crates/rivet-nbt) does NOT run the
-#      blocks step (the step is not a workspace-wide or crate-blind addition).
+#      packets step (the step is not a workspace-wide or crate-blind addition).
 #   5. Every scenario guards the anti-pattern: the invocation is always
-#      `-p rivet-registry --features blocks` — `--all-features` (every feature
+#      `-p rivet-protocol --features packets` — `--all-features` (every feature
 #      of every selected package) or `--workspace --features` (also enables
-#      `blocks` on any other member that declares it) never appear in the log.
+#      `packets` on rivet-fuzz) never appear in the log.
 #
-# Like test_codegen_gate.sh, this runs the real scripts/gate.sh against a
+# Like test_gate_features.sh, this runs the real scripts/gate.sh against a
 # sandboxed repo layout with stubs for cargo/cargo-machete/cargo-nextest/java
 # under a redirected $HOME/.cargo/bin and a controlled PATH, so it is
 # deterministic on any host and never depends on ambient PATH or an ambient
@@ -71,7 +72,7 @@ cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
 chmod +x "$SANDBOX/scripts/gate.sh"
 
 # --- satisfy the oracle pre-check --------------------------------------------
-# Same dummy-file/version-stub approach as test_codegen_gate.sh so a green full
+# Same dummy-file/version-stub approach as test_gate_features.sh so a green full
 # gate really reaches GATE GREEN rather than exiting 3 (ORACLE UNVERIFIED).
 # bare java 25+ on PATH (reports openjdk 25).
 cat > "$SANDBOX/home/.cargo/bin/java" <<'EOF'
@@ -94,33 +95,34 @@ EOF
 
 TEST_LOG="$SANDBOX/invocations.log"
 : > "$TEST_LOG"
-FAIL_BLOCKS_TEST="$SANDBOX/fail_blocks_test"     # presence fails the blocks-feature `test` step
-FAIL_BLOCKS_CLIPPY="$SANDBOX/fail_blocks_clippy" # presence fails the blocks-feature `clippy` step
+FAIL_PACKETS_TEST="$SANDBOX/fail_packets_test"     # presence fails the packets-feature `test` step
+FAIL_PACKETS_CLIPPY="$SANDBOX/fail_packets_clippy" # presence fails the packets-feature `clippy` step
 
 # Stub cargo: log every invocation; honor the failure markers; everything else
 # passes. The workspace-wide steps (`fmt --all --check`, `clippy --workspace
 # --all-targets`, `test --workspace`/`nextest run --workspace`) and the oracle
 # steps (`run -q -p rivet-oracle -- verify`, `run -q -p rivet-parity -- --require-oracle`)
-# have no `-p rivet-registry --features blocks` and never fail. The blocks step
-# runs as `clippy -p rivet-registry --features blocks --all-targets` and as
-# `test -p rivet-registry --features blocks` (nextest: `nextest run -p
-# rivet-registry --features blocks`); the two cases below honor the markers for
-# those exact invocations. Note `cargo machete`/`cargo machete tools/rivet-codegen`
-# are dispatched by cargo to the `cargo-machete` binary (also stubbed), not to
-# this stub.
+# have no `-p rivet-protocol --features packets` and never fail. The packets
+# step runs as `clippy -p rivet-protocol --features packets --all-targets` and
+# as `test -p rivet-protocol --features packets` (nextest: `nextest run -p
+# rivet-protocol --features packets`); the two cases below honor the markers for
+# those exact invocations. The sibling `-p rivet-registry --features blocks`
+# step runs too and is left to pass. Note `cargo machete`/`cargo machete
+# tools/rivet-codegen` are dispatched by cargo to the `cargo-machete` binary
+# (also stubbed), not to this stub.
 cat > "$SANDBOX/home/.cargo/bin/cargo" <<EOF
 #!/bin/bash
 echo "\$*" >> "$TEST_LOG"
 case " \$* " in
-  " clippy -p rivet-registry --features blocks "*)
-    if [ -f "$FAIL_BLOCKS_CLIPPY" ]; then
-      echo "stub: failing blocks-feature clippy invocation" >&2
+  " clippy -p rivet-protocol --features packets "*)
+    if [ -f "$FAIL_PACKETS_CLIPPY" ]; then
+      echo "stub: failing packets-feature clippy invocation" >&2
       exit 1
     fi
     ;;
-  " test -p rivet-registry --features blocks "*|" nextest run -p rivet-registry --features blocks "*)
-    if [ -f "$FAIL_BLOCKS_TEST" ]; then
-      echo "stub: failing blocks-feature test invocation" >&2
+  " test -p rivet-protocol --features packets "*|" nextest run -p rivet-protocol --features packets "*)
+    if [ -f "$FAIL_PACKETS_TEST" ]; then
+      echo "stub: failing packets-feature test invocation" >&2
       exit 1
     fi
     ;;
@@ -151,31 +153,31 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # reference-oracle javac probe is deterministic on hosts with their own JDK.
 GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
-# Assertions shared by every scenario: the blocks step must be scoped to
-# `-p rivet-registry --features blocks` — never widened to `--all-features` or
+# Assertions shared by every scenario: the packets step must be scoped to
+# `-p rivet-protocol --features packets` — never widened to `--all-features` or
 # `--workspace --features` (`--all-features` enables every feature of every
-# selected package; `--workspace --features blocks` also enables `blocks` on any
-# other member that declares it).
+# selected package; `--workspace --features packets` also enables `packets` on
+# rivet-fuzz).
 assert_no_workspace_wide_features() {
   local what="$1" log="$2"
   if grep -q -- "--all-features" "$log"; then
-    echo "FAIL ($what): blocks step used --all-features" >&2
+    echo "FAIL ($what): packets step used --all-features" >&2
     exit 1
   fi
   if grep -q -- "--workspace --features" "$log"; then
-    echo "FAIL ($what): blocks step used --workspace --features" >&2
+    echo "FAIL ($what): packets step used --workspace --features" >&2
     exit 1
   fi
 }
 
-# assert_blocks_ran <profile> <log>: the blocks clippy AND test invocations both
-# appear in the gate's cargo invocation log.
-assert_blocks_ran() {
+# assert_packets_ran <profile> <log>: the packets clippy AND test invocations
+# both appear in the gate's cargo invocation log.
+assert_packets_ran() {
   local profile="$1" log="$2"
-  grep -q -- "clippy -p rivet-registry --features blocks" "$log" \
-    || { echo "FAIL ($profile): blocks-feature clippy invocation missing from cargo log" >&2; exit 1; }
-  grep -qE -- "test -p rivet-registry --features blocks|nextest run -p rivet-registry --features blocks" "$log" \
-    || { echo "FAIL ($profile): blocks-feature test invocation missing from cargo log" >&2; exit 1; }
+  grep -q -- "clippy -p rivet-protocol --features packets" "$log" \
+    || { echo "FAIL ($profile): packets-feature clippy invocation missing from cargo log" >&2; exit 1; }
+  grep -qE -- "test -p rivet-protocol --features packets|nextest run -p rivet-protocol --features packets" "$log" \
+    || { echo "FAIL ($profile): packets-feature test invocation missing from cargo log" >&2; exit 1; }
 }
 
 # run_scenarios <profile-name> <nextest-presence>
@@ -189,8 +191,8 @@ run_scenarios() {
     rm -f "$SANDBOX/home/.cargo/bin/cargo-nextest"
   fi
 
-  # --- scenario 0: green full gate runs the blocks step and reaches GATE GREEN --
-  rm -f "$FAIL_BLOCKS_TEST" "$FAIL_BLOCKS_CLIPPY"
+  # --- scenario 0: green full gate runs the packets step and reaches GATE GREEN --
+  rm -f "$FAIL_PACKETS_TEST" "$FAIL_PACKETS_CLIPPY"
   : > "$TEST_LOG"
   if ! eval "$GATE" > "$SANDBOX/$profile.green.log" 2>&1; then
     echo "FAIL ($profile, scenario 0): green full gate did not exit 0" >&2
@@ -198,57 +200,57 @@ run_scenarios() {
   fi
   grep -q "GATE GREEN" "$SANDBOX/$profile.green.log" \
     || { echo "FAIL ($profile, scenario 0): green full gate did not reach GATE GREEN" >&2; exit 1; }
-  grep -q "rivet-registry --features blocks (generated registry tables)" "$SANDBOX/$profile.green.log" \
-    || { echo "FAIL ($profile, scenario 0): blocks step did not run on the full gate" >&2; exit 1; }
-  assert_blocks_ran "$profile" "$TEST_LOG"
+  grep -q "rivet-protocol --features packets (generated packet tables + packet bodies)" "$SANDBOX/$profile.green.log" \
+    || { echo "FAIL ($profile, scenario 0): packets step did not run on the full gate" >&2; exit 1; }
+  assert_packets_ran "$profile" "$TEST_LOG"
   assert_no_workspace_wide_features "$profile/scenario-0" "$TEST_LOG"
-  echo "ok ($profile): green full gate runs blocks clippy+test and reaches GATE GREEN"
+  echo "ok ($profile): green full gate runs packets clippy+test and reaches GATE GREEN"
 
-  # --- scenario 1: full gate is red when the blocks-feature test fails ---------
-  rm -f "$FAIL_BLOCKS_CLIPPY"
+  # --- scenario 1: full gate is red when the packets-feature test fails ---------
+  rm -f "$FAIL_PACKETS_CLIPPY"
   : > "$TEST_LOG"
-  touch "$FAIL_BLOCKS_TEST"
+  touch "$FAIL_PACKETS_TEST"
   if eval "$GATE" > "$SANDBOX/$profile.red-test.log" 2>&1; then
-    echo "FAIL ($profile, scenario 1): full gate exited 0 despite a failing blocks test" >&2
+    echo "FAIL ($profile, scenario 1): full gate exited 0 despite a failing packets test" >&2
     exit 1
   fi
-  grep -q "stub: failing blocks-feature test invocation" "$SANDBOX/$profile.red-test.log" \
-    || { echo "FAIL ($profile, scenario 1): the blocks test stub was not invoked" >&2; exit 1; }
+  grep -q "stub: failing packets-feature test invocation" "$SANDBOX/$profile.red-test.log" \
+    || { echo "FAIL ($profile, scenario 1): the packets test stub was not invoked" >&2; exit 1; }
   grep -q "GATE GREEN" "$SANDBOX/$profile.red-test.log" && {
-    echo "FAIL ($profile, scenario 1): 'GATE GREEN' printed despite a blocks failure" >&2; exit 1; }
+    echo "FAIL ($profile, scenario 1): 'GATE GREEN' printed despite a packets failure" >&2; exit 1; }
   grep -q "ORACLE UNVERIFIED" "$SANDBOX/$profile.red-test.log" && {
-    echo "FAIL ($profile, scenario 1): red came from the oracle verdict, not the blocks failure" >&2; exit 1; }
-  echo "ok ($profile): full gate is red when the blocks-feature test step fails"
+    echo "FAIL ($profile, scenario 1): red came from the oracle verdict, not the packets failure" >&2; exit 1; }
+  echo "ok ($profile): full gate is red when the packets-feature test step fails"
 
-  # --- scenario 2: full gate is red when the blocks-feature clippy fails -------
-  rm -f "$FAIL_BLOCKS_TEST"
+  # --- scenario 2: full gate is red when the packets-feature clippy fails -------
+  rm -f "$FAIL_PACKETS_TEST"
   : > "$TEST_LOG"
-  touch "$FAIL_BLOCKS_CLIPPY"
+  touch "$FAIL_PACKETS_CLIPPY"
   if eval "$GATE" > "$SANDBOX/$profile.red-clippy.log" 2>&1; then
-    echo "FAIL ($profile, scenario 2): full gate exited 0 despite a failing blocks clippy" >&2
+    echo "FAIL ($profile, scenario 2): full gate exited 0 despite a failing packets clippy" >&2
     exit 1
   fi
-  grep -q "stub: failing blocks-feature clippy invocation" "$SANDBOX/$profile.red-clippy.log" \
-    || { echo "FAIL ($profile, scenario 2): the blocks clippy stub was not invoked" >&2; exit 1; }
+  grep -q "stub: failing packets-feature clippy invocation" "$SANDBOX/$profile.red-clippy.log" \
+    || { echo "FAIL ($profile, scenario 2): the packets clippy stub was not invoked" >&2; exit 1; }
   grep -q "GATE GREEN" "$SANDBOX/$profile.red-clippy.log" && {
-    echo "FAIL ($profile, scenario 2): 'GATE GREEN' printed despite a blocks clippy failure" >&2; exit 1; }
+    echo "FAIL ($profile, scenario 2): 'GATE GREEN' printed despite a packets clippy failure" >&2; exit 1; }
   grep -q "ORACLE UNVERIFIED" "$SANDBOX/$profile.red-clippy.log" && {
-    echo "FAIL ($profile, scenario 2): red came from the oracle verdict, not the blocks clippy failure" >&2; exit 1; }
-  echo "ok ($profile): full gate is red when the blocks-feature clippy step fails"
+    echo "FAIL ($profile, scenario 2): red came from the oracle verdict, not the packets clippy failure" >&2; exit 1; }
+  echo "ok ($profile): full gate is red when the packets-feature clippy step fails"
 
-  # --- scenario 3: scoped rivet-registry gate still runs the blocks step -------
-  rm -f "$FAIL_BLOCKS_TEST" "$FAIL_BLOCKS_CLIPPY"
+  # --- scenario 3: scoped rivet-protocol gate still runs the packets step -------
+  rm -f "$FAIL_PACKETS_TEST" "$FAIL_PACKETS_CLIPPY"
   : > "$TEST_LOG"
-  if ! eval "$GATE crates/rivet-registry" > "$SANDBOX/$profile.scoped-registry.log" 2>&1; then
-    echo "FAIL ($profile, scenario 3): scoped rivet-registry gate failed (exit non-zero)" >&2
+  if ! eval "$GATE crates/rivet-protocol" > "$SANDBOX/$profile.scoped-protocol.log" 2>&1; then
+    echo "FAIL ($profile, scenario 3): scoped rivet-protocol gate failed (exit non-zero)" >&2
     exit 1
   fi
-  grep -q "GATE GREEN" "$SANDBOX/$profile.scoped-registry.log" \
-    || { echo "FAIL ($profile, scenario 3): scoped rivet-registry gate did not reach GATE GREEN" >&2; exit 1; }
-  assert_blocks_ran "$profile/scenario-3" "$TEST_LOG"
-  echo "ok ($profile): scoped rivet-registry gate still runs the blocks step"
+  grep -q "GATE GREEN" "$SANDBOX/$profile.scoped-protocol.log" \
+    || { echo "FAIL ($profile, scenario 3): scoped rivet-protocol gate did not reach GATE GREEN" >&2; exit 1; }
+  assert_packets_ran "$profile/scenario-3" "$TEST_LOG"
+  echo "ok ($profile): scoped rivet-protocol gate still runs the packets step"
 
-  # --- scenario 4: scoped gate for an unrelated crate skips the blocks step ----
+  # --- scenario 4: scoped gate for an unrelated crate skips the packets step ----
   : > "$TEST_LOG"
   if ! eval "$GATE crates/rivet-nbt" > "$SANDBOX/$profile.scoped-nbt.log" 2>&1; then
     echo "FAIL ($profile, scenario 4): scoped rivet-nbt gate failed (exit non-zero)" >&2
@@ -256,15 +258,15 @@ run_scenarios() {
   fi
   grep -q "GATE GREEN" "$SANDBOX/$profile.scoped-nbt.log" \
     || { echo "FAIL ($profile, scenario 4): scoped rivet-nbt gate did not reach GATE GREEN" >&2; exit 1; }
-  if grep -q -- "-p rivet-registry --features blocks" "$TEST_LOG"; then
-    echo "FAIL ($profile, scenario 4): scoped rivet-nbt gate ran the blocks step" >&2
+  if grep -q -- "-p rivet-protocol --features packets" "$TEST_LOG"; then
+    echo "FAIL ($profile, scenario 4): scoped rivet-nbt gate ran the packets step" >&2
     exit 1
   fi
   assert_no_workspace_wide_features "$profile/scenario-4" "$TEST_LOG"
-  echo "ok ($profile): scoped rivet-nbt gate skips the blocks step"
+  echo "ok ($profile): scoped rivet-nbt gate skips the packets step"
 }
 
 run_scenarios "nextest" nextest
 run_scenarios "fallback-cargo-test" absent
 
-echo "ALL GATE FEATURES TESTS PASSED (nextest + cargo test fallback)"
+echo "ALL GATE PACKETS TESTS PASSED (nextest + cargo test fallback)"

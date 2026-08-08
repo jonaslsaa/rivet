@@ -6,18 +6,18 @@
 //! impl; `handle()` stays deferred with the listener hierarchy (M1.1/#148).
 //!
 //! The `custom` module (`...protocol.common.custom`) holds the custom-payload
-//! dispatch machinery. Bodies that are not portable yet (need a registry-wired
-//! codec, a `Component` stream codec, or a value type not yet ported) are
-//! deferred as STUB modules with a `blocked` note in their doc — see the
-//! `clientbound_disconnect`, `clientbound_resource_pack_push`,
-//! `clientbound_server_links`, `clientbound_show_dialog`, and
-//! `clientbound_update_tags` modules.
+//! dispatch machinery. Bodies that are not ported yet are deferred as STUB
+//! modules with a note in their doc — see the `clientbound_disconnect`,
+//! `clientbound_resource_pack_push`, and `clientbound_show_dialog` modules.
 //!
 //! The `ClientInformation` payload value type and its three enums
 //! (`chat_visiblity`, `humanoid_arm`, `particle_status`) are
 //! `server.level`/`world.entity` value types that live here (issue #197) rather
 //! than in their package-mirror crates because `rivet-protocol` cannot depend on
-//! the downstream `rivet-server`/`rivet-entity` crates.
+//! the downstream `rivet-server`/`rivet-entity` crates. `ServerLinks` has the
+//! same constraint (issue #207): its wire codecs live in the `server_links`
+//! module here, consumed by the `clientbound_server_links` packet body, while
+//! the server-side `ServerLinks` value type is deferred to `rivet-server`.
 
 pub mod chat_visiblity;
 pub mod client_information;
@@ -38,6 +38,7 @@ pub mod custom;
 pub mod humanoid_arm;
 pub mod packet_types;
 pub mod particle_status;
+pub mod server_links;
 pub mod serverbound_client_information;
 pub mod serverbound_custom_click_action;
 pub mod serverbound_custom_payload;

@@ -64,12 +64,16 @@ impl SelectorContents {
 
     /// `SelectorContents.MAP_CODEC` — `RecordCodecBuilder.mapCodec` over
     /// `selector` (deferred compilable string → plain string) and the optional
-    /// `separator` component, lifted to the `ComponentContents` enum.
-    pub fn map_codec<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<ComponentContents, Ops>> {
+    /// `separator` component, lifted to the `ComponentContents` enum. `top` is
+    /// the enclosing `ComponentSerialization.CODEC`; the `separator` codec
+    /// reuses it so encoding a selector does not build a fresh recursive
+    /// Component graph per use (Java's `ComponentSerialization.CODEC.optional
+    /// FieldOf("separator")` references the same static).
+    pub fn map_codec<Ops: DynamicOps + 'static>(
+        top: Arc<dyn codec::Codec<crate::Component, Ops>>,
+    ) -> Arc<dyn MapCodec<ComponentContents, Ops>> {
         map_codec_mod::xmap(
-            Arc::new(SelectorMapCodec {
-                _ops: std::marker::PhantomData,
-            }),
+            Arc::new(SelectorMapCodec { top }),
             Arc::new(|c: &SelectorContents| ComponentContents::Selector(c.clone())),
             Arc::new(|c: &ComponentContents| match c {
                 ComponentContents::Selector(inner) => inner.clone(),
@@ -81,7 +85,8 @@ impl SelectorContents {
 
 /// `SelectorContents.MAP_CODEC`.
 struct SelectorMapCodec<Ops: DynamicOps + 'static> {
-    _ops: std::marker::PhantomData<Ops>,
+    /// `ComponentSerialization.CODEC` — reused for the `separator`.
+    top: Arc<dyn codec::Codec<crate::Component, Ops>>,
 }
 
 impl<Ops: DynamicOps + 'static> std::fmt::Debug for SelectorMapCodec<Ops> {
@@ -104,9 +109,7 @@ impl<Ops: DynamicOps + 'static> MapDecoder<SelectorContents, Ops> for SelectorMa
         };
         // `ComponentSerialization.CODEC.optionalFieldOf("separator")`.
         let separator = match input.get_string("separator") {
-            Some(value) => crate::component_serialization::codec::<Ops>()
-                .parse(ops, &value)
-                .map(|c| Some(c.clone())),
+            Some(value) => self.top.parse(ops, &value).map(|c| Some(c.clone())),
             None => DataResult::success(None),
         };
         selector.flat_map(move |selector| {
@@ -128,11 +131,7 @@ impl<Ops: DynamicOps + 'static> MapEncoder<SelectorContents, Ops> for SelectorMa
             codec::string_codec::<Ops>().encode_start(ops, &input.selector),
         );
         if let Some(separator) = &input.separator {
-            prefix.add_string_result(
-                "separator",
-                crate::component_serialization::codec::<Ops>()
-                    .encode_start(ops, separator.as_ref()),
-            );
+            prefix.add_string_result("separator", self.top.encode_start(ops, separator.as_ref()));
         }
     }
 }

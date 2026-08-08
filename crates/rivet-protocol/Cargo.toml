@@ -54,6 +54,13 @@ name = "client_information_registration"
 required-features = ["packets"]
 
 [[test]]
+name = "server_links_registration"
+# Exercises the real ClientboundServerLinksPacket body codec through the
+# id-dispatch registration machinery (issue #207); the generated packet-ID
+# tables pin its configuration id 16 / play id 137 slots.
+required-features = ["packets"]
+
+[[test]]
 name = "entity_pairing_packets"
 # Exercises the issue #90 clientbound entity-pairing packet bodies + the
 # syncher wire model (game + syncher modules), which live behind the packets
