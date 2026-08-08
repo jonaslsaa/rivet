@@ -2,9 +2,10 @@
 //! observable-outcome object for the `join` and `move` scenarios.
 //!
 //! The client emits a JSON-lines stream on stdout (`protocol:1`). Not every
-//! line is an observable outcome: `starting` is launch metadata and
-//! `disconnect`/`connection_failed`/`timeout` are terminal states. This module
-//! projects the stream onto the canonical shape the comparator diffs:
+//! line is an observable outcome: `starting` is launch metadata (including the
+//! pinned Azalea revision) and `disconnect`/`connection_failed`/`timeout` are
+//! terminal states. This module projects the stream onto the canonical shape
+//! the comparator diffs:
 //!
 //! ```json
 //! {
@@ -12,7 +13,8 @@
 //!   "scenario": "join",
 //!   "outcome": "spawned",
 //!   "lifecycle": ["init", "login", "spawn"],
-//!   "position": {"x": 9.5, "y": -60.0, "z": -3.5},
+//!   "azalea_revision": "6249c295d353b9b3ef68f665b311cba39211fd19",
+//!   "position": {"x": 9.5, "y": -63.0, "z": -3.5},
 //!   "world": "minecraft:overworld",
 //!   "gamemode": "survival",
 //!   "health": {"health": 20.0, "food": 20, "saturation": 5.0},
@@ -34,6 +36,11 @@
 //! shifts per boot. `position.y` (superflat spawn height) and the chunk count
 //! are deterministic and stay compared. The comparator skips exactly these
 //! fields and reports them as excluded, never silently.
+//!
+//! `azalea_revision` is the exact Git revision the client was built against
+//! (see [`PINNED_AZALEA_REVISION`]); [`rivet_play_verdict`] requires it so a
+//! stale or locally-modified client binary cannot stand in for the pinned
+//! headless client.
 
 use serde_json::{Value, json};
 
@@ -166,44 +173,74 @@ fn outcome(records: &[Value]) -> &'static str {
     "unknown"
 }
 
-/// Verify a normalized transcript is the honest *pre-play* boundary of a
-/// server that has not implemented login/configuration (Rivet, issue #96).
+/// The Azalea revision the harness requires the client to have been built
+/// against (issue #192). The client emits its actual build revision in the
+/// `starting` record; the verdict compares it to this pin so a locally-modified
+/// or stale client binary cannot stand in for the unmodified pinned headless
+/// client.
+pub const PINNED_AZALEA_REVISION: &str = "6249c295d353b9b3ef68f665b311cba39211fd19";
+
+/// The deterministic chunk send-set a Rivet join must deliver. Rivet's join
+/// burst sends the Moonrise view-distance-4 square for the client's resolved
+/// view distance. The bounds are `±(view_distance + 1)` (the `includeNeighbors`
+/// margin): for view distance 4 that is the 11×11 raster `-5..5`, and the
+/// four corners `(±5, ±5)` are excluded by `isWithinDistance` (`3²+3²=18 ≥
+/// 4²=16`), leaving exactly 117. With the pinned Azalea client
+/// (`ClientInformation::default().view_distance = 8`, resolved through
+/// `client + 1` capped at `load - 1 = 4`) that resolves to view distance 4 and
+/// the 117-chunk send-set.
+pub const JOIN_CHUNK_COUNT: u64 = 117;
+
+/// Rivet's fixed superflat spawn height (`BlockPos(0, -63, 0)`), deterministic
+/// across boots. The Paper reference in the Rivet-vs-Paper differential boots
+/// the single-stone superflat fixture and spawns at the same y=-63.0 (issue
+/// #159), so `position.y` is a genuinely compared field on both sides — never
+/// excluded or normalized. This is required as the genuine-Rivet marker.
+pub const JOIN_SPAWN_Y: f64 = -63.0;
+
+/// Verify a normalized transcript is the honest *play* boundary of a genuine
+/// Rivet boot: the unmodified pinned Azalea client completed offline login,
+/// configuration (registry sync), the play handoff, spawned, and received
+/// exactly the deterministic 117-chunk send-set.
 ///
-/// Returns a human-readable description of how far the client got. Errors when
-/// the transcript claims a completed join (`spawned` — Rivet reached play, so
-/// the pre-play assumption is stale and the harness must be updated), shows no
-/// lifecycle events at all (malformed transcript), or has an outcome other
-/// than `disconnected`.
+/// Returns a human-readable description of the play boundary reached. Errors
+/// when the transcript does not prove that:
 ///
-/// The outcome is the connection proof, not the lifecycle: azalea fires
-/// `Event::Init` on ECS-entity creation *before* any TCP connection is
-/// established (`LocalPlayerEvents` is inserted immediately after the join
-/// callback, and `init_listener` fires on `Added<LocalPlayerEvents>`), so a
-/// non-empty lifecycle alone proves nothing. `connection_failed` fires only
-/// when creating the connection fails (azalea's `ConnectionFailedEvent`) and
-/// `timeout` means no session completed — neither proves the client reached
-/// the server. Only `disconnected` (the server closed a connected client) is
-/// evidence of a real pre-play exchange. The companion server-side check
-/// (`connection established` + the login listener's `unsupported:` rejection
-/// in the rivet log) is the genuinely Rivet-specific half of that proof.
-pub fn preplay_verdict(t: &Value) -> Result<&'static str, String> {
+/// - the outcome is anything but `spawned`. `connection_failed`/`timeout` mean
+///   the connect or first write failed, and `disconnected` means the server
+///   closed the client before play — exactly what a fake or non-Rivet endpoint
+///   (one that never completes login/configuration) produces. The pre-play
+///   Rivet build produced `disconnected` at the login boundary, so this is also
+///   the counterfactual that fails against a stale pre-play server.
+/// - the lifecycle does not contain both `login` and `spawn` (malformed
+///   transcript, or the client never reached play).
+/// - `chunk_count != 117` — the server did not send the deterministic
+///   view-distance-4 send-set.
+/// - `position.y != -63.0` — the server did not spawn the player at Rivet's
+///   fixed superflat spawn (a Paper-like y=-60 spawn fails here).
+/// - `azalea_revision != PINNED_AZALEA_REVISION` — the client binary was built
+///   against a different Azalea revision than the pinned one.
+///
+/// The `spawned` outcome is a stronger connection proof than the pre-play
+/// `disconnected` ever was: azalea fires `Event::Init` before any TCP connect,
+/// and `connection_failed`/`timeout` fire without a completed session, but the
+/// `joined` event that produces `spawned` is emitted only after the client
+/// observed login, configuration, the play handoff, chunk quiescence, and the
+/// player entity spawn. The companion server-side check (`connection
+/// established` in the rivet log) is the genuinely Rivet-specific half of that
+/// proof.
+pub fn rivet_play_verdict(t: &Value) -> Result<&'static str, String> {
     let outcome = t
         .get("outcome")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    if outcome == "spawned" {
-        return Err(
-            "rivet reached play (outcome=spawned); the pre-play assumption no longer holds — \
-             update the harness when login/configuration lands (issues #96/#159)"
-                .to_owned(),
-        );
-    }
-    if outcome != "disconnected" {
+    if outcome != "spawned" {
         return Err(format!(
-            "rivet transcript outcome is {outcome} (expected disconnected): the client never \
-             completed a session against the Rivet port. connection_failed/timeout mean the \
-             connect or first write failed, and the init event alone fires before any connect, \
-             so the harness did not actually target the server"
+            "rivet transcript outcome is {outcome} (expected spawned): the client never \
+             completed login/configuration into play against the Rivet port. \
+             connection_failed/timeout mean the connect or first write failed, and disconnected \
+             means the server closed the client before play — what a fake or non-Rivet endpoint, \
+             or a stale pre-play Rivet build, produces"
         ));
     }
     let lifecycle: Vec<&str> = t
@@ -211,12 +248,37 @@ pub fn preplay_verdict(t: &Value) -> Result<&'static str, String> {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    if lifecycle.is_empty() {
+    if !lifecycle.contains(&"login") || !lifecycle.contains(&"spawn") {
         return Err(format!(
-            "rivet transcript has no lifecycle events (outcome={outcome}) — malformed transcript"
+            "rivet transcript lifecycle is {lifecycle:?} (expected to contain login and spawn) \
+             — malformed transcript or the client never reached play"
         ));
     }
-    Ok("login (pre-play; Rivet login/configuration not implemented, issue #96)")
+    if t.get("azalea_revision").and_then(Value::as_str) != Some(PINNED_AZALEA_REVISION) {
+        return Err(format!(
+            "rivet transcript azalea_revision is {:?} (expected {PINNED_AZALEA_REVISION}) — the \
+             client was not built from the pinned unmodified Azalea revision",
+            t.get("azalea_revision").and_then(Value::as_str)
+        ));
+    }
+    let chunk_count = t.get("chunk_count").and_then(Value::as_u64).unwrap_or(0);
+    if chunk_count != JOIN_CHUNK_COUNT {
+        return Err(format!(
+            "rivet transcript received {chunk_count} chunks (expected {JOIN_CHUNK_COUNT}): the \
+             server did not send the deterministic view-distance-4 send-set"
+        ));
+    }
+    let y = t
+        .get("position")
+        .and_then(|p| p.get("y"))
+        .and_then(Value::as_f64);
+    if y != Some(JOIN_SPAWN_Y) {
+        return Err(format!(
+            "rivet transcript spawn position.y is {y:?} (expected {JOIN_SPAWN_Y}): the server \
+             did not spawn the player at Rivet's fixed superflat spawn"
+        ));
+    }
+    Ok("play (login + configuration + spawn; deterministic 117-chunk send-set)")
 }
 
 /// Project a client run onto the canonical `join` transcript.
@@ -235,11 +297,21 @@ pub fn normalize_join(raw: &str) -> Result<Value, String> {
         .find(|r| r.get("event") == Some(&json!("joined")))
         .cloned();
 
+    // The `starting` record carries the client binary's pinned Azalea build
+    // revision; surface it so the verdict can prove the client was built from
+    // the pinned unmodified revision.
+    let azalea_revision = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("starting")))
+        .and_then(|r| r.get("azalea_revision").and_then(Value::as_str))
+        .map(str::to_owned);
+
     let mut transcript = json!({
         "protocol": PROTOCOL,
         "scenario": "join",
         "outcome": outcome(&records),
         "lifecycle": lifecycle,
+        "azalea_revision": azalea_revision,
         "excluded": excluded_fields(),
     });
 
@@ -399,6 +471,21 @@ mod tests {
             r#"{"event":"login","protocol":1}"#,
             r#"{"event":"spawn","position":{"x":9.5,"y":-60.0,"z":-3.5},"protocol":1}"#,
             r#"{"event":"joined","position":{"x":9.5,"y":-59.0,"z":-3.5},"world":"minecraft:overworld","gamemode":"survival","health":{"health":20.0,"food":20,"saturation":5.0},"experience":{"level":0,"progress":0.0,"total":0},"inventory":{"selected_slot":0,"items":[]},"chunk_count":81,"chunks":[[-4,-4],[-4,-3],[0,0]],"observation_ms":4123,"protocol":1}"#,
+        ]
+        .join("\n")
+    }
+
+    /// A genuine Rivet play run at HEAD: the pinned Azalea client completes
+    /// login + configuration (registry sync), the play handoff, spawns at
+    /// Rivet's fixed superflat spawn y=-63.0, and receives exactly the
+    /// deterministic 117-chunk send-set.
+    fn rivet_play_records() -> String {
+        [
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":40,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            r#"{"event":"joined","position":{"x":0.0,"y":-63.0,"z":0.0},"world":"minecraft:overworld","gamemode":"survival","health":{"health":1.0,"food":20,"saturation":5.0},"experience":{"level":0,"progress":0.0,"total":0},"inventory":{"selected_slot":0,"items":[]},"chunk_count":117,"chunks":[[-5,-5],[-5,-4],[0,0],[5,5]],"observation_ms":4123,"protocol":1}"#,
         ]
         .join("\n")
     }
@@ -629,79 +716,126 @@ mod tests {
     }
 
     #[test]
-    fn preplay_verdict_accepts_a_disconnected_login_boundary() {
-        // A genuine Rivet pre-play run: the server closes the connected client
-        // at the login listener (issue #96), which azalea surfaces as a
-        // `disconnect` event — the one outcome that proves an established
-        // session.
+    fn rivet_play_verdict_accepts_a_genuine_rivet_play_run() {
+        // A genuine Rivet play run at HEAD: pinned Azalea completes login +
+        // configuration (registry sync) + play handoff + spawn + the exact
+        // 117-chunk send-set, at Rivet's fixed superflat spawn y=-63.0.
+        let t = normalize_join(&rivet_play_records()).expect("normalize");
+        let verdict = rivet_play_verdict(&t).expect("play verdict");
+        assert!(
+            verdict.contains("play"),
+            "verdict must name the play boundary, got {verdict}"
+        );
+    }
+
+    #[test]
+    fn rivet_play_verdict_rejects_a_pre_play_disconnect() {
+        // Counterfactual against a stale pre-play Rivet build (or any server
+        // that never completes login/configuration): the server closes the
+        // client at the login boundary, surfacing as `disconnected` — exactly
+        // the outcome the old pre-play verifier accepted. The play verifier
+        // must reject it.
         let raw = [
-            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":5,"azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":5,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
             r#"{"event":"init","protocol":1}"#,
             r#"{"event":"disconnect","reason":"Server closed the connection before login","after_spawn":false,"protocol":1}"#,
         ]
         .join("\n");
         let t = normalize_join(&raw).expect("normalize");
-        let verdict = preplay_verdict(&t).expect("pre-play verdict");
+        assert_eq!(t["outcome"], "disconnected");
+        let err = rivet_play_verdict(&t).expect_err("disconnected is not play");
         assert!(
-            verdict.contains("pre-play"),
-            "verdict must name the pre-play boundary, got {verdict}"
+            err.contains("spawned"),
+            "error must demand the spawned outcome, got {err}"
         );
     }
 
     #[test]
-    fn preplay_verdict_rejects_connection_failed() {
+    fn rivet_play_verdict_rejects_connection_failed() {
         // `connection_failed` is azalea's `ConnectionFailedEvent`, sent only
         // when creating the connection fails (connect refused / first write
-        // failed) — the client never reached the server, so this must not be
-        // accepted as a pre-play boundary.
+        // failed) — the client never reached the server.
         let raw = [
-            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
             r#"{"event":"init","protocol":1}"#,
             r#"{"event":"connection_failed","reason":"failed to create connection","protocol":1}"#,
         ]
         .join("\n");
         let t = normalize_join(&raw).expect("normalize");
         assert!(
-            preplay_verdict(&t).is_err(),
+            rivet_play_verdict(&t).is_err(),
             "connection_failed must not be accepted: the client never completed a session"
         );
     }
 
     #[test]
-    fn preplay_verdict_rejects_timeout() {
+    fn rivet_play_verdict_rejects_timeout() {
         // A hung/dead endpoint that never responds is a `timeout`, not proof of
-        // a pre-play exchange.
+        // play.
         let raw = [
-            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
             r#"{"event":"init","protocol":1}"#,
             r#"{"event":"timeout","timeout_seconds":5,"protocol":1}"#,
         ]
         .join("\n");
         let t = normalize_join(&raw).expect("normalize");
         assert!(
-            preplay_verdict(&t).is_err(),
+            rivet_play_verdict(&t).is_err(),
             "timeout must not be accepted: the client never completed a session"
         );
     }
 
     #[test]
-    fn preplay_verdict_rejects_a_spawned_transcript() {
-        let t = json!({
-            "outcome": "spawned",
-            "lifecycle": ["init", "login", "spawn"],
-        });
-        assert!(preplay_verdict(&t).is_err(), "spawned is not pre-play");
+    fn rivet_play_verdict_rejects_a_fake_server_with_wrong_chunk_count() {
+        // Counterfactual against a fake/non-Rivet server: outcome=spawned and
+        // the right lifecycle, but not the deterministic 117-chunk send-set.
+        let mut t = normalize_join(&rivet_play_records()).expect("normalize");
+        t["chunk_count"] = json!(81);
+        assert!(
+            rivet_play_verdict(&t).is_err(),
+            "a spawned transcript without 117 chunks is not a genuine Rivet play run"
+        );
     }
 
     #[test]
-    fn preplay_verdict_rejects_an_empty_transcript() {
+    fn rivet_play_verdict_rejects_a_paper_like_spawn_height() {
+        // Counterfactual against a non-Rivet (Paper-like) server: spawns the
+        // player at y=-60.0, not Rivet's fixed superflat y=-63.0.
+        let mut t = normalize_join(&rivet_play_records()).expect("normalize");
+        t["position"]["y"] = json!(-60.0);
+        assert!(
+            rivet_play_verdict(&t).is_err(),
+            "a spawn at Paper-like y=-60 is not Rivet's deterministic superflat spawn"
+        );
+    }
+
+    #[test]
+    fn rivet_play_verdict_rejects_a_wrong_azalea_revision() {
+        // Counterfactual against a locally-modified or stale client binary:
+        // the transcript was produced by a client not built from the pinned
+        // unmodified Azalea revision.
+        let mut t = normalize_join(&rivet_play_records()).expect("normalize");
+        t["azalea_revision"] = json!("deadbeef");
+        assert!(
+            rivet_play_verdict(&t).is_err(),
+            "a client not built from the pinned Azalea revision must not pass"
+        );
+    }
+
+    #[test]
+    fn rivet_play_verdict_rejects_a_spawned_transcript_missing_login() {
+        // outcome=spawned without the login lifecycle event is malformed — the
+        // lifecycle is the play-progress proof (login -> configuration -> spawn).
         let t = json!({
-            "outcome": "disconnected",
-            "lifecycle": [],
+            "outcome": "spawned",
+            "lifecycle": ["init", "spawn"],
+            "azalea_revision": PINNED_AZALEA_REVISION,
+            "chunk_count": JOIN_CHUNK_COUNT,
+            "position": {"x": 0.0, "y": JOIN_SPAWN_Y, "z": 0.0},
         });
         assert!(
-            preplay_verdict(&t).is_err(),
-            "a disconnected transcript with no lifecycle is malformed"
+            rivet_play_verdict(&t).is_err(),
+            "a spawned transcript without login is malformed"
         );
     }
 }

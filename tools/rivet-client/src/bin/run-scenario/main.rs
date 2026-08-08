@@ -19,31 +19,42 @@
 //!   spawn-relative position deltas, velocity, on-ground, teleport/keepalive
 //!   echo relationships), then prove the comparator detects a tampered sampled
 //!   position (negative case).
-//! - `join --server rivet --pairs paper:rivet`: the Rivet headless-boot check.
-//!   Boot `--runs` rivet-servers, wait for the machine-readable `RIVET_READY`
-//!   marker, join each with the client, shut down cleanly on SIGTERM. Reports
-//!   the current pre-play limitation honestly (Rivet's login/configuration is
-//!   not implemented — issue #96) instead of claiming play behavior.
-//! - `join --server both --pairs paper:rivet`: the Paper-vs-Rivet pre-play
-//!   scenario. Boot Paper and Rivet on isolated ports, join each, and report the
-//!   controlled pre-play transcript divergence. Reports the divergence as the
-//!   documented pre-play limitation, not a harness bug.
+//! - `join --server rivet --pairs paper:rivet` (issue #192): the Rivet
+//!   headless-boot play check. Boot `--runs` rivet-servers, wait for the
+//!   machine-readable `RIVET_READY` marker, join each with the client, shut
+//!   down cleanly on SIGTERM. Requires the pinned Azalea client to complete
+//!   offline login, configuration (registry sync), the play handoff, spawn,
+//!   and receive exactly the deterministic 117-chunk send-set.
+//! - `join --server both --pairs paper:rivet` (issue #192): the Paper-vs-Rivet
+//!   play scenario. Boot Paper and Rivet on isolated ports, join each, and
+//!   compare the play-state observables. Both reach spawn; the compared
+//!   transcripts must diverge only on the excluded per-boot nondeterminism and
+//!   the documented health default gap — any other divergence, including a
+//!   position.y mismatch, FAILS the run. Paper boots with the single-stone
+//!   superflat fixture so both servers spawn at y=-63.0 and `position.y` is a
+//!   genuinely compared field (issue #159: the old default-flat Paper reference
+//!   spawned at y=-60 and position.y was wrongly treated as a "documented gap").
+//!   A controlled negative then tampers the compared `position.y` on the Paper
+//!   reference and requires the real comparator/divergence path to report the
+//!   tampered value and refuse PASS, so the live acceptance cannot pass
+//!   vacuously.
 //!
 //! ## Connection proof (Rivet modes)
 //!
-//! The Rivet modes prove the client actually reached the Rivet port — they
-//! cannot pass against a dead endpoint. Azalea fires `Event::Init` before any
-//! TCP connect, and `connection_failed`/`timeout` fire without completing a
-//! session, so the client transcript alone cannot distinguish a live pre-play
-//! exchange from a hung or refusing peer. Two independent observables are
-//! required instead:
+//! The Rivet modes prove the client actually completed a genuine play session
+//! against the Rivet port — they cannot pass against a dead endpoint, a fake
+//! `RIVET_READY` binary, or a stale pre-play Rivet build. Two independent
+//! observables are required:
 //!
-//! 1. the client transcript outcome is `disconnected` (never `connection_failed`
-//!    or `timeout`), and
-//! 2. the rivet-server log contains `connection established` (the per-connection
-//!    task logs this on TCP accept) followed by the login listener's
-//!    `login state not implemented yet` rejection (issue #96) — lines only the
-//!    real `rivet-server` binary emits for a genuine pre-play exchange.
+//! 1. the rivet-server log contains `connection established` (the per-connection
+//!    task logs this on TCP accept) — a line only the real `rivet-server`
+//!    binary emits, and
+//! 2. the client transcript is judged by [`transcript::rivet_play_verdict`]:
+//!    outcome `spawned`, lifecycle containing `login` and `spawn`, the pinned
+//!    Azalea build revision, exactly `JOIN_CHUNK_COUNT` (117) chunks, and the
+//!    deterministic superflat spawn y `JOIN_SPAWN_Y` (-63.0). A stale pre-play
+//!    Rivet build, a fake/non-Rivet endpoint, or a Paper-like y=-60 spawn all
+//!    fail the verdict.
 //!
 //! Raw diagnostics (server logs, client stdout/stderr, normalized transcripts)
 //! are preserved under `work/`.
@@ -218,6 +229,7 @@ impl Args {
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
         let mut runs = DEFAULT_RUNS;
         let mut runs_explicit = false;
+        let mut pairs_explicit = false;
 
         if let Some(sub) = args.next() {
             command = match sub.as_str() {
@@ -257,12 +269,23 @@ impl Args {
                     pairs = Pairs::parse(&v).ok_or_else(|| {
                         format!("invalid --pairs value: {v} (expected paper:paper|paper:rivet)")
                     })?;
+                    pairs_explicit = true;
                 }
                 _ => return Err(format!("unknown argument: {argument}\n\n{}", usage())),
             }
         }
 
         if command == Subcommand::Join {
+            // When --pairs is omitted, derive it from --server: rivet/both only
+            // ever compare Paper-vs-Rivet, so the paper:paper default would be
+            // invalid. An explicit --pairs is still validated below.
+            if !pairs_explicit {
+                pairs = match server {
+                    ServerSelection::Paper => Pairs::PaperPaper,
+                    ServerSelection::Rivet | ServerSelection::Both => Pairs::PaperRivet,
+                };
+            }
+
             // Valid --server/--pairs combinations: paper:paper needs a Paper
             // boot; paper:rivet needs a Rivet boot (and a Paper reference when
             // `both`). `capture` only uses `--server` (which kind to boot once),
@@ -470,17 +493,18 @@ fn run_client(
     })
 }
 
-/// Verify the rivet-server log shows the client was actually accepted and
-/// rejected at the login boundary: the per-connection task logs `connection
-/// established` on TCP accept, and the login listener logs `unsupported: login
-/// state not implemented yet` when it closes the client (issue #96).
+/// Verify the rivet-server log shows the client was actually accepted: the
+/// per-connection task logs `connection established` on TCP accept.
 ///
 /// This is the genuinely Rivet-specific half of the connection proof. The
 /// client transcript alone cannot prove the client reached the Rivet port:
 /// azalea fires `Event::Init` before any TCP connect, and a live-but-hung peer
-/// could still produce a `disconnect`. Only the real rivet-server binary emits
-/// these two lines for a genuine pre-play exchange, so requiring them kills the
-/// false-green (a dead endpoint, a hung port, or a fake `RIVET_READY` binary).
+/// could still appear to make progress. Only the real rivet-server binary emits
+/// this line for a genuine exchange, so requiring it kills the false-green (a
+/// dead endpoint, a hung port, or a fake `RIVET_READY` binary). The play-side
+/// half of the proof — that the client completed login/configuration into
+/// spawn and received the deterministic 117-chunk send-set — is judged by
+/// [`transcript::rivet_play_verdict`] on the client transcript.
 fn verify_rivet_connection(log_path: &Path) -> Result<(), RunnerError> {
     let text = fs::read_to_string(log_path)?;
     if !text.contains("connection established") {
@@ -489,29 +513,43 @@ fn verify_rivet_connection(log_path: &Path) -> Result<(), RunnerError> {
             log_path.display()
         )));
     }
-    if !text.contains("login state not implemented yet") {
-        return Err(RunnerError::Gate(format!(
-            "rivet log {} shows a connection but no login-boundary rejection — the client did \
-             not reach Rivet's login listener (issue #96)",
-            log_path.display()
-        )));
-    }
     Ok(())
 }
 
-/// Fixtures `server.properties` (seed 42, superflat, offline, port 25599) —
-/// the config source of truth for Paper boots. Rivet boots do not require it:
-/// `rivet-server` is driven purely by `--host`/`--port`.
-fn server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
-    let p = crate_root.join("../rivet-oracle/fixtures/server.properties");
+/// Resolve a `rivet-oracle` `server.properties` fixture by name. The default
+/// `server.properties` (seed 42, superflat, offline, port 25599) is the config
+/// source of truth for Paper boots; the single-stone variant is the Paper
+/// reference of the Rivet-vs-Paper differential (issue #159). Rivet boots do
+/// not require either: `rivet-server` is driven purely by `--host`/`--port`.
+fn fixture_server_properties(crate_root: &Path, name: &str) -> Result<PathBuf, RunnerError> {
+    let p = crate_root.join(format!("../rivet-oracle/fixtures/{name}"));
     if p.is_file() {
         Ok(p)
     } else {
         Err(RunnerError::Unverified(format!(
-            "server.properties not found at {} (rivet-oracle fixtures)",
+            "{name} not found at {} (rivet-oracle fixtures)",
             p.display()
         )))
     }
+}
+
+/// The default superflat fixture for Paper boots that do not need a spawn
+/// height to match Rivet's.
+fn server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
+    fixture_server_properties(crate_root, "server.properties")
+}
+
+/// The single-stone superflat `server.properties` the Paper reference of the
+/// Rivet-vs-Paper differential boots with (issue #159).
+///
+/// The shared fixture's `generator-settings={}` makes Paper fall back to the
+/// default FLAT preset (bedrock ×1 + dirt ×2 + grass ×1 = 4 layers), which
+/// spawns at y=-60 — while Rivet serves its single-stone world at y=-63. With
+/// `generator-settings={"layers":[{"height":1,"block":"minecraft:stone"}]}`
+/// Paper has exactly one layer and spawns at y=-63 too, so `position.y` becomes
+/// a genuinely compared field instead of a 3-block "documented gap".
+fn single_stone_server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
+    fixture_server_properties(crate_root, "server-single-stone.properties")
 }
 
 fn ensure_client_binary() -> Result<PathBuf, RunnerError> {
@@ -898,8 +936,8 @@ fn run_move_self_check(args: &Args) -> Result<(), RunnerError> {
     }
 }
 
-/// Mode B: Rivet headless boot + pre-play transcript (issue #155 DoD 2).
-fn run_rivet_preplay(args: &Args) -> Result<(), RunnerError> {
+/// Mode B: Rivet headless boot + play transcript (issue #192).
+fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-rivet");
     fs::create_dir_all(&work)?;
@@ -910,7 +948,7 @@ fn run_rivet_preplay(args: &Args) -> Result<(), RunnerError> {
     let client_bin = ensure_client_binary()?;
     let base = base_address(args)?;
 
-    println!("rivet scenario runner: rivet (headless boot + pre-play transcript)");
+    println!("rivet scenario runner: rivet (headless boot + play transcript)");
     println!("    rivet-server bin  : {}", rivet_bin.display());
     println!("    rivet-client bin  : {}", client_bin.display());
     println!("    address           : {}", args.address);
@@ -947,35 +985,39 @@ fn run_rivet_preplay(args: &Args) -> Result<(), RunnerError> {
         server::shutdown(&mut srv)?;
         // The client transcript is only the client-side half of the proof;
         // require the server log to show the real rivet-server accepted the
-        // connection and rejected it at the login boundary.
+        // connection (connection established on TCP accept).
         verify_rivet_connection(&log_path)?;
 
         let normalized =
             transcript::normalize_join(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
         let transcript_path = work.join(format!("{prefix}.transcript.json"));
         fs::write(&transcript_path, serde_json::to_string_pretty(&normalized)?)?;
-        let boundary = transcript::preplay_verdict(&normalized)?;
+        let boundary = transcript::rivet_play_verdict(&normalized)?;
         println!(
-            "[run  {idx}] outcome={} lifecycle={:?} (pre-play boundary: {boundary}) — transcript in {}",
+            "[run  {idx}] outcome={} lifecycle={:?} chunk_count={} (play boundary: {boundary}) — transcript in {}",
             normalized["outcome"],
             normalized["lifecycle"],
+            normalized["chunk_count"],
             transcript_path.display()
         );
         transcripts.push(normalized);
     }
 
     println!();
-    println!("Rivet pre-play summary ({} boots)", args.runs);
+    println!("Rivet play summary ({} boots)", args.runs);
     println!(
-        "    {}/{}\tRivet boots reached RIVET_READY, accepted a real client connection at the login",
+        "    {}/{}\tRivet boots reached RIVET_READY, accepted a real client connection",
         args.runs, args.runs
     );
     println!(
-        "        boundary (server log: 'connection established' + 'login state not implemented'),"
+        "        (server log: 'connection established'), took the pinned Azalea client through"
     );
-    println!("        and shut down cleanly on SIGTERM");
+    println!(
+        "        login/configuration into spawn with the deterministic 117-chunk send-set, and"
+    );
+    println!("        shut down cleanly on SIGTERM");
     if args.runs >= 2 {
-        println!("    deterministic pre-play self-check (Rivet-vs-Rivet):");
+        println!("    deterministic Rivet-vs-Rivet self-check:");
         let mut identical = true;
         for (i, pair) in transcripts.windows(2).enumerate() {
             let d = comparator::diff(&pair[0], &pair[1]);
@@ -996,44 +1038,170 @@ fn run_rivet_preplay(args: &Args) -> Result<(), RunnerError> {
         }
         if !identical {
             return Err(RunnerError::Gate(
-                "Rivet-vs-Rivet pre-play transcripts differ (expected identical pre-play)"
-                    .to_owned(),
+                "Rivet-vs-Rivet play transcripts differ (expected identical play)".to_owned(),
             ));
         }
     }
 
     println!();
+    println!("VERDICT: PASS — rivet-server boots headlessly, reaches RIVET_READY, and takes the");
+    println!("    pinned unmodified Azalea client through offline login, configuration (registry");
+    println!("    sync), and the play handoff to spawn, receiving exactly the deterministic");
     println!(
-        "VERDICT: PASS — rivet-server boots headlessly, reaches RIVET_READY, and accepts a real"
+        "    {}-chunk send-set at Rivet's fixed superflat spawn y={}. The connection is proven",
+        transcript::JOIN_CHUNK_COUNT,
+        transcript::JOIN_SPAWN_Y
     );
     println!(
-        "    client connection at the login boundary (issue #96). The connection is proven two"
+        "    two ways: the rivet log shows 'connection established' (only the real rivet-server"
     );
-    println!(
-        "    ways: the client transcript ends in 'disconnected' (not connection_failed/timeout,"
-    );
-    println!("    which azalea emits without ever completing a session), and the rivet log shows");
-    println!(
-        "    'connection established' followed by the login listener's 'unsupported: login state"
-    );
-    println!(
-        "    not implemented yet'. The client does NOT complete login/configuration — Rivet's is"
-    );
-    println!("    not implemented (issue #96) — so the transcript is pre-play by design. This is");
-    println!(
-        "    reported honestly: the harness never claims play behavior Rivet has not implemented."
-    );
+    println!("    emits it), and the client transcript is outcome=spawned with lifecycle");
+    println!("    init->login->spawn, the pinned Azalea revision, 117 chunks, and spawn y=-63.0 —");
+    println!("    which a stale pre-play build, a fake/non-Rivet endpoint, or a Paper-like y=-60");
+    println!("    spawn all fail.");
     println!("    artifacts: {}", work.display());
     Ok(())
 }
 
-/// Mode C: Paper-vs-Rivet pre-play scenario — the controlled, honest report of
-/// the current pre-play limitation (issue #155 DoD 3).
+/// The compared Paper-vs-Rivet transcripts must diverge only on the documented
+/// Rivet/Paper gaps; any other divergence is a genuine Rivet/Paper mismatch, not
+/// a harness artifact, and fails the run. Normal runs rebuild the server and the
+/// fallback has a narrow freshness guard; this behavioral gate remains
+/// load-bearing even when an explicit `RIVET_SERVER_BIN` override is used.
+///
+/// `position.y` is deliberately NOT here (issue #159): the Paper reference now
+/// boots the single-stone superflat fixture and spawns at y=-63.0 like Rivet,
+/// so a position.y divergence is a real server mismatch and must fail the run —
+/// never be normalized or excluded to make the test pass. The only remaining
+/// documented gap is the health component default, and it is value-bound:
+/// Rivet's join burst does not send `set_health` (play-state gap tracked
+/// separately), so azalea reports 1.0 against Rivet vs 20.0 against Paper. A
+/// future half-implemented `set_health` that reports any other value fails here
+/// rather than being waved through.
+fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerError> {
+    const DOCUMENTED_GAPS: [(&str, f64, f64); 1] = [("health.health", 20.0, 1.0)];
+    for f in &d.diffs {
+        let Some((expected, actual)) = DOCUMENTED_GAPS
+            .iter()
+            .find(|(path, _, _)| *path == f.path)
+            .map(|(_, e, a)| (*e, *a))
+        else {
+            return Err(RunnerError::Gate(format!(
+                "Paper-vs-Rivet divergence on {}: expected {} got {} — not one of the documented \
+                 Rivet/Paper gaps ({:?}); refusing PASS",
+                f.path,
+                f.expected,
+                f.actual,
+                DOCUMENTED_GAPS
+                    .iter()
+                    .map(|(p, _, _)| *p)
+                    .collect::<Vec<_>>()
+            )));
+        };
+        let f_expected = f.expected.as_f64();
+        let f_actual = f.actual.as_f64();
+        if f_expected != Some(expected) || f_actual != Some(actual) {
+            return Err(RunnerError::Gate(format!(
+                "Paper-vs-Rivet divergence on {}: expected {} got {} — the documented gap only \
+                 admits Paper={expected} vs Rivet={actual}; refusing PASS",
+                f.path, f.expected, f.actual
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Prove the both-mode divergence path is non-vacuous: tamper the compared
+/// `position.y` on the Paper reference and re-run the exact comparator +
+/// divergence gate the live comparison used, requiring the reported
+/// `position.y` divergence to observe the tampered value and the gate to refuse
+/// PASS.
+///
+/// The live acceptance cannot pass unless a tampered compared field actually
+/// flows through the comparator and the divergence gate: a comparator that
+/// reports nothing, or a `position.y` silently moved into `excluded`, would
+/// PASS vacuously without this negative. The tamper is offset above the larger
+/// of the two spawn heights, so it differs from both paper's and rivet's y for
+/// all MC-realistic spawn heights (small magnitudes, where the f64 spacing is
+/// far below 1.0). A fixed +1.0 on paper's y alone would silently align with
+/// rivet's y if the two spawn heights were ever adjacent, and the negative would
+/// fail on a healthy tree. Because `position.y` is a *compared* field in this
+/// scenario (issue #159: the single-stone fixture spawns both servers at
+/// y=-63), the divergence gate must refuse PASS on the tamper — a position.y
+/// divergence is a real server mismatch, never a documented gap to wave through.
+fn prove_both_mode_non_vacuous(paper_t: &Value, rivet_t: &Value) -> Result<(), RunnerError> {
+    let mut tampered = paper_t.clone();
+    let y = tampered["position"]["y"].as_f64().ok_or_else(|| {
+        RunnerError::Gate(
+            "negative case FAILED: paper transcript has no position to tamper".to_owned(),
+        )
+    })?;
+    let rivet_y = rivet_t["position"]["y"].as_f64().ok_or_else(|| {
+        RunnerError::Gate(
+            "negative case FAILED: rivet transcript has no position to compare against".to_owned(),
+        )
+    })?;
+    let tampered_y = y.max(rivet_y) + 1.0;
+    tampered["position"]["y"] = json!(tampered_y);
+    let neg = comparator::diff(&tampered, rivet_t);
+    match neg.diffs.iter().find(|f| f.path == "position.y") {
+        Some(f) if f.expected.as_f64() == Some(tampered_y) => {
+            // The tampered value was read by the real comparator. Now the real
+            // divergence gate must refuse PASS: position.y is a compared field,
+            // so a divergence on it is a genuine server mismatch.
+            match check_paper_rivet_divergence(&neg) {
+                Err(e) if e.to_string().contains("position.y") => {}
+                Err(e) => {
+                    return Err(RunnerError::Gate(format!(
+                        "negative case FAILED: the divergence gate refused PASS for a reason other \
+                         than the tampered position.y: {e}"
+                    )));
+                }
+                Ok(()) => {
+                    return Err(RunnerError::Gate(
+                        "negative case FAILED: the divergence gate PASSED despite the tampered \
+                         position.y — position.y must be a compared field, not a documented gap \
+                         to wave through"
+                            .to_owned(),
+                    ));
+                }
+            }
+            println!(
+                "    tampered paper position.y {y} -> {tampered_y} — the divergence path reported \
+                 'position.y: expected {tampered_y}, got {}' and refused PASS, so position.y is \
+                 genuinely compared and read by the gate",
+                f.actual
+            );
+            Ok(())
+        }
+        Some(f) => Err(RunnerError::Gate(format!(
+            "negative case FAILED: the divergence path reported 'position.y: expected {} got {}', \
+             but paper position.y was tampered to {tampered_y} — the reported divergence must \
+             observe the tampered value (position.y must never be excluded or normalized to make \
+             the comparison pass)",
+            f.expected, f.actual
+        ))),
+        None => Err(RunnerError::Gate(
+            "negative case FAILED: tampering paper position.y produced no compared 'position.y' \
+             diff (it is excluded, absent, or the comparator reported nothing) — position.y must \
+             be a compared field read by the divergence gate"
+                .to_owned(),
+        )),
+    }
+}
+
+/// Mode C: Paper-vs-Rivet play scenario (issue #192, inverted for #159). Both
+/// servers must take the pinned Azalea client through login/configuration into
+/// spawn; the transcripts are compared field-level and differ only on the
+/// excluded per-boot nondeterminism and the documented health default gap.
+/// Paper boots the single-stone superflat fixture so both servers spawn at
+/// y=-63.0 and `position.y` is a compared field (never excluded or normalized
+/// to pass).
 fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-both");
     fs::create_dir_all(&work)?;
-    let server_properties = server_properties(&crate_root)?;
+    let server_properties = single_stone_server_properties(&crate_root)?;
     let jar = server::ensure_jar(&crate_root)?;
     let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
     let client_bin = ensure_client_binary()?;
@@ -1045,11 +1213,18 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     let paper_addr = SocketAddr::new(base.ip(), ports[0]);
     let rivet_addr = SocketAddr::new(base.ip(), ports[1]);
 
-    println!("rivet scenario runner: join (Paper-vs-Rivet pre-play)");
+    println!("rivet scenario runner: join (Paper-vs-Rivet play)");
     println!("    paperclip jar     : {}", jar.display());
     println!("    rivet-server bin  : {}", rivet_bin.display());
     println!("    rivet-client bin  : {}", client_bin.display());
-    println!("    server.properties : {}", server_properties.display());
+    println!(
+        "    server.properties : {} (single-stone superflat)",
+        server_properties.display()
+    );
+    println!(
+        "    paper pin         : {} (verified from the materialized jar)",
+        server::PAPER_PIN_COMMIT
+    );
     println!("    paper address     : {paper_addr}");
     println!("    rivet address     : {rivet_addr}");
     println!();
@@ -1073,6 +1248,14 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         "join",
     )?;
     server::shutdown(&mut paper_srv)?;
+    // Load-bearing provenance: the Paper reference this differential compares
+    // Rivet against must be the pinned oracle commit. This is scoped to the
+    // differential path only — Paper-vs-Paper self-checks (paper:paper join,
+    // move) and capture compare a build against itself, where the pin is not a
+    // correctness requirement. The check reads the jar that actually booted in
+    // the run dir, so a stale, swapped, or unverifiable Paper cannot silently
+    // stand in for the reference.
+    server::verify_paper_provenance(paper_srv.run_dir())?;
     let paper_t =
         transcript::normalize_join(&paper_client.stdout_text).map_err(RunnerError::Transcript)?;
     let paper_tp = work.join("paper.transcript.json");
@@ -1089,7 +1272,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         )));
     }
 
-    // Rivet SUT — must reach READY and accept the client at the pre-play boundary.
+    // Rivet SUT — must reach READY and take the client through play.
     let mut rivet_srv = server::boot(
         server::ServerKind::Rivet,
         &work.join("rivet"),
@@ -1109,56 +1292,78 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     )?;
     server::shutdown(&mut rivet_srv)?;
     // Server-side half of the connection proof: the rivet log must show the
-    // real rivet-server accepted the client and rejected it at the login
-    // boundary (the client transcript's `disconnect` alone could also come
-    // from a live-but-hung peer).
+    // real rivet-server accepted the client (connection established on TCP
+    // accept).
     verify_rivet_connection(&work.join("rivet.log"))?;
     let rivet_t =
         transcript::normalize_join(&rivet_client.stdout_text).map_err(RunnerError::Transcript)?;
     let rivet_tp = work.join("rivet.transcript.json");
     fs::write(&rivet_tp, serde_json::to_string_pretty(&rivet_t)?)?;
-    let boundary = transcript::preplay_verdict(&rivet_t)?;
+    let boundary = transcript::rivet_play_verdict(&rivet_t)?;
     println!(
-        "    Rivet outcome      : {} (transcript in {})",
+        "    Rivet outcome      : {} chunk_count={} (transcript in {})",
         rivet_t["outcome"],
+        rivet_t["chunk_count"],
         rivet_tp.display()
     );
 
-    // Comparator diff is informational: the divergence is the expected pre-play
-    // gap (Rivet has no play-state observables to compare yet).
     println!();
-    println!("Paper-vs-Rivet comparator (pre-play transcript divergence):");
+    println!("Paper-vs-Rivet comparator (play-state divergence):");
     let d = comparator::diff(&paper_t, &rivet_t);
+    check_paper_rivet_divergence(&d)?;
     println!(
-        "    {} field(s) differ — expected, because Rivet has no play-state observables yet:",
+        "    {} field(s) differ — the documented Rivet/Paper gap (health component default),",
         d.diffs.len()
     );
+    println!("    plus the excluded per-boot nondeterminism:");
     for f in &d.diffs {
         println!("        {f}");
     }
+    for f in &d.excluded {
+        println!("        (excluded) {f}");
+    }
+
+    // Negative case: prove the divergence path just exercised is non-vacuous.
+    // Tamper a *compared* field (position.y, the deterministic superflat spawn
+    // height) on the Paper reference and require the real comparator/divergence
+    // path to report the expected named mismatch and refuse PASS — the harness
+    // must not pass vacuously, and position.y must never be excluded or
+    // normalized to make the comparison pass.
+    println!();
+    println!("Negative case (tamper paper position.y through the real divergence path)");
+    prove_both_mode_non_vacuous(&paper_t, &rivet_t)?;
 
     println!();
-    println!("VERDICT: PASS (harness verification) — the harness targeted Rivet and reports the");
-    println!("    current pre-play limitation honestly:");
-    println!("      * Paper reached spawn (reference behavior unchanged).");
+    println!("VERDICT: PASS — both servers took the pinned Azalea client through login and");
+    println!("    configuration into play:");
+    println!("      * Paper reached spawn from the single-stone superflat (Git-Commit pinned) and");
+    println!("        Rivet reached RIVET_READY on its own isolated port ({rivet_addr}) and took");
+    println!("        the client through the {boundary}.");
     println!(
-        "      * Rivet reached RIVET_READY on its own isolated port ({rivet_addr}) and accepted a"
-    );
-    println!("        real client connection at the {boundary}.");
-    println!("      * The connection is proven two ways: the client transcript is 'disconnected'");
-    println!(
-        "        (never connection_failed/timeout, which fire without a completed session), and"
+        "      * Both spawn at the same superflat height y=-63.0, so position.y is a compared"
     );
     println!(
-        "        the rivet log shows 'connection established' + the login listener's rejection."
+        "        field — the negative case proved the comparator reads a tampered spawn height"
     );
     println!(
-        "      * Rivet login/configuration is not implemented (issue #96), so the Paper-vs-Rivet"
+        "        and the divergence gate refuses PASS on it, so any Paper-vs-Rivet position.y"
     );
+    println!("        divergence would FAIL the run.");
+    println!("      * The connection is proven two ways: the rivet log shows 'connection");
     println!(
-        "        transcripts differ by design. This is the documented pre-play state, NOT a harness"
+        "        established' (only the real rivet-server emits it), and the client transcript"
     );
-    println!("        failure. When #96 lands, this becomes the parity comparison of issue #159.");
+    println!("        is outcome=spawned with the pinned Azalea revision, 117 chunks, and spawn");
+    println!("        y=-63.0 — which a stale pre-play build, a fake/non-Rivet endpoint, or a");
+    println!("        Paper-like y=-60 spawn all fail.");
+    println!("      * The compared transcripts differ only on the documented Rivet/Paper gap");
+    println!("        (health default: Rivet omits set_health so azalea reports 1.0 vs Paper's");
+    println!("        20.0) — any other divergence, including position.y, fails the run, so a");
+    println!("        Paper-vs-Rivet regression cannot pass as 'expected'.");
+    println!("      * The negative case proved the divergence path is non-vacuous: a tampered");
+    println!("        compared position.y on the Paper reference was reported by the real");
+    println!("        comparator/divergence path and refused PASS, so the acceptance cannot pass");
+    println!("        while ignoring a changed compared field.");
     println!("    artifacts: {}", work.display());
     Ok(())
 }
@@ -1166,7 +1371,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
 fn run_join(args: &Args) -> Result<(), RunnerError> {
     match (args.server, args.pairs) {
         (ServerSelection::Paper, Pairs::PaperPaper) => run_paper_self_check(args),
-        (ServerSelection::Rivet, Pairs::PaperRivet) => run_rivet_preplay(args),
+        (ServerSelection::Rivet, Pairs::PaperRivet) => run_rivet_play(args),
         (ServerSelection::Both, Pairs::PaperRivet) => run_paper_vs_rivet(args),
         (server, pairs) => Err(RunnerError::Gate(format!(
             "unhandled --server {} / --pairs {} combination",
@@ -1319,6 +1524,21 @@ mod tests {
     }
 
     #[test]
+    fn server_selection_defaults_the_pairs() {
+        // --server rivet/both with no --pairs must not default to the invalid
+        // paper:paper; the README documents `join --server rivet --runs 2` and
+        // `join --server both --pairs paper:rivet`, so omitting --pairs for a
+        // rivet/both run is the natural invocation.
+        assert!(parse(&["join", "--server", "rivet", "--runs", "2"]).is_ok());
+        assert!(parse(&["join", "--server", "both"]).is_ok());
+        // Plain `join` still defaults to Paper-vs-Paper.
+        assert!(parse(&["join"]).is_ok());
+        assert!(parse(&["join", "--server", "paper"]).is_ok());
+        // An explicit conflicting --pairs remains rejected.
+        assert!(parse(&["join", "--server", "rivet", "--pairs", "paper:paper"]).is_err());
+    }
+
+    #[test]
     fn runs_validation_per_mode() {
         assert!(parse(&["join"]).is_ok());
         assert!(parse(&["join", "--runs", "1"]).is_err(), "paper needs >=2");
@@ -1421,6 +1641,205 @@ mod tests {
         assert_eq!(
             RunnerError::Server(server::Error::Gate("x".into())).exit_code(),
             EXIT_FAIL
+        );
+    }
+
+    fn diff_with(path: &str) -> comparator::TranscriptDiff {
+        diff_with_values(path, json!(null), json!(null))
+    }
+
+    fn diff_with_values(path: &str, expected: Value, actual: Value) -> comparator::TranscriptDiff {
+        let mut d = comparator::TranscriptDiff::default();
+        d.diffs.push(comparator::FieldDiff {
+            path: path.to_owned(),
+            expected,
+            actual,
+        });
+        d
+    }
+
+    #[test]
+    fn paper_rivet_divergence_accepts_only_documented_gaps() {
+        assert!(check_paper_rivet_divergence(&comparator::TranscriptDiff::default()).is_ok());
+        // The documented gap is value-bound: Paper sends 20.0, Rivet 1.0.
+        assert!(
+            check_paper_rivet_divergence(&diff_with_values(
+                "health.health",
+                json!(20.0),
+                json!(1.0)
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn paper_rivet_divergence_rejects_a_wrong_health_gap_value() {
+        // The documented gap is not a blanket "any divergence on health.health":
+        // a future half-implemented set_health that reports, say, 15.0 vs Paper's
+        // 20.0 must FAIL rather than be waved through as the documented gap.
+        let err = check_paper_rivet_divergence(&diff_with_values(
+            "health.health",
+            json!(20.0),
+            json!(15.0),
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("only admits Paper=20 vs Rivet=1"),
+            "a wrong health value must fail the value-bound gap, got {err}"
+        );
+        assert!(
+            err.to_string().contains("refusing PASS"),
+            "a wrong health value must refuse PASS, got {err}"
+        );
+    }
+
+    #[test]
+    fn paper_rivet_divergence_rejects_position_y_as_undocumented() {
+        // Issue #159: the Paper reference now boots the single-stone superflat
+        // and spawns at y=-63.0 like Rivet, so a position.y divergence is a real
+        // server mismatch and must FAIL — never a "documented gap" to be waved
+        // through. The counterfactual keeps the old (wrong) Paper reference at
+        // y=-60 and asserts the both-mode refuses PASS instead of accepting it.
+        let err = check_paper_rivet_divergence(&diff_with("position.y")).unwrap_err();
+        assert!(
+            err.to_string().contains("position.y"),
+            "error must name the diverging position.y, got {err}"
+        );
+        assert!(
+            err.to_string().contains("refusing PASS"),
+            "position.y must fail the run, got {err}"
+        );
+    }
+
+    /// A join transcript with the deterministic observables set, matching the
+    /// shape `normalize_join` produces (position.x/z and chunks excluded).
+    fn join_transcript(y: f64, health: f64) -> Value {
+        json!({
+            "protocol": 1,
+            "scenario": "join",
+            "outcome": "spawned",
+            "lifecycle": ["init", "login", "spawn"],
+            "azalea_revision": "6249c295d353b9b3ef68f665b311cba39211fd19",
+            "position": { "x": 9.5, "y": y, "z": -3.5 },
+            "world": "minecraft:overworld",
+            "gamemode": "survival",
+            "health": { "health": health, "food": 20, "saturation": 5.0 },
+            "chunk_count": 117,
+            "chunks": [[-4, -4], [-4, -3], [0, 0]],
+            "excluded": {
+                "position.x": "randomized per boot",
+                "position.z": "randomized per boot",
+                "chunks": "centered on the randomized spawn chunk",
+            },
+        })
+    }
+
+    #[test]
+    fn both_mode_negative_passes_when_tampered_position_y_is_reported() {
+        // The genuine Paper-vs-Rivet shape (issue #159): both servers spawn at
+        // the same superflat height y=-63, so the transcripts diverge only on
+        // the documented health default gap (Paper 20 / Rivet 1). Tampering
+        // Paper's position.y through the real comparator/divergence path must be
+        // reported with the tampered value and refused PASS (position.y is a
+        // compared field).
+        let paper = join_transcript(-63.0, 20.0);
+        let rivet = join_transcript(-63.0, 1.0);
+        assert!(prove_both_mode_non_vacuous(&paper, &rivet).is_ok());
+    }
+
+    #[test]
+    fn both_mode_negative_passes_when_spawn_heights_are_adjacent() {
+        // Regression for the false-failure mode: with a fixed +1.0 offset,
+        // paper.y = -64 tampered to -63 would collide with rivet.y = -63, produce
+        // no position.y diff, and FAIL on a healthy tree. The tamper must be
+        // offset above the larger spawn height so it always differs from rivet.
+        // The counterfactual keeps paper at y=-64 (a divergence that would
+        // already fail the real comparison) and asserts the tamper path still
+        // reports the tampered value.
+        let paper = join_transcript(-64.0, 20.0);
+        let rivet = join_transcript(-63.0, 1.0);
+        assert!(prove_both_mode_non_vacuous(&paper, &rivet).is_ok());
+    }
+
+    #[test]
+    fn both_mode_negative_fails_if_position_y_is_silently_excluded() {
+        // If a future edit moves position.y into the `excluded` map (so the
+        // comparison could pass by never seeing the tamper), the negative must
+        // FAIL: the reported divergence must not observe the tampered value.
+        let mut paper = join_transcript(-63.0, 20.0);
+        paper["excluded"]["position.y"] = json!("silently dropped from parity");
+        let rivet = join_transcript(-63.0, 1.0);
+        let err = prove_both_mode_non_vacuous(&paper, &rivet).unwrap_err();
+        assert!(
+            err.to_string().contains("position.y"),
+            "error must name the missing position.y divergence, got {err}"
+        );
+    }
+
+    #[test]
+    fn both_mode_negative_fails_without_a_position_to_tamper() {
+        // A transcript with no position (or one stripped of y) cannot prove the
+        // comparator reads position.y; the negative must FAIL, not skip.
+        let paper = json!({
+            "outcome": "spawned",
+            "health": { "health": 20.0 },
+            "excluded": { "position.y": "normalized away" },
+        });
+        let rivet = join_transcript(-63.0, 1.0);
+        let err = prove_both_mode_non_vacuous(&paper, &rivet).unwrap_err();
+        assert!(
+            err.to_string().contains("no position to tamper"),
+            "error must explain there is no position to tamper, got {err}"
+        );
+    }
+
+    #[test]
+    fn paper_rivet_divergence_rejects_an_undocumented_gap() {
+        // Counterfactual against a current Rivet whose play state has drifted
+        // from Paper on a compared (non-excluded) observable: the divergence is
+        // not one of the documented gaps, so the both-mode must FAIL rather
+        // than print a PASS while diverging.
+        let err = check_paper_rivet_divergence(&diff_with("gamemode")).unwrap_err();
+        assert!(
+            err.to_string().contains("gamemode"),
+            "error must name the diverging field, got {err}"
+        );
+    }
+
+    /// The scenario's hardcoded `PAPER_PIN_COMMIT` must not drift from the
+    /// oracle manifest's `paper` provenance pin (the golden baseline the oracle
+    /// gate verifies against). A forward oracle-pin bump already fails loudly at
+    /// runtime (the materialized jar's commit won't match); this test closes the
+    /// reverse direction — editing only the scenario constant — by reading the
+    /// manifest the same way `tools/rivet-oracle`'s `parse_paper_pin` does and
+    /// asserting the pins agree.
+    #[test]
+    fn paper_pin_matches_oracle_manifest() {
+        let manifest_path = crate_root().join("../rivet-oracle/fixtures/manifest.json");
+        let text = fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", manifest_path.display()));
+        let manifest: Value =
+            serde_json::from_str(&text).expect("oracle manifest must be valid JSON");
+        let paper = manifest
+            .get("paper")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                panic!(
+                    "oracle manifest {} must carry a 'paper' provenance string",
+                    manifest_path.display()
+                )
+            });
+        let pin = paper
+            .rsplit_once('@')
+            .map(|(_, commit)| commit.trim())
+            .filter(|commit| !commit.is_empty())
+            .unwrap_or_else(|| panic!("paper provenance {paper:?} must carry an @<commit> pin"));
+        assert_eq!(
+            pin,
+            server::PAPER_PIN_COMMIT,
+            "scenario PAPER_PIN_COMMIT drifted from the oracle manifest pin ({pin} vs {}); \
+             keep them in lockstep so the differential targets the same Paper reference",
+            server::PAPER_PIN_COMMIT
         );
     }
 }

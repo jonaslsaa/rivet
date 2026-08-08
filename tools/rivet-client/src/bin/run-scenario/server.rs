@@ -7,9 +7,16 @@
 //! stdout (rivet-server/src/main.rs), then SIGTERM and waits for a clean exit
 //! (code 0).
 //!
-//! Both kinds reuse the paperclip-materialized `libraries/`/`versions`/`cache`
-//! across Paper boots and wipe everything else, so each run is a fresh world at
-//! a fixed seed while staying fast on re-runs. Every boot gets its own port
+//! Paper boots reuse the paperclip-downloaded `libraries/` and `cache/` (the
+//! slow ~160MB downloads) and wipe everything else, so each run is a fresh world
+//! at a fixed seed while staying fast on re-runs. `versions/` is deliberately
+//! NOT preserved: the paperclip re-materializes the server jar on every boot, so
+//! `verify_paper_provenance` (called only by the Rivet-vs-Paper differential
+//! path in main.rs, where the Paper reference must be the pinned oracle commit)
+//! can only ever see the jar the artifact actually being booted produced — a
+//! swapped, stale, or non-bundler artifact cannot silently stand in for the
+//! pinned reference. Paper-vs-Paper self-checks and capture do not require the
+//! pin: they compare a build against itself. Every boot gets its own port
 //! (`reserve_ports` in main.rs): the Paper run dir's `server.properties` is
 //! patched to the allocated port and `rivet-server` is passed `--host`/`--port`,
 //! so no two servers in a scenario can collide.
@@ -25,6 +32,13 @@ use std::time::{Duration, Instant};
 
 /// Name of the paperclip bundler jar we boot through.
 pub const PAPERCLIP_JAR: &str = "paper-paperclip-26.2.local-SNAPSHOT.jar";
+
+/// The Paper commit the scenario's Paper reference must be built from — the
+/// same pin `tools/rivet-oracle/fixtures/manifest.json` records
+/// (`paper: 26.2-DEV-main@0a99345`). The paperclip materializes the compiled
+/// server into `versions/26.2/paper-26.2.jar`; its `Git-Commit` manifest
+/// attribute must equal this pin for a Paper boot to be provenance-verified.
+pub const PAPER_PIN_COMMIT: &str = "0a99345";
 
 /// Machine-readable readiness marker printed by `rivet-server` on stdout once
 /// the TCP listener is bound (crates/rivet-server/src/main.rs).
@@ -99,6 +113,10 @@ pub struct Server {
     kind: ServerKind,
     child: Child,
     log_path: PathBuf,
+    /// The run dir the server booted in. For Paper this is where the paperclip
+    /// materialized the compiled server jar, so `shutdown` can verify the
+    /// booted jar's provenance.
+    run_dir: PathBuf,
     /// Byte offset in the boot log at the moment READY was seen; used to
     /// inspect only the post-READY tail for the clean-save/clean-exit marker.
     ready_offset: usize,
@@ -117,6 +135,16 @@ impl Drop for Server {
         }
         let _ = signal_process(self.child.id(), "KILL");
         let _ = self.child.wait();
+    }
+}
+
+impl Server {
+    /// The run dir the server booted in. For Paper this is where the paperclip
+    /// materialized the compiled server jar, so a caller that needs the
+    /// load-bearing provenance check (the Rivet-vs-Paper differential) can
+    /// verify the booted jar after shutdown.
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
     }
 }
 
@@ -175,8 +203,101 @@ pub fn ensure_jar(crate_root: &Path) -> Result<PathBuf, Error> {
     )))
 }
 
-/// Locate the `rivet-server` binary: `RIVET_SERVER_BIN` env wins, then the main
-/// workspace's `target/debug/rivet-server`.
+/// Read the `Git-Commit: <sha>` attribute from a Paper server jar's
+/// `META-INF/MANIFEST.MF` by shelling out to `unzip -p` (the same dependency-
+/// minimal approach as `tools/rivet-oracle`'s `read_jar_git_commit`). Returns
+/// `None` when the jar has no such attribute (a paperclip wrapper, not a
+/// compiled server).
+///
+/// This mirrors the oracle's helper rather than sharing it: the two binaries
+/// classify failures differently (the oracle maps a missing `unzip` to `Gate`;
+/// here `classify_commit_lookup_error` maps it to `Unverified`, the scenario
+/// harness's UNVERIFIED contract for a missing prerequisite). Extracting a
+/// shared helper would couple two standalone binaries' error models for two
+/// small functions.
+pub fn read_jar_git_commit(jar: &Path) -> io::Result<Option<String>> {
+    let out = Command::new("unzip")
+        .arg("-p")
+        .arg(jar)
+        .arg("META-INF/MANIFEST.MF")
+        .output()?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("Git-Commit:")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        }))
+}
+
+/// Verify the server jar a Paper boot actually materialized (the paperclip
+/// writes `versions/26.2/paper-26.2.jar` into the run dir) carries the pinned
+/// `Git-Commit` attribute. This is the same provenance the oracle gate enforces
+/// (`tools/rivet-oracle` `check_pin`): the Paper reference is only meaningful
+/// for a Rivet-vs-Paper differential if it is known to be the pinned commit.
+/// The check is intentionally read from what actually booted — not from the
+/// paperclip jar or any co-located proxy — so a stale, swapped, or
+/// unverifiable Paper cannot silently stand in for the reference.
+pub fn verify_paper_provenance(run_dir: &Path) -> Result<(), Error> {
+    let jar = run_dir.join("versions/26.2/paper-26.2.jar");
+    if !jar.is_file() {
+        return Err(Error::Unverified(format!(
+            "materialized server jar {} missing — the paperclip did not materialize a server",
+            jar.display()
+        )));
+    }
+    let actual = match read_jar_git_commit(&jar) {
+        Ok(Some(commit)) => commit,
+        Ok(None) => {
+            return Err(Error::Unverified(format!(
+                "materialized server jar {} carries no Git-Commit manifest attribute — \
+                 cannot verify the Paper reference is the pinned {PAPER_PIN_COMMIT}",
+                jar.display()
+            )));
+        }
+        Err(e) => return Err(classify_commit_lookup_error(e)),
+    };
+    if actual != PAPER_PIN_COMMIT {
+        return Err(Error::Unverified(format!(
+            "materialized server jar {} is Git-Commit {actual}, but the scenario's Paper \
+             reference is pinned to {PAPER_PIN_COMMIT}. Rebuild the paperclip from the pinned \
+             Paper (build working/Paper at {PAPER_PIN_COMMIT}) before running the differential.",
+            jar.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Classify a `read_jar_git_commit` failure. When the `unzip` binary itself is
+/// missing, `Command::spawn` reports `ErrorKind::NotFound`; that is a missing
+/// prerequisite — UNVERIFIED, not a hard FAIL — since the differential cannot
+/// establish the Paper reference's pin without reading the materialized jar.
+/// Any other failure is a genuine IO error.
+fn classify_commit_lookup_error(e: io::Error) -> Error {
+    if e.kind() == io::ErrorKind::NotFound {
+        Error::Unverified(
+            "cannot verify the Paper reference: `unzip` is not installed (needed to read the \
+             materialized server jar's Git-Commit attribute)"
+                .to_string(),
+        )
+    } else {
+        Error::Io(e)
+    }
+}
+
+/// Locate the `rivet-server` binary: `RIVET_SERVER_BIN` env wins, then the
+/// workspace this harness was built in (`<workspace>/target/debug/rivet-server`).
+///
+/// The fallback resolves against the harness's own manifest dir, so a harness
+/// built inside a worktree selects that worktree's server path. A narrow
+/// freshness guard rejects the fallback when it predates the server entry
+/// point; normal runs rebuild before executing, and the PLAY verdict provides
+/// the load-bearing stale-server check. `RIVET_SERVER_BIN` remains an explicit,
+/// non-commit-bound override for a server in another tree.
 pub fn ensure_rivet_binary(crate_root: &Path) -> Result<PathBuf, Error> {
     if let Ok(p) = std::env::var("RIVET_SERVER_BIN") {
         let p = PathBuf::from(p);
@@ -189,14 +310,34 @@ pub fn ensure_rivet_binary(crate_root: &Path) -> Result<PathBuf, Error> {
         )));
     }
     let workspace_bin = crate_root.join("../../target/debug/rivet-server");
-    if workspace_bin.is_file() {
-        return Ok(workspace_bin);
+    if !workspace_bin.is_file() {
+        return Err(Error::Unverified(format!(
+            "rivet-server binary not found at {}. Build it (cargo build -p rivet-server from \
+             the selected workspace root) or set RIVET_SERVER_BIN.",
+            workspace_bin.display()
+        )));
     }
-    Err(Error::Unverified(format!(
-        "rivet-server binary not found at {}. Build it (cargo build -p rivet-server from the \
-         repo root) or set RIVET_SERVER_BIN.",
-        workspace_bin.display()
-    )))
+    // Provenance: the fallback must be fresh relative to the rivet-server
+    // source in the same workspace. Git checkouts stamp changed files with the
+    // checkout time, so a binary built for an older commit predates the newer
+    // source; refuse it rather than booting the wrong server.
+    let src_marker = crate_root.join("../../crates/rivet-server/src/main.rs");
+    let src_modified = fs::metadata(&src_marker)
+        .ok()
+        .and_then(|m| m.modified().ok());
+    let bin_modified = fs::metadata(&workspace_bin)?.modified()?;
+    if let Some(src_modified) = src_modified
+        && bin_modified < src_modified
+    {
+        return Err(Error::Unverified(format!(
+            "rivet-server binary {} is older than its source {} — it is a stale build \
+             from a different commit. Rebuild it in this workspace (cargo build -p \
+             rivet-server) or point RIVET_SERVER_BIN at the intended binary.",
+            workspace_bin.display(),
+            src_marker.display()
+        )));
+    }
+    Ok(workspace_bin)
 }
 
 /// Rewrite `server-port=` in a run dir's `server.properties` so every boot
@@ -225,9 +366,14 @@ fn patch_server_port(properties: &Path, port: u16) -> Result<(), Error> {
     Ok(())
 }
 
-/// Prepare a clean scratch run dir. For Paper, reuses the paperclip-materialized
-/// libraries so a re-run boots in ~10s instead of ~30s. When a
-/// `server.properties` source is provided, copies it (seed 42, superflat,
+/// Prepare a clean scratch run dir. For Paper, reuses the paperclip-downloaded
+/// libraries and vanilla cache so a re-run boots in ~10s instead of ~30s.
+/// `versions/` is deliberately NOT preserved: the paperclip re-materializes the
+/// server jar from the artifact actually booted on every boot, so
+/// `verify_paper_provenance` can never be fooled by a stale jar left by a prior
+/// (possibly swapped) artifact. A regular Paper jar booted in place of the
+/// bundler never writes `versions/`, so the missing jar fails UNVERIFIED. When
+/// a `server.properties` source is provided, copies it (seed 42, superflat,
 /// offline) and patches its port to the allocated one, guaranteeing config
 /// parity by construction plus port isolation. Rivet boots pass `None`: the
 /// rivet-server binary is driven purely by `--host`/`--port` and never reads
@@ -250,7 +396,7 @@ fn prepare_run_dir(
             for entry in fs::read_dir(run_dir)? {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if matches!(name.as_str(), "libraries" | "versions" | "cache") {
+                if matches!(name.as_str(), "libraries" | "cache") {
                     continue;
                 }
                 let p = entry.path();
@@ -411,6 +557,7 @@ pub fn boot(
         kind,
         child,
         log_path: log_path.to_path_buf(),
+        run_dir: run_dir.to_path_buf(),
         ready_offset,
         stopped: false,
     })
@@ -420,8 +567,8 @@ pub fn boot(
 ///
 /// Paper's clean shutdown is the `All dimensions are saved` marker in the
 /// post-`Done` log tail. Rivet's clean shutdown is the SIGTERM handler draining
-/// and exiting with code 0 (rivet-server/src/main.rs); pre-play there is nothing
-/// to save, so the exit status is the load-bearing assertion.
+/// and exiting with code 0 (rivet-server/src/main.rs); Rivet persists no world
+/// state yet, so the exit status is the load-bearing assertion.
 pub fn shutdown(server: &mut Server) -> Result<(), Error> {
     let pid = server.child.id();
     println!("    server ready; shutting down cleanly (SIGTERM)...");
@@ -446,6 +593,13 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
                         .into(),
                 ));
             }
+            // Provenance is verified only where it is load-bearing: the
+            // Rivet-vs-Paper differential (run_paper_vs_rivet) requires the
+            // Paper reference to be the pinned oracle commit. Paper-vs-Paper
+            // self-checks (paper:paper join, move) and capture compare a build
+            // against itself, so the pin is not a correctness requirement
+            // there. The differential path calls verify_paper_provenance
+            // explicitly after this shutdown.
         }
         ServerKind::Rivet => {
             // Clean shutdown is the SIGTERM handler draining and exiting 0
@@ -466,6 +620,203 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CRC-32 (IEEE) over `data`, matching what zip tools verify. The test
+    /// builds real jar files so `unzip` reads the MANIFEST without a bad-CRC
+    /// warning.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut table = [0u32; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+            *slot = c;
+        }
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        !crc
+    }
+
+    /// Write a minimal valid zip (one stored `META-INF/MANIFEST.MF` entry) to
+    /// `dir/paper.jar` and return its path. `commit` is the `Git-Commit`
+    /// attribute value, or omitted to emulate a jar with no provenance.
+    fn make_jar(dir: &Path, commit: Option<&str>) -> PathBuf {
+        let manifest = match commit {
+            Some(c) => format!(
+                "Manifest-Version: 1.0\r\nGit-Commit: {c}\r\nSpecification-Version: 26.2\r\n"
+            ),
+            None => "Manifest-Version: 1.0\r\nSpecification-Version: 26.2\r\n".to_owned(),
+        };
+        let name = b"META-INF/MANIFEST.MF";
+        let data = manifest.as_bytes();
+        let crc = crc32(data);
+        let jar = dir.join("paper.jar");
+
+        let mut bytes = Vec::new();
+        // Local file header (method 0 = store, so sizes match data).
+        bytes.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&20u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(data);
+        let local_offset = 0u32;
+        let central_start = bytes.len() as u32;
+
+        // Central directory entry.
+        bytes.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&20u16.to_le_bytes());
+        bytes.extend_from_slice(&20u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&local_offset.to_le_bytes());
+        bytes.extend_from_slice(name);
+        let central_size = bytes.len() as u32 - central_start;
+
+        // End of central directory.
+        bytes.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&central_size.to_le_bytes());
+        bytes.extend_from_slice(&central_start.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+
+        fs::write(&jar, bytes).expect("write jar");
+        jar
+    }
+
+    /// A run dir laid out like a Paper boot: the materialized server jar under
+    /// `versions/26.2/`. `tag` keeps parallel tests from sharing a directory.
+    fn run_dir_with_materialized_jar(tag: &str, commit: Option<&str>) -> (PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("rivet-scenario-jar-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let versions = dir.join("versions/26.2");
+        fs::create_dir_all(&versions).unwrap();
+        let jar = make_jar(&versions, commit);
+        fs::rename(&jar, versions.join("paper-26.2.jar")).unwrap();
+        (dir, versions.join("paper-26.2.jar"))
+    }
+
+    #[test]
+    fn read_jar_git_commit_extracts_the_attribute() {
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-mf-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let jar = make_jar(&dir, Some("0a99345"));
+        assert_eq!(
+            read_jar_git_commit(&jar).unwrap(),
+            Some("0a99345".to_owned())
+        );
+        // A jar with no Git-Commit attribute reads back None.
+        let bare = make_jar(&dir, None);
+        assert_eq!(read_jar_git_commit(&bare).unwrap(), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn paper_provenance_accepts_the_pinned_commit() {
+        let (dir, _jar) = run_dir_with_materialized_jar("pinned", Some("0a99345"));
+        verify_paper_provenance(&dir).expect("pinned jar must verify");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn paper_provenance_rejects_a_different_commit() {
+        let (dir, _jar) = run_dir_with_materialized_jar("mismatch", Some("deadbeef"));
+        let err = verify_paper_provenance(&dir).unwrap_err();
+        assert!(
+            err.to_string().contains("deadbeef") && err.to_string().contains("0a99345"),
+            "must name both the booted and the pinned commit, got {err}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn paper_provenance_unverified_when_no_commit_attribute() {
+        let (dir, _jar) = run_dir_with_materialized_jar("noattr", None);
+        let err = verify_paper_provenance(&dir).unwrap_err();
+        assert!(
+            matches!(err, Error::Unverified(_)),
+            "a jar without provenance must be UNVERIFIED, got {err}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn paper_provenance_unverified_when_jar_missing() {
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-nomf-{}", std::process::id()));
+        fs::create_dir_all(dir.join("versions/26.2")).unwrap();
+        let err = verify_paper_provenance(&dir).unwrap_err();
+        assert!(
+            matches!(err, Error::Unverified(_)),
+            "a missing materialized jar must be UNVERIFIED, got {err}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn paper_provenance_unverified_when_unzip_missing() {
+        // `Command::new("unzip")` fails with ErrorKind::NotFound when the binary
+        // is absent from PATH; `verify_paper_provenance` routes that through
+        // `classify_commit_lookup_error`, which must classify it as UNVERIFIED (a
+        // missing prerequisite), not a hard FAIL. Fabricate the io::Error
+        // directly rather than mutating PATH (unsafe on this toolchain and racy
+        // in multi-threaded test runs).
+        let err = classify_commit_lookup_error(io::Error::new(
+            io::ErrorKind::NotFound,
+            "program not found",
+        ));
+        assert!(
+            matches!(err, Error::Unverified(_)),
+            "a missing unzip binary must be UNVERIFIED, got {err}"
+        );
+        assert!(
+            err.to_string().contains("unzip"),
+            "must name unzip as the missing prereq, got {err}"
+        );
+    }
+
+    #[test]
+    fn paper_provenance_io_failure_is_a_hard_error() {
+        // Any read failure that is not a missing unzip binary stays a genuine
+        // IO error, so a corrupt or unreadable jar cannot masquerade as
+        // "no provenance" UNVERIFIED.
+        let err = classify_commit_lookup_error(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+        assert!(
+            matches!(err, Error::Io(_)),
+            "a non-NotFound read failure must stay an IO error, got {err}"
+        );
+    }
 
     #[test]
     fn patch_server_port_replaces_only_the_port_line() {
@@ -498,6 +849,39 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The stale-jar provenance fix: `prepare_run_dir` must wipe `versions/` on
+    /// every Paper boot so `verify_paper_provenance` can only see the jar the
+    /// artifact actually being booted materialized. A stale jar left by a prior
+    /// (possibly swapped) artifact must not survive — otherwise a regular Paper
+    /// jar booted in place of the bundler would pass on the old pinned jar.
+    /// `libraries/` and `cache/` (the slow downloads) are still preserved.
+    #[test]
+    fn prepare_run_dir_wipes_stale_versions_but_keeps_download_cache() {
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-rd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("libraries/org")).unwrap();
+        fs::create_dir_all(dir.join("cache")).unwrap();
+        fs::create_dir_all(dir.join("versions/26.2")).unwrap();
+        fs::write(dir.join("libraries/org/dummy.jar"), b"lib").unwrap();
+        fs::write(dir.join("cache/mojang.jar"), b"vanilla").unwrap();
+        // A stale materialized jar from a *prior* boot (e.g. the pinned commit).
+        let stale = make_jar(&dir.join("versions/26.2"), Some("0a99345"));
+        fs::rename(&stale, dir.join("versions/26.2/paper-26.2.jar")).unwrap();
+
+        prepare_run_dir(&dir, ServerKind::Paper, None, 25599).unwrap();
+
+        assert!(
+            !dir.join("versions").exists(),
+            "versions/ must be wiped so a stale jar cannot fool provenance"
+        );
+        assert!(
+            dir.join("libraries").is_dir(),
+            "libraries/ must be preserved"
+        );
+        assert!(dir.join("cache").is_dir(), "cache/ must be preserved");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Dropping a `Server` without a clean `shutdown` must kill the underlying
     /// process (a leftover server would hold its port hostage for the next run).
     #[test]
@@ -516,6 +900,7 @@ mod tests {
             kind: ServerKind::Rivet,
             child,
             log_path: PathBuf::from("/dev/null"),
+            run_dir: PathBuf::from("/nonexistent"),
             ready_offset: 0,
             stopped: false,
         };
@@ -548,6 +933,7 @@ mod tests {
             kind: ServerKind::Rivet,
             child,
             log_path: PathBuf::from("/dev/null"),
+            run_dir: PathBuf::from("/nonexistent"),
             ready_offset: 0,
             stopped: false,
         };

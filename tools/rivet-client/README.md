@@ -39,8 +39,8 @@ transcripts with a field-level comparator.
 tools/rivet-client/run-scenario.sh join            # Paper-vs-Paper self-check: 2 fresh Paper boots, must be identical
 tools/rivet-client/run-scenario.sh join --runs 3  # more Paper boots
 tools/rivet-client/run-scenario.sh move           # Paper-vs-Paper movement self-check: bounded walk, identical movement transcripts
-tools/rivet-client/run-scenario.sh join --server rivet            # Rivet headless boot + pre-play transcript
-tools/rivet-client/run-scenario.sh join --server both --pairs paper:rivet  # Paper-vs-Rivet pre-play scenario
+tools/rivet-client/run-scenario.sh join --server rivet            # Rivet headless boot: pinned Azalea completes login/config/spawn, exact 117-chunk send-set
+tools/rivet-client/run-scenario.sh join --server both --pairs paper:rivet  # Paper-vs-Rivet play scenario
 tools/rivet-client/run-scenario.sh capture        # one boot; print the normalized transcript
 ```
 
@@ -48,10 +48,10 @@ Modes (`--server` selects which servers boot, `--pairs` selects the comparison):
 
 | `--server` | `--pairs` | What runs |
 |---|---|---|
-| `paper` (default) | `paper:paper` (default) | `join` Paper-vs-Paper self-check: `--runs` Paper boots must produce identical transcripts, plus the tamper negative case. Behavior unchanged from before #155. |
+| `paper` (default) | `paper:paper` (default) | `join` Paper-vs-Paper self-check: `--runs` Paper boots must produce identical transcripts, plus the tamper negative case. Paper-vs-Paper modes compare a build against itself, so they boot whatever Paper build the paperclip produces and do not require the oracle pin. |
 | `paper` | `paper:paper` | `move` Paper-vs-Paper movement self-check (issue #53): each boot drives the client's bounded forward walk (`move` mode) and `--runs` Paper boots must produce identical normalized movement transcripts (per-tick spawn-relative deltas, velocity, on-ground, teleport/keepalive echo relationships), plus the tamper negative case. This validates the movement harness against Paper; a Rivet-vs-Paper comparison is deferred until Rivet's movement listener lands (issue #158). |
-| `rivet` | `paper:rivet` | `join` Rivet headless boot: `--runs` rivet-servers, each must reach `RIVET_READY`, accept the client at the pre-play boundary, and shut down cleanly on SIGTERM. Reports the pre-play limitation honestly (issue #96). |
-| `both` | `paper:rivet` | `join` Paper-vs-Rivet pre-play scenario: Paper and Rivet boot on isolated ports, the client joins each, and the harness reports the controlled pre-play transcript divergence. `--runs` is rejected here (it always boots exactly one Paper + one Rivet). |
+| `rivet` | `paper:rivet` | `join` Rivet headless boot (issue #192): `--runs` rivet-servers, each must reach `RIVET_READY`, take the pinned Azalea client through offline login, configuration (registry sync), the play handoff, and spawn, receiving exactly the deterministic 117-chunk send-set, and shut down cleanly on SIGTERM. |
+| `both` | `paper:rivet` | `join` Paper-vs-Rivet play scenario (issue #192, inverted by #159): Paper and Rivet boot on isolated ports, the client joins each, and both must reach spawn. This is the load-bearing provenance path: after the Paper boot, the materialized server jar is verified to carry the pinned oracle commit (exit 3 UNVERIFIED otherwise), so the differential is always against the same reference the oracle gate uses. Both servers boot the single-stone superflat fixture, so the spawn height `position.y` is compared; the transcripts must differ only on the excluded per-boot nondeterminism plus the one documented Rivet/Paper gap (the health component default) — any other divergence FAILS the run. A controlled negative then tampers the compared `position.y` on the Paper reference (offset above both spawn heights) and requires the real comparator/divergence path to report the tampered value and refuse PASS, so the acceptance cannot pass vacuously or by silently excluding position.y. `--runs` is rejected here (it always boots exactly one Paper + one Rivet). |
 
 Rivet readiness is a machine-readable `RIVET_READY` marker on `rivet-server`
 stdout (crates/rivet-server/src/main.rs); the harness waits for it as a hard
@@ -61,14 +61,23 @@ a FAIL. Every boot gets its own isolated port (Paper's run-dir
 never collide. Rivet boots do not need `server.properties` (the binary is
 driven purely by `--host`/`--port`).
 
-A Rivet run only passes if the client actually reached the Rivet port. Azalea
-fires `Event::Init` before any TCP connect, and `connection_failed`/`timeout`
-fire without completing a session, so the transcript alone cannot distinguish a
-live pre-play exchange from a dead or hung endpoint. The harness requires both
-independent observables: the client transcript outcome is `disconnected`, and
-the rivet log shows `connection established` followed by the login listener's
-`login state not implemented yet` rejection (issue #96) — lines only the real
-`rivet-server` emits for a genuine pre-play exchange.
+A Rivet run only passes if the client completed a genuine play session against
+the Rivet port. Azalea fires `Event::Init` before any TCP connect, and
+`connection_failed`/`timeout` fire without completing a session, so the
+transcript alone cannot distinguish a live server from a dead or hung endpoint.
+The harness requires two independent observables: the rivet log shows
+`connection established` (a line only the real `rivet-server` binary emits on
+TCP accept), and the client transcript passes `rivet_play_verdict` — outcome
+`spawned`, lifecycle containing `login` and `spawn`, the pinned Azalea build
+revision, exactly 117 chunks, and the deterministic superflat spawn y `-63.0`.
+A stale pre-play Rivet build (which closes the client at the login boundary),
+a fake/non-Rivet endpoint, or a Paper-like y=-60 spawn all fail the verdict.
+
+The fallback `rivet-server` path is resolved inside the harness's workspace,
+and a narrow freshness guard rejects it when it predates that workspace's
+`rivet-server` entry point. Normal runs rebuild before executing; the PLAY
+verdict and Rivet-only connection log remain the load-bearing stale/fake-server
+checks. `RIVET_SERVER_BIN` is an explicit override and is not commit-bound.
 
 The runner:
 
@@ -77,10 +86,10 @@ The runner:
    READY marker (`Done (...)!` for Paper, `RIVET_READY` for Rivet).
 2. Runs the headless client in the requested mode (`join` waits for the stable
    `joined` record after the chunk stream quiesces; `move` drives the bounded
-   forward walk and waits for the `moved` record) — or, for Rivet, records the
-   honest pre-play outcome (`disconnected`, never `spawned`;
-   `connection_failed`/`timeout` are rejected as "client never completed a
-   session").
+   forward walk and waits for the `moved` record). For Rivet the transcript must
+   pass `rivet_play_verdict` — `connection_failed`/`timeout` and any
+   `disconnected` pre-play outcome are rejected as "client never completed
+   login/configuration into play".
 3. SIGTERM-shuts the server down cleanly and preserves raw diagnostics under
    `work/scenario-join/`, `work/scenario-move/`, `work/scenario-rivet/`, or
    `work/scenario-both/` (`boot*.log`, `client*.stdout.jsonl`,

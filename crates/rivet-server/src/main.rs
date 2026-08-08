@@ -4,12 +4,12 @@
 //!
 //! The full boot sequence (world/level load, registry/data load, tick-phase
 //! systems) is M1 sub-issues #100/#101; this binary brings up the TCP listener,
-//! the pre-play connection state machines, the tick spine, and — with
+//! the login/configuration/play state machines, the tick spine, and — with
 //! `enable_join` set — the live play path: an offline client that completes
 //! login + configuration joins the superflat world and receives the join burst
 //! (issue #101 Slice B) sized by its `ClientInformation` view distance — the
-//! capture client's 8 resolves the 135-frame burst, a `create_default` client's
-//! 2 the 99-frame burst.
+//! capture client's 8 caps at `load - 1` and resolves the 117-chunk send-set, a
+//! `create_default` client's 2 the 81-chunk set.
 //!
 //! ## Machine-readable protocol (stdout)
 //!
