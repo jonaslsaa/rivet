@@ -132,9 +132,11 @@ impl CarvingMask {
     }
 }
 
-/// `getIndex(x, y, z)` — `x & 15 | (z & 15) << 4 | (y - minY) << 8`.
+/// `getIndex(x, y, z)` — `x & 15 | (z & 15) << 4 | (y - minY) << 8`. The
+/// subtraction wraps like Java's int arithmetic (PORTING.md); a `y - minY`
+/// outside `i32` wraps instead of panicking.
 fn get_index(x: i32, y: i32, z: i32, min_y: i32) -> usize {
-    (x & 15 | (z & 15) << 4 | (y - min_y) << 8) as usize
+    (x & 15 | (z & 15) << 4 | (y.wrapping_sub(min_y)) << 8) as usize
 }
 
 #[cfg(test)]

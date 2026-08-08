@@ -16,9 +16,9 @@
 //! unit (#232), so this module ports `getChunkForLighting` alone; the owning
 //! units re-add the methods when those types land.
 //!
-//! The value is a `Fn(&ChunkPos)`-style closure resolving the `Option<C>`
-//! chunk back-reference, following the pure-value pattern of the heightmap
-//! module (OWNERSHIP.md — no stored `&ChunkAccess`).
+//! The value is a `Fn(i32, i32) -> Option<C>` closure resolving the chunk
+//! back-reference by chunk coordinates, following the pure-value pattern of
+//! the heightmap module (OWNERSHIP.md — no stored `&ChunkAccess`).
 
 /// `net.minecraft.world.level.chunk.LightChunkGetter`.
 pub struct LightChunkGetter<C> {

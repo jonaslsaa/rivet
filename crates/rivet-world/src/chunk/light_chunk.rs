@@ -5,24 +5,23 @@
 //! `findBlockLightSources(BiConsumer<BlockPos, BlockState>)` plus
 //! `getSkyLightSources()` (`ChunkSkyLightSources`). `ChunkAccess` implements it.
 //!
-//! The port keeps the two lighting hooks. The `BlockGetter` superinterface and
-//! `ChunkSkyLightSources` are not ported (BlockGetter is deferred with the
-//! world/access units; `ChunkSkyLightSources` is owned by the
-//! `mc.world.level.lighting` unit), so those methods are omitted rather than
-//! stubbed. The block-state type is the caller's `T`, and block light sources
-//! are resolved through the closure `is_light_source` — the light engines that
-//! consult them are deferred (#184).
+//! The port keeps `findBlockLightSources` alone. `getSkyLightSources()`
+//! (`ChunkSkyLightSources`) is deferred with the `mc.world.level.lighting`
+//! unit (#184) and `BlockGetter` with the world/access unit (#232), so both
+//! are omitted rather than stubbed. The block-state type is the caller's `T`,
+//! and block light sources are resolved through the closure `is_light_source`
+//! — the light engines that consult them are deferred (#184).
 //!
 //! RivetTodo(#184): the light engines (`LightEngine` and the section storages)
-//! that drive `findBlockLightSources`/`getSkyLightSources` are not ported;
-//! this module ports the chunk-side surface the engines call.
+//! that drive `findBlockLightSources` are not ported; this module ports the
+//! chunk-side surface the engines call.
 
 use rivet_registry::core::BlockPos;
 
 /// `net.minecraft.world.level.chunk.LightChunk`.
 pub trait LightChunk<T> {
     /// `findBlockLightSources(BiConsumer<BlockPos, BlockState>)` — visits every
-    /// block that emits light (`state.getLightEmission() > 0` in Java). The
+    /// block that emits light (`state.getLightEmission() != 0` in Java). The
     /// light-emitting predicate is resolved per state by the caller.
     fn find_block_light_sources(
         &self,

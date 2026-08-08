@@ -27,8 +27,8 @@ pub struct StructureAccess<S> {
     structure_starts: HashMap<S, i64>,
     /// `structuresRefences` — structure id -> chunk references. Java's
     /// `LongOpenHashSet` is not ported; modeled as a `Vec<u64>` that keeps the
-    /// set's semantics by deduplicating on insert (insertion order, not
-    /// sorted).
+    /// set's semantics by deduplicating on insert (first-insertion order; Java
+    /// defines no iteration order for its hash set).
     structure_references: HashMap<S, Vec<u64>>,
 }
 
@@ -80,10 +80,19 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
     }
 
     /// `setAllReferences(Map)` — clear + putAll (the `markUnsaved` side
-    /// effect is omitted).
+    /// effect is omitted). Java's values are already `LongOpenHashSet`s, so a
+    /// caller handing over raw `Vec`s here must get the same set semantics:
+    /// duplicates dedupe on insert (first-insertion order preserved).
     pub fn set_all_references(&mut self, data: HashMap<S, Vec<u64>>) {
         self.structure_references.clear();
-        self.structure_references.extend(data);
+        for (structure, references) in data {
+            let set = self.structure_references.entry(structure).or_default();
+            for reference in references {
+                if !set.contains(&reference) {
+                    set.push(reference);
+                }
+            }
+        }
     }
 }
 
@@ -140,5 +149,17 @@ mod tests {
         access.set_all_references(data);
         assert!(access.get_references_for_structure(&"old").is_empty());
         assert_eq!(access.get_references_for_structure(&"new"), &[9, 8]);
+    }
+
+    #[test]
+    fn set_all_references_deduplicates_like_the_java_set() {
+        // Java's `setAllReferences` values are `LongOpenHashSet`s, so duplicate
+        // references cannot survive a `putAll`. The `Vec` model must dedupe on
+        // insert the same way (counterfactual: a raw `extend` would keep the
+        // duplicate `1`, `2`, `3`).
+        let mut access = StructureAccess::<&str>::new();
+        let data = std::collections::HashMap::from([("monument", vec![1u64, 2, 1, 3, 2, 3])]);
+        access.set_all_references(data);
+        assert_eq!(access.get_references_for_structure(&"monument"), &[1, 2, 3]);
     }
 }

@@ -218,6 +218,11 @@ fn unpack_then_pack_reencodes_in_storage_order() {
 
     let repacked = states.pack();
     let read_view_packed = PalettedContainerRO::pack(&states, factory.block_states_strategy());
+    // The read-view `pack(Strategy)` must match the container's own-strategy
+    // `pack()` field-for-field — comparing only the bit width would let a
+    // same-width wrong palette/storage pass.
+    assert_eq!(read_view_packed.palette_entries, repacked.palette_entries);
+    assert_eq!(read_view_packed.storage, repacked.storage);
     assert_eq!(read_view_packed.bits_per_entry, repacked.bits_per_entry);
     assert_eq!(repacked.palette_entries, vec![StateId(1), StateId(0)]);
     assert_eq!(repacked.bits_per_entry, 4);
