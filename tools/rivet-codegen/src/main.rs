@@ -16,11 +16,13 @@ mod block_states;
 mod extract;
 mod extract_biomes_tags;
 mod generate;
+mod items_recipes;
 mod model;
 mod mth_gen;
 mod packets;
 mod probe_biomes_tags;
 mod probe_block_states;
+mod probe_items_recipes;
 mod registries;
 mod registry_data;
 mod reports;
@@ -69,6 +71,15 @@ fn main() -> Result<()> {
             let bundler = flag(&args, "--bundler");
             probe_biomes_tags::run(bundler)
         }
+        Some("extract-items-recipes") => {
+            let bundler = flag(&args, "--bundler");
+            let output = flag(&args, "--output");
+            items_recipes::run(bundler, output)
+        }
+        Some("probe-items-recipes") => {
+            let bundler = flag(&args, "--bundler");
+            probe_items_recipes::run(bundler)
+        }
         Some("reports") => {
             let jar = flag(&args, "--jar");
             let output = flag(&args, "--output");
@@ -98,7 +109,7 @@ fn print_usage() {
         "rivet-codegen — vanilla data extraction + registry codegen\n\
          \n\
          USAGE:\n\
-         \x20   rivet-codegen <extract|generate|registries|mth-gen|probe-block-states|extract-biomes-tags|probe-biomes-tags|reports> [flags]\n\
+         \x20   rivet-codegen <extract|generate|registries|mth-gen|probe-block-states|extract-biomes-tags|probe-biomes-tags|extract-items-recipes|probe-items-recipes|reports> [flags]\n\
          \n\
          SUBCOMMANDS:\n\
          \x20   extract   Extract the block registry + block states from the Paper 26.2\n\
@@ -126,6 +137,16 @@ fn print_usage() {
          \x20             Paper jar and cross-check the emitted block-state global-id table\n\
          \x20             (issue #154): live size/contiguity/defaults + the representative\n\
          \x20             anchor ids. Flags: --bundler <path>  path to paper-bundler-26.2*.jar\n\
+         \x20   extract-items-recipes  Dump the deterministic item metadata (default max stack\n\
+         \x20             size, required feature flags, crafting remaining item) + the canonical\n\
+         \x20             Recipe.CODEC-re-encoded recipe table from a live Paper load\n\
+         \x20             (ItemRecipeExtractor.java) into data/items_recipes.json (+ provenance\n\
+         \x20             manifest), issue #186.\n\
+         \x20             Flags: --bundler <path>   path to paper-bundler-26.2*.jar\n\
+         \x20                     --output <path>   output JSON (default data/items_recipes.json)\n\
+         \x20   probe-items-recipes  Re-run the item+recipe extractor against the real Paper jar\n\
+         \x20             and require byte-identity with the committed data/items_recipes.json,\n\
+         \x20             plus the anchor counts (issue #186). Flags: --bundler <path>\n\
          \x20   extract-biomes-tags  Dump the deterministic biome id table + tag network\n\
          \x20             content from a live Paper registry load (BiomeTagExtractor.java)\n\
          \x20             into data/biomes_tags.json (+ provenance manifest), issue #49.\n\

@@ -40,6 +40,21 @@ JVM and to use `anyhow`/`serde`.
   network-serialization content to `data/biomes_tags.json` (issue #49). The
   helper writes a `probe` object with the live-load counts into the fixture
   because `Bootstrap.wrapStreams()` redirects `System.out` into the logger.
+- **`extract-items-recipes`** — compiles and runs `java/ItemRecipeExtractor.java`
+  against the real Paper jar, reproducing `RecipeManager.prepare`'s recipe load
+  (`FileToIdConverter.registry(Registries.RECIPE)` + `scanDirectory` +
+  `Recipe.CODEC` into a `TreeMap<Identifier, Recipe<?>>`), and writes the
+  deterministic item metadata (default max stack size via bound
+  `DATA_COMPONENT_INITIALIZERS` holder components, required feature flags,
+  crafting-remaining item) + the canonical `Recipe.CODEC`-re-encoded recipe
+  table to `data/items_recipes.json` (+ provenance manifest), issue #186. The
+  fixture is validated on write and pinned by sha256; it is currently captured
+  only — the downstream registry emission is owned by #228.
+- **`probe-items-recipes`** — re-runs `ItemRecipeExtractor` against the real
+  Paper jar and requires byte-identity with the committed
+  `data/items_recipes.json` plus the anchor counts (1537 items / 1585 recipes).
+  This is the live half of the fixture-pinned conformance test in
+  `items_recipes.rs` tests.
 - **`probe-biomes-tags`** — re-runs `BiomeTagExtractor` against the real Paper
   jar and requires byte-identity with the committed `data/biomes_tags.json`
   plus the anchor counts (66 biomes / 15 tag-carrying registries / 697 tags).
@@ -64,6 +79,8 @@ rivet-codegen registries [--input <path>]  [--output <dir>]
 rivet-codegen mth-gen    [--bundler <path>] [--output <dir>]
 rivet-codegen extract-biomes-tags [--bundler <path>] [--output <path>]
 rivet-codegen probe-biomes-tags  [--bundler <path>]
+rivet-codegen extract-items-recipes [--bundler <path>] [--output <path>]
+rivet-codegen probe-items-recipes  [--bundler <path>]
 rivet-codegen probe-block-states [--bundler <path>]
 rivet-codegen reports    [--jar <path>] [--output <dir>] [--verify]
 ```
@@ -85,6 +102,8 @@ target/release/rivet-codegen registries       # -> crates/rivet-registry/src/gen
 target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
 target/release/rivet-codegen extract-biomes-tags  # -> data/biomes_tags.json + manifest
 target/release/rivet-codegen probe-biomes-tags    # verify biome ids + tag network content against live Paper
+target/release/rivet-codegen extract-items-recipes  # -> data/items_recipes.json + manifest
+target/release/rivet-codegen probe-items-recipes    # verify item metadata + canonical recipes against live Paper
 target/release/rivet-codegen probe-block-states   # verify the emitted block-state global ids against live Paper
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```

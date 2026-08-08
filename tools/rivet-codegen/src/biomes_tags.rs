@@ -468,7 +468,10 @@ fn cross_check_shared(key: &str, runtime: &[Entry], report: &HashMap<String, u32
 
 /// Read the pinned `data/reports/registries.json` report surfaces for the
 /// report-backed tag-carrying registries. Returns name -> protocol_id per key.
-fn read_report_surfaces() -> Result<HashMap<String, HashMap<String, u32>>> {
+/// `pub(crate)` so the items+recipes half ([`crate::items_recipes`]) reuses the
+/// same surfaces for its own fixture cross-check instead of re-implementing the
+/// report reader.
+pub(crate) fn read_report_surfaces() -> Result<HashMap<String, HashMap<String, u32>>> {
     let repo_root = crate::extract::find_repo_root()?;
     let path = repo_root.join("tools/rivet-codegen/data/reports/registries.json");
     let json = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
