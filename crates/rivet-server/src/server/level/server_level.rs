@@ -17,10 +17,11 @@
 //! pools) resolve chunk/level data through tick-thread confinement or the
 //! immutable config snapshot.
 //!
-//! `LevelData.RespawnData` is the Java record `(GlobalPos, yaw, pitch)`; the
-//! superflat spawn is `BlockPos(0, -63, 0)` — `FlatLevelSource.getSpawnHeight`
-//! returns `minY + min(height, layers.size()) = -64 + min(384, 1) = -63`, and
-//! the spawn chunk is the chunk containing it, `(0,0)`.
+//! `LevelData.RespawnData` is the Java record `(GlobalPos, yaw, pitch)`, ported
+//! once in `rivet_world::level` (issue #232) and imported here; the superflat
+//! spawn is `BlockPos(0, -63, 0)` — `FlatLevelSource.getSpawnHeight` returns
+//! `minY + min(height, layers.size()) = -64 + min(384, 1) = -63`, and the spawn
+//! chunk is the chunk containing it, `(0,0)`.
 //!
 //! RivetTodo(#227): the `Level` base surface (tick, `getBlockState`,
 //! entities, time, weather, game rules), the `ServerLevel.tick` phases, and the
@@ -30,8 +31,9 @@
 
 use rivet_registry::Identifier;
 use rivet_registry::ResourceKey;
-use rivet_registry::core::{BlockPos, ChunkPos, GlobalPos};
+use rivet_registry::core::{BlockPos, ChunkPos};
 use rivet_registry::registries::{self, Level};
+use rivet_world::level::RespawnData;
 use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
 
 use super::chunk_map::ChunkMap;
@@ -44,66 +46,6 @@ pub fn overworld_dimension() -> ResourceKey<Level> {
         &*registries::DIMENSION,
         Identifier::with_default_namespace("overworld"),
     )
-}
-
-/// `net.minecraft.world.level.storage.LevelData.RespawnData` — the `(GlobalPos,
-/// yaw, pitch)` record the world (and the player's respawn) is anchored to.
-///
-/// Java `LevelData.RespawnData.of` normalizes yaw via `Mth.wrapDegrees` and
-/// clamps pitch to `[-90, 90]`; the record constructor itself stores the raw
-/// values. The M1 world uses the superflat spawn `(0, -63, 0)` with yaw 0,
-/// pitch 0.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RespawnData {
-    global_pos: GlobalPos,
-    yaw: f32,
-    pitch: f32,
-}
-
-impl RespawnData {
-    /// `LevelData.RespawnData(GlobalPos, yaw, pitch)`.
-    pub fn new(global_pos: GlobalPos, yaw: f32, pitch: f32) -> Self {
-        RespawnData {
-            global_pos,
-            yaw,
-            pitch,
-        }
-    }
-
-    /// `LevelData.RespawnData.of(dimension, pos, yaw, pitch)` — normalizes the
-    /// angles (`Mth.wrapDegrees` yaw, `Mth.clamp(pitch, -90, 90)`).
-    pub fn of(dimension: ResourceKey<Level>, pos: BlockPos, yaw: f32, pitch: f32) -> Self {
-        RespawnData::new(
-            GlobalPos::of(dimension, pos.immutable()),
-            rivet_util::mth::wrap_degrees_f32(yaw),
-            rivet_util::mth::clamp_f32(pitch, -90.0, 90.0),
-        )
-    }
-
-    /// `RespawnData.globalPos()`.
-    pub fn global_pos(&self) -> &GlobalPos {
-        &self.global_pos
-    }
-
-    /// `RespawnData.dimension()`.
-    pub fn dimension(&self) -> &ResourceKey<Level> {
-        self.global_pos.dimension()
-    }
-
-    /// `RespawnData.pos()`.
-    pub fn pos(&self) -> BlockPos {
-        self.global_pos.pos()
-    }
-
-    /// `RespawnData.yaw()`.
-    pub fn yaw(&self) -> f32 {
-        self.yaw
-    }
-
-    /// `RespawnData.pitch()`.
-    pub fn pitch(&self) -> f32 {
-        self.pitch
-    }
 }
 
 /// The config that builds the M1 superflat world (issue #156). Immutable after

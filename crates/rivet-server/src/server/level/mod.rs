@@ -26,4 +26,4 @@ pub use player_chunk_loader::{
     PlayPacket, PlayerChunkLoader, encode_play_frame, get_client_view_distance,
     get_load_view_distance, get_send_view_distance, get_tick_distance,
 };
-pub use server_level::{RespawnData, ServerLevel, ServerLevelConfig, overworld_dimension};
+pub use server_level::{ServerLevel, ServerLevelConfig, overworld_dimension};
