@@ -15,6 +15,7 @@
 
 pub mod join;
 pub mod play_sender;
+pub mod session;
 
 use std::collections::HashMap;
 
@@ -157,6 +158,11 @@ impl PlayerIndices {
     /// Resolve a connection to its player UUID.
     pub fn uuid_for(&self, connection_id: ConnectionId) -> Option<Uuid> {
         self.by_connection.get(&connection_id).copied()
+    }
+
+    /// Iterate the connection ids with a registered session (the live sessions).
+    pub fn connection_ids(&self) -> impl Iterator<Item = ConnectionId> + '_ {
+        self.by_connection.keys().copied()
     }
 
     /// The number of registered sessions.

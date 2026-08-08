@@ -1,4 +1,4 @@
-//! `server::player` — the join-burst foundation tests (Slice A of #101):
+//! `server::player` — the join-burst tests (Slices A + B of #101):
 //! `PlaySender` encodes + queues frames, `ServerPlayer`/`PlayerIndices` model
 //! the session, and `place_new_player`/`send_level_info` emit the Paper-faithful
 //! play join burst.
@@ -8,16 +8,18 @@
 //! offline superflat world, seed 42, view distance 4). The committed capture is
 //! the deterministic canonical form (`normalize::canonicalize`), not the raw
 //! transcript. The `canonicalize` function groups by `(state, direction, id)`,
-//! so the normalized capture supplies Slice A's
-//! BODIES but erases ORDER — the burst order comes from `PLAY_BURST_ORDER` /
-//! the Paper source, not from the capture's positional adjacency. Each body is
-//! the packet payload the capture proxy strips (packet id + compression prefix
-//! already removed, randomized fields canonicalized), so the byte-exact
-//! assertions compare an encoded burst member against the capture's normalized
-//! body. The four `rivet-protocol`
-//! `join_clientbound_*.hex` fixtures pin the same bodies. Slice A covers ids
-//! `[49,10,64,105,72,43,113,97,38,70]` — the ten members Paper sends in between
-//! (see the authoritative list in `join.rs`'s module doc) are deferred.
+//! so the normalized capture supplies the BODIES but erases ORDER — the burst
+//! order comes from `PLAY_BURST_ORDER` / the Paper source, not from the
+//! capture's positional adjacency. Each body is the packet payload the capture
+//! proxy strips (packet id + compression prefix already removed, randomized
+//! fields canonicalized), so the byte-exact assertions compare an encoded burst
+//! member against the capture's normalized body. The `rivet-protocol`
+//! `join_clientbound_*.hex` fixtures pin the same bodies; the #194
+//! `chunk_golden_full.hex` pins the superflat chunk content. Slice B emits the
+//! full ported burst: `[49,10,64,105,34,72,43,113,97,38,70]`, the #100 cache
+//! packets (95/111/94), the 117 chunks (45), then the second `sendLevelInfo`
+//! (43/113/97/38) — the members Paper sends in between (see the authoritative
+//! list in `join.rs`'s module doc) are deferred.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -159,9 +161,9 @@ fn registry_with_connection() -> (
 ) {
     let mut registry = ConnectionRegistry::new();
     let (in_tx, in_rx) = tokio::sync::mpsc::channel(4);
-    // The whole 10-packet burst is queued before the test drains, so the
+    // The whole 135-frame burst is queued before the test drains, so the
     // outbound channel must hold every frame (Paper's 1024 default does).
-    let (out_tx, out_rx) = tokio::sync::mpsc::channel(32);
+    let (out_tx, out_rx) = tokio::sync::mpsc::channel(256);
     registry.apply(
         rivet_server::server::tick::channels::LifecycleEvent::Connect {
             id: PROBE_ID,
@@ -196,8 +198,11 @@ fn protocol_fixture(name: &str) -> Vec<u8> {
 }
 
 /// Decode one outbound `frame` back to `(packet_id, body)` using the real
-/// VarInt21 frame decoder and VarInt readers — no fixed 1-byte offset
-/// assumptions, so future >=128-byte bodies or packet ids decode correctly.
+/// VarInt21 frame decoder, the compression decoder, and VarInt readers — no
+/// fixed 1-byte offset assumptions, so future >=128-byte bodies or packet ids
+/// decode correctly. Sub-threshold bodies (the join members) are uncompressed
+/// (`varint(0)`); the 7279-byte chunk bodies exceed the 256 threshold and are
+/// zlib-compressed (`varint(declaredLen) ++ zlib`).
 fn decode_frame(frame: &[u8]) -> (u32, Vec<u8>) {
     let mut buf = BytesMut::from(frame);
     let wire = Varint21FrameDecoder::new(None)
@@ -205,11 +210,18 @@ fn decode_frame(frame: &[u8]) -> (u32, Vec<u8>) {
         .expect("frame decodes")
         .expect("frame present");
     let mut wire = BytesMut::from(&wire[..]);
-    // Below-threshold frames are uncompressed: `varint(0) ++ varint(packet_id) ++ body`.
     let declared_len = var_int::read(&mut wire);
-    assert_eq!(declared_len, 0, "below-threshold frame is uncompressed");
-    let packet_id = var_int::read(&mut wire) as u32;
-    (packet_id, wire.to_vec())
+    let payload = if declared_len == 0 {
+        wire.to_vec()
+    } else {
+        let mut decoder = flate2::read::ZlibDecoder::new(&wire[..]);
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut out).expect("zlib inflate");
+        out
+    };
+    let mut payload = BytesMut::from(&payload[..]);
+    let packet_id = var_int::read(&mut payload) as u32;
+    (packet_id, payload.to_vec())
 }
 
 /// The `PacketType` id constants the burst asserts against.
@@ -219,12 +231,17 @@ mod ids {
     pub const CHANGE_DIFFICULTY: u32 = PacketType::ChangeDifficulty.id();
     pub const PLAYER_ABILITIES: u32 = PacketType::PlayerAbilities.id();
     pub const SET_HELD_SLOT: u32 = PacketType::SetHeldSlot.id();
+    pub const ENTITY_EVENT: u32 = PacketType::EntityEvent.id();
     pub const PLAYER_POSITION: u32 = PacketType::PlayerPosition.id();
     pub const INITIALIZE_BORDER: u32 = PacketType::InitializeBorder.id();
     pub const SET_TIME: u32 = PacketType::SetTime.id();
     pub const SET_DEFAULT_SPAWN: u32 = PacketType::SetDefaultSpawnPosition.id();
     pub const GAME_EVENT: u32 = PacketType::GameEvent.id();
     pub const PLAYER_INFO_UPDATE: u32 = PacketType::PlayerInfoUpdate.id();
+    pub const SET_CHUNK_CACHE_RADIUS: u32 = PacketType::SetChunkCacheRadius.id();
+    pub const SET_SIMULATION_DISTANCE: u32 = PacketType::SetSimulationDistance.id();
+    pub const SET_CHUNK_CACHE_CENTER: u32 = PacketType::SetChunkCacheCenter.id();
+    pub const LEVEL_CHUNK_WITH_LIGHT: u32 = PacketType::LevelChunkWithLight.id();
 }
 
 // ---- PlayerIndices ----------------------------------------------------------
@@ -325,22 +342,37 @@ fn border_body() -> Vec<u8> {
     hex_bytes("00000000000000000000000000000000418c9c3700000000418c9c370000000000f086a70e05ac02")
 }
 
-/// The Slice A ids in Paper's send order — `PLAY_BURST_ORDER` minus the ten
-/// deferred members (the complete, authoritative list is in `join.rs`'s module
-/// doc; don't restate a partial list here).
-fn slice_a_order() -> Vec<u32> {
-    vec![
+/// The full Slice B burst ids in Paper's send order — `PLAY_BURST_ORDER`
+/// restricted to the ported members (the complete, authoritative list is in
+/// `join.rs`'s module doc), with the two `sendLevelInfo` occurrences bracketing
+/// the player_info update and the #100 cache + 117-chunk send-set immediately
+/// before the second `sendLevelInfo`. 135 frames total: 11 join members, the 3
+/// cache packets, the 117 chunks, and the 4 second-`sendLevelInfo` members.
+fn burst_order() -> Vec<u32> {
+    let mut order = vec![
         ids::LOGIN,
         ids::CHANGE_DIFFICULTY,
         ids::PLAYER_ABILITIES,
         ids::SET_HELD_SLOT,
+        ids::ENTITY_EVENT,
         ids::PLAYER_POSITION,
         ids::INITIALIZE_BORDER,
         ids::SET_TIME,
         ids::SET_DEFAULT_SPAWN,
         ids::GAME_EVENT,
         ids::PLAYER_INFO_UPDATE,
-    ]
+        ids::SET_CHUNK_CACHE_RADIUS,
+        ids::SET_SIMULATION_DISTANCE,
+        ids::SET_CHUNK_CACHE_CENTER,
+    ];
+    order.extend(std::iter::repeat_n(ids::LEVEL_CHUNK_WITH_LIGHT, 117));
+    order.extend([
+        ids::INITIALIZE_BORDER,
+        ids::SET_TIME,
+        ids::SET_DEFAULT_SPAWN,
+        ids::GAME_EVENT,
+    ]);
+    order
 }
 
 /// Run the full `place_new_player` burst into a connected registry and return
@@ -348,6 +380,18 @@ fn slice_a_order() -> Vec<u32> {
 /// Each frame is decompressed/deframed by stripping the VarInt21 length prefix
 /// and the compression prefix (below-threshold frames are uncompressed).
 fn run_burst_with(world: &ServerLevel, config: &JoinConfig) -> Vec<(u32, Vec<u8>)> {
+    run_burst_with_requested(world, config, None)
+}
+
+/// Like `run_burst_with`, but the session manager's `requested_view_distance`
+/// (the client's `ClientInformation` view distance). `None` mirrors the
+/// `PlayerChunkLoader` auto-config path (no client request); `Some(n)` caps at
+/// `load - 1`.
+fn run_burst_with_requested(
+    world: &ServerLevel,
+    config: &JoinConfig,
+    requested_view_distance: Option<i32>,
+) -> Vec<(u32, Vec<u8>)> {
     let mut sender = play_sender();
     let (mut connections, mut out_rx) = registry_with_connection();
     let sent_ids = place_new_player(
@@ -357,6 +401,7 @@ fn run_burst_with(world: &ServerLevel, config: &JoinConfig) -> Vec<(u32, Vec<u8>
         &probe_player(),
         world,
         config,
+        requested_view_distance,
     )
     .expect("burst encodes + queues");
 
@@ -387,9 +432,15 @@ fn run_burst() -> Vec<(u32, Vec<u8>)> {
 fn place_new_player_sends_paper_order_and_byte_exact_bodies() {
     let packets = run_burst();
     let ids_sent: Vec<u32> = packets.iter().map(|(id, _)| *id).collect();
-    assert_eq!(ids_sent, slice_a_order(), "PLAY_BURST_ORDER prefix");
+    assert_eq!(
+        ids_sent,
+        burst_order(),
+        "PLAY_BURST_ORDER restricted to ported members"
+    );
 
-    // Each Slice A body must match the pinned capture/fixture body byte-for-byte.
+    // The Slice B member bodies must match the pinned capture/fixture bodies
+    // byte-for-byte. Chunks are checked separately (all 117 differ only in the
+    // 8-byte BE coordinate header), so they're skipped here.
     for (id, body) in &packets {
         match *id {
             ids::LOGIN => assert_eq!(body, &protocol_fixture("join_clientbound_login")),
@@ -410,11 +461,88 @@ fn place_new_player_sends_paper_order_and_byte_exact_bodies() {
             ids::CHANGE_DIFFICULTY => assert_eq!(body, &hex_bytes("0100")),
             ids::GAME_EVENT => assert_eq!(body, &hex_bytes("0d00000000")),
             ids::SET_HELD_SLOT => assert_eq!(body, &hex_bytes("00")),
+            // `sendPlayerPermissionLevel`'s op-level event: `[entityId 4B BE
+            // 00000001][eventId 24]` — the login playerId 1, PERMISSION_LEVEL_ALL.
+            ids::ENTITY_EVENT => assert_eq!(body, &hex_bytes("0000000118")),
             ids::PLAYER_INFO_UPDATE => assert_eq!(
                 body,
                 &protocol_fixture("join_clientbound_player_info_update")
             ),
+            ids::SET_CHUNK_CACHE_RADIUS => assert_eq!(body, &hex_bytes("04")),
+            ids::SET_SIMULATION_DISTANCE => assert_eq!(body, &hex_bytes("04")),
+            ids::SET_CHUNK_CACHE_CENTER => assert_eq!(body, &hex_bytes("0000")),
+            ids::LEVEL_CHUNK_WITH_LIGHT => {} // checked in the chunk-specific test
             other => panic!("unexpected burst member {other}"),
+        }
+    }
+}
+
+#[test]
+fn burst_sends_exactly_one_117_chunk_sequence() {
+    // The one-time burst: exactly 135 frames — the 11 join members + 3 cache
+    // packets + 117 chunks + 4 second-`sendLevelInfo` members. No frame is lost
+    // or duplicated (the outbound channel carried every queued frame).
+    let packets = run_burst();
+    assert_eq!(packets.len(), 135, "full Slice B burst frame count");
+
+    let chunk_count = packets
+        .iter()
+        .filter(|(id, _)| *id == ids::LEVEL_CHUNK_WITH_LIGHT)
+        .count();
+    assert_eq!(chunk_count, 117, "exactly one 117-chunk send-set");
+
+    let second_level_start = packets
+        .iter()
+        .position(|(id, _)| *id == ids::LEVEL_CHUNK_WITH_LIGHT)
+        .map(|p| p + 117)
+        .expect("chunk block present");
+    assert_eq!(
+        packets[second_level_start..]
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![
+            ids::INITIALIZE_BORDER,
+            ids::SET_TIME,
+            ids::SET_DEFAULT_SPAWN,
+            ids::GAME_EVENT,
+        ],
+        "second sendLevelInfo follows the chunk block"
+    );
+}
+
+#[test]
+fn burst_chunk_bodies_match_the_fixture_apart_from_coords() {
+    // `chunk_golden_body.hex` is the canonical chunk (`body[8:]` — no coord
+    // header); all 117 superflat bodies differ only in the 8-byte BE coord
+    // header, so every encoded chunk body matches `header ++ golden`.
+    let golden = protocol_fixture("chunk_golden_body");
+    let packets = run_burst();
+    let chunks: Vec<&(u32, Vec<u8>)> = packets
+        .iter()
+        .filter(|(id, _)| *id == ids::LEVEL_CHUNK_WITH_LIGHT)
+        .collect();
+    assert_eq!(chunks.len(), 117);
+
+    let first = &chunks[0].1;
+    assert_eq!(
+        i32::from_be_bytes([first[0], first[1], first[2], first[3]]),
+        -5,
+        "first send chunk x"
+    );
+    assert_eq!(
+        i32::from_be_bytes([first[4], first[5], first[6], first[7]]),
+        -4,
+        "first send chunk z"
+    );
+    assert_eq!(first[8..], golden, "chunk body matches the fixture");
+    for (id, body) in &packets {
+        if *id == ids::LEVEL_CHUNK_WITH_LIGHT {
+            assert_eq!(
+                &body[8..],
+                golden,
+                "every chunk body is the deterministic superflat content"
+            );
         }
     }
 }
@@ -561,6 +689,7 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
                 &player,
                 &level,
                 &config,
+                None,
             );
         })],
         stats.clone(),
@@ -570,9 +699,10 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
         .spawn(move || loop_.run())
         .expect("spawn tick loop");
 
-    // Register the connection through the real lifecycle channel.
+    // Register the connection through the real lifecycle channel. The outbound
+    // channel must hold the whole 135-frame burst before the test drains.
     let (in_tx, in_rx) = tokio::sync::mpsc::channel(4);
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(64);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(256);
     lifecycle_tx
         .try_send(
             rivet_server::server::tick::channels::LifecycleEvent::Connect {
@@ -591,13 +721,13 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
     // Advance the tick; the burst fires on the first tick.
     sim.advance(NANOS_PER_TICK);
 
-    // Drain the outbound channel until the burst's ten frames arrive. The
+    // Drain the outbound channel until the full 135-frame burst arrives. The
     // deadline is checked on every recv attempt (not only after a successful
     // `blocking_recv`), so a burst that never fires fails boundedly instead of
     // hanging the test.
     let mut got: Vec<u32> = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while got.len() < slice_a_order().len() {
+    while got.len() < burst_order().len() {
         assert!(
             std::time::Instant::now() < deadline,
             "timed out waiting for burst (got {got:?})"
@@ -616,7 +746,7 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
             }
         }
     }
-    assert_eq!(got, slice_a_order());
+    assert_eq!(got, burst_order());
 
     shutdown.request();
     handle.join().expect("tick loop exits cleanly");

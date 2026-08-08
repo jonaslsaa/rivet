@@ -365,6 +365,7 @@ fn default_config() -> ServerConfig {
         inbound_channel_capacity: 64,
         outbound_channel_capacity: 64,
         lifecycle_capacity: 64,
+        enable_join: false,
     }
 }
 

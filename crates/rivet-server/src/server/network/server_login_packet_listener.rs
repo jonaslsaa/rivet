@@ -66,6 +66,10 @@ enum LoginState {
 #[derive(Debug, Default)]
 pub struct ServerLoginPacketListener {
     state: LoginState,
+    /// The authenticated `GameProfile` built by `handle_hello` (issue #101 Slice
+    /// B). Carried to the configuration listener so the finish→play handoff can
+    /// transfer it to the tick thread for the join burst.
+    profile: Option<GameProfile>,
 }
 
 impl ServerLoginPacketListener {
@@ -138,6 +142,8 @@ impl ServerLoginPacketListener {
         // spoofed UUID/profile in this slice).
         let name = hello.name().to_string();
         let profile = GameProfile::new_without_properties(create_offline_player_uuid(&name), name);
+        // Stored so the configuration listener can carry it into the play state.
+        self.profile = Some(profile.clone());
 
         // Paper's `startClientVerification` sets state VERIFYING, then `tick()`
         // calls `verifyLoginAndFinishConnectionSetup`. No tick driver exists yet,
@@ -216,7 +222,11 @@ impl ServerLoginPacketListener {
         // a configuration packet. (Java's final `state = ACCEPTED` is moot here:
         // the listener is replaced by the configuration one.)
         conn.set_outbound_protocol(ConnectionProtocol::Configuration);
-        let mut config_listener = ServerConfigurationPacketListener::new();
+        let profile = self
+            .profile
+            .clone()
+            .expect("handle_hello built the profile before the ack");
+        let mut config_listener = ServerConfigurationPacketListener::new(profile);
         config_listener
             .start_configuration(conn)
             .map_err(DisconnectReason::Unsupported)?;

@@ -201,6 +201,7 @@ async fn run_connection(
         in_tx
             .as_ref()
             .expect("inbound sender kept for the play handoff"),
+        &endpoint,
         shutdown,
     )
     .await;
@@ -258,15 +259,13 @@ async fn handle_outbound(
                 Some(timeout) => conn.flush_out_bounded(timeout).await,
                 None => conn.flush_out().await,
             };
-            if flushed.is_err() {
+            if let Err(e) = flushed {
                 // A failed flush: when the server is stopping the frames were
                 // boundedly attempted (or preserved for `close`'s bounded retry)
                 // and the terminal reason is the stop — never a misreported EOF.
-                return Some(if conn.shutdown_requested() {
-                    DisconnectReason::ServerShutdown
-                } else {
-                    DisconnectReason::EndOfStream
-                });
+                // A per-write progress timeout (the peer is not reading) is the
+                // liveness `Timeout`; a peer-write-closed is `EndOfStream`.
+                return Some(conn.flush_error_reason(&e));
             }
             Some(reason)
         }
@@ -290,14 +289,11 @@ async fn drain_outbound(
             return Some(reason);
         }
     }
-    if conn.flush_out().await.is_err() {
+    if let Err(e) = conn.flush_out().await {
         // A flush aborted because shutdown fired mid-write (frames preserved)
-        // is a stop, not the peer going away.
-        return Some(if conn.shutdown_requested() {
-            DisconnectReason::ServerShutdown
-        } else {
-            DisconnectReason::EndOfStream
-        });
+        // is a stop, not the peer going away; a per-write progress timeout is
+        // the liveness `Timeout`; a peer-write-closed is `EndOfStream`.
+        return Some(conn.flush_error_reason(&e));
     }
     None
 }
@@ -397,6 +393,7 @@ async fn forward_play_failed(
 /// and forwards every decoded frame to the tick thread over `in_tx` — the
 /// OWNERSHIP §Network play boundary. Returns the disconnect reason that ends
 /// the loop; the connection is closed by the caller.
+#[allow(clippy::too_many_arguments)]
 async fn conn_loop(
     conn: &mut Connection,
     listener: &mut Box<dyn PacketListener>,
@@ -404,6 +401,7 @@ async fn conn_loop(
     mut read: OwnedReadHalf,
     mut out_rx: mpsc::Receiver<OutboundEvent>,
     in_tx: &mpsc::Sender<ServerboundFrame>,
+    endpoint: &NetworkEndpoint,
     shutdown: Arc<Shutdown>,
 ) -> DisconnectReason {
     // Whether the connection has crossed the configuration→play boundary and
@@ -446,14 +444,11 @@ async fn conn_loop(
                 let event = match event {
                     Some(event) => event,
                     None => {
-                        if conn.flush_out().await.is_err() {
+                        if let Err(e) = conn.flush_out().await {
                             // A flush aborted by shutdown (frames preserved) is a
-                            // stop, not the peer going away.
-                            return if shutdown.is_requested() {
-                                DisconnectReason::ServerShutdown
-                            } else {
-                                DisconnectReason::EndOfStream
-                            };
+                            // stop, not the peer going away; a per-write progress
+                            // timeout is the liveness `Timeout`.
+                            return conn.flush_error_reason(&e);
                         }
                         if shutdown.is_requested() {
                             return DisconnectReason::ServerShutdown;
@@ -501,6 +496,25 @@ async fn conn_loop(
                 Ok(InboundOutcome::Keep) => {}
                 Ok(InboundOutcome::Play) => {
                     in_play = true;
+                    // Forward the configuration→play handoff (the profile +
+                    // ClientInformation the listener stashed) to the tick thread
+                    // as an EnterPlay lifecycle event, then start forwarding
+                    // frames. EnterPlay goes over the lifecycle channel (drained
+                    // before the inbound channel), so the tick applies the
+                    // handoff before the first coalesced play frame.
+                    if let Some((profile, client_information)) = conn.take_play_handoff()
+                        && endpoint
+                            .enter_play(conn.id(), profile, client_information)
+                            .await
+                            .is_err()
+                    {
+                        // The lifecycle channel is closed: the tick thread is
+                        // gone before the handoff landed. The connection is
+                        // still open but can never spawn a session, so close
+                        // it as a stop (the socket close flushes anything
+                        // queued; there is no session to disconnect in-band).
+                        return DisconnectReason::ServerShutdown;
+                    }
                     // Frames already buffered when the handoff fired (a client
                     // that coalesced `finish_configuration` with a play packet)
                     // are drained into the tick channel now.
@@ -535,6 +549,15 @@ mod tests {
 
     fn test_config() -> Arc<ServerConfig> {
         Arc::new(ServerConfig::default())
+    }
+
+    /// A throwaway `NetworkEndpoint` for tests that drive `conn_loop` directly.
+    /// The lifecycle receiver is dropped immediately — the test listeners never
+    /// stash a handoff, so `enter_play` is never reached and the endpoint is
+    /// only ever borrowed.
+    fn test_endpoint() -> NetworkEndpoint {
+        let (lifecycle_tx, _lifecycle_rx) = mpsc::channel(16);
+        NetworkEndpoint::new(lifecycle_tx, Arc::new(Shutdown::new()))
     }
 
     /// A throwaway connected `Connection` + its client socket (the client reads
@@ -720,6 +743,7 @@ mod tests {
         });
         let in_tx_for_task = in_tx.clone();
 
+        let endpoint = test_endpoint();
         let task = tokio::spawn(async move {
             conn_loop(
                 &mut conn,
@@ -728,6 +752,7 @@ mod tests {
                 read,
                 out_rx,
                 &in_tx_for_task,
+                &endpoint,
                 shutdown,
             )
             .await
@@ -829,6 +854,7 @@ mod tests {
             .unwrap();
         drop(out_tx);
 
+        let endpoint = test_endpoint();
         let reason = conn_loop(
             &mut conn,
             &mut listener_box,
@@ -836,6 +862,7 @@ mod tests {
             read,
             out_rx,
             &in_tx,
+            &endpoint,
             shutdown,
         )
         .await;
@@ -898,6 +925,7 @@ mod tests {
             .unwrap();
         drop(out_tx); // the tick thread's final pass dropped every out_tx
 
+        let endpoint = test_endpoint();
         let start = std::time::Instant::now();
         let reason = conn_loop(
             &mut conn,
@@ -906,6 +934,7 @@ mod tests {
             read,
             out_rx,
             &in_tx,
+            &endpoint,
             shutdown,
         )
         .await;
@@ -920,6 +949,141 @@ mod tests {
         );
         // Keep the client socket alive (dropping it would close the peer and
         // make the write error instead of block).
+        assert!(client.local_addr().is_ok());
+    }
+
+    /// A non-reading peer cannot wedge the outbound prune: when the tick side
+    /// drops the channel (an outbound-overflow prune) with frames still queued,
+    /// `conn_loop`'s flush is bounded by the per-write progress timeout, so a
+    /// socket that accepts nothing reports the liveness `Timeout` promptly
+    /// instead of blocking forever.
+    #[tokio::test]
+    async fn conn_loop_prune_flush_times_out_with_non_reading_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        let config = Arc::new(ServerConfig {
+            read_timeout: Duration::from_millis(50),
+            ..ServerConfig::default()
+        });
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+            InboundDrained::new(),
+        );
+        conn.set_outbound_protocol(ConnectionProtocol::Login);
+        // Frames queued ahead of the prune (a previous Packet event that the
+        // socket could not flush): 64 MiB >> any socket buffer, and the peer
+        // never reads, so the flush can make no progress.
+        conn.queue_raw_frame(Bytes::from(vec![0x42u8; 64 * 1024 * 1024]));
+
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        // The tick side already pruned the connection: the outbound channel is
+        // closed, so `out_rx.recv()` returns `None` and the loop flushes.
+        let (_out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let mut listener_box: Box<dyn PacketListener> = Box::new(ServerHandshakePacketListener);
+
+        let endpoint = test_endpoint();
+        let start = std::time::Instant::now();
+        let reason = conn_loop(
+            &mut conn,
+            &mut listener_box,
+            &config,
+            read,
+            out_rx,
+            &in_tx,
+            &endpoint,
+            shutdown,
+        )
+        .await;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the prune flush must not run unbounded"
+        );
+        assert_eq!(
+            reason,
+            DisconnectReason::Timeout,
+            "a non-reading peer is the liveness timeout, not a wedge and not EOF"
+        );
+        // Keep the client socket alive (dropping it would close the peer and
+        // make the write error instead of block).
+        assert!(client.local_addr().is_ok());
+    }
+
+    /// A `Disconnect` whose flush cannot complete (a non-reading peer) is
+    /// bounded by the per-write progress timeout: `conn_loop` exits with the
+    /// liveness `Timeout` promptly instead of wedging in the disconnect flush.
+    #[tokio::test]
+    async fn conn_loop_disconnect_flush_times_out_with_non_reading_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        let config = Arc::new(ServerConfig {
+            read_timeout: Duration::from_millis(50),
+            ..ServerConfig::default()
+        });
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+            InboundDrained::new(),
+        );
+        conn.set_outbound_protocol(ConnectionProtocol::Login);
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let mut listener_box: Box<dyn PacketListener> = Box::new(ServerHandshakePacketListener);
+
+        // A frame far larger than any socket buffer, then the Disconnect: the
+        // Disconnect flush cannot complete because the peer never reads.
+        out_tx
+            .send(OutboundEvent::Packet {
+                frame: Bytes::from(vec![0x42u8; 64 * 1024 * 1024]),
+            })
+            .await
+            .unwrap();
+        out_tx
+            .send(OutboundEvent::Disconnect {
+                reason: DisconnectReason::RequestHandled,
+            })
+            .await
+            .unwrap();
+        drop(out_tx);
+
+        let endpoint = test_endpoint();
+        let start = std::time::Instant::now();
+        let reason = conn_loop(
+            &mut conn,
+            &mut listener_box,
+            &config,
+            read,
+            out_rx,
+            &in_tx,
+            &endpoint,
+            shutdown,
+        )
+        .await;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the disconnect flush must not run unbounded"
+        );
+        assert_eq!(
+            reason,
+            DisconnectReason::Timeout,
+            "a non-reading peer during a disconnect flush is the liveness timeout"
+        );
         assert!(client.local_addr().is_ok());
     }
 
@@ -992,6 +1156,7 @@ mod tests {
         });
 
         let task_shutdown = Arc::clone(&shutdown);
+        let endpoint = test_endpoint();
         let task = tokio::spawn(async move {
             conn_loop(
                 &mut conn,
@@ -1000,6 +1165,7 @@ mod tests {
                 read,
                 out_rx,
                 &in_tx,
+                &endpoint,
                 task_shutdown,
             )
             .await

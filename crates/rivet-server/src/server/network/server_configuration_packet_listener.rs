@@ -22,6 +22,7 @@ use rivet_protocol::protocol::configuration::clientbound_update_enabled_features
 use rivet_protocol::protocol::configuration::serverbound_finish_configuration::ServerboundFinishConfigurationPacket;
 use rivet_protocol::protocol::configuration::serverbound_select_known_packs::ServerboundSelectKnownPacks;
 use rivet_registry::Identifier;
+use rivet_registry::core::GameProfile;
 use rivet_util::KnownPack;
 
 use super::connection::Connection;
@@ -70,7 +71,8 @@ const SERVER_BRAND: &str = "Rivet";
 const SYNCHRONIZE_REGISTRIES_TASK_TYPE: &str = "synchronize_registries";
 /// `ConfigurationTask.Type` id for `JoinWorldTask` — queued last so the client's
 /// `finish_configuration` reply finishes it and the connection hands off to play
-/// (issue #96). `PrepareSpawnTask` (#100) and `spawnPlayer` (#101) are deferred.
+/// (issue #96). `PrepareSpawnTask` (#100) is deferred; the join burst
+/// (`spawnPlayer`) runs tick-side via the play listener (issue #101 Slice B).
 const JOIN_WORLD_TASK_TYPE: &str = "join_world";
 
 /// `net.minecraft.server.network.ConfigurationTask` — one deferred step of the
@@ -142,8 +144,9 @@ impl ConfigurationTask for SynchronizeRegistriesTask {
 /// `handleConfigurationFinished`, after which the connection hands off to the
 /// play state. In Paper, `PrepareSpawnTask` (the spawn-chunk load, #100) runs
 /// immediately before this task; that task is deferred, so configuration
-/// completes and reaches play without a spawn-chunk load and without the join
-/// burst (`spawnPlayer`, #101).
+/// completes and reaches play without a spawn-chunk load. The join burst
+/// (`spawnPlayer`) is not part of the configuration phase — it runs tick-side
+/// via the play listener (issue #101 Slice B).
 struct JoinWorldTask;
 
 impl ConfigurationTask for JoinWorldTask {
@@ -175,14 +178,15 @@ impl ConfigurationTask for JoinWorldTask {
 /// on the M1 offline world), then queues the configuration tasks and starts the
 /// first. The registry-sync task (`SynchronizeRegistriesTask`) and the terminal
 /// `JoinWorldTask` are the M1 queue; the spawn-chunk load (`PrepareSpawnTask`,
-/// #100) that Paper runs between them and the join burst (`spawnPlayer`, #101)
-/// are deferred. The queue is [sync, join_world]: the client replies to
-/// `select_known_packs`, the server sends the registry/tag data and finishes
-/// the sync, `JoinWorldTask` sends `ClientboundFinishConfigurationPacket`, and
-/// the client's `finish_configuration` reply finishes it — the connection then
-/// hands off to the play state (`ListenerOutcome::Play`), where frames are
-/// forwarded to the tick thread. A `finish_configuration` with any other task
-/// current mismatches `finishCurrentTask` exactly like Java and closes.
+/// #100) that Paper runs between them is deferred. The queue is
+/// [sync, join_world]: the client replies to `select_known_packs`, the server
+/// sends the registry/tag data and finishes the sync, `JoinWorldTask` sends
+/// `ClientboundFinishConfigurationPacket`, and the client's `finish_configuration`
+/// reply finishes it — the connection then hands off to the play state
+/// (`ListenerOutcome::Play`), where frames are forwarded to the tick thread and
+/// the join burst (`spawnPlayer`) fires tick-side via the play listener
+/// (issue #101 Slice B). A `finish_configuration` with any other task current
+/// mismatches `finishCurrentTask` exactly like Java and closes.
 ///
 /// The task queue is Java-shaped (`configurationTasks` FIFO drained by
 /// `startNextTask` into `currentTask`, finished by `finishCurrentTask`).
@@ -197,22 +201,39 @@ pub struct ServerConfigurationPacketListener {
     /// `CommonListenerCookie` (`ClientInformation.createDefault()`); the
     /// deferred field is updated by `handleClientInformation`.
     client_information: ClientInformation,
+    /// The authenticated `GameProfile` the login phase built for this connection
+    /// (`CommonListenerCookie.profile`, issue #101 Slice B). Carried across the
+    /// finish→play handoff so the tick thread can spawn the join burst.
+    profile: GameProfile,
 }
 
 impl Default for ServerConfigurationPacketListener {
     fn default() -> Self {
+        // Java builds the listener from the `CommonListenerCookie`, which always
+        // carries the authenticated profile; the `Default` is only for the
+        // handoff tests and starts from the offline empty profile.
         ServerConfigurationPacketListener {
             configuration_tasks: VecDeque::new(),
             current_task: None,
             client_information: ClientInformation::create_default(),
+            profile: GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ),
         }
     }
 }
 
 impl ServerConfigurationPacketListener {
-    /// `new ServerConfigurationPacketListenerImpl(server, connection, cookie)`.
-    pub fn new() -> Self {
-        Self::default()
+    /// `new ServerConfigurationPacketListenerImpl(server, connection, cookie)` —
+    /// the listener for a connection whose login phase authenticated `profile`.
+    pub fn new(profile: GameProfile) -> Self {
+        ServerConfigurationPacketListener {
+            configuration_tasks: VecDeque::new(),
+            current_task: None,
+            client_information: ClientInformation::create_default(),
+            profile,
+        }
     }
 
     /// `startConfiguration()` — Paper sends the brand first, then
@@ -220,7 +241,8 @@ impl ServerConfigurationPacketListener {
     /// the first (`startNextTask`).
     ///
     /// This slice queues the registry sync + `JoinWorldTask` (the finish→play
-    /// seam); `PrepareSpawnTask` (#100) and `spawnPlayer` (#101) are deferred.
+    /// seam); `PrepareSpawnTask` (#100) is deferred. The join burst
+    /// (`spawnPlayer`) runs tick-side via the play listener (issue #101 Slice B).
     pub fn start_configuration(&mut self, conn: &mut Connection) -> Result<(), String> {
         // `send(new ClientboundCustomPayloadPacket(new BrandPayload(server
         // .getServerModName())))`.
@@ -260,15 +282,12 @@ impl ServerConfigurationPacketListener {
         // `returnToWorld` queues `PrepareSpawnTask` (the spawn-chunk load, #100)
         // then `JoinWorldTask`. `PrepareSpawnTask` is deferred, so the queue is
         // [sync, join_world]: configuration completes and the connection reaches
-        // the play handoff, but no spawn chunk is loaded and no join burst is
-        // sent — both are #100/#101.
+        // the play handoff; the join burst fires tick-side via the play listener
+        // (issue #101 Slice B), so `spawnPlayer` needs no configuration-phase
+        // task here.
         // RivetTodo(#100): `PrepareSpawnTask` — the spawn-chunk load that in
-        // Paper gates `JoinWorldTask` (and `spawnPlayer`); it belongs between
-        // the sync and `JoinWorldTask` in the queue.
-        // RivetTodo(#101): `spawnPlayer` → `PlayerList.placeNewPlayer` +
-        // `sendLevelInfo` and the play-state listener
-        // (`ServerGamePacketListenerImpl`) that consumes the tick-thread frames
-        // the handoff forwards.
+        // Paper gates `JoinWorldTask`; it belongs between the sync and
+        // `JoinWorldTask` in the queue.
         // RivetTodo(#236): `addOptionalTasks` — the code-of-conduct and
         // resource-pack configuration tasks, and the Paper configuration event
         // task (`AsyncPlayerConnectionConfigureEvent`).
@@ -444,19 +463,24 @@ impl PacketListener for ServerConfigurationPacketListener {
                 // `JoinWorldTask` (whose `start` sent
                 // `ClientboundFinishConfigurationPacket`), then swap the
                 // outbound protocol to play and hand the connection off to the
-                // tick thread. Paper then runs the duplicate-login / can-login
-                // gates and `prepareSpawnTask.spawnPlayer(...)` (the join
-                // burst) — those are #101, so the seam is exposed here and the
-                // play-state listener consumes the forwarded frames there.
-                // RivetTodo(#101): the duplicate-login / canPlayerLogin gates
-                // and `spawnPlayer` → `placeNewPlayer`/`sendLevelInfo`, and the
-                // `ServerGamePacketListenerImpl` that follows the handoff.
+                // tick thread. The duplicate-login / can-login gates and
+                // `prepareSpawnTask.spawnPlayer(...)` (the join burst) run
+                // tick-side via the play listener (issue #101 Slice B), which
+                // consumes the forwarded frames there.
+                // RivetTodo(#101): the duplicate-login / canPlayerLogin gates —
+                // the can-login checks run on the tick side before the session
+                // spawns in `PlayerSessionManager::spawn_session`.
                 let _: ServerboundFinishConfigurationPacket = decode_packet(
                     frame,
                     rivet_protocol::protocol::configuration::serverbound_finish_configuration::stream_codec(),
                 )?;
                 self.finish_current_task(JOIN_WORLD_TASK_TYPE, conn)?;
                 conn.set_outbound_protocol(ConnectionProtocol::Play);
+                // Stash the authenticated profile + `ClientInformation` on the
+                // connection; the per-connection task forwards them to the tick
+                // thread as the EnterPlay handoff (issue #101 Slice B) the join
+                // burst needs.
+                conn.set_play_handoff(self.profile.clone(), self.client_information.clone());
                 Ok(ListenerOutcome::Play)
             }
             ACCEPT_CODE_OF_CONDUCT_PACKET_ID => {
@@ -544,8 +568,12 @@ mod tests {
     #[test]
     fn default_client_information_initial_value() {
         // Java initializes `clientInformation` from the cookie
-        // (`ClientInformation.createDefault()`); this slice starts there.
-        let listener = ServerConfigurationPacketListener::new();
+        // (`ClientInformation.createDefault()`); this slice starts there. The
+        // listener carries the authenticated profile from the login phase.
+        let listener = ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+            rivet_util::mth::Uuid { most: 0, least: 0 },
+            String::new(),
+        ));
         assert_eq!(
             listener.client_information,
             ClientInformation::create_default()
@@ -597,7 +625,11 @@ mod tests {
         // first; `PrepareSpawnTask` (#100) is deferred. Finishing the sync starts
         // `JoinWorldTask`, whose `start` sends the finish_configuration packet.
         let mut conn = config_connection().await;
-        let mut listener = ServerConfigurationPacketListener::new();
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
         listener.start_configuration(&mut conn).unwrap();
 
         assert_eq!(
@@ -637,7 +669,11 @@ mod tests {
         // seam the per-connection task uses to start forwarding frames to the
         // tick thread.
         let mut conn = config_connection().await;
-        let mut listener = ServerConfigurationPacketListener::new();
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
         listener.start_configuration(&mut conn).unwrap();
         listener
             .finish_current_task(SYNCHRONIZE_REGISTRIES_TASK_TYPE, &mut conn)
@@ -665,7 +701,11 @@ mod tests {
         // `finishCurrentTask(JoinWorldTask.TYPE)` — Java's
         // `IllegalStateException` — surfaced as a deterministic Malformed close.
         let mut conn = config_connection().await;
-        let mut listener = ServerConfigurationPacketListener::new();
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
         listener.start_configuration(&mut conn).unwrap();
 
         let frame = Bytes::from(varint(3));
