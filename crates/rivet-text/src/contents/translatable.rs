@@ -3,13 +3,17 @@
 //! Holds a `key`, an optional `fallback`, and a list of format arguments. The
 //! arguments are Java `Object`s; in Rust they are an enum of the
 //! `TranslatableContents.isAllowedPrimitiveArgument` set (Number/Boolean/
-//! String) plus nested `Component` values. Format-string decomposition and
-//! per-locale resolution are NOT in this slice (issue #92) — `visit` visits
-//! nothing, matching an unresolved component in a non-localized encode (the
-//! encode path in `ComponentSerialization` never decomposes; Paper's localized
-//! Adventure path does, and is out of scope).
+//! String) plus nested `Component` values.
+//!
+//! `visit`/`visit_styled` perform the locale resolution: `decompose` reads the
+//! translated format string (via the process-wide [`Language`]), decomposes it
+//! with the `FORMAT_PATTERN` `%(?:(\\d+)\\$)?([A-Za-z%]|$)`, and visits the
+//! parts in order, short-circuiting on the first `Some` exactly like Java. The
+//! decomposition result is cached (`decomposedWith` / `decomposedParts`), so a
+//! component re-visits without re-reading the language.
 
 use super::super::ComponentContents;
+use crate::locale;
 use crate::style::Style;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
@@ -21,7 +25,9 @@ use rivet_serialization::map_codec::{self as map_codec_mod, MapCodec};
 use rivet_serialization::map_decoder::MapDecoder;
 use rivet_serialization::map_encoder::MapEncoder;
 use rivet_serialization::number::Number;
+use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// One translatable argument — Java `Object` restricted to the allowed
 /// primitive set plus `Component`.
@@ -34,7 +40,7 @@ pub enum TranslatableArg {
     Float(f64),
     Bool(bool),
     String(String),
-    Component(crate::Component),
+    Component(Box<crate::Component>),
 }
 
 impl std::fmt::Display for TranslatableArg {
@@ -59,11 +65,156 @@ impl std::fmt::Display for TranslatableArg {
 }
 
 /// Port of `net.minecraft.network.chat.contents.TranslatableContents`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct TranslatableContents {
     key: String,
     fallback: Option<String>,
     args: Vec<TranslatableArg>,
+    /// `decomposedWith` / `decomposedParts` — the cached decomposition. Java
+    /// stores `Language decomposedWith` plus the `List<FormattedText>` parts
+    /// and re-decomposes only when the language changes; the port's `OnceLock`
+    /// computes once and the process-wide language is write-once in this slice
+    /// (`Language.inject` is deferred), so the cache never goes stale and the
+    /// identity field Java keys on is unnecessary. The parts `Arc` is shared
+    /// across clones, like Java sharing the same contents on `copy()`.
+    decompose_cache: OnceLock<DecomposeCache>,
+}
+
+/// The cached decomposition of a translated format string.
+#[derive(Clone)]
+struct DecomposeCache {
+    /// `decomposedParts` — the ordered parts, visited on each `visit`.
+    parts: Arc<[DecomposedPart]>,
+}
+
+/// One part of a decomposed format string — Java's `List<FormattedText>`.
+/// A format argument that is a `Component` is stored as the component itself
+/// (its `visit` walks contents + siblings); every other argument is stored as
+/// its `toString` text (`%%` → `"%"`, null → `"null"`). The `Component` is
+/// boxed so the enum stays small (`Component` is a large value type).
+#[derive(Clone, Debug)]
+enum DecomposedPart {
+    Text(String),
+    Component(Box<crate::Component>),
+}
+
+impl DecomposedPart {
+    /// `FormattedText.visit(ContentConsumer)` — a `Text` part delivers the
+    /// string; a `Component` part recurses via `Component.visit` (contents then
+    /// siblings), passing the same consumer.
+    fn visit_content<T>(&self, output: &mut dyn FnMut(&str) -> Option<T>) -> Option<T> {
+        match self {
+            DecomposedPart::Text(text) => output(text),
+            DecomposedPart::Component(component) => component.visit_content(output),
+        }
+    }
+
+    /// `FormattedText.visit(StyledContentConsumer, Style)`.
+    fn visit_styled<T>(
+        &self,
+        output: &mut dyn FnMut(&Style, &str) -> Option<T>,
+        style: &Style,
+    ) -> Option<T> {
+        match self {
+            DecomposedPart::Text(text) => output(style, text),
+            DecomposedPart::Component(component) => component.visit_styled(output, style),
+        }
+    }
+}
+
+/// One `FORMAT_PATTERN` match — Java's `Matcher` group/span results.
+struct FormatMatch<'a> {
+    /// `Matcher.start()` — byte index of the `%`.
+    start: usize,
+    /// `Matcher.end()` — byte index one past the match (at least `start + 1`,
+    /// since the literal `%` always consumes a byte).
+    end: usize,
+    /// `Matcher.group(1)` — the `(\d+)` position-index digits, if the
+    /// `(\d+\$)` group matched.
+    index_group: Option<&'a str>,
+    /// `Matcher.group(2)` — the conversion character (`s`, or `%` for `%%`),
+    /// or the empty string for the end-anchor (`$`) branch.
+    format_type: &'a str,
+}
+
+/// `FORMAT_PATTERN` — `%(?:(\\d+)\\$)?([A-Za-z%]|$)`, implemented as a byte
+/// scanner (no regex dependency). `find_from(current)` mirrors
+/// `Matcher.find(int)`: the first match at or after `current`. The tricky
+/// branch is group 2: a single ASCII letter or `%`, or — at the very end of
+/// the input — the empty `$` alternative, which consumes just the `%` and
+/// yields `format_type == ""`.
+struct FormatMatcher<'a> {
+    template: &'a str,
+}
+
+impl<'a> FormatMatcher<'a> {
+    fn new(template: &'a str) -> Self {
+        FormatMatcher { template }
+    }
+
+    /// `Matcher.find(int current)`.
+    fn find_from(&self, current: usize) -> Option<FormatMatch<'a>> {
+        let bytes = self.template.as_bytes();
+        let mut i = current;
+        while i < bytes.len() {
+            if bytes[i] == b'%' {
+                // Optional `(\d+\$)` — digits then `$`; without the `$` the
+                // group matches empty and scanning resumes right after `%`
+                // (the regex backtracks past the digits).
+                let mut j = i + 1;
+                let digits_start = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let has_index = j > digits_start && j < bytes.len() && bytes[j] == b'$';
+                let index_group = has_index.then(|| &self.template[digits_start..j]);
+                let g2 = if has_index { j + 1 } else { i + 1 };
+
+                if g2 < bytes.len() {
+                    let c = bytes[g2];
+                    if c.is_ascii_alphabetic() || c == b'%' {
+                        return Some(FormatMatch {
+                            start: i,
+                            end: g2 + 1,
+                            index_group,
+                            format_type: &self.template[g2..g2 + 1],
+                        });
+                    }
+                    // A non-letter/non-`%` (and not end-of-input) can't fill
+                    // group 2; the pattern fails at this `%`, keep scanning.
+                } else {
+                    // End of input: `([A-Za-z%]|$)` matches the empty `$`
+                    // branch; the match is the `%` alone.
+                    return Some(FormatMatch {
+                        start: i,
+                        end: g2,
+                        index_group,
+                        format_type: "",
+                    });
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+}
+
+/// The failures `decomposeTemplate`/`getArgument` can throw. Java wraps them
+/// in `TranslatableFormatException` ("Error parsing: <c>: ...",
+/// "Invalid index %d requested for <c>", or "Error while parsing: <c>"), but
+/// `decompose` catches every variant and falls back to a single part holding
+/// the raw format string, so the message text is never surfaced and the
+/// variants carry no payload.
+enum FormatError {
+    /// The raw `IllegalArgumentException` — an embedded `%` in literal text
+    /// between matches.
+    IllegalArgument,
+    /// `"Unsupported format: '<formatString>'"`.
+    Unsupported,
+    /// `Integer.parseInt` failure (an index-group that overflows `int`).
+    NumberFormat,
+    /// `"Invalid index %d requested for <component>"`.
+    InvalidIndex,
 }
 
 impl TranslatableContents {
@@ -76,6 +227,7 @@ impl TranslatableContents {
             key,
             fallback,
             args,
+            decompose_cache: OnceLock::new(),
         }
     }
 
@@ -94,19 +246,190 @@ impl TranslatableContents {
         &self.args
     }
 
-    /// `visit(ContentConsumer)` — resolution via `Language.decompose` is issue
-    /// #92 scope; an unresolved translatable contributes no plain text.
-    pub fn visit_content<T>(&self, _output: &mut dyn FnMut(&str) -> Option<T>) -> Option<T> {
+    /// `visit(ContentConsumer)` — `decompose()` then visit each part in order,
+    /// returning the first `Some` the consumer produces. Paper wraps the
+    /// consumer in `TranslatableContentConsumer`, which counts visited strings
+    /// and throws `IllegalArgumentException("Too long")` once the count exceeds
+    /// 32; the caught exception surfaces as `output.accept("...")`.
+    ///
+    /// The port models the counting consumer with a per-visit shared
+    /// [`Cell`] counter and abort flag: the wrapped consumer increments the
+    /// counter and, past the limit, drops the string (never calling `output`)
+    /// and sets the abort flag, which the part loop checks to stop. This
+    /// reproduces Java's observable output exactly — the strings accepted up to
+    /// the limit reach `output`, everything past it is discarded, and a single
+    /// `"..."` is appended. Each `visit_content` call (including a nested
+    /// translatable reached through a `Component` arg) creates its own counter,
+    /// matching Java's nested `TranslatableContentConsumer`; the nested level's
+    /// `"..."` passes through this level's counting consumer, so the shared
+    /// counter accumulates across the whole visit like `A.accept` does.
+    pub fn visit_content<T>(&self, output: &mut dyn FnMut(&str) -> Option<T>) -> Option<T> {
+        let visited = Cell::new(0usize);
+        let aborted = Cell::new(false);
+        {
+            let mut counted = |text: &str| -> Option<T> {
+                // Paper: `if (this.visited++ > 32) throw` — the increment is
+                // skipped on the aborting call, so 33 strings are accepted.
+                let n = visited.get();
+                if n > 32 {
+                    aborted.set(true);
+                    return None;
+                }
+                visited.set(n + 1);
+                output(text)
+            };
+            self.decompose();
+            for part in self.decomposed() {
+                if aborted.get() {
+                    break;
+                }
+                if let Some(result) = part.visit_content(&mut counted) {
+                    return Some(result);
+                }
+            }
+        }
+        // Paper: `catch (IllegalArgumentException ignored) { return
+        // output.accept("..."); }` — `output` is the original consumer, not the
+        // counting wrapper.
+        if aborted.get() {
+            return output("...");
+        }
         None
     }
 
-    /// `visit(StyledContentConsumer, Style)` — same deferral.
+    /// `visit(StyledContentConsumer, Style)` — `decompose()` then visit each
+    /// part with `part.visit(output, currentStyle)`, short-circuiting on the
+    /// first `Some`. Paper's "Too long" guard wraps only the unstyled `visit`;
+    /// the styled path is uncounted.
     pub fn visit_styled<T>(
         &self,
-        _output: &mut dyn FnMut(&Style, &str) -> Option<T>,
-        _style: &Style,
+        output: &mut dyn FnMut(&Style, &str) -> Option<T>,
+        style: &Style,
     ) -> Option<T> {
+        self.decompose();
+        for part in self.decomposed() {
+            if let Some(result) = part.visit_styled(output, style) {
+                return Some(result);
+            }
+        }
         None
+    }
+
+    /// `decompose()` — resolve the format string from the process-wide
+    /// [`Language`], decompose it into parts, and cache them. On a format error
+    /// Java falls back to a single part holding the raw format string. The
+    /// `OnceLock` computes once; Java re-decomposes only when the language
+    /// instance changes, and the port's default language is write-once in this
+    /// slice (`Language.inject` is deferred), so once-only is equivalent.
+    fn decompose(&self) {
+        let lang = locale::get_instance();
+        self.decompose_cache.get_or_init(|| {
+            let format = match &self.fallback {
+                Some(fallback) => lang.get_or_default_with(&self.key, fallback).to_owned(),
+                None => lang.get_or_default(&self.key).to_owned(),
+            };
+            let parts = match self.decompose_template(&format) {
+                Ok(parts) => parts,
+                Err(_) => vec![DecomposedPart::Text(format)],
+            };
+            DecomposeCache {
+                parts: parts.into(),
+            }
+        });
+    }
+
+    /// The cached decomposed parts (after [`decompose`](Self::decompose)).
+    fn decomposed(&self) -> &[DecomposedPart] {
+        &self
+            .decompose_cache
+            .get()
+            .expect("decompose() runs before decomposed()")
+            .parts
+    }
+
+    /// `decomposeTemplate(template, consumer)` — the `FORMAT_PATTERN`
+    /// `%(?:(\\d+)\\$)?([A-Za-z%]|$)` scan. Plain text between matches is
+    /// emitted verbatim; `%%` emits `"%"`; `%s`/`%<n>$s` emits the argument
+    /// (component or `toString`); any other conversion, an embedded `%` in
+    /// literal text, or an out-of-range index throws
+    /// [`TranslatableFormatException`] (the caller falls back to the raw
+    /// format).
+    fn decompose_template(&self, template: &str) -> Result<Vec<DecomposedPart>, FormatError> {
+        let mut parts = Vec::new();
+        let mut current = 0;
+        // `replacementIndex` — the implicit 0-based position of the next
+        // unindexed `%s` (`replacementIndex++` in Java's loop body).
+        let mut replacement_index = 0usize;
+
+        let scan = FormatMatcher::new(template);
+        while let Some(FormatMatch {
+            start,
+            end,
+            index_group,
+            format_type,
+        }) = scan.find_from(current)
+        {
+            if start > current {
+                let prefix = &template[current..start];
+                if prefix.contains('%') {
+                    return Err(FormatError::IllegalArgument);
+                }
+                parts.push(DecomposedPart::Text(prefix.to_owned()));
+            }
+
+            let format_string = &template[start..end];
+            if format_type == "%" && format_string == "%%" {
+                parts.push(DecomposedPart::Text("%".to_owned()));
+            } else {
+                if format_type != "s" {
+                    return Err(FormatError::Unsupported);
+                }
+                let index = match index_group {
+                    Some(digits) => {
+                        digits
+                            .parse::<i32>()
+                            .map_err(|_| FormatError::NumberFormat)? as i64
+                            - 1
+                    }
+                    None => {
+                        let idx = replacement_index;
+                        replacement_index += 1;
+                        idx as i64
+                    }
+                };
+                parts.push(self.get_argument(index)?);
+            }
+
+            current = end;
+        }
+
+        if current < template.len() {
+            let tail = &template[current..];
+            if tail.contains('%') {
+                return Err(FormatError::IllegalArgument);
+            }
+            parts.push(DecomposedPart::Text(tail.to_owned()));
+        }
+
+        Ok(parts)
+    }
+
+    /// `getArgument(int)` — the part for a format argument. A `Component` arg
+    /// is the component itself; a null-ish arg is `"null"`; otherwise the
+    /// `toString`. An out-of-range index throws `Invalid index N requested
+    /// for <component>`.
+    fn get_argument(&self, index: i64) -> Result<DecomposedPart, FormatError> {
+        if index >= 0 && (index as usize) < self.args.len() {
+            let arg = &self.args[index as usize];
+            match arg {
+                TranslatableArg::Component(component) => {
+                    Ok(DecomposedPart::Component(component.clone()))
+                }
+                other => Ok(DecomposedPart::Text(other.to_string())),
+            }
+        } else {
+            Err(FormatError::InvalidIndex)
+        }
     }
 
     /// `TranslatableContents.MAP_CODEC` — `RecordCodecBuilder.mapCodec` over
@@ -247,6 +570,27 @@ impl<Ops: DynamicOps + 'static> MapCodec<TranslatableContents, Ops> for Translat
     }
 }
 
+impl PartialEq for TranslatableContents {
+    /// `TranslatableContents.equals(Object)` — compares only `key`, `fallback`,
+    /// and `args` (`Arrays.equals`); the decomposition cache is derived state
+    /// and not part of equality.
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.fallback == other.fallback && self.args == other.args
+    }
+}
+
+impl std::fmt::Debug for TranslatableContents {
+    /// Manual `Debug` (the `OnceLock` cache field has none); mirrors the value
+    /// fields, like `Component`'s derived `Debug`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TranslatableContents")
+            .field("key", &self.key)
+            .field("fallback", &self.fallback)
+            .field("args", &self.args)
+            .finish()
+    }
+}
+
 impl std::fmt::Display for TranslatableContents {
     /// `TranslatableContents.toString()` —
     /// `translation{key='K'[, fallback='F'], args=[...]}`. The `args` render via
@@ -291,11 +635,11 @@ pub fn arg_codec<Ops: DynamicOps + 'static>(
             Either::Left(a) => a.clone(),
             Either::Right(c) => match c.try_collapse_to_string() {
                 Some(text) => TranslatableArg::String(text),
-                None => TranslatableArg::Component(c.clone()),
+                None => TranslatableArg::Component(Box::new(c.clone())),
             },
         }),
         Arc::new(|a: &TranslatableArg| match a {
-            TranslatableArg::Component(c) => Either::Right(c.clone()),
+            TranslatableArg::Component(c) => Either::Right((**c).clone()),
             other => Either::Left(other.clone()),
         }),
     )

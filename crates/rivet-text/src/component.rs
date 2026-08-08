@@ -9,12 +9,13 @@
 //! in 24w14a. The three fields — `contents`, `siblings`, `style` — are exactly
 //! `MutableComponent`'s.
 //!
-//! RivetTodo(#85): `visit`/`visitSelf` are not exposed as trait methods;
-//! `get_string`/`flatten` walk the tree directly. Deferred: `getString(int
-//! limit)`, `contains`, `toFlatList`, `getVisualOrderText`, the `Iterable`/
-//! `stream` views, and the `translatable(...)` vararg factories
-//! (`translatable(key, args...)`, `translatableWithFallback(key, fallback[,
-//! args...])`, `translatableEscape`). `copy`/`plain_copy` are ported because
+//! RivetTodo(#85): `visit`/`visit_styled` are exposed (the translated arg
+//! recursion in `TranslatableContents` needs them), but the rest of the
+//! `Component` surface is deferred: `getString(int limit)`, `contains`,
+//! `toFlatList`, `getVisualOrderText`, the `Iterable`/`stream` views, and the
+//! `translatable(...)` vararg factories (`translatable(key, args...)`,
+//! `translatableWithFallback(key, fallback[, args...])`,
+//! `translatableEscape`). `copy`/`plain_copy` are ported because
 //! `ComponentSerialization.createFromList` needs them.
 
 use crate::component_contents::ComponentContents;
@@ -225,7 +226,8 @@ impl Component {
     /// styling; not part of the Java `Component` surface. Unlike `toFlatList`
     /// (deferred), it does not apply parent-style inheritance — it reports the
     /// style each node carries directly, which is what the visitor's
-    /// pre-styled leaves need.
+    /// pre-styled leaves need. Equivalent to `visit_styled` collecting every
+    /// leaf with its *own* style.
     pub fn flatten(&self) -> Vec<(String, Style)> {
         let mut out = Vec::new();
         self.contents.visit_content(&mut |text| {
@@ -238,6 +240,42 @@ impl Component {
             out.extend(sibling.flatten());
         }
         out
+    }
+
+    /// `Component.visit(FormattedText.ContentConsumer<T>)` — the node's
+    /// contents then each sibling, short-circuiting on the first `Some`. This
+    /// is what `FormattedText` calls when a translatable argument is a
+    /// `Component` (`getArgument` returns the component itself).
+    pub fn visit_content<T>(&self, output: &mut dyn FnMut(&str) -> Option<T>) -> Option<T> {
+        if let Some(result) = self.contents.visit_content(output) {
+            return Some(result);
+        }
+        for sibling in &self.siblings {
+            if let Some(result) = sibling.visit_content(output) {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    /// `Component.visit(FormattedText.StyledContentConsumer<T>, Style)` — the
+    /// node's style applied to the parent style, then contents then siblings
+    /// visited with that applied style, short-circuiting on the first `Some`.
+    pub fn visit_styled<T>(
+        &self,
+        output: &mut dyn FnMut(&Style, &str) -> Option<T>,
+        parent_style: &Style,
+    ) -> Option<T> {
+        let self_style = self.style.apply_to(parent_style);
+        if let Some(result) = self.contents.visit_styled(output, &self_style) {
+            return Some(result);
+        }
+        for sibling in &self.siblings {
+            if let Some(result) = sibling.visit_styled(output, &self_style) {
+                return Some(result);
+            }
+        }
+        None
     }
 }
 

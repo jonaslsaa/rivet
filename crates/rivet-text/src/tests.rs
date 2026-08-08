@@ -14,6 +14,7 @@ use crate::contents::{
     KeybindContents, PlainTextContents, ScoreContents, ScoreName, SelectorContents,
     TranslatableArg, TranslatableContents,
 };
+use crate::numbers::NumberFormat;
 use crate::style::Style;
 use crate::text_color::TextColor;
 use rivet_serialization::codec::Codec;
@@ -632,7 +633,10 @@ fn component_json_translatable_lenient_fallback() {
         "fallback": 42
     });
     let decoded = codec.parse(&ops, &input).get_or_throw("parse").clone();
-    assert_eq!(decoded.get_string(), "");
+    // `key.tip` is not a real key, so `getOrDefault` returns the key itself
+    // (`Language.getOrDefault(id, id)`); `get_string` resolves the translatable
+    // via the locale and yields `"key.tip"`.
+    assert_eq!(decoded.get_string(), "key.tip");
     match decoded.get_contents() {
         ComponentContents::Translatable(contents) => assert_eq!(contents.get_fallback(), None),
         other => panic!("expected translatable, got {other:?}"),
@@ -679,6 +683,355 @@ fn component_json_translatable_args_round_trip() {
 
     let decoded = codec.parse(&ops, &encoded).get_or_throw("parse").clone();
     assert_eq!(decoded, component);
+}
+
+// ---------------------------------------------------------------------------
+// network.chat.numbers NumberFormat
+// ---------------------------------------------------------------------------
+
+#[test]
+fn number_format_formats_score_values_like_java() {
+    // `BlankFormat.format` → `Component.empty()`.
+    assert_eq!(NumberFormat::Blank.format(42), Component::empty());
+    assert_eq!(NumberFormat::Blank.format(-7), Component::empty());
+
+    // `StyledFormat.format` → `Component.literal(Integer.toString(value))
+    // .withStyle(style)`.
+    let styled = NumberFormat::Styled(Style::EMPTY.with_bold(Some(true)));
+    let rendered = styled.format(42);
+    assert_eq!(rendered.get_string(), "42");
+    assert_eq!(rendered.get_style(), &Style::EMPTY.with_bold(Some(true)));
+    // Java `Integer.toString` has no sign/leading-zero surprises for negatives.
+    assert_eq!(styled.format(-7).get_string(), "-7");
+    // `StyledFormat.NO_STYLE` renders plain text.
+    assert_eq!(
+        NumberFormat::Styled(Style::EMPTY).format(0).get_string(),
+        "0"
+    );
+
+    // `FixedFormat.format` → `value.copy()` (a fresh equal component).
+    let fixed = NumberFormat::Fixed(Component::literal("fixed"));
+    assert_eq!(fixed.format(99), Component::literal("fixed"));
+    assert_eq!(fixed.format(99).get_string(), "fixed");
+}
+
+#[test]
+fn number_format_type_names_match_bootstrap() {
+    // The three registry names in `NumberFormatTypes.bootstrap`.
+    assert_eq!(NumberFormat::Blank.type_().name(), "blank");
+    assert_eq!(NumberFormat::Styled(Style::EMPTY).type_().name(), "styled");
+    assert_eq!(
+        NumberFormat::Fixed(Component::literal("x")).type_().name(),
+        "fixed"
+    );
+}
+
+#[test]
+fn number_format_json_round_trip_all_types() {
+    // `NumberFormatTypes.MAP_CODEC` dispatches on the `"type"` field. Under
+    // non-compressed `JsonOps`, `KeyDispatchCodec` writes the element codec's
+    // keys then the `"type"` discriminator.
+    let ops = JsonOps::INSTANCE;
+    let top = component_codec();
+    let codec = crate::numbers::number_format_types::codec(top);
+
+    // Blank — `MapCodec.unit(INSTANCE)` encodes nothing, so only `type`.
+    let blank = NumberFormat::Blank;
+    let encoded = codec
+        .encode_start(&ops, &blank)
+        .get_or_throw("encode")
+        .clone();
+    assert_eq!(encoded, serde_json::json!({"type": "blank"}));
+    let decoded = codec.parse(&ops, &encoded).get_or_throw("parse").clone();
+    assert_eq!(decoded, NumberFormat::Blank);
+
+    // Styled — `Style.Serializer.MAP_CODEC` writes the style keys inline.
+    let styled = NumberFormat::Styled(Style::EMPTY.with_bold(Some(true)));
+    let encoded = codec
+        .encode_start(&ops, &styled)
+        .get_or_throw("encode")
+        .clone();
+    assert_eq!(encoded, serde_json::json!({"bold": true, "type": "styled"}));
+    let decoded = codec.parse(&ops, &encoded).get_or_throw("parse").clone();
+    assert_eq!(decoded, styled);
+
+    // Fixed — `ComponentSerialization.CODEC.fieldOf("value")`; a bare literal
+    // encodes to a JSON string.
+    let fixed = NumberFormat::Fixed(Component::literal("hi"));
+    let encoded = codec
+        .encode_start(&ops, &fixed)
+        .get_or_throw("encode")
+        .clone();
+    assert_eq!(encoded, serde_json::json!({"value": "hi", "type": "fixed"}));
+    let decoded = codec.parse(&ops, &encoded).get_or_throw("parse").clone();
+    assert_eq!(decoded, fixed);
+}
+
+#[test]
+fn number_format_json_unknown_type_errors() {
+    // A `type` outside the bootstrap set → `DataResult.error("Unknown element
+    // id: ...")` (the `NUMBER_FORMAT_TYPE` registry's unknown-name error).
+    let ops = JsonOps::INSTANCE;
+    let codec = crate::numbers::number_format_types::codec(component_codec());
+    let bad = serde_json::json!({"type": "not-a-format"});
+    let result = codec.parse(&ops, &bad);
+    assert!(
+        result.result().is_none(),
+        "expected an error, got {result:?}"
+    );
+}
+
+#[test]
+fn number_format_style_codec_rejects_non_map_fixed() {
+    // `FixedFormat.TYPE` reads `value` via `ComponentSerialization.CODEC`; a
+    // non-component value there fails decode. Java surfaces the underlying
+    // error through the field codec.
+    let ops = JsonOps::INSTANCE;
+    let codec = crate::numbers::number_format_types::codec(component_codec());
+    let bad = serde_json::json!({"type": "fixed", "value": {"not": ["a component"]}});
+    let result = codec.parse(&ops, &bad);
+    assert!(
+        result.result().is_none(),
+        "expected an error, got {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TranslatableContents locale resolution
+// ---------------------------------------------------------------------------
+
+/// A translatable whose key is not in `en_us` and whose `fallback` is used.
+/// Java `getOrDefault(key, fallback)` returns the fallback for a missing key.
+fn translatable_with_fallback(fallback: &str, args: Vec<TranslatableArg>) -> TranslatableContents {
+    TranslatableContents::new("no.such.key".to_string(), Some(fallback.to_string()), args)
+}
+
+#[test]
+fn translatable_resolves_real_locale_key() {
+    // `chat.type.text` = "<%s> %s"; two positional args in order.
+    let contents = TranslatableContents::new(
+        "chat.type.text".to_string(),
+        None,
+        vec![
+            TranslatableArg::String("Steve".to_string()),
+            TranslatableArg::String("Hello".to_string()),
+        ],
+    );
+    let component = Component::create(ComponentContents::Translatable(contents));
+    assert_eq!(component.get_string(), "<Steve> Hello");
+}
+
+#[test]
+fn translatable_missing_key_uses_fallback() {
+    // A missing key resolves the fallback string (Java `getOrDefault(key,
+    // fallback)`); `%s` is replaced by the single arg.
+    let component = Component::create(ComponentContents::Translatable(translatable_with_fallback(
+        "Hello %s!",
+        vec![TranslatableArg::String("world".to_string())],
+    )));
+    assert_eq!(component.get_string(), "Hello world!");
+}
+
+#[test]
+fn translatable_missing_key_and_no_fallback_uses_key() {
+    // `getOrDefault(key)` = `getOrDefault(key, key)`: a wholly unknown key
+    // resolves to itself.
+    let contents = TranslatableContents::new("totally.unknown.key".to_string(), None, Vec::new());
+    let component = Component::create(ComponentContents::Translatable(contents));
+    assert_eq!(component.get_string(), "totally.unknown.key");
+}
+
+#[test]
+fn translatable_escaped_percent_and_indexed_args() {
+    // `%%` → a literal `%`; `%2$s` picks arg index 1 (explicit index, so the
+    // implicit `replacementIndex` is not consumed).
+    let contents = TranslatableContents::new(
+        "escaped.key".to_string(),
+        Some("100%% of %2$s and %s".to_string()),
+        vec![
+            TranslatableArg::Number(7),
+            TranslatableArg::String("score".to_string()),
+        ],
+    );
+    let component = Component::create(ComponentContents::Translatable(contents));
+    assert_eq!(component.get_string(), "100% of score and 7");
+}
+
+#[test]
+fn translatable_component_arg_recurses() {
+    // A `Component` argument is visited as the component itself (contents then
+    // siblings), so its plain text is inserted in order.
+    let mut nested = Component::literal("nested");
+    nested.append_component(Component::literal("+sib"));
+    let contents = TranslatableContents::new(
+        "nested.key".to_string(),
+        Some("pre [%s] post".to_string()),
+        vec![TranslatableArg::Component(Box::new(nested))],
+    );
+    let component = Component::create(ComponentContents::Translatable(contents));
+    assert_eq!(component.get_string(), "pre [nested+sib] post");
+}
+
+#[test]
+fn translatable_malformed_format_falls_back_to_raw() {
+    // `translation.test.invalid2` = "hi %  s": the `%` in literal text between
+    // matches throws `IllegalArgumentException`, and `decompose` falls back to
+    // a single `Text` part holding the raw format string (Java's
+    // `TranslatableFormatException` path).
+    let contents =
+        TranslatableContents::new("translation.test.invalid2".to_string(), None, Vec::new());
+    let component = Component::create(ComponentContents::Translatable(contents));
+    assert_eq!(component.get_string(), "hi %  s");
+}
+
+#[test]
+fn translatable_out_of_range_index_falls_back_to_raw() {
+    // `%s` with no arg → `getArgument(0)` out of range → `Invalid index`
+    // exception → raw-format fallback.
+    let contents = TranslatableContents::new(
+        "oob.key".to_string(),
+        Some("need %s here".to_string()),
+        Vec::new(),
+    );
+    let component = Component::create(ComponentContents::Translatable(contents));
+    assert_eq!(component.get_string(), "need %s here");
+}
+
+#[test]
+fn translatable_paper_too_long_guard_appends_ellipsis() {
+    // Paper's `TranslatableContentConsumer` accepts 33 strings (post-increment
+    // `visited++ > 32`) then throws; `visit` catches and appends "...". Build a
+    // fallback with 40 `%s` slots and 40 args → 40 visited strings.
+    let format = std::iter::repeat_n("%s", 40).collect::<Vec<_>>().join("");
+    let args = (0..40)
+        .map(|i| TranslatableArg::Number(i as i64))
+        .collect::<Vec<_>>();
+    let contents = translatable_with_fallback(&format, args);
+    let component = Component::create(ComponentContents::Translatable(contents));
+    // 33 accepted numbers (0..=32) then "...".
+    let expected = (0..33).map(|i| i.to_string()).collect::<Vec<_>>().join("") + "...";
+    assert_eq!(component.get_string(), expected);
+}
+
+#[test]
+fn translatable_styled_visit_short_circuits() {
+    // `visit_styled` visits parts in order and stops at the first `Some`; a
+    // consumer that matches the second part sees both styles applied.
+    let contents = TranslatableContents::new(
+        "chat.type.text".to_string(),
+        None,
+        vec![
+            TranslatableArg::String("a".to_string()),
+            TranslatableArg::String("b".to_string()),
+        ],
+    );
+    let mut seen = Vec::new();
+    let style = Style::EMPTY.with_bold(Some(true));
+    let result = contents.visit_styled(
+        &mut |s, text| {
+            seen.push((s.clone(), text.to_owned()));
+            None::<()>
+        },
+        &style,
+    );
+    assert!(result.is_none());
+    // `<`, arg0, `> `, arg1 — 4 parts visited, each carrying the (unchanged)
+    // current style.
+    assert_eq!(seen.len(), 4);
+    assert_eq!(
+        seen[0],
+        (Style::EMPTY.with_bold(Some(true)), "<".to_string())
+    );
+    assert_eq!(
+        seen[1],
+        (Style::EMPTY.with_bold(Some(true)), "a".to_string())
+    );
+    assert_eq!(
+        seen[2],
+        (Style::EMPTY.with_bold(Some(true)), "> ".to_string())
+    );
+    assert_eq!(
+        seen[3],
+        (Style::EMPTY.with_bold(Some(true)), "b".to_string())
+    );
+
+    // Short-circuit: the first part matches.
+    let mut hit = 0;
+    let style = Style::EMPTY;
+    let result = contents.visit_styled(
+        &mut |_, _| {
+            hit += 1;
+            Some(())
+        },
+        &style,
+    );
+    assert_eq!(result, Some(()));
+    assert_eq!(hit, 1);
+}
+
+#[test]
+fn translatable_equality_ignores_decomposition_cache() {
+    // `TranslatableContents.equals` compares key/fallback/args only; two equal
+    // contents are equal even though one has decomposed (populated cache) and
+    // the other has not.
+    let mk = || {
+        TranslatableContents::new(
+            "chat.type.text".to_string(),
+            None,
+            vec![TranslatableArg::String("a".to_string())],
+        )
+    };
+    let a = mk();
+    let b = mk();
+    assert_eq!(a, b);
+    let component = Component::create(ComponentContents::Translatable(a));
+    let _ = component.get_string(); // decompose the cache on the stored contents.
+    match component.get_contents() {
+        ComponentContents::Translatable(stored) => assert_eq!(stored, &b),
+        other => panic!("expected translatable, got {other:?}"),
+    }
+}
+
+#[test]
+fn translatable_reuses_component_codec_for_args() {
+    // The `with` list encodes args through `ComponentSerialization.CODEC`
+    // (threaded as `top`); a nested component arg round-trips via the shared
+    // graph, not a fresh per-value codec.
+    let ops = JsonOps::INSTANCE;
+    let codec = component_codec();
+    let nested = Component::literal("nested");
+    let contents = TranslatableContents::new(
+        "nested.key".to_string(),
+        Some("x %s".to_string()),
+        vec![TranslatableArg::Component(Box::new(nested))],
+    );
+    let component = Component::new(
+        ComponentContents::Translatable(contents),
+        Vec::new(),
+        Style::EMPTY,
+    );
+    let encoded = codec
+        .encode_start(&ops, &component)
+        .get_or_throw("encode")
+        .clone();
+    assert_eq!(
+        encoded,
+        serde_json::json!({"translate": "nested.key", "fallback": "x %s", "with": ["nested"]})
+    );
+    // Decode collapses the literal component arg to its String (Java
+    // `ARG_CODEC` `Objects.requireNonNullElse(component.tryCollapseToString(),
+    // component)`), so the round-tripped args hold `String("nested")`.
+    let decoded = codec.parse(&ops, &encoded).get_or_throw("parse").clone();
+    let collapsed = Component::new(
+        ComponentContents::Translatable(TranslatableContents::new(
+            "nested.key".to_string(),
+            Some("x %s".to_string()),
+            vec![TranslatableArg::String("nested".to_string())],
+        )),
+        Vec::new(),
+        Style::EMPTY,
+    );
+    assert_eq!(decoded, collapsed);
 }
 
 // `Component.visit`/`flatten` helpers used above.
