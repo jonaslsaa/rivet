@@ -637,7 +637,11 @@ mod tests {
         let mut g = legacy_wgr();
         g.set_large_feature_seed(12345, 3, -7);
         g.next_gaussian();
-        assert_eq!(g.get_count(), 8, "fresh gaussian draws 2 next-doubles = 4 next-bits");
+        assert_eq!(
+            g.get_count(),
+            8,
+            "fresh gaussian draws 2 next-doubles = 4 next-bits"
+        );
         g.next_gaussian();
         assert_eq!(g.get_count(), 8, "stored gaussian draws nothing");
     }
