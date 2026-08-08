@@ -639,7 +639,7 @@ fn skip_patch_value(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
         if id < 0 {
             return None;
         }
-        skip_component_value(body, off, id as u32, depth + 1)?;
+        skip_any_component_value(body, off, id as u32, depth + 1)?;
     }
     for _ in 0..negative {
         skip_varint(body, off)?;
@@ -942,13 +942,14 @@ fn skip_nbt_predicate(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 /// `TypedDataComponent` — `[DataComponentType registry VarInt][value]`, where the
-/// value uses the component's own stream codec (recursing into [`skip_component_value`]).
+/// value uses the component's own stream codec (recursing into
+/// [`skip_any_component_value`]).
 fn skip_typed_data_component(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
     let id = frame::read_varint(body, off)?;
     if id < 0 {
         return None;
     }
-    skip_component_value(body, off, id as u32, depth + 1)
+    skip_any_component_value(body, off, id as u32, depth + 1)
 }
 
 fn skip_data_component_exact_predicate(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
@@ -964,21 +965,24 @@ fn skip_data_component_exact_predicate(body: &[u8], off: &mut usize, depth: usiz
 }
 
 fn skip_data_component_predicate(body: &[u8], off: &mut usize, _depth: usize) -> Option<()> {
-    // list(64)(Single). Single = [Type either][value]; a concrete predicate type's
-    // value is a fromCodecWithRegistries NBT tag (fully parsed by `skip_nbt`), an
-    // `AnyValueType` (component type) value is unit — so no further depth recursion.
+    // list(64)(Single). Single = [Type either][value]. The Type either reads
+    // [readBoolean][registry varint]: a nonzero byte selects a concrete
+    // DATA_COMPONENT_PREDICATE_TYPE, a zero byte a DATA_COMPONENT_TYPE (AnyValue).
+    // The value for BOTH branches is a fromCodecWithRegistries NBT tag — a
+    // concrete predicate's `singleStreamCodec` serializes the whole predicate to
+    // one tag, and an AnyValueType's `unitCodec` encodes to an empty compound —
+    // so every element is [bool][varint][NBT tag], fully bounded by the NBT
+    // parser (no depth recursion). An End tag is refused like Java's tagCodec.
     let count = frame::read_varint(body, off)?;
     if count < 0 {
         return None;
     }
     for _ in 0..count {
-        let which = *body.get(*off)?;
-        *off += 1;
-        if which == 0 {
-            skip_varint(body, off)?;
-            skip_nbt(body, off)?;
-        } else {
-            skip_varint(body, off)?;
+        skip_bool(body, off)?; // either flag (nonzero = concrete predicate type)
+        skip_varint(body, off)?; // predicate-type or component-type registry id
+        let value = read_nbt(body, off)?;
+        if matches!(value, Nbt::End) {
+            return None;
         }
     }
     Some(())
@@ -1026,13 +1030,14 @@ fn skip_attribute_modifiers(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 fn skip_charged_projectiles(body: &[u8], off: &mut usize) -> Option<()> {
-    // list(?ItemStackTemplate).
-    skip_list(body, off, skip_optional_item_stack)
+    // list(1024)(ItemStackTemplate) — the elements are NOT Optional (only
+    // ItemContainerContents wraps its ItemStackTemplates in an Optional).
+    skip_list(body, off, skip_item_stack_leaf)
 }
 
 fn skip_bundle_contents(body: &[u8], off: &mut usize) -> Option<()> {
-    // list(?ItemStackTemplate).
-    skip_list(body, off, skip_optional_item_stack)
+    // list(256)(ItemStackTemplate) — the elements are NOT Optional.
+    skip_list(body, off, skip_item_stack_leaf)
 }
 
 fn skip_painting_variant_holder(body: &[u8], off: &mut usize) -> Option<()> {
@@ -1114,6 +1119,23 @@ fn skip_shape(body: &[u8], off: &mut usize, shape: Shape, depth: usize) -> Optio
 fn skip_component_value(body: &[u8], off: &mut usize, id: u32, depth: usize) -> Option<()> {
     let shape = component_shape(id)?;
     skip_shape(body, off, shape, depth)
+}
+
+/// Consume one registered component's wire value (the entry's type id has
+/// already been read), dispatching the NBT-shaped ids (0/6/9/11/58/59/60) —
+/// which are not expressible as a [`Shape`] — to the shared reader, and every
+/// other registered id to its byte-exact shape walker. Used where a composite
+/// embeds a `DataComponentPatch` (an `ItemStackTemplate`-holding component) or a
+/// `TypedDataComponent`, so a nested `custom_name`/`custom_data`/... value is
+/// skipped instead of failing the whole canonicalization.
+fn skip_any_component_value(body: &[u8], off: &mut usize, id: u32, depth: usize) -> Option<()> {
+    match component_type_name(id) {
+        Some(name) => {
+            let _ = read_component_value(body, off, name)?;
+            Some(())
+        }
+        None => skip_component_value(body, off, id, depth),
+    }
 }
 
 /// One positive patch entry: the component type id plus the canonical value.
@@ -2295,6 +2317,170 @@ mod tests {
             "profile value must be copied byte-exact"
         );
         assert_eq!(canon_update_advancements(&canon), Some(canon.clone()));
+    }
+
+    #[test]
+    fn charged_and_bundle_projectile_contents_are_not_optional() {
+        // ChargedProjectiles (id 49) and BundleContents (id 50) are
+        // `ItemStackTemplate.STREAM_CODEC.apply(ByteBufCodecs.list(...))` — plain
+        // ItemStackTemplate lists with NO Optional wrapper (only
+        // ItemContainerContents 75 wraps its elements in an Optional). A
+        // regression that skipped each element as `?ItemStackTemplate` would read
+        // the second element's item id as an absent-present bool and truncate the
+        // value, so a two-element value must round-trip byte-exact.
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        for id in [49u32, 50] {
+            let mut value = Vec::new();
+            frame::write_varint(&mut value, 2); // list count
+            for _ in 0..2 {
+                frame::write_varint(&mut value, 0); // item
+                frame::write_varint(&mut value, 1); // count
+                frame::write_varint(&mut value, 0); // patch positive
+                frame::write_varint(&mut value, 0); // patch negative
+            }
+            let entry = (id, value.clone());
+            let adv = advancement(
+                "story:root",
+                None,
+                Some(&display_for(&title, &title, &[entry], &[], &[0])),
+                &[vec!["c".into()]],
+                false,
+            );
+            let input = body(false, &[adv], &[], &[], true);
+            let canon = canon_update_advancements(&input)
+                .expect("plain ItemStackTemplate list canonicalizes");
+            assert_eq!(
+                canon, input,
+                "{id} two-element list must be copied byte-exact (elements not Optional)"
+            );
+        }
+    }
+
+    #[test]
+    fn data_component_predicate_reads_value_tag_for_both_branches() {
+        // can_place_on (id 14) = list(BlockPredicate); each BlockPredicate carries
+        // DataComponentMatchers = [exact list][partial list] where partial is a
+        // list(Single) of DataComponentPredicate. Each Single = [Type either][value]
+        // with the Type either reading [bool][registry varint], and the value for
+        // BOTH branches is an NBT tag: a concrete predicate's
+        // fromCodecWithRegistries tag, or an AnyValueType's empty-compound unit
+        // (`unitCodec` maps empty() to an empty compound — never zero bytes). A
+        // regression that read the value tag for only one branch would mis-skip
+        // the other and truncate the can_place_on value.
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 1); // list(BlockPredicate) count
+        value.push(0); // blocks optional: absent
+        value.push(0); // properties optional: absent
+        value.push(0); // nbt optional: absent
+        value.push(0); // DataComponentExactPredicate: empty list
+        // DataComponentPredicate: list(64)(Single).
+        frame::write_varint(&mut value, 2); // two Singles
+        // AnyValue branch (either flag 0 -> DATA_COMPONENT_TYPE): the value is an
+        // empty-compound unit, still an NBT tag on the wire.
+        value.push(0); // either flag: zero -> AnyValue (component type)
+        frame::write_varint(&mut value, 6); // custom_name DATA_COMPONENT_TYPE id
+        value.push(10); // value tag: empty compound
+        value.push(0);
+        // Concrete branch (either flag nonzero -> DATA_COMPONENT_PREDICATE_TYPE).
+        value.push(1); // either flag: nonzero -> concrete predicate type
+        frame::write_varint(&mut value, 0); // predicate-type registry id
+        value.push(10); // value tag: empty compound
+        value.push(0);
+        let entry = (14u32, value.clone());
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input).expect("predicate value canonicalizes");
+        assert_eq!(
+            canon, input,
+            "data-component predicate with concrete and AnyValue singles must be copied byte-exact"
+        );
+    }
+
+    /// The NBT-shaped component set exercised inside nested patches: custom_name
+    /// (6), lore (11), entity_data (58), plus a non-NBT item_model (10) that must
+    /// still be bounded via its exact wire shape. Entries are fed in a non-sorted
+    /// order so a naive id-ordered walk would mis-align.
+    fn nested_component_patch() -> Vec<u8> {
+        let zombie = nbt_compound(vec![("id", nbt_str("zombie"))]);
+        let model = (10u32, vec![0x03, 0x61, 0x62, 0x63]); // [len 3]["abc"]
+        patch(
+            &[
+                custom_name("x"),
+                lore(&["L1"]),
+                entity_data(7, &zombie),
+                model,
+            ],
+            &[],
+        )
+    }
+
+    /// Run `input` through the display canonicalizer and assert the display value
+    /// is copied byte-exact: a nested ItemStackTemplate's DataComponentPatch is
+    /// NOT re-sorted (only the icon patch at the display top level is), so a
+    /// valid composite whose patch carries NBT-shaped components must pass
+    /// through unchanged rather than failing the whole canonicalization.
+    fn assert_composite_value_passes_byte_exact(entry: (u32, Vec<u8>)) {
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input)
+            .expect("composite with nested NBT-shaped components canonicalizes");
+        assert_eq!(
+            canon, input,
+            "composite value with nested NBT-shaped components must be copied byte-exact"
+        );
+    }
+
+    #[test]
+    fn nested_patch_dispatches_nbt_shaped_components_in_composite_paths() {
+        // Every ItemStackTemplate-holding component embeds DataComponentPatch
+        // values, and a nested patch entry whose component is NBT-shaped
+        // (custom_name 6 / lore 11 / entity_data 58) is not expressible as a
+        // Shape and must be dispatched to the shared NBT reader. A regression
+        // would fail the whole display canonicalization (None) and keep the raw
+        // body. The three representative paths differ in how the elements are
+        // wrapped:
+        //   - container (75)        list(256)(?ItemStackTemplate)  — Optional
+        //   - use_remainder (25)    single ItemStackTemplate        — no list
+        //   - bundle_contents (50)  list(256)(ItemStackTemplate)    — plain
+        let patch = nested_component_patch();
+
+        // Container: [count][?ItemStackTemplate: present][item][count][patch].
+        let mut container = Vec::new();
+        frame::write_varint(&mut container, 1); // list count
+        container.push(1); // Optional present
+        frame::write_varint(&mut container, 0); // item
+        frame::write_varint(&mut container, 1); // count
+        container.extend_from_slice(&patch);
+        assert_composite_value_passes_byte_exact((75u32, container));
+
+        // UseRemainder: [item][count][patch] — a single ItemStackTemplate.
+        let mut use_remainder = Vec::new();
+        frame::write_varint(&mut use_remainder, 0); // item
+        frame::write_varint(&mut use_remainder, 1); // count
+        use_remainder.extend_from_slice(&patch);
+        assert_composite_value_passes_byte_exact((25u32, use_remainder));
+
+        // BundleContents: [count][item][count][patch] — plain, NOT Optional.
+        let mut bundle = Vec::new();
+        frame::write_varint(&mut bundle, 1); // list count
+        frame::write_varint(&mut bundle, 0); // item
+        frame::write_varint(&mut bundle, 1); // count
+        bundle.extend_from_slice(&patch);
+        assert_composite_value_passes_byte_exact((50u32, bundle));
     }
 
     #[test]
