@@ -12,6 +12,15 @@
 //!   for single-key-deep compounds; semantic for multi-key, where the binary
 //!   field order is the documented HashMap-iteration-order divergence).
 //! - `idem`         — Rust-internal read->write->read structural idempotence.
+//! - `component.json` — the committed text corpus (issue #98): Paper's
+//!   `ComponentSerialization.CODEC` decode->re-encode under non-compressed
+//!   `JsonOps` vs the Rust port, byte-for-byte for accepted entries + strict
+//!   accept/reject parity. Paper-accepted click/hover entries (whose field
+//!   names match Paper 26.2: ShowText `value`, OpenUrl `url`, RunCommand
+//!   `command`, CopyToClipboard `value`) are documented as a STUB divergence
+//!   (see `input_has_click_or_hover`); the `malformed-*-wrong-key` negatives
+//!   pin those field names as load-bearing. Everything else must match Paper
+//!   byte-for-byte.
 //!
 //! Output: JSON Lines on stdout (one object per check + a `stats` summary), a
 //! human summary on stderr. Run `cargo run -p rivet-parity -- --help`.
@@ -32,6 +41,8 @@ use rivet_nbt::snbt_printer_tag_visitor::SnbtPrinterTagVisitor;
 use rivet_nbt::string_tag_visitor::StringTagVisitor;
 use rivet_nbt::tag::Tag;
 use rivet_nbt::tag_parser::TagParser;
+use rivet_serialization::json_ops::JsonOps;
+use rivet_text::component::Component;
 use rivet_util::{DataInputStream, DataOutputStream};
 use serde_json::{Value, json};
 
@@ -494,6 +505,133 @@ fn check_idem(id: &str, label: &str, bytes: &[u8]) -> Value {
     check.finish()
 }
 
+/// True when the component JSON mentions a `click_event` / `hover_event` key.
+///
+/// The Rust `ClickEvent`/`HoverEvent` codecs are STUBs (RivetTodo #89, epic
+/// #12) that error on decode and encode, so Paper-accepted click/hover inputs
+/// are the one class of *documented* accept divergence in this corpus — marked
+/// as a soft field + divergence (like `compound_key_order`), never a hard
+/// mismatch. Everything else that diverges is a genuine bug.
+fn input_has_click_or_hover(input: &str) -> bool {
+    input.contains("click_event") || input.contains("hover_event")
+}
+
+/// `component.json`: Paper's `ComponentSerialization.CODEC` decode->re-encode
+/// under non-compressed `JsonOps` (the chat/title/player-info/scoreboard wire
+/// form), vs the Rust port's decode->re-encode of the same input (issue #98).
+///
+/// - `accept` parity: does the Rust codec accept/reject what Paper accepts/
+///   rejects? (Soft for the click/hover STUB divergence.)
+/// - `canonical` byte identity: for accepted inputs, the Rust re-encode must
+///   equal the live oracle's canonical AND the committed golden's canonical,
+///   byte for byte (both sides serialize compactly with insertion order and no
+///   HTML escaping).
+/// - `golden_accept` provenance: the committed golden must agree with the live
+///   oracle — a drift means Paper moved under us, not that Rust is wrong.
+fn check_component_json(
+    oracle: Option<&mut oracle::Oracle>,
+    id: &str,
+    input: &str,
+    golden_accept: bool,
+    golden_canonical: Option<&str>,
+    codec: &std::sync::Arc<dyn rivet_serialization::codec::Codec<Component, JsonOps>>,
+) -> Value {
+    let mut check = Check::new("component.json", id.to_string(), Some(input.to_string()));
+
+    let rust = rust_component_json(input, codec);
+
+    let Some(handle) = oracle else {
+        // No Paper comparison possible. The Rust-vs-golden byte identity is
+        // covered by the offline corpus tests in rivet-text; here just mark
+        // the check skipped (consistent with the NBT kinds under --no-oracle).
+        check.skip("oracle unavailable");
+        return check.finish();
+    };
+
+    match handle.call("component.json", &[("input", input)]) {
+        Ok(result) => {
+            let oracle_accept = result["accept"].as_bool().unwrap_or(false);
+            // Provenance: the committed golden is what this pinned Paper
+            // produced at capture time; the live oracle must still agree.
+            check.field(
+                "golden_accept",
+                &oracle_accept.to_string(),
+                &golden_accept.to_string(),
+            );
+
+            match &rust {
+                Ok(rust_canonical) => {
+                    if oracle_accept {
+                        let oracle_canonical = result["canonical"].as_str().unwrap_or("");
+                        check.field("canonical_oracle", oracle_canonical, rust_canonical);
+                        if let Some(golden) = golden_canonical {
+                            check.field("canonical_golden", golden, rust_canonical);
+                        }
+                    } else {
+                        check.field("accept", "reject", "accept");
+                        check.note("Rust accepted a component Paper rejects");
+                    }
+                }
+                Err(rust_err) => {
+                    if oracle_accept {
+                        if input_has_click_or_hover(input) {
+                            // Documented STUB divergence: Paper accepts a
+                            // click/hover component whose Rust codec is a STUB
+                            // (RivetTodo #89, epic #12). Never a hard mismatch.
+                            check.divergence("component_click_hover_stub");
+                            check.field_soft("accept", "accept", "reject");
+                            check.note(&format!(
+                                "Paper accepts; Rust rejects at the ClickEvent/HoverEvent \
+                                 STUB codec (RivetTodo #89, epic #12): {rust_err}"
+                            ));
+                        } else {
+                            check.field("accept", "accept", "reject");
+                            check.note(&format!(
+                                "Rust rejected a component Paper accepts: {rust_err}"
+                            ));
+                        }
+                    } else {
+                        // Both rejected — accept/reject parity holds; error text
+                        // is informational only.
+                        check.field_soft("accept", "reject", "reject");
+                        check.note(&format!("both rejected; rust error: {rust_err}"));
+                    }
+                }
+            }
+        }
+        Err(oracle_err) => match &rust {
+            Ok(rust_canonical) => {
+                check.field("oracle_accept", "accept", "error");
+                check.note(&format!("oracle error: {oracle_err}"));
+                let _ = rust_canonical;
+            }
+            Err(_) => check.note(&format!("oracle error (rust also rejected): {oracle_err}")),
+        },
+    }
+    check.finish()
+}
+
+/// Rust side of `component.json`: parse `input` as JSON, decode it through
+/// `ComponentSerialization.CODEC` under non-compressed `JsonOps`, re-encode,
+/// and serialize compactly — the exact mirror of the Paper oracle op.
+fn rust_component_json(
+    input: &str,
+    codec: &std::sync::Arc<dyn rivet_serialization::codec::Codec<Component, JsonOps>>,
+) -> Result<String, String> {
+    let ops = JsonOps::INSTANCE;
+    let value: serde_json::Value =
+        serde_json::from_str(input).map_err(|e| format!("invalid JSON: {e}"))?;
+    let decoded = codec.parse(&ops, &value);
+    let component = decoded
+        .result()
+        .ok_or_else(|| "component decode failed".to_string())?;
+    let encoded = codec.encode_start(&ops, component);
+    let encoded = encoded
+        .result()
+        .ok_or_else(|| "component encode failed".to_string())?;
+    serde_json::to_string(encoded).map_err(|e| format!("serialize: {e}"))
+}
+
 // ---- main ----
 
 /// Workspace-root `PARITY.md` scoreboard path. Points at the workspace root
@@ -544,7 +682,15 @@ fn m1_scenario_gate_section() -> String {
 /// is appended so a capped snapshot is not mistaken for full-corpus coverage.
 fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
     let mut rows: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
-    for kind in ["snbt.parse", "nbt.decode", "nbt.encode", "idem"] {
+    // NBT/SNBT checks are `rivet-nbt:*`; the component-JSON corpus (issue #98)
+    // is `rivet-text:component.json`.
+    for (kind, crate_name) in [
+        ("snbt.parse", "rivet-nbt"),
+        ("nbt.decode", "rivet-nbt"),
+        ("nbt.encode", "rivet-nbt"),
+        ("idem", "rivet-nbt"),
+        ("component.json", "rivet-text"),
+    ] {
         let total = summary.totals.get(kind).copied().unwrap_or(0);
         let skipped = summary.skipped.get(kind).copied().unwrap_or(0);
         // Skipped checks (e.g. oracle unavailable) were not measured; a row of
@@ -553,7 +699,7 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
             continue;
         }
         rows.insert(
-            format!("rivet-nbt:{kind}"),
+            format!("{crate_name}:{kind}"),
             (
                 total - skipped,
                 summary.matched.get(kind).copied().unwrap_or(0),
@@ -587,6 +733,7 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
     md.push_str(&m1_scenario_gate_section());
     md.push_str("\n### Divergences\n\n");
     md.push_str("`compound_key_order` is the documented insertion-order divergence (DECISIONS.md D12): Rust's `CompoundTag` is insertion-ordered, so hand-built compounds emit Rust's put sequence while Java emits fastutil hash order; read-back fixtures round-trip byte-for-byte. All such checks remain `ok` and are counted under `diverged`, never under `mismatched`.\n");
+    md.push_str("\n`component_click_hover_stub` is the documented STUB divergence for the text corpus (issue #98): the corpus carries four Paper-accepted click/hover components (`click-copy-to-clipboard`, `click-open-url`, `click-run-command`, `hover-show-text`) whose Rust `ClickEvent`/`HoverEvent` codecs are STUBs (RivetTodo #89, epic #12) and therefore reject. The fixtures use exactly Paper 26.2's codec field names (ShowText `value`, OpenUrl `url`, RunCommand `command`, CopyToClipboard `value`) and none needs registry/Holder context, so Paper accepts all four and the only reason Rivet rejects them is the unported STUB codec — never a malformed field or registry/Holder context; the four `malformed-*-wrong-key` negatives carry the same content with a wrong field name (show_text `contents`, open_url `href`, run_command `value`, copy_to_clipboard `text`) and Paper rejects them, pinning the field names as load-bearing. Once the STUBs are ported, the divergence closes and those checks become hard accept-parity. Everything else in `component.json` must match Paper byte-for-byte (canonical JSON under non-compressed `JsonOps`) and is counted under `mismatched` when it does not.\n");
 
     let path = scoreboard_path();
     match std::fs::write(&path, md) {
@@ -810,6 +957,35 @@ fn main() {
         transcript.push(check);
     }
 
+    // ---- component.json: the committed text corpus vs Paper (issue #98) ----
+    if let Some(entries) = corpus::text_corpus() {
+        let codec = rivet_text::component_serialization::codec();
+        // The Rust-side decode->re-encode byte-identity against the committed
+        // golden is covered by the offline corpus tests in rivet-text; here the
+        // oracle comparison is the point.
+        for entry in &entries {
+            let check = check_component_json(
+                oracle.as_deref_mut(),
+                &format!("component.{id}", id = entry.id),
+                &entry.input,
+                entry.accept,
+                entry.canonical.as_deref(),
+                &codec,
+            );
+            summary.record(&check);
+            transcript.push(check);
+        }
+        eprintln!(
+            "[rivet-parity] text corpus: {} component.json entries under {}",
+            entries.len(),
+            corpus::text_fixtures_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "?".into())
+        );
+    } else {
+        eprintln!("[rivet-parity] text fixtures not present; skipping component.json section");
+    }
+
     // ---- emit transcript + summary ----
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
@@ -844,7 +1020,13 @@ fn main() {
     eprintln!("=== rivet-nbt vs Paper Java oracle — parity summary ===");
     // Invalid-corpus checks carry kind "snbt.parse" too; their ids are
     // prefixed `parse-invalid.` in the transcript.
-    let kinds = ["snbt.parse", "nbt.decode", "nbt.encode", "idem"];
+    let kinds = [
+        "snbt.parse",
+        "nbt.decode",
+        "nbt.encode",
+        "idem",
+        "component.json",
+    ];
     for kind in kinds {
         let total = summary.totals.get(kind).copied().unwrap_or(0);
         if total == 0 {

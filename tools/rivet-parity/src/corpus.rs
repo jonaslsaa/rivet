@@ -279,6 +279,78 @@ pub fn fixtures_dir() -> Option<std::path::PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+/// Locate the committed `fixtures/text/` component-JSON corpus + golden
+/// (issue #98), relative to the workspace root.
+pub fn text_fixtures_dir() -> Option<std::path::PathBuf> {
+    let ws = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()?;
+    let dir = ws.join("tools/rivet-oracle/fixtures/text");
+    dir.is_dir().then_some(dir)
+}
+
+/// One entry of the committed component-JSON text corpus (issue #98): the
+/// exact wire JSON (`input`, stored as a JSON string so the bytes fed to Paper
+/// equal the bytes the Rust side parses), Paper's verdict at capture
+/// (`accept`, from `golden.json`), and — for accepted entries — Paper's
+/// canonical decode->re-encode JSON under non-compressed `JsonOps`
+/// (`canonical`, copied verbatim so the byte identity is preserved).
+pub struct TextFixtureEntry {
+    pub id: String,
+    pub input: String,
+    pub accept: bool,
+    pub canonical: Option<String>,
+}
+
+/// Load the committed text corpus + golden, merged by id in corpus order.
+///
+/// Every corpus entry must have a matching golden entry (the golden covers
+/// every input), and accepted entries must carry Paper's canonical JSON. A
+/// missing or malformed pair is a hard error — the corpus is the fixture, not
+/// something to paper over.
+pub fn text_corpus() -> Option<Vec<TextFixtureEntry>> {
+    let dir = text_fixtures_dir()?;
+    let corpus_path = dir.join("corpus.json");
+    let golden_path = dir.join("golden.json");
+    if !corpus_path.is_file() || !golden_path.is_file() {
+        return None;
+    }
+    let corpus: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&corpus_path).ok()?).ok()?;
+    let golden: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&golden_path).ok()?).ok()?;
+
+    let golden_by_id: std::collections::HashMap<&str, &serde_json::Value> = golden["entries"]
+        .as_array()?
+        .iter()
+        .map(|e| (e["id"].as_str().unwrap_or_default(), e))
+        .collect();
+
+    let mut out = Vec::new();
+    for entry in corpus["entries"].as_array()? {
+        let id = entry["id"].as_str().map(str::to_string)?;
+        let input = entry["input"].as_str().map(str::to_string)?;
+        let accept = entry["accept"].as_bool()?;
+        let g = golden_by_id.get(id.as_str()).copied()?;
+        let canonical = if accept {
+            Some(
+                g.get("canonical")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        out.push(TextFixtureEntry {
+            id,
+            input,
+            accept,
+            canonical,
+        });
+    }
+    Some(out)
+}
+
 /// Walk the fixtures tree collecting `*.nbt` files in deterministic order.
 pub fn collect_fixtures(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();

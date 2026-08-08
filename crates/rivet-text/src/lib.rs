@@ -23,4 +23,6 @@ pub use style::Style;
 pub use text_color::TextColor;
 
 #[cfg(test)]
+mod corpus_tests;
+#[cfg(test)]
 mod tests;

@@ -20,6 +20,7 @@ human-readable summary goes to stderr.
 | `nbt.decode` | binary NBT bytes (fixtures) | canonical + pretty SNBT after Rust `NbtIo.read` vs oracle `nbt.decode` |
 | `nbt.encode` | compound SNBT | binary NBT bytes — **byte-for-byte** for single-key-deep compounds; for multi-key compounds the binary field order is the documented HashMap-iteration-order divergence, so the binding comparison is a *semantic* one (both binaries must re-read to the same canonical SNBT) |
 | `idem` | binary NBT bytes | Rust-internal read->write->read structural equality (always runs, even without the oracle) |
+| `component.json` | component JSON (fixtures) | Paper `ComponentSerialization.CODEC` decode->re-encode under non-compressed `JsonOps` vs the Rust port's re-encode, byte-for-byte; accept/reject parity over the committed issue-#98 text corpus (46 accepted + 16 strict malformed) |
 
 ### Known divergences
 
@@ -32,6 +33,22 @@ human-readable summary goes to stderr.
   separately from hard mismatches. **The SNBT text checks do not suffer this**:
   both printers sort compound keys, so `snbt.parse` and `nbt.decode` compare
   byte-for-byte.
+- **`component_click_hover_stub`** — the issue-#98 text corpus carries four
+  Paper-accepted click/hover components (`click-copy-to-clipboard`,
+  `click-open-url`, `click-run-command`, `hover-show-text`) whose Rust
+  `ClickEvent`/`HoverEvent` codecs are STUBs (RivetTodo #89, epic #12) and
+  therefore reject. The fixtures use exactly Paper 26.2's codec field names
+  (ShowText `value`, OpenUrl `url`, RunCommand `command`, CopyToClipboard
+  `value`) and none needs registry/Holder context, so Paper accepts all four
+  and the only reason Rivet rejects them is the unported STUB codec — never a
+  malformed field or registry/Holder context. The four `malformed-*-wrong-key`
+  negatives carry the same content with a wrong field name (show_text
+  `contents`, open_url `href`, run_command `value`, copy_to_clipboard `text`);
+  Paper rejects them, pinning the field names as load-bearing. Those checks are
+  marked `"divergences": ["component_click_hover_stub"]` with a soft `accept`
+  field, counted under `diverged` not `mismatched`. Once the STUBs are ported
+  the divergence closes and the checks become hard accept-parity. Everything
+  else in `component.json` must match Paper byte-for-byte.
 
 ## How to run
 

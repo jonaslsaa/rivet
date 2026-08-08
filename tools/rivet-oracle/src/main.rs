@@ -39,8 +39,10 @@
 //!   7. **`regenerate`** — full regeneration of all fixture kinds: M0 chunk
 //!      slice (boot + extract), M2 region payloads (twin-boot: two independent
 //!      fresh normal-overworld boots whose extracted payloads must be
-//!      byte-identical before anything is committed), and the worldgen semantic
-//!      samples. Sub-select with `--m0` / `--m2` / `--samples`.
+//!      byte-identical before anything is committed), the worldgen semantic
+//!      samples, and the text component-JSON corpus (Paper reference-oracle
+//!      capture, issue #98). Sub-select with `--m0` / `--m2` / `--samples` /
+//!      `--text`.
 //!
 //! Note on determinism (see scripts/extract_fixtures.py): raw region files
 //! are NOT byte-stable across boots (framing/timestamps), but the decompressed
@@ -353,11 +355,13 @@ struct WorldgenManifest<'a> {
     level_type: &'a str,
     kind: &'a str,
     note: &'a str,
-    captured: Vec<WorldgenCaptured>,
+    captured: Vec<CapturedFile>,
 }
 
+/// A captured file entry in a fixture manifest: relative path + SHA-256 + byte
+/// count, verified by `verify_fixtures`. Shared by the worldgen and text kinds.
 #[derive(serde::Serialize)]
-struct WorldgenCaptured {
+struct CapturedFile {
     path: String,
     sha256: String,
     bytes: usize,
@@ -1555,7 +1559,7 @@ fn regenerate_worldgen_manifest(wg_dir: &Path) -> Result<(), Error> {
     for name in ["samples.json", "light.json"] {
         let data = fs::read(wg_dir.join(name))
             .map_err(|e| Error::Manifest(format!("{name} missing: {e}")))?;
-        captured.push(WorldgenCaptured {
+        captured.push(CapturedFile {
             path: name.to_string(),
             sha256: sha256_hex(&data),
             bytes: data.len(),
@@ -1626,6 +1630,108 @@ fn regenerate_samples() -> Result<(), Error> {
     // 3. Rewrite the worldgen manifest from the fresh hashes.
     regenerate_worldgen_manifest(&wg)?;
     println!("regenerated worldgen semantic samples (samples.json, light.json, manifest.json)");
+    Ok(())
+}
+
+/// `fixtures/text/` manifest, serialized in the exact committed field order so
+/// regeneration is byte-identical (git-clean). The text corpus (issue #98)
+/// hashes the committed `corpus.json` (input component JSON, exact wire bytes)
+/// and `golden.json` (Paper's accept/reject verdict + canonical decode→re-encode
+/// JSON under non-compressed `JsonOps`). The `paper` provenance is read back out
+/// of `corpus.json` so the manifest always describes what was captured.
+#[derive(serde::Serialize)]
+struct TextManifest<'a> {
+    format: u64,
+    paper: &'a str,
+    kind: &'a str,
+    note: &'a str,
+    captured: Vec<CapturedFile>,
+}
+
+/// Rewrite `fixtures/text/manifest.json` from the committed corpus + golden.
+///
+/// The `paper` pin comes from `corpus.json`'s provenance field (the pinned
+/// Paper 26.2 revision the golden was captured against), mirroring how the
+/// worldgen manifest reads its seed + pin back out of the generated samples so
+/// it always describes what was actually produced.
+fn regenerate_text_manifest(text_dir: &Path) -> Result<(), Error> {
+    let corpus_path = text_dir.join("corpus.json");
+    let corpus: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&corpus_path)
+            .map_err(|e| Error::Manifest(format!("{} missing: {e}", corpus_path.display())))?,
+    )
+    .map_err(|e| Error::Manifest(format!("{} unparsable: {e}", corpus_path.display())))?;
+    let paper = corpus
+        .get("paper")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let mut captured = Vec::new();
+    for name in ["corpus.json", "golden.json"] {
+        let data = fs::read(text_dir.join(name))
+            .map_err(|e| Error::Manifest(format!("{name} missing: {e}")))?;
+        captured.push(CapturedFile {
+            path: name.to_string(),
+            sha256: sha256_hex(&data),
+            bytes: data.len(),
+        });
+    }
+
+    let manifest = TextManifest {
+        format: 1,
+        paper: &paper,
+        kind: "text",
+        note: "Paper-grounded component JSON corpus + golden (issue #98): `corpus.json` is the \
+               committed input corpus (each `input` is the exact wire JSON a \
+               chat/title/player-info/scoreboard packet carries, stored as a JSON string so the \
+               bytes fed to Paper equal the bytes the Rust side parses); `golden.json` records \
+               Paper's accept/reject verdict and the canonical decode->re-encode JSON under \
+               non-compressed JsonOps, stored verbatim as a JSON string so no serialization \
+               layer re-normalizes it. Regenerate with `regenerate --text` (needs the \
+               materialized Paper runtime + reference oracle launcher).",
+        captured,
+    };
+    let mut text = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| Error::Manifest(format!("cannot serialize text manifest: {e}")))?;
+    text.push('\n');
+    fs::write(text_dir.join("manifest.json"), text)?;
+    println!("rewrote {}", text_dir.join("manifest.json").display());
+    Ok(())
+}
+
+/// Regenerate the `fixtures/text/` fixtures: drive the Paper reference oracle
+/// over `corpus.json` (`scripts/extract_text_fixtures.py` writes `golden.json`),
+/// then rewrite the manifest. No full server boot — only the materialized Paper
+/// runtime + the reference oracle launcher are needed.
+fn regenerate_text() -> Result<(), Error> {
+    let text_dir = crate_dir().join("fixtures/text");
+    fs::create_dir_all(&text_dir)?;
+
+    let extractor = crate_dir().join("scripts/extract_text_fixtures.py");
+    let corpus = text_dir.join("corpus.json");
+    let golden = text_dir.join("golden.json");
+    let status = Command::new("python3")
+        .arg(&extractor)
+        .arg(&corpus)
+        .arg(&golden)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| {
+            Error::Gate(format!(
+                "failed to run python3 {}: {e}",
+                extractor.display()
+            ))
+        })?;
+    if !status.success() {
+        return Err(Error::Gate(format!(
+            "extract_text_fixtures.py exited {status} — see its stderr (Paper oracle runtime \
+             missing? set RIVET_PAPER_JAR / RIVET_PAPER_LIBRARIES / RIVET_PAPER_RUNTIME_JAR)"
+        )));
+    }
+
+    regenerate_text_manifest(&text_dir)?;
+    println!("regenerated text fixture corpus (corpus.json, golden.json, manifest.json)");
     Ok(())
 }
 
@@ -1792,15 +1898,20 @@ fn regenerate_m2(dest: &Path) -> Result<(), Error> {
 /// committed — the M0-verify-in-a-temporary-destination path.
 fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     for flag in only {
-        if !matches!(*flag, "--m0" | "--m2" | "--samples") {
+        if !matches!(*flag, "--m0" | "--m2" | "--samples" | "--text") {
             return Err(Error::Gate(format!("unknown regenerate flag: {flag}")));
         }
     }
-    // `--to <dir>` must name exactly one booting kind. A shared destination
+    // `--to <dir>` must name exactly one *booting* kind. A shared destination
     // across kinds would clobber M0's output when M2's twin-boot copy replaces
-    // the whole directory (silently discarding M0), and the worldgen samples
-    // ignore a destination entirely — so refuse instead of misbehaving.
-    if to.is_some() && (only.len() != 1 || only.contains(&"--samples")) {
+    // the whole directory (silently discarding M0), and the derived kinds
+    // (worldgen samples, text corpus) regenerate their committed fixture trees
+    // and ignore a destination entirely — so refuse instead of misbehaving.
+    let booting = only
+        .iter()
+        .filter(|flag| matches!(**flag, "--m0" | "--m2"))
+        .count();
+    if to.is_some() && booting != 1 {
         let what = if only.is_empty() {
             String::from("all kinds (bare regenerate)")
         } else {
@@ -1808,13 +1919,15 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
         };
         return Err(Error::Gate(format!(
             "regenerate --to <dir> requires exactly one of --m0/--m2 (--samples \
-             regenerates the committed fixtures/worldgen tree and ignores --to); \
+             regenerates the committed fixtures/worldgen tree and ignores --to; --text \
+             regenerates the committed fixtures/text tree and ignores --to); \
              got {what}"
         )));
     }
     let m0 = only.is_empty() || only.contains(&"--m0");
     let m2 = only.is_empty() || only.contains(&"--m2");
     let samples = only.is_empty() || only.contains(&"--samples");
+    let text = only.is_empty() || only.contains(&"--text");
     let m0_default = crate_dir().join("fixtures");
     let m2_default = crate_dir().join("fixtures/regions/overworld-normal");
     let m0_dest = to.unwrap_or(&m0_default);
@@ -1830,6 +1943,10 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     if samples {
         println!("==> regenerating worldgen semantic samples");
         regenerate_samples()?;
+    }
+    if text {
+        println!("==> regenerating text fixture corpus (corpus.json + golden.json)");
+        regenerate_text()?;
     }
     Ok(())
 }
@@ -2356,10 +2473,13 @@ fn print_usage() {
         "  cargo run -p rivet-oracle -- sample         regenerate worldgen/ semantic samples + manifest"
     );
     println!("  cargo run -p rivet-oracle -- regenerate     regenerate ALL fixture kinds");
-    println!("                                             (sub-select: --m0 / --m2 / --samples;");
-    println!("                                              --to <dir> regenerates into a scratch");
+    println!("                                             (sub-select: --m0 / --m2 / --samples /");
+    println!("                                              --text; --to <dir> regenerates into a");
     println!(
-        "                                              destination instead of the fixtures tree)"
+        "                                              scratch destination instead of the fixtures"
+    );
+    println!(
+        "                                              tree; --text needs the Paper oracle runtime)"
     );
     println!();
     println!(
@@ -2784,6 +2904,7 @@ mod tests {
             (&[][..], "all kinds (bare regenerate)"),
             (&["--m0", "--m2"][..], "--m0 --m2"),
             (&["--samples"][..], "ignores --to"),
+            (&["--text"][..], "ignores --to"),
         ] {
             match run_regenerate(flags, to) {
                 Err(Error::Gate(m)) => assert!(
@@ -3193,6 +3314,151 @@ mod tests {
         assert_eq!(
             committed, regenerated,
             "regenerating the worldgen manifest must be byte-identical (git-clean)"
+        );
+        // And the regenerated manifest is self-consistent: it verifies its files.
+        verify_fixtures(&scratch).unwrap();
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// The committed `fixtures/text/` corpus (issue #98) must verify clean, carry
+    /// the pinned Paper provenance, and capture exactly the two committed files.
+    #[test]
+    fn text_manifest_verify() {
+        let dir = fixtures_dir().join("text");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let manifest = verify_fixtures(&dir).expect("text fixtures should match manifest");
+        assert_eq!(manifest.kind.as_deref(), Some("text"));
+        assert_eq!(
+            parse_paper_pin(manifest.paper.as_deref()),
+            Some("0a99345".into())
+        );
+        let mut names: Vec<&str> = manifest.captured.iter().map(|c| c.path.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["corpus.json", "golden.json"]);
+    }
+
+    /// The corpus must be non-vacuous and representative: enough entries to
+    /// exercise the chat/title/player-info/scoreboard paths, with both accepted
+    /// components and strict malformed (reject) fixtures present. A corpus that
+    /// silently shrinks to nothing is a failed fixture.
+    #[test]
+    fn text_corpus_is_non_vacuous() {
+        let corpus = fixtures_dir().join("text").join("corpus.json");
+        if !corpus.is_file() {
+            return;
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&corpus).unwrap()).unwrap();
+        let entries = v["entries"].as_array().expect("entries is a list");
+        assert!(
+            entries.len() >= 50,
+            "corpus must be substantial, got {}",
+            entries.len()
+        );
+        let accepts = entries
+            .iter()
+            .filter(|e| e["accept"] == serde_json::Value::Bool(true))
+            .count();
+        let rejects = entries
+            .iter()
+            .filter(|e| e["accept"] == serde_json::Value::Bool(false))
+            .count();
+        assert!(
+            accepts >= 30,
+            "corpus must exercise accepted components, got {accepts}"
+        );
+        assert!(
+            rejects >= 5,
+            "corpus must include strict malformed fixtures, got {rejects}"
+        );
+        // Every entry has the required shape.
+        for e in entries {
+            assert!(e.get("id").is_some(), "entry lacks an id");
+            let input = e.get("input").and_then(|i| i.as_str());
+            assert!(
+                input.is_some() && !input.unwrap().is_empty(),
+                "entry {} input must be a non-empty JSON string",
+                e["id"]
+            );
+        }
+    }
+
+    /// The corpus `accept` verdicts and the golden (Paper's real verdicts) must
+    /// agree entry-for-entry — the committed corpus never lies about what Paper
+    /// accepted or rejected (issue #98 byte/JSON identity without normalization).
+    #[test]
+    fn text_corpus_accept_matches_golden() {
+        let dir = fixtures_dir().join("text");
+        let corpus = dir.join("corpus.json");
+        let golden = dir.join("golden.json");
+        if !corpus.is_file() || !golden.is_file() {
+            return;
+        }
+        let cv: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&corpus).unwrap()).unwrap();
+        let gv: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&golden).unwrap()).unwrap();
+        let mut corpus_by_id: std::collections::BTreeMap<&str, bool> = cv["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| (e["id"].as_str().unwrap(), e["accept"].as_bool().unwrap()))
+            .collect();
+        assert_eq!(
+            corpus_by_id.len(),
+            cv["entries"].as_array().unwrap().len(),
+            "duplicate corpus ids"
+        );
+        let golden_entries = gv["entries"].as_array().unwrap();
+        assert_eq!(
+            corpus_by_id.len(),
+            golden_entries.len(),
+            "golden must cover every corpus entry"
+        );
+        for ge in golden_entries {
+            let id = ge["id"].as_str().unwrap();
+            let accept = ge["accept"].as_bool().unwrap();
+            assert_eq!(
+                corpus_by_id.remove(id),
+                Some(accept),
+                "corpus accept disagrees with Paper golden for {id}"
+            );
+            if accept {
+                assert!(
+                    ge.get("canonical").is_some(),
+                    "accepted entry {id} must record Paper's canonical JSON"
+                );
+            }
+        }
+        assert!(corpus_by_id.is_empty(), "golden missed corpus entries");
+    }
+
+    /// Regenerating the text manifest in Rust is byte-identical to the committed
+    /// manifest (given unchanged corpus + golden) — regeneration is git-clean
+    /// and the committed manifest is what the writer would produce.
+    #[test]
+    fn text_manifest_regeneration_is_byte_identical() {
+        let dir = fixtures_dir().join("text");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-text-regen-{}", std::process::id()));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        fs::create_dir_all(&scratch).unwrap();
+        for name in ["corpus.json", "golden.json"] {
+            fs::copy(dir.join(name), scratch.join(name)).unwrap();
+        }
+        regenerate_text_manifest(&scratch).unwrap();
+        let committed = fs::read(dir.join("manifest.json")).unwrap();
+        let regenerated = fs::read(scratch.join("manifest.json")).unwrap();
+        assert_eq!(
+            committed, regenerated,
+            "regenerating the text manifest must be byte-identical (git-clean)"
         );
         // And the regenerated manifest is self-consistent: it verifies its files.
         verify_fixtures(&scratch).unwrap();

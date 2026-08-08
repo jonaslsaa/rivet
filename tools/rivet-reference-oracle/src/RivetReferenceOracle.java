@@ -5,6 +5,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mojang.serialization.JsonOps;
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -20,6 +21,10 @@ import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.SnbtPrinterTagVisitor;
 import net.minecraft.nbt.Tag;
 import net.minecraft.nbt.TagParser;
+import net.minecraft.SharedConstants;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.ComponentSerialization;
+import net.minecraft.server.Bootstrap;
 
 public final class RivetReferenceOracle {
     private static final int PROTOCOL_VERSION = 1;
@@ -27,6 +32,25 @@ public final class RivetReferenceOracle {
     private static final int MAX_BASE64_CHARS = ((MAX_NBT_BYTES + 2) / 3) * 4;
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
     private static final TagParser<Tag> SNBT_PARSER = TagParser.create(NbtOps.INSTANCE);
+
+    /**
+     * The untouched stdout, captured before {@code Bootstrap.bootStrap()}
+     * installs Paper's log4j SysOutOverSLF4J wrapper (which re-logs every
+     * {@code System.out.println} as a {@code [STDOUT]: ...} line). The
+     * JSON-Lines protocol rides on the raw stream so responses stay parseable.
+     */
+    private static final java.io.PrintStream RAW_STDOUT = System.out;
+
+    static {
+        // `component.json` decodes through `ComponentSerialization.CODEC`, whose
+        // contents codecs touch the vanilla registries (score/selector/etc.).
+        // Bootstrap the registries once at startup, the same way WorldGenSampler
+        // does — no full server boot required. The NBT ops don't use registries
+        // and are unaffected. `SharedConstants.tryDetectVersion()` must run
+        // first (Bootstrap reads the current game version).
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+    }
 
     private RivetReferenceOracle() {
     }
@@ -47,8 +71,8 @@ public final class RivetReferenceOracle {
             String line;
             while ((line = input.readLine()) != null) {
                 if (!line.isBlank()) {
-                    System.out.println(GSON.toJson(processLine(line)));
-                    System.out.flush();
+                    RAW_STDOUT.println(GSON.toJson(processLine(line)));
+                    RAW_STDOUT.flush();
                 }
             }
         }
@@ -65,6 +89,7 @@ public final class RivetReferenceOracle {
                 case "snbt.parse" -> parseSnbt(requiredString(request, "input"));
                 case "nbt.encode" -> encodeNbt(requiredString(request, "input"));
                 case "nbt.decode" -> decodeNbt(requiredString(request, "input_base64"));
+                case "component.json" -> componentJson(requiredString(request, "input"));
                 default -> throw new IllegalArgumentException("unknown operation: " + operation);
             };
             return success(id, result);
@@ -119,6 +144,45 @@ public final class RivetReferenceOracle {
         JsonObject result = describeTag(tag);
         result.addProperty("bytes", bytes.length);
         return result;
+    }
+
+    /**
+     * `component.json`: decode a component JSON through
+     * {@link ComponentSerialization#CODEC} under non-compressed {@link JsonOps}
+     * and re-encode it. This is Paper's canonical round-trip identity for the
+     * wire form a chat/title/player-info/scoreboard packet carries: `accept` is
+     * whether the input decodes at all, and `canonical` is the exact JSON the
+     * codec re-emits (byte-comparable with the Rust side, since both serialize
+     * compactly with insertion order and no HTML escaping). A malformed input
+     * (invalid JSON or an undecodable component) returns `accept:false` — the
+     * accept/reject parity contract for the strict-malformed fixtures.
+     */
+    private static JsonObject componentJson(final String input) {
+        JsonObject result = new JsonObject();
+        JsonElement element;
+        try {
+            element = JsonParser.parseString(input);
+        } catch (Exception error) {
+            result.addProperty("accept", false);
+            return result;
+        }
+        try {
+            Component component = ComponentSerialization.CODEC
+                .decode(JsonOps.INSTANCE, element)
+                .getOrThrow()
+                .getFirst();
+            JsonElement encoded = ComponentSerialization.CODEC
+                .encodeStart(JsonOps.INSTANCE, component)
+                .getOrThrow();
+            result.addProperty("accept", true);
+            // Serialize with the same non-html-escaping Gson used for responses
+            // so the canonical is byte-identical to the Rust encoder's output.
+            result.addProperty("canonical", GSON.toJson(encoded));
+            return result;
+        } catch (Exception error) {
+            result.addProperty("accept", false);
+            return result;
+        }
     }
 
     private static JsonObject describeTag(final Tag tag) {
@@ -228,7 +292,14 @@ public final class RivetReferenceOracle {
         summary.addProperty("ok", true);
         summary.addProperty("protocol", PROTOCOL_VERSION);
         summary.addProperty("tests", 9);
-        System.out.println(GSON.toJson(summary));
+        // Emit on the raw stream, not System.out: Bootstrap.bootStrap() has
+        // re-wired System.out through log4j's SysOutOverSLF4J wrapper, so a
+        // System.out.println here would surface as a `[HH:mm:ss LEVEL]: [STDOUT]:
+        // {...}` log line instead of a bare JSON line. The JSON-Lines protocol
+        // (and any consumer that parses the self-test output line by line) rides
+        // on the raw stream.
+        RAW_STDOUT.println(GSON.toJson(summary));
+        RAW_STDOUT.flush();
     }
 
     private static void requireSuccess(final JsonObject response, final String operation) {
