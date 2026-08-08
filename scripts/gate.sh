@@ -397,20 +397,30 @@ run_oracle_hash() {
 }
 
 # Returns 0 iff $1 is exactly the bare JSON-Lines summary the oracle self-test
-# must emit: a single line, starting with '{' (NOT a log4j `[HH:mm:ss LEVEL]:
-# [STDOUT]: ...` prefix — Bootstrap.bootStrap() re-wires System.out through
-# SysOutOverSLF4J, so a regression of selfTest() back to System.out.println
-# either prefixes the summary or swallows it entirely), and carrying the
-# top-level "ok":true the summary sets. Any other shape — empty stdout, a
-# `[`-prefixed log line, extra lines — means the raw-stdout protocol broke.
+# must emit: a single JSON object whose top-level "ok" is the boolean true.
+# Parsed structurally with python3 (NOT a substring scan — a substring glob
+# would accept a nested `{"ok":true}` with no top-level ok, and a top-level
+# "ok":false / "ok":"true" / "ok":1 must all be rejected).
+#
+# The raw-stdout shape is the load-bearing contract: the summary must NOT be a
+# log4j `[HH:mm:ss LEVEL]: [STDOUT]: ...` prefix — Bootstrap.bootStrap()
+# re-wires System.out through SysOutOverSLF4J, so a regression of selfTest()
+# back to System.out.println either prefixes the summary or swallows it
+# entirely. Empty stdout, a `[`-prefixed log line, or extra lines means the
+# protocol broke.
 oracle_self_test_stdout_is_raw_json() {
   [ "$#" -eq 1 ] || return 1
   [ -n "$1" ] || return 1
-  case "$1" in
-    *$'\n'*) return 1 ;;           # more than one line
-    '{'*'"ok":true'*) return 0 ;;  # one bare JSON line, ok:true
-    *) return 1 ;;
-  esac
+  printf '%s\n' "$1" | python3 -c '
+import json, sys
+line = sys.stdin.read()
+try:
+    data = json.loads(line)
+except ValueError:
+    sys.exit(1)
+if not isinstance(data, dict) or data.get("ok") is not True:
+    sys.exit(1)
+'
 }
 
 # The reference oracle's `--self-test` mode (RivetReferenceOracle.selfTest())
@@ -420,10 +430,11 @@ oracle_self_test_stdout_is_raw_json() {
 # {...}` log line (or swallowed). Asserting the real stdout shape is the
 # load-bearing proof that a regression back to System.out.println fails the
 # gate; it shares the parity step's prerequisites (the compiled oracle boots
-# against the same Paper runtime), so it is guarded by PARITY_RUNNABLE.
+# against the same Paper runtime), so it is guarded by PARITY_RUNNABLE, and the
+# JSON verdict is parsed with python3 (already a gate prereq for `verify`).
 run_oracle_self_test() {
   echo "==> reference oracle self-test (raw JSON Lines on stdout, no log prefix)"
-  if [ "$PARITY_RUNNABLE" = 1 ]; then
+  if [ "$PARITY_RUNNABLE" = 1 ] && command -v python3 >/dev/null 2>&1; then
     local out="" rc=0
     out="$(bash "$REPO_DIR/tools/rivet-reference-oracle/run.sh" --self-test)" || rc=$?
     if [ "$rc" -ne 0 ]; then

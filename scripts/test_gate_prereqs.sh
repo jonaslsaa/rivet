@@ -233,9 +233,12 @@ pass "tool crash: FAILED, exit 1, never VERIFIED"
 # [STDOUT]: ...` prefix, and not swallowed). This is the load-bearing test for
 # RivetReferenceOracle.selfTest()'s RAW_STDOUT emission: a regression back to
 # System.out.println (re-wired through SysOutOverSLF4J by Bootstrap.bootStrap())
-# produces a prefixed line or empty stdout and must FAIL the gate. The step
-# resolves run.sh via REPO_DIR, so only that file is shimmed inside FAKE_FULL;
-# PARITY_RUNNABLE is set directly, as in the parity tests above.
+# produces a prefixed line or empty stdout and must FAIL the gate. The verdict
+# is a *structural* JSON parse (top-level "ok" must be the boolean true): a
+# nested `{"ok":true}` (top-level ok absent) and a top-level `"ok":false` are
+# both counterfeits and must FAIL. The step resolves run.sh via REPO_DIR, so
+# only that file is shimmed inside FAKE_FULL; PARITY_RUNNABLE is set directly,
+# as in the parity tests above.
 SELF_SHIM_DIR="$FAKE_FULL/tools/rivet-reference-oracle"
 mkdir -p "$SELF_SHIM_DIR"
 self_run_sh() { # $1 = literal stdout line the fake run.sh should emit
@@ -285,6 +288,30 @@ set -e
 [ "$rc12" = 1 ] || fail "self-test: multi-line stdout should exit 1 (got $rc12)"
 grep -q "^    FAILED" "$TMP/out12" || fail "self-test: FAILED not printed for multi-line stdout"
 pass "self-test: multi-line stdout -> FAILED"
+
+# Counterfeit: a *nested* {"ok":true} with no top-level ok. The old substring
+# glob accepted this ("...ok":true..." matches); the structural parse must fail.
+self_run_sh '{"result":{"ok":true,"protocol":1,"tests":9}}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out12b" 2>&1 )
+rc12b=$?
+set -e
+[ "$rc12b" = 1 ] || fail "self-test: nested-only ok:true should exit 1 (got $rc12b)"
+grep -q "^    FAILED" "$TMP/out12b" || fail "self-test: FAILED not printed for nested-only ok:true"
+pass "self-test: nested-only ok:true -> FAILED"
+
+# Counterfeit: top-level ok present but false (or "true"/1, the non-boolean
+# forms) — the verdict is not the boolean true and must FAIL.
+self_run_sh '{"ok":false,"protocol":1,"tests":9}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out12c" 2>&1 )
+rc12c=$?
+set -e
+[ "$rc12c" = 1 ] || fail "self-test: top-level ok:false should exit 1 (got $rc12c)"
+grep -q "^    FAILED" "$TMP/out12c" || fail "self-test: FAILED not printed for top-level ok:false"
+pass "self-test: top-level ok:false -> FAILED"
 
 # Not runnable: UNVERIFIED, ORACLE_UNVERIFIED=1, no hard failure.
 ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=0
