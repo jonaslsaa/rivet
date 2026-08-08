@@ -14,7 +14,7 @@
 //!   "outcome": "spawned",
 //!   "lifecycle": ["init", "login", "spawn"],
 //!   "azalea_revision": "6249c295d353b9b3ef68f665b311cba39211fd19",
-//!   "position": {"x": 9.5, "y": -60.0, "z": -3.5},
+//!   "position": {"x": 9.5, "y": -63.0, "z": -3.5},
 //!   "world": "minecraft:overworld",
 //!   "gamemode": "survival",
 //!   "health": {"health": 20.0, "food": 20, "saturation": 5.0},
@@ -188,8 +188,10 @@ pub const PINNED_AZALEA_REVISION: &str = "6249c295d353b9b3ef68f665b311cba39211fd
 pub const JOIN_CHUNK_COUNT: u64 = 117;
 
 /// Rivet's fixed superflat spawn height (`BlockPos(0, -63, 0)`), deterministic
-/// across boots — unlike Paper, which randomizes the spawn X/Z offset and
-/// spawns at y=-60. This is compared (and required) as the genuine-Rivet marker.
+/// across boots. The Paper reference in the Rivet-vs-Paper differential boots
+/// the single-stone superflat fixture and spawns at the same y=-63.0 (issue
+/// #159), so `position.y` is a genuinely compared field on both sides — never
+/// excluded or normalized. This is required as the genuine-Rivet marker.
 pub const JOIN_SPAWN_Y: f64 = -63.0;
 
 /// Verify a normalized transcript is the honest *play* boundary of a genuine

@@ -29,8 +29,11 @@
 //!   play scenario. Boot Paper and Rivet on isolated ports, join each, and
 //!   compare the play-state observables. Both reach spawn; the compared
 //!   transcripts must diverge only on the excluded per-boot nondeterminism and
-//!   the documented Rivet/Paper gaps (spawn height y and the health component
-//!   default) — any other divergence FAILS the run.
+//!   the documented health default gap — any other divergence, including a
+//!   position.y mismatch, FAILS the run. Paper boots with the single-stone
+//!   superflat fixture so both servers spawn at y=-63.0 and `position.y` is a
+//!   genuinely compared field (issue #159: the old default-flat Paper reference
+//!   spawned at y=-60 and position.y was wrongly treated as a "documented gap").
 //!
 //! ## Connection proof (Rivet modes)
 //!
@@ -507,6 +510,27 @@ fn server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
     } else {
         Err(RunnerError::Unverified(format!(
             "server.properties not found at {} (rivet-oracle fixtures)",
+            p.display()
+        )))
+    }
+}
+
+/// The single-stone superflat `server.properties` the Paper reference of the
+/// Rivet-vs-Paper differential boots with (issue #159).
+///
+/// The shared fixture's `generator-settings={}` makes Paper fall back to the
+/// default FLAT preset (bedrock ×1 + dirt ×2 + grass ×1 = 4 layers), which
+/// spawns at y=-60 — while Rivet serves its single-stone world at y=-63. With
+/// `generator-settings={"layers":[{"height":1,"block":"minecraft:stone"}]}`
+/// Paper has exactly one layer and spawns at y=-63 too, so `position.y` becomes
+/// a genuinely compared field instead of a 3-block "documented gap".
+fn single_stone_server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
+    let p = crate_root.join("../rivet-oracle/fixtures/server-single-stone.properties");
+    if p.is_file() {
+        Ok(p)
+    } else {
+        Err(RunnerError::Unverified(format!(
+            "single-stone server.properties not found at {} (rivet-oracle fixtures)",
             p.display()
         )))
     }
@@ -1024,18 +1048,46 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
 }
 
 /// The compared Paper-vs-Rivet transcripts must diverge only on the documented
-/// Rivet/Paper gaps (spawn height y and the health component default); any other
-/// divergence is a genuine Rivet/Paper mismatch, not a harness artifact, and
-/// fails the run. `RIVET_SERVER_BIN`/provenance prevent a stale binary from
-/// being booted; this gate catches a *current* binary whose play state has
-/// drifted from Paper.
+/// Rivet/Paper gaps; any other divergence is a genuine Rivet/Paper mismatch, not
+/// a harness artifact, and fails the run. `RIVET_SERVER_BIN`/provenance prevent
+/// a stale binary from being booted; this gate catches a *current* binary whose
+/// play state has drifted from Paper.
+///
+/// `position.y` is deliberately NOT here (issue #159): the Paper reference now
+/// boots the single-stone superflat fixture and spawns at y=-63.0 like Rivet,
+/// so a position.y divergence is a real server mismatch and must fail the run —
+/// never be normalized or excluded to make the test pass. The only remaining
+/// documented gap is the health component default, and it is value-bound:
+/// Rivet's join burst does not send `set_health` (play-state gap tracked
+/// separately), so azalea reports 1.0 against Rivet vs 20.0 against Paper. A
+/// future half-implemented `set_health` that reports any other value fails here
+/// rather than being waved through.
 fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerError> {
-    const DOCUMENTED_GAPS: [&str; 2] = ["position.y", "health.health"];
+    const DOCUMENTED_GAPS: [(&str, f64, f64); 1] = [("health.health", 20.0, 1.0)];
     for f in &d.diffs {
-        if !DOCUMENTED_GAPS.contains(&f.path.as_str()) {
+        let Some((expected, actual)) = DOCUMENTED_GAPS
+            .iter()
+            .find(|(path, _, _)| *path == f.path)
+            .map(|(_, e, a)| (*e, *a))
+        else {
             return Err(RunnerError::Gate(format!(
                 "Paper-vs-Rivet divergence on {}: expected {} got {} — not one of the documented \
-                 Rivet/Paper gaps ({DOCUMENTED_GAPS:?}); refusing PASS",
+                 Rivet/Paper gaps ({:?}); refusing PASS",
+                f.path,
+                f.expected,
+                f.actual,
+                DOCUMENTED_GAPS
+                    .iter()
+                    .map(|(p, _, _)| *p)
+                    .collect::<Vec<_>>()
+            )));
+        };
+        let f_expected = f.expected.as_f64();
+        let f_actual = f.actual.as_f64();
+        if f_expected != Some(expected) || f_actual != Some(actual) {
+            return Err(RunnerError::Gate(format!(
+                "Paper-vs-Rivet divergence on {}: expected {} got {} — the documented gap only \
+                 admits Paper={expected} vs Rivet={actual}; refusing PASS",
                 f.path, f.expected, f.actual
             )));
         }
@@ -1043,15 +1095,18 @@ fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), Ru
     Ok(())
 }
 
-/// Mode C: Paper-vs-Rivet play scenario (issue #192). Both servers must take
-/// the pinned Azalea client through login/configuration into spawn; the
-/// transcripts are compared field-level and differ only on the excluded
-/// per-boot nondeterminism and the documented Rivet/Paper gaps.
+/// Mode C: Paper-vs-Rivet play scenario (issue #192, inverted for #159). Both
+/// servers must take the pinned Azalea client through login/configuration into
+/// spawn; the transcripts are compared field-level and differ only on the
+/// excluded per-boot nondeterminism and the documented health default gap.
+/// Paper boots the single-stone superflat fixture so both servers spawn at
+/// y=-63.0 and `position.y` is a compared field (never excluded or normalized
+/// to pass).
 fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-both");
     fs::create_dir_all(&work)?;
-    let server_properties = server_properties(&crate_root)?;
+    let server_properties = single_stone_server_properties(&crate_root)?;
     let jar = server::ensure_jar(&crate_root)?;
     let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
     let client_bin = ensure_client_binary()?;
@@ -1067,7 +1122,14 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     println!("    paperclip jar     : {}", jar.display());
     println!("    rivet-server bin  : {}", rivet_bin.display());
     println!("    rivet-client bin  : {}", client_bin.display());
-    println!("    server.properties : {}", server_properties.display());
+    println!(
+        "    server.properties : {} (single-stone superflat)",
+        server_properties.display()
+    );
+    println!(
+        "    paper pin         : {} (verified from the materialized jar)",
+        server::PAPER_PIN_COMMIT
+    );
     println!("    paper address     : {paper_addr}");
     println!("    rivet address     : {rivet_addr}");
     println!();
@@ -1147,22 +1209,67 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     let d = comparator::diff(&paper_t, &rivet_t);
     check_paper_rivet_divergence(&d)?;
     println!(
-        "    {} field(s) differ — the documented Rivet/Paper gaps (spawn height y and the",
+        "    {} field(s) differ — the documented Rivet/Paper gap (health component default),",
         d.diffs.len()
     );
-    println!("    health component default), plus the excluded per-boot nondeterminism:");
+    println!("    plus the excluded per-boot nondeterminism:");
     for f in &d.diffs {
         println!("        {f}");
+    }
+    for f in &d.excluded {
+        println!("        (excluded) {f}");
+    }
+
+    // Negative case: tamper a *compared* field (position.y, the deterministic
+    // superflat spawn height) and require the comparator to detect it — the
+    // harness must not pass vacuously, and position.y must never be excluded or
+    // normalized to make the comparison pass.
+    println!();
+    println!("Negative case (tamper paper position.y)");
+    let mut tampered = paper_t.clone();
+    match tampered["position"]["y"].as_f64() {
+        Some(y) => {
+            tampered["position"]["y"] = json!(y + 1.0);
+            let neg = comparator::diff(&paper_t, &tampered);
+            if neg.is_identical() {
+                return Err(RunnerError::Gate(
+                    "negative case FAILED: comparator did not detect a tampered position.y"
+                        .to_owned(),
+                ));
+            }
+            let detected: Vec<&str> = neg.diffs.iter().map(|f| f.path.as_str()).collect();
+            if !detected.contains(&"position.y") {
+                return Err(RunnerError::Gate(format!(
+                    "negative case FAILED: tampering position.y was not reported as a diff \
+                     (detected {detected:?}) — position.y must be a compared field"
+                )));
+            }
+            println!(
+                "    tampered position.y += 1 -> detected {} field diff(s):",
+                neg.diffs.len()
+            );
+            for f in &neg.diffs {
+                println!("      {f}");
+            }
+        }
+        None => {
+            return Err(RunnerError::Gate(
+                "negative case FAILED: paper transcript has no position to tamper".to_owned(),
+            ));
+        }
     }
 
     println!();
     println!("VERDICT: PASS — both servers took the pinned Azalea client through login and");
     println!("    configuration into play:");
-    println!("      * Paper reached spawn (reference behavior unchanged).");
+    println!("      * Paper reached spawn from the single-stone superflat (Git-Commit pinned) and");
+    println!("        Rivet reached RIVET_READY on its own isolated port ({rivet_addr}) and took");
+    println!("        the client through the {boundary}.");
     println!(
-        "      * Rivet reached RIVET_READY on its own isolated port ({rivet_addr}) and took the"
+        "      * Both spawn at the same superflat height y=-63.0, so position.y is a compared"
     );
-    println!("        client through the {boundary}.");
+    println!("        field — the negative case proved the comparator detects a tampered spawn");
+    println!("        height, and any Paper-vs-Rivet position.y divergence would FAIL the run.");
     println!("      * The connection is proven two ways: the rivet log shows 'connection");
     println!(
         "        established' (only the real rivet-server emits it), and the client transcript"
@@ -1170,12 +1277,10 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     println!("        is outcome=spawned with the pinned Azalea revision, 117 chunks, and spawn");
     println!("        y=-63.0 — which a stale pre-play build, a fake/non-Rivet endpoint, or a");
     println!("        Paper-like y=-60 spawn all fail.");
-    println!("      * The compared transcripts differ only on the documented Rivet/Paper gaps");
-    println!("        (position.y: Rivet superflat y=-63 vs Paper y=-60; health default: Rivet");
-    println!(
-        "        omits set_health so azalea reports 1.0 vs Paper's 20.0) — any other divergence"
-    );
-    println!("        fails the run, so a Paper-vs-Rivet regression cannot pass as 'expected'.");
+    println!("      * The compared transcripts differ only on the documented Rivet/Paper gap");
+    println!("        (health default: Rivet omits set_health so azalea reports 1.0 vs Paper's");
+    println!("        20.0) — any other divergence, including position.y, fails the run, so a");
+    println!("        Paper-vs-Rivet regression cannot pass as 'expected'.");
     println!("    artifacts: {}", work.display());
     Ok(())
 }
@@ -1442,11 +1547,15 @@ mod tests {
     }
 
     fn diff_with(path: &str) -> comparator::TranscriptDiff {
+        diff_with_values(path, json!(null), json!(null))
+    }
+
+    fn diff_with_values(path: &str, expected: Value, actual: Value) -> comparator::TranscriptDiff {
         let mut d = comparator::TranscriptDiff::default();
         d.diffs.push(comparator::FieldDiff {
             path: path.to_owned(),
-            expected: json!(null),
-            actual: json!(null),
+            expected,
+            actual,
         });
         d
     }
@@ -1454,8 +1563,54 @@ mod tests {
     #[test]
     fn paper_rivet_divergence_accepts_only_documented_gaps() {
         assert!(check_paper_rivet_divergence(&comparator::TranscriptDiff::default()).is_ok());
-        assert!(check_paper_rivet_divergence(&diff_with("position.y")).is_ok());
-        assert!(check_paper_rivet_divergence(&diff_with("health.health")).is_ok());
+        // The documented gap is value-bound: Paper sends 20.0, Rivet 1.0.
+        assert!(
+            check_paper_rivet_divergence(&diff_with_values(
+                "health.health",
+                json!(20.0),
+                json!(1.0)
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn paper_rivet_divergence_rejects_a_wrong_health_gap_value() {
+        // The documented gap is not a blanket "any divergence on health.health":
+        // a future half-implemented set_health that reports, say, 15.0 vs Paper's
+        // 20.0 must FAIL rather than be waved through as the documented gap.
+        let err = check_paper_rivet_divergence(&diff_with_values(
+            "health.health",
+            json!(20.0),
+            json!(15.0),
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("only admits Paper=20 vs Rivet=1"),
+            "a wrong health value must fail the value-bound gap, got {err}"
+        );
+        assert!(
+            err.to_string().contains("refusing PASS"),
+            "a wrong health value must refuse PASS, got {err}"
+        );
+    }
+
+    #[test]
+    fn paper_rivet_divergence_rejects_position_y_as_undocumented() {
+        // Issue #159: the Paper reference now boots the single-stone superflat
+        // and spawns at y=-63.0 like Rivet, so a position.y divergence is a real
+        // server mismatch and must FAIL — never a "documented gap" to be waved
+        // through. The counterfactual keeps the old (wrong) Paper reference at
+        // y=-60 and asserts the both-mode refuses PASS instead of accepting it.
+        let err = check_paper_rivet_divergence(&diff_with("position.y")).unwrap_err();
+        assert!(
+            err.to_string().contains("position.y"),
+            "error must name the diverging position.y, got {err}"
+        );
+        assert!(
+            err.to_string().contains("refusing PASS"),
+            "position.y must fail the run, got {err}"
+        );
     }
 
     #[test]
@@ -1468,6 +1623,43 @@ mod tests {
         assert!(
             err.to_string().contains("gamemode"),
             "error must name the diverging field, got {err}"
+        );
+    }
+
+    /// The scenario's hardcoded `PAPER_PIN_COMMIT` must not drift from the
+    /// oracle manifest's `paper` provenance pin (the golden baseline the oracle
+    /// gate verifies against). A forward oracle-pin bump already fails loudly at
+    /// runtime (the materialized jar's commit won't match); this test closes the
+    /// reverse direction — editing only the scenario constant — by reading the
+    /// manifest the same way `tools/rivet-oracle`'s `parse_paper_pin` does and
+    /// asserting the pins agree.
+    #[test]
+    fn paper_pin_matches_oracle_manifest() {
+        let manifest_path = crate_root().join("../rivet-oracle/fixtures/manifest.json");
+        let text = fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", manifest_path.display()));
+        let manifest: Value =
+            serde_json::from_str(&text).expect("oracle manifest must be valid JSON");
+        let paper = manifest
+            .get("paper")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| {
+                panic!(
+                    "oracle manifest {} must carry a 'paper' provenance string",
+                    manifest_path.display()
+                )
+            });
+        let pin = paper
+            .rsplit_once('@')
+            .map(|(_, commit)| commit.trim())
+            .filter(|commit| !commit.is_empty())
+            .unwrap_or_else(|| panic!("paper provenance {paper:?} must carry an @<commit> pin"));
+        assert_eq!(
+            pin,
+            server::PAPER_PIN_COMMIT,
+            "scenario PAPER_PIN_COMMIT drifted from the oracle manifest pin ({pin} vs {}); \
+             keep them in lockstep so the differential targets the same Paper reference",
+            server::PAPER_PIN_COMMIT
         );
     }
 }
