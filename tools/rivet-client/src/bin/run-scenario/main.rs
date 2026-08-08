@@ -1026,9 +1026,9 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
 /// The compared Paper-vs-Rivet transcripts must diverge only on the documented
 /// Rivet/Paper gaps (spawn height y and the health component default); any other
 /// divergence is a genuine Rivet/Paper mismatch, not a harness artifact, and
-/// fails the run. `RIVET_SERVER_BIN`/provenance prevent a stale binary from
-/// being booted; this gate catches a *current* binary whose play state has
-/// drifted from Paper.
+/// fails the run. Normal runs rebuild the server and the fallback has a narrow
+/// freshness guard; this behavioral gate remains load-bearing even when an
+/// explicit `RIVET_SERVER_BIN` override is used.
 fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerError> {
     const DOCUMENTED_GAPS: [&str; 2] = ["position.y", "health.health"];
     for f in &d.diffs {
