@@ -8,9 +8,12 @@
 //! `26.2-DEV-main@0a99345` fixture).
 //!
 //! Paper calls `sendLevelInfo` TWICE inside `placeNewPlayer` (lines 231 and
-//! 294). The burst below is the FIRST occurrence, emitted before the
-//! `player_info_update` broadcast; Slice A ports only this first-occurrence
-//! foundation. The second block re-sends the same four members
+//! 294) — this is a Paper source fact, NOT inferred from the capture (whose
+//! duplicate id-43/38/97 observations cannot be attributed to a single player:
+//! the proxy merges its two relay streams, and the capture interleaves more
+//! than one connection's traffic). The burst below is the FIRST occurrence,
+//! emitted before the `player_info_update` broadcast; Slice A ports only this
+//! first-occurrence foundation. The second block re-sends the same four members
 //! (`initialize_border` → `set_time` → `set_default_spawn_position` →
 //! `game_event`) after `player_info_update` (and after the addEntity entity
 //! pairing); it is deferred to Slice B. It is the last of the Slice A
@@ -42,7 +45,10 @@
 //! 42, view distance 4) the #153 capture records; the capture-grounded values
 //! below — three vanilla levels, `max_players 20`, the world-border defaults,
 //! the two clocks, the `RivetProbe` profile — are pinned by that fixture's
-//! `join_clientbound_*.hex` golden bodies.
+//! `join_clientbound_*.hex` golden bodies. The `capture.jsonl` is the
+//! NORMALIZED capture (`normalize::canonicalize`): Slice A selects its bodies
+//! and order from that normalized form despite the raw capture interleaving
+//! the proxy's two relay streams and more than one connection's traffic.
 
 use rivet_protocol::generated::packets::play::clientbound::PacketType;
 use rivet_protocol::protocol::game::clientbound_change_difficulty::ClientboundChangeDifficultyPacket;
