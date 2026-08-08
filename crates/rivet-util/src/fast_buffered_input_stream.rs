@@ -2,8 +2,9 @@
 //! avoids refills for reads within the buffer. Faithful port of the Java class
 //! (DEFAULT_BUFFER_SIZE = 8192).
 //!
-//! RivetTodo(#209): minimal faithful surface for the compressed read path —
-//! only the buffering shape `NbtIo` needs is ported.
+//! Only the buffered-read shape the compressed NBT path needs is ported.
+//! Java's `skip`/`available`/`close` are omitted: the NBT read path only ever
+//! pulls bytes through `read`, and dropping the stream releases the inner one.
 
 use std::io::{self, Read};
 
@@ -38,6 +39,8 @@ impl<R: Read> FastBufferedInputStream<R> {
         self.limit - self.position
     }
 
+    /// Java's `fill()`: reads one buffer-full; on EOF the buffer stays empty
+    /// (`limit` 0) so the next read reports EOF.
     fn fill(&mut self) -> io::Result<()> {
         let n = self.inner.read(&mut self.buffer)?;
         self.limit = n;
@@ -48,16 +51,26 @@ impl<R: Read> FastBufferedInputStream<R> {
 
 impl<R: Read> Read for FastBufferedInputStream<R> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        // Rust's `Read` contract requires a zero-length read to return `Ok(0)`.
+        // Java's `read(byte[], 0, 0)` returns -1 only when the empty buffer is
+        // at EOF (after a successful fill it returns 0); that -1 is the one
+        // case a Rust `Read` cannot reproduce, so short-circuit to Ok(0).
         if output.is_empty() {
             return Ok(0);
         }
-        if self.position >= self.limit {
+        let mut available = self.bytes_in_buffer();
+        if available == 0 {
+            // Java: a read at least as large as the buffer bypasses the buffer
+            // and reads the underlying stream directly.
+            if output.len() >= self.buffer.len() {
+                return self.inner.read(output);
+            }
             self.fill()?;
-            if self.position >= self.limit {
-                return Ok(0);
+            available = self.bytes_in_buffer();
+            if available == 0 {
+                return Ok(0); // EOF — Java returns -1.
             }
         }
-        let available = self.bytes_in_buffer();
         let to_copy = available.min(output.len());
         output[..to_copy].copy_from_slice(&self.buffer[self.position..self.position + to_copy]);
         self.position += to_copy;

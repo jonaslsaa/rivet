@@ -1,10 +1,20 @@
 //! `java.io.DataInput` / `java.io.DataOutput` ports — the byte-level contract
 //! used by `NbtIo` (rivet-nbt) and the network codec.
 //!
-//! RivetTodo(#209): minimal faithful surface for the NBT read/write path —
-//! big-endian primitives + modified-UTF-8 strings (`writeUTF`/`readUTF`), the
-//! only string form `NbtIo` uses; the rest of the `java.io.DataOutput`/
-//! `DataInput` surface is not ported.
+//! The surface is the minimal slice `NbtIo`'s read/write path needs: big-endian
+//! primitives (`writeShort`/`readInt`/...) and modified-UTF-8 strings
+//! (`writeUTF`/`readUTF`), the only string form the NBT tags use. The rest of
+//! the `java.io.DataOutput`/`DataInput` surface (`writeChar`, `writeBytes`,
+//! `readChar`, ...) is deliberately not ported.
+//!
+//! The write side encodes through the `cesu8` crate's Java variant, which
+//! matches `DataOutputStream.writeUTF` byte-for-byte (NUL as `C0 80`, astral
+//! characters as CESU-8 surrogate pairs, 2-byte length prefix in big-endian).
+//! The read side is a direct port of OpenJDK's `DataInputStream.readUTF`
+//! decoder ([`decode_modified_utf8`]) rather than `cesu8`'s Java-variant
+//! decoder: Java accepts overlong forms (`C1 80` -> `U+0040`, `E0 80 80` ->
+//! NUL) that `cesu8` rejects, and Java's diagnostics name the exact byte
+//! offset, which `cesu8`'s generic error does not.
 
 use std::io::{self, Read, Write};
 
@@ -18,6 +28,11 @@ pub trait DataOutput {
 
     /// `DataOutput.writeUTF(String)` — modified UTF-8 with a 2-byte length
     /// prefix (big-endian), matching `java.io.DataOutputStream.writeUTF`.
+    ///
+    /// Errors with `InvalidData` (Java's `UTFDataFormatException`) before
+    /// writing anything when the encoded body exceeds 65535 bytes; the error
+    /// message matches OpenJDK 25's, except the head/tail display keeps whole
+    /// code points where Java's UTF-16 slicing would split a surrogate pair.
     fn write_utf(&mut self, s: &str) -> io::Result<()>;
 
     /// `DataOutput.writeBoolean(boolean)`.
@@ -189,17 +204,64 @@ impl<W: Write> DataOutput for DataOutputStream<W> {
         let encoded = cesu8::to_java_cesu8(s);
         if encoded.len() > u16::MAX as usize {
             // Modified UTF-8 longer than 65535 bytes cannot be length-prefixed.
-            // Java DataOutput.writeUTF throws UTFDataFormatException here;
-            // NbtIo.StringFallbackDataOutput catches it and writes "" instead.
-            // We surface the overflow and let the caller decide (see NbtIo).
+            // Java `DataOutputStream.writeUTF` throws UTFDataFormatException
+            // here — before writing anything — and
+            // `NbtIo.StringFallbackDataOutput` catches it and writes "" instead.
+            // We surface the overflow, with Java's exact message, and let the
+            // caller decide (see NbtIo).
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("encoded string too long: {} bytes", encoded.len()),
+                too_long_message(s, encoded.len()),
             ));
         }
+        // `as i16` keeps the low 16 bits, i.e. exactly Java's `writeShort(utflen)`
+        // which truncates the 0..=65535 byte length to 16 bits.
         self.write_short(encoded.len() as i16)?;
         self.inner.write_all(&encoded)
     }
+}
+
+/// OpenJDK `DataOutputStream.tooLongMsg` — the `UTFDataFormatException`
+/// message for a modified-UTF-8 body longer than 65535 bytes.
+///
+/// The message quotes the first and last 8 UTF-16 code units of `s`
+/// (`String.substring(0, 8)` / `substring(slen - 8, slen)` in Java), so an
+/// astral character counts as two units. Java's UTF-16 slicing can cut between
+/// the halves of a surrogate pair, leaving a lone surrogate in the message; a
+/// Rust `String` cannot hold one, so when a cut lands inside an astral
+/// character the whole character is kept instead. This display-side preservation
+/// is not the decoder's behavior — [`decode_modified_utf8`] rejects an unpaired
+/// surrogate with an error.
+fn too_long_message(s: &str, utflen: usize) -> String {
+    /// First `n` UTF-16 code units of `s` as whole characters, from the start
+    /// or the end; a cut inside an astral character keeps the whole character
+    /// (see [`too_long_message`]).
+    fn take_utf16(s: &str, n: usize, from_end: bool) -> String {
+        let mut units = 0usize;
+        let mut out = String::new();
+        if from_end {
+            for ch in s.chars().rev() {
+                if units >= n {
+                    break;
+                }
+                out.push(ch);
+                units += ch.len_utf16();
+            }
+            out.chars().rev().collect()
+        } else {
+            for ch in s.chars() {
+                if units >= n {
+                    break;
+                }
+                out.push(ch);
+                units += ch.len_utf16();
+            }
+            out
+        }
+    }
+    let head = take_utf16(s, 8, false);
+    let tail = take_utf16(s, 8, true);
+    format!("encoded string ({head}...{tail}) too long: {utflen} bytes")
 }
 
 /// `DataInputStream` over any `Read` — implements `DataInput`.
@@ -254,10 +316,7 @@ impl<R: Read> DataInput for DataInputStream<R> {
         let len = self.read_unsigned_short()? as usize;
         let mut buf = vec![0u8; len];
         self.inner.read_exact(&mut buf)?;
-        match cesu8::from_java_cesu8(&buf) {
-            Ok(s) => Ok(s.into_owned()),
-            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-        }
+        decode_modified_utf8(&buf)
     }
 
     fn read_fully(&mut self, n: usize) -> io::Result<Vec<u8>> {
@@ -279,4 +338,141 @@ impl<R: Read> DataInput for DataInputStream<R> {
         }
         Ok(skipped)
     }
+}
+
+/// OpenJDK `DataInputStream.readUTF` body decoder — turns the bytes after the
+/// 2-byte length prefix into the equivalent Rust `String`.
+///
+/// This is a faithful port of the current OpenJDK body (the loop after
+/// `readFully(bytearr, 0, utflen)`), including its error handling:
+/// - the top nibble of each byte selects the 1/2/3-byte form, and the
+///   leading-ASCII run is decoded first;
+/// - a two-byte form whose second byte is not `10xxxxxx`, or a three-byte
+///   form whose second or third byte is not `10xxxxxx`, throws
+///   `UTFDataFormatException` with the same byte offset message;
+/// - a truncated lead byte at the end throws "malformed input: partial
+///   character at end";
+/// - top nibbles 8-11 and 15 throw "malformed input around byte N";
+/// - a raw `0x00` byte is a valid one-byte character, and the overlong
+///   two-byte form `C1 80` decodes to `U+0040` (only the continuation bytes
+///   are validated, not the lead byte's non-overlong bound).
+///
+/// The deviations are forced by the return type. Java `readUTF` returns a
+/// UTF-16 `String` with no validation, so it never fails on an unpaired
+/// surrogate (`0xD800..=0xDFFF`); Rust `String` must be valid UTF-8, so an
+/// unpaired surrogate here is an error. A high+low surrogate pair — how the
+/// encoder wrote an astral character — is returned by Java as two code units
+/// representing that one astral scalar, which Rust materializes as the single
+/// scalar.
+pub fn decode_modified_utf8(bytes: &[u8]) -> io::Result<String> {
+    let utflen = bytes.len();
+    // Java's first loop: fast-forward over the leading ASCII run.
+    let mut units = Vec::with_capacity(utflen);
+    let mut count = 0usize;
+    while count < utflen && bytes[count] <= 0x7F {
+        units.push(bytes[count] as u16);
+        count += 1;
+    }
+
+    // Java's switch (c >> 4) loop. `count` tracks bytes consumed exactly like
+    // the Java `count`, so the error messages report the same byte offsets.
+    while count < utflen {
+        let c = bytes[count] as i32;
+        match c >> 4 {
+            // 0xxxxxxx.
+            0..=7 => {
+                count += 1;
+                units.push(c as u16);
+            }
+            // 110x xxxx   10xx xxxx.
+            12 | 13 => {
+                count += 2;
+                if count > utflen {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "malformed input: partial character at end",
+                    ));
+                }
+                let char2 = bytes[count - 1] as i32;
+                if (char2 & 0xC0) != 0x80 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("malformed input around byte {count}"),
+                    ));
+                }
+                units.push((((c & 0x1F) << 6) | (char2 & 0x3F)) as u16);
+            }
+            // 1110 xxxx  10xx xxxx  10xx xxxx.
+            14 => {
+                count += 3;
+                if count > utflen {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "malformed input: partial character at end",
+                    ));
+                }
+                let char2 = bytes[count - 2] as i32;
+                let char3 = bytes[count - 1] as i32;
+                if (char2 & 0xC0) != 0x80 || (char3 & 0xC0) != 0x80 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("malformed input around byte {}", count - 1),
+                    ));
+                }
+                units.push((((c & 0x0F) << 12) | ((char2 & 0x3F) << 6) | (char3 & 0x3F)) as u16);
+            }
+            // 10xx xxxx, 1111 xxxx.
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("malformed input around byte {count}"),
+                ));
+            }
+        }
+    }
+
+    // Java `return new String(chararr, 0, chararr_count)`: code units to a Rust
+    // String. Adjacent high+low surrogates combine into the astral scalar the
+    // encoder wrote; an unpaired surrogate is unrepresentable and errors.
+    // `char::from_u32` is guarded so the hostile-input path can never panic.
+    let mut out = String::with_capacity(units.len());
+    let mut j = 0;
+    while j < units.len() {
+        let c = units[j];
+        match c {
+            0xD800..=0xDBFF => {
+                let Some(&next) = units.get(j + 1) else {
+                    return Err(unpaired_surrogate());
+                };
+                if !(0xDC00..=0xDFFF).contains(&next) {
+                    return Err(unpaired_surrogate());
+                }
+                let cp = 0x1_0000 + (((c as u32 - 0xD800) << 10) | (next as u32 - 0xDC00));
+                let Some(ch) = char::from_u32(cp) else {
+                    return Err(unpaired_surrogate());
+                };
+                out.push(ch);
+                j += 2;
+            }
+            0xDC00..=0xDFFF => {
+                return Err(unpaired_surrogate());
+            }
+            _ => {
+                let Some(ch) = char::from_u32(c as u32) else {
+                    return Err(unpaired_surrogate());
+                };
+                out.push(ch);
+                j += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A decoded `0xD800..=0xDFFF` code unit not paired with its counterpart.
+fn unpaired_surrogate() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "unpaired surrogate in modified UTF-8 (Java String can hold it, Rust String cannot)",
+    )
 }
