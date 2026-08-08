@@ -43,6 +43,15 @@ pub type Tickable = Box<dyn FnMut(&mut TickContext) + Send>;
 pub struct TickContext<'a> {
     /// The current tick number (`MinecraftServer.currentTick`, 1-based).
     pub tick: u64,
+    /// The monotonic nanosecond reading at this tick (Paper `System.nanoTime()`)
+    /// — the deterministic clock axis keepalive (issue #157) runs on. Injected
+    /// from the loop's `TickTime`, so the same code is deterministic under
+    /// `SimTime` and real under `RealTime`.
+    pub now_ns: i64,
+    /// The millis reading at the same instant (Paper `Util.getMillis()`) —
+    /// keepalive's `now_ms` axis: the challenge id each pending challenge is
+    /// stamped with (the timeout check runs on the `now_ns` axis, above).
+    pub now_ms: i64,
     /// The tick-side connection registry.
     pub connections: &'a mut ConnectionRegistry,
     /// Inbound frames drained from all connections this tick, in per-connection
@@ -127,6 +136,10 @@ impl ServerTickLoop {
 
     fn run_tick(&mut self) {
         let tick = self.scheduler.tick_count();
+        // The clock readings for this tick, shared with every tickable (the
+        // keepalive drive reads both axes — issue #157).
+        let now_ns = self.time.now_nanos() as i64;
+        let now_ms = now_ns / 1_000_000;
 
         // 1. Lifecycle: apply Connect/Disconnect events.
         while let Ok(event) = self.lifecycle_rx.try_recv() {
@@ -186,6 +199,8 @@ impl ServerTickLoop {
         } = &mut *self;
         let mut ctx = TickContext {
             tick,
+            now_ns,
+            now_ms,
             connections: registry,
             inbound,
         };

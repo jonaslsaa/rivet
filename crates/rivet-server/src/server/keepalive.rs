@@ -182,6 +182,12 @@ pub struct KeepaliveState {
     /// `ServerCommonPacketListenerImpl.latency` — the last computed average
     /// latency in ms (`this.keepAlive.pingCalculator5s.getAvgLatencyMS()`).
     latency_ms: i32,
+    /// The kick limit (`paper.playerconnection.keepalive`, issue #236) in ns.
+    /// Defaults to [`KEEPALIVE_LIMIT_NS`]; a shorter limit lets the live server
+    /// tests exercise the timeout window without a half-minute wait each. Paper
+    /// reads the same knob from a system property; the 1s transmit cadence is
+    /// not configurable, exactly as in Java.
+    timeout_ns: i64,
 }
 
 impl Default for KeepaliveState {
@@ -195,12 +201,14 @@ impl Default for KeepaliveState {
             ping_calculator_1m: PingCalculator::one_minute(),
             ping_calculator_5s: PingCalculator::five_seconds(),
             latency_ms: 0,
+            timeout_ns: KEEPALIVE_LIMIT_NS,
         }
     }
 }
 
 impl KeepaliveState {
-    /// `new KeepAlive()` with the initial `lastKeepAliveTx` reading.
+    /// `new KeepAlive()` with the initial `lastKeepAliveTx` reading and the
+    /// pinned `KEEPALIVE_LIMIT_NS` kick limit.
     pub fn new(first_now_ns: i64) -> Self {
         KeepaliveState {
             last_keep_alive_tx_ns: first_now_ns,
@@ -208,13 +216,27 @@ impl KeepaliveState {
         }
     }
 
+    /// `new KeepAlive()` with an explicit kick limit (`paper.playerconnection.
+    /// keepalive`, issue #236). Same as [`KeepaliveState::new`] except the
+    /// timeout the tick fires at; the 1s transmit cadence is unchanged.
+    pub fn new_with_timeout(first_now_ns: i64, timeout_ns: i64) -> Self {
+        KeepaliveState {
+            last_keep_alive_tx_ns: first_now_ns,
+            timeout_ns,
+            ..KeepaliveState::default()
+        }
+    }
+
     /// `KeepAlive.copyForListenerHandoff()` — a fresh machine that preserves
     /// the transmit throttle state and ping history but starts with an empty
     /// pending queue ("listener handoff should reset pending keepalive
-    /// expectations", `createCookie`). The play listener after configuration
-    /// calls this on handoff.
+    /// expectations", `createCookie`). Not currently wired into any production
+    /// handoff: the play path seeds a fresh machine in `spawn_session`, and the
+    /// configuration listener owns no `KeepaliveState` yet (RivetTodo #157), so
+    /// the only caller is the unit test below.
     pub fn copy_for_listener_handoff(&self) -> Self {
-        let mut copy = KeepaliveState::new(self.last_keep_alive_tx_ns);
+        let mut copy =
+            KeepaliveState::new_with_timeout(self.last_keep_alive_tx_ns, self.timeout_ns);
         copy.ping_calculator_1m.copy_from(&self.ping_calculator_1m);
         copy.ping_calculator_5s.copy_from(&self.ping_calculator_5s);
         copy.latency_ms = self.latency_ms;
@@ -287,9 +309,10 @@ impl KeepaliveState {
             outcome.send = Some(pka.challenge_id);
         }
 
-        // 30 s timeout: `(currTime - oldest.txTimeNS()) > KEEPALIVE_LIMIT_NS`.
+        // Timeout: `(currTime - oldest.txTimeNS()) > timeout` (the strict `>` on
+        // `KEEPALIVE_LIMIT_NS` by default, or the config's shorter limit).
         if let Some(oldest) = self.pending.front().copied()
-            && tx_time_ns.wrapping_sub(oldest.tx_time_ns) > KEEPALIVE_LIMIT_NS
+            && tx_time_ns.wrapping_sub(oldest.tx_time_ns) > self.timeout_ns
         {
             outcome.timeout = true;
         }
@@ -507,6 +530,20 @@ mod tests {
         // One ms later it fires.
         let o = tick_at(&mut s, 1000 + KEEPALIVE_LIMIT_MS + 1);
         assert!(o.timeout);
+    }
+
+    #[test]
+    fn configurable_timeout_shortens_the_kick() {
+        // `paper.playerconnection.keepalive` (issue #236): a machine built with
+        // a 2s limit kicks at 2s, with the same strict `>` boundary. The 1s
+        // transmit cadence is unaffected.
+        let mut s = KeepaliveState::new_with_timeout(0, ms_to_ns(2_000));
+        assert_eq!(tick_at(&mut s, 1_000).send, Some(1_000), "challenge at 1s");
+        // At exactly 2s elapsed (3s), the strict `>` does not fire.
+        let o = tick_at(&mut s, 3_000);
+        assert!(!o.timeout);
+        // One ms past 2s elapsed it fires.
+        assert!(tick_at(&mut s, 3_001).timeout);
     }
 
     #[test]
