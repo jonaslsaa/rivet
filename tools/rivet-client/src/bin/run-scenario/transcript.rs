@@ -181,10 +181,14 @@ fn outcome(records: &[Value]) -> &'static str {
 pub const PINNED_AZALEA_REVISION: &str = "6249c295d353b9b3ef68f665b311cba39211fd19";
 
 /// The deterministic chunk send-set a Rivet join must deliver. Rivet's join
-/// burst sends the Moonrise view-distance-4 square (11×11 minus the four
-/// corners = 117) for the client's resolved view distance; with the pinned
-/// Azalea client (`ClientInformation::default().view_distance = 8`, resolved
-/// through `client + 1` capped at `load - 1 = 4`) that is exactly 117 chunks.
+/// burst sends the Moonrise view-distance-4 square for the client's resolved
+/// view distance. The bounds are `±(view_distance + 1)` (the `includeNeighbors`
+/// margin): for view distance 4 that is the 11×11 raster `-5..5`, and the
+/// four corners `(±5, ±5)` are excluded by `isWithinDistance` (`3²+3²=18 ≥
+/// 4²=16`), leaving exactly 117. With the pinned Azalea client
+/// (`ClientInformation::default().view_distance = 8`, resolved through
+/// `client + 1` capped at `load - 1 = 4`) that resolves to view distance 4 and
+/// the 117-chunk send-set.
 pub const JOIN_CHUNK_COUNT: u64 = 117;
 
 /// Rivet's fixed superflat spawn height (`BlockPos(0, -63, 0)`), deterministic

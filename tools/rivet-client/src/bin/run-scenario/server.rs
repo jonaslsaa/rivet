@@ -11,9 +11,12 @@
 //! slow ~160MB downloads) and wipe everything else, so each run is a fresh world
 //! at a fixed seed while staying fast on re-runs. `versions/` is deliberately
 //! NOT preserved: the paperclip re-materializes the server jar on every boot, so
-//! `verify_paper_provenance` can only ever see the jar the artifact actually
-//! being booted produced — a swapped, stale, or non-bundler artifact cannot
-//! silently stand in for the pinned reference. Every boot gets its own port
+//! `verify_paper_provenance` (called only by the Rivet-vs-Paper differential
+//! path in main.rs, where the Paper reference must be the pinned oracle commit)
+//! can only ever see the jar the artifact actually being booted produced — a
+//! swapped, stale, or non-bundler artifact cannot silently stand in for the
+//! pinned reference. Paper-vs-Paper self-checks and capture do not require the
+//! pin: they compare a build against itself. Every boot gets its own port
 //! (`reserve_ports` in main.rs): the Paper run dir's `server.properties` is
 //! patched to the allocated port and `rivet-server` is passed `--host`/`--port`,
 //! so no two servers in a scenario can collide.
@@ -135,6 +138,16 @@ impl Drop for Server {
     }
 }
 
+impl Server {
+    /// The run dir the server booted in. For Paper this is where the paperclip
+    /// materialized the compiled server jar, so a caller that needs the
+    /// load-bearing provenance check (the Rivet-vs-Paper differential) can
+    /// verify the booted jar after shutdown.
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+}
+
 /// Send a signal to `pid` via the POSIX `kill` utility (no signal crate).
 fn signal_process(pid: u32, signal: &str) -> io::Result<()> {
     let status = Command::new("kill")
@@ -195,6 +208,13 @@ pub fn ensure_jar(crate_root: &Path) -> Result<PathBuf, Error> {
 /// minimal approach as `tools/rivet-oracle`'s `read_jar_git_commit`). Returns
 /// `None` when the jar has no such attribute (a paperclip wrapper, not a
 /// compiled server).
+///
+/// This mirrors the oracle's helper rather than sharing it: the two binaries
+/// classify failures differently (the oracle maps a missing `unzip` to `Gate`;
+/// here `classify_commit_lookup_error` maps it to `Unverified`, the scenario
+/// harness's UNVERIFIED contract for a missing prerequisite). Extracting a
+/// shared helper would couple two standalone binaries' error models for two
+/// small functions.
 pub fn read_jar_git_commit(jar: &Path) -> io::Result<Option<String>> {
     let out = Command::new("unzip")
         .arg("-p")
@@ -230,13 +250,17 @@ pub fn verify_paper_provenance(run_dir: &Path) -> Result<(), Error> {
             jar.display()
         )));
     }
-    let actual = read_jar_git_commit(&jar)?.ok_or_else(|| {
-        Error::Unverified(format!(
-            "materialized server jar {} carries no Git-Commit manifest attribute — \
+    let actual = match read_jar_git_commit(&jar) {
+        Ok(Some(commit)) => commit,
+        Ok(None) => {
+            return Err(Error::Unverified(format!(
+                "materialized server jar {} carries no Git-Commit manifest attribute — \
                  cannot verify the Paper reference is the pinned {PAPER_PIN_COMMIT}",
-            jar.display()
-        ))
-    })?;
+                jar.display()
+            )));
+        }
+        Err(e) => return Err(classify_commit_lookup_error(e)),
+    };
     if actual != PAPER_PIN_COMMIT {
         return Err(Error::Unverified(format!(
             "materialized server jar {} is Git-Commit {actual}, but the scenario's Paper \
@@ -246,6 +270,23 @@ pub fn verify_paper_provenance(run_dir: &Path) -> Result<(), Error> {
         )));
     }
     Ok(())
+}
+
+/// Classify a `read_jar_git_commit` failure. When the `unzip` binary itself is
+/// missing, `Command::spawn` reports `ErrorKind::NotFound`; that is a missing
+/// prerequisite — UNVERIFIED, not a hard FAIL — since the differential cannot
+/// establish the Paper reference's pin without reading the materialized jar.
+/// Any other failure is a genuine IO error.
+fn classify_commit_lookup_error(e: io::Error) -> Error {
+    if e.kind() == io::ErrorKind::NotFound {
+        Error::Unverified(
+            "cannot verify the Paper reference: `unzip` is not installed (needed to read the \
+             materialized server jar's Git-Commit attribute)"
+                .to_string(),
+        )
+    } else {
+        Error::Io(e)
+    }
 }
 
 /// Locate the `rivet-server` binary: `RIVET_SERVER_BIN` env wins, then the
@@ -552,10 +593,13 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
                         .into(),
                 ));
             }
-            // Provenance: the server jar this boot actually materialized and
-            // loaded must be the pinned Paper commit. Read from the run dir (what
-            // really booted), not the paperclip jar or a co-located proxy.
-            verify_paper_provenance(&server.run_dir)?;
+            // Provenance is verified only where it is load-bearing: the
+            // Rivet-vs-Paper differential (run_paper_vs_rivet) requires the
+            // Paper reference to be the pinned oracle commit. Paper-vs-Paper
+            // self-checks (paper:paper join, move) and capture compare a build
+            // against itself, so the pin is not a correctness requirement
+            // there. The differential path calls verify_paper_provenance
+            // explicitly after this shutdown.
         }
         ServerKind::Rivet => {
             // Clean shutdown is the SIGTERM handler draining and exiting 0
@@ -735,6 +779,43 @@ mod tests {
             "a missing materialized jar must be UNVERIFIED, got {err}"
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn paper_provenance_unverified_when_unzip_missing() {
+        // `Command::new("unzip")` fails with ErrorKind::NotFound when the binary
+        // is absent from PATH; `verify_paper_provenance` routes that through
+        // `classify_commit_lookup_error`, which must classify it as UNVERIFIED (a
+        // missing prerequisite), not a hard FAIL. Fabricate the io::Error
+        // directly rather than mutating PATH (unsafe on this toolchain and racy
+        // in multi-threaded test runs).
+        let err = classify_commit_lookup_error(io::Error::new(
+            io::ErrorKind::NotFound,
+            "program not found",
+        ));
+        assert!(
+            matches!(err, Error::Unverified(_)),
+            "a missing unzip binary must be UNVERIFIED, got {err}"
+        );
+        assert!(
+            err.to_string().contains("unzip"),
+            "must name unzip as the missing prereq, got {err}"
+        );
+    }
+
+    #[test]
+    fn paper_provenance_io_failure_is_a_hard_error() {
+        // Any read failure that is not a missing unzip binary stays a genuine
+        // IO error, so a corrupt or unreadable jar cannot masquerade as
+        // "no provenance" UNVERIFIED.
+        let err = classify_commit_lookup_error(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+        assert!(
+            matches!(err, Error::Io(_)),
+            "a non-NotFound read failure must stay an IO error, got {err}"
+        );
     }
 
     #[test]

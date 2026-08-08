@@ -512,19 +512,27 @@ fn verify_rivet_connection(log_path: &Path) -> Result<(), RunnerError> {
     Ok(())
 }
 
-/// Fixtures `server.properties` (seed 42, superflat, offline, port 25599) —
-/// the config source of truth for Paper boots. Rivet boots do not require it:
-/// `rivet-server` is driven purely by `--host`/`--port`.
-fn server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
-    let p = crate_root.join("../rivet-oracle/fixtures/server.properties");
+/// Resolve a `rivet-oracle` `server.properties` fixture by name. The default
+/// `server.properties` (seed 42, superflat, offline, port 25599) is the config
+/// source of truth for Paper boots; the single-stone variant is the Paper
+/// reference of the Rivet-vs-Paper differential (issue #159). Rivet boots do
+/// not require either: `rivet-server` is driven purely by `--host`/`--port`.
+fn fixture_server_properties(crate_root: &Path, name: &str) -> Result<PathBuf, RunnerError> {
+    let p = crate_root.join(format!("../rivet-oracle/fixtures/{name}"));
     if p.is_file() {
         Ok(p)
     } else {
         Err(RunnerError::Unverified(format!(
-            "server.properties not found at {} (rivet-oracle fixtures)",
+            "{name} not found at {} (rivet-oracle fixtures)",
             p.display()
         )))
     }
+}
+
+/// The default superflat fixture for Paper boots that do not need a spawn
+/// height to match Rivet's.
+fn server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
+    fixture_server_properties(crate_root, "server.properties")
 }
 
 /// The single-stone superflat `server.properties` the Paper reference of the
@@ -537,15 +545,7 @@ fn server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
 /// Paper has exactly one layer and spawns at y=-63 too, so `position.y` becomes
 /// a genuinely compared field instead of a 3-block "documented gap".
 fn single_stone_server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
-    let p = crate_root.join("../rivet-oracle/fixtures/server-single-stone.properties");
-    if p.is_file() {
-        Ok(p)
-    } else {
-        Err(RunnerError::Unverified(format!(
-            "single-stone server.properties not found at {} (rivet-oracle fixtures)",
-            p.display()
-        )))
-    }
+    fixture_server_properties(crate_root, "server-single-stone.properties")
 }
 
 fn ensure_client_binary() -> Result<PathBuf, RunnerError> {
@@ -1044,7 +1044,7 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
     println!("    pinned unmodified Azalea client through offline login, configuration (registry");
     println!("    sync), and the play handoff to spawn, receiving exactly the deterministic");
     println!(
-        "    {}​-chunk send-set at Rivet's fixed superflat spawn y={}​. The connection is proven",
+        "    {}-chunk send-set at Rivet's fixed superflat spawn y={}. The connection is proven",
         transcript::JOIN_CHUNK_COUNT,
         transcript::JOIN_SPAWN_Y
     );
@@ -1165,6 +1165,14 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         "join",
     )?;
     server::shutdown(&mut paper_srv)?;
+    // Load-bearing provenance: the Paper reference this differential compares
+    // Rivet against must be the pinned oracle commit. This is scoped to the
+    // differential path only — Paper-vs-Paper self-checks (paper:paper join,
+    // move) and capture compare a build against itself, where the pin is not a
+    // correctness requirement. The check reads the jar that actually booted in
+    // the run dir, so a stale, swapped, or unverifiable Paper cannot silently
+    // stand in for the reference.
+    server::verify_paper_provenance(paper_srv.run_dir())?;
     let paper_t =
         transcript::normalize_join(&paper_client.stdout_text).map_err(RunnerError::Transcript)?;
     let paper_tp = work.join("paper.transcript.json");
