@@ -18,6 +18,7 @@ use crate::protocol::packet_type::PacketType;
 use crate::protocol::status::packet_types::clientbound_status_response;
 use crate::protocol::status::server_status::ServerStatus;
 use rivet_serialization::json_ops::JsonOps;
+use std::sync::OnceLock;
 
 /// `net.minecraft.network.protocol.status.ClientboundStatusResponsePacket`.
 #[derive(Clone, Debug, PartialEq)]
@@ -40,16 +41,31 @@ impl ClientboundStatusResponsePacket {
     /// lenientJson(32767).apply(fromCodec(OPS, ServerStatus.CODEC)), ...)`.
     /// `JsonOps::INSTANCE` is the empty-registry serialization context
     /// (Java's `RegistryAccess.EMPTY.createSerializationContext(JsonOps.INSTANCE)`).
+    ///
+    /// Cached behind a `static OnceLock` (Java's `static final STREAM_CODEC`):
+    /// building it runs `ServerStatus.CODEC`, whose description field is the
+    /// recursive `ComponentSerialization.CODEC` — a permanent strong `Arc` cycle
+    /// (see [`crate::codec::byte_buf_codecs::trusted_component`]). The status
+    /// listener serves one response per ping, so a per-call build would leak one
+    /// Component graph per status ping. Reuse the single registration-time
+    /// graph instead.
     pub fn stream_codec() -> StreamCodec<FriendlyByteBuf, ClientboundStatusResponsePacket> {
-        let json_codec = apply(
-            lenient_json(32767),
-            byte_buf_codecs::from_codec(JsonOps::INSTANCE, ServerStatus::codec()),
-        );
-        composite_1(
-            json_codec,
-            |p: &ClientboundStatusResponsePacket| p.status.clone(),
-            |status: ServerStatus| ClientboundStatusResponsePacket::new(status),
-        )
+        static STREAM_CODEC: OnceLock<
+            StreamCodec<FriendlyByteBuf, ClientboundStatusResponsePacket>,
+        > = OnceLock::new();
+        STREAM_CODEC
+            .get_or_init(|| {
+                let json_codec = apply(
+                    lenient_json(32767),
+                    byte_buf_codecs::from_codec(JsonOps::INSTANCE, ServerStatus::codec()),
+                );
+                composite_1(
+                    json_codec,
+                    |p: &ClientboundStatusResponsePacket| p.status.clone(),
+                    |status: ServerStatus| ClientboundStatusResponsePacket::new(status),
+                )
+            })
+            .clone()
     }
 }
 
@@ -109,6 +125,49 @@ mod tests {
         assert_eq!(
             String::from_utf8(json.to_vec()).unwrap(),
             r#"{"description":"Hi"}"#
+        );
+    }
+
+    #[test]
+    fn stream_codec_reuses_the_component_graph_across_many_pings() {
+        // Issue #207: the status listener serves one `ClientboundStatusResponse`
+        // per status ping, so `stream_codec()` must reuse the single process-wide
+        // `ServerStatus`/`Component` graph. Each fresh `ServerStatus::codec()`
+        // builds a new recursive `Component` graph (a permanent strong `Arc`
+        // cycle), so a per-call build would leak one graph per ping.
+        // `CODEC_BUILD_COUNT` counts graph constructions on this thread; it must
+        // stay flat across repeated stream_codec() calls after the first.
+        use rivet_text::component_serialization::CODEC_BUILD_COUNT;
+        let graph_count = || CODEC_BUILD_COUNT.with(|c| c.get());
+
+        let status = ServerStatus::new(
+            Component::literal("A Rivet Server"),
+            Some(Players::new(20, 1, Vec::new())),
+            Some(Version::new("1.21.4".to_string(), 769)),
+            Some(Favicon::new(vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])),
+            true,
+        );
+        let packet = ClientboundStatusResponsePacket::new(status);
+
+        // First ping: builds the process-wide stream codec (and its recursive
+        // Component graph) on this thread if it is not already built.
+        let mut out = FriendlyByteBuf::new(BytesMut::new());
+        ClientboundStatusResponsePacket::stream_codec()
+            .encode(&mut out, &packet)
+            .unwrap();
+        let after_first = graph_count();
+
+        // Simulate many subsequent status pings.
+        for _ in 0..50 {
+            let mut out = FriendlyByteBuf::new(BytesMut::new());
+            ClientboundStatusResponsePacket::stream_codec()
+                .encode(&mut out, &packet)
+                .unwrap();
+        }
+        let after_repeat = graph_count();
+        assert_eq!(
+            after_repeat, after_first,
+            "status stream codec rebuilt the recursive Component graph per ping (leak)"
         );
     }
 
