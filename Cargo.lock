@@ -563,6 +563,7 @@ dependencies = [
  "cesu8",
  "flate2",
  "indexmap",
+ "phf",
  "rivet-core",
  "rivet-serialization",
  "rivet-text",

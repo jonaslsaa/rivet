@@ -11,6 +11,7 @@ workspace = true
 cesu8 = { workspace = true }
 flate2 = { workspace = true }
 indexmap = { workspace = true }
+phf = { workspace = true, features = ["macros"] }
 rivet-core = { workspace = true }
 rivet-serialization = { workspace = true }
 rivet-text = { workspace = true }
