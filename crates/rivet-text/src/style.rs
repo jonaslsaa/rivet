@@ -182,6 +182,27 @@ impl Style {
         self.with_color(TextColor::from_legacy_format(color))
     }
 
+    /// `Style.EMPTY.withColor(color)` as a `const` — the fixed
+    /// `StyledFormat` defaults (`NumberFormat::SIDEBAR_DEFAULT`,
+    /// `PLAYER_LIST_DEFAULT`) need their colored styles at compile time, and
+    /// the runtime builder is not `const`. `color` is always `Some`, so the
+    /// all-empty collapse to `EMPTY` cannot trigger.
+    pub(crate) const fn colored(color: TextColor) -> Style {
+        Style {
+            color: Some(color),
+            shadow_color: None,
+            bold: None,
+            italic: None,
+            underlined: None,
+            strikethrough: None,
+            obfuscated: None,
+            click_event: None,
+            hover_event: None,
+            insertion: None,
+            font: None,
+        }
+    }
+
     /// `Style.withColor(int)`.
     pub fn with_color_rgb(&self, color: i32) -> Style {
         self.with_color(Some(TextColor::from_rgb(color)))

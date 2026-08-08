@@ -708,6 +708,16 @@ fn number_format_formats_score_values_like_java() {
         NumberFormat::Styled(Style::EMPTY).format(0).get_string(),
         "0"
     );
+    // The `StyledFormat` default styles: no style, RED, YELLOW.
+    assert_eq!(NumberFormat::NO_STYLE, NumberFormat::Styled(Style::EMPTY));
+    assert_eq!(
+        NumberFormat::SIDEBAR_DEFAULT,
+        NumberFormat::Styled(Style::EMPTY.with_color_format(ChatFormatting::Red))
+    );
+    assert_eq!(
+        NumberFormat::PLAYER_LIST_DEFAULT,
+        NumberFormat::Styled(Style::EMPTY.with_color_format(ChatFormatting::Yellow))
+    );
 
     // `FixedFormat.format` → `value.copy()` (a fresh equal component).
     let fixed = NumberFormat::Fixed(Component::literal("fixed"));
