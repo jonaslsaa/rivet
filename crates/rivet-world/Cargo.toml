@@ -22,6 +22,10 @@ rivet-util = { workspace = true }
 [dev-dependencies]
 # Tests build real containers (BytesMut-backed FriendlyByteBuf).
 bytes = { workspace = true }
+# The section-tag decode test builds a `SerializableChunkData`-style section
+# `CompoundTag` (`Y` + `block_states`/`biomes`; the golden fixture carries no
+# light arrays).
+rivet-nbt = { workspace = true }
 # The PalettedContainer<StateId> golden tests drive the real global
 # block-state table (rivet-registry `blocks` feature). Dev-only: normal
 # builds of rivet-world stay feature-free.

@@ -448,20 +448,20 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
 
     /// `pack(Strategy<T>)` — the NBT codec path. Re-encodes the storage against
     /// a fresh `HashMapPalette`, then picks the on-disc configuration by the
-    /// palette size.
-    pub fn pack(&self) -> PackedData<T> {
+    /// palette size. Takes the strategy explicitly (Java's signature — the
+    /// `PalettedContainerRO` read-view takes it as an argument); the container's
+    /// own strategy is the value every caller passes.
+    pub fn pack_with_strategy(&self, strategy: &Strategy<T>) -> PackedData<T> {
         let current_storage = &*self.data.storage;
         let current_palette = &*self.data.palette;
         let mut new_palette = HashMapPalette::new(current_storage.get_bits(), Vec::new());
         let new_contents = reencode_contents(current_storage, current_palette, &mut new_palette);
-        let stored_configuration = self
-            .strategy
-            .configuration_for_palette_size(new_palette.get_size());
+        let stored_configuration = strategy.configuration_for_palette_size(new_palette.get_size());
         let bits_on_disc = stored_configuration.bits_in_storage();
         let values = if bits_on_disc != 0 {
             let storage = SimpleBitStorage::from_values(
                 bits_on_disc,
-                self.strategy.entry_count() as usize,
+                strategy.entry_count() as usize,
                 &new_contents,
             );
             Some(storage.get_raw().to_vec())
@@ -469,6 +469,13 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
             None
         };
         PackedData::with_bits(new_palette.get_entries(), values, bits_on_disc)
+    }
+
+    /// `pack()` — [`pack_with_strategy`](Self::pack_with_strategy) with the
+    /// container's own strategy (the common call; Java always passes the same
+    /// strategy the container was built with).
+    pub fn pack(&self) -> PackedData<T> {
+        self.pack_with_strategy(&self.strategy)
     }
 
     /// `unpack(Strategy<T>, PackedData<T>)` — Anti-Xray disabled
@@ -578,6 +585,90 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
     /// The strategy's global-palette in-memory width.
     pub fn global_palette_bits_in_memory(&self) -> i32 {
         self.strategy.global_palette_bits_in_memory()
+    }
+}
+
+/// `PalettedContainerRO<T>` — the read-view surface of a paletted container
+/// (Java's interface of the same name; `PalettedContainer` implements it).
+///
+/// `copy`/`recreate`/`pack` return the concrete `PalettedContainer` (Java's
+/// covariant returns). The mutating surface (`set`, `getAndSet`, `read`) is
+/// deliberately absent — it is not part of the read view.
+///
+/// The methods delegate to the inherent [`PalettedContainer`] surface; this
+/// trait exists so a value that only needs reads can be typed by capability
+/// (e.g. the factory's `biomeContainerCodec` in Java is `Codec<
+/// PalettedContainerRO<Holder<Biome>>>`).
+pub trait PalettedContainerRO<T: Clone + PartialEq + Send + 'static> {
+    /// `get(int, int, int)`.
+    fn get(&self, x: i32, y: i32, z: i32) -> T;
+    /// `getAll(Consumer<T>)`.
+    fn get_all(&self, consumer: &mut dyn FnMut(T));
+    /// `write(FriendlyByteBuf)` — the deprecated no-Anti-Xray-info variant.
+    fn write(&self, buffer: &mut FriendlyByteBuf);
+    /// `getSerializedSize()`.
+    fn get_serialized_size(&self) -> i32;
+    /// `bitsPerEntry()` — the in-memory storage width.
+    fn bits_per_entry(&self) -> i32;
+    /// `maybeHas(Predicate<T>)`.
+    fn maybe_has(&self, predicate: &mut dyn FnMut(&T) -> bool) -> bool;
+    /// `forEachInPalette(Consumer<T>)`.
+    fn for_each_in_palette(&self, consumer: &mut dyn FnMut(T));
+    /// `count(PalettedContainer.CountConsumer<T>)`.
+    fn count(&self, output: &mut dyn FnMut(T, i32));
+    /// `copy()`.
+    fn copy(&self) -> PalettedContainer<T>;
+    /// `recreate()`.
+    fn recreate(&self) -> PalettedContainer<T>;
+    /// `pack(Strategy<T>)`.
+    fn pack(&self, strategy: &Strategy<T>) -> PackedData<T>;
+}
+
+impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainerRO<T>
+    for PalettedContainer<T>
+{
+    fn get(&self, x: i32, y: i32, z: i32) -> T {
+        PalettedContainer::get(self, x, y, z)
+    }
+
+    fn get_all(&self, consumer: &mut dyn FnMut(T)) {
+        PalettedContainer::get_all(self, consumer)
+    }
+
+    fn write(&self, buffer: &mut FriendlyByteBuf) {
+        PalettedContainer::write(self, buffer)
+    }
+
+    fn get_serialized_size(&self) -> i32 {
+        PalettedContainer::get_serialized_size(self)
+    }
+
+    fn bits_per_entry(&self) -> i32 {
+        PalettedContainer::bits_per_entry(self)
+    }
+
+    fn maybe_has(&self, predicate: &mut dyn FnMut(&T) -> bool) -> bool {
+        PalettedContainer::maybe_has(self, predicate)
+    }
+
+    fn for_each_in_palette(&self, consumer: &mut dyn FnMut(T)) {
+        PalettedContainer::for_each_in_palette(self, consumer)
+    }
+
+    fn count(&self, output: &mut dyn FnMut(T, i32)) {
+        PalettedContainer::count(self, output)
+    }
+
+    fn copy(&self) -> PalettedContainer<T> {
+        PalettedContainer::copy(self)
+    }
+
+    fn recreate(&self) -> PalettedContainer<T> {
+        PalettedContainer::recreate(self)
+    }
+
+    fn pack(&self, strategy: &Strategy<T>) -> PackedData<T> {
+        PalettedContainer::pack_with_strategy(self, strategy)
     }
 }
 
