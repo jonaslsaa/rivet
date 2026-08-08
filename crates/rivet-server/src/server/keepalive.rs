@@ -231,9 +231,17 @@ impl KeepaliveState {
     /// the transmit throttle state and ping history but starts with an empty
     /// pending queue ("listener handoff should reset pending keepalive
     /// expectations", `createCookie`). Not currently wired into any production
-    /// handoff: the play path seeds a fresh machine in `spawn_session`, and the
-    /// configuration listener owns no `KeepaliveState` yet (RivetTodo #283), so
-    /// the only caller is the unit test below.
+<<<<<<< HEAD
+    /// handoff: the configuration listener owns its own `KeepaliveState`
+    /// (issue #283), and the play path seeds a fresh machine in `spawn_session`
+    /// — so no `KeepaliveState` carries across the finish→play seam and the
+    /// only caller is the unit test below.
+=======
+    /// handoff: the configuration listener owns its own `KeepaliveState`
+    /// (issue #283), and the play path seeds a fresh machine in `spawn_session`
+    /// — so no `KeepaliveState` carries across the finish→play seam and the
+    /// only caller is the unit test below.
+>>>>>>> b812a89 (fix(server): correct stale copyForListenerHandoff doc + guard fresh-seed divergence)
     pub fn copy_for_listener_handoff(&self) -> Self {
         let mut copy =
             KeepaliveState::new_with_timeout(self.last_keep_alive_tx_ns, self.timeout_ns);
@@ -693,6 +701,30 @@ mod tests {
         // At 3000ms it does.
         let o = copy.tick(ms_to_ns(3000), 3000);
         assert_eq!(o.send, Some(3000));
+    }
+
+    #[test]
+    fn fresh_seed_resets_the_throttle_not_copy() {
+        // The finish→play seam diverges from Paper's `copyForListenerHandoff`
+        // (which preserves the transmit throttle): `spawn_session` builds a
+        // fresh `new_with_timeout(now_ns, ...)`, so a handoff after a config
+        // phase whose last transmit was t=2000 still waits a full second from
+        // the fresh seed — the first play challenge fires at seed+1s, never on
+        // the old cadence.
+        let mut prior = state(0);
+        tick_at(&mut prior, 1000);
+        tick_at(&mut prior, 2000); // last transmit at t=2000
+        // Paper's copy would carry that throttle (a copy at t=3000 sends at
+        // once); the fresh seed at t=3000 does not.
+        let mut fresh = KeepaliveState::new(ms_to_ns(3000));
+        let o = fresh.tick(ms_to_ns(3500), 3500);
+        assert_eq!(o.send, None, "no send 500ms after the fresh seed");
+        let o = fresh.tick(ms_to_ns(4000), 4000);
+        assert_eq!(
+            o.send,
+            Some(4000),
+            "first play challenge 1s after the fresh seed"
+        );
     }
 
     #[test]
