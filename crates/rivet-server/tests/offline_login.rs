@@ -80,6 +80,7 @@ fn config_with_threshold(compression_threshold: i32) -> ServerConfig {
         outbound_channel_capacity: 64,
         lifecycle_capacity: 64,
         enable_join: false,
+        keepalive_timeout: Duration::from_secs(30),
     }
 }
 
@@ -231,6 +232,23 @@ async fn expect_eof(stream: &mut TcpStream) {
         Ok(Ok(n)) => panic!("server sent {n} bytes before closing; expected EOF"),
         Ok(Err(_)) => {}
         Err(_) => panic!("timed out waiting for EOF"),
+    }
+}
+
+/// Read until EOF, tolerating trailing data: the keepalive timeout close flushes
+/// whatever the timeout tick already queued (possibly a fresh challenge when the
+/// 1s throttle and the timeout check land on the same tick — Paper checks the
+/// throttle first) before the socket closes. Panics only if the close does not
+/// arrive within the deadline.
+async fn expect_eof_allowing_trailing(stream: &mut TcpStream) {
+    let mut buf = [0u8; 128];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buf)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => break,
+            Ok(Ok(_)) => continue, // trailing frame; keep reading to the close
+            Err(_) => panic!("timed out waiting for the disconnect close"),
+        }
     }
 }
 
@@ -1136,6 +1154,18 @@ fn config_with_join() -> ServerConfig {
         outbound_channel_capacity: 1024,
         lifecycle_capacity: 1024,
         enable_join: true,
+        keepalive_timeout: Duration::from_secs(30),
+    }
+}
+
+/// `config_with_join()` with a short keepalive kick limit, so the live TCP
+/// keepalive tests exercise the timeout window in seconds instead of the pinned
+/// 30s default (`paper.playerconnection.keepalive`, issue #236). The 1s transmit
+/// cadence is never configurable, exactly as in Java.
+fn config_with_join_keepalive(timeout: Duration) -> ServerConfig {
+    ServerConfig {
+        keepalive_timeout: timeout,
+        ..config_with_join()
     }
 }
 
@@ -1218,5 +1248,108 @@ async fn live_join_burst_over_tcp_after_finish_configuration() {
 
     // The connection stays open in play (a live session, not a silent close).
     expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// The client's view of one live keepalive exchange: drive the full handshake →
+/// login → registry sync → `client_information` → `finish_configuration` with
+/// `enable_join` on, consume the 135-frame join burst, and return the live play
+/// connection. The tick-owned session is in play and its keepalive state is
+/// live (first challenge fires ~1s later).
+async fn join_to_play(
+    config: ServerConfig,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>, TcpStream) {
+    let (addr, server_task) = start_server(config).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    client
+        .write_all(&client_information_frame(8))
+        .await
+        .expect("write client_information");
+    client
+        .write_all(&finish_configuration_reply_frame())
+        .await
+        .expect("write finish_configuration");
+    for _ in 0..135 {
+        let _ = read_compressed_packet(&mut client).await;
+    }
+    (addr, server_task, client)
+}
+
+/// Read one clientbound play `keep_alive` (id 44) and return its 8-byte
+/// challenge id (the raw big-endian `long` the server expects echoed back). The
+/// frame is under the 256 threshold, so it arrives with `declaredLength 0`.
+async fn read_play_keepalive_challenge(stream: &mut TcpStream) -> [u8; 8] {
+    let (_, payload) = read_compressed_packet(stream).await;
+    let (id, used) = decode_varint(&payload);
+    assert_eq!(
+        id,
+        PacketType::KeepAlive.id() as i32,
+        "clientbound play keep_alive"
+    );
+    payload[used..used + 8]
+        .try_into()
+        .expect("keep_alive body is an 8-byte long")
+}
+
+/// Frame a serverbound play `keep_alive` reply (id 28) echoing the challenge
+/// id bytes, compressed under the threshold (`varint(0)` declaredLength).
+fn play_keepalive_reply_frame(challenge_id: [u8; 8]) -> Vec<u8> {
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&challenge_id);
+    let mut wire = varint(0); // declaredLength 0 → raw payload
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// A live client that echoes every play `keep_alive` challenge survives well
+/// past the (shortened) kick window: the tick-owned keepalive loop transmits
+/// the clientbound challenge (id 44) over the real socket, and the echoed
+/// serverbound reply (id 28) is routed back into the same state machine, so no
+/// pending challenge ever exceeds the 2s limit.
+#[tokio::test]
+async fn live_keepalive_responding_client_survives_beyond_the_timeout_window() {
+    let (_addr, server_task, mut client) =
+        join_to_play(config_with_join_keepalive(Duration::from_secs(2))).await;
+
+    // Echo every challenge. 4 challenges span ~4s — 2× the 2s kick limit — so a
+    // client that failed to respond would already have been disconnected.
+    for _ in 0..4 {
+        let challenge = read_play_keepalive_challenge(&mut client).await;
+        client
+            .write_all(&play_keepalive_reply_frame(challenge))
+            .await
+            .expect("write keepalive reply");
+    }
+
+    // Still connected past the timeout window.
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// A live client that receives a play `keep_alive` challenge and never answers
+/// it is disconnected — the socket closes once the challenge exceeds the 2s
+/// kick limit (the TIMEOUT disconnect from `keepConnectionAlive` reaches the
+/// wire as a close).
+///
+/// The close is Paper's send-then-disconnect ordering: when the 1s throttle and
+/// the timeout check land on the same tick the throttled challenge is queued
+/// before the timeout fires, and the disconnect flushes it before closing — so
+/// the client may observe one more clientbound play `keep_alive` before EOF.
+/// [`expect_eof_allowing_trailing`] tolerates either shape.
+#[tokio::test]
+async fn live_keepalive_unanswered_challenge_is_disconnected() {
+    let (_addr, server_task, mut client) =
+        join_to_play(config_with_join_keepalive(Duration::from_secs(2))).await;
+
+    // Receive the first challenge, then go silent. The kick fires ~2s after
+    // that challenge's transmit (the strict `>` limit); the 5s deadline inside
+    // the EOF helper covers the 1s transmit + the 2s limit, far short of the
+    // 30s read timeout — so an EOF here is the keepalive kick, not a read
+    // timeout.
+    let _challenge = read_play_keepalive_challenge(&mut client).await;
+    expect_eof_allowing_trailing(&mut client).await;
     server_task.abort();
 }

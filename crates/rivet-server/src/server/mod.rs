@@ -67,6 +67,11 @@ pub struct ServerConfig {
     /// #101 Slice B). Off by default so the offline-login tests exercise the
     /// handoff seam without the burst; the M1 binary enables it.
     pub enable_join: bool,
+    /// The keepalive kick limit (`paper.playerconnection.keepalive`, issue
+    /// #236). Paper's default 30s is pinned; a shorter value lets the live
+    /// keepalive tests exercise the timeout window without a half-minute wait
+    /// each (the 1s transmit cadence is never configurable, as in Java).
+    pub keepalive_timeout: Duration,
 }
 
 impl Default for ServerConfig {
@@ -83,6 +88,7 @@ impl Default for ServerConfig {
             outbound_channel_capacity: 1024,
             lifecycle_capacity: 256,
             enable_join: false,
+            keepalive_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -113,9 +119,9 @@ impl Server {
         // the burst; the M1 binary enables it. The session manager is moved into
         // the tick thread by `serve` (`std::mem::take`).
         if config.enable_join {
-            tickables.push(player::session::session_manager_tickable(
-                player::session::default_session_config(config.compression_threshold),
-            ));
+            let mut session = player::session::default_session_config(config.compression_threshold);
+            session.keepalive_timeout_ns = config.keepalive_timeout.as_nanos() as i64;
+            tickables.push(player::session::session_manager_tickable(session));
         }
         Server {
             config,

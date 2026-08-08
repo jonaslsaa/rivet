@@ -12,12 +12,15 @@
 //! connection's inbound play frames with bounded FIFO buffering that bridges the
 //! handoff race without losing or duplicating a frame.
 //!
-//! No keepalive/movement semantics are pretended: serverbound frames are decoded
-//! only to the extent needed to prove routing (the `keep_alive` id/body boundary)
-//! and otherwise dropped. `keep_alive` (id 28) is the single serverbound play
-//! body ported so far; its minimal handling here parses the echoed id and counts
-//! it, but the full `handle_keep_alive` echo + timeout loop is RivetTodo(#157),
-//! and the movement/teleport surface is RivetTodo(#158).
+//! One tick-owned [`KeepaliveState`] per live session drives the Paper-faithful
+//! keepalive loop (#157): `keepConnectionAlive` each tick (1s transmit cadence,
+//! 30s kick limit, both off the `TickContext` clock axes so the machine is
+//! deterministic under `SimTime`), and `handleKeepAlive` on the serverbound
+//! `keep_alive` (id 28) reply — a non-`Accepted` outcome (wrong/stale id)
+//! disconnects with TIMEOUT, and a silent client is disconnected when its oldest
+//! challenge exceeds the kick limit. The movement/teleport surface remains
+//! RivetTodo(#158): every other play frame is dropped without pretending
+//! semantics.
 //!
 //! The outbound burst fires exactly once per connection (the handoff is consumed
 //! — [`ConnectionRegistry::take_play_handoff`]), and the join burst is
@@ -30,15 +33,19 @@
 use rivet_protocol::codec::StreamDecoder;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_protocol::generated::packets::play::serverbound::PacketType as ServerboundPacketType;
+use rivet_protocol::protocol::common::clientbound_keep_alive::ClientboundKeepAlivePacket;
 use rivet_protocol::protocol::common::serverbound_keep_alive::ServerboundKeepAlivePacket;
 
+use crate::server::keepalive::{KEEPALIVE_LIMIT_NS, KeepaliveResponseOutcome, KeepaliveState};
 use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
 use crate::server::network::connection_id::ConnectionId;
+use crate::server::network::keepalive::{KeepaliveSink, drive_keepalive};
 use crate::server::network::packet_listener::DisconnectReason;
 use crate::server::player::join::{JoinConfig, place_new_player};
 use crate::server::player::play_sender::PlaySender;
 use crate::server::player::{PlayerIndices, ServerPlayer};
 use crate::server::tick::channels::{OutboundEvent, ServerboundFrame};
+use crate::server::tick::registry::ConnectionRegistry;
 use crate::server::tick::{TickContext, Tickable};
 
 /// The maximum inbound frames the session manager retains per connection while
@@ -53,6 +60,13 @@ use crate::server::tick::{TickContext, Tickable};
 /// unbounded accumulation. A connection that exceeds the bound is disconnected
 /// (anti-flood policy, matching the tick drain's own budget).
 pub const MAX_PENDING_SESSION_FRAMES: usize = 1024;
+
+/// The clientbound `keep_alive` packet id in the play protocol —
+/// `GameProtocols.CLIENTBOUND_TEMPLATE` (`rivet-protocol` generated table):
+/// `minecraft:keep_alive` is 44. Distinct from the configuration protocol's
+/// `keep_alive` id 4, which the network-side `ConnectionKeepaliveSink` uses.
+pub const PLAY_CLIENTBOUND_KEEP_ALIVE_ID: u32 =
+    rivet_protocol::generated::packets::play::clientbound::PacketType::KeepAlive.id();
 
 /// The tick-owned play session manager — one instance per server, owning the
 /// `ServerLevel` (tick-confined), the `PlaySender`, the player indices, and the
@@ -69,9 +83,15 @@ pub struct PlayerSessionManager {
     /// Inbound frames routed to a live session (test/counterfactual observability:
     /// proves no loss and no double-delivery across the handoff race).
     routed_frames: usize,
-    /// `keep_alive` (id 28) frames whose body parsed (the sole ported serverbound
-    /// play body; the full keepalive loop is #157).
+    /// `keep_alive` (id 28) frames whose body parsed.
     keep_alives_seen: usize,
+    /// One tick-owned keepalive state per live session (issue #157), keyed by
+    /// connection. Inserted at session spawn; driven every tick; removed on
+    /// disconnect (timeout, bad reply, or connection loss).
+    keepalive: std::collections::HashMap<ConnectionId, KeepaliveState>,
+    /// The keepalive kick limit in ns each session's state is built with (the
+    /// `ServerConfig.keepalive_timeout` the session config carried).
+    keepalive_timeout_ns: i64,
 }
 
 /// The configuration the session manager needs to run a play session (Slice B).
@@ -87,6 +107,8 @@ pub struct SessionManagerConfig {
     pub level: ServerLevel,
     /// The join config (max players, level keys, game rules).
     pub join: JoinConfig,
+    /// The keepalive kick limit in ns (from `ServerConfig.keepalive_timeout`).
+    pub keepalive_timeout_ns: i64,
 }
 
 /// The default M1 play-session config: the superflat `ServerLevel` (seed 42,
@@ -102,6 +124,7 @@ pub fn default_session_config(compression_threshold: i32) -> SessionManagerConfi
         world_clock_access: world_clock_access(),
         level: ServerLevel::new(ServerLevelConfig::default()),
         join: join_config(),
+        keepalive_timeout_ns: KEEPALIVE_LIMIT_NS,
     }
 }
 
@@ -129,12 +152,15 @@ impl PlayerSessionManager {
             pending: std::collections::HashMap::new(),
             routed_frames: 0,
             keep_alives_seen: 0,
+            keepalive: std::collections::HashMap::new(),
+            keepalive_timeout_ns: config.keepalive_timeout_ns,
         }
     }
 
     /// Run one tick of play session management: consume every connection's
     /// handoff (spawning its session + burst), route the tick's inbound frames
-    /// into sessions, then clean up sessions whose connection is gone.
+    /// into sessions, run each live session's keepalive tick (transmit +
+    /// timeout), then clean up sessions whose connection is gone.
     pub fn tick(&mut self, ctx: &mut TickContext) {
         let ids: Vec<ConnectionId> = ctx.connections.ids().collect();
         for id in ids {
@@ -146,6 +172,7 @@ impl PlayerSessionManager {
         for (id, frame) in inbound {
             self.route_inbound(ctx, id, frame);
         }
+        self.drive_keepalives(ctx);
         self.prune_lost(ctx);
     }
 
@@ -220,11 +247,53 @@ impl PlayerSessionManager {
             return;
         }
 
+        // The session now owns a tick-thread keepalive state (issue #157).
+        // `lastKeepAliveTx` is seeded with this tick's reading so the 1s
+        // transmit throttle counts from now, and the kick limit comes from
+        // `ServerConfig.keepalive_timeout`.
+        self.keepalive.insert(
+            connection_id,
+            KeepaliveState::new_with_timeout(ctx.now_ns, self.keepalive_timeout_ns),
+        );
+
         // Deliver frames that arrived before the handoff (the client coalesced
         // `finish_configuration` with its first play packet) in FIFO order.
         if let Some(frames) = self.pending.remove(&connection_id) {
             for frame in frames {
                 self.route_inbound(ctx, connection_id, frame);
+            }
+        }
+    }
+
+    /// `ServerGamePacketListenerImpl.tick`'s keepalive half — run
+    /// `keepConnectionAlive` for every live session off the tick's clock axes,
+    /// transmitting the clientbound keep_alive when the 1s throttle elapses and
+    /// disconnecting with TIMEOUT when a session's oldest challenge exceeds the
+    /// kick limit. The state is removed once the disconnect fires (the
+    /// connection is being torn down; Paper's disconnect closes the listener).
+    fn drive_keepalives(&mut self, ctx: &mut TickContext) {
+        let ids: Vec<ConnectionId> = self.keepalive.keys().copied().collect();
+        for id in ids {
+            let Some(keepalive) = self.keepalive.get_mut(&id) else {
+                continue;
+            };
+            let mut sink = PlayKeepaliveSink {
+                sender: &mut self.sender,
+                connections: ctx.connections,
+                id,
+            };
+            match drive_keepalive(keepalive, ctx.now_ns, ctx.now_ms, &mut sink) {
+                Ok(()) => {}
+                Err(reason) => {
+                    tracing::warn!(%id, %reason, "disconnecting play session");
+                    // `drive_keepalive` returns the reason (`disconnect_timeout`
+                    // or a send failure); the disconnect itself is issued here,
+                    // mirroring Paper's `disconnect(TIMEOUT, TIMEOUT)`.
+                    let _ = ctx
+                        .connections
+                        .send(id, OutboundEvent::Disconnect { reason });
+                    self.keepalive.remove(&id);
+                }
             }
         }
     }
@@ -253,46 +322,67 @@ impl PlayerSessionManager {
             frames.push(frame);
             return;
         }
-        self.dispatch(id, frame);
+        self.dispatch(ctx, id, frame);
     }
 
     /// Dispatch one play frame to its session. Only `keep_alive` (id 28) is
-    /// decoded — the sole ported serverbound play body. The echo + timeout loop
-    /// is #157; every other play frame is dropped without pretending semantics
+    /// decoded — the sole ported serverbound play body. Its echoed id runs
+    /// through `handleKeepAlive`: an `Accepted` reply (the oldest pending
+    /// challenge) is absorbed, and a wrong/stale id — `OutOfOrder` or
+    /// `NoMatchingChallenge` — disconnects with TIMEOUT, exactly as in Java.
+    /// Every other play frame is dropped without pretending semantics
     /// (movement/teleport is #158).
-    fn dispatch(&mut self, id: ConnectionId, frame: ServerboundFrame) {
+    fn dispatch(&mut self, ctx: &mut TickContext, id: ConnectionId, frame: ServerboundFrame) {
         self.routed_frames += 1;
         if read_packet_id(&frame.bytes) != Some(ServerboundPacketType::KeepAlive as u32) {
             return;
         }
-        // `handleKeepAlive`'s body boundary: the echoed `long` id. Parsing it
-        // proves the frame reached the session intact. The keepalive state
-        // machine (transmit cadence, timeout disconnect) is RivetTodo(#157).
-        //
-        // The decode runs on the tick thread, so its panics must be contained
-        // here, never abort the tick: a truncated body (`read_long` on < 8
-        // remaining bytes panics) is dropped and counted as malformed, matching
-        // the decode-boundary containment of [`decode_packet`].
+        // `handleKeepAlive`'s body boundary: the echoed `long` id. The decode
+        // runs on the tick thread, so its panics must be contained here, never
+        // abort the tick: a truncated body (`read_long` on < 8 remaining bytes
+        // panics) is dropped and counted as malformed, matching the
+        // decode-boundary containment of [`decode_packet`].
         let mut raw = bytes::BytesMut::from(&frame.bytes[..]);
         let _ = rivet_protocol::var_int::read(&mut raw); // packet id
         let mut input = FriendlyByteBuf::new(raw);
         let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ServerboundKeepAlivePacket::stream_codec().decode(&mut input)
         }));
-        match decoded {
-            Ok(Ok(_)) => {
+        let echo_id = match decoded {
+            Ok(Ok(packet)) => {
                 self.keep_alives_seen += 1;
+                packet.id()
             }
             Ok(Err(_)) | Err(_) => {
                 tracing::warn!(%id, "malformed keep_alive play frame");
+                return;
+            }
+        };
+        // `handleKeepAlive(packet, System.nanoTime())` — the reply is matched
+        // against the pending challenges. The frame arrived this tick, so the
+        // receive reading is this tick's `now_ns`.
+        let Some(keepalive) = self.keepalive.get_mut(&id) else {
+            return;
+        };
+        match keepalive.handle_keepalive(echo_id, ctx.now_ns) {
+            KeepaliveResponseOutcome::Accepted => {}
+            outcome => {
+                tracing::warn!(%id, ?outcome, "disconnecting play session on bad keep_alive reply");
+                self.keepalive.remove(&id);
+                let _ = ctx.connections.send(
+                    id,
+                    OutboundEvent::Disconnect {
+                        reason: DisconnectReason::Timeout,
+                    },
+                );
             }
         }
     }
 
     /// Remove sessions whose connection is gone (the tick pruned the registry
-    /// entry on disconnect/EOF/overflow). The player index and any pending
-    /// frames for a lost connection are dropped so the indices stay a bijection
-    /// with live connections.
+    /// entry on disconnect/EOF/overflow). The player index, any pending frames,
+    /// and the keepalive state for a lost connection are dropped so the indices
+    /// stay a bijection with live connections.
     fn prune_lost(&mut self, ctx: &mut TickContext) {
         let ids: Vec<ConnectionId> = self.indices.connection_ids().collect();
         for id in ids {
@@ -308,6 +398,48 @@ impl PlayerSessionManager {
                 self.pending.remove(&id);
             }
         }
+        let keepalive_ids: Vec<ConnectionId> = self.keepalive.keys().copied().collect();
+        for id in keepalive_ids {
+            if !ctx.connections.contains(id) {
+                self.keepalive.remove(&id);
+            }
+        }
+    }
+}
+
+/// The [`KeepaliveSink`] for a play session: transmit the challenge through the
+/// tick-side [`PlaySender`] as a play clientbound `keep_alive` (id 44, the
+/// `GameProtocols` clientbound table — distinct from the configuration id 4),
+/// and report a timeout disconnect. A send failure (overload / gone connection)
+/// maps to the connection's disconnect reason so `drive_keepalive` returns
+/// `Err` and the session is torn down exactly like a timeout kick.
+struct PlayKeepaliveSink<'a> {
+    sender: &'a mut PlaySender,
+    connections: &'a mut ConnectionRegistry,
+    id: ConnectionId,
+}
+
+impl KeepaliveSink for PlayKeepaliveSink<'_> {
+    fn send_keepalive(&mut self, challenge_id: i64) -> Result<(), DisconnectReason> {
+        let body = self
+            .sender
+            .encode_body(
+                ClientboundKeepAlivePacket::stream_codec(),
+                &ClientboundKeepAlivePacket::new(challenge_id),
+            )
+            .map_err(|e| DisconnectReason::Unsupported(format!("encode keepalive: {e}")))?;
+        self.sender
+            .send_packet(
+                self.connections,
+                self.id,
+                PLAY_CLIENTBOUND_KEEP_ALIVE_ID,
+                &body,
+            )
+            .map_err(|e| DisconnectReason::Unsupported(format!("send keepalive: {e}")))
+    }
+
+    fn disconnect_timeout(&mut self) -> DisconnectReason {
+        DisconnectReason::Timeout
     }
 }
 
@@ -428,13 +560,37 @@ mod tests {
     }
 
     /// A `keep_alive` (id 28) play frame with the given echoed id — the sole
-    /// ported serverbound play body, so `dispatch` decodes and counts it.
+    /// ported serverbound play body, so `dispatch` decodes it and routes the id
+    /// through `handleKeepAlive`.
     fn keepalive_frame(id: i64) -> ServerboundFrame {
         let mut bytes = varint(28);
         bytes.extend_from_slice(&id.to_be_bytes());
         ServerboundFrame {
             bytes: Bytes::from(bytes),
         }
+    }
+
+    /// A play frame with a non-keepalive packet id (`dispatch` drops those
+    /// without decoding — routing-only frames for the buffering tests, which
+    /// must not trip the keepalive reply validation).
+    fn play_frame(packet_id: i32, body: &[u8]) -> ServerboundFrame {
+        let mut bytes = varint(packet_id);
+        bytes.extend_from_slice(body);
+        ServerboundFrame {
+            bytes: Bytes::from(bytes),
+        }
+    }
+
+    /// True when `out_rx` carries a `Disconnect` (its reason recorded).
+    fn drained_disconnect_reason(
+        out_rx: &mut tokio::sync::mpsc::Receiver<OutboundEvent>,
+    ) -> Option<DisconnectReason> {
+        while let Ok(event) = out_rx.try_recv() {
+            if let OutboundEvent::Disconnect { reason } = event {
+                return Some(reason);
+            }
+        }
+        None
     }
 
     /// A registry with `ID` connected over a bounded outbound channel (capacity
@@ -475,20 +631,35 @@ mod tests {
         });
     }
 
-    /// Run one tick of the manager against the registry with the given inbound
-    /// frames; returns the manager (the registry borrow ends).
-    fn run_tick(
+    /// Run one tick of the manager at simulated `now_ms` (the monotonic clock
+    /// starts at 0; `now_ns` is derived the same way `ServerTickLoop.run_tick`
+    /// derives it — `now_nanos / 1_000_000`). Returns the manager (the registry
+    /// borrow ends).
+    fn run_tick_at(
         mut manager: PlayerSessionManager,
         registry: &mut ConnectionRegistry,
         inbound: Vec<(ConnectionId, ServerboundFrame)>,
+        now_ms: i64,
     ) -> PlayerSessionManager {
         let mut ctx = TickContext {
             tick: 1,
+            now_ns: now_ms * 1_000_000,
+            now_ms,
             connections: registry,
             inbound,
         };
         manager.tick(&mut ctx);
         manager
+    }
+
+    /// Run one tick at `now_ms = 0` (the epoch reading sessions are seeded
+    /// with).
+    fn run_tick(
+        manager: PlayerSessionManager,
+        registry: &mut ConnectionRegistry,
+        inbound: Vec<(ConnectionId, ServerboundFrame)>,
+    ) -> PlayerSessionManager {
+        run_tick_at(manager, registry, inbound, 0)
     }
 
     fn probe_profile() -> GameProfile {
@@ -503,11 +674,14 @@ mod tests {
         let (mut registry, _out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(default_session_config(256));
 
-        // Tick 1: play frames arrive before the handoff — buffered FIFO.
+        // Tick 1: play frames arrive before the handoff — buffered FIFO. The
+        // frames are non-keepalive so the buffering path is exercised without
+        // the keepalive reply validation (a reply to a challenge the server
+        // never sent would disconnect).
         manager = run_tick(
             manager,
             &mut registry,
-            vec![(ID, keepalive_frame(1)), (ID, keepalive_frame(2))],
+            vec![(ID, play_frame(0, &[])), (ID, play_frame(1, &[]))],
         );
         assert_eq!(manager.session_count(), 0, "no session before the handoff");
         assert_eq!(
@@ -519,17 +693,12 @@ mod tests {
         // The handoff lands; tick 2 drains it (spawns the session + burst) and
         // delivers the pending frames in order, plus the tick's new frame.
         apply_enter_play(&mut registry);
-        manager = run_tick(manager, &mut registry, vec![(ID, keepalive_frame(3))]);
+        manager = run_tick(manager, &mut registry, vec![(ID, play_frame(2, &[]))]);
         assert_eq!(manager.session_count(), 1, "handoff spawns the session");
         assert_eq!(
             manager.routed_frames(),
             3,
             "pending + fresh frames delivered exactly once"
-        );
-        assert_eq!(
-            manager.keep_alives_seen(),
-            3,
-            "all three keep_alives decoded"
         );
     }
 
@@ -594,7 +763,7 @@ mod tests {
     /// `read_packet_id`/bare-`decode` on a truncated frame).
     #[test]
     fn hostile_truncated_play_frames_are_dropped_not_panicked() {
-        let (mut registry, _out_rx) = connected_registry();
+        let (mut registry, mut out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(default_session_config(256));
 
         apply_enter_play(&mut registry);
@@ -631,15 +800,23 @@ mod tests {
         );
 
         // The tick ran to completion — the hostile frames were dropped without
-        // a panic — and only the well-formed keep_alive was decoded.
+        // a panic. Only the well-formed keep_alive decoded; its id matches no
+        // pending challenge (the session spawned this tick at t=0, before any
+        // transmit), so it is counted as seen and then the reply is rejected
+        // with a TIMEOUT disconnect, exactly like Paper.
         assert_eq!(manager.session_count(), 1);
         assert_eq!(manager.routed_frames(), 4, "all frames consumed");
         assert_eq!(manager.keep_alives_seen(), 1, "only the valid keep_alive");
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::Timeout),
+            "a reply to an unsent challenge disconnects"
+        );
     }
 
     #[test]
-    fn keep_alive_beyond_handoff_is_routed_and_counted() {
-        let (mut registry, _out_rx) = connected_registry();
+    fn keep_alive_beyond_handoff_is_routed_and_decoded() {
+        let (mut registry, mut out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(default_session_config(256));
 
         apply_enter_play(&mut registry);
@@ -650,10 +827,22 @@ mod tests {
         );
         assert_eq!(manager.session_count(), 1);
         assert_eq!(manager.routed_frames(), 2);
-        assert_eq!(manager.keep_alives_seen(), 2);
+        assert_eq!(
+            manager.keep_alives_seen(),
+            2,
+            "both keep_alive bodies decoded"
+        );
         assert!(
             manager.pending.is_empty(),
             "handoff already applied, nothing buffered"
+        );
+        // The session spawned this tick at t=0 before any transmit, so neither
+        // echoed id matches a pending challenge — the first reply disconnects
+        // with TIMEOUT, exactly like Paper's "without matching challenge" path.
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::Timeout),
+            "a reply to an unsent challenge is a TIMEOUT disconnect"
         );
     }
 
@@ -779,6 +968,179 @@ mod tests {
             manager.indices.connection_for(&probe_profile().id()),
             Some(ID),
             "playersByUUID forward lookup"
+        );
+    }
+
+    /// A client that answers every challenge: the keepalive loop transmits at
+    /// the 1s cadence, the reply is accepted the following tick, and the session
+    /// survives far past the default 30s kick limit — the timeout check only
+    /// sees an empty pending queue (the oldest challenge was answered).
+    #[test]
+    fn responding_client_survives_beyond_the_timeout_window() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+
+        // Spawn at t=0 (the session seeds its keepalive state this tick). Then
+        // run 40s of 1s cycles: transmit a challenge each second, answer it the
+        // next tick.
+        apply_enter_play(&mut registry);
+        manager = run_tick_at(manager, &mut registry, vec![], 0);
+        assert_eq!(manager.session_count(), 1);
+
+        for t in (1..=40).map(|i| i * 1000) {
+            // This tick's transmit (id = the millis reading).
+            manager = run_tick_at(manager, &mut registry, vec![], t);
+            // The client's echo arrives the following tick; it matches the
+            // oldest (only) pending challenge and is accepted.
+            manager = run_tick_at(
+                manager,
+                &mut registry,
+                vec![(ID, keepalive_frame(t))],
+                t + 1,
+            );
+        }
+
+        // 40s elapsed — past the 30s limit — but every challenge was answered,
+        // so the session is alive and no disconnect was queued.
+        assert_eq!(manager.session_count(), 1, "session survives the window");
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            None,
+            "a responding client is never kicked"
+        );
+    }
+
+    /// A silent client is disconnected with TIMEOUT when its oldest challenge
+    /// exceeds the kick limit (strict `>`): at exactly 30s elapsed no kick, one
+    /// ms later it fires and the keepalive state is pruned.
+    #[test]
+    fn silent_client_is_disconnected_after_the_timeout_window() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+
+        apply_enter_play(&mut registry);
+        manager = run_tick_at(manager, &mut registry, vec![], 0);
+
+        // The 1s transmit at t=1000 queues challenge id 1000; no reply ever
+        // comes.
+        manager = run_tick_at(manager, &mut registry, vec![], 1000);
+        assert_eq!(manager.keep_alives_seen(), 0, "client never replies");
+
+        // At exactly `1000 + 30000 = 31000`ms, elapsed == limit — the strict
+        // `>` boundary does NOT kick yet.
+        manager = run_tick_at(manager, &mut registry, vec![], 31000);
+        assert_eq!(manager.session_count(), 1, "still alive at the boundary");
+
+        // One ms later the oldest challenge exceeds the limit: TIMEOUT
+        // disconnect, and the keepalive state is pruned (the next tick has
+        // nothing left to drive).
+        manager = run_tick_at(manager, &mut registry, vec![], 31001);
+        assert_eq!(manager.session_count(), 1, "session index remains");
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::Timeout),
+            "a silent client is kicked with TIMEOUT"
+        );
+        assert!(
+            manager.keepalive.is_empty(),
+            "keepalive state pruned on disconnect"
+        );
+    }
+
+    /// A wrong/stale echo (no matching pending challenge) disconnects with
+    /// TIMEOUT — the Paper `handleKeepAlive` "without matching challenge" path —
+    /// even though the client is otherwise alive.
+    #[test]
+    fn wrong_keepalive_id_disconnects() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+
+        apply_enter_play(&mut registry);
+        manager = run_tick_at(manager, &mut registry, vec![], 0);
+        // Transmit challenge id 1000.
+        manager = run_tick_at(manager, &mut registry, vec![], 1000);
+
+        // The client echoes a challenge the server never sent.
+        manager = run_tick_at(
+            manager,
+            &mut registry,
+            vec![(ID, keepalive_frame(999))],
+            1001,
+        );
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::Timeout),
+            "an unknown echoed id is a TIMEOUT disconnect"
+        );
+        assert!(
+            manager.keepalive.is_empty(),
+            "keepalive state pruned on the bad reply"
+        );
+    }
+
+    /// The configured kick limit (a short `ServerConfig.keepalive_timeout`)
+    /// shortens the window: with a 2s limit the kick fires at 2s, proving the
+    /// knob reaches the session's keepalive state end to end.
+    #[test]
+    fn configurable_keepalive_timeout_shortens_the_kick() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut config = default_session_config(256);
+        config.keepalive_timeout_ns = 2_000 * 1_000_000;
+        let mut manager = PlayerSessionManager::new(config);
+
+        apply_enter_play(&mut registry);
+        manager = run_tick_at(manager, &mut registry, vec![], 0);
+        manager = run_tick_at(manager, &mut registry, vec![], 1000); // transmit id 1000
+        // At 1000+2000=3000ms exactly, the strict `>` does not fire...
+        manager = run_tick_at(manager, &mut registry, vec![], 3000);
+        assert_eq!(manager.session_count(), 1, "no kick at the boundary");
+        // ...one ms later it does. Only the outbound assertion follows, so the
+        // manager is consumed without rebinding.
+        let _ = run_tick_at(manager, &mut registry, vec![], 3001);
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::Timeout),
+            "the 2s limit kicks at 2s"
+        );
+    }
+
+    /// A `keep_alive` frame with an unknown/malformed packet id is dropped; only
+    /// a well-formed body whose echoed id matches a pending challenge is
+    /// accepted — no disconnect, and the challenge is consumed.
+    #[test]
+    fn matching_keepalive_reply_is_accepted() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+
+        apply_enter_play(&mut registry);
+        manager = run_tick_at(manager, &mut registry, vec![], 0);
+        manager = run_tick_at(manager, &mut registry, vec![], 1000); // transmit id 1000
+
+        manager = run_tick_at(
+            manager,
+            &mut registry,
+            vec![(ID, keepalive_frame(1000))],
+            1001,
+        );
+        assert_eq!(manager.keep_alives_seen(), 1, "the echo is decoded");
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            None,
+            "a matching echo is accepted, not kicked"
+        );
+        // The accepted challenge is consumed: a later duplicate echo matches
+        // nothing and disconnects. Only the outbound assertion follows, so the
+        // manager is consumed without rebinding.
+        let _ = run_tick_at(
+            manager,
+            &mut registry,
+            vec![(ID, keepalive_frame(1000))],
+            1002,
+        );
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::Timeout),
+            "a replayed echo after acceptance is a TIMEOUT disconnect"
         );
     }
 }
