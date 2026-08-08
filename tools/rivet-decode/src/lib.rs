@@ -13,6 +13,7 @@
 //! subcommands with exit codes 0 / 1 / 3 (matching `rivet-oracle`'s gate
 //! contract).
 
+pub mod advancement;
 pub mod corpus;
 pub mod frag;
 pub mod frame;
