@@ -34,6 +34,45 @@ use crate::suggestion::{Suggestions, SuggestionsBuilder};
 #[cfg(test)]
 mod tests;
 
+/// Paper's `CommandNode.getRelevantNodes(StringReader, Object source)` dispatch —
+/// the source's literal resolution for the `minecraft:` prefix prioritization (#211).
+/// Paper checks the concrete `CommandSourceStack` runtime type and two `source`
+/// values; the Minecraft `CommandSourceStack` type lands with the command-dispatch
+/// units (#211's dependency), so this crate generalizes the condition as the `S`
+/// type implementing this trait (the Java `instanceof CommandSourceStack` becomes
+/// the per-`S` impl choice).
+///
+/// Java's conditions are: `source instanceof CommandSourceStack css && css.source ==
+/// CommandSource.NULL` (the function-parsing compilation context) and `source
+/// instanceof CommandSourceStack css && css.source instanceof
+/// CloseableCommandBlockSource` (command blocks). For every other `CommandSourceStack`
+/// — notably a player, the server console, or RCON — the vanilla exact-literal
+/// lookup applies and an unprefixed input does NOT match the `minecraft:` literal.
+///
+/// The default `resolve_literal` is the identity — a source that is not one of
+/// Paper's command-block/function kinds performs the vanilla exact lookup. The
+/// future `CommandSourceStack` port overrides it to apply Paper's per-source
+/// conditions (the `source` field value and `getCommandBlockOverride`).
+pub trait CommandSource: Send + Sync {
+    /// Given the word read from the input, the source may map it to a
+    /// `minecraft:`-prefixed literal before the lookup. Java decides per-word:
+    /// `source == CommandSource.NULL` (function parsing) and `source instanceof
+    /// CloseableCommandBlockSource` (command blocks, gated by
+    /// `getCommandBlockOverride(word)`) map a non-`:`-containing word to
+    /// `"minecraft:" + word`; a player or console source leaves it unchanged.
+    fn resolve_literal(&self, text: &str) -> String {
+        text.to_string()
+    }
+}
+
+// The crate's in-tree `S` instantiations (`String`, `&str`, `i32`) are not
+// Paper `CommandSourceStack`s — `instanceof CommandSourceStack` is false — so
+// they use the default identity resolution: an unprefixed input matches only
+// the exact literal.
+impl CommandSource for String {}
+impl CommandSource for &str {}
+impl CommandSource for i32 {}
+
 /// Java `CommandNode<S>` — the abstract tree node, modelled as an object-safe trait.
 ///
 /// Java's `parse` uses the implicit `this` reference to record itself in the context
@@ -76,8 +115,28 @@ pub trait CommandNode<S>: Send + Sync {
         context: &CommandContext<S>,
         builder: &mut SuggestionsBuilder,
     ) -> Result<Suggestions, CommandSyntaxException<'static>>;
-    /// Java `getRelevantNodes(StringReader)`.
-    fn get_relevant_nodes(&self, reader: &mut StringReader) -> Vec<Arc<dyn CommandNode<S>>>;
+    /// Java `getRelevantNodes(StringReader)` — the one-arg overload, which Paper
+    /// keeps for compatibility. It forwards with no source so the `minecraft:`
+    /// prefix prioritization is inactive (Java passes `null`).
+    fn get_relevant_nodes(&self, reader: &mut StringReader) -> Vec<Arc<dyn CommandNode<S>>>
+    where
+        S: CommandSource,
+    {
+        self.get_relevant_nodes_with_source(reader, None)
+    }
+    /// Java `getRelevantNodes(StringReader, Object source)` — Paper's two-arg
+    /// overload. The `source` is the command source (`CommandSourceStack` in
+    /// Paper); a source whose type implements `CommandSource` resolves a
+    /// `minecraft:`-prefixed literal against its unprefixed twin (see
+    /// `CommandSource::resolve_literal`). Passing `None` reproduces the vanilla
+    /// exact-literal path (Java's `null` source).
+    fn get_relevant_nodes_with_source(
+        &self,
+        reader: &mut StringReader,
+        source: Option<&S>,
+    ) -> Vec<Arc<dyn CommandNode<S>>>
+    where
+        S: CommandSource;
     /// Java `isValidInput(String)`.
     fn is_valid_input(&self, input: &str) -> bool;
     /// Java `getExamples()`.
@@ -153,8 +212,21 @@ impl<S: 'static> CommandNode<S> for Arc<dyn CommandNode<S>> {
     ) -> Result<Suggestions, CommandSyntaxException<'static>> {
         (**self).list_suggestions(context, builder)
     }
-    fn get_relevant_nodes(&self, reader: &mut StringReader) -> Vec<Arc<dyn CommandNode<S>>> {
+    fn get_relevant_nodes(&self, reader: &mut StringReader) -> Vec<Arc<dyn CommandNode<S>>>
+    where
+        S: CommandSource,
+    {
         (**self).get_relevant_nodes(reader)
+    }
+    fn get_relevant_nodes_with_source(
+        &self,
+        reader: &mut StringReader,
+        source: Option<&S>,
+    ) -> Vec<Arc<dyn CommandNode<S>>>
+    where
+        S: CommandSource,
+    {
+        (**self).get_relevant_nodes_with_source(reader, source)
     }
     fn is_valid_input(&self, input: &str) -> bool {
         (**self).is_valid_input(input)
@@ -247,9 +319,18 @@ impl<S: 'static> NodeChildren<S> {
         self.children.iter().find(|c| c.get_name() == name).cloned()
     }
 
-    /// Java `getRelevantNodes(StringReader)` — the exact literal whose text matches
-    /// the input's next word, else all argument children.
-    fn get_relevant_nodes(&self, reader: &mut StringReader) -> Vec<Arc<dyn CommandNode<S>>> {
+    /// Java `getRelevantNodes(StringReader, Object source)` — the exact literal whose
+    /// text matches the input's next word, else all argument children. Paper's
+    /// patch (#211) lets a command source map the word to a `minecraft:`-prefixed
+    /// twin before the lookup; the source's `resolve_literal` decides that.
+    fn get_relevant_nodes(
+        &self,
+        reader: &mut StringReader,
+        source: Option<&S>,
+    ) -> Vec<Arc<dyn CommandNode<S>>>
+    where
+        S: CommandSource,
+    {
         if !self.literals.is_empty() {
             let cursor = reader.get_cursor();
             while reader.can_read() && reader.peek() != ' ' {
@@ -258,7 +339,15 @@ impl<S: 'static> NodeChildren<S> {
             let text =
                 StringRange::between(cursor, reader.get_cursor()).get_string(reader.get_string());
             reader.set_cursor(cursor);
-            if let Some(&i) = self.literals.get(&text) {
+            // Paper: try the source-resolved key first (e.g. "minecraft:foo"), then
+            // the literal word ("foo"); either missing falls through to the arguments.
+            let resolved = source.map_or(text.clone(), |s| s.resolve_literal(&text));
+            if let Some(&i) = self.literals.get(&resolved) {
+                return vec![self.children[i].clone()];
+            }
+            if resolved != text
+                && let Some(&i) = self.literals.get(&text)
+            {
                 return vec![self.children[i].clone()];
             }
             return self
@@ -406,11 +495,18 @@ impl<S: 'static> CommandNode<S> for RootCommandNode<S> {
     ) -> Result<Suggestions, CommandSyntaxException<'static>> {
         Ok(Suggestions::empty())
     }
-    fn get_relevant_nodes(&self, reader: &mut StringReader) -> Vec<Arc<dyn CommandNode<S>>> {
+    fn get_relevant_nodes_with_source(
+        &self,
+        reader: &mut StringReader,
+        source: Option<&S>,
+    ) -> Vec<Arc<dyn CommandNode<S>>>
+    where
+        S: CommandSource,
+    {
         self.children
             .read()
             .expect("lock")
-            .get_relevant_nodes(reader)
+            .get_relevant_nodes(reader, source)
     }
     fn is_valid_input(&self, _input: &str) -> bool {
         false
@@ -456,6 +552,10 @@ impl<S: 'static> CommandNode<S> for RootCommandNode<S> {
 pub struct LiteralCommandNode<S> {
     literal: String,
     literal_lower_case: String,
+    /// Paper's `nonPrefixed` (#211): for a `minecraft:`-prefixed literal, the text
+    /// after the prefix. `parse` accepts the full literal first, then this twin —
+    /// so a function-parse input "foo" matches the literal "minecraft:foo".
+    non_prefixed: Option<String>,
     children: RwLock<NodeChildren<S>>,
     command: RwLock<Option<Arc<dyn Command<S>>>>,
     requirement: Predicate<S>,
@@ -475,9 +575,11 @@ impl<S: 'static> LiteralCommandNode<S> {
         forks: bool,
     ) -> Self {
         let literal_lower_case = literal.to_lowercase();
+        let non_prefixed = literal.strip_prefix("minecraft:").map(str::to_string);
         LiteralCommandNode {
             literal,
             literal_lower_case,
+            non_prefixed,
             children: RwLock::new(NodeChildren::new()),
             command: RwLock::new(command),
             requirement,
@@ -492,12 +594,15 @@ impl<S: 'static> LiteralCommandNode<S> {
         &self.literal
     }
 
-    fn parse_literal(&self, reader: &mut StringReader) -> i32 {
+    /// Java's private `parse(StringReader, boolean secondPass)` — matches `literal`
+    /// against the reader, consuming it only on a word-boundary match. Lengths are
+    /// Java `String.length()` (UTF-16 code units).
+    fn parse_pass(&self, reader: &mut StringReader, literal: &str) -> i32 {
         let start = reader.get_cursor();
-        let literal_len = self.literal.encode_utf16().count() as i32;
+        let literal_len = literal.encode_utf16().count() as i32;
         if reader.can_read_with_length(literal_len) {
             let end = start.wrapping_add(literal_len);
-            if substring_utf16(reader.get_string(), start, end) == self.literal {
+            if substring_utf16(reader.get_string(), start, end) == literal {
                 reader.set_cursor(end);
                 if !reader.can_read() || reader.peek() == ' ' {
                     return end;
@@ -550,7 +655,14 @@ impl<S: 'static> CommandNode<S> for LiteralCommandNode<S> {
         context_builder: &mut CommandContextBuilder<S>,
     ) -> Result<(), CommandSyntaxException<'static>> {
         let start = reader.get_cursor();
-        let end = self.parse_literal(reader);
+        // Paper (#211): first pass against the full literal, then against the
+        // `nonPrefixed` twin, so "foo" matches the literal "minecraft:foo".
+        let mut end = self.parse_pass(reader, &self.literal);
+        if end == -1
+            && let Some(non_prefixed) = &self.non_prefixed
+        {
+            end = self.parse_pass(reader, non_prefixed);
+        }
         if end > -1 {
             context_builder.with_node(node, StringRange::between(start, end));
             return Ok(());
@@ -574,18 +686,23 @@ impl<S: 'static> CommandNode<S> for LiteralCommandNode<S> {
             Ok(Suggestions::empty())
         }
     }
-    fn get_relevant_nodes(&self, reader: &mut StringReader) -> Vec<Arc<dyn CommandNode<S>>> {
-        // RivetTodo(#211): Paper's "prioritize mc commands in function parsing" —
-        // a `minecraft:`-prefixed literal matches its unprefixed `nonPrefixed` twin
-        // on a second pass — is not ported; it depends on the Minecraft `CommandSourceStack`.
+    fn get_relevant_nodes_with_source(
+        &self,
+        reader: &mut StringReader,
+        source: Option<&S>,
+    ) -> Vec<Arc<dyn CommandNode<S>>>
+    where
+        S: CommandSource,
+    {
         self.children
             .read()
             .expect("lock")
-            .get_relevant_nodes(reader)
+            .get_relevant_nodes(reader, source)
     }
     fn is_valid_input(&self, input: &str) -> bool {
+        // Paper: `parse(new StringReader(input), false)` — first pass only.
         let mut reader = StringReader::new(input);
-        self.parse_literal(&mut reader) > -1
+        self.parse_pass(&mut reader, &self.literal) > -1
     }
     fn get_examples(&self) -> Vec<String> {
         vec![self.literal.clone()]
@@ -778,11 +895,18 @@ impl<S: 'static, T: 'static + Send + Sync> CommandNode<S> for ArgumentCommandNod
             Ok(self.type_.list_suggestions(context, builder))
         }
     }
-    fn get_relevant_nodes(&self, reader: &mut StringReader) -> Vec<Arc<dyn CommandNode<S>>> {
+    fn get_relevant_nodes_with_source(
+        &self,
+        reader: &mut StringReader,
+        source: Option<&S>,
+    ) -> Vec<Arc<dyn CommandNode<S>>>
+    where
+        S: CommandSource,
+    {
         self.children
             .read()
             .expect("lock")
-            .get_relevant_nodes(reader)
+            .get_relevant_nodes(reader, source)
     }
     fn is_valid_input(&self, input: &str) -> bool {
         let mut reader = StringReader::new(input);
