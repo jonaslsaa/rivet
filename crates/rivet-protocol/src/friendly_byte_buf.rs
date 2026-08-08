@@ -726,7 +726,10 @@ pub fn limit_value<T>(original: impl Fn(i32) -> T, limit: i32) -> impl Fn(i32) -
 }
 
 /// `java.io.DataOutput` adapter over a `BufMut`, used by the NBT write bridge.
-/// Modified UTF-8 (`writeUTF`) matches `DataOutputStream` exactly via `cesu8`.
+/// Modified UTF-8 (`writeUTF`) matches `DataOutputStream` byte-for-byte via
+/// `rivet_util::data_io`'s encoder; on a body longer than 65535 bytes it
+/// surfaces the same `UTFDataFormatException`-style `InvalidData` error Java
+/// does (before writing anything).
 struct BufDataOutput<'a> {
     buf: &'a mut dyn BufMut,
 }
@@ -743,13 +746,7 @@ impl DataOutput for BufDataOutput<'_> {
     }
 
     fn write_utf(&mut self, s: &str) -> io::Result<()> {
-        let encoded = cesu8::to_java_cesu8(s);
-        if encoded.len() > u16::MAX as usize {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("encoded string too long: {} bytes", encoded.len()),
-            ));
-        }
+        let encoded = rivet_util::data_io::write_utf_body(s)?;
         self.buf.put_u16(encoded.len() as u16);
         self.buf.put_slice(&encoded);
         Ok(())
@@ -814,9 +811,7 @@ impl DataInput for BufDataInput<'_> {
         self.check_available(len)?;
         let mut bytes = vec![0u8; len];
         self.buf.copy_to_slice(&mut bytes);
-        cesu8::from_java_cesu8(&bytes)
-            .map(|cow| cow.into_owned())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        rivet_util::data_io::decode_modified_utf8(&bytes)
     }
 
     fn read_fully(&mut self, n: usize) -> io::Result<Vec<u8>> {
@@ -1485,5 +1480,216 @@ mod tests {
         assert!(r.read_nbt().is_some());
         assert_eq!(r.read_utf(), "sentinel");
         assert_eq!(r.readable_bytes(), 0);
+    }
+
+    // ---- modified UTF-8 through the NBT bridge ----------------------------
+    //
+    // The NBT bridge's `BufDataInput::read_utf` / `BufDataOutput::write_utf`
+    // share the `rivet_util::data_io` modified-UTF-8 codec (the read side is
+    // `decode_modified_utf8`, the OpenJDK 25 `readUTF` port; the write side is
+    // `write_utf_body`). These are byte-level counterfactual cases for issue
+    // #265: each payload is fed straight to that decoder, and the assertions
+    // would fail against the previous `cesu8::from_java_cesu8` implementation
+    // (`C1 80` / overlong 3-byte forms were rejected and the error messages
+    // were generic instead of the exact OpenJDK ones). Raw NUL is kept as an
+    // OpenJDK-fidelity lock, not a cesu8 divergence.
+
+    /// Decodes a modified-UTF-8 payload (u16 length prefix + bytes) exactly as
+    /// the NBT read bridge does.
+    fn bridge_read_utf(payload: &[u8]) -> Result<String, io::Error> {
+        let mut bytes = BytesMut::new();
+        bytes.put_u16(payload.len() as u16);
+        bytes.extend_from_slice(payload);
+        let mut input = BufDataInput { buf: &mut bytes };
+        DataInput::read_utf(&mut input)
+    }
+
+    #[test]
+    fn bridge_read_utf_accepts_raw_nul() {
+        // OpenJDK decodes a raw 0x00 byte to U+0000.
+        assert_eq!(bridge_read_utf(&[0x00]).unwrap(), "\u{0}");
+        assert_eq!(bridge_read_utf(&[0x41, 0x00, 0x42]).unwrap(), "A\u{0}B");
+    }
+
+    #[test]
+    fn bridge_read_utf_accepts_c1_80() {
+        // Counterfactual: cesu8 rejected C1 80. OpenJDK masks to U+0040.
+        assert_eq!(bridge_read_utf(&[0xC1, 0x80]).unwrap(), "@");
+        assert_eq!(bridge_read_utf(&[0xC0, 0x80]).unwrap(), "\u{0}");
+    }
+
+    #[test]
+    fn bridge_read_utf_accepts_overlong_three_byte_forms() {
+        // Counterfactual: cesu8 rejected E0 80 80 / E0 81 80.
+        assert_eq!(bridge_read_utf(&[0xE0, 0x80, 0x80]).unwrap(), "\u{0}");
+        assert_eq!(bridge_read_utf(&[0xE0, 0x81, 0x80]).unwrap(), "@");
+    }
+
+    #[test]
+    fn bridge_read_utf_decodes_supplementary_pairs() {
+        assert_eq!(
+            bridge_read_utf(&[0xED, 0xA0, 0x80, 0xED, 0xB0, 0x80]).unwrap(),
+            "\u{10000}"
+        );
+        assert_eq!(
+            bridge_read_utf(&[0xED, 0xA0, 0xBD, 0xED, 0xB2, 0xA9]).unwrap(),
+            "\u{1F4A9}"
+        );
+    }
+
+    #[test]
+    fn bridge_read_utf_errors_on_truncation() {
+        let err = bridge_read_utf(&[0xC2]).unwrap_err();
+        assert_eq!(err.to_string(), "malformed input: partial character at end");
+        let err = bridge_read_utf(&[0xE1, 0x80]).unwrap_err();
+        assert_eq!(err.to_string(), "malformed input: partial character at end");
+    }
+
+    #[test]
+    fn bridge_read_utf_errors_on_malformed_continuation() {
+        let err = bridge_read_utf(&[0xC2, 0x41]).unwrap_err();
+        assert_eq!(err.to_string(), "malformed input around byte 2");
+        let err = bridge_read_utf(&[0xE1, 0x80, 0x41]).unwrap_err();
+        assert_eq!(err.to_string(), "malformed input around byte 2");
+        let err = bridge_read_utf(&[0x80]).unwrap_err();
+        assert_eq!(err.to_string(), "malformed input around byte 0");
+    }
+
+    #[test]
+    fn bridge_read_utf_errors_on_isolated_surrogate() {
+        // An isolated surrogate cannot be represented in a Rust String, so the
+        // decode errors explicitly rather than lossily replacing (issue #264).
+        // The message is the shared decoder's, identical to what `data_io`
+        // surfaces: `unpaired surrogate in modified UTF-8 (...)`.
+        for bytes in [&[0xED, 0xA0, 0x80][..], &[0xED, 0xB0, 0x80][..]] {
+            let err = bridge_read_utf(bytes).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "unpaired surrogate in modified UTF-8 (Java String can hold it, Rust String cannot)"
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_write_utf_errors_with_exact_jdk_message() {
+        // The NBT write bridge's `BufDataOutput::write_utf` surfaces
+        // `DataOutputStream.writeUTF`'s `UTFDataFormatException` as an
+        // `io::Error`. Its message must be byte-for-byte the JDK 25
+        // `tooLongMsg`: `encoded string (HEAD...TAIL) too long: N bytes` with
+        // the first/last 8 code units and the encoded byte count. This is the
+        // exact text a Paper-side log/exception would carry (verified against a
+        // live JDK 25 probe).
+        let too_long = "a".repeat(0x10000);
+        let mut b = BytesMut::new();
+        let err = BufDataOutput { buf: &mut b }
+            .write_utf(&too_long)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "encoded string (aaaaaaaa...aaaaaaaa) too long: 65536 bytes"
+        );
+        // Non-ASCII head/tail, byte count over 65535 with a different unit
+        // count: the reported number is the encoded byte count, not the unit
+        // count (70_000 units encode to 100_000 bytes).
+        let mixed = format!("{}{}", "a".repeat(40_000), "\u{80}".repeat(30_000));
+        let mut b = BytesMut::new();
+        let err = BufDataOutput { buf: &mut b }.write_utf(&mixed).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "encoded string (aaaaaaaa...\
+             \u{80}\u{80}\u{80}\u{80}\u{80}\u{80}\u{80}\u{80}) too long: 100000 bytes"
+        );
+    }
+
+    // ---- byte-level counterfactual cases through the real NBT codec path ----
+    //
+    // The cases above feed the bridge decoders directly. These exercise the
+    // same codec but through the real `writeNbt` / `readNbt` protocol entry
+    // points: the string-tag payload bytes on the wire are hand-built and fed
+    // to `FriendlyByteBuf::read_nbt_with_accounter`, and `write_nbt` is fed a
+    // string tag whose value would previously have been (mis)encoded. They
+    // would fail against the `cesu8::from_java_cesu8` decoder (rejecting
+    // `C1 80`/overlong forms) and against `cesu8::to_java_cesu8`'s lossy write
+    // on the length overflow.
+
+    /// A hand-built `StringTag` (id 8) wire payload in the `writeAnyTag` /
+    /// `readAnyTag` format the `FriendlyByteBuf` NBT bridge uses: id byte +
+    /// `writeUTF(value)` (big-endian `u16` length + raw bytes). The bridge
+    /// writes unnamed tags (no name prefix), so the value bytes here are fed
+    /// straight to the shared `decode_modified_utf8` decoder.
+    fn string_tag_payload(value: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + 2 + value.len());
+        bytes.push(8); // TAG_STRING
+        bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(value);
+        bytes
+    }
+
+    fn read_string_tag(raw: &[u8]) -> Option<Tag> {
+        let mut r = FriendlyByteBuf::new(BytesMut::from(raw));
+        r.read_nbt_with_accounter(&mut NbtAccounter::default_quota())
+    }
+
+    #[test]
+    fn read_nbt_string_tag_accepts_raw_nul_and_overlong_forms() {
+        // Raw NUL is a valid one-byte modified-UTF-8 character (OpenJDK
+        // fidelity lock); `C1 80` and `E0 80 80` are the overlong forms cesu8
+        // rejected but OpenJDK masks to `@` / NUL.
+        let cases = [
+            (&[0x00][..], "\u{0}".to_string()),
+            (&[0xC1, 0x80][..], "@".to_string()),
+            (&[0xC0, 0x80][..], "\u{0}".to_string()),
+            (&[0xE0, 0x80, 0x80][..], "\u{0}".to_string()),
+            (&[0xE0, 0x81, 0x80][..], "@".to_string()),
+        ];
+        for (payload, expected) in cases {
+            let raw = string_tag_payload(payload);
+            let tag = read_string_tag(&raw);
+            match tag {
+                Some(Tag::String(s)) => assert_eq!(s.value, expected, "payload {payload:02x?}"),
+                other => panic!("expected a String tag, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn read_nbt_string_tag_decodes_supplementary_pairs() {
+        // U+10000 = D800 DC00; the decoder combines the two halves.
+        let raw = string_tag_payload(&[0xED, 0xA0, 0x80, 0xED, 0xB0, 0x80]);
+        match read_string_tag(&raw) {
+            Some(Tag::String(s)) => assert_eq!(s.value, "\u{10000}"),
+            other => panic!("expected a String tag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_nbt_string_tag_errors_on_truncated_modified_utf8() {
+        // A `C2` lead byte with no continuation is malformed; the decode
+        // surfaces the exact OpenJDK message through the `ReportedException`
+        // wrap ("Loading NBT data") and the bridge panics (the unchecked
+        // `DecoderException`), matching Java's `readNbt` error path.
+        let raw = string_tag_payload(&[0xC2]);
+        let msg = panic_message(|| {
+            let _ = read_string_tag(&raw);
+        });
+        assert_eq!(msg, "Loading NBT data");
+    }
+
+    #[test]
+    fn write_nbt_string_tag_round_trips_shared_encoder_bytes() {
+        // The write bridge's `write_utf` uses the same encoder as
+        // `DataOutputStream`; the string-tag bytes on the wire are exactly what
+        // `rivet_util::data_io` would produce (`C0 80` for NUL, 6-byte CESU-8
+        // pair for U+10000), and reading back through `read_nbt` yields the
+        // original value.
+        for value in ["\u{0}", "\u{10000}", "💩", "abc", ""] {
+            let mut b = buf();
+            b.write_nbt(Some(&Tag::String(StringTag::value_of(value.to_string()))));
+            let mut r = FriendlyByteBuf::new(written(b));
+            match r.read_nbt_with_accounter(&mut NbtAccounter::default_quota()) {
+                Some(Tag::String(s)) => assert_eq!(s.value, value, "round trip {value:?}"),
+                other => panic!("expected a String tag, got {other:?}"),
+            }
+        }
     }
 }

@@ -8,7 +8,6 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-cesu8 = { workspace = true }
 crc32c = { workspace = true }
 md5 = { workspace = true }
 sha2 = { workspace = true }

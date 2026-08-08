@@ -7,13 +7,15 @@
 //! the `java.io.DataOutput`/`DataInput` surface (`writeChar`, `writeBytes`,
 //! `readChar`, ...) is deliberately not ported.
 //!
-//! The write side encodes through the `cesu8` crate's Java variant, which
-//! matches `DataOutputStream.writeUTF` byte-for-byte (NUL as `C0 80`, astral
-//! characters as CESU-8 surrogate pairs, 2-byte length prefix in big-endian).
-//! The read side is a direct port of OpenJDK's `DataInputStream.readUTF`
-//! decoder ([`decode_modified_utf8`]) rather than `cesu8`'s Java-variant
-//! decoder: Java accepts overlong forms (`C1 80` -> `U+0040`, `E0 80 80` ->
-//! NUL) that `cesu8` rejects, and Java's diagnostics name the exact byte
+//! Both directions of modified UTF-8 are in-repo ports, so `rivet-protocol`'s
+//! NBT bridge and `rivet-nbt`'s `StringFallbackDataOutput` can share them
+//! without a dependency cycle (both already depend on `rivet-util`). The write
+//! side ([`write_utf_body`]) matches `DataOutputStream.writeUTF` byte-for-byte
+//! (NUL as `C0 80`, astral characters as CESU-8 surrogate pairs, 2-byte length
+//! prefix in big-endian). The read side ([`decode_modified_utf8`]) is a direct
+//! port of OpenJDK's `DataInputStream.readUTF` decoder: Java accepts overlong
+//! forms (`C1 80` -> `U+0040`, `E0 80 80` -> NUL) that the `cesu8` crate's
+//! Java-variant decoder rejects, and Java's diagnostics name the exact byte
 //! offset, which `cesu8`'s generic error does not.
 
 use std::io::{self, Read, Write};
@@ -201,24 +203,73 @@ impl<W: Write> DataOutput for DataOutputStream<W> {
     }
 
     fn write_utf(&mut self, s: &str) -> io::Result<()> {
-        let encoded = cesu8::to_java_cesu8(s);
-        if encoded.len() > u16::MAX as usize {
-            // Modified UTF-8 longer than 65535 bytes cannot be length-prefixed.
-            // Java `DataOutputStream.writeUTF` throws UTFDataFormatException
-            // here — before writing anything — and
-            // `NbtIo.StringFallbackDataOutput` catches it and writes "" instead.
-            // We surface the overflow, with Java's exact message, and let the
-            // caller decide (see NbtIo).
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                too_long_message(s, encoded.len()),
-            ));
-        }
+        let encoded = write_utf_body(s)?;
         // `as i16` keeps the low 16 bits, i.e. exactly Java's `writeShort(utflen)`
         // which truncates the 0..=65535 byte length to 16 bits.
         self.write_short(encoded.len() as i16)?;
         self.inner.write_all(&encoded)
     }
+}
+
+/// `DataOutputStream.writeUTF` body — encode `s` as modified UTF-8 (no length
+/// prefix; the caller writes the `u16`) and enforce the 2-byte prefix limit.
+///
+/// A body longer than 65535 bytes is an `InvalidData` error (Java's
+/// `UTFDataFormatException`) with OpenJDK 25's exact `tooLongMsg`, returned
+/// before any bytes are produced. `NbtIo.StringFallbackDataOutput` catches that
+/// specific error and writes `""` instead. The network NBT bridge
+/// (`rivet-protocol::friendly_byte_buf`) shares this helper so its overflow
+/// wording and byte-for-byte encoding are identical to `DataOutputStream`'s.
+pub fn write_utf_body(s: &str) -> io::Result<Vec<u8>> {
+    let encoded = encode_modified_utf8(s);
+    if encoded.len() > u16::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            too_long_message(s, encoded.len()),
+        ));
+    }
+    Ok(encoded)
+}
+
+/// `DataOutputStream.writeUTF` — encode `s` as modified UTF-8 (no length
+/// prefix; the caller writes the `u16`). Every `&str` is encodable: NUL →
+/// `C0 80`, BMP non-ASCII → two bytes, supplementary scalars → two surrogate
+/// halves (three bytes each). Mirrors Java exactly, including that a string
+/// longer than 65535 encoded bytes fails via [`too_long_message`].
+fn encode_modified_utf8(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for unit in s.encode_utf16() {
+        match unit {
+            // The 2-byte form covers 0x0000 and 0x0080..=0x07FF: NUL is never
+            // written as a raw 0x00 byte.
+            0x0000 | 0x0080..=0x07FF => {
+                out.push(0xC0 | ((unit >> 6) & 0x1F) as u8);
+                out.push(0x80 | (unit & 0x3F) as u8);
+            }
+            0x0001..=0x007F => out.push(unit as u8),
+            _ => {
+                out.push(0xE0 | ((unit >> 12) & 0x0F) as u8);
+                out.push(0x80 | ((unit >> 6) & 0x3F) as u8);
+                out.push(0x80 | (unit & 0x3F) as u8);
+            }
+        }
+    }
+    out
+}
+
+/// The modified-UTF-8 byte length of `s` (the `writeUTF` payload length), used
+/// by `NbtIo.StringFallbackDataOutput` to pre-check the prefix limit without
+/// allocating the encoded body.
+pub fn encoded_len(s: &str) -> usize {
+    let mut len = 0usize;
+    for unit in s.encode_utf16() {
+        len += match unit {
+            0x0001..=0x007F => 1,
+            0x0000 | 0x0080..=0x07FF => 2,
+            _ => 3,
+        };
+    }
+    len
 }
 
 /// OpenJDK `DataOutputStream.tooLongMsg` — the `UTFDataFormatException`

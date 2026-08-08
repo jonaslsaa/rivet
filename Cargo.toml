@@ -12,7 +12,6 @@ license = "GPL-3.0-or-later"
 [workspace.dependencies]
 base64 = "0.22"
 bytes = "1"
-cesu8 = "1"
 crc32c = "0.6"
 flate2 = "1"
 indexmap = "2"
