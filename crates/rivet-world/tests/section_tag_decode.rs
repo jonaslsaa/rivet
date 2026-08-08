@@ -144,10 +144,20 @@ fn decode_block_states(
                     let Tag::Int(id) = entry else {
                         panic!("block_states.palette entries must be ints");
                     };
-                    StateId(id.value as u16)
+                    // Java's `BlockState.CODEC` fails on an out-of-range
+                    // registry id rather than truncating it.
+                    let count = rivet_registry::generated::block_states::BLOCK_STATE_COUNT as i32;
+                    if !(0..count).contains(&id.value) {
+                        return Err(format!(
+                            "block_states.palette id {} out of range 0..{count}",
+                            id.value
+                        ));
+                    }
+                    Ok(StateId(id.value as u16))
                 })
-                .collect()
+                .collect::<Result<Vec<_>, String>>()
         })
+        .transpose()?
         .unwrap_or_default();
     let storage = block_states.get_long_array("data").cloned();
     let packed = PackedData::new(palette, storage);
@@ -169,10 +179,16 @@ fn decode_biomes(
                     let Tag::Int(id) = entry else {
                         panic!("biomes.palette entries must be ints");
                     };
-                    BiomeId(id.value as u16)
+                    // Java's biome codec fails on an out-of-range registry id
+                    // rather than truncating it (66 biome ids in this port).
+                    if !(0..66).contains(&id.value) {
+                        return Err(format!("biomes.palette id {} out of range 0..66", id.value));
+                    }
+                    Ok(BiomeId(id.value as u16))
                 })
-                .collect()
+                .collect::<Result<Vec<_>, String>>()
         })
+        .transpose()?
         .unwrap_or_default();
     let storage = biomes.get_long_array("data").cloned();
     let packed = PackedData::new(palette, storage);
@@ -231,6 +247,27 @@ fn unpack_then_pack_reencodes_in_storage_order() {
     let mut expected = vec![0i64; 16];
     expected.resize(256, 0x1111_1111_1111_1111i64);
     assert_eq!(repacked.storage.as_deref().unwrap(), &expected);
+}
+
+#[test]
+fn out_of_range_palette_id_errors_not_truncates() {
+    // Java's `BlockState.CODEC` fails on an out-of-range registry id; a
+    // truncating `as u16` would silently map 0x20000 to air (id 0) and the
+    // golden assertions would pass on the wrong state. The decode helper must
+    // error instead.
+    let factory = factory();
+    let mut tag = golden_section_tag();
+    let block_states = tag.get_compound_or_empty_mut("block_states");
+    block_states.put(
+        "palette".into(),
+        Tag::List(ListTag::with_list(vec![Tag::Int(IntTag::value_of(
+            0x20000,
+        ))])),
+    );
+    let err = decode_block_states(&factory, &tag)
+        .err()
+        .expect("out-of-range id must error");
+    assert!(err.contains("out of range"), "err: {err}");
 }
 
 #[test]

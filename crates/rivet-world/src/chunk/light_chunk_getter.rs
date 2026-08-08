@@ -21,23 +21,34 @@
 //! the heightmap module (OWNERSHIP.md — no stored `&ChunkAccess`).
 
 /// `net.minecraft.world.level.chunk.LightChunkGetter`.
-pub struct LightChunkGetter<C> {
+///
+/// The resolver is a generic `Fn` stored by value (not a boxed `dyn`, no
+/// `'static` bound), so a caller can capture a borrowed reference — e.g.
+/// `LightChunkGetter::new(|x, z| level.get_chunk_for_lighting(x, z))`
+/// borrowing a `&Level`. This follows the pure-value pattern of the heightmap
+/// module: no stored `&ChunkAccess`, no heap allocation per getter.
+pub struct LightChunkGetter<C, T> {
     /// `getChunkForLighting(int x, int z)` — resolves the chunk (or `None`)
     /// for a chunk-coordinate pair. Java returns `null` when no chunk is
     /// loaded at `(x, z)`.
-    chunk_for_lighting: Box<dyn Fn(i32, i32) -> Option<C>>,
+    chunk_for_lighting: C,
+    _chunk: std::marker::PhantomData<T>,
 }
 
-impl<C> LightChunkGetter<C> {
+impl<C, T> LightChunkGetter<C, T>
+where
+    C: Fn(i32, i32) -> Option<T>,
+{
     /// `LightChunkGetter` — wraps the caller's chunk-resolution closure.
-    pub fn new(chunk_for_lighting: impl Fn(i32, i32) -> Option<C> + 'static) -> Self {
+    pub fn new(chunk_for_lighting: C) -> Self {
         LightChunkGetter {
-            chunk_for_lighting: Box::new(chunk_for_lighting),
+            chunk_for_lighting,
+            _chunk: std::marker::PhantomData,
         }
     }
 
     /// `getChunkForLighting(int x, int z)`.
-    pub fn get_chunk_for_lighting(&self, x: i32, z: i32) -> Option<C> {
+    pub fn get_chunk_for_lighting(&self, x: i32, z: i32) -> Option<T> {
         (self.chunk_for_lighting)(x, z)
     }
 }

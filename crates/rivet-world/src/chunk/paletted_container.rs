@@ -599,7 +599,7 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
 /// trait exists so a value that only needs reads can be typed by capability
 /// (e.g. the factory's `biomeContainerCodec` in Java is `Codec<
 /// PalettedContainerRO<Holder<Biome>>>`).
-pub trait PalettedContainerRO<T: Clone + PartialEq + Send + 'static> {
+pub trait PalettedContainerRO<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> {
     /// `get(int, int, int)`.
     fn get(&self, x: i32, y: i32, z: i32) -> T;
     /// `getAll(Consumer<T>)`.

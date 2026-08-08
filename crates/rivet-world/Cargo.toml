@@ -12,6 +12,9 @@ workspace = true
 # `FriendlyByteBuf` (and the section/data-layer buffers it fills) is BytesMut-
 # backed; the #100 superflat content builder writes sections through it.
 bytes = { workspace = true }
+# `StructureAccess`'s reference sets stand in for Java's `LongOpenHashSet`
+# (insertion-ordered, deduplicating).
+indexmap = { workspace = true }
 # The `packets` feature unlocks the game packet bodies this crate produces
 # content for (#94): `LevelChunkPacketData`, `LightUpdatePacketData`,
 # `HeightmapType` (all feature-gated in rivet-protocol).

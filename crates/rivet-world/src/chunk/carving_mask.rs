@@ -133,15 +133,35 @@ impl CarvingMask {
 }
 
 /// `getIndex(x, y, z)` — `x & 15 | (z & 15) << 4 | (y - minY) << 8`. The
-/// subtraction wraps like Java's int arithmetic (PORTING.md); a `y - minY`
-/// outside `i32` wraps instead of panicking.
+/// subtraction and shift wrap like Java's int arithmetic (PORTING.md); a
+/// `y - minY` outside `i32` wraps instead of panicking. Java then hands the
+/// result to `BitSet`, which throws `IndexOutOfBoundsException` on a negative
+/// bit index (a `y` below the column); the port panics with the same semantics
+/// rather than sign-extending the negative int into a huge `usize` that would
+/// abort on an unbounded allocation.
 fn get_index(x: i32, y: i32, z: i32, min_y: i32) -> usize {
-    (x & 15 | (z & 15) << 4 | (y.wrapping_sub(min_y)) << 8) as usize
+    let index = x & 15 | (z & 15) << 4 | y.wrapping_sub(min_y) << 8;
+    assert!(
+        index >= 0,
+        "CarvingMask bit index {index} for y {y} below minY {min_y}: Java's BitSet throws IndexOutOfBoundsException"
+    );
+    index as usize
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic]
+    fn set_below_column_panics_like_java_ioobe() {
+        // Java's `BitSet.set` throws `IndexOutOfBoundsException` for a
+        // negative bit index — a `y` below the column (`y < minY`). The
+        // port must not sign-extend that negative index into a huge `usize`
+        // and abort on an unbounded `resize`; it panics instead.
+        let mut mask = CarvingMask::new(8, -64);
+        mask.set(0, -65, 0);
+    }
 
     #[test]
     fn get_index_is_java_exact() {
