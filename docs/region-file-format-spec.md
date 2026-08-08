@@ -301,8 +301,10 @@ by the soft-failure path above. Steps:
 1. Back up the file (`<file>.<random>.backup`), then **scan every sector** from sector 2 up to
    `min(roundToSectors(fileSize), 0x7FFFFF)` — the constant is `Integer.MAX_VALUE >>> 8`, i.e. it is
    *not* the 24-bit sector mask — looking for valid chunk streams (4-byte length via `getLength` +
-   `attemptRead`); after each successful read the scan jumps ahead by that chunk's sector span, and
-   after a failed read it advances by exactly one sector.
+   `attemptRead`). The scan jumps ahead by the chunk's sector span only when a parsed compound is
+   **accepted** into a slot; every other outcome advances by exactly one sector — a null read, the
+   `OVERSIZED_COMPOUND` marker, a compound outside this region's bounds, or a compound strictly older
+   than the incumbent `LastUpdate`.
 2. `attemptRead` validates `0 <= length` and that `sector*4096 + 4 + length <= fileLength`, reads
    exactly `length` bytes at `sector*4096 + 4` (a short read is a failure), unwraps the codec, and
    parses NBT; any failure returns null. A compression byte with the external bit set returns the
