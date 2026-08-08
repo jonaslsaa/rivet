@@ -12,8 +12,8 @@
 //! RivetTodo(#207): `Dialog` needs the `ItemStackTemplate`/`Item`/
 //! `DataComponentPatch` value types and `ClickEvent.ShowDialog` (the
 //! `Holder<Dialog>` action), which has a Java-level cycle with `Dialog` and so
-//! cannot be ported as a crate-cycle-free leaf. The `trusted_component` stream
-//! codec ported in this issue (`byte_buf_codecs::trusted_component`,
+//! cannot be ported as a crate-cycle-free leaf. The `trusted_context_free_component`
+//! stream codec ported in this issue (`crate::chat::trusted_context_free_component`,
 //! `ComponentSerialization.TRUSTED_CONTEXT_FREE_STREAM_CODEC`) does NOT serve
 //! this packet — it serves `ServerLinks` custom display names — so the `Dialog`
 //! tree is the only remaining blocker. Registered in play and configuration

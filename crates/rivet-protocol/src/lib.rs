@@ -31,6 +31,7 @@
 #[cfg(feature = "packets")]
 pub mod generated;
 
+pub mod chat;
 pub mod codec;
 pub mod compression_decoder;
 pub mod compression_encoder;

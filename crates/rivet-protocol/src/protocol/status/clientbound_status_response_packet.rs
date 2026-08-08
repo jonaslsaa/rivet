@@ -45,10 +45,9 @@ impl ClientboundStatusResponsePacket {
     /// Cached behind a `static OnceLock` (Java's `static final STREAM_CODEC`):
     /// building it runs `ServerStatus.CODEC`, whose description field is the
     /// recursive `ComponentSerialization.CODEC` — a permanent strong `Arc` cycle
-    /// (see [`crate::codec::byte_buf_codecs::trusted_component`]). The status
-    /// listener serves one response per ping, so a per-call build would leak one
-    /// Component graph per status ping. Reuse the single registration-time
-    /// graph instead.
+    /// (see [`crate::chat`]). The status listener serves one response per ping,
+    /// so a per-call build would leak one Component graph per status ping. Reuse
+    /// the single registration-time graph instead.
     pub fn stream_codec() -> StreamCodec<FriendlyByteBuf, ClientboundStatusResponsePacket> {
         static STREAM_CODEC: OnceLock<
             StreamCodec<FriendlyByteBuf, ClientboundStatusResponsePacket>,

@@ -17,7 +17,7 @@
 //!   ComponentSerialization.TRUSTED_CONTEXT_FREE_STREAM_CODEC)`: a boolean
 //!   `true` for a known type (varint id), `false` for a custom component (the
 //!   trusted NBT-tag wire form,
-//!   [`crate::codec::byte_buf_codecs::trusted_component`]).
+//!   [`crate::chat::trusted_context_free_component`]).
 //! - `UntrustedEntry.STREAM_CODEC` — composite of `TYPE_STREAM_CODEC` then
 //!   `STRING_UTF8` (max [`crate::friendly_byte_buf::MAX_STRING_LENGTH`]) for the
 //!   link.
@@ -132,7 +132,7 @@ impl UntrustedEntry {
 fn type_stream_codec() -> StreamCodec<FriendlyByteBuf, Either<KnownLinkType, Component>> {
     byte_buf_codecs::either(
         KnownLinkType::stream_codec(),
-        byte_buf_codecs::trusted_component(),
+        crate::chat::trusted_context_free_component(),
     )
 }
 
