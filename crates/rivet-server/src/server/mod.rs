@@ -10,6 +10,7 @@
 pub mod keepalive;
 pub mod level;
 pub mod network;
+pub mod player;
 pub mod tick;
 
 use std::net::IpAddr;
