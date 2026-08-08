@@ -140,7 +140,12 @@ fn install_spawn_datapack(run_dir: &Path) -> Result<(), Error> {
 }
 
 /// Prepare a clean scratch run dir, reusing the paperclip-materialized
-/// libraries so a re-run boots in ~10s instead of ~30s.
+/// libraries and vanilla cache so a re-run boots in ~10s instead of ~30s.
+/// `versions/` is deliberately NOT preserved: the paperclip re-materializes the
+/// compiled server jar into `versions/26.2/paper-26.2.jar` on every boot, so
+/// `check_pin` can only ever read the jar the artifact actually being booted
+/// produced — a stale jar left by a prior (possibly swapped) artifact must not
+/// survive to masquerade as the pinned reference.
 pub fn prepare_run_dir(
     run_dir: &Path,
     server_properties_src: &Path,
@@ -157,7 +162,7 @@ pub fn prepare_run_dir(
             for entry in fs::read_dir(run_dir)? {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if matches!(name.as_str(), "libraries" | "versions" | "cache") {
+                if matches!(name.as_str(), "libraries" | "cache") {
                     continue;
                 }
                 let p = entry.path();
@@ -238,4 +243,81 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run dir laid out like a prior Paper boot: the materialized server jar
+    /// under `versions/26.2/`, plus the paperclip-downloaded `libraries/` and
+    /// `cache/`. `tag` keeps parallel tests from sharing a directory.
+    fn stale_run_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rivet-capture-rd-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("libraries/org")).unwrap();
+        fs::create_dir_all(dir.join("cache")).unwrap();
+        fs::create_dir_all(dir.join("versions/26.2")).unwrap();
+        fs::write(dir.join("libraries/org/dummy.jar"), b"lib").unwrap();
+        fs::write(dir.join("cache/mojang.jar"), b"vanilla").unwrap();
+        // A stale materialized jar from a *prior* boot (arbitrary bytes suffice:
+        // prepare_run_dir only wipes it; it is never read here).
+        fs::write(dir.join("versions/26.2/paper-26.2.jar"), b"stale jar").unwrap();
+        // A stale world from the prior boot, which must also go.
+        fs::create_dir_all(dir.join("world")).unwrap();
+        fs::write(dir.join("world/level.dat"), b"stale").unwrap();
+        dir
+    }
+
+    /// The stale-jar provenance fix: `prepare_run_dir` must wipe `versions/` on
+    /// every capture boot so `check_pin` can only see the jar the artifact
+    /// actually being booted materialized — a stale jar left by a prior
+    /// (possibly swapped) artifact must not survive to masquerade as the pinned
+    /// reference. `libraries/` and `cache/` (the slow downloads) are still
+    /// preserved, and the fresh config + spawn datapack are installed.
+    #[test]
+    fn prepare_run_dir_wipes_stale_versions_but_keeps_download_cache() {
+        let dir = stale_run_dir("wipe");
+        // The fixture config sources must live OUTSIDE the run dir: the wipe
+        // clears the run dir's non-cache entries before these are copied in.
+        let src = std::env::temp_dir().join(format!("rivet-capture-src-{}", std::process::id()));
+        fs::create_dir_all(&src).unwrap();
+        let props = src.join("server.properties");
+        let defaults = src.join("paper-world-defaults.yml");
+        fs::write(&props, "level-seed=42\n").unwrap();
+        fs::write(&defaults, "spawn-limits:\n").unwrap();
+
+        prepare_run_dir(&dir, &props, &defaults).unwrap();
+
+        assert!(
+            !dir.join("versions").exists(),
+            "versions/ must be wiped so a stale jar cannot fool check_pin"
+        );
+        assert!(
+            dir.join("libraries").is_dir(),
+            "libraries/ must be preserved (the slow download)"
+        );
+        assert!(dir.join("cache").is_dir(), "cache/ must be preserved");
+        assert!(
+            !dir.join("world/level.dat").exists(),
+            "the prior world's contents must be wiped for a fresh deterministic boot \
+             (the world dir itself is re-created by the spawn datapack install)"
+        );
+        assert!(
+            dir.join("server.properties").is_file(),
+            "the fresh server.properties must be installed"
+        );
+        assert!(
+            dir.join("config/paper-world-defaults.yml").is_file(),
+            "the fresh paper-world-defaults.yml must be installed"
+        );
+        assert!(
+            dir.join("world/datapacks/rivet-capture/data/minecraft/tags/function/load.json")
+                .is_file(),
+            "the spawn-determinism datapack must be installed into the fresh world"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+        let _ = fs::remove_dir_all(&src);
+    }
 }
