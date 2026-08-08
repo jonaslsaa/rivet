@@ -52,7 +52,8 @@ pub fn decode_modified_utf8(bytes: &[u8]) -> Option<String> {
 /// canonicalizer only re-encodes strings it decoded from u16-prefixed wire
 /// fields, which are at most 65535 bytes and re-encode to at most that.
 pub fn encode_modified_utf8(s: &str) -> Vec<u8> {
-    rivet_util::data_io::write_utf_body(s).expect("decoded u16-prefixed string re-encodes within the u16 limit")
+    rivet_util::data_io::write_utf_body(s)
+        .expect("decoded u16-prefixed string re-encodes within the u16 limit")
 }
 
 /// Read a bare NBT payload of `type_byte` (no name prefix).
