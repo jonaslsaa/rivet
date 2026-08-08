@@ -1487,12 +1487,16 @@ mod tests {
     // The NBT bridge's `BufDataInput::read_utf` / `BufDataOutput::write_utf`
     // share the `rivet_util::data_io` modified-UTF-8 codec (the read side is
     // `decode_modified_utf8`, the OpenJDK 25 `readUTF` port; the write side is
-    // `write_utf_body`). These are byte-level counterfactual cases for issue
-    // #265: each payload is fed straight to that decoder, and the assertions
-    // would fail against the previous `cesu8::from_java_cesu8` implementation
-    // (`C1 80` / overlong 3-byte forms were rejected and the error messages
-    // were generic instead of the exact OpenJDK ones). Raw NUL is kept as an
-    // OpenJDK-fidelity lock, not a cesu8 divergence.
+    // `write_utf_body`). These are byte-level cases for issue #265: each payload
+    // is fed straight to that decoder. The assertions are cesu8 counterfactuals
+    // only where the crate's Java-variant decoder diverges from
+    // `DataInputStream` — the overlong forms (`C1 80`, `E0 80 80`, `E0 81 80`)
+    // it rejects, and the exact OpenJDK diagnostics it lacks (its read error is
+    // the generic "could not convert CESU-8 data to UTF-8", and the old write
+    // bridge surfaced a generic "encoded string too long: N bytes" instead of
+    // the JDK `tooLongMsg`). Raw NUL and supplementary pairs decode identically
+    // under cesu8, so those assertions are OpenJDK-fidelity locks, not cesu8
+    // divergences.
 
     /// Decodes a modified-UTF-8 payload (u16 length prefix + bytes) exactly as
     /// the NBT read bridge does.
@@ -1607,10 +1611,18 @@ mod tests {
     // same codec but through the real `writeNbt` / `readNbt` protocol entry
     // points: the string-tag payload bytes on the wire are hand-built and fed
     // to `FriendlyByteBuf::read_nbt_with_accounter`, and `write_nbt` is fed a
-    // string tag whose value would previously have been (mis)encoded. They
-    // would fail against the `cesu8::from_java_cesu8` decoder (rejecting
-    // `C1 80`/overlong forms) and against `cesu8::to_java_cesu8`'s lossy write
-    // on the length overflow.
+    // string tag. Only `read_nbt_string_tag_accepts_raw_nul_and_overlong_forms`
+    // is a cesu8 counterfactual here, and only some of its payloads: `C1 80`,
+    // `E0 80 80`, and `E0 81 80` are rejected by `cesu8::from_java_cesu8` but
+    // decoded by OpenJDK (masked to `@` / NUL). Its raw NUL and `C0 80` cases
+    // decode identically under cesu8 (raw NUL passes `from_utf8`; `C0 80` maps
+    // to NUL), so those are OpenJDK-fidelity locks, not divergences. The other
+    // cases behave identically under cesu8 — `write_nbt` encodes these short
+    // strings byte-for-byte the same, and the truncation panic is the
+    // crash-report title ("Loading NBT data"), decoder-independent. The
+    // oversized-value panic below locks the JDK `tooLongMsg` through the
+    // `write_nbt_ref` panic-wrap, replacing the old bridge's generic "encoded
+    // string too long: N bytes" error.
 
     /// A hand-built `StringTag` (id 8) wire payload in the `writeAnyTag` /
     /// `readAnyTag` format the `FriendlyByteBuf` NBT bridge uses: id byte +
@@ -1691,5 +1703,26 @@ mod tests {
                 other => panic!("expected a String tag, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn write_nbt_string_tag_panics_with_jdk_message_on_oversized_value() {
+        // Through the production `writeNbt` entry point, a string value whose
+        // modified-UTF-8 body exceeds 65535 bytes surfaces the JDK `tooLongMsg`
+        // as the panic — `write_nbt_ref` wraps the `InvalidData` in
+        // `panic!("{e}")`, Java's unchecked `EncoderException`. This locks the
+        // panic-wrap in `write_nbt_ref`, not just `BufDataOutput::write_utf`
+        // directly (which `bridge_write_utf_errors_with_exact_jdk_message`
+        // covers), and replaces the old bridge's generic "encoded string too
+        // long: N bytes" error with the exact JDK wording.
+        let too_long = "a".repeat(0x10000);
+        let mut b = buf();
+        let msg = panic_message(|| {
+            b.write_nbt(Some(&Tag::String(StringTag::value_of(too_long))));
+        });
+        assert_eq!(
+            msg,
+            "encoded string (aaaaaaaa...aaaaaaaa) too long: 65536 bytes"
+        );
     }
 }
