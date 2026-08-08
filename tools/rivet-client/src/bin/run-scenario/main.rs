@@ -225,6 +225,7 @@ impl Args {
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
         let mut runs = DEFAULT_RUNS;
         let mut runs_explicit = false;
+        let mut pairs_explicit = false;
 
         if let Some(sub) = args.next() {
             command = match sub.as_str() {
@@ -264,12 +265,23 @@ impl Args {
                     pairs = Pairs::parse(&v).ok_or_else(|| {
                         format!("invalid --pairs value: {v} (expected paper:paper|paper:rivet)")
                     })?;
+                    pairs_explicit = true;
                 }
                 _ => return Err(format!("unknown argument: {argument}\n\n{}", usage())),
             }
         }
 
         if command == Subcommand::Join {
+            // When --pairs is omitted, derive it from --server: rivet/both only
+            // ever compare Paper-vs-Rivet, so the paper:paper default would be
+            // invalid. An explicit --pairs is still validated below.
+            if !pairs_explicit {
+                pairs = match server {
+                    ServerSelection::Paper => Pairs::PaperPaper,
+                    ServerSelection::Rivet | ServerSelection::Both => Pairs::PaperRivet,
+                };
+            }
+
             // Valid --server/--pairs combinations: paper:paper needs a Paper
             // boot; paper:rivet needs a Rivet boot (and a Paper reference when
             // `both`). `capture` only uses `--server` (which kind to boot once),
@@ -1049,9 +1061,9 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
 
 /// The compared Paper-vs-Rivet transcripts must diverge only on the documented
 /// Rivet/Paper gaps; any other divergence is a genuine Rivet/Paper mismatch, not
-/// a harness artifact, and fails the run. `RIVET_SERVER_BIN`/provenance prevent
-/// a stale binary from being booted; this gate catches a *current* binary whose
-/// play state has drifted from Paper.
+/// a harness artifact, and fails the run. Normal runs rebuild the server and the
+/// fallback has a narrow freshness guard; this behavioral gate remains
+/// load-bearing even when an explicit `RIVET_SERVER_BIN` override is used.
 ///
 /// `position.y` is deliberately NOT here (issue #159): the Paper reference now
 /// boots the single-stone superflat fixture and spawns at y=-63.0 like Rivet,
@@ -1438,6 +1450,21 @@ mod tests {
         assert!(parse(&["join", "--server", "paper", "--pairs", "paper:rivet"]).is_err());
         assert!(parse(&["join", "--server", "nope"]).is_err());
         assert!(parse(&["join", "--pairs", "rivet:rivet"]).is_err());
+    }
+
+    #[test]
+    fn server_selection_defaults_the_pairs() {
+        // --server rivet/both with no --pairs must not default to the invalid
+        // paper:paper; the README documents `join --server rivet --runs 2` and
+        // `join --server both --pairs paper:rivet`, so omitting --pairs for a
+        // rivet/both run is the natural invocation.
+        assert!(parse(&["join", "--server", "rivet", "--runs", "2"]).is_ok());
+        assert!(parse(&["join", "--server", "both"]).is_ok());
+        // Plain `join` still defaults to Paper-vs-Paper.
+        assert!(parse(&["join"]).is_ok());
+        assert!(parse(&["join", "--server", "paper"]).is_ok());
+        // An explicit conflicting --pairs remains rejected.
+        assert!(parse(&["join", "--server", "rivet", "--pairs", "paper:paper"]).is_err());
     }
 
     #[test]

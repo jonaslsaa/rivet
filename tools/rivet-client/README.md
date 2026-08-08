@@ -73,11 +73,11 @@ revision, exactly 117 chunks, and the deterministic superflat spawn y `-63.0`.
 A stale pre-play Rivet build (which closes the client at the login boundary),
 a fake/non-Rivet endpoint, or a Paper-like y=-60 spawn all fail the verdict.
 
-Binary provenance is load-bearing for Rivet runs: the runner resolves the
-`rivet-server` binary inside the workspace it was built in and refuses (exit 3)
-a fallback binary that is older than the rivet-server source in that same
-workspace, so a stale `target` from a different checkout cannot be mistaken for
-the selected tree's server. `RIVET_SERVER_BIN` remains the explicit override.
+The fallback `rivet-server` path is resolved inside the harness's workspace,
+and a narrow freshness guard rejects it when it predates that workspace's
+`rivet-server` entry point. Normal runs rebuild before executing; the PLAY
+verdict and Rivet-only connection log remain the load-bearing stale/fake-server
+checks. `RIVET_SERVER_BIN` is an explicit override and is not commit-bound.
 
 The runner:
 

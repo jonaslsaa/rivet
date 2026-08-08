@@ -252,13 +252,11 @@ pub fn verify_paper_provenance(run_dir: &Path) -> Result<(), Error> {
 /// workspace this harness was built in (`<workspace>/target/debug/rivet-server`).
 ///
 /// The fallback resolves against the harness's own manifest dir, so a harness
-/// built inside a worktree picks up that worktree's own server build — not a
-/// stale build from a different checkout. Provenance is load-bearing: the
-/// fallback is refused (UNVERIFIED) when the binary is older than the
-/// rivet-server source in the same workspace, so a stale root `target` from
-/// another commit cannot be silently mistaken for the selected tree's server.
-/// `RIVET_SERVER_BIN` remains the explicit override when the server under test
-/// lives in a different tree than the harness.
+/// built inside a worktree selects that worktree's server path. A narrow
+/// freshness guard rejects the fallback when it predates the server entry
+/// point; normal runs rebuild before executing, and the PLAY verdict provides
+/// the load-bearing stale-server check. `RIVET_SERVER_BIN` remains an explicit,
+/// non-commit-bound override for a server in another tree.
 pub fn ensure_rivet_binary(crate_root: &Path) -> Result<PathBuf, Error> {
     if let Ok(p) = std::env::var("RIVET_SERVER_BIN") {
         let p = PathBuf::from(p);
