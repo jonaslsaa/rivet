@@ -1714,10 +1714,11 @@ async fn config_custom_payload_brand_keeps_open() {
 
 #[tokio::test]
 async fn config_custom_payload_brand_truncated_closes() {
-    // A brand utf that declares 5 bytes but carries 2 panics inside Java's
-    // `readUtf(256)` (the unchecked read) — caught by `handleCustomPayload`'s
-    // try/catch → the `"Invalid custom payload payload!"` disconnect, surfaced
-    // here as a deterministic Malformed close (EOF).
+    // A brand utf that declares 5 bytes but carries 2 throws Java's
+    // `DecoderException` from `Utf8String.read`'s not-enough-bytes check —
+    // caught by `handleCustomPayload`'s try/catch → the `"Invalid custom
+    // payload payload!"` disconnect, surfaced here as a deterministic Malformed
+    // close (EOF).
     let (addr, server_task) = start_server(config_with_threshold(256)).await;
     let mut client = TcpStream::connect(addr).await.expect("connect");
 
@@ -1728,6 +1729,82 @@ async fn config_custom_payload_brand_truncated_closes() {
         .write_all(&config_custom_payload_frame("minecraft:brand", b"\x05Pa"))
         .await
         .expect("write truncated brand");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_register_malformed_channel_closes() {
+    // A `minecraft:register` channel that `validateAndCorrectChannel` rejects
+    // (here: not entirely lowercase) throws inside `readChannelIdentifier` —
+    // caught by `handleCustomPayload`'s try/catch → the invalid-payload
+    // disconnect (EOF). The channel is never tracked (the bridge is deferred,
+    // #26); validation alone closes.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:register",
+            b"Foo:Bar",
+        ))
+        .await
+        .expect("write malformed register");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_register_oversize_channel_closes() {
+    // A 32770-byte channel-list payload exceeds the `DiscardedPayload`
+    // 32767-byte decode cap, so it is rejected at DECODE — before the channel
+    // validation runs — like Java's `DiscardedPayload.streamCodec(identifier,
+    // 32767)`. Either way the connection closes with the invalid-payload
+    // disconnect.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut oversize = vec![b'a'; 32768];
+    oversize.extend_from_slice(b":y");
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:register",
+            &oversize,
+        ))
+        .await
+        .expect("write oversize register");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_brand_oversize_closes() {
+    // A brand whose decoded length exceeds the `readUtf(256)` max throws Java's
+    // `DecoderException` (the decoded-length check — distinct from the truncated
+    // not-enough-bytes check) → the same invalid-payload disconnect. 257 units
+    // (`varint 0x81 0x02`) is one past the 256 max; 256 would be exactly at the
+    // limit and pass.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut data = vec![0x81u8, 0x02]; // varint 257
+    data.extend(vec![b'a'; 257]);
+    client
+        .write_all(&config_custom_payload_frame("minecraft:brand", &data))
+        .await
+        .expect("write oversize brand");
 
     expect_eof(&mut client).await;
     server_task.abort();

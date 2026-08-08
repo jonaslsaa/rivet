@@ -79,12 +79,50 @@ const CUSTOM_UNREGISTER: &str = "unregister";
 /// payload id (Paper); the client's brand is a `utf` string read at max 256.
 const MINECRAFT_BRAND: &str = "brand";
 
+/// `Messenger.MAX_CHANNEL_SIZE` — `Integer.getInteger("paper.maxCustomChannelName",
+/// Short.MAX_VALUE)`, the max length `validateAndCorrectChannel` permits.
+const MAX_CUSTOM_CHANNEL_SIZE: usize = 32767;
+
 /// The disconnect `handleCustomPayload` sends on any payload parse failure:
 /// `Component.literal("Invalid custom payload payload!")`. This slice closes the
 /// connection deterministically (the observable Java behavior) without a
 /// formatted disconnect body, so the reason is only descriptive.
 fn invalid_custom_payload() -> DisconnectReason {
     DisconnectReason::Malformed("Invalid custom payload payload!".into())
+}
+
+/// `StandardMessenger.validateAndCorrectChannel` — the per-segment validation
+/// the plugin bridge applies in `addChannel`/`removeChannel`. Java CORRECTS
+/// (accepts) the legacy `BungeeCord` ↔ `bungeecord:main` spellings, then
+/// rejects a channel over 32767 chars, without a `:`, or not entirely
+/// lowercase — every rejection is an exception the `handleCustomPayload` catch
+/// converts to the invalid-payload disconnect. The corrected value has no
+/// observable effect here: the tracked channel set is the plugin bridge,
+/// deferred (#26), so only acceptance vs rejection matters.
+///
+/// `readChannelIdentifier` skips empty segments before validating, mirrored by
+/// the `is_empty` early return below.
+fn validate_register_channel(channel: &[u8]) -> Result<(), DisconnectReason> {
+    if channel.is_empty() {
+        return Ok(());
+    }
+    // US-ASCII decoding (`new String(..., US_ASCII)`) maps every byte to one
+    // char (non-ASCII bytes become U+FFFD), so byte and char lengths agree and
+    // only `A`-`Z` change under `toLowerCase(Locale.ROOT)` — the byte checks
+    // mirror the string checks exactly.
+    if channel == b"BungeeCord" || channel == b"bungeecord:main" {
+        return Ok(());
+    }
+    if channel.len() > MAX_CUSTOM_CHANNEL_SIZE {
+        return Err(invalid_custom_payload());
+    }
+    if !channel.contains(&b':') {
+        return Err(invalid_custom_payload());
+    }
+    if channel.iter().any(u8::is_ascii_uppercase) {
+        return Err(invalid_custom_payload());
+    }
+    Ok(())
 }
 
 /// `ConfigurationTask.Type` id for `SynchronizeRegistriesTask` — queued first;
@@ -228,10 +266,13 @@ pub struct ServerConfigurationPacketListener {
     /// deferred field is updated by `handleClientInformation`.
     client_information: ClientInformation,
     /// `ServerCommonPacketListenerImpl.clientBrand` — the `minecraft:brand`
-    /// payload decoded by `handleCustomPayload` (`readUtf(256)`). Java carries
-    /// it into the play state via `CommonListenerCookie`; the play-side consumer
-    /// (`Player.getClientBrandName()`, Paper API) is plugin-layer, deferred with
-    /// the JVM adapter (#26).
+    /// payload decoded by `handleCustomPayload` (`readUtf(256)`). Stored on
+    /// this listener only: the finish→play handoff
+    /// (`set_play_handoff(profile, client_information)`) carries just the
+    /// profile + `ClientInformation`, so the brand is dropped at that seam.
+    /// Java carries it into play via `CommonListenerCookie`; the play-side
+    /// consumer (`Player.getClientBrandName()`, Paper API) is plugin-layer,
+    /// deferred with the JVM adapter (#26).
     client_brand: Option<String>,
     /// The authenticated `GameProfile` the login phase built for this connection
     /// (`CommonListenerCookie.profile`, issue #101 Slice B). Carried across the
@@ -404,17 +445,20 @@ impl ServerConfigurationPacketListener {
     /// ```
     ///
     /// The register/unregister payload is a list of US-ASCII channel ids
-    /// separated by `\0` (no length prefixes). Paper dispatches each channel to
-    /// the plugin bridge (`bridge.addChannel`/`removeChannel`, which validates
-    /// against `StandardMessenger`, applies the 128-channel limit, and fires
-    /// register/unregister events) — a plugin-layer surface (the CraftPlayer's
-    /// channel set) that carries the only observable effect of a register/
-    /// unregister; there is no native state to update, so the branch is an
-    /// early return exactly like Java's, deferred with the JVM adapter (#26).
-    /// The brand decode is `readUtf(256)` — a truncated/oversize brand panics in
-    /// Java's unchecked `IndexOutOfBoundsException`/over-length check, caught by
-    /// the try/catch; here the panic-equivalent (`FriendlyByteBuf::read_utf_max`
-    /// on the raw bytes) is caught and mapped to the same disconnect.
+    /// separated by `\0` (no length prefixes). Paper validates each channel
+    /// against `StandardMessenger.validateAndCorrectChannel` (via the plugin
+    /// bridge's `addChannel`/`removeChannel`) and fires register/unregister
+    /// events — the only observable Java effect besides the connection
+    /// state is that an invalid channel throws and disconnects, so this slice
+    /// validates the same way and discards the corrected value. The bridge
+    /// itself (the 128-channel limit and the events) is plugin-layer, deferred
+    /// with the JVM adapter (#26). Empty segments (leading/consecutive/trailing
+    /// `\0`) are skipped by `readChannelIdentifier` before validation.
+    /// The brand decode is `readUtf(256)` — a truncated/oversize brand throws
+    /// `DecoderException` (empty data throws netty `IndexOutOfBoundsException`),
+    /// caught by the try/catch; here the panic-equivalent
+    /// (`FriendlyByteBuf::read_utf_max` on the raw bytes) is caught and mapped
+    /// to the same disconnect.
     ///
     fn handle_custom_payload(
         &mut self,
@@ -434,21 +478,37 @@ impl ServerConfigurationPacketListener {
         // `CUSTOM_REGISTER.equals(identifier)` compares the full identifier, so
         // a hostile `foo:register` payload does NOT match — `with_default_namespace`
         // is the `minecraft:register` Java compares against.
-        // RivetTodo(#26): the plugin bridge's register/unregister handling —
-        // `readChannelIdentifier` → `bridge.addChannel`/`removeChannel` (the
-        // 128-channel limit, `StandardMessenger.validateAndCorrectChannel`, and
-        // the `PlayerRegisterChannelEvent`/`PlayerUnregisterChannelEvent`).
         if identifier == Identifier::with_default_namespace(CUSTOM_REGISTER)
             || identifier == Identifier::with_default_namespace(CUSTOM_UNREGISTER)
         {
+            // `readChannelIdentifier` over the 0-separated channel list. The
+            // validated channel is discarded (there is no plugin bridge yet): the
+            // only observable Java effect here is that an invalid channel throws
+            // and disconnects — the plugin surface (`bridge.addChannel`/
+            // `removeChannel`, the 128-channel limit, the register/unregister
+            // events) is deferred with the JVM adapter (#26).
+            // RivetTodo(#26): the plugin bridge — `addChannel`/`removeChannel`,
+            // the 128-channel limit, and the
+            // `PlayerRegisterChannelEvent`/`PlayerUnregisterChannelEvent`.
+            let mut start = 0;
+            for (i, b) in data.iter().enumerate() {
+                if *b == 0 {
+                    validate_register_channel(&data[start..i])?;
+                    start = i + 1;
+                }
+            }
+            validate_register_channel(&data[start..])?;
             return Ok(());
         }
 
         if identifier == Identifier::with_default_namespace(MINECRAFT_BRAND) {
-            // `new FriendlyByteBuf(wrappedBuffer(data)).readUtf(256)` — Java's
-            // unchecked read panics on a truncated/oversize utf (the
-            // `IndexOutOfBoundsException` the catch block handles); `read_utf_max`
-            // panics identically, so the panic is caught here.
+            // `new FriendlyByteBuf(wrappedBuffer(data)).readUtf(256)` — Java
+            // throws `DecoderException` for a truncated or over-max utf (from
+            // `Utf8String.read`'s available-bytes and decoded-length checks) and
+            // netty `IndexOutOfBoundsException` for an empty buffer (`VarInt.read`
+            // on no bytes); every one is caught by `handleCustomPayload`'s
+            // `catch (Exception)` → the invalid-payload disconnect. `read_utf_max`
+            // panics on the same inputs, so the panic is caught and mapped here.
             let brand = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 FriendlyByteBuf::new(BytesMut::from(data.as_slice())).read_utf_max(256)
             }))
@@ -898,9 +958,9 @@ mod tests {
     #[tokio::test]
     async fn custom_payload_register_keeps_open() {
         // `minecraft:register` with a 0-separated channel list (`bungeecord:main`
-        // then `my:plugin`) — the handler early-returns (the only observable
-        // effect is the plugin bridge, deferred with the JVM adapter #26), so the
-        // connection stays open.
+        // then `my:plugin`) — every segment is valid, so the connection stays
+        // open (the plugin bridge is deferred, #26; `bungeecord:main` corrects
+        // to `BungeeCord` but the corrected value is discarded).
         let mut conn = config_connection().await;
         let mut listener =
             ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
@@ -920,9 +980,9 @@ mod tests {
 
     #[tokio::test]
     async fn custom_payload_unregister_keeps_open() {
-        // `minecraft:unregister` — the same early return; empty segments
-        // (trailing `\0`) are fine because the handler never parses them in this
-        // slice.
+        // `minecraft:unregister` — same validation path; the trailing empty
+        // segment after `\0` is skipped by `readChannelIdentifier`, and the valid
+        // `a:one` segment keeps the connection open.
         let mut conn = config_connection().await;
         let mut listener =
             ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
@@ -959,10 +1019,11 @@ mod tests {
 
     #[tokio::test]
     async fn custom_payload_brand_truncated_closes_invalid_payload() {
-        // A brand utf that declares 5 bytes but carries 2 is Java's unchecked
-        // `readUtf(256)` `IndexOutOfBoundsException` → the catch block's
-        // `"Invalid custom payload payload!"` disconnect. The panic is caught
-        // here and surfaced as that Malformed reason.
+        // A brand utf that declares 5 bytes but carries 2 throws Java's
+        // `DecoderException("Not enough bytes in buffer, ...")` from
+        // `Utf8String.read` → the catch block's `"Invalid custom payload
+        // payload!"` disconnect. The panic is caught here and surfaced as that
+        // Malformed reason.
         let mut conn = config_connection().await;
         let mut listener =
             ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
@@ -982,11 +1043,168 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn custom_payload_brand_oversize_closes_invalid_payload() {
+        // A brand whose decoded length exceeds the 256 `readUtf(256)` max throws
+        // Java's `DecoderException("The received string length is longer than
+        // maximum allowed ...")` — a different `Utf8String.read` check than the
+        // truncated case but the same shared disconnect. (257 ASCII 'a' units,
+        // length varint `0x81 0x02`.)
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let mut data = vec![0x81u8, 0x02]; // varint 257
+        data.extend(vec![b'a'; 257]);
+        let frame = Bytes::from(custom_payload_frame("minecraft:brand", &data));
+        let err = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DisconnectReason::Malformed("Invalid custom payload payload!".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_payload_brand_empty_data_closes_invalid_payload() {
+        // An empty brand data buffer — `VarInt.read` on zero bytes throws
+        // Java's netty `IndexOutOfBoundsException` (the one case that is NOT a
+        // `DecoderException`), still caught by `catch (Exception)` → the same
+        // disconnect. Here the varint read on an empty buffer panics.
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let frame = Bytes::from(custom_payload_frame("minecraft:brand", b""));
+        let err = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DisconnectReason::Malformed("Invalid custom payload payload!".into())
+        );
+    }
+
+    /// Drive a `minecraft:register`/`minecraft:unregister` payload and return
+    /// whether the connection stayed open. The channel-validation behavior is
+    /// identical for both ids (Paper's `readChannelIdentifier` uses the same
+    /// `validateAndCorrectChannel` in `addChannel` and `removeChannel`).
+    async fn register_payload_keeps_open(id: &str, data: &[u8]) -> bool {
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let frame = Bytes::from(custom_payload_frame(id, data));
+        matches!(
+            listener.handle_frame(frame, &mut conn, &crate::server::ServerConfig::default()),
+            Ok(ListenerOutcome::Keep)
+        )
+    }
+
+    #[tokio::test]
+    async fn register_invalid_channel_closes_invalid_payload() {
+        // A `minecraft:register` channel with an uppercase segment is rejected by
+        // `validateAndCorrectChannel` (`"Channel must be entirely lowercase"` →
+        // `IllegalArgumentException`), which `handleCustomPayload` converts to
+        // the invalid-payload disconnect.
+        assert!(!register_payload_keeps_open("minecraft:register", b"Foo:Bar").await);
+    }
+
+    #[tokio::test]
+    async fn register_no_separator_closes_invalid_payload() {
+        // A channel without a `:` separator is rejected
+        // (`"Channel must contain : separator"` → `IllegalArgumentException`).
+        assert!(!register_payload_keeps_open("minecraft:register", b"no-separator").await);
+    }
+
+    #[tokio::test]
+    async fn register_oversize_payload_rejected_at_decode() {
+        // A 32770-byte channel-list payload exceeds the `DiscardedPayload`
+        // 32767-byte decode cap, so the packet is rejected at DECODE — exactly
+        // like Java's `DiscardedPayload.streamCodec(identifier, 32767)`, which
+        // throws before `handleCustomPayload` runs. The `> 32767` channel
+        // length check in `validateAndCorrectChannel` is therefore unreachable
+        // through the real payload path (a single segment is bounded by the
+        // payload size) and is exercised directly by
+        // `validate_register_channel_oversize` below. Either way the connection
+        // closes.
+        let mut oversize = vec![b'a'; 32768];
+        oversize.extend_from_slice(b":y");
+        assert!(!register_payload_keeps_open("minecraft:register", &oversize).await);
+    }
+
+    #[test]
+    fn validate_register_channel_oversize() {
+        // Mirror of `validateAndCorrectChannel`'s max-length branch
+        // (`ChannelNameTooLongException`, > 32767 chars). Unreachable through
+        // `handleCustomPayload` (the payload decode cap bounds a segment), kept
+        // for exact method fidelity. The boundary is exact: 32767 chars passes,
+        // 32770 chars (`32768 'a'` + `:y`) throws on length before the other
+        // checks.
+        let mut oversize = vec![b'a'; 32768];
+        oversize.extend_from_slice(b":y");
+        assert!(validate_register_channel(&oversize).is_err());
+        let mut at_limit = vec![b'a'; 32765];
+        at_limit.extend_from_slice(b":y");
+        assert!(validate_register_channel(&at_limit).is_ok());
+    }
+
+    #[tokio::test]
+    async fn unregister_invalid_channel_closes_invalid_payload() {
+        // `minecraft:unregister` validates through the same path — an invalid
+        // channel closes the connection just like register.
+        assert!(!register_payload_keeps_open("minecraft:unregister", b"Foo:Bar").await);
+    }
+
+    #[tokio::test]
+    async fn register_bungeecord_correction_keeps_open() {
+        // `BungeeCord` and `bungeecord:main` are CORRECTED (accepted) by
+        // `validateAndCorrectChannel`, not rejected — the corrected value has no
+        // observable effect here (the bridge is deferred, #26), so the
+        // connection stays open.
+        assert!(register_payload_keeps_open("minecraft:register", b"BungeeCord").await);
+        assert!(register_payload_keeps_open("minecraft:register", b"bungeecord:main").await);
+    }
+
+    #[tokio::test]
+    async fn register_empty_segments_are_skipped() {
+        // Empty segments (leading/consecutive/trailing `\0`) are skipped by
+        // `readChannelIdentifier` before validation, so a payload of only empty
+        // segments or with an empty trailing segment stays open. The valid
+        // `a:one`/`b:two` segments validate normally.
+        assert!(register_payload_keeps_open("minecraft:register", b"").await);
+        assert!(register_payload_keeps_open("minecraft:register", b"\x00").await);
+        assert!(
+            register_payload_keeps_open("minecraft:register", b"\x00a:one\x00\x00b:two\x00").await
+        );
+    }
+
+    #[tokio::test]
+    async fn register_mixed_valid_then_invalid_closes() {
+        // Validation is per segment: a valid channel before an invalid one still
+        // throws on the invalid segment and closes.
+        assert!(!register_payload_keeps_open("minecraft:register", b"a:ok\x00Foo:Bar").await);
+    }
+
+    #[tokio::test]
     async fn custom_payload_other_namespace_register_is_ignored() {
         // Java's `CUSTOM_REGISTER.equals(identifier)` compares the FULL
         // identifier, so a hostile `foo:register` payload is neither a register
-        // nor a brand — it falls through to the plugin dispatch (deferred, #26)
-        // and is otherwise ignored. `client_brand` stays unset.
+        // nor a brand — it falls through to the plugin dispatch (deferred, #26),
+        // no channel validation runs, and `client_brand` stays unset. (The `x:y`
+        // bytes would be a valid channel but are never parsed.)
         let mut conn = config_connection().await;
         let mut listener =
             ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
