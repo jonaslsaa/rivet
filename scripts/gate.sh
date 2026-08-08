@@ -502,11 +502,13 @@ main() {
   # Enable the feature for exactly this one crate and run clippy + tests, so the
   # packet tables and bodies are compiled, linted, and exercised on every full
   # merge gate. Never use `--workspace --features packets` or `--all-features`:
-  # `packets` is per-crate (and --all-features would fail on crates without it).
-  # Re-running this one crate's tests with the feature is deliberate — cargo
-  # cannot run only the feature-gated tests, and the whole crate is a fast test
-  # run. Scoped gates for rivet-protocol also get the feature (same gap
-  # otherwise).
+  # `--workspace --features packets` would also enable `packets` on every other
+  # member that declares it (rivet-fuzz forwards to rivet-protocol/packets), and
+  # `--all-features` would enable every feature of every selected package — both
+  # widen the step far beyond this one crate's feature. Re-running this one
+  # crate's tests with the feature is deliberate — cargo cannot run only the
+  # feature-gated tests, and the whole crate is a fast test run. Scoped gates
+  # for rivet-protocol also get the feature (same gap otherwise).
   local GATE_PACKETS=false
   for p in ${PKGS[@]+"${PKGS[@]}"}; do
     [ "$p" = "rivet-protocol" ] && GATE_PACKETS=true
@@ -529,9 +531,10 @@ main() {
   # formatting). The fuzz crate is a workspace member and compiles on the pinned
   # stable toolchain (cargo-fuzz/nightly is only needed to RUN the fuzzers), so
   # the gate type-checks and lints them explicitly — a broken packet target must
-  # fail the merge. Never use `--all-features` or
-  # `--workspace --features` (they would enable rivet-protocol's `packets`
-  # feature workspace-wide, or fail on crates without the feature).
+  # fail the merge. Never use `--all-features` or `--workspace --features`:
+  # `--workspace --features packets` would also enable rivet-protocol's `packets`
+  # (blurring this step into the rivet-protocol packets step), and
+  # `--all-features` would enable every feature of every selected package.
   local GATE_FUZZ=false
   for p in ${PKGS[@]+"${PKGS[@]}"}; do
     [ "$p" = "rivet-fuzz" ] && GATE_FUZZ=true

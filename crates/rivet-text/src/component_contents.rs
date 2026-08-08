@@ -14,6 +14,7 @@ use crate::contents::{
     KeybindContents, PlainTextContents, ScoreContents, SelectorContents, TranslatableContents,
 };
 use crate::style::Style;
+use rivet_serialization::codec::Codec;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec::MapCodec;
 use std::sync::Arc;
@@ -67,13 +68,20 @@ impl ComponentContents {
 
     /// `ComponentContents.codec()` — the `MapCodec<? extends ComponentContents>`
     /// for this variant, used by the dispatch in `ComponentSerialization`.
-    pub fn codec<Ops: DynamicOps + 'static>(&self) -> Arc<dyn MapCodec<ComponentContents, Ops>> {
+    /// `top` is the enclosing `ComponentSerialization.CODEC` (Java's static
+    /// singleton); contents whose codec recurses into `Component` (translatable
+    /// args, selector separator) reuse it rather than building a fresh
+    /// recursive graph per use.
+    pub fn codec<Ops: DynamicOps + 'static>(
+        &self,
+        top: Arc<dyn Codec<crate::Component, Ops>>,
+    ) -> Arc<dyn MapCodec<ComponentContents, Ops>> {
         match self {
             ComponentContents::PlainText(_) => PlainTextContents::map_codec(),
-            ComponentContents::Translatable(_) => TranslatableContents::map_codec(),
+            ComponentContents::Translatable(_) => TranslatableContents::map_codec(top.clone()),
             ComponentContents::Keybind(_) => KeybindContents::map_codec(),
             ComponentContents::Score(_) => ScoreContents::map_codec(),
-            ComponentContents::Selector(_) => SelectorContents::map_codec(),
+            ComponentContents::Selector(_) => SelectorContents::map_codec(top.clone()),
         }
     }
 }

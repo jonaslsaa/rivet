@@ -51,7 +51,19 @@ use rivet_serialization::extra_codecs;
 use rivet_serialization::map_codec::{self as map_codec, MapCodec};
 use rivet_serialization::map_decoder::MapDecoder;
 use rivet_serialization::map_encoder::MapEncoder;
+use std::cell::Cell;
 use std::sync::Arc;
+
+// Test instrument: how many times this thread has called [`codec`], i.e. how
+// many distinct `Codec.recursive` Component graphs it has constructed. Each
+// call to [`codec`] builds a fresh graph (a permanent strong cycle), so the
+// count must stay flat while a single graph is reused for nested components.
+// Load-bearing tests (issue #207) snapshot this before/after repeated
+// translatable-arg / selector-separator encodes to catch a per-use rebuild.
+#[doc(hidden)]
+thread_local! {
+    pub static CODEC_BUILD_COUNT: Cell<usize> = const { Cell::new(0) };
+}
 
 /// `ComponentContents::codec` — resolves a contents value to its registered
 /// `MapCodec` (Java's `codecGetter` in `ComponentSerialization`).
@@ -59,6 +71,7 @@ type CodecGetter<T, Ops> = Arc<dyn Fn(&T) -> Arc<dyn MapCodec<T, Ops>> + Send + 
 
 /// `ComponentSerialization.CODEC`.
 pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Component, Ops>> {
+    CODEC_BUILD_COUNT.with(|c| c.set(c.get() + 1));
     codec::recursive("Component".to_string(), Arc::new(|top| create_codec(top)))
 }
 
@@ -66,8 +79,14 @@ pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Component, Ops>> {
 fn create_codec<Ops: DynamicOps + 'static>(
     top: Arc<dyn Codec<Component, Ops>>,
 ) -> Arc<dyn Codec<Component, Ops>> {
-    let content_types = bootstrap();
-    let contents_codec = create_legacy_component_matcher(&content_types);
+    // Every nested `Component` reference inside the graph (the `extra` sibling
+    // list, the `top` special form, and the translatable-arg / selector-
+    // separator codecs) is threaded `top` — the `RecursiveSelf` of this graph —
+    // so the whole graph shares the single `recursive` codec and no nested
+    // `codec()` graph is ever built per use (Java's `ComponentSerialization.CODEC`
+    // static singleton is threaded the same way).
+    let content_types = bootstrap(top.clone());
+    let contents_codec = create_legacy_component_matcher(top.clone(), &content_types);
 
     // `record { contents, extra: optionalFieldOf("extra", List.of()), style }`
     // apply `MutableComponent::new` — `RecordCodecBuilder.create(...)` returns
@@ -145,30 +164,37 @@ fn create_from_list(list: &[Component]) -> Component {
 /// `bootstrap(LateBoundIdMapper<String, MapCodec<? extends ComponentContents>>)`.
 ///
 /// `nbt` and `object` are deferred (RivetTodo(#89) at module scope); the five
-/// registered contents match the ported slice.
-fn bootstrap<Ops: DynamicOps + 'static>()
--> extra_codecs::LateBoundIdMapper<String, Arc<dyn MapCodec<ComponentContents, Ops>>> {
+/// registered contents match the ported slice. `top` is threaded into the
+/// contents whose codecs recurse into `Component` (translatable args, selector
+/// separator) so they reuse this graph instead of building their own.
+fn bootstrap<Ops: DynamicOps + 'static>(
+    top: Arc<dyn Codec<Component, Ops>>,
+) -> extra_codecs::LateBoundIdMapper<String, Arc<dyn MapCodec<ComponentContents, Ops>>> {
     let mapper = extra_codecs::LateBoundIdMapper::new();
     mapper.put("text".to_string(), PlainTextContents::map_codec());
     mapper.put(
         "translatable".to_string(),
-        TranslatableContents::map_codec(),
+        TranslatableContents::map_codec(top.clone()),
     );
     mapper.put("keybind".to_string(), KeybindContents::map_codec());
     mapper.put("score".to_string(), ScoreContents::map_codec());
-    mapper.put("selector".to_string(), SelectorContents::map_codec());
+    mapper.put(
+        "selector".to_string(),
+        SelectorContents::map_codec(top.clone()),
+    );
     mapper
 }
 
 /// `createLegacyComponentMatcher(types, codecGetter, typeFieldName)` —
 /// `orCompressed(StrictEither(type, discriminator, fuzzy), discriminator)`.
 fn create_legacy_component_matcher<Ops: DynamicOps + 'static>(
+    top: Arc<dyn Codec<Component, Ops>>,
     types: &extra_codecs::LateBoundIdMapper<String, Arc<dyn MapCodec<ComponentContents, Ops>>>,
 ) -> Arc<dyn MapCodec<ComponentContents, Ops>> {
     let values = extra_codecs::late_bound_values(types);
     let entries = extra_codecs::late_bound_entries(types);
     let codec_getter: CodecGetter<ComponentContents, Ops> =
-        Arc::new(|c: &ComponentContents| c.codec());
+        Arc::new(move |c: &ComponentContents| c.codec(top.clone()));
 
     // `FuzzyCodec(types.values(), codecGetter)`.
     let fuzzy: Arc<dyn MapCodec<ComponentContents, Ops>> = Arc::new(FuzzyCodec {

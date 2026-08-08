@@ -111,12 +111,16 @@ impl TranslatableContents {
 
     /// `TranslatableContents.MAP_CODEC` — `RecordCodecBuilder.mapCodec` over
     /// `translate`, the lenient `fallback`, and the optional `with` list,
-    /// lifted to the `ComponentContents` enum.
-    pub fn map_codec<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<ComponentContents, Ops>> {
+    /// lifted to the `ComponentContents` enum. `top` is the enclosing
+    /// `ComponentSerialization.CODEC`; the `with` args' component branch
+    /// (`ARG_CODEC`) reuses it so encoding a translatable does not build a
+    /// fresh recursive Component graph per use (Java's `ARG_CODEC` references
+    /// the same static `ComponentSerialization.CODEC`).
+    pub fn map_codec<Ops: DynamicOps + 'static>(
+        top: Arc<dyn Codec<crate::Component, Ops>>,
+    ) -> Arc<dyn MapCodec<ComponentContents, Ops>> {
         map_codec_mod::xmap(
-            Arc::new(TranslatableMapCodec {
-                _ops: std::marker::PhantomData,
-            }),
+            Arc::new(TranslatableMapCodec { top }),
             Arc::new(|c: &TranslatableContents| ComponentContents::Translatable(c.clone())),
             Arc::new(|c: &ComponentContents| match c {
                 ComponentContents::Translatable(inner) => inner.clone(),
@@ -128,7 +132,8 @@ impl TranslatableContents {
 
 /// `TranslatableContents.MAP_CODEC`.
 struct TranslatableMapCodec<Ops: DynamicOps + 'static> {
-    _ops: std::marker::PhantomData<Ops>,
+    /// `ComponentSerialization.CODEC` — reused for nested `Component` args.
+    top: Arc<dyn Codec<crate::Component, Ops>>,
 }
 
 impl<Ops: DynamicOps + 'static> std::fmt::Debug for TranslatableMapCodec<Ops> {
@@ -173,7 +178,8 @@ impl<Ops: DynamicOps + 'static> MapDecoder<TranslatableContents, Ops>
         // Optional `with` list via `ARG_CODEC.listOf()`.
         let args = match input.get_string("with") {
             Some(value) => {
-                let list = codec::list::<TranslatableArg, Ops>(arg_codec()).parse(ops, &value);
+                let list = codec::list::<TranslatableArg, Ops>(arg_codec(self.top.clone()))
+                    .parse(ops, &value);
                 list.map(|list| {
                     if list.is_empty() {
                         Vec::new()
@@ -215,8 +221,8 @@ impl<Ops: DynamicOps + 'static> MapEncoder<TranslatableContents, Ops>
         }
         // Java writes `"with"` only when `args` is non-empty (`adjustArgs`).
         if !input.args.is_empty() {
-            let list =
-                codec::list::<TranslatableArg, Ops>(arg_codec()).encode_start(ops, &input.args);
+            let list = codec::list::<TranslatableArg, Ops>(arg_codec(self.top.clone()))
+                .encode_start(ops, &input.args);
             prefix.add_string_result("with", list);
         }
     }
@@ -268,14 +274,18 @@ impl std::fmt::Display for TranslatableContents {
 /// Decode collapses a plain-text `Component` argument to its `String` (Java's
 /// `component -> Objects.requireNonNullElse(component.tryCollapseToString(),
 /// component)`), so a component arg that is a bare literal round-trips as a
-/// string.
-pub fn arg_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<TranslatableArg, Ops>> {
+/// string. `top` is the enclosing `ComponentSerialization.CODEC`; the component
+/// branch reuses it instead of building a fresh recursive graph per arg (Java's
+/// `ARG_CODEC` references the same static `ComponentSerialization.CODEC`).
+pub fn arg_codec<Ops: DynamicOps + 'static>(
+    top: Arc<dyn Codec<crate::Component, Ops>>,
+) -> Arc<dyn Codec<TranslatableArg, Ops>> {
     codec::xmap(
         codec::either(
             Arc::new(PrimitiveArgCodec {
                 _ops: std::marker::PhantomData,
             }),
-            crate::component_serialization::codec::<Ops>(),
+            top,
         ),
         Arc::new(|e: &Either<TranslatableArg, crate::Component>| match e {
             Either::Left(a) => a.clone(),

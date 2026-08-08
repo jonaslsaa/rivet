@@ -712,7 +712,10 @@ pub fn compound_tag_codec(
 /// [`crate::codec::stream_codec::recursive`]). The graph must be built exactly
 /// once per process, so it is cached behind a `static OnceLock`: repeated calls
 /// return clones of the single registration-time graph (Java's `static final`
-/// field) and cannot accumulate additional leaked graphs per connection.
+/// field) and cannot accumulate additional leaked graphs per connection. The
+/// graph's nested `Component` references (translatable `with` args, selector
+/// `separator`) are threaded the same single graph, so they never build a
+/// fresh recursive graph per encode either.
 pub fn trusted_component() -> StreamCodec<FriendlyByteBuf, rivet_text::Component> {
     static CODEC: OnceLock<StreamCodec<FriendlyByteBuf, rivet_text::Component>> = OnceLock::new();
     CODEC
@@ -1614,6 +1617,57 @@ mod tests {
         assert_eq!(
             codec.decode(&mut input).unwrap(),
             rivet_registry::core::GameType::Survival
+        );
+    }
+
+    #[test]
+    fn trusted_component_nested_components_do_not_rebuild_the_recursive_graph() {
+        // Issue #207: encoding a translatable with a Component arg or a selector
+        // with a separator must reuse the single cached `Component` graph. Each
+        // fresh `component_serialization::codec()` is a permanent strong `Arc`
+        // cycle, so a per-use rebuild would leak one graph per encode.
+        // `CODEC_BUILD_COUNT` counts graph constructions on this thread; it must
+        // stay flat across repeated encodes after the first (which forces the
+        // lazy recursive factory).
+        use rivet_text::Component;
+        use rivet_text::component_contents::ComponentContents;
+        use rivet_text::component_serialization::CODEC_BUILD_COUNT;
+        use rivet_text::contents::{TranslatableArg, TranslatableContents};
+        use rivet_text::style::Style;
+
+        let graph_count = || CODEC_BUILD_COUNT.with(|c| c.get());
+
+        // A root with a translatable carrying a nested Component arg and a
+        // selector with a separator — both recurse into the Component codec.
+        // The arg is styled so it does not collapse to a bare string on decode
+        // (Java `tryCollapseToString`), keeping it a true `Component` arg.
+        let mut root = Component::literal("root");
+        root.append_component(Component::create(ComponentContents::Translatable(
+            TranslatableContents::new(
+                "key.tip".to_string(),
+                None,
+                vec![TranslatableArg::Component(
+                    Component::literal("arg").with_style(Style::EMPTY.with_bold(Some(true))),
+                )],
+            ),
+        )));
+        root.append_component(Component::selector("@p", Some(Component::literal(","))));
+
+        // First round-trip through the cached stream codec (the process-wide
+        // graph may already be built by a parallel test on another thread; the
+        // counter is thread-local, so this snapshot covers whatever THIS thread
+        // observed before and during the first encode).
+        round_trip(&trusted_component(), &root);
+        let after_first = graph_count();
+
+        // Repeated encodes must not construct any new recursive Component graph.
+        for _ in 0..50 {
+            round_trip(&trusted_component(), &root);
+        }
+        let after_repeat = graph_count();
+        assert_eq!(
+            after_repeat, after_first,
+            "nested component codecs rebuilt the recursive graph per use (leak)"
         );
     }
 

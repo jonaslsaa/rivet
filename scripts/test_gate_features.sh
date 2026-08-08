@@ -18,9 +18,9 @@
 #   4. A scoped gate for an unrelated crate (crates/rivet-nbt) does NOT run the
 #      blocks step (the step is not a workspace-wide or crate-blind addition).
 #   5. Every scenario guards the anti-pattern: the invocation is always
-#      `-p rivet-registry --features blocks` — `--all-features` or
-#      `--workspace --features` (which would enable rivet-protocol's `packets`
-#      feature or fail on crates without the feature) never appear in the log.
+#      `-p rivet-registry --features blocks` — `--all-features` (every feature
+#      of every selected package) or `--workspace --features` (also enables
+#      `blocks` on any other member that declares it) never appear in the log.
 #
 # Like test_codegen_gate.sh, this runs the real scripts/gate.sh against a
 # sandboxed repo layout with stubs for cargo/cargo-machete/cargo-nextest/java
@@ -153,8 +153,9 @@ GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk PATH=$SANDBOX/home/.cargo/bi
 
 # Assertions shared by every scenario: the blocks step must be scoped to
 # `-p rivet-registry --features blocks` — never widened to `--all-features` or
-# `--workspace --features` (which would enable rivet-protocol's `packets`
-# feature or fail on crates that lack `blocks`).
+# `--workspace --features` (`--all-features` enables every feature of every
+# selected package; `--workspace --features blocks` also enables `blocks` on any
+# other member that declares it).
 assert_no_workspace_wide_features() {
   local what="$1" log="$2"
   if grep -q -- "--all-features" "$log"; then
