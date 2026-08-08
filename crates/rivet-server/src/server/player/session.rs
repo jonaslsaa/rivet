@@ -18,9 +18,21 @@
 //! deterministic under `SimTime`), and `handleKeepAlive` on the serverbound
 //! `keep_alive` (id 28) reply — a non-`Accepted` outcome (wrong/stale id)
 //! disconnects with TIMEOUT, and a silent client is disconnected when its oldest
-//! challenge exceeds the kick limit. The movement/teleport surface remains
-//! RivetTodo(#158): every other play frame is dropped without pretending
-//! semantics.
+//! challenge exceeds the kick limit.
+//!
+//! One tick-owned [`Session`] per live session carries the authoritative
+//! movement/teleport state (issue #158): the spawn teleport (`PlayerList.
+//! placeNewPlayer` → `teleport`) embeds a real `awaitingTeleport` id in the
+//! burst's player-position packet; `accept_teleportation` (id 0) validates that
+//! pending id (correct → snap to the awaited position, matching id with no
+//! pending → `invalid_player_movement` kick, stale id → silent no-op);
+//! `move_player` (ids 30-33) gates non-finite values with the same kick, ignores
+//! position movement while the teleport is pending (rotation-only snap), and
+//! otherwise routes the accepted finite position + rotation into the tick-owned
+//! player (`absSnapTo`) with the M1 permissive too-quickly predicate evaluated
+//! but never acted on. The `move_frames_seen` counter and the `player_position`/
+//! `player_yaw`/`player_pitch` accessors expose the tick-owned state to tests,
+//! proving server authority rather than client prediction.
 //!
 //! The outbound burst fires exactly once per connection (the handoff is consumed
 //! — [`ConnectionRegistry::take_play_handoff`]), and the join burst is
@@ -32,18 +44,27 @@
 
 use rivet_protocol::codec::StreamDecoder;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
+use rivet_protocol::game::serversbound_accept_teleportation_packet::accept_teleportation_codec;
+use rivet_protocol::game::serversbound_move_player_packet::{
+    ServerboundMovePlayerPacket, pos_codec, pos_rot_codec, rot_codec, status_only_codec,
+};
 use rivet_protocol::generated::packets::play::serverbound::PacketType as ServerboundPacketType;
 use rivet_protocol::protocol::common::clientbound_keep_alive::ClientboundKeepAlivePacket;
 use rivet_protocol::protocol::common::serverbound_keep_alive::ServerboundKeepAlivePacket;
 
 use crate::server::keepalive::{KEEPALIVE_LIMIT_NS, KeepaliveResponseOutcome, KeepaliveState};
 use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
+use crate::server::movement_math::{
+    DEFAULT_MOVED_TOO_QUICKLY_MULTIPLIER, MoveState, build_move_targets, contains_invalid_values,
+    moved_distance_sqr, moved_too_quickly, movement_speed,
+};
 use crate::server::network::connection_id::ConnectionId;
 use crate::server::network::keepalive::{KeepaliveSink, drive_keepalive};
 use crate::server::network::packet_listener::DisconnectReason;
 use crate::server::player::join::{JoinConfig, place_new_player};
 use crate::server::player::play_sender::PlaySender;
 use crate::server::player::{PlayerIndices, ServerPlayer};
+use crate::server::teleport_ack::{TeleportAckOutcome, TeleportAckState};
 use crate::server::tick::channels::{OutboundEvent, ServerboundFrame};
 use crate::server::tick::registry::ConnectionRegistry;
 use crate::server::tick::{TickContext, Tickable};
@@ -85,6 +106,9 @@ pub struct PlayerSessionManager {
     routed_frames: usize,
     /// `keep_alive` (id 28) frames whose body parsed.
     keep_alives_seen: usize,
+    /// `move_player` (ids 30-33) / `accept_teleportation` (id 0) frames whose
+    /// body parsed (issue #158 observability).
+    move_frames_seen: usize,
     /// One tick-owned keepalive state per live session (issue #157), keyed by
     /// connection. Inserted at session spawn; driven every tick; removed on
     /// disconnect (timeout, bad reply, or connection loss).
@@ -92,6 +116,29 @@ pub struct PlayerSessionManager {
     /// The keepalive kick limit in ns each session's state is built with (the
     /// `ServerConfig.keepalive_timeout` the session config carried).
     keepalive_timeout_ns: i64,
+    /// One tick-owned play session per live connection (issue #158), keyed by
+    /// connection: the authoritative `ServerPlayer` the movement/teleport paths
+    /// write into, plus the `awaitingTeleport` ack machine and Paper move
+    /// anchors. Inserted at session spawn; every inbound move/ack frame is
+    /// checked against it; removed alongside the keepalive state on disconnect.
+    sessions: std::collections::HashMap<ConnectionId, Session>,
+}
+
+/// The tick-owned session state for one connection (issue #158): the
+/// authoritative `ServerPlayer` (OWNERSHIP "one owner: the tick thread") and
+/// the `awaitingTeleport` ack machine plus the Paper `firstGood/lastGood` move
+/// anchors. The network task only forwards wire frames over the bounded
+/// channel; all mutation happens here on the tick thread.
+struct Session {
+    player: ServerPlayer,
+    movement: SessionMovement,
+}
+
+/// The movement/teleport half of a session: the `awaitingTeleport` ack state
+/// plus the Paper `firstGood/lastGood` anchors.
+struct SessionMovement {
+    teleport: TeleportAckState,
+    anchors: MoveState,
 }
 
 /// The configuration the session manager needs to run a play session (Slice B).
@@ -152,8 +199,10 @@ impl PlayerSessionManager {
             pending: std::collections::HashMap::new(),
             routed_frames: 0,
             keep_alives_seen: 0,
+            move_frames_seen: 0,
             keepalive: std::collections::HashMap::new(),
             keepalive_timeout_ns: config.keepalive_timeout_ns,
+            sessions: std::collections::HashMap::new(),
         }
     }
 
@@ -168,6 +217,12 @@ impl PlayerSessionManager {
                 self.spawn_session(ctx, id, profile, client_information);
             }
         }
+        // `tickPlayer()` → `resetPosition()`: refresh every live session's move
+        // anchors before any inbound move/ack frame is handled this tick (issue
+        // #158). Paper resets `firstGood/lastGood` to the player's position at
+        // the top of every tick, so the too-quickly predicate always measures
+        // per-tick displacement against a fresh anchor.
+        self.reset_move_anchors();
         let inbound = std::mem::take(&mut ctx.inbound);
         for (id, frame) in inbound {
             self.route_inbound(ctx, id, frame);
@@ -189,6 +244,53 @@ impl PlayerSessionManager {
     /// `keep_alive` frames whose body parsed (see the `keep_alives_seen` field).
     pub fn keep_alives_seen(&self) -> usize {
         self.keep_alives_seen
+    }
+
+    /// `move_player`/`accept_teleportation` frames whose body parsed (the
+    /// movement counter — the `routed_frames` counterpart for #158).
+    pub fn move_frames_seen(&self) -> usize {
+        self.move_frames_seen
+    }
+
+    /// The authoritative `ServerPlayer` position of a live session (test
+    /// observability for issue #158: proves the ack/movement paths write the
+    /// tick-owned player — the counterfactual to "client prediction"). `None`
+    /// when the connection has no session.
+    pub fn player_position(&self, id: ConnectionId) -> Option<rivet_registry::core::Vec3> {
+        self.sessions.get(&id).map(|s| s.player.position())
+    }
+
+    /// The authoritative `ServerPlayer` yaw of a live session (issue #158 test
+    /// observability, the rotation half of the snap paths).
+    pub fn player_yaw(&self, id: ConnectionId) -> Option<f32> {
+        self.sessions.get(&id).map(|s| s.player.yaw())
+    }
+
+    /// The authoritative `ServerPlayer` pitch of a live session (issue #158
+    /// test observability, the rotation half of the snap paths).
+    pub fn player_pitch(&self, id: ConnectionId) -> Option<f32> {
+        self.sessions.get(&id).map(|s| s.player.pitch())
+    }
+
+    /// The first `firstGood` anchor of a live session (issue #158 test
+    /// observability for the per-tick `resetPosition` mirror). `None` when the
+    /// connection has no session.
+    pub fn move_anchor(&self, id: ConnectionId) -> Option<[f64; 3]> {
+        self.sessions
+            .get(&id)
+            .map(|s| s.movement.anchors.first_good())
+    }
+
+    /// `ServerGamePacketListenerImpl.tickPlayer()` → `resetPosition()` — refresh
+    /// every live session's `firstGood/lastGood` move anchors to the player's
+    /// current position. Paper calls this at the top of every tick, so the
+    /// too-quickly predicate measures per-tick displacement against a fresh
+    /// anchor rather than a stale spawn-time value.
+    fn reset_move_anchors(&mut self) {
+        for session in self.sessions.values_mut() {
+            let pos = session.player.position();
+            session.movement.anchors.reset_position(pos.x, pos.y, pos.z);
+        }
     }
 
     /// `PlayerList.placeNewPlayer(connection, player, cookie)` — spawn the
@@ -223,12 +325,36 @@ impl PlayerSessionManager {
         );
         self.indices.insert(player.uuid(), connection_id);
 
+        // The spawn teleport (issue #158): `PlayerList.placeNewPlayer` calls
+        // `playerConnection.teleport(player.getX(), ...)` — Paper's
+        // `internalTeleport` increments `awaitingTeleport` (0 → 1) and records
+        // the spawn as the awaited position. The id embedded in the burst's
+        // player_position packet is this 1; the matching `accept_teleportation`
+        // ack snaps the player back to spawn and clears the pending marker. The
+        // move anchors (`firstGood/lastGood`) are seeded at the spawn position
+        // (`resetPosition`); every subsequent tick refreshes them
+        // (`reset_move_anchors`), exactly as Paper's `tickPlayer()`.
+        let spawn = [
+            player.position().x,
+            player.position().y,
+            player.position().z,
+        ];
+        let mut movement = SessionMovement {
+            teleport: TeleportAckState::new(),
+            anchors: MoveState::new(spawn[0], spawn[1], spawn[2]),
+        };
+        let teleport_id = movement
+            .teleport
+            .begin_teleport(spawn[0], spawn[1], spawn[2]);
+
         // Fire the join burst in Paper's order. `requested_view_distance` is the
         // client's `ClientInformation` view distance — the Moonrise ladder feeds
         // it through `client + 1` (the capture client's 8 caps at `load - 1` =
         // 4, the 117-chunk M1 send-set; a `create_default` client's 2 resolves
         // send 3, the 81-chunk square). The resolved distances also go into the
-        // cache-radius packet this burst emits.
+        // cache-radius packet this burst emits. The burst embeds `teleport_id`,
+        // so it must succeed before the session (and its awaited spawn teleport)
+        // is registered.
         if let Err(e) = place_new_player(
             &mut self.sender,
             ctx.connections,
@@ -237,6 +363,7 @@ impl PlayerSessionManager {
             &self.level,
             &self.join,
             Some(client_information.view_distance() as i32),
+            teleport_id,
         ) {
             // A burst encode/send failure is a server-side fault or an outbound
             // overload; the connection was pruned by `ConnectionRegistry::send`
@@ -246,6 +373,11 @@ impl PlayerSessionManager {
             self.indices.remove(&player.uuid());
             return;
         }
+
+        // The session is live: the tick-owned player (the movement/teleport
+        // write target) plus the ack/anchors state, keyed by connection.
+        self.sessions
+            .insert(connection_id, Session { player, movement });
 
         // The session now owns a tick-thread keepalive state (issue #157).
         // `lastKeepAliveTx` is seeded with this tick's reading so the 1s
@@ -325,26 +457,48 @@ impl PlayerSessionManager {
         self.dispatch(ctx, id, frame);
     }
 
-    /// Dispatch one play frame to its session. Only `keep_alive` (id 28) is
-    /// decoded — the sole ported serverbound play body. Its echoed id runs
-    /// through `handleKeepAlive`: an `Accepted` reply (the oldest pending
-    /// challenge) is absorbed, and a wrong/stale id — `OutOfOrder` or
-    /// `NoMatchingChallenge` — disconnects with TIMEOUT, exactly as in Java.
-    /// Every other play frame is dropped without pretending semantics
-    /// (movement/teleport is #158).
+    /// Dispatch one play frame to its session. `keep_alive` (id 28) is decoded
+    /// and its echoed id runs through `handleKeepAlive` (a wrong/stale id is a
+    /// TIMEOUT disconnect, exactly as in Java). The four `move_player` variants
+    /// (ids 30-33) and `accept_teleportation` (id 0) run the Paper-faithful
+    /// movement/teleport path (issue #158): the ack machine validates the
+    /// pending teleport id, movement is ignored while a teleport is pending,
+    /// and accepted finite movement is routed into the tick-owned player. Every
+    /// other play frame is dropped without pretending semantics.
     fn dispatch(&mut self, ctx: &mut TickContext, id: ConnectionId, frame: ServerboundFrame) {
         self.routed_frames += 1;
-        if read_packet_id(&frame.bytes) != Some(ServerboundPacketType::KeepAlive as u32) {
+        let Some(packet_id) = read_packet_id(&frame.bytes) else {
             return;
+        };
+        let Some(packet_type) = ServerboundPacketType::from_id(packet_id) else {
+            return;
+        };
+        match packet_type {
+            ServerboundPacketType::KeepAlive => {
+                self.dispatch_keepalive(ctx, id, &frame.bytes);
+            }
+            ServerboundPacketType::MovePlayerPos
+            | ServerboundPacketType::MovePlayerPosRot
+            | ServerboundPacketType::MovePlayerRot
+            | ServerboundPacketType::MovePlayerStatusOnly => {
+                self.dispatch_move_player(ctx, id, &frame.bytes, packet_id);
+            }
+            ServerboundPacketType::AcceptTeleportation => {
+                self.dispatch_accept_teleportation(ctx, id, &frame.bytes, packet_id);
+            }
+            _ => {}
         }
-        // `handleKeepAlive`'s body boundary: the echoed `long` id. The decode
-        // runs on the tick thread, so its panics must be contained here, never
-        // abort the tick: a truncated body (`read_long` on < 8 remaining bytes
-        // panics) is dropped and logged, not counted — `keep_alives_seen` only
-        // counts frames whose body parsed, matching the decode-boundary
-        // containment of
-        // [`crate::server::network::packet_listener::decode_packet`].
-        let mut raw = bytes::BytesMut::from(&frame.bytes[..]);
+    }
+
+    /// `ServerGamePacketListenerImpl.handleKeepAlive` — decode the echoed `long`
+    /// id and match it against the pending challenges. The decode runs on the
+    /// tick thread, so its panics must be contained here, never abort the tick:
+    /// a truncated body (`read_long` on < 8 remaining bytes panics) is dropped
+    /// and logged, not counted — `keep_alives_seen` only counts frames whose
+    /// body parsed, matching the decode-boundary containment of
+    /// [`crate::server::network::packet_listener::decode_packet`].
+    fn dispatch_keepalive(&mut self, ctx: &mut TickContext, id: ConnectionId, bytes: &[u8]) {
+        let mut raw = bytes::BytesMut::from(bytes);
         let _ = rivet_protocol::var_int::read(&mut raw); // packet id
         let mut input = FriendlyByteBuf::new(raw);
         let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -381,6 +535,169 @@ impl PlayerSessionManager {
         }
     }
 
+    /// `ServerGamePacketListenerImpl.handleAcceptTeleportPacket` — validate the
+    /// ack id against the pending teleport. A matching id snaps the player to
+    /// the awaited position (and updates `lastGood`); a matching id with no
+    /// pending position is the Paper-faithful `invalid_player_movement` kick; a
+    /// wrong/stale id is a silent no-op.
+    fn dispatch_accept_teleportation(
+        &mut self,
+        ctx: &mut TickContext,
+        id: ConnectionId,
+        bytes: &[u8],
+        packet_id: u32,
+    ) {
+        let decoded = decode_game_body(bytes, packet_id, accept_teleportation_codec());
+        let ack = match decoded {
+            Ok(ack) => {
+                self.move_frames_seen += 1;
+                ack
+            }
+            Err(e) => {
+                tracing::warn!(%id, %e, "malformed accept_teleportation play frame");
+                return;
+            }
+        };
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        let player = &mut session.player;
+        let movement = &mut session.movement;
+        match movement.teleport.accept(ack.get_id()) {
+            TeleportAckOutcome::Accepted { x, y, z } => {
+                // `absSnapTo(awaitingPositionFromClient, player.getYRot(), ...)`:
+                // rotation is unchanged, position snaps to the awaited spawn.
+                player.abs_snap_to(x, y, z, player.yaw(), player.pitch());
+                movement.anchors.on_move_accepted(x, y, z);
+            }
+            TeleportAckOutcome::InvalidMovementKick => {
+                tracing::warn!(%id, "teleport ack with no pending teleport");
+                let _ = ctx.connections.send(
+                    id,
+                    OutboundEvent::Disconnect {
+                        reason: DisconnectReason::InvalidPlayerMovement,
+                    },
+                );
+            }
+            TeleportAckOutcome::Ignored => {}
+        }
+    }
+
+    /// `ServerGamePacketListenerImpl.handleMovePlayer` (the M1 subset) — the
+    /// authoritative movement path. The invalid-value gate (NaN position /
+    /// non-finite rotation) disconnects with `invalid_player_movement`. While a
+    /// teleport is pending, position movement is ignored and only rotation is
+    /// snapped (`updateAwaitingTeleport`). Otherwise the accepted position is
+    /// clamped, the too-quickly predicate is evaluated permissively (M1: never
+    /// acted on), and the accepted finite position + rotation is routed into the
+    /// tick-owned player. Gravity, collisions, movedWrongly, and the anti-cheat
+    /// responses are M3.
+    fn dispatch_move_player(
+        &mut self,
+        ctx: &mut TickContext,
+        id: ConnectionId,
+        bytes: &[u8],
+        packet_id: u32,
+    ) {
+        let decoded = decode_move_player(bytes, packet_id);
+        let packet = match decoded {
+            Ok(packet) => {
+                self.move_frames_seen += 1;
+                packet
+            }
+            Err(e) => {
+                tracing::warn!(%id, %e, "malformed move_player play frame");
+                return;
+            }
+        };
+
+        // `containsInvalidValues(packet.getX(0.0), ..., packet.getXRot(0.0F))` —
+        // the gate runs on the raw packet values with zero fallbacks. It fires
+        // before the session lookup, exactly as in Java.
+        if contains_invalid_values(
+            packet.get_x(0.0),
+            packet.get_y(0.0),
+            packet.get_z(0.0),
+            packet.get_y_rot(0.0),
+            packet.get_x_rot(0.0),
+        ) {
+            let _ = ctx.connections.send(
+                id,
+                OutboundEvent::Disconnect {
+                    reason: DisconnectReason::InvalidPlayerMovement,
+                },
+            );
+            return;
+        }
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        let player = &mut session.player;
+        let movement = &mut session.movement;
+
+        // `updateAwaitingTeleport()` — while a teleport is pending the client's
+        // position movement is ignored; only the wrapped rotation is accepted.
+        if movement.teleport.is_pending() {
+            player.abs_snap_rotation_to(
+                rivet_util::mth::wrap_degrees_f32(packet.get_y_rot(player.yaw())),
+                rivet_util::mth::wrap_degrees_f32(packet.get_x_rot(player.pitch())),
+            );
+            return;
+        }
+
+        // `Mth.wrapDegrees(...)` + `clampHorizontal`/`clampVertical` on the
+        // packet fields, with the player's current values as fallbacks.
+        let targets = build_move_targets(
+            move_pos_field(&packet, 0),
+            move_pos_field(&packet, 1),
+            move_pos_field(&packet, 2),
+            move_rot_field(&packet, 0),
+            move_rot_field(&packet, 1),
+            player.position().x,
+            player.position().y,
+            player.position().z,
+            player.yaw(),
+            player.pitch(),
+        );
+        let first = movement.anchors.first_good();
+        let last = movement.anchors.last_good();
+        let start = [
+            player.position().x,
+            player.position().y,
+            player.position().z,
+        ];
+        let moved = moved_distance_sqr([targets.x, targets.y, targets.z], first, start, last);
+        // The M1 permissive boundary: `shouldCheckPlayerMovement` is assumed
+        // true and the too-quickly predicate is evaluated with the vanilla
+        // walking speed + default multiplier, but a violation is only logged —
+        // the M3 anti-cheat response (the `PlayerFailMoveEvent` / `teleport`
+        // re-sync) is out of scope.
+        if moved_too_quickly(
+            moved,
+            0.0,
+            false,
+            1,
+            movement_speed(false, 0.05, 0.1),
+            DEFAULT_MOVED_TOO_QUICKLY_MULTIPLIER,
+        ) {
+            tracing::debug!(%id, ?moved, "player moved too quickly (M1: permissive)");
+        }
+
+        // Route the accepted finite movement into the tick-owned player
+        // (`absSnapTo(target, yRot, xRot)`); `lastGood` follows the accepted
+        // position.
+        player.abs_snap_to(
+            targets.x,
+            targets.y,
+            targets.z,
+            targets.y_rot,
+            targets.x_rot,
+        );
+        movement
+            .anchors
+            .on_move_accepted(targets.x, targets.y, targets.z);
+    }
+
     /// Remove sessions whose connection is gone (the tick pruned the registry
     /// entry on disconnect/EOF/overflow). The player index, any pending frames,
     /// and the keepalive state for a lost connection are dropped so the indices
@@ -404,6 +721,12 @@ impl PlayerSessionManager {
         for id in keepalive_ids {
             if !ctx.connections.contains(id) {
                 self.keepalive.remove(&id);
+            }
+        }
+        let session_ids: Vec<ConnectionId> = self.sessions.keys().copied().collect();
+        for id in session_ids {
+            if !ctx.connections.contains(id) {
+                self.sessions.remove(&id);
             }
         }
     }
@@ -458,6 +781,98 @@ fn read_packet_id(frame: &[u8]) -> Option<u32> {
     match id {
         Ok(id) if id >= 0 => Some(id as u32),
         _ => None,
+    }
+}
+
+/// Decode a play packet body with the tick-thread panic containment of
+/// [`crate::server::network::packet_listener::decode_packet`]: the packet-id
+/// varint is consumed (the caller already read it to dispatch), the body is
+/// decoded inside `catch_unwind` (a truncated scalar read panics in the codec,
+/// matching Java's unchecked `IndexOutOfBoundsException`), and trailing bytes
+/// are a "packet was larger than expected" error. `Err`/panic map to `Malformed`
+/// — the movement handlers log and drop the frame, never abort the tick.
+fn decode_game_body<T, C>(bytes: &[u8], packet_id: u32, codec: C) -> Result<T, String>
+where
+    C: StreamDecoder<FriendlyByteBuf, T>,
+{
+    let mut buf = bytes::BytesMut::from(bytes);
+    let _ = rivet_protocol::var_int::read(&mut buf); // consume the id (dispatch validated it)
+    let mut input = FriendlyByteBuf::new(buf);
+    let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.decode(&mut input)))
+        .map_err(|payload| {
+            format!(
+                "decoding packet {packet_id} panicked: {}",
+                panic_message(payload)
+            )
+        })?
+        .map_err(|e| format!("decoding packet {packet_id}: {}", e.message))?;
+    if input.readable_bytes() != 0 {
+        return Err(format!(
+            "packet {packet_id} was larger than expected, {} bytes extra",
+            input.readable_bytes()
+        ));
+    }
+    Ok(value)
+}
+
+/// Decode a `ServerboundMovePlayerPacket` with the variant's own codec (the
+/// four variants share the enum type but have distinct wire layouts — the id
+/// selects the reader, exactly as Java's per-subclass `STREAM_CODEC`).
+fn decode_move_player(bytes: &[u8], packet_id: u32) -> Result<ServerboundMovePlayerPacket, String> {
+    use ServerboundPacketType as T;
+    match packet_id {
+        p if p == T::MovePlayerPos as u32 => decode_game_body(bytes, packet_id, pos_codec()),
+        p if p == T::MovePlayerPosRot as u32 => decode_game_body(bytes, packet_id, pos_rot_codec()),
+        p if p == T::MovePlayerRot as u32 => decode_game_body(bytes, packet_id, rot_codec()),
+        p if p == T::MovePlayerStatusOnly as u32 => {
+            decode_game_body(bytes, packet_id, status_only_codec())
+        }
+        _ => Err(format!("not a move_player packet id: {packet_id}")),
+    }
+}
+
+/// The packet's position field by index (0=x, 1=y, 2=z) as an `Option` —
+/// `Some` only when the variant stores it (`hasPos`). The handler feeds these
+/// to `build_move_targets`, which applies the player-value fallback and the
+/// Paper clamps/wrapping itself.
+fn move_pos_field(packet: &ServerboundMovePlayerPacket, index: u8) -> Option<f64> {
+    match packet {
+        ServerboundMovePlayerPacket::Pos { x, y, z, .. }
+        | ServerboundMovePlayerPacket::PosRot { x, y, z, .. } => match index {
+            0 => Some(*x),
+            1 => Some(*y),
+            2 => Some(*z),
+            _ => None,
+        },
+        ServerboundMovePlayerPacket::Rot { .. }
+        | ServerboundMovePlayerPacket::StatusOnly { .. } => None,
+    }
+}
+
+/// The packet's rotation field by index (0=yRot, 1=xRot) as an `Option` —
+/// `Some` only when the variant stores it (`hasRot`).
+fn move_rot_field(packet: &ServerboundMovePlayerPacket, index: u8) -> Option<f32> {
+    match packet {
+        ServerboundMovePlayerPacket::PosRot { y_rot, x_rot, .. }
+        | ServerboundMovePlayerPacket::Rot { y_rot, x_rot, .. } => match index {
+            0 => Some(*y_rot),
+            1 => Some(*x_rot),
+            _ => None,
+        },
+        ServerboundMovePlayerPacket::Pos { .. }
+        | ServerboundMovePlayerPacket::StatusOnly { .. } => None,
+    }
+}
+
+/// Extract the message from a `catch_unwind` panic payload (a `&str` or
+/// `String`, as `panic!` produces).
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(msg) = payload.downcast_ref::<&str>() {
+        msg.to_string()
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        msg.clone()
+    } else {
+        "unknown panic payload".into()
     }
 }
 
@@ -578,6 +993,43 @@ mod tests {
     fn play_frame(packet_id: i32, body: &[u8]) -> ServerboundFrame {
         let mut bytes = varint(packet_id);
         bytes.extend_from_slice(body);
+        ServerboundFrame {
+            bytes: Bytes::from(bytes),
+        }
+    }
+
+    /// An `accept_teleportation` (id 0) play frame echoing the given teleport
+    /// id — the ack for the pending `awaitingTeleport`.
+    fn accept_teleport_frame(id: i32) -> ServerboundFrame {
+        let mut bytes = varint(0);
+        rivet_protocol::var_int::write(&mut bytes, id);
+        ServerboundFrame {
+            bytes: Bytes::from(bytes),
+        }
+    }
+
+    /// A `move_player_pos` (id 30) play frame carrying a position (3 doubles +
+    /// the 1-byte flags, not on ground) — a movement the server must gate and
+    /// route.
+    fn move_pos_frame(x: f64, y: f64, z: f64) -> ServerboundFrame {
+        let mut bytes = varint(30);
+        bytes.extend_from_slice(&x.to_be_bytes());
+        bytes.extend_from_slice(&y.to_be_bytes());
+        bytes.extend_from_slice(&z.to_be_bytes());
+        bytes.push(0x00);
+        ServerboundFrame {
+            bytes: Bytes::from(bytes),
+        }
+    }
+
+    /// A `move_player_rot` (id 32) play frame carrying a rotation (2 floats +
+    /// the 1-byte flags) — a rotation-only movement, used to pin the
+    /// rotation-is-accepted-while-teleport-pending path.
+    fn move_rot_frame(y_rot: f32, x_rot: f32) -> ServerboundFrame {
+        let mut bytes = varint(32);
+        bytes.extend_from_slice(&y_rot.to_be_bytes());
+        bytes.extend_from_slice(&x_rot.to_be_bytes());
+        bytes.push(0x00);
         ServerboundFrame {
             bytes: Bytes::from(bytes),
         }
@@ -970,6 +1422,275 @@ mod tests {
             manager.indices.connection_for(&probe_profile().id()),
             Some(ID),
             "playersByUUID forward lookup"
+        );
+    }
+
+    /// The spawn teleport (issue #158): `placeNewPlayer` embeds
+    /// `awaitingTeleport = 1` in the burst's player_position packet, and the
+    /// matching `accept_teleportation` ack is `Accepted` — the player snaps to
+    /// the awaited spawn and the pending marker clears, so movement the next
+    /// tick routes into the tick-owned player instead of being ignored.
+    #[test]
+    fn matching_ack_snaps_to_awaited_position_and_clears_pending() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+
+        // The session spawns this tick at the world spawn (0,-63,0) with the
+        // spawn teleport (id 1) pending. The ack for id 1 is accepted.
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        assert_eq!(manager.session_count(), 1);
+        assert_eq!(manager.move_frames_seen(), 1, "ack body parsed");
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            None,
+            "matching ack is not a disconnect"
+        );
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (0.0, -63.0, 0.0), "awaited spawn");
+
+        // Pending cleared: the next tick's move is accepted into the tick-owned
+        // player rather than ignored.
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(5.0, -63.0, 5.0))],
+        );
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!(
+            (pos.x, pos.y, pos.z),
+            (5.0, -63.0, 5.0),
+            "move accepted after ack"
+        );
+    }
+
+    /// A stale/wrong ack id is a silent no-op (`handleAcceptTeleportPacket`'s
+    /// id-mismatch path): no disconnect, the player stays put, and the pending
+    /// teleport survives — a subsequent move is still ignored.
+    #[test]
+    fn wrong_ack_id_is_silently_ignored_and_teleport_stays_pending() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, accept_teleport_frame(999))],
+        );
+        assert_eq!(manager.move_frames_seen(), 1, "ack body parsed");
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            None,
+            "wrong id is a no-op, not a kick"
+        );
+
+        // The teleport is still pending: movement is still ignored.
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(5.0, -63.0, 5.0))],
+        );
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!(
+            (pos.x, pos.y, pos.z),
+            (0.0, -63.0, 0.0),
+            "still awaiting teleport"
+        );
+    }
+
+    /// While the spawn teleport is pending, `updateAwaitingTeleport` ignores the
+    /// client's position movement but accepts its rotation: a `move_player_pos`
+    /// leaves the position at spawn, and a `move_player_rot` snaps the wrapped
+    /// rotation. The rotation is preserved when the teleport is later acked
+    /// (`absSnapTo(awaited, getYRot(), getXRot())`).
+    #[test]
+    fn movement_before_ack_ignores_position_but_snaps_rotation() {
+        let (mut registry, _out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+
+        // A position move while the teleport is pending: ignored (the player
+        // stays at spawn). A rotation move: accepted, wrapped.
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![
+                (ID, move_pos_frame(5.0, -63.0, 5.0)),
+                (ID, move_rot_frame(450.0, 30.0)),
+            ],
+        );
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (0.0, -63.0, 0.0), "position ignored");
+        assert_eq!(manager.player_yaw(ID), Some(90.0), "450 wraps to 90");
+        assert_eq!(manager.player_pitch(ID), Some(30.0));
+
+        // Acking the teleport preserves the client-accepted rotation.
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        assert_eq!(manager.player_yaw(ID), Some(90.0), "rotation preserved");
+        assert_eq!(manager.player_pitch(ID), Some(30.0));
+    }
+
+    /// After the spawn teleport is acked, accepted finite movement routes into
+    /// the tick-owned `ServerPlayer` (server authority, not client prediction):
+    /// the position and rotation written by `absSnapTo` are readable from the
+    /// manager.
+    #[test]
+    fn movement_after_ack_is_accepted_into_the_tick_owned_player() {
+        let (mut registry, _out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(12.5, -63.0, -8.25))],
+        );
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!((pos.x, pos.y, pos.z), (12.5, -63.0, -8.25));
+
+        // A rotation-only frame with no position keeps the current position.
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_rot_frame(90.0, 45.0))],
+        );
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!(
+            (pos.x, pos.y, pos.z),
+            (12.5, -63.0, -8.25),
+            "position retained"
+        );
+        assert_eq!(manager.player_yaw(ID), Some(90.0));
+        assert_eq!(manager.player_pitch(ID), Some(45.0));
+    }
+
+    /// A non-finite rotation in a move frame fires `containsInvalidValues` —
+    /// the Paper `invalid_player_movement` kick (`multiplayer.disconnect.
+    /// invalid_player_movement`), the same reason a matching ack with no
+    /// pending position produces. The connection is disconnected, not the tick.
+    #[test]
+    fn non_finite_rotation_move_disconnects_with_invalid_player_movement() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_rot_frame(f32::NAN, 30.0))],
+        );
+        assert_eq!(manager.move_frames_seen(), 1, "body parsed before the gate");
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::InvalidPlayerMovement),
+            "NaN rotation is the Paper-faithful kick"
+        );
+    }
+
+    /// A NaN position in a move frame fires the same `invalid_player_movement`
+    /// kick (Paper checks positions with `Double.isNaN`, so NaN is rejected but
+    /// infinite positions pass the gate — that asymmetry is pinned here).
+    #[test]
+    fn nan_position_move_disconnects_but_infinite_position_is_accepted() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+
+        // NaN x is rejected before the session lookup: the Paper-faithful kick.
+        // The manager is discarded — the disconnect is the assertion.
+        let _ = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(f64::NAN, -63.0, 0.0))],
+        );
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::InvalidPlayerMovement),
+            "NaN position is the Paper-faithful kick"
+        );
+    }
+
+    /// A `move_player` frame for a connection whose handoff has not landed is
+    /// buffered into the pending FIFO, not dispatched (the handoff-race policy
+    /// `route_inbound` applies to every play frame): no decode runs yet (so the
+    /// move counter stays 0), no kick, and the frame is delivered the tick the
+    /// session spawns.
+    #[test]
+    fn move_frame_before_handoff_is_buffered_not_dropped() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(1.0, 2.0, 3.0))],
+        );
+        assert_eq!(manager.session_count(), 0);
+        assert_eq!(manager.routed_frames(), 0, "buffered, not routed");
+        assert_eq!(manager.move_frames_seen(), 0, "not decoded yet");
+        assert_eq!(
+            manager.pending.get(&ID).map(Vec::len),
+            Some(1),
+            "pending FIFO"
+        );
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            None,
+            "a pre-handoff frame is not a kick"
+        );
+
+        // The handoff lands; the next tick spawns the session and delivers the
+        // buffered move. The spawn teleport is still pending (unacked), so the
+        // move's position is ignored — the player stays at spawn, exactly the
+        // `updateAwaitingTeleport` behavior for movement-before-ack.
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![]);
+        assert_eq!(manager.session_count(), 1);
+        assert_eq!(manager.move_frames_seen(), 1, "delivered and decoded");
+        let pos = manager.player_position(ID).unwrap();
+        assert_eq!(
+            (pos.x, pos.y, pos.z),
+            (0.0, -63.0, 0.0),
+            "teleport still pending"
+        );
+    }
+
+    /// The per-tick `resetPosition` mirror (issue #158): `tickPlayer()` resets
+    /// `firstGood/lastGood` to the player's position at the top of every tick,
+    /// so the too-quickly predicate measures per-tick displacement against a
+    /// fresh anchor. A move to (5,-63,5) then a move to (5,-63,6) leaves the
+    /// anchor at the tick-start position (5,-63,5) — without the per-tick
+    /// reset it would stay at the spawn (0,-63,0).
+    #[test]
+    fn move_anchors_reset_to_tick_start_position_every_tick() {
+        let (mut registry, _out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(5.0, -63.0, 5.0))],
+        );
+        assert_eq!(
+            manager.move_anchor(ID),
+            Some([0.0, -63.0, 0.0]),
+            "anchor reset to the position the tick started at"
+        );
+
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(5.0, -63.0, 6.0))],
+        );
+        assert_eq!(
+            manager.move_anchor(ID),
+            Some([5.0, -63.0, 5.0]),
+            "anchor follows the accepted position across ticks"
         );
     }
 

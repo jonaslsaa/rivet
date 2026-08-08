@@ -68,8 +68,11 @@
 //! normalized capture's (or the raw capture's) positional order. It also
 //! normalizes racy ids to fixed values (the teleport id, entity_event's
 //! `entityId -> 1`, `eventId -> 0`); the deterministic real values this slice
-//! emits (teleport id 0, entity id 1, event id 24) are the Paper source facts,
-//! asserted inline in `join_burst.rs`.
+//! emits (entity id 1, event id 24) are the Paper source facts, asserted inline
+//! in `join_burst.rs`. The teleport id is *not* a fixed 0: `place_new_player`
+//! runs the live `awaitingTeleport` machine (issue #158) and embeds the
+//! session's real id (1 for the spawn teleport), which `join_burst.rs` pins by
+//! rewriting the fixture's leading id varint.
 
 use rivet_protocol::game::clientbound_entity_event_packet::{
     ClientboundEntityEventPacket, entity_event_codec,
@@ -188,6 +191,13 @@ pub struct JoinConfig {
 /// `load - 1` (4) → 117 chunks; a `create_default` client's 2 resolves send 3
 /// → 81 chunks. `None` (the auto-config path) resolves the world's own send
 /// distance, 4 on the M1 world.
+///
+/// `teleport_id` is the live `awaitingTeleport` id (issue #158) the caller's
+/// session began for the spawn teleport (`playerConnection.teleport` in
+/// `placeNewPlayer`). Paper embeds it in the player_position packet and awaits
+/// the matching `accept_teleportation` ack before accepting the player's
+/// position movement.
+#[allow(clippy::too_many_arguments)]
 pub fn place_new_player(
     sender: &mut PlaySender,
     connections: &mut ConnectionRegistry,
@@ -196,6 +206,7 @@ pub fn place_new_player(
     level: &ServerLevel,
     join: &JoinConfig,
     requested_view_distance: Option<i32>,
+    teleport_id: i32,
 ) -> Result<Vec<u32>, PlaySendError> {
     let mut sent = Vec::with_capacity(3 + 117 + 10);
 
@@ -284,10 +295,12 @@ pub fn place_new_player(
     sent.push(ENTITY_EVENT_ID);
 
     // `playerConnection.teleport(player.getX(), ...)` — the position teleport.
-    // The teleport `id 0` is the capture's canonical normalized value
-    // (normalize.rs rewrites the server's randomized per-login counter to 0);
-    // it is NOT a Paper constant. Live per-teleport counter wiring (the
-    // `awaitingTeleport` ack matching) is #158 / M3.
+    // The embedded `awaitingTeleport` id is the live session's (issue #158):
+    // Paper's `placeNewPlayer` teleport increments the per-connection counter
+    // to 1 and awaits the matching `accept_teleportation` ack (the capture's
+    // `id 0` was normalize.rs's canonical rewrite of the counter, not a Paper
+    // value). The ack matches on this id; the server records the spawn as the
+    // awaited position.
     let change = PositionMoveRotation::new(
         player.position(),
         Vec3::new(0.0, 0.0, 0.0),
@@ -296,7 +309,7 @@ pub fn place_new_player(
     );
     let body = sender.encode_body(
         ClientboundPlayerPositionPacket::stream_codec(),
-        &ClientboundPlayerPositionPacket::new(0, change, Vec::new()),
+        &ClientboundPlayerPositionPacket::new(teleport_id, change, Vec::new()),
     )?;
     sender.send_packet(connections, connection_id, PLAYER_POSITION_ID, &body)?;
     sent.push(PLAYER_POSITION_ID);

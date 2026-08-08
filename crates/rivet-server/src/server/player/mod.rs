@@ -111,6 +111,24 @@ impl ServerPlayer {
         self.pitch
     }
 
+    /// `Entity.absSnapTo(x, y, z, yRot, xRot)` — the authoritative
+    /// position+rotation write the movement/teleport paths route accepted
+    /// values into (issue #158). The tick thread owns the player, so only
+    /// these methods mutate the position.
+    pub fn abs_snap_to(&mut self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) {
+        self.position = Vec3::new(x, y, z);
+        self.yaw = yaw;
+        self.pitch = pitch;
+    }
+
+    /// `Entity.absSnapRotationTo(yRot, xRot)` — rotation-only snap, used while a
+    /// teleport is pending (`updateAwaitingTeleport` accepts the client's
+    /// rotation but ignores its position movement).
+    pub fn abs_snap_rotation_to(&mut self, yaw: f32, pitch: f32) {
+        self.yaw = yaw;
+        self.pitch = pitch;
+    }
+
     /// `gameMode()`.
     pub fn game_type(&self) -> GameType {
         self.game_type
