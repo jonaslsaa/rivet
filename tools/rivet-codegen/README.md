@@ -80,7 +80,7 @@ checkout; the tool needs a jar produced elsewhere.
 ```
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
-target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_states.rs, registries.rs} + crates/rivet-protocol/src/generated/
+target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_states.rs, registries.rs, biomes.rs, tags.rs, synchronized.rs, registry_data.rs} + crates/rivet-protocol/src/generated/
 target/release/rivet-codegen registries       # -> crates/rivet-registry/src/generated/registries.rs (report-driven half only)
 target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
 target/release/rivet-codegen extract-biomes-tags  # -> data/biomes_tags.json + manifest
@@ -89,12 +89,15 @@ target/release/rivet-codegen probe-block-states   # verify the emitted block-sta
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
-`generate` emits four independent outputs: the block registry (from
-`data/block_states.json`), the static-builtin registry tables (from
-`data/reports/registries.json`, the `RegistryDumpReport` fixture), the
-block-state global-id table (from `data/reports/blocks.json`, the
-`BlockListReport` fixture), and the packet-ID tables (from
-`data/reports/packets.json`, the `PacketReport` fixture). Regenerate all four
+`generate` emits the block registry (from `data/block_states.json`), the
+static-builtin registry tables (from `data/reports/registries.json`, the
+`RegistryDumpReport` fixture), the block-state global-id table (from
+`data/reports/blocks.json`, the `BlockListReport` fixture), the biome id +
+tag network tables (from `data/biomes_tags.json`), the synchronized
+configuration-registry element tables (from `data/synchronized_registries.json`),
+the pre-baked registry NBT payloads (from `data/registry_data.json`, the
+canonical join capture), and the packet-ID tables (from
+`data/reports/packets.json`, the `PacketReport` fixture). Regenerate all of them
 with a single `generate` run; `--input`/`--output` control the block half,
 `--packets`/`--packets-output` control the packet half. (The `registries`
 subcommand emits just the report-driven registry tables.)

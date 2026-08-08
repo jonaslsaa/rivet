@@ -10,9 +10,11 @@
 // §Registries). For the 8 surfaces with an existing id table (`biomes.rs`/
 // `tags.rs`) the names are cross-checked at generate time; the other 21 are
 // datapack registries the report cannot cover, so the capture is their source.
-// When the client accepts the advertised `KnownPack`s, Paper sends every
-// entry with `data = Optional.empty()` (the client holds the contents); the
-// full NBT element content is #109/#100.
+// These are the element metadata; the full per-element NBT content is the
+// sibling `registry_data.rs` table (`SYNCHRONIZED_NBT`), cross-checked against
+// these names at generate time. At runtime the server serves `data` as
+// `Optional.empty()` for accepted vanilla elements and the pre-baked payloads
+// otherwise (`registry_sync::pack_registries`).
 
 /// The 29 `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` entries: each registry key
 /// paired with its element names in ascending registry id order (the wire order).

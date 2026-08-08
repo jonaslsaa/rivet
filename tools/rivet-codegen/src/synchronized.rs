@@ -7,10 +7,9 @@
 //! `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` is the fixed 29-registry list
 //! the `ClientboundRegistryDataPacket` stream carries (one packet per registry,
 //! each element `PackedRegistryEntry(id, Optional<Tag> data)`). Element *ids*
-//! are always on the wire; the `data` NBT is present only when the client did
-//! not accept the server's `KnownPack`s (the M1 vanilla client accepts
-//! `minecraft:core:26.2`, so every entry is `Optional.empty()` — the client
-//! already holds the element contents).
+//! are always on the wire; this module emits the element *names* (the metadata
+//! half). The full per-element NBT `data` content is the sibling `registry_data`
+//! codegen (`generated::registry_data` → `SYNCHRONIZED_NBT`).
 //!
 //! The runtime element order is ascending registry id (`registry.listElements()`
 //! == insertion index == network id; OWNERSHIP.md §Registries), so the fixture
@@ -36,8 +35,9 @@ use crate::reports::SourceProvenance;
 
 /// `RegistryDataLoader.SYNCHRONIZED_REGISTRIES` in order (MC 26.2). The wire
 /// order of the 29 `ClientboundRegistryDataPacket`s; a drift in which registry
-/// or how many fails generation.
-const SYNCHRONIZED_KEYS: &[&str] = &[
+/// or how many fails generation. Shared with `registry_data` (the pre-baked
+/// NBT payloads must be served in the same packet order).
+pub(crate) const SYNCHRONIZED_KEYS: &[&str] = &[
     "minecraft:worldgen/biome",
     "minecraft:chat_type",
     "minecraft:trim_pattern",
@@ -422,9 +422,11 @@ fn render(registries: &[SynchronizedRegistry], source: &SourceProvenance) -> Str
          // §Registries). For the 8 surfaces with an existing id table (`biomes.rs`/\n\
          // `tags.rs`) the names are cross-checked at generate time; the other 21 are\n\
          // datapack registries the report cannot cover, so the capture is their source.\n\
-         // When the client accepts the advertised `KnownPack`s, Paper sends every\n\
-         // entry with `data = Optional.empty()` (the client holds the contents); the\n\
-         // full NBT element content is #109/#100.\n\n",
+         // These are the element metadata; the full per-element NBT content is the\n\
+         // sibling `registry_data.rs` table (`SYNCHRONIZED_NBT`), cross-checked against\n\
+         // these names at generate time. At runtime the server serves `data` as\n\
+         // `Optional.empty()` for accepted vanilla elements and the pre-baked payloads\n\
+         // otherwise (`registry_sync::pack_registries`).\n\n",
     );
 
     out.push_str(
