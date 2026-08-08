@@ -148,6 +148,14 @@ pub fn wait_for_exit(
     }
 }
 
+/// Whether a [`wait_for_exit`] result implies the child was reaped, so `Drop`
+/// must not touch it again. Its `Ok` (clean exit) and SIGKILL-timeout `Gate`
+/// paths both reap; only an `io` failure returns without reaping, leaving the
+/// child possibly live for `Drop` to SIGKILL.
+fn wait_for_exit_reaped(result: &Result<ExitStatus, Error>) -> bool {
+    matches!(result, Ok(_) | Err(Error::Gate(_)))
+}
+
 /// A running server child with the boot lifecycle and kill-on-drop cleanup.
 pub struct ChildServer {
     child: Child,
@@ -191,8 +199,10 @@ impl ChildServer {
     /// SIGTERM the child, wait for exit, and mark it stopped. Returns the exit
     /// status so the caller can run its clean-shutdown assertion (rivet-server
     /// must exit 0). On timeout the child is SIGKILLed and `Error::Gate` is
-    /// returned. Either way the child is reaped by [`wait_for_exit`] before
-    /// this returns, so `Drop` must not try to kill it again.
+    /// returned. Only when [`wait_for_exit`] actually reaped the child (clean
+    /// exit or SIGKILL timeout) is `stopped` set, so `Drop` still SIGKILLs the
+    /// child on the one path that leaves it running — `wait_for_exit`'s
+    /// `io` failure, where `try_wait` errors out without reaping.
     pub fn shutdown(
         &mut self,
         timeout: Duration,
@@ -200,9 +210,7 @@ impl ChildServer {
     ) -> Result<ExitStatus, Error> {
         let _ = signal(self.child.id(), "TERM");
         let result = wait_for_exit(&mut self.child, timeout, poll_interval);
-        // wait_for_exit reaps the child on every path (clean exit or SIGKILL
-        // timeout), so the child is gone regardless of whether it exited 0.
-        self.stopped = true;
+        self.stopped = wait_for_exit_reaped(&result);
         result
     }
 
@@ -417,5 +425,20 @@ mod tests {
         )
         .expect("exit");
         assert_eq!(status.code(), Some(7));
+    }
+
+    /// `wait_for_exit_reaped` mirrors exactly which [`wait_for_exit`] paths
+    /// reap the child: clean exit (`Ok`) and the SIGKILL-timeout (`Gate`) path
+    /// both do, while an `io` failure leaves the child possibly live so `Drop`
+    /// must still SIGKILL it. This pins `shutdown`'s `stopped` decision against
+    /// regressing to the masked behavior the review found.
+    #[test]
+    fn shutdown_only_marks_stopped_when_wait_for_exit_reaped() {
+        let clean = Command::new("true").status().expect("true exits");
+        assert!(wait_for_exit_reaped(&Ok(clean)));
+        assert!(wait_for_exit_reaped(&Err(Error::Gate("stuck".into()))));
+        assert!(!wait_for_exit_reaped(&Err(Error::Io(io::Error::other(
+            "waitpid ECHILD (pathological)"
+        )))));
     }
 }
