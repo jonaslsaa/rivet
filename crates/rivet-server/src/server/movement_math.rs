@@ -36,6 +36,10 @@ pub const METERS_PER_TICK_FLYING: f64 = 300.0;
 /// `x`/`y`/`z` are checked with `Double.isNaN` only: infinity is *accepted* for
 /// positions. `yRot`/`xRot` use Guava `Floats.isFinite` (= `Float.isFinite`),
 /// which rejects both NaN and infinity.
+///
+/// The gate runs on the packet's raw values: absent packet positions default to
+/// 0.0 (Java `packet.getX(0.0)`), whereas [`build_move_targets`] defaults absent
+/// positions to the player's current coordinates — both matching Paper.
 pub fn contains_invalid_values(x: f64, y: f64, z: f64, y_rot: f32, x_rot: f32) -> bool {
     x.is_nan() || y.is_nan() || z.is_nan() || !y_rot.is_finite() || !x_rot.is_finite()
 }
