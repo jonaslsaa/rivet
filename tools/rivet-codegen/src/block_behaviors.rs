@@ -1,0 +1,459 @@
+//! `rivet-codegen generate` block-behaviors half — consume the pinned live-Paper
+//! behavior dump `data/block_behaviors.json` (see [`crate::extract_block_behaviors`])
+//! and emit the compact run-length-encoded per-`StateId` behavior table into
+//! `crates/rivet-registry/src/generated/block_behaviors.rs` (issue #228).
+//!
+//! # Ground truth
+//!
+//! The fixture is the real `Block.BLOCK_STATE_REGISTRY` dump evaluated by
+//! `BlockBehaviourProbe` against the pinned Paper 26.2 jar: for every state id
+//! in 0..32366 it packs the worldgen/heightmap/lighting behaviors into a 32-bit
+//! word (bit layout documented in the probe and re-emitted here), then RLEs
+//! consecutive equal words. The `BlockState` newtype in `rivet-registry`
+//! decodes these words; no behavior is hand-typed.
+//!
+//! Validation: the runs must partition `0..state_count` densely (first starts
+//! at 0, starts strictly increasing, lengths positive, no overlap, sum ==
+//! count), the word's reserved bits (22..32) must be zero, and the fixture must
+//! match its provenance manifest sha256. `state_count` is pinned to 32366 (the
+//! emitted `BLOCK_STATE_COUNT`) by the live probe.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde_json::Value;
+
+use crate::reports::SourceProvenance;
+
+/// The canonical pinned behavior-table fixture.
+pub fn default_input(repo_root: &Path) -> PathBuf {
+    repo_root.join("tools/rivet-codegen/data/block_behaviors.json")
+}
+
+/// Tables are written into the same committed `generated/` dir as the block
+/// tables (the golden drift test in [`crate::generate`] asserts that dir
+/// contains exactly the generated files).
+pub fn default_output(repo_root: &Path) -> PathBuf {
+    repo_root.join("crates/rivet-registry/src/generated")
+}
+
+pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> {
+    let repo_root = crate::extract::find_repo_root()?;
+    let input = match input_flag {
+        Some(p) => p.to_path_buf(),
+        None => default_input(&repo_root),
+    };
+    let output = match output_flag {
+        Some(p) => p.to_path_buf(),
+        None => default_output(&repo_root),
+    };
+
+    let json = fs::read_to_string(&input).with_context(|| format!("read {}", input.display()))?;
+    let root = crate::registries::parse_strict(&json)
+        .with_context(|| format!("parse {}", input.display()))?;
+
+    let runs = validate(root)?;
+    let source = load_provenance(&input)?;
+
+    fs::create_dir_all(&output).with_context(|| format!("create {}", output.display()))?;
+    fs::write(output.join("block_behaviors.rs"), render(&runs, &source))
+        .context("write generated/block_behaviors.rs")?;
+
+    println!(
+        "Wrote {} behavior runs across {} states -> {}",
+        runs.len(),
+        runs.iter().map(|r| r.length).sum::<u32>(),
+        output.display()
+    );
+    Ok(())
+}
+
+/// One RLE run: states `[start, start + length)` share `word`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Run {
+    start: u32,
+    length: u32,
+    word: u32,
+}
+
+/// Structural + oracle-conformance validation of `block_behaviors.json`. Fails
+/// on: a missing/malformed/non-integer field, a non-positive run length, a
+/// first run not starting at 0, non-strictly-increasing run starts, runs that
+/// overlap or leave a gap, a total that does not equal `state_count`, `word`
+/// with reserved bits set, or a word field outside its documented bit width.
+fn validate(root: Value) -> Result<Vec<Run>> {
+    let obj = root
+        .as_object()
+        .context("block_behaviors.json root must be a JSON object")?;
+    let state_count = obj
+        .get("state_count")
+        .and_then(Value::as_u64)
+        .with_context(|| "`state_count` must be a non-negative integer")?;
+
+    let runs_value = obj
+        .get("runs")
+        .context("`runs` missing from block_behaviors.json")?;
+    let runs_value = runs_value.as_array().context("`runs` must be an array")?;
+    if runs_value.is_empty() {
+        bail!("`runs` is empty");
+    }
+
+    let mut runs = Vec::with_capacity(runs_value.len());
+    let mut expected_start = 0u64;
+    for (i, run) in runs_value.iter().enumerate() {
+        let run_obj = run
+            .as_object()
+            .with_context(|| format!("run {i} must be a JSON object"))?;
+        for field in run_obj.keys() {
+            if !matches!(field.as_str(), "start" | "length" | "word") {
+                bail!("run {i} has unexpected field `{field}`");
+            }
+        }
+        let start = run_obj
+            .get("start")
+            .and_then(Value::as_u64)
+            .with_context(|| format!("run {i} `start` must be a non-negative integer"))?;
+        let length = run_obj
+            .get("length")
+            .and_then(Value::as_u64)
+            .with_context(|| format!("run {i} `length` must be a non-negative integer"))?;
+        if length == 0 {
+            bail!("run {i} has zero length");
+        }
+        let word = run_obj
+            .get("word")
+            .and_then(Value::as_u64)
+            .with_context(|| format!("run {i} `word` must be a non-negative integer"))?;
+        // Reserved bits 22..32 must be zero — a probe emitting a field outside
+        // its documented width would otherwise be silently dropped.
+        if word >> 22 != 0 {
+            bail!("run {i} word {word} has reserved bits set");
+        }
+        // Field bounds by bit width (light_dampening, light_emission <= 15,
+        // map_color <= 63) are implied by the width, so the reserved check
+        // above is the only field-level bound worth asserting here.
+
+        if start != expected_start {
+            bail!(
+                "runs do not densely partition 0..{state_count}: run {i} starts at {start} but \
+                 the previous run ends at {expected_start}"
+            );
+        }
+        runs.push(Run {
+            start: start as u32,
+            length: length as u32,
+            word: word as u32,
+        });
+        expected_start += length;
+    }
+    if expected_start != state_count {
+        bail!("runs cover [0, {expected_start}) but state_count is {state_count}");
+    }
+    // The emitted runs are `(u16, u16, u32)` tuples; start/length are bounded by
+    // state_count, so this single check keeps every run's fields in range.
+    u16::try_from(state_count).context("state_count does not fit u16 (emitted runs are u16)")?;
+
+    Ok(runs)
+}
+
+/// Link the fixture to its pinned provenance: the fixture must match the sha256
+/// recorded next to it in `data/block_behaviors.manifest.json`, and the emitted
+/// header carries that provenance (jar identity + MC/proto/world versions).
+fn load_provenance(input: &Path) -> Result<SourceProvenance> {
+    let manifest_path = input
+        .parent()
+        .map(|p| p.join("block_behaviors.manifest.json"))
+        .with_context(|| format!("{} has no parent dir", input.display()))?;
+    let manifest_json = fs::read_to_string(&manifest_path).with_context(|| {
+        format!(
+            "read {} (expected next to the pinned fixture)",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: FixtureManifest = serde_json::from_str(&manifest_json)
+        .with_context(|| format!("parse {}", manifest_path.display()))?;
+    let bytes = fs::read(input).with_context(|| format!("read {}", input.display()))?;
+    let actual = crate::reports::sha256_hex(&bytes);
+    if actual != manifest.file.sha256 {
+        bail!(
+            "block_behaviors.json does not match its provenance manifest (expected sha256 {}, got {}) — \
+             run `rivet-codegen extract-block-behaviors` to refresh the pinned fixture",
+            manifest.file.sha256,
+            actual
+        );
+    }
+    Ok(manifest.source)
+}
+
+#[derive(serde::Deserialize)]
+struct FixtureManifest {
+    source: SourceProvenance,
+    file: FixtureFile,
+}
+
+#[derive(serde::Deserialize)]
+struct FixtureFile {
+    sha256: String,
+}
+
+/// Render `generated/block_behaviors.rs`.
+fn render(runs: &[Run], source: &SourceProvenance) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "// Generated by `tools/rivet-codegen generate` from data/block_behaviors.json\n\
+         // (live Paper Block.BLOCK_STATE_REGISTRY dump; MC {}, protocol {}, world {}).\n\
+         // Source jar sha256 {}; provenance linked to data/block_behaviors.manifest.json.\n\
+         // Do not edit by hand — PORTING.md: registries/data are generated, not hand-ported.\n\n",
+        source.minecraft_version,
+        source.protocol_version,
+        source.world_version,
+        source.jar_sha256.get(..16).unwrap_or(&source.jar_sha256)
+    ));
+    out.push_str(
+        "// Per-StateId worldgen/heightmap/lighting behavior words (issue #228). The\n\
+         // values are Paper's cached state accessors evaluated by BlockBehaviourProbe\n\
+         // against the real Block.BLOCK_STATE_REGISTRY — never hand-typed. Bit layout:\n\
+         //   bit  0  is_air\n\
+         //   bit  1  blocks_motion\n\
+         //   bit  2  solid_render\n\
+         //   bit  3  can_occlude\n\
+         //   bit  4  use_shape_for_light_occlusion\n\
+         //   bit  5  propagates_skylight_down\n\
+         //   bit  6  random_ticking\n\
+         //   bit  7  fluid_empty\n\
+         //   bits  8-11   light_dampening (0..15)\n\
+         //   bits  12-15  light_emission (0..15)\n\
+         //   bits  16-21  map_color_id (0..63)\n\
+         //   bits  22-31  reserved (always 0)\n\
+         // Words are run-length encoded: each (start, length, word) covers states\n\
+         // [start, start + length). Runs partition 0..BLOCK_STATE_COUNT and are sorted\n\
+         // by start.\n\n",
+    );
+    // `StateId` is referenced by `behavior_of`; `BLOCK_STATE_COUNT` appears only
+    // in doc comments, so importing it would trip the unused-import lint.
+    out.push_str("use crate::generated::block_states::StateId;\n\n");
+
+    for (name, expr, doc) in [
+        ("BEHAVIOR_FLAG_IS_AIR", "1 << 0", "state is air"),
+        (
+            "BEHAVIOR_FLAG_BLOCKS_MOTION",
+            "1 << 1",
+            "state blocks motion (Heightmap OCEAN_FLOOR/MOTION_BLOCKING predicate)",
+        ),
+        (
+            "BEHAVIOR_FLAG_SOLID_RENDER",
+            "1 << 2",
+            "state's occlusion shape is a full block",
+        ),
+        (
+            "BEHAVIOR_FLAG_CAN_OCCLUDE",
+            "1 << 3",
+            "state can occlude light (canOcclude)",
+        ),
+        (
+            "BEHAVIOR_FLAG_USE_SHAPE_FOR_LIGHT_OCCLUSION",
+            "1 << 4",
+            "light occlusion follows the non-full occlusion shape",
+        ),
+        (
+            "BEHAVIOR_FLAG_PROPAGATES_SKYLIGHT_DOWN",
+            "1 << 5",
+            "sky light passes straight through",
+        ),
+        (
+            "BEHAVIOR_FLAG_RANDOM_TICKING",
+            "1 << 6",
+            "state is random-ticked",
+        ),
+        (
+            "BEHAVIOR_FLAG_FLUID_EMPTY",
+            "1 << 7",
+            "the state carries no fluid",
+        ),
+    ] {
+        out.push_str(&format!(
+            "/// {doc}.\n\
+             pub const {name}: u32 = {expr};\n"
+        ));
+    }
+    out.push('\n');
+    out.push_str(
+        "/// Shift/width of the `light_dampening` field (0..15).\n\
+         pub const BEHAVIOR_SHIFT_LIGHT_DAMPENING: u32 = 8;\n\
+         /// Shift/width of the `light_emission` field (0..15).\n\
+         pub const BEHAVIOR_SHIFT_LIGHT_EMISSION: u32 = 12;\n\
+         /// Shift/width of the `map_color_id` field (0..63).\n\
+         pub const BEHAVIOR_SHIFT_MAP_COLOR: u32 = 16;\n\
+         pub const BEHAVIOR_MASK_LIGHT_DAMPENING: u32 = 0xF;\n\
+         pub const BEHAVIOR_MASK_LIGHT_EMISSION: u32 = 0xF;\n\
+         pub const BEHAVIOR_MASK_MAP_COLOR: u32 = 0x3F;\n\n",
+    );
+
+    out.push_str(
+        "/// Run-length-encoded behavior words: `(start_state_id, length, word)`.\n\
+         /// Runs partition `0..BLOCK_STATE_COUNT` and are sorted by start.\n\
+         pub static BLOCK_BEHAVIOR_RUNS: &[(u16, u16, u32)] = &[\n",
+    );
+    for run in runs {
+        out.push_str(&format!(
+            "    ({}, {}, {:#X}),\n",
+            run.start, run.length, run.word
+        ));
+    }
+    out.push_str("];\n\n");
+
+    out.push_str(
+        "/// The behavior word for a state id. Ids outside `0..BLOCK_STATE_COUNT` fall\n\
+         /// back to state 0 (air), mirroring `Block.stateById`.\n\
+         pub fn behavior_of(id: StateId) -> u32 {\n\
+             let id = id.0 as u32;\n\
+             let idx = BLOCK_BEHAVIOR_RUNS.partition_point(|(start, _, _)| *start as u32 <= id);\n\
+             if idx == 0 {\n\
+                 return BLOCK_BEHAVIOR_RUNS[0].2;\n\
+             }\n\
+             let (start, len, word) = BLOCK_BEHAVIOR_RUNS[idx - 1];\n\
+             if id < start as u32 + len as u32 {\n\
+                 word\n\
+             } else {\n\
+                 BLOCK_BEHAVIOR_RUNS[0].2\n\
+             }\n\
+         }\n",
+    );
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_root() -> Value {
+        serde_json::json!({
+            "generator": "test",
+            "minecraft_version": "26.2",
+            "state_count": 5,
+            "runs": [
+                {"start": 0, "length": 2, "word": 1},
+                {"start": 2, "length": 3, "word": 0x20015},
+            ],
+        })
+    }
+
+    #[test]
+    fn dense_partition_passes() {
+        let runs = validate(valid_root()).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[1].word, 0x20015);
+    }
+
+    #[test]
+    fn sparse_runs_fail() {
+        let mut v = valid_root();
+        v["runs"][1]["start"] = serde_json::json!(3);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("densely partition"), "got: {err}");
+    }
+
+    #[test]
+    fn overlapping_runs_fail() {
+        // First run longer than the second's expected start is overlap.
+        let mut v = valid_root();
+        v["runs"][0]["length"] = serde_json::json!(4);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("densely partition"), "got: {err}");
+    }
+
+    #[test]
+    fn total_mismatch_fails() {
+        let mut v = valid_root();
+        v["state_count"] = serde_json::json!(6);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("state_count is 6"), "got: {err}");
+    }
+
+    #[test]
+    fn zero_length_run_fails() {
+        let mut v = valid_root();
+        v["runs"][0]["length"] = serde_json::json!(0);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("zero length"), "got: {err}");
+    }
+
+    #[test]
+    fn reserved_bits_fail() {
+        let mut v = valid_root();
+        v["runs"][0]["word"] = serde_json::json!(1u64 << 22);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("reserved bits"), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_field_fails() {
+        let mut v = valid_root();
+        v["runs"][0]["extra"] = serde_json::json!(1);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("unexpected field"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_runs_fail() {
+        let mut v = valid_root();
+        v["runs"] = serde_json::json!([]);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn rendering_is_deterministic_and_carries_provenance() {
+        let source: SourceProvenance = serde_json::from_str(
+            r#"{"jar":"paper-26.2.jar","jar_sha256":"e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda","minecraft_version":"26.2","protocol_version":776,"world_version":4903}"#,
+        )
+        .unwrap();
+        let runs = vec![
+            Run {
+                start: 0,
+                length: 1,
+                word: 0x3,
+            },
+            Run {
+                start: 1,
+                length: 2,
+                word: 0x20000,
+            },
+        ];
+        let a = render(&runs, &source);
+        let b = render(&runs, &source);
+        assert_eq!(a, b);
+        assert!(a.contains("MC 26.2, protocol 776, world 4903"));
+        assert!(a.contains("e1a027e9481a16ec"));
+        assert!(a.contains("(0, 1, 0x3)"));
+        assert!(a.contains("(1, 2, 0x20000)"));
+    }
+
+    /// The emitted `behavior_of` binary search must reproduce the fixture words
+    /// for every state (the RLE decode is the load-bearing consumer path).
+    #[test]
+    fn behavior_of_matches_fixture_words() {
+        let runs = vec![
+            Run {
+                start: 0,
+                length: 2,
+                word: 0x1,
+            },
+            Run {
+                start: 2,
+                length: 3,
+                word: 0x20015,
+            },
+        ];
+        let source: SourceProvenance = serde_json::from_str(
+            r#"{"jar":"p","jar_sha256":"e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda","minecraft_version":"26.2","protocol_version":776,"world_version":4903}"#,
+        )
+        .unwrap();
+        let rendered = render(&runs, &source);
+        // The emitted behavior_of: out-of-range falls back to the first run.
+        assert!(rendered.contains("partition_point"));
+        assert!(rendered.contains("BLOCK_BEHAVIOR_RUNS[0].2"));
+    }
+}

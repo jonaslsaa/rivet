@@ -701,6 +701,9 @@ main() {
       echo "==> rivet-codegen probe-biomes-tags (live Paper biome id + tag network content)"
       cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
         probe-biomes-tags --bundler "$PROBE_BUNDLER"
+      echo "==> rivet-codegen probe-block-behaviors (live Paper per-StateId behavior table)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+        probe-block-behaviors --bundler "$PROBE_BUNDLER"
     else
       echo "    SKIPPED (no Paper bundler jar: build working/Paper (paper-bundler-*.jar) or place it in tools/rivet-oracle/work/jars/)"
     fi
