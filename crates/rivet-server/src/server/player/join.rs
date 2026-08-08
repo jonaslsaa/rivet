@@ -46,9 +46,10 @@
 //! below — three vanilla levels, `max_players 20`, the world-border defaults,
 //! the two clocks, the `RivetProbe` profile — are pinned by that fixture's
 //! `join_clientbound_*.hex` golden bodies. The `capture.jsonl` is the
-//! NORMALIZED capture (`normalize::canonicalize`): Slice A selects its bodies
-//! and order from that normalized form despite the raw capture interleaving
-//! the proxy's two relay streams and more than one connection's traffic.
+//! NORMALIZED capture (`normalize::canonicalize`): it supplies Slice A's
+//! BODIES, but canonicalize groups by `(state, direction, id)` and so erases
+//! ORDER — the burst order comes from `PLAY_BURST_ORDER` / the Paper source,
+//! not from the normalized capture's (or the raw capture's) positional order.
 
 use rivet_protocol::generated::packets::play::clientbound::PacketType;
 use rivet_protocol::protocol::game::clientbound_change_difficulty::ClientboundChangeDifficultyPacket;

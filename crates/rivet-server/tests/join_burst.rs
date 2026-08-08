@@ -8,12 +8,14 @@
 //! offline superflat world, seed 42, view distance 4). The committed capture is
 //! the deterministic canonical form (`normalize::canonicalize`), not the raw
 //! transcript: the raw capture interleaves the proxy's two relay streams and
-//! more than one connection's traffic, so Slice A's bodies and order are
-//! selected from the normalized capture rather than inferred from raw
-//! positional adjacency. Each body is the packet payload the capture proxy
-//! strips (packet id + compression prefix already removed, randomized fields
-//! canonicalized), so the byte-exact assertions compare an encoded burst member
-//! against the capture's normalized body. The four `rivet-protocol`
+//! more than one connection's traffic. The `canonicalize` function groups by
+//! `(state, direction, id)`, so the normalized capture supplies Slice A's
+//! BODIES but erases ORDER — the burst order comes from `PLAY_BURST_ORDER` /
+//! the Paper source, not from the capture's positional adjacency. Each body is
+//! the packet payload the capture proxy strips (packet id + compression prefix
+//! already removed, randomized fields canonicalized), so the byte-exact
+//! assertions compare an encoded burst member against the capture's normalized
+//! body. The four `rivet-protocol`
 //! `join_clientbound_*.hex` fixtures pin the same bodies. Slice A covers ids
 //! `[49,10,64,105,72,43,113,97,38,70]` — the ten members Paper sends in between
 //! (see the authoritative list in `join.rs`'s module doc) are deferred.
