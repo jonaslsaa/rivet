@@ -7,7 +7,6 @@ use tokio::net::TcpListener;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use super::connection::{Connection, InboundOutcome};
@@ -419,6 +418,14 @@ async fn conn_loop(
     // to tick.
     let mut tick = tokio::time::interval(config.tick_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Paper's `ReadTimeoutHandler(30)` — the read-idle deadline. It gates socket
+    // reads (a read completes within `config.read_timeout`), independently of
+    // the keepalive, which gates only the configuration listener's own 1s
+    // throttle + `keepalive_timeout` kick and is driven per `tick_interval`
+    // above. The deadline is refreshed only on a completed read, never on a tick
+    // or an outbound drain (netty's IdleStateHandler counts channel reads
+    // only), so the keepalive tick cannot keep restarting it.
+    let mut read_deadline = tokio::time::Instant::now() + config.read_timeout;
     loop {
         // Non-blocking drain of whatever the tick thread has queued.
         if let Some(reason) = drain_outbound(conn, &mut out_rx).await {
@@ -492,10 +499,14 @@ async fn conn_loop(
                 // One event handled; loop to drain the rest and flush.
                 continue;
             }
-            _ = timeout(config.read_timeout, std::future::pending::<()>()) => {
+            // The read-idle arm: fires at the deadline, independent of how many
+            // times the tick arm restarted the `select!` since the last read.
+            _ = tokio::time::sleep_until(read_deadline) => {
                 return DisconnectReason::Timeout;
             }
         };
+        // A completed socket read is reader-idle progress: refresh the deadline.
+        read_deadline = tokio::time::Instant::now() + config.read_timeout;
         // Decode panics (a truncated scalar read — `FriendlyByteBuf.readLong`
         // on a short body) are caught at the decode boundary in
         // [`decode_packet`], which returns a clean `DisconnectReason::Malformed`
@@ -1313,5 +1324,149 @@ mod tests {
         let challenge = read_frame(&mut client).await;
         assert_eq!(challenge[0], 0x04, "configuration keep_alive packet id");
         assert_eq!(challenge.len(), 9, "id varint + 8-byte body");
+    }
+
+    /// The read-idle timeout is Paper's `ReadTimeoutHandler(30)`, independent of
+    /// the keepalive: a silent client under a handshake listener (nothing for
+    /// the keepalive to drive) with a 100ms read timeout and a 20ms tick is
+    /// closed at the deadline. Before the deadline fix, the tick arm restarted
+    /// the `timeout(pending())` select arm every 20ms, so the read-idle timer
+    /// never expired and the loop spun forever at the tick cadence.
+    #[tokio::test]
+    async fn conn_loop_read_idle_timeout_fires_despite_keepalive_tick() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        let config = Arc::new(ServerConfig {
+            tick_interval: Duration::from_millis(20),
+            read_timeout: Duration::from_millis(100),
+            ..ServerConfig::default()
+        });
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+            InboundDrained::new(),
+        );
+        let mut listener_box: Box<dyn PacketListener> = Box::new(ServerHandshakePacketListener);
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        let (_out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let endpoint = test_endpoint();
+
+        let start = std::time::Instant::now();
+        let task = tokio::spawn(async move {
+            conn_loop(
+                &mut conn,
+                &mut listener_box,
+                &config,
+                read,
+                out_rx,
+                &in_tx,
+                &endpoint,
+                shutdown,
+            )
+            .await
+        });
+        let reason = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the read-idle deadline must exit the loop, not spin at the tick cadence")
+            .unwrap();
+        assert_eq!(reason, DisconnectReason::Timeout);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the read-idle timeout fires at ~100ms, not later"
+        );
+        // The handshake listener transmits nothing; a read-idle close writes no
+        // keepalive challenge either.
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            client.try_read(&mut buf).unwrap_or(0),
+            0,
+            "the read-idle close leaves the wire empty"
+        );
+    }
+
+    /// The read-idle deadline beats the keepalive when it is sooner: a silent
+    /// configuration client with a 150ms read timeout is closed by the read-idle
+    /// timer before the keepalive's 1s transmit throttle could send its first
+    /// challenge — `Timeout` at ~150ms with nothing on the wire. This
+    /// distinguishes the read-idle timer from the keepalive timeout, which
+    /// transmits a challenge first and fires only after `keepalive_timeout`
+    /// (the converse is `conn_loop_config_keepalive_interval_drives_transmit_and_timeout`).
+    #[tokio::test]
+    async fn conn_loop_read_idle_timeout_beats_keepalive_with_silent_config_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        let config = Arc::new(ServerConfig {
+            tick_interval: Duration::from_millis(20),
+            read_timeout: Duration::from_millis(150),
+            ..ServerConfig::default()
+        });
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+            InboundDrained::new(),
+        );
+        conn.set_outbound_protocol(ConnectionProtocol::Configuration);
+        // A live keepalive that would transmit its first challenge after the 1s
+        // throttle — far beyond the 150ms read deadline.
+        let config_listener = ServerConfigurationPacketListener::new(
+            GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ),
+            conn.monotonic_nanos(),
+            Duration::from_secs(30).as_nanos() as i64,
+        );
+        let mut listener_box: Box<dyn PacketListener> = Box::new(config_listener);
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        let (_out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let endpoint = test_endpoint();
+
+        let start = std::time::Instant::now();
+        let task = tokio::spawn(async move {
+            conn_loop(
+                &mut conn,
+                &mut listener_box,
+                &config,
+                read,
+                out_rx,
+                &in_tx,
+                &endpoint,
+                shutdown,
+            )
+            .await
+        });
+        let reason = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the read-idle deadline must exit the loop, not spin at the tick cadence")
+            .unwrap();
+        assert_eq!(reason, DisconnectReason::Timeout);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "the read-idle timeout fired before the keepalive's 1s transmit throttle"
+        );
+        // No keepalive challenge reached the client: the close was the read-idle
+        // deadline, not the keepalive timeout.
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            client.try_read(&mut buf).unwrap_or(0),
+            0,
+            "the keepalive never transmitted before the read-idle close"
+        );
     }
 }
