@@ -343,11 +343,23 @@ derived** — a Rivet seam (see §8).
 
 ### 6.4 `PostProcessing` (L175-189 read, L626 + L768-783 write)
 
-A `ListTag` with **one entry per section** (every section gets an entry);
-each entry is a `ListTag` of shorts (`ShortTag.valueOf(...)`), or an **empty**
-list when the section has none (L768-783). Read: null/empty → null entry
-(L178-189). The index maps to the section index; the list length is the number
-of sections, not the height range.
+A `ListTag` with **one entry per block section**, not per `sections`-list
+entry. `packOffsets` emits one entry per element of `postProcessingSections`
+(L768-783), which `copyOf` copies 1:1 from `chunk.getPostProcessing()`
+(L521-525) — an array sized `new ShortList[levelHeightAccessor.getSectionsCount()]`
+(ChunkAccess.java L153), i.e. the block-section count (`getMaxSectionY() -
+getMinSectionY() + 1`, LevelHeightAccessor.java L15-17). Each entry is a
+`ListTag` of shorts (`ShortTag.valueOf(...)`), or an **empty** list when the
+block section has none (L768-783). Read: null/empty → null entry (L178-189).
+The index `i` maps to the block-section index (into `chunk.getSections()`,
+`i == sectionY - getMinSectionY()`), not to a position in the `sections` list.
+The list length is the block-section count, not the `sections`-list length:
+starlight light sections extend one section above and below the block range
+(`getMinLightSection`/`getMaxLightSection`, L454-489; WorldUtil.java L26-31),
+so the `sections` list can be longer. The committed fixture has 25 `sections`
+entries (Y −5..19; the −5 entry is light-only — starlight state tags but no
+`block_states`/`BlockLight`/`SkyLight`) but only 24 `PostProcessing` entries
+(block sections Y −4..19).
 
 ### 6.5 `carving_mask` (L165 read, L620-622 write, L436)
 
