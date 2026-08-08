@@ -11,11 +11,12 @@ implement, it does not implement storage code and it does not invent APIs.
 - `.../storage/RegionFileVersion.java`
 - `.../storage/RegionBitmap.java`
 - `.../storage/RegionFileStorage.java`
-- `.../storage/IOWorker.java`
+- `.../storage/IOWorker.java` (vanilla async façade; live chunk I/O is moonrise, §11)
 - `.../storage/SimpleRegionStorage.java`
 - `.../storage/SectionStorage.java`
 - `.../storage/RegionStorageInfo.java`
 - `.../storage/SerializableChunkData.java` (chunk coordinate / save-time helpers only)
+- `.../ca/spottedleaf/moonrise/patches/chunk_system/io/MoonriseRegionFileIO.java` (live async I/O, §11)
 - `.../net/minecraft/nbt/NbtIo.java` (root-tag framing)
 - `.../net/minecraft/world/level/ChunkPos.java` (region math)
 
@@ -225,9 +226,11 @@ read `<regionfile-base>_oversized_<x>_<z>.nbt` and merge its `Entities` / `TileE
 the region-file record's lists". The region file still holds a real (possibly partial) chunk compound;
 the oversized file supplements it.
 
-**[Paper]** This is **legacy-write path**: `RegionFileStorage.write` (the moonrise-rewritten path
-used for chunks) explicitly calls `region.setOversized(..., false)` and the comment says "We don't do
-this anymore, mojang stores differently, but clear old meta flag if it exists". The only active
+**[Paper]** This is **legacy-write path**: the legacy `RegionFileStorage.write` explicitly calls
+`region.setOversized(..., false)` with the comment "We don't do this anymore, mojang stores
+differently, but clear old meta flag if it exists". Note the moonrise chunk-write path
+(`moonrise$startWrite`/`moonrise$finishWrite`) never touches Aikar oversized at all — it only does
+so indirectly by going through `RegionFile.write`, which has no Aikar interaction. The only active
 producers of Aikar files are old saves / the header-recalc path, which re-derives the meta flags
 from existing `*.oversized.nbt` files (§8).
 
@@ -310,14 +313,20 @@ by the soft-failure path above. Steps:
    so overlapping/duplicate data gets only one owner; oversized stubs are re-emitted into newly
    allocated single sectors, each stub carrying the codec id that was detected for its `.mcc` file.
 6. Timestamps are rewritten (present → now, absent → 0) — "simply destroy the timestamp header".
-7. The header is flushed and `force(true)`-ed.
+7. The repaired header is **not** written back to disk: the step ends with `flush()` — which is only
+   `file.force(true)` — plus an extra `file.force(true)`, and `writeHeader()` is never called (the
+   "Successfully wrote new header to disk" log is misleading). The repaired `offsets`/`timestamps`
+   live only in the in-memory header buffer for the rest of the session; the on-disk header stays
+   corrupt until a later recalc re-repairs it in memory on reopen.
 
 After recalc the in-memory `usedSectors` is `copyFrom` the fresh bitmap.
 
 **[Rivet]** Port both tiers. The recalc must reproduce `roundToSectors`, the `LastUpdate`-based
 newest-wins tie-break, the `getChunkCoordinate` slot matching, and the "fresh bitmap" re-allocation
 — this is a data-recovery path where subtle divergence silently mis-links chunks. `roundToSectors`:
-`sectors = bytes >>> 12; rem = bytes & 4095; sectors + (rem != 0 ? 1 : 0)`.
+`sectors = bytes >>> 12; rem = bytes & 4095; sectors + (rem != 0 ? 1 : 0)`. Also reproduce that recalc
+never writes the header back to disk (step 7): the repaired header is memory-only for the session,
+and a port that calls `writeHeader()` on recalc would change on-disk bytes Paper leaves untouched.
 
 ---
 
@@ -368,29 +377,35 @@ format concern; keep an equivalent toggle so the write can be split from seriali
 
 ---
 
-## 11. IOWorker ordering relevant to the region-file layer
+## 11. Asynchronous I/O ordering relevant to the region-file layer
 
-**[Paper]** `IOWorker` is the async façade over `RegionFileStorage`; it is a
-`PriorityConsecutiveExecutor` with three priorities: `FOREGROUND`, `BACKGROUND`, `SHUTDOWN`. The
-region-file layer only ever sees work serialized through this executor:
+**[Paper]** In Paper 26.2 the *live* chunk I/O path is **not** `IOWorker` (the vanilla async façade
+exists only for the world-upgrader — `SimpleRegionStorage` constructs `new IOWorker(...).storage`
+and keeps only the `RegionFileStorage`, and `RecreatingSimpleRegionStorage`'s `writeWorker` is the
+upgrader path). Live chunk I/O is driven by the moonrise chunk system
+(`ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO`):
 
-- **Pending-write coalescing:** `store(pos, data)` records the latest `CompoundTag` per `ChunkPos`
-  in `pendingWrites` (a `LinkedHashMap`) and returns the same shared future on re-store; that future
-  completes later when the `BACKGROUND` runnable performs `storePendingChunk` → `storage.write`.
-  A `loadAsync` / `scanChunk` for a pos with a pending write serves the in-memory copy, not the disk.
-- **Write serialization:** all region-file access is synchronized on the single `RegionFile`
-  (`RegionFile.write` and `getChunkDataInputStream` are `synchronized`); the executor provides
-  ordering so a chunk's write is not interleaved with its own read, and `synchronize(flush)` drains
-  pending writes (`allOf` the store futures) and then `storage.flush()`.
-- **Shutdown:** `close()` sets `shutdownRequested`, schedules a `SHUTDOWN`-priority barrier, closes
-  the executor, then closes storage. No new work is accepted after the barrier.
+- **Per-type controller:** each `RegionDataController` (one per `RegionFileType`, e.g. chunk data,
+  POI, entities) owns a `PrioritisedExecutor` for compression/serialization and an
+  `AreaDependentQueue` for blocking I/O. `createRegionIoTask` keys I/O on the **region**
+  (`chunkX >> 5, chunkZ >> 5`), so all disk access touching one region file is serialized.
+- **Per-chunk coalescing:** one `ChunkIOTask` per `ChunkPos` in `chunkTasks`; a re-store replaces the
+  pending `CompoundTag` in the in-progress write (`allPendingWrites`), so only the latest data is
+  written, and a concurrent read of a chunk with an in-progress write is served from memory.
+- **RegionFile mutual exclusion:** `RegionFile.write` and `getChunkDataInputStream` are still
+  `synchronized`, so even with multiple controllers/executors a single `RegionFile` handle is never
+  touched concurrently; the queue only adds ordering, not additional locking.
+- **Flush:** a per-chunk `flushRegionsOnSave` config (`paperConfig().chunks.flushRegionsOnSave`)
+  calls `RegionFile.flush()` after each `finishWrite` when enabled; otherwise fsync happens at
+  close/eviction.
 
-**[Rivet]** The IOWorker ordering that matters to the region-file layer is: (a) one logical writer per
-region file (mutual exclusion over a `RegionFile` handle), (b) pending-write coalescing so the last
-`store` for a chunk is what lands on disk, (c) drain-then-flush on `synchronize`, (d) no writes after
-shutdown. Replicate these invariants; the executor mechanics (Java `Concurrent`/`Priority`
-threading) are an implementation surface, not part of the on-disk format, and Rivet's own threading
-model (D5) governs their port.
+**[Rivet]** The ordering that matters to the region-file layer is: (a) one logical writer per region
+file (mutual exclusion over a `RegionFile` handle), (b) per-chunk write coalescing so the last
+store for a chunk is what lands on disk, (c) reads of a chunk with a pending write serve the
+in-memory copy, not the disk, (d) no writes after shutdown. Replicate these invariants; the
+executor mechanics (Java `Concurrent`/`Priority` threading, moonrise's `AreaDependentQueue`) are an
+implementation surface, not part of the on-disk format, and Rivet's own threading model (D5)
+governs their port.
 
 ---
 
