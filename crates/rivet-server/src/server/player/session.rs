@@ -342,7 +342,8 @@ impl PlayerSessionManager {
         // abort the tick: a truncated body (`read_long` on < 8 remaining bytes
         // panics) is dropped and logged, not counted — `keep_alives_seen` only
         // counts frames whose body parsed, matching the decode-boundary
-        // containment of [`decode_packet`].
+        // containment of
+        // [`crate::server::network::packet_listener::decode_packet`].
         let mut raw = bytes::BytesMut::from(&frame.bytes[..]);
         let _ = rivet_protocol::var_int::read(&mut raw); // packet id
         let mut input = FriendlyByteBuf::new(raw);
