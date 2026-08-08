@@ -68,7 +68,8 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
 
     /// `getReferencesForStructure(Structure)` — iterate the reference set for a
     /// structure, or yield nothing when absent (Java's `EMPTY_REFERENCE_SET`).
-    /// `IndexSet` has no contiguous `&[u64]` view, so the port returns an
+    /// `IndexSet` exposes its entries as a contiguous `Slice` facade
+    /// (`as_slice()`) but not as a literal `&[u64]`, so the port returns an
     /// iterator, matching Java's `LongSet` callers which only iterate it.
     pub fn get_references_for_structure<'a>(
         &'a self,
