@@ -38,6 +38,7 @@ pub mod tag_type;
 pub mod tag_types;
 pub mod tag_visitor;
 pub mod text_component_tag_visitor;
+pub mod unicode_name_table;
 
 pub mod visitors;
 

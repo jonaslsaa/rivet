@@ -26,13 +26,10 @@
 //!   `NbtFormatException` carrying the full `getMessage()` text, i.e.
 //!   `"<reason> at position <cursor>: <context><--[HERE]"`.
 //!
-//! RivetTodo(#203): the public `Codec<CompoundTag>` surfaces
-//! `TagParser.FLATTENED_CODEC` and `TagParser.LENIENT_CODEC`, and the public
-//! `char` constants `ELEMENT_SEPARATOR` (`,`) and `NAME_VALUE_SEPARATOR`
-//! (`:`), are not ported — they are the DFU `Codec`/`Codec.STRING` /
-//! `Codec.withAlternative` surface, which now exists in `rivet-serialization`.
-//! They are called out here so the omission is explicit rather than silent.
-//! (The printer defines its own private `ELEMENT_SEPARATOR`/
+//! The public DFU `Codec` surfaces `TagParser.FLATTENED_CODEC` /
+//! `LENIENT_CODEC` (built by [`flattened_codec`]/[`lenient_codec`]) and the
+//! `char` constants [`ELEMENT_SEPARATOR`]/[`NAME_VALUE_SEPARATOR`] are ported.
+//! (The SNBT printer defines its own private `ELEMENT_SEPARATOR`/
 //! `NAME_VALUE_SEPARATOR`, which are a different class's constants and are
 //! ported in `snbt_printer_tag_visitor`.)
 
@@ -41,7 +38,10 @@ use crate::nbt_format_exception::NbtFormatException;
 use crate::nbt_ops::NbtOps;
 use crate::snbt_operations::{BUILTIN_FALSE, BUILTIN_TRUE, BuiltinKey, find_builtin, run_builtin};
 use crate::tag::Tag;
+use crate::unicode_name_table::CodePointOfError;
 use rivet_serialization::dynamic_ops::{DynamicOps, Pair};
+use rivet_serialization::{Codec, DataResult, Lifecycle, codec};
+use std::sync::Arc;
 
 // ---- Unicode helpers (the `StringReader.skipWhitespace` /
 // `Character.isWhitespace` surface the grammar needs). Java indices are UTF-16
@@ -1026,9 +1026,7 @@ impl SnbtParser {
     }
 
     /// `stringEscapeSequence` action — convert `\xHH`/`\uHHHH`/`\UHHHHHHHH`
-    /// hex escapes and `\N{name}`. RivetTodo(#203): `Character.codePointOf`
-    /// (the Unicode name database) is not ported, so `\N{...}` always reports
-    /// an invalid character name until the name table is ported.
+    /// hex escapes and `\N{name}`.
     ///
     /// The escape is always 2/4/8 hex digits, so `codepoint` is at most
     /// 0xFFFFFFFF; the only invalid cases are out-of-codepoint (> 0x10FFFF,
@@ -1082,15 +1080,52 @@ impl SnbtParser {
                 self.restore(mark);
             }
         }
-        // \N{name} — RivetTodo(#203): Character.codePointOf is not ported.
+        // \N{name} — resolve the name through the `Character.codePointOf`
+        // name database (`unicode_name_table`), mirroring `SnbtGrammar`'s
+        // `try { codePoint = Character.codePointOf(character); } catch
+        // (IllegalArgumentException e) { store ERROR_INVALID_CHARACTER_NAME }`.
         if self.try_char(b'N' as u16) {
             if self.try_char(b'{' as u16)
-                && self.parse_unicode_name().is_some()
+                && let Some(name) = self.parse_unicode_name()
                 && self.try_char(b'}' as u16)
             {
-                self.store(self.mark(), ERROR_INVALID_CHARACTER_NAME, true);
-                self.restore(mark);
-                return None;
+                match crate::unicode_name_table::code_point_of(&name) {
+                    Ok(cp) => match char::from_u32(cp) {
+                        // `code_point_of` returns `Ok` only for valid scalar
+                        // code points (the table excludes surrogates and
+                        // > MAX_CODE_POINT), so this always holds; the error
+                        // arm is defensive only and never panics.
+                        Some(c) => return Some(c.to_string()),
+                        None => {
+                            self.store(
+                                self.mark(),
+                                format!("{ERROR_INVALID_CODEPOINT_PREFIX}U+{cp:08X}"),
+                                true,
+                            );
+                            self.restore(mark);
+                            return None;
+                        }
+                    },
+                    Err(CodePointOfError::UnknownName) => {
+                        self.store(self.mark(), ERROR_INVALID_CHARACTER_NAME, true);
+                        self.restore(mark);
+                        return None;
+                    }
+                    Err(CodePointOfError::LoneSurrogate(cp)) => {
+                        // Java's `codePointOf` resolves e.g. `\N{HIGH SURROGATES
+                        // D800}` and `Character.toString` returns a String holding
+                        // the lone surrogate; Rust `char` cannot represent one, so
+                        // the escape is a documented divergence — same
+                        // invalid-codepoint error as the `\uHHHH` surrogate path.
+                        self.store(
+                            self.mark(),
+                            format!("{ERROR_INVALID_CODEPOINT_PREFIX}U+{cp:08X}"),
+                            true,
+                        );
+                        self.restore(mark);
+                        return None;
+                    }
+                }
             }
             self.restore(mark);
         }
@@ -1727,6 +1762,12 @@ fn clean_and_append(output: &mut String, contents: &str) {
 
 // ---- `TagParser` ----
 
+/// `TagParser.ELEMENT_SEPARATOR` — `,`.
+pub const ELEMENT_SEPARATOR: char = ',';
+
+/// `TagParser.NAME_VALUE_SEPARATOR` — `:`.
+pub const NAME_VALUE_SEPARATOR: char = ':';
+
 /// `TagParser<T>` specialised to `NbtOps` (the crate's only parser,
 /// `NBT_OPS_PARSER = create(NbtOps.INSTANCE)`). Java keeps the ops generic;
 /// `getOps()` is preserved.
@@ -1774,6 +1815,40 @@ impl TagParser {
             None => Err(parser.failure()),
         }
     }
+}
+
+/// `TagParser.FLATTENED_CODEC` — `Codec.STRING.comapFlatMap(parse, toString)`.
+///
+/// Encodes a compound as its SNBT string. Decodes by parsing the string and
+/// requiring a compound result: a compound is `DataResult::success(...,
+/// Lifecycle::stable())` (mirroring Java's explicit `DataResult.success(
+/// compoundTag, Lifecycle.stable())`), a non-compound result errors with
+/// `"Expected compound tag, got " + <SNBT>`, and a parse failure surfaces the
+/// `CommandSyntaxException.getMessage()` text.
+pub fn flattened_codec() -> Arc<dyn Codec<CompoundTag, NbtOps>> {
+    codec::comap_flat_map(
+        codec::string_codec::<NbtOps>(),
+        Arc::new(|s: &String| -> DataResult<CompoundTag> {
+            match TagParser::create(NbtOps::instance()).parse_fully(s) {
+                Ok(Tag::Compound(c)) => DataResult::success_with_lifecycle(c, Lifecycle::stable()),
+                Ok(other) => DataResult::error(format!("Expected compound tag, got {other}")),
+                Err(e) => DataResult::error(e.message),
+            }
+        }),
+        Arc::new(|c: &CompoundTag| {
+            crate::string_tag_visitor::StringTagVisitor::to_string(&Tag::Compound(c.copy_tag()))
+        }),
+    )
+}
+
+/// `TagParser.LENIENT_CODEC` — `Codec.withAlternative(FLATTENED_CODEC,
+/// CompoundTag.CODEC)`. Tries the SNBT-string form first, then falls back to a
+/// raw compound tag.
+pub fn lenient_codec() -> Arc<dyn Codec<CompoundTag, NbtOps>> {
+    codec::with_alternative(
+        flattened_codec(),
+        crate::compound_tag::compound_tag_codec::codec(),
+    )
 }
 
 /// `TagParser.parseCompoundFully(String)` — parse SNBT and require a compound
@@ -2341,5 +2416,217 @@ mod tests {
             err.contains("Expected a valid unquoted string"),
             "err = {err}"
         );
+    }
+
+    #[test]
+    fn named_unicode_escape_resolves_real_names() {
+        // `Character.codePointOf` name lookups (the JDK name database).
+        assert_eq!(
+            parse(r#""\N{SNOWMAN}""#),
+            Tag::String(StringTag::value_of("☃".into()))
+        );
+        assert_eq!(
+            parse(r#""\N{BLACK HEART SUIT}""#),
+            Tag::String(StringTag::value_of("♥".into()))
+        );
+        // Case-insensitive and whitespace-trimmed lookup (`name.trim()
+        // .toUpperCase(Locale.ROOT)`).
+        assert_eq!(
+            parse(r#""\N{snowman}""#),
+            Tag::String(StringTag::value_of("☃".into()))
+        );
+        assert_eq!(
+            parse(r#""\N{  SNOWMAN  }""#),
+            Tag::String(StringTag::value_of("☃".into()))
+        );
+        // An astral-plane codepoint (LINEAR B SYLLABLE B008 A).
+        assert_eq!(
+            parse(r#""\N{LINEAR B SYLLABLE B008 A}""#),
+            Tag::String(StringTag::value_of("\u{10000}".into()))
+        );
+    }
+
+    #[test]
+    fn named_unicode_escape_resolves_algorithmic_names() {
+        // Code points with no canonical name resolve through their algorithmic
+        // `<UnicodeBlock> <hex>` spelling (JDK `Character.codePointOf` probes).
+        assert_eq!(
+            parse(r#""\N{CJK UNIFIED IDEOGRAPHS 4E00}""#),
+            Tag::String(StringTag::value_of("\u{4E00}".into()))
+        );
+        assert_eq!(
+            parse(r#""\N{HANGUL SYLLABLES AC00}""#),
+            Tag::String(StringTag::value_of("\u{AC00}".into()))
+        );
+        assert_eq!(
+            parse(r#""\N{CJK UNIFIED IDEOGRAPHS EXTENSION A 3400}""#),
+            Tag::String(StringTag::value_of("\u{3400}".into()))
+        );
+        assert_eq!(
+            parse(r#""\N{CJK UNIFIED IDEOGRAPHS EXTENSION B 20000}""#),
+            Tag::String(StringTag::value_of("\u{20000}".into()))
+        );
+        // Case-insensitive + trimmed algorithmic lookup, exactly like Java.
+        assert_eq!(
+            parse(r#""\N{  cjk unified ideographs 4e00  }""#),
+            Tag::String(StringTag::value_of("\u{4E00}".into()))
+        );
+    }
+
+    #[test]
+    fn named_unicode_escape_surrogate_is_invalid_codepoint() {
+        // Java's `codePointOf("HIGH SURROGATES D800")` = 0xD800 and
+        // `Character.toString` yields a String holding the lone surrogate; Rust
+        // `char` cannot represent one, so this is the documented divergence —
+        // the same invalid-codepoint error as the `\uHHHH` surrogate path.
+        let err = parse_err(r#""\N{HIGH SURROGATES D800}""#);
+        assert!(
+            err.contains("Invalid Unicode character value: U+0000D800"),
+            "err = {err}"
+        );
+        // A non-matching name whose suffix parses as a surrogate is an unknown
+        // name, not a surrogate (Java throws `IllegalArgumentException`).
+        let err = parse_err(r#""\N{NONSENSE D800}""#);
+        assert!(
+            err.contains("Invalid Unicode character name"),
+            "err = {err}"
+        );
+    }
+
+    #[test]
+    fn named_unicode_escape_rejects_unknown_names() {
+        // A name that is not in Java's `CharacterName` table → the
+        // `snbt.parser.invalid_character_name` error.
+        let err = parse_err(r#""\N{NOT A REAL UNICODE NAME}""#);
+        assert!(
+            err.contains("Invalid Unicode character name"),
+            "err = {err}"
+        );
+
+        // The known Java-rejected cases (Java's name database has no aliases
+        // for these — they must NOT resolve).
+        for name in [
+            "NUL",
+            "TAB",
+            "LF",
+            "LINE FEED",
+            "CARRIAGE RETURN",
+            "CJK UNIFIED IDEOGRAPH-4E00",
+            "HANGUL SYLLABLE AC00",
+        ] {
+            let input = format!(r#""\N{{{name}}}""#);
+            let err = parse_err(&input);
+            assert!(
+                err.contains("Invalid Unicode character name"),
+                "name {name:?} should fail, err = {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn named_unicode_escape_grammar_boundaries() {
+        // Missing closing brace: `{` commits the escape, the greedy name
+        // reads "SNOWMAN", and `character('}')` fails — the farthest error is
+        // the stored "Expected literal }" (SnbtGrammar `Term.sequence`).
+        let err = parse_err(r#""\N{SNOWMAN"#);
+        assert!(err.contains("Expected literal }"), "err = {err}");
+
+        // Empty name → GreedyPatternParseRule(UNICODE_NAME) fails with
+        // ERROR_INVALID_CHARACTER_NAME.
+        let err = parse_err(r#""\N{}""#);
+        assert!(
+            err.contains("Invalid Unicode character name"),
+            "err = {err}"
+        );
+
+        // A char outside `[-a-zA-Z0-9 ]` (e.g. `_`) truncates the greedy
+        // name to "SNOW", so `character('}')` again fails → "Expected literal }".
+        let err = parse_err(r#""\N{SNOW_MAN}""#);
+        assert!(err.contains("Expected literal }"), "err = {err}");
+    }
+
+    #[test]
+    fn flattened_codec_round_trip() {
+        let ops = NbtOps::instance();
+        let codec = flattened_codec();
+        let mut original = CompoundTag::new();
+        original.put_string("name", "steve");
+        original.put_int("lives", 3);
+
+        // Encode → SNBT string.
+        let encoded = codec
+            .encode_start(&ops, &original)
+            .get_or_throw("encode")
+            .clone();
+        assert!(matches!(encoded, Tag::String(_)), "encoded = {encoded:?}");
+        // Decode → equal compound (via the string form).
+        let decoded = codec.parse(&ops, &encoded).get_or_throw("parse").clone();
+        assert_eq!(decoded, original);
+
+        // Round trip preserves the compound even when the string is a plain
+        // single key (SNBT `{name:steve}`).
+        let direct = codec
+            .parse(&ops, &Tag::String(StringTag::value_of("{a:1}".into())))
+            .get_or_throw("parse")
+            .clone();
+        let mut expect = CompoundTag::new();
+        expect.put_int("a", 1);
+        assert_eq!(direct, expect);
+    }
+
+    #[test]
+    fn flattened_codec_rejects_non_compound() {
+        let ops = NbtOps::instance();
+        let codec = flattened_codec();
+        // A non-compound SNBT string is an error.
+        let result = codec.parse(&ops, &Tag::String(StringTag::value_of("42".into())));
+        assert!(result.error_ref().is_some(), "expected error for 42");
+        assert!(
+            result
+                .error_ref()
+                .unwrap()
+                .message()
+                .contains("Expected compound tag, got 42"),
+            "msg = {:?}",
+            result.error_ref().unwrap().message()
+        );
+
+        // A malformed SNBT string is an error carrying the parse message.
+        let result = codec.parse(&ops, &Tag::String(StringTag::value_of("{".into())));
+        assert!(result.error_ref().is_some(), "expected error for {{");
+
+        // A non-string tag fails the underlying `Codec.STRING` decode (the
+        // flattened codec only ever reads strings).
+        let result = codec.parse(&ops, &Tag::Int(IntTag::value_of(42)));
+        assert!(result.error_ref().is_some(), "expected error for int tag");
+    }
+
+    #[test]
+    fn lenient_codec_falls_back_to_raw_compound() {
+        let ops = NbtOps::instance();
+        let codec = lenient_codec();
+        let mut original = CompoundTag::new();
+        original.put_int("x", 7);
+
+        // Encodes via the primary (SNBT-string) alternative.
+        let encoded = codec
+            .encode_start(&ops, &original)
+            .get_or_throw("encode")
+            .clone();
+        assert!(matches!(encoded, Tag::String(_)), "encoded = {encoded:?}");
+
+        // Decodes a raw compound tag (which the string codec rejects) via the
+        // alternative `CompoundTag.CODEC`.
+        let decoded = codec
+            .parse(&ops, &Tag::Compound(original.clone()))
+            .get_or_throw("parse")
+            .clone();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn element_and_name_value_separators_match_java() {
+        assert_eq!(ELEMENT_SEPARATOR, ',');
+        assert_eq!(NAME_VALUE_SEPARATOR, ':');
     }
 }
