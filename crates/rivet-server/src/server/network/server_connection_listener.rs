@@ -423,8 +423,8 @@ async fn conn_loop(
     // the keepalive, which gates only the configuration listener's own 1s
     // throttle + `keepalive_timeout` kick and is driven per `tick_interval`
     // above. The deadline is refreshed only on a completed read, never on a tick
-    // or an outbound drain (netty's IdleStateHandler counts channel reads
-    // only), so the keepalive tick cannot keep restarting it.
+    // or an outbound drain (netty's `ReadTimeoutHandler` counts reads only),
+    // so the keepalive tick cannot keep restarting it.
     let mut read_deadline = tokio::time::Instant::now() + config.read_timeout;
     loop {
         // Non-blocking drain of whatever the tick thread has queued.
