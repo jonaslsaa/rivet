@@ -17,7 +17,8 @@
 //! The `Level.OVERWORLD`/`NETHER`/`END` `ResourceKey<Level>` constants are not
 //! `const`: `ResourceKey` owns an `Identifier` (a `String`), so Java's static
 //! finals become `fn` accessors (the `registries::DIMENSION` key is a
-//! `LazyLock` in `rivet-registry`).
+//! `LazyLock` in `rivet-registry`). `dimension()` returns a `&ResourceKey`
+//! mirroring the field-backed Java accessor.
 
 use rivet_registry::Identifier;
 use rivet_registry::ResourceKey;

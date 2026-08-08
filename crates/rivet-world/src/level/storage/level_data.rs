@@ -45,7 +45,13 @@ pub trait LevelData {
 /// Java record `RespawnData(GlobalPos globalPos, float yaw, float pitch)`.
 /// `LevelData.RespawnData.of` normalizes the angles (`Mth.wrapDegrees` yaw,
 /// `Mth.clamp(pitch, -90, 90)`); the record constructor stores the raw values.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// No `PartialEq`: the Java record's generated `equals` compares `float`
+/// components with `Float.compare` (NaN equal, `+0.0 != -0.0`), which Rust's
+/// derived `f32` `PartialEq` does not match. The seam needs only
+/// [`RespawnData::position_equals`] (Paper's plain-`==` variant); whole-record
+/// equality defers with the codec surface (issue #126).
+#[derive(Clone, Debug)]
 pub struct RespawnData {
     global_pos: GlobalPos,
     yaw: f32,

@@ -5,9 +5,9 @@
 //! `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/level/
 //! LevelAccessor.java`. The #232 value slice ports the game-time seam — the
 //! read side that `SerializableChunkData.write()` resolves through `Level`
-//! (`getGameTime` → `getLevelData().getGameTime()`) — plus the `nextSubTickCount`
-//! counter. The scheduled-tick, sound/particle/event, chunk-source, random,
-//! server and CraftBukkit surfaces defer.
+//! (`getGameTime` → `getLevelData().getGameTime()`) — plus the `getDifficulty`
+//! value pass-through. The scheduled-tick, sound/particle/event, chunk-source,
+//! random, server and CraftBukkit surfaces defer.
 
 use rivet_registry::core::Difficulty;
 
@@ -20,14 +20,9 @@ use super::storage::level_data::LevelData;
 /// `CommonLevelAccessor` (`LevelReader + LevelSimulatedRW + EntityGetter`) and
 /// `ScheduledTickAccess` (the scheduled-tick surface) are not part of this
 /// unit's file list; `LevelReader` is the ported ancestor. The scheduled-tick
-/// `createTick`/`scheduleTick` defaults and the `ScheduledTick` type defer
-/// with the ticks unit.
+/// `createTick`/`scheduleTick` defaults, the `ScheduledTick` type, and
+/// `nextSubTickCount` (tick-loop mutable state) defer with the ticks unit.
 pub trait LevelAccessor: LevelReader {
-    /// `nextSubTickCount()` — the monotonically increasing sub-tick counter.
-    /// Java `Level.nextSubTickCount` returns `this.subTickCount++`; the
-    /// increment is state, so this takes `&mut self` (the tick-thread owner).
-    fn next_sub_tick_count(&mut self) -> i64;
-
     /// `getLevelData()`.
     fn get_level_data(&self) -> &dyn LevelData;
 
@@ -84,7 +79,6 @@ mod tests {
     /// resolves: `level.getGameTime()` → `getLevelData().getGameTime()`.
     struct FakeLevel {
         data: FakeLevelData,
-        sub_ticks: i64,
     }
 
     impl LevelHeightAccessor for FakeLevel {
@@ -118,12 +112,6 @@ mod tests {
     }
 
     impl LevelAccessor for FakeLevel {
-        fn next_sub_tick_count(&mut self) -> i64 {
-            // `Level.nextSubTickCount()` returns `this.subTickCount++`.
-            self.sub_ticks += 1;
-            self.sub_ticks - 1
-        }
-
         fn get_level_data(&self) -> &dyn LevelData {
             &self.data
         }
@@ -136,7 +124,6 @@ mod tests {
                 difficulty: Difficulty::Hard,
                 respawn: default_respawn_data(),
             },
-            sub_ticks: 0,
         }
     }
 
@@ -151,13 +138,18 @@ mod tests {
         assert_eq!(level.get_difficulty(), Difficulty::Hard);
     }
 
+    /// Counterfactual: the game-time seam is a pass-through to `LevelData`, so
+    /// even a zero or negative tick count must flow through unchanged (Java
+    /// `getLevelData().getGameTime()` has no clamping).
     #[test]
-    fn next_sub_tick_count_increments_from_zero() {
-        // Java `Level.nextSubTickCount()` returns `this.subTickCount++`, so the
-        // first call yields 0 and each subsequent call is one higher.
-        let mut level = fake_level();
-        assert_eq!(level.next_sub_tick_count(), 0);
-        assert_eq!(level.next_sub_tick_count(), 1);
-        assert_eq!(level.next_sub_tick_count(), 2);
+    fn game_time_pass_through_is_unclamped() {
+        let level = FakeLevel {
+            data: FakeLevelData {
+                game_time: -1,
+                difficulty: Difficulty::Peaceful,
+                respawn: default_respawn_data(),
+            },
+        };
+        assert_eq!(level.get_game_time(), -1);
     }
 }

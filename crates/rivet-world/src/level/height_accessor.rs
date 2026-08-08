@@ -10,7 +10,8 @@
 //! Java.
 //!
 //! `LevelHeightAccessor.create` is the Java static factory returning an
-//! anonymous implementation; `SimpleLevelHeightAccessor` mirrors that instance.
+//! anonymous implementation; [`SimpleLevelHeightAccessor`] mirrors that
+//! instance and is returned by the module-level [`create`] fn.
 
 use rivet_registry::core::{BlockPos, SectionPos};
 
@@ -84,19 +85,12 @@ pub trait LevelHeightAccessor {
     }
 }
 
-/// `LevelHeightAccessor.create(int minY, int height)` — the concrete value
-/// Java's static factory wraps in an anonymous `LevelHeightAccessor`.
+/// The concrete accessor [`create`] returns — the value Java's static factory
+/// wraps in an anonymous `LevelHeightAccessor` implementation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimpleLevelHeightAccessor {
     min_y: i32,
     height: i32,
-}
-
-impl SimpleLevelHeightAccessor {
-    /// `LevelHeightAccessor.create(minY, height)`.
-    pub fn new(min_y: i32, height: i32) -> Self {
-        SimpleLevelHeightAccessor { min_y, height }
-    }
 }
 
 impl LevelHeightAccessor for SimpleLevelHeightAccessor {
@@ -109,9 +103,10 @@ impl LevelHeightAccessor for SimpleLevelHeightAccessor {
     }
 }
 
-/// `LevelHeightAccessor.create(int minY, int height)`.
+/// `LevelHeightAccessor.create(int minY, int height)` — the Java static
+/// factory.
 pub fn create(min_y: i32, height: i32) -> SimpleLevelHeightAccessor {
-    SimpleLevelHeightAccessor::new(min_y, height)
+    SimpleLevelHeightAccessor { min_y, height }
 }
 
 #[cfg(test)]
@@ -121,7 +116,7 @@ mod tests {
     /// The overworld's superflat height access (`min_y = -64`, `height = 384`,
     /// so `max_y = 319`, sections `-4..=19` — 24 sections).
     fn overworld() -> SimpleLevelHeightAccessor {
-        SimpleLevelHeightAccessor::new(-64, 384)
+        create(-64, 384)
     }
 
     #[test]
@@ -172,5 +167,29 @@ mod tests {
         assert_eq!(h.get_min_y(), 0);
         assert_eq!(h.get_height(), 256);
         assert_eq!(h.get_max_y(), 255);
+        // The 1.17+ overworld: minY -64, height 384.
+        let overworld = create(-64, 384);
+        assert_eq!(overworld.get_max_y(), 319);
+        assert_eq!(overworld.get_sections_count(), 24);
+    }
+
+    /// The height-arithmetic counterfactual: a Java-invalid height of 0 or a
+    /// height taller than a full world must not panic and must stay
+    /// arithmetic-exact (no saturating/checked surprises vs Java's plain `+`).
+    #[test]
+    fn height_arithmetic_never_panics_on_extremes() {
+        let empty = create(0, 0);
+        assert_eq!(empty.get_max_y(), -1);
+        // `max_section_y` (-1 >> 4) is below `min_section_y` (0 >> 4): zero
+        // sections, and no block is inside the (empty) build height.
+        assert_eq!(empty.get_sections_count(), 0);
+        assert!(!empty.is_inside_build_height(0)); // 0 > -1
+        // A height near i32::MAX saturates neither: Java `minY + height - 1`
+        // wraps in release; we mirror the plain arithmetic so no overflow
+        // panic. `max_y` wraps around and sections collapse back.
+        let huge = create(0, i32::MAX);
+        assert_eq!(huge.get_max_y(), i32::MAX - 1);
+        // `huge.get_max_section_y()` is `(i32::MAX - 1) >> 4` = 134217727.
+        assert_eq!(huge.get_max_section_y(), 134_217_727);
     }
 }
