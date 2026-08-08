@@ -55,6 +55,13 @@ const CONFIG_ACCEPT_CODE_OF_CONDUCT_ID: i32 = 9;
 /// slice forwards to the tick thread after the configuration→play handoff.
 const PLAY_KEEP_ALIVE_PACKET_ID: i32 = 28;
 
+/// Configuration serverbound id for `keep_alive` (a long body) — the config
+/// listener's keepalive reply direction.
+const CONFIG_KEEP_ALIVE_PACKET_ID: i32 = 4;
+/// Configuration clientbound id for `keep_alive` — the config keepalive
+/// challenge direction.
+const CONFIG_CLIENTBOUND_KEEP_ALIVE_ID: i32 = 4;
+
 /// The pinned capture fixture's offline profile for the test player
 /// (`UUID.nameUUIDFromBytes("OfflinePlayer:RivetProbe")`, issue #198): most
 /// `0x0a9ffa92a7063e6f`, least `0x900cf12f869d37ea`. The listener derives this
@@ -215,16 +222,23 @@ async fn read_frame_payload(stream: &mut TcpStream) -> Vec<u8> {
     read_bytes(stream, len as usize).await
 }
 
-/// Assert nothing arrives and the connection stays open (a short timeout with
-/// no data and no EOF).
-async fn expect_silent_open(stream: &mut TcpStream) {
+/// Assert nothing arrives and the connection stays open for `duration` (a
+/// longer silent-open window than [`expect_silent_open`], for asserting a
+/// stopped keepalive driver stays stopped across a kick window).
+async fn expect_silent_open_for(stream: &mut TcpStream, duration: Duration) {
     let mut buf = [0u8; 16];
-    match tokio::time::timeout(Duration::from_millis(200), stream.read(&mut buf)).await {
+    match tokio::time::timeout(duration, stream.read(&mut buf)).await {
         Ok(Ok(0)) => panic!("connection closed; expected it to stay open"),
         Ok(Ok(n)) => panic!("unexpected data: {n} bytes"),
         Ok(Err(_)) => panic!("read error"),
         Err(_) => {} // timeout: still open, nothing sent
     }
+}
+
+/// Assert nothing arrives and the connection stays open (a short timeout with
+/// no data and no EOF).
+async fn expect_silent_open(stream: &mut TcpStream) {
+    expect_silent_open_for(stream, Duration::from_millis(200)).await;
 }
 
 /// Read until EOF; panics if the server writes data instead of closing (the
@@ -1650,6 +1664,148 @@ async fn live_trace_records_teleport_ack_move_and_session_end() {
     assert_eq!(end.field("x"), Some("42.5"));
     assert_eq!(end.field("y"), Some("-63"));
     assert_eq!(end.field("z"), Some("-17.25"));
+
+// ---- issue #283: configuration-phase keepalive lifecycle ----
+
+/// `config_with_threshold` with a short keepalive kick limit, so the live
+/// configuration-phase keepalive tests exercise the timeout window in seconds
+/// instead of the pinned 30s default (`paper.playerconnection.keepalive`,
+/// issue #236). `enable_join` stays off — these tests drive the configuration
+/// listener's keepalive (tokio side), not the play session's.
+fn config_with_threshold_keepalive(compression_threshold: i32, timeout: Duration) -> ServerConfig {
+    ServerConfig {
+        keepalive_timeout: timeout,
+        ..config_with_threshold(compression_threshold)
+    }
+}
+
+/// Drive the login → registry-sync → `JoinWorldTask` sequence and return the
+/// client socket still in the configuration phase (the client has NOT replied
+/// `finish_configuration`, so the config listener stays current and its
+/// keepalive is live).
+async fn login_to_configuration(
+    config: ServerConfig,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>, TcpStream) {
+    let (addr, server_task) = start_server(config).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    (addr, server_task, client)
+}
+
+/// Read one clientbound configuration `keep_alive` (id 4) and return its 8-byte
+/// challenge id (the raw big-endian `long` the server expects echoed back). The
+/// frame is under the 256 threshold, so it arrives with `declaredLength 0`.
+async fn read_config_keepalive_challenge(stream: &mut TcpStream) -> [u8; 8] {
+    let (_, payload) = read_compressed_packet(stream).await;
+    let (id, used) = decode_varint(&payload);
+    assert_eq!(
+        id, CONFIG_CLIENTBOUND_KEEP_ALIVE_ID,
+        "clientbound configuration keep_alive"
+    );
+    payload[used..used + 8]
+        .try_into()
+        .expect("keep_alive body is an 8-byte long")
+}
+
+/// Frame a serverbound configuration `keep_alive` reply (id 4) echoing the
+/// challenge id bytes, compressed under the threshold (`varint(0)` declaredLength).
+fn config_keepalive_reply_frame(challenge_id: [u8; 8]) -> Vec<u8> {
+    let mut body = varint(CONFIG_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&challenge_id);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// A configuration-phase client that echoes every config `keep_alive` challenge
+/// survives well past the (shortened) kick window: `conn_loop`'s interval arm
+/// drives the config listener's keepalive over the real socket, and the echoed
+/// serverbound reply is routed back into the same state machine, so no pending
+/// challenge ever exceeds the 2s limit.
+#[tokio::test]
+async fn config_keepalive_responding_client_survives_beyond_the_timeout_window() {
+    let (_addr, server_task, mut client) =
+        login_to_configuration(config_with_threshold_keepalive(256, Duration::from_secs(2))).await;
+
+    // 3 challenges span ~3s — past the 2s kick limit — so a client that failed
+    // to respond would already have been disconnected.
+    for _ in 0..3 {
+        let challenge = read_config_keepalive_challenge(&mut client).await;
+        client
+            .write_all(&config_keepalive_reply_frame(challenge))
+            .await
+            .expect("write config keepalive reply");
+    }
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// A configuration-phase client that receives a config `keep_alive` challenge
+/// and never answers is disconnected — the socket closes once the challenge
+/// exceeds the 2s kick limit (the TIMEOUT disconnect from `keepConnectionAlive`
+/// reaches the wire as a close). The close is far short of the 30s read
+/// timeout, so an EOF here is the keepalive kick, not a read timeout.
+#[tokio::test]
+async fn config_keepalive_unanswered_challenge_is_disconnected() {
+    let (_addr, server_task, mut client) =
+        login_to_configuration(config_with_threshold_keepalive(256, Duration::from_secs(2))).await;
+
+    let _challenge = read_config_keepalive_challenge(&mut client).await;
+    // `expect_eof_allowing_trailing` tolerates the throttled challenge the
+    // timeout tick may queue before the close (Paper's send-then-disconnect).
+    expect_eof_allowing_trailing(&mut client).await;
+    server_task.abort();
+}
+
+/// A configuration-phase client that replies with a wrong id (one matching no
+/// pending challenge) is disconnected immediately with TIMEOUT — Java's
+/// "without matching challenge" branch — not left open to the kick window.
+#[tokio::test]
+async fn config_keepalive_wrong_reply_disconnects() {
+    let (_addr, server_task, mut client) =
+        login_to_configuration(config_with_threshold_keepalive(256, Duration::from_secs(2))).await;
+
+    // Read the challenge (proving the transmit), then reply with a wrong id.
+    let _challenge = read_config_keepalive_challenge(&mut client).await;
+    client
+        .write_all(&config_keepalive_reply_frame([0xFF; 8]))
+        .await
+        .expect("write wrong config keepalive reply");
+
+    // The wrong reply closes immediately, before the 2s kick window.
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+/// The config keepalive stops at the configuration→play handoff: after
+/// `finish_configuration` the `conn_loop` tick arm skips (`in_play`), so no
+/// config keep_alive is transmitted and the connection is not closed by the
+/// config kick limit — even past the challenge's 2s window. There is no play
+/// session (`enable_join` off), so nothing replaces the stopped driver; the
+/// connection simply stays open and silent.
+#[tokio::test]
+async fn config_keepalive_stops_at_play_handoff() {
+    let (_addr, server_task, mut client) =
+        login_to_configuration(config_with_threshold_keepalive(256, Duration::from_secs(2))).await;
+
+    // Observe the config keepalive is live, answer it, then hand off to play.
+    let challenge = read_config_keepalive_challenge(&mut client).await;
+    client
+        .write_all(&config_keepalive_reply_frame(challenge))
+        .await
+        .expect("write config keepalive reply");
+    client
+        .write_all(&finish_configuration_reply_frame())
+        .await
+        .expect("write finish_configuration");
+
+    // 4s spans the 2s kick window measured from the challenge's transmit: a
+    // config keepalive that kept driving past play would have closed here. It
+    // stays open and silent instead.
+    expect_silent_open_for(&mut client, Duration::from_secs(4)).await;
 
     server_task.abort();
 }

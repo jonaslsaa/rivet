@@ -411,6 +411,14 @@ async fn conn_loop(
     // frames are now forwarded to the tick thread instead of a listener.
     let mut in_play = false;
     let mut chunk = [0u8; 4096];
+    // The per-connection tick source (issue #283): Paper ticks every listener
+    // each server tick (`ServerConnectionListener.tick()`); Rivet drives the
+    // configuration listener's keepalive from this per-connection-task interval
+    // at `config.tick_interval`. The drive is skipped once `in_play` — the play
+    // keepalive is tick-side (`PlayerSessionManager`), and there is no listener
+    // to tick.
+    let mut tick = tokio::time::interval(config.tick_interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         // Non-blocking drain of whatever the tick thread has queued.
         if let Some(reason) = drain_outbound(conn, &mut out_rx).await {
@@ -420,10 +428,25 @@ async fn conn_loop(
                 .await;
         }
 
-        // Block on the socket read, but wake on shutdown and on any event the
-        // tick thread enqueues (so a single-connection outbound event is handled
-        // promptly, not after the next inbound packet or the 30s timeout).
+        // Block on the socket read, but wake on shutdown, on the config
+        // keepalive tick, and on any event the tick thread enqueues (so a
+        // single-connection outbound event is handled promptly, not after the
+        // next inbound packet or the 30s timeout).
         let n = tokio::select! {
+            _ = tick.tick() => {
+                if !in_play {
+                    // `TickablePacketListener.tick()` for the current listener:
+                    // the configuration keepalive (`keepConnectionAlive`). Both
+                    // clock axes come from the connection's monotonic epoch, the
+                    // same axis the listener's state was seeded on.
+                    let now_ns = conn.monotonic_nanos();
+                    let now_ms = now_ns / 1_000_000;
+                    if let Err(reason) = listener.tick(conn, now_ns, now_ms) {
+                        return reason;
+                    }
+                }
+                continue;
+            }
             n = read.read(&mut chunk) => match n {
                 Err(_) => return DisconnectReason::EndOfStream,
                 Ok(0) => return DisconnectReason::EndOfStream,
@@ -549,6 +572,8 @@ mod tests {
     use tokio::net::TcpStream;
 
     use crate::server::network::packet_listener::ListenerOutcome;
+    use crate::server::network::server_configuration_packet_listener::ServerConfigurationPacketListener;
+    use rivet_registry::core::GameProfile;
 
     fn test_config() -> Arc<ServerConfig> {
         Arc::new(ServerConfig::default())
@@ -1209,5 +1234,84 @@ mod tests {
             received == expected,
             "frame stream corrupted by the interrupted flush"
         );
+    }
+
+    /// The `conn_loop` keepalive interval arm (issue #283) is load-bearing end
+    /// to end: a config listener seeded with a short kick limit, a silent
+    /// client, and a 20ms tick interval. The `select!` tick arm drives the
+    /// keepalive every 20ms — the 1s transmit throttle queues the first
+    /// challenge (flushed to the client on the next loop's drain), and the
+    /// strict-`>` timeout then closes the connection. Without the arm the
+    /// keepalive would never be driven and no challenge would ever be sent (the
+    /// config-listener counterfactual
+    /// `keepalive_requires_the_interval_drive_to_transmit`).
+    #[tokio::test]
+    async fn conn_loop_config_keepalive_interval_drives_transmit_and_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        // 20ms drives the keepalive promptly; the 5s read timeout keeps the
+        // terminal reason the keepalive timeout, not the read arm.
+        let config = Arc::new(ServerConfig {
+            tick_interval: Duration::from_millis(20),
+            read_timeout: Duration::from_secs(5),
+            ..ServerConfig::default()
+        });
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+            InboundDrained::new(),
+        );
+        // Mirror the production login ack path: the outbound protocol flips to
+        // Configuration before the config listener is built, so its keepalive
+        // sink can send.
+        conn.set_outbound_protocol(ConnectionProtocol::Configuration);
+        // Seed the keepalive at the connection's current monotonic reading with
+        // a 300ms kick limit, so the whole transmit+timeout window (~1.3s: the
+        // 1s throttle, then the 300ms strict-`>` kick) fits the test. The read
+        // timeout (5s) is longer, so the keepalive closes the connection first.
+        let config_listener = ServerConfigurationPacketListener::new(
+            GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ),
+            conn.monotonic_nanos(),
+            Duration::from_millis(300).as_nanos() as i64,
+        );
+        let mut listener_box: Box<dyn PacketListener> = Box::new(config_listener);
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        let (_out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let endpoint = test_endpoint();
+
+        let reason = conn_loop(
+            &mut conn,
+            &mut listener_box,
+            &config,
+            read,
+            out_rx,
+            &in_tx,
+            &endpoint,
+            shutdown,
+        )
+        .await;
+
+        assert_eq!(
+            reason,
+            DisconnectReason::Timeout,
+            "the silent client is closed after the keepalive window"
+        );
+        // The client received the configuration keepalive challenge before the
+        // close — `[varint21 9][id 4][8-byte be now_ms]` — proving the interval
+        // arm drove the keepalive transmit end to end.
+        let challenge = read_frame(&mut client).await;
+        assert_eq!(challenge[0], 0x04, "configuration keep_alive packet id");
+        assert_eq!(challenge.len(), 9, "id varint + 8-byte body");
     }
 }

@@ -30,12 +30,14 @@ use rivet_registry::core::GameProfile;
 use rivet_util::KnownPack;
 
 use super::connection::Connection;
+use super::keepalive::{ConnectionKeepaliveSink, drive_keepalive};
 use super::packet_listener::{
     DisconnectReason, ListenerOutcome, PacketListener, decode_packet, packet_id,
 };
 use super::registry_sync;
 use super::server_login_packet_listener::encode_body;
 use crate::server::ServerConfig;
+use crate::server::keepalive::{KeepaliveResponseOutcome, KeepaliveState};
 
 /// `ConfigurationProtocols.SERVERBOUND` packet ids. The generated table pins:
 /// `client_information` 0, `cookie_response` 1, `custom_payload` 2,
@@ -279,6 +281,14 @@ pub struct ServerConfigurationPacketListener {
     /// (`CommonListenerCookie.profile`, issue #101 Slice B). Carried across the
     /// finish→play handoff so the tick thread can spawn the join burst.
     profile: GameProfile,
+    /// `ServerCommonPacketListenerImpl.keepAlive` — the configuration-phase
+    /// keepalive state (issue #283). Owned by this listener on the tokio side
+    /// of OWNERSHIP; `conn_loop` drives it every `config.tick_interval` via
+    /// [`PacketListener::tick`] → [`Self::keep_connection_alive`]. Dropped at
+    /// `ListenerOutcome::Play`: play seeds a fresh machine in
+    /// `spawn_session`, so no keepalive timestamps or ping history carry into
+    /// PLAY (the #283 rule).
+    keepalive: KeepaliveState,
 }
 
 impl Default for ServerConfigurationPacketListener {
@@ -295,6 +305,7 @@ impl Default for ServerConfigurationPacketListener {
                 rivet_util::mth::Uuid { most: 0, least: 0 },
                 String::new(),
             ),
+            keepalive: KeepaliveState::default(),
         }
     }
 }
@@ -302,14 +313,50 @@ impl Default for ServerConfigurationPacketListener {
 impl ServerConfigurationPacketListener {
     /// `new ServerConfigurationPacketListenerImpl(server, connection, cookie)` —
     /// the listener for a connection whose login phase authenticated `profile`.
-    pub fn new(profile: GameProfile) -> Self {
+    ///
+    /// `now_ns` is the connection's monotonic reading at construction and seeds
+    /// `KeepaliveState::new_with_timeout` — Paper's
+    /// `keepAlive.lastKeepAliveTx = System.nanoTime()` runs once in the
+    /// `KeepAlive` constructor, so a fresh machine transmits its first challenge
+    /// one second after the listener starts (never immediately). The kick limit
+    /// comes from `ServerConfig.keepalive_timeout` (`paper.playerconnection.
+    /// keepalive`, issue #236), read at the login ack construction site.
+    pub fn new(profile: GameProfile, now_ns: i64, keepalive_timeout_ns: i64) -> Self {
         ServerConfigurationPacketListener {
             configuration_tasks: VecDeque::new(),
             current_task: None,
             client_information: ClientInformation::create_default(),
             client_brand: None,
             profile,
+            keepalive: KeepaliveState::new_with_timeout(now_ns, keepalive_timeout_ns),
         }
+    }
+
+    /// `ServerCommonPacketListenerImpl.keepConnectionAlive()` — the per-tick
+    /// keepalive driver for the configuration phase. Paper runs it inside the
+    /// listener's `tick()` (each server tick via
+    /// `ServerConnectionListener.tick`); Rivet drives it from `conn_loop` every
+    /// `config.tick_interval` through [`PacketListener::tick`] (issue #283), a
+    /// faithful cadence because the 1s transmit throttle and the 30s kick limit
+    /// gate the observable behavior, not the 50ms drive period.
+    ///
+    /// `now_ns`/`now_ms` come from the connection's monotonic epoch
+    /// (`Connection::monotonic_nanos`; `now_ms = now_ns / 1_000_000`), the same
+    /// axis the construction seed used. `Err(reason)` is the keepalive timeout
+    /// close (or a send failure), returned for `conn_loop` to terminate the
+    /// connection.
+    fn keep_connection_alive(
+        &mut self,
+        conn: &mut Connection,
+        now_ns: i64,
+        now_ms: i64,
+    ) -> Result<(), DisconnectReason> {
+        drive_keepalive(
+            &mut self.keepalive,
+            now_ns,
+            now_ms,
+            &mut ConnectionKeepaliveSink::new(conn),
+        )
     }
 
     /// `startConfiguration()` — Paper sends the brand first, then
@@ -604,19 +651,24 @@ impl PacketListener for ServerConfigurationPacketListener {
                 Ok(ListenerOutcome::Keep)
             }
             KEEP_ALIVE_PACKET_ID => {
-                // `handleKeepAlive` — Paper's keepalive challenge tracking. The
-                // configuration-phase challenge lifecycle is deferred (#283); a
-                // serverbound keepalive with no pending challenge would disconnect
-                // in Java ("without matching challenge").
+                // `handleKeepAlive(packet, System.nanoTime())` — match the echoed
+                // id against the pending challenges (Paper's
+                // `ServerCommonPacketListenerImpl.handleKeepAlive`). The receive
+                // reading is the connection's monotonic clock at decode time, the
+                // same epoch the challenges were transmitted on. `Accepted` (the
+                // reply matches the oldest pending challenge) absorbs it and
+                // updates the ping calculators; an `OutOfOrder` (a non-oldest
+                // challenge) or `NoMatchingChallenge` (nothing matches) reply
+                // disconnects with TIMEOUT, exactly as in Java.
                 let packet: ServerboundKeepAlivePacket =
                     decode_packet(frame, ServerboundKeepAlivePacket::stream_codec())?;
-                let _ = packet;
-                // RivetTodo(#283): the configuration listener does not yet own a
-                // `KeepaliveState`, so periodic challenges, reply matching, and
-                // timeout disconnects are not driven here. The play listener's
-                // delivered keepalive wiring (#157) provides the state-machine
-                // pattern; configuration still needs its own tick source and
-                // lifecycle integration.
+                match self
+                    .keepalive
+                    .handle_keepalive(packet.id(), conn.monotonic_nanos())
+                {
+                    KeepaliveResponseOutcome::Accepted => {}
+                    _ => return Err(DisconnectReason::Timeout),
+                }
                 Ok(ListenerOutcome::Keep)
             }
             PONG_PACKET_ID => {
@@ -727,6 +779,20 @@ impl PacketListener for ServerConfigurationPacketListener {
     }
 
     fn on_disconnect(&mut self) {}
+
+    /// `ServerConfigurationPacketListenerImpl.tick()` — the per-tick keepalive
+    /// drive (`keepConnectionAlive` runs first in Paper's tick). `conn_loop`
+    /// drives this every `config.tick_interval` (issue #283) with the
+    /// connection's monotonic readings; an `Err(reason)` (the keepalive timeout
+    /// or a send failure) closes the connection.
+    fn tick(
+        &mut self,
+        conn: &mut Connection,
+        now_ns: i64,
+        now_ms: i64,
+    ) -> Result<(), DisconnectReason> {
+        self.keep_connection_alive(conn, now_ns, now_ms)
+    }
 }
 
 impl ServerConfigurationPacketListener {
@@ -791,15 +857,28 @@ impl std::fmt::Debug for ServerConfigurationPacketListener {
 mod tests {
     use super::*;
 
+    /// The empty-profile configuration listener used by the handoff tests, with
+    /// a deterministic keepalive seed (monotonic 0) and the pinned 30s kick
+    /// limit — no wall clock anywhere. The seed is the `now_ns` reading at
+    /// construction (`Connection::monotonic_nanos` in production); the keepalive
+    /// tests drive `keep_connection_alive` with injected times instead.
+    fn test_listener() -> ServerConfigurationPacketListener {
+        ServerConfigurationPacketListener::new(
+            GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ),
+            0,
+            crate::server::keepalive::KEEPALIVE_LIMIT_NS,
+        )
+    }
+
     #[test]
     fn default_client_information_initial_value() {
         // Java initializes `clientInformation` from the cookie
         // (`ClientInformation.createDefault()`); this slice starts there. The
         // listener carries the authenticated profile from the login phase.
-        let listener = ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-            rivet_util::mth::Uuid { most: 0, least: 0 },
-            String::new(),
-        ));
+        let listener = test_listener();
         assert_eq!(
             listener.client_information,
             ClientInformation::create_default()
@@ -853,11 +932,7 @@ mod tests {
         // Finishing the sync starts `JoinWorldTask`, whose `start` sends the
         // finish_configuration packet.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         assert_eq!(
@@ -897,11 +972,7 @@ mod tests {
         // seam the per-connection task uses to start forwarding frames to the
         // tick thread.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
         listener
             .finish_current_task(SYNCHRONIZE_REGISTRIES_TASK_TYPE, &mut conn)
@@ -929,11 +1000,7 @@ mod tests {
         // `finishCurrentTask(JoinWorldTask.TYPE)` — Java's
         // `IllegalStateException` — surfaced as a deterministic Malformed close.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let frame = Bytes::from(varint(3));
@@ -963,11 +1030,7 @@ mod tests {
         // open (the plugin bridge is deferred, #26; `bungeecord:main` corrects
         // to `BungeeCord` but the corrected value is discarded).
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let data = b"bungeecord:main\x00my:plugin";
@@ -985,11 +1048,7 @@ mod tests {
         // segment after `\0` is skipped by `readChannelIdentifier`, and the valid
         // `a:one` segment keeps the connection open.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let frame = Bytes::from(custom_payload_frame("minecraft:unregister", b"a:one\x00"));
@@ -1004,11 +1063,7 @@ mod tests {
         // `minecraft:brand` data is a `utf` string (`\x05Paper`); the handler
         // stores it as the client brand.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let frame = Bytes::from(custom_payload_frame("minecraft:brand", b"\x05Paper"));
@@ -1026,11 +1081,7 @@ mod tests {
         // payload!"` disconnect. The panic is caught here and surfaced as that
         // Malformed reason.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let frame = Bytes::from(custom_payload_frame("minecraft:brand", b"\x05Pa"));
@@ -1051,11 +1102,7 @@ mod tests {
         // truncated case but the same shared disconnect. (257 ASCII 'a' units,
         // length varint `0x81 0x02`.)
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let mut data = vec![0x81u8, 0x02]; // varint 257
@@ -1077,11 +1124,7 @@ mod tests {
         // `DecoderException`), still caught by `catch (Exception)` → the same
         // disconnect. Here the varint read on an empty buffer panics.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let frame = Bytes::from(custom_payload_frame("minecraft:brand", b""));
@@ -1100,11 +1143,7 @@ mod tests {
     /// `validateAndCorrectChannel` in `addChannel` and `removeChannel`).
     async fn register_payload_keeps_open(id: &str, data: &[u8]) -> bool {
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let frame = Bytes::from(custom_payload_frame(id, data));
@@ -1208,11 +1247,7 @@ mod tests {
         // channel bytes make this load-bearing: a namespace-insensitive match
         // would reject them.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let frame = Bytes::from(custom_payload_frame("foo:register", b"Foo:Bar"));
@@ -1229,11 +1264,7 @@ mod tests {
         // fires) and the task-finish branch can never match — the connection
         // stays open. Body: `[uuid 16][action ordinal varint]`.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         let mut body = varint(RESOURCE_PACK_PACKET_ID);
@@ -1259,11 +1290,7 @@ mod tests {
         // No CoC task is ever queued, so `finishCurrentTask("server_code_of_conduct")`
         // always mismatches — Java's `IllegalStateException` — a Malformed close.
         let mut conn = config_connection().await;
-        let mut listener =
-            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ));
+        let mut listener = test_listener();
         listener.start_configuration(&mut conn).unwrap();
 
         // Fieldless body: `[id 9]` with no trailing bytes.
@@ -1277,6 +1304,187 @@ mod tests {
                 "Unexpected request for task finish, current task: synchronize_registries, requested: server_code_of_conduct"
                     .into()
             )
+        );
+    }
+
+    /// Milliseconds, in ns, as an `i64` (the mono axis; `test_listener` seeds the
+    /// keepalive at monotonic 0).
+    fn ms_to_ns(ms: i64) -> i64 {
+        ms * 1_000_000
+    }
+
+    /// Drive one keepalive tick at the injected instant `t_ms` — `now_ns =
+    /// ms_to_ns(t_ms)`, `now_ms = t_ms` (the same two-axis mapping
+    /// `conn_loop` uses: `now_ns = conn.monotonic_nanos()`, `now_ms =
+    /// now_ns / 1_000_000`). Returns the tick outcome: `Err(reason)` is the
+    /// keepalive timeout close.
+    fn drive_at(
+        listener: &mut ServerConfigurationPacketListener,
+        conn: &mut Connection,
+        t_ms: i64,
+    ) -> Result<(), DisconnectReason> {
+        listener.keep_connection_alive(conn, ms_to_ns(t_ms), t_ms)
+    }
+
+    /// Frame a serverbound `keep_alive` reply (`[id 4] ++ [8-byte be id]`), the
+    /// decompressed body `handle_frame` receives, and dispatch it.
+    fn reply_keepalive(
+        listener: &mut ServerConfigurationPacketListener,
+        conn: &mut Connection,
+        id: i64,
+    ) -> Result<ListenerOutcome, DisconnectReason> {
+        let mut frame = varint(KEEP_ALIVE_PACKET_ID);
+        frame.extend_from_slice(&id.to_be_bytes());
+        listener.handle_frame(
+            Bytes::from(frame),
+            conn,
+            &crate::server::ServerConfig::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn keepalive_first_challenge_sent_after_one_second() {
+        // The config listener's first tick at t=1000ms (1s past the construction
+        // seed, monotonic 0) queues the first challenge. The wire frame is the
+        // configuration keepalive: `varint21(9) ++ [id 4] ++ [8-byte be 1000]`
+        // (the id is the millis reading, `ClientboundKeepAlivePacket` body).
+        let mut conn = config_connection().await;
+        let mut listener = test_listener();
+        drive_at(&mut listener, &mut conn, 1000).unwrap();
+        assert_eq!(
+            conn.outbound_bytes(),
+            &[0x09, 0x04, 0, 0, 0, 0, 0, 0, 0x03, 0xE8]
+        );
+        assert_eq!(listener.keepalive.pending_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn keepalive_throttle_is_one_challenge_per_second() {
+        // Paper's 1s transmit throttle (`>= SECONDS.toNanos(1)`): 500ms after
+        // the seed queues nothing, exactly 1000ms queues the first challenge,
+        // 999ms after that queues nothing, and exactly another second later the
+        // next challenge is queued — never a duplicate within the second.
+        let mut conn = config_connection().await;
+        let mut listener = test_listener();
+        drive_at(&mut listener, &mut conn, 500).unwrap();
+        assert_eq!(listener.keepalive.pending_len(), 0);
+        assert!(conn.outbound_bytes().is_empty());
+
+        drive_at(&mut listener, &mut conn, 1000).unwrap();
+        drive_at(&mut listener, &mut conn, 1999).unwrap();
+        assert_eq!(
+            listener.keepalive.pending_len(),
+            1,
+            "no send before a full second"
+        );
+
+        drive_at(&mut listener, &mut conn, 2000).unwrap();
+        assert_eq!(listener.keepalive.pending_len(), 2);
+        // Two 10-byte keepalive frames: ids 1000 then 2000.
+        assert_eq!(
+            conn.outbound_bytes(),
+            &[
+                0x09, 0x04, 0, 0, 0, 0, 0, 0, 0x03, 0xE8, // 1000
+                0x09, 0x04, 0, 0, 0, 0, 0, 0, 0x07, 0xD0, // 2000
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn keepalive_responding_client_survives_timeout_windows() {
+        // A client that answers every challenge within the 30s limit keeps the
+        // connection open across arbitrarily many windows: each reply clears the
+        // pending queue before the strict-`>` timeout can fire.
+        let mut conn = config_connection().await;
+        let mut listener = test_listener();
+        for t in (1..=10).map(|i| i * 1000) {
+            drive_at(&mut listener, &mut conn, t).unwrap();
+            reply_keepalive(&mut listener, &mut conn, t).unwrap();
+        }
+        assert_eq!(listener.keepalive.pending_len(), 0);
+        // A 60s idle past the last reply: the queue is empty (nothing pending),
+        // so no timeout fires; the throttle queues a fresh challenge.
+        drive_at(&mut listener, &mut conn, 70_000).unwrap();
+        assert_eq!(listener.keepalive.pending_len(), 1);
+        assert_eq!(
+            listener.keepalive.peek_pending().unwrap().challenge_id,
+            70_000
+        );
+    }
+
+    #[tokio::test]
+    async fn keepalive_silent_client_disconnects_strictly_after_limit() {
+        // A client that never replies: the first challenge (tx t=1000ms) times
+        // out strictly after 30s of silence. At exactly 30s elapsed (t=31000,
+        // `31000-1000 == KEEPALIVE_LIMIT_MS`) the strict `>` does NOT fire;
+        // one ms later it fires, closing with `DisconnectReason::Timeout`.
+        let mut conn = config_connection().await;
+        let mut listener = test_listener();
+        drive_at(&mut listener, &mut conn, 1000).unwrap();
+        drive_at(&mut listener, &mut conn, 31_000).unwrap();
+        let err = drive_at(&mut listener, &mut conn, 31_001).unwrap_err();
+        assert_eq!(err, DisconnectReason::Timeout);
+    }
+
+    #[tokio::test]
+    async fn keepalive_wrong_reply_disconnects() {
+        // A reply whose id matches no pending challenge — Java's "without
+        // matching challenge" branch — closes with TIMEOUT.
+        let mut conn = config_connection().await;
+        let mut listener = test_listener();
+        drive_at(&mut listener, &mut conn, 1000).unwrap();
+        let err = reply_keepalive(&mut listener, &mut conn, 9999).unwrap_err();
+        assert_eq!(err, DisconnectReason::Timeout);
+    }
+
+    #[tokio::test]
+    async fn keepalive_out_of_order_reply_disconnects() {
+        // Two unanswered challenges (1000 then 2000); replying to the SECOND
+        // first is out-of-order — Java's `OutOfOrder` branch — a TIMEOUT close.
+        let mut conn = config_connection().await;
+        let mut listener = test_listener();
+        drive_at(&mut listener, &mut conn, 1000).unwrap();
+        drive_at(&mut listener, &mut conn, 2000).unwrap();
+        let err = reply_keepalive(&mut listener, &mut conn, 2000).unwrap_err();
+        assert_eq!(err, DisconnectReason::Timeout);
+    }
+
+    #[tokio::test]
+    async fn keepalive_stale_duplicate_reply_disconnects() {
+        // A reply that matched once cannot be replayed: after id 1000 is
+        // accepted and cleared, replaying it matches nothing (the queue no
+        // longer contains it) — a TIMEOUT close, exactly like Java.
+        let mut conn = config_connection().await;
+        let mut listener = test_listener();
+        drive_at(&mut listener, &mut conn, 1000).unwrap();
+        drive_at(&mut listener, &mut conn, 2000).unwrap();
+        reply_keepalive(&mut listener, &mut conn, 1000).unwrap();
+        let err = reply_keepalive(&mut listener, &mut conn, 1000).unwrap_err();
+        assert_eq!(err, DisconnectReason::Timeout);
+    }
+
+    /// The `conn_loop` interval arm (issue #283) is load-bearing for the
+    /// keepalive: the configuration packets (`start_configuration`) transmit
+    /// WITHOUT any drive, but the keepalive challenge only ever reaches the wire
+    /// through `keep_connection_alive` — the drive `conn_loop`'s tick arm is the
+    /// only production caller. Without that arm the first challenge is never
+    /// sent; the exact 10-byte frame (`[len 9][id 4][8-byte be 1000]`) is absent
+    /// until a drive at t=1000ms.
+    #[tokio::test]
+    async fn keepalive_requires_the_interval_drive_to_transmit() {
+        let mut conn = config_connection().await;
+        let mut listener = test_listener();
+        listener.start_configuration(&mut conn).unwrap();
+        let challenge = [0x09, 0x04, 0, 0, 0, 0, 0, 0, 0x03, 0xE8];
+        assert!(
+            !conn.outbound_bytes().windows(10).any(|w| w == challenge),
+            "no keepalive challenge without a drive, despite the queued config packets"
+        );
+        // The drive (what `conn_loop`'s tick arm invokes) transmits it.
+        drive_at(&mut listener, &mut conn, 1000).unwrap();
+        assert!(
+            conn.outbound_bytes().windows(10).any(|w| w == challenge),
+            "the interval drive is what transmits the keepalive"
         );
     }
 }
