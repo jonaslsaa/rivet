@@ -169,6 +169,7 @@ fn registry_with_connection() -> (
             remote: REMOTE,
             in_rx,
             out_tx,
+            drained: rivet_server::server::tick::channels::InboundDrained::new(),
         },
     );
     let _ = in_tx;
@@ -580,6 +581,7 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
                 remote: REMOTE,
                 in_rx,
                 out_tx,
+                drained: rivet_server::server::tick::channels::InboundDrained::new(),
             },
         )
         .expect("lifecycle fits");
