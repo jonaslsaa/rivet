@@ -9,5 +9,6 @@ workspace = true
 
 [dependencies]
 cesu8 = { workspace = true }
+crc32c = { workspace = true }
 md5 = { workspace = true }
 rivet-serialization = { workspace = true }
