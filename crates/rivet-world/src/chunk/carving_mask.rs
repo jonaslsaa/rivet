@@ -17,9 +17,10 @@
 //!
 //! RivetTodo(#181): `CarvingContext` and the carvers that consume this mask
 //! (the `mc.world.level.levelgen.carver` unit) are not ported; this module
-//! ports the mask value alone. The default `additionalMask` is `null` in Java
-//! and evaluates `false`; the port models it as `Option` and treats `None` as
-//! always-false to preserve the Java default semantics.
+//! ports the mask value alone. Java's default `additionalMask` is the lambda
+//! `(x, y, z) -> false` (`CarvingMask.java` field initializer) — never `null`;
+//! the port models it as `Option`, treating `None` as always-false, which
+//! preserves the default semantics.
 
 use rivet_registry::core::{BlockPos, ChunkPos};
 
@@ -80,9 +81,11 @@ impl CarvingMask {
         let index = get_index(x, y, z, self.min_y);
         let word = index >> 6;
         if word >= self.mask.len() {
-            // `BitSet.set` grows the backing array to hold the bit. This only
-            // fires for masks built via `from_array` with fewer words than
-            // [`new`]; the `new` constructor sizes the array to full capacity.
+            // `BitSet.set` grows the backing array to hold the bit. This fires
+            // for masks built via `from_array` with fewer words than [`new`],
+            // and for a [`new`] mask when `y` is above the column (the fixed
+            // `256 * height` capacity is exceeded); `BitSet.set` grows there
+            // too, so the port mirrors it.
             self.mask.resize(word + 1, 0);
         }
         self.mask[word] |= 1u64 << (index & 63);
@@ -106,18 +109,37 @@ impl CarvingMask {
     }
 
     /// `stream(ChunkPos)` — the set indices as `BlockPos`es at absolute y.
+    ///
+    /// Iterates only the words up to the last non-zero one, mirroring Java's
+    /// `BitSet.stream()` bound on `wordsInUse`: a freshly-zeroed mask (for
+    /// example) streams nothing rather than scanning its full word array.
     pub fn stream<'a>(&'a self, pos: &'a ChunkPos) -> impl Iterator<Item = BlockPos> + 'a {
-        self.mask.iter().enumerate().flat_map(move |(word, bits)| {
-            let base = (word as i32) * 64;
-            (0..64).filter_map(move |bit| {
-                if bits & (1u64 << bit) == 0 {
-                    None
-                } else {
-                    let index = base + bit;
-                    Some(pos.get_block_at(index & 15, (index >> 8) + self.min_y, (index >> 4) & 15))
-                }
+        // `wordsInUse` equivalent — the last non-zero word + 1. `new()` keeps
+        // the full `256 * height / 64` words at zero, so this trims the scan
+        // to the set bits exactly like `BitSet.stream()`.
+        let words_in_use = self
+            .mask
+            .iter()
+            .rposition(|w| *w != 0)
+            .map_or(0, |last| last + 1);
+        self.mask[..words_in_use]
+            .iter()
+            .enumerate()
+            .flat_map(move |(word, bits)| {
+                let base = (word as i32) * 64;
+                (0..64).filter_map(move |bit| {
+                    if bits & (1u64 << bit) == 0 {
+                        None
+                    } else {
+                        let index = base + bit;
+                        Some(pos.get_block_at(
+                            index & 15,
+                            (index >> 8) + self.min_y,
+                            (index >> 4) & 15,
+                        ))
+                    }
+                })
             })
-        })
     }
 
     /// `toArray()` — `mask.toLongArray()`.

@@ -16,6 +16,14 @@
 //! `setAllStarts` live on `ChunkAccess`, not this interface, so they are not
 //! part of the port.
 //!
+//! RivetTodo(#185): `LongOpenHashSet` iterates in its hash-probe slot order,
+//! which is deterministic per instance but *not* insertion order, and
+//! `SerializableChunkData` writes `getAllReferences().toLongArray()` into the
+//! NBT `References` tag in that slot order. The port's `IndexSet` yields
+//! first-insertion order, so a byte-for-byte parity check on serialized
+//! references diverges once the owning unit serializes them; #185 must model
+//! fastutil's probe order there.
+//!
 //! RivetTodo(#185): the `Structure`/`StructureStart`/`LongSet` types and the
 //! `ChunkAccess` implementation live with the structure and access units;
 //! this module ports the interface shape keyed by the caller's structure id.
@@ -26,13 +34,14 @@ use std::collections::HashMap;
 /// `net.minecraft.world.level.chunk.StructureAccess`.
 pub struct StructureAccess<S> {
     /// `structureStarts` — structure id -> start. `StructureStart` is absent,
-    /// so the start value is the caller's `V`.
+    /// so the start value is modeled as an `i64`.
     structure_starts: HashMap<S, i64>,
     /// `structuresRefences` — structure id -> chunk references. Java's
     /// `LongOpenHashSet` is not ported; modeled as an `IndexSet<u64>` that
     /// keeps the set's semantics — amortized O(1) insert/contains, dedup on
-    /// insert, first-insertion order (Java defines no iteration order for its
-    /// hash set).
+    /// insert — but with first-insertion order where Java uses fastutil's
+    /// deterministic hash-probe slot order (see the module `RivetTodo(#185)`
+    /// note on the parity divergence once references serialize).
     structure_references: HashMap<S, IndexSet<u64>>,
 }
 

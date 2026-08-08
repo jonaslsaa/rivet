@@ -11,11 +11,16 @@
 //! same `unpack` this test drives. Missing compounds fall back to
 //! `factory.createForBlockStates()/createForBiomes()` (`orElseGet`).
 //!
-//! The fixture is the committed PR #194 golden chunk's section 0 (from
-//! `chunk_golden_buffer.hex`): one 4-bit Linear block palette `[air=0,
-//! stone=1]` with the stone layer at section-y 0 (256 entries -> 16 longs of
-//! `0x1111…`, then 240 air longs) and a single-value plains biome palette. The
-//! test hand-builds that section tag and decodes it, asserting the exact
+//! NOTE — the palette is modeled as the **value layer only** here: entries are
+//! `IntTag`s (the port's `StateId`/`BiomeId` wire stand-ins), not the
+//! `{Name, Properties}` block-state compounds Java's `BlockState.CODEC`
+//! decodes. The test pins the container read-view/unpack behavior — the piece
+//! this closure owns — not the block-state codec; #202 adds
+//! `NbtUtils.readBlockState` and the real compound codecs. The fixture shape
+//! (section 0, `[air, stone]` 4-bit Linear palette, stone layer at section-y
+//! 0, plains biome) is the committed PR #194 golden chunk's section 0.
+//!
+//! The test hand-builds that section tag and decodes it, asserting the exact
 //! golden values (stone/air layout, 4 bits, serialized size, re-pack identity).
 
 use rivet_nbt::compound_tag::CompoundTag;

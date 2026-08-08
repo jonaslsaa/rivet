@@ -19,6 +19,17 @@
 //! The value is a `Fn(i32, i32) -> Option<C>` closure resolving the chunk
 //! back-reference by chunk coordinates, following the pure-value pattern of
 //! the heightmap module (OWNERSHIP.md — no stored `&ChunkAccess`).
+//!
+//! The chunk type `T` is deliberately left unconstrained: Java's
+//! `getChunkForLighting` returns `@Nullable LightChunk`, but the light-engine
+//! consumer that would constrain `T: LightChunk<B>` does not exist yet (#184),
+//! and forcing the constraint here would require a phantom block-state type
+//! parameter callers could not infer. When the light engine lands it constrains
+//! the chunk type at its call site, matching Java's `@Nullable LightChunk`.
+//! Note Java's `LightChunk` is not generic (`LightChunk extends BlockGetter`);
+//! the `LightChunk<T>` type parameter is the port's own adaptation — it models
+//! `BlockState` as the caller's `T` — and `T` here is the getter's *chunk*
+//! type, distinct from that block-state parameter.
 
 /// `net.minecraft.world.level.chunk.LightChunkGetter`.
 ///
