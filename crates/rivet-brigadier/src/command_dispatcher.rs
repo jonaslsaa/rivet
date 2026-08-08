@@ -104,7 +104,7 @@ impl<S: 'static> CommandDispatcher<S> {
         parse: ParseResults<S>,
     ) -> Result<i32, CommandSyntaxException<'static>>
     where
-        S: Clone + crate::tree::CommandSource,
+        S: Clone,
     {
         if parse.get_reader().can_read() {
             if parse.exceptions_len() == 1 {

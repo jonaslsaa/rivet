@@ -150,6 +150,20 @@ fn unprefixed_input_prefers_minecraft_literal_over_bare_literal() {
 }
 
 #[test]
+fn source_mapping_falls_back_to_bare_literal_when_minecraft_missing() {
+    // Paper's fallback (`if (literal == null) literal = literals.get(text)`): a
+    // source-mapped word "foo" -> "minecraft:foo" misses when only the bare `foo`
+    // literal is registered, and the exact word "foo" is then matched.
+    let mut subject = CommandDispatcher::<FunctionSource>::new();
+    register_literal(&mut subject, "foo");
+
+    let parse = subject.parse_string("foo", FunctionSource);
+    assert_eq!(parse.get_context().get_nodes().len(), 1);
+    let matched = parse.get_context().get_nodes()[0].get_node();
+    assert_eq!(matched.get_name(), "foo");
+}
+
+#[test]
 fn already_prefixed_input_matches_minecraft_literal_exactly() {
     // `text.contains(':')` skips the mapping; the exact "minecraft:foo" matches.
     let mut subject = CommandDispatcher::<FunctionSource>::new();

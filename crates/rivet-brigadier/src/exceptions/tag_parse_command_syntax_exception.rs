@@ -25,8 +25,10 @@ use crate::exceptions::exception_type_eq;
 use crate::exceptions::simple_command_exception_type::SimpleCommandExceptionType;
 use crate::literal_message::LiteralMessage;
 
-/// Java `TagParseCommandSyntaxException.EXCEPTION_TYPE`.
-pub static EXCEPTION_TYPE: LazyLock<SimpleCommandExceptionType> =
+/// Java `TagParseCommandSyntaxException.EXCEPTION_TYPE` — `private static final`
+/// in Java; kept private here too, reachable only through the constructor /
+/// detector below.
+static EXCEPTION_TYPE: LazyLock<SimpleCommandExceptionType> =
     LazyLock::new(|| SimpleCommandExceptionType::new(LiteralMessage::new("Error parsing NBT")));
 
 /// Java `new TagParseCommandSyntaxException(String message)` — a

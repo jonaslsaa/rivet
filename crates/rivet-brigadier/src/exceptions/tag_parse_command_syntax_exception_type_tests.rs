@@ -4,16 +4,16 @@
 //! becomes type-identity with the private `EXCEPTION_TYPE`.
 
 use crate::exceptions::tag_parse_command_syntax_exception::{
-    EXCEPTION_TYPE, is_tag_parse_exception, tag_parse_exception,
+    is_tag_parse_exception, tag_parse_exception,
 };
-use crate::exceptions::{BuiltInExceptionProvider, CommandSyntaxException, exception_type_eq};
+use crate::exceptions::{BuiltInExceptionProvider, CommandSyntaxException};
 
 #[test]
 fn tag_parse_exception_carries_fixed_type_and_message() {
     let ex = tag_parse_exception("Unknown tag type");
-    // Java: the private static final EXCEPTION_TYPE.
-    assert!(exception_type_eq(ex.get_type(), &*EXCEPTION_TYPE));
-    // Java: Component.literal(message) -> getString() is the SNBT parse error.
+    // The fixed private EXCEPTION_TYPE is stamped on (is_tag_parse_exception is
+    // type identity with it), and the SNBT parse error becomes the message.
+    assert!(is_tag_parse_exception(&ex));
     assert_eq!(ex.get_message(), "Unknown tag type");
     assert_eq!(ex.get_raw_message().get_string(), "Unknown tag type");
     // No input/cursor — created via the `(CommandExceptionType, Message)` ctor.
