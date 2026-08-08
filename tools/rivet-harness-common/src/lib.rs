@@ -7,8 +7,10 @@
 //! `rivet-client`'s `run-scenario` binary, which previously duplicated the
 //! boot loop, kill-on-drop, port reservation, and JSONL line policy across
 //! their `server.rs`/`main.rs` modules. `rivet-oracle` is a future consumer:
-//! it has not been migrated yet, but the surface is std-only so it can be
-//! adopted without adding a dependency or lockfile entry to its binary.
+//! it has not been migrated yet, but the surface is std-only, so adopting it
+//! adds no external (non-std) packages to the consumer's dependency tree — the
+//! only new lockfile entry is the crate itself (serde_json is a dev-dependency,
+//! never a runtime dependency of a consumer).
 //!
 //! The crate is std-only by design — see `Cargo.toml`. Modules:
 //!
