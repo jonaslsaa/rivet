@@ -201,6 +201,7 @@ async fn run_connection(
         in_tx
             .as_ref()
             .expect("inbound sender kept for the play handoff"),
+        &endpoint,
         shutdown,
     )
     .await;
@@ -397,6 +398,7 @@ async fn forward_play_failed(
 /// and forwards every decoded frame to the tick thread over `in_tx` — the
 /// OWNERSHIP §Network play boundary. Returns the disconnect reason that ends
 /// the loop; the connection is closed by the caller.
+#[allow(clippy::too_many_arguments)]
 async fn conn_loop(
     conn: &mut Connection,
     listener: &mut Box<dyn PacketListener>,
@@ -404,6 +406,7 @@ async fn conn_loop(
     mut read: OwnedReadHalf,
     mut out_rx: mpsc::Receiver<OutboundEvent>,
     in_tx: &mpsc::Sender<ServerboundFrame>,
+    endpoint: &NetworkEndpoint,
     shutdown: Arc<Shutdown>,
 ) -> DisconnectReason {
     // Whether the connection has crossed the configuration→play boundary and
@@ -501,6 +504,25 @@ async fn conn_loop(
                 Ok(InboundOutcome::Keep) => {}
                 Ok(InboundOutcome::Play) => {
                     in_play = true;
+                    // Forward the configuration→play handoff (the profile +
+                    // ClientInformation the listener stashed) to the tick thread
+                    // as an EnterPlay lifecycle event, then start forwarding
+                    // frames. EnterPlay goes over the lifecycle channel (drained
+                    // before the inbound channel), so the tick applies the
+                    // handoff before the first coalesced play frame.
+                    if let Some((profile, client_information)) = conn.take_play_handoff()
+                        && endpoint
+                            .enter_play(conn.id(), profile, client_information)
+                            .await
+                            .is_err()
+                    {
+                        // The lifecycle channel is closed: the tick thread is
+                        // gone before the handoff landed. The connection is
+                        // still open but can never spawn a session, so close
+                        // it as a stop (the socket close flushes anything
+                        // queued; there is no session to disconnect in-band).
+                        return DisconnectReason::ServerShutdown;
+                    }
                     // Frames already buffered when the handoff fired (a client
                     // that coalesced `finish_configuration` with a play packet)
                     // are drained into the tick channel now.
@@ -535,6 +557,15 @@ mod tests {
 
     fn test_config() -> Arc<ServerConfig> {
         Arc::new(ServerConfig::default())
+    }
+
+    /// A throwaway `NetworkEndpoint` for tests that drive `conn_loop` directly.
+    /// The lifecycle receiver is dropped immediately — the test listeners never
+    /// stash a handoff, so `enter_play` is never reached and the endpoint is
+    /// only ever borrowed.
+    fn test_endpoint() -> NetworkEndpoint {
+        let (lifecycle_tx, _lifecycle_rx) = mpsc::channel(16);
+        NetworkEndpoint::new(lifecycle_tx, Arc::new(Shutdown::new()))
     }
 
     /// A throwaway connected `Connection` + its client socket (the client reads
@@ -720,6 +751,7 @@ mod tests {
         });
         let in_tx_for_task = in_tx.clone();
 
+        let endpoint = test_endpoint();
         let task = tokio::spawn(async move {
             conn_loop(
                 &mut conn,
@@ -728,6 +760,7 @@ mod tests {
                 read,
                 out_rx,
                 &in_tx_for_task,
+                &endpoint,
                 shutdown,
             )
             .await
@@ -829,6 +862,7 @@ mod tests {
             .unwrap();
         drop(out_tx);
 
+        let endpoint = test_endpoint();
         let reason = conn_loop(
             &mut conn,
             &mut listener_box,
@@ -836,6 +870,7 @@ mod tests {
             read,
             out_rx,
             &in_tx,
+            &endpoint,
             shutdown,
         )
         .await;
@@ -898,6 +933,7 @@ mod tests {
             .unwrap();
         drop(out_tx); // the tick thread's final pass dropped every out_tx
 
+        let endpoint = test_endpoint();
         let start = std::time::Instant::now();
         let reason = conn_loop(
             &mut conn,
@@ -906,6 +942,7 @@ mod tests {
             read,
             out_rx,
             &in_tx,
+            &endpoint,
             shutdown,
         )
         .await;
@@ -992,6 +1029,7 @@ mod tests {
         });
 
         let task_shutdown = Arc::clone(&shutdown);
+        let endpoint = test_endpoint();
         let task = tokio::spawn(async move {
             conn_loop(
                 &mut conn,
@@ -1000,6 +1038,7 @@ mod tests {
                 read,
                 out_rx,
                 &in_tx,
+                &endpoint,
                 task_shutdown,
             )
             .await

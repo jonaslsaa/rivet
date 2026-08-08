@@ -12,6 +12,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use flate2::read::ZlibDecoder;
+use rivet_protocol::generated::packets::play::clientbound::PacketType;
 use rivet_server::server::{Server, ServerConfig};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -78,6 +79,7 @@ fn config_with_threshold(compression_threshold: i32) -> ServerConfig {
         inbound_channel_capacity: 64,
         outbound_channel_capacity: 64,
         lifecycle_capacity: 64,
+        enable_join: false,
     }
 }
 
@@ -919,8 +921,10 @@ async fn finish_configuration_after_sync_reaches_play() {
         .await
         .expect("write finish_configuration");
 
-    // The handoff is silent: `spawnPlayer` (#101) is deferred, so nothing is
-    // sent in play yet — but the connection stays open (no deterministic close).
+    // The handoff is silent here because this test config leaves `enable_join`
+    // off (issue #101 Slice B: the join burst runs only when the play listener
+    // is wired). Nothing is sent in play yet, but the connection stays open (no
+    // deterministic close). The burst itself is covered by `join_burst.rs`.
     expect_silent_open(&mut client).await;
     server_task.abort();
 }
@@ -1111,5 +1115,106 @@ async fn play_flood_over_inbound_budget_closes_with_eof() {
         .expect("write compressed flood");
 
     expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+/// The live-join config: `enable_join` on (issue #101 Slice B) with channel
+/// capacities large enough for the whole 135-frame join burst — the tick fires
+/// the burst into the connection's outbound channel in one synchronous pass, so
+/// the channel must hold it before the per-connection task drains it to the
+/// socket (the 64 default would overflow and disconnect the client mid-join).
+fn config_with_join() -> ServerConfig {
+    ServerConfig {
+        bind_host: std::net::IpAddr::from([127, 0, 0, 1]),
+        port: 0,
+        max_connections: 16,
+        read_timeout: Duration::from_secs(30),
+        compression_threshold: 256,
+        tick_interval: Duration::from_millis(50),
+        catchup_ticks: 5,
+        inbound_channel_capacity: 1024,
+        outbound_channel_capacity: 1024,
+        lifecycle_capacity: 1024,
+        enable_join: true,
+    }
+}
+
+/// The `place_new_player` join burst in Paper's send order — the same sequence
+/// `join_burst.rs::burst_order` asserts at the unit level, mirrored here so the
+/// live wire path is covered end to end: the 11 join members, the 3 #100 cache
+/// packets, the 117 superflat chunks, then the second `sendLevelInfo` block.
+fn join_burst_ids() -> Vec<u32> {
+    let mut ids = vec![
+        PacketType::Login.id(),
+        PacketType::ChangeDifficulty.id(),
+        PacketType::PlayerAbilities.id(),
+        PacketType::SetHeldSlot.id(),
+        PacketType::EntityEvent.id(),
+        PacketType::PlayerPosition.id(),
+        PacketType::InitializeBorder.id(),
+        PacketType::SetTime.id(),
+        PacketType::SetDefaultSpawnPosition.id(),
+        PacketType::GameEvent.id(),
+        PacketType::PlayerInfoUpdate.id(),
+        PacketType::SetChunkCacheRadius.id(),
+        PacketType::SetSimulationDistance.id(),
+        PacketType::SetChunkCacheCenter.id(),
+    ];
+    ids.extend(std::iter::repeat_n(
+        PacketType::LevelChunkWithLight.id(),
+        117,
+    ));
+    ids.extend([
+        PacketType::InitializeBorder.id(),
+        PacketType::SetTime.id(),
+        PacketType::SetDefaultSpawnPosition.id(),
+        PacketType::GameEvent.id(),
+    ]);
+    ids
+}
+
+/// The end-to-end live join (issue #101 Slice B): boot the server with
+/// `enable_join` on, drive the full handshake → login → registry sync →
+/// `client_information` → `finish_configuration` over a real socket, then
+/// assert the tick-owned play listener fires the entire 135-frame
+/// `place_new_player` burst on the wire in Paper's order.
+///
+/// The client reports view distance 8 (the #153 capture client's value); the
+/// Moonrise ladder caps the send distance at `load - 1` (4), so the send-set is
+/// the capture's 117-chunk square — not the 77 chunks a `createDefault` view
+/// distance 2 would resolve. `join_burst.rs` covers the byte-exact bodies; this
+/// test proves the burst is live end to end (login → configuration → play over
+/// TCP, framed + compressed as the connection task emits it).
+#[tokio::test]
+async fn live_join_burst_over_tcp_after_finish_configuration() {
+    let (addr, server_task) = start_server(config_with_join()).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    client
+        .write_all(&client_information_frame(8))
+        .await
+        .expect("write client_information");
+    client
+        .write_all(&finish_configuration_reply_frame())
+        .await
+        .expect("write finish_configuration");
+
+    // The join burst: read every frame the tick fired, decompressing as needed
+    // (below-threshold frames pass through with declaredLength 0; the ~7 KB
+    // chunks exceed the 256 threshold and are zlib-compressed).
+    let mut seen = Vec::with_capacity(135);
+    for _ in 0..135 {
+        let (_, payload) = read_compressed_packet(&mut client).await;
+        let (id, _) = decode_varint(&payload);
+        seen.push(id as u32);
+    }
+
+    assert_eq!(seen, join_burst_ids(), "the 135-frame live join burst");
+
+    // The connection stays open in play (a live session, not a silent close).
+    expect_silent_open(&mut client).await;
     server_task.abort();
 }

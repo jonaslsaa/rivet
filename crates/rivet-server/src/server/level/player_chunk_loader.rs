@@ -40,10 +40,10 @@
 //! every connection, exactly as `Connection::send_packet` does on the tokio
 //! side (the #96 per-connection refinement is a `RivetTodo`).
 //!
-//! RivetTodo(#101): the `ServerPlayer`/`placeNewPlayer` join burst that calls
-//! `addPlayer` + `update` each tick — this slice is invoked directly by tests
-//! and exposes the M1 send-set. RivetTodo(#185): the per-stage send/load queues
-//! and rate limiters the full `updateQueues` drains.
+//! The `placeNewPlayer` join burst calls this per-player chunk send-set once at
+//! spawn (see `join.rs`), then `update` each tick (issue #101 Slice B).
+//! RivetTodo(#185): the per-stage send/load queues and rate limiters the full
+//! `updateQueues` drains.
 
 use bytes::{Bytes, BytesMut};
 

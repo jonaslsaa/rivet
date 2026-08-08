@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
+use rivet_protocol::protocol::common::client_information::ClientInformation;
+use rivet_registry::core::GameProfile;
 use tokio::sync::mpsc;
 
 use crate::server::network::connection_id::ConnectionId;
@@ -149,6 +151,18 @@ pub enum LifecycleEvent {
         id: ConnectionId,
         reason: DisconnectReason,
     },
+    /// The configuration→play handoff (issue #101 Slice B): the authenticated
+    /// profile + `ClientInformation` a connection carried across the finish
+    /// configuration boundary. Sent by the network side when the configuration
+    /// listener hands the connection to the play state, so the tick thread can
+    /// spawn the join burst. It travels over the lifecycle channel (drained
+    /// before the inbound channel each tick) so the tick applies the handoff
+    /// before it sees the first coalesced play frame.
+    EnterPlay {
+        id: ConnectionId,
+        profile: GameProfile,
+        client_information: ClientInformation,
+    },
 }
 
 /// The tick thread's per-connection channel ends (OWNERSHIP §Network "packet
@@ -168,6 +182,11 @@ pub struct ConnChannels {
     /// Preserved in FIFO order ahead of the channel and delivered by the next
     /// drain — deterministic retention, never dropped.
     pub(crate) pending_frame: Option<ServerboundFrame>,
+    /// The configuration→play handoff payload, present once the network side
+    /// sent [`LifecycleEvent::EnterPlay`] and until the session manager consumes
+    /// it to spawn the join burst (issue #101 Slice B). Stored on the connection
+    /// so the handoff and the first coalesced play frames cannot be torn apart.
+    play_handoff: Option<(GameProfile, ClientInformation)>,
 }
 
 impl ConnChannels {
@@ -185,6 +204,7 @@ impl ConnChannels {
             out_tx,
             drained,
             pending_frame: None,
+            play_handoff: None,
         }
     }
 
@@ -194,5 +214,19 @@ impl ConnChannels {
 
     pub fn remote(&self) -> SocketAddr {
         self.remote
+    }
+
+    /// Record the configuration→play handoff ([`LifecycleEvent::EnterPlay`]).
+    pub(crate) fn set_play_handoff(
+        &mut self,
+        profile: GameProfile,
+        client_information: ClientInformation,
+    ) {
+        self.play_handoff = Some((profile, client_information));
+    }
+
+    /// Consume the handoff; `None` when no handoff is pending.
+    pub(crate) fn take_play_handoff(&mut self) -> Option<(GameProfile, ClientInformation)> {
+        self.play_handoff.take()
     }
 }

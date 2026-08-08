@@ -5,8 +5,10 @@ use bytes::{Buf, Bytes, BytesMut};
 use rivet_protocol::compression_decoder::CompressionDecoder;
 use rivet_protocol::compression_encoder::CompressionEncoder;
 use rivet_protocol::generated::protocol::ConnectionProtocol;
+use rivet_protocol::protocol::common::client_information::ClientInformation;
 use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
 use rivet_protocol::varint21_length_field_prepender::encode_frame;
+use rivet_registry::core::GameProfile;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 
@@ -112,6 +114,12 @@ pub struct Connection {
     /// backpressures (a slow or non-reading peer) is aborted on shutdown instead
     /// of wedging the per-connection task and `serve()`'s shutdown drain.
     shutdown: Arc<Shutdown>,
+    /// The configuration→play handoff payload: the authenticated profile +
+    /// `ClientInformation` the configuration listener stashed before reporting
+    /// `ListenerOutcome::Play`. The per-connection task forwards it to the tick
+    /// thread as [`LifecycleEvent::EnterPlay`] at the same moment it starts
+    /// forwarding play frames (issue #101 Slice B).
+    play_handoff: Option<(GameProfile, ClientInformation)>,
 }
 
 impl Connection {
@@ -140,6 +148,7 @@ impl Connection {
             drained,
             last_drained: 0,
             shutdown,
+            play_handoff: None,
         }
     }
 
@@ -169,6 +178,23 @@ impl Connection {
     /// set: a flush aborted by shutdown is a stop, not the peer going away.
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown.is_requested()
+    }
+
+    /// Stash the configuration→play handoff (the profile + `ClientInformation`
+    /// a connection carried into the play state). The configuration listener
+    /// calls this just before reporting [`ListenerOutcome::Play`]; the
+    /// per-connection task then forwards it to the tick thread (issue #101).
+    pub fn set_play_handoff(
+        &mut self,
+        profile: GameProfile,
+        client_information: ClientInformation,
+    ) {
+        self.play_handoff = Some((profile, client_information));
+    }
+
+    /// Take the stashed handoff; `None` when none is pending.
+    pub fn take_play_handoff(&mut self) -> Option<(GameProfile, ClientInformation)> {
+        self.play_handoff.take()
     }
 
     /// The encoded frames queued for the wire (netty `channel.write` queue).

@@ -61,6 +61,12 @@ pub struct ServerConfig {
     pub outbound_channel_capacity: usize,
     /// Network→tick lifecycle/registration channel capacity.
     pub lifecycle_capacity: usize,
+    /// Live play sessions: when set, `Server::new` wires the tick-owned
+    /// [`PlayerSessionManager`](player::session::PlayerSessionManager) that
+    /// consumes configuration→play handoffs and fires the join burst (issue
+    /// #101 Slice B). Off by default so the offline-login tests exercise the
+    /// handoff seam without the burst; the M1 binary enables it.
+    pub enable_join: bool,
 }
 
 impl Default for ServerConfig {
@@ -76,6 +82,7 @@ impl Default for ServerConfig {
             inbound_channel_capacity: 1024,
             outbound_channel_capacity: 1024,
             lifecycle_capacity: 256,
+            enable_join: false,
         }
     }
 }
@@ -99,12 +106,23 @@ impl Server {
         let shutdown = Arc::new(Shutdown::new());
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(config.lifecycle_capacity);
         let endpoint = Arc::new(NetworkEndpoint::new(lifecycle_tx, shutdown.clone()));
+        let mut tickables: Vec<Tickable> = Vec::new();
+        // Live play sessions (issue #101 Slice B): the tick-owned session manager
+        // that consumes configuration→play handoffs and fires the join burst. Off
+        // by default so the offline-login tests exercise the handoff seam without
+        // the burst; the M1 binary enables it. The session manager is moved into
+        // the tick thread by `serve` (`std::mem::take`).
+        if config.enable_join {
+            tickables.push(player::session::session_manager_tickable(
+                player::session::default_session_config(config.compression_threshold),
+            ));
+        }
         Server {
             config,
             endpoint,
             shutdown,
             stats: Arc::new(TickStats::default()),
-            tickables: Vec::new(),
+            tickables,
             lifecycle_rx: Some(lifecycle_rx),
         }
     }

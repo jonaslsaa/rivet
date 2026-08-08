@@ -7,6 +7,9 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
+use rivet_protocol::protocol::common::client_information::ClientInformation;
+use rivet_registry::core::GameProfile;
+
 use super::channels::{
     ConnChannels, LifecycleEvent, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
     MAX_INBOUND_FRAMES_PER_DRAIN, OutboundEvent, ServerboundFrame,
@@ -89,7 +92,29 @@ impl ConnectionRegistry {
             LifecycleEvent::Disconnect { id, .. } => {
                 self.connections.remove(&id);
             }
+            LifecycleEvent::EnterPlay {
+                id,
+                profile,
+                client_information,
+            } => {
+                if let Some(conn) = self.connections.get_mut(&id) {
+                    conn.set_play_handoff(profile, client_information);
+                }
+                // An EnterPlay for an unknown connection is a race where the
+                // connection already closed; the handoff is dropped.
+            }
         }
+    }
+
+    /// Consume a connection's configuration→play handoff ([`LifecycleEvent::EnterPlay`])
+    /// so the session manager can spawn its join burst exactly once.
+    pub fn take_play_handoff(
+        &mut self,
+        id: ConnectionId,
+    ) -> Option<(GameProfile, ClientInformation)> {
+        self.connections
+            .get_mut(&id)
+            .and_then(ConnChannels::take_play_handoff)
     }
 
     /// Drain one connection's inbound frames in FIFO order, bounded by the

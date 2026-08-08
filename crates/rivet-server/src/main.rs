@@ -4,7 +4,10 @@
 //!
 //! The full boot sequence (world/level load, registry/data load, tick-phase
 //! systems) is M1 sub-issues #100/#101; this binary brings up the TCP listener,
-//! pre-play connection state machines, and the empty tick spine.
+//! the pre-play connection state machines, the tick spine, and — with
+//! `enable_join` set — the live play path: an offline client that completes
+//! login + configuration joins the superflat world and receives the 135-frame
+//! join burst (issue #101 Slice B).
 //!
 //! ## Machine-readable protocol (stdout)
 //!
@@ -87,8 +90,24 @@ async fn run_server(server: Server) -> ExitCode {
 
 /// Parse the bind config. `--host` and `--port` override the defaults so the
 /// binary is runnable without a `server.properties` parser (a later M1 slice).
+///
+/// The production binary always enables the live play path: `Server::new`
+/// wires the tick-owned session manager that consumes the configuration→play
+/// handoff and fires the join burst (issue #101 Slice B). `ServerConfig::default()`
+/// leaves `enable_join` off so the offline-login tests exercise the handoff
+/// seam without the burst; this entry point turns it on.
 fn server_config_from_args() -> ServerConfig {
-    config_from_args(std::env::args().skip(1))
+    production_config_from_args(std::env::args().skip(1))
+}
+
+/// The M1 production config: the parsed bind config with `enable_join` forced
+/// on (see [`server_config_from_args`]). Pure so tests can assert the binary's
+/// join behavior without touching real process args.
+fn production_config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
+    ServerConfig {
+        enable_join: true,
+        ..config_from_args(args)
+    }
 }
 
 fn config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
@@ -137,5 +156,14 @@ mod tests {
         );
         assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 25599);
+    }
+
+    #[test]
+    fn production_config_enables_live_join() {
+        let config = production_config_from_args(Vec::<String>::new().into_iter());
+        assert!(
+            config.enable_join,
+            "the M1 binary must run the live play path (issue #101 Slice B)"
+        );
     }
 }
