@@ -6,8 +6,10 @@
 //! systems) is M1 sub-issues #100/#101; this binary brings up the TCP listener,
 //! the pre-play connection state machines, the tick spine, and — with
 //! `enable_join` set — the live play path: an offline client that completes
-//! login + configuration joins the superflat world and receives the 135-frame
-//! join burst (issue #101 Slice B).
+//! login + configuration joins the superflat world and receives the join burst
+//! (issue #101 Slice B) sized by its `ClientInformation` view distance — the
+//! capture client's 8 resolves the 135-frame burst, a `create_default` client's
+//! 2 the 99-frame burst.
 //!
 //! ## Machine-readable protocol (stdout)
 //!

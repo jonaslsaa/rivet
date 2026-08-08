@@ -1181,10 +1181,12 @@ fn join_burst_ids() -> Vec<u32> {
 ///
 /// The client reports view distance 8 (the #153 capture client's value); the
 /// Moonrise ladder caps the send distance at `load - 1` (4), so the send-set is
-/// the capture's 117-chunk square — not the 77 chunks a `createDefault` view
-/// distance 2 would resolve. `join_burst.rs` covers the byte-exact bodies; this
-/// test proves the burst is live end to end (login → configuration → play over
-/// TCP, framed + compressed as the connection task emits it).
+/// the capture's 117-chunk square. A `createDefault` client (view distance 2)
+/// would resolve send 3 and the full 9×9 = 81-chunk square instead — the
+/// `create_default_handoff_resolves_the_81_chunk_send_set` unit test pins that
+/// shape. `join_burst.rs` covers the byte-exact bodies; this test proves the
+/// burst is live end to end (login → configuration → play over TCP, framed +
+/// compressed as the connection task emits it).
 #[tokio::test]
 async fn live_join_burst_over_tcp_after_finish_configuration() {
     let (addr, server_task) = start_server(config_with_join()).await;

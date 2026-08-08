@@ -197,8 +197,11 @@ impl PlayerSessionManager {
         self.indices.insert(player.uuid(), connection_id);
 
         // Fire the join burst in Paper's order. `requested_view_distance` is the
-        // client's `ClientInformation` view distance — the Moonrise ladder caps
-        // it at `load - 1`, so the M1 send-set is unchanged for any real client.
+        // client's `ClientInformation` view distance — the Moonrise ladder feeds
+        // it through `client + 1` (the capture client's 8 caps at `load - 1` =
+        // 4, the 117-chunk M1 send-set; a `create_default` client's 2 resolves
+        // send 3, the 81-chunk square). The resolved distances also go into the
+        // cache-radius packet this burst emits.
         if let Err(e) = place_new_player(
             &mut self.sender,
             ctx.connections,
@@ -411,6 +414,8 @@ mod tests {
     use crate::server::tick::registry::ConnectionRegistry;
     use bytes::Bytes;
     use rivet_protocol::protocol::common::client_information::ClientInformation;
+    use rivet_protocol::protocol::game::clientbound_set_chunk_cache_radius::ClientboundSetChunkCacheRadiusPacket;
+    use rivet_protocol::protocol::game::clientbound_set_simulation_distance::ClientboundSetSimulationDistancePacket;
     use rivet_registry::core::{GameProfile, create_offline_player_uuid};
 
     /// A connected connection id for the counterfactual tests.
@@ -433,8 +438,9 @@ mod tests {
     }
 
     /// A registry with `ID` connected over a bounded outbound channel (capacity
-    /// 256 — the whole 135-frame join burst must fit before the test drains).
-    /// Returns the registry and the outbound receiver for asserting disconnect.
+    /// 256 — the largest burst these unit tests fire is the `create_default`
+    /// 99-frame send-set, which must fit before the test drains). Returns the
+    /// registry and the outbound receiver for asserting disconnect.
     fn connected_registry() -> (
         ConnectionRegistry,
         tokio::sync::mpsc::Receiver<OutboundEvent>,
@@ -455,12 +461,16 @@ mod tests {
 
     /// Apply the configuration→play handoff for `ID` (the network side sends
     /// `LifecycleEvent::EnterPlay` when the connection reaches play).
+    ///
+    /// The handoff carries `ClientInformation::create_default()`, whose
+    /// `view_distance` is **2** (not 8 — the capture client's value is set by
+    /// the `client_information_frame` in the e2e test). The Moonrise send
+    /// ladder resolves `client + 1 = 3` and the send-set is the 9×9 = 81-chunk
+    /// square (at send 3 the corners `(±4,±4)` are included, `2² + 2² = 8 < 9`).
     fn apply_enter_play(registry: &mut ConnectionRegistry) {
         registry.apply(LifecycleEvent::EnterPlay {
             id: ID,
             profile: probe_profile(),
-            // The M1 capture client requests view distance 8; the Moonrise
-            // ladder caps it at load - 1 (4), so the send-set is unchanged.
             client_information: ClientInformation::create_default(),
         });
     }
@@ -645,6 +655,114 @@ mod tests {
             manager.pending.is_empty(),
             "handoff already applied, nothing buffered"
         );
+    }
+
+    /// Decode one outbound play frame into `(packet_id, body)` — the body is
+    /// the bytes after the packet-id varint, decompressed if the frame was
+    /// zlib-compressed (the frame is the VarInt21 length header, then
+    /// `varint(declaredLength) ++ [zlib payload | raw]`, then
+    /// `varint(id) ++ body`).
+    fn frame_parts(frame: &[u8]) -> (u32, Vec<u8>) {
+        let mut buf = bytes::BytesMut::from(frame);
+        let _len = rivet_protocol::var_int::read(&mut buf);
+        let declared = rivet_protocol::var_int::read(&mut buf);
+        let payload: Vec<u8> = if declared > 0 {
+            let mut decoder = flate2::read::ZlibDecoder::new(&buf[..]);
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut out).expect("inflate");
+            out
+        } else {
+            buf.to_vec()
+        };
+        let mut payload: &[u8] = &payload;
+        let id = rivet_protocol::var_int::read(&mut payload) as u32;
+        (id, payload.to_vec())
+    }
+
+    /// Drain every frame the tick queued for `ID` into ordered `(packet_id,
+    /// body)` pairs.
+    fn drain_outbound_frames(
+        out_rx: &mut tokio::sync::mpsc::Receiver<OutboundEvent>,
+    ) -> Vec<(u32, Vec<u8>)> {
+        let mut frames = Vec::new();
+        while let Ok(event) = out_rx.try_recv() {
+            if let OutboundEvent::Packet { frame } = event {
+                frames.push(frame_parts(&frame));
+            }
+        }
+        frames
+    }
+
+    /// `create_default` (view distance 2) must NOT resolve to the M1 capture's
+    /// 117-chunk send-set: the Moonrise ladder yields send `client + 1 = 3`, and
+    /// at send 3 the corner cells `(±4,±4)` are still *inside* the square —
+    /// `ChunkTrackingView` shrinks the delta by 2 first (`|±4| − 2 = 2`),
+    /// giving `2² + 2² = 8 < 9` — so the send-set is the full 9×9 = 81 chunks.
+    /// The corner cut only appears at send 4 (the M1 capture's 117-chunk
+    /// square). This test pins the 81-chunk/99-frame shape the `create_default`
+    /// handoff actually produces end to end.
+    #[test]
+    fn create_default_handoff_resolves_the_81_chunk_send_set() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry); // create_default: view distance 2
+        manager = run_tick(manager, &mut registry, vec![]);
+        assert_eq!(manager.session_count(), 1);
+
+        let frames = drain_outbound_frames(&mut out_rx);
+        // 18 non-chunk burst members (11 join + 3 cache + 4 second-sendLevelInfo)
+        // + 81 chunks = 99 frames.
+        let chunk_count = frames
+            .iter()
+            .filter(|(id, _)| *id == rivet_protocol::generated::packets::play::clientbound::PacketType::LevelChunkWithLight.id())
+            .count();
+        assert_eq!(
+            frames.len(),
+            99,
+            "create_default (view distance 2) fires a 99-frame burst"
+        );
+        assert_eq!(
+            chunk_count, 81,
+            "send distance 3 gives the full 9x9 square (corners included)"
+        );
+        // The two cache packets carry the resolved distances — cache radius 3
+        // (the send distance), simulation distance 4 (the world's tick
+        // distance) — pinned by burst order and decoded to their exact body
+        // bytes with no trailing bytes.
+        let cache_radius = &frames[11];
+        let sim_distance = &frames[12];
+        assert_eq!(
+            cache_radius.0,
+            rivet_protocol::generated::packets::play::clientbound::PacketType::SetChunkCacheRadius
+                .id(),
+            "cache radius packet precedes the chunks"
+        );
+        assert_eq!(
+            sim_distance.0,
+            rivet_protocol::generated::packets::play::clientbound::PacketType::SetSimulationDistance.id(),
+            "simulation distance packet follows"
+        );
+        let mut radius_buf = FriendlyByteBuf::new(bytes::BytesMut::from(cache_radius.1.as_slice()));
+        let decoded_radius = ClientboundSetChunkCacheRadiusPacket::stream_codec()
+            .decode(&mut radius_buf)
+            .unwrap();
+        assert_eq!(
+            decoded_radius,
+            ClientboundSetChunkCacheRadiusPacket::new(3),
+            "cache radius is the resolved send distance 3"
+        );
+        assert_eq!(radius_buf.readable_bytes(), 0, "no trailing bytes");
+
+        let mut sim_buf = FriendlyByteBuf::new(bytes::BytesMut::from(sim_distance.1.as_slice()));
+        let decoded_sim = ClientboundSetSimulationDistancePacket::stream_codec()
+            .decode(&mut sim_buf)
+            .unwrap();
+        assert_eq!(
+            decoded_sim,
+            ClientboundSetSimulationDistancePacket::new(4),
+            "simulation distance is the world's tick distance 4"
+        );
+        assert_eq!(sim_buf.readable_bytes(), 0, "no trailing bytes");
     }
 
     // A compile-time smoke of the session's spawn geometry (the respawn pos,

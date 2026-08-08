@@ -183,9 +183,11 @@ pub struct JoinConfig {
 /// issue #100) is emitted immediately before the second `sendLevelInfo` so the
 /// level-snapshot block stays contiguous and the chunk stream is the last burst
 /// member. `requested_view_distance` is the client's `ClientInformation`
-/// view distance (Slice B): the Moonrise ladder caps it at `load - 1` (4 on the
-/// M1 world), so the M1 send-set is unchanged whether or not a client requests
-/// one.
+/// view distance (Slice B): the Moonrise ladder feeds it through `client + 1`,
+/// so the send-set DOES depend on the client — the capture client's 8 caps at
+/// `load - 1` (4) → 117 chunks; a `create_default` client's 2 resolves send 3
+/// → 81 chunks. `None` (the auto-config path) resolves the world's own send
+/// distance, 4 on the M1 world.
 pub fn place_new_player(
     sender: &mut PlaySender,
     connections: &mut ConnectionRegistry,

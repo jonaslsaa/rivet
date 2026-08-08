@@ -85,9 +85,11 @@ const AUTO_CONFIG_SEND_DISTANCE: bool = true;
 
 /// `RegionizedPlayerChunkLoader.getClientViewDistance(player)` —
 /// `player.requestedViewDistance()`, `null` → -1 (the "no request" sentinel the
-/// ladder resolves via auto-config). The M1 callers pass `None` (issue #101 is
-/// not wired), but the capture client itself requests 8 — see
-/// `add_and_send_chunks`.
+/// ladder resolves via auto-config). The live Slice B caller
+/// (`PlayerSessionManager::spawn_session` →
+/// [`place_new_player`](crate::server::player::join::place_new_player)) passes
+/// `Some(client_information.view_distance())`; the `None` auto-config path
+/// remains for the unit/`join_burst` callers that hand no client information.
 pub fn get_client_view_distance(requested_view_distance: Option<i32>) -> i32 {
     requested_view_distance.map(|vd| vd.max(0)).unwrap_or(-1)
 }
@@ -218,10 +220,11 @@ impl PlayerChunkLoader {
     /// record the distances sent in those packets, not the chunk set's delivery.
     ///
     /// `requested_view_distance` is `ServerPlayer.requestedViewDistance()`
-    /// (issue #101); the M1 callers pass `None`. Note the capture client itself
-    /// requests 8 (`client_information` view distance in `capture.jsonl`), but
-    /// the ladder still resolves send = 4 (`min(load - 1, client + 1)`), so the
-    /// M1 send-set is unchanged.
+    /// (issue #101). The live Slice B caller passes
+    /// `Some(ClientInformation.view_distance)` (the capture client requests 8,
+    /// which the ladder caps at `load - 1` → send 4, the 117-chunk M1 send-set).
+    /// The unit/`join_burst` callers pass `None`, which the auto-config ladder
+    /// resolves to the world's own send distance (also 4 on the M1 world).
     pub fn add_and_send_chunks(
         &mut self,
         world: &ServerLevel,
