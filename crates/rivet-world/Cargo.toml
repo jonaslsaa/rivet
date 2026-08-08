@@ -12,6 +12,11 @@ workspace = true
 # `FriendlyByteBuf` (and the section/data-layer buffers it fills) is BytesMut-
 # backed; the #100 superflat content builder writes sections through it.
 bytes = { workspace = true }
+# `StructureAccess`'s reference sets are an `IndexSet<u64>` — the Rust stand-in
+# for Java's `LongOpenHashSet`. Dedup and first-insertion order are the
+# IndexSet's, not Java's (which iterates in hash-probe slot order; see the
+# module `RivetTodo(#185)` in structure_access).
+indexmap = { workspace = true }
 # The `packets` feature unlocks the game packet bodies this crate produces
 # content for (#94): `LevelChunkPacketData`, `LightUpdatePacketData`,
 # `HeightmapType` (all feature-gated in rivet-protocol).
@@ -22,6 +27,10 @@ rivet-util = { workspace = true }
 [dev-dependencies]
 # Tests build real containers (BytesMut-backed FriendlyByteBuf).
 bytes = { workspace = true }
+# The section-tag decode test builds a `SerializableChunkData`-style section
+# `CompoundTag` (`Y` + `block_states`/`biomes`; the golden fixture carries no
+# light arrays).
+rivet-nbt = { workspace = true }
 # The PalettedContainer<StateId> golden tests drive the real global
 # block-state table (rivet-registry `blocks` feature). Dev-only: normal
 # builds of rivet-world stay feature-free.
