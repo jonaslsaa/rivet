@@ -35,19 +35,19 @@ use crate::suggestion::{Suggestions, SuggestionsBuilder};
 mod tests;
 
 /// Paper's `CommandNode.getRelevantNodes(StringReader, Object source)` dispatch —
-/// the source's literal resolution for the `minecraft:` prefix prioritization.
+/// the source's literal resolution for the `minecraft:` prefix prioritization (#211).
 /// Paper checks the concrete `CommandSourceStack` runtime type and two `source`
-/// values; the Minecraft type lands with the command-dispatch units (#210's
-/// dependency), so this crate generalizes the condition as the `S` type
-/// implementing this trait (the Java `instanceof CommandSourceStack` becomes the
-/// per-`S` impl choice).
+/// values; the Minecraft `CommandSourceStack` type lands with the command-dispatch
+/// units (#211's dependency), so this crate generalizes the condition as the `S`
+/// type implementing this trait (the Java `instanceof CommandSourceStack` becomes
+/// the per-`S` impl choice).
 ///
 /// Java's conditions are: `source instanceof CommandSourceStack css && css.source ==
-/// CommandSource.NULL` (command blocks / functions via the RCON or function system)
-/// and `source instanceof CommandSourceStack css && css.source instanceof
+/// CommandSource.NULL` (the function-parsing compilation context) and `source
+/// instanceof CommandSourceStack css && css.source instanceof
 /// CloseableCommandBlockSource` (command blocks). For every other `CommandSourceStack`
-/// — notably a player or the server console — the vanilla exact-literal lookup
-/// applies and an unprefixed input does NOT match the `minecraft:` literal.
+/// — notably a player, the server console, or RCON — the vanilla exact-literal
+/// lookup applies and an unprefixed input does NOT match the `minecraft:` literal.
 ///
 /// The default `resolve_literal` is the identity — a source that is not one of
 /// Paper's command-block/function kinds performs the vanilla exact lookup. The
