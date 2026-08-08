@@ -311,7 +311,17 @@ fn render_block_properties(
         }
         out.push_str("]),\n");
     }
-    out.push_str("];\n");
+    out.push_str("];\n\n");
+
+    // The largest per-block property shape. `BlockState`'s mixed-radix scratch
+    // buffers are sized to this, so the bound is derived from the same table it
+    // indexes and regenerates automatically if a future MC grows a shape.
+    let max_shape_len = block_shapes.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
+    out.push_str(&format!(
+        "/// The largest per-block property shape (max property count across all\n\
+         /// blocks). Scratch buffers in `block_state::BlockState` are sized to this.\n\
+         pub const MAX_BLOCK_STATE_PROPERTY_COUNT: usize = {max_shape_len};\n"
+    ));
     out
 }
 

@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
+use crate::model::BlockRegistry;
 use crate::reports::SourceProvenance;
 
 /// The canonical pinned behavior-table fixture.
@@ -54,6 +55,14 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
         .with_context(|| format!("parse {}", input.display()))?;
 
     let runs = validate(root)?;
+    // The behavior table must span exactly the same state space as the
+    // block-state registry it indexes: a behavior dump regenerated from a
+    // differently-sized registry would leave real states silently decoding as
+    // air (`behavior_of` falls back to `BLOCK_BEHAVIOR_RUNS[0]`). The registry
+    // total is re-derived from the extract artifact so this cannot pass a
+    // self-consistent-but-stale pair of fixtures.
+    let block_state_count = registry_state_count(&repo_root)?;
+    check_state_count_matches(&runs, block_state_count)?;
     let source = load_provenance(&input)?;
 
     fs::create_dir_all(&output).with_context(|| format!("create {}", output.display()))?;
@@ -75,6 +84,45 @@ pub(crate) struct Run {
     start: u32,
     length: u32,
     word: u32,
+}
+
+/// The total number of block states in the registry (`BLOCK_STATE_COUNT`),
+/// re-derived from the extract artifact `block_states.json`: each block
+/// contributes the product of its property value counts (a single-state block
+/// has no properties, so a product of zero factors is `1`). `block_states`
+/// pins this product to the report's contiguous per-block state ranges, so it
+/// equals the emitted `BLOCK_STATE_COUNT`.
+fn registry_state_count(repo_root: &Path) -> Result<u32> {
+    let input = crate::generate::default_input(repo_root);
+    let json = fs::read_to_string(&input).with_context(|| format!("read {}", input.display()))?;
+    let registry: BlockRegistry =
+        serde_json::from_str(&json).with_context(|| format!("parse {}", input.display()))?;
+    Ok(registry
+        .blocks
+        .iter()
+        .map(|b| {
+            b.properties
+                .iter()
+                .map(|p| p.values.len() as u32)
+                .product::<u32>()
+                .max(1) // a block with no properties is a single state
+        })
+        .sum())
+}
+
+/// The behavior runs must cover exactly `block_state_count` states (the
+/// registry's `BLOCK_STATE_COUNT`). A mismatch means the two tables were
+/// regenerated from different-sized registries, so generation must fail rather
+/// than emit a table whose uncovered tail silently decodes as air.
+fn check_state_count_matches(runs: &[Run], block_state_count: u32) -> Result<()> {
+    let behavior_count: u64 = runs.iter().map(|r| r.length as u64).sum();
+    if behavior_count != block_state_count as u64 {
+        bail!(
+            "block_behaviors.json covers {behavior_count} states but block_states.json defines \
+             {block_state_count} (BLOCK_STATE_COUNT) — regenerate both from the same jar"
+        );
+    }
+    Ok(())
 }
 
 /// Structural + oracle-conformance validation of `block_behaviors.json`. Fails
@@ -405,6 +453,46 @@ mod tests {
     }
 
     #[test]
+    fn state_count_mismatch_with_registry_fails() {
+        // Dense, self-consistent runs that span 5 states — but the registry
+        // defines 6. `validate` alone cannot see this; the cross-check against
+        // `block_states.json` is what catches a behavior dump regenerated from
+        // a differently-sized registry.
+        let runs = [
+            Run {
+                start: 0,
+                length: 2,
+                word: 0x1,
+            },
+            Run {
+                start: 2,
+                length: 3,
+                word: 0x20015,
+            },
+        ];
+        let err = check_state_count_matches(&runs, 6).unwrap_err();
+        assert!(err.to_string().contains("covers 5 states"), "got: {err}");
+        assert!(err.to_string().contains("defines 6"), "got: {err}");
+    }
+
+    #[test]
+    fn state_count_match_passes() {
+        let runs = [
+            Run {
+                start: 0,
+                length: 2,
+                word: 0x1,
+            },
+            Run {
+                start: 2,
+                length: 3,
+                word: 0x20015,
+            },
+        ];
+        check_state_count_matches(&runs, 5).unwrap();
+    }
+
+    #[test]
     fn rendering_is_deterministic_and_carries_provenance() {
         let source: SourceProvenance = serde_json::from_str(
             r#"{"jar":"paper-26.2.jar","jar_sha256":"e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda","minecraft_version":"26.2","protocol_version":776,"world_version":4903}"#,
@@ -432,28 +520,61 @@ mod tests {
     }
 
     /// The emitted `behavior_of` binary search must reproduce the fixture words
-    /// for every state (the RLE decode is the load-bearing consumer path).
+    /// for every state in the real table (the RLE decode is the load-bearing
+    /// consumer path). Walking all 32366 states — including both boundaries of
+    /// every one of the 16753 runs and the out-of-range fallback — proves the
+    /// `partition_point` decode has no off-by-one anywhere.
     #[test]
     fn behavior_of_matches_fixture_words() {
-        let runs = vec![
-            Run {
-                start: 0,
-                length: 2,
-                word: 0x1,
-            },
-            Run {
-                start: 2,
-                length: 3,
-                word: 0x20015,
-            },
-        ];
-        let source: SourceProvenance = serde_json::from_str(
-            r#"{"jar":"p","jar_sha256":"e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda","minecraft_version":"26.2","protocol_version":776,"world_version":4903}"#,
-        )
-        .unwrap();
-        let rendered = render(&runs, &source);
-        // The emitted behavior_of: out-of-range falls back to the first run.
-        assert!(rendered.contains("partition_point"));
-        assert!(rendered.contains("BLOCK_BEHAVIOR_RUNS[0].2"));
+        let repo_root = crate::extract::find_repo_root().unwrap();
+        let json = fs::read_to_string(default_input(&repo_root)).unwrap();
+        let root = crate::registries::parse_strict(&json).unwrap();
+        let runs = validate(root).unwrap();
+        let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
+        assert_eq!(state_count, 32366, "registry state count drifted");
+
+        // A dense word array is the ground truth to decode against.
+        let mut words = vec![0u32; state_count as usize];
+        for r in &runs {
+            for w in words[r.start as usize..(r.start + r.length) as usize].iter_mut() {
+                *w = r.word;
+            }
+        }
+
+        // The exact decode the emitted `behavior_of` performs: the last run
+        // whose start is <= id, in-range check, else the air fallback.
+        let decode = |id: u32| -> u32 {
+            let idx = runs.partition_point(|r| r.start <= id);
+            if idx == 0 {
+                return runs[0].word;
+            }
+            let (start, len, word) = (
+                runs[idx - 1].start,
+                runs[idx - 1].length,
+                runs[idx - 1].word,
+            );
+            if id < start + len { word } else { runs[0].word }
+        };
+
+        // Every state decodes to the fixture's own word.
+        for id in 0..state_count {
+            assert_eq!(decode(id as u32), words[id as usize], "state {id}");
+        }
+        // Out-of-range falls back to air's word (state 0).
+        assert_eq!(decode(state_count as u32), words[0], "first out-of-range");
+        assert_eq!(decode(u16::MAX as u32), words[0], "far out-of-range");
+    }
+
+    /// The real fixture must agree with `block_states.json` on the total state
+    /// count (`BLOCK_STATE_COUNT`), so a behavior dump from a differently-sized
+    /// registry fails `generate` even when it is internally self-consistent.
+    #[test]
+    fn real_fixture_state_count_matches_registry() {
+        let repo_root = crate::extract::find_repo_root().unwrap();
+        assert_eq!(registry_state_count(&repo_root).unwrap(), 32366);
+        let json = fs::read_to_string(default_input(&repo_root)).unwrap();
+        let root = crate::registries::parse_strict(&json).unwrap();
+        let runs = validate(root).unwrap();
+        check_state_count_matches(&runs, 32366).unwrap();
     }
 }

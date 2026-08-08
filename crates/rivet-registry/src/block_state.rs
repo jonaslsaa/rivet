@@ -34,7 +34,9 @@ use crate::generated::block_behaviors::{
     BEHAVIOR_SHIFT_LIGHT_DAMPENING, BEHAVIOR_SHIFT_LIGHT_EMISSION, BEHAVIOR_SHIFT_MAP_COLOR,
     behavior_of,
 };
-use crate::generated::block_properties::{BLOCK_PROPERTY_VALUES, BlockPropertyId};
+use crate::generated::block_properties::{
+    BLOCK_PROPERTY_VALUES, BlockPropertyId, MAX_BLOCK_STATE_PROPERTY_COUNT,
+};
 use crate::generated::block_states::{
     StateId, block_of, default_state, shape_of, state_id, values_of,
 };
@@ -126,7 +128,7 @@ impl BlockState {
     pub fn get_property(self, prop: BlockPropertyId) -> Option<u16> {
         let block = self.block();
         let shape = shape_of(block);
-        let mut buf = [0u16; 7];
+        let mut buf = [0u16; MAX_BLOCK_STATE_PROPERTY_COUNT];
         values_of(self.0, &mut buf);
         shape.iter().position(|&p| p == prop as u16).map(|i| buf[i])
     }
@@ -144,7 +146,7 @@ impl BlockState {
         if value >= count {
             return Err(BlockStateError::ValueOutOfRange { prop, value, count });
         }
-        let mut buf = [0u16; 7];
+        let mut buf = [0u16; MAX_BLOCK_STATE_PROPERTY_COUNT];
         values_of(self.0, &mut buf);
         buf[pos] = value;
         Ok(Self(state_id(block, &buf[..shape.len()])))

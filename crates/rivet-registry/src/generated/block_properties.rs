@@ -1529,3 +1529,7 @@ pub static BLOCK_STATE_SHAPES: &[(u16, &[u16])] = &[
     (1189, &[91, 65, 66, 67, 68]),
     (1190, &[120]),
 ];
+
+/// The largest per-block property shape (max property count across all
+/// blocks). Scratch buffers in `block_state::BlockState` are sized to this.
+pub const MAX_BLOCK_STATE_PROPERTY_COUNT: usize = 7;
