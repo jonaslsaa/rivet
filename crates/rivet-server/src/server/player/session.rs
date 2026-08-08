@@ -340,8 +340,9 @@ impl PlayerSessionManager {
         // `handleKeepAlive`'s body boundary: the echoed `long` id. The decode
         // runs on the tick thread, so its panics must be contained here, never
         // abort the tick: a truncated body (`read_long` on < 8 remaining bytes
-        // panics) is dropped and counted as malformed, matching the
-        // decode-boundary containment of [`decode_packet`].
+        // panics) is dropped and logged, not counted — `keep_alives_seen` only
+        // counts frames whose body parsed, matching the decode-boundary
+        // containment of [`decode_packet`].
         let mut raw = bytes::BytesMut::from(&frame.bytes[..]);
         let _ = rivet_protocol::var_int::read(&mut raw); // packet id
         let mut input = FriendlyByteBuf::new(raw);
@@ -632,9 +633,9 @@ mod tests {
     }
 
     /// Run one tick of the manager at simulated `now_ms` (the monotonic clock
-    /// starts at 0; `now_ns` is derived the same way `ServerTickLoop.run_tick`
-    /// derives it — `now_nanos / 1_000_000`). Returns the manager (the registry
-    /// borrow ends).
+    /// starts at 0; `now_ns` is the inverse of the loop's derivation — the loop
+    /// computes `now_ms = now_nanos / 1_000_000`, so here `now_ns =
+    /// now_ms * 1_000_000`). Returns the manager (the registry borrow ends).
     fn run_tick_at(
         mut manager: PlayerSessionManager,
         registry: &mut ConnectionRegistry,
