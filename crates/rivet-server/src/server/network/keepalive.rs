@@ -2,30 +2,21 @@
 //! listener needs from its `Connection`, and the shared driver that runs
 //! `KeepaliveState::tick` each server tick.
 //!
-//! # The #96 seam
+//! # Listener seam
 //!
-//! The full `ServerCommonPacketListenerImpl.keepConnectionAlive` runs in BOTH
-//! the configuration phase (`ServerConfigurationPacketListenerImpl.tick`, this
-//! slice) and the play phase (`ServerGamePacketListenerImpl.tick`). The play
-//! listener does not exist yet (#96/#101). To keep the play/network integration
-//! behind a narrow seam, the tick-thread state machine
-//! [`super::super::keepalive::KeepaliveState`] is pure (no `Connection`, no
-//! packets), and the *only* listener-facing surface is:
+//! The full `ServerCommonPacketListenerImpl.keepConnectionAlive` runs in both
+//! configuration and play. The tick-thread state machine
+//! [`super::super::keepalive::KeepaliveState`] stays pure (no `Connection`, no
+//! packets), while listeners use:
 //!
-//!   - [`KeepaliveSink`] — the two outbound effects a tick can demand:
-//!     transmit a clientbound keep-alive, or disconnect for keepalive timeout;
-//!   - [`drive_keepalive`] — runs one `KeepaliveState::tick` and applies its
-//!     outcome through a [`KeepaliveSink`].
+//!   - [`KeepaliveSink`] for the two outbound effects: transmit a clientbound
+//!     keep-alive or disconnect for timeout;
+//!   - [`drive_keepalive`] to run one state-machine tick and apply its outcome.
 //!
-//! This PR delivers the seam only: no listener owns a [`KeepaliveState`] yet.
-//! The configuration listener will own one and call [`drive_keepalive`] from
-//! its `tick` hook, and the serverbound `keep_alive` packet will route to
-//! `KeepaliveState::handle_keepalive`, once the configuration tick hook exists
-//! (#96). When #96 lands the play listener implements the same
-//! [`KeepaliveSink`] against the play connection and reuses the exact same
-//! `KeepaliveState` + `drive_keepalive` — no new keepalive logic. Until then,
-//! no play-listener (`ServerGamePacketListenerImpl`) file is touched and no
-//! speculative play-state API is invented.
+//! PLAY sessions own one [`KeepaliveState`] each and drive it through
+//! `PlayKeepaliveSink`. The configuration listener does not own or drive a
+//! keepalive state yet (issue #157); when that tick hook lands it can reuse this
+//! seam without duplicating the keepalive logic.
 
 use bytes::BytesMut;
 
