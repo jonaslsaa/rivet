@@ -184,12 +184,13 @@ mod tests {
         // sections, and no block is inside the (empty) build height.
         assert_eq!(empty.get_sections_count(), 0);
         assert!(!empty.is_inside_build_height(0)); // 0 > -1
-        // A height near i32::MAX saturates neither: Java `minY + height - 1`
-        // wraps in release; we mirror the plain arithmetic so no overflow
-        // panic. `max_y` wraps around and sections collapse back.
         let huge = create(0, i32::MAX);
         assert_eq!(huge.get_max_y(), i32::MAX - 1);
         // `huge.get_max_section_y()` is `(i32::MAX - 1) >> 4` = 134217727.
         assert_eq!(huge.get_max_section_y(), 134_217_727);
+
+        // Java's `minY + height - 1` wraps rather than saturating.
+        let wrapped = create(i32::MAX, 2);
+        assert_eq!(wrapped.get_max_y(), i32::MIN);
     }
 }
