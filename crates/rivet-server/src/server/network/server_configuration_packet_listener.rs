@@ -241,9 +241,10 @@ impl ConfigurationTask for JoinWorldTask {
 /// (`FeatureFlags.REGISTRY.toNames(worldData.enabledFeatures())` — `{minecraft:vanilla}`
 /// on the M1 offline world), then queues the configuration tasks and starts the
 /// first. The registry-sync task (`SynchronizeRegistriesTask`) and the terminal
-/// `JoinWorldTask` are the M1 queue; the spawn-chunk load (`PrepareSpawnTask`,
-/// #100) that Paper runs between them is deferred. The queue is
-/// [sync, join_world]: the client replies to `select_known_packs`, the server
+/// `JoinWorldTask` are the M1 queue; Paper's `PrepareSpawnTask` between them is
+/// not ported — the M1 superflat chunks are delivered tick-side via the
+/// direct-send path (#100). The queue is [sync, join_world]: the client replies
+/// to `select_known_packs`, the server
 /// sends the registry/tag data and finishes the sync, `JoinWorldTask` sends
 /// `ClientboundFinishConfigurationPacket`, and the client's `finish_configuration`
 /// reply finishes it — the connection then hands off to the play state
@@ -316,7 +317,8 @@ impl ServerConfigurationPacketListener {
     /// the first (`startNextTask`).
     ///
     /// This slice queues the registry sync + `JoinWorldTask` (the finish→play
-    /// seam); `PrepareSpawnTask` (#100) is deferred. The join burst
+    /// seam); Paper's `PrepareSpawnTask` is not ported — the M1 superflat chunks
+    /// are delivered tick-side via the direct-send path (#100). The join burst
     /// (`spawnPlayer`) runs tick-side via the play listener (issue #101 Slice B).
     pub fn start_configuration(&mut self, conn: &mut Connection) -> Result<(), String> {
         // `send(new ClientboundCustomPayloadPacket(new BrandPayload(server
@@ -844,8 +846,10 @@ mod tests {
     #[tokio::test]
     async fn start_configuration_queues_sync_then_join_world() {
         // The M1 queue is [synchronize_registries, join_world]: the sync starts
-        // first; `PrepareSpawnTask` (#100) is deferred. Finishing the sync starts
-        // `JoinWorldTask`, whose `start` sends the finish_configuration packet.
+        // first; Paper's `PrepareSpawnTask` is not ported — the M1 superflat
+        // chunks are delivered tick-side via the direct-send path (#100).
+        // Finishing the sync starts `JoinWorldTask`, whose `start` sends the
+        // finish_configuration packet.
         let mut conn = config_connection().await;
         let mut listener =
             ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
