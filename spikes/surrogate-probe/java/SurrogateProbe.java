@@ -110,6 +110,7 @@ public final class SurrogateProbe {
         // ---- 5. Gson JsonPrimitive round-trip of a lone surrogate -----------
         probeGson("gson_high_escaped", "\"\\ud800\"");
         probeGson("gson_high_raw", high);
+        probeGson("gson_low_escaped", "\"\\udc00\"");
         probeGson("gson_pair_escaped", "\"\\ud83d\\udca9\"");
 
         // ---- 6. UTF-8 encoder of a lone surrogate (Java String -> bytes) ----
