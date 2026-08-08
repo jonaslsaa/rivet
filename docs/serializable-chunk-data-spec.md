@@ -104,8 +104,11 @@ scratch; under D13 the gate wraps it in an uncompressed record. Keys marked
 `block_ticks`, `fluid_ticks`, `PostProcessing`, `Heightmaps`, `structures` are
 always present.
 
-**[Rivet]** The implementer must reproduce this put sequence verbatim for the
-byte-identity gate. Note two Paper asymmetries to preserve, not "fix":
+**[Rivet]** The implementer must reproduce this put sequence verbatim. Under
+D12 this is the write-side byte-identity contract for compounds **Rivet writes
+from scratch** (read-back of a §2-order compound is byte-identical); it is not
+a claim about re-emitting Paper-captured bytes, which are in fastutil hash
+order (see §12.1.4). Note two Paper asymmetries to preserve, not "fix":
 
 - `isLightOn` is written `true` at position 12 (L609-611) and then **clobbered
   to `false`** at position 22 under starlight (L639). In an insertion-ordered
@@ -528,32 +531,47 @@ block fixers; `BlendingData`/retrogen application; deflate/lz4 write parity
    pass once the §2/§3/§4 write path is wired.
 2. **Negative control:** reordering any §2 key (or a §3 section key) must
    change the emitted bytes (proves order-sensitivity, D12).
-3. **Full payload round trip:** `parse(fixture) → write()` reproduces the
-   fixture bytes for a chunk that exercises multiple sections, a non-trivial
+3. **Full payload round trip (read-back):** a compound in §2 write order — the
+   exact shape Rivet's own `write()` emits — must survive `parse` → `write()`
+   byte-identically for a chunk that exercises multiple sections, a non-trivial
    palette (`hashmap` and `linear`), `BlockLight`/`SkyLight`, starlight state
    ints, `Heightmaps`, `structures`/`References`, `block_ticks`/`fluid_ticks`,
-   `PostProcessing`, `UpgradeData`, and `block_entities`/`entities`.
+   `PostProcessing`, `UpgradeData`, and `block_entities`/`entities`. Because
+   `CompoundTag` is insertion-ordered (D12), read-back of a §2-order compound
+   is byte-identical — this is the write-side byte-identity guarantee, and it
+   covers Rivet-authored chunks, not Paper-captured ones.
+4. **Differential vs Paper (rivet-parity):** the #231 wave must extend
+   rivet-parity with a chunk-level check: `parse(fixture) → write()` against the
+   committed Paper fixture must match Paper's own `parse → write()` **modulo
+   the accepted `compound_key_order` divergence** (PARITY.md): Rivet's `write()`
+   re-emits keys in §2 insertion order while Paper emits fastutil hash order, so
+   key-order differences are classified `diverged`, never `mismatched`.
+   Byte-identity with a Paper-captured fixture is guaranteed only at the
+   `NbtIo` layer (§12.1.1) and for read-back of a §2-order compound; `write()`
+   of Paper hash-ordered bytes reorders keys to §2 by design (D12).
 
 ### 12.2 Real-world read-only-copy smoke (M2 world load)
 
-4. **Read a launcher-created world:** copy a 26.2 world save (read-only, never
+5. **Read a launcher-created world:** copy a 26.2 world save (read-only, never
    write to the original — the launcher-created New World save noted in memory
    `local-new-world-save`) and load every region record through
    `parse` with the §9 defaults; every chunk either parses or drops exactly as
    Paper does (empty `Status` → null; newer `DataVersion` honored).
-5. **No mutation on read:** reading a fixture never rewrites the fixture; a
-   `parse → write` on a read-only copy must be byte-identical (D12) and must
-   not alter `LastUpdate`/`InhabitedTime` (those come only from a `copyOf`
-   save path with a real game time).
+6. **No mutation on read:** reading a fixture never rewrites the fixture; a
+   `parse → write` on a read-only copy must not alter `LastUpdate`/
+   `InhabitedTime` (those come only from a `copyOf` save path with a real game
+   time). Byte identity on a Paper-captured read is exactly the §12.1.1
+   `NbtIo` round trip — the full §2-order `write()` output on such a chunk
+   diverges only by the accepted `compound_key_order` (D12, §12.1.4).
 
 ### 12.3 Oracle negatives (load-bearing, not incidental)
 
-6. `DataLayer` length != 2048 → hard error (not a silent default).
-7. `block_states`/`biomes` with wrong palette/data → `ChunkReadException`
+7. `DataLayer` length != 2048 → hard error (not a silent default).
+8. `block_states`/`biomes` with wrong palette/data → `ChunkReadException`
    (not a silent AIR/plains default).
-8. Empty `Status` → `parse` null → chunk dropped.
-9. `DataVersion` newer than current → abort (unless the Paper flag is set).
-10. Starlight version != 10 with `isLightOn` present → `lightCorrect = false`
+9. Empty `Status` → `parse` null → chunk dropped.
+10. `DataVersion` newer than current → abort (unless the Paper flag is set).
+11. Starlight version != 10 with `isLightOn` present → `lightCorrect = false`
     (no invented fallback).
 
 These are the oracle negatives the #231 wave must carry; weakening any of them
