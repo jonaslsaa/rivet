@@ -494,6 +494,33 @@ main() {
     fi
   fi
 
+  # --- feature-gated packet tables + packet bodies (rivet-protocol `packets`) ----
+  # rivet-protocol's generated packet-ID tables (src/generated) and the packet
+  # body codecs + their registration/integration tests (protocol/* modules, e.g.
+  # issue #207 server links) live behind the crate's `packets` cargo feature, so
+  # the `cargo test --workspace` step above never builds or executes them.
+  # Enable the feature for exactly this one crate and run clippy + tests, so the
+  # packet tables and bodies are compiled, linted, and exercised on every full
+  # merge gate. Never use `--workspace --features packets` or `--all-features`:
+  # `packets` is per-crate (and --all-features would fail on crates without it).
+  # Re-running this one crate's tests with the feature is deliberate — cargo
+  # cannot run only the feature-gated tests, and the whole crate is a fast test
+  # run. Scoped gates for rivet-protocol also get the feature (same gap
+  # otherwise).
+  local GATE_PACKETS=false
+  for p in ${PKGS[@]+"${PKGS[@]}"}; do
+    [ "$p" = "rivet-protocol" ] && GATE_PACKETS=true
+  done
+  if [ "$FULL_GATE" = true ] || [ "$GATE_PACKETS" = true ]; then
+    echo "==> rivet-protocol --features packets (generated packet tables + packet bodies)"
+    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-protocol --features packets --all-targets
+    if command -v cargo-nextest >/dev/null 2>&1; then
+      cargo nextest run -p rivet-protocol --features packets
+    else
+      cargo test -p rivet-protocol --features packets
+    fi
+  fi
+
   # --- rivet-fuzz packet-decode targets (`packets` feature) ----------------------
   # The five packet fuzz targets (fuzz/fuzz_targets/packet_*.rs) are gated behind
   # the rivet-fuzz `packets` feature (forwards to rivet-protocol/packets) via

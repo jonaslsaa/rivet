@@ -280,9 +280,13 @@ pub fn recursive<A, Ops: DynamicOps + 'static>(
 where
     A: 'static,
 {
-    // `Arc::new_cyclic` lets the self-referential `RecursiveSelf` hold an
-    // `Arc<RecursiveCodec>` back to the parent (Java's `RecursiveSelf` holds the
-    // parent reference; a `Weak`/`new_cyclic` avoids leaking to `'static`).
+    // `Arc::new_cyclic` supplies the parent `Arc<RecursiveCodec>` that Java's
+    // `RecursiveSelf` holds; the `Weak` only defers the reference until `get()`
+    // upgrades it. Once the lazy cell initializes, the cached codec embeds a
+    // `RecursiveSelf` holding a strong `Arc` back to the parent, so the graph is
+    // a strong cycle that is never freed (Rust has no GC to collect Java's weak
+    // `RecursiveSelf`). `recursive` is a registration-time constructor: build
+    // the codec once per process and reuse it, never per connection.
     Arc::new_cyclic(|weak| RecursiveCodec {
         name,
         wrapped,

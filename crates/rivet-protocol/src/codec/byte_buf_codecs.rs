@@ -4,9 +4,12 @@
 //! Java: `ByteBufCodecs.java` in `working/Paper` (vanilla 26.2). Every method
 //! here returns a fresh `StreamCodec<FriendlyByteBuf, T>` (codecs are stateless,
 //! so a fresh `Arc` is observationally identical to Java's `static final`
-//! fields). The buffer is `FriendlyByteBuf`, the only registry-independent
-//! buffer this crate has; Java's generic `B extends ByteBuf` is instantiated
-//! here as required by the port.
+//! fields). The one exception is [`trusted_component`]: its recursive `Component`
+//! graph holds a permanent strong cycle, so it is cached behind a `static
+//! OnceLock` and never built per call (see its doc). The buffer is
+//! `FriendlyByteBuf`, the only registry-independent buffer this crate has;
+//! Java's generic `B extends ByteBuf` is instantiated here as required by the
+//! port.
 //!
 //! Error model follows the [`crate::codec::StreamDecoder`]
 //! boundary: netty `DecoderException`/`EncoderException` map to
@@ -65,7 +68,7 @@ use rivet_serialization::Either;
 use rivet_serialization::codec::Codec;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_util::mth::{pack_degrees, unpack_degrees};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE`.
 pub const MAX_INITIAL_COLLECTION_SIZE: i32 = 65536;
@@ -699,18 +702,30 @@ pub fn compound_tag_codec(
 /// tag codec.
 ///
 /// Used by `ServerLinks.UntrustedEntry` (`ServerLinks.TYPE_STREAM_CODEC`) for
-/// the custom-link display name, exactly as Java. Each call builds a fresh
-/// recursive `Component` codec graph (cheap, no leak — `Codec.recursive` is a
-/// `Weak` self-reference), but mirror Java's `static final` field and build it
-/// once at packet registration time, not per connection.
+/// the custom-link display name, exactly as Java.
+///
+/// Cycle cost (deliberate, and permanent): the `Component` codec graph behind
+/// this stream codec is built with [`rivet_serialization::codec::recursive`],
+/// whose lazily-initialized cell embeds a strong `Arc` back to the parent once
+/// the first encode/decode runs — a strong cycle that is never freed (the same
+/// cost `StreamCodec.recursive` documents in
+/// [`crate::codec::stream_codec::recursive`]). The graph must be built exactly
+/// once per process, so it is cached behind a `static OnceLock`: repeated calls
+/// return clones of the single registration-time graph (Java's `static final`
+/// field) and cannot accumulate additional leaked graphs per connection.
 pub fn trusted_component() -> StreamCodec<FriendlyByteBuf, rivet_text::Component> {
-    apply(
-        trusted_tag(),
-        from_codec(
-            NbtOps::instance(),
-            rivet_text::component_serialization::codec::<NbtOps>(),
-        ),
-    )
+    static CODEC: OnceLock<StreamCodec<FriendlyByteBuf, rivet_text::Component>> = OnceLock::new();
+    CODEC
+        .get_or_init(|| {
+            apply(
+                trusted_tag(),
+                from_codec(
+                    NbtOps::instance(),
+                    rivet_text::component_serialization::codec::<NbtOps>(),
+                ),
+            )
+        })
+        .clone()
 }
 
 /// `ByteBufCodecs.optional(StreamCodec)` — a boolean presence prefix, then the
