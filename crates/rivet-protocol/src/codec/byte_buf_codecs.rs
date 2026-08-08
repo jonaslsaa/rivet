@@ -34,6 +34,9 @@
 //!   via `NbtOps`. The ops-typed `fromCodec(DynamicOps<T>, Codec<V>)` overload
 //!   IS ported (below); it is what `ClientboundStatusResponsePacket` uses
 //!   (`lenientJson(32767).apply(fromCodec(OPS, ServerStatus.CODEC))`).
+//!   `fromCodecTrusted(ComponentSerialization.CODEC)` is ported as
+//!   [`trusted_component`] (issue #207); a fully generic
+//!   `fromCodecTrusted(Codec)` is deferred with its consumers.
 //! - `registryFriendlyLengthPrefixed` — needs the buffer-preserving decorator
 //!   form of `lengthPrefixed` over `RegistryFriendlyByteBuf`.
 //!   `registry`/`holderRegistry`/`holder`/`holderSet` are ported in
@@ -47,6 +50,7 @@
 //!   anti-DoS on the registry buffer, out of scope for the registry-independent
 //!   slice.
 
+use crate::codec::apply;
 use crate::codec::stream_codec::{CodecError, CodecOperation, StreamCodec, of};
 use crate::codec::stream_decoder::StreamDecoder;
 use crate::codec::stream_encoder::StreamEncoder;
@@ -54,6 +58,7 @@ use crate::friendly_byte_buf::{FriendlyByteBuf, MAX_STRING_LENGTH};
 use bytes::BytesMut;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::nbt_accounter::NbtAccounter;
+use rivet_nbt::nbt_ops::NbtOps;
 use rivet_nbt::tag::Tag;
 use rivet_registry::core::{GameProfile, GameType, Property, PropertyMap};
 use rivet_serialization::Either;
@@ -683,6 +688,28 @@ pub fn compound_tag_codec(
                 None => Err(CodecError::new("Expected non-null compound tag")),
             }
         },
+    )
+}
+
+/// `ComponentSerialization.TRUSTED_CONTEXT_FREE_STREAM_CODEC` —
+/// `ByteBufCodecs.fromCodecTrusted(ComponentSerialization.CODEC)`, i.e.
+/// `tagCodec(unlimitedHeap).apply(fromCodec(NbtOps.INSTANCE, CODEC))`: the
+/// `Component` is serialized to an NBT `Tag` via the `ComponentSerialization`
+/// codec over `NbtOps`, then that tag is written with the trusted (unlimited)
+/// tag codec.
+///
+/// Used by `ServerLinks.UntrustedEntry` (`ServerLinks.TYPE_STREAM_CODEC`) for
+/// the custom-link display name, exactly as Java. Each call builds a fresh
+/// recursive `Component` codec graph (cheap, no leak — `Codec.recursive` is a
+/// `Weak` self-reference), but mirror Java's `static final` field and build it
+/// once at packet registration time, not per connection.
+pub fn trusted_component() -> StreamCodec<FriendlyByteBuf, rivet_text::Component> {
+    apply(
+        trusted_tag(),
+        from_codec(
+            NbtOps::instance(),
+            rivet_text::component_serialization::codec::<NbtOps>(),
+        ),
     )
 }
 
