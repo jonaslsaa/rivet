@@ -18,7 +18,8 @@ SNBT), **lossy-replace** (Java does this for the protocol, via `new String(bytes
 (the only honest Rust option when the byte stream is not UTF-8). This spec pins the canonical behavior per boundary
 so parity checks are deterministic and no code silently drops data.
 
-The current codebase already implements an "unsupported-surrogate policy" in several places, each referencing #264:
+The current codebase already implements an "unsupported-surrogate policy" in several places (flagged for this issue
+by a `RivetTodo(#264)` marker in `unicode_name_table.rs`):
 `crates/rivet-util/src/data_io.rs` (`unpaired_surrogate()` error),
 `crates/rivet-nbt/src/tag_parser.rs` (`apply_hex_escape` / `\N{}` lone-surrogate → `ERROR_INVALID_CODEPOINT`),
 `crates/rivet-nbt/src/unicode_name_table.rs` (`CodePointOfError::LoneSurrogate`).
@@ -35,7 +36,7 @@ This spec confirms, rationalizes, and canonizes that policy; it does not propose
 | netty `ByteBufUtil.writeUtf8` (protocol write) | `"\uD800"` | `3f` (single `?` — UTF-8 encoder replaces) | unreachable |
 | netty `Utf8String.read` (protocol read) | `ED A0 80` (varint framed) | `U+FFFD` (1 unit), passes maxLength | `U+FFFD` (WHATWG) — **matches** |
 | JDK `new String(b, UTF_8)` | `ED A0 80` | `U+FFFD` | `U+FFFD` (WHATWG) — **matches** |
-| Gson parse/serialize | `"\ud800"` | parses to lone surrogate; re-serializes as `"?"` | serde_json **errors** (`lone leading surrogate …`) |
+| Gson parse/serialize | `"\ud800"` / `"\udc00"` | both parse to lone surrogates; re-serialize as `"?"` | serde_json **rejects both** — `"\ud800"` → `unexpected end of hex escape`; `"\udc00"` → `lone leading surrogate in hex escape` (serde_json mislabels the trailing surrogate as "leading") |
 | SNBT `\uHHHH` / `\N{name}` | `\uD800` / `HIGH SURROGATES D800` | accepted, `Character.toString(0xD800)` → lone surrogate | `ERROR_INVALID_CODEPOINT` |
 | `StringTag.quoteAndEscape` (SNBT printer) | `"\uD800"` | `"` + raw U+D800 + `"` | n/a (value can't exist) |
 
@@ -68,7 +69,7 @@ Two facts are load-bearing:
 | B9 | JSON (chat/component) | Gson `JsonParser` | `serde_json` (via `rivet-serialization::JsonOps`, `rivet-text`) | **divergence documented**: serde_json rejects lone-surrogate escapes; Gson accepts & emits `?`. Keep serde_json; document |
 | B10 | Registry/identifier | `Identifier.parse` (ASCII-only) | `rivet-registry::identifier` | n/a (ASCII), doc-only |
 | B11 | Filesystem paths | `java.nio.file.Path` (UTF-8/OS encoding) | `std::path::PathBuf` / `to_string_lossy` | n/a in current tree (no `Path` port yet); specify `to_string_lossy`+document when the `Path` wave lands |
-| B12 | JVM-adapter FFI | Java `String` → C `char*` | `rivet-ffi` (future) | Specify below (§6): marshal UTF-8, lone surrogate → `?` on the Java side (matches netty) or `Err` |
+| B12 | JVM-adapter FFI | Java `String` → C `char*` | `rivet-ffi` (future) | Specify in §4 / §7 Stage 4: marshal UTF-8, lone surrogate → `?` on the Java side (matches netty) or `Err` |
 
 ## 4. Canonical decision (D14 candidate)
 
@@ -76,10 +77,11 @@ Two facts are load-bearing:
 replace.**
 
 - Internal string type everywhere: Rust `String` (valid UTF-8). No `Vec<u16>` boundary type.
-- **Read boundaries that are MUTF-8 or SNBT (B1/B3/B4/B5): error** on an unpaired surrogate, with a message naming
-  the byte position (MUTF-8) or `U+XXXX` (SNBT). These are the only boundaries where Java *preserves* a lone
-  surrogate; Rivet rejects because Rust `String` cannot hold it. This is a **documented `diverged` parity case**,
-  never a silent data loss.
+- **Read boundaries that are MUTF-8 or SNBT (B1/B3/B4/B5): error** on an unpaired surrogate — the MUTF-8 decoder
+  with a generic `unpaired surrogate in modified UTF-8` message (Stage 0), SNBT naming the code point as `U+XXXX`.
+  Java `readUTF` never fails on a surrogate (it preserves it), so there is no byte-offset diagnostic to mirror.
+  These are the only boundaries where Java *preserves* a lone surrogate; Rivet rejects because Rust `String`
+  cannot hold it. This is a **documented `diverged` parity case**, never a silent data loss.
 - **Read boundary that is protocol UTF-8 (B7): lossy-replace to U+FFFD**, which is *already byte-for-byte what
   Java does* — not a divergence.
 - **JSON boundary (B9): keep serde_json; document** that `"\ud800"` errors in Rust where Gson accepts it. Do not
