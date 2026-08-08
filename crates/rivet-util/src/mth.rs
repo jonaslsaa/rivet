@@ -195,14 +195,36 @@ pub fn abs_max(a: i32, b: i32) -> i32 {
     a.wrapping_abs().max(b.wrapping_abs())
 }
 
-/// `Mth.absMax(float a, float b)`.
+/// `Mth.absMax(float a, float b)` = `Math.max(Math.abs(a), Math.abs(b))`.
+///
+/// Java `Math.max` propagates NaN from *either* operand, whereas Rust `f32::max` returns
+/// the non-NaN operand when the other is NaN, so NaN is handled explicitly. Absing first
+/// matches Java's `Math.abs`: `-0.0` becomes `+0.0`, and a NaN has its sign bit cleared
+/// while its payload is preserved, so signed-zero results are `+0.0` and propagated NaN
+/// is the sign-cleared input NaN.
 pub fn abs_max_f32(a: f32, b: f32) -> f32 {
-    a.abs().max(b.abs())
+    let a = a.abs();
+    let b = b.abs();
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else {
+        a.max(b)
+    }
 }
 
-/// `Mth.absMax(double a, double b)`.
+/// `Mth.absMax(double a, double b)` — same NaN/signed-zero semantics as `abs_max_f32`.
 pub fn abs_max_f64(a: f64, b: f64) -> f64 {
-    a.abs().max(b.abs())
+    let a = a.abs();
+    let b = b.abs();
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else {
+        a.max(b)
+    }
 }
 
 /// `Mth.chessboardDistance(int x0, int z0, int x1, int z1)` — Java int
@@ -1272,3 +1294,70 @@ pub fn mul_and_truncate(fraction: &Fraction, factor: i32) -> i32 {
 #[cfg(test)]
 #[path = "mth_golden_tests.rs"]
 mod mth_golden_tests;
+
+#[cfg(test)]
+mod tests {
+    // Hand-written unit tests for `Mth.absMax` float/double boundary behavior
+    // (signed zero, NaN). These are not in the generated golden oracle, which only
+    // covers the `absMax(int, int)` overload. Expected values are grounded in the
+    // pinned JDK 25 (`working/Paper` toolchain) live probes of
+    // `Math.max(Math.abs(a), Math.abs(b))`.
+    use super::{abs_max_f32, abs_max_f64};
+
+    #[test]
+    fn abs_max_f64_signed_zero_matches_java_math_max() {
+        // `Math.abs(±0.0)` is `+0.0`, so `Math.max(Math.abs(a), Math.abs(b))` is
+        // positive zero in every ordering.
+        assert!(abs_max_f64(0.0, 0.0).is_sign_positive());
+        assert!(abs_max_f64(-0.0, 0.0).is_sign_positive());
+        assert!(abs_max_f64(0.0, -0.0).is_sign_positive());
+        assert!(abs_max_f64(-0.0, -0.0).is_sign_positive());
+        assert_eq!(abs_max_f64(-0.0, 0.0).to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn abs_max_f64_propagates_nan_from_either_operand() {
+        // Java `Math.max` returns NaN if either argument is NaN; Rust `f64::max`
+        // would return the non-NaN operand instead (the original defect).
+        assert!(abs_max_f64(f64::NAN, 5.0).is_nan());
+        assert!(abs_max_f64(5.0, f64::NAN).is_nan());
+        assert!(abs_max_f64(f64::NAN, f64::NAN).is_nan());
+        // Absing first matches Java: `Math.abs` clears a NaN's sign bit while preserving
+        // its payload. These inputs are canonical NaNs (zero payload), so the propagated
+        // NaN is canonical even for an explicitly negative NaN.
+        assert_eq!(abs_max_f64(f64::NAN, 5.0).to_bits(), f64::NAN.to_bits());
+        assert_eq!(
+            abs_max_f64(f64::from_bits(0xfff8_0000_0000_0000), 5.0).to_bits(),
+            f64::NAN.to_bits()
+        );
+        // NaN wins over any magnitude, including infinities and signed zero.
+        assert!(abs_max_f64(f64::NAN, f64::NEG_INFINITY).is_nan());
+        assert!(abs_max_f64(f64::INFINITY, f64::NAN).is_nan());
+        assert!(abs_max_f64(f64::NAN, -0.0).is_nan());
+    }
+
+    #[test]
+    fn abs_max_f32_signed_zero_matches_java_math_max() {
+        assert!(abs_max_f32(0.0f32, 0.0).is_sign_positive());
+        assert!(abs_max_f32(-0.0f32, 0.0).is_sign_positive());
+        assert!(abs_max_f32(0.0f32, -0.0).is_sign_positive());
+        assert!(abs_max_f32(-0.0f32, -0.0).is_sign_positive());
+        assert_eq!(abs_max_f32(-0.0f32, 0.0).to_bits(), 0.0f32.to_bits());
+    }
+
+    #[test]
+    fn abs_max_f32_propagates_nan_from_either_operand() {
+        assert!(abs_max_f32(f32::NAN, 5.0f32).is_nan());
+        assert!(abs_max_f32(5.0f32, f32::NAN).is_nan());
+        assert!(abs_max_f32(f32::NAN, f32::NAN).is_nan());
+        // Same canonicalization as the f64 case above.
+        assert_eq!(abs_max_f32(f32::NAN, 5.0f32).to_bits(), f32::NAN.to_bits());
+        assert_eq!(
+            abs_max_f32(f32::from_bits(0xffc0_0000), 5.0f32).to_bits(),
+            f32::NAN.to_bits()
+        );
+        assert!(abs_max_f32(f32::NAN, f32::NEG_INFINITY).is_nan());
+        assert!(abs_max_f32(f32::INFINITY, f32::NAN).is_nan());
+        assert!(abs_max_f32(f32::NAN, -0.0f32).is_nan());
+    }
+}
