@@ -49,7 +49,8 @@ pub struct TickContext<'a> {
     /// `SimTime` and real under `RealTime`.
     pub now_ns: i64,
     /// The millis reading at the same instant (Paper `Util.getMillis()`) —
-    /// keepalive's `now_ms` axis (the challenge id and the timeout check).
+    /// keepalive's `now_ms` axis: the challenge id each pending challenge is
+    /// stamped with (the timeout check runs on the `now_ns` axis, above).
     pub now_ms: i64,
     /// The tick-side connection registry.
     pub connections: &'a mut ConnectionRegistry,
