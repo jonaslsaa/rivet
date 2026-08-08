@@ -20,12 +20,15 @@ use crate::int_tag::IntTag;
 use crate::list_tag::ListTag;
 use crate::long_array_tag::LongArrayTag;
 use crate::long_tag::LongTag;
+use crate::nbt_ops::NbtOps;
 use crate::short_tag::ShortTag;
 use crate::stream_tag_visitor::{EntryResult, StreamTagVisitor, ValueResult};
 use crate::string_tag::StringTag;
 use crate::tag::Tag;
 use crate::tag_visitor::TagVisitor;
 use indexmap::IndexMap;
+use rivet_serialization::{Codec, MapCodec, map_codec, map_encoder};
+use std::sync::Arc;
 
 pub const SELF_SIZE_IN_BYTES: i32 = 48;
 pub const MAP_ENTRY_SIZE_IN_BYTES: i32 = 32;
@@ -425,13 +428,207 @@ impl CompoundTag {
         CompoundTag { tags: ret }
     }
 
-    /// RivetTodo(#204): Java's `CompoundTag.store(String, Codec, ...)`,
-    /// `storeNullable`, `read(String, Codec, ...)`, `readQuiet` (incl. the
-    /// `DynamicOps<Tag>` and `MapCodec` overloads) are not ported — the DFU
-    /// `Codec`/`MapCodec` surface (`comapFlatMap`, `PASSTHROUGH`,
-    /// `MapCodec.decode` over `MapLike`) now exists in `rivet-serialization`,
-    /// so the overloads are a plain omission with no consumer forcing them.
+    /// `CompoundTag.store(String, Codec<T>, T)` — encode `value` and put the
+    /// result under `name`. `Codec.encodeStart(NbtOps.INSTANCE,
+    /// value).getOrThrow()`; an encode error panics (Java's
+    /// `IllegalStateException`).
+    pub fn store<A>(&mut self, name: &str, codec: &Arc<dyn Codec<A, NbtOps>>, value: &A)
+    where
+        A: 'static,
+    {
+        let ops = NbtOps::instance();
+        self.put(
+            name.to_string(),
+            codec
+                .encode_start(&ops, value)
+                .get_or_throw("encodeStart")
+                .clone(),
+        );
+    }
+
+    /// `CompoundTag.store(String, Codec<T>, DynamicOps<Tag>, T)`. `NbtOps` is
+    /// the only `DynamicOps<Tag>`, so the ops argument is retained purely for
+    /// Java signature parity and must be `NbtOps::instance()`.
+    pub fn store_with_ops<A>(
+        &mut self,
+        name: &str,
+        codec: &Arc<dyn Codec<A, NbtOps>>,
+        _ops: NbtOps,
+        value: &A,
+    ) where
+        A: 'static,
+    {
+        self.store(name, codec, value);
+    }
+
+    /// `CompoundTag.storeNullable(String, Codec<T>, @Nullable T)` — a no-op for
+    /// `None`.
+    pub fn store_nullable<A>(
+        &mut self,
+        name: &str,
+        codec: &Arc<dyn Codec<A, NbtOps>>,
+        value: Option<&A>,
+    ) where
+        A: 'static,
+    {
+        if let Some(v) = value {
+            self.store(name, codec, v);
+        }
+    }
+
+    /// `CompoundTag.storeNullable(String, Codec<T>, DynamicOps<Tag>, @Nullable T)`.
+    pub fn store_nullable_with_ops<A>(
+        &mut self,
+        name: &str,
+        codec: &Arc<dyn Codec<A, NbtOps>>,
+        ops: NbtOps,
+        value: Option<&A>,
+    ) where
+        A: 'static,
+    {
+        if let Some(v) = value {
+            self.store_with_ops(name, codec, ops, v);
+        }
+    }
+
+    /// `CompoundTag.store(MapCodec<T>, T)` — merge the encoded compound into
+    /// this tag.
+    pub fn store_map<A>(&mut self, codec: &Arc<dyn MapCodec<A, NbtOps>>, value: &A)
+    where
+        A: 'static,
+    {
+        self.store_map_with_ops(codec, NbtOps::instance(), value);
+    }
+
+    /// `CompoundTag.store(MapCodec<T>, DynamicOps<Tag>, T)` —
+    /// `this.merge((CompoundTag)codec.encoder().encodeStart(ops,
+    /// value).getOrThrow())`. The `MapEncoder.encoder()` half builds into a
+    /// fresh compressed builder; an encode error panics (Java
+    /// `IllegalStateException`) and a non-compound result panics on the
+    /// unchecked `(CompoundTag)` cast.
+    pub fn store_map_with_ops<A>(
+        &mut self,
+        codec: &Arc<dyn MapCodec<A, NbtOps>>,
+        ops: NbtOps,
+        value: &A,
+    ) where
+        A: 'static,
+    {
+        let encoder = map_encoder::encoder(Arc::new(map_codec::MapCodecEncoderHalf(codec.clone())));
+        let encoded = encoder.encode_start(&ops, value);
+        match encoded.get_or_throw("encodeStart") {
+            Tag::Compound(c) => self.merge(c),
+            other => panic!("CompoundTag.store(MapCodec): expected compound, got {other}"),
+        };
+    }
+
+    /// `CompoundTag.read(String, Codec<T>)` — parse the tag under `name`,
+    /// logging nothing on a partial result.
     ///
+    /// Java logs `LOGGER.error("Failed to read field ({}={}): {}", name, tag,
+    /// error)` via `resultOrPartial`; rivet-nbt has no logging infrastructure,
+    /// so the callback is a no-op (documented divergence — the partial-value
+    /// semantics are preserved).
+    pub fn read<A>(&self, name: &str, codec: &Arc<dyn Codec<A, NbtOps>>) -> Option<A>
+    where
+        A: 'static,
+    {
+        self.read_with_ops(name, codec, NbtOps::instance())
+    }
+
+    /// `CompoundTag.read(String, Codec<T>, DynamicOps<Tag>)`.
+    pub fn read_with_ops<A>(
+        &self,
+        name: &str,
+        codec: &Arc<dyn Codec<A, NbtOps>>,
+        ops: NbtOps,
+    ) -> Option<A>
+    where
+        A: 'static,
+    {
+        match self.get(name) {
+            Some(tag) => codec.parse(&ops, tag).result_or_partial(|_error| {
+                // Java's `LOGGER.error("Failed to read field ({}={}): {}", name,
+                // tag, error)` is dropped — no logging infra in rivet-nbt.
+            }),
+            None => None,
+        }
+    }
+
+    /// `CompoundTag.readQuiet(String, Codec<T>)` — `read` without the (absent)
+    /// error logging.
+    pub fn read_quiet<A>(&self, name: &str, codec: &Arc<dyn Codec<A, NbtOps>>) -> Option<A>
+    where
+        A: 'static,
+    {
+        self.read_quiet_with_ops(name, codec, NbtOps::instance())
+    }
+
+    /// `CompoundTag.readQuiet(String, Codec<T>, DynamicOps<Tag>)`.
+    pub fn read_quiet_with_ops<A>(
+        &self,
+        name: &str,
+        codec: &Arc<dyn Codec<A, NbtOps>>,
+        ops: NbtOps,
+    ) -> Option<A>
+    where
+        A: 'static,
+    {
+        match self.get(name) {
+            Some(tag) => codec.parse(&ops, tag).result_or_partial_silent(),
+            None => None,
+        }
+    }
+
+    /// `CompoundTag.read(MapCodec<T>)` — decode this whole compound as a map.
+    pub fn read_map<A>(&self, codec: &Arc<dyn MapCodec<A, NbtOps>>) -> Option<A>
+    where
+        A: 'static,
+    {
+        self.read_map_with_ops(codec, NbtOps::instance())
+    }
+
+    /// `CompoundTag.read(MapCodec<T>, DynamicOps<Tag>)` —
+    /// `codec.decode(ops, ops.getMap(this).getOrThrow()).resultOrPartial(...)`.
+    pub fn read_map_with_ops<A>(
+        &self,
+        codec: &Arc<dyn MapCodec<A, NbtOps>>,
+        ops: NbtOps,
+    ) -> Option<A>
+    where
+        A: 'static,
+    {
+        let map = ops.map_like(self);
+        codec
+            .decode(&ops, map.as_ref())
+            .result_or_partial(|_error| {
+                // Java's `LOGGER.error("Failed to read value ({}): {}", this,
+                // error)` is dropped — no logging infra in rivet-nbt.
+            })
+    }
+
+    /// `CompoundTag.readQuiet(MapCodec<T>)` — `readMap` without the (absent)
+    /// error logging.
+    pub fn read_map_quiet<A>(&self, codec: &Arc<dyn MapCodec<A, NbtOps>>) -> Option<A>
+    where
+        A: 'static,
+    {
+        self.read_map_quiet_with_ops(codec, NbtOps::instance())
+    }
+
+    /// `CompoundTag.readQuiet(MapCodec<T>, DynamicOps<Tag>)`.
+    pub fn read_map_quiet_with_ops<A>(
+        &self,
+        codec: &Arc<dyn MapCodec<A, NbtOps>>,
+        ops: NbtOps,
+    ) -> Option<A>
+    where
+        A: 'static,
+    {
+        let map = ops.map_like(self);
+        codec.decode(&ops, map.as_ref()).result_or_partial_silent()
+    }
+
     /// `CompoundTag.merge(CompoundTag)`.
     pub fn merge(&mut self, other: &CompoundTag) -> &mut CompoundTag {
         for (tag_name, other_tag) in other.tags.iter() {
@@ -485,7 +682,8 @@ pub mod compound_tag_codec {
     use super::CompoundTag;
     use crate::nbt_ops::NbtOps;
     use crate::tag::Tag;
-    use rivet_serialization::{DataResult, Dynamic};
+    use rivet_serialization::{Codec, DataResult, Dynamic, codec};
+    use std::sync::Arc;
 
     /// Port of `CompoundTag.CODEC`.
     ///
@@ -509,7 +707,193 @@ pub mod compound_tag_codec {
         // t.convert(NbtOps.INSTANCE) is identity here (ops == NbtOps).
         match &input.value {
             Tag::Compound(c) => DataResult::success(c.copy_tag()),
-            other => DataResult::error(format!("Not a compound tag: {other:?}")),
+            other => DataResult::error(format!("Not a compound tag: {other}")),
         }
+    }
+
+    /// `CompoundTag.CODEC` as a `Codec<CompoundTag, NbtOps>` — the
+    /// `Codec.PASSTHROUGH.comapFlatMap(...)` above, wired through
+    /// `codec::comap_flat_map`.
+    pub fn codec() -> Arc<dyn Codec<CompoundTag, NbtOps>> {
+        codec::comap_flat_map(
+            codec::passthrough::<NbtOps>(),
+            Arc::new(|d: &Dynamic<Tag>| parse(d)),
+            Arc::new(|c: &CompoundTag| {
+                Dynamic::new(&NbtOps::instance(), Tag::Compound(c.copy_tag()))
+            }),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::int_tag::IntTag;
+    use crate::tag::Tag;
+    use rivet_serialization::{DataResult, codec};
+
+    fn ops() -> NbtOps {
+        NbtOps::instance()
+    }
+
+    #[test]
+    fn store_read_round_trip_with_string_codec() {
+        let mut tag = CompoundTag::new();
+        let codec = codec::string_codec::<NbtOps>();
+        tag.store("name", &codec, &"steve".to_string());
+        assert_eq!(
+            tag.get_string("name"),
+            Some(&"steve".to_string()),
+            "store must put the encoded value"
+        );
+        assert_eq!(
+            tag.read::<String>("name", &codec),
+            Some("steve".to_string())
+        );
+        assert_eq!(
+            tag.read_quiet::<String>("name", &codec),
+            Some("steve".to_string())
+        );
+    }
+
+    #[test]
+    fn store_nullable_omits_none() {
+        let mut tag = CompoundTag::new();
+        let codec = codec::int_codec::<NbtOps>();
+        tag.store_nullable("x", &codec, Some(&7));
+        assert_eq!(tag.get_int("x"), Some(7));
+        tag.store_nullable("y", &codec, None::<&i32>);
+        assert!(!tag.contains("y"), "None must not be stored");
+    }
+
+    #[test]
+    fn store_with_ops_matches_default() {
+        let mut tag = CompoundTag::new();
+        let codec = codec::long_codec::<NbtOps>();
+        tag.store_with_ops("k", &codec, ops(), &42_i64);
+        assert_eq!(tag.get_long("k"), Some(42));
+    }
+
+    #[test]
+    fn read_missing_returns_none() {
+        let tag = CompoundTag::new();
+        let codec = codec::int_codec::<NbtOps>();
+        assert_eq!(tag.read::<i32>("missing", &codec), None);
+        assert_eq!(tag.read_quiet::<i32>("missing", &codec), None);
+    }
+
+    #[test]
+    fn read_type_mismatch_returns_none() {
+        let mut tag = CompoundTag::new();
+        tag.put_string("not_an_int", "oops");
+        let codec = codec::int_codec::<NbtOps>();
+        // String under an int codec → error (no partial) → None.
+        assert_eq!(tag.read::<i32>("not_an_int", &codec), None);
+        assert_eq!(tag.read_quiet::<i32>("not_an_int", &codec), None);
+    }
+
+    #[test]
+    fn read_error_with_partial_returns_partial() {
+        // A codec whose decode returns an error carrying a partial value — the
+        // `resultOrPartial` path of `read`/`readQuiet`.
+        let codec: Arc<dyn Codec<i32, NbtOps>> = codec::flat_xmap(
+            codec::int_codec::<NbtOps>(),
+            Arc::new(|_v: &i32| DataResult::error_with_partial("decode failed".to_string(), 123)),
+            Arc::new(|v: &i32| DataResult::success(*v)),
+        );
+        let mut tag = CompoundTag::new();
+        tag.put_int("x", 1);
+        assert_eq!(tag.read::<i32>("x", &codec), Some(123));
+        assert_eq!(tag.read_quiet::<i32>("x", &codec), Some(123));
+    }
+
+    #[test]
+    fn store_map_and_read_map_round_trip() {
+        let mut tag = CompoundTag::new();
+        // `Codec.fieldOf("level")` over an int codec → a `MapCodec<i32>` that
+        // encodes/decodes the single key `level`.
+        let map_codec = codec::field_of(codec::int_codec::<NbtOps>(), "level".to_string());
+        tag.store_map(&map_codec, &7);
+        assert_eq!(tag.get_int("level"), Some(7), "store_map merges level:7");
+        assert_eq!(tag.read_map(&map_codec), Some(7));
+
+        // read_quiet_map: same result.
+        assert_eq!(tag.read_map_quiet(&map_codec), Some(7));
+    }
+
+    #[test]
+    fn store_map_merges_and_preserves_existing_keys() {
+        let mut tag = CompoundTag::new();
+        tag.put_int("keep", 1);
+        let map_codec = codec::field_of(codec::int_codec::<NbtOps>(), "level".to_string());
+        tag.store_map(&map_codec, &2);
+        assert_eq!(tag.get_int("level"), Some(2));
+        assert!(tag.contains("keep"), "store_map merges, not replaces");
+    }
+
+    #[test]
+    fn read_map_type_mismatch_returns_none() {
+        // A field present with the wrong tag type → the int field codec fails
+        // to decode → None.
+        let mut tag = CompoundTag::new();
+        tag.put_string("x", "not_an_int");
+        let map_codec = codec::field_of(codec::int_codec::<NbtOps>(), "x".to_string());
+        assert_eq!(tag.read_map(&map_codec), None);
+        assert_eq!(tag.read_map_quiet(&map_codec), None);
+    }
+
+    #[test]
+    fn compound_tag_codec_round_trip() {
+        let mut original = CompoundTag::new();
+        original.put_string("a", "b");
+        original.put_int("n", 9);
+        let codec = crate::compound_tag::compound_tag_codec::codec();
+        let ops = ops();
+        let encoded = codec
+            .encode_start(&ops, &original)
+            .get_or_throw("encode")
+            .clone();
+        let decoded = codec.parse(&ops, &encoded).get_or_throw("parse").clone();
+        assert_eq!(decoded, original);
+
+        // PASSTHROUGH rejects a non-compound.
+        let result = codec.parse(&ops, &Tag::Int(IntTag::value_of(1)));
+        assert!(result.error_ref().is_some());
+    }
+
+    #[test]
+    fn codec_non_compound_error_uses_snbt_display() {
+        // Java: `DataResult.error(() -> "Not a compound tag: " + tag)` — the
+        // tag renders through `Tag.toString()` (SNBT Display), not Rust Debug.
+        let codec = crate::compound_tag::compound_tag_codec::codec();
+        let ops = ops();
+
+        let int_result = codec.parse(&ops, &Tag::Int(IntTag::value_of(1)));
+        assert_eq!(
+            int_result.error_ref().expect("int tag must fail").message(),
+            "Not a compound tag: 1"
+        );
+
+        // SNBT quotes a string; Rust Debug renders the inner `String` (with
+        // escaping and the `StringTag` wrapper), so these exact texts are the
+        // counterfactual to `{:?}`. Note `quote_and_escape` switches the
+        // delimiter: a string containing `"` is single-quoted.
+        let plain_result = codec.parse(&ops, &Tag::String(StringTag::value_of("hi".into())));
+        assert_eq!(
+            plain_result
+                .error_ref()
+                .expect("string tag must fail")
+                .message(),
+            r#"Not a compound tag: "hi""#
+        );
+
+        let quote_result = codec.parse(&ops, &Tag::String(StringTag::value_of("a\"b".into())));
+        assert_eq!(
+            quote_result
+                .error_ref()
+                .expect("string tag must fail")
+                .message(),
+            "Not a compound tag: 'a\"b'"
+        );
     }
 }

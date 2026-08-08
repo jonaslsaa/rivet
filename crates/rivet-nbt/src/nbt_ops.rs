@@ -29,6 +29,15 @@ impl NbtOps {
     pub fn instance() -> Self {
         NbtOps
     }
+
+    /// `NbtOps.getMap(CompoundTag)` — the `MapLike` view used by
+    /// `CompoundTag.read(MapCodec)`. `get_map` takes a `&Tag`; this inherent
+    /// form takes the compound directly so `read` does not wrap `self` in a
+    /// throwaway `Tag::Compound` copy. The box clones the compound either way
+    /// (`MapLike`'s `'static` ownership), so it is a single clone.
+    pub fn map_like(&self, tag: &CompoundTag) -> Box<dyn MapLike<Tag>> {
+        Box::new(CompoundMapLike { tag: tag.clone() })
+    }
 }
 
 /// `MapLike<Tag>` over a `CompoundTag` (owns a clone so the box is `'static`).
