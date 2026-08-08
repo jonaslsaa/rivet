@@ -402,9 +402,12 @@ upgrader path). Live chunk I/O is driven by the moonrise chunk system
   POI, entities) owns a `PrioritisedExecutor` for compression/serialization and an
   `AreaDependentQueue` for blocking I/O. `createRegionIoTask` keys I/O on the **region**
   (`chunkX >> 5, chunkZ >> 5`), so all disk access touching one region file is serialized.
-- **Per-chunk coalescing:** one `ChunkIOTask` per `ChunkPos` in `chunkTasks`; a re-store replaces the
-  pending `CompoundTag` in the in-progress write (`allPendingWrites`), so only the latest data is
-  written, and a concurrent read of a chunk with an in-progress write is served from memory.
+- **Per-chunk ordered stores:** one `ChunkIOTask` per `ChunkPos` in `chunkTasks`; a re-store pushes a
+  new `InProgressWrite` onto `allPendingWrites` (reassigning `inProgressWrite`), and every store is
+  compressed and written to disk in order — `tryCompleteWrite` returns false while a newer write is
+  pending, scheduling the next one, so intermediate stores are not dropped and the disk record is
+  always the last store's. A concurrent read of a chunk with an in-progress write is served from
+  memory.
 - **RegionFile mutual exclusion:** `RegionFile.write` and `getChunkDataInputStream` are still
   `synchronized`, so even with multiple controllers/executors a single `RegionFile` handle is never
   touched concurrently; the queue only adds ordering, not additional locking.
@@ -413,7 +416,7 @@ upgrader path). Live chunk I/O is driven by the moonrise chunk system
   close/eviction.
 
 **[Rivet]** The ordering that matters to the region-file layer is: (a) one logical writer per region
-file (mutual exclusion over a `RegionFile` handle), (b) per-chunk write coalescing so the last
+file (mutual exclusion over a `RegionFile` handle), (b) per-chunk write ordering so the last
 store for a chunk is what lands on disk, (c) reads of a chunk with a pending write serve the
 in-memory copy, not the disk, (d) no writes after shutdown. Replicate these invariants; the
 executor mechanics (Java `Concurrent`/`Priority` threading, moonrise's `AreaDependentQueue`) are an
