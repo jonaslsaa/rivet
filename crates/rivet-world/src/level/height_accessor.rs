@@ -87,7 +87,7 @@ pub trait LevelHeightAccessor {
 
 /// The concrete accessor [`create`] returns — the value Java's static factory
 /// wraps in an anonymous `LevelHeightAccessor` implementation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct SimpleLevelHeightAccessor {
     min_y: i32,
     height: i32,
