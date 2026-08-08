@@ -24,47 +24,54 @@
 //! `STREAM_CODEC` half lives in `rivet-protocol` (`FriendlyByteBuf::read_uuid`/
 //! `write_uuid`).
 //!
-//! RivetTodo(#212): `BlockBox`, `Direction8`, `Rotations` (also
-//! `net.minecraft.core` value types named in OWNERSHIP.md §Registries as
-//! staying in `rivet-registry::core`) are not yet ported; the `Position`
-//! trait's sole Java implementors are JOML `Vec3`/`Vector3d` which are
-//! deferred, so no in-crate type implements it and the `Position`-taking
-//! overloads are omitted. RivetTodo(#126): codec/`StreamCodec` impls — protocol
-//! codecs live in `rivet-protocol`, incl. `FriendlyByteBuf::read/writeBlockPos`/
-//! `read/writeChunkPos` (#126). `Entity`/`ChunkAccess`/`LevelHeightAccessor`-
-//! parametered overloads and JOML (`Vec3`, `Vector3f`, `Quaternionf`,
-//! `Matrix4fc`, `OctahedralGroup`) returns stay deferred with their owning
-//! units.
+//! RivetTodo(#212): `BlockBox`, `Direction8`, `Rotations` are ported as pure
+//! value types (with `Rotations::CODEC` here). The remaining #212 gaps are the
+//! `Position` trait's only Java implementors — JOML `Vec3`/`Vector3d`,
+//! deferred with #206 — so no in-crate type implements it and the
+//! `Position`-taking overloads are omitted, and the
+//! `Entity`/`ChunkAccess`/`LevelHeightAccessor`-parametered overloads plus the
+//! JOML returns (`BlockBox::aabb` -> `AABB` is #206; `Vec3`, `Vector3f`,
+//! `Quaternionf`, `Matrix4fc`, `OctahedralGroup` with their owning units)
+//! stay deferred. RivetTodo(#126): the `StreamCodec` impls
+//! (`BlockBox.STREAM_CODEC`, `Rotations.STREAM_CODEC`,
+//! `FriendlyByteBuf::read/writeBlockPos`/`read/writeChunkPos`) live in
+//! `rivet-protocol`.
 
 mod axis_cycle;
+mod block_box;
 mod block_pos;
 mod chunk_pos;
 mod cursor3d;
 mod difficulty;
 mod direction;
+mod direction8;
 mod game_profile;
 mod game_type;
 mod global_pos;
 mod position;
 mod relative;
 mod rotation;
+mod rotations;
 mod section_pos;
 mod uuid_util;
 mod vec3;
 mod vec3i;
 
 pub use axis_cycle::AxisCycle;
+pub use block_box::BlockBox;
 pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus};
 pub use chunk_pos::ChunkPos;
 pub use cursor3d::Cursor3D;
 pub use difficulty::Difficulty;
 pub use direction::{Axis, AxisDirection, Direction, Plane};
+pub use direction8::Direction8;
 pub use game_profile::{GameProfile, Property, PropertyMap};
 pub use game_type::GameType;
 pub use global_pos::GlobalPos;
 pub use position::Position;
 pub use relative::Relative;
 pub use rotation::Rotation;
+pub use rotations::{Rotations, rotations_codec};
 pub use section_pos::SectionPos;
 pub use uuid_util::create_offline_player_uuid;
 pub use vec3::Vec3;
