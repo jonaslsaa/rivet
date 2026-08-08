@@ -149,7 +149,7 @@ selected.
 | `2` | deflate | `InflaterInputStream` | `DeflaterOutputStream` | yes |
 | `3` | none | identity | identity | yes |
 | `4` | lz4 | `LZ4BlockInputStream` | `LZ4BlockOutputStream` | yes |
-| `127` | custom | unwrap path reads a modified-UTF-8 string id, logs, returns null (never crashes) | never writable (no output wrapper) | yes |
+| `127` | custom | unwrap path reads a modified-UTF-8 string id, logs, returns null (never crashes) | never writable (output wrapper throws `UnsupportedOperationException`) | yes |
 
 - **Selection:** `RegionFileVersion.DEFAULT = VERSION_DEFLATE`; `configure(optionName)` switches the
   selected version from `server.properties` `region-file-compression`. [Rivet] under D13 the M2
@@ -277,7 +277,9 @@ treated as "empty chunk".
 
 **Tier 1 — per-read soft failure.** Any anomaly in §7 returns null (chunk treated as absent) after
 logging; on `CHUNK`-type region files (`canRecalcHeader == true`) it first attempts
-`recalculateHeader()` and retries once. Non-CHUNK files (e.g. POI/entities with `DataFixTypes`
+`recalculateHeader()` and recursively retries after each successful recalc. In practice a successful
+recalc relinks the slot to valid data or clears it, terminating the retry. Non-CHUNK files (e.g.
+POI/entities with `DataFixTypes`
 other than `CHUNK`) do not recalc — the read simply returns null; the slot is left untouched on the
 per-read path. (The "log and delete the slot" behavior for non-CHUNK files exists only in the
 constructor's header-replay loop, below, when an *open-time* header entry is invalid — not on read.)
@@ -373,8 +375,8 @@ format concern; keep an equivalent toggle so the write can be split from seriali
 region-file layer only ever sees work serialized through this executor:
 
 - **Pending-write coalescing:** `store(pos, data)` records the latest `CompoundTag` per `ChunkPos`
-  in `pendingWrites` (a `LinkedHashMap`) and completes the *same* future on re-store; the actual
-  disk write happens later on the `BACKGROUND` runnable (`storePendingChunk` → `storage.write`).
+  in `pendingWrites` (a `LinkedHashMap`) and returns the same shared future on re-store; that future
+  completes later when the `BACKGROUND` runnable performs `storePendingChunk` → `storage.write`.
   A `loadAsync` / `scanChunk` for a pos with a pending write serves the in-memory copy, not the disk.
 - **Write serialization:** all region-file access is synchronized on the single `RegionFile`
   (`RegionFile.write` and `getChunkDataInputStream` are `synchronized`); the executor provides
