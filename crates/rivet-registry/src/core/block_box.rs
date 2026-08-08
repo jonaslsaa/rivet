@@ -146,13 +146,14 @@ impl BlockBox {
         BlockBox::new(self.min.offset_vec(offset), self.max.offset_vec(offset))
     }
 
-    /// The Java record `hashCode` — `Objects.hash(min, max)`, which is
-    /// `31 * (31 * 1 + min.hashCode()) + max.hashCode()` in wrapping int
-    /// arithmetic (the record spec starts the accumulator at `1`, so the seed
-    /// contributes `31^2 = 961`).
+    /// The Java record `hashCode` — `min.hashCode() * 31 + max.hashCode()` in
+    /// wrapping int arithmetic. javac's generated record `hashCode` seeds the
+    /// accumulator at `0`, not `Objects.hash`'s `1` (verified against the JDK
+    /// on the pinned toolchain), so there is no seed term.
     pub fn hash_code(&self) -> i32 {
-        961i32
-            .wrapping_add(self.min.hash_code().wrapping_mul(31))
+        self.min
+            .hash_code()
+            .wrapping_mul(31)
             .wrapping_add(self.max.hash_code())
     }
 }
@@ -251,24 +252,23 @@ mod tests {
 
     #[test]
     fn hash_code_matches_java_record() {
-        // Hand-replicated `Objects.hash(min, max)` = `31*(31*1 + h(min)) +
-        // h(max)`, where `h(BlockPos)` is `Vec3i.hashCode` =
-        // `(y + z*31)*31 + x`. For min=(0,0,0): h=0; max=(1,2,3):
-        // h = (2 + 3*31)*31 + 1 = 95*31 + 1 = 2946.
+        // javac's generated record `hashCode` = `31 * min.hashCode() +
+        // max.hashCode()` (accumulator seeded at 0), where `h(BlockPos)` is
+        // `Vec3i.hashCode` = `(y + z*31)*31 + x`. Values pinned against the JDK
+        // on the pinned toolchain.
+        // min=(0,0,0): h=0; max=(1,2,3): h = (2 + 3*31)*31 + 1 = 2946.
+        assert_eq!(BlockBox::of_two(bp(0, 0, 0), bp(1, 2, 3)).hash_code(), 2946);
+        // Both corners zero.
+        assert_eq!(BlockBox::of(bp(0, 0, 0)).hash_code(), 0);
+        // Negative corners wrap through Vec3i.hashCode: h(-1,-1,-1) = -993,
+        // h(1,1,1) = 993, so 31*(-993) + 993 = -29790.
         assert_eq!(
-            BlockBox::of_two(bp(0, 0, 0), bp(1, 2, 3)).hash_code(),
-            31 * 31 + 2946
+            BlockBox::of_two(bp(-1, -1, -1), bp(1, 1, 1)).hash_code(),
+            -29790
         );
-        // Both corners zero: seed only.
-        assert_eq!(BlockBox::of(bp(0, 0, 0)).hash_code(), 961);
-        // Negative coordinates wrap through Vec3i.hashCode.
-        let b = BlockBox::of_two(bp(-1, -1, -1), bp(1, 1, 1));
-        assert_eq!(
-            b.hash_code(),
-            961i32
-                .wrapping_add(b.min().hash_code().wrapping_mul(31))
-                .wrapping_add(b.max().hash_code())
-        );
+        // Boundary: both corners at (MAX,0,0) — h = i32::MAX, so
+        // 31*MAX + MAX wraps to -32.
+        assert_eq!(BlockBox::of(bp(i32::MAX, 0, 0)).hash_code(), -32);
     }
 
     #[test]

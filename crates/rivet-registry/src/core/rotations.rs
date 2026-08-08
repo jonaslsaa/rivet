@@ -110,10 +110,11 @@ impl PartialEq for Rotations {
 impl Eq for Rotations {}
 
 impl Rotations {
-    /// The Java record `hashCode` — `Objects.hash(x, y, z)`, which is
-    /// `((31 * 1 + Float.hashCode(x)) * 31 + Float.hashCode(y)) * 31 +
-    /// Float.hashCode(z)` in wrapping int arithmetic (the record spec starts
-    /// the accumulator at `1`, so the seed contributes `31^3 = 29791`).
+    /// The Java record `hashCode` — `(Float.hashCode(x) * 31 +
+    /// Float.hashCode(y)) * 31 + Float.hashCode(z)` in wrapping int arithmetic
+    /// (javac's generated record `hashCode` seeds the accumulator at `0`, not
+    /// `Objects.hash`'s `1`; verified against the JDK on the pinned toolchain),
+    /// so there is no seed term.
     pub fn hash_code(&self) -> i32 {
         let hx = float_to_int_bits(self.x) as i32;
         let hy = float_to_int_bits(self.y) as i32;
@@ -122,7 +123,6 @@ impl Rotations {
             .wrapping_mul(31)
             .wrapping_add(hy.wrapping_mul(31))
             .wrapping_add(hz)
-            .wrapping_add(29791)
     }
 }
 
@@ -213,19 +213,24 @@ mod tests {
 
     #[test]
     fn hash_code_matches_java_record() {
-        // Hand-replicated `Objects.hash(x, y, z)`: floatToIntBits(1.0f) =
-        // 0x3F800000 = 1065353216, (2.0f) = 0x40000000, (3.0f) = 0x40400000;
-        // ((31*1 + hx)*31 + hy)*31 + hz in wrapping int.
-        assert_eq!(Rotations::new(1.0, 2.0, 3.0).hash_code(), 1606448223);
-        // All-zero rotations: hx=hy=hz=0, seed only.
-        assert_eq!(Rotations::new(0.0, 0.0, 0.0).hash_code(), 29791);
+        // javac's generated record `hashCode` = `(hx*31 + hy)*31 + hz`
+        // (accumulator seeded at 0), where `h` = `Float.hashCode` =
+        // `floatToIntBits`. Values pinned against the JDK on the pinned
+        // toolchain.
+        // floatToIntBits(1.0f) = 0x3F800000 = 1065353216, (2.0f) = 0x40000000,
+        // (3.0f) = 0x40400000.
+        assert_eq!(Rotations::new(1.0, 2.0, 3.0).hash_code(), 1606418432);
+        // All-zero rotations.
+        assert_eq!(Rotations::new(0.0, 0.0, 0.0).hash_code(), 0);
         // NaN components canonicalize to 0x7fc00000 (wrapping arithmetic).
         let nan = Rotations::create_without_validity_checks(f32::NAN, 0.0, 0.0);
-        let expected = 0x7fc0_0000i32
-            .wrapping_mul(31)
-            .wrapping_mul(31)
-            .wrapping_add(29791);
-        assert_eq!(nan.hash_code(), expected);
+        assert_eq!(nan.hash_code(), -1883242496);
+        // Negative zero: floatToIntBits(-0.0) = 0x80000000 = i32::MIN.
+        let negz = Rotations::create_without_validity_checks(-0.0, 0.0, 0.0);
+        assert_eq!(negz.hash_code(), -2147483648);
+        // Through the normalizing constructor: (720, 45, -360) stores
+        // (0.0, 45.0, -0.0), whose hash is pinned directly.
+        assert_eq!(Rotations::new(720.0, 45.0, -360.0).hash_code(), -2075394048);
     }
 
     #[test]
