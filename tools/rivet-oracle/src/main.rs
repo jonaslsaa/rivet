@@ -3435,9 +3435,12 @@ mod tests {
         assert!(corpus_by_id.is_empty(), "golden missed corpus entries");
     }
 
-    /// Regenerating the text manifest in Rust is byte-identical to the committed
-    /// manifest (given unchanged corpus + golden) — regeneration is git-clean
-    /// and the committed manifest is what the writer would produce.
+    /// The committed `manifest.json` is exactly what the manifest writer
+    /// produces over the committed `corpus.json` + `golden.json`: re-running
+    /// the hashing reproduces it byte-for-byte (git-clean) and the regenerated
+    /// manifest verifies its own files. This proves the *writer* is
+    /// deterministic over fixed inputs — it does not boot Paper a second time,
+    /// so it is not a twin-boot proof of `golden.json` (see `regenerate --m2`).
     #[test]
     fn text_manifest_regeneration_is_byte_identical() {
         let dir = fixtures_dir().join("text");

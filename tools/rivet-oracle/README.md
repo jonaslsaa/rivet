@@ -362,9 +362,13 @@ unported `ClickEvent`/`HoverEvent` STUB codec (epic #12) — never a malformed
 field or registry/Holder context; the four `malformed-*-wrong-key` negatives
 carry the same content with a wrong field name and Paper rejects them, pinning
 the field names as load-bearing. `regenerate --text` boots the Paper oracle
-(like `--m0`/`--m2`) and is deterministic: two independent boots must produce
-byte-identical `golden.json`. The `text_manifest_regeneration_is_byte_identical`
-unit test enforces that regeneration is git-clean.
+(like `--m0`/`--m2`). The `text_manifest_regeneration_is_byte_identical` unit
+test proves only the *manifest writer's* determinism: re-running the manifest
+hashing over the committed `corpus.json` + `golden.json` reproduces the
+committed `manifest.json` byte-for-byte (git-clean), and the regenerated
+manifest verifies its own files. It does not run a second Paper boot, so it is
+not a twin-boot determinism proof of `golden.json` (that is the M2 `regenerate
+--m2` procedure below, which actually performs two independent boots).
 
 M2 region regeneration (the worldgen nondeterminism case, #266) is a
 **twin-boot**: `regenerate --m2` performs two independent fresh Paper boots
