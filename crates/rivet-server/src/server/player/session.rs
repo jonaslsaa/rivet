@@ -178,7 +178,9 @@ impl PlayerSessionManager {
         // The M1 world spawn: the level's respawn geometry (the superflat
         // `(0, -63, 0)` spawn, zero rotation, survival). The per-player
         // `ServerPlayer` carries the authenticated profile + the login `playerId`
-        // (the deterministic superflat world's first entity id is 1).
+        // hardcoded to 1 — the deterministic superflat world's first entity id.
+        // The Paper `ServerLevel.getNextEntityId()` / `ENTITY_COUNTER` allocation
+        // this hardcode defers is recorded as a residual in issue #222.
         let respawn = self.level.get_respawn_data();
         let pos = respawn.pos();
         let player = ServerPlayer::new(

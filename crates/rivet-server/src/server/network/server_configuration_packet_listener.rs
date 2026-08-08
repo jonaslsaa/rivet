@@ -463,13 +463,19 @@ impl PacketListener for ServerConfigurationPacketListener {
                 // `JoinWorldTask` (whose `start` sent
                 // `ClientboundFinishConfigurationPacket`), then swap the
                 // outbound protocol to play and hand the connection off to the
-                // tick thread. The duplicate-login / can-login gates and
-                // `prepareSpawnTask.spawnPlayer(...)` (the join burst) run
-                // tick-side via the play listener (issue #101 Slice B), which
-                // consumes the forwarded frames there.
-                // RivetTodo(#101): the duplicate-login / canPlayerLogin gates —
-                // the can-login checks run on the tick side before the session
-                // spawns in `PlayerSessionManager::spawn_session`.
+                // tick thread. Only the join burst
+                // (`prepareSpawnTask.spawnPlayer(...)` — `place_new_player`)
+                // runs tick-side via the play listener (issue #101 Slice B),
+                // which consumes the forwarded frames there. Paper's
+                // duplicate-login / canPlayerLogin gates are NOT part of that
+                // burst — they run in `handleConfigurationFinished` before the
+                // spawn, and that login-side handling is deferred here.
+                // RivetTodo(#101): the Paper-faithful duplicate-login /
+                // canPlayerLogin gates — `PlayerList.getPlayer(uuid) != null`
+                // → `DUPLICATE_LOGIN_DISCONNECT_MESSAGE` and
+                // `PlayerList.canPlayerLogin(remoteAddress, nameAndId)`, both
+                // evaluated in `handleConfigurationFinished` before
+                // `prepareSpawnTask.spawnPlayer`; neither runs today.
                 let _: ServerboundFinishConfigurationPacket = decode_packet(
                     frame,
                     rivet_protocol::protocol::configuration::serverbound_finish_configuration::stream_codec(),

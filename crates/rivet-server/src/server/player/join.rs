@@ -15,8 +15,8 @@
 //! the one join re-sending them, not from proxy merging or a second connection.
 //! `set_time` (113) is sampled once only because `canonicalize` keeps racy ids'
 //! first occurrence. The burst below emits BOTH `sendLevelInfo` occurrences
-//! (the first before `player_info_update`, the second after the player_info
-//! broadcast), matching Paper's source order.
+//! (the first before `player_info_update`, the second after the joiner's own
+//! `player_info_update`), matching Paper's source order.
 //!
 //! This burst is `PLAY_BURST_ORDER` restricted to the members that are ported —
 //! the deferred members are dropped, keeping the relative order of the members
@@ -40,7 +40,8 @@
 //!   init (epic #22);
 //! - `system_chat` (121) — the join message (epic #12);
 //! - player_info_update (70);
-//! - second `sendLevelInfo` (43/113/97/38) — after the player_info broadcast;
+//! - second `sendLevelInfo` (43/113/97/38) — after the joiner's own
+//!   `player_info_update`;
 //! - the Moonrise chunk-loader send-set (issue #100): cache radius (95),
 //!   simulation distance (111), cache center (94), then the deterministic 117
 //!   `level_chunk_with_light` (45) bodies. Moonrise's `addPlayer` runs at
@@ -304,7 +305,14 @@ pub fn place_new_player(
     // `this.sendLevelInfo(player, level)`.
     sent.extend(send_level_info(sender, connections, connection_id, level)?);
 
-    // `broadcastPlayerInfo(...)` → `ClientboundPlayerInfoUpdatePacket.createPlayerInitializing(List.of(player))`.
+    // The joiner's own `ClientboundPlayerInfoUpdatePacket` entry (id 70), sent
+    // to its own connection only. Paper's `placeNewPlayer` performs TWO fan-out
+    // sends around this entry — the joiner to every existing player and the
+    // existing visible roster to the joiner — both deferred.
+    // RivetTodo(#101): the two player_info fan-out directions — broadcast the
+    // joiner to existing visible players, and send the existing visible roster
+    // to the joiner (`createPlayerInitializing(List.of(player))` to each and
+    // `createPlayerInitializing(onlinePlayers, player)` to the joiner).
     let entry = Entry::new(
         player.uuid(),
         Some(player.profile().clone()),
@@ -351,8 +359,9 @@ pub fn place_new_player(
     }
 
     // `this.sendLevelInfo(player, level)` — Paper's SECOND `sendLevelInfo`
-    // occurrence, after the player_info broadcast and the addEntity tracker. It
-    // re-sends the same four level-snapshot members the first call did.
+    // occurrence, after the joiner's own `player_info_update` and the addEntity
+    // tracker. It re-sends the same four level-snapshot members the first call
+    // did.
     sent.extend(send_level_info(sender, connections, connection_id, level)?);
 
     Ok(sent)
