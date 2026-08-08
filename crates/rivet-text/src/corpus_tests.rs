@@ -87,24 +87,11 @@ fn load_text_corpus() -> Option<Vec<CorpusEntry>> {
     Some(out)
 }
 
-/// The Rust mirror of the Paper oracle op: parse `input` as JSON, decode
-/// through `ComponentSerialization.CODEC` under non-compressed `JsonOps`,
-/// re-encode, and serialize compactly (insertion order, no HTML escaping) —
-/// byte-identical to Paper's canonical form.
+/// The Rust mirror of the Paper oracle op. Shared with `rivet-parity` via
+/// `component_serialization::json_canonical`, so the offline and live compare
+/// can never drift apart.
 fn rust_component_json(input: &str) -> Result<String, String> {
-    let ops = JsonOps::INSTANCE;
-    let codec = crate::component_serialization::codec();
-    let value: serde_json::Value =
-        serde_json::from_str(input).map_err(|e| format!("invalid JSON: {e}"))?;
-    let decoded = codec.parse(&ops, &value);
-    let component = decoded
-        .result()
-        .ok_or_else(|| "component decode failed".to_string())?;
-    let encoded = codec.encode_start(&ops, component);
-    let encoded = encoded
-        .result()
-        .ok_or_else(|| "component encode failed".to_string())?;
-    serde_json::to_string(encoded).map_err(|e| format!("serialize: {e}"))
+    crate::component_serialization::json_canonical(&crate::component_serialization::codec(), input)
 }
 
 /// `ComponentSerialization.CODEC` as used in these tests.
