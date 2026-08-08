@@ -133,6 +133,15 @@ The pin has three layers, each verified at run time:
    checks the baseline's provenance against the freshly booted log each run,
    so a committed manifest that drifts from what a run actually did is caught.
 
+   Which manifests are region captures is decided by the explicit `kind` field
+   (`kind: "m2"`), stamped by `regenerate` — never inferred from Paper's
+   level-type/compression strings, so a future change to how Paper spells
+   `level-type` cannot silently drop the provenance requirement. The old
+   pre-`kind` committed manifests are handled by a strict, named fallback
+   (none-compression `minecraft\:normal` with chunks) that is never a silent
+   skip: a kind-less manifest of that shape is still a region capture and still
+   requires the pinned provenance.
+
 Every boot also runs with **entity spawning suppressed**: `fixtures/paper-world-defaults.yml`
 sets every `entities.spawning.spawn-limits.*` category to 0, so no mob can
 spawn into the save window and serialize into the captured chunks' `Entities`
@@ -340,6 +349,18 @@ write the fixtures and leaves both trees (in the system temp dir, paths printed)
 for investigation — it never commits, excludes, or normalizes chunks to force
 a pass. On a match it records the boot log's observed `chunk-concurrency` into
 the region manifest (replacing any previous value) and commits the fixtures.
+
+`regenerate --m0` stamps the M0 superflat manifest with `kind: "m0"` and the
+M2 twin-boot stamps `kind: "m2"` (+ the observed concurrency). Regenerating
+into a scratch destination (`--to <dir>`) validates the produced tree before it
+is committed anywhere: `cargo run -p rivet-oracle -- regenerate --m0 --to /tmp/x`
+must produce a manifest that verifies clean and requires no M2 chunk-concurrency
+provenance (proving the regenerated M0 is not misclassified as a region capture,
+issue #266). `--to` requires exactly one of `--m0`/`--m2`: bare
+`regenerate --to /dir` and multi-kind `--m0 --m2 --to /dir` are refused (they
+would share one destination across kinds and M2's twin-boot replaces the whole
+directory, silently discarding M0's output), and `--samples` is refused with
+`--to` (worldgen samples regenerate the committed `fixtures/worldgen` tree).
 
 The gate's hash verification is the safety net against a bad regeneration.
 Never hand-edit fixtures; regenerate from a clean run instead. Every boot in the

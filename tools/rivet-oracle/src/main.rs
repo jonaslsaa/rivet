@@ -57,7 +57,12 @@
 //! `boot_and_shutdown` refuses a boot whose log does not confirm that pin
 //! (missing/ineffective config), the `verify` gates enforce provenance drift
 //! between the baseline manifest and the run, and M2 region captures record
-//! their concurrency as `chunk-concurrency` manifest provenance.
+//! their concurrency as `chunk-concurrency` manifest provenance. Which
+//! manifests are concurrency-sensitive region captures is decided by the
+//! explicit `kind` field (`kind: "m2"`, stamped by `regenerate`), never
+//! inferred from the level-type/compression strings — so a regenerated M0
+//! manifest (`kind: "m0"`) can never be misclassified as a region capture that
+//! requires the chunk-concurrency provenance (issue #266).
 //!
 //! Entity spawning is also suppressed for deterministic chunks (issue #266):
 //! every boot copies `fixtures/paper-world-defaults.yml` into the run dir's
@@ -235,6 +240,17 @@ impl ChunkConcurrency {
     }
 }
 
+/// Explicit capture-kind provenance written into regenerated manifests
+/// (issue #266). The `kind` field is authoritative for the M0 vs M2
+/// chunk-concurrency gate: `m0` declares the flat superflat slice (never
+/// concurrency-sensitive, never requires chunk-concurrency provenance), `m2`
+/// declares the normal-overworld none-compression region capture (always
+/// concurrency-sensitive, MUST record the pinned 1/1 provenance). Regeneration
+/// stamps these so classification never depends on inferring the capture from
+/// the level-type/compression strings.
+const KIND_M0: &str = "m0";
+const KIND_M2: &str = "m2";
+
 /// The fixture manifest (subset of fields; unknown fields are ignored).
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Manifest {
@@ -289,6 +305,11 @@ impl ChunkDiff {
 struct BootConfig {
     props_src: PathBuf,
     chunks_only: bool,
+    /// Explicit capture-kind stamped into the regenerated manifest (issue #266):
+    /// `KIND_M0` for the superflat slice, `KIND_M2` for the normal-overworld
+    /// region capture. Kept authoritative so the chunk-concurrency provenance
+    /// gate never depends on inferring the capture from config strings.
+    kind: &'static str,
     title: &'static str,
     baseline: PathBuf,
 }
@@ -297,6 +318,7 @@ fn m0_config() -> BootConfig {
     BootConfig {
         props_src: crate_dir().join("fixtures/server.properties"),
         chunks_only: false,
+        kind: KIND_M0,
         title: "M0 sanity gate: green against vanilla itself (superflat, seed 42)",
         baseline: crate_dir().join("fixtures"),
     }
@@ -306,6 +328,7 @@ fn m2_config() -> BootConfig {
     BootConfig {
         props_src: crate_dir().join("fixtures/server-normal.properties"),
         chunks_only: true,
+        kind: KIND_M2,
         title: "M2 region gate: normal-overworld none-compression region parity (seed 42)",
         baseline: crate_dir().join("fixtures/regions/overworld-normal"),
     }
@@ -423,20 +446,28 @@ fn verify_fixtures(dir: &Path) -> Result<Manifest, Error> {
     Ok(manifest)
 }
 
-/// The normal-overworld none-compression region chunk capture — the M2
-/// fixtures (`fixtures/server-normal.properties`): `level-type=minecraft:normal`,
-/// `region-file-compression=none` per DECISIONS D13, plus a nonzero chunk count.
+/// True for the concurrency-sensitive M2 region chunk capture — the only
+/// capture whose byte identity depends on the pinned chunk-concurrency
+/// provenance (issue #266).
 ///
-/// Only this capture carries the strictest determinism requirement (issue #266):
-/// its worldgen FEATURES passes race across chunk borders under concurrent
-/// Moonrise workers, so a byte-identity oracle is only well-posed at the pinned
-/// 1/1 concurrency and the manifest must record it. The M0 superflat slice
-/// (`fixtures/server.properties`, `level-type=minecraft:flat`) is ALSO
-/// none-compression but its flat worldgen is not concurrency-sensitive — it
-/// must NOT be classified here, or a `regenerate --m0` (which records
-/// `region-file-compression=none` + `chunk-count` but never injects
-/// chunk-concurrency provenance) would produce a manifest the gate rejects.
+/// Classification is **authoritative by explicit `kind`**: a regenerated M2
+/// manifest carries `kind: "m2"` and a regenerated M0 carries `kind: "m0"`
+/// (`regenerate` stamps both), so the decision never depends on inferring the
+/// capture from the level-type/compression strings. A manifest with any other
+/// (or missing) kind is *not* a region capture.
+///
+/// The inferential check is kept ONLY as a backward-compatible fallback for the
+/// two already-committed manifests captured before the `kind` field existed
+/// (M0 flat root and M2 normal-overworld region). It is a strict, named
+/// fallback, never a silent skip: a kind-less none-compression
+/// normal-overworld capture with chunks is still a region capture and still
+/// requires the pinned provenance. The explicit kind wins whenever present, so
+/// a future change to Paper's level-type string (or escaping) can never make a
+/// kinded M2 manifest silently provenance-free.
 fn is_region_capture(manifest: &Manifest) -> bool {
+    if let Some(kind) = manifest.kind.as_deref() {
+        return kind == KIND_M2;
+    }
     manifest.level_type.as_deref() == Some("minecraft\\:normal")
         && manifest.region_file_compression.as_deref() == Some("none")
         && manifest.chunk_count.unwrap_or(0) > 0
@@ -1092,13 +1123,16 @@ fn boot_and_shutdown(run_dir: &Path, log_path: &Path, jar: &Path) -> Result<(), 
 /// payloads (no level.dat / server.properties wall-clock copies) are emitted —
 /// regeneration stays git-clean.
 ///
-/// `observed` is the chunk concurrency the boot actually ran with (parsed from
-/// the boot log). For M2 region captures it is recorded into the manifest as
-/// `chunk-concurrency` provenance (issue #266); for other kinds it is ignored.
+/// `kind` is the explicit capture-kind provenance stamped into the manifest
+/// (`KIND_M0` for the flat superflat slice, `KIND_M2` for the normal-overworld
+/// region capture, issue #266). `observed` is the chunk concurrency the boot
+/// actually ran with (parsed from the boot log): for M2 region captures it is
+/// recorded as `chunk-concurrency` provenance; M0 never records it.
 fn extract_fresh_fixtures(
     world_dir: &Path,
     out_dir: &Path,
     chunks_only: bool,
+    kind: &str,
     observed: Option<ChunkConcurrency>,
 ) -> Result<(), Error> {
     let script = crate_dir().join("scripts/extract_fixtures.py");
@@ -1119,30 +1153,36 @@ fn extract_fresh_fixtures(
         )));
     }
 
-    if chunks_only {
-        let observed = observed.ok_or_else(|| {
+    let observed = if chunks_only {
+        Some(observed.ok_or_else(|| {
             Error::Gate(
                 "M2 region extraction needs the boot's observed chunk concurrency to record \
                  provenance (issue #266)"
                     .into(),
             )
-        })?;
-        inject_chunk_concurrency(out_dir, observed)?;
-    }
-    Ok(())
+        })?)
+    } else {
+        None
+    };
+    inject_manifest_metadata(out_dir, kind, observed)
 }
 
-/// Record `chunk-concurrency` provenance into a manifest (issue #266).
+/// Record capture-kind + (for M2) `chunk-concurrency` provenance into a
+/// manifest (issue #266).
 ///
 /// `extract_fixtures.py` writes the manifest (alphabetically sorted keys,
-/// `indent=2`, trailing newline); we add the concurrency field with the same
+/// `indent=2`, trailing newline); we add the provenance fields with the same
 /// formatting so the file stays git-clean under identical input.
-fn inject_chunk_concurrency(dir: &Path, observed: ChunkConcurrency) -> Result<(), Error> {
+fn inject_manifest_metadata(
+    dir: &Path,
+    kind: &str,
+    observed: Option<ChunkConcurrency>,
+) -> Result<(), Error> {
     let manifest_path = dir.join("manifest.json");
     let mut root: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|e| {
             Error::Gate(format!(
-                "cannot read {} to record chunk-concurrency: {e}",
+                "cannot read {} to record provenance: {e}",
                 manifest_path.display()
             ))
         })?)
@@ -1152,10 +1192,13 @@ fn inject_chunk_concurrency(dir: &Path, observed: ChunkConcurrency) -> Result<()
                 manifest_path.display()
             ))
         })?;
-    root["chunk-concurrency"] = serde_json::json!({
-        "worker-threads": observed.worker_threads,
-        "io-threads": observed.io_threads,
-    });
+    root["kind"] = serde_json::Value::String(kind.to_string());
+    if let Some(observed) = observed {
+        root["chunk-concurrency"] = serde_json::json!({
+            "worker-threads": observed.worker_threads,
+            "io-threads": observed.io_threads,
+        });
+    }
     let mut text = serde_json::to_string_pretty(&root)
         .map_err(|e| Error::Gate(format!("cannot serialize manifest: {e}")))?;
     text.push('\n');
@@ -1199,7 +1242,13 @@ fn fresh_extraction(
     } else {
         None
     };
-    extract_fresh_fixtures(&run_dir.join("world"), &tmp, cfg.chunks_only, observed)?;
+    extract_fresh_fixtures(
+        &run_dir.join("world"),
+        &tmp,
+        cfg.chunks_only,
+        cfg.kind,
+        observed,
+    )?;
     Ok((tmp, log_path))
 }
 
@@ -1578,20 +1627,15 @@ fn regenerate_samples() -> Result<(), Error> {
 /// the safety net against a bad regeneration. The boot runs under the pinned
 /// `fixtures/paper-global.yml` (issue #266); `boot_and_shutdown` refuses a boot
 /// that does not log the 1/1 worker/I-O thread pin.
-fn regenerate_m0() -> Result<(), Error> {
+fn regenerate_m0(dest: &Path) -> Result<(), Error> {
     let jar = ensure_jar()?;
     let run_dir = crate_dir().join("work/verify/run");
     let props = crate_dir().join("fixtures/server.properties");
     let log_path = run_dir.with_file_name("boot-m0.log");
     prepare_run_dir(&run_dir, &props)?;
     boot_and_shutdown(&run_dir, &log_path, &jar)?;
-    extract_fresh_fixtures(
-        &run_dir.join("world"),
-        &crate_dir().join("fixtures"),
-        false,
-        None,
-    )?;
-    println!("regenerated M0 golden chunk slice under fixtures/");
+    extract_fresh_fixtures(&run_dir.join("world"), dest, false, KIND_M0, None)?;
+    println!("regenerated M0 golden chunk slice under {}", dest.display());
     Ok(())
 }
 
@@ -1678,11 +1722,10 @@ fn trees_byte_identical(a: &Path, b: &Path) -> Result<bool, Error> {
 ///
 /// Performs TWO independent fresh Paper boots under the pinned concurrency and
 /// requires their extracted chunk-NBT payloads (and manifests) to be
-/// byte-identical before committing anything into
-/// `fixtures/regions/overworld-normal/`. If the pair diverges, the committed
-/// fixtures are left untouched and the two extraction trees are kept for
+/// byte-identical before committing anything into `dest`. If the pair diverges,
+/// `dest` is left untouched and the two extraction trees are kept for
 /// inspection — a nondeterministic pair is never committed.
-fn regenerate_m2() -> Result<(), Error> {
+fn regenerate_m2(dest: &Path) -> Result<(), Error> {
     let jar = ensure_jar()?;
     let run_dir = crate_dir().join("work/verify/run");
     let cfg = m2_config();
@@ -1704,9 +1747,10 @@ fn regenerate_m2() -> Result<(), Error> {
              committed (issue #266).\n\
              boot A kept at: {}\n\
              boot B kept at: {}\n\
-             committed fixtures under fixtures/regions/overworld-normal/ were NOT touched.",
+             destination {} was NOT touched.",
             boot_a.display(),
-            boot_b.display()
+            boot_b.display(),
+            dest.display()
         );
         return Err(Error::Gate(
             "M2 twin-boot byte-identity check failed — refusing to commit a nondeterministic pair"
@@ -1714,39 +1758,66 @@ fn regenerate_m2() -> Result<(), Error> {
         ));
     }
 
-    let target = crate_dir().join("fixtures/regions/overworld-normal");
-    if target.exists() {
-        fs::remove_dir_all(&target)?;
+    if dest.exists() {
+        fs::remove_dir_all(dest)?;
     }
-    fs::create_dir_all(&target)?;
-    copy_dir_recursive(&boot_a, &target)?;
+    fs::create_dir_all(dest)?;
+    copy_dir_recursive(&boot_a, dest)?;
     let _ = fs::remove_dir_all(&boot_a);
     let _ = fs::remove_dir_all(&boot_b);
     println!(
-        "regenerated M2 normal-overworld region payloads under fixtures/regions/overworld-normal/ \
-         (twin-boot byte-identical; chunk-concurrency provenance recorded)"
+        "regenerated M2 normal-overworld region payloads under {} (twin-boot byte-identical; \
+         chunk-concurrency provenance recorded)",
+        dest.display()
     );
     Ok(())
 }
 
 /// `regenerate`: full regeneration of every fixture kind (or a sub-selection
 /// via `--m0` / `--m2` / `--samples`).
-fn run_regenerate(only: &[&str]) -> Result<(), Error> {
-    let m0 = only.is_empty() || only.contains(&"--m0");
-    let m2 = only.is_empty() || only.contains(&"--m2");
-    let samples = only.is_empty() || only.contains(&"--samples");
+///
+/// Each kind defaults to its committed location (M0 -> `fixtures/`, M2 ->
+/// `fixtures/regions/overworld-normal/`), so the official path refreshes the
+/// golden fixtures in place. An explicit `--to <dir>` overrides the destination
+/// for a single kind (refused for bare/combined selections or `--samples`),
+/// regenerating into a scratch dir for gate validation before anything is
+/// committed — the M0-verify-in-a-temporary-destination path.
+fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     for flag in only {
         if !matches!(*flag, "--m0" | "--m2" | "--samples") {
             return Err(Error::Gate(format!("unknown regenerate flag: {flag}")));
         }
     }
+    // `--to <dir>` must name exactly one booting kind. A shared destination
+    // across kinds would clobber M0's output when M2's twin-boot copy replaces
+    // the whole directory (silently discarding M0), and the worldgen samples
+    // ignore a destination entirely — so refuse instead of misbehaving.
+    if to.is_some() && (only.len() != 1 || only.contains(&"--samples")) {
+        let what = if only.is_empty() {
+            String::from("all kinds (bare regenerate)")
+        } else {
+            only.join(" ")
+        };
+        return Err(Error::Gate(format!(
+            "regenerate --to <dir> requires exactly one of --m0/--m2 (--samples \
+             regenerates the committed fixtures/worldgen tree and ignores --to); \
+             got {what}"
+        )));
+    }
+    let m0 = only.is_empty() || only.contains(&"--m0");
+    let m2 = only.is_empty() || only.contains(&"--m2");
+    let samples = only.is_empty() || only.contains(&"--samples");
+    let m0_default = crate_dir().join("fixtures");
+    let m2_default = crate_dir().join("fixtures/regions/overworld-normal");
+    let m0_dest = to.unwrap_or(&m0_default);
+    let m2_dest = to.unwrap_or(&m2_default);
     if m0 {
         println!("==> regenerating M0 golden chunk slice");
-        regenerate_m0()?;
+        regenerate_m0(m0_dest)?;
     }
     if m2 {
         println!("==> regenerating M2 normal-overworld region payloads");
-        regenerate_m2()?;
+        regenerate_m2(m2_dest)?;
     }
     if samples {
         println!("==> regenerating worldgen semantic samples");
@@ -1791,7 +1862,11 @@ fn print_usage() {
         "  cargo run -p rivet-oracle -- sample         regenerate worldgen/ semantic samples + manifest"
     );
     println!("  cargo run -p rivet-oracle -- regenerate     regenerate ALL fixture kinds");
-    println!("                                             (sub-select: --m0 / --m2 / --samples)");
+    println!("                                             (sub-select: --m0 / --m2 / --samples;");
+    println!("                                              --to <dir> regenerates into a scratch");
+    println!(
+        "                                              destination instead of the fixtures tree)"
+    );
     println!();
     println!(
         "Every gate mode enforces the manifest's pinned Paper commit (fixtures/**/manifest.json"
@@ -1841,8 +1916,28 @@ fn run() -> Result<(), Error> {
         }
         Some("sample") => regenerate_samples(),
         Some("regenerate") => {
-            let flags: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
-            run_regenerate(&flags)
+            // `--to <dir>` overrides the destination for a single kind
+            // (regenerate into a scratch dir for gate validation before
+            // committing); run_regenerate refuses bare/combined `--to`.
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            let mut to: Option<PathBuf> = None;
+            let mut flags: Vec<&str> = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                if rest[i] == "--to" {
+                    let Some(dir) = rest.get(i + 1) else {
+                        return Err(Error::Gate(
+                            "regenerate --to requires a destination dir".into(),
+                        ));
+                    };
+                    to = Some(PathBuf::from(dir));
+                    i += 2;
+                } else {
+                    flags.push(rest[i]);
+                    i += 1;
+                }
+            }
+            run_regenerate(&flags, to.as_deref())
         }
         Some("--help") | Some("-h") => {
             print_usage();
@@ -1937,9 +2032,15 @@ mod tests {
             "D13: normal-overworld region captures use region-file-compression=none"
         );
         assert_eq!(manifest.level_type.as_deref(), Some("minecraft\\:normal"));
-        // Issue #266: a none-compression region capture MUST record the pinned
-        // 1/1 worker/I-O concurrency it was generated under. Missing or drifted
-        // provenance is a hard failure, never a skip.
+        // Issue #266: the regenerated region manifest carries the explicit m2
+        // capture-kind, and MUST record the pinned 1/1 worker/I-O concurrency
+        // it was generated under. Missing or drifted provenance is a hard
+        // failure, never a skip.
+        assert_eq!(
+            manifest.kind.as_deref(),
+            Some(KIND_M2),
+            "regenerated M2 manifest must carry kind: m2"
+        );
         assert_eq!(
             manifest.chunk_concurrency,
             Some(ChunkConcurrency::PINNED),
@@ -1976,14 +2077,11 @@ mod tests {
         );
     }
 
-    /// `is_region_capture` discriminates on the concurrency-sensitive M2 case:
-    /// normal-overworld + none-compression + nonzero chunk count. The M0
-    /// superflat slice is ALSO none-compression + chunk-count>0 but its flat
-    /// worldgen is not concurrency-sensitive — a `regenerate --m0` produces
-    /// exactly that shape (region-file-compression=none from the props, no
-    /// chunk-concurrency provenance) and must NOT be treated as a region
-    /// capture, or the gate would reject the regenerated M0 manifest (issue
-    /// #266).
+    /// `is_region_capture` is authoritative by explicit `kind` (issue #266):
+    /// `kind: "m2"` is the concurrency-sensitive normal-overworld region
+    /// capture; `kind: "m0"` (and every other kind) is not. A kind-less
+    /// manifest falls back to the strict string inference ONLY for the two
+    /// committed manifests captured before the `kind` field existed.
     #[test]
     fn region_capture_discriminates_normal_overworld() {
         let normal = Manifest {
@@ -1997,13 +2095,15 @@ mod tests {
             chunk_concurrency: None,
             captured: Vec::new(),
         };
+
+        // Kind-less backward-compat fallback: normal + none + chunks is the M2
+        // capture (the committed pre-kind region manifest's exact shape).
         assert!(
             is_region_capture(&normal),
-            "normal + none + chunks is the M2 capture"
+            "kind-less normal + none + chunks is the M2 capture"
         );
-
-        // M0 superflat slice: same compression + chunk count, but flat level
-        // type — must NOT be classified as the concurrency-sensitive capture.
+        // M0 superflat slice (kind-less): same compression + chunk count, but
+        // flat level type — never a region capture.
         let m0 = Manifest {
             level_type: Some("minecraft\\:flat".into()),
             chunk_count: Some(432),
@@ -2013,7 +2113,6 @@ mod tests {
             !is_region_capture(&m0),
             "M0 superflat is not a region capture"
         );
-
         // Non-none compression or zero chunks are not a region capture either.
         let deflate = Manifest {
             region_file_compression: Some("deflate".into()),
@@ -2027,12 +2126,53 @@ mod tests {
         assert!(!is_region_capture(&empty));
     }
 
+    /// The explicit `kind` is authoritative over the inferred strings: a
+    /// `kind: "m2"` manifest is a region capture even if its level-type/compression
+    /// strings look like the M0 superflat slice, and a `kind: "m0"` manifest is
+    /// NOT a region capture even with the normal-overworld strings. Regeneration
+    /// stamps these, so classification never depends on the config strings.
+    #[test]
+    fn region_capture_kind_is_authoritative_over_strings() {
+        let base = Manifest {
+            format: 1,
+            seed: Some("42".into()),
+            level_type: Some("minecraft\\:normal".into()),
+            paper: Some("26.2-DEV-main@0a99345".into()),
+            chunk_count: Some(408),
+            region_file_compression: Some("none".into()),
+            kind: None,
+            chunk_concurrency: None,
+            captured: Vec::new(),
+        };
+
+        // Mutation: same strings, kind flipped — classification must flip with
+        // the kind, never with the strings.
+        let m2_kind = Manifest {
+            kind: Some(KIND_M2.into()),
+            level_type: Some("minecraft\\:flat".into()),
+            ..base.clone()
+        };
+        assert!(
+            is_region_capture(&m2_kind),
+            "kind: m2 is a region capture regardless of the level-type string"
+        );
+
+        let m0_kind = Manifest {
+            kind: Some(KIND_M0.into()),
+            ..base
+        };
+        assert!(
+            !is_region_capture(&m0_kind),
+            "kind: m0 is never a region capture even with normal+none+chunks"
+        );
+    }
+
     /// A freshly regenerated M0 manifest has the exact shape the gate must
-    /// accept without chunk-concurrency provenance: `region-file-compression=none`
+    /// accept: `kind: "m0"` (stamped by the regenerate path), `region-file-compression=none`
     /// (emitted by extract_fixtures.py from the M0 props), `chunk-count`, and
-    /// `level-type=minecraft:flat`, with no `chunk-concurrency` field (the M0
-    /// path never injects it). `verify_fixtures` must accept it — this is the
-    /// documented `regenerate --m0` refresh path (issue #266).
+    /// NO `chunk-concurrency` field (the M0 path never injects it).
+    /// `verify_fixtures` must accept it — this is the documented `regenerate
+    /// --m0` refresh path (issue #266).
     #[test]
     fn regenerated_m0_manifest_verifies_without_provenance() {
         let scratch =
@@ -2047,6 +2187,7 @@ mod tests {
                 "format": 1,
                 "paper": "26.2-DEV-main@0a99345",
                 "seed": "42",
+                "kind": KIND_M0,
                 "level-type": "minecraft\\:flat",
                 "level-name": "world",
                 "region-file-compression": "none",
@@ -2059,16 +2200,109 @@ mod tests {
         .unwrap();
         // No captured files means only the structural checks run: the format,
         // the hashes (none), and the chunk-concurrency provenance gating. A
-        // flat slice must not be treated as a region capture.
+        // kind: m0 slice must NOT be treated as a region capture, so it verifies
+        // without chunk-concurrency provenance.
         verify_fixtures(&scratch).expect("regenerated-M0-shaped manifest must verify clean");
         let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// A regenerated M2 manifest (`kind: "m2"`) MUST carry the pinned
+    /// chunk-concurrency provenance — stripping it (or drifting it) fails
+    /// verification even though the kind alone marks it a region capture. M2
+    /// always requires provenance; M0 never does.
+    #[test]
+    fn regenerated_m2_manifest_requires_provenance() {
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-m2shape-{}", std::process::id()));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        fs::create_dir_all(&scratch).unwrap();
+        let write_manifest = |cc: Option<serde_json::Value>, path: &Path| {
+            let mut m = serde_json::json!({
+                "format": 1,
+                "paper": "26.2-DEV-main@0a99345",
+                "seed": "42",
+                "kind": KIND_M2,
+                "level-type": "minecraft\\:normal",
+                "level-name": "world",
+                "region-file-compression": "none",
+                "spawn-region": "0.0",
+                "chunk-count": 408,
+                "captured": []
+            });
+            if let Some(cc) = cc {
+                m["chunk-concurrency"] = cc;
+            }
+            fs::write(
+                path.join("manifest.json"),
+                serde_json::to_string_pretty(&m).unwrap(),
+            )
+            .unwrap();
+        };
+
+        // Missing provenance on a kind: m2 manifest is a hard failure.
+        write_manifest(None, &scratch);
+        match verify_fixtures(&scratch) {
+            Err(Error::Manifest(m)) => {
+                assert!(
+                    m.contains("chunk-concurrency"),
+                    "message names the missing provenance: {m}"
+                );
+            }
+            other => panic!("expected Manifest error, got {other:?}"),
+        }
+
+        // Drifted (non-pinned) provenance is a hard failure too.
+        write_manifest(
+            Some(serde_json::json!({"worker-threads": 3, "io-threads": 1})),
+            &scratch,
+        );
+        match verify_fixtures(&scratch) {
+            Err(Error::Manifest(m)) => {
+                assert!(m.contains("3/1"), "message names the drifted counts: {m}");
+            }
+            other => panic!("expected Manifest error, got {other:?}"),
+        }
+
+        // Pinned provenance verifies clean.
+        write_manifest(
+            Some(serde_json::json!({"worker-threads": 1, "io-threads": 1})),
+            &scratch,
+        );
+        verify_fixtures(&scratch).expect("kind: m2 with pinned provenance must verify clean");
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// `regenerate --to <dir>` must refuse any selection that would silently
+    /// misbehave: a shared destination across kinds (M2's twin-boot replaces
+    /// the whole directory, discarding M0's output) or a kind that ignores the
+    /// destination entirely (worldgen samples). Each refusal happens before any
+    /// boot, so no Paper jar is needed.
+    #[test]
+    fn regenerate_to_requires_single_booting_kind() {
+        let to = Some(Path::new("/tmp/rivet-oracle-refused"));
+        for (flags, needle) in [
+            (&[][..], "all kinds (bare regenerate)"),
+            (&["--m0", "--m2"][..], "--m0 --m2"),
+            (&["--samples"][..], "ignores --to"),
+        ] {
+            match run_regenerate(flags, to) {
+                Err(Error::Gate(m)) => assert!(
+                    m.contains(needle),
+                    "refusal must name the offending selection; got: {m}"
+                ),
+                other => panic!("expected Gate refusal for {flags:?}, got {other:?}"),
+            }
+        }
     }
 
     /// The committed `fixtures/paper-world-defaults.yml` (the pinned Paper
     /// world-defaults every oracle boot runs under) must cap every
     /// `entities.spawning.spawn-limits.*` category at 0 (issue #266). MC 26.2
-    /// removed the vanilla spawn-monsters/animals/npcs server.properties keys,
-    /// so these spawn-limits are the effective no-entity-spawn switch.
+    /// removed the vanilla spawn-monsters/animals/npcs server.properties keys
+    /// (DedicatedServerProperties reads none of them), so these spawn-limits
+    /// are the effective no-entity-spawn switch.
     #[test]
     fn pinned_world_defaults_caps_all_spawn_limits() {
         let f = fixtures_dir().join("paper-world-defaults.yml");
@@ -2090,6 +2324,72 @@ mod tests {
                 text.contains(&needle),
                 "pinned paper-world-defaults.yml must cap spawn-limit {category} at 0"
             );
+        }
+    }
+
+    /// The committed boot-config properties fixtures must NOT carry the
+    /// ineffective vanilla spawn-animals/monsters/npcs keys (issue #266): MC
+    /// 26.2 removed them from DedicatedServerProperties, so writing them is a
+    /// no-op and an overclaim. The effective no-entity-spawn suppression is the
+    /// pinned paper-world-defaults.yml spawn-limits (asserted above).
+    #[test]
+    fn boot_config_fixtures_have_no_vanilla_spawn_keys() {
+        for props in ["server.properties", "server-normal.properties"] {
+            let f = fixtures_dir().join(props);
+            if !f.is_file() {
+                continue;
+            }
+            let text = fs::read_to_string(&f).unwrap();
+            for key in ["spawn-animals", "spawn-monsters", "spawn-npcs"] {
+                assert!(
+                    !text.lines().any(|l| {
+                        let l = l.trim();
+                        l.starts_with(key) && l.contains('=')
+                    }),
+                    "{props} must not set the removed no-op key {key} (issue #266)"
+                );
+            }
+        }
+    }
+
+    /// Runtime evidence that entity spawning is suppressed: the captured chunk
+    /// NBT payloads (M0 superflat and M2 normal-overworld) contain no entity
+    /// data at all — no `Entities` list tag anywhere in any captured chunk.
+    /// Combined with the spawn-limits-0 world-defaults assertion, this is the
+    /// "assert from effective generated config or runtime evidence" guarantee
+    /// (issue #266). Twin-boot byte identity and the strict verify diff remain
+    /// authoritative even if suppression ever fails.
+    #[test]
+    fn captured_chunk_payloads_have_no_entities() {
+        for root in [
+            fixtures_dir().join("chunk"),
+            fixtures_dir().join("regions/overworld-normal/chunk"),
+        ] {
+            if !root.is_dir() {
+                continue;
+            }
+            let mut n = 0;
+            let mut walk = vec![root.clone()];
+            while let Some(dir) = walk.pop() {
+                for entry in fs::read_dir(&dir).unwrap().flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        walk.push(p);
+                    } else if p.extension().is_some_and(|e| e == "nbt") {
+                        let data = fs::read(&p).unwrap();
+                        // NBT is a binary tag tree; the 'Entities' key name is
+                        // present verbatim if any entity list tag was written.
+                        assert!(
+                            !data.windows(b"Entities".len()).any(|w| w == b"Entities"),
+                            "captured chunk {} contains an Entities tag — entity \
+                             spawning was NOT suppressed (issue #266)",
+                            p.display()
+                        );
+                        n += 1;
+                    }
+                }
+            }
+            assert!(n > 0, "no chunk payloads found under {}", root.display());
         }
     }
 
