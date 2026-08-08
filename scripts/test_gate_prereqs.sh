@@ -227,5 +227,71 @@ grep -q "^    FAILED" "$TMP/out8" || fail "tool crash: FAILED not printed"
 grep -q "^    VERIFIED" "$TMP/out8" && fail "tool crash: VERIFIED printed despite crash"
 pass "tool crash: FAILED, exit 1, never VERIFIED"
 
+# --- test 5: run_oracle_self_test must prove the raw-JSON-Lines contract -------
+# The self-test step runs `tools/rivet-reference-oracle/run.sh --self-test` and
+# asserts stdout is exactly one bare JSON line (no log4j `[HH:mm:ss LEVEL]:
+# [STDOUT]: ...` prefix, and not swallowed). This is the load-bearing test for
+# RivetReferenceOracle.selfTest()'s RAW_STDOUT emission: a regression back to
+# System.out.println (re-wired through SysOutOverSLF4J by Bootstrap.bootStrap())
+# produces a prefixed line or empty stdout and must FAIL the gate. The step
+# resolves run.sh via REPO_DIR, so only that file is shimmed inside FAKE_FULL;
+# PARITY_RUNNABLE is set directly, as in the parity tests above.
+SELF_SHIM_DIR="$FAKE_FULL/tools/rivet-reference-oracle"
+mkdir -p "$SELF_SHIM_DIR"
+self_run_sh() { # $1 = literal stdout line the fake run.sh should emit
+  printf '#!/bin/bash\nprintf "%%s\\n" %q\n' "$1" > "$SELF_SHIM_DIR/run.sh"
+  chmod +x "$SELF_SHIM_DIR/run.sh"
+}
+
+# Healthy self-test: stdout is the bare JSON summary.
+self_run_sh '{"ok":true,"protocol":1,"tests":9}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+run_oracle_self_test > "$TMP/out9" 2>&1
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "self-test: ORACLE_UNVERIFIED set on success"
+grep -q "^    VERIFIED" "$TMP/out9" || fail "self-test: VERIFIED not printed for bare JSON line"
+pass "self-test: bare JSON line -> VERIFIED"
+
+# Regression: the summary routed through System.out after Bootstrap.bootStrap()
+# vanishes entirely (stdout empty) — must be FAILED, exit 1.
+self_run_sh ''
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out10" 2>&1 )
+rc10=$?
+set -e
+[ "$rc10" = 1 ] || fail "self-test: empty stdout should exit 1 (got $rc10)"
+grep -q "^    FAILED" "$TMP/out10" || fail "self-test: FAILED not printed for empty stdout"
+grep -q "^    VERIFIED" "$TMP/out10" && fail "self-test: VERIFIED printed despite empty stdout"
+pass "self-test: empty stdout (System.out regression) -> FAILED"
+
+# Regression: a log4j-prefixed line must be FAILED, exit 1.
+self_run_sh '[2026-08-08T14:00:00Z INFO]: [STDOUT]: {"ok":true,"protocol":1,"tests":9}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out11" 2>&1 )
+rc11=$?
+set -e
+[ "$rc11" = 1 ] || fail "self-test: log-prefixed line should exit 1 (got $rc11)"
+grep -q "^    FAILED" "$TMP/out11" || fail "self-test: FAILED not printed for log-prefixed line"
+pass "self-test: log4j-prefixed line -> FAILED"
+
+# Multi-line stdout (a trailing diagnostic) must be FAILED, exit 1.
+self_run_sh $'{"ok":true,"protocol":1,"tests":9}\njunk'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out12" 2>&1 )
+rc12=$?
+set -e
+[ "$rc12" = 1 ] || fail "self-test: multi-line stdout should exit 1 (got $rc12)"
+grep -q "^    FAILED" "$TMP/out12" || fail "self-test: FAILED not printed for multi-line stdout"
+pass "self-test: multi-line stdout -> FAILED"
+
+# Not runnable: UNVERIFIED, ORACLE_UNVERIFIED=1, no hard failure.
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=0
+run_oracle_self_test > "$TMP/out13" 2>&1
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "self-test: ORACLE_UNVERIFIED not set when not runnable"
+grep -q "^    UNVERIFIED" "$TMP/out13" || fail "self-test: UNVERIFIED not printed when not runnable"
+pass "self-test: not runnable -> UNVERIFIED"
+
 echo
 echo "ALL GATE PREREQ TESTS PASSED"

@@ -33,6 +33,10 @@
 #                          exactly "1 worker threads, 1 I/O threads", and the M2
 #                          region baseline must carry matching chunk-concurrency
 #                          provenance — drift fails the gate loudly.
+#   - reference self-test  boot the reference oracle in --self-test mode and assert
+#                          stdout is exactly one bare JSON line (no log4j [STDOUT]
+#                          prefix, not swallowed) — the load-bearing proof that
+#                          selfTest() rides the raw stream. Shares the parity prereqs.
 #   - rivet-parity         byte-for-byte NBT/SNBT diff of rivet-nbt against the Paper
 #                          reference oracle — the only gate step that exercises real
 #                          Rivet code against Paper.
@@ -392,6 +396,51 @@ run_oracle_hash() {
   fi
 }
 
+# Returns 0 iff $1 is exactly the bare JSON-Lines summary the oracle self-test
+# must emit: a single line, starting with '{' (NOT a log4j `[HH:mm:ss LEVEL]:
+# [STDOUT]: ...` prefix — Bootstrap.bootStrap() re-wires System.out through
+# SysOutOverSLF4J, so a regression of selfTest() back to System.out.println
+# either prefixes the summary or swallows it entirely), and carrying the
+# top-level "ok":true the summary sets. Any other shape — empty stdout, a
+# `[`-prefixed log line, extra lines — means the raw-stdout protocol broke.
+oracle_self_test_stdout_is_raw_json() {
+  [ "$#" -eq 1 ] || return 1
+  [ -n "$1" ] || return 1
+  case "$1" in
+    *$'\n'*) return 1 ;;           # more than one line
+    '{'*'"ok":true'*) return 0 ;;  # one bare JSON line, ok:true
+    *) return 1 ;;
+  esac
+}
+
+# The reference oracle's `--self-test` mode (RivetReferenceOracle.selfTest())
+# must emit exactly one bare JSON line on stdout. selfTest() writes through
+# RAW_STDOUT — the System.out captured before Bootstrap.bootStrap() re-wires it
+# through log4j — precisely so the summary is not a `[HH:mm:ss LEVEL]: [STDOUT]:
+# {...}` log line (or swallowed). Asserting the real stdout shape is the
+# load-bearing proof that a regression back to System.out.println fails the
+# gate; it shares the parity step's prerequisites (the compiled oracle boots
+# against the same Paper runtime), so it is guarded by PARITY_RUNNABLE.
+run_oracle_self_test() {
+  echo "==> reference oracle self-test (raw JSON Lines on stdout, no log prefix)"
+  if [ "$PARITY_RUNNABLE" = 1 ]; then
+    local out="" rc=0
+    out="$(bash "$REPO_DIR/tools/rivet-reference-oracle/run.sh" --self-test)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "    FAILED — reference oracle --self-test exited $rc (see output above)"
+      exit 1
+    fi
+    if ! oracle_self_test_stdout_is_raw_json "$out"; then
+      echo "    FAILED — reference oracle --self-test did not emit a bare JSON line (got: ${out:-<empty>})"
+      exit 1
+    fi
+    echo "    VERIFIED — reference oracle --self-test emitted raw JSON Lines ($out)"
+  else
+    echo "    UNVERIFIED — reference oracle self-test did not run (see the prereq report above)"
+    ORACLE_UNVERIFIED=1
+  fi
+}
+
 run_rivet_parity() {
   echo "==> rivet-parity (byte-for-byte NBT/SNBT vs Paper oracle)"
   if [ "$PARITY_RUNNABLE" = 1 ]; then
@@ -714,6 +763,7 @@ main() {
   if [ "$FULL_GATE" = true ]; then
     run_oracle_verify
     run_oracle_hash
+    run_oracle_self_test
     run_rivet_parity
     run_join_capture
   fi
