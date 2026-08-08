@@ -14,10 +14,12 @@
 //! packets; `update_tags`' `TagNetworkSerialization.NetworkPayload` wire shape
 //! lives in `crate::protocol::common::tag_network_payload`.
 //!
-//! Deferred, not stubbed (not on the M1 offline join path; the listener decodes
-//! and ignores them, #236):
-//! RivetTodo(#236): `reset_chat`/`code_of_conduct`/`accept_code_of_conduct`
-//! bodies land with the configuration listener's client-response handlers.
+//! Deferred, not stubbed (not on the M1 offline join path): `accept_code_of_conduct`
+//! is decoded by the configuration listener's `handleAcceptCodeOfConduct`
+//! (issue #236), which always closes on the mismatch — no CoC task is ever
+//! queued (`MinecraftServer.getCodeOfConducts()` is `Map.of()`). The
+//! `reset_chat`/`code_of_conduct` bodies stay deferred with the CoC task that
+//! would send them.
 //!
 //! `handle()` stays deferred with the listener hierarchy (M1.1/#148), like every
 //! other body module.
@@ -28,5 +30,6 @@ pub mod clientbound_select_known_packs;
 pub mod clientbound_update_enabled_features;
 pub mod packed_registry_entry;
 pub mod packet_types;
+pub mod serverbound_accept_code_of_conduct;
 pub mod serverbound_finish_configuration;
 pub mod serverbound_select_known_packs;

@@ -48,6 +48,7 @@ pub use configuration::clientbound_registry_data::ClientboundRegistryDataPacket;
 pub use configuration::clientbound_select_known_packs::ClientboundSelectKnownPacks;
 pub use configuration::clientbound_update_enabled_features::ClientboundUpdateEnabledFeaturesPacket;
 pub use configuration::packed_registry_entry::PackedRegistryEntry;
+pub use configuration::serverbound_accept_code_of_conduct::ServerboundAcceptCodeOfConductPacket;
 pub use configuration::serverbound_finish_configuration::ServerboundFinishConfigurationPacket;
 pub use configuration::serverbound_select_known_packs::ServerboundSelectKnownPacks;
 pub use game::common_player_spawn_info::CommonPlayerSpawnInfo;
