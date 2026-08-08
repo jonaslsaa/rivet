@@ -23,10 +23,12 @@
 //! can only ever see the jar the artifact actually being booted produced — a
 //! swapped, stale, or non-bundler artifact cannot silently stand in for the
 //! pinned reference. Paper-vs-Paper self-checks and capture do not require the
-//! pin: they compare a build against itself. Every boot gets its own port (held
-//! `rivet-harness-common::port` reservations from main.rs): the Paper run dir's
-//! `server.properties` is patched to the allocated port and `rivet-server` is
-//! passed `--host`/`--port`, so no two servers in a scenario can collide.
+//! pin: they compare a build against itself. Concurrent servers get distinct
+//! ports (held `rivet-harness-common::port` reservations from main.rs): the
+//! Paper run dir's `server.properties` is patched to the allocated port and
+//! `rivet-server` is passed `--host`/`--port`, so no two servers in a scenario
+//! can collide. Sequential single-server modes reuse the base port one boot at a
+//! time, so they never contend.
 
 use std::fmt;
 use std::fs;

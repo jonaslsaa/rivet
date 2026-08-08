@@ -55,8 +55,9 @@ impl fmt::Display for Verdict {
 
 /// Build the verdict for a named-path negative control: `mismatched` is the
 /// list of items the pipeline reported as diverging; the control passes only
-/// when it contains the tampered path. `empty_on_none` reports a *clean* diff
-/// (false negative) when no items diverge.
+/// when it contains the tampered path. An empty `mismatched` is a *clean* diff
+/// (false negative), and a non-empty one that omits the tampered path is a
+/// *wrong-item* divergence; both fail the control.
 pub fn verdict(tampered: &str, mismatched: &[String]) -> Verdict {
     if mismatched.iter().any(|p| p == tampered) {
         Verdict::Detected(tampered.to_owned())
