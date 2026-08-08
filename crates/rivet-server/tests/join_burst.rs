@@ -3,14 +3,20 @@
 //! the session, and `place_new_player`/`send_level_info` emit the Paper-faithful
 //! play join burst.
 //!
-//! Ground truth: the `tools/rivet-capture/fixtures/join/capture.jsonl` join
-//! (protocol 776, Paper `26.2-DEV-main@0a99345`, offline superflat world,
-//! seed 42, view distance 4). The packet bodies are the raw packet bodies the
-//! capture proxy strips (packet id + compression prefix already removed), so the
-//! byte-exact assertions compare an encoded burst member against the capture's
-//! body. The four `rivet-protocol` `join_clientbound_*.hex` fixtures pin the same
-//! bodies. Slice A covers ids `[49,10,64,105,72,43,113,97,38,70]` — the
-//! `update_recipes` (133) member is deferred (RivetTodo(#87)).
+//! Ground truth: the `tools/rivet-capture/fixtures/join/capture.jsonl` — the
+//! NORMALIZED #153 capture (protocol 776, Paper `26.2-DEV-main@0a99345`,
+//! offline superflat world, seed 42, view distance 4). The committed capture is
+//! the deterministic canonical form (`normalize::canonicalize`), not the raw
+//! transcript: the raw capture interleaves the proxy's two relay streams and
+//! more than one connection's traffic, so Slice A's bodies and order are
+//! selected from the normalized capture rather than inferred from raw
+//! positional adjacency. Each body is the packet payload the capture proxy
+//! strips (packet id + compression prefix already removed, randomized fields
+//! canonicalized), so the byte-exact assertions compare an encoded burst member
+//! against the capture's normalized body. The four `rivet-protocol`
+//! `join_clientbound_*.hex` fixtures pin the same bodies. Slice A covers ids
+//! `[49,10,64,105,72,43,113,97,38,70]` — the ten members Paper sends in between
+//! (see the authoritative list in `join.rs`'s module doc) are deferred.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -306,16 +312,20 @@ fn play_sender_send_to_missing_connection_errors_gone() {
 
 // ---- Byte-exact burst bodies against the capture + fixtures -----------------
 
-/// The `initialize_border` body the capture's id-43 line records (both
-/// `sendLevelInfo` occurrences carry it): `center 0,0; old = new size =
-/// 59999968.0` (the float `5.999997E7F` promoted to double); `lerp_time 0;
-/// absolute_max_size 29999984; warning_blocks 5; warning_time 300`.
+/// The `initialize_border` body the capture's id-43 line records: `center 0,0;
+/// old = new size = 59999968.0` (the float `5.999997E7F` promoted to double);
+/// `lerp_time 0; absolute_max_size 29999984; warning_blocks 5; warning_time
+/// 300`. Paper's `sendLevelInfo` emits the same body on both of its
+/// occurrences; the capture records id-43 twice (its duplicate cannot be
+/// attributed to one player — the capture interleaves connections), and this
+/// body is the deterministic value both occurrences carry.
 fn border_body() -> Vec<u8> {
     hex_bytes("00000000000000000000000000000000418c9c3700000000418c9c370000000000f086a70e05ac02")
 }
 
-/// The Slice A ids in Paper's send order (PLAY_BURST_ORDER minus the deferred
-/// `update_recipes`/entity-pairing members).
+/// The Slice A ids in Paper's send order — `PLAY_BURST_ORDER` minus the ten
+/// deferred members (the complete, authoritative list is in `join.rs`'s module
+/// doc; don't restate a partial list here).
 fn slice_a_order() -> Vec<u32> {
     vec![
         ids::LOGIN,
