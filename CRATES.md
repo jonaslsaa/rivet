@@ -28,7 +28,7 @@ Module paths inside crates mirror Java packages (PORTING.md). Crate boundaries e
 
 **Data:** `serde` + `serde_json` (configs, datapack JSON — never packets or chunk hot paths), `toml` (config), `slotmap` (entity/holder arenas), `rustc-hash` (FxHashMap default), `indexmap` (order-observable maps), `smallvec`, `bitflags`, `phf` (generated static tables), `uuid`, `bytes`.
 
-**Formats/compression:** `flate2` (+`async-compression` for the network stream), `cesu8`, `md5` (Java seed hashing, not security), `xxhash-rust` (fixture/chunk hashing).
+**Formats/compression:** `flate2` (+`async-compression` for the network stream), `cesu8`, `md5` (Java seed hashing, not security), `xxhash-rust` (fixture/chunk hashing), `crc32c` (RFC 3720 CRC-32C for `HashOps`'s `DynamicOps<HashCode>` serialization adapter, issue #205 — the byte-identical checksum behind Guava's `Hashing.crc32c()`).
 
 **Crypto (protocol):** RustCrypto stable releases only — `aes`, `cfb8`, `rsa`, `sha1`, `sha2`; `rand` for non-gameplay randomness only (gameplay RNG is `rivet-util`).
 
