@@ -87,26 +87,39 @@ fn state_str(s: State) -> &'static str {
 }
 
 /// Locate the rivet-client binary (offline Azalea bot) the harness drives.
-fn client_binary() -> Result<PathBuf, String> {
-    if let Ok(p) = env::var(CLIENT_BIN_ENV) {
+fn client_binary() -> Result<PathBuf, CaptureError> {
+    let default_bin = crate_root().join("../rivet-client/target/debug/rivet-client");
+    resolve_client_binary(env::var(CLIENT_BIN_ENV).ok(), default_bin)
+}
+
+/// Resolve the client binary from an explicit override or the default sibling
+/// build. A missing binary is a missing prerequisite, not a failure: the shared
+/// exit contract (and `rivet-client run-scenario`) classifies it as UNVERIFIED
+/// — nothing was compared. The resolution core is split from the env read so a
+/// counterfactual test can pin that classification without mutating the process
+/// environment (a global that would race across parallel tests).
+fn resolve_client_binary(
+    override_path: Option<String>,
+    default_bin: PathBuf,
+) -> Result<PathBuf, CaptureError> {
+    if let Some(p) = override_path {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Ok(p);
         }
-        return Err(format!(
+        return Err(CaptureError::Unverified(format!(
             "{CLIENT_BIN_ENV} is set to {} but it is not a file",
             p.display()
-        ));
+        )));
     }
-    let sibling = crate_root().join("../rivet-client/target/debug/rivet-client");
-    if sibling.is_file() {
-        return Ok(sibling);
+    if default_bin.is_file() {
+        return Ok(default_bin);
     }
-    Err(format!(
+    Err(CaptureError::Unverified(format!(
         "rivet-client binary not found at {} — build it first (tools/rivet-client/run.sh or \
          `cd tools/rivet-client && cargo build --locked`) or set {CLIENT_BIN_ENV}",
-        sibling.display()
-    ))
+        default_bin.display()
+    )))
 }
 
 /// The capture harness's error type. Carries the machine-stable exit code so
@@ -1184,5 +1197,96 @@ mod real_capture_tests {
                 kind.name()
             );
         }
+    }
+}
+
+/// The exit classification of a missing/invalid rivet-client binary, pinned
+/// against the shared 0/1/3 contract (see `rivet-harness-common::exit`).
+#[cfg(test)]
+mod client_binary_tests {
+    use super::*;
+
+    /// Path that is guaranteed to exist as a file, so the positive resolution
+    /// branch is deterministic regardless of whether a rivet-client has been
+    /// built in this checkout.
+    fn existing_file() -> PathBuf {
+        let p = crate_root().join("Cargo.toml");
+        assert!(p.is_file(), "rivet-capture Cargo.toml must exist");
+        p
+    }
+
+    /// Path that is guaranteed not to be a file, so the missing-prerequisite
+    /// branch is deterministic regardless of the build state.
+    fn non_file() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "rivet-capture-no-such-client-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        assert!(
+            !p.is_file(),
+            "temp path must not already be a file: {}",
+            p.display()
+        );
+        p
+    }
+
+    /// Counterfactual for the exit contract: a missing or invalid rivet-client
+    /// binary is UNVERIFIED (exit 3), not FAIL (exit 1) — the shared
+    /// 0/1/3 classification, matching what `rivet-client run-scenario` does for
+    /// its own missing client. Both the default and the override path are
+    /// injected so the test is load-bearing without mutating the process
+    /// environment (a global that would race across parallel tests).
+    #[test]
+    fn missing_or_invalid_client_binary_classifies_unverified() {
+        let missing = non_file();
+
+        // Default path: the sibling rivet-client build does not exist.
+        let err = resolve_client_binary(None, missing.clone()).unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "a missing default client binary must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "a missing default client binary must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        assert!(
+            err.to_string().contains("rivet-client binary not found"),
+            "the Unverified error must name the missing default binary, got: {err}"
+        );
+
+        // Override path: RIVET_CLIENT_BIN points at a path that is not a file.
+        let err = resolve_client_binary(Some(missing.display().to_string()), missing.clone())
+            .unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "an invalid RIVET_CLIENT_BIN must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "an invalid RIVET_CLIENT_BIN must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        assert!(
+            err.to_string().contains(CLIENT_BIN_ENV),
+            "the Unverified error must name RIVET_CLIENT_BIN, got: {err}"
+        );
+    }
+
+    /// A resolvable client binary (default or override) still succeeds.
+    #[test]
+    fn existing_client_binary_resolves() {
+        let real = existing_file();
+        assert_eq!(
+            resolve_client_binary(None, real.clone()).expect("default existing path resolves"),
+            real
+        );
+        assert_eq!(
+            resolve_client_binary(Some(real.display().to_string()), real.clone())
+                .expect("override existing path resolves"),
+            real
+        );
     }
 }
