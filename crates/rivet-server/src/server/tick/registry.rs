@@ -39,9 +39,26 @@ pub enum OutboundError {
 
 /// The tick thread's connections, keyed by `ConnectionId` (OWNERSHIP §Network:
 /// the tick thread owns the inbound receivers / outbound senders).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ConnectionRegistry {
     connections: HashMap<ConnectionId, ConnChannels>,
+    /// The rotating round-robin drain cursor: the connection at which the next
+    /// tick's aggregate drain starts (ascending `ConnectionId` order, wrapping).
+    /// The tick loop advances it past the connections it gave budget to, so the
+    /// aggregate inbound budget ([`MAX_INBOUND_FRAMES_PER_TICK`] /
+    /// [`MAX_INBOUND_BYTES_PER_TICK`]) cannot indefinitely favor the same fixed
+    /// subset of connections. A stable connection that sorts last is still
+    /// served on its turn. See [`Self::rotated_ids`].
+    next_drain: ConnectionId,
+}
+
+impl Default for ConnectionRegistry {
+    fn default() -> Self {
+        ConnectionRegistry {
+            connections: HashMap::new(),
+            next_drain: ConnectionId(0),
+        }
+    }
 }
 
 impl ConnectionRegistry {
@@ -71,6 +88,33 @@ impl ConnectionRegistry {
 
     pub fn iter(&self) -> impl Iterator<Item = (&ConnectionId, &ConnChannels)> {
         self.connections.iter()
+    }
+
+    /// Connection ids in deterministic ascending `ConnectionId` order, rotated
+    /// to start at or after [`Self::next_drain`] (wrapping). The tick loop drains
+    /// in this order, so the rotating start gives every connection its turn at
+    /// the head of the aggregate budget instead of permanently favoring the
+    /// connections that happen to sort first (a fixed order lets the connections
+    /// at the tail starve indefinitely once the aggregate budget is exhausted
+    /// before reaching them).
+    ///
+    /// The rotation is deterministic (sorted, not hash order): the fairness
+    /// tests depend on it, and a `HashMap` iteration order is unspecified.
+    pub fn rotated_ids(&self) -> Vec<ConnectionId> {
+        let mut ids: Vec<ConnectionId> = self.connections.keys().copied().collect();
+        ids.sort_unstable();
+        // `ConnectionId`s are unique per boot, so a cursor pointing at a removed
+        // connection simply starts the rotation at the next higher id (wrapping
+        // when the cursor is past every id — `rotate_left(len)` is a no-op).
+        let pos = ids.partition_point(|id| *id < self.next_drain);
+        ids.rotate_left(pos);
+        ids
+    }
+
+    /// Set the rotating drain cursor for the next drain pass (called by the tick
+    /// loop after each aggregate drain).
+    pub fn advance_drain_cursor(&mut self, next: ConnectionId) {
+        self.next_drain = next;
     }
 
     /// Apply one lifecycle event (the tick thread's registration source).
@@ -273,6 +317,66 @@ mod tests {
             drained: InboundDrained::new(),
         });
         (in_tx, out_rx)
+    }
+
+    /// The rotating drain order is deterministic by ascending `ConnectionId`,
+    /// never the unspecified `HashMap` iteration order, and starts at the
+    /// cursor (wrapping).
+    #[test]
+    fn rotated_ids_are_sorted_and_rotated_deterministically() {
+        let mut reg = ConnectionRegistry::new();
+        // Connected out of id order: the rotation is by id, not insertion.
+        for id in [
+            ConnectionId(5),
+            ConnectionId(1),
+            ConnectionId(9),
+            ConnectionId(3),
+        ] {
+            connect(&mut reg, id, 4, 4);
+        }
+        // Cursor 0 (default): ascending id order.
+        assert_eq!(
+            reg.rotated_ids(),
+            vec![
+                ConnectionId(1),
+                ConnectionId(3),
+                ConnectionId(5),
+                ConnectionId(9)
+            ]
+        );
+        // A cursor at 3 starts the rotation there, wrapping 9 before 1.
+        reg.advance_drain_cursor(ConnectionId(3));
+        assert_eq!(
+            reg.rotated_ids(),
+            vec![
+                ConnectionId(3),
+                ConnectionId(5),
+                ConnectionId(9),
+                ConnectionId(1)
+            ]
+        );
+        // A cursor past every id wraps fully back to the head (no-op rotation).
+        reg.advance_drain_cursor(ConnectionId(10));
+        assert_eq!(
+            reg.rotated_ids(),
+            vec![
+                ConnectionId(1),
+                ConnectionId(3),
+                ConnectionId(5),
+                ConnectionId(9)
+            ]
+        );
+        // A cursor pointing at a removed id falls through to the next higher.
+        reg.advance_drain_cursor(ConnectionId(6));
+        assert_eq!(
+            reg.rotated_ids(),
+            vec![
+                ConnectionId(9),
+                ConnectionId(1),
+                ConnectionId(3),
+                ConnectionId(5)
+            ]
+        );
     }
 
     #[test]

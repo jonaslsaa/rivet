@@ -137,11 +137,15 @@ impl ServerTickLoop {
         // bounded by the per-connection budget (inside drain_one_bounded) and
         // the aggregate per-tick budget. Once the aggregate budget is exhausted
         // the remaining frames stay retained in the channels for a later tick.
-        let ids: Vec<ConnectionId> = self.registry.ids().collect();
+        // The drain order is a rotating round-robin (`rotated_ids`): the start
+        // advances past the connections given budget each tick, so the aggregate
+        // cap cannot indefinitely starve the connections that sort last.
+        let ids = self.registry.rotated_ids();
+        let mut attempted = 0usize;
         let mut inbound = Vec::new();
         let mut aggregate_frames = 0usize;
         let mut aggregate_bytes = 0usize;
-        for id in ids {
+        for id in ids.iter().copied() {
             let remaining_frames = MAX_INBOUND_FRAMES_PER_TICK.saturating_sub(aggregate_frames);
             let remaining_bytes = MAX_INBOUND_BYTES_PER_TICK.saturating_sub(aggregate_bytes);
             if remaining_frames == 0 || remaining_bytes == 0 {
@@ -164,6 +168,14 @@ impl ServerTickLoop {
                     tracing::debug!(%id, "tick registry pruned closed connection");
                 }
             }
+            attempted += 1;
+        }
+        // Fairness: the next tick's drain starts at the connection right after
+        // the last one this tick got budget to attempt (wrapping to the head
+        // when everyone was attempted), so the same connections cannot always
+        // consume the aggregate budget first.
+        if let Some(next) = ids.get(attempted).copied().or_else(|| ids.first().copied()) {
+            self.registry.advance_drain_cursor(next);
         }
 
         // 3. Tickables, with disjoint mutable borrows of registry + tickables.
@@ -539,5 +551,291 @@ mod tests {
             MAX_INBOUND_BYTES_PER_TICK + MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
             "the retained connection's bytes are delivered on a later tick"
         );
+    }
+
+    /// Per-tick per-connection delivered-frame counts, derived by diffing the
+    /// cumulative recorded log against its length before this tick.
+    fn per_tick_counts(
+        recorded: &[(ConnectionId, Vec<u8>)],
+        prev_len: usize,
+    ) -> std::collections::HashMap<ConnectionId, usize> {
+        let mut counts: std::collections::HashMap<ConnectionId, usize> =
+            std::collections::HashMap::new();
+        for (id, _) in &recorded[prev_len..] {
+            *counts.entry(*id).or_default() += 1;
+        }
+        counts
+    }
+
+    /// Per-tick per-connection delivered-byte counts, derived by diffing the
+    /// cumulative recorded log against its length before this tick.
+    fn per_tick_bytes(
+        recorded: &[(ConnectionId, Vec<u8>)],
+        prev_len: usize,
+    ) -> std::collections::HashMap<ConnectionId, usize> {
+        let mut counts: std::collections::HashMap<ConnectionId, usize> =
+            std::collections::HashMap::new();
+        for (id, bytes) in &recorded[prev_len..] {
+            *counts.entry(*id).or_default() += bytes.len();
+        }
+        counts
+    }
+
+    /// Fairness regression: 9 continuously-flooding connections share the
+    /// aggregate frame budget (8 × the per-connection allowance) exactly, so a
+    /// fixed drain order would serve the same 8 connections every tick and the
+    /// 9th would starve forever. The rotating round-robin start serves every
+    /// connection within `len` ticks, skipping a different connection each tick
+    /// (9, 8, 7, ..., 1) so the tail always gets its turn.
+    #[test]
+    fn run_tick_rotating_drain_serves_all_within_len_ticks() {
+        const N: u64 = 9;
+        let recorded = Arc::new(Mutex::new(Vec::<(ConnectionId, Vec<u8>)>::new()));
+        let (mut loop_, lifecycle_tx) = test_loop_record_ids(Arc::clone(&recorded));
+
+        let mut senders = Vec::new();
+        for i in 0..N {
+            let (in_tx, in_rx) = tokio::sync::mpsc::channel(4096);
+            let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+            let id = ConnectionId(i + 1);
+            lifecycle_tx
+                .try_send(LifecycleEvent::Connect {
+                    id,
+                    remote: REMOTE,
+                    in_rx,
+                    out_tx,
+                    drained: InboundDrained::new(),
+                })
+                .unwrap();
+            for seq in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+                in_tx.try_send(frame_seq((i + 1) as u8, seq)).unwrap();
+            }
+            senders.push(in_tx);
+        }
+
+        let mut prev_len = 0usize;
+        for tick in 1..=N as usize {
+            loop_.run_tick();
+            let guard = recorded.lock().unwrap();
+            let counts = per_tick_counts(&guard, prev_len);
+            prev_len = guard.len();
+            drop(guard);
+
+            assert_eq!(
+                counts.values().sum::<usize>(),
+                MAX_INBOUND_FRAMES_PER_TICK,
+                "each tick delivers exactly the aggregate frame budget"
+            );
+            // The skipped connection rotates: N+1-tick (9, 8, ..., 1). The
+            // other 8 connections serve at their full per-connection cap.
+            let skipped = ConnectionId((N as usize + 1 - tick) as u64);
+            for i in 1..=N as usize {
+                let id = ConnectionId(i as u64);
+                let expected = if id == skipped {
+                    0
+                } else {
+                    MAX_INBOUND_FRAMES_PER_DRAIN
+                };
+                assert_eq!(
+                    counts.get(&id).copied().unwrap_or(0),
+                    expected,
+                    "tick {tick}: connection {id} must serve at its cap (or be the rotated skip)"
+                );
+            }
+
+            // Sustain the flood: refill every channel to the per-connection cap
+            // (a full channel is already at the cap; try_send fails harmlessly).
+            for (i, tx) in senders.iter().enumerate() {
+                for seq in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+                    let _ = tx.try_send(frame_seq((i + 1) as u8, seq));
+                }
+            }
+        }
+    }
+
+    /// The byte half of the same fairness bound: 9 flooding connections each
+    /// carrying 2 × 8 MiB (16 MiB, the per-connection byte allowance), sustained.
+    /// The aggregate byte budget (8 × 16 MiB) is exhausted by 8 connections per
+    /// tick; the rotating start still serves every connection within `len` ticks,
+    /// so a byte-flooding tail connection survives instead of starving forever.
+    #[test]
+    fn run_tick_rotating_drain_serves_all_byte_flood() {
+        const N: u64 = 9;
+        const FRAME: usize = 8 * 1024 * 1024;
+        let recorded = Arc::new(Mutex::new(Vec::<(ConnectionId, Vec<u8>)>::new()));
+        let (mut loop_, lifecycle_tx) = test_loop_record_ids(Arc::clone(&recorded));
+
+        let mut senders = Vec::new();
+        for i in 0..N {
+            let (in_tx, in_rx) = tokio::sync::mpsc::channel(64);
+            let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+            let id = ConnectionId(i + 1);
+            lifecycle_tx
+                .try_send(LifecycleEvent::Connect {
+                    id,
+                    remote: REMOTE,
+                    in_rx,
+                    out_tx,
+                    drained: InboundDrained::new(),
+                })
+                .unwrap();
+            for _ in 0..2 {
+                in_tx
+                    .try_send(ServerboundFrame {
+                        bytes: Bytes::from(vec![0x42u8; FRAME]),
+                    })
+                    .unwrap();
+            }
+            senders.push(in_tx);
+        }
+
+        let mut prev_len = 0usize;
+        for tick in 1..=N as usize {
+            loop_.run_tick();
+            let guard = recorded.lock().unwrap();
+            let bytes = per_tick_bytes(&guard, prev_len);
+            prev_len = guard.len();
+            drop(guard);
+
+            assert_eq!(
+                bytes.values().sum::<usize>(),
+                MAX_INBOUND_BYTES_PER_TICK,
+                "each tick delivers exactly the aggregate byte budget"
+            );
+            let skipped = ConnectionId((N as usize + 1 - tick) as u64);
+            for i in 1..=N as usize {
+                let id = ConnectionId(i as u64);
+                let expected = if id == skipped { 0 } else { 2 * FRAME };
+                assert_eq!(
+                    bytes.get(&id).copied().unwrap_or(0),
+                    expected,
+                    "tick {tick}: connection {id} must deliver its byte allowance (or be the rotated skip)"
+                );
+            }
+            for tx in &senders {
+                for _ in 0..2 {
+                    let _ = tx.try_send(ServerboundFrame {
+                        bytes: Bytes::from(vec![0x42u8; FRAME]),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Cursor-wrap fairness: a connection that joins late (the highest id, so it
+    /// sorts last) is served promptly because the drain start rotates. The 8
+    /// established connections keep the aggregate budget exactly exhausted each
+    /// tick (each drains at its per-connection cap, so the cursor wraps back to
+    /// the head every pass), then the 9th registers. A fixed drain order would
+    /// serve connections 1-8 forever and starve the newcomer; the rotation moves
+    /// it to the head of the very next pass, so it is served within 2 ticks of
+    /// joining.
+    #[test]
+    fn run_tick_rotating_cursor_wrap_serves_late_joiner() {
+        let recorded = Arc::new(Mutex::new(Vec::<(ConnectionId, Vec<u8>)>::new()));
+        let (mut loop_, lifecycle_tx) = test_loop_record_ids(Arc::clone(&recorded));
+
+        let mut senders = Vec::new();
+        for i in 0..8u64 {
+            let (in_tx, in_rx) = tokio::sync::mpsc::channel(4096);
+            let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+            let id = ConnectionId(i + 1);
+            lifecycle_tx
+                .try_send(LifecycleEvent::Connect {
+                    id,
+                    remote: REMOTE,
+                    in_rx,
+                    out_tx,
+                    drained: InboundDrained::new(),
+                })
+                .unwrap();
+            for seq in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+                in_tx.try_send(frame_seq((i + 1) as u8, seq)).unwrap();
+            }
+            senders.push(in_tx);
+        }
+
+        // Two ticks where the 8 connections exhaust the budget exactly (each at
+        // its cap; the cursor wraps back to the head each pass). The established
+        // connections refill to the cap every tick so the budget stays consumed.
+        let mut prev_len = 0usize;
+        for _ in 0..2 {
+            loop_.run_tick();
+            assert_eq!(
+                recorded.lock().unwrap().len() - prev_len,
+                MAX_INBOUND_FRAMES_PER_TICK,
+                "8 connections exhaust the aggregate budget at the exact boundary"
+            );
+            prev_len = recorded.lock().unwrap().len();
+            for (i, tx) in senders.iter().enumerate() {
+                for seq in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+                    let _ = tx.try_send(frame_seq((i + 1) as u8, seq));
+                }
+            }
+        }
+
+        // The 9th (highest-id) connection joins while the others keep flooding.
+        let (late_tx, in_rx) = tokio::sync::mpsc::channel(4096);
+        let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+        let late = ConnectionId(9);
+        lifecycle_tx
+            .try_send(LifecycleEvent::Connect {
+                id: late,
+                remote: REMOTE,
+                in_rx,
+                out_tx,
+                drained: InboundDrained::new(),
+            })
+            .unwrap();
+        for seq in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+            late_tx.try_send(frame_seq(9, seq)).unwrap();
+        }
+        senders.push(late_tx);
+
+        // A helper that refills every connection to the per-connection cap each
+        // tick so the aggregate budget stays exhausted every pass (a fixed order
+        // would then starve the newcomer forever).
+        let refill_all = || {
+            for (i, tx) in senders.iter().enumerate() {
+                for seq in 0..MAX_INBOUND_FRAMES_PER_DRAIN {
+                    let _ = tx.try_send(frame_seq((i + 1) as u8, seq));
+                }
+            }
+        };
+
+        // Pass A: the rotation still starts at the head (the 8-connection passes
+        // wrapped the cursor to id 1), so the newcomer sorts last and is skipped.
+        loop_.run_tick();
+        let pass_a = {
+            let guard = recorded.lock().unwrap();
+            let c = per_tick_counts(&guard, prev_len);
+            prev_len = guard.len();
+            c
+        };
+        assert_eq!(
+            pass_a.get(&late).copied().unwrap_or(0),
+            0,
+            "the late joiner sorts last on the pass whose rotation started at the head"
+        );
+        refill_all();
+        // Pass B: the cursor advanced past the newcomer, so the rotation starts
+        // at it and it is served at the head of the aggregate budget — even
+        // though the established connections refilled and the budget is again
+        // fully exhausted (a fixed order would skip it forever).
+        loop_.run_tick();
+        let guard = recorded.lock().unwrap();
+        let served = guard[prev_len..]
+            .iter()
+            .filter(|(id, _)| *id == late)
+            .count();
+        assert!(
+            served > 0,
+            "the late-joining connection must be served on the pass after the one that skipped it"
+        );
+        assert!(
+            served <= MAX_INBOUND_FRAMES_PER_DRAIN,
+            "the late-joining connection serves at most its per-connection cap"
+        );
+        drop(guard);
     }
 }

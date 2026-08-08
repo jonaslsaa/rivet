@@ -66,11 +66,12 @@ pub const MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN: usize = 16 * 1024 * 1024;
 ///
 /// The per-connection budget ([`MAX_INBOUND_FRAMES_PER_DRAIN`]) bounds a single
 /// connection; the aggregate bound exists because N flooding connections could
-/// otherwise deliver N × per-connection work in one tick. It is a simple
-/// aggregate cap, not a fair-share scheduler: once the budget is exhausted the
-/// tick stops draining (the excess stays retained in the channels for a later
-/// tick), and the per-connection budget is never exceeded regardless. A fair
-/// round-robin across connections is deferred (recorded in #93/#96).
+/// otherwise deliver N × per-connection work in one tick. Once the budget is
+/// exhausted the tick stops draining (the excess stays retained in the channels
+/// for a later tick), and the per-connection budget is never exceeded regardless.
+/// Fairness is a rotating round-robin start order (`ConnectionRegistry::rotated_ids`):
+/// the tick advances the drain start past the connections it gave budget to, so
+/// no stable connection can be starved by the aggregate cap forever.
 pub const MAX_INBOUND_FRAMES_PER_TICK: usize = 8 * MAX_INBOUND_FRAMES_PER_DRAIN;
 
 /// Slice-local *aggregate* inbound budget, decompressed-bytes half: the maximum
