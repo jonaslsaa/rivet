@@ -32,14 +32,18 @@
 //!
 //! Output: `data/items_recipes.json` + `data/items_recipes.manifest.json`.
 //!
-//! The extracted fixture is currently *fixture-only*: it is captured and pinned
-//! here, but not yet emitted into the `rivet-registry` generated tables.
-//! Emission must reuse the same report-driven registry-emission seam the
-//! biome/tag/block tables use, and the downstream collision domain (item ids vs
-//! the `registries.rs` `ITEM_BY_*` surface, plus the M3 item/loot consumers of
-//! #22) is owned by #228. The single `RivetTodo(#228)` marker lives at the one
-//! intentional seam — `cross_check_item_report`, where a future #228 generated
-//! `ITEM_BY_*` surface would replace the report cross-check.
+//! The fixture is *fixture-only* for the behavioral halves: the per-item
+//! `max_stack_size`/`feature_flags`/`crafting_remaining_item` metadata and the
+//! recipe table are captured and pinned here, but not yet emitted into the
+//! `rivet-registry` generated tables. (The item id table itself is already
+//! emitted — the report-driven `registries` generator covers it as
+//! `ITEM_BY_NAME`/`ITEM_BY_ID`, per the first paragraph.) Emission of the
+//! behavioral + recipe halves must reuse the same report-driven
+//! registry-emission seam the biome/tag/block tables use, and the downstream
+//! collision domain (item ids vs the `registries.rs` `ITEM_BY_*` surface, plus
+//! the M3 item/loot consumers of #22) is owned by #186 — whose "Done means"
+//! requires that emission. The single `RivetTodo(#186)` marker lives at the one
+//! intentional seam — `cross_check_item_report`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -609,10 +613,11 @@ fn check_anchors(root: &Value) -> Result<()> {
 /// Cross-check the fixture's item id table against the pinned report's
 /// `minecraft:item` surface — the live-load registration order cannot drift
 /// from the datagen capture.
-// RivetTodo(#228): when #228 emits the item id table into
-// crates/rivet-registry/src/generated/, this cross-check should compare the
-// fixture against that generated `ITEM_BY_*` surface instead of the raw report
-// (same source of truth, but the generated table is what consumers link against).
+// RivetTodo(#186): the report cross-check below already covers the item id table
+// against the surface that feeds the generated `ITEM_BY_*` tables; when #186
+// emits the item behavioral metadata + recipes into
+// crates/rivet-registry/src/generated/, this cross-check should extend to that
+// emitted surface (the generated table is what consumers link against).
 fn cross_check_item_report(root: &Value) -> Result<()> {
     let report = read_item_report_surface()?;
     let items = root

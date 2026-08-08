@@ -48,8 +48,10 @@ JVM and to use `anyhow`/`serde`.
   `DATA_COMPONENT_INITIALIZERS` holder components, required feature flags,
   crafting-remaining item) + the canonical `Recipe.CODEC`-re-encoded recipe
   table to `data/items_recipes.json` (+ provenance manifest), issue #186. The
-  fixture is validated on write and pinned by sha256; it is currently captured
-  only — the downstream registry emission is owned by #228.
+  fixture is validated on write and pinned by sha256; it is currently emitted
+  only for the item id table (the report-driven `registries` generator's
+  `ITEM_BY_NAME`/`ITEM_BY_ID`) — the downstream emission of the behavioral item
+  metadata + recipes into `rivet-registry` is owned by #186 itself.
 - **`probe-items-recipes`** — re-runs `ItemRecipeExtractor` against the real
   Paper jar and requires byte-identity with the committed
   `data/items_recipes.json` plus the anchor counts (1537 items / 1585 recipes).
