@@ -51,10 +51,10 @@ impl<R: Read> FastBufferedInputStream<R> {
 
 impl<R: Read> Read for FastBufferedInputStream<R> {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        // Rust's `Read` contract requires a zero-length read to return `Ok(0)`
-        // (Java's `read(byte[], 0, 0)` would return -1 on an empty buffer, but
-        // that quirk is unobservable through the NBT path and would violate the
-        // trait contract).
+        // Rust's `Read` contract requires a zero-length read to return `Ok(0)`.
+        // Java's `read(byte[], 0, 0)` returns -1 only when the empty buffer is
+        // at EOF (after a successful fill it returns 0); that -1 is the one
+        // case a Rust `Read` cannot reproduce, so short-circuit to Ok(0).
         if output.is_empty() {
             return Ok(0);
         }

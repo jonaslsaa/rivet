@@ -567,6 +567,75 @@ fn fast_buffered_input_stream_reads_across_chunks() {
     assert_eq!(buffered.read(&mut out[..5]).unwrap(), 0);
 }
 
+/// A reader that hands out `data` in fixed-size chunks and records the buffer
+/// length of every inner `read` call, so a test can distinguish a bypass (the
+/// inner read sees the caller's requested length) from a fill (it sees the
+/// internal buffer size).
+struct InstrumentedChunkedReader {
+    data: Vec<u8>,
+    pos: usize,
+    chunk: usize,
+    read_lens: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+}
+
+impl InstrumentedChunkedReader {
+    fn new(data: Vec<u8>, chunk: usize) -> (Self, std::rc::Rc<std::cell::RefCell<Vec<usize>>>) {
+        let read_lens = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        (
+            InstrumentedChunkedReader {
+                data,
+                pos: 0,
+                chunk,
+                read_lens: read_lens.clone(),
+            },
+            read_lens,
+        )
+    }
+}
+
+impl io::Read for InstrumentedChunkedReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_lens.borrow_mut().push(buf.len());
+        let n = self.chunk.min(buf.len()).min(self.data.len() - self.pos);
+        buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+#[test]
+fn fast_buffered_input_stream_large_read_bypasses_buffer() {
+    // A read at least as long as the internal buffer forwards to the inner
+    // stream directly (Java `read(byte[], off, length)` when the buffer is
+    // empty and `length >= buffer.length`). The inner reader must see the
+    // caller's requested length, not the internal buffer size — the latter is
+    // what a fill would pass. A chunked reader returns fewer bytes than
+    // requested, so the byte stream alone cannot tell the two apart; the
+    // read-call pattern can.
+    let data: Vec<u8> = (0..10u8).collect();
+    let (reader, read_lens) = InstrumentedChunkedReader::new(data, 3);
+    let mut buffered = FastBufferedInputStream::with_buffer_size(reader, 4);
+
+    let mut out = [0u8; 5];
+    // Buffer empty, len 5 >= 4 -> bypass: the inner read is called with the
+    // 5-byte request, and the 3-byte chunk limits what comes back.
+    assert_eq!(buffered.read(&mut out).unwrap(), 3);
+    assert_eq!(&out[..3], &[0, 1, 2]);
+    assert_eq!(*read_lens.borrow(), vec![5]);
+
+    // Sub-buffer read: fills first, so the inner read sees the 4-byte buffer.
+    let mut out = [0u8; 3];
+    assert_eq!(buffered.read(&mut out).unwrap(), 3);
+    assert_eq!(&out, &[3, 4, 5]);
+    assert_eq!(*read_lens.borrow(), vec![5, 4]);
+
+    // Buffer exhausted again; another large read bypasses.
+    let mut out = [0u8; 5];
+    assert_eq!(buffered.read(&mut out).unwrap(), 3);
+    assert_eq!(&out[..3], &[6, 7, 8]);
+    assert_eq!(*read_lens.borrow(), vec![5, 4, 5]);
+}
+
 #[test]
 fn fast_buffered_input_stream_within_buffer_avoids_refills() {
     let data: Vec<u8> = (0..10u8).collect();
