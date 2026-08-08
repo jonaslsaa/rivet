@@ -1846,21 +1846,40 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
 //                                   today); reads a Rivet region tree layout
 //                                   when present.
 //   hash-diff <paper> <rivet>    -> 0 match / 1 mismatch naming each chunk /
-//                                   3 UNVERIFIED (missing Rivet manifest, or a
+//                                   3 UNVERIFIED (missing Rivet manifest, a
+//                                   Paper-vs-Paper self-diff — the same tree on
+//                                   both sides proves nothing about Rivet, or a
 //                                   required corpus coordinate with no FULL
 //                                   data) / 64 usage.
 //   hash-diff --expect-fail ...  -> negative control: corrupt a copy of the
-//                                   baseline, require the tampered chunk named.
+//                                   Rivet baseline, require the tampered chunk
+//                                   named.
 //
 // Live FULL-chunk generation is blocked (#51 must capture status-FULL region
 // fixtures and Rivet worldgen must reach FULL, #231/#15); pre-worldgen the
-// Paper-vs-Rivet diff MUST exit 3, never 0 — the gate never claims parity it
-// does not have.
+// gate skips the Paper-vs-Rivet diff with an explicit NOTICE and never runs a
+// self-diff — it never claims parity it does not have. The gate's hash stage is
+// milestone-gated (not an oracle prereq), so an absent comparison does not fail
+// the gate. Setting RIVET_HASH_DIR opts into the strict check: the comparison
+// is then required, and any UNVERIFIED (incomplete corpus coverage, or a
+// self-diff if it aliases the paper tree) or FAILED divergence aborts the gate.
+
+/// The world seed recorded in a fixture dir's own manifest.json, when present.
+/// `load_manifest` reads the region/worldgen manifest (seed is a string field);
+/// a chunk-hash manifest.json parses under the same struct (unknown fields are
+/// ignored), so a Rivet tree that already carries provenance yields its seed
+/// here too. This keeps the recorded hash-manifest seed honest — it is the
+/// actual seed the payloads were generated under, never a magic literal.
+fn source_region_seed(dir: &Path) -> Option<String> {
+    load_manifest(dir).ok()?.seed
+}
 
 /// `hash-paper`: rebuild the committed Paper manifest from the decompressed
 /// `.nbt` fixtures (the two genuine FULL chunks today: the_nether/0.0 and
-/// the_end/0.0). The seed used is the M2 capture's seed (42) recorded as the
-/// manifest's provenance; the paper pin and corpus version are constants.
+/// the_end/0.0). The seed recorded is read back out of the source region
+/// capture's manifest (the committed capture's working seed, 42 — distinct from
+/// the pinned corpus seeds, which are the #175 sweep targets); the paper pin and
+/// corpus version are constants.
 fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     hash::self_check().map_err(Error::Gate)?;
     let dest = dir
@@ -1869,7 +1888,9 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     let payload_dir = dir
         .map(Path::to_path_buf)
         .unwrap_or_else(|| crate_dir().join("fixtures/regions/overworld-normal"));
-    let manifest = hash_manifest::build_from_payloads(&payload_dir, "42", "minecraft\\:normal")
+    let seed =
+        source_region_seed(&payload_dir).unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
+    let manifest = hash_manifest::build_from_payloads(&payload_dir, &seed, "minecraft\\:normal")
         .map_err(Error::Gate)?;
     let json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| Error::Gate(format!("cannot serialize hash manifest: {e}")))?;
@@ -1887,10 +1908,11 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     let cov = hash_manifest::coverage(&manifest, &corpus::Corpus::from_committed());
     let complete = if cov.is_complete() { " (complete)" } else { "" };
     println!(
-        "  coverage vs corpus: {}/{} present{complete}; missing: {}",
+        "  coverage vs corpus: {}/{} present{complete}; missing: {}; extra: {}",
         cov.present,
         cov.expected,
-        cov.missing.join(", ")
+        cov.missing.join(", "),
+        cov.extra.join(", ")
     );
     Ok(())
 }
@@ -1915,8 +1937,9 @@ fn run_hash_rivet(dir: &Path) -> Result<(), Error> {
             dir.display()
         )));
     }
-    let manifest =
-        hash_manifest::build_from_payloads(dir, "42", "minecraft\\:normal").map_err(Error::Gate)?;
+    let seed = source_region_seed(dir).unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
+    let manifest = hash_manifest::build_from_payloads(dir, &seed, "minecraft\\:normal")
+        .map_err(Error::Gate)?;
     if manifest.full_count == 0 {
         return Err(Error::Gate(format!(
             "Rivet chunk tree {} has 0 FULL chunks — Rivet worldgen has not reached FULL \
@@ -1945,12 +1968,34 @@ struct ChunkHashMismatch {
 
 /// `hash-diff`: compare a Paper `HashManifest` against a Rivet one. Refuses
 /// differing provenance; only FULL entries are compared (non-FULL is recorded
-/// and reported, never silently included); a missing Rivet manifest, or a
-/// required corpus coordinate with no FULL data on either side, is UNVERIFIED.
+/// and reported, never silently included); a missing Rivet manifest, a
+/// Paper-vs-Paper self-diff, or a required corpus coordinate with no FULL data
+/// on either side, is UNVERIFIED.
 ///
 /// Returns: Ok(true) = PASS, Ok(false) = FAIL, Err = UNVERIFIED (3).
 fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
     hash::self_check().map_err(Error::Gate)?;
+    // A self-comparison (both args the same committed Paper manifest) compares
+    // Paper against itself and proves nothing about Rivet — it must never
+    // produce a Paper-vs-Rivet PASS. Canonicalize so an aliased path to the
+    // same tree is still refused; a nonexistent Rivet dir is caught by the
+    // manifest check below with a clearer message.
+    if rivet_dir.is_dir() {
+        let paper_canon = paper_dir
+            .canonicalize()
+            .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", paper_dir.display())))?;
+        let rivet_canon = rivet_dir
+            .canonicalize()
+            .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", rivet_dir.display())))?;
+        if paper_canon == rivet_canon {
+            return Err(Error::Gate(format!(
+                "paper and rivet dirs are the same tree ({}): a Paper-vs-Paper self-diff \
+                 proves nothing about Rivet — pass a distinct Rivet chunk dir; UNVERIFIED, \
+                 never green",
+                paper_canon.display()
+            )));
+        }
+    }
     if !rivet_dir.join("manifest.json").is_file() {
         return Err(Error::Gate(format!(
             "no Rivet hash manifest at {} — pre-worldgen the Paper-vs-Rivet diff is \
@@ -2100,8 +2145,11 @@ fn run_hash_diff_negative(
         fs::remove_dir_all(&scratch)?;
     }
     copy_dir_recursive(rivet_dir, &scratch)?;
-    // Find a FULL payload to tamper.
+    // Find a FULL payload to tamper. The corrupted copy must keep the original
+    // manifest's provenance (seed included) so the diff against Paper sees only
+    // the tamper, never a spurious provenance mismatch.
     let manifest = load_hash_manifest(rivet_dir)?;
+    let seed = manifest.seed.clone();
     let Some(full) = manifest.entries.iter().find(|e| e.is_full()) else {
         let _ = fs::remove_dir_all(&scratch);
         return Err(Error::Gate(
@@ -2118,8 +2166,9 @@ fn run_hash_diff_negative(
     let tampered = mutate::tamper(&payload, kind).map_err(Error::Gate)?;
     fs::write(&target, tampered)
         .map_err(|e| Error::Gate(format!("cannot write tampered payload: {e}")))?;
-    // Rebuild the corrupted copy's manifest from its payloads.
-    let rebuilt = hash_manifest::build_from_payloads(&scratch, "42", "minecraft\\:normal")
+    // Rebuild the corrupted copy's manifest from its payloads, keeping the
+    // original seed so the tamper is the only divergence.
+    let rebuilt = hash_manifest::build_from_payloads(&scratch, &seed, "minecraft\\:normal")
         .map_err(Error::Gate)?;
     let json = serde_json::to_string_pretty(&rebuilt)
         .map_err(|e| Error::Gate(format!("cannot serialize: {e}")))?;
@@ -3700,6 +3749,48 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    /// The Paper-vs-Paper self-diff guard: passing the SAME tree as both paper
+    /// and rivet compares Paper against itself and proves nothing about Rivet —
+    /// it is UNVERIFIED (3), never a false PASS. This is the exact invocation the
+    /// gate used to run (`hash-diff "$paper_dir" "$paper_dir"`).
+    #[test]
+    fn hash_diff_refuses_paper_self_diff() {
+        let tmp = hash_tmp("hash-selfdiff");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, _) = paper_rivet_dirs(&tmp, &[], &[]);
+        assert!(
+            run_hash_diff(&paper, &paper).is_err(),
+            "paper-vs-paper self-diff must be refused (UNVERIFIED)"
+        );
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &paper)),
+            HASH_EXIT_UNVERIFIED
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A symlink alias to the same tree is still a self-diff — the guard
+    /// canonicalizes so an aliased path cannot sneak a Paper-vs-Paper comparison
+    /// past it.
+    #[test]
+    fn hash_diff_refuses_symlinked_self_diff() {
+        let tmp = hash_tmp("hash-selfdiff-link");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, _) = paper_rivet_dirs(&tmp, &[], &[]);
+        #[cfg(unix)]
+        {
+            let alias = tmp.join("alias");
+            std::os::unix::fs::symlink(&paper, &alias).unwrap();
+            assert!(
+                run_hash_diff(&paper, &alias).is_err(),
+                "symlinked alias of the paper tree must be refused"
+            );
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     /// A different seed in the Rivet manifest is provenance drift: the diff
     /// refuses to compare (UNVERIFIED, exit 3) rather than comparing digests
     /// that mean different worlds.
@@ -3757,8 +3848,9 @@ mod tests {
         let tmp = hash_tmp("hash-partial");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
-        // Both sides cover only (0,0) — exactly the committed capture's honest
-        // coverage (1/8), reproduced synthetically.
+        // Both sides have FULL data only at coordinate (0,0), like the committed
+        // M2 capture — so 7 of the 8 required corpus coordinates lack FULL data
+        // on both sides, reproduced synthetically.
         let paper = write_hash_fixture_tree(&tmp.join("paper"), &[(0, 0)]);
         let rivet = write_hash_fixture_tree(&tmp.join("rivet"), &[(0, 0)]);
         assert!(run_hash_diff(&paper, &rivet).is_err());
@@ -3804,6 +3896,46 @@ mod tests {
     #[test]
     fn hash_self_check_exits_zero() {
         assert_eq!(hash_cli_exit(&["hash-self-check".to_string()]), Some(0));
+    }
+
+    /// The committed Paper hash manifest records the capture's working seed (42,
+    /// read from `fixtures/regions/overworld-normal/manifest.json`), NOT one of
+    /// the pinned corpus seeds. Its honest coverage is therefore 0 sweep cells
+    /// (0/N present, all FULL entries outside the corpus) — a capture not
+    /// generated under a corpus seed cannot claim any of the #175 sweep.
+    #[test]
+    fn committed_paper_manifest_coverage_is_honest() {
+        let dir = crate_dir().join("fixtures/chunk-hash/paper");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let m = load_hash_manifest(&dir).unwrap();
+        let cov = hash_manifest::coverage(&m, &corpus::Corpus::from_committed());
+        assert_eq!(
+            m.seed,
+            hash_manifest::CAPTURE_SEED,
+            "committed capture seed"
+        );
+        assert!(
+            !corpus::corpus_seeds()
+                .iter()
+                .any(|s| s.to_string() == m.seed),
+            "working seed 42 must not be a pinned corpus seed"
+        );
+        assert_eq!(
+            cov.present, 0,
+            "off-corpus-seed capture covers zero sweep cells"
+        );
+        assert_eq!(cov.expected, corpus::SEED_COUNT * corpus::COORDINATES.len());
+        assert_eq!(
+            cov.extra.len(),
+            m.full_count,
+            "every FULL chunk of the working-seed capture is outside the corpus"
+        );
+        assert!(
+            !cov.is_complete(),
+            "capture under working seed 42 is not complete"
+        );
     }
 
     /// The `--expect-fail` negative control: tamper a copy of the baseline and

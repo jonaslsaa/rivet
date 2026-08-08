@@ -36,6 +36,14 @@ use crate::mutate::parse_payload;
 pub const HASH_ALGORITHM: &str = "xxh3_64";
 /// Digest scope: raw serialized payload bytes, region framing excluded.
 pub const HASH_SCOPE: &str = "payload-only";
+/// The committed M2 region capture's fixed world seed — the seed the 408
+/// payloads in `fixtures/regions/overworld-normal` were generated under. It is
+/// the *working* seed for the single committed capture and is distinct from
+/// `corpus::corpus_seeds()`: those are the pinned #175 sweep targets a future
+/// live generation must reach. Every rebuilt hash manifest records whichever
+/// seed its fixture tree was generated under (read from the source manifest),
+/// never a magic literal.
+pub const CAPTURE_SEED: &str = "42";
 /// Corpus revision this digest table follows (bump on a seed/coordinate
 /// corpus change so stale tables refuse to compare).
 pub const CORPUS_VERSION: &str = "v1";
@@ -277,7 +285,16 @@ fn parse_chunk_filename(path: &Path) -> Result<(i32, i32), String> {
 }
 
 /// Coverage of `manifest`'s FULL chunks against the corpus (threat 4: coverage
-/// is reported, never assumed). `extra` = FULL entries not in the corpus.
+/// is reported, never assumed). `extra` = FULL entries not in the corpus sweep.
+///
+/// The sweep target is **seeds × coordinates** (the #175 matrix): a green sweep
+/// needs a FULL chunk at every corpus coordinate, generated under every corpus
+/// seed. A manifest records a single world seed, so at most one seed's row of
+/// coordinates can be present — a manifest under an off-corpus seed covers zero
+/// cells and its FULL entries are all "extra" (the whole manifest is outside the
+/// sweep). Coverage is informational today (nothing gates on it); a future
+/// multi-seed green decision compares one seed-pair at a time and must reach
+/// complete coverage per seed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Coverage {
     pub expected: usize,
@@ -293,40 +310,71 @@ impl Coverage {
 }
 
 /// Compute coverage of a manifest's FULL chunks against the corpus
-/// (seeds × coordinates). A seed × coordinate pair is "present" when the
-/// manifest has a FULL entry for the pair's primary dimension-agnostic key —
-/// here the corpus names coordinates, so coverage counts any FULL entry whose
-/// (cx, cz) is in the corpus (across all dims), matching the #175 matrix's
-/// per-dimension intent when live generation exists.
+/// (seeds × coordinates). A (seed, coordinate) cell is "present" when the
+/// manifest's seed is a corpus seed AND it has a FULL entry at that coordinate
+/// (any dimension — the corpus names coordinates, not dimensions). The manifest's
+/// seed must be a corpus seed for any cell to count: an off-corpus seed (like the
+/// committed capture's working seed 42) covers none of the sweep.
 pub fn coverage(manifest: &HashManifest, corpus: &corpus::Corpus) -> Coverage {
-    let mut expected = 0usize;
-    let mut present = 0usize;
+    let expected = corpus.seeds.len() * corpus.coordinates.len();
+    let seed = manifest.seed.parse::<u64>().ok();
+    let seed_idx = seed.and_then(|s| corpus.seeds.iter().position(|c| *c == s));
     let mut missing = Vec::new();
-    let mut seen: BTreeMap<(i32, i32), bool> = BTreeMap::new();
+    let mut extra = Vec::new();
+    let mut present = 0usize;
+
+    let Some(si) = seed_idx else {
+        // Off-corpus seed: no sweep cell can be satisfied; every FULL entry is
+        // outside the corpus (the manifest was generated under a seed the sweep
+        // does not target).
+        missing = corpus
+            .seeds
+            .iter()
+            .flat_map(|s| {
+                corpus
+                    .coordinates
+                    .iter()
+                    .map(move |c| format!("{s}@({},{})", c.0, c.1))
+            })
+            .collect();
+        for e in &manifest.entries {
+            if e.is_full() {
+                extra.push(format!("{}/{}.{}.{}", e.dim, e.region, e.cx, e.cz));
+            }
+        }
+        return Coverage {
+            expected,
+            present,
+            missing,
+            extra,
+        };
+    };
+
+    let seed = corpus.seeds[si];
+    let mut covered: BTreeMap<(i32, i32), bool> = BTreeMap::new();
     for c in &corpus.coordinates {
-        seen.insert(*c, false);
+        covered.insert(*c, false);
     }
     for e in &manifest.entries {
         if e.is_full()
-            && let Some(found) = seen.get_mut(&(e.cx, e.cz))
+            && let Some(found) = covered.get_mut(&(e.cx, e.cz))
             && !*found
         {
             *found = true;
             present += 1;
         }
     }
-    for (coord, found) in &seen {
-        expected += 1;
+    for (coord, found) in &covered {
         if !*found {
-            missing.push(format!("({},{})", coord.0, coord.1));
+            missing.push(format!("{seed}@({},{})", coord.0, coord.1));
         }
     }
-    let extra: Vec<String> = manifest
-        .entries
-        .iter()
-        .filter(|e| e.is_full() && !seen.contains_key(&(e.cx, e.cz)))
-        .map(|e| format!("{}/{}.{}.{}", e.dim, e.region, e.cx, e.cz))
-        .collect();
+    // FULL entries at coordinates outside the corpus are over-generation.
+    for e in &manifest.entries {
+        if e.is_full() && !covered.contains_key(&(e.cx, e.cz)) {
+            extra.push(format!("{}/{}.{}.{}", e.dim, e.region, e.cx, e.cz));
+        }
+    }
     Coverage {
         expected,
         present,
@@ -345,13 +393,17 @@ mod tests {
     }
 
     fn sample_manifest(entries: Vec<ChunkHashEntry>) -> HashManifest {
+        sample_manifest_seeded(entries, "5207638315753790570")
+    }
+
+    fn sample_manifest_seeded(entries: Vec<ChunkHashEntry>, seed: &str) -> HashManifest {
         let full_count = entries.iter().filter(|e| e.is_full()).count();
         HashManifest {
             format: 1,
             hash_algorithm: HASH_ALGORITHM.to_string(),
             hash_scope: HASH_SCOPE.to_string(),
             corpus_version: CORPUS_VERSION.to_string(),
-            seed: "5207638315753790570".to_string(),
+            seed: seed.to_string(),
             level_type: "minecraft\\:normal".to_string(),
             region_file_compression: "none".to_string(),
             paper: "26.2-DEV-main@0a99345".to_string(),
@@ -438,16 +490,45 @@ mod tests {
             seeds: vec![42],
             coordinates: vec![(0, 0), (15, 15)],
         };
-        let m = sample_manifest(vec![full_entry("the_nether", 0, 0)]);
+        // A manifest under the corpus seed 42: (0,0) present, (15,15) missing.
+        let m = sample_manifest_seeded(vec![full_entry("the_nether", 0, 0)], "42");
         let cov = coverage(&m, &corpus);
+        assert_eq!(cov.expected, 2);
         assert_eq!(cov.present, 1);
-        assert_eq!(cov.missing, vec!["(15,15)".to_string()]);
+        assert_eq!(cov.missing, vec!["42@(15,15)".to_string()]);
         assert!(!cov.is_complete());
 
         // A FULL entry outside the corpus is "extra".
-        let m2 = sample_manifest(vec![full_entry("the_nether", 7, 7)]);
+        let m2 = sample_manifest_seeded(vec![full_entry("the_nether", 7, 7)], "42");
         let cov2 = coverage(&m2, &corpus);
+        assert_eq!(cov2.present, 0);
         assert_eq!(cov2.extra, vec!["the_nether/0.0.7.7".to_string()]);
+    }
+
+    /// A manifest under an off-corpus seed (the committed capture's working seed
+    /// 42 when it is not a corpus seed) covers zero sweep cells — the whole
+    /// sweep is missing and every FULL entry is outside the corpus. This is the
+    /// honest answer the seed-aware sweep gives for a capture that was not
+    /// generated under a pinned corpus seed.
+    #[test]
+    fn coverage_off_corpus_seed_covers_nothing() {
+        let corpus = Corpus {
+            seeds: vec![5207638315753790570],
+            coordinates: vec![(0, 0), (15, 15)],
+        };
+        let m = sample_manifest_seeded(vec![full_entry("the_nether", 0, 0)], "42");
+        let cov = coverage(&m, &corpus);
+        assert_eq!(cov.expected, 2);
+        assert_eq!(cov.present, 0, "seed 42 is not a corpus seed");
+        assert_eq!(
+            cov.missing,
+            vec![
+                "5207638315753790570@(0,0)".to_string(),
+                "5207638315753790570@(15,15)".to_string()
+            ]
+        );
+        assert_eq!(cov.extra, vec!["the_nether/0.0.0.0".to_string()]);
+        assert!(!cov.is_complete());
     }
 
     #[test]
