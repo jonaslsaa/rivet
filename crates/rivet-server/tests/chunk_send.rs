@@ -23,8 +23,9 @@ use rivet_server::server::level::{
 };
 use rivet_server::server::network::connection::Connection;
 use rivet_server::server::network::connection_id::ConnectionId;
-use rivet_server::server::tick::channels::{LifecycleEvent, OutboundEvent};
+use rivet_server::server::tick::channels::{InboundDrained, LifecycleEvent, OutboundEvent};
 use rivet_server::server::tick::registry::{ConnectionRegistry, OutboundError};
+use rivet_server::server::tick::shutdown::Shutdown;
 use tokio::io::AsyncReadExt;
 
 /// The #194 capture fixture's first `level_chunk_with_light` body (coords
@@ -110,7 +111,14 @@ async fn chunk_send_set_reaches_a_real_tcp_client_in_order() {
     // Server: accept, queue every frame, flush to the socket, close.
     let (sock, _remote) = listener.accept().await.unwrap();
     let (_read, write) = sock.into_split();
-    let mut conn = Connection::new(ConnectionId(1), addr, Arc::new(test_config()), write);
+    let mut conn = Connection::new(
+        ConnectionId(1),
+        addr,
+        Arc::new(test_config()),
+        Arc::new(Shutdown::new()),
+        write,
+        InboundDrained::new(),
+    );
     for frame in &frames {
         conn.queue_raw_frame(frame.clone());
     }
@@ -206,7 +214,14 @@ async fn chunk_send_set_tcp_without_compression_uses_plain_frames() {
 
     let (sock, _remote) = listener.accept().await.unwrap();
     let (_read, write) = sock.into_split();
-    let mut conn = Connection::new(ConnectionId(1), addr, Arc::new(test_config()), write);
+    let mut conn = Connection::new(
+        ConnectionId(1),
+        addr,
+        Arc::new(test_config()),
+        Arc::new(Shutdown::new()),
+        write,
+        InboundDrained::new(),
+    );
     for frame in &frames {
         conn.queue_raw_frame(frame.clone());
     }
@@ -242,6 +257,7 @@ fn chunk_send_set_respects_bounded_outbound_channel() {
         remote: std::net::SocketAddr::from(([127, 0, 0, 1], 25565)),
         in_rx,
         out_tx,
+        drained: InboundDrained::new(),
     });
 
     let mut queued = 0usize;
