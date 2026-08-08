@@ -8,16 +8,19 @@
 //! `26.2-DEV-main@0a99345` fixture).
 //!
 //! Paper calls `sendLevelInfo` TWICE inside `placeNewPlayer` (lines 231 and
-//! 294) — this is a Paper source fact, NOT inferred from the capture (whose
-//! duplicate id-43/38/97 observations cannot be attributed to a single player:
-//! the proxy merges its two relay streams, and the capture interleaves more
-//! than one connection's traffic). The burst below is the FIRST occurrence,
-//! emitted before the `player_info_update` broadcast; Slice A ports only this
-//! first-occurrence foundation. The second block re-sends the same four members
+//! 294) and `initInventoryMenu` TWICE (lines 235 and 306) — both Paper source
+//! facts. They are why the single-player #153 capture records the level-snapshot
+//! members twice (duplicate id-43/38/97 from the two `sendLevelInfo` calls,
+//! id-18/20 from the two `initInventoryMenu` calls): the duplicates come from
+//! the one join re-sending them, not from proxy merging or a second connection.
+//! `set_time` (113) is sampled once only because `canonicalize` keeps racy ids'
+//! first occurrence. The burst below is the FIRST occurrence, emitted before the
+//! `player_info_update` broadcast; Slice A ports only this first-occurrence
+//! foundation. The second block re-sends the same four members
 //! (`initialize_border` → `set_time` → `set_default_spawn_position` →
 //! `game_event`) after `player_info_update` (and after the addEntity entity
-//! pairing); it is deferred to Slice B. It is the last of the Slice A
-//! level-snapshot content: the later `initInventoryMenu` re-sends
+//! pairing); it is deferred to Slice B. It is the final level-snapshot block in
+//! `placeNewPlayer`: the later `initInventoryMenu` re-sends
 //! `container_set_content`/`container_set_slot` (18/20), so nothing in the
 //! snapshot itself follows it.
 //!

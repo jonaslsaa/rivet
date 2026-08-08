@@ -7,9 +7,8 @@
 //! NORMALIZED #153 capture (protocol 776, Paper `26.2-DEV-main@0a99345`,
 //! offline superflat world, seed 42, view distance 4). The committed capture is
 //! the deterministic canonical form (`normalize::canonicalize`), not the raw
-//! transcript: the raw capture interleaves the proxy's two relay streams and
-//! more than one connection's traffic. The `canonicalize` function groups by
-//! `(state, direction, id)`, so the normalized capture supplies Slice A's
+//! transcript. The `canonicalize` function groups by `(state, direction, id)`,
+//! so the normalized capture supplies Slice A's
 //! BODIES but erases ORDER — the burst order comes from `PLAY_BURST_ORDER` /
 //! the Paper source, not from the capture's positional adjacency. Each body is
 //! the packet payload the capture proxy strips (packet id + compression prefix
@@ -319,9 +318,9 @@ fn play_sender_send_to_missing_connection_errors_gone() {
 /// old = new size = 59999968.0` (the float `5.999997E7F` promoted to double);
 /// `lerp_time 0; absolute_max_size 29999984; warning_blocks 5; warning_time
 /// 300`. Paper's `sendLevelInfo` emits the same body on both of its
-/// occurrences; the capture records id-43 twice (its duplicate cannot be
-/// attributed to one player — the capture interleaves connections), and this
-/// body is the deterministic value both occurrences carry.
+/// occurrences, so the single-player capture records id-43 twice (the second
+/// block is the Slice-B-deferred `sendLevelInfo`); this body is the
+/// deterministic value both occurrences carry.
 fn border_body() -> Vec<u8> {
     hex_bytes("00000000000000000000000000000000418c9c3700000000418c9c370000000000f086a70e05ac02")
 }
