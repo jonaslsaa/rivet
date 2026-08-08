@@ -12,13 +12,16 @@
 //!
 //! `util` is a partial port of `net.minecraft.util.Util` for the registry-core
 //! slice (issue #107 / #122); `string_representable` and `by_id_map` are full
-//! ports of their `mc.util` classes. See each module's provenance header.
+//! ports of their `mc.util` classes. `hash_ops` is a full port of
+//! `net.minecraft.util.HashOps` (the `DynamicOps<HashCode>` DFU serialization
+//! adapter, issue #205). See each module's provenance header.
 
 pub mod bit_storage;
 pub mod by_id_map;
 pub mod data_io;
 pub mod delegate_data_output;
 pub mod fast_buffered_input_stream;
+pub mod hash_ops;
 pub mod java_float_format;
 pub mod java_hash;
 pub mod known_pack;
@@ -37,6 +40,7 @@ pub use by_id_map::{OutOfBoundsStrategy, continuous, sparse};
 pub use data_io::{DataInput, DataInputStream, DataOutput, DataOutputStream};
 pub use delegate_data_output::DelegateDataOutput;
 pub use fast_buffered_input_stream::FastBufferedInputStream;
+pub use hash_ops::{HashCode, HashFunction, HashOps, Hasher};
 pub use known_pack::KnownPack;
 // `BitRandomSource` is deliberately NOT re-exported at the root: it declares
 // `next_int`/`next_long`/... (same names as `RandomSource`), so importing both

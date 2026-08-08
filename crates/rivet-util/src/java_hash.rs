@@ -13,11 +13,9 @@
 //! running the reference implementation on OpenJDK 25 (the Java runtime in
 //! this environment), not invented.
 //!
-//! RivetTodo(#205): `net.minecraft.util.HashOps` — the only other hash-named
-//! type in the package — is not ported here: it is a ~390-line
-//! `DynamicOps<HashCode>` DFU serialization adapter (Guava `Hashing`/`CRC32C`,
-//! `DataResult`, `RecordBuilder`, `ListBuilder`), not a hash algorithm; it is
-//! a plain omission with no consumer forcing it.
+//! `net.minecraft.util.HashOps` — the other hash-named type in the package —
+//! is a `DynamicOps<HashCode>` DFU serialization adapter, not a hash
+//! algorithm; it is ported separately in `hash_ops` (issue #205).
 
 /// `String.hashCode()` — the JDK algorithm over UTF-16 code units.
 ///
