@@ -114,3 +114,17 @@ impl Drop for Oracle {
         let _ = self.child.wait();
     }
 }
+
+/// The single oracle operation the differential checks drive. Split out (rather
+/// than taking `Oracle` directly) so the accept/canonical decision logic in
+/// `check_component_json` can be unit-tested against a stub oracle without
+/// spawning the Paper JVM (issue #98).
+pub trait OracleCall {
+    fn call(&mut self, op: &str, fields: &[(&str, &str)]) -> Result<Value, String>;
+}
+
+impl OracleCall for Oracle {
+    fn call(&mut self, op: &str, fields: &[(&str, &str)]) -> Result<Value, String> {
+        Oracle::call(self, op, fields)
+    }
+}
