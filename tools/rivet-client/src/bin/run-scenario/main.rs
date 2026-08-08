@@ -34,6 +34,10 @@
 //!   superflat fixture so both servers spawn at y=-63.0 and `position.y` is a
 //!   genuinely compared field (issue #159: the old default-flat Paper reference
 //!   spawned at y=-60 and position.y was wrongly treated as a "documented gap").
+//!   A controlled negative then tampers the compared `position.y` on the Paper
+//!   reference and requires the real comparator/divergence path to report the
+//!   tampered value and refuse PASS, so the live acceptance cannot pass
+//!   vacuously.
 //!
 //! ## Connection proof (Rivet modes)
 //!
@@ -1107,6 +1111,85 @@ fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), Ru
     Ok(())
 }
 
+/// Prove the both-mode divergence path is non-vacuous: tamper the compared
+/// `position.y` on the Paper reference and re-run the exact comparator +
+/// divergence gate the live comparison used, requiring the reported
+/// `position.y` divergence to observe the tampered value and the gate to refuse
+/// PASS.
+///
+/// The live acceptance cannot pass unless a tampered compared field actually
+/// flows through the comparator and the divergence gate: a comparator that
+/// reports nothing, or a `position.y` silently moved into `excluded`, would
+/// PASS vacuously without this negative. The tamper is offset above the larger
+/// of the two spawn heights, so it differs from both paper's and rivet's y for
+/// all MC-realistic spawn heights (small magnitudes, where the f64 spacing is
+/// far below 1.0). A fixed +1.0 on paper's y alone would silently align with
+/// rivet's y if the two spawn heights were ever adjacent, and the negative would
+/// fail on a healthy tree. Because `position.y` is a *compared* field in this
+/// scenario (issue #159: the single-stone fixture spawns both servers at
+/// y=-63), the divergence gate must refuse PASS on the tamper — a position.y
+/// divergence is a real server mismatch, never a documented gap to wave through.
+fn prove_both_mode_non_vacuous(paper_t: &Value, rivet_t: &Value) -> Result<(), RunnerError> {
+    let mut tampered = paper_t.clone();
+    let y = tampered["position"]["y"].as_f64().ok_or_else(|| {
+        RunnerError::Gate(
+            "negative case FAILED: paper transcript has no position to tamper".to_owned(),
+        )
+    })?;
+    let rivet_y = rivet_t["position"]["y"].as_f64().ok_or_else(|| {
+        RunnerError::Gate(
+            "negative case FAILED: rivet transcript has no position to compare against".to_owned(),
+        )
+    })?;
+    let tampered_y = y.max(rivet_y) + 1.0;
+    tampered["position"]["y"] = json!(tampered_y);
+    let neg = comparator::diff(&tampered, rivet_t);
+    match neg.diffs.iter().find(|f| f.path == "position.y") {
+        Some(f) if f.expected.as_f64() == Some(tampered_y) => {
+            // The tampered value was read by the real comparator. Now the real
+            // divergence gate must refuse PASS: position.y is a compared field,
+            // so a divergence on it is a genuine server mismatch.
+            match check_paper_rivet_divergence(&neg) {
+                Err(e) if e.to_string().contains("position.y") => {}
+                Err(e) => {
+                    return Err(RunnerError::Gate(format!(
+                        "negative case FAILED: the divergence gate refused PASS for a reason other \
+                         than the tampered position.y: {e}"
+                    )));
+                }
+                Ok(()) => {
+                    return Err(RunnerError::Gate(
+                        "negative case FAILED: the divergence gate PASSED despite the tampered \
+                         position.y — position.y must be a compared field, not a documented gap \
+                         to wave through"
+                            .to_owned(),
+                    ));
+                }
+            }
+            println!(
+                "    tampered paper position.y {y} -> {tampered_y} — the divergence path reported \
+                 'position.y: expected {tampered_y}, got {}' and refused PASS, so position.y is \
+                 genuinely compared and read by the gate",
+                f.actual
+            );
+            Ok(())
+        }
+        Some(f) => Err(RunnerError::Gate(format!(
+            "negative case FAILED: the divergence path reported 'position.y: expected {} got {}', \
+             but paper position.y was tampered to {tampered_y} — the reported divergence must \
+             observe the tampered value (position.y must never be excluded or normalized to make \
+             the comparison pass)",
+            f.expected, f.actual
+        ))),
+        None => Err(RunnerError::Gate(
+            "negative case FAILED: tampering paper position.y produced no compared 'position.y' \
+             diff (it is excluded, absent, or the comparator reported nothing) — position.y must \
+             be a compared field read by the divergence gate"
+                .to_owned(),
+        )),
+    }
+}
+
 /// Mode C: Paper-vs-Rivet play scenario (issue #192, inverted for #159). Both
 /// servers must take the pinned Azalea client through login/configuration into
 /// spawn; the transcripts are compared field-level and differ only on the
@@ -1240,44 +1323,15 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         println!("        (excluded) {f}");
     }
 
-    // Negative case: tamper a *compared* field (position.y, the deterministic
-    // superflat spawn height) and require the comparator to detect it — the
-    // harness must not pass vacuously, and position.y must never be excluded or
+    // Negative case: prove the divergence path just exercised is non-vacuous.
+    // Tamper a *compared* field (position.y, the deterministic superflat spawn
+    // height) on the Paper reference and require the real comparator/divergence
+    // path to report the expected named mismatch and refuse PASS — the harness
+    // must not pass vacuously, and position.y must never be excluded or
     // normalized to make the comparison pass.
     println!();
-    println!("Negative case (tamper paper position.y)");
-    let mut tampered = paper_t.clone();
-    match tampered["position"]["y"].as_f64() {
-        Some(y) => {
-            tampered["position"]["y"] = json!(y + 1.0);
-            let neg = comparator::diff(&paper_t, &tampered);
-            if neg.is_identical() {
-                return Err(RunnerError::Gate(
-                    "negative case FAILED: comparator did not detect a tampered position.y"
-                        .to_owned(),
-                ));
-            }
-            let detected: Vec<&str> = neg.diffs.iter().map(|f| f.path.as_str()).collect();
-            if !detected.contains(&"position.y") {
-                return Err(RunnerError::Gate(format!(
-                    "negative case FAILED: tampering position.y was not reported as a diff \
-                     (detected {detected:?}) — position.y must be a compared field"
-                )));
-            }
-            println!(
-                "    tampered position.y += 1 -> detected {} field diff(s):",
-                neg.diffs.len()
-            );
-            for f in &neg.diffs {
-                println!("      {f}");
-            }
-        }
-        None => {
-            return Err(RunnerError::Gate(
-                "negative case FAILED: paper transcript has no position to tamper".to_owned(),
-            ));
-        }
-    }
+    println!("Negative case (tamper paper position.y through the real divergence path)");
+    prove_both_mode_non_vacuous(&paper_t, &rivet_t)?;
 
     println!();
     println!("VERDICT: PASS — both servers took the pinned Azalea client through login and");
@@ -1288,8 +1342,13 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     println!(
         "      * Both spawn at the same superflat height y=-63.0, so position.y is a compared"
     );
-    println!("        field — the negative case proved the comparator detects a tampered spawn");
-    println!("        height, and any Paper-vs-Rivet position.y divergence would FAIL the run.");
+    println!(
+        "        field — the negative case proved the comparator reads a tampered spawn height"
+    );
+    println!(
+        "        and the divergence gate refuses PASS on it, so any Paper-vs-Rivet position.y"
+    );
+    println!("        divergence would FAIL the run.");
     println!("      * The connection is proven two ways: the rivet log shows 'connection");
     println!(
         "        established' (only the real rivet-server emits it), and the client transcript"
@@ -1301,6 +1360,10 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     println!("        (health default: Rivet omits set_health so azalea reports 1.0 vs Paper's");
     println!("        20.0) — any other divergence, including position.y, fails the run, so a");
     println!("        Paper-vs-Rivet regression cannot pass as 'expected'.");
+    println!("      * The negative case proved the divergence path is non-vacuous: a tampered");
+    println!("        compared position.y on the Paper reference was reported by the real");
+    println!("        comparator/divergence path and refused PASS, so the acceptance cannot pass");
+    println!("        while ignoring a changed compared field.");
     println!("    artifacts: {}", work.display());
     Ok(())
 }
@@ -1645,6 +1708,88 @@ mod tests {
         assert!(
             err.to_string().contains("refusing PASS"),
             "position.y must fail the run, got {err}"
+        );
+    }
+
+    /// A join transcript with the deterministic observables set, matching the
+    /// shape `normalize_join` produces (position.x/z and chunks excluded).
+    fn join_transcript(y: f64, health: f64) -> Value {
+        json!({
+            "protocol": 1,
+            "scenario": "join",
+            "outcome": "spawned",
+            "lifecycle": ["init", "login", "spawn"],
+            "azalea_revision": "6249c295d353b9b3ef68f665b311cba39211fd19",
+            "position": { "x": 9.5, "y": y, "z": -3.5 },
+            "world": "minecraft:overworld",
+            "gamemode": "survival",
+            "health": { "health": health, "food": 20, "saturation": 5.0 },
+            "chunk_count": 117,
+            "chunks": [[-4, -4], [-4, -3], [0, 0]],
+            "excluded": {
+                "position.x": "randomized per boot",
+                "position.z": "randomized per boot",
+                "chunks": "centered on the randomized spawn chunk",
+            },
+        })
+    }
+
+    #[test]
+    fn both_mode_negative_passes_when_tampered_position_y_is_reported() {
+        // The genuine Paper-vs-Rivet shape (issue #159): both servers spawn at
+        // the same superflat height y=-63, so the transcripts diverge only on
+        // the documented health default gap (Paper 20 / Rivet 1). Tampering
+        // Paper's position.y through the real comparator/divergence path must be
+        // reported with the tampered value and refused PASS (position.y is a
+        // compared field).
+        let paper = join_transcript(-63.0, 20.0);
+        let rivet = join_transcript(-63.0, 1.0);
+        assert!(prove_both_mode_non_vacuous(&paper, &rivet).is_ok());
+    }
+
+    #[test]
+    fn both_mode_negative_passes_when_spawn_heights_are_adjacent() {
+        // Regression for the false-failure mode: with a fixed +1.0 offset,
+        // paper.y = -64 tampered to -63 would collide with rivet.y = -63, produce
+        // no position.y diff, and FAIL on a healthy tree. The tamper must be
+        // offset above the larger spawn height so it always differs from rivet.
+        // The counterfactual keeps paper at y=-64 (a divergence that would
+        // already fail the real comparison) and asserts the tamper path still
+        // reports the tampered value.
+        let paper = join_transcript(-64.0, 20.0);
+        let rivet = join_transcript(-63.0, 1.0);
+        assert!(prove_both_mode_non_vacuous(&paper, &rivet).is_ok());
+    }
+
+    #[test]
+    fn both_mode_negative_fails_if_position_y_is_silently_excluded() {
+        // If a future edit moves position.y into the `excluded` map (so the
+        // comparison could pass by never seeing the tamper), the negative must
+        // FAIL: the reported divergence must not observe the tampered value.
+        let mut paper = join_transcript(-63.0, 20.0);
+        paper["excluded"]["position.y"] = json!("silently dropped from parity");
+        let rivet = join_transcript(-63.0, 1.0);
+        let err = prove_both_mode_non_vacuous(&paper, &rivet).unwrap_err();
+        assert!(
+            err.to_string().contains("position.y"),
+            "error must name the missing position.y divergence, got {err}"
+        );
+    }
+
+    #[test]
+    fn both_mode_negative_fails_without_a_position_to_tamper() {
+        // A transcript with no position (or one stripped of y) cannot prove the
+        // comparator reads position.y; the negative must FAIL, not skip.
+        let paper = json!({
+            "outcome": "spawned",
+            "health": { "health": 20.0 },
+            "excluded": { "position.y": "normalized away" },
+        });
+        let rivet = join_transcript(-63.0, 1.0);
+        let err = prove_both_mode_non_vacuous(&paper, &rivet).unwrap_err();
+        assert!(
+            err.to_string().contains("no position to tamper"),
+            "error must explain there is no position to tamper, got {err}"
         );
     }
 
