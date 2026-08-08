@@ -9,8 +9,9 @@
 //! `data_io` / `delegate_data_output` / `fast_buffered_input_stream` provide
 //! the byte-IO contract `NbtIo` needs: big-endian primitives, modified-UTF-8
 //! strings (write side through the `cesu8` Java-variant encoder, read side a
-//! direct port of OpenJDK's `readUTF` decoder), the write-delegate, and the
-//! 8KB compressed-read buffer.
+//! direct port of OpenJDK's `readUTF` decoder — `cesu8`'s Java-variant decoder
+//! rejects the overlong forms Java accepts and has no byte-offset
+//! diagnostics), the write-delegate, and the 8KB compressed-read buffer.
 //!
 //! `util` is a partial port of `net.minecraft.util.Util` for the registry-core
 //! slice (issue #107 / #122); `string_representable` and `by_id_map` are full

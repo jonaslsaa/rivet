@@ -4,10 +4,10 @@
 //!
 //! The `readUTF` expected values were produced by running OpenJDK 25's
 //! `DataInputStream.readUTF` over the same byte bodies (see the byte-offset
-//! error messages, the overlong `C1 80` -> `U+0040` behavior, and the raw-NUL
-//! acceptance). The surrogate cases are the one documented deviation: Java
-//! `String` holds an unpaired surrogate, Rust `String` cannot, so a lone
-//! surrogate errors here.
+//! error messages, the overlong `C1 80` -> `U+0040` and `E0 80 80` -> NUL
+//! behaviors, and the raw-NUL acceptance). The surrogate cases are the one
+//! documented deviation: Java `String` holds an unpaired surrogate, Rust
+//! `String` cannot, so a lone surrogate errors here.
 
 use rivet_util::data_io::{
     DataInput, DataInputStream, DataOutput, DataOutputStream, decode_modified_utf8,
@@ -208,28 +208,83 @@ fn write_utf_length_boundary_65535_bytes() {
     assert_eq!(input.read_utf().unwrap(), mixed);
 }
 
+/// Java `DataOutputStream.writeUTF` throws `UTFDataFormatException` *before*
+/// writing anything; the buffer must stay empty. Message format matches
+/// OpenJDK 25's `tooLongMsg`.
 #[test]
-fn write_utf_overflow_65536_errors_without_writing() {
-    // Java `DataOutputStream.writeUTF` throws UTFDataFormatException *before*
-    // writing anything; the buffer must stay empty.
-    let ascii = "a".repeat(65_536);
+fn write_utf_overflow_exact_ascii_message() {
+    let ascii = "a".repeat(65_536); // 65536 modified-UTF-8 bytes
     let mut out = DataOutputStream::new(Vec::new());
     let err = out.write_utf(&ascii).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    assert!(err.to_string().contains("too long"));
+    assert_eq!(
+        err.to_string(),
+        "encoded string (aaaaaaaa...aaaaaaaa) too long: 65536 bytes"
+    );
     assert!(out.into_inner().is_empty());
+}
 
-    // Astral chars are 6 CESU-8 bytes each: 10923 * 6 = 65538 > 65535.
-    let emoji = "\u{10401}".repeat(10_923);
-    let mut out = DataOutputStream::new(Vec::new());
-    assert!(out.write_utf(&emoji).is_err());
-    assert!(out.into_inner().is_empty());
-
-    // 32768 NULs = 65536 bytes.
+#[test]
+fn write_utf_overflow_exact_nul_message() {
+    // 32768 NULs, each a 2-byte C0 80 -> 65536 bytes.
     let nuls = "\u{0}".repeat(32_768);
     let mut out = DataOutputStream::new(Vec::new());
-    assert!(out.write_utf(&nuls).is_err());
+    let err = out.write_utf(&nuls).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "encoded string (\0\0\0\0\0\0\0\0...\0\0\0\0\0\0\0\0) too long: 65536 bytes"
+    );
     assert!(out.into_inner().is_empty());
+}
+
+#[test]
+fn write_utf_overflow_exact_supplementary_message() {
+    // Astral chars are 6 modified-UTF-8 bytes and 2 UTF-16 code units each:
+    // 10923 * 6 = 65538 bytes, and the 8-unit head/tail slice is 4 chars.
+    let emoji = "\u{10401}".repeat(10_923);
+    let mut out = DataOutputStream::new(Vec::new());
+    let err = out.write_utf(&emoji).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "encoded string (𐐁𐐁𐐁𐐁...𐐁𐐁𐐁𐐁) too long: 65538 bytes"
+    );
+    assert!(out.into_inner().is_empty());
+}
+
+#[test]
+fn write_utf_overflow_head_tail_counts_utf16_units() {
+    // The head/tail are 8 UTF-16 code units, not 8 code points: 4 BMP + 2
+    // astral chars = 8 units, so the head shows 6 characters.
+    let prefix = "éééé𐐁𐐁"; // 8 UTF-16 units, 20 modified-UTF-8 bytes
+    let pad = 65_536 - 20;
+    let s = format!("{prefix}{}", "Z".repeat(pad));
+    let mut out = DataOutputStream::new(Vec::new());
+    let err = out.write_utf(&s).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "encoded string (éééé𐐁𐐁...ZZZZZZZZ) too long: 65536 bytes"
+    );
+}
+
+#[test]
+fn write_utf_overflow_utf16_slice_keeps_whole_straddling_char() {
+    // Java's `substring(0, 8)` slices UTF-16 code units, so with 3 astral
+    // chars + 'X' (7 units) the 8th unit is the high half of the next astral
+    // pair, leaving a lone high surrogate at the end of Java's head. The tail
+    // (`substring(slen - 8, slen)`) cuts the other way: it starts on the low
+    // half of its first astral char, leaving a lone low surrogate at the start
+    // of Java's tail. Rust cannot hold a lone surrogate, so the whole
+    // straddling character is kept in each slice.
+    let prefix = "𐐁𐐁𐐁X𐐁"; // 9 UTF-16 units, 25 bytes
+    let suffix = "𐐁X𐐁𐐁𐐁"; // 9 UTF-16 units, 25 bytes
+    let pad = 65_536 - 25 - 25;
+    let s = format!("{prefix}{}{suffix}", "Z".repeat(pad));
+    let mut out = DataOutputStream::new(Vec::new());
+    let err = out.write_utf(&s).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "encoded string (𐐁𐐁𐐁X𐐁...𐐁X𐐁𐐁𐐁) too long: 65536 bytes"
+    );
 }
 
 #[test]
@@ -283,6 +338,7 @@ fn read_utf_overlong_and_boundary_forms() {
     assert_ok(&[0xC1, 0xBF], "\u{7F}");
     assert_ok(&[0xC2, 0x80], "\u{80}");
     assert_ok(&[0xDF, 0xBF], "\u{7FF}");
+    assert_ok(&[0xE0, 0x80, 0x80], "\u{0}"); // overlong three-byte NUL
     assert_ok(&[0xE0, 0xA0, 0x80], "\u{800}");
     assert_ok(&[0xE1, 0x80, 0x80], "\u{1000}");
     assert_ok(&[0xEF, 0xBF, 0xBF], "\u{FFFF}");
@@ -347,6 +403,7 @@ fn decode_modified_utf8_matches_java_dump() {
         (&[0xC1, 0x80], "\u{40}"),
         (&[0xC2, 0x80], "\u{80}"),
         (&[0xDF, 0xBF], "\u{7FF}"),
+        (&[0xE0, 0x80, 0x80], "\u{0}"), // overlong three-byte NUL
         (&[0xE0, 0xA0, 0x80], "\u{800}"),
         (&[0xEF, 0xBF, 0xBF], "\u{FFFF}"),
         (&[0xE1, 0x80, 0x80], "\u{1000}"),

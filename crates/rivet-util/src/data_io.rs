@@ -10,10 +10,11 @@
 //! The write side encodes through the `cesu8` crate's Java variant, which
 //! matches `DataOutputStream.writeUTF` byte-for-byte (NUL as `C0 80`, astral
 //! characters as CESU-8 surrogate pairs, 2-byte length prefix in big-endian).
-//! The read side ports OpenJDK's `DataInputStream.readUTF` decoder directly
-//! ([`decode_modified_utf8`]): hostile input must behave exactly like Java —
-//! including inputs the `cesu8` Java-variant decoder rejects (a raw NUL byte)
-//! or corrupts (the overlong two-byte form `C1 80`).
+//! The read side is a direct port of OpenJDK's `DataInputStream.readUTF`
+//! decoder ([`decode_modified_utf8`]) rather than `cesu8`'s Java-variant
+//! decoder: Java accepts overlong forms (`C1 80` -> `U+0040`, `E0 80 80` ->
+//! NUL) that `cesu8` rejects, and Java's diagnostics name the exact byte
+//! offset, which `cesu8`'s generic error does not.
 
 use std::io::{self, Read, Write};
 
@@ -27,6 +28,11 @@ pub trait DataOutput {
 
     /// `DataOutput.writeUTF(String)` — modified UTF-8 with a 2-byte length
     /// prefix (big-endian), matching `java.io.DataOutputStream.writeUTF`.
+    ///
+    /// Errors with `InvalidData` (Java's `UTFDataFormatException`) before
+    /// writing anything when the encoded body exceeds 65535 bytes; the error
+    /// message matches OpenJDK 25's, except the head/tail display keeps whole
+    /// code points where Java's UTF-16 slicing would split a surrogate pair.
     fn write_utf(&mut self, s: &str) -> io::Result<()>;
 
     /// `DataOutput.writeBoolean(boolean)`.
@@ -198,13 +204,14 @@ impl<W: Write> DataOutput for DataOutputStream<W> {
         let encoded = cesu8::to_java_cesu8(s);
         if encoded.len() > u16::MAX as usize {
             // Modified UTF-8 longer than 65535 bytes cannot be length-prefixed.
-            // Java `DataOutput.writeUTF` throws UTFDataFormatException here —
-            // before writing anything — and `NbtIo.StringFallbackDataOutput`
-            // catches it and writes "" instead. We surface the overflow and let
-            // the caller decide (see NbtIo).
+            // Java `DataOutputStream.writeUTF` throws UTFDataFormatException
+            // here — before writing anything — and
+            // `NbtIo.StringFallbackDataOutput` catches it and writes "" instead.
+            // We surface the overflow, with Java's exact message, and let the
+            // caller decide (see NbtIo).
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("encoded string too long: {} bytes", encoded.len()),
+                too_long_message(s, encoded.len()),
             ));
         }
         // `as i16` keeps the low 16 bits, i.e. exactly Java's `writeShort(utflen)`
@@ -212,6 +219,49 @@ impl<W: Write> DataOutput for DataOutputStream<W> {
         self.write_short(encoded.len() as i16)?;
         self.inner.write_all(&encoded)
     }
+}
+
+/// OpenJDK `DataOutputStream.tooLongMsg` — the `UTFDataFormatException`
+/// message for a modified-UTF-8 body longer than 65535 bytes.
+///
+/// The message quotes the first and last 8 UTF-16 code units of `s`
+/// (`String.substring(0, 8)` / `substring(slen - 8, slen)` in Java), so an
+/// astral character counts as two units. Java's UTF-16 slicing can cut between
+/// the halves of a surrogate pair, leaving a lone surrogate in the message; a
+/// Rust `String` cannot hold one, so when a cut lands inside an astral
+/// character the whole character is kept instead. This display-side preservation
+/// is not the decoder's behavior — [`decode_modified_utf8`] rejects an unpaired
+/// surrogate with an error.
+fn too_long_message(s: &str, utflen: usize) -> String {
+    /// First `n` UTF-16 code units of `s` as whole characters, from the start
+    /// or the end; a cut inside an astral character keeps the whole character
+    /// (see [`too_long_message`]).
+    fn take_utf16(s: &str, n: usize, from_end: bool) -> String {
+        let mut units = 0usize;
+        let mut out = String::new();
+        if from_end {
+            for ch in s.chars().rev() {
+                if units >= n {
+                    break;
+                }
+                out.push(ch);
+                units += ch.len_utf16();
+            }
+            out.chars().rev().collect()
+        } else {
+            for ch in s.chars() {
+                if units >= n {
+                    break;
+                }
+                out.push(ch);
+                units += ch.len_utf16();
+            }
+            out
+        }
+    }
+    let head = take_utf16(s, 8, false);
+    let tail = take_utf16(s, 8, true);
+    format!("encoded string ({head}...{tail}) too long: {utflen} bytes")
 }
 
 /// `DataInputStream` over any `Read` — implements `DataInput`.
