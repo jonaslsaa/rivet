@@ -507,6 +507,7 @@ name = "rivet-capture"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "rivet-harness-common",
  "rivet-protocol",
  "rivet-registry",
  "serde",
@@ -548,6 +549,13 @@ dependencies = [
  "rivet-protocol",
  "rivet-serialization",
  "rivet-util",
+]
+
+[[package]]
+name = "rivet-harness-common"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
