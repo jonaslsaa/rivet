@@ -17,12 +17,12 @@
 //! RivetTodo(#216): the `SavedTick<Block>`/`SavedTick<Fluid>` neighbor-tick
 //! codecs (`BLOCK_TICKS_CODEC`/`FLUID_TICKS_CODEC`) are not ported —
 //! `SavedTick` lives with the `world.ticks` unit.
-//! RivetTodo(block/block-state units): `BlockFixers`/`BlockFixer` and the
-//! `upgrade`/`upgradeSides`/`upgradeInside` walk need real `BlockBehaviour`
-//! shape-update flags (via #228); the owning `mc.world.level.block` unit
-//! re-adds them. `UpgradeData.EMPTY` keeps the `EmptyBlockGetter` level
-//! accessor arg in Java; the port's `EMPTY` is a plain empty value (the
-//! accessor is only consulted by the deferred fixers).
+//! RivetTodo(#228): `BlockFixers`/`BlockFixer` and the `upgrade`/
+//! `upgradeSides`/`upgradeInside` walk are not ported — they need real
+//! `BlockBehaviour` shape-update flags; the `mc.world.level.block` slice
+//! re-adds them when it lands. `UpgradeData.EMPTY` keeps the
+//! `EmptyBlockGetter` level accessor arg in Java; the port's `EMPTY` is a
+//! plain empty value (the accessor is only consulted by the deferred fixers).
 
 use rivet_registry::core::Direction8;
 
