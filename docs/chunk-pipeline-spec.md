@@ -362,9 +362,13 @@ loading/generating concurrently; the send limiter has no such cap.
 
 View distances: `loadViewDistance = max(tickViewDistance + 1, override)`;
 `sendViewDistance = loadViewDistance - 1`. Positions enter the send queue when
-inside the send view distance and the chunk is GENERATED (`wantChunkSent`), and
-independently enter the tick queue when inside the tick view distance
-(`wantChunkTicked`). The GENERATED→TICK promotion (which replaces the
+`wantChunkSent` — Chebyshev distance `max(|dx|,|dz|) <= lastSendDistance + 1`
+(one square beyond the send view distance) and within the send-view
+`ChunkTrackingView` region (`wantChunkLoaded` at radius `lastSendDistance`,
+neighbour-buffer 2) — and the chunk is GENERATED; positions independently enter
+the tick queue when inside the tick view distance (`wantChunkTicked`,
+`max(|dx|,|dz|) <= lastTickDistance`).
+The GENERATED→TICK promotion (which replaces the
 `GENERATED`-level ticket with the `TICK_TICKET_LEVEL` = 31 ticket, keeping the
 chunk at the generated level for anyone else) is gated only on the chunk's
 neighbours being generated/ticking within `FULL_LOADED − ENTITY_TICKING = 2`
@@ -421,12 +425,18 @@ owner, not on the tokio side and not in shared locks:
   `feature/184-lighting-provider-seam` (not yet on main — see §11); until that
   merges, the pipeline's light seam is the `EMPTY` stub (§1).
 
-Java's `ReentrantAreaLock`/`schedulingLockArea` (region locks, 16×16-grid) are
-the *mechanism* Paper uses to serialize stage-1/3 of unload and task scheduling
-across its worker threads; under D5 the single tick thread makes those locks
-degenerate (no contention), so Rivet does not port the lock grid — the
-**invariant** it enforces (a column's schedule/unload decisions are atomic with
-respect to its neighbour-read/write set) is preserved by tick-thread ownership.
+Java's `ReentrantAreaLock`/`schedulingLockArea` (region locks) are the *mechanism*
+Paper uses to serialize stage-1/3 of unload and task scheduling across its worker
+threads. The lock grid's cell size is `1 << lockShift`, where
+`lockShift = max(moonrise$getRegionChunkShift(), SECTION_SHIFT)`; `SECTION_SHIFT
+= 6`, and in this pinned build `moonrise$getRegionChunkShift()` delegates to
+Folia's placeholder `TickRegions.getRegionChunkShift()`, which also returns
+`SECTION_SHIFT` — so `lockShift = 6` and the cells are 64×64 chunks (a Folia
+deployment may configure a different region-chunk shift). Under D5 the single
+tick thread makes those locks degenerate (no contention), so Rivet does not port
+the lock grid — the **invariant** it enforces (a column's schedule/unload
+decisions are atomic with respect to its neighbour-read/write set) is preserved
+by tick-thread ownership.
 
 ---
 
