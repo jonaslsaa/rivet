@@ -418,7 +418,9 @@ impl RegionFile {
 
     /// `doesChunkExist(pos)` — the location is nonzero *and* the stream header
     /// validates as a real stream of a registered codec (external streams need
-    /// the `.mcc` file to exist). IO failures report + return false like Paper.
+    /// the `.mcc` file to exist). IO failures return false like Paper (Paper
+    /// additionally reports the exception to `ServerInternalException`; this
+    /// port skips that crash-report hook).
     pub fn does_chunk_exist(&mut self, pos: &ChunkPos) -> bool {
         let offset = self.get_offset(pos);
         if offset == 0 {
@@ -763,7 +765,9 @@ impl RegionFile {
         // RivetTodo(#231): every slot is treated as not-Aikar-oversized, which
         // is exactly the modern-world outcome.
 
-        let file_length = self.file_mut().metadata().map(|m| m.len()).unwrap_or(0);
+        // Java `this.file.size()` throws IOException; propagate the same way
+        // rather than silently treating the region as empty.
+        let file_length = self.file_mut().metadata()?.len();
         let total_sectors = round_to_sectors(file_length as i64);
 
         // Scan sectors 2..maxSector looking for valid chunk streams. The bound
