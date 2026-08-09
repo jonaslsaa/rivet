@@ -26,6 +26,21 @@ pub enum Direction8 {
 }
 
 impl Direction8 {
+    /// `Direction8.values()` — the eight directions in ordinal order (the
+    /// bitmask order `UpgradeData`'s `Sides` byte uses).
+    pub const fn all() -> [Direction8; 8] {
+        [
+            Direction8::North,
+            Direction8::NorthEast,
+            Direction8::East,
+            Direction8::SouthEast,
+            Direction8::South,
+            Direction8::SouthWest,
+            Direction8::West,
+            Direction8::NorthWest,
+        ]
+    }
+
     /// `Direction8.getDirections()` — the member `Direction`s in
     /// `Direction.values()` order.
     pub fn get_directions(&self) -> Vec<Direction> {

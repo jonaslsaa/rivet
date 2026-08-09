@@ -81,6 +81,14 @@ impl<
         self.states.get(x, y, z)
     }
 
+    /// `getNoiseBiome(int, int, int)` — the 4×4×4 biome container read
+    /// (section-local quart coords). Java passes the already-masked quart
+    /// coords through to `PalettedContainer.get` unmasked; the callers (the
+    /// chunk `getNoiseBiome`) mask to `& 3` first.
+    pub fn get_noise_biome(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> B {
+        self.biomes.get(quart_x, quart_y, quart_z)
+    }
+
     /// `hasOnlyAir()`.
     pub fn has_only_air(&self) -> bool {
         self.non_empty_block_count == 0
