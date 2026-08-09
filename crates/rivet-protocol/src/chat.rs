@@ -8,8 +8,10 @@
 //! half — the stream codec family over the NBT `Tag` via
 //! [`byte_buf_codecs::from_codec`].
 //!
-//! The five Java constants, 1:1 — plus [`component`], the generic
-//! `ByteBufCodecs.fromCodec(Codec)` sibling (no constant in
+//! The five Java constants, 1:1 — plus [`trusted_optional_component`], the
+//! context-free trusted optional that mirrors
+//! `TRUSTED_CONTEXT_FREE_STREAM_CODEC.apply(ByteBufCodecs::optional)` (used by
+//! `ClientboundResourcePackPushPacket`; no standalone constant in
 //! `ComponentSerialization`):
 //! - [`component_with_registries`] — `STREAM_CODEC`
 //!   (`tagCodec(defaultQuota)` over `RegistryFriendlyByteBuf`, with the codec
@@ -22,11 +24,10 @@
 //!   (issue #207); it serves `ServerLinks` custom display names.
 //! - [`optional_component_with_registries`] — `OPTIONAL_STREAM_CODEC`.
 //! - [`trusted_optional_component_with_registries`] — `TRUSTED_OPTIONAL_STREAM_CODEC`.
-//! - [`component`] — `ByteBufCodecs.fromCodec(CODEC)`: the untrusted,
-//!   context-free, default-quota complement of the trusted codec (Java's
-//!   `ByteBufCodecs.fromCodec(Codec)` generic; no constant in
-//!   `ComponentSerialization` but the natural sibling). The context-free
-//!   optional forms are [`optional_component`] / [`trusted_optional_component`].
+//! - [`trusted_optional_component`] — `ByteBufCodecs.optional(
+//!   trustedContextFreeComponent())`, the context-free trusted optional:
+//!   `TRUSTED_CONTEXT_FREE_STREAM_CODEC.apply(ByteBufCodecs::optional)`, used by
+//!   `ClientboundResourcePackPushPacket`'s prompt field.
 //!
 //! Cycle cost and caching: the `Component` codec graph is built with
 //! [`rivet_serialization::codec::recursive`], whose lazily-initialized cell
@@ -182,21 +183,6 @@ pub fn trusted_context_free_component() -> StreamCodec<FriendlyByteBuf, Componen
         .clone()
 }
 
-/// `ByteBufCodecs.fromCodec(ComponentSerialization.CODEC)` — the untrusted,
-/// context-free complement of [`trusted_context_free_component`]:
-/// `tagCodec(defaultQuota).apply(fromCodec(NbtOps.INSTANCE, CODEC))`.
-pub fn component() -> StreamCodec<FriendlyByteBuf, Component> {
-    static CODEC: OnceLock<StreamCodec<FriendlyByteBuf, Component>> = OnceLock::new();
-    CODEC
-        .get_or_init(|| {
-            apply(
-                byte_buf_codecs::tag(),
-                from_codec(NbtOps::instance(), component_codec()),
-            )
-        })
-        .clone()
-}
-
 /// `OPTIONAL_STREAM_CODEC` — `STREAM_CODEC.apply(ByteBufCodecs::optional)`:
 /// a boolean presence prefix, then the registry-aware component.
 pub fn optional_component_with_registries()
@@ -219,16 +205,10 @@ pub fn trusted_optional_component_with_registries()
         .clone()
 }
 
-/// `ByteBufCodecs.optional(component())` — the context-free untrusted optional.
-pub fn optional_component() -> StreamCodec<FriendlyByteBuf, Option<Component>> {
-    static CODEC: OnceLock<StreamCodec<FriendlyByteBuf, Option<Component>>> = OnceLock::new();
-    CODEC
-        .get_or_init(|| byte_buf_codecs::optional(component()))
-        .clone()
-}
-
 /// `ByteBufCodecs.optional(trustedContextFreeComponent())` — the context-free
-/// trusted optional.
+/// trusted optional:
+/// `TRUSTED_CONTEXT_FREE_STREAM_CODEC.apply(ByteBufCodecs::optional)`, used by
+/// `ClientboundResourcePackPushPacket`'s prompt field.
 pub fn trusted_optional_component() -> StreamCodec<FriendlyByteBuf, Option<Component>> {
     static CODEC: OnceLock<StreamCodec<FriendlyByteBuf, Option<Component>>> = OnceLock::new();
     CODEC
@@ -344,17 +324,11 @@ mod tests {
     fn optional_context_free_wire_form() {
         // None -> boolean false. Some(literal "hi") -> true, then the string tag.
         let mut out = buf();
-        optional_component().encode(&mut out, &None).unwrap();
+        trusted_optional_component()
+            .encode(&mut out, &None)
+            .unwrap();
         assert_eq!(written(out), vec![0x00]);
 
-        let mut out = buf();
-        optional_component()
-            .encode(&mut out, &Some(Component::literal("hi")))
-            .unwrap();
-        assert_eq!(written(out), vec![0x01, 0x08, 0x00, 0x02, b'h', b'i']);
-
-        // The trusted optional shares the wire (same graph, quota differs only
-        // on decode).
         let mut out = buf();
         trusted_optional_component()
             .encode(&mut out, &Some(Component::literal("hi")))
@@ -362,29 +336,10 @@ mod tests {
         assert_eq!(written(out), vec![0x01, 0x08, 0x00, 0x02, b'h', b'i']);
 
         let mut input = FriendlyByteBuf::new(BytesMut::from(vec![0x00].as_slice()));
-        assert_eq!(optional_component().decode(&mut input).unwrap(), None);
-        let mut input = FriendlyByteBuf::new(BytesMut::from(vec![0x00].as_slice()));
         assert_eq!(
             trusted_optional_component().decode(&mut input).unwrap(),
             None
         );
-    }
-
-    #[test]
-    fn trusted_and_untrusted_context_free_encode_identically() {
-        // The two context-free codecs share one codec graph; the accounter
-        // differs only on decode, so encode output must be byte-identical.
-        let mut root = Component::literal("root");
-        root.append_component(
-            Component::literal("child").with_style(Style::EMPTY.with_italic(Some(true))),
-        );
-        let mut trusted = buf();
-        trusted_context_free_component()
-            .encode(&mut trusted, &root)
-            .unwrap();
-        let mut untrusted = buf();
-        component().encode(&mut untrusted, &root).unwrap();
-        assert_eq!(written(trusted), written(untrusted));
     }
 
     #[test]
@@ -430,7 +385,9 @@ mod tests {
         // renders after the message), it does not panic.
         let wire = vec![0x03, 0x00, 0x00, 0x00, 0x05]; // IntTag(5)
         let mut input = FriendlyByteBuf::new(BytesMut::from(wire.as_slice()));
-        let err = component().decode(&mut input).unwrap_err();
+        let err = trusted_context_free_component()
+            .decode(&mut input)
+            .unwrap_err();
         assert!(
             err.message.starts_with("Failed to decode:"),
             "unexpected message: {}",
@@ -439,12 +396,25 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn truncated_component_panics_like_java() {
-        // A compound id byte with no payload: the raw NBT I/O failure panics
-        // (Java's unchecked rethrow of the IOException inside readNbt).
+        // A compound id byte with no payload: the first entry type byte hits
+        // EOF inside `CompoundTag.load`, which Java wraps as
+        // `ReportedNbtException` (CrashReport "Loading NBT data") — the
+        // unchecked rethrow of the IOException inside readNbt.
         let mut input = FriendlyByteBuf::new(BytesMut::from(vec![0x0A].as_slice()));
-        let _ = trusted_context_free_component().decode(&mut input);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = trusted_context_free_component().decode(&mut input);
+        }));
+        let payload = result.expect_err("truncated NBT must panic");
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .expect("panic payload is a String");
+        assert!(
+            msg.starts_with("Loading NBT data"),
+            "unexpected panic: {msg}"
+        );
     }
 
     #[test]
@@ -479,10 +449,14 @@ mod tests {
         );
 
         // Untrusted decode: the default quota panics with Java's
-        // `NbtAccounterException` message.
-        let mut untrusted_input = FriendlyByteBuf::new(BytesMut::from(bytes.as_slice()));
+        // `NbtAccounterException` message. The untrusted context-free codec was
+        // removed as speculative; the surviving untrusted codec is the
+        // registry-aware `STREAM_CODEC` (`component_with_registries`), which
+        // reads the same NBT bytes through an empty-access registry buffer.
+        let mut untrusted_input =
+            RegistryFriendlyByteBuf::new(BytesMut::from(bytes.as_slice()), RegistryAccess::empty());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            component().decode(&mut untrusted_input)
+            component_with_registries().decode(&mut untrusted_input)
         }));
         let payload = result.expect_err("untrusted decode must panic on oversize NBT");
         let msg = payload
@@ -516,9 +490,8 @@ mod tests {
         )));
         root.append_component(Component::selector("@p", Some(Component::literal(","))));
 
-        // Context-free graph (NbtOps): warm both codecs, then snapshot.
+        // Context-free graph (NbtOps): warm the codec, then snapshot.
         round_trip(&trusted_context_free_component(), &root);
-        round_trip(&component(), &root);
         let after_context_free = graph_count();
         for _ in 0..50 {
             round_trip(&trusted_context_free_component(), &root);
