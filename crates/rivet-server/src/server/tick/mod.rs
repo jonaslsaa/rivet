@@ -208,6 +208,15 @@ impl ServerTickLoop {
             tickable(&mut ctx);
         }
 
+        // Disconnect-reason boundary: the session manager (when registered)
+        // consumed the reasons for the sessions it pruned this tick; whatever
+        // remains belongs to connections that never reached play and is dropped
+        // here. The drain runs unconditionally at the end of every tick, so the
+        // map is empty between ticks even on a server with no session manager —
+        // a status/offline-login boot must not accumulate a reason per
+        // disconnect over a long run.
+        registry.drain_unconsumed_disconnect_reasons();
+
         self.stats.ticks.store(tick, Ordering::Relaxed);
         self.stats
             .connected
@@ -220,6 +229,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use channels::{InboundDrained, ServerboundFrame};
+    use registry::OutboundError;
     use scheduler::TickScheduler;
     use shutdown::Shutdown;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -852,5 +862,148 @@ mod tests {
             "the late-joining connection serves at most its per-connection cap"
         );
         drop(guard);
+    }
+
+    /// Load-bearing counterfactual for the disconnect-reason leak: `run_tick`
+    /// drains every recorded disconnect reason at the tick boundary even when
+    /// **no session manager tickable is registered** — the `enable_join=false`
+    /// boot (status/offline-login servers and the default test config). Each
+    /// recorded reason is consumed or dropped within the tick that recorded it,
+    /// so a long-lived boot never accumulates one entry per disconnected
+    /// `ConnectionId`.
+    ///
+    /// The loop here registers only the frame-recording tickable (no session
+    /// manager, exactly the leak's trigger), connects a fresh connection each
+    /// round, and closes it through the three removal paths the registry
+    /// records a reason on: a lifecycle `Disconnect` event, a closed inbound
+    /// channel (EOF prune on drain), and an outbound-overflow prune. After each
+    /// `run_tick`, the reason map must be empty — the tick boundary drained it
+    /// (there is no session manager to consume anything). A regression that
+    /// skipped the drain fails here after a single round; the 512-round loop
+    /// additionally proves the map does not grow over a long run.
+    #[test]
+    fn run_tick_drains_disconnect_reasons_without_a_session_manager() {
+        let recorded = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let (mut loop_, lifecycle_tx) = test_loop(Arc::clone(&recorded));
+        assert_eq!(
+            loop_.registry.disconnect_reason_count(),
+            0,
+            "a fresh loop starts with an empty reason map"
+        );
+
+        // Path 1: lifecycle Disconnect events (a status/handshake/login close
+        // with no session — exactly what an `enable_join=false` boot sees).
+        for round in 0..512 {
+            let id = ConnectionId(round * 3 + 1);
+            let (in_tx, in_rx) = tokio::sync::mpsc::channel(4);
+            let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+            lifecycle_tx
+                .try_send(LifecycleEvent::Connect {
+                    id,
+                    remote: REMOTE,
+                    in_rx,
+                    out_tx,
+                    drained: InboundDrained::new(),
+                })
+                .unwrap();
+            let _in_tx = in_tx; // kept alive: the inbound channel stays open
+            loop_.run_tick();
+            assert!(loop_.registry.contains(id), "connect registered the entry");
+            lifecycle_tx
+                .try_send(LifecycleEvent::Disconnect {
+                    id,
+                    reason: DisconnectReason::Timeout,
+                })
+                .unwrap();
+            loop_.run_tick();
+            assert_eq!(
+                loop_.registry.disconnect_reason_count(),
+                0,
+                "tick {round}: the lifecycle reason was drained, not retained"
+            );
+        }
+
+        // Path 2: a closed inbound channel (the connection task dropped its
+        // sender; the tick's drain prunes the entry and records EndOfStream).
+        for round in 0..512 {
+            let id = ConnectionId(round * 3 + 2);
+            let (in_tx, in_rx) = tokio::sync::mpsc::channel(4);
+            let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+            lifecycle_tx
+                .try_send(LifecycleEvent::Connect {
+                    id,
+                    remote: REMOTE,
+                    in_rx,
+                    out_tx,
+                    drained: InboundDrained::new(),
+                })
+                .unwrap();
+            drop(in_tx); // the connection task is gone before the next tick
+            loop_.run_tick();
+            assert!(
+                !loop_.registry.contains(id),
+                "tick {round}: the EOF prune removed the entry"
+            );
+            assert_eq!(
+                loop_.registry.disconnect_reason_count(),
+                0,
+                "tick {round}: the EOF reason was drained at the tick boundary"
+            );
+        }
+
+        // Path 3: an outbound-overflow prune (the tick dropped the connection
+        // when its outbound channel was full — the backpressure policy). The
+        // channel has capacity 1 and is never drained, so the first outbound
+        // event fills it and the second overflows, pruning the entry and
+        // recording `Overflow`. The keepalive/anti-flood paths drive this same
+        // `send` from the tick; no `Disconnect` lifecycle event is involved.
+        for round in 0..512 {
+            let id = ConnectionId(round * 3 + 3);
+            let (in_tx, in_rx) = tokio::sync::mpsc::channel(4);
+            let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+            lifecycle_tx
+                .try_send(LifecycleEvent::Connect {
+                    id,
+                    remote: REMOTE,
+                    in_rx,
+                    out_tx,
+                    drained: InboundDrained::new(),
+                })
+                .unwrap();
+            let _in_tx = in_tx; // kept alive: the inbound channel stays open
+            let _out_rx = out_rx; // never drained: the outbound channel fills
+            loop_.run_tick();
+            assert!(loop_.registry.contains(id), "connect registered the entry");
+            assert_eq!(
+                loop_.registry.send(
+                    id,
+                    channels::OutboundEvent::Disconnect {
+                        reason: DisconnectReason::Timeout
+                    }
+                ),
+                Ok(()),
+                "tick {round}: the first send fills the outbound channel"
+            );
+            assert_eq!(
+                loop_.registry.send(
+                    id,
+                    channels::OutboundEvent::Disconnect {
+                        reason: DisconnectReason::Timeout
+                    }
+                ),
+                Err(OutboundError::Overflow(id)),
+                "tick {round}: the second send overflows and prunes the entry"
+            );
+            assert!(
+                !loop_.registry.contains(id),
+                "tick {round}: the overflow prune removed the entry"
+            );
+            loop_.run_tick();
+            assert_eq!(
+                loop_.registry.disconnect_reason_count(),
+                0,
+                "tick {round}: the overflow reason was drained at the tick boundary"
+            );
+        }
     }
 }

@@ -10,6 +10,7 @@
 pub mod keepalive;
 pub mod level;
 pub mod movement_math;
+pub mod movement_trace;
 pub mod network;
 pub mod player;
 pub mod teleport_ack;
