@@ -216,13 +216,12 @@ pub fn trace_session_end(
 mod tests {
     use super::*;
 
-    /// The gate is a stable snapshot: a call after the first must return the
-    /// same bool (the `OnceLock` caches the value; a later `set_var` would be
-    /// ignored). The test setter pins both states deterministically — the
-    /// enabled records and the zero-behavior-when-unset — without depending on
-    /// the runner's env.
+    /// The setter pins both gate states and the cached value is stable across
+    /// calls. The genuine one-time `RIVET_TRACE_MOVEMENT` env read is a
+    /// production-only path in `movement_trace_enabled`; this test asserts the
+    /// cache snapshot directly because it must not depend on the runner's env.
     #[test]
-    fn gate_reads_env_exactly_once() {
+    fn set_trace_gate_is_stable_across_calls() {
         set_trace_gate_for_tests(true);
         assert!(movement_trace_enabled(), "pinned enabled");
         assert!(movement_trace_enabled(), "the gate is stable across calls");
