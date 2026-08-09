@@ -839,7 +839,7 @@ async fn move_and_emit(bot: Client, state: State) {
             // samples, X/Z are spawn-relative (the server randomizes the spawn
             // offset each boot) and `y` is absolute (the superflat spawn height
             // is fixed), so the record is normalized the same way. `last_sent`
-            // is a *compared* field in the #53/#713 differentials: the evidence
+            // is a *compared* field in the #53 differentials: the evidence
             // across fresh boots and Paper-vs-Rivet runs (the
             // `differing_last_sent_is_compared` parity test) shows it is
             // deterministic per server and Paper-vs-Rivet equal on X/Z, so a

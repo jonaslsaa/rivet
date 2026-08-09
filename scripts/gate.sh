@@ -38,7 +38,7 @@
 #   - scenario runner      join: boots Paper twice via the Azalea client and requires
 #                          identical normalized transcripts, plus a negative case.
 #                          join --server both / move --server both run the Rivet-vs-Paper
-#                          differentials (issue #713): the same client boots each server
+#                          differentials (issues #192/#53): the same client boots each server
 #                          and must produce equal normalized transcripts, proving Rivet's
 #                          join and authoritative-walk behavior matches Paper's. dwell boots
 #                          Rivet headlessly and proves the client survives past the 30 s
@@ -723,7 +723,7 @@ main() {
   #
   # Rows:
   #   join                  Paper-vs-Paper self-check + tamper negative.
-  #   join --server both    Rivet-vs-Paper join differential (issue #713):
+  #   join --server both    Rivet-vs-Paper join differential (issue #192, inverted by #159):
   #                         the same client joins each server and the normalized
   #                         transcripts must match — proving Rivet's offline
   #                         login/configuration/PLAY/chunk-receipt matches Paper.

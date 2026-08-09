@@ -39,7 +39,7 @@
 //!   reference and requires the real comparator/divergence path to report the
 //!   tampered value and refuse PASS, so the live acceptance cannot pass
 //!   vacuously.
-//! - `dwell` (issue #714, terminal M1 acceptance): the Rivet-only wall-clock
+//! - `dwell` (issue #160, terminal M1 acceptance): the Rivet-only wall-clock
 //!   keepalive-survival gate. Boots exactly one rivet-server; the pinned Azalea
 //!   client spawns into PLAY and stays connected for `--dwell-seconds` of wall
 //!   clock while auto-echoing every live keepalive. Passes only if the client
@@ -2086,7 +2086,7 @@ fn run_move(args: &Args) -> Result<(), RunnerError> {
     }
 }
 
-/// Mode E: the wall-clock keepalive-survival gate (issue #714, terminal M1
+/// Mode E: the wall-clock keepalive-survival gate (issue #160, terminal M1
 /// acceptance). Boots a real rivet-server headlessly, drives the pinned Azalea
 /// client's `dwell` mode (spawn into PLAY, stay connected for
 /// `--dwell-seconds` wall-clock seconds while azalea auto-echoes every live
@@ -2104,7 +2104,7 @@ fn run_move(args: &Args) -> Result<(), RunnerError> {
 ///    outcome `dwelled`, lifecycle containing login and spawn, the pinned Azalea
 ///    revision, wall-clock survival past 30 s, >= 30 challenges, a 1:1
 ///    challenge->echo pairing, and a challenge span across the window, and
-///    (issue #714: controlled negative) the verdict rejects a transcript whose
+///    (issue #160: controlled negative) the verdict rejects a transcript whose
 ///    challenge->echo relationship is missing,
 /// 4. a controlled negative: tamper the compared survival scalar
 ///    (`connected_wall_seconds`) to 0 and require the real verdict path to
