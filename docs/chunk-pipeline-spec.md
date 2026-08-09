@@ -343,10 +343,14 @@ through **six ticket stages** per view position:
 
 The ticket levels come from the constants `GENERATED_TICKET_LEVEL =
 FULL_LOADED_TICKET_LEVEL (33)`, `LOADED_TICKET_LEVEL = getTicketLevel(EMPTY)
-(44)`, `TICK_TICKET_LEVEL = ENTITY_TICKING_TICKET_LEVEL (31)`; a position that
-enters a stage adds both `PLAYER_TICKET_DELAYED` (short timeout — the grace
-window that stops a rapid demote-re-add cycle from re-spinning a load) and
-`PLAYER_TICKET` at the stage level. The
+(44)`, `TICK_TICKET_LEVEL = ENTITY_TICKING_TICKET_LEVEL (31)`. Stage *entry*
+adds only `PLAYER_TICKET` at the stage level: the LOADED/GENERATING/TICK
+promotions are `TicketOperation.addOp`/`addAndRemove` calls carrying
+`PLAYER_TICKET` alone. `PLAYER_TICKET_DELAYED` is the demotion/exit ticket —
+the area-map remove callbacks (`loadTicketCleanup`, `tickMap`) replace the
+departing `PLAYER_TICKET` with `PLAYER_TICKET_DELAYED` at the same level, whose
+short timeout is the grace window that stops a rapid demote-re-add cycle from
+re-spinning a load. The
 loader holds three `StaggeredRateLimiter`s (send, load-ticket, generate-ticket),
 each ticked with a config rate clamped to `[1, MAX_RATE]` (`MAX_RATE = 10_000`; a
 config of `≤ 0` or `> MAX_RATE` becomes `MAX_RATE`), with an
