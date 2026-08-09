@@ -4,7 +4,7 @@
 //! Java: `ClientboundDisconnectPacket.java` in `working/Paper`. A single
 //! `Component` (the kick reason) over `ComponentSerialization
 //! .TRUSTED_CONTEXT_FREE_STREAM_CODEC`, which is now ported as
-//! [`crate::codec::byte_buf_codecs::trusted_component`] (issue #207) — so this
+//! [`crate::chat::trusted_context_free_component`] (issue #89/#207) — so this
 //! body is portable but not yet ported.
 //!
 //! The discriminator value exists (`packet_types::clientbound_disconnect`); only

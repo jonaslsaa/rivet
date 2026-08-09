@@ -4,9 +4,9 @@
 //! Java: `ByteBufCodecs.java` in `working/Paper` (vanilla 26.2). Every method
 //! here returns a fresh `StreamCodec<FriendlyByteBuf, T>` (codecs are stateless,
 //! so a fresh `Arc` is observationally identical to Java's `static final`
-//! fields). The one exception is [`trusted_component`]: its recursive `Component`
-//! graph holds a permanent strong cycle, so it is cached behind a `static
-//! OnceLock` and never built per call (see its doc). The buffer is
+//! fields). The one exception is the recursive `Component` codec, which holds a
+//! permanent strong cycle and is therefore cached behind a `static OnceLock` in
+//! [`crate::chat`] (the wire-codec home, see its module docs). The buffer is
 //! `FriendlyByteBuf`, the only registry-independent buffer this crate has;
 //! Java's generic `B extends ByteBuf` is instantiated here as required by the
 //! port.
@@ -32,14 +32,13 @@
 //!
 //! RivetTodo(#126): the remaining registry-dependent `ByteBufCodecs` members are
 //! deferred with their owning units, not silently omitted:
-//! - `fromCodec(Codec)` / `fromCodecTrusted` / `fromCodecWithRegistries*` (the
-//!   `NbtOps`-backed variants) — need `Codec<T>` wired through `StreamCodec`
-//!   via `NbtOps`. The ops-typed `fromCodec(DynamicOps<T>, Codec<V>)` overload
+//! - The generic `fromCodec(Codec)` / `fromCodecTrusted(Codec)` /
+//!   `fromCodecWithRegistries(Codec)` family — the `NbtOps`-backed `Codec<T>`
+//!   wire codecs — is ported for `Component` in [`crate::chat`] (issue #89),
+//!   the only current consumer; a fully generic variant is deferred with its
+//!   owning units. The ops-typed `fromCodec(DynamicOps<T>, Codec<V>)` overload
 //!   IS ported (below); it is what `ClientboundStatusResponsePacket` uses
 //!   (`lenientJson(32767).apply(fromCodec(OPS, ServerStatus.CODEC))`).
-//!   `fromCodecTrusted(ComponentSerialization.CODEC)` is ported as
-//!   [`trusted_component`] (issue #207); a fully generic
-//!   `fromCodecTrusted(Codec)` is deferred with its consumers.
 //! - `registryFriendlyLengthPrefixed` — needs the buffer-preserving decorator
 //!   form of `lengthPrefixed` over `RegistryFriendlyByteBuf`.
 //!   `registry`/`holderRegistry`/`holder`/`holderSet` are ported in
@@ -53,7 +52,6 @@
 //!   anti-DoS on the registry buffer, out of scope for the registry-independent
 //!   slice.
 
-use crate::codec::apply;
 use crate::codec::stream_codec::{CodecError, CodecOperation, StreamCodec, of};
 use crate::codec::stream_decoder::StreamDecoder;
 use crate::codec::stream_encoder::StreamEncoder;
@@ -61,14 +59,13 @@ use crate::friendly_byte_buf::{FriendlyByteBuf, MAX_STRING_LENGTH};
 use bytes::BytesMut;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::nbt_accounter::NbtAccounter;
-use rivet_nbt::nbt_ops::NbtOps;
 use rivet_nbt::tag::Tag;
 use rivet_registry::core::{GameProfile, GameType, Property, PropertyMap};
 use rivet_serialization::Either;
 use rivet_serialization::codec::Codec;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_util::mth::{pack_degrees, unpack_degrees};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE`.
 pub const MAX_INITIAL_COLLECTION_SIZE: i32 = 65536;
@@ -692,43 +689,6 @@ pub fn compound_tag_codec(
             }
         },
     )
-}
-
-/// `ComponentSerialization.TRUSTED_CONTEXT_FREE_STREAM_CODEC` —
-/// `ByteBufCodecs.fromCodecTrusted(ComponentSerialization.CODEC)`, i.e.
-/// `tagCodec(unlimitedHeap).apply(fromCodec(NbtOps.INSTANCE, CODEC))`: the
-/// `Component` is serialized to an NBT `Tag` via the `ComponentSerialization`
-/// codec over `NbtOps`, then that tag is written with the trusted (unlimited)
-/// tag codec.
-///
-/// Used by `ServerLinks.UntrustedEntry` (`ServerLinks.TYPE_STREAM_CODEC`) for
-/// the custom-link display name, exactly as Java.
-///
-/// Cycle cost (deliberate, and permanent): the `Component` codec graph behind
-/// this stream codec is built with [`rivet_serialization::codec::recursive`],
-/// whose lazily-initialized cell embeds a strong `Arc` back to the parent once
-/// the first encode/decode runs — a strong cycle that is never freed (the same
-/// cost `StreamCodec.recursive` documents in
-/// [`crate::codec::stream_codec::recursive`]). The graph must be built exactly
-/// once per process, so it is cached behind a `static OnceLock`: repeated calls
-/// return clones of the single registration-time graph (Java's `static final`
-/// field) and cannot accumulate additional leaked graphs per connection. The
-/// graph's nested `Component` references (translatable `with` args, selector
-/// `separator`) are threaded the same single graph, so they never build a
-/// fresh recursive graph per encode either.
-pub fn trusted_component() -> StreamCodec<FriendlyByteBuf, rivet_text::Component> {
-    static CODEC: OnceLock<StreamCodec<FriendlyByteBuf, rivet_text::Component>> = OnceLock::new();
-    CODEC
-        .get_or_init(|| {
-            apply(
-                trusted_tag(),
-                from_codec(
-                    NbtOps::instance(),
-                    rivet_text::component_serialization::codec::<NbtOps>(),
-                ),
-            )
-        })
-        .clone()
 }
 
 /// `ByteBufCodecs.optional(StreamCodec)` — a boolean presence prefix, then the
@@ -1617,57 +1577,6 @@ mod tests {
         assert_eq!(
             codec.decode(&mut input).unwrap(),
             rivet_registry::core::GameType::Survival
-        );
-    }
-
-    #[test]
-    fn trusted_component_nested_components_do_not_rebuild_the_recursive_graph() {
-        // Issue #207: encoding a translatable with a Component arg or a selector
-        // with a separator must reuse the single cached `Component` graph. Each
-        // fresh `component_serialization::codec()` is a permanent strong `Arc`
-        // cycle, so a per-use rebuild would leak one graph per encode.
-        // `CODEC_BUILD_COUNT` counts graph constructions on this thread; it must
-        // stay flat across repeated encodes after the first (which forces the
-        // lazy recursive factory).
-        use rivet_text::Component;
-        use rivet_text::component_contents::ComponentContents;
-        use rivet_text::component_serialization::CODEC_BUILD_COUNT;
-        use rivet_text::contents::{TranslatableArg, TranslatableContents};
-        use rivet_text::style::Style;
-
-        let graph_count = || CODEC_BUILD_COUNT.with(|c| c.get());
-
-        // A root with a translatable carrying a nested Component arg and a
-        // selector with a separator — both recurse into the Component codec.
-        // The arg is styled so it does not collapse to a bare string on decode
-        // (Java `tryCollapseToString`), keeping it a true `Component` arg.
-        let mut root = Component::literal("root");
-        root.append_component(Component::create(ComponentContents::Translatable(
-            TranslatableContents::new(
-                "key.tip".to_string(),
-                None,
-                vec![TranslatableArg::Component(
-                    Component::literal("arg").with_style(Style::EMPTY.with_bold(Some(true))),
-                )],
-            ),
-        )));
-        root.append_component(Component::selector("@p", Some(Component::literal(","))));
-
-        // First round-trip through the cached stream codec (the process-wide
-        // graph may already be built by a parallel test on another thread; the
-        // counter is thread-local, so this snapshot covers whatever THIS thread
-        // observed before and during the first encode).
-        round_trip(&trusted_component(), &root);
-        let after_first = graph_count();
-
-        // Repeated encodes must not construct any new recursive Component graph.
-        for _ in 0..50 {
-            round_trip(&trusted_component(), &root);
-        }
-        let after_repeat = graph_count();
-        assert_eq!(
-            after_repeat, after_first,
-            "nested component codecs rebuilt the recursive graph per use (leak)"
         );
     }
 
