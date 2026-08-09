@@ -37,7 +37,15 @@
 #                          Rivet code against Paper.
 #   - scenario runner      join: boots Paper twice via the Azalea client and requires
 #                          identical normalized transcripts, plus a negative case.
-#                          Guarded by the paperclip jar, like oracle verify.
+#                          join --server both / move --server both run the Rivet-vs-Paper
+#                          differentials (issues #192/#53): the same client boots each server
+#                          and must produce equal normalized transcripts, proving Rivet's
+#                          join and authoritative-walk behavior matches Paper's. dwell boots
+#                          Rivet headlessly and proves the client survives past the 30 s
+#                          keepalive kick limit (wall-clock, echoing every live keepalive).
+#                          The Paper rows are guarded by the paperclip jar, like oracle
+#                          verify; dwell needs only the rivet-server binary. Each row exits
+#                          0 PASS / 1 FAIL / 3 UNVERIFIED (never silently green).
 #   - join capture         rivet-capture: boots Paper, joins via the Azalea client
 #                          through a byte-transparent proxy, and diffs the normalized
 #                          join packets byte-for-byte against the committed fixture,
@@ -706,22 +714,47 @@ main() {
     run_join_capture
   fi
 
-  # --- scenario runner (full gate only; M0 join harness: Paper-vs-Paper + negative case) --
-  # The Paper-vs-Paper join harness boots local Paper twice, joins each with the
-  # Azalea headless client, and requires identical normalized transcripts, plus a
-  # negative case proving the comparator detects a tampered position. The runner
-  # also runs its own unit tests first (port isolation, ServerKind, process-
-  # lifecycle cleanup, exit-code classification — issue #155). Runs only
-  # when a paperclip jar is materialized (same guard style as oracle verify);
-  # skipped when gating a crate subset (the scenario drives a whole server).
+  # --- scenario runner (full gate only; terminal M1 acceptance harness) ------
+  # Boots local servers (Paper and/or Rivet), joins each with the Azalea
+  # headless client, and requires identical normalized transcripts (plus a
+  # negative case proving the comparator detects a tampered transcript). The
+  # runner also runs its own unit tests first (port isolation, ServerKind,
+  # process-lifecycle cleanup, exit-code classification — issue #155).
+  #
+  # Rows:
+  #   join                  Paper-vs-Paper self-check + tamper negative.
+  #   join --server both    Rivet-vs-Paper join differential (issue #192, inverted by #159):
+  #                         the same client joins each server and the normalized
+  #                         transcripts must match — proving Rivet's offline
+  #                         login/configuration/PLAY/chunk-receipt matches Paper.
+  #   move --server both    Rivet-vs-Paper authoritative-walk differential:
+  #                         the same client walks in each server and the sampled
+  #                         walk, teleport acks, and keepalive echoes must match.
+  #   dwell                 Rivet-only wall-clock keepalive survival: the client
+  #                         stays in PLAY past the 30 s kick limit echoing every
+  #                         live keepalive, and the rivet log must show the
+  #                         connection and never a `read timeout` kick.
+  #
+  # The Paper rows run when a paperclip jar is materialized (same guard style as
+  # oracle verify). The dwell row is Rivet-only — it needs no jar, only the
+  # rivet-server binary (which run-scenario.sh builds on demand). Every row
+  # exits 0 PASS / 1 FAIL / 3 UNVERIFIED, so a missing prereq or a failed
+  # scenario can never look green. Skipped when gating a crate subset (the
+  # scenario drives a whole server).
   if [ "$FULL_GATE" = true ]; then
-    echo "==> scenario runner (join: Paper-vs-Paper + negative case)"
     if [ -n "${RIVET_ORACLE_JAR:-}" ] || [ -f "$REPO_DIR/tools/rivet-client/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar" ] || \
        ls "$REPO_DIR"/working/Paper/paper-server/build/libs/paper-paperclip*.jar >/dev/null 2>&1; then
+      echo "==> scenario runner (join: Paper-vs-Paper + negative case)"
       "$REPO_DIR/tools/rivet-client/run-scenario.sh" join
+      echo "==> scenario runner (join: Rivet-vs-Paper differential)"
+      "$REPO_DIR/tools/rivet-client/run-scenario.sh" join --server both
+      echo "==> scenario runner (move: Rivet-vs-Paper authoritative-walk differential)"
+      "$REPO_DIR/tools/rivet-client/run-scenario.sh" move --server both
     else
       echo "    SKIPPED (no paperclip jar: set RIVET_ORACLE_JAR or materialize working/Paper first)"
     fi
+    echo "==> scenario runner (dwell: wall-clock keepalive survival past the 30s kick limit)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" dwell --server rivet
   fi
 
   # --- unused dependencies (cargo-machete) -------------------------------------

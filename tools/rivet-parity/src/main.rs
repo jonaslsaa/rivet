@@ -507,6 +507,34 @@ fn scoreboard_path() -> PathBuf {
         .join("PARITY.md")
 }
 
+/// The M1 terminal acceptance section of the scoreboard: the three live-server
+/// scenario rows that this fixture-diff tool does not measure but
+/// `scripts/gate.sh` exercises via `run-scenario`. Two are Paper-vs-Rivet
+/// differentials (`join --server both`, `move --server both`); the third is the
+/// Rivet-only `dwell --server rivet` wall-clock keepalive-survival gate, which
+/// has no Paper comparison. Kept as a pure string function so the checked-in
+/// PARITY.md and a regenerated scoreboard stay byte-identical — the unit test
+/// asserts that identity against the committed file.
+fn m1_scenario_gate_section() -> String {
+    let mut s = String::new();
+    s.push_str("\n### M1 scenario gate (join/move/dwell)\n\n");
+    s.push_str(
+        "The M1 terminal acceptance (issues #157/#160: keepalive survival + terminal M1 gate) \
+         adds three live-server scenario rows that this fixture-diff tool does not measure: they \
+         are exercised by `scripts/gate.sh` via `run-scenario` (exit 0 PASS / 1 FAIL / 3 \
+         UNVERIFIED), never by `rivet-parity`. They are listed here so the DoD's PARITY.md rows \
+         are present and explicit: two Paper-vs-Rivet differentials (`join --server both` and \
+         `move --server both`) plus the Rivet-only `dwell --server rivet` wall-clock \
+         keepalive-survival row.\n\n",
+    );
+    s.push_str("| scenario | servers | comparison | gate.sh row |\n");
+    s.push_str("|---|---|---|---|\n");
+    s.push_str("| `join --server both` | Paper + Rivet | Paper-vs-Rivet play transcript | `run-scenario.sh join --server both` |\n");
+    s.push_str("| `move --server both` | Paper + Rivet | Paper-vs-Rivet authoritative movement transcript | `run-scenario.sh move --server both` |\n");
+    s.push_str("| `dwell --server rivet` | Rivet only | Rivet-only wall-clock keepalive survival past the 30 s kick limit (no Paper comparison) | `run-scenario.sh dwell --server rivet` |\n");
+    s
+}
+
 /// Emit or refresh the workspace-root `PARITY.md` scoreboard.
 ///
 /// Sections are driven purely by the live run's stats, so a check that stops
@@ -556,6 +584,7 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
              (a deliberate capped run); the full corpus is the 432 committed M0 chunk-NBT fixtures._\n"
         ));
     }
+    md.push_str(&m1_scenario_gate_section());
     md.push_str("\n### Divergences\n\n");
     md.push_str("`compound_key_order` is the documented insertion-order divergence (DECISIONS.md D12): Rust's `CompoundTag` is insertion-ordered, so hand-built compounds emit Rust's put sequence while Java emits fastutil hash order; read-back fixtures round-trip byte-for-byte. All such checks remain `ok` and are counted under `diverged`, never under `mismatched`.\n");
 
@@ -853,4 +882,25 @@ fn main() {
         eprintln!("  RESULT: byte-for-byte parity holds (within documented divergences)");
     }
     eprintln!("  STATUS: VERIFIED (all oracle checks ran)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regeneration identity for the M1 scenario-gate section: the checked-in
+    /// PARITY.md is produced by `rivet-parity --scoreboard`, so the generator's
+    /// section must appear in the committed file byte-for-byte. A hand-edited
+    /// PARITY.md that drifts from the generator (or a generator change that
+    /// forgets the committed file) fails here.
+    #[test]
+    fn m1_scenario_gate_section_matches_committed_parity_md() {
+        let committed = std::fs::read_to_string(scoreboard_path())
+            .expect("workspace-root PARITY.md must exist next to the crate");
+        let section = m1_scenario_gate_section();
+        assert!(
+            committed.contains(&section),
+            "committed PARITY.md must contain the generator's M1 section verbatim;\nmissing:\n{section}"
+        );
+    }
 }

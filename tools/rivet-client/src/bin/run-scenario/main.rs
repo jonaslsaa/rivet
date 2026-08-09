@@ -39,6 +39,23 @@
 //!   reference and requires the real comparator/divergence path to report the
 //!   tampered value and refuse PASS, so the live acceptance cannot pass
 //!   vacuously.
+//! - `dwell` (issues #157/#160: keepalive survival + terminal M1 gate): the
+//!   Rivet-only wall-clock keepalive-survival gate. Boots exactly one
+//!   rivet-server; the pinned Azalea client spawns into PLAY and stays connected
+//!   for `--dwell-seconds` of wall
+//!   clock while auto-echoing every live keepalive. Passes only if the client
+//!   survived past the server's 30 s kick limit, proven via the rivet log's
+//!   `connection established` line, the absence of a `read timeout` kick, the
+//!   `rivet_dwell_verdict`, and a tamper negative on `connected_wall_seconds`.
+//!   `dwell` has no comparison concept, so any explicit `--runs` or `--pairs`
+//!   is rejected (exit 64) rather than silently ignored, and `--dwell-seconds`
+//!   is dwell-only (an explicit value on join/move/capture is a silent no-op
+//!   and is rejected the same way). The window must be at least
+//!   `transcript::DWELL_MIN_DWELL_SECONDS` (a 31 s window would span only
+//!   ~29.8 s of challenges and fail the verdict), and `--timeout-seconds` must
+//!   exceed it by more than `DWELL_TIMEOUT_HEADROOM_SECONDS` so the client's
+//!   post-window settle loop and pre-spawn login time cannot let the timeout
+//!   cut the `dwell` record off.
 //!
 //! ## Connection proof (Rivet modes)
 //!
@@ -86,6 +103,20 @@ const DEFAULT_ADDRESS: &str = "127.0.0.1:25599";
 const DEFAULT_USERNAME: &str = "RivetProbe";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_RUNS: usize = 2;
+/// Default dwell window for the `dwell` scenario. The wall-clock seconds the
+/// client stays connected after spawn while echoing every live keepalive. Must
+/// exceed the server's 30 s keepalive kick limit (keepalive.rs
+/// `KEEPALIVE_LIMIT_MS`), with headroom for the first challenge to land after
+/// the join burst settles.
+const DEFAULT_DWELL_SECONDS: u64 = 41;
+/// Reserved client-side headroom (s) beyond the dwell window that
+/// `--timeout-seconds` must accommodate before it can pass validation: the
+/// client's 1 s keepalive settle loop (`rivet-client`'s `DWELL_SETTLE_TIMEOUT`)
+/// plus the login/configuration time before spawn (`rivet-client`'s
+/// `DWELL_LOGIN_HEADROOM_SECONDS`). Mirrors the client's own parse-time
+/// validation so a `run-scenario`-accepted invocation is never cut off by the
+/// client's timeout branch before it emits the `dwell` record.
+const DWELL_TIMEOUT_HEADROOM_SECONDS: u64 = 6;
 
 // Machine-stable exit codes. PASS/FAIL/UNVERIFIED are the shared contract
 // (rivet-harness-common::exit); usage errors are a separate 64.
@@ -152,6 +183,7 @@ impl From<String> for RunnerError {
 enum Subcommand {
     Join,
     Move,
+    Dwell,
     Capture,
     Help,
 }
@@ -205,6 +237,7 @@ impl Pairs {
     }
 }
 
+#[derive(Debug)]
 struct Args {
     command: Subcommand,
     server: ServerSelection,
@@ -213,6 +246,7 @@ struct Args {
     username: String,
     timeout_seconds: u64,
     runs: usize,
+    dwell_seconds: u64,
 }
 
 impl Args {
@@ -229,13 +263,17 @@ impl Args {
         let mut username = DEFAULT_USERNAME.to_owned();
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
         let mut runs = DEFAULT_RUNS;
+        let mut dwell_seconds = DEFAULT_DWELL_SECONDS;
+        let mut server_explicit = false;
         let mut runs_explicit = false;
         let mut pairs_explicit = false;
+        let mut dwell_explicit = false;
 
         if let Some(sub) = args.next() {
             command = match sub.as_str() {
                 "join" => Subcommand::Join,
                 "move" => Subcommand::Move,
+                "dwell" => Subcommand::Dwell,
                 "capture" => Subcommand::Capture,
                 "--help" | "-h" | "help" => Subcommand::Help,
                 _ => return Err(format!("unknown subcommand: {sub}\n\n{}", usage())),
@@ -264,6 +302,14 @@ impl Args {
                     server = ServerSelection::parse(&v).ok_or_else(|| {
                         format!("invalid --server value: {v} (expected paper|rivet|both)")
                     })?;
+                    server_explicit = true;
+                }
+                "--dwell-seconds" => {
+                    let v = next_value(&mut args, "--dwell-seconds")?;
+                    dwell_seconds = v
+                        .parse()
+                        .map_err(|_| format!("invalid --dwell-seconds value: {v}"))?;
+                    dwell_explicit = true;
                 }
                 "--pairs" => {
                     let v = next_value(&mut args, "--pairs")?;
@@ -274,6 +320,19 @@ impl Args {
                 }
                 _ => return Err(format!("unknown argument: {argument}\n\n{}", usage())),
             }
+        }
+
+        // `--dwell-seconds` only has meaning for the dwell scenario; on
+        // join/move/capture the client is never asked to dwell, so an explicit
+        // value would be a silent no-op. Reject it (exit 64) rather than ignore
+        // it — the same no-silent-noop policy as --runs/--pairs on dwell.
+        if dwell_explicit && command != Subcommand::Dwell {
+            return Err(
+                "--dwell-seconds only applies to the dwell scenario (the keepalive-survival \
+                 gate); join/move/capture never dwell, so an explicit value would be a silent \
+                 no-op — drop it"
+                    .to_owned(),
+            );
         }
 
         // When --pairs is omitted, derive it from --server: rivet/both only
@@ -372,6 +431,75 @@ impl Args {
             }
         }
 
+        if command == Subcommand::Dwell {
+            // The dwell scenario is a Rivet headless-boot survival probe: it
+            // always boots rivet-server (never Paper, which has no place in the
+            // keepalive-survival gate). Only --server rivet (or the default,
+            // which the server-defaulting logic below pins to rivet) is valid.
+            if server_explicit && server != ServerSelection::Rivet {
+                return Err(format!(
+                    "dwell only supports --server rivet (the keepalive-survival gate is a Rivet \
+                     headless-boot probe); got --server {}",
+                    server.as_str()
+                ));
+            }
+            server = ServerSelection::Rivet;
+            // dwell has no comparison concept (it boots exactly one Rivet
+            // server), so an explicit --pairs is a silent no-op. Reject it
+            // rather than ignore it — a caller who passes --pairs believes the
+            // comparison happened.
+            if pairs_explicit {
+                return Err(
+                    "dwell has no --pairs comparison (it boots exactly one Rivet server); drop it"
+                        .to_owned(),
+                );
+            }
+            // dwell always boots exactly one Rivet server, so any explicit
+            // --runs — even `--runs 1`, which equals the implicit default — is
+            // a silent no-op. Reject every explicit value (like the both-server
+            // precedent) rather than accept one that does nothing.
+            if runs_explicit {
+                return Err(
+                    "dwell always boots exactly one Rivet server, so --runs is a silent no-op; \
+                     drop it"
+                        .to_owned(),
+                );
+            }
+            runs = 1;
+            // The dwell window must be long enough to prove survival past the
+            // server's 30 s kick limit AND to span the required 30 s of
+            // challenges after the first one lands (~1.2 s in). A window of
+            // only 31 s would span ~29.8 s and fail the verdict on a healthy
+            // run, so the floor is `DWELL_MIN_DWELL_SECONDS`, not
+            // `DWELL_SURVIVAL_SECONDS + 1`.
+            if dwell_seconds < transcript::DWELL_MIN_DWELL_SECONDS {
+                return Err(format!(
+                    "--dwell-seconds must be at least {} (the server's {} s keepalive kick limit \
+                     plus the first-challenge offset and margin; a shorter window cannot prove \
+                     survival past the kick or span the required {} s of challenges)",
+                    transcript::DWELL_MIN_DWELL_SECONDS,
+                    transcript::DWELL_SURVIVAL_SECONDS,
+                    transcript::DWELL_MIN_SPAN_MS / 1000
+                ));
+            }
+            // The outer client timeout starts at process launch, while the
+            // dwell window only starts at spawn; after the window the client
+            // spends up to 1 s settling the keepalive stream before emitting
+            // the `dwell` record. `dwell < timeout` is therefore not enough —
+            // the timeout must reserve the settle loop AND the pre-spawn
+            // login/configuration time, or the timeout branch cuts the client
+            // off before it emits.
+            if timeout_seconds <= dwell_seconds + DWELL_TIMEOUT_HEADROOM_SECONDS {
+                return Err(format!(
+                    "--timeout-seconds must exceed --dwell-seconds by more than \
+                     {DWELL_TIMEOUT_HEADROOM_SECONDS}s of settle/login headroom (the client spends \
+                     up to 1 s settling the keepalive stream after the dwell window, plus the \
+                     login/configuration time before spawn, and must emit the dwell record before \
+                     the timeout fires); got dwell {dwell_seconds}s timeout {timeout_seconds}s"
+                ));
+            }
+        }
+
         Ok(Self {
             command,
             server,
@@ -380,6 +508,7 @@ impl Args {
             username,
             timeout_seconds,
             runs,
+            dwell_seconds,
         })
     }
 }
@@ -391,15 +520,16 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: run-scenario <join|move|capture> [options]\n\
+        "Usage: run-scenario <join|move|dwell|capture> [options]\n\
          Options:\n\
-         \x20 --server paper|rivet|both  which servers to boot (default paper)\n\
+         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell is always rivet)\n\
          \x20 --pairs paper:paper|paper:rivet\n\
          \x20                            comparison to run (default paper:paper)\n\
          \x20 --address HOST:PORT        server address (default {DEFAULT_ADDRESS})\n\
          \x20 --username NAME            offline account name (default {DEFAULT_USERNAME})\n\
          \x20 --timeout-seconds N        client timeout per run (default {DEFAULT_TIMEOUT_SECONDS})\n\
-         \x20 --runs N                   boots to compare (default {DEFAULT_RUNS}; paper needs >=2)"
+         \x20 --dwell-seconds N          dwell-mode wall-clock window (default {DEFAULT_DWELL_SECONDS})\n\
+         \x20 --runs N                   boots to compare (default {DEFAULT_RUNS}; paper needs >=2; dwell rejects it)"
     )
 }
 
@@ -462,29 +592,52 @@ struct ClientRun {
     stderr_path: PathBuf,
 }
 
+/// Client-launch parameters forwarded to the headless `rivet-client` binary for
+/// a single run. `dwell_seconds` is only meaningful in `dwell` mode; non-dwell
+/// runs set it to 0 and [`client_argv`] omits `--dwell-seconds` entirely,
+/// because the client rejects an explicit non-dwell `--dwell-seconds` as a
+/// silent no-op.
+struct ClientSpec {
+    address: String,
+    username: String,
+    timeout_seconds: u64,
+    dwell_seconds: u64,
+    mode: String,
+}
+
+/// Build the `rivet-client` argv for one run. `--dwell-seconds` is appended
+/// only for `dwell` mode: the client rejects an explicit `--dwell-seconds` on
+/// join/move as a silent no-op, so forwarding the runner's non-dwell 0 would
+/// make every non-dwell invocation fail at parse time.
+fn client_argv(spec: &ClientSpec) -> Vec<String> {
+    let mut argv = vec![
+        "--mode".to_owned(),
+        spec.mode.clone(),
+        "--address".to_owned(),
+        spec.address.clone(),
+        "--username".to_owned(),
+        spec.username.clone(),
+        "--timeout-seconds".to_owned(),
+        spec.timeout_seconds.to_string(),
+    ];
+    if spec.mode == "dwell" {
+        argv.push("--dwell-seconds".to_owned());
+        argv.push(spec.dwell_seconds.to_string());
+    }
+    argv
+}
+
 /// Run the headless client once and preserve its raw stdout/stderr.
 fn run_client(
     binary: &Path,
-    address: &str,
-    username: &str,
-    timeout_seconds: u64,
+    spec: &ClientSpec,
     work: &Path,
     prefix: &str,
-    mode: &str,
 ) -> Result<ClientRun, RunnerError> {
     let stdout_path = work.join(format!("{prefix}.stdout.jsonl"));
     let stderr_path = work.join(format!("{prefix}.stderr.log"));
     let output = Command::new(binary)
-        .args([
-            "--mode",
-            mode,
-            "--address",
-            address,
-            "--username",
-            username,
-            "--timeout-seconds",
-            &timeout_seconds.to_string(),
-        ])
+        .args(client_argv(spec))
         .stdin(Stdio::null())
         .output()
         .map_err(|e| {
@@ -610,12 +763,15 @@ fn one_join(
     println!("[run  {idx}] joining via rivet-client ...");
     let client_run = run_client(
         client_bin,
-        &address.to_string(),
-        &args.username,
-        args.timeout_seconds,
+        &ClientSpec {
+            address: address.to_string(),
+            username: args.username.clone(),
+            timeout_seconds: args.timeout_seconds,
+            dwell_seconds: 0,
+            mode: "join".to_owned(),
+        },
         work,
         &format!("client{idx}"),
-        "join",
     )?;
     server::shutdown(&mut srv)?;
 
@@ -794,12 +950,15 @@ fn one_move(
     println!("[run  {idx}] walking via rivet-client (move mode) ...");
     let client_run = run_client(
         client_bin,
-        &address.to_string(),
-        &args.username,
-        args.timeout_seconds,
+        &ClientSpec {
+            address: address.to_string(),
+            username: args.username.clone(),
+            timeout_seconds: args.timeout_seconds,
+            dwell_seconds: 0,
+            mode: "move".to_owned(),
+        },
         work,
         &format!("client{idx}"),
-        "move",
     )?;
     server::shutdown(&mut srv)?;
 
@@ -999,12 +1158,15 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
         println!("[run  {idx}] connecting via rivet-client ...");
         let client_run = run_client(
             &client_bin,
-            &base.to_string(),
-            &args.username,
-            args.timeout_seconds,
+            &ClientSpec {
+                address: base.to_string(),
+                username: args.username.clone(),
+                timeout_seconds: args.timeout_seconds,
+                dwell_seconds: 0,
+                mode: "join".to_owned(),
+            },
             &work,
             &prefix,
-            "join",
         )?;
         server::shutdown(&mut srv)?;
         // The client transcript is only the client-side half of the proof;
@@ -1524,12 +1686,15 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     )?;
     let paper_client = run_client(
         &client_bin,
-        &paper_addr.to_string(),
-        &args.username,
-        args.timeout_seconds,
+        &ClientSpec {
+            address: paper_addr.to_string(),
+            username: args.username.clone(),
+            timeout_seconds: args.timeout_seconds,
+            dwell_seconds: 0,
+            mode: "join".to_owned(),
+        },
         &work,
         "paper",
-        "join",
     )?;
     server::shutdown(&mut paper_srv)?;
     // Load-bearing provenance: the Paper reference this differential compares
@@ -1569,12 +1734,15 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     )?;
     let rivet_client = run_client(
         &client_bin,
-        &rivet_addr.to_string(),
-        &args.username,
-        args.timeout_seconds,
+        &ClientSpec {
+            address: rivet_addr.to_string(),
+            username: args.username.clone(),
+            timeout_seconds: args.timeout_seconds,
+            dwell_seconds: 0,
+            mode: "join".to_owned(),
+        },
         &work,
         "rivet",
-        "join",
     )?;
     server::shutdown(&mut rivet_srv)?;
     // Server-side half of the connection proof: the rivet log must show the
@@ -1728,12 +1896,15 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
     )?;
     let paper_client = run_client(
         &client_bin,
-        &paper_addr.to_string(),
-        &args.username,
-        args.timeout_seconds,
+        &ClientSpec {
+            address: paper_addr.to_string(),
+            username: args.username.clone(),
+            timeout_seconds: args.timeout_seconds,
+            dwell_seconds: 0,
+            mode: "move".to_owned(),
+        },
         &work,
         "paper",
-        "move",
     )?;
     server::shutdown(&mut paper_srv)?;
     // Load-bearing provenance (same as the join differential): the Paper
@@ -1771,12 +1942,15 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
     )?;
     let rivet_client = run_client(
         &client_bin,
-        &rivet_addr.to_string(),
-        &args.username,
-        args.timeout_seconds,
+        &ClientSpec {
+            address: rivet_addr.to_string(),
+            username: args.username.clone(),
+            timeout_seconds: args.timeout_seconds,
+            dwell_seconds: 0,
+            mode: "move".to_owned(),
+        },
         &work,
         "rivet",
-        "move",
     )?;
     server::shutdown(&mut rivet_srv)?;
     // Server-side half of the connection proof: the rivet log must show the
@@ -1913,6 +2087,175 @@ fn run_move(args: &Args) -> Result<(), RunnerError> {
     }
 }
 
+/// Mode E: the wall-clock keepalive-survival gate (issues #157/#160: keepalive
+/// survival + terminal M1 gate). Boots a real rivet-server headlessly, drives
+/// the pinned Azalea client's `dwell` mode (spawn into PLAY, stay connected for
+/// `--dwell-seconds` wall-clock seconds while azalea auto-echoes every live
+/// keepalive), and verifies the client survived past the server's 30 s keepalive
+/// kick limit.
+///
+/// The survival proof is four-fold, mirroring the other Rivet scenarios:
+///
+/// 1. the rivet-server log shows `connection established` (the client genuinely
+///    reached the Rivet port — only the real rivet-server emits it),
+/// 2. the rivet-server log shows no `read timeout` kick (server_connection_listener
+///    logs `read timeout` when the keepalive timeout fires — a client that
+///    stopped echoing would be kicked here),
+/// 3. the client transcript is judged by [`transcript::rivet_dwell_verdict`]:
+///    outcome `dwelled`, lifecycle containing login and spawn, the pinned Azalea
+///    revision, wall-clock survival past 30 s, >= 30 challenges, a 1:1
+///    challenge->echo pairing, and a challenge span across the window — the
+///    verdict rejects a transcript whose 1:1 challenge->echo relationship is
+///    missing,
+/// 4. a controlled negative: tamper the compared survival scalar
+///    (`connected_wall_seconds`) to 0 and require the real verdict path to
+///    refuse PASS — the acceptance cannot pass vacuously.
+///
+/// Missing prereqs (rivet-server binary, rivet-client binary) surface as
+/// UNVERIFIED, never a silent skip.
+fn run_dwell(args: &Args) -> Result<(), RunnerError> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/scenario-dwell");
+    fs::create_dir_all(&work)?;
+    let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
+    let client_bin = ensure_client_binary()?;
+    let base = base_address(args)?;
+
+    println!("rivet scenario runner: dwell (wall-clock keepalive survival)");
+    println!("    rivet-server bin  : {}", rivet_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    address           : {}", args.address);
+    println!(
+        "    dwell window      : {}s (server keepalive kick limit: {}s)",
+        args.dwell_seconds,
+        transcript::DWELL_SURVIVAL_SECONDS
+    );
+    println!();
+
+    let run_dir = work.join("rivet1");
+    let log_path = work.join("rivet1.log");
+    let mut srv = server::boot(
+        server::ServerKind::Rivet,
+        &run_dir,
+        &log_path,
+        &rivet_bin,
+        None,
+        base,
+        None,
+        &[],
+    )?;
+    println!("[run  1] dwelling via rivet-client (dwell mode) ...");
+    let client_run = run_client(
+        &client_bin,
+        &ClientSpec {
+            address: base.to_string(),
+            username: args.username.clone(),
+            timeout_seconds: args.timeout_seconds,
+            dwell_seconds: args.dwell_seconds,
+            mode: "dwell".to_owned(),
+        },
+        &work,
+        "dwell1",
+    )?;
+    server::shutdown(&mut srv)?;
+    // Server-side half of the connection proof: the real rivet-server must have
+    // accepted the client (connection established on TCP accept).
+    verify_rivet_connection(&log_path)?;
+    // Survival's server-side negative: the keepalive timeout must NOT have
+    // fired. A client that stopped echoing would be kicked with a `read timeout`
+    // log (server_connection_listener.rs `DisconnectReason::Timeout`). Requiring
+    // its absence is the genuinely server-side half of the survival proof — the
+    // client transcript alone cannot prove the server never disconnected it.
+    let rivet_log = fs::read_to_string(&log_path)?;
+    if rivet_log.contains("read timeout") {
+        return Err(RunnerError::Gate(format!(
+            "rivet log {} shows a 'read timeout' kick — the server disconnected the client for \
+             failing its keepalive; the client did not survive the {}-second kick window. The \
+             transcript's echo counts are therefore meaningless.",
+            log_path.display(),
+            transcript::DWELL_SURVIVAL_SECONDS
+        )));
+    }
+
+    let normalized =
+        transcript::normalize_dwell(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+    let transcript_path = work.join("dwell1.transcript.json");
+    fs::write(&transcript_path, serde_json::to_string_pretty(&normalized)?)?;
+    let boundary = transcript::rivet_dwell_verdict(&normalized)?;
+    println!(
+        "[run  1] outcome={} connected_wall_seconds={} challenge_count={} echo_count={} \
+         (survival boundary: {boundary}) — transcript in {}",
+        normalized["outcome"],
+        normalized["dwell"]["connected_wall_seconds"],
+        normalized["dwell"]["challenge_count"],
+        normalized["dwell"]["echo_count"],
+        transcript_path.display()
+    );
+
+    // Negative case: prove the verdict path just exercised is non-vacuous.
+    // Tamper a *compared* survival scalar (connected_wall_seconds, which the
+    // verdict strictly requires to exceed the kick limit) and require the real
+    // verdict to refuse PASS. Without this, a verdict that never checked the
+    // window (or a transcript shaped to satisfy a vacuous check) would pass.
+    println!();
+    println!("Negative case (tamper connected_wall_seconds through the real verdict path)");
+    {
+        let mut tampered = normalized.clone();
+        tampered["dwell"]["connected_wall_seconds"] = json!(0.0);
+        match transcript::rivet_dwell_verdict(&tampered) {
+            Err(e) if e.contains("connected_wall_seconds") => {
+                println!(
+                    "    tampered connected_wall_seconds -> 0 — the verdict refused PASS, so \
+                     wall-clock survival is genuinely verified"
+                );
+            }
+            Err(e) => {
+                return Err(RunnerError::Gate(format!(
+                    "negative case FAILED: the dwell verdict refused PASS for a reason other than \
+                     the tampered connected_wall_seconds: {e}"
+                )));
+            }
+            Ok(_) => {
+                return Err(RunnerError::Gate(
+                    "negative case FAILED: the dwell verdict PASSED with connected_wall_seconds=0 \
+                     — wall-clock survival is not genuinely checked"
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+
+    println!();
+    println!("VERDICT: PASS — rivet-server kept a real client alive in PLAY past its 30 s");
+    println!("    keepalive kick limit:");
+    println!(
+        "      * The client spawned into PLAY and stayed connected for {}-wall-clock seconds",
+        args.dwell_seconds
+    );
+    println!(
+        "        (the server's keepalive kick limit is {}s), echoing every live keepalive",
+        transcript::DWELL_SURVIVAL_SECONDS
+    );
+    println!(
+        "        challenge (1:1 challenge->echo, {} challenges).",
+        normalized["dwell"]["challenge_count"]
+    );
+    println!("      * The connection is proven two ways: the rivet log shows 'connection");
+    println!("        established' (only the real rivet-server emits it) and contains no 'read");
+    println!("        timeout' kick (a client that stopped echoing would be disconnected here),");
+    println!(
+        "        and the client transcript is outcome=dwelled with the pinned Azalea revision,"
+    );
+    println!("        wall-clock survival past the kick limit, and a 1:1 challenge->echo cadence.");
+    println!("      * The negative case proved the verdict path is non-vacuous: a tampered");
+    println!(
+        "        connected_wall_seconds=0 was refused PASS by the real verdict, so wall-clock"
+    );
+    println!("        survival cannot be waved through by a transcript that never survived.");
+    println!("    artifacts: {}", work.display());
+    Ok(())
+}
+
 fn run_join(args: &Args) -> Result<(), RunnerError> {
     match (args.server, args.pairs) {
         (ServerSelection::Paper, Pairs::PaperPaper) => run_paper_self_check(args),
@@ -1968,12 +2311,15 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
     )?;
     let client_run = run_client(
         &client_bin,
-        &base.to_string(),
-        &args.username,
-        args.timeout_seconds,
+        &ClientSpec {
+            address: base.to_string(),
+            username: args.username.clone(),
+            timeout_seconds: args.timeout_seconds,
+            dwell_seconds: 0,
+            mode: "join".to_owned(),
+        },
         &work,
         "client1",
-        "join",
     )?;
     server::shutdown(&mut srv)?;
 
@@ -1996,6 +2342,7 @@ fn main() -> ExitCode {
     let result = match args.command {
         Subcommand::Join => run_join(&args),
         Subcommand::Move => run_move(&args),
+        Subcommand::Dwell => run_dwell(&args),
         Subcommand::Capture => run_capture(&args),
         Subcommand::Help => {
             println!("{}", usage());
@@ -2190,6 +2537,7 @@ mod tests {
             username: DEFAULT_USERNAME.to_owned(),
             timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
             runs: DEFAULT_RUNS,
+            dwell_seconds: DEFAULT_DWELL_SECONDS,
         };
         let addr = base_address(&args).expect("hostname resolves");
         assert_eq!(addr.port(), 25599);
@@ -2230,6 +2578,227 @@ mod tests {
             RunnerError::Server(server::Error::Gate("x".into())).exit_code(),
             EXIT_FAIL
         );
+    }
+
+    #[test]
+    fn dwell_parses_and_defaults_to_a_single_rivet_boot() {
+        let a = parse(&["dwell"]).unwrap();
+        assert_eq!(a.command, Subcommand::Dwell);
+        assert_eq!(
+            a.server,
+            ServerSelection::Rivet,
+            "dwell is always a Rivet boot"
+        );
+        assert_eq!(a.runs, 1, "dwell runs exactly one boot");
+        assert_eq!(a.dwell_seconds, DEFAULT_DWELL_SECONDS);
+    }
+
+    #[test]
+    fn dwell_accepts_explicit_dwell_seconds() {
+        let a = parse(&["dwell", "--dwell-seconds", "45"]).unwrap();
+        assert_eq!(a.dwell_seconds, 45);
+        assert_eq!(a.server, ServerSelection::Rivet);
+    }
+
+    #[test]
+    fn dwell_rejects_a_paper_boot() {
+        // The keepalive-survival gate is a Rivet headless-boot probe; Paper has
+        // no place in it.
+        let err = parse(&["dwell", "--server", "paper"]).unwrap_err();
+        assert!(
+            err.contains("--server rivet"),
+            "error must explain only rivet is valid, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_requires_a_window_past_the_kick_limit() {
+        // The dwell window must exceed the server's 30 s keepalive kick limit;
+        // a shorter window cannot prove survival past it.
+        let err = parse(&["dwell", "--dwell-seconds", "20"]).unwrap_err();
+        assert!(
+            err.contains("kick limit"),
+            "error must name the kick limit, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_requires_a_window_above_the_span_floor() {
+        // The old `DWELL_SURVIVAL_SECONDS + 1` = 31 s floor was marginal: the
+        // first challenge lands ~1.2 s after spawn, so a 31 s window spans only
+        // ~29.8 s — below the required 30 s challenge span. The floor is now
+        // `DWELL_MIN_DWELL_SECONDS`, so 34 s is rejected and 35 s is accepted.
+        let err = parse(&["dwell", "--dwell-seconds", "34"]).unwrap_err();
+        assert!(
+            err.contains("at least 35"),
+            "error must state the minimum window, got {err}"
+        );
+        assert!(parse(&["dwell", "--dwell-seconds", "35"]).is_ok());
+    }
+
+    #[test]
+    fn dwell_timeout_must_reserve_settle_and_login_headroom() {
+        // `dwell < timeout` is not enough: the timeout starts at process launch
+        // while the dwell window starts at spawn, and after the window the
+        // client spends up to 1 s settling the keepalive stream before emitting.
+        // 47 = 41 + 6 (settle 1 s + login headroom 5 s) must be rejected
+        // (the record would race the timeout); 48 leaves a strict margin.
+        let err =
+            parse(&["dwell", "--dwell-seconds", "41", "--timeout-seconds", "47"]).unwrap_err();
+        assert!(
+            err.contains("--timeout-seconds") && err.contains("headroom"),
+            "error must explain the reserved headroom, got {err}"
+        );
+        assert!(parse(&["dwell", "--dwell-seconds", "41", "--timeout-seconds", "48"]).is_ok());
+    }
+
+    #[test]
+    fn dwell_requires_the_window_before_the_client_timeout() {
+        // The dwell must finish before the outer client timeout, or the timeout
+        // branch would cut the client off before it emits the dwell record.
+        let err =
+            parse(&["dwell", "--dwell-seconds", "41", "--timeout-seconds", "20"]).unwrap_err();
+        assert!(
+            err.contains("--timeout-seconds"),
+            "error must explain the timeout bound, got {err}"
+        );
+    }
+
+    #[test]
+    fn non_dwell_commands_reject_explicit_dwell_seconds() {
+        // --dwell-seconds is dwell-scenario-only; on join/move/capture an
+        // explicit value would be a silent no-op (the client is invoked with a
+        // 0 dwell), so it is rejected with the exit-64 CLI-misuse error.
+        for cmd in ["join", "move", "capture"] {
+            let err = parse(&[cmd, "--dwell-seconds", "41"]).unwrap_err();
+            assert!(
+                err.contains("--dwell-seconds") && err.contains("silent no-op"),
+                "{cmd} must reject --dwell-seconds as a silent no-op, got {err}"
+            );
+        }
+        // dwell still accepts an explicit value.
+        assert!(parse(&["dwell", "--dwell-seconds", "41"]).is_ok());
+    }
+
+    #[test]
+    fn client_argv_omits_dwell_seconds_for_non_dwell_modes() {
+        // Counterfactual for the release-blocking regression: `run_client`
+        // unconditionally forwarded `--dwell-seconds 0`, which the client
+        // rejects on join/move as an explicit silent-no-op value (exit 64),
+        // breaking every non-dwell run. The argv builder must append the flag
+        // only for dwell and forward the runner's non-dwell 0 as nothing at all.
+        let join = client_argv(&ClientSpec {
+            address: DEFAULT_ADDRESS.to_owned(),
+            username: DEFAULT_USERNAME.to_owned(),
+            timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
+            dwell_seconds: 0,
+            mode: "join".to_owned(),
+        });
+        assert_eq!(
+            join,
+            vec![
+                "--mode".to_owned(),
+                "join".to_owned(),
+                "--address".to_owned(),
+                DEFAULT_ADDRESS.to_owned(),
+                "--username".to_owned(),
+                DEFAULT_USERNAME.to_owned(),
+                "--timeout-seconds".to_owned(),
+                DEFAULT_TIMEOUT_SECONDS.to_string(),
+            ],
+            "non-dwell argv must be exactly the mode/address/username/timeout set"
+        );
+        for mode in ["join", "move"] {
+            let argv = client_argv(&ClientSpec {
+                address: DEFAULT_ADDRESS.to_owned(),
+                username: DEFAULT_USERNAME.to_owned(),
+                timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
+                dwell_seconds: 0,
+                mode: mode.to_owned(),
+            });
+            assert!(
+                !argv.iter().any(|a| a == "--dwell-seconds"),
+                "{mode} argv must omit --dwell-seconds, got {argv:?}"
+            );
+        }
+        // dwell forwards its value so the client's parse-time window and
+        // timeout-headroom validation can run.
+        let dwell = client_argv(&ClientSpec {
+            address: DEFAULT_ADDRESS.to_owned(),
+            username: DEFAULT_USERNAME.to_owned(),
+            timeout_seconds: 48,
+            dwell_seconds: 41,
+            mode: "dwell".to_owned(),
+        });
+        assert_eq!(dwell[dwell.len() - 2], "--dwell-seconds");
+        assert_eq!(dwell[dwell.len() - 1], "41");
+    }
+
+    #[test]
+    fn dwell_rejects_explicit_runs_one() {
+        // dwell always boots exactly one Rivet server; an explicit --runs 1 —
+        // equal to the implicit default — is still a silent no-op and must be
+        // rejected (no-silent-noop policy, like the both-server precedent).
+        let err = parse(&["dwell", "--runs", "1"]).unwrap_err();
+        assert!(err.contains("--runs"), "error must name --runs, got {err}");
+        assert!(
+            err.contains("silent no-op"),
+            "error must explain --runs is a no-op, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_rejects_an_explicit_runs_count() {
+        // dwell always boots exactly one Rivet server; a --runs other than 1 is
+        // a silent no-op and must be rejected.
+        let err = parse(&["dwell", "--runs", "2"]).unwrap_err();
+        assert!(err.contains("--runs"), "error must name --runs, got {err}");
+        assert!(
+            err.contains("silent no-op"),
+            "error must explain --runs is a no-op, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_rejects_an_explicit_pairs() {
+        // dwell has no comparison concept (exactly one Rivet boot), so an
+        // explicit --pairs would be a silent no-op. Reject it with the CLI
+        // misuse error (which exits 64), like --runs.
+        let err = parse(&["dwell", "--pairs", "paper:rivet"]).unwrap_err();
+        assert!(
+            err.contains("--pairs"),
+            "error must name --pairs, got {err}"
+        );
+        assert!(
+            err.contains("no --pairs"),
+            "error must explain dwell has no comparison, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_negative_rejects_a_zero_survival_window() {
+        // The dwell verdict must reject a transcript that did not actually
+        // survive past the kick limit — the controlled negative the live
+        // scenario runs. A verdict that passed connected_wall_seconds=0 would be
+        // vacuous.
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":50,"mode":"dwell","dwell_seconds":41,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            r#"{"event":"dwell","requested_dwell_seconds":41,"connected_wall_seconds":41.2,"challenge_count":41,"echo_count":41,"challenge_ids":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41],"echo_ids":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41],"first_challenge_offset_ms":1200,"last_challenge_offset_ms":41100,"challenge_span_ms":39900,"protocol":1}"#,
+        ]
+        .join("\n");
+        let t = transcript::normalize_dwell(&raw).expect("normalize");
+        let mut tampered = t.clone();
+        tampered["dwell"]["connected_wall_seconds"] = json!(0.0);
+        let err = transcript::rivet_dwell_verdict(&tampered).unwrap_err();
+        assert!(
+            err.contains("connected_wall_seconds"),
+            "a zero survival window must be refused, got {err}"
+        );
+        // The untampered transcript passes — the negative is not vacuous.
+        assert!(transcript::rivet_dwell_verdict(&t).is_ok());
     }
 
     fn diff_with(path: &str) -> comparator::TranscriptDiff {
