@@ -14,8 +14,10 @@
 //!
 //! Validation: the runs must partition `0..state_count` densely (first starts
 //! at 0, starts strictly increasing, lengths positive, no overlap, sum ==
-//! count), the word's reserved bits (22..32) must be zero, and the fixture must
-//! match its provenance manifest sha256. `state_count` is pinned to 32366 (the
+//! count), every run's start/length must fit the emitted `(u16, u16, u32)`
+//! tuple and lie within `state_count`, the accumulation is overflow-checked,
+//! the word's reserved bits (22..32) must be zero, and the fixture must match
+//! its provenance manifest sha256. `state_count` is pinned to 32366 (the
 //! emitted `BLOCK_STATE_COUNT`) by the live probe.
 
 use std::fs;
@@ -126,10 +128,13 @@ fn check_state_count_matches(runs: &[Run], block_state_count: u32) -> Result<()>
 }
 
 /// Structural + oracle-conformance validation of `block_behaviors.json`. Fails
-/// on: a missing/malformed/non-integer field, a non-positive run length, a
-/// first run not starting at 0, non-strictly-increasing run starts, runs that
-/// overlap or leave a gap, a total that does not equal `state_count`, `word`
-/// with reserved bits set, or a word field outside its documented bit width.
+/// on: a missing/malformed/non-integer field, a `state_count` that does not fit
+/// u16 (the emitted run tuple width), a non-positive run length, a run
+/// start/length that does not fit u32 (rejected before the lossy cast), a run
+/// that extends past `state_count`, a first run not starting at 0,
+/// non-strictly-increasing run starts, runs that overlap or leave a gap, a
+/// total that does not equal `state_count`, `word` with reserved bits set, or a
+/// word field outside its documented bit width.
 fn validate(root: Value) -> Result<Vec<Run>> {
     let obj = root
         .as_object()
@@ -138,6 +143,10 @@ fn validate(root: Value) -> Result<Vec<Run>> {
         .get("state_count")
         .and_then(Value::as_u64)
         .with_context(|| "`state_count` must be a non-negative integer")?;
+    // The emitted runs are `(u16, u16, u32)` tuples; `state_count` is the upper
+    // bound on every run's start and length, so it must fit u16. Checked up
+    // front so a hostile total is rejected before any per-run work.
+    u16::try_from(state_count).context("state_count does not fit u16 (emitted runs are u16)")?;
 
     let runs_value = obj
         .get("runs")
@@ -169,6 +178,15 @@ fn validate(root: Value) -> Result<Vec<Run>> {
         if length == 0 {
             bail!("run {i} has zero length");
         }
+        // Reject values that cannot be represented in the emitted `(u16, u16,
+        // u32)` tuples before the lossy casts below — a hostile fixture must
+        // fail cleanly, never truncate.
+        if start > u32::MAX as u64 {
+            bail!("run {i} start {start} exceeds u32");
+        }
+        if length > u32::MAX as u64 {
+            bail!("run {i} length {length} exceeds u32");
+        }
         let word = run_obj
             .get("word")
             .and_then(Value::as_u64)
@@ -188,19 +206,30 @@ fn validate(root: Value) -> Result<Vec<Run>> {
                  the previous run ends at {expected_start}"
             );
         }
+        // A run may not extend past the registry total, and neither the run's
+        // end nor the accumulated start may overflow — use checked arithmetic
+        // so a hostile fixture is rejected rather than panicking or wrapping.
+        let end = start
+            .checked_add(length)
+            .with_context(|| format!("run {i} start+length overflows u64"))?;
+        if end > state_count {
+            bail!(
+                "run {i} extends past state_count: [start, start+length) = [{start}, {end}) \
+                 overruns {state_count}"
+            );
+        }
+        expected_start = expected_start
+            .checked_add(length)
+            .with_context(|| format!("run {i} length overflows the accumulated start"))?;
         runs.push(Run {
             start: start as u32,
             length: length as u32,
             word: word as u32,
         });
-        expected_start += length;
     }
     if expected_start != state_count {
         bail!("runs cover [0, {expected_start}) but state_count is {state_count}");
     }
-    // The emitted runs are `(u16, u16, u32)` tuples; start/length are bounded by
-    // state_count, so this single check keeps every run's fields in range.
-    u16::try_from(state_count).context("state_count does not fit u16 (emitted runs are u16)")?;
 
     Ok(runs)
 }
@@ -450,6 +479,68 @@ mod tests {
         v["runs"] = serde_json::json!([]);
         let err = validate(v).unwrap_err();
         assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn huge_length_near_u64_max_fails() {
+        // A length near u64::MAX must be rejected by the u32 bound before any
+        // lossy cast — previously it truncated and then failed with a
+        // misleading density error.
+        let mut v = valid_root();
+        v["runs"][0]["length"] = serde_json::json!(u64::MAX - 1);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("exceeds u32"), "got: {err}");
+    }
+
+    #[test]
+    fn huge_start_near_u64_max_fails() {
+        // A start near u64::MAX must be rejected by the u32 bound, not hit the
+        // density check with a truncated value.
+        let mut v = valid_root();
+        v["runs"][1]["start"] = serde_json::json!(u64::MAX - 1);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("exceeds u32"), "got: {err}");
+    }
+
+    #[test]
+    fn run_extending_past_state_count_fails() {
+        // state_count is 5; the first run alone covers 6 states — an overrun,
+        // not a gap, so it must fail the state_count bound rather than the
+        // density check.
+        let mut v = valid_root();
+        v["runs"][0]["length"] = serde_json::json!(6);
+        let err = validate(v).unwrap_err();
+        assert!(
+            err.to_string().contains("extends past state_count"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn state_count_beyond_u16_fails() {
+        // The emitted runs are (u16, u16, u32); a total that cannot be spanned
+        // by u16 run fields is rejected up front.
+        let mut v = valid_root();
+        v["state_count"] = serde_json::json!(1u64 << 40);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("does not fit u16"), "got: {err}");
+    }
+
+    #[test]
+    fn run_touching_state_count_boundary_passes() {
+        // A single run spanning exactly [0, state_count) is the maximal valid
+        // partition — the over-state-count bound must not reject equality.
+        let v = serde_json::json!({
+            "generator": "test",
+            "minecraft_version": "26.2",
+            "state_count": 5,
+            "runs": [
+                {"start": 0, "length": 5, "word": 1},
+            ],
+        });
+        let runs = validate(v).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].length, 5);
     }
 
     #[test]

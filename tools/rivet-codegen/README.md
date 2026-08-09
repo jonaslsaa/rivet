@@ -60,11 +60,14 @@ JVM and to use `anyhow`/`serde`.
   run-length-encoded per-`StateId` behavior table to `data/block_behaviors.json`
   (+ provenance manifest), issue #228.
 - **`probe-block-behaviors`** — re-runs `BlockBehaviourProbe` against the real
-  Paper jar and requires byte-identity with the committed `data/block_behaviors.json`
-  plus the anchor counts (state_count 32366, run_count, and the representative
-  air/stone/water/lava/oak_leaves/glass/torch words). This is the live half of
-  the fixture-pinned conformance tests in `generate`'s `block_behaviors.rs`
-  tests and the `rivet-registry` `BlockState` behavior-decode tests.
+  Paper jar and requires byte-identity with the committed `data/block_behaviors.json`,
+  that every probe anchor key (state_count, run_count, and the representative
+  air/stone/water/lava/oak_leaves/glass/torch words) is present, and that
+  state_count is pinned to 32366. The anchor *values* are pinned independently
+  by the `rivet-registry` `BlockState` behavior-decode tests
+  (`behavior_queries_match_probe_anchors` /
+  `behavior_word_fields_match_paper_semantics`). This is the live half of the
+  fixture-pinned conformance tests in `generate`'s `block_behaviors.rs` tests.
 - **`reports`** — runs the vanilla `net.minecraft.data.Main --reports` datagen
   against the materialized Paper 26.2 server jar and pins the canonical
   `packets.json` / `registries.json` / `blocks.json` reports (with provenance)
@@ -247,14 +250,26 @@ the block-state index layout and must not be sorted during codegen.
 Wired into `crates/rivet-registry/src/generated/`, committed, and gated behind
 the crate's `"blocks"` cargo feature:
 
-- `mod.rs` — declares the generated submodules (`block_properties`, `blocks`,
-  `registries`).
+- `mod.rs` — declares the generated submodules: `biomes`, `block_behaviors`,
+  `block_properties`, `block_states`, `blocks`, `registries`, `registry_data`,
+  `synchronized`, `tags`.
 - `blocks.rs` — `BlockId(pub u16)`, a `phf::Map<&'static str, u16>`
   (`BLOCK_BY_NAME`), an id-indexed `BLOCK_BY_ID` array, and lookup methods.
 - `block_properties.rs` — `BlockPropertyId`, an enum with one variant per
   distinct `(name, values)` property type, plus the value tables and a per-block
   `BLOCK_STATE_SHAPES` table (ordered property ids by block id).
+- `block_states.rs` — the dense global block-state ids in Paper's
+  `Block.BLOCK_STATE_REGISTRY` order (`StateId(pub u16)`, `BLOCK_STATE_COUNT` =
+  32366, `GLOBAL_PALETTE_BITS`, `BLOCK_STATE_BASES`, and
+  `shape_of`/`state_id`/`block_of`), the wire global-palette index (issue #154).
+- `block_behaviors.rs` — the run-length-encoded per-`StateId` behavior table
+  (`BLOCK_BEHAVIOR_RUNS`, the flag/shift/mask constants, and `behavior_of`),
+  issue #228.
 - `registries.rs` — the report-driven static-builtin tables (see below).
+- `registry_data.rs` — the pre-baked registry NBT payloads (`SYNCHRONIZED_NBT`,
+  from `data/registry_data.json`, the canonical join capture).
+- `synchronized.rs` — the synchronized configuration-registry element tables
+  (`SYNCHRONIZED_REGISTRIES`, from `data/synchronized_registries.json`).
 - `biomes.rs` — the biome id/name table (`BIOME_BY_NAME`/`BIOME_BY_ID`, dense
   `0..n`, `BIOME_COUNT`), the element table a `PalettedContainer<Holder<Biome>>`
   global palette indexes into (issue #49).

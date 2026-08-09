@@ -154,7 +154,9 @@ fn print_usage() {
          \x20                     --output <path>   output JSON (default data/block_behaviors.json)\n\
          \x20   probe-block-behaviors  Re-run the behavior-table extractor against the real Paper jar\n\
          \x20             and require byte-identity with the committed data/block_behaviors.json,\n\
-         \x20             plus the anchor counts (issue #228). Flags: --bundler <path>\n\
+         \x20             presence of every probe anchor key, and state_count pinned to 32366\n\
+         \x20             (anchor values are pinned by the rivet-registry decode tests), issue #228.\n\
+         \x20             Flags: --bundler <path>\n\
          \x20   reports   Run the vanilla net.minecraft.data.Main --reports datagen against the\n\
          \x20             materialized Paper 26.2 server jar and pin packets.json, registries.json,\n\
          \x20             blocks.json with provenance under data/reports/.\n\
