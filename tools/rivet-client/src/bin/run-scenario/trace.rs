@@ -20,8 +20,11 @@
 //! keepalive chatter) are ignored.
 
 use serde_json::{Value, json};
-/// pinned in `movement_trace.rs`). The scenario boots rivet-server with it set
-/// so the tick thread emits its authoritative movement audit.
+
+/// The env var that enables the authoritative movement trace
+/// (`RIVET_TRACE_MOVEMENT=1`, pinned in `crates/rivet-server/src/server/
+/// movement_trace.rs`). The scenario boots rivet-server with it set so the
+/// tick thread emits its authoritative movement audit.
 pub const TRACE_MOVEMENT_ENV: &str = "RIVET_TRACE_MOVEMENT";
 
 /// The three trace tags emitted by `rivet-server` (pinned in `movement_trace.rs`).
