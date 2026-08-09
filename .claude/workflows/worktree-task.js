@@ -139,7 +139,8 @@ const impl = await resilientAgent(
     `${COMMIT_POLICY} Use PATH=\`$HOME/.cargo/bin:$PATH\` for cargo. ` +
     `${RESUME_NOTE}\n\n` +
     `When you believe the task is complete, run ONE inner self-review before reporting: spawn a FRESH ` +
-    `reviewer subagent with the Agent tool (run_in_background: false). Give it ONLY the task text, the ` +
+    `reviewer subagent with the Agent tool (run_in_background: false); if the Agent tool is unavailable, ` +
+    `use another independent fresh-reviewer mechanism and name it in your report. Give it ONLY the task text, the ` +
     `worktree path, and this scope — none of your reasoning: "${REVIEW_SCOPE}" Tell it to hunt ` +
     `correctness, fidelity to Paper, and process violations, and that an empty findings list is a valid ` +
     `result. Apply its critical and major findings — except a finding that is factually WRONG, which you ` +
