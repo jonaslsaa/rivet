@@ -42,10 +42,15 @@ def main() -> int:
     corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
     entries = corpus["entries"]
 
-    # One JVM boot; feed every entry as a JSON-Lines request.
+    # One JVM boot: a leading `ping` learns the pin of the Paper jar the oracle
+    # actually compiled against (recorded as the golden's `paper` provenance so
+    # the manifest never goes stale), then every entry as a JSON-Lines request.
     payload = "\n".join(
-        json.dumps({"id": str(i), "op": "component.json", "input": e["input"]})
-        for i, e in enumerate(entries)
+        [json.dumps({"id": "ping", "op": "ping"})]
+        + [
+            json.dumps({"id": str(i), "op": "component.json", "input": e["input"]})
+            for i, e in enumerate(entries)
+        ]
     ) + "\n"
     proc = subprocess.run(
         [str(run_sh)], input=payload, text=True, capture_output=True, encoding="utf-8"
@@ -54,15 +59,46 @@ def main() -> int:
         sys.stderr.write(proc.stderr)
         return 1
 
+    # Parse the oracle's JSON-Lines response. The reference oracle writes ONLY
+    # its JSON responses to stdout (it rides the raw stream, not log4j), but a
+    # launcher or JVM regression could leak a log line — that must fail loudly
+    # with a clear message, never be silently skipped or misread as a response.
     responses = {}
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
             continue
-        resp = json.loads(line)
-        responses[resp["id"]] = resp
+        try:
+            resp = json.loads(line)
+        except json.JSONDecodeError as error:
+            print(
+                f"oracle stdout is not pure JSON-Lines; unparseable line: {line!r} "
+                f"({error})",
+                file=sys.stderr,
+            )
+            return 1
+        rid = resp.get("id")
+        if rid is None:
+            print(f"oracle response missing `id`: {resp}", file=sys.stderr)
+            return 1
+        if str(rid) in responses:
+            print(
+                f"oracle emitted a duplicate response id {rid!r}: {resp}",
+                file=sys.stderr,
+            )
+            return 1
+        responses[str(rid)] = resp
 
-    golden = {"format": 1, "kind": "text", "entries": []}
+    ping = responses.pop("ping", None)
+    if ping is None or not ping.get("ok"):
+        print("oracle ping failed; cannot record the captured Paper pin", file=sys.stderr)
+        return 1
+    ping_result = ping.get("result", {})
+    impl = ping_result.get("paper_implementation", "unknown")
+    commit = ping_result.get("paper_commit", "unknown")
+    paper = f"{impl}@{commit}"
+
+    golden = {"format": 1, "kind": "text", "paper": paper, "entries": []}
     for i, entry in enumerate(entries):
         resp = responses.get(str(i))
         if resp is None or not resp.get("ok"):
@@ -84,7 +120,7 @@ def main() -> int:
     accepted = sum(1 for e in golden["entries"] if e["accept"])
     print(
         f"extracted {len(entries)} entries ({accepted} accept, "
-        f"{len(entries) - accepted} reject) -> {golden_path}"
+        f"{len(entries) - accepted} reject; captured against {paper}) -> {golden_path}"
     )
     return 0
 

@@ -22,7 +22,7 @@
 //! codec/STUB boundary — never for registry/Holder context or malformed fields.
 
 use crate::component::Component;
-use crate::corpus::{TextFixtureEntry, text_corpus};
+use crate::corpus::{CorpusError, TextFixtureEntry, text_corpus};
 use rivet_serialization::codec::Codec;
 use rivet_serialization::json_ops::JsonOps;
 
@@ -36,11 +36,17 @@ const DOCUMENTED_STUB_DIVERGENCES: &[&str] = &[
     "hover-show-text",
 ];
 
-/// The Rust mirror of the Paper oracle op. Shared with `rivet-parity` via
-/// `component_serialization::json_canonical`, so the offline and live compare
-/// can never drift apart.
-fn rust_component_json(input: &str) -> Result<String, String> {
-    crate::component_serialization::json_canonical(&crate::component_serialization::codec(), input)
+/// The Rust mirror of the Paper oracle op, run through ONE codec graph.
+///
+/// Building a fresh `component_serialization::codec()` per call constructs a
+/// permanent strong `Arc` cycle per entry (issue #207); the corpus tests run
+/// per-entry across all 62 fixtures, so they must reuse a single graph. Each
+/// test constructs one codec and threads it through every call.
+fn rust_component_json(
+    input: &str,
+    codec: &std::sync::Arc<dyn Codec<Component, JsonOps>>,
+) -> Result<String, String> {
+    crate::component_serialization::json_canonical(codec, input)
 }
 
 /// `ComponentSerialization.CODEC` as used in these tests.
@@ -51,7 +57,7 @@ fn component_codec() -> std::sync::Arc<dyn Codec<Component, JsonOps>> {
 #[test]
 fn text_corpus_present_and_non_vacuous() {
     let corpus = text_corpus().expect(
-        "issue-#98 text corpus + golden must be present at \
+        "issue-#98 text corpus + golden must be present and well-formed at \
          tools/rivet-oracle/fixtures/text/ — the fixture is the test",
     );
     assert!(
@@ -81,13 +87,89 @@ fn text_corpus_present_and_non_vacuous() {
     }
 }
 
+/// A present-but-broken corpus must hard-error, never silently skip: a
+/// malformed file, a missing golden entry, and an accept verdict that
+/// contradicts golden.json's provenance all yield `Malformed`, while a wholly
+/// absent pair yields `Absent` (the "fixtures pruned" case callers may skip).
+#[test]
+fn loader_hard_errors_on_malformed_and_absent_distinguish() {
+    let tmp = std::env::temp_dir().join(format!("rivet-text-corpus-loader-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let corpus = tmp.join("corpus.json");
+    let golden = tmp.join("golden.json");
+
+    // Absent pair -> Absent.
+    assert!(matches!(
+        crate::corpus::parse_text_corpus(&corpus, &golden),
+        Err(CorpusError::Absent)
+    ));
+
+    // Exactly one present is a broken tree -> Malformed, never Absent.
+    std::fs::write(&corpus, "{}").unwrap();
+    assert!(matches!(
+        crate::corpus::parse_text_corpus(&corpus, &golden),
+        Err(CorpusError::Malformed(m)) if m.contains("missing")
+    ));
+    std::fs::remove_file(&corpus).unwrap();
+    std::fs::write(&golden, "{}").unwrap();
+    assert!(matches!(
+        crate::corpus::parse_text_corpus(&corpus, &golden),
+        Err(CorpusError::Malformed(m)) if m.contains("missing")
+    ));
+    std::fs::remove_file(&golden).unwrap();
+
+    // Unparsable JSON -> Malformed.
+    std::fs::write(&corpus, "{broken").unwrap();
+    std::fs::write(&golden, "{also-broken").unwrap();
+    assert!(matches!(
+        crate::corpus::parse_text_corpus(&corpus, &golden),
+        Err(CorpusError::Malformed(_))
+    ));
+
+    // Valid JSON but a corpus entry with no matching golden -> Malformed.
+    std::fs::write(
+        &corpus,
+        r#"{"entries":[{"id":"a","input":"\"x\"","accept":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(&golden, r#"{"entries":[]}"#).unwrap();
+    assert!(matches!(
+        crate::corpus::parse_text_corpus(&corpus, &golden),
+        Err(CorpusError::Malformed(m)) if m.contains("no matching golden")
+    ));
+
+    // Accept verdict contradicts the golden's provenance -> Malformed.
+    std::fs::write(&golden, r#"{"entries":[{"id":"a","accept":false}]}"#).unwrap();
+    assert!(matches!(
+        crate::corpus::parse_text_corpus(&corpus, &golden),
+        Err(CorpusError::Malformed(m)) if m.contains("contradicts")
+    ));
+
+    // Consistent pair -> Ok, with the golden's canonical threaded through.
+    std::fs::write(
+        &golden,
+        r#"{"entries":[{"id":"a","accept":true,"canonical":"\"x\""}]}"#,
+    )
+    .unwrap();
+    let loaded = crate::corpus::parse_text_corpus(&corpus, &golden).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id, "a");
+    assert!(loaded[0].accept);
+    assert_eq!(loaded[0].canonical.as_deref(), Some("\"x\""));
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn accepted_components_reencode_byte_identical_to_golden() {
     let corpus = text_corpus().expect("corpus present (see non-vacuous test)");
+    let codec = component_codec();
     let mut accepted_but_rejected: Vec<&str> = Vec::new();
 
     for e in corpus.iter().filter(|e| e.accept) {
-        match rust_component_json(&e.input) {
+        match rust_component_json(&e.input, &codec) {
             Ok(rust_canonical) => {
                 let golden = e
                     .canonical
@@ -118,11 +200,12 @@ fn accepted_components_reencode_byte_identical_to_golden() {
 #[test]
 fn rejected_entries_are_rejected_by_rust() {
     let corpus = text_corpus().expect("corpus present (see non-vacuous test)");
+    let codec = component_codec();
     let rejects: Vec<&TextFixtureEntry> = corpus.iter().filter(|e| !e.accept).collect();
     assert!(!rejects.is_empty(), "corpus must include rejected fixtures");
     for e in rejects {
         assert!(
-            rust_component_json(&e.input).is_err(),
+            rust_component_json(&e.input, &codec).is_err(),
             "Rust must reject {} — Paper's verdict is reject",
             e.id
         );
@@ -200,6 +283,7 @@ fn corrected_click_hover_fixtures_use_paper_schemas_and_canonicals() {
 #[test]
 fn wrong_key_negatives_are_recorded_as_rejected() {
     let corpus = text_corpus().expect("corpus present (see non-vacuous test)");
+    let codec = component_codec();
     let by_id: std::collections::HashMap<&str, &TextFixtureEntry> =
         corpus.iter().map(|e| (e.id.as_str(), e)).collect();
     for id in [
@@ -216,7 +300,7 @@ fn wrong_key_negatives_are_recorded_as_rejected() {
             "{id} must be Paper-rejected (wrong field name pins the correct schema)"
         );
         assert!(
-            rust_component_json(&entry.input).is_err(),
+            rust_component_json(&entry.input, &codec).is_err(),
             "Rust must reject {id} too (the ClickEvent/HoverEvent codec is a STUB, \
              and the field name is wrong either way)"
         );

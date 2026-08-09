@@ -522,6 +522,65 @@ fn input_has_click_or_hover(input: &str) -> bool {
     json_has_key(&value, &["click_event", "hover_event"])
 }
 
+/// Whether a Rust rejection of an input that carries a click/hover field is
+/// provably at the ClickEvent/HoverEvent STUB codec, and not an unrelated
+/// failure. The documented divergence (RivetTodo #89, epic #12) is narrow:
+/// Paper accepts the input and Rust rejects it *because* its click_event /
+/// hover_event codec is a STUB. Removing every such field must leave a
+/// component the Rust codec accepts — if it still rejects, the rejection is
+/// for an unrelated reason and must NOT be masked as the soft STUB divergence.
+fn rust_rejection_is_at_click_hover_stub(
+    input: &str,
+    codec: &std::sync::Arc<dyn rivet_serialization::codec::Codec<Component, JsonOps>>,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return false;
+    };
+    match strip_keys(&value, &["click_event", "hover_event"]) {
+        // Stripping left nothing that could stand alone as a component — the
+        // input was *only* a click/hover object. Fail closed (hard mismatch)
+        // rather than guess.
+        None => false,
+        Some(stripped) => rust_component_json(&stripped.to_string(), codec).is_ok(),
+    }
+}
+
+/// Return a copy of `value` with every object's `keys` properties removed,
+/// recursively. `None` when nothing remains that could still be a component
+/// (a node became empty after stripping).
+fn strip_keys(value: &serde_json::Value, keys: &[&str]) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if keys.contains(&k.as_str()) {
+                    continue;
+                }
+                out.insert(k.clone(), strip_keys(v, keys)?);
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(out))
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let mut out = Vec::new();
+            for v in items {
+                if let Some(v) = strip_keys(v, keys) {
+                    out.push(v);
+                }
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Array(out))
+            }
+        }
+        other => Some(other.clone()),
+    }
+}
+
 /// Recursively scan a JSON value for any object that carries one of `keys`.
 /// Mirrors where a component's `click_event`/`hover_event` style fields can
 /// appear (nested in `extra` siblings, translatable args, etc.) — but only as
@@ -598,7 +657,9 @@ fn check_component_json<O: oracle::OracleCall>(
                 }
                 Err(rust_err) => {
                     if oracle_accept {
-                        if input_has_click_or_hover(input) {
+                        if input_has_click_or_hover(input)
+                            && rust_rejection_is_at_click_hover_stub(input, codec)
+                        {
                             // Documented STUB divergence: Paper accepts a
                             // click/hover component whose Rust codec is a STUB
                             // (RivetTodo #89, epic #12). Never a hard mismatch.
@@ -609,6 +670,13 @@ fn check_component_json<O: oracle::OracleCall>(
                                  STUB codec (RivetTodo #89, epic #12): {rust_err}"
                             ));
                         } else {
+                            // Even though the input carries a click/hover key,
+                            // the Rust rejection may be for an UNRELATED reason
+                            // (a malformed component elsewhere, an unsupported
+                            // sibling, etc.). The STUB is a precise, narrow
+                            // divergence — it must not mask a genuine Rust
+                            // failure, so only a rejection provably at the
+                            // click/hover field stays soft.
                             check.field("accept", "accept", "reject");
                             check.note(&format!(
                                 "Rust rejected a component Paper accepts: {rust_err}"
@@ -978,32 +1046,41 @@ fn main() {
     }
 
     // ---- component.json: the committed text corpus vs Paper (issue #98) ----
-    if let Some(entries) = corpus::text_corpus() {
-        let codec = rivet_text::component_serialization::codec();
-        // The Rust-side decode->re-encode byte-identity against the committed
-        // golden is covered by the offline corpus tests in rivet-text; here the
-        // oracle comparison is the point.
-        for entry in &entries {
-            let check = check_component_json(
-                oracle.as_deref_mut(),
-                &format!("component.{id}", id = entry.id),
-                &entry.input,
-                entry.accept,
-                entry.canonical.as_deref(),
-                &codec,
+    match corpus::text_corpus() {
+        Ok(entries) => {
+            let codec = rivet_text::component_serialization::codec();
+            // The Rust-side decode->re-encode byte-identity against the committed
+            // golden is covered by the offline corpus tests in rivet-text; here the
+            // oracle comparison is the point.
+            for entry in &entries {
+                let check = check_component_json(
+                    oracle.as_deref_mut(),
+                    &format!("component.{id}", id = entry.id),
+                    &entry.input,
+                    entry.accept,
+                    entry.canonical.as_deref(),
+                    &codec,
+                );
+                summary.record(&check);
+                transcript.push(check);
+            }
+            eprintln!(
+                "[rivet-parity] text corpus: {} component.json entries under {}",
+                entries.len(),
+                corpus::text_fixtures_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| "?".into())
             );
-            summary.record(&check);
-            transcript.push(check);
         }
-        eprintln!(
-            "[rivet-parity] text corpus: {} component.json entries under {}",
-            entries.len(),
-            corpus::text_fixtures_dir()
-                .map(|d| d.display().to_string())
-                .unwrap_or_else(|| "?".into())
-        );
-    } else {
-        eprintln!("[rivet-parity] text fixtures not present; skipping component.json section");
+        Err(corpus::CorpusError::Absent) => {
+            eprintln!("[rivet-parity] text fixtures not present; skipping component.json section");
+        }
+        Err(e @ corpus::CorpusError::Malformed(_)) => {
+            // A present-but-broken committed corpus must never silently stop
+            // being exercised — hard-fail like a parity divergence.
+            eprintln!("[rivet-parity] FATAL: {e}");
+            std::process::exit(1);
+        }
     }
 
     // ---- emit transcript + summary ----
@@ -1243,6 +1320,85 @@ mod tests {
                 .any(|d| d == "component_click_hover_stub"),
             "divergence must be tagged component_click_hover_stub: {check}"
         );
+    }
+
+    /// The click/hover STUB divergence must not mask an UNRELATED Rust
+    /// rejection. When the input carries a click/hover field AND another
+    /// property the Rust codec rejects (a malformed sibling, etc.), stripping
+    /// the click/hover field still leaves a rejected component — so the
+    /// rejection is not provably at the STUB and must be a HARD mismatch, not
+    /// the soft `component_click_hover_stub` divergence.
+    #[test]
+    fn click_hover_stub_does_not_mask_unrelated_rust_rejection() {
+        let mut oracle = StubOracle {
+            response: Ok(json!({
+                "accept": true,
+                "canonical": "{\"text\":\"c\",\"extra\":[{\"text\":\"b\"}],\"click_event\":{\"url\":\"https://example.com\",\"action\":\"open_url\"}}",
+            })),
+        };
+        // The input has a real click_event key (so the old substring/structural
+        // walk WOULD have classified it as the STUB) but ALSO an `extra: []`
+        // sibling the Rust codec rejects. Stripping click_event leaves
+        // `{"text":"c","extra":[]}`, which Rust still rejects — the rejection
+        // is unrelated to the click/hover STUB and must stay hard.
+        let input = "{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"url\":\"https://example.com\"},\"extra\":[]}";
+        assert!(
+            input_has_click_or_hover(input),
+            "a real click_event key is present"
+        );
+        let codec = component_codec();
+        assert!(
+            !rust_rejection_is_at_click_hover_stub(input, &codec),
+            "stripping click_event must still reject (extra:[] is unrelated)"
+        );
+        let check = check_component_json(
+            Some(&mut oracle),
+            "component.click-hover-with-unrelated-reject",
+            input,
+            /* golden_accept */ true,
+            None,
+            &codec,
+        );
+        assert!(
+            !check["ok"].as_bool().unwrap(),
+            "an unrelated Rust rejection must stay a hard mismatch: {check}"
+        );
+        assert!(
+            !check["divergences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d == "component_click_hover_stub"),
+            "must NOT be tagged as the soft click/hover STUB divergence: {check}"
+        );
+    }
+
+    /// `rust_rejection_is_at_click_hover_stub` strips the click/hover fields
+    /// and re-runs the decode: it is true only when the stripped component
+    /// parses, false when the input is only a click/hover object or the
+    /// stripped form still rejects.
+    #[test]
+    fn rust_rejection_is_at_stub_only_when_stripped_component_parses() {
+        let codec = component_codec();
+        // A pure click/hover component: stripping leaves nothing -> false.
+        assert!(!rust_rejection_is_at_click_hover_stub(
+            "{\"click_event\":{\"action\":\"open_url\",\"url\":\"https://e\"}}",
+            &codec
+        ));
+        // A click/hover sibling beside plain text: stripping leaves a valid
+        // component -> true (the rejection is at the STUB).
+        assert!(rust_rejection_is_at_click_hover_stub(
+            "{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"url\":\"https://e\"}}",
+            &codec
+        ));
+        // An unrelated malformation beside the click/hover: stripping still
+        // rejects -> false (not provably at the STUB).
+        assert!(!rust_rejection_is_at_click_hover_stub(
+            "{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"url\":\"https://e\"},\"extra\":[]}",
+            &codec
+        ));
+        // Invalid JSON -> false.
+        assert!(!rust_rejection_is_at_click_hover_stub("{broken", &codec));
     }
 
     /// The structural object-key walk must not classify a component whose

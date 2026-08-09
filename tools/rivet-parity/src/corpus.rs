@@ -284,8 +284,10 @@ pub fn fixtures_dir() -> Option<std::path::PathBuf> {
 /// in `rivet-text` (the crate whose codec the corpus exercises), and this tool
 /// reuses it so the schema parsing can never drift between the two. The entry
 /// type is `rivet_text::corpus::TextFixtureEntry` (visible through the returned
-/// `text_corpus()` signature; callers never name it).
-pub use rivet_text::corpus::{text_corpus, text_fixtures_dir};
+/// `text_corpus()` signature; callers never name it). A malformed committed
+/// corpus is a hard `CorpusError::Malformed` — only genuine absence
+/// (`CorpusError::Absent`) lets the caller skip the section.
+pub use rivet_text::corpus::{CorpusError, text_corpus, text_fixtures_dir};
 
 /// Walk the fixtures tree collecting `*.nbt` files in deterministic order.
 pub fn collect_fixtures(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

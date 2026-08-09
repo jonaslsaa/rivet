@@ -1639,7 +1639,9 @@ fn regenerate_samples() -> Result<(), Error> {
 /// hashes the committed `corpus.json` (input component JSON, exact wire bytes)
 /// and `golden.json` (Paper's accept/reject verdict + canonical decode→re-encode
 /// JSON under non-compressed `JsonOps`). The `paper` provenance is read back out
-/// of `corpus.json` so the manifest always describes what was captured.
+/// of `golden.json` — the file the extractor actually wrote against the live
+/// oracle's ping — so the manifest always describes the Paper the golden was
+/// captured against, never a stale hand-maintained field.
 #[derive(serde::Serialize)]
 struct TextManifest<'a> {
     format: u64,
@@ -1651,18 +1653,19 @@ struct TextManifest<'a> {
 
 /// Rewrite `fixtures/text/manifest.json` from the committed corpus + golden.
 ///
-/// The `paper` pin comes from `corpus.json`'s provenance field (the pinned
-/// Paper 26.2 revision the golden was captured against), mirroring how the
-/// worldgen manifest reads its seed + pin back out of the generated samples so
-/// it always describes what was actually produced.
+/// The `paper` pin comes from `golden.json`'s provenance field, which
+/// `extract_text_fixtures.py` records from the live oracle's `ping` — the
+/// pinned Paper revision the golden was actually captured against. Mirroring
+/// how the worldgen manifest reads its seed + pin back out of the generated
+/// samples so it always describes what was actually produced.
 fn regenerate_text_manifest(text_dir: &Path) -> Result<(), Error> {
-    let corpus_path = text_dir.join("corpus.json");
-    let corpus: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&corpus_path)
-            .map_err(|e| Error::Manifest(format!("{} missing: {e}", corpus_path.display())))?,
+    let golden_path = text_dir.join("golden.json");
+    let golden: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&golden_path)
+            .map_err(|e| Error::Manifest(format!("{} missing: {e}", golden_path.display())))?,
     )
-    .map_err(|e| Error::Manifest(format!("{} unparsable: {e}", corpus_path.display())))?;
-    let paper = corpus
+    .map_err(|e| Error::Manifest(format!("{} unparsable: {e}", golden_path.display())))?;
+    let paper = golden
         .get("paper")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")

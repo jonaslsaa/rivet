@@ -156,6 +156,13 @@ public final class RivetReferenceOracle {
      * compactly with insertion order and no HTML escaping). A malformed input
      * (invalid JSON or an undecodable component) returns `accept:false` — the
      * accept/reject parity contract for the strict-malformed fixtures.
+     *
+     * The reject path is a VERDICT, not a failure: Paper's codec declining to
+     * decode is a `DataResult.error`, returned as `accept:false`. A thrown
+     * exception inside the codec (e.g. an NPE on an unexpected shape) is an
+     * infrastructure crash and MUST propagate — the response then carries
+     * `ok:false` + an `error`, and the parity tool hard-fails instead of
+     * recording a spurious "both rejected" match.
      */
     private static JsonObject componentJson(final String input) {
         JsonObject result = new JsonObject();
@@ -166,23 +173,21 @@ public final class RivetReferenceOracle {
             result.addProperty("accept", false);
             return result;
         }
-        try {
-            Component component = ComponentSerialization.CODEC
-                .decode(JsonOps.INSTANCE, element)
-                .getOrThrow()
-                .getFirst();
-            JsonElement encoded = ComponentSerialization.CODEC
-                .encodeStart(JsonOps.INSTANCE, component)
-                .getOrThrow();
-            result.addProperty("accept", true);
-            // Serialize with the same non-html-escaping Gson used for responses
-            // so the canonical is byte-identical to the Rust encoder's output.
-            result.addProperty("canonical", GSON.toJson(encoded));
-            return result;
-        } catch (Exception error) {
+        var decoded = ComponentSerialization.CODEC.decode(JsonOps.INSTANCE, element);
+        if (decoded.error().isPresent()) {
+            // Paper's codec declined to decode the input — a genuine reject.
             result.addProperty("accept", false);
             return result;
         }
+        Component component = decoded.getOrThrow().getFirst();
+        JsonElement encoded = ComponentSerialization.CODEC
+            .encodeStart(JsonOps.INSTANCE, component)
+            .getOrThrow();
+        result.addProperty("accept", true);
+        // Serialize with the same non-html-escaping Gson used for responses
+        // so the canonical is byte-identical to the Rust encoder's output.
+        result.addProperty("canonical", GSON.toJson(encoded));
+        return result;
     }
 
     private static JsonObject describeTag(final Tag tag) {
