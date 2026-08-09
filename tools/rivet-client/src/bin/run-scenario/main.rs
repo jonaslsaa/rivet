@@ -1643,13 +1643,10 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     );
     println!("        is outcome=spawned with the pinned Azalea revision, 117 chunks, and spawn");
     println!(
-        "        y={} — which a stale pre-play build, a fake/non-Rivet endpoint, or a",
+        "        y={} — which a stale pre-play build, a fake/non-Rivet endpoint, or any",
         transcript::JOIN_SPAWN_Y
     );
-    println!(
-        "        non-{}-height spawn all fail.",
-        transcript::JOIN_SPAWN_Y
-    );
+    println!("        other spawn height fails.");
     println!("      * The compared transcripts differ only on the documented Rivet/Paper gap");
     println!("        (health default: Rivet omits set_health so azalea reports 1.0 vs Paper's");
     println!("        20.0) — any other divergence, including position.y, fails the run, so a");
