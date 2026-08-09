@@ -203,14 +203,38 @@ mod tests {
 
     #[test]
     fn section_math_never_panics_on_extreme_extents() {
-        // The height-arithmetic counterfactual: Java's plain `+`/`-` wraps
-        // rather than saturating, and the facade must not panic on a world
-        // height of i32::MAX or a zero-height world.
+        // The facade computes Java's section arithmetic with plain `+`/`-`
+        // (PORTING.md wrapping semantics). This world height (i32::MAX) never
+        // overflows any intermediate value: maxY = i32::MAX - 1, sectionsCount
+        // = 134217728, so the light-section bounds are exactly Java's. The
+        // section values are asserted below; the wrap-vs-saturate counterfactual
+        // (an input that genuinely overflows) is `section_math_wraps_on_overflowing_height`.
         let huge = LevelLightEngine::new(Box::new(create_accessor(0, i32::MAX)), false, false);
         // (i32::MAX - 1) >> 4 = 134217727 sections + 2 padding.
         assert_eq!(huge.get_light_section_count(), 134_217_728 + 2);
         assert_eq!(huge.get_min_light_section(), -1);
         assert_eq!(huge.get_max_light_section(), 134_217_727 + 2);
+    }
+
+    #[test]
+    fn section_math_wraps_on_overflowing_height() {
+        // The genuine wrap-vs-saturate counterfactual: Java's plain `+`
+        // overflows in `getMaxY()` (minY + height - 1 = 3_000_000_000 - 1 >
+        // i32::MAX), so the wrapped section bounds differ from what saturating
+        // arithmetic would produce. The facade must reproduce Java's wrapped
+        // values (and no panic) — not a saturating "improvement".
+        // create(1.5e9, 1.5e9): maxY wraps to -1294967297,
+        // minSectionY = 93750000, maxSectionY = -80935457, sectionsCount =
+        // -174685456, lightSectionCount = -174685454, minLightSection =
+        // 93749999, maxLightSection = -80935455.
+        let wrapped = LevelLightEngine::new(
+            Box::new(create_accessor(1_500_000_000, 1_500_000_000)),
+            false,
+            false,
+        );
+        assert_eq!(wrapped.get_light_section_count(), -174_685_454);
+        assert_eq!(wrapped.get_min_light_section(), 93_749_999);
+        assert_eq!(wrapped.get_max_light_section(), -80_935_455);
     }
 
     #[test]
