@@ -13,6 +13,11 @@
 //! - `chunk::level_chunk_section` — `LevelChunkSection` wire write/size/recalc
 //! - `chunk::data_layer` — `DataLayer` (16³ light layer)
 //! - `levelgen::heightmap` — `Heightmap`/`primeHeightmaps`
+//! - `levelgen::feature` — the `feature.core` slice (the
+//!   `mc.world.level.levelgen.feature.core` unit): `ConfiguredFeature` (and its
+//!   erased wildcard), `FeatureId`, `FeatureBehavior`, `FeaturePlaceContext`,
+//!   `FeatureCountTracker`; the `#181` codegen feature dispatch
+//!   (`feature_place`) stays a STUB
 //! - `levelgen::feature::configurations` — the `FeatureConfiguration` trait,
 //!   `NoneFeatureConfiguration` and their DFU codecs (the
 //!   `mc.world.level.levelgen.feature.configurations.core` unit), plus an
