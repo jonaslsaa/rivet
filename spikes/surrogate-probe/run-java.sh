@@ -19,14 +19,14 @@ find_jar() { find "$GRADLE_CACHE/$1/$2" -name "$2-$3*.jar" 2>/dev/null | grep -v
 
 NETTY_BUF="${NETTY_BUF:-$(find_jar io.netty netty-buffer 4.2.15.Final)}"
 NETTY_COMMON="${NETTY_COMMON:-$(find_jar io.netty netty-common 4.2.15.Final)}"
-GSON="${GSON:-$(find "$HOME/.gradle/wrapper/dists" -name 'gson-2.13.1.jar' 2>/dev/null | head -1)}"
+GSON="${GSON:-$(find_jar com.google.code.gson gson 2.14.0)}"
 
 if [[ -z "$NETTY_BUF" || -z "$NETTY_COMMON" ]]; then
   echo "error: netty 4.2.15 jars not found (set NETTY_BUF/NETTY_COMMON)" >&2
   exit 64
 fi
 if [[ -z "$GSON" ]]; then
-  echo "error: gson jar not found (set GSON)" >&2
+  echo "error: gson 2.14.0 jar not found (set GSON)" >&2
   exit 64
 fi
 

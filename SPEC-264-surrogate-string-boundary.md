@@ -25,7 +25,7 @@ by a `RivetTodo(#264)` marker in `unicode_name_table.rs`):
 `crates/rivet-nbt/src/unicode_name_table.rs` (`CodePointOfError::LoneSurrogate`).
 This spec confirms, rationalizes, and canonizes that policy; it does not propose a new type.
 
-## 2. Ground truth (live probes, JDK 25.0.2 + netty 4.2.15 + Gson 2.13.1)
+## 2. Ground truth (live probes, JDK 25.0.2 + netty 4.2.15 + Gson 2.14.0)
 
 `spikes/surrogate-probe/run.sh` runs both halves and prints JSON Lines. Key results:
 
@@ -157,10 +157,10 @@ replace.**
 ## 6. Executable oracle/fixture probes
 
 **Already built and run:** `spikes/surrogate-probe/` — standalone (own `[workspace]`), prints JSON Lines:
-- `run-java.sh`: JDK 25 + netty 4.2.15 + Gson ground-truth (the table in §2).
+- `run-java.sh`: JDK 25 + netty 4.2.15 + Gson 2.14.0 (Paper's pinned versions) ground-truth — the table in §2.
 - `cargo run` (Rust counter-probe): `decode_modified_utf8`, `write_utf_body`, WHATWG decode, serde_json.
 - `run.sh`: runs both halves back-to-back (Java JSON Lines, then Rust JSON Lines) for manual comparison.
-Run: `spikes/surrogate-probe/run.sh`. (Requires netty 4.2.15/Gson in `~/.gradle`; overridable via `NETTY_BUF`/`NETTY_COMMON`/`GSON`.)
+Run: `spikes/surrogate-probe/run.sh`. (Requires netty 4.2.15/Gson 2.14.0 in `~/.gradle`; overridable via `NETTY_BUF`/`NETTY_COMMON`/`GSON`.)
 
 **To add (implementation sub-issue #264-b, requires the M0 materialized Paper jar for the oracle):**
 - `rivet-reference-oracle`: add `nbt.decode` corpus cases for the lone-surrogate root named-tag payloads

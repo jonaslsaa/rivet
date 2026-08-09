@@ -11,9 +11,9 @@ import java.util.HexFormat;
 
 /**
  * Ground-truth probe for Java string boundaries that can hold isolated UTF-16
- * surrogates (GitHub #264). Compiles and runs against the pinned JDK (25.0.2)
- * and netty 4.2.15 (the versions Paper 26.2 uses). Each probe prints one
- * machine-readable JSON line on stdout; nothing on stderr.
+ * surrogates (GitHub #264). Compiles and runs against the pinned JDK (25.0.2),
+ * netty 4.2.15 and Gson 2.14.0 (the versions Paper 26.2 uses). Each probe
+ * prints one machine-readable JSON line on stdout; nothing on stderr.
  *
  * Run: see run.sh in this directory.
  */
