@@ -118,7 +118,7 @@ impl RegionFileVersion {
     /// Rivet's registration order. It is NOT Java's ordering: Paper joins
     /// `VERSIONS_BY_NAME.keySet()`, a fastutil `Object2ObjectOpenHashMap`
     /// whose iteration order is hash-slot order — an implementation artifact
-    /// (it spells "lz4, deflate, none, gzip" for the pinned fastutil 8.5.18
+    /// (it spells "lz4, none, deflate, gzip" for the pinned fastutil 8.5.18
     /// default table), not a spec'd format. Rivet keeps its own stable order
     /// and claims no parity on the exact string.
     pub fn configure(option_name: &str) {
@@ -433,8 +433,9 @@ mod tests {
         let compressed = writer.finish().unwrap();
         // A finished gzip member: the RFC 1952 magic header (10 bytes) at the
         // front and the 8-byte trailer (CRC32 + ISIZE) at the back. gzip is
-        // lossy for tiny inputs only when smaller than the header; this fixture
-        // is long enough to stay a real deflate stream and round-trip.
+        // lossless — the round-trip below restores the payload exactly; the
+        // length bound only confirms the member is complete (header + trailer),
+        // since tiny payloads can still *expand* under gzip's fixed overhead.
         assert_eq!(&compressed[..2], &[0x1f, 0x8b]);
         assert!(
             compressed.len() >= 18,
