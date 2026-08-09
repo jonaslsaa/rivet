@@ -483,9 +483,9 @@ impl RegionFile {
             if num_sectors < 0 {
                 // A corrupt Spigot-sentinel length wraps to a negative sector
                 // count. Java's `ByteBuffer.allocate(numSectors * 4096)` throws
-                // a `NegativeArraySizeException` (an unchecked crash); per this
-                // port's corruption convention the chunk is treated as absent
-                // rather than panicking on the allocation size.
+                // an `IllegalArgumentException` (unchecked, a server crash); per
+                // this port's corruption convention the chunk is treated as
+                // absent rather than panicking on the allocation size.
                 eprintln!("Chunk {} has a negative sector count {}", pos, num_sectors);
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
@@ -1806,10 +1806,10 @@ mod tests {
     fn spigot_sentinel_negative_length_returns_none_without_panic() {
         // A Spigot-255 location whose chunk's first sector declares a negative
         // length wraps to a negative sector count on read. Java would crash on
-        // `ByteBuffer.allocate`; the port treats the chunk as absent. The
-        // header is corrupted *after* open because `open()` itself repairs a
-        // corrupt sentinel at startup — this simulates the region file being
-        // modified beneath the open handle.
+        // `ByteBuffer.allocate` (unchecked `IllegalArgumentException`); the port
+        // treats the chunk as absent. The header is corrupted *after* open
+        // because `open()` itself repairs a corrupt sentinel at startup — this
+        // simulates the region file being modified beneath the open handle.
         let dir = tempfile::tempdir().unwrap();
         let mut region = open_region(dir.path(), RegionFileVersion::VERSION_NONE);
         // Spigot sentinel on location[0], pointing at sector 2.
