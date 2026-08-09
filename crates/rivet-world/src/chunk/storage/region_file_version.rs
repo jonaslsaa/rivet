@@ -158,14 +158,18 @@ impl RegionFileVersion {
     /// lz4 read is deferred in Rivet: it returns [`io::ErrorKind::Unsupported`]
     /// while Java reads lz4 fine (`LZ4BlockInputStream`) — a Rivet gap, not a
     /// Java error. Custom id 127 also returns [`io::ErrorKind::Unsupported`]
-    /// here as Rivet's deferral boundary; Java never reaches this wrapper for
-    /// id 127 — `RegionFile.createChunkInputStream` special-cases it first,
-    /// reading a modified-UTF-8 id, logging "Unrecognized custom compression"
-    /// / "Invalid custom compression id", and returning null. Both of
-    /// `VERSION_CUSTOM`'s registered wrappers throw
-    /// `UnsupportedOperationException`; neither is reachable through
-    /// `RegionFile` — the read side special-cases id 127, and the id is absent
-    /// from `VERSIONS_BY_NAME`, so `getSelected()` never selects it.
+    /// here as Rivet's deferral boundary; Java's normal read path never reaches
+    /// this wrapper for id 127 — `RegionFile.createChunkInputStream`
+    /// special-cases it first, reading a modified-UTF-8 id, logging
+    /// "Unrecognized custom compression" / "Invalid custom compression id", and
+    /// returning null. Both of `VERSION_CUSTOM`'s registered wrappers throw
+    /// `UnsupportedOperationException`. On `RegionFile`'s normal read/write
+    /// paths neither is invoked: the read side special-cases id 127, and the id
+    /// is absent from `VERSIONS_BY_NAME`, so `getSelected()` never selects it
+    /// (the write side). The header-recalc recovery scan is the exception: it
+    /// tries every registered version on an oversized chunk, so it invokes the
+    /// custom input wrapper and swallows the thrown
+    /// `UnsupportedOperationException` (`catch (Exception ex) { continue; }`).
     pub fn wrap_input<R: Read>(self, input: R) -> io::Result<RegionFileReader<R>> {
         match self.id {
             1 => Ok(RegionFileReader::Gzip(flate2::read::MultiGzDecoder::new(
