@@ -30,18 +30,28 @@
 //!      baseline. Exits 0 only when the tampered chunk is detected and named —
 //!      proving the pipeline is not vacuously green (see README). `--m2
 //!      --expect-fail` runs the control against the region baseline.
-//!   6. **`sample`** — regenerate the `worldgen/` semantic fixtures: run the
+//!   6. **`verify --full`** — the M2 FULL region gate (issue #51): same boot
+//!      pipeline with the superflat config (`fixtures/server-full.properties`,
+//!      `region-file-compression=none` per DECISIONS D13, corpus seed 0),
+//!      diffed against `fixtures/regions/superflat-full` — the corpus-forced,
+//!      twin-boot-captured status-FULL region payloads. The capture injects
+//!      level-33 forced tickets for every corpus coordinate into each
+//!      dimension, so all 8 corpus coordinates per dimension reach
+//!      `minecraft:full`; LastUpdate is normalized to 0 (save-clock artifact).
+//!      `--full --expect-fail` runs the control.
+//!   7. **`sample`** — regenerate the `worldgen/` semantic fixtures: run the
 //!      Paper-side sampler (`scripts/run_worldgen_sampler.sh`) into
 //!      `samples.json`, re-extract the Starlight light samples from the M0
 //!      FULL superflat chunks (`scripts/extract_light_samples.py`), and rewrite
 //!      `manifest.json`. Requires the materialized Paper runtime (see the
 //!      scripts; no full server boot).
-//!   7. **`regenerate`** — full regeneration of all fixture kinds: M0 chunk
+//!   8. **`regenerate`** — full regeneration of all fixture kinds: M0 chunk
 //!      slice (boot + extract), M2 region payloads (twin-boot: two independent
 //!      fresh normal-overworld boots whose extracted payloads must be
-//!      byte-identical before anything is committed), the worldgen semantic
-//!      samples, and the text component-JSON corpus (Paper reference-oracle
-//!      capture, issue #98). Sub-select with `--m0` / `--m2` / `--samples` /
+//!      byte-identical before anything is committed), the FULL superflat region
+//!      payloads (also twin-boot, issue #51), the worldgen semantic samples, and
+//!      the text component-JSON corpus (Paper reference-oracle capture, issue
+//!      #98). Sub-select with `--m0` / `--m2` / `--full` / `--samples` /
 //!      `--text`.
 //!
 //! Note on determinism (see scripts/extract_fixtures.py): raw region files
@@ -80,15 +90,18 @@
 //!   cargo run -p rivet-oracle -- verify                # full M0 gate: boot -> extract -> pin-check -> diff
 //!   cargo run -p rivet-oracle -- verify [dir]          # gate against a custom baseline dir
 //!   cargo run -p rivet-oracle -- verify --m2 [dir]     # M2 region gate (normal-overworld none-compression)
+//!   cargo run -p rivet-oracle -- verify --full [dir]   # M2 FULL region gate (superflat status-FULL capture, issue #51)
 //!   cargo run -p rivet-oracle -- verify --expect-fail [dir]
 //!                                # M0 negative control: boot -> extract -> diff against a
 //!                                # deliberately corrupted copy of the baseline; exits 0 only
 //!                                # when the pipeline detects AND names the tamper
 //!   cargo run -p rivet-oracle -- verify --m2 --expect-fail [dir]
 //!                                # M2 negative control against the region baseline
+//!   cargo run -p rivet-oracle -- verify --full --expect-fail [dir]
+//!                                # M2 FULL negative control against the superflat region baseline
 //!   cargo run -p rivet-oracle -- sample                # regenerate worldgen/ semantic samples + manifest
 //!   cargo run -p rivet-oracle -- regenerate            # regenerate all fixture kinds
-//!                                                      # (sub-select: --m0/--m2/--samples/--text)
+//!                                                      # (sub-select: --m0/--m2/--full/--samples/--text)
 //!   RIVET_ORACLE_JAR=/path/jar.jar cargo run -p rivet-oracle -- verify
 //!
 //! Every gate mode enforces the Paper pin recorded in the relevant
@@ -111,10 +124,17 @@ use std::env;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use rivet_nbt::compound_tag::CompoundTag;
+use rivet_nbt::list_tag::ListTag;
+use rivet_nbt::nbt_io;
+use rivet_nbt::tag::Tag;
+use rivet_util::{DataInputStream, DataOutputStream};
 
 use crate::mutate::TamperKind;
 
@@ -256,11 +276,14 @@ impl ChunkConcurrency {
 /// chunk-concurrency gate: `m0` declares the flat superflat slice (never
 /// concurrency-sensitive, never requires chunk-concurrency provenance), `m2`
 /// declares the normal-overworld none-compression region capture (always
+/// concurrency-sensitive, MUST record the pinned 1/1 provenance), `full`
+/// declares the superflat status-FULL region capture (issue #51 — also
 /// concurrency-sensitive, MUST record the pinned 1/1 provenance). Regeneration
 /// stamps these so classification never depends on inferring the capture from
 /// the level-type/compression strings.
 const KIND_M0: &str = "m0";
 const KIND_M2: &str = "m2";
+const KIND_FULL: &str = "full";
 
 /// The fixture manifest (subset of fields; unknown fields are ignored).
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -312,14 +335,17 @@ impl ChunkDiff {
 /// Which boot configuration a gate/negative-control run uses. M0 is the
 /// superflat slice (`fixtures/server.properties`, full extract); M2 is the
 /// normal-overworld none-compression region capture (`server-normal.properties`,
-/// `--chunks-only` extract).
+/// `--chunks-only` extract); FULL is the superflat status-FULL region capture
+/// under corpus seed 0 (`server-full.properties`, `--chunks-only` extract,
+/// issue #51).
 struct BootConfig {
     props_src: PathBuf,
     chunks_only: bool,
     /// Explicit capture-kind stamped into the regenerated manifest (issue #266):
     /// `KIND_M0` for the superflat slice, `KIND_M2` for the normal-overworld
-    /// region capture. Kept authoritative so the chunk-concurrency provenance
-    /// gate never depends on inferring the capture from config strings.
+    /// region capture, `KIND_FULL` for the superflat status-FULL capture.
+    /// Kept authoritative so the chunk-concurrency provenance gate never
+    /// depends on inferring the capture from config strings.
     kind: &'static str,
     title: &'static str,
     baseline: PathBuf,
@@ -342,6 +368,16 @@ fn m2_config() -> BootConfig {
         kind: KIND_M2,
         title: "M2 region gate: normal-overworld none-compression region parity (seed 42)",
         baseline: crate_dir().join("fixtures/regions/overworld-normal"),
+    }
+}
+
+fn full_config() -> BootConfig {
+    BootConfig {
+        props_src: crate_dir().join("fixtures/server-full.properties"),
+        chunks_only: true,
+        kind: KIND_FULL,
+        title: "M2 FULL gate: superflat status-FULL region capture (corpus-forced, seed 0)",
+        baseline: crate_dir().join("fixtures/regions/superflat-full"),
     }
 }
 
@@ -479,7 +515,7 @@ fn verify_fixtures(dir: &Path) -> Result<Manifest, Error> {
 /// kinded M2 manifest silently provenance-free.
 fn is_region_capture(manifest: &Manifest) -> bool {
     if let Some(kind) = manifest.kind.as_deref() {
-        return kind == KIND_M2;
+        return kind == KIND_M2 || kind == KIND_FULL;
     }
     manifest.level_type.as_deref() == Some("minecraft\\:normal")
         && manifest.region_file_compression.as_deref() == Some("none")
@@ -1154,6 +1190,15 @@ fn extract_fresh_fixtures(
     if chunks_only {
         cmd.arg("--chunks-only");
     }
+    // The FULL capture spans the four regions around the origin (issue #51) so
+    // every corpus coordinate — positive, negative, and the x/z=31 seams —
+    // lands in a captured region file. M0/M2 stay on the single spawn region.
+    // The corpus coordinates are forced to `minecraft:full` by the two-boot
+    // ticket-injection capture (`full_forced_extraction`), never left to a
+    // spawn boot.
+    if kind == KIND_FULL {
+        cmd.arg("--all-regions");
+    }
     let out = cmd
         .stdin(Stdio::null())
         .output()
@@ -1169,8 +1214,8 @@ fn extract_fresh_fixtures(
     let observed = if chunks_only {
         Some(observed.ok_or_else(|| {
             Error::Gate(
-                "M2 region extraction needs the boot's observed chunk concurrency to record \
-                 provenance (issue #266)"
+                "M2/FULL region extraction needs the boot's observed chunk concurrency to \
+                 record provenance (issue #266)"
                     .into(),
             )
         })?)
@@ -1219,6 +1264,243 @@ fn inject_manifest_metadata(
     Ok(())
 }
 
+/// The Moonrise FULL-chunk ticket level (`FULL_CHUNK_LEVEL`): a forced chunk at
+/// this level is generated through `minecraft:full` WITHOUT entity ticking, so
+/// its serialized payload is content-deterministic. Level 31 (`ENTITY_TICKING`)
+/// would tick the chunk and serialize nondeterministic entity state into the
+/// payloads — the forced FULL capture must stay at 33.
+const FORCED_TICKET_LEVEL: i32 = 33;
+/// `ticks_left = Long.MIN_VALUE` — a forced ticket never counts down, so it
+/// holds the chunk persistent for the whole boot.
+const FORCED_TICKET_TICKS_LEFT: i64 = i64::MIN;
+
+/// The three dimensions + their Moonrise SavedData subpaths. Every dimension
+/// (incl. the overworld) stores its `chunk_tickets.dat` SavedData under
+/// `dimensions/minecraft/<dim>/data/minecraft/` (not the legacy per-world root).
+const TICKET_DIMS: &[(&str, &str)] = &[
+    ("overworld", "dimensions/minecraft/overworld"),
+    ("the_nether", "dimensions/minecraft/the_nether"),
+    ("the_end", "dimensions/minecraft/the_end"),
+];
+
+/// Write a level-33 `minecraft:forced` ticket for every corpus coordinate into
+/// each dimension's `chunk_tickets.dat` (gzip NBT), mirroring the Moonrise
+/// `TicketStorage`/`Ticket` codec:
+///
+///   `{DataVersion:int, data:{tickets:[{type:"minecraft:forced",
+///     chunk_pos:int_array[x,z], level:int, ticks_left:long}]}}`
+///
+/// Written between boot1 (world create) and boot2 (capture) so boot2 loads
+/// "8 persistent chunks" per dimension and finishes every corpus coordinate to
+/// `minecraft:full` — the corpus-forced generation that a spawn boot never
+/// reaches (issue #51).
+fn inject_forced_tickets(world_dir: &Path) -> Result<(), Error> {
+    let mut tickets = Vec::new();
+    for (cx, cz) in crate::corpus::COORDINATES {
+        let mut ticket = CompoundTag::new();
+        ticket.put_string("type", "minecraft:forced");
+        ticket.put_int_array("chunk_pos", vec![*cx, *cz]);
+        ticket.put_int("level", FORCED_TICKET_LEVEL);
+        ticket.put_long("ticks_left", FORCED_TICKET_TICKS_LEFT);
+        tickets.push(Tag::Compound(ticket));
+    }
+    let mut data = CompoundTag::new();
+    data.put(
+        "tickets".to_string(),
+        Tag::List(ListTag::with_list(tickets)),
+    );
+    let mut root = CompoundTag::new();
+    root.put_int("DataVersion", 4903);
+    root.put("data".to_string(), Tag::Compound(data));
+
+    for (_, sub) in TICKET_DIMS {
+        let dir = world_dir.join(sub).join("data/minecraft");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("chunk_tickets.dat");
+        let mut out = fs::File::create(&path)?;
+        nbt_io::write_compressed(&root, &mut out).map_err(|e| {
+            Error::Gate(format!(
+                "cannot write forced tickets {}: {e}",
+                path.display()
+            ))
+        })?;
+    }
+    println!(
+        "      injected level-{FORCED_TICKET_LEVEL} forced tickets for {} corpus coordinates x {} dimensions",
+        crate::corpus::COORDINATES.len(),
+        TICKET_DIMS.len()
+    );
+    Ok(())
+}
+
+/// Rewrite a serialized chunk payload so its root `LastUpdate` (the save-clock
+/// game-time long) is 0, matching the committed M0 FULL convention. The
+/// save-clock long varies by a few ticks across forced-capture boots (the save
+/// lands on a nondeterministic tick), so the twin-boot byte-identity proof
+/// normalizes it before comparing: `LastUpdate` is a save-clock artifact, not
+/// worldgen content. Returns `None` when the payload has no `LastUpdate` (a
+/// partial chunk that never records one — left untouched by the tree pass).
+fn normalize_last_update(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut compound =
+        nbt_io::read_unlimited(&mut DataInputStream::new(Cursor::new(bytes))).ok()?;
+    if !compound.tags.contains_key("LastUpdate") {
+        return None;
+    }
+    compound.put_long("LastUpdate", 0);
+    let mut out = Vec::new();
+    nbt_io::write(&compound, &mut DataOutputStream::new(Cursor::new(&mut out))).ok()?;
+    Some(out)
+}
+
+/// Normalize every chunk payload in an extraction tree (`normalize_last_update`
+/// over the `*.nbt` payloads). Applied to both twin-boot extractions before the
+/// byte-identity check and to the committed baseline, so the FULL gate compares
+/// worldgen content, not the save-clock artifact. Returns how many payloads
+/// changed.
+fn normalize_last_update_tree(dir: &Path) -> Result<usize, Error> {
+    let mut count = 0usize;
+    let mut walk = vec![dir.to_path_buf()];
+    while let Some(d) = walk.pop() {
+        for entry in fs::read_dir(&d)? {
+            let p = entry?.path();
+            if p.is_dir() {
+                walk.push(p);
+            } else if p.extension().map(|x| x == "nbt").unwrap_or(false) {
+                let bytes = fs::read(&p)?;
+                if let Some(normalized) = normalize_last_update(&bytes)
+                    && normalized != bytes
+                {
+                    fs::write(&p, normalized)?;
+                    count += 1;
+                }
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Recompute the `sha256`/`bytes` of every `captured[]` entry from the
+/// on-disk payloads. `extract_fixtures.py` hashes the raw payloads, so after
+/// `normalize_last_update_tree` rewrites them the manifest would otherwise
+/// describe bytes that no longer exist — breaking `verify_fixtures`,
+/// `diff_chunk_hashes`, and the tamper control's internal-consistency check.
+/// The manifest is rewritten with the same `serde_json::to_string_pretty` +
+/// trailing-newline formatting as `inject_manifest_metadata`, so regeneration
+/// stays byte-stable.
+fn rehash_captured(dir: &Path) -> Result<(), Error> {
+    let manifest_path = dir.join("manifest.json");
+    let mut root: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|e| {
+            Error::Gate(format!(
+                "cannot read {} to rehash captured payloads: {e}",
+                manifest_path.display()
+            ))
+        })?)
+        .map_err(|e| {
+            Error::Gate(format!(
+                "manifest {} unparsable: {e}",
+                manifest_path.display()
+            ))
+        })?;
+    let captured = root
+        .get_mut("captured")
+        .and_then(|c| c.as_array_mut())
+        .ok_or_else(|| Error::Gate("manifest has no `captured` list to rehash".into()))?;
+    for cap in captured.iter_mut() {
+        let Some(path) = cap.get("path").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let bytes = fs::read(dir.join(path))
+            .map_err(|e| Error::Gate(format!("cannot read {} to rehash: {e}", path)))?;
+        cap["sha256"] = serde_json::Value::String(sha256_hex(&bytes));
+        cap["bytes"] = serde_json::Value::Number((bytes.len() as u64).into());
+    }
+    let mut text = serde_json::to_string_pretty(&root)
+        .map_err(|e| Error::Gate(format!("cannot serialize manifest: {e}")))?;
+    text.push('\n');
+    fs::write(&manifest_path, text)?;
+    Ok(())
+}
+
+/// Require the capture boot to have loaded the 8 forced persistent chunks in
+/// every dimension — the proof that corpus-forced generation actually ran. A
+/// boot that loaded 0 (the ticket injection silently failed) is refused instead
+/// of re-committing a plain spawn boot.
+fn verify_forced_load(log_path: &Path) -> Result<(), Error> {
+    let log_text = fs::read(log_path)?;
+    let log_text = String::from_utf8_lossy(&log_text);
+    let loads = log_text
+        .lines()
+        .filter(|l| l.contains("Loading 8 persistent chunks"))
+        .count();
+    if loads < TICKET_DIMS.len() {
+        return Err(Error::Gate(format!(
+            "forced-capture boot did not load 8 persistent chunks in all {} dimensions \
+             (found {loads} 'Loading 8 persistent chunks' lines in {}) — the ticket \
+             injection silently failed; refusing to commit a spawn boot",
+            TICKET_DIMS.len(),
+            log_path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The corpus-forced FULL capture (issue #51): a TWO-boot sequence that forces
+/// every corpus coordinate to `minecraft:full` in all three dimensions.
+///
+///   boot1 (create): `prepare_run_dir` + a clean Done/SIGTERM boot creates the
+///     world (booting over a missing world crashes with "Overworld settings
+///     missing" before any chunk can load).
+///   inject: level-33 `minecraft:forced` tickets for all 8 corpus coordinates
+///     are written into each dimension's `chunk_tickets.dat`.
+///   boot2 (capture): a second Done/SIGTERM boot loads the 8 persistent chunks
+///     per dimension, finishes each to `minecraft:full`, and saves them.
+///
+/// The extraction is then normalized (root `LastUpdate` zeroed) so the twin
+/// boots are byte-identical, and the capture log is verified to have loaded the
+/// forced chunks (see `verify_forced_load`). The returned log path is the
+/// capture boot's — the concurrency-pin provenance the FULL baseline must agree
+/// with.
+fn full_forced_extraction(
+    run_dir: &Path,
+    jar: &Path,
+    cfg: &BootConfig,
+    tag: &str,
+) -> Result<(PathBuf, PathBuf), Error> {
+    debug_assert_eq!(cfg.kind, KIND_FULL);
+    let create_log = run_dir.with_file_name(format!("boot-{tag}-create.log"));
+    let capture_log = run_dir.with_file_name(format!("boot-{tag}.log"));
+    prepare_run_dir(run_dir, &cfg.props_src)?;
+    println!("      [boot1] creating the superflat world...");
+    boot_and_shutdown(run_dir, &create_log, jar)?;
+    inject_forced_tickets(&run_dir.join("world"))?;
+    println!("      [boot2] capturing the forced FULL chunks...");
+    boot_and_shutdown(run_dir, &capture_log, jar)?;
+    verify_forced_load(&capture_log)?;
+
+    let tmp = env::temp_dir().join(format!("rivet-oracle-verify-{}-{tag}", std::process::id()));
+    if tmp.exists() {
+        fs::remove_dir_all(&tmp)?;
+    }
+    let observed = {
+        let log_text = fs::read(&capture_log)?;
+        parse_boot_thread_counts(&String::from_utf8_lossy(&log_text)).map(|(w, i)| {
+            ChunkConcurrency {
+                worker_threads: w,
+                io_threads: i,
+            }
+        })
+    };
+    extract_fresh_fixtures(&run_dir.join("world"), &tmp, true, KIND_FULL, observed)?;
+    let normalized = normalize_last_update_tree(&tmp)?;
+    // The extracted manifest hashed the pre-normalization payloads; rehash it so
+    // the manifest describes the bytes actually on disk (verify_fixtures and the
+    // tamper control both rely on captured[] matching the tree).
+    rehash_captured(&tmp)?;
+    println!("      normalized LastUpdate to 0 in {normalized} chunk payloads");
+    Ok((tmp, capture_log))
+}
+
 /// Boot a fresh Paper run in `run_dir` and extract its deterministic chunk-NBT
 /// slice into a temp dir. Returns the temp extraction dir (caller owns
 /// cleanup). Shared by the `verify` gates and negative controls. `tag`
@@ -1236,6 +1518,11 @@ fn fresh_extraction(
     cfg: &BootConfig,
     tag: &str,
 ) -> Result<(PathBuf, PathBuf), Error> {
+    if cfg.kind == KIND_FULL {
+        // The FULL gate needs corpus-forced generation (two boots + ticket
+        // injection + LastUpdate normalization), not a plain spawn boot.
+        return full_forced_extraction(run_dir, jar, cfg, tag);
+    }
     let log_path = run_dir.with_file_name(format!("boot-{tag}.log"));
     prepare_run_dir(run_dir, &cfg.props_src)?;
     boot_and_shutdown(run_dir, &log_path, jar)?;
@@ -1891,30 +2178,92 @@ fn regenerate_m2(dest: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Regenerate the superflat status-FULL region payloads with a corpus-forced
+/// twin-boot determinism proof (issue #51), mirroring `regenerate_m2`.
+///
+/// Performs TWO independent corpus-forced captures (`full_forced_extraction`:
+/// create -> inject level-33 forced tickets for every corpus coordinate ->
+/// capture, under the pinned 1/1 concurrency), normalizes each extraction's
+/// save-clock `LastUpdate` to 0, and requires the two extracted chunk-NBT
+/// payloads (and manifests) to be byte-identical before committing anything
+/// into `dest`. If the pair diverges, `dest` is left untouched and the two
+/// extraction trees are kept for inspection — a nondeterministic pair is never
+/// committed.
+fn regenerate_full(dest: &Path) -> Result<(), Error> {
+    let jar = ensure_jar()?;
+    let run_dir = crate_dir().join("work/verify/run");
+    let cfg = full_config();
+
+    println!(
+        "[1/3] corpus-forced capture 1: superflat FULL (create + forced tickets + capture, 1/1 pin)..."
+    );
+    let (boot_a, _) = fresh_extraction(&run_dir, &jar, &cfg, "fulla")?;
+    println!(
+        "[2/3] corpus-forced capture 2: superflat FULL (create + forced tickets + capture, 1/1 pin)..."
+    );
+    let (boot_b, _) = fresh_extraction(&run_dir, &jar, &cfg, "fullb")?;
+
+    println!("[3/3] byte-comparing the two independent extractions...");
+    if !trees_byte_identical(&boot_a, &boot_b)? {
+        eprintln!(
+            "regeneration ABORTED: the two independent corpus-forced Paper captures produced \
+             DIFFERENT chunk payloads — the superflat FULL generation is not byte-deterministic \
+             (after LastUpdate normalization), so nothing is committed (issue #51).\n\
+             capture A kept at: {}\n\
+             capture B kept at: {}\n\
+             destination {} was NOT touched.",
+            boot_a.display(),
+            boot_b.display(),
+            dest.display()
+        );
+        return Err(Error::Gate(
+            "superflat-FULL twin-boot byte-identity check failed — refusing to commit a \
+             nondeterministic pair"
+                .into(),
+        ));
+    }
+
+    if dest.exists() {
+        fs::remove_dir_all(dest)?;
+    }
+    fs::create_dir_all(dest)?;
+    copy_dir_recursive(&boot_a, dest)?;
+    let _ = fs::remove_dir_all(&boot_a);
+    let _ = fs::remove_dir_all(&boot_b);
+    println!(
+        "regenerated superflat status-FULL region payloads under {} (twin-boot byte-identical; \
+         chunk-concurrency provenance recorded)",
+        dest.display()
+    );
+    Ok(())
+}
+
 /// `regenerate`: full regeneration of every fixture kind (or a sub-selection
-/// via `--m0` / `--m2` / `--samples` / `--text`). A bare invocation regenerates
-/// all four kinds — M0, M2, the derived worldgen samples, and the derived text
-/// corpus (issue #98).
+/// via `--m0` / `--m2` / `--full` / `--samples` / `--text`). A bare invocation
+/// regenerates all five kinds — M0, M2, the superflat status-FULL capture
+/// (issue #51), the derived worldgen samples, and the derived text corpus
+/// (issue #98).
 ///
 /// Each kind defaults to its committed location (M0 -> `fixtures/`, M2 ->
-/// `fixtures/regions/overworld-normal/`; the derived kinds always regenerate
-/// their committed `fixtures/worldgen` / `fixtures/text` trees), so the official
-/// path refreshes the golden fixtures in place. An explicit `--to <dir>`
-/// overrides the destination for a single *booting* kind (`--m0`/`--m2` only;
-/// refused for bare/combined selections and for the derived kinds), regenerating
-/// into a scratch dir for gate validation before anything is committed — the
+/// `fixtures/regions/overworld-normal/`, FULL -> `fixtures/regions/superflat-full/`;
+/// the derived kinds always regenerate their committed `fixtures/worldgen` /
+/// `fixtures/text` trees), so the official path refreshes the golden fixtures in
+/// place. An explicit `--to <dir>` overrides the destination for a single
+/// *booting* kind (`--m0`/`--m2`/`--full` only; refused for bare/combined
+/// selections and for the derived kinds), regenerating into a scratch dir for
+/// gate validation before anything is committed — the
 /// M0-verify-in-a-temporary-destination path.
 fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     for flag in only {
-        if !matches!(*flag, "--m0" | "--m2" | "--samples" | "--text") {
+        if !matches!(*flag, "--m0" | "--m2" | "--full" | "--samples" | "--text") {
             return Err(Error::Gate(format!("unknown regenerate flag: {flag}")));
         }
     }
     // `--to <dir>` is only meaningful for a single booting kind (see
     // `to_targets_single_booting_kind`): the derived kinds always regenerate
     // their committed fixture trees and ignore a destination, and a shared
-    // destination across the booting kinds would let M2's twin-boot copy replace
-    // the whole directory, silently discarding M0's output.
+    // destination across the booting kinds would let M2/FULL's twin-boot copy
+    // replace the whole directory, silently discarding the other kind's output.
     if to.is_some() && !to_targets_single_booting_kind(only) {
         let what = if only.is_empty() {
             String::from("all kinds (bare regenerate)")
@@ -1922,20 +2271,23 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
             only.join(" ")
         };
         return Err(Error::Gate(format!(
-            "regenerate --to <dir> requires exactly one of --m0/--m2 — bare and \
-             combined selections, and the derived kinds --samples/--text (which \
-             regenerate their committed fixture trees and ignore --to), are \
-             refused; got {what}"
+            "regenerate --to <dir> requires exactly one of --m0/--m2/--full — bare \
+             and combined selections, and the derived kinds --samples/--text \
+             (which regenerate their committed fixture trees and ignore --to), \
+             are refused; got {what}"
         )));
     }
     let m0 = regenerates_kind("--m0", only);
     let m2 = regenerates_kind("--m2", only);
+    let full = regenerates_kind("--full", only);
     let samples = regenerates_kind("--samples", only);
     let text = regenerates_kind("--text", only);
     let m0_default = crate_dir().join("fixtures");
     let m2_default = crate_dir().join("fixtures/regions/overworld-normal");
+    let full_default = crate_dir().join("fixtures/regions/superflat-full");
     let m0_dest = to.unwrap_or(&m0_default);
     let m2_dest = to.unwrap_or(&m2_default);
+    let full_dest = to.unwrap_or(&full_default);
     if m0 {
         println!("==> regenerating M0 golden chunk slice");
         regenerate_m0(m0_dest)?;
@@ -1943,6 +2295,10 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     if m2 {
         println!("==> regenerating M2 normal-overworld region payloads");
         regenerate_m2(m2_dest)?;
+    }
+    if full {
+        println!("==> regenerating superflat status-FULL region payloads (corpus-forced, seed 0)");
+        regenerate_full(full_dest)?;
     }
     if samples {
         println!("==> regenerating worldgen semantic samples");
@@ -1962,12 +2318,12 @@ fn regenerates_kind(flag: &str, only: &[&str]) -> bool {
 }
 
 /// Whether a `regenerate` selection may legally be combined with `--to <dir>`.
-/// Only exactly one of the *booting* kinds (`--m0`/`--m2`) writes to the
-/// destination; bare/combined selections and the derived kinds
+/// Only exactly one of the *booting* kinds (`--m0`/`--m2`/`--full`) writes to
+/// the destination; bare/combined selections and the derived kinds
 /// (`--samples`/`--text`, which regenerate their committed fixture trees and
 /// ignore a destination) are refused.
 fn to_targets_single_booting_kind(only: &[&str]) -> bool {
-    matches!(only, ["--m0"] | ["--m2"])
+    matches!(only, ["--m0"] | ["--m2"] | ["--full"])
 }
 
 // ---- #54 chunk-hash engine commands -----------------------------------------
@@ -2010,12 +2366,31 @@ fn source_region_seed(dir: &Path) -> Option<String> {
     load_manifest(dir).ok()?.seed
 }
 
+/// Read the source region capture's manifest provenance that a hash manifest
+/// must inherit (seed, level-type, region-file-compression). `load_manifest`
+/// parses the extract script's manifest (unknown fields ignored), so a Rivet
+/// tree that already carries provenance yields it here too. Every value is the
+/// actual one the payloads were generated under, never a magic literal.
+fn source_region_provenance(dir: &Path) -> Option<hash_manifest::CaptureProvenance> {
+    let m = load_manifest(dir).ok()?;
+    Some(hash_manifest::CaptureProvenance::from_region_manifest(
+        m.level_type.as_deref(),
+        m.region_file_compression.as_deref(),
+    ))
+}
+
 /// `hash-paper`: rebuild the committed Paper manifest from the decompressed
-/// `.nbt` fixtures (the two genuine FULL chunks today: the_nether/0.0 and
-/// the_end/0.0). The seed recorded is read back out of the source region
-/// capture's manifest (the committed capture's working seed, 42 — distinct from
-/// the pinned corpus seeds, which are the #175 sweep targets); the paper pin and
-/// corpus version are constants.
+/// `.nbt` fixtures. The seed, level-type, region-file-compression, and corpus
+/// version recorded are all read back out of the source region capture's
+/// manifest — the default source is the M2 capture (working seed 42, distinct
+/// from the pinned corpus seeds, which are the #175 sweep targets), whose only
+/// FULL chunks are the_nether/0.0 and the_end/0.0. The single `dir` argument
+/// overrides both the payload source and the manifest destination (one tree):
+/// run it against a scratch copy of a different tree to hash that tree without
+/// touching committed fixtures — e.g. a copy of the corpus-forced superflat-full
+/// capture reports its 8 FULL chunks per dimension (corpus seed 0,
+/// 5207638315753790570, `minecraft\:flat`, issue #51). Nothing is hardcoded;
+/// the paper pin is a constant.
 fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     hash::self_check().map_err(Error::Gate)?;
     let dest = dir
@@ -2024,10 +2399,12 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     let payload_dir = dir
         .map(Path::to_path_buf)
         .unwrap_or_else(|| crate_dir().join("fixtures/regions/overworld-normal"));
+    let prov = source_region_provenance(&payload_dir).unwrap_or_default();
     let seed =
         source_region_seed(&payload_dir).unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
-    let manifest = hash_manifest::build_from_payloads(&payload_dir, &seed, "minecraft\\:normal")
-        .map_err(Error::Gate)?;
+    let manifest =
+        hash_manifest::build_from_payloads_with(&payload_dir, &seed, &prov.level_type, &prov)
+            .map_err(Error::Gate)?;
     let json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| Error::Gate(format!("cannot serialize hash manifest: {e}")))?;
     fs::create_dir_all(&dest)
@@ -2035,11 +2412,27 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     let path = dest.join("manifest.json");
     fs::write(&path, json + "\n")
         .map_err(|e| Error::Gate(format!("cannot write {}: {e}", path.display())))?;
+    let mut dim_full: std::collections::BTreeMap<&str, usize> = Default::default();
+    for e in &manifest.entries {
+        if e.is_full() {
+            *dim_full.entry(e.dim.as_str()).or_default() += 1;
+        }
+    }
+    let dim_narration = dim_full
+        .iter()
+        .map(|(d, n)| format!("{d}: {n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     println!(
-        "hash-paper: wrote {} ({} chunks, {} FULL: the_nether/0.0 + the_end/0.0; overworld has 0 FULL)",
+        "hash-paper: wrote {} ({} chunks, {} FULL: {})",
         path.display(),
         manifest.chunk_count,
-        manifest.full_count
+        manifest.full_count,
+        if dim_narration.is_empty() {
+            "none".to_string()
+        } else {
+            dim_narration
+        }
     );
     let cov = hash_manifest::coverage(&manifest, &corpus::Corpus::from_committed());
     let complete = if cov.is_complete() { " (complete)" } else { "" };
@@ -2074,7 +2467,8 @@ fn run_hash_rivet(dir: &Path) -> Result<(), Error> {
         )));
     }
     let seed = source_region_seed(dir).unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
-    let manifest = hash_manifest::build_from_payloads(dir, &seed, "minecraft\\:normal")
+    let prov = source_region_provenance(dir).unwrap_or_default();
+    let manifest = hash_manifest::build_from_payloads_with(dir, &seed, &prov.level_type, &prov)
         .map_err(Error::Gate)?;
     if manifest.full_count == 0 {
         return Err(Error::Gate(format!(
@@ -2286,6 +2680,10 @@ fn run_hash_diff_negative(
     // the tamper, never a spurious provenance mismatch.
     let manifest = load_hash_manifest(rivet_dir)?;
     let seed = manifest.seed.clone();
+    let prov = hash_manifest::CaptureProvenance::from_region_manifest(
+        Some(&manifest.level_type),
+        Some(&manifest.region_file_compression),
+    );
     let Some(full) = manifest.entries.iter().find(|e| e.is_full()) else {
         let _ = fs::remove_dir_all(&scratch);
         return Err(Error::Gate(
@@ -2303,9 +2701,11 @@ fn run_hash_diff_negative(
     fs::write(&target, tampered)
         .map_err(|e| Error::Gate(format!("cannot write tampered payload: {e}")))?;
     // Rebuild the corrupted copy's manifest from its payloads, keeping the
-    // original seed so the tamper is the only divergence.
-    let rebuilt = hash_manifest::build_from_payloads(&scratch, &seed, "minecraft\\:normal")
-        .map_err(Error::Gate)?;
+    // original seed + level-type + compression so the tamper is the only
+    // divergence (the corrupted copy inherits the original provenance).
+    let rebuilt =
+        hash_manifest::build_from_payloads_with(&scratch, &seed, &manifest.level_type, &prov)
+            .map_err(Error::Gate)?;
     let json = serde_json::to_string_pretty(&rebuilt)
         .map_err(|e| Error::Gate(format!("cannot serialize: {e}")))?;
     fs::write(scratch.join("manifest.json"), json + "\n")
@@ -2476,6 +2876,11 @@ fn print_usage() {
     println!(
         "                                                     none-compression region parity)"
     );
+    println!("  cargo run -p rivet-oracle -- verify --full  FULL region gate (superflat");
+    println!(
+        "                                                     status-FULL region capture, issue"
+    );
+    println!("                                                     #51)");
     println!("  cargo run -p rivet-oracle -- verify --expect-fail [dir]");
     println!(
         "                                             M0 negative control: diff against a corrupted"
@@ -2492,10 +2897,14 @@ fn print_usage() {
         "  cargo run -p rivet-oracle -- sample         regenerate worldgen/ semantic samples + manifest"
     );
     println!("  cargo run -p rivet-oracle -- regenerate     regenerate ALL fixture kinds");
-    println!("                                             (sub-select: --m0 / --m2 / --samples /");
-    println!("                                              --text; --to <dir> — exactly one of");
     println!(
-        "                                              --m0/--m2 — writes into a scratch dir for"
+        "                                             (sub-select: --m0 / --m2 / --full / --samples / --text;"
+    );
+    println!(
+        "                                              --to <dir> — exactly one of --m0/--m2/--full"
+    );
+    println!(
+        "                                              — writes into a scratch dir for"
     );
     println!(
         "                                              gate validation; --samples/--text always"
@@ -2528,16 +2937,29 @@ fn run() -> Result<(), Error> {
     match args.first().map(String::as_str) {
         Some("verify") => {
             let mut m2 = false;
+            let mut full = false;
             let mut expect_fail = false;
             let mut rest: Vec<String> = Vec::new();
             for a in args.iter().skip(1) {
                 match a.as_str() {
                     "--m2" => m2 = true,
+                    "--full" => full = true,
                     "--expect-fail" => expect_fail = true,
                     other => rest.push(other.to_string()),
                 }
             }
-            let cfg = if m2 { m2_config() } else { m0_config() };
+            if m2 && full {
+                return Err(Error::Gate(
+                    "verify --m2 and verify --full are mutually exclusive".into(),
+                ));
+            }
+            let cfg = if m2 {
+                m2_config()
+            } else if full {
+                full_config()
+            } else {
+                m0_config()
+            };
             // A custom baseline dir wins over the mode default.
             let cfg = if let Some(dir) = rest.first() {
                 BootConfig {
@@ -2812,18 +3234,22 @@ mod tests {
     }
 
     /// Bare `regenerate` intentionally regenerates every fixture kind —
-    /// including the derived worldgen samples and the text corpus (issue #98).
-    /// Each `--flag` sub-selects only its own kind. This pins the selection
-    /// semantics so a future change cannot silently drop (or add) a kind from
-    /// the bare invocation.
+    /// including the superflat status-FULL capture (issue #51), the derived
+    /// worldgen samples, and the text corpus (issue #98). Each `--flag`
+    /// sub-selects only its own kind. This pins the selection semantics so a
+    /// future change cannot silently drop (or add) a kind from the bare
+    /// invocation.
     #[test]
     fn regenerate_selection_includes_text_on_bare() {
         assert!(regenerates_kind("--m0", &[]));
         assert!(regenerates_kind("--m2", &[]));
+        assert!(regenerates_kind("--full", &[]));
         assert!(regenerates_kind("--samples", &[]));
         assert!(regenerates_kind("--text", &[]));
         assert!(regenerates_kind("--m0", &["--m0"]));
         assert!(!regenerates_kind("--m0", &["--text"]));
+        assert!(regenerates_kind("--full", &["--full"]));
+        assert!(!regenerates_kind("--full", &["--m0"]));
         assert!(regenerates_kind("--text", &["--text"]));
         assert!(!regenerates_kind("--text", &["--m0"]));
         assert!(!regenerates_kind("--samples", &["--m0"]));
@@ -2956,8 +3382,11 @@ mod tests {
             (&["--m0", "--text"][..], "--m0 --text"),
             (&["--m2", "--samples"][..], "--m2 --samples"),
             (&["--m2", "--text"][..], "--m2 --text"),
+            (&["--full", "--samples"][..], "--full --samples"),
+            (&["--full", "--text"][..], "--full --text"),
             (&["--m0", "--m2", "--samples"][..], "--m0 --m2 --samples"),
             (&["--m0", "--m2", "--text"][..], "--m0 --m2 --text"),
+            (&["--m0", "--full", "--text"][..], "--m0 --full --text"),
         ] {
             assert!(
                 !to_targets_single_booting_kind(flags),
@@ -2974,6 +3403,7 @@ mod tests {
         // Exactly one booting kind is the only legal `--to` target.
         assert!(to_targets_single_booting_kind(&["--m0"]));
         assert!(to_targets_single_booting_kind(&["--m2"]));
+        assert!(to_targets_single_booting_kind(&["--full"]));
     }
 
     /// The committed `fixtures/paper-world-defaults.yml` (the pinned Paper
@@ -4190,6 +4620,79 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    /// Status and structures mutations through the real verdict (issue #51
+    /// component 7): a chunk whose `Status` is demoted, or whose FULL-time
+    /// `structures` compound is removed, is no longer a *genuine* FULL payload.
+    /// These cannot be a "plausible wrong digest" — the FULL gate refuses them
+    /// before any xxh3_64 is compared: a demoted-status chunk stops being FULL
+    /// (its corpus coordinate lacks FULL data on that side → UNVERIFIED, exit 3),
+    /// and a structures-missing chunk fails `validate_full_payload` at manifest
+    /// build (→ UNVERIFIED, exit 3). Neither can ever be a false green.
+    #[test]
+    fn hash_diff_refuses_status_and_structures_tamper() {
+        let tmp = hash_tmp("hash-status-struct");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        let (cx, cz) = all_corpus_coordinates()[0];
+        let target = paper
+            .join("chunk/the_nether/0.0")
+            .join(format!("{cx}.{cz}.nbt"));
+
+        // Status demotion: rebuild the paper manifest with the (0,0) chunk no
+        // longer FULL — the required-corpus guard sees no FULL data at (0,0) on
+        // the paper side and the diff is UNVERIFIED (3), never green.
+        let mut root = crate::mutate::parse_payload(&fs::read(&target).unwrap()).unwrap();
+        root.put_string("Status", "minecraft:structure_starts");
+        fs::write(&target, crate::mutate::encode_payload(&root).unwrap()).unwrap();
+        let m = hash_manifest::build_from_payloads(&paper, "42", "minecraft\\:normal").unwrap();
+        fs::write(
+            paper.join("manifest.json"),
+            serde_json::to_string_pretty(&m).unwrap() + "\n",
+        )
+        .unwrap();
+        assert!(run_hash_diff(&paper, &rivet).is_err());
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            HASH_EXIT_UNVERIFIED,
+            "a demoted-status chunk must be refused, never compared as FULL"
+        );
+
+        // Structures removal: restore Status to full but drop the `structures`
+        // compound — the FULL validator refuses the payload at manifest build, so
+        // the comparator can never compare a chunk Paper did not actually finish.
+        let mut root =
+            crate::mutate::parse_payload(&crate::mutate::fixture_full_payload(cx, cz)).unwrap();
+        root.tags.swap_remove("structures");
+        fs::write(&target, crate::mutate::encode_payload(&root).unwrap()).unwrap();
+        assert!(
+            hash_manifest::build_from_payloads(&paper, "42", "minecraft\\:normal").is_err(),
+            "FULL validator refuses a FULL chunk whose structures compound is missing"
+        );
+
+        // Section-local light tamper: restore the payload's shape but shrink a
+        // section's `SkyLight` array below its 2048-byte packed size. The FULL
+        // validator refuses malformed light data at manifest build (spec §5), so
+        // the comparator never compares a chunk whose light was not finalized.
+        let mut root =
+            crate::mutate::parse_payload(&crate::mutate::fixture_full_payload(cx, cz)).unwrap();
+        let sections = root.get_list_or_empty_mut("sections");
+        if let rivet_nbt::tag::Tag::Compound(sec) = &mut sections.list[0] {
+            sec.tags.insert(
+                "SkyLight".to_string(),
+                rivet_nbt::tag::Tag::ByteArray(rivet_nbt::byte_array_tag::ByteArrayTag::new(
+                    vec![0i8; 10],
+                )),
+            );
+        }
+        fs::write(&target, crate::mutate::encode_payload(&root).unwrap()).unwrap();
+        assert!(
+            hash_manifest::build_from_payloads(&paper, "42", "minecraft\\:normal").is_err(),
+            "FULL validator refuses a FULL chunk whose section light data is malformed"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     /// Bad argument counts map to usage (64) for every hash-* subcommand.
     #[test]
     fn hash_cli_usage_returns_64() {
@@ -4288,6 +4791,47 @@ mod tests {
             hash_diff_exit(&args),
             0,
             "every TamperKind detected and named (no vacuous green)"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// `hash-paper [dir]` dir override: run against a scratch copy of a tree
+    /// without touching committed fixtures. The single dir is both the payload
+    /// source and the manifest destination, and provenance (level-type,
+    /// region-file-compression, seed) is inherited from the source region
+    /// manifest — nothing hardcoded except the paper pin constant.
+    #[test]
+    fn hash_paper_dir_override_inherits_provenance_and_covers_corpus() {
+        let tmp = hash_tmp("hash-paper-dir");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let dir = write_hash_fixture_tree(&tmp.join("tree"), &all_corpus_coordinates());
+        // A region manifest with provenance the source region capture would
+        // carry: flat level type, uncompressed regions, corpus seed 0.
+        let region = serde_json::json!({
+            "format": 1,
+            "seed": corpus::corpus_seed(0).to_string(),
+            "level-type": "minecraft\\:flat",
+            "region-file-compression": "none",
+            "kind": "full",
+            "chunk-count": 24,
+        });
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string_pretty(&region).unwrap() + "\n",
+        )
+        .unwrap();
+
+        run_hash_paper(Some(&dir)).expect("hash-paper dir override succeeds");
+        let m = load_hash_manifest(&dir).expect("manifest written into the overridden dir");
+        assert_eq!(m.seed, corpus::corpus_seed(0).to_string());
+        assert_eq!(m.level_type, "minecraft\\:flat");
+        assert_eq!(m.region_file_compression, "none");
+        let cov = hash_manifest::coverage(&m, &corpus::Corpus::from_committed());
+        assert!(
+            cov.is_complete(),
+            "the 8 corpus coordinates × full matrix is a complete sweep: {} present",
+            cov.present
         );
         let _ = fs::remove_dir_all(&tmp);
     }
