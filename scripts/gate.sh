@@ -45,6 +45,16 @@
 #                          exec's the JVM, whose exit status passes straight through) —
 #                          and --require-oracle makes any nonzero exit a hard failure
 #                          (exit 1), mirroring rivet-parity's rc=3 handling.
+#   - rivet-oracle verify --full  M2 FULL region gate (issue #51): boot a fresh
+#                          superflat server (region-file-compression=none, D13) and
+#                          diff its chunk-NBT slice against the committed status-FULL
+#                          region baseline — the corpus-forced, twin-boot-captured
+#                          superflat full-status chunks. The capture injects
+#                          level-33 forced tickets for every corpus coordinate into
+#                          each dimension, so all 8 corpus coordinates per dimension
+#                          reach `minecraft:full`; LastUpdate is normalized to 0
+#                          (save-clock artifact). Also runs the --full --expect-fail
+#                          negative control.
 #   - rivet-parity         byte-for-byte NBT/SNBT diff of rivet-nbt against the Paper
 #                          reference oracle — the only gate step that exercises real
 #                          Rivet code against Paper.
@@ -327,6 +337,11 @@ run_oracle_verify() {
     echo "    VERIFIED — fresh normal-overworld boot is byte-identical to the committed region baseline"
     echo "==> oracle negative control (verify --m2 --expect-fail: detects tamper)"
     cargo run -q -p rivet-oracle -- verify --m2 --expect-fail
+    echo "==> oracle verify (M2 FULL region gate: superflat status-FULL region capture, issue #51)"
+    cargo run -q -p rivet-oracle -- verify --full
+    echo "    VERIFIED — fresh corpus-forced superflat boot is byte-identical to the committed status-FULL region baseline"
+    echo "==> oracle negative control (verify --full --expect-fail: detects tamper)"
+    cargo run -q -p rivet-oracle -- verify --full --expect-fail
   else
     echo "    UNVERIFIED — oracle verify did not run (see the prereq report above)"
     ORACLE_UNVERIFIED=1

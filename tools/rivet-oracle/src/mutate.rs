@@ -83,6 +83,11 @@ pub fn encode_payload(compound: &CompoundTag) -> Result<Vec<u8>, String> {
 /// the chunk coordinate (so distinct chunks hash distinctly). Deterministic by
 /// construction — the diff tests and the tamper negatives build whole fixture
 /// trees from it instead of committing thousands of payload blobs.
+///
+/// It also carries the FULL-time structure fields `hash_manifest` requires of a
+/// genuinely finished chunk (`structures` + all four FINAL heightmaps as 37-long
+/// arrays), so `build_from_payloads`' `validate_full_payload` accepts it and the
+/// synthetic trees hash the same way the live superflat FULL capture does.
 #[cfg(test)]
 pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
     let mut root = CompoundTag::new();
@@ -114,8 +119,24 @@ pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
         Tag::List(ListTag::with_list(vec![Tag::Compound(section)])),
     );
     let mut heightmaps = CompoundTag::new();
-    heightmaps.put_long_array("WORLD_SURFACE", vec![1; 37]);
+    for key in [
+        "OCEAN_FLOOR",
+        "WORLD_SURFACE",
+        "MOTION_BLOCKING",
+        "MOTION_BLOCKING_NO_LEAVES",
+    ] {
+        heightmaps.put_long_array(key, vec![1; 37]);
+    }
     root.put("Heightmaps".to_string(), Tag::Compound(heightmaps));
+    let mut structures = CompoundTag::new();
+    structures.put("starts".to_string(), Tag::Compound(CompoundTag::new()));
+    structures.put("References".to_string(), Tag::Compound(CompoundTag::new()));
+    root.put("structures".to_string(), Tag::Compound(structures));
+    // lightCorrect (SerializableChunkData §6): a genuine FULL chunk always
+    // carries isLightOn (true at write, then clobbered to false) and
+    // starlight.light_version == 10. The FULL validator requires both.
+    root.put_byte("isLightOn", 0);
+    root.put_int("starlight.light_version", 10);
     encode_payload(&root).expect("fixture payload encodes")
 }
 
@@ -317,11 +338,17 @@ mod tests {
             .clone()
     }
 
+    /// The first `LongArray` in the `Heightmaps` compound — the exact array
+    /// `tamper_heightmap` flips (its `find_map` picks the first long array).
     fn heightmap(c: &CompoundTag) -> Vec<i64> {
         c.get_compound("Heightmaps")
             .unwrap()
-            .get_long_array("WORLD_SURFACE")
-            .unwrap()
-            .clone()
+            .tags
+            .iter()
+            .find_map(|(_, v)| match v {
+                Tag::LongArray(l) => Some(l.data.clone()),
+                _ => None,
+            })
+            .expect("Heightmaps has a long array")
     }
 }
