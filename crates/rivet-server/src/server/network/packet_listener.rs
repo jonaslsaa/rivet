@@ -59,13 +59,22 @@ pub trait PacketListener: Send {
         config: &ServerConfig,
     ) -> Result<ListenerOutcome, DisconnectReason>;
 
-    /// `TickablePacketListener.tick()` — the per-tick driver hook, reserved for
-    /// #157 (Paper's configuration keepalive + task ticking). Not yet driven by
-    /// the connection loop, so the default is a no-op; the configuration
-    /// listener's keepalive/task tick mechanics land with #157.
-    // RivetTodo(#157): drive listener ticks from `conn_loop` (Paper ticks every
-    // listener each server tick; the per-connection task has no tick source yet).
-    fn tick(&mut self) {}
+    /// `TickablePacketListener.tick()` — the per-tick driver hook
+    /// (`ServerConnectionListener.tick()` → `Connection.tick()` →
+    /// `TickablePacketListener.tick()` in Paper). `conn_loop` drives it for the
+    /// configuration listener every `config.tick_interval` (issue #283); the
+    /// other listeners have nothing per-tick, so the default is a no-op. The
+    /// clock axes come from the same `Connection::monotonic_nanos` epoch the
+    /// keepalive runs on (`now_ns`, `now_ms = now_ns / 1_000_000`). A
+    /// `Err(reason)` closes the connection.
+    fn tick(
+        &mut self,
+        _conn: &mut Connection,
+        _now_ns: i64,
+        _now_ms: i64,
+    ) -> Result<(), DisconnectReason> {
+        Ok(())
+    }
 
     /// `onDisconnect(DisconnectionDetails)` — called when the connection drops.
     /// No-ops for all listeners in this slice.

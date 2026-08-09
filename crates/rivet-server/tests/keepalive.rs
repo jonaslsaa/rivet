@@ -98,13 +98,26 @@ fn decode_keepalive_id(frame: &Bytes) -> Option<i64> {
 /// Per-connection keepalive state the tick thread owns, shared with the test
 /// through a `Mutex` (test scaffolding only — the production machine has no
 /// locks; OWNERSHIP "one owner: the tick thread").
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ConnCell {
     keepalive: KeepaliveState,
     /// Challenge ids transmitted this session, in order.
     sends: Vec<i64>,
     /// Set once a keepalive-related disconnect fires.
     disconnected: Option<DisconnectReason>,
+}
+
+/// `ConnCell` has no `Default` for the keepalive itself (a time-zero machine
+/// would transmit on the first tick); the test harness seeds every cell at
+/// monotonic 0, the same epoch the drive runs on.
+impl Default for ConnCell {
+    fn default() -> Self {
+        ConnCell {
+            keepalive: KeepaliveState::new(0),
+            sends: Vec::new(),
+            disconnected: None,
+        }
+    }
 }
 
 /// The tickable's outbound sink: records the send and pushes the real
@@ -194,7 +207,10 @@ fn build_keepalive_loop(
             if cell.disconnected.is_some() {
                 continue;
             }
-            let mut ka = std::mem::take(&mut cell.keepalive);
+            // Take-tick-putback: `KeepaliveState` has no `Default`, so the
+            // placeholder is a fresh seed (discarded by the put-back right
+            // after the drive).
+            let mut ka = std::mem::replace(&mut cell.keepalive, KeepaliveState::new(0));
             let mut sink = CellSink {
                 cell,
                 id,

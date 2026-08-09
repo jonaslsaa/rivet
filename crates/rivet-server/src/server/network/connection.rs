@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::{Buf, Bytes, BytesMut};
 use rivet_protocol::compression_decoder::CompressionDecoder;
@@ -82,6 +83,13 @@ pub struct Connection {
     id: ConnectionId,
     remote_addr: SocketAddr,
     config: Arc<ServerConfig>,
+    /// The monotonic-clock epoch anchor for this connection (issue #283): the
+    /// per-connection task reads `Instant`-relative nanos for the configuration
+    /// keepalive's `tx_time_ns` / seed from this single `Instant`. Tokio runs
+    /// one per-connection task per connection, so one epoch per `Connection` is
+    /// exactly the lifetime the config keepalive needs — no shared clock, and
+    /// the same epoch feeds both the construction seed and every tick drive.
+    clock_epoch: Instant,
     write: OwnedWriteHalf,
     /// Inbound bytes not yet decoded into a full frame.
     read_buf: BytesMut,
@@ -135,6 +143,7 @@ impl Connection {
             id,
             remote_addr,
             config,
+            clock_epoch: Instant::now(),
             write,
             read_buf: BytesMut::new(),
             out_buf: BytesMut::new(),
@@ -158,6 +167,15 @@ impl Connection {
 
     pub fn remote_addr(&self) -> SocketAddr {
         self.remote_addr
+    }
+
+    /// The current monotonic nanoseconds reading in this connection's clock
+    /// epoch (`System.nanoTime()` in Java; the same axis `KeepaliveState` runs
+    /// its `tx_time_ns` on). Read at the configuration listener's construction
+    /// (the `lastKeepAliveTx` seed) and at every config keepalive tick drive —
+    /// see [`Connection::clock_epoch`].
+    pub fn monotonic_nanos(&self) -> i64 {
+        self.clock_epoch.elapsed().as_nanos() as i64
     }
 
     /// `Connection.setupOutboundProtocol(ProtocolInfo)` — records which state the

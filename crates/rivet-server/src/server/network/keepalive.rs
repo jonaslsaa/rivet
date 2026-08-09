@@ -14,9 +14,10 @@
 //!   - [`drive_keepalive`] to run one state-machine tick and apply its outcome.
 //!
 //! PLAY sessions own one [`KeepaliveState`] each and drive it through
-//! `PlayKeepaliveSink`. The configuration listener does not own or drive a
-//! keepalive state yet (issue #157); when that tick hook lands it can reuse this
-//! seam without duplicating the keepalive logic.
+//! `PlayKeepaliveSink`. The configuration listener (issue #283) owns one too and
+//! drives it through [`ConnectionKeepaliveSink`] from `conn_loop`, which drives
+//! the listener at `config.tick_interval` only while a CONFIGURATION listener is
+//! current — both reuse this seam instead of duplicating the keepalive logic.
 
 use bytes::BytesMut;
 

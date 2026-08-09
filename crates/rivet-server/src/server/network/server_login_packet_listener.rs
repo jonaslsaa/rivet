@@ -91,7 +91,7 @@ impl PacketListener for ServerLoginPacketListener {
     ) -> Result<ListenerOutcome, DisconnectReason> {
         match packet_id(&frame)? {
             HELLO_PACKET_ID => self.handle_hello(frame, conn, config),
-            LOGIN_ACKNOWLEDGED_PACKET_ID => self.handle_login_acknowledgement(frame, conn),
+            LOGIN_ACKNOWLEDGED_PACKET_ID => self.handle_login_acknowledgement(frame, conn, config),
             KEY_PACKET_ID => Err(DisconnectReason::Unsupported(
                 // `handleKey` is the RSA online-auth path (`ClientboundHello`/
                 // `ServerboundKey`). M1 runs offline (`usesAuthentication()`
@@ -201,6 +201,7 @@ impl ServerLoginPacketListener {
         &mut self,
         frame: Bytes,
         conn: &mut Connection,
+        config: &ServerConfig,
     ) -> Result<ListenerOutcome, DisconnectReason> {
         // `Validate.validState(this.state == PROTOCOL_SWITCHING, "Unexpected
         // login acknowledgement packet")`.
@@ -226,7 +227,18 @@ impl ServerLoginPacketListener {
             .profile
             .clone()
             .expect("handle_hello built the profile before the ack");
-        let mut config_listener = ServerConfigurationPacketListener::new(profile);
+        // The configuration keepalive (issue #283) is seeded with the
+        // connection's monotonic reading at construction — Paper's
+        // `lastKeepAliveTx = System.nanoTime()` — and the configured kick limit
+        // (`paper.playerconnection.keepalive`, `ServerConfig.keepalive_timeout`).
+        // `conn.monotonic_nanos()` and the tick drive (`PacketListener::tick`)
+        // share the same per-connection epoch, so the 1s transmit throttle and
+        // the 30s timeout count from construction exactly like Java.
+        let mut config_listener = ServerConfigurationPacketListener::new(
+            profile,
+            conn.monotonic_nanos(),
+            config.keepalive_timeout.as_nanos() as i64,
+        );
         config_listener
             .start_configuration(conn)
             .map_err(DisconnectReason::Unsupported)?;
