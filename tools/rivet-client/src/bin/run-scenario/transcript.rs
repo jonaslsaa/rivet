@@ -690,6 +690,9 @@ pub fn normalize_dwell(raw: &str) -> Result<Value, String> {
 ///   show a 1:1 challenge->echo pairing.
 /// - `challenge_span_ms < DWELL_MIN_SPAN_MS` — the challenges did not span the
 ///   survival window.
+/// - `first_challenge_offset_ms` absent or null — no keepalive challenge ever
+///   arrived during the window (the normalizer projects an absent raw offset to
+///   null, so the guard checks the value, not just the key).
 ///
 /// The companion server-side checks (in the runner) are the `connection
 /// established` log (the client genuinely reached the Rivet port) and the
@@ -775,10 +778,14 @@ pub fn rivet_dwell_verdict(t: &Value) -> Result<&'static str, String> {
              did not span the full survival window"
         ));
     }
-    if dwell.get("first_challenge_offset_ms").is_none() {
+    if dwell
+        .get("first_challenge_offset_ms")
+        .and_then(Value::as_u64)
+        .is_none()
+    {
         return Err(
-            "dwell has no first_challenge_offset_ms: no keepalive challenge arrived during the \
-             window"
+            "dwell has no first_challenge_offset_ms (absent or null): no keepalive challenge \
+             arrived during the window"
                 .to_owned(),
         );
     }
@@ -1348,6 +1355,42 @@ mod tests {
         assert!(
             err.contains("challenge_span_ms"),
             "error must name the span, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_verdict_rejects_a_null_first_challenge_offset() {
+        // The normalizer emits `first_challenge_offset_ms` as null when the raw
+        // record carries no first offset (no keepalive challenge ever arrived),
+        // so the key is present-but-null — the verdict guard must reject that
+        // value rather than only checking key absence (which the normalizer's
+        // explicit null always satisfies). The span stays valid here so it is
+        // this offset guard, not the span guard, that must refuse PASS.
+        let mut t = normalize_dwell(&dwell_records()).expect("normalize");
+        t["dwell"]["first_challenge_offset_ms"] = Value::Null;
+        let err = rivet_dwell_verdict(&t).expect_err("null first offset must fail the verdict");
+        assert!(
+            err.contains("first_challenge_offset_ms"),
+            "error must name the missing first offset, got {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_dwell_emits_null_when_the_first_offset_is_absent() {
+        // The verdict guards on the *value* of `first_challenge_offset_ms`, so
+        // the normalizer's absent→null projection is load-bearing: a raw record
+        // with no first offset must normalize to an explicit null (not leave the
+        // key out) that the value-aware verdict guard can then reject. (The
+        // span also normalizes to null here, since it needs both offsets, so a
+        // raw-absent offset can never silently slip past the verdict.)
+        let raw = dwell_raw_with(
+            r#""requested_dwell_seconds":41,"connected_wall_seconds":41.2,"challenge_count":2,"echo_count":2,"challenge_ids":[1000,1001],"echo_ids":[1000,1001],"last_challenge_offset_ms":41100,"challenge_span_ms":39900"#,
+        );
+        let t = normalize_dwell(&raw).expect("normalize");
+        assert_eq!(t["dwell"]["first_challenge_offset_ms"], Value::Null);
+        assert!(
+            rivet_dwell_verdict(&t).is_err(),
+            "a transcript with no first challenge offset must not pass"
         );
     }
 
