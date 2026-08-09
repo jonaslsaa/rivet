@@ -299,7 +299,7 @@ replay fails (invalid sector < 2, `numSectors <= 0`, out-of-bounds, or overlappi
 by the soft-failure path above. Steps:
 
 1. Back up the file (`<file>.<random>.backup`), then **scan every sector** from sector 2 up to
-   `min(roundToSectors(fileSize), 0x7FFFFF)` — the constant is `Integer.MAX_VALUE >>> 8`, i.e. it is
+   (exclusive) `min(roundToSectors(fileSize), 0x7FFFFF)` — the constant is `Integer.MAX_VALUE >>> 8`, i.e. it is
    *not* the 24-bit sector mask — looking for valid chunk streams (4-byte length via `getLength` +
    `attemptRead`). The scan jumps ahead by the chunk's sector span only when a parsed compound is
    **accepted** into a slot; every other outcome advances by exactly one sector — a null read, the
