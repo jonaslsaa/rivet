@@ -27,10 +27,13 @@ pub struct Uuid {
 
 impl Uuid {
     /// `UUID.fromString(String)` — Java's parser, exactly (JDK 25). Accepts
-    /// any string of at most 36 chars with exactly 4 dashes whose groups parse
-    /// as signed base-16 longs, masking each group to its 32/16/16/16/48-bit
-    /// width (short groups pad with zeros, so `1-2-3-4-5` is valid; a group
-    /// wider than its field truncates, so `100000000-2-3-4-5` is valid).
+    /// any string of at most 36 UTF-16 code units with exactly 4 dashes whose
+    /// groups parse as signed base-16 longs, masking each group to its
+    /// 32/16/16/16/48-bit width (short groups pad with zeros, so `1-2-3-4-5`
+    /// is valid; a group wider than its field truncates, so
+    /// `100000000-2-3-4-5` is valid). Hex digits are `Character.digit(char,
+    /// 16)` — ASCII `0-9A-Fa-f`, the BMP decimal digits (Arabic-Indic,
+    /// Devanagari, fullwidth, &c.), and fullwidth `Ａ-Ｆ`/`ａ-ｆ`.
     /// Braces, the `urn:uuid:` prefix, the undashed 32-char form, and a group
     /// whose value exceeds `Long.MAX_VALUE` (e.g. `8000000000000000`) are
     /// REJECTED — `UUID.fromString` never accepted them (verified against the
@@ -43,15 +46,25 @@ impl Uuid {
     /// throws), so `UUIDUtil.STRING_CODEC` can reproduce its
     /// `"Invalid UUID <s>: <cause>"` error verbatim.
     pub fn from_string(name: &str) -> Result<Uuid, String> {
-        let len = name.len();
-        // Java's `UUID.fromString` rejects strings longer than 36 chars
+        // Java's `UUID.fromString` sees a `String` as UTF-16 code units
+        // (`name.length()`, `charAt(i)`, `Character.digit(char, 16)`), so the
+        // parser below operates on code units, not bytes — a fullwidth digit
+        // is 3 UTF-8 bytes but 1 code unit, and must count as 1.
+        let units: Vec<u16> = name.encode_utf16().collect();
+        let len = units.len();
+        // Java's `UUID.fromString1` rejects strings longer than 36 code units
         // outright ("UUID string too large").
         if len > 36 {
             return Err("UUID string too large".to_string());
         }
         // Locate the dashes exactly as repeated `indexOf('-', ...)` would; a
         // 5th dash (or fewer than 4) is "Invalid UUID string".
-        let dash_after = |start: usize| name[start..].find('-').map(|i| start + i);
+        let dash_after = |start: usize| {
+            units[start..]
+                .iter()
+                .position(|&u| u == u16::from(b'-'))
+                .map(|i| start + i)
+        };
         let d1 = dash_after(0);
         let d2 = d1.and_then(|d| dash_after(d + 1));
         let d3 = d2.and_then(|d| dash_after(d + 1));
@@ -64,11 +77,11 @@ impl Uuid {
         // `Long.parseLong(segment, 16)` masked to the field width. Each group
         // parses as a SIGNED long (values beyond `Long.MAX_VALUE` overflow),
         // then masks — exactly Java's `parseLong(...) & 0x...`.
-        let g1 = (parse_long_hex(&name[..d1])? as u64) & 0xffff_ffff;
-        let g2 = (parse_long_hex(&name[d1 + 1..d2])? as u64) & 0xffff;
-        let g3 = (parse_long_hex(&name[d2 + 1..d3])? as u64) & 0xffff;
-        let g4 = (parse_long_hex(&name[d3 + 1..d4])? as u64) & 0xffff;
-        let g5 = (parse_long_hex(&name[d4 + 1..len])? as u64) & 0xffff_ffff_ffff;
+        let g1 = (parse_long_hex(&units[..d1])? as u64) & 0xffff_ffff;
+        let g2 = (parse_long_hex(&units[d1 + 1..d2])? as u64) & 0xffff;
+        let g3 = (parse_long_hex(&units[d2 + 1..d3])? as u64) & 0xffff;
+        let g4 = (parse_long_hex(&units[d3 + 1..d4])? as u64) & 0xffff;
+        let g5 = (parse_long_hex(&units[d4 + 1..len])? as u64) & 0xffff_ffff_ffff;
         Ok(Uuid {
             most: ((g1 << 32) | (g2 << 16) | g3) as i64,
             least: ((g4 << 48) | g5) as i64,
@@ -78,25 +91,25 @@ impl Uuid {
 
 /// `Long.parseLong(String, 16)` — Java's signed-base-16 parser, with the exact
 /// JDK-25 accept/reject set and `NumberFormatException` messages. Parses a
-/// segment into a signed `i64` (a value outside `[i64::MIN, i64::MAX]` — e.g. a
-/// 16-hex-digit group starting `8..f` — is rejected), accumulating negatively
-/// the way Java does so `Long.MIN_VALUE` parses. `Err` is Java's message:
-/// `For input string: "" under radix 16` for an empty segment, `Error at index
-/// N in: "..."` for a non-hex digit or overflow, and the lone-sign cases.
-fn parse_long_hex(segment: &str) -> Result<i64, String> {
-    let bytes = segment.as_bytes();
-    if bytes.is_empty() {
+/// segment (a slice of UTF-16 code units) into a signed `i64` (a value outside
+/// `[i64::MIN, i64::MAX]` — e.g. a 16-hex-digit group starting `8..f` — is
+/// rejected), accumulating negatively the way Java does so `Long.MIN_VALUE`
+/// parses. `Err` is Java's message: `For input string: "" under radix 16` for
+/// an empty segment, `Error at index N in: "..."` for a non-hex digit or
+/// overflow, and the lone-sign cases.
+fn parse_long_hex(segment: &[u16]) -> Result<i64, String> {
+    if segment.is_empty() {
         // Java `NumberFormatException.forInputString("", 16)`.
         return Err("For input string: \"\" under radix 16".to_string());
     }
-    let first = bytes[0];
-    let signed = first == b'-' || first == b'+';
-    let negative = first == b'-';
+    let first = segment[0];
+    let signed = first == u16::from(b'-') || first == u16::from(b'+');
+    let negative = first == u16::from(b'-');
     // Java's `digit` sentinel `~0xFF` when the first char is a sign. `i` is 1
     // after the first char was consumed by `s.charAt(i++)`.
     let mut digit: i64 = if signed { -256 } else { hex_digit_value(first) };
     let mut i = 1;
-    if digit >= 0 || (digit == -256 && bytes.len() > 1) {
+    if digit >= 0 || (digit == -256 && segment.len() > 1) {
         // `limit`: `MIN_VALUE` for a leading '-', else `MIN_VALUE + 1`.
         let limit = if negative { i64::MIN } else { i64::MIN + 1 };
         let multmin = limit / 16;
@@ -105,10 +118,10 @@ fn parse_long_hex(segment: &str) -> Result<i64, String> {
         let mut result = -(digit & 0xff);
         let mut in_range = true;
         loop {
-            if i >= bytes.len() {
+            if i >= segment.len() {
                 break;
             }
-            digit = hex_digit_value(bytes[i]);
+            digit = hex_digit_value(segment[i]);
             i += 1;
             if digit < 0 {
                 // Non-hex digit: Java's `digit >= 0` loop condition fails;
@@ -123,24 +136,81 @@ fn parse_long_hex(segment: &str) -> Result<i64, String> {
             }
             result = 16 * result - digit;
         }
-        if in_range && i == bytes.len() && digit >= 0 {
+        if in_range && i == segment.len() && digit >= 0 {
             return Ok(if negative { result } else { -result });
         }
     }
     // `NumberFormatException.forCharSequence(s, 0, len, i - (digit < -1 ? 0 : 1))`.
     let error_index = i - if digit < -1 { 0 } else { 1 };
-    Err(format!("Error at index {error_index} in: \"{segment}\""))
+    // `segment` is a slice of `encode_utf16` output over a valid `&str`, so it
+    // is well-formed UTF-16 and `from_utf16` cannot fail.
+    let seg_str = String::from_utf16(segment).expect("segment is well-formed UTF-16");
+    Err(format!("Error at index {error_index} in: \"{seg_str}\""))
 }
 
-/// `Character.digit(char, 16)` for ASCII hex digits; `-1` for anything else.
-fn hex_digit_value(c: u8) -> i64 {
-    match c {
-        b'0'..=b'9' => (c - b'0') as i64,
-        b'a'..=b'f' => (c - b'a' + 10) as i64,
-        b'A'..=b'F' => (c - b'A' + 10) as i64,
-        _ => -1,
+/// `Character.digit(char, 16)` — the JDK-25 BMP digit set, returning the same
+/// value the JVM does (0..=15) or `-1` for a non-digit. `c` is a UTF-16 code
+/// unit. The set covers ASCII `0-9A-Fa-f`, the BMP decimal digits (Arabic-Indic
+/// `٠-٩`, Devanagari `०-९`, fullwidth `０-９`, &c.), and fullwidth
+/// `Ａ-Ｆ`/`ａ-ｆ`. Surrogate code units (U+D800-U+DFFF) are not digits and
+/// match no range.
+fn hex_digit_value(c: u16) -> i64 {
+    let cp = c as u32;
+    for &(lo, hi, base) in HEX_DIGIT_RANGES {
+        if cp >= lo && cp <= hi {
+            return cp as i64 + base as i64;
+        }
     }
+    -1
 }
+
+/// `Character.digit(cp, 16)` over the BMP, collapsed into ranges of contiguous
+/// code points. Each entry maps a `cp` in `lo..=hi` to `cp as i64 + base`.
+/// Generated from the local JDK 25 (`Character.digit(cp, 16) >= 0` for every
+/// BMP code point); regenerate if the pinned JDK changes.
+static HEX_DIGIT_RANGES: &[(u32, u32, i32)] = &[
+    ('\u{0030}' as u32, '\u{0039}' as u32, -48),
+    ('\u{0041}' as u32, '\u{0046}' as u32, -55),
+    ('\u{0061}' as u32, '\u{0066}' as u32, -87),
+    ('\u{0660}' as u32, '\u{0669}' as u32, -1632),
+    ('\u{06F0}' as u32, '\u{06F9}' as u32, -1776),
+    ('\u{07C0}' as u32, '\u{07C9}' as u32, -1984),
+    ('\u{0966}' as u32, '\u{096F}' as u32, -2406),
+    ('\u{09E6}' as u32, '\u{09EF}' as u32, -2534),
+    ('\u{0A66}' as u32, '\u{0A6F}' as u32, -2662),
+    ('\u{0AE6}' as u32, '\u{0AEF}' as u32, -2790),
+    ('\u{0B66}' as u32, '\u{0B6F}' as u32, -2918),
+    ('\u{0BE6}' as u32, '\u{0BEF}' as u32, -3046),
+    ('\u{0C66}' as u32, '\u{0C6F}' as u32, -3174),
+    ('\u{0CE6}' as u32, '\u{0CEF}' as u32, -3302),
+    ('\u{0D66}' as u32, '\u{0D6F}' as u32, -3430),
+    ('\u{0DE6}' as u32, '\u{0DEF}' as u32, -3558),
+    ('\u{0E50}' as u32, '\u{0E59}' as u32, -3664),
+    ('\u{0ED0}' as u32, '\u{0ED9}' as u32, -3792),
+    ('\u{0F20}' as u32, '\u{0F29}' as u32, -3872),
+    ('\u{1040}' as u32, '\u{1049}' as u32, -4160),
+    ('\u{1090}' as u32, '\u{1099}' as u32, -4240),
+    ('\u{17E0}' as u32, '\u{17E9}' as u32, -6112),
+    ('\u{1810}' as u32, '\u{1819}' as u32, -6160),
+    ('\u{1946}' as u32, '\u{194F}' as u32, -6470),
+    ('\u{19D0}' as u32, '\u{19D9}' as u32, -6608),
+    ('\u{1A80}' as u32, '\u{1A89}' as u32, -6784),
+    ('\u{1A90}' as u32, '\u{1A99}' as u32, -6800),
+    ('\u{1B50}' as u32, '\u{1B59}' as u32, -6992),
+    ('\u{1BB0}' as u32, '\u{1BB9}' as u32, -7088),
+    ('\u{1C40}' as u32, '\u{1C49}' as u32, -7232),
+    ('\u{1C50}' as u32, '\u{1C59}' as u32, -7248),
+    ('\u{A620}' as u32, '\u{A629}' as u32, -42528),
+    ('\u{A8D0}' as u32, '\u{A8D9}' as u32, -43216),
+    ('\u{A900}' as u32, '\u{A909}' as u32, -43264),
+    ('\u{A9D0}' as u32, '\u{A9D9}' as u32, -43472),
+    ('\u{A9F0}' as u32, '\u{A9F9}' as u32, -43504),
+    ('\u{AA50}' as u32, '\u{AA59}' as u32, -43600),
+    ('\u{ABF0}' as u32, '\u{ABF9}' as u32, -44016),
+    ('\u{FF10}' as u32, '\u{FF19}' as u32, -65296),
+    ('\u{FF21}' as u32, '\u{FF26}' as u32, -65303),
+    ('\u{FF41}' as u32, '\u{FF46}' as u32, -65335),
+];
 
 /// `UUID.toString()` — the canonical `8-4-4-4-12` lowercase-hex form.
 impl std::fmt::Display for Uuid {
@@ -281,6 +351,94 @@ mod tests {
         assert_eq!(
             Uuid::from_string("7fffffffffffffff-a-b-c-d"),
             Ok(uuid(0xffffffff_000a000b, 0x000c_00000000000d))
+        );
+    }
+
+    #[test]
+    fn from_string_accepts_unicode_hex_digits() {
+        // Java's `Character.digit(char, 16)` accepts the full BMP digit set
+        // and fullwidth `Ａ-Ｆ`/`ａ-ｆ`; `UUID.fromString` parses them
+        // (verified on the local JDK 25.0.2).
+        // Fullwidth digits ０-９ (U+FF10-U+FF19).
+        assert_eq!(
+            Uuid::from_string(
+                "００１１２２３３-４４５５-６６７７-８８９９-ａａｂｂｃｃｄｄｅｅｆｆ"
+            ),
+            Ok(uuid(0x00112233_44556677, 0x8899_aabbccddeeff))
+        );
+        // Fullwidth letters Ａ-Ｆ / ａ-ｆ (U+FF21-U+FF26, U+FF41-U+FF46).
+        assert_eq!(
+            Uuid::from_string(
+                "ＦＦＦＦＦＦＦＦ-ＦＦＦＦ-ＦＦＦＦ-ＦＦＦＦ-ＦＦＦＦＦＦＦＦＦＦＦＦ"
+            ),
+            Ok(uuid(0xffffffff_ffffffff, 0xffff_ffffffffffff))
+        );
+        // Arabic-Indic ٠-٩ (U+0660-U+0669).
+        assert_eq!(
+            Uuid::from_string("٠١٢٣٤٥٦٧-٨٩٠١-٢٣٤٥-٦٧٨٩-٠١٢٣٤٥٦٧٨٩"),
+            Ok(uuid(0x01234567_89012345, 0x6789_000123456789))
+        );
+        // Devanagari ०-९ (U+0966-U+096F).
+        assert_eq!(
+            Uuid::from_string("०१२३४५६७-८९०१-२३४५-६७८९-०१२३४५६७८९"),
+            Ok(uuid(0x01234567_89012345, 0x6789_000123456789))
+        );
+        // Tibetan ༠-༩ (U+0F20-U+0F29).
+        assert_eq!(
+            Uuid::from_string("༠༡༢༣༤༥༦༧-༨༩༠༡-༢༣༤༥-༦༧༨༩-༠༡༢༣༤༥༦༧༨༩"),
+            Ok(uuid(0x01234567_89012345, 0x6789_000123456789))
+        );
+        // Fullwidth and ASCII digits mix within one UUID.
+        assert_eq!(
+            Uuid::from_string("００１１２２３３-4455-6677-8899-aabbccddeeff"),
+            Ok(uuid(0x00112233_44556677, 0x8899_aabbccddeeff))
+        );
+        // Short fullwidth groups pad with zeros like ASCII ones.
+        assert_eq!(
+            Uuid::from_string("１-２-３-４-５"),
+            Ok(uuid(0x00000001_00020003, 0x0004_000000000005))
+        );
+    }
+
+    #[test]
+    fn from_string_rejects_invalid_unicode_neighbors() {
+        // Fullwidth `Ｇ` (U+FF27) and `ｇ` (U+FF47) have digit value 16 — not a
+        // hex digit — so Java rejects the whole string. The error index is
+        // segment-relative, in UTF-16 code units (verified on the JDK 25
+        // oracle).
+        assert_eq!(
+            Uuid::from_string(
+                "ＧＦＦＦＦＦＦＦ-ＦＦＦＦ-ＦＦＦＦ-ＦＦＦＦ-ＦＦＦＦＦＦＦＦＦＦＦＦ"
+            ),
+            Err("Error at index 0 in: \"ＧＦＦＦＦＦＦＦ\"".to_string())
+        );
+        assert_eq!(
+            Uuid::from_string(
+                "ｇＦＦＦＦＦＦＦ-ＦＦＦＦ-ＦＦＦＦ-ＦＦＦＦ-ＦＦＦＦＦＦＦＦＦＦＦＦ"
+            ),
+            Err("Error at index 0 in: \"ｇＦＦＦＦＦＦＦ\"".to_string())
+        );
+        // A bad digit mid-segment: the index counts code units within the
+        // failing segment (segment-relative), matching Java.
+        assert_eq!(
+            Uuid::from_string(
+                "００１１２２３ｇ-４４５５-６６７７-８８９９-ａａｂｂｃｃｄｄｅｅｆｆ"
+            ),
+            Err("Error at index 7 in: \"００１１２２３ｇ\"".to_string())
+        );
+        assert_eq!(
+            Uuid::from_string(
+                "００１１２２３３-４４５５-６６７７-８８９９-ａａｂｂｃｃｄｄｅｅｆｇ"
+            ),
+            Err("Error at index 11 in: \"ａａｂｂｃｃｄｄｅｅｆｇ\"".to_string())
+        );
+        // Superscript one U+00B9 is NOT a decimal digit (category No, not Nd),
+        // so `Character.digit('¹', 16)` is -1 and Java rejects the string; the
+        // index lands on the superscript, segment-relative (verified on JDK
+        // 25.0.2).
+        assert_eq!(
+            Uuid::from_string("0011223¹-4455-6677-8899-aabbccddeeff"),
+            Err("Error at index 7 in: \"0011223¹\"".to_string())
         );
     }
 
