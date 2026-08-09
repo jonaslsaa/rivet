@@ -20,14 +20,19 @@
 //! delegation surface and `getLayerListener` land with the
 //! `mc.world.level.lighting.core` unit.
 //!
-//! The `EMPTY` singleton (Java `new LevelLightEngine()` with no engines) is
-//! [`Default`].
+//! Java's `EMPTY` singleton (a no-engine `new LevelLightEngine()`) shapes
+//! [`Default`]: the same `LevelHeightAccessor.create(0, 0)` and both light
+//! flags false. Java's `EMPTY` still constructs a non-null `StarLightInterface`;
+//! the Rust `Default` leaves the provider `None` because the concrete provider
+//! lives in `rivet-server` (the seam) and cannot be filled from `rivet-world`.
 //!
 //! RivetTodo(#184): the `LightEngine`/`LayerLightSectionStorage` engine surface
 //! and the `LightEventListener`/`getLayerListener` implementation are not
 //! ported (the `mc.world.level.lighting.core`/`.engine` units); this module is
 //! the facade skeleton — section arithmetic, light flags, and the provider
-//! holder.
+//! holder. `has_block_light`/`has_sky_light` are stored but not threaded into
+//! the provider (Java passes them to the `StarLightInterface` ctor); the
+//! provider receives them when the real engine lands.
 
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::lighting::star_light_provider::StarLightProvider;
@@ -49,9 +54,13 @@ pub struct LevelLightEngine {
     /// The concrete light provider (`StarLightInterface` in `rivet-server`),
     /// replacing Java's `blockEngine`/`skyEngine` `LightEngine<?,?>` members.
     provider: Option<Box<dyn StarLightProvider + Send>>,
-    /// `hasBlockLight` — whether a block-light engine is active.
+    /// `hasBlockLight` — whether a block-light engine is active. Stored on the
+    /// facade but not yet threaded into the provider (Java passes it to the
+    /// `StarLightInterface` ctor); the seam keeps it until the engine lands.
     has_block_light: bool,
-    /// `hasSkyLight` — whether a sky-light engine is active.
+    /// `hasSkyLight` — whether a sky-light engine is active. Stored on the
+    /// facade but not yet threaded into the provider (Java passes it to the
+    /// `StarLightInterface` ctor); the seam keeps it until the engine lands.
     has_sky_light: bool,
 }
 
@@ -138,8 +147,11 @@ impl LevelLightEngine {
     }
 }
 
-/// Java's `EMPTY` singleton — `new LevelLightEngine()` with
-/// `LevelHeightAccessor.create(0, 0)` and no engines/provider.
+/// Java's `EMPTY` singleton *shape* — `new LevelLightEngine()` with
+/// `LevelHeightAccessor.create(0, 0)` and both light flags false. Java's
+/// `EMPTY` also constructs a non-null `StarLightInterface`; the Rust `Default`
+/// leaves the provider `None` (the concrete provider lives in `rivet-server`,
+/// see the module doc).
 impl Default for LevelLightEngine {
     fn default() -> Self {
         LevelLightEngine::new(
@@ -185,10 +197,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_default_matches_the_java_singleton() {
+    fn empty_default_matches_the_java_singleton_shape() {
         // Java `EMPTY = new LevelLightEngine()`: LevelHeightAccessor.create(0,
         // 0) (minY 0, height 0), no engines. minSectionY = 0, sectionsCount = 0,
         // so lightSectionCount = 2, minLightSection = -1, maxLightSection = 1.
+        // The section arithmetic and light flags match the singleton; the
+        // provider is `None` because Java's non-null `StarLightInterface` lives
+        // in `rivet-server` — see the `Default` impl doc.
         let mut empty = LevelLightEngine::default();
         assert_eq!(empty.get_light_section_count(), 2);
         assert_eq!(empty.get_min_light_section(), -1);

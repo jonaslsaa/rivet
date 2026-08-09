@@ -47,11 +47,14 @@ use crate::chunk::data_layer::DataLayer;
 /// safe so `LevelLightEngine` can own it as `Box<dyn StarLightProvider>`.
 pub trait StarLightProvider {
     /// `StarLightInterface.blockChange(BlockPos)` — queue a block-light change
-    /// at `pos`.
+    /// at `pos`. Java returns a `LightQueue.ChunkTasks` task handle; the port
+    /// drops the return (the light-queue defers with the engine units, #184).
     fn block_change(&mut self, pos: BlockPos);
 
     /// `StarLightInterface.sectionChange(SectionPos, boolean)` — queue a
-    /// section-emptiness change for `pos` (Java's `newEmptyValue`).
+    /// section-emptiness change for `pos` (Java's `newEmptyValue`). Java
+    /// returns a `LightQueue.ChunkTasks` task handle; the port drops the return
+    /// (the light-queue defers with the engine units, #184).
     fn section_change(&mut self, pos: SectionPos, new_empty_value: bool);
 
     /// `StarLightInterface.lightChunk(ChunkAccess, Boolean[])` — light a chunk
