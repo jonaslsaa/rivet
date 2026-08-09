@@ -126,8 +126,9 @@ mod tests {
     fn spawn_chunk_content_is_the_deterministic_superflat() {
         let map = ChunkMap::new(ChunkPos::ZERO, 4);
         let chunk = map.get_chunk(ChunkPos::ZERO).unwrap();
-        // The 24-section single-stone content: the sections buffer is non-empty.
-        assert!(!chunk.sections_buffer().is_empty());
+        // The 24-section single-stone content: section 0 (Y=-4) holds the stone
+        // layer (superflat minY -64, height 384).
+        assert_eq!(chunk.get_sections().len(), 24);
         // The three `Usage.CLIENT` heightmaps (WORLD_SURFACE, MOTION_BLOCKING,
         // MOTION_BLOCKING_NO_LEAVES) in enum id order — issue #156's DoD
         // heightmap set. All stored offsets 1 (stone at y=-64).

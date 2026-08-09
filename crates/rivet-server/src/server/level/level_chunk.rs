@@ -36,6 +36,7 @@ use rivet_protocol::protocol::game::level_chunk_packet_data::LevelChunkPacketDat
 use rivet_protocol::protocol::game::light_update_packet_data::LightUpdatePacketData;
 use rivet_registry::core::ChunkPos;
 use rivet_world::chunk::level_chunk::LevelChunk as WorldLevelChunk;
+use rivet_world::chunk::level_chunk_section::LevelChunkSection;
 use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
 use rivet_world::chunk::strategy::Strategy;
 use rivet_world::chunk::upgrade_data::UpgradeData;
@@ -151,6 +152,12 @@ impl LevelChunk {
     /// `#94 ClientboundLevelChunkWithLightPacket` heightmap payload.
     pub fn client_heightmaps(&self) -> Vec<(HeightmapType, Vec<i64>)> {
         self.chunk.client_heightmaps()
+    }
+
+    /// `LevelChunk.getSections()` — the deterministic superflat content's 24
+    /// sections (384 / 16, minY -64), section 0 (Y=-4) holding the stone layer.
+    pub fn get_sections(&self) -> &[LevelChunkSection<StateId, BiomeId>] {
+        self.chunk.get_sections()
     }
 
     /// The opaque sections buffer — the `[bits][palette][raw]` wire bytes of
