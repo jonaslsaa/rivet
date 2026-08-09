@@ -33,8 +33,7 @@
 //!   and the encode side still uses the value's own codec.
 //!
 //! RivetTodo(#89): `nbt`/`object` contents are not registered (they need
-//! `NbtOps`/path parsing and `ObjectInfo`); `ClickEvent`/`HoverEvent` codecs
-//! error on encode when a style carries those fields. The NBT wire-codec family
+//! `NbtOps`/path parsing and `ObjectInfo`). The NBT wire-codec family
 //! (`STREAM_CODEC`/`TRUSTED_STREAM_CODEC`/`TRUSTED_CONTEXT_FREE_STREAM_CODEC`
 //! and the optional variants) is ported in `rivet-protocol::chat`, which runs
 //! this same graph over `NbtOps`/`RegistryOps`; the Adventure localization path
@@ -141,7 +140,7 @@ fn create_codec<Ops: DynamicOps + 'static>(
                 }),
             );
             let style = map_codec::for_getter(
-                crate::style::serializer::map_codec(),
+                crate::style::serializer::map_codec(top_inner.clone()),
                 Arc::new(|c: &Component| c.get_style().clone()),
             );
             instance.group(contents).and(extra).and(style).apply(

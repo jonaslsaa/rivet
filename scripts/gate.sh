@@ -419,33 +419,36 @@ run_oracle_hash() {
   fi
 }
 
-# Returns 0 iff $1 is exactly the bare JSON-Lines summary the oracle self-test
-# must emit: a single JSON object whose top-level "ok" is the boolean true.
-# Parsed structurally with python3 (NOT a substring scan — a substring glob
-# would accept a nested `{"ok":true}` with no top-level ok, and a top-level
-# "ok":false / "ok":"true" / "ok":1 must all be rejected).
+# Returns 0 iff stdin is exactly the bare JSON-Lines summary the oracle
+# self-test must emit: a single JSON object whose top-level "ok" is the boolean
+# true, with no trailing blank line. Reads RAW bytes from stdin (NOT a $()
+# capture, which strips trailing newlines) so the line-count contract is
+# checkable. Parsed structurally with python3 (NOT a substring scan — a
+# substring glob would accept a nested `{"ok":true}` with no top-level ok, and
+# a top-level "ok":false / "ok":"true" / "ok":1 must all be rejected).
 #
 # The raw-stdout shape is the load-bearing contract: the summary must NOT be a
 # log4j `[HH:mm:ss LEVEL]: [STDOUT]: ...` prefix — Bootstrap.bootStrap()
 # re-wires System.out through SysOutOverSLF4J, so a regression of selfTest()
 # back to System.out.println either prefixes the summary or swallows it
-# entirely. Empty stdout, a `[`-prefixed log line, extra lines, or leading/
-# trailing whitespace around the JSON object means the protocol broke — the
-# line must be *exactly* the bare JSON object.
+# entirely. Empty stdout, a `[`-prefixed log line, extra lines, a trailing
+# blank line, or leading/trailing whitespace around the JSON object means the
+# protocol broke — the line must be *exactly* the bare JSON object.
 oracle_self_test_stdout_is_raw_json() {
-  [ "$#" -eq 1 ] || return 1
-  [ -n "$1" ] || return 1
-  printf '%s\n' "$1" | python3 -c '
+  python3 -c '
 import json, sys
-raw = sys.stdin.read()
-# The wrapper pipe appends one newline after command substitution strips the
-# captured trailing newlines. Remove only that wrapper newline so any remaining
-# leading or trailing whitespace fails the bare-JSON contract.
-line = raw[:-1] if raw.endswith("\n") else raw
+raw = sys.stdin.buffer.read()
+line = raw.rstrip(b"\n")
+if len(raw) - len(line) > 1:
+    sys.exit(1)          # trailing blank line (more than the single terminator)
+if b"\n" in line:
+    sys.exit(1)          # more than one line of content
 if line != line.strip():
-    sys.exit(1)
+    sys.exit(1)          # leading/trailing whitespace around the JSON object
+if not line:
+    sys.exit(1)          # empty stdout
 try:
-    data = json.loads(line)
+    data = json.loads(line.decode("utf-8"))
 except ValueError:
     sys.exit(1)
 if not isinstance(data, dict) or data.get("ok") is not True:
@@ -480,9 +483,16 @@ if not isinstance(data, dict) or data.get("ok") is not True:
 run_oracle_self_test() {
   echo "==> reference oracle self-test (raw JSON Lines on stdout, no log prefix)"
   if [ "$PARITY_RUNNABLE" = 1 ] && command -v python3 >/dev/null 2>&1; then
-    local out="" rc=0
-    out="$(bash "$REPO_DIR/tools/rivet-reference-oracle/run.sh" --self-test)" || rc=$?
+    local out="" rc=0 tmp
+    # Capture stdout to a file (not $() — command substitution strips trailing
+    # newlines, so a trailing blank line would be invisible to the checker).
+    # run.sh exec's the JVM, so its exit status passes straight through; stderr
+    # stays on the terminal so a boot/prereq failure's message is visible.
+    tmp="$(mktemp)"
+    bash "$REPO_DIR/tools/rivet-reference-oracle/run.sh" --self-test >"$tmp" || rc=$?
+    out="$(cat "$tmp")"
     if [ "$rc" -ne 0 ]; then
+      rm -f "$tmp"
       echo "    UNVERIFIED — reference oracle --self-test did not yield the raw JSON verdict (exit $rc; see output above)"
       ORACLE_UNVERIFIED=1
       if [ "$REQUIRE_ORACLE" = 1 ]; then
@@ -491,10 +501,12 @@ run_oracle_self_test() {
       fi
       return 0
     fi
-    if ! oracle_self_test_stdout_is_raw_json "$out"; then
+    if ! oracle_self_test_stdout_is_raw_json <"$tmp"; then
+      rm -f "$tmp"
       echo "    FAILED — reference oracle --self-test did not emit a bare JSON line (got: ${out:-<empty>})"
       exit 1
     fi
+    rm -f "$tmp"
     echo "    VERIFIED — reference oracle --self-test emitted raw JSON Lines ($out)"
   else
     echo "    UNVERIFIED — reference oracle self-test did not run (see the prereq report above)"

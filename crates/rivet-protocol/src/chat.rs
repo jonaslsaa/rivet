@@ -483,9 +483,9 @@ mod tests {
             TranslatableContents::new(
                 "key.tip".to_string(),
                 None,
-                vec![TranslatableArg::Component(
+                vec![TranslatableArg::Component(Box::new(
                     Component::literal("arg").with_style(Style::EMPTY.with_bold(Some(true))),
-                )],
+                ))],
             ),
         )));
         root.append_component(Component::selector("@p", Some(Component::literal(","))));

@@ -16,7 +16,11 @@ use crate::hover_event::HoverEvent;
 use crate::text_color::TextColor;
 
 /// Port of `net.minecraft.network.chat.Style`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `Eq`: `HoverEvent::ShowText` carries a `Component`, which is only
+/// `PartialEq` (`TranslatableArg::Float`). Java's `Style.equals` has the same
+/// structural semantics, so the port mirrors it at `PartialEq`.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Style {
     color: Option<TextColor>,
     shadow_color: Option<i32>,
@@ -550,8 +554,13 @@ pub mod serializer {
     use rivet_serialization::map_encoder::MapEncoder;
     use std::sync::Arc;
 
-    /// `Style.Serializer.MAP_CODEC`.
-    pub fn map_codec<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<Style, Ops>> {
+    /// `Style.Serializer.MAP_CODEC`. `top` is the `RecursiveSelf` of the
+    /// `Component` graph: the `HoverEvent.ShowText` "value" field is itself a
+    /// `Component`, so it must reuse the same `top` codec — building a fresh
+    /// one per encode would grow `CODEC_BUILD_COUNT` (issue #207).
+    pub fn map_codec<Ops: DynamicOps + 'static>(
+        top: Arc<dyn Codec<crate::Component, Ops>>,
+    ) -> Arc<dyn MapCodec<Style, Ops>> {
         Arc::new(StyleMapCodec {
             color: codec::optional_field("color".to_string(), text_color_codec(), false),
             // Java uses `ExtraCodecs.ARGB_COLOR_CODEC` (INT with a VECTOR4F
@@ -577,17 +586,12 @@ pub mod serializer {
             ),
             hover_event: codec::optional_field(
                 "hover_event".to_string(),
-                HoverEvent::codec(),
+                HoverEvent::codec(top),
                 false,
             ),
             insertion: codec::optional_field("insertion".to_string(), codec::string_codec(), false),
             font: codec::optional_field("font".to_string(), font_description_codec(), false),
         })
-    }
-
-    /// `Style.Serializer.CODEC` — `MAP_CODEC.codec()`.
-    pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Style, Ops>> {
-        rivet_serialization::map_codec::codec_of(map_codec())
     }
 
     /// The 11-field record codec. `record_builder` only composes up to 4
