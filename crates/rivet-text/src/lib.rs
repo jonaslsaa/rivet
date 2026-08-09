@@ -8,6 +8,7 @@ pub mod component;
 pub mod component_contents;
 pub mod component_serialization;
 pub mod contents;
+pub mod corpus;
 pub mod font_description;
 pub mod hover_event;
 pub mod style;
@@ -22,5 +23,7 @@ pub use rivet_core::ChatFormatting;
 pub use style::Style;
 pub use text_color::TextColor;
 
+#[cfg(test)]
+mod corpus_tests;
 #[cfg(test)]
 mod tests;

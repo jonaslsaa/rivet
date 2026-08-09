@@ -1,0 +1,301 @@
+{
+  "format": 1,
+  "kind": "text",
+  "paper": "26.2-DEV-main@0a99345",
+  "entries": [
+    {
+      "id": "literal-plain",
+      "accept": true,
+      "canonical": "\"hello\""
+    },
+    {
+      "id": "literal-unicode",
+      "accept": true,
+      "canonical": "\"héllo wörld\""
+    },
+    {
+      "id": "literal-emoji",
+      "accept": true,
+      "canonical": "\"🎉\""
+    },
+    {
+      "id": "literal-empty",
+      "accept": true,
+      "canonical": "\"\""
+    },
+    {
+      "id": "literal-markup",
+      "accept": true,
+      "canonical": "\"<b>hi & bye</b>\""
+    },
+    {
+      "id": "literal-escapes",
+      "accept": true,
+      "canonical": "\"line1\\nline2\\t\\\"quoted\\\" \\\\backslash\""
+    },
+    {
+      "id": "literal-json-tokens",
+      "accept": true,
+      "canonical": "\"{}[],: true false null\""
+    },
+    {
+      "id": "literal-dashes",
+      "accept": true,
+      "canonical": "\"stat.player.one\""
+    },
+    {
+      "id": "styled-bold",
+      "accept": true,
+      "canonical": "{\"text\":\"bold\",\"bold\":true}"
+    },
+    {
+      "id": "styled-italic",
+      "accept": true,
+      "canonical": "{\"text\":\"it\",\"italic\":true}"
+    },
+    {
+      "id": "styled-named-color",
+      "accept": true,
+      "canonical": "{\"text\":\"red\",\"color\":\"red\"}"
+    },
+    {
+      "id": "styled-hex-color",
+      "accept": true,
+      "canonical": "{\"text\":\"hex\",\"color\":\"#FF5555\"}"
+    },
+    {
+      "id": "styled-multi-format",
+      "accept": true,
+      "canonical": "{\"text\":\"x\",\"bold\":true,\"italic\":true,\"underlined\":true,\"strikethrough\":true,\"obfuscated\":true}"
+    },
+    {
+      "id": "styled-shadow-color",
+      "accept": true,
+      "canonical": "{\"text\":\"s\",\"shadow_color\":-16777216}"
+    },
+    {
+      "id": "styled-insertion",
+      "accept": true,
+      "canonical": "{\"text\":\"i\",\"insertion\":\"insert me\"}"
+    },
+    {
+      "id": "styled-font",
+      "accept": true,
+      "canonical": "{\"text\":\"f\",\"font\":\"minecraft:default\"}"
+    },
+    {
+      "id": "styled-negated-format",
+      "accept": true,
+      "canonical": "{\"text\":\"n\",\"bold\":false}"
+    },
+    {
+      "id": "translatable-plain",
+      "accept": true,
+      "canonical": "{\"translate\":\"multiplayer.player.joined\"}"
+    },
+    {
+      "id": "translatable-fallback",
+      "accept": true,
+      "canonical": "{\"translate\":\"key\",\"fallback\":\"Fallback\"}"
+    },
+    {
+      "id": "translatable-with-string",
+      "accept": true,
+      "canonical": "{\"translate\":\"chat.type.text\",\"with\":[\"<Steve>\"]}"
+    },
+    {
+      "id": "translatable-with-int",
+      "accept": true,
+      "canonical": "{\"translate\":\"commands.give.success\",\"with\":[42,\"diamond\"]}"
+    },
+    {
+      "id": "translatable-with-float",
+      "accept": true,
+      "canonical": "{\"translate\":\"custom.f\",\"with\":[3.5]}"
+    },
+    {
+      "id": "translatable-with-neg-int",
+      "accept": true,
+      "canonical": "{\"translate\":\"custom.n\",\"with\":[-7]}"
+    },
+    {
+      "id": "translatable-with-bool",
+      "accept": true,
+      "canonical": "{\"translate\":\"custom.b\",\"with\":[true]}"
+    },
+    {
+      "id": "translatable-with-long",
+      "accept": true,
+      "canonical": "{\"translate\":\"custom.big\",\"with\":[2147483648]}"
+    },
+    {
+      "id": "translatable-with-styled-component",
+      "accept": true,
+      "canonical": "{\"translate\":\"custom.c\",\"with\":[{\"text\":\"nested\",\"bold\":true}]}"
+    },
+    {
+      "id": "translatable-with-mixed",
+      "accept": true,
+      "canonical": "{\"translate\":\"custom.m\",\"with\":[1,2.5,false,\"four\"]}"
+    },
+    {
+      "id": "keybind-forward",
+      "accept": true,
+      "canonical": "{\"keybind\":\"key.forward\"}"
+    },
+    {
+      "id": "keybind-jump",
+      "accept": true,
+      "canonical": "{\"keybind\":\"key.jump\"}"
+    },
+    {
+      "id": "score-plain",
+      "accept": true,
+      "canonical": "{\"score\":{\"name\":\"Player\",\"objective\":\"obj\"}}"
+    },
+    {
+      "id": "score-dashed",
+      "accept": true,
+      "canonical": "{\"score\":{\"name\":\"Team A\",\"objective\":\"scoreboard\"}}"
+    },
+    {
+      "id": "selector-plain",
+      "accept": true,
+      "canonical": "{\"selector\":\"@p\"}"
+    },
+    {
+      "id": "selector-styled",
+      "accept": true,
+      "canonical": "{\"selector\":\"@a[team=red]\",\"color\":\"gold\"}"
+    },
+    {
+      "id": "selector-with-separator",
+      "accept": true,
+      "canonical": "{\"selector\":\"@e\",\"separator\":\",\"}"
+    },
+    {
+      "id": "selector-with-object-separator",
+      "accept": true,
+      "canonical": "{\"selector\":\"@e\",\"separator\":\" | \"}"
+    },
+    {
+      "id": "nested-extra",
+      "accept": true,
+      "canonical": "{\"text\":\"a\",\"extra\":[\"b\",\"c\"]}"
+    },
+    {
+      "id": "nested-extra-styled",
+      "accept": true,
+      "canonical": "{\"text\":\"a\",\"extra\":[{\"text\":\"b\",\"bold\":true},{\"translate\":\"x\"}]}"
+    },
+    {
+      "id": "nested-deep",
+      "accept": true,
+      "canonical": "{\"text\":\"a\",\"extra\":[{\"text\":\"b\",\"extra\":[\"c\"]}]}"
+    },
+    {
+      "id": "nested-extra-with-style",
+      "accept": true,
+      "canonical": "{\"text\":\"a\",\"extra\":[\"b\",\"c\"],\"color\":\"yellow\"}"
+    },
+    {
+      "id": "nested-list-form",
+      "accept": true,
+      "canonical": "{\"text\":\"a\",\"extra\":[\"b\"]}"
+    },
+    {
+      "id": "typed-text",
+      "accept": true,
+      "canonical": "\"legacy\""
+    },
+    {
+      "id": "typed-translatable",
+      "accept": true,
+      "canonical": "{\"translate\":\"a\",\"fallback\":\"b\"}"
+    },
+    {
+      "id": "hover-show-text",
+      "accept": true,
+      "canonical": "{\"text\":\"h\",\"hover_event\":{\"value\":\"hover!\",\"action\":\"show_text\"}}"
+    },
+    {
+      "id": "click-open-url",
+      "accept": true,
+      "canonical": "{\"text\":\"c\",\"click_event\":{\"url\":\"https://example.com/path?q=1&r=2\",\"action\":\"open_url\"}}"
+    },
+    {
+      "id": "click-run-command",
+      "accept": true,
+      "canonical": "{\"text\":\"r\",\"click_event\":{\"command\":\"/say hi\",\"action\":\"run_command\"}}"
+    },
+    {
+      "id": "click-copy-to-clipboard",
+      "accept": true,
+      "canonical": "{\"text\":\"cp\",\"click_event\":{\"value\":\"copied\",\"action\":\"copy_to_clipboard\"}}"
+    },
+    {
+      "id": "malformed-hover-show-text-wrong-key",
+      "accept": false
+    },
+    {
+      "id": "malformed-click-open-url-wrong-key",
+      "accept": false
+    },
+    {
+      "id": "malformed-click-run-command-wrong-key",
+      "accept": false
+    },
+    {
+      "id": "malformed-click-copy-clipboard-wrong-key",
+      "accept": false
+    },
+    {
+      "id": "malformed-not-json",
+      "accept": false
+    },
+    {
+      "id": "malformed-unclosed-object",
+      "accept": false
+    },
+    {
+      "id": "malformed-text-missing-key",
+      "accept": false
+    },
+    {
+      "id": "malformed-translate-not-string",
+      "accept": false
+    },
+    {
+      "id": "malformed-bold-not-bool",
+      "accept": false
+    },
+    {
+      "id": "malformed-extra-empty",
+      "accept": false
+    },
+    {
+      "id": "malformed-extra-not-list",
+      "accept": false
+    },
+    {
+      "id": "malformed-score-missing-objective",
+      "accept": false
+    },
+    {
+      "id": "malformed-score-not-object",
+      "accept": false
+    },
+    {
+      "id": "malformed-unknown-type",
+      "accept": false
+    },
+    {
+      "id": "malformed-bad-color",
+      "accept": false
+    },
+    {
+      "id": "malformed-with-bad-component",
+      "accept": false
+    }
+  ]
+}

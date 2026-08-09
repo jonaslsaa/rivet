@@ -12,6 +12,10 @@ workspace = true
 rivet-core = { workspace = true }
 rivet-serialization = { workspace = true }
 rivet-util = { workspace = true }
+# serde_json carries workspace `preserve_order` so the component-JSON canonical
+# compare preserves insertion order — required for byte-identity vs Paper's
+# Gson output (issue #98). A library dep (not dev) because
+# `component_serialization::json_canonical` is shared with the live parity tool.
+serde_json = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }

@@ -12,6 +12,15 @@
 //!   for single-key-deep compounds; semantic for multi-key, where the binary
 //!   field order is the documented HashMap-iteration-order divergence).
 //! - `idem`         — Rust-internal read->write->read structural idempotence.
+//! - `component.json` — the committed text corpus (issue #98): Paper's
+//!   `ComponentSerialization.CODEC` decode->re-encode under non-compressed
+//!   `JsonOps` vs the Rust port, byte-for-byte for accepted entries + strict
+//!   accept/reject parity. Paper-accepted click/hover entries (whose field
+//!   names match Paper 26.2: ShowText `value`, OpenUrl `url`, RunCommand
+//!   `command`, CopyToClipboard `value`) are documented as a STUB divergence
+//!   (see `input_has_click_or_hover`); the `malformed-*-wrong-key` negatives
+//!   pin those field names as load-bearing. Everything else must match Paper
+//!   byte-for-byte.
 //!
 //! Output: JSON Lines on stdout (one object per check + a `stats` summary), a
 //! human summary on stderr. Run `cargo run -p rivet-parity -- --help`.
@@ -32,6 +41,8 @@ use rivet_nbt::snbt_printer_tag_visitor::SnbtPrinterTagVisitor;
 use rivet_nbt::string_tag_visitor::StringTagVisitor;
 use rivet_nbt::tag::Tag;
 use rivet_nbt::tag_parser::TagParser;
+use rivet_serialization::json_ops::JsonOps;
+use rivet_text::component::Component;
 use rivet_util::{DataInputStream, DataOutputStream};
 use serde_json::{Value, json};
 
@@ -494,6 +505,221 @@ fn check_idem(id: &str, label: &str, bytes: &[u8]) -> Value {
     check.finish()
 }
 
+/// True when the component JSON contains a `click_event` / `hover_event` key
+/// in its object tree (structural, not a substring scan: a component whose
+/// *content* merely mentions "click_event" must not be classified as the STUB
+/// divergence).
+///
+/// The Rust `ClickEvent`/`HoverEvent` codecs are STUBs (RivetTodo #89, epic
+/// #12) that error on decode and encode, so Paper-accepted click/hover inputs
+/// are the one class of *documented* accept divergence in this corpus — marked
+/// as a soft field + divergence (like `compound_key_order`), never a hard
+/// mismatch. Everything else that diverges is a genuine bug.
+fn input_has_click_or_hover(input: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return false;
+    };
+    json_has_key(&value, &["click_event", "hover_event"])
+}
+
+/// Whether a Rust rejection of an input that carries a click/hover field is
+/// provably at the ClickEvent/HoverEvent STUB codec, and not an unrelated
+/// failure. The documented divergence (RivetTodo #89, epic #12) is narrow:
+/// Paper accepts the input and Rust rejects it *because* its click_event /
+/// hover_event codec is a STUB. Removing every such field must leave a
+/// component the Rust codec accepts — if it still rejects, the rejection is
+/// for an unrelated reason and must NOT be masked as the soft STUB divergence.
+fn rust_rejection_is_at_click_hover_stub(
+    input: &str,
+    codec: &std::sync::Arc<dyn rivet_serialization::codec::Codec<Component, JsonOps>>,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return false;
+    };
+    match strip_keys(&value, &["click_event", "hover_event"]) {
+        // Stripping left nothing that could stand alone as a component — the
+        // input was *only* a click/hover object. Fail closed (hard mismatch)
+        // rather than guess.
+        None => false,
+        Some(stripped) => rust_component_json(&stripped.to_string(), codec).is_ok(),
+    }
+}
+
+/// Return a copy of `value` with every object's `keys` properties removed,
+/// recursively. `None` when nothing remains that could still be a component
+/// (a node became empty after stripping).
+fn strip_keys(value: &serde_json::Value, keys: &[&str]) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if keys.contains(&k.as_str()) {
+                    continue;
+                }
+                out.insert(k.clone(), strip_keys(v, keys)?);
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(out))
+            }
+        }
+        serde_json::Value::Array(items) => {
+            let mut out = Vec::new();
+            for v in items {
+                if let Some(v) = strip_keys(v, keys) {
+                    out.push(v);
+                }
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Array(out))
+            }
+        }
+        other => Some(other.clone()),
+    }
+}
+
+/// Recursively scan a JSON value for any object that carries one of `keys`.
+/// Mirrors where a component's `click_event`/`hover_event` style fields can
+/// appear (nested in `extra` siblings, translatable args, etc.) — but only as
+/// real keys, so content text that happens to mention the name is ignored.
+fn json_has_key(value: &serde_json::Value, keys: &[&str]) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            keys.iter().any(|k| map.contains_key(*k)) || map.values().any(|v| json_has_key(v, keys))
+        }
+        serde_json::Value::Array(items) => items.iter().any(|v| json_has_key(v, keys)),
+        _ => false,
+    }
+}
+
+/// `component.json`: Paper's `ComponentSerialization.CODEC` decode->re-encode
+/// under non-compressed `JsonOps` (the chat/title/player-info/scoreboard wire
+/// form), vs the Rust port's decode->re-encode of the same input (issue #98).
+///
+/// - `accept` parity: does the Rust codec accept/reject what Paper accepts/
+///   rejects? (Soft for the click/hover STUB divergence.)
+/// - `canonical` byte identity: for accepted inputs, the Rust re-encode must
+///   equal the live oracle's canonical AND the committed golden's canonical,
+///   byte for byte (both sides serialize compactly with insertion order and no
+///   HTML escaping).
+/// - `golden_accept` provenance: the committed golden must agree with the live
+///   oracle — a drift means Paper moved under us, not that Rust is wrong.
+/// - Oracle infrastructure errors (the oracle process dies mid-session, e.g. a
+///   dead/stale Paper runtime) are ALWAYS a hard mismatch — even when Rust also
+///   rejects the input, the comparison produced no verdict and must never be
+///   recorded as a match.
+fn check_component_json<O: oracle::OracleCall>(
+    oracle: Option<&mut O>,
+    id: &str,
+    input: &str,
+    golden_accept: bool,
+    golden_canonical: Option<&str>,
+    codec: &std::sync::Arc<dyn rivet_serialization::codec::Codec<Component, JsonOps>>,
+) -> Value {
+    let mut check = Check::new("component.json", id.to_string(), Some(input.to_string()));
+
+    let rust = rust_component_json(input, codec);
+
+    let Some(handle) = oracle else {
+        // No Paper comparison possible. The Rust-vs-golden byte identity is
+        // covered by the offline corpus tests in rivet-text; here just mark
+        // the check skipped (consistent with the NBT kinds under --no-oracle).
+        check.skip("oracle unavailable");
+        return check.finish();
+    };
+
+    match handle.call("component.json", &[("input", input)]) {
+        Ok(result) => {
+            let oracle_accept = result["accept"].as_bool().unwrap_or(false);
+            // Provenance: the committed golden is what this pinned Paper
+            // produced at capture time; the live oracle must still agree.
+            check.field(
+                "golden_accept",
+                &oracle_accept.to_string(),
+                &golden_accept.to_string(),
+            );
+
+            match &rust {
+                Ok(rust_canonical) => {
+                    if oracle_accept {
+                        let oracle_canonical = result["canonical"].as_str().unwrap_or("");
+                        check.field("canonical_oracle", oracle_canonical, rust_canonical);
+                        if let Some(golden) = golden_canonical {
+                            check.field("canonical_golden", golden, rust_canonical);
+                        }
+                    } else {
+                        check.field("accept", "reject", "accept");
+                        check.note("Rust accepted a component Paper rejects");
+                    }
+                }
+                Err(rust_err) => {
+                    if oracle_accept {
+                        if input_has_click_or_hover(input)
+                            && rust_rejection_is_at_click_hover_stub(input, codec)
+                        {
+                            // Documented STUB divergence: Paper accepts a
+                            // click/hover component whose Rust codec is a STUB
+                            // (RivetTodo #89, epic #12). Never a hard mismatch.
+                            check.divergence("component_click_hover_stub");
+                            check.field_soft("accept", "accept", "reject");
+                            check.note(&format!(
+                                "Paper accepts; Rust rejects at the ClickEvent/HoverEvent \
+                                 STUB codec (RivetTodo #89, epic #12): {rust_err}"
+                            ));
+                        } else {
+                            // Even though the input carries a click/hover key,
+                            // the Rust rejection may be for an UNRELATED reason
+                            // (a malformed component elsewhere, an unsupported
+                            // sibling, etc.). The STUB is a precise, narrow
+                            // divergence — it must not mask a genuine Rust
+                            // failure, so only a rejection provably at the
+                            // click/hover field stays soft.
+                            check.field("accept", "accept", "reject");
+                            check.note(&format!(
+                                "Rust rejected a component Paper accepts: {rust_err}"
+                            ));
+                        }
+                    } else {
+                        // Both rejected — accept/reject parity holds; error text
+                        // is informational only.
+                        check.field_soft("accept", "reject", "reject");
+                        check.note(&format!("both rejected; rust error: {rust_err}"));
+                    }
+                }
+            }
+        }
+        Err(oracle_err) => match &rust {
+            Ok(rust_canonical) => {
+                check.field("oracle_accept", "accept", "error");
+                check.note(&format!("oracle error: {oracle_err}"));
+                let _ = rust_canonical;
+            }
+            Err(_) => {
+                // Neither side produced a verdict — this is an unverified
+                // comparison, not a match. Mark it explicitly so the gate never
+                // records it under `matched` (Summary::record counts `!ok` as a
+                // mismatch). The oracle may have died mid-session.
+                check.field("oracle", "reachable", "error");
+                check.note(&format!("oracle error (rust also rejected): {oracle_err}"));
+            }
+        },
+    }
+    check.finish()
+}
+
+/// Rust side of `component.json`. Shared with the offline corpus tests via
+/// `rivet_text::component_serialization::json_canonical`, so the offline and
+/// live compare can never drift apart.
+fn rust_component_json(
+    input: &str,
+    codec: &std::sync::Arc<dyn rivet_serialization::codec::Codec<Component, JsonOps>>,
+) -> Result<String, String> {
+    rivet_text::component_serialization::json_canonical(codec, input)
+}
+
 // ---- main ----
 
 /// Workspace-root `PARITY.md` scoreboard path. Points at the workspace root
@@ -544,7 +770,15 @@ fn m1_scenario_gate_section() -> String {
 /// is appended so a capped snapshot is not mistaken for full-corpus coverage.
 fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
     let mut rows: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
-    for kind in ["snbt.parse", "nbt.decode", "nbt.encode", "idem"] {
+    // NBT/SNBT checks are `rivet-nbt:*`; the component-JSON corpus (issue #98)
+    // is `rivet-text:component.json`.
+    for (kind, crate_name) in [
+        ("snbt.parse", "rivet-nbt"),
+        ("nbt.decode", "rivet-nbt"),
+        ("nbt.encode", "rivet-nbt"),
+        ("idem", "rivet-nbt"),
+        ("component.json", "rivet-text"),
+    ] {
         let total = summary.totals.get(kind).copied().unwrap_or(0);
         let skipped = summary.skipped.get(kind).copied().unwrap_or(0);
         // Skipped checks (e.g. oracle unavailable) were not measured; a row of
@@ -553,7 +787,7 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
             continue;
         }
         rows.insert(
-            format!("rivet-nbt:{kind}"),
+            format!("{crate_name}:{kind}"),
             (
                 total - skipped,
                 summary.matched.get(kind).copied().unwrap_or(0),
@@ -587,6 +821,7 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
     md.push_str(&m1_scenario_gate_section());
     md.push_str("\n### Divergences\n\n");
     md.push_str("`compound_key_order` is the documented insertion-order divergence (DECISIONS.md D12): Rust's `CompoundTag` is insertion-ordered, so hand-built compounds emit Rust's put sequence while Java emits fastutil hash order; read-back fixtures round-trip byte-for-byte. All such checks remain `ok` and are counted under `diverged`, never under `mismatched`.\n");
+    md.push_str("\n`component_click_hover_stub` is the documented STUB divergence for the text corpus (issue #98): the corpus carries four Paper-accepted click/hover components (`click-copy-to-clipboard`, `click-open-url`, `click-run-command`, `hover-show-text`) whose Rust `ClickEvent`/`HoverEvent` codecs are STUBs (RivetTodo #89, epic #12) and therefore reject. The fixtures use exactly Paper 26.2's codec field names (ShowText `value`, OpenUrl `url`, RunCommand `command`, CopyToClipboard `value`) and none needs registry/Holder context, so Paper accepts all four and the only reason Rivet rejects them is the unported STUB codec — never a malformed field or registry/Holder context; the four `malformed-*-wrong-key` negatives carry the same content with a wrong field name (show_text `contents`, open_url `href`, run_command `value`, copy_to_clipboard `text`) and Paper rejects them, pinning the field names as load-bearing. Once the STUBs are ported, the divergence closes and those checks become hard accept-parity. Everything else in `component.json` must match Paper byte-for-byte (canonical JSON under non-compressed `JsonOps`) and is counted under `mismatched` when it does not.\n");
 
     let path = scoreboard_path();
     match std::fs::write(&path, md) {
@@ -810,6 +1045,44 @@ fn main() {
         transcript.push(check);
     }
 
+    // ---- component.json: the committed text corpus vs Paper (issue #98) ----
+    match corpus::text_corpus() {
+        Ok(entries) => {
+            let codec = rivet_text::component_serialization::codec();
+            // The Rust-side decode->re-encode byte-identity against the committed
+            // golden is covered by the offline corpus tests in rivet-text; here the
+            // oracle comparison is the point.
+            for entry in &entries {
+                let check = check_component_json(
+                    oracle.as_deref_mut(),
+                    &format!("component.{id}", id = entry.id),
+                    &entry.input,
+                    entry.accept,
+                    entry.canonical.as_deref(),
+                    &codec,
+                );
+                summary.record(&check);
+                transcript.push(check);
+            }
+            eprintln!(
+                "[rivet-parity] text corpus: {} component.json entries under {}",
+                entries.len(),
+                corpus::text_fixtures_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| "?".into())
+            );
+        }
+        Err(corpus::CorpusError::Absent) => {
+            eprintln!("[rivet-parity] text fixtures not present; skipping component.json section");
+        }
+        Err(e @ corpus::CorpusError::Malformed(_)) => {
+            // A present-but-broken committed corpus must never silently stop
+            // being exercised — hard-fail like a parity divergence.
+            eprintln!("[rivet-parity] FATAL: {e}");
+            std::process::exit(1);
+        }
+    }
+
     // ---- emit transcript + summary ----
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
@@ -844,7 +1117,13 @@ fn main() {
     eprintln!("=== rivet-nbt vs Paper Java oracle — parity summary ===");
     // Invalid-corpus checks carry kind "snbt.parse" too; their ids are
     // prefixed `parse-invalid.` in the transcript.
-    let kinds = ["snbt.parse", "nbt.decode", "nbt.encode", "idem"];
+    let kinds = [
+        "snbt.parse",
+        "nbt.decode",
+        "nbt.encode",
+        "idem",
+        "component.json",
+    ];
     for kind in kinds {
         let total = summary.totals.get(kind).copied().unwrap_or(0);
         if total == 0 {
@@ -902,5 +1181,249 @@ mod tests {
             committed.contains(&section),
             "committed PARITY.md must contain the generator's M1 section verbatim;\nmissing:\n{section}"
         );
+    }
+
+    use rivet_serialization::codec::Codec;
+
+    /// A stub oracle that answers every `component.json` call with one canned
+    /// outcome — the JVM never boots. Lets the accept/canonical decision logic
+    /// in `check_component_json` be exercised directly (issue #98).
+    struct StubOracle {
+        response: Result<serde_json::Value, String>,
+    }
+
+    impl oracle::OracleCall for StubOracle {
+        fn call(&mut self, _op: &str, _fields: &[(&str, &str)]) -> Result<Value, String> {
+            self.response.clone()
+        }
+    }
+
+    fn component_codec() -> std::sync::Arc<dyn Codec<Component, JsonOps>> {
+        rivet_text::component_serialization::codec()
+    }
+
+    /// The load-bearing counterfactual for the oracle-error path: when the
+    /// oracle process dies (a dead/stale Paper runtime), the check is a HARD
+    /// mismatch — even when Rust also rejects the input, the comparison
+    /// produced no verdict and must never be recorded as a match.
+    #[test]
+    fn component_json_oracle_error_hard_fails_even_when_rust_rejects() {
+        let mut oracle = StubOracle {
+            response: Err("oracle closed stdout (did it crash?)".to_string()),
+        };
+        // Not valid JSON, so Rust rejects it too — both sides are "down".
+        let check = check_component_json(
+            Some(&mut oracle),
+            "component.broken",
+            "{broken",
+            /* golden_accept */ false,
+            /* golden_canonical */ None,
+            &component_codec(),
+        );
+        assert!(
+            !check["ok"].as_bool().unwrap(),
+            "oracle infra error must never be recorded as a match"
+        );
+        let note = check["note"].as_str().unwrap();
+        assert!(
+            note.contains("oracle error"),
+            "note should surface the oracle error, got: {note}"
+        );
+
+        // And it lands under `mismatched`, never `matched`.
+        let mut summary = Summary::default();
+        summary.record(&check);
+        assert_eq!(summary.mismatched.get("component.json"), Some(&1));
+        assert!(!summary.matched.contains_key("component.json"));
+    }
+
+    /// The happy path: Paper accepts with a canonical that equals Rust's
+    /// re-encode — the check passes.
+    #[test]
+    fn component_json_both_accept_and_canonical_identical_passes() {
+        let mut oracle = StubOracle {
+            response: Ok(json!({
+                "accept": true,
+                "canonical": "{\"text\":\"hello\",\"bold\":true}",
+            })),
+        };
+        let check = check_component_json(
+            Some(&mut oracle),
+            "component.hello",
+            "{\"text\":\"hello\",\"bold\":true}",
+            /* golden_accept */ true,
+            Some("{\"text\":\"hello\",\"bold\":true}"),
+            &component_codec(),
+        );
+        assert!(
+            check["ok"].as_bool().unwrap(),
+            "matching accept + canonical should pass: {check}"
+        );
+    }
+
+    /// Both sides reject (Paper's verdict is reject and the Rust codec rejects
+    /// the same input) — accept/reject parity holds, so the check passes.
+    #[test]
+    fn component_json_both_reject_passes() {
+        let mut oracle = StubOracle {
+            response: Ok(json!({ "accept": false })),
+        };
+        // Wrong field name inside hover_event: Paper rejects it and the Rust
+        // STUB codec rejects the hover_event itself.
+        let check = check_component_json(
+            Some(&mut oracle),
+            "component.wrong-key",
+            "{\"text\":\"h\",\"hover_event\":{\"action\":\"show_text\",\"contents\":\"x\"}}",
+            /* golden_accept */ false,
+            None,
+            &component_codec(),
+        );
+        assert!(
+            check["ok"].as_bool().unwrap(),
+            "both-reject accept parity should pass: {check}"
+        );
+    }
+
+    /// The documented click/hover STUB divergence is soft, never a hard
+    /// mismatch: Paper accepts a click/hover component whose Rust codec is a
+    /// STUB, and the structural key walk must classify it correctly.
+    #[test]
+    fn component_json_click_hover_stub_divergence_is_soft() {
+        let mut oracle = StubOracle {
+            response: Ok(json!({
+                "accept": true,
+                "canonical": "{\"text\":\"c\",\"click_event\":{\"url\":\"https://example.com\",\"action\":\"open_url\"}}",
+            })),
+        };
+        let input = "{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"url\":\"https://example.com\"}}";
+        assert!(
+            input_has_click_or_hover(input),
+            "a real click_event key must classify as the STUB divergence"
+        );
+        let check = check_component_json(
+            Some(&mut oracle),
+            "component.click-open-url",
+            input,
+            /* golden_accept */ true,
+            None,
+            &component_codec(),
+        );
+        assert!(
+            check["ok"].as_bool().unwrap(),
+            "documented STUB divergence must stay soft: {check}"
+        );
+        assert!(
+            check["divergences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d == "component_click_hover_stub"),
+            "divergence must be tagged component_click_hover_stub: {check}"
+        );
+    }
+
+    /// The click/hover STUB divergence must not mask an UNRELATED Rust
+    /// rejection. When the input carries a click/hover field AND another
+    /// property the Rust codec rejects (a malformed sibling, etc.), stripping
+    /// the click/hover field still leaves a rejected component — so the
+    /// rejection is not provably at the STUB and must be a HARD mismatch, not
+    /// the soft `component_click_hover_stub` divergence.
+    #[test]
+    fn click_hover_stub_does_not_mask_unrelated_rust_rejection() {
+        let mut oracle = StubOracle {
+            response: Ok(json!({
+                "accept": true,
+                "canonical": "{\"text\":\"c\",\"extra\":[{\"text\":\"b\"}],\"click_event\":{\"url\":\"https://example.com\",\"action\":\"open_url\"}}",
+            })),
+        };
+        // The input has a real click_event key (so the old substring/structural
+        // walk WOULD have classified it as the STUB) but ALSO an `extra: []`
+        // sibling the Rust codec rejects. Stripping click_event leaves
+        // `{"text":"c","extra":[]}`, which Rust still rejects — the rejection
+        // is unrelated to the click/hover STUB and must stay hard.
+        let input = "{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"url\":\"https://example.com\"},\"extra\":[]}";
+        assert!(
+            input_has_click_or_hover(input),
+            "a real click_event key is present"
+        );
+        let codec = component_codec();
+        assert!(
+            !rust_rejection_is_at_click_hover_stub(input, &codec),
+            "stripping click_event must still reject (extra:[] is unrelated)"
+        );
+        let check = check_component_json(
+            Some(&mut oracle),
+            "component.click-hover-with-unrelated-reject",
+            input,
+            /* golden_accept */ true,
+            None,
+            &codec,
+        );
+        assert!(
+            !check["ok"].as_bool().unwrap(),
+            "an unrelated Rust rejection must stay a hard mismatch: {check}"
+        );
+        assert!(
+            !check["divergences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d == "component_click_hover_stub"),
+            "must NOT be tagged as the soft click/hover STUB divergence: {check}"
+        );
+    }
+
+    /// `rust_rejection_is_at_click_hover_stub` strips the click/hover fields
+    /// and re-runs the decode: it is true only when the stripped component
+    /// parses, false when the input is only a click/hover object or the
+    /// stripped form still rejects.
+    #[test]
+    fn rust_rejection_is_at_stub_only_when_stripped_component_parses() {
+        let codec = component_codec();
+        // A pure click/hover component: stripping leaves nothing -> false.
+        assert!(!rust_rejection_is_at_click_hover_stub(
+            "{\"click_event\":{\"action\":\"open_url\",\"url\":\"https://e\"}}",
+            &codec
+        ));
+        // A click/hover sibling beside plain text: stripping leaves a valid
+        // component -> true (the rejection is at the STUB).
+        assert!(rust_rejection_is_at_click_hover_stub(
+            "{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"url\":\"https://e\"}}",
+            &codec
+        ));
+        // An unrelated malformation beside the click/hover: stripping still
+        // rejects -> false (not provably at the STUB).
+        assert!(!rust_rejection_is_at_click_hover_stub(
+            "{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"url\":\"https://e\"},\"extra\":[]}",
+            &codec
+        ));
+        // Invalid JSON -> false.
+        assert!(!rust_rejection_is_at_click_hover_stub("{broken", &codec));
+    }
+
+    /// The structural object-key walk must not classify a component whose
+    /// *content* merely mentions the click/hover literals as a STUB divergence.
+    #[test]
+    fn click_hover_detection_ignores_content_literals() {
+        // A real click_event key nested in an `extra` sibling is classified.
+        assert!(input_has_click_or_hover(
+            "{\"text\":\"a\",\"extra\":[{\"text\":\"b\",\"click_event\":{}}]}"
+        ));
+        assert!(input_has_click_or_hover(
+            "{\"text\":\"a\",\"hover_event\":{\"action\":\"show_text\",\"value\":\"x\"}}"
+        ));
+        // Ordinary string content mentioning the names is NOT a key — the raw
+        // substring scan this replaces would have misclassified it.
+        assert!(!input_has_click_or_hover(
+            "{\"text\":\"the chat mentions click_event and hover_event here\"}"
+        ));
+        assert!(!input_has_click_or_hover(
+            "\"click_event hover_event in a plain string\""
+        ));
+        assert!(!input_has_click_or_hover("{\"nested\":[\"hover_event\"]}"));
+        // Invalid JSON is never classified (the old substring scan returned
+        // true for a bare "click_event" mention in unparseable text).
+        assert!(!input_has_click_or_hover("{broken"));
+        assert!(!input_has_click_or_hover("click_event"));
     }
 }

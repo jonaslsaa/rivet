@@ -48,6 +48,7 @@ use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::{DynamicOps, Keyable, MapLike, RecordBuilder};
 use rivet_serialization::either::Either;
 use rivet_serialization::extra_codecs;
+use rivet_serialization::json_ops::JsonOps;
 use rivet_serialization::map_codec::{self as map_codec, MapCodec};
 use rivet_serialization::map_decoder::MapDecoder;
 use rivet_serialization::map_encoder::MapEncoder;
@@ -73,6 +74,30 @@ type CodecGetter<T, Ops> = Arc<dyn Fn(&T) -> Arc<dyn MapCodec<T, Ops>> + Send + 
 pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Component, Ops>> {
     CODEC_BUILD_COUNT.with(|c| c.set(c.get() + 1));
     codec::recursive("Component".to_string(), Arc::new(|top| create_codec(top)))
+}
+
+/// Decode `input` as JSON through the given `CODEC` under non-compressed
+/// `JsonOps`, re-encode, and serialize compactly (insertion order, no HTML
+/// escaping) — the byte-identical mirror of Paper's `component.json` oracle op
+/// (issue #98). Shared by the offline corpus tests (`corpus_tests.rs`) and the
+/// live `rivet-parity` differential so the decode->re-encode compare can never
+/// drift between the two.
+pub fn json_canonical(
+    codec: &Arc<dyn Codec<Component, JsonOps>>,
+    input: &str,
+) -> Result<String, String> {
+    let ops = JsonOps::INSTANCE;
+    let value: serde_json::Value =
+        serde_json::from_str(input).map_err(|e| format!("invalid JSON: {e}"))?;
+    let decoded = codec.parse(&ops, &value);
+    let component = decoded
+        .result()
+        .ok_or_else(|| "component decode failed".to_string())?;
+    let encoded = codec.encode_start(&ops, component);
+    let encoded = encoded
+        .result()
+        .ok_or_else(|| "component encode failed".to_string())?;
+    serde_json::to_string(encoded).map_err(|e| format!("serialize: {e}"))
 }
 
 /// The non-recursive body of `CODEC` given the `topSerializer`.

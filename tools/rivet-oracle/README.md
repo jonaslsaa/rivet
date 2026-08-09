@@ -55,6 +55,10 @@ rivet-oracle/
     chunk-hash/         # #54 xxh3_64 seed-hash gate (see 'Chunk-hash engine')
       corpus.json       # deterministic seed/coordinate corpus (single source of truth)
       paper/manifest.json  # Paper xxh3_64 digest table over the M2 region payloads
+    text/               # chat/title/player-info/scoreboard component-JSON corpus
+      manifest.json     # hashes of corpus.json + golden.json (kind: text)
+      corpus.json       # 62 exact component-JSON inputs (issue #98)
+      golden.json       # Paper's verdict + canonical decode->re-encode per input
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
@@ -187,8 +191,9 @@ cargo run -p rivet-oracle -- <dir>       # check a specific fixtures dir
 
 The no-arg form discovers every `manifest.json` under `fixtures/` — the M0
 superflat slice (`fixtures/`), the worldgen semantic samples
-(`fixtures/worldgen/`), and the normal-overworld region payloads
-(`fixtures/regions/overworld-normal/`) — and verifies each against its own
+(`fixtures/worldgen/`), the normal-overworld region payloads
+(`fixtures/regions/overworld-normal/`), and the text component-JSON corpus
+(`fixtures/text/`, issue #98) — and verifies each against its own
 manifest. Prints `OK: all N captured files match manifest SHA-256s` and a
 summary per kind (seed, level-type, region-file-compression, per-dimension
 chunk counts). Exits nonzero on any hash or size mismatch, or if any kind
@@ -342,7 +347,28 @@ cargo run -p rivet-oracle -- regenerate            # all kinds
 cargo run -p rivet-oracle -- regenerate --m0       # M0 superflat slice only
 cargo run -p rivet-oracle -- regenerate --m2       # M2 region payloads only
 cargo run -p rivet-oracle -- regenerate --samples  # worldgen samples only
+cargo run -p rivet-oracle -- regenerate --text     # text corpus only (Paper oracle op)
 ```
+
+The `text/` corpus (issue #98) records the exact component JSON a chat/title/
+player-info/scoreboard packet carries, Paper's accept/reject verdict in the
+Bootstrap-only oracle context, and Paper's canonical `ComponentSerialization.
+CODEC` decode->re-encode under non-compressed `JsonOps` (stored as verbatim JSON
+strings so the byte identity is preserved). The four Paper-accepted
+click/hover entries use exactly Paper 26.2's codec field names (ShowText
+`value`, OpenUrl `url`, RunCommand `command`, CopyToClipboard `value`) and none
+needs registry/Holder context, so the only reason Rivet rejects them is the
+unported `ClickEvent`/`HoverEvent` STUB codec (epic #12) — never a malformed
+field or registry/Holder context; the four `malformed-*-wrong-key` negatives
+carry the same content with a wrong field name and Paper rejects them, pinning
+the field names as load-bearing. `regenerate --text` boots the Paper oracle
+(like `--m0`/`--m2`). The `text_manifest_regeneration_is_byte_identical` unit
+test proves only the *manifest writer's* determinism: re-running the manifest
+hashing over the committed `corpus.json` + `golden.json` reproduces the
+committed `manifest.json` byte-for-byte (git-clean), and the regenerated
+manifest verifies its own files. It does not run a second Paper boot, so it is
+not a twin-boot determinism proof of `golden.json` (that is the M2 `regenerate
+--m2` procedure below, which actually performs two independent boots).
 
 M2 region regeneration (the worldgen nondeterminism case, #266) is a
 **twin-boot**: `regenerate --m2` performs two independent fresh Paper boots
@@ -362,8 +388,10 @@ provenance (proving the regenerated M0 is not misclassified as a region capture,
 issue #266). `--to` requires exactly one of `--m0`/`--m2`: bare
 `regenerate --to /dir` and multi-kind `--m0 --m2 --to /dir` are refused (they
 would share one destination across kinds and M2's twin-boot replaces the whole
-directory, silently discarding M0's output), and `--samples` is refused with
-`--to` (worldgen samples regenerate the committed `fixtures/worldgen` tree).
+directory, silently discarding M0's output), and the derived kinds `--samples`
+and `--text` are refused with `--to` (worldgen samples regenerate the committed
+`fixtures/worldgen` tree; the text corpus regenerates the committed
+`fixtures/text` tree via the Paper reference oracle).
 
 The gate's hash verification is the safety net against a bad regeneration.
 Never hand-edit fixtures; regenerate from a clean run instead. Every boot in the

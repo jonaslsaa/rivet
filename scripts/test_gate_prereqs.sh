@@ -227,5 +227,174 @@ grep -q "^    FAILED" "$TMP/out8" || fail "tool crash: FAILED not printed"
 grep -q "^    VERIFIED" "$TMP/out8" && fail "tool crash: VERIFIED printed despite crash"
 pass "tool crash: FAILED, exit 1, never VERIFIED"
 
+# --- test 5: run_oracle_self_test must prove the raw-JSON-Lines contract -------
+# The self-test step runs `tools/rivet-reference-oracle/run.sh --self-test` and
+# asserts stdout is exactly one bare JSON line (no log4j `[HH:mm:ss LEVEL]:
+# [STDOUT]: ...` prefix, and not swallowed). This is the load-bearing test for
+# RivetReferenceOracle.selfTest()'s RAW_STDOUT emission: a regression back to
+# System.out.println (re-wired through SysOutOverSLF4J by Bootstrap.bootStrap())
+# produces a prefixed line or empty stdout and must FAIL the gate. The verdict
+# is a *structural* JSON parse (top-level "ok" must be the boolean true): a
+# nested `{"ok":true}` (top-level ok absent) and a top-level `"ok":false` are
+# both counterfeits and must FAIL. The step resolves run.sh via REPO_DIR, so
+# only that file is shimmed inside FAKE_FULL; PARITY_RUNNABLE is set directly,
+# as in the parity tests above.
+SELF_SHIM_DIR="$FAKE_FULL/tools/rivet-reference-oracle"
+mkdir -p "$SELF_SHIM_DIR"
+self_run_sh() { # $1 = literal stdout line the fake run.sh should emit
+  printf '#!/bin/bash\nprintf "%%s\\n" %q\n' "$1" > "$SELF_SHIM_DIR/run.sh"
+  chmod +x "$SELF_SHIM_DIR/run.sh"
+}
+
+# Healthy self-test: stdout is the bare JSON summary.
+self_run_sh '{"ok":true,"protocol":1,"tests":9}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+run_oracle_self_test > "$TMP/out9" 2>&1
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "self-test: ORACLE_UNVERIFIED set on success"
+grep -q "^    VERIFIED" "$TMP/out9" || fail "self-test: VERIFIED not printed for bare JSON line"
+pass "self-test: bare JSON line -> VERIFIED"
+
+# Regression: the summary routed through System.out after Bootstrap.bootStrap()
+# vanishes entirely (stdout empty) — must be FAILED, exit 1.
+self_run_sh ''
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out10" 2>&1 )
+rc10=$?
+set -e
+[ "$rc10" = 1 ] || fail "self-test: empty stdout should exit 1 (got $rc10)"
+grep -q "^    FAILED" "$TMP/out10" || fail "self-test: FAILED not printed for empty stdout"
+grep -q "^    VERIFIED" "$TMP/out10" && fail "self-test: VERIFIED printed despite empty stdout"
+pass "self-test: empty stdout (System.out regression) -> FAILED"
+
+# Regression: a log4j-prefixed line must be FAILED, exit 1.
+self_run_sh '[2026-08-08T14:00:00Z INFO]: [STDOUT]: {"ok":true,"protocol":1,"tests":9}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out11" 2>&1 )
+rc11=$?
+set -e
+[ "$rc11" = 1 ] || fail "self-test: log-prefixed line should exit 1 (got $rc11)"
+grep -q "^    FAILED" "$TMP/out11" || fail "self-test: FAILED not printed for log-prefixed line"
+pass "self-test: log4j-prefixed line -> FAILED"
+
+# Multi-line stdout (a trailing diagnostic) must be FAILED, exit 1.
+self_run_sh $'{"ok":true,"protocol":1,"tests":9}\njunk'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out12" 2>&1 )
+rc12=$?
+set -e
+[ "$rc12" = 1 ] || fail "self-test: multi-line stdout should exit 1 (got $rc12)"
+grep -q "^    FAILED" "$TMP/out12" || fail "self-test: FAILED not printed for multi-line stdout"
+pass "self-test: multi-line stdout -> FAILED"
+
+# Leading/trailing whitespace around the JSON object (a padded line, or a JVM
+# that emitted a stray blank/indent) is not the bare JSON line the contract
+# requires — json.loads would tolerate it, so the exact-shape check must reject.
+self_run_sh '  {"ok":true,"protocol":1,"tests":9}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out12a" 2>&1 )
+rc12a=$?
+set -e
+[ "$rc12a" = 1 ] || fail "self-test: whitespace-padded stdout should exit 1 (got $rc12a)"
+grep -q "^    FAILED" "$TMP/out12a" || fail "self-test: FAILED not printed for whitespace-padded stdout"
+grep -q "^    VERIFIED" "$TMP/out12a" && fail "self-test: VERIFIED printed despite whitespace-padded stdout"
+pass "self-test: whitespace-padded stdout -> FAILED"
+
+# Counterfeit: a *nested* {"ok":true} with no top-level ok. The old substring
+# glob accepted this ("...ok":true..." matches); the structural parse must fail.
+self_run_sh '{"result":{"ok":true,"protocol":1,"tests":9}}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out12b" 2>&1 )
+rc12b=$?
+set -e
+[ "$rc12b" = 1 ] || fail "self-test: nested-only ok:true should exit 1 (got $rc12b)"
+grep -q "^    FAILED" "$TMP/out12b" || fail "self-test: FAILED not printed for nested-only ok:true"
+pass "self-test: nested-only ok:true -> FAILED"
+
+# Counterfeit: top-level ok present but false (or "true"/1, the non-boolean
+# forms) — the verdict is not the boolean true and must FAIL.
+self_run_sh '{"ok":false,"protocol":1,"tests":9}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out12c" 2>&1 )
+rc12c=$?
+set -e
+[ "$rc12c" = 1 ] || fail "self-test: top-level ok:false should exit 1 (got $rc12c)"
+grep -q "^    FAILED" "$TMP/out12c" || fail "self-test: FAILED not printed for top-level ok:false"
+pass "self-test: top-level ok:false -> FAILED"
+
+# Not runnable: UNVERIFIED, ORACLE_UNVERIFIED=1, no hard failure.
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=0
+run_oracle_self_test > "$TMP/out13" 2>&1
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "self-test: ORACLE_UNVERIFIED not set when not runnable"
+grep -q "^    UNVERIFIED" "$TMP/out13" || fail "self-test: UNVERIFIED not printed when not runnable"
+pass "self-test: not runnable -> UNVERIFIED"
+
+# A run.sh that exits nonzero — whether the oracle failed to boot (a
+# present-but-stale runtime jar fails its SHA/commit pin, a prereq is missing)
+# or selfTest() threw a JVM assertion after booting (run.sh exec's the JVM, so
+# its exit status passes straight through) — never exercised the RAW_STDOUT
+# verdict in a way the wrapper can distinguish. The classification is therefore
+# conservatively UNVERIFIED (gate exit 3 via ORACLE_UNVERIFIED), NEVER FAILED —
+# the distinguishing property from the booted-but-bad-stdout cases above, where a
+# run.sh that exits 0 while emitting a non-bare-JSON line is a real self-test
+# failure (FAILED, exit 1). Mirrors run_rivet_parity's dead-oracle (rc=3)
+# handling.
+dead_self_run_sh() { # $1 = exit code run.sh should return
+  printf '#!/bin/bash\nprintf "%%s\\n" "Paper compile jar and materialized runtime jar do not match" >&2\nexit %s\n' "$1" > "$SELF_SHIM_DIR/run.sh"
+  chmod +x "$SELF_SHIM_DIR/run.sh"
+}
+
+# Dead oracle, gate not in --require-oracle mode: UNVERIFIED, returns 0 (main
+# turns ORACLE_UNVERIFIED into exit 3), never FAILED. Runs in the CURRENT shell
+# (not a subshell) so the ORACLE_UNVERIFIED global propagates to the assertions.
+dead_self_run_sh 1
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+run_oracle_self_test > "$TMP/out14" 2>&1
+rc14=$?
+set -e
+[ "$rc14" = 0 ] || fail "self-test: dead oracle without --require-oracle should return 0 (got $rc14)"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "self-test: ORACLE_UNVERIFIED not set on dead oracle"
+grep -q "^    UNVERIFIED" "$TMP/out14" || fail "self-test: UNVERIFIED not printed for dead oracle"
+grep -q "^    FAILED" "$TMP/out14" && fail "self-test: FAILED printed for nonzero run.sh exit (classification is conservatively UNVERIFIED, never FAILED)"
+grep -q "^    VERIFIED" "$TMP/out14" && fail "self-test: VERIFIED printed despite dead oracle"
+pass "self-test: dead oracle -> UNVERIFIED, never FAILED/VERIFIED"
+
+# Dead oracle with --require-oracle: hard failure (exit 1), after reporting
+# UNVERIFIED. run_oracle_self_test exits the shell here, so it runs in a
+# subshell.
+dead_self_run_sh 1
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REQUIRE_ORACLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out15" 2>&1 )
+rc15=$?
+set -e
+REQUIRE_ORACLE=0
+[ "$rc15" = 1 ] || fail "self-test: dead oracle + --require-oracle should exit 1 (got $rc15)"
+grep -q "^    UNVERIFIED" "$TMP/out15" || fail "self-test: UNVERIFIED not printed before the hard failure"
+grep -q "hard failure" "$TMP/out15" || fail "self-test: --require-oracle hard-failure message missing"
+pass "self-test: dead oracle + --require-oracle exits 1"
+
+# A non-1 nonzero exit (run.sh aborts for an unanticipated reason, or the JVM
+# exits with a nonstandard status) is still conservatively UNVERIFIED, not FAILED —
+# classification keys on the raw-JSON verdict being unobservable, not on the
+# specific exit code.
+dead_self_run_sh 7
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+run_oracle_self_test > "$TMP/out16" 2>&1
+rc16=$?
+set -e
+[ "$rc16" = 0 ] || fail "self-test: any nonzero run.sh exit should return 0 (got $rc16)"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "self-test: ORACLE_UNVERIFIED not set for nonzero exit 7"
+grep -q "^    UNVERIFIED" "$TMP/out16" || fail "self-test: UNVERIFIED not printed for exit 7"
+grep -q "^    FAILED" "$TMP/out16" && fail "self-test: FAILED printed for exit 7 (classification is conservatively UNVERIFIED, never FAILED)"
+pass "self-test: nonzero exit 7 -> UNVERIFIED, never FAILED"
+
 echo
 echo "ALL GATE PREREQ TESTS PASSED"

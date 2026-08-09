@@ -1,0 +1,18 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "text",
+  "note": "Paper-grounded component JSON corpus + golden (issue #98): `corpus.json` is the committed input corpus (each `input` is the exact wire JSON a chat/title/player-info/scoreboard packet carries, stored as a JSON string so the bytes fed to Paper equal the bytes the Rust side parses); `golden.json` records Paper's accept/reject verdict and the canonical decode->re-encode JSON under non-compressed JsonOps, stored verbatim as a JSON string so no serialization layer re-normalizes it. Regenerate with `regenerate --text` (needs the materialized Paper runtime + reference oracle launcher).",
+  "captured": [
+    {
+      "path": "corpus.json",
+      "sha256": "7d626cba7c35589fd953f73dd40cfe6fdc72c8a2e00af749c0014c3fcb6ddf38",
+      "bytes": 10162
+    },
+    {
+      "path": "golden.json",
+      "sha256": "fee84b6798f0aae2ab1606d9f88f4addc7c740fa8d830d976fc91c3154aff636",
+      "bytes": 7622
+    }
+  ]
+}

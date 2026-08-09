@@ -9,5 +9,10 @@ description = "Byte-for-byte NBT/SNBT parity diff between rivet-nbt and the Pape
 base64 = "0.22"
 chrono = "0.4"
 rivet-nbt = { path = "../../crates/rivet-nbt" }
+rivet-serialization = { path = "../../crates/rivet-serialization" }
+rivet-text = { path = "../../crates/rivet-text" }
 rivet-util = { path = "../../crates/rivet-util" }
-serde_json = "1"
+# workspace serde_json carries `preserve_order` so JSON map insertion order is
+# preserved — required for byte-identical component-JSON canonical compare
+# against Paper's Gson output (issue #98).
+serde_json = { workspace = true }

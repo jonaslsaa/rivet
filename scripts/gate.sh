@@ -12,8 +12,9 @@
 # The full gate also runs the oracle steps against the Paper Java oracle, plus the
 # scenario runner:
 #   - rivet-oracle (default)  verifies ALL committed fixture kinds: the M0 chunk
-#                          slice, the M2 worldgen semantic samples, and the M2
-#                          normal-overworld none-compression region payloads
+#                          slice, the M2 worldgen semantic samples, the M2
+#                          normal-overworld none-compression region payloads,
+#                          and the text component-JSON corpus (issue #98)
 #                          (each against its own manifest.json SHA-256s).
 #   - rivet-oracle verify  M0 sanity gate: boot a fresh Paper server and diff its
 #                          chunk-NBT slice against the committed golden baseline.
@@ -32,6 +33,18 @@
 #                          exactly "1 worker threads, 1 I/O threads", and the M2
 #                          region baseline must carry matching chunk-concurrency
 #                          provenance — drift fails the gate loudly.
+#   - reference self-test  boot the reference oracle in --self-test mode and assert
+#                          stdout is exactly one bare JSON line (no log4j [STDOUT]
+#                          prefix, not swallowed) — the load-bearing proof that
+#                          selfTest() rides the raw stream. Shares the parity prereqs.
+#                          A booted oracle with broken raw stdout is FAILED; any
+#                          nonzero run.sh exit is conservatively UNVERIFIED (exit 3) —
+#                          the wrapper's single exit channel cannot distinguish a
+#                          boot/prereq failure (present-but-stale runtime jar, missing
+#                          prereq) from a JVM self-test assertion failure (run.sh
+#                          exec's the JVM, whose exit status passes straight through) —
+#                          and --require-oracle makes any nonzero exit a hard failure
+#                          (exit 1), mirroring rivet-parity's rc=3 handling.
 #   - rivet-parity         byte-for-byte NBT/SNBT diff of rivet-nbt against the Paper
 #                          reference oracle — the only gate step that exercises real
 #                          Rivet code against Paper.
@@ -301,7 +314,7 @@ oracle_prereq_check() {
 # gate like any other oracle stage; the tamper never touches the committed
 # fixtures.
 run_oracle_verify() {
-  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions)"
+  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus)"
   cargo run -q -p rivet-oracle
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
     echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
@@ -388,6 +401,89 @@ run_oracle_hash() {
   else
     echo "    FAILED — hash-diff exited $rc (see the output above)"
     exit 1
+  fi
+}
+
+# Returns 0 iff $1 is exactly the bare JSON-Lines summary the oracle self-test
+# must emit: a single JSON object whose top-level "ok" is the boolean true.
+# Parsed structurally with python3 (NOT a substring scan — a substring glob
+# would accept a nested `{"ok":true}` with no top-level ok, and a top-level
+# "ok":false / "ok":"true" / "ok":1 must all be rejected).
+#
+# The raw-stdout shape is the load-bearing contract: the summary must NOT be a
+# log4j `[HH:mm:ss LEVEL]: [STDOUT]: ...` prefix — Bootstrap.bootStrap()
+# re-wires System.out through SysOutOverSLF4J, so a regression of selfTest()
+# back to System.out.println either prefixes the summary or swallows it
+# entirely. Empty stdout, a `[`-prefixed log line, extra lines, or leading/
+# trailing whitespace around the JSON object means the protocol broke — the
+# line must be *exactly* the bare JSON object.
+oracle_self_test_stdout_is_raw_json() {
+  [ "$#" -eq 1 ] || return 1
+  [ -n "$1" ] || return 1
+  printf '%s\n' "$1" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+# The wrapper pipe appends one newline after command substitution strips the
+# captured trailing newlines. Remove only that wrapper newline so any remaining
+# leading or trailing whitespace fails the bare-JSON contract.
+line = raw[:-1] if raw.endswith("\n") else raw
+if line != line.strip():
+    sys.exit(1)
+try:
+    data = json.loads(line)
+except ValueError:
+    sys.exit(1)
+if not isinstance(data, dict) or data.get("ok") is not True:
+    sys.exit(1)
+'
+}
+
+# The reference oracle's `--self-test` mode (RivetReferenceOracle.selfTest())
+# must emit exactly one bare JSON line on stdout. selfTest() writes through
+# RAW_STDOUT — the System.out captured before Bootstrap.bootStrap() re-wires it
+# through log4j — precisely so the summary is not a `[HH:mm:ss LEVEL]: [STDOUT]:
+# {...}` log line (or swallowed). Asserting the real stdout shape is the
+# load-bearing proof that a regression back to System.out.println fails the
+# gate; it shares the parity step's prerequisites (the compiled oracle boots
+# against the same Paper runtime), so it is guarded by PARITY_RUNNABLE, and the
+# JSON verdict is parsed with python3 (already a gate prereq for `verify`).
+#
+# Classification, mirroring run_rivet_parity's 0/1/3 contract:
+#   run.sh exits 0 AND stdout is the bare JSON line  -> VERIFIED
+#   run.sh exits 0 but stdout is not the bare JSON   -> FAILED (exit 1): the
+#     oracle booted, so a broken raw-stdout protocol is a real self-test
+#     failure.
+#   run.sh exits nonzero                             -> UNVERIFIED: run.sh's single
+#     exit channel cannot tell a boot/prereq failure (a present-but-stale runtime
+#     jar fails its SHA/commit pin, a prereq is missing) from a JVM self-test
+#     assertion failure — selfTest() throws on a failed assertion and run.sh exec's
+#     the JVM, so its nonzero exit passes straight through. Either way the
+#     RAW_STDOUT verdict was never observed, so this is a conservative
+#     classification, never a proven self-test failure. Sets ORACLE_UNVERIFIED
+#     (gate exits 3); with --require-oracle any nonzero exit is a hard failure
+#     (exit 1), exactly like rivet-parity's rc=3 handling.
+run_oracle_self_test() {
+  echo "==> reference oracle self-test (raw JSON Lines on stdout, no log prefix)"
+  if [ "$PARITY_RUNNABLE" = 1 ] && command -v python3 >/dev/null 2>&1; then
+    local out="" rc=0
+    out="$(bash "$REPO_DIR/tools/rivet-reference-oracle/run.sh" --self-test)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "    UNVERIFIED — reference oracle --self-test did not yield the raw JSON verdict (exit $rc; see output above)"
+      ORACLE_UNVERIFIED=1
+      if [ "$REQUIRE_ORACLE" = 1 ]; then
+        echo "    --require-oracle is set: a nonzero self-test exit is a hard failure"
+        exit 1
+      fi
+      return 0
+    fi
+    if ! oracle_self_test_stdout_is_raw_json "$out"; then
+      echo "    FAILED — reference oracle --self-test did not emit a bare JSON line (got: ${out:-<empty>})"
+      exit 1
+    fi
+    echo "    VERIFIED — reference oracle --self-test emitted raw JSON Lines ($out)"
+  else
+    echo "    UNVERIFIED — reference oracle self-test did not run (see the prereq report above)"
+    ORACLE_UNVERIFIED=1
   fi
 }
 
@@ -713,6 +809,7 @@ main() {
   if [ "$FULL_GATE" = true ]; then
     run_oracle_verify
     run_oracle_hash
+    run_oracle_self_test
     run_rivet_parity
     run_join_capture
   fi

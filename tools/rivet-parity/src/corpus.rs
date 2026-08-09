@@ -279,6 +279,16 @@ pub fn fixtures_dir() -> Option<std::path::PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+/// Locate + load the committed `fixtures/text/` component-JSON corpus + golden
+/// (issue #98). Shared with the offline corpus tests: the single loader lives
+/// in `rivet-text` (the crate whose codec the corpus exercises), and this tool
+/// reuses it so the schema parsing can never drift between the two. The entry
+/// type is `rivet_text::corpus::TextFixtureEntry` (visible through the returned
+/// `text_corpus()` signature; callers never name it). A malformed committed
+/// corpus is a hard `CorpusError::Malformed` — only genuine absence
+/// (`CorpusError::Absent`) lets the caller skip the section.
+pub use rivet_text::corpus::{CorpusError, text_corpus, text_fixtures_dir};
+
 /// Walk the fixtures tree collecting `*.nbt` files in deterministic order.
 pub fn collect_fixtures(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
