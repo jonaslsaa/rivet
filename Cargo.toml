@@ -13,6 +13,7 @@ license = "GPL-3.0-or-later"
 base64 = "0.22"
 bytes = "1"
 crc32c = "0.6"
+crossfire = "3"
 flate2 = "1"
 indexmap = "2"
 md5 = "0.7"
@@ -32,9 +33,11 @@ rivet-serialization = { path = "crates/rivet-serialization" }
 rivet-text = { path = "crates/rivet-text" }
 rivet-util = { path = "crates/rivet-util" }
 rivet-world = { path = "crates/rivet-world" }
+rayon = "1"
 ryu = "1.0"
 phf = "0.11"
 serde_json = { version = "1", features = ["preserve_order"] }
+xxhash-rust = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "warn" # rivet-ffi overrides locally; see PORTING.md
