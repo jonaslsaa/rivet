@@ -87,14 +87,14 @@ const LIFECYCLE_EVENTS: [&str; 3] = ["init", "login", "spawn"];
 ///   client and the sampled walk above is unaffected; they are recorded as a
 ///   diagnostic so the invariant "server corrections occurred while walking"
 ///   stays observable, but they are excluded from parity.
-/// - `walk.last_sent`: the final movement frame actually sent (the client's
-///   `LastSentPosition` at the tick the walk stopped). It is a snapshot of the
-///   *unsampled* tail — the `MOVE_TICKS - 1 - SAMPLE_TICKS` moving ticks after
-///   the sampled prefix — exactly the region a mid-walk server re-sync
-///   (`player_position`) perturbation lands in, so it is not guaranteed stable
-///   across fresh boots (see the `SAMPLE_TICKS` rationale in `rivet-client`).
-///   It is recorded as a diagnostic so the final position is observable, and
-///   excluded from parity until the re-sync timing is understood.
+/// - `walk.spawn_origin`: the full-precision spawn position the client
+///   subtracted to normalize the samples and `last_sent` to spawn-relative X/Z.
+///   Paper randomizes the spawn X/Z offset per boot, so the origin varies per
+///   boot and is excluded — the whole point of the normalization is that the
+///   walk is compared independent of where the player spawned. It is carried
+///   (rather than dropped) because the harness needs it: `check_rivet_authoritative`
+///   adds the origin back to `last_sent` to reconstruct the absolute position
+///   for the cross-check against Rivet's absolute authoritative trace.
 fn excluded_move_fields() -> serde_json::Map<String, Value> {
     let mut map = serde_json::Map::new();
     map.insert(
@@ -113,13 +113,9 @@ fn excluded_move_fields() -> serde_json::Map<String, Value> {
         "walk.corrections_count".to_owned(),
         json!("the number of entity_position_sync packets is timing-dependent (how many client position packets land before each server tick), verified to vary across fresh boots (46-118 across test boots); recorded as a diagnostic, excluded from parity"),
     );
-    // RivetTodo(#53): last_sent currently samples the unsampled walk tail, where
-    // a mid-walk server re-sync perturbation can land; once the re-sync timing
-    // is characterized it should be promoted to a compared field (and its
-    // spawn-relative normalizer exercised against a re-sync boot).
     map.insert(
-        "walk.last_sent".to_owned(),
-        json!("the final movement frame actually sent (LastSentPosition at the tick the walk stopped) is a snapshot of the unsampled tail beyond SAMPLE_TICKS — the region a mid-walk server re-sync (player_position) perturbation lands in — so it is not guaranteed stable across fresh boots; recorded as a diagnostic, excluded from parity"),
+        "walk.spawn_origin".to_owned(),
+        json!("the full-precision spawn position subtracted to normalize the samples and last_sent to spawn-relative X/Z; Paper randomizes the spawn X/Z offset per boot, so the origin varies per boot — the walk is compared spawn-relative, and the origin is only carried so check_rivet_authoritative can reconstruct the absolute last_sent"),
     );
     map
 }
@@ -470,10 +466,17 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
             "movement_ticks": walk.get("movement_ticks").cloned().unwrap_or(Value::Null),
             "sampled_ticks": sampled_ticks,
             "heading_degrees": walk.get("heading_degrees").cloned().unwrap_or(Value::Null),
-            // The client already normalizes `last_sent` to spawn-relative
-            // X/Z (matching the samples), so it is copied verbatim; it is
-            // recorded as an excluded diagnostic, not compared (see
-            // `excluded_move_fields`).
+            // The full-precision spawn origin the client subtracted to
+            // normalize X/Z, carried verbatim and excluded from parity (see
+            // `excluded_move_fields`). The harness needs it to invert the
+            // normalization for the Rivet-trace cross-check.
+            "spawn_origin": walk.get("spawn_origin").cloned().unwrap_or(Value::Null),
+            // The client already normalizes `last_sent` to spawn-relative X/Z
+            // (matching the samples), so it is copied verbatim and compared:
+            // the evidence across fresh boots (the `differing_last_sent_is_compared`
+            // parity test) shows it is deterministic per server and Paper-vs-Rivet
+            // equal on X/Z, so a differing `last_sent` is a real movement
+            // divergence, not per-boot noise.
             "last_sent": walk.get("last_sent").cloned().unwrap_or(Value::Null),
             "samples": samples,
             "teleport_ack_echo": set_equality(&teleports, &teleport_acks),
@@ -603,6 +606,9 @@ mod tests {
                 "movement_ticks": 119,
                 "sampled_ticks": samples.len(),
                 "heading_degrees": -90.0,
+                // The full-precision spawn position the client subtracted (the
+                // `spawn` record for the fixture is x=9.5 z=-3.5).
+                "spawn_origin": {"x": 9.5, "y": -60.0, "z": -3.5},
                 // A plausible final sent position: the walk's last moving tick is
                 // 19 ticks past the 100th sample (~+25 blocks from spawn).
                 "last_sent": {"x": 25.0, "y": -60.0, "z": 0.0},
@@ -662,20 +668,36 @@ mod tests {
         assert!(t["excluded"]["walk.keepalives"].is_string());
         assert!(t["excluded"]["walk.corrections"].is_string());
         assert!(t["excluded"]["walk.corrections_count"].is_string());
-        // The final sent position is recorded (copied verbatim) and declared
-        // excluded: a differing `last_sent` must not fail the differential.
+        // The final sent position is recorded (copied verbatim) and compared —
+        // the evidence in `differing_last_sent_is_compared` shows it is
+        // deterministic per server and Paper-vs-Rivet equal on X/Z, so it is
+        // not an excluded diagnostic.
         assert_eq!(t["walk"]["last_sent"]["x"], json!(25.0));
         assert_eq!(t["walk"]["last_sent"]["y"], json!(-60.0));
         assert_eq!(t["walk"]["last_sent"]["z"], json!(0.0));
-        assert!(t["excluded"]["walk.last_sent"].is_string());
+        assert!(t["excluded"].get("walk.last_sent").is_none());
+        // The full-precision spawn origin is carried (so the harness can
+        // reconstruct the absolute last_sent) but excluded from parity — the
+        // walk is compared spawn-relative and Paper randomizes the origin.
+        assert_eq!(
+            t["walk"]["spawn_origin"],
+            json!({"x": 9.5, "y": -60.0, "z": -3.5})
+        );
+        assert!(t["excluded"]["walk.spawn_origin"].is_string());
     }
 
     #[test]
-    fn differing_last_sent_is_excluded_from_parity() {
-        // The walk's final sent position is a diagnostic, not a compared field:
-        // two runs with a different `last_sent` (a mid-walk re-sync perturbation
-        // landing in the unsampled tail) must diff clean — the excluded
-        // declaration absorbs the difference rather than failing parity.
+    fn differing_last_sent_is_compared() {
+        // The walk's final sent position is a *compared* field: the genuine
+        // artifacts show it is deterministic per server (identical across two
+        // fresh Paper boots — transcript1.json and transcript2.json both record
+        // last_sent x=25.428 z=0.0 despite corrections differing 127 vs 105) and
+        // Paper-vs-Rivet equal on X/Z (Rivet's probe records the same 25.428).
+        // The only divergence seen is the fixture artifact on y (Paper's
+        // default-flat spawn -60.0 vs the single-stone fixture's -63.0), which
+        // the both-mode scenario removes by booting Paper from the same
+        // single-stone fixture. So a differing `last_sent` is a real movement
+        // divergence and must FAIL parity, not be absorbed by an exclusion.
         let a = normalize_move(&move_records()).expect("normalize");
         // `move_records()` renders the `json!` walk compactly, so the
         // `last_sent` object is an exact substring to tamper.
@@ -686,12 +708,12 @@ mod tests {
         let b = normalize_move(&b_raw).expect("normalize");
         let d = super::super::comparator::diff(&a, &b);
         assert!(
-            d.is_identical(),
-            "a differing excluded last_sent must not fail parity: {d:?}"
+            !d.is_identical(),
+            "a differing compared last_sent must fail parity: {d:?}"
         );
         assert!(
-            d.excluded.iter().any(|f| f.path == "walk.last_sent"),
-            "the differing last_sent is reported as an excluded diagnostic"
+            d.diffs.iter().any(|f| f.path == "walk.last_sent.x"),
+            "the differing last_sent must be a compared diff: {d:?}"
         );
     }
 

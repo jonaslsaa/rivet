@@ -431,13 +431,38 @@ fn boot_timeout(kind: ServerKind) -> Duration {
     }
 }
 
+/// Resolve an artifact path against the harness's current directory when it is
+/// relative. The child is spawned with its working directory set to `run_dir`
+/// (where the world and `server.properties` live), so a relative artifact path
+/// — which `RIVET_ORACLE_JAR` may legitimately carry — would otherwise be
+/// resolved against `run_dir` and fail to boot (Paper: `Unable to access
+/// jarfile`).
+fn absolutize_artifact(artifact: &Path) -> PathBuf {
+    if artifact.is_absolute() {
+        artifact.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(artifact))
+            .unwrap_or_else(|_| artifact.to_path_buf())
+    }
+}
+
 /// Spawn the server, wait for READY, and return the running server.
 ///
 /// stdout+stderr are teed to `log_path`. `artifact` is the paperclip jar for
 /// Paper or the `rivet-server` binary for Rivet. `server_properties_src` is
 /// required for Paper and unused for Rivet (pass `None`): the rivet-server
 /// binary is driven purely by `--host`/`--port` and never reads
-/// `server.properties`.
+/// `server.properties`. `envs` are extra environment variables for the child
+/// (currently only the Rivet-vs-Paper movement differential passes any: it
+/// boots the rivet-server with `RIVET_TRACE_MOVEMENT=1` so the tick thread
+/// emits its authoritative movement audit on stderr).
+///
+/// The eight arguments are the distinct inputs a boot needs (server kind, run
+/// dir, log tee, artifact, optional properties source, bind address, optional
+/// held port reservation, child envs); the excess over clippy's default limit
+/// is inherent to the operation rather than a refactorable arity smell.
+#[allow(clippy::too_many_arguments)]
 pub fn boot(
     kind: ServerKind,
     run_dir: &Path,
@@ -446,20 +471,25 @@ pub fn boot(
     server_properties_src: Option<&Path>,
     address: SocketAddr,
     port_reservation: Option<rivet_harness_common::port::PortReservation>,
+    envs: &[(&str, &str)],
 ) -> Result<Server, Error> {
     prepare_run_dir(run_dir, kind, server_properties_src, address.port())?;
+    // The child runs with its cwd set to `run_dir`; a relative artifact (e.g.
+    // `RIVET_ORACLE_JAR=work/jars/...`) must be resolved against the harness's
+    // own cwd, not the run dir, or Java cannot find the jar.
+    let artifact = absolutize_artifact(artifact);
 
     let mut command = match kind {
         ServerKind::Paper => {
             let mut c = Command::new("java");
             c.args(["-Xms512M", "-Xmx2G", "-jar"])
-                .arg(artifact)
+                .arg(&artifact)
                 .arg("nogui")
                 .current_dir(run_dir);
             c
         }
         ServerKind::Rivet => {
-            let mut c = Command::new(artifact);
+            let mut c = Command::new(&artifact);
             c.args([
                 "--host",
                 &address.ip().to_string(),
@@ -470,6 +500,7 @@ pub fn boot(
             c
         }
     };
+    command.envs(envs.iter().copied());
     // A held port reservation (used by the multi-server Paper-vs-Rivet mode) is
     // released only now, immediately before the child process binds the port,
     // so the port cannot be stolen during the (possibly slow) run-dir prep.
@@ -556,6 +587,21 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
 mod tests {
     use super::*;
     use std::process::Stdio;
+
+    /// A relative artifact must resolve against the harness's cwd, not the run
+    /// dir the child is spawned with — `RIVET_ORACLE_JAR=work/jars/...` is a
+    /// relative path, and without this resolution Java's `-jar` would look in
+    /// the run dir and fail with `Unable to access jarfile`.
+    #[test]
+    fn relative_artifact_resolves_against_harness_cwd() {
+        let cwd = std::env::current_dir().expect("harness cwd");
+        let resolved = absolutize_artifact(Path::new("work/jars/paper.jar"));
+        assert!(resolved.is_absolute(), "must absolutize, got {resolved:?}");
+        assert_eq!(resolved, cwd.join("work/jars/paper.jar"));
+        // An already-absolute artifact passes through untouched.
+        let absolute = PathBuf::from("/tmp/paper.jar");
+        assert_eq!(absolutize_artifact(&absolute), absolute);
+    }
 
     /// CRC-32 (IEEE) over `data`, matching what zip tools verify. The test
     /// builds real jar files so `unzip` reads the MANIFEST without a bad-CRC

@@ -720,16 +720,36 @@ async fn move_and_emit(bot: Client, state: State) {
             // final sample would always disagree and is not done here. Like the
             // samples, X/Z are spawn-relative (the server randomizes the spawn
             // offset each boot) and `y` is absolute (the superflat spawn height
-            // is fixed), so the record is normalized the same way — but it is
-            // NOT guaranteed identical across boots: it is a snapshot of the
-            // unsampled tail, the region a mid-walk server re-sync
-            // (`player_position`) perturbation lands in. It is recorded as a
-            // diagnostic and excluded from the #53 differential (see the
-            // `walk.last_sent` entry in `excluded_move_fields`).
+            // is fixed), so the record is normalized the same way. `last_sent`
+            // is a *compared* field in the #53/#713 differentials: the evidence
+            // across fresh boots and Paper-vs-Rivet runs (the
+            // `differing_last_sent_is_compared` parity test) shows it is
+            // deterministic per server and Paper-vs-Rivet equal on X/Z, so a
+            // differing `last_sent` is a real movement divergence, not per-boot
+            // noise — it is no longer excluded (there is no `walk.last_sent`
+            // entry in `excluded_move_fields`). The one honest caveat is that
+            // `last_sent` snapshots the unsampled tail, the region a mid-walk
+            // server re-sync (`player_position`) perturbation would land in; if
+            // one ever does land there, the differential now FAILS on the
+            // divergence rather than waving it through — the intended strict
+            // behavior.
+            //
+            // `spawn_origin` is the full-precision spawn position the X/Z
+            // normalization subtracted. It is carried (not rounded) so the
+            // harness can invert the normalization losslessly: the runner adds
+            // it back to `last_sent` to reconstruct the absolute position for
+            // the Rivet-trace cross-check (run-scenario's
+            // `check_rivet_authoritative`). It is per-boot nondeterministic
+            // (Paper randomizes the spawn X/Z offset) and excluded from parity.
             "walk_ticks": MOVE_TICKS,
             "movement_ticks": MOVE_TICKS - 1,
             "sampled_ticks": samples.len(),
             "heading_degrees": -90.0,
+            "spawn_origin": json!({
+                "x": origin.x,
+                "y": origin.y,
+                "z": origin.z,
+            }),
             "last_sent": json!({
                 "x": round_to(last_sent.x - origin.x, 3),
                 "y": round_to(last_sent.y, 3),
