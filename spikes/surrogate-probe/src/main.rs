@@ -1,12 +1,15 @@
 //! Rust ground-truth counter-probe for the surrogate-string boundary (GitHub
-//! #264). Prints the same JSON Lines shape as the Java `SurrogateProbe` so the
-//! two can be diffed mechanically. Run via `./run.sh` (which also runs the
-//! Java probe).
+//! #264). Prints JSON Lines on stdout, one line per probe. Each line is valid
+//! JSON; the Java `SurrogateProbe` is the independent ground truth, while this
+//! half mirrors the crate code (the `whatwg` module is a byte-identical copy of
+//! `rivet-protocol::utf8_string::decode_utf8`, not an independent check). The
+//! two halves use different key prefixes and value shapes, so they are compared
+//! row-by-row by hand rather than diffed wholesale. Run via `./run.sh`.
 
 use rivet_util::data_io::{decode_modified_utf8, write_utf_body};
 
 fn out(key: &str, value: String) {
-    println!("{{\"probe\":\"{key}\",\"value\":{value}}}");
+    println!("{{\"probe\":{},\"value\":{}}}", q(key), q(&value));
 }
 
 fn q(s: &str) -> String {
@@ -15,11 +18,10 @@ fn q(s: &str) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
+    // Lowercase, no separators — the same shape as Java `HexFormat.of()` so the
+    // two halves' byte fields are directly comparable.
     let mut s = String::new();
-    for (i, b) in bytes.iter().enumerate() {
-        if i > 0 {
-            s.push(' ');
-        }
+    for b in bytes {
         s.push_str(&format!("{b:02x}"));
     }
     s
@@ -38,12 +40,9 @@ fn main() {
         match decode_modified_utf8(bytes) {
             Ok(s) => out(
                 key,
-                format!("ok units={} chars={}", s.encode_utf16().count(), q(&s)),
+                format!("ok units={} chars={}", s.encode_utf16().count(), s),
             ),
-            Err(e) => out(
-                key,
-                format!("ERR kind={:?} msg={}", e.kind(), q(&e.to_string())),
-            ),
+            Err(e) => out(key, format!("ERR kind={:?} msg={}", e.kind(), e)),
         }
     }
 
@@ -78,7 +77,7 @@ fn main() {
         let s = crate::whatwg::decode(bytes);
         out(
             key,
-            format!("units={} chars={}", s.encode_utf16().count(), q(&s)),
+            format!("units={} chars={}", s.encode_utf16().count(), s),
         );
     }
 
@@ -97,18 +96,20 @@ fn main() {
                     format!(
                         "units={} chars={} reserialized={}",
                         s.encode_utf16().count(),
-                        q(s),
-                        q(&v.to_string())
+                        s,
+                        v
                     ),
                 );
             }
-            Err(e) => out(key, format!("ERR {}", q(&e.to_string()))),
+            Err(e) => out(key, format!("ERR {}", e)),
         }
     }
 }
 
-// Minimal copy of the WHATWG UTF-8 decoder (the crate's decode_utf8) so the
-// probe crate need not depend on rivet-protocol.
+// Mirror of `crates/rivet-protocol/src/utf8_string.rs::decode_utf8`, kept
+// byte-identical so the probe crate need not depend on rivet-protocol. This is
+// NOT an independent implementation — the JDK decoder behind the Java probe's
+// `jdk_decode_*` rows is the independent check for the protocol boundary.
 mod whatwg {
     pub fn decode(input: &[u8]) -> String {
         let mut out = String::with_capacity(input.len());

@@ -133,19 +133,34 @@ public final class SurrogateProbe {
             new byte[]{(byte) 0xED, (byte) 0xA0, (byte) 0x80});
     }
 
-    /** StringTag.quoteAndEscape equivalent (the SNBT printer's string form). */
+    /**
+     * Faithful port of {@code StringTag.quoteAndEscape} + {@code SnbtGrammar.escapeControlCharacters}
+     * (pinned Paper 26.2 sources), so the B6 row exercises the real SNBT printer algorithm including the
+     * control-character path, not just the surrogate inputs this probe feeds it.
+     */
+    private static final HexFormat HEX_ESCAPE = HexFormat.of().withUpperCase();
+
     private static String quoteAndEscape(final String s) {
         StringBuilder result = new StringBuilder();
-        char quote = '\0';
+        int quoteMarkIndex = result.length();
+        result.append(' ');
+        char quote = 0;
+
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c == '\\') {
                 result.append("\\\\");
             } else if (c != '"' && c != '\'') {
-                result.append(c);
+                String escaped = escapeControlCharacters(c);
+                if (escaped != null) {
+                    result.append('\\');
+                    result.append(escaped);
+                } else {
+                    result.append(c);
+                }
             } else {
-                if (quote == '\0') {
-                    quote = (c == '"') ? '\'' : '"';
+                if (quote == 0) {
+                    quote = (char) (c == '"' ? 39 : 34);
                 }
                 if (quote == c) {
                     result.append('\\');
@@ -153,10 +168,25 @@ public final class SurrogateProbe {
                 result.append(c);
             }
         }
-        if (quote == '\0') {
+
+        if (quote == 0) {
             quote = '"';
         }
-        return quote + result.toString() + quote;
+        result.setCharAt(quoteMarkIndex, quote);
+        result.append(quote);
+        return result.toString();
+    }
+
+    /** Mirror of {@code SnbtGrammar.escapeControlCharacters}. */
+    private static String escapeControlCharacters(final char c) {
+        return switch (c) {
+            case '\b' -> "b";
+            case '\t' -> "t";
+            case '\n' -> "n";
+            case '\f' -> "f";
+            case '\r' -> "r";
+            default -> c < ' ' ? "x" + HEX_ESCAPE.toHexDigits((byte) c) : null;
+        };
     }
 
     private static String codeUnits(final String s) {

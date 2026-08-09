@@ -40,19 +40,32 @@ This spec confirms, rationalizes, and canonizes that policy; it does not propose
 | SNBT `\uHHHH` / `\N{name}` | `\uD800` / `HIGH SURROGATES D800` | accepted, `Character.toString(0xD800)` → lone surrogate | `ERROR_INVALID_CODEPOINT` |
 | `StringTag.quoteAndEscape` (SNBT printer) | `"\uD800"` | `"` + raw U+D800 + `"` | n/a (value can't exist) |
 
-Provenance of the SNBT rows (Java and Rust): the Java side uses a hand-rolled `quoteAndEscape` *equivalent* (the real
-`StringTag.quoteAndEscape` needs the M0 materialized Paper jar, deferred to #264-b); the Rust side is verified by the
+Provenance of the SNBT rows (Java and Rust): the Java `Character.*` results (`codePointOf`, `toString`,
+`isValidCodePoint`) are live-probed via the JDK. The parser *acceptance* claim — `SnbtGrammar.stringEscapeSequence`
+reads `\uHHHH` as `Character.isValidCodePoint` + `Character.toString`, so `\uD800` is accepted and yields a `String`
+holding the lone surrogate — is read from the pinned Paper source; the real parser lives in the M0 materialized Paper
+jar (deferred to #264-b), so the standalone probe has **no live SNBT parser**. The B6 printer row comes from a
+*full faithful port* of `StringTag.quoteAndEscape` (including `SnbtGrammar.escapeControlCharacters`), verified against
+the pinned source; for the probed surrogate inputs it emits `"` + raw U+D800 + `"`. The Rust side is verified by the
 tree unit tests in `tag_parser.rs` (`apply_hex_escape` / `\N{}` → `ERROR_INVALID_CODEPOINT`) and
 `unicode_name_table.rs` (`CodePointOfError::LoneSurrogate`), not by the standalone probe (which deliberately avoids a
 `rivet-nbt` dependency chain).
+
+Provenance of the protocol rows: the Rust probe's `whatwg` module is a byte-identical mirror of
+`rivet-protocol::utf8_string::decode_utf8` (copied so the probe crate need not depend on `rivet-protocol`) — it is
+**not** an independent check. The independent ground truth for the protocol boundary is the Java JDK decoder behind
+the `jdk_decode_*` rows (and netty `Utf8String.read`). The Rust probe is a *counter*-probe: it reproduces the crate
+code, while Java supplies the external oracle.
 
 Two facts are load-bearing:
 
 1. **The protocol boundary is already byte-faithful.** `Utf8String.read` in Java does
    `input.toString(readerIndex, bufferLength, UTF_8)`, i.e. the JDK UTF-8 decoder, which produces U+FFFD for a
    lone-surrogate byte sequence. The Rust port's WHATWG decoder produces the same single U+FFFD (verified
-   differentially in `utf8_string.rs` and reconfirmed by the probe). There is **no** divergence to fix on the
-   network path. Only the *length check* afterwards counts UTF-16 units; U+FFFD is 1 unit on both sides.
+   differentially in `utf8_string.rs` and reconfirmed by the probe — the probe's `whatwg` module mirrors the crate
+   decoder, so the independent check here is Java's JDK decoder, per the provenance note above). There is **no**
+   divergence to fix on the network path. Only the *length check* afterwards counts UTF-16 units; U+FFFD is 1 unit
+   on both sides.
 2. **A surrogate-preserving boundary type is not justified.** A `Vec<u16>`/`String16` type at the NBT/protocol
    boundary would propagate into every `StringTag.value`, `CompoundTag` key, tag visitor, SNBT printer, `NbtOps`
    (DFU), `Component` serialization and `Identifier` — a cross-cutting refactor of the whole foundation for input
@@ -75,7 +88,7 @@ Two facts are load-bearing:
 | B9 | JSON (chat/component) | Gson `JsonParser` | `serde_json` (via `rivet-serialization::JsonOps`, `rivet-text`) | **divergence documented**: serde_json rejects lone-surrogate escapes; Gson accepts & emits `?`. Keep serde_json; document |
 | B10 | Registry/identifier | `Identifier.parse` (ASCII-only) | `rivet-registry::identifier` | n/a (ASCII), doc-only |
 | B11 | Filesystem paths | `java.nio.file.Path` (UTF-8/OS encoding) | `std::path::PathBuf` / `to_string_lossy` | n/a in current tree (no `Path` port yet); specify `to_string_lossy`+document when the `Path` wave lands |
-| B12 | JVM-adapter FFI | Java `String` → C `char*` | `rivet-ffi` (future) | Specify in §4 / §7 Stage 4: marshal UTF-8, lone surrogate → `?` on the Java side (matches netty) or `Err` |
+| B12 | JVM-adapter FFI | Java `String` → C `char*` | `rivet-ffi` (existing stub crate, empty) | Specify in §4 / §7 Stage 4: marshal UTF-8, lone surrogate → `?` on the Java side (matches netty) or `Err` |
 | B13 | Filesystem file **contents** (configs, datapacks) | Java `Files.readString` (UTF-8) / `Properties.load` (ISO-8859-1) | serde/toml (future server-properties, `world/` files) | n/a in current tree (no config/datapack loader yet); specify `from_utf8`+error when the loader wave lands — a lone surrogate in a config file cannot round-trip through Rust `String` |
 
 The inventory is about **lone** surrogates. A *paired* surrogate (`𐀀` = U+10000) is a valid code point and
@@ -172,9 +185,10 @@ Depends on nothing but the current tree. Each stage is a small PR against #264's
 4. **Stage 3 — JSON counterfactual test (#264-c).** Add a focused `rivet-text`/`rivet-serialization` test
    asserting serde_json *rejects* `"\ud800"` (locking the documented divergence) and that a Gson-generated chat
    JSON containing `\ud800` is rejected, matching the counterfactual in `spikes/surrogate-probe`.
-5. **Stage 4 — FFI string marshalling policy (#264-d, future M3+).** When `rivet-ffi` ships, marshal Java `String`
-   to `char*` with `getBytes(UTF_8)` (lone surrogate → `?`, byte-for-byte what netty does) OR reject with an ABI
-   error status; document one, chosen when the adapter wave lands. Not implemented now.
+5. **Stage 4 — FFI string marshalling policy (#264-d, future M3+).** `rivet-ffi` exists today only as an empty stub
+   crate. When its marshalling layer lands, marshal Java `String` to `char*` with `getBytes(UTF_8)` (lone surrogate
+   → `?`, byte-for-byte what netty does) OR reject with an ABI error status; document one, chosen when the adapter
+   wave lands. Not implemented now.
 
 No crate-cycle impact: all changes are additive (tests/fixtures/docs) or within existing leaves. `rivet-util`,
 `rivet-nbt`, `rivet-protocol`, `rivet-serialization` dependency directions are untouched.
@@ -185,6 +199,7 @@ No crate-cycle impact: all changes are additive (tests/fixtures/docs) or within 
 - **#264-b — Oracle:** reference-oracle lone-surrogate corpus + rivet-parity `diverged` wiring. Depends on M0 Paper
   jar materialization (gate prereq).
 - **#264-c — JSON counterfactual test:** serde_json-vs-Gson lone-surrogate lock-in `rivet-text`/`rivet-serialization`.
-- **#264-d — FFI policy (future):** string marshalling choice at the JVM adapter boundary. Blocked until M3/M4.
+- **#264-d — FFI policy (future):** string marshalling choice at the JVM adapter boundary (the `rivet-ffi` crate
+  exists as an empty stub; the choice is made when its marshalling layer is added). Blocked until M3/M4.
 
 Nothing here is blocked on un-landed waves; #264-a and #264-c are runnable immediately.
