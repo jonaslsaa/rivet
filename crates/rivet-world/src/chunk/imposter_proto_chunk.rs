@@ -345,6 +345,25 @@ mod tests {
         PalettedContainerFactory::new(block_strategy(), 0, biome_strategy(), 0)
     }
 
+    /// The `BlockBehaviour` predicates for the test sections: air is `0`,
+    /// nothing randomly ticks, everything is fluid-empty, nothing is
+    /// special-colliding.
+    fn is_air(s: &u8) -> bool {
+        *s == 0
+    }
+    fn is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn fluid_is_empty(_s: &u8) -> bool {
+        true
+    }
+    fn fluid_is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn is_special_colliding(_s: &u8) -> bool {
+        false
+    }
+
     /// An imposter over the wrapped chunk (see [`wrapped_chunk`]).
     fn imposter(
         wrapped: LevelChunk<u8, u8, &'static str>,
@@ -362,13 +381,21 @@ mod tests {
         sections.push(crate::chunk::level_chunk_section::LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            |s: &u8| *s == 0,
+            &is_air,
+            &is_randomly_ticking,
+            &fluid_is_empty,
+            &fluid_is_randomly_ticking,
+            &is_special_colliding,
         ));
         for _ in 1..24 {
             sections.push(crate::chunk::level_chunk_section::LevelChunkSection::new(
                 PalettedContainer::new(0u8, block_strategy()),
                 PalettedContainer::new(0u8, biome_strategy()),
-                |s: &u8| *s == 0,
+                &is_air,
+                &is_randomly_ticking,
+                &fluid_is_empty,
+                &fluid_is_randomly_ticking,
+                &is_special_colliding,
             ));
         }
         LevelChunk::new(
@@ -379,7 +406,6 @@ mod tests {
             0,
             Some(sections),
             0,
-            &|s| *s == 0,
             // u8 tests: 0 is air, 1 is stone (blocks motion).
             &|s: &u8| StateFlags {
                 is_air: *s == 0,

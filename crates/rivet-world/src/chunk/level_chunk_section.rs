@@ -14,9 +14,11 @@
 //! walk, and `read()` adopts Java's client-side forced-special-colliding
 //! behavior. `specialCollidingBlocks` is never observable from the wire — it
 //! only drives the Moonrise collision fast path — so the `is_special_colliding`
-//! predicate is parameterized like `is_air` until the real `BlockBehaviour`
-//! collision flags land (the `mc.world.level.block` slice replaces the
-//! superflat-safe defaults, mirroring `is_randomly_ticking`/`fluid_is_empty`).
+//! predicate is parameterized like `is_air`: every constructor takes the
+//! caller's real `BlockBehaviour` predicates (there is no placeholder default
+//! that silently zeroes the ticking/special-colliding fields). The superflat
+//! callers wire the generated behavior table where it covers a flag and
+//! exact-for-content stand-ins plus `RivetTodo(#216)` where it does not.
 //!
 //! Deferred with the owning unit: the Anti-Xray `chunkPacketInfo`/
 //! `chunkSectionIndex` write params (with `paper.antixray`), and the
@@ -26,6 +28,7 @@
 use crate::chunk::moonrise_short_list::ShortList;
 use crate::chunk::paletted_container::PalettedContainer;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
+use std::sync::LazyLock;
 
 /// `LevelChunkSection.BIOME_CONTAINER_BITS`.
 pub const BIOME_CONTAINER_BITS: i32 = 2;
@@ -35,10 +38,15 @@ pub const BIOME_CONTAINER_BITS: i32 = 2;
 /// the section has any non-air block that is special-colliding.
 const CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS: i16 = 9999;
 
-/// The `16*16*16` ascending index list Java's `recalcBlockCounts` reuses as
-/// the single-value palette's coordinate list (`FULL_LIST`). A fresh allocation
-/// is equivalent: it is consumed once per recalc and never mutated.
+/// `16*16*16` — the section cell count (the length of Java's `FULL_LIST`).
 const SECTION_SIZE: usize = 16 * 16 * 16;
+
+/// `LevelChunkSection.FULL_LIST` — the ascending `0..4096` index list Java
+/// builds once as a static and reuses for the single-value palette's
+/// coordinate list (issue #216). The port mirrors that static reuse: a
+/// process-wide shared list the single-palette recalc reads without
+/// allocating a fresh 4096-short list per call.
+static FULL_LIST: LazyLock<Vec<i16>> = LazyLock::new(|| (0..SECTION_SIZE as i16).collect());
 
 /// `LevelChunkSection` — the block/biome container pair plus the wire-visible
 /// count fields and the Moonrise block-counting lists.
@@ -72,15 +80,25 @@ impl<
 > LevelChunkSection<T, B>
 {
     /// `LevelChunkSection(PalettedContainer<BlockState> states,
-    /// PalettedContainer<Holder<Biome>> biomes)` — runs `recalcBlockCounts()`.
+    /// PalettedContainer<Holder<Biome>> biomes)` — runs `recalcBlockCounts()`
+    /// with the caller's real `BlockBehaviour` predicates.
     ///
-    /// `is_air` classifies states for the recalc; the `is_randomly_ticking`,
-    /// `fluid_is_empty`, and `is_special_colliding` defaults are the
-    /// superflat-safe stand-ins documented on [`recalc_block_counts`].
+    /// All five predicates are required — there is no placeholder default that
+    /// silently zeroes the ticking/special-colliding fields. The caller passes
+    /// its `state.isAir()` / `state.isRandomlyTicking()` /
+    /// `state.getFluidState().isEmpty()` /
+    /// `state.getFluidState().isRandomlyTicking()` /
+    /// `CollisionUtil.isSpecialCollidingBlock(state)` equivalents; the
+    /// superflat callers wire the generated behavior table where it covers a
+    /// flag (see [`recalc_block_counts`] for the two flags it does not yet).
     pub fn new(
         states: PalettedContainer<T>,
         biomes: PalettedContainer<B>,
         is_air: impl Fn(&T) -> bool,
+        is_randomly_ticking: impl Fn(&T) -> bool,
+        fluid_is_empty: impl Fn(&T) -> bool,
+        fluid_is_randomly_ticking: impl Fn(&T) -> bool,
+        is_special_colliding: impl Fn(&T) -> bool,
     ) -> Self {
         let mut section = LevelChunkSection {
             non_empty_block_count: 0,
@@ -92,8 +110,34 @@ impl<
             special_colliding_blocks: 0,
             ticking_blocks: ShortList::new(),
         };
-        section.recalc_block_counts(&is_air, &|_| false, &|_| true, &|_| false);
+        section.recalc_block_counts(
+            &is_air,
+            &is_randomly_ticking,
+            &fluid_is_empty,
+            &fluid_is_randomly_ticking,
+            &is_special_colliding,
+        );
         section
+    }
+
+    /// The default all-air section Java's `LevelChunkSection(containerFactory,
+    /// ...)` path builds (issue #216): a section whose container is the
+    /// factory's air default. `recalcBlockCounts()` on all-air content yields
+    /// exactly this zero state (no non-empty blocks, no fluids, no ticking, no
+    /// special-colliding), so the block predicates are unnecessary here — this
+    /// constructor is the honest equivalent and is only valid for guaranteed
+    /// all-air content (the chunk accessors' `replaceMissingSections` defaults).
+    pub(crate) fn new_all_air(states: PalettedContainer<T>, biomes: PalettedContainer<B>) -> Self {
+        LevelChunkSection {
+            non_empty_block_count: 0,
+            fluid_count: 0,
+            ticking_block_count: 0,
+            ticking_fluid_count: 0,
+            states,
+            biomes,
+            special_colliding_blocks: 0,
+            ticking_blocks: ShortList::new(),
+        }
     }
 
     /// `getBlockState(int, int, int)`.
@@ -169,32 +213,43 @@ impl<
     /// then tallies them from the container's palette via the storage walk.
     ///
     /// Java's Moonrise fast path (issue #216) is ported: when the palette
-    /// holds a single value, `FULL_LIST` (the ascending `0..4096` index list)
-    /// is used instead of `moonrise$countEntries()`; otherwise the
-    /// per-palette-id coordinate groups are read from the storage directly.
-    /// Each group contributes the palette value's counts; the packed positions
-    /// of randomly-ticking values are appended to `tickingBlocks` (Java's
-    /// `setMinCapacity` + `add` loop — the `ShortList` dedupes, so the
-    /// coordinate list ends up with exactly the distinct ticking positions).
+    /// holds a single value, the static `FULL_LIST` (the ascending `0..4096`
+    /// index list, allocated once like Java's) is used instead of
+    /// `moonrise$countEntries()`; otherwise the per-palette-id coordinate
+    /// groups are read from the storage directly. Each group contributes the
+    /// palette value's counts; the packed positions of randomly-ticking values
+    /// are appended to `tickingBlocks` (Java's `setMinCapacity` + `add` loop —
+    /// the `ShortList` dedupes, so the coordinate list ends up with exactly
+    /// the distinct ticking positions).
+    ///
+    /// All five predicates are the caller's real `BlockBehaviour` equivalents —
+    /// there is no placeholder default. Paper uses `state.isRandomlyTicking()`
+    /// for the block count and `fluid.isRandomlyTicking()` for the fluid
+    /// count, so `is_randomly_ticking` and `fluid_is_randomly_ticking` are
+    /// threaded separately. The superflat callers wire the generated behavior
+    /// table for `is_randomly_ticking`/`fluid_is_empty`, and the two flags the
+    /// table does not yet carry are tracked below.
+    ///
+    /// RivetTodo(#216): the generated `block_behaviors` table has no
+    /// fluid-random-tick or special-colliding flags; the superflat callers
+    /// pass exact-for-content stand-ins (the air + stone content has no fluid
+    /// and no special-colliding block) and the real `CollisionUtil`
+    /// `isSpecialCollidingBlock` / `fluid.isRandomlyTicking()` equivalents
+    /// must be wired when the owning block slice adds them.
+    ///
     /// `tickingBlocks`'s element order follows `count_entries`' first-appearance
     /// order (Java's hash-bucket order is not portable); the list never reaches
-    /// the wire and no ported consumer reads its order.
+    /// the wire and no ported consumer reads its order yet.
     ///
-    /// Three simplifications are superflat-safe and deferred with the owning
-    /// unit (#216): `is_randomly_ticking` doubles for both the block and the
-    /// fluid random-tick predicates (Paper uses `state.isRandomlyTicking()` for
-    /// the block and `fluid.isRandomlyTicking()` for the fluid),
-    /// `fluid_is_empty` replaces real `BlockBehaviour` fluid flags, and
-    /// `is_special_colliding` replaces `CollisionUtil.isSpecialCollidingBlock`
-    /// (the `shapeExceedsCube` cache flag / `MOVING_PISTON` — not in the
-    /// generated `block_behaviors` table). None of these affect the wire
-    /// counts (`nonEmptyBlockCount`/`fluidCount`), which are exact for the air
-    /// + stone content.
+    /// RivetTodo(#216): `count_entries`' first-appearance outer order diverges
+    /// from Java's hash-bucket `tickingBlocks` order; the random-tick
+    /// scheduling unit must revisit this before consuming the list's order.
     pub fn recalc_block_counts(
         &mut self,
         is_air: &dyn Fn(&T) -> bool,
         is_randomly_ticking: &dyn Fn(&T) -> bool,
         fluid_is_empty: &dyn Fn(&T) -> bool,
+        fluid_is_randomly_ticking: &dyn Fn(&T) -> bool,
         is_special_colliding: &dyn Fn(&T) -> bool,
     ) {
         self.non_empty_block_count = 0;
@@ -213,10 +268,20 @@ impl<
             let mut special_colliding = 0i32;
 
             let palette_size = self.states.palette_size();
-            let counts: Vec<(i32, Vec<i16>)> = if palette_size == 1 {
-                vec![(0, (0..SECTION_SIZE as i16).collect())]
+            // Java's `paletteSize == 1` fast path reuses the static `FULL_LIST`
+            // (allocated once) instead of `moonrise$countEntries()`; the port
+            // mirrors that static reuse so the single-value recalc does not
+            // allocate a fresh 4096-short list each call. The multi-value path
+            // materializes the per-id lists exactly like Java's map.
+            let entries: Vec<(i32, Vec<i16>)>;
+            let counts: Vec<(i32, &[i16])> = if palette_size == 1 {
+                vec![(0, FULL_LIST.as_slice())]
             } else {
-                self.states.count_entries()
+                entries = self.states.count_entries();
+                entries
+                    .iter()
+                    .map(|(id, coords)| (*id, coords.as_slice()))
+                    .collect()
             };
 
             for (palette_idx, coordinates) in counts {
@@ -241,13 +306,16 @@ impl<
                         (coordinates.len() + self.ticking_blocks.size()) * 3 / 2,
                         SECTION_SIZE,
                     ));
-                    for packed in coordinates {
+                    for &packed in coordinates {
                         self.ticking_blocks.add(packed);
                     }
                 }
                 if !fluid_is_empty(&state) {
                     fluid += palette_count;
-                    if is_randomly_ticking(&state) {
+                    // Paper uses the fluid state's own random-tick predicate
+                    // (`fluid.isRandomlyTicking()`), distinct from the block
+                    // state's — threaded separately.
+                    if fluid_is_randomly_ticking(&state) {
                         ticking_fluid += palette_count;
                     }
                 }
@@ -360,13 +428,12 @@ mod tests {
         *state == 0
     }
 
-    /// A fresh all-air section (`LevelChunkSection(PalettedContainer.of(0),
-    /// PalettedContainer.of(0))`, which runs `recalcBlockCounts`).
+    /// A fresh all-air section — the `new_all_air` default (equivalent to
+    /// `recalcBlockCounts` on all-air content: zero counts, empty ticking).
     fn all_air_section() -> LevelChunkSection<u8, u8> {
-        LevelChunkSection::new(
+        LevelChunkSection::new_all_air(
             PalettedContainer::new(0u8, block_strategy()),
             PalettedContainer::new(0u8, biome_strategy()),
-            is_air,
         )
     }
 
@@ -383,13 +450,17 @@ mod tests {
             PalettedContainer::new(1u8, block_strategy()),
             PalettedContainer::new(0u8, biome_strategy()),
             is_air,
+            |_| true,  // block randomly ticking
+            |_| true,  // fluid empty
+            |_| true,  // fluid randomly ticking (unused: fluid empty)
+            |_| false, // special colliding
         );
         assert_eq!(section.non_empty_block_count(), 4096);
         assert_eq!(section.fluid_count(), 0);
         assert!(!section.has_fluid());
 
         // Every packed position 0..4096 is distinct, so all are appended.
-        section.recalc_block_counts(&is_air, &|_| true, &|_| true, &|_| false);
+        section.recalc_block_counts(&is_air, &|_| true, &|_| true, &|_| true, &|_| false);
         assert_eq!(section.ticking_block_count(), 4096);
         assert_eq!(section.ticking_blocks().size(), 4096);
         for index in 0..4096 {
@@ -399,7 +470,7 @@ mod tests {
         assert!(section.is_randomly_ticking_blocks());
         assert!(!section.is_randomly_ticking_fluids());
         // An all-special-colliding single-value section counts every cell.
-        section.recalc_block_counts(&is_air, &|_| false, &|_| true, &|_| true);
+        section.recalc_block_counts(&is_air, &|_| false, &|_| true, &|_| true, &|_| true);
         assert_eq!(section.non_empty_block_count(), 4096);
         assert!(section.has_special_colliding_blocks());
     }
@@ -424,10 +495,20 @@ mod tests {
             states,
             PalettedContainer::new(0u8, biome_strategy()),
             is_air,
+            |s| *s == 2 || *s == 4, // block randomly ticking
+            |_| true,               // fluid empty
+            |_| true,               // fluid randomly ticking (unused: fluid empty)
+            |s| *s == 3,            // special colliding
         );
 
         // Values 2 and 4 randomly tick; value 3 is special-colliding.
-        section.recalc_block_counts(&is_air, &|s| *s == 2 || *s == 4, &|_| true, &|s| *s == 3);
+        section.recalc_block_counts(
+            &is_air,
+            &|s| *s == 2 || *s == 4,
+            &|_| true,
+            &|_| true,
+            &|s| *s == 3,
+        );
         assert_eq!(section.non_empty_block_count(), 6);
         assert_eq!(section.fluid_count(), 0);
         assert_eq!(section.ticking_block_count(), 3);
@@ -454,13 +535,17 @@ mod tests {
             states,
             PalettedContainer::new(0u8, biome_strategy()),
             is_air,
+            |_| false,   // block randomly ticking
+            |_| true,    // fluid empty
+            |_| true,    // fluid randomly ticking (unused: fluid empty)
+            |s| *s == 3, // special colliding
         );
-        section.recalc_block_counts(&is_air, &|_| false, &|_| true, &|s| *s == 3);
+        section.recalc_block_counts(&is_air, &|_| false, &|_| true, &|_| true, &|s| *s == 3);
         assert_eq!(section.non_empty_block_count(), 3);
         assert!(section.has_special_colliding_blocks());
 
         // A predicate matching nothing leaves the count at zero.
-        section.recalc_block_counts(&is_air, &|_| false, &|_| true, &|_| false);
+        section.recalc_block_counts(&is_air, &|_| false, &|_| true, &|_| true, &|_| false);
         assert!(!section.has_special_colliding_blocks());
         assert_eq!(section.non_empty_block_count(), 3);
     }
@@ -477,6 +562,10 @@ mod tests {
             states,
             PalettedContainer::new(0u8, biome_strategy()),
             is_air,
+            |_| false, // block randomly ticking
+            |_| true,  // fluid empty
+            |_| true,  // fluid randomly ticking (unused: fluid empty)
+            |_| false, // special colliding
         );
         assert_eq!(section.non_empty_block_count(), 1);
 
@@ -524,28 +613,66 @@ mod tests {
             states,
             PalettedContainer::new(0u8, biome_strategy()),
             is_air,
+            |_| false, // block randomly ticking
+            |_| true,  // fluid empty
+            |_| true,  // fluid randomly ticking (unused: fluid empty)
+            |_| false, // special colliding
         );
-        section.recalc_block_counts(&is_air, &|_| true, &|_| true, &|_| false);
+        section.recalc_block_counts(&is_air, &|_| true, &|_| true, &|_| true, &|_| false);
         assert_eq!(section.ticking_block_count(), 2);
         assert_eq!(section.ticking_blocks().size(), 2);
 
         // Now nothing ticks: the earlier list must be dropped, not appended to.
-        section.recalc_block_counts(&is_air, &|_| false, &|_| true, &|_| false);
+        section.recalc_block_counts(&is_air, &|_| false, &|_| true, &|_| true, &|_| false);
         assert_eq!(section.ticking_block_count(), 0);
         assert_eq!(section.ticking_blocks().size(), 0);
         assert_eq!(section.non_empty_block_count(), 2);
         assert!(!section.is_randomly_ticking());
 
-        // The fluid branch: both states are non-empty fluid, so the (shared)
-        // random-ticking predicate counts them as ticking fluids too. The
-        // `is_randomly_ticking_fluids` getter reflects the fluid list, distinct
-        // from the block list.
-        section.recalc_block_counts(&is_air, &|_| true, &|s| *s != 1, &|_| false);
+        // The fluid branch: both states are non-empty fluid, and the fluid
+        // random-tick predicate (distinct from the block predicate) counts
+        // them as ticking fluids. The `is_randomly_ticking_fluids` getter
+        // reflects the fluid list, distinct from the block list.
+        section.recalc_block_counts(&is_air, &|_| true, &|s| *s != 1, &|_| true, &|_| false);
         assert_eq!(section.fluid_count(), 2);
         assert_eq!(section.ticking_fluid_count(), 2);
         assert!(section.is_randomly_ticking());
         assert!(section.is_randomly_ticking_fluids());
         assert_eq!(section.ticking_block_count(), 2);
         assert!(section.is_randomly_ticking_blocks());
+    }
+
+    /// The fluid random-tick predicate is independent of the block one (Paper:
+    /// `state.isRandomlyTicking()` vs `fluid.isRandomlyTicking()`): a state can
+    /// tick as a block without ticking as a fluid, and vice versa.
+    #[test]
+    fn fluid_ticking_uses_its_own_predicate() {
+        let mut states = PalettedContainer::new(0u8, block_strategy());
+        states.set(0, 0, 0, 1); // block-ticking only
+        states.set(1, 0, 0, 2); // fluid-ticking only
+        let mut section = LevelChunkSection::new(
+            states,
+            PalettedContainer::new(0u8, biome_strategy()),
+            is_air,
+            |_| false, // block randomly ticking (overridden below)
+            |_| true,  // fluid empty (overridden below)
+            |_| true,  // fluid randomly ticking (overridden below)
+            |_| false, // special colliding
+        );
+        // Block ticks only value 1; fluid branch is entered only for value 2,
+        // and among those only value 2 ticks as a fluid.
+        section.recalc_block_counts(
+            &is_air,
+            &|s| *s == 1, // block randomly ticking
+            &|s| *s != 2, // fluid empty (false for value 2 → fluid present)
+            &|s| *s == 2, // fluid randomly ticking
+            &|_| false,   // special colliding
+        );
+        assert_eq!(section.ticking_block_count(), 1);
+        assert_eq!(section.fluid_count(), 1);
+        assert_eq!(section.ticking_fluid_count(), 1);
+        assert!(section.is_randomly_ticking_blocks());
+        assert!(section.is_randomly_ticking_fluids());
+        assert_eq!(section.ticking_blocks().size(), 1);
     }
 }

@@ -101,7 +101,15 @@ impl<
 /// The `BlockBehaviour` flag predicates the superflat build resolves per state
 /// (the content is air + stone, so they are exact for it; the owning world
 /// units replace them with real behavior). Grouped so `build_superflat` takes
-/// one parameter instead of four predicates.
+/// one parameter instead of eight predicates.
+///
+/// The heightmap predicates (`is_air`/`blocks_motion`/`has_fluid`/`is_leaves`)
+/// and the block-counting recalc predicates are threaded from the caller's
+/// `BlockBehaviour` equivalents — there is no placeholder default. `RivetTodo(#216)`
+/// covers the two recalc flags the generated `block_behaviors` table does not
+/// yet carry (`fluid_is_randomly_ticking` and `is_special_colliding`); the
+/// caller passes exact-for-content stand-ins for them until the owning block
+/// slice adds the real flags.
 pub struct BlockFlags<T: 'static> {
     /// `state.isAir()`.
     pub is_air: &'static dyn Fn(&T) -> bool,
@@ -112,6 +120,16 @@ pub struct BlockFlags<T: 'static> {
     pub has_fluid: &'static dyn Fn(&T) -> bool,
     /// `state.is(BlockTags.LEAVES)`.
     pub is_leaves: &'static dyn Fn(&T) -> bool,
+    /// `state.isRandomlyTicking()` — the block random-tick predicate.
+    pub is_randomly_ticking: &'static dyn Fn(&T) -> bool,
+    /// `state.getFluidState().isEmpty()`.
+    pub fluid_is_empty: &'static dyn Fn(&T) -> bool,
+    /// `state.getFluidState().isRandomlyTicking()` — the fluid random-tick
+    /// predicate, distinct from the block one.
+    pub fluid_is_randomly_ticking: &'static dyn Fn(&T) -> bool,
+    /// `CollisionUtil.isSpecialCollidingBlock(state)` — `hasLargeCollisionShape`
+    /// or `MOVING_PISTON`.
+    pub is_special_colliding: &'static dyn Fn(&T) -> bool,
 }
 
 /// Builds the deterministic single-stone superflat chunk content.
@@ -141,12 +159,28 @@ where
         }
     }
     let biomes = PalettedContainer::new(plains.clone(), biome_strategy.clone());
-    sections.push(LevelChunkSection::new(states, biomes, flags.is_air));
+    sections.push(LevelChunkSection::new(
+        states,
+        biomes,
+        flags.is_air,
+        flags.is_randomly_ticking,
+        flags.fluid_is_empty,
+        flags.fluid_is_randomly_ticking,
+        flags.is_special_colliding,
+    ));
     // Sections 1..23: all air, plains biome.
     for _ in 1..SECTION_COUNT {
         let states = PalettedContainer::new(air.clone(), block_strategy.clone());
         let biomes = PalettedContainer::new(plains.clone(), biome_strategy.clone());
-        sections.push(LevelChunkSection::new(states, biomes, flags.is_air));
+        sections.push(LevelChunkSection::new(
+            states,
+            biomes,
+            flags.is_air,
+            flags.is_randomly_ticking,
+            flags.fluid_is_empty,
+            flags.fluid_is_randomly_ticking,
+            flags.is_special_colliding,
+        ));
     }
 
     let heightmaps = heightmaps_for_sections(&sections, SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT, &flags);

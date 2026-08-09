@@ -145,18 +145,15 @@ where
     /// when present with the accessor's section count it is adopted, otherwise
     /// Java logs a warning and keeps the default array. Either way every
     /// section is filled with a default air container via `replaceMissingSections`
-    /// (Java's `LevelChunkSection(containerFactory, level, chunkPos, sectionY)`);
-    /// the port needs the caller's `is_air` predicate for that recalc.
-    /// `blendingData` is omitted (deferred, #184). `is_air` is `&dyn` because
-    /// the default-section construction outlives the call.
+    /// (Java's `LevelChunkSection(containerFactory, level, chunkPos, sectionY)`).
+    /// The factory's air default is guaranteed all-air, so the replacement
+    /// sections are `new_all_air` (issue #216) — no recalc predicates needed.
+    /// `blendingData` is omitted (deferred, #184).
     ///
     /// `resolve` classifies states for the heightmap predicates (`isOpaque`).
     /// Java reaches the same flags through `BlockState` methods; the port
-    /// takes them from the caller because `rivet-world`'s production build
-    /// has no `BlockBehaviour` table (the `blocks` feature is dev-only), and
-    /// the predicate is stored `&'static` so a base can outlive a borrowed
-    /// local (the concrete chunk types keep their resolver).
-    #[allow(clippy::too_many_arguments)] // Java's constructor has 7 parameters; the port adds the is_air and resolve predicates.
+    /// stores the caller's stateless predicate so on-demand and live heightmap
+    /// updates can classify section states.
     pub fn new(
         pos: ChunkPos,
         upgrade_data: UpgradeData,
@@ -164,7 +161,6 @@ where
         container_factory: &PalettedContainerFactory<T, B>,
         inhabited_time: i64,
         sections: Option<Vec<LevelChunkSection<T, B>>>,
-        is_air: &'static dyn Fn(&T) -> bool,
         resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
     ) -> Self {
         let count = height_accessor.get_sections_count() as usize;
@@ -181,10 +177,9 @@ where
             None => Vec::new(),
         };
         for _ in sections_vec.len()..count {
-            sections_vec.push(LevelChunkSection::new(
+            sections_vec.push(LevelChunkSection::new_all_air(
                 container_factory.create_for_block_states(),
                 container_factory.create_for_biomes(),
-                is_air,
             ));
         }
         ChunkAccess {
@@ -808,6 +803,25 @@ mod tests {
         }
     }
 
+    /// The `BlockBehaviour` predicates for the test sections: air is `0`,
+    /// nothing randomly ticks, everything is fluid-empty, nothing is
+    /// special-colliding.
+    fn is_air(s: &u8) -> bool {
+        *s == 0
+    }
+    fn is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn fluid_is_empty(_s: &u8) -> bool {
+        true
+    }
+    fn fluid_is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn is_special_colliding(_s: &u8) -> bool {
+        false
+    }
+
     /// A base with all-default air sections.
     fn default_base() -> ChunkAccess<u8, u8, &'static str> {
         ChunkAccess::new(
@@ -817,7 +831,6 @@ mod tests {
             &factory(),
             0,
             None,
-            &|s| *s == 0,
             &test_flags,
         )
     }
@@ -826,7 +839,7 @@ mod tests {
     fn constructor_fills_default_sections_for_none() {
         let base = default_base();
         assert_eq!(base.get_sections().len(), 24);
-        // All-default sections are all-air (recalc ran with is_air).
+        // All-default sections are all-air (the `new_all_air` defaults).
         assert!(base.get_sections().iter().all(|s| s.has_only_air()));
         // No heightmap entries yet (the concrete types prime them).
         assert!(base.heightmaps().iter().all(Option::is_none));
@@ -835,14 +848,17 @@ mod tests {
     #[test]
     fn constructor_adopts_matching_sections_and_rejects_mismatches() {
         let factory = factory();
-        let is_air = &|s: &u8| *s == 0;
         // A stone section (id 1, not air).
         let mut states = PalettedContainer::new(0u8, block_strategy());
         states.set(0, 0, 0, 1u8);
         let stone = LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            is_air,
+            &is_air,
+            &is_randomly_ticking,
+            &fluid_is_empty,
+            &fluid_is_randomly_ticking,
+            &is_special_colliding,
         );
         // A mismatched-length array is rejected wholesale, exactly like Java's
         // `arraycopy` guard: it logs a warning and keeps the all-default array
@@ -855,7 +871,6 @@ mod tests {
             &factory,
             0,
             Some(vec![stone]),
-            is_air,
             &test_flags,
         );
         assert_eq!(base.get_sections().len(), 24);
@@ -868,7 +883,11 @@ mod tests {
             sections.push(LevelChunkSection::new(
                 PalettedContainer::new(0u8, block_strategy()),
                 PalettedContainer::new(0u8, biome_strategy()),
-                is_air,
+                &is_air,
+                &is_randomly_ticking,
+                &fluid_is_empty,
+                &fluid_is_randomly_ticking,
+                &is_special_colliding,
             ));
         }
         let mut states = PalettedContainer::new(0u8, block_strategy());
@@ -876,7 +895,11 @@ mod tests {
         sections[0] = LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            is_air,
+            &is_air,
+            &is_randomly_ticking,
+            &fluid_is_empty,
+            &fluid_is_randomly_ticking,
+            &is_special_colliding,
         );
         let base = ChunkAccess::<u8, u8, &str>::new(
             ChunkPos::ZERO,
@@ -885,7 +908,6 @@ mod tests {
             &factory,
             0,
             Some(sections),
-            is_air,
             &test_flags,
         );
         assert_eq!(base.get_sections().len(), 24);
@@ -1084,7 +1106,11 @@ mod tests {
         base.sections[0] = LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            |s: &u8| *s == 0,
+            &is_air,
+            &is_randomly_ticking,
+            &fluid_is_empty,
+            &fluid_is_randomly_ticking,
+            &is_special_colliding,
         );
         assert!(!base.is_y_space_empty(-64, 0));
         assert!(!base.is_y_space_empty(-1000, 1000));
@@ -1100,7 +1126,11 @@ mod tests {
         base.sections[0] = LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            |s: &u8| *s == 0,
+            &is_air,
+            &is_randomly_ticking,
+            &fluid_is_empty,
+            &fluid_is_randomly_ticking,
+            &is_special_colliding,
         );
         let mut found = Vec::new();
         base.find_block_light_sources(&|s| *s != 0, |pos, state| found.push((pos, state)));

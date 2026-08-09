@@ -77,9 +77,8 @@ where
     /// PalettedContainerFactory, BlendingData)` — the base constructor with
     /// `inhabitedTime = 0`, an empty `status`, and no carving mask.
     ///
-    /// `air`/`void_air` are the read defaults; `is_air` classifies states for
-    /// the default-section recalc; `resolve` classifies states for the
-    /// heightmap predicates (see [`ChunkAccess::new`]).
+    /// `air`/`void_air` are the read defaults; `resolve` classifies states for
+    /// the heightmap predicates (see [`ChunkAccess::new`]).
     #[allow(clippy::too_many_arguments)] // Java's constructor has 8 parameters.
     pub fn new(
         pos: ChunkPos,
@@ -89,7 +88,6 @@ where
         sections: Option<Vec<LevelChunkSection<T, B>>>,
         air: T,
         void_air: T,
-        is_air: &'static dyn Fn(&T) -> bool,
         resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
     ) -> Self {
         ProtoChunk {
@@ -100,7 +98,6 @@ where
                 container_factory,
                 0,
                 sections,
-                is_air,
                 resolve,
             ),
             entities: Vec::new(),
@@ -356,6 +353,25 @@ mod tests {
         PalettedContainerFactory::new(block_strategy(), 0, biome_strategy(), 0)
     }
 
+    /// The `BlockBehaviour` predicates for the test sections: air is `0`,
+    /// nothing randomly ticks, everything is fluid-empty, nothing is
+    /// special-colliding.
+    fn is_air(s: &u8) -> bool {
+        *s == 0
+    }
+    fn is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn fluid_is_empty(_s: &u8) -> bool {
+        true
+    }
+    fn fluid_is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn is_special_colliding(_s: &u8) -> bool {
+        false
+    }
+
     /// A worldgen chunk with a stone block at (0, 0, 0) of section 0 and
     /// `air = 0`, `void_air = 255`.
     fn stone_proto() -> ProtoChunk<u8, u8, &'static str> {
@@ -365,13 +381,21 @@ mod tests {
         sections.push(LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            |s: &u8| *s == 0,
+            &is_air,
+            &is_randomly_ticking,
+            &fluid_is_empty,
+            &fluid_is_randomly_ticking,
+            &is_special_colliding,
         ));
         for _ in 1..24 {
             sections.push(LevelChunkSection::new(
                 PalettedContainer::new(0u8, block_strategy()),
                 PalettedContainer::new(0u8, biome_strategy()),
-                |s: &u8| *s == 0,
+                &is_air,
+                &is_randomly_ticking,
+                &fluid_is_empty,
+                &fluid_is_randomly_ticking,
+                &is_special_colliding,
             ));
         }
         ProtoChunk::new(
@@ -382,7 +406,6 @@ mod tests {
             Some(sections),
             0,
             255,
-            &|s| *s == 0,
             // u8 tests: 0 is air, 1 is stone (blocks motion).
             &|s: &u8| StateFlags {
                 is_air: *s == 0,

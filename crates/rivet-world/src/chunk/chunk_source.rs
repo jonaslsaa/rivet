@@ -184,7 +184,6 @@ mod tests {
             0,
             None,
             0,
-            &|s| *s == 0,
             // u8 tests: 0 is air, anything else blocks motion.
             &|s: &u8| crate::levelgen::heightmap::StateFlags {
                 is_air: *s == 0,
