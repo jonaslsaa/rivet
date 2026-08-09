@@ -47,7 +47,14 @@
 //!   `connection established` line, the absence of a `read timeout` kick, the
 //!   `rivet_dwell_verdict`, and a tamper negative on `connected_wall_seconds`.
 //!   `dwell` has no comparison concept, so any explicit `--runs` or `--pairs`
-//!   is rejected (exit 64) rather than silently ignored.
+//!   is rejected (exit 64) rather than silently ignored, and `--dwell-seconds`
+//!   is dwell-only (an explicit value on join/move/capture is a silent no-op
+//!   and is rejected the same way). The window must be at least
+//!   `transcript::DWELL_MIN_DWELL_SECONDS` (a 31 s window would span only
+//!   ~29.8 s of challenges and fail the verdict), and `--timeout-seconds` must
+//!   exceed it by more than `DWELL_TIMEOUT_HEADROOM_SECONDS` so the client's
+//!   post-window settle loop and pre-spawn login time cannot let the timeout
+//!   cut the `dwell` record off.
 //!
 //! ## Connection proof (Rivet modes)
 //!
@@ -101,6 +108,14 @@ const DEFAULT_RUNS: usize = 2;
 /// `KEEPALIVE_LIMIT_MS`), with headroom for the first challenge to land after
 /// the join burst settles.
 const DEFAULT_DWELL_SECONDS: u64 = 41;
+/// Reserved client-side headroom (s) beyond the dwell window that
+/// `--timeout-seconds` must accommodate before it can pass validation: the
+/// client's 1 s keepalive settle loop (`rivet-client`'s `DWELL_SETTLE_TIMEOUT`)
+/// plus the login/configuration time before spawn (`rivet-client`'s
+/// `DWELL_LOGIN_HEADROOM_SECONDS`). Mirrors the client's own parse-time
+/// validation so a `run-scenario`-accepted invocation is never cut off by the
+/// client's timeout branch before it emits the `dwell` record.
+const DWELL_TIMEOUT_HEADROOM_SECONDS: u64 = 6;
 
 // Machine-stable exit codes. PASS/FAIL/UNVERIFIED are the shared contract
 // (rivet-harness-common::exit); usage errors are a separate 64.
@@ -251,6 +266,7 @@ impl Args {
         let mut server_explicit = false;
         let mut runs_explicit = false;
         let mut pairs_explicit = false;
+        let mut dwell_explicit = false;
 
         if let Some(sub) = args.next() {
             command = match sub.as_str() {
@@ -292,6 +308,7 @@ impl Args {
                     dwell_seconds = v
                         .parse()
                         .map_err(|_| format!("invalid --dwell-seconds value: {v}"))?;
+                    dwell_explicit = true;
                 }
                 "--pairs" => {
                     let v = next_value(&mut args, "--pairs")?;
@@ -302,6 +319,19 @@ impl Args {
                 }
                 _ => return Err(format!("unknown argument: {argument}\n\n{}", usage())),
             }
+        }
+
+        // `--dwell-seconds` only has meaning for the dwell scenario; on
+        // join/move/capture the client is never asked to dwell, so an explicit
+        // value would be a silent no-op. Reject it (exit 64) rather than ignore
+        // it — the same no-silent-noop policy as --runs/--pairs on dwell.
+        if dwell_explicit && command != Subcommand::Dwell {
+            return Err(
+                "--dwell-seconds only applies to the dwell scenario (the keepalive-survival \
+                 gate); join/move/capture never dwell, so an explicit value would be a silent \
+                 no-op — drop it"
+                    .to_owned(),
+            );
         }
 
         // When --pairs is omitted, derive it from --server: rivet/both only
@@ -435,21 +465,37 @@ impl Args {
                 );
             }
             runs = 1;
-            // The dwell window must exceed the server's 30 s kick limit and
-            // finish before the outer client --timeout-seconds bound.
-            if dwell_seconds < transcript::DWELL_SURVIVAL_SECONDS as u64 + 1 {
+            // The dwell window must be long enough to prove survival past the
+            // server's 30 s kick limit AND to span the required 30 s of
+            // challenges after the first one lands (~1.2 s in). A window of
+            // only 31 s would span ~29.8 s and fail the verdict on a healthy
+            // run, so the floor is `DWELL_MIN_DWELL_SECONDS`, not
+            // `DWELL_SURVIVAL_SECONDS + 1`.
+            if dwell_seconds < transcript::DWELL_MIN_DWELL_SECONDS {
                 return Err(format!(
-                    "--dwell-seconds must be > {} (the server's keepalive kick limit); the client \
-                     must stay connected past the kick to prove survival",
-                    transcript::DWELL_SURVIVAL_SECONDS
+                    "--dwell-seconds must be at least {} (the server's {} s keepalive kick limit \
+                     plus the first-challenge offset and margin; a shorter window cannot prove \
+                     survival past the kick or span the required {} s of challenges)",
+                    transcript::DWELL_MIN_DWELL_SECONDS,
+                    transcript::DWELL_SURVIVAL_SECONDS,
+                    transcript::DWELL_MIN_SPAN_MS / 1000
                 ));
             }
-            if dwell_seconds >= timeout_seconds {
-                return Err(
-                    "--dwell-seconds must be less than --timeout-seconds (dwell must finish \
-                     before the client timeout bound)"
-                        .to_owned(),
-                );
+            // The outer client timeout starts at process launch, while the
+            // dwell window only starts at spawn; after the window the client
+            // spends up to 1 s settling the keepalive stream before emitting
+            // the `dwell` record. `dwell < timeout` is therefore not enough —
+            // the timeout must reserve the settle loop AND the pre-spawn
+            // login/configuration time, or the timeout branch cuts the client
+            // off before it emits.
+            if timeout_seconds <= dwell_seconds + DWELL_TIMEOUT_HEADROOM_SECONDS {
+                return Err(format!(
+                    "--timeout-seconds must exceed --dwell-seconds by more than \
+                     {DWELL_TIMEOUT_HEADROOM_SECONDS}s of settle/login headroom (the client spends \
+                     up to 1 s settling the keepalive stream after the dwell window, plus the \
+                     login/configuration time before spawn, and must emit the dwell record before \
+                     the timeout fires); got dwell {dwell_seconds}s timeout {timeout_seconds}s"
+                ));
             }
         }
 
@@ -547,7 +593,8 @@ struct ClientRun {
 
 /// Client-launch parameters forwarded to the headless `rivet-client` binary for
 /// a single run. `dwell_seconds` is only meaningful in `dwell` mode; join/move
-/// runs pass 0 and the client ignores it outside dwell mode.
+/// runs always pass 0 (an explicit non-dwell value would be a silent no-op that
+/// both CLIs reject, and the runner never supplies one).
 struct ClientSpec {
     address: String,
     username: String,
@@ -2563,6 +2610,36 @@ mod tests {
     }
 
     #[test]
+    fn dwell_requires_a_window_above_the_span_floor() {
+        // The old `DWELL_SURVIVAL_SECONDS + 1` = 31 s floor was marginal: the
+        // first challenge lands ~1.2 s after spawn, so a 31 s window spans only
+        // ~29.8 s — below the required 30 s challenge span. The floor is now
+        // `DWELL_MIN_DWELL_SECONDS`, so 34 s is rejected and 35 s is accepted.
+        let err = parse(&["dwell", "--dwell-seconds", "34"]).unwrap_err();
+        assert!(
+            err.contains("at least 35"),
+            "error must state the minimum window, got {err}"
+        );
+        assert!(parse(&["dwell", "--dwell-seconds", "35"]).is_ok());
+    }
+
+    #[test]
+    fn dwell_timeout_must_reserve_settle_and_login_headroom() {
+        // `dwell < timeout` is not enough: the timeout starts at process launch
+        // while the dwell window starts at spawn, and after the window the
+        // client spends up to 1 s settling the keepalive stream before emitting.
+        // 47 = 41 + 6 (settle 1 s + login headroom 5 s) must be rejected
+        // (the record would race the timeout); 48 leaves a strict margin.
+        let err =
+            parse(&["dwell", "--dwell-seconds", "41", "--timeout-seconds", "47"]).unwrap_err();
+        assert!(
+            err.contains("--timeout-seconds") && err.contains("headroom"),
+            "error must explain the reserved headroom, got {err}"
+        );
+        assert!(parse(&["dwell", "--dwell-seconds", "41", "--timeout-seconds", "48"]).is_ok());
+    }
+
+    #[test]
     fn dwell_requires_the_window_before_the_client_timeout() {
         // The dwell must finish before the outer client timeout, or the timeout
         // branch would cut the client off before it emits the dwell record.
@@ -2572,6 +2649,22 @@ mod tests {
             err.contains("--timeout-seconds"),
             "error must explain the timeout bound, got {err}"
         );
+    }
+
+    #[test]
+    fn non_dwell_commands_reject_explicit_dwell_seconds() {
+        // --dwell-seconds is dwell-scenario-only; on join/move/capture an
+        // explicit value would be a silent no-op (the client is invoked with a
+        // 0 dwell), so it is rejected with the exit-64 CLI-misuse error.
+        for cmd in ["join", "move", "capture"] {
+            let err = parse(&[cmd, "--dwell-seconds", "41"]).unwrap_err();
+            assert!(
+                err.contains("--dwell-seconds") && err.contains("silent no-op"),
+                "{cmd} must reject --dwell-seconds as a silent no-op, got {err}"
+            );
+        }
+        // dwell still accepts an explicit value.
+        assert!(parse(&["dwell", "--dwell-seconds", "41"]).is_ok());
     }
 
     #[test]

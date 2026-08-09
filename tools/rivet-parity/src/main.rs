@@ -556,6 +556,11 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
              (a deliberate capped run); the full corpus is the 432 committed M0 chunk-NBT fixtures._\n"
         ));
     }
+    md.push_str("\n### M1 scenario gate (join/move)\n\n");
+    md.push_str("The M1 terminal acceptance (issue #160) adds two live-server scenario rows that this fixture-diff tool does not measure: they are exercised by `scripts/gate.sh` via `run-scenario` (exit 0 PASS / 1 FAIL / 3 UNVERIFIED), never by `rivet-parity`. They are listed here so the DoD's PARITY.md join/move rows are present and explicit.\n\n");
+    md.push_str("| scenario | servers | comparison | gate.sh row |\n|---|---|---|---|\n");
+    md.push_str("| `join --server both` | Paper + Rivet | Paper-vs-Rivet play transcript | `run-scenario.sh join --server both` |\n");
+    md.push_str("| `move --server both` | Paper + Rivet | Paper-vs-Rivet authoritative movement transcript | `run-scenario.sh move --server both` |\n");
     md.push_str("\n### Divergences\n\n");
     md.push_str("`compound_key_order` is the documented insertion-order divergence (DECISIONS.md D12): Rust's `CompoundTag` is insertion-ordered, so hand-built compounds emit Rust's put sequence while Java emits fastutil hash order; read-back fixtures round-trip byte-for-byte. All such checks remain `ok` and are counted under `diverged`, never under `mismatched`.\n");
 

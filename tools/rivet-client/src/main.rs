@@ -67,6 +67,22 @@ const DWELL_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// the verdict. 1 s is far shorter than the survival-window proof and keeps the
 /// wall-clock record honest.
 const DWELL_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
+/// The minimum wall-clock dwell window (s) `--mode dwell` accepts. The
+/// transcript verdict requires the challenge span to reach 30 s, and the first
+/// challenge lands ~1.2 s after spawn, so a 31 s window (the server's 30 s kick
+/// limit plus 1) would span only ~29.8 s and fail on a healthy run. 35 s leaves
+/// a comfortable margin. Mirrors `run-scenario`'s
+/// `transcript::DWELL_MIN_DWELL_SECONDS`; kept in sync so a direct client
+/// invocation cannot be told to run a window that cannot prove survival.
+const DWELL_MIN_DWELL_SECONDS: u64 = 35;
+/// Reserved client-side headroom (s) beyond the dwell window + settle timeout
+/// that `--timeout-seconds` must accommodate. The timeout starts at process
+/// launch while the dwell window only starts at `Event::Spawn` (after offline
+/// login and configuration), so the timeout must reserve that pre-spawn time
+/// too, or the timeout branch cuts the client off before it emits the `dwell`
+/// record. Mirrors `run-scenario`'s `DWELL_TIMEOUT_HEADROOM_SECONDS` (5 s here
+/// + the 1 s settle above = the 6 s the runner reserves).
+const DWELL_LOGIN_HEADROOM_SECONDS: u64 = 5;
 
 /// After `Event::Spawn` we keep the client alive for a short observation window
 /// so the observable outcome is stable (chunks arrived, health/inventory
@@ -122,12 +138,16 @@ struct Args {
 
 impl Args {
     fn parse() -> Result<Self, String> {
+        Self::parse_from(env::args().skip(1))
+    }
+
+    fn parse_from(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut address = DEFAULT_ADDRESS.to_owned();
         let mut username = DEFAULT_USERNAME.to_owned();
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
         let mut dwell_seconds = DEFAULT_DWELL_SECONDS;
+        let mut dwell_explicit = false;
         let mut mode = Mode::Join;
-        let mut args = env::args().skip(1);
 
         while let Some(argument) = args.next() {
             match argument.as_str() {
@@ -150,27 +170,56 @@ impl Args {
                     dwell_seconds = value
                         .parse()
                         .map_err(|_| format!("invalid --dwell-seconds value: {value}"))?;
+                    dwell_explicit = true;
                 }
                 "--help" | "-h" => return Err(usage()),
                 _ => return Err(format!("unknown argument: {argument}\n\n{}", usage())),
             }
         }
 
+        // --dwell-seconds only has meaning in dwell mode; on join/move an
+        // explicit value would be a silent no-op, so it is rejected (exit 64)
+        // rather than ignored.
+        if dwell_explicit && mode != Mode::Dwell {
+            return Err(
+                "--dwell-seconds only applies to --mode dwell; join/move never dwell, so an \
+                 explicit value would be a silent no-op — drop it"
+                    .to_owned(),
+            );
+        }
         if username.is_empty() {
             return Err("--username must not be empty".to_owned());
         }
         if timeout_seconds == 0 {
             return Err("--timeout-seconds must be greater than zero".to_owned());
         }
-        if mode == Mode::Dwell && dwell_seconds == 0 {
-            return Err("--mode dwell requires --dwell-seconds greater than zero".to_owned());
+        if mode == Mode::Dwell && dwell_seconds < DWELL_MIN_DWELL_SECONDS {
+            return Err(format!(
+                "--mode dwell requires --dwell-seconds of at least {DWELL_MIN_DWELL_SECONDS} (the \
+                 server's 30 s keepalive kick limit plus the first-challenge offset and margin; a \
+                 shorter window cannot prove survival or span the required 30 s of challenges)"
+            ));
         }
-        // The dwell window must finish before the outer --timeout-seconds bound,
-        // or the timeout branch would cut the client off before it emits.
-        if mode == Mode::Dwell && dwell_seconds >= timeout_seconds {
-            return Err(
-                "--dwell-seconds must be less than --timeout-seconds (dwell must finish before the timeout bound)".to_owned(),
-            );
+        // The timeout starts at process launch while the dwell window only
+        // starts at spawn; after the window the client spends up to
+        // DWELL_SETTLE_TIMEOUT settling the keepalive stream before emitting
+        // the `dwell` record. `dwell < timeout` is therefore not enough — the
+        // timeout must reserve the settle loop AND the pre-spawn
+        // login/configuration time, or the timeout branch cuts the client off
+        // before it emits.
+        if mode == Mode::Dwell
+            && timeout_seconds
+                <= dwell_seconds + DWELL_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS
+        {
+            return Err(format!(
+                "--timeout-seconds must exceed --dwell-seconds by more than {}s (the client \
+                 spends up to {}s settling the keepalive stream after the dwell window, plus {}s \
+                 of login/configuration time before spawn, and must emit the dwell record before \
+                 the timeout fires)",
+                DWELL_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS,
+                DWELL_SETTLE_TIMEOUT.as_secs(),
+                DWELL_LOGIN_HEADROOM_SECONDS
+            ));
         }
 
         Ok(Self {
@@ -587,7 +636,7 @@ async fn observe_and_emit(bot: Client, state: State) {
         // stream must surface as `chunk_count: 0`, not be accepted as stable.
         if size > 0
             && now >= started + MIN_OBSERVATION
-            && now.duration_since(last_change) >= QUIET_PERIOD
+            && now.saturating_duration_since(last_change) >= QUIET_PERIOD
         {
             break;
         }
@@ -879,6 +928,32 @@ async fn settle_and_snapshot(
     }
 }
 
+/// Elapsed wall-clock seconds from `start` to `now`, saturating at zero. A
+/// receipt instant recorded before the dwell window start (a keepalive that
+/// landed before `Event::Spawn` set the origin) must produce 0, never a panic
+/// from [`Instant::duration_since`]'s "later instant" precondition.
+fn elapsed_secs_f64(start: Instant, now: Instant) -> f64 {
+    now.saturating_duration_since(start).as_secs_f64()
+}
+
+/// Wall-clock offset (ms) of a keepalive receipt from the dwell window start,
+/// saturating at zero for a receipt before spawn (same invariant as
+/// [`elapsed_secs_f64`]).
+fn receipt_offset_ms(receipt: Instant, start: Instant) -> u64 {
+    receipt.saturating_duration_since(start).as_millis() as u64
+}
+
+/// The challenge span across the dwell window: the last receipt offset minus
+/// the first. `None` when there is no offset pair, or the offsets are inverted
+/// (a corrupt/out-of-order stream) — the transcript then carries `null` and the
+/// verdict refuses PASS rather than trusting a declared span.
+fn challenge_span_ms(offsets: &[u64]) -> Option<u64> {
+    match (offsets.first(), offsets.last()) {
+        (Some(first), Some(last)) if last >= first => Some(last - first),
+        _ => None,
+    }
+}
+
 /// Emit the `dwell` record — the keepalive-survival observable — after staying
 /// connected for `state.dwell` wall-clock seconds past spawn, then end the
 /// client.
@@ -919,20 +994,17 @@ async fn dwell_and_emit(bot: Client, state: State) {
     let keepalive_echoes = log.echoes;
 
     let now = Instant::now();
-    let connected_wall_seconds = now.duration_since(start).as_secs_f64();
+    let connected_wall_seconds = elapsed_secs_f64(start, now);
     // Wall-clock offset of each challenge receipt from spawn (ms). Challenges
     // arrive on the play socket after the join burst settles; the first is at
     // roughly the keepalive cadence after spawn.
     let offsets_ms: Vec<u64> = keepalive_instants
         .iter()
-        .map(|t| t.duration_since(start).as_millis() as u64)
+        .map(|t| receipt_offset_ms(*t, start))
         .collect();
     let first_offset_ms = offsets_ms.first().copied();
     let last_offset_ms = offsets_ms.last().copied();
-    let challenge_span_ms = match (first_offset_ms, last_offset_ms) {
-        (Some(first), Some(last)) if last >= first => Some(last - first),
-        _ => None,
-    };
+    let challenge_span_ms = challenge_span_ms(&offsets_ms);
 
     emit(json!({
         "event": "dwell",
@@ -1213,6 +1285,117 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_millis(50),
             "a settled log must not be delayed by the settle loop"
+        );
+    }
+
+    #[test]
+    fn duration_helpers_saturate_instead_of_panicking() {
+        // Counterfactual for the latent panic paths: a receipt instant recorded
+        // before the dwell window start (a keepalive that landed before
+        // `Event::Spawn` set the origin) must yield 0, not panic via
+        // `Instant::duration_since`'s "later instant" precondition.
+        let start = Instant::now();
+        let later = start + Duration::from_secs(2);
+        assert_eq!(receipt_offset_ms(start, later), 0);
+        assert_eq!(elapsed_secs_f64(later, start), 0.0);
+        // Normal ordering yields the expected offsets.
+        assert_eq!(receipt_offset_ms(later, start), 2000);
+        assert_eq!(elapsed_secs_f64(start, later), 2.0);
+    }
+
+    #[test]
+    fn challenge_span_derives_from_offsets_without_panicking() {
+        assert_eq!(challenge_span_ms(&[1200, 41_100]), Some(39_900));
+        assert_eq!(challenge_span_ms(&[]), None);
+        // A single challenge spans 0 ms (first == last) — the verdict rejects it
+        // as below the 30 s minimum — and an inverted pair (corrupt/out-of-order
+        // stream) yields None rather than a subtraction panic.
+        assert_eq!(challenge_span_ms(&[41_100]), Some(0));
+        assert_eq!(challenge_span_ms(&[5000, 1000]), None);
+    }
+
+    fn parse(v: &[&str]) -> Result<Args, String> {
+        Args::parse_from(v.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn non_dwell_modes_reject_explicit_dwell_seconds() {
+        // --dwell-seconds is dwell-mode-only; an explicit value on join/move is
+        // a silent no-op and must be rejected (the caller's error exits 64).
+        for mode in ["join", "move"] {
+            let err = parse(&["--mode", mode, "--dwell-seconds", "41"]).unwrap_err();
+            assert!(
+                err.contains("--dwell-seconds") && err.contains("silent no-op"),
+                "{mode} must reject --dwell-seconds as a silent no-op, got {err}"
+            );
+        }
+        // dwell accepts an explicit value (with a timeout that reserves the
+        // settle/login headroom; the 30 s default timeout cannot fit any valid
+        // dwell window).
+        assert!(
+            parse(&[
+                "--mode",
+                "dwell",
+                "--dwell-seconds",
+                "41",
+                "--timeout-seconds",
+                "48"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn dwell_rejects_a_window_below_the_span_floor() {
+        // A 31 s window would span only ~29.8 s of challenges and fail the
+        // verdict; the client enforces the same floor as the runner.
+        let err = parse(&["--mode", "dwell", "--dwell-seconds", "34"]).unwrap_err();
+        assert!(
+            err.contains("at least 35"),
+            "error must state the minimum window, got {err}"
+        );
+        assert!(
+            parse(&[
+                "--mode",
+                "dwell",
+                "--dwell-seconds",
+                "35",
+                "--timeout-seconds",
+                "42"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn dwell_timeout_must_reserve_settle_and_login_headroom() {
+        // dwell < timeout is not enough: the timeout starts at process launch
+        // while the dwell window starts at spawn, and after the window the
+        // client spends up to 1 s settling before emitting. 47 = 41 + 1 (settle)
+        // + 5 (login) must be rejected; 48 leaves a strict margin.
+        let err = parse(&[
+            "--mode",
+            "dwell",
+            "--dwell-seconds",
+            "41",
+            "--timeout-seconds",
+            "47",
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("--timeout-seconds") && err.contains("settling"),
+            "error must explain the reserved settle headroom, got {err}"
+        );
+        assert!(
+            parse(&[
+                "--mode",
+                "dwell",
+                "--dwell-seconds",
+                "41",
+                "--timeout-seconds",
+                "48",
+            ])
+            .is_ok()
         );
     }
 }

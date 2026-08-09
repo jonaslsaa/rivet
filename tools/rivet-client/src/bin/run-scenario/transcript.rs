@@ -535,6 +535,14 @@ pub const DWELL_MIN_CHALLENGES: usize = 30;
 /// receipt — the challenges must actually span the survival window, not cluster
 /// at its start.
 pub const DWELL_MIN_SPAN_MS: u64 = 30_000;
+/// The minimum wall-clock dwell window (s) the `dwell` scenario accepts. The
+/// verdict requires the challenge span (last receipt offset minus first) to
+/// reach `DWELL_MIN_SPAN_MS`, and the first challenge lands ~1.2 s after spawn
+/// (the join burst must settle first), so a window of only 31 s —
+/// `DWELL_SURVIVAL_SECONDS + 1` — would span ~29.8 s and fail the verdict on a
+/// healthy run. 35 s leaves a comfortable margin above the 30 s span for any
+/// realistic first-challenge offset.
+pub const DWELL_MIN_DWELL_SECONDS: u64 = 35;
 
 /// Nondeterministic fields of the `dwell` transcript, with justification.
 ///
@@ -568,6 +576,16 @@ fn excluded_dwell_fields() -> serde_json::Map<String, Value> {
 /// nondeterminism declaration (the per-boot id values). The survival scalars —
 /// `connected_wall_seconds`, `challenge_count`, `echo_count`, and the span — are
 /// the verdict-checked acceptance invariants.
+///
+/// `challenge_count`, `echo_count`, and `challenge_span_ms` are *derived*, not
+/// copied from the record: the record's duplicated count/span fields are
+/// redundant with the `challenge_ids`/`echo_ids` arrays and the first/last
+/// offset pair, so a malformed client that declares a self-contradictory count
+/// or span (a lying or buggy record) must not shape the transcript. The counts
+/// come from the array lengths, and the span from `last_challenge_offset_ms -
+/// first_challenge_offset_ms` (computed in the client from the receipt
+/// instants). A span whose offsets are absent or inverted (a corrupt/out-of-order
+/// stream) normalizes to `null` and fails the verdict.
 ///
 /// A `dwell` run that never completes the window (timeout / connection_failed /
 /// disconnect before the `dwell` record — a server that kicked the client, or a
@@ -615,17 +633,34 @@ pub fn normalize_dwell(raw: &str) -> Result<Value, String> {
     if let Some(dwell) = dwell {
         let challenge_ids = dwell.get("challenge_ids").cloned().unwrap_or(json!([]));
         let echo_ids = dwell.get("echo_ids").cloned().unwrap_or(json!([]));
+        // Canonical counts: the actual challenge/echo arrays, not the record's
+        // duplicated count fields (a malformed record could declare anything).
+        let challenge_count = challenge_ids.as_array().map(|a| a.len()).unwrap_or(0);
+        let echo_count = echo_ids.as_array().map(|a| a.len()).unwrap_or(0);
+        // Canonical span: recomputed from the first/last receipt offsets the
+        // client measured. The record's declared `challenge_span_ms` is a
+        // redundant duplicate and is not trusted.
+        let first_offset = dwell
+            .get("first_challenge_offset_ms")
+            .and_then(Value::as_u64);
+        let last_offset = dwell
+            .get("last_challenge_offset_ms")
+            .and_then(Value::as_u64);
+        let challenge_span_ms = match (first_offset, last_offset) {
+            (Some(first), Some(last)) if last >= first => Some(last - first),
+            _ => None,
+        };
         transcript["dwell"] = json!({
             "requested_dwell_seconds": dwell.get("requested_dwell_seconds").cloned().unwrap_or(Value::Null),
             "connected_wall_seconds": dwell.get("connected_wall_seconds").cloned().unwrap_or(Value::Null),
-            "challenge_count": dwell.get("challenge_count").cloned().unwrap_or(Value::Null),
-            "echo_count": dwell.get("echo_count").cloned().unwrap_or(Value::Null),
+            "challenge_count": challenge_count,
+            "echo_count": echo_count,
             "challenge_ids": challenge_ids,
             "echo_ids": echo_ids,
             "echo_relationship": set_equality(&challenge_ids, &echo_ids),
-            "first_challenge_offset_ms": dwell.get("first_challenge_offset_ms").cloned().unwrap_or(Value::Null),
-            "last_challenge_offset_ms": dwell.get("last_challenge_offset_ms").cloned().unwrap_or(Value::Null),
-            "challenge_span_ms": dwell.get("challenge_span_ms").cloned().unwrap_or(Value::Null),
+            "first_challenge_offset_ms": first_offset.map(Value::from),
+            "last_challenge_offset_ms": last_offset.map(Value::from),
+            "challenge_span_ms": challenge_span_ms.map(Value::from),
         });
     }
 
@@ -1337,6 +1372,63 @@ mod tests {
         assert!(
             rivet_dwell_verdict(&t).is_err(),
             "a client not built from the pinned Azalea revision must not pass"
+        );
+    }
+
+    /// A dwell-mode raw stream with the given dwell-record body overridden.
+    /// Used by the counterfactuals below to mutate the duplicated count/span
+    /// fields a malformed client could declare.
+    fn dwell_raw_with(body: &str) -> String {
+        [
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":50,"mode":"dwell","dwell_seconds":41,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            &format!("{{\"event\":\"dwell\",{body},\"protocol\":1}}"),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn normalize_dwell_derives_counts_from_the_ids_arrays() {
+        // A malformed record declaring counts that contradict its own arrays
+        // must not shape the transcript: the canonical counts come from the
+        // challenge_ids/echo_ids lengths (41 here), never from the duplicated
+        // count fields a buggy or lying client could set.
+        let raw = dwell_raw_with(
+            r#""requested_dwell_seconds":41,"connected_wall_seconds":41.2,"challenge_count":999,"echo_count":0,"challenge_ids":[1000,1001],"echo_ids":[1000,1001],"first_challenge_offset_ms":1200,"last_challenge_offset_ms":41100,"challenge_span_ms":39900"#,
+        );
+        let t = normalize_dwell(&raw).expect("normalize");
+        assert_eq!(t["dwell"]["challenge_count"], json!(2));
+        assert_eq!(t["dwell"]["echo_count"], json!(2));
+        assert_eq!(t["dwell"]["echo_relationship"], json!(true));
+    }
+
+    #[test]
+    fn normalize_dwell_derives_span_from_the_offset_pair() {
+        // The record's declared challenge_span_ms is a redundant duplicate of
+        // last_offset - first_offset; a record declaring a bogus span must not
+        // be trusted — the canonical span is recomputed from the offsets.
+        let raw = dwell_raw_with(
+            r#""requested_dwell_seconds":41,"connected_wall_seconds":41.2,"challenge_count":2,"echo_count":2,"challenge_ids":[1000,1001],"echo_ids":[1000,1001],"first_challenge_offset_ms":1200,"last_challenge_offset_ms":41100,"challenge_span_ms":99999"#,
+        );
+        let t = normalize_dwell(&raw).expect("normalize");
+        assert_eq!(t["dwell"]["challenge_span_ms"], json!(39900));
+    }
+
+    #[test]
+    fn normalize_dwell_spans_null_when_offsets_are_inverted() {
+        // A corrupt/out-of-order stream whose last offset precedes the first
+        // cannot yield a span; the transcript carries null and the verdict
+        // refuses PASS rather than trusting a declared span.
+        let raw = dwell_raw_with(
+            r#""requested_dwell_seconds":41,"connected_wall_seconds":41.2,"challenge_count":2,"echo_count":2,"challenge_ids":[1000,1001],"echo_ids":[1000,1001],"first_challenge_offset_ms":5000,"last_challenge_offset_ms":1000,"challenge_span_ms":99999"#,
+        );
+        let t = normalize_dwell(&raw).expect("normalize");
+        assert_eq!(t["dwell"]["challenge_span_ms"], Value::Null);
+        assert!(
+            rivet_dwell_verdict(&t).is_err(),
+            "an inverted offset pair must fail the span verdict"
         );
     }
 }
