@@ -15,8 +15,9 @@
 //!
 //! PLAY sessions own one [`KeepaliveState`] each and drive it through
 //! `PlayKeepaliveSink`. The configuration listener (issue #283) owns one too and
-//! drives it through [`ConnectionKeepaliveSink`] from `conn_loop`'s interval
-//! tick — both reuse this seam instead of duplicating the keepalive logic.
+//! drives it through [`ConnectionKeepaliveSink`] from `conn_loop`, which drives
+//! the listener at `config.tick_interval` only while a CONFIGURATION listener is
+//! current — both reuse this seam instead of duplicating the keepalive logic.
 
 use bytes::BytesMut;
 

@@ -9,6 +9,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
+use rivet_protocol::generated::protocol::ConnectionProtocol;
+
 use super::connection::{Connection, InboundOutcome};
 use super::connection_id::ConnectionId;
 use super::packet_listener::{DisconnectReason, PacketListener};
@@ -410,14 +412,16 @@ async fn conn_loop(
     // frames are now forwarded to the tick thread instead of a listener.
     let mut in_play = false;
     let mut chunk = [0u8; 4096];
-    // The per-connection tick source (issue #283): Paper ticks every listener
-    // each server tick (`ServerConnectionListener.tick()`); Rivet drives the
-    // configuration listener's keepalive from this per-connection-task interval
-    // at `config.tick_interval`. The drive is skipped once `in_play` — the play
-    // keepalive is tick-side (`PlayerSessionManager`), and there is no listener
-    // to tick.
-    let mut tick = tokio::time::interval(config.tick_interval);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The per-connection keepalive tick source (issue #283). Paper ticks every
+    // listener each server tick (`ServerConnectionListener.tick()`); Rivet
+    // drives the configuration listener's keepalive from this interval at
+    // `config.tick_interval`. The select precondition below polls it only while
+    // a CONFIGURATION listener is current — handshake/login listeners tick as
+    // no-ops and PLAY owns keepalive on the tick thread (`PlayerSessionManager`)
+    // — so outside CONFIGURATION no timer is armed and the loop is not woken
+    // every `tick_interval` for nothing.
+    let mut keepalive_tick = tokio::time::interval(config.tick_interval);
+    keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Paper's `ReadTimeoutHandler(30)` — the read-idle deadline. It gates socket
     // reads (a read completes within `config.read_timeout`), independently of
     // the keepalive, which gates only the configuration listener's own 1s
@@ -440,17 +444,17 @@ async fn conn_loop(
         // single-connection outbound event is handled promptly, not after the
         // next inbound packet or the 30s timeout).
         let n = tokio::select! {
-            _ = tick.tick() => {
-                if !in_play {
-                    // `TickablePacketListener.tick()` for the current listener:
-                    // the configuration keepalive (`keepConnectionAlive`). Both
-                    // clock axes come from the connection's monotonic epoch, the
-                    // same axis the listener's state was seeded on.
-                    let now_ns = conn.monotonic_nanos();
-                    let now_ms = now_ns / 1_000_000;
-                    if let Err(reason) = listener.tick(conn, now_ns, now_ms) {
-                        return reason;
-                    }
+            // A branch whose precondition is false is never polled, so the
+            // interval arms no timer until the listener reaches CONFIGURATION.
+            _ = keepalive_tick.tick(), if !in_play && listener.protocol() == ConnectionProtocol::Configuration => {
+                // `TickablePacketListener.tick()` for the current listener:
+                // the configuration keepalive (`keepConnectionAlive`). Both
+                // clock axes come from the connection's monotonic epoch, the
+                // same axis the listener's state was seeded on.
+                let now_ns = conn.monotonic_nanos();
+                let now_ms = now_ns / 1_000_000;
+                if let Err(reason) = listener.tick(conn, now_ns, now_ms) {
+                    return reason;
                 }
                 continue;
             }
@@ -576,7 +580,6 @@ async fn conn_loop(
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use rivet_protocol::generated::protocol::ConnectionProtocol;
     use rivet_protocol::varint21_length_field_prepender::encode_frame;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
@@ -1468,5 +1471,164 @@ mod tests {
             0,
             "the keepalive never transmitted before the read-idle close"
         );
+    }
+
+    /// A listener that counts `tick()` invocations, so a test can observe
+    /// whether `conn_loop`'s keepalive arm actually drives the listener. The
+    /// protocol is configurable: a non-`Configuration` protocol asserts the arm
+    /// sleeps (no periodic wake), a `Configuration` one asserts it drives.
+    struct TickCounter {
+        protocol: ConnectionProtocol,
+        ticks: Arc<AtomicUsize>,
+    }
+
+    /// Spawn `conn_loop` with a `TickCounter` of `protocol`, a 20ms
+    /// `tick_interval`, a long read timeout, and a connected silent client.
+    /// Returns the loop task, the outbound sender (dropped to end the loop), the
+    /// shutdown signal, the tick counter, and the live client socket (kept open
+    /// so `conn_loop` blocks on the read instead of seeing EOF).
+    #[allow(clippy::type_complexity)]
+    async fn spawn_tick_counter_loop(
+        protocol: ConnectionProtocol,
+    ) -> (
+        tokio::task::JoinHandle<DisconnectReason>,
+        mpsc::Sender<OutboundEvent>,
+        Arc<Shutdown>,
+        Arc<AtomicUsize>,
+        TcpStream,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        // A long read timeout so the read-idle deadline does not end the loop
+        // before the assertion window.
+        let config = Arc::new(ServerConfig {
+            tick_interval: Duration::from_millis(20),
+            read_timeout: Duration::from_secs(30),
+            ..ServerConfig::default()
+        });
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+            InboundDrained::new(),
+        );
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let mut listener_box: Box<dyn PacketListener> = Box::new(TickCounter {
+            protocol,
+            ticks: Arc::clone(&ticks),
+        });
+        let endpoint = test_endpoint();
+        let shutdown_for_task = Arc::clone(&shutdown);
+        let task = tokio::spawn(async move {
+            conn_loop(
+                &mut conn,
+                &mut listener_box,
+                &config,
+                read,
+                out_rx,
+                &in_tx,
+                &endpoint,
+                shutdown_for_task,
+            )
+            .await
+        });
+        (task, out_tx, shutdown, ticks, client)
+    }
+
+    impl PacketListener for TickCounter {
+        fn protocol(&self) -> ConnectionProtocol {
+            self.protocol
+        }
+
+        fn handle_frame(
+            &mut self,
+            _frame: Bytes,
+            _conn: &mut Connection,
+            _config: &ServerConfig,
+        ) -> Result<ListenerOutcome, DisconnectReason> {
+            Ok(ListenerOutcome::Keep)
+        }
+
+        fn tick(
+            &mut self,
+            _conn: &mut Connection,
+            _now_ns: i64,
+            _now_ms: i64,
+        ) -> Result<(), DisconnectReason> {
+            self.ticks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The keepalive arm (issue #283) drives while a CONFIGURATION listener is
+    /// current: with a 20ms `tick_interval` and a silent client, `conn_loop`
+    /// wakes periodically and calls `listener.tick()` at that cadence. Without
+    /// the arm no drive would ever fire (the config-listener counterfactual
+    /// `keepalive_requires_the_interval_drive_to_transmit` proves the transmit
+    /// side; this proves the wake cadence itself).
+    #[tokio::test]
+    async fn conn_loop_keepalive_arm_ticks_within_configuration() {
+        let (task, out_tx, shutdown, ticks, _client) =
+            spawn_tick_counter_loop(ConnectionProtocol::Configuration).await;
+
+        // Several 20ms intervals at most; the wait is bounded so a loaded CI
+        // machine cannot fail a fixed-window assertion.
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while ticks.load(Ordering::SeqCst) < 8 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the keepalive arm must drive the CONFIGURATION listener at the tick interval");
+
+        // End the loop: drop the outbound channel and request shutdown so the
+        // task exits deterministically.
+        drop(out_tx);
+        shutdown.request();
+        let reason = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("conn_loop did not exit after shutdown")
+            .unwrap();
+        assert_eq!(reason, DisconnectReason::ServerShutdown);
+    }
+
+    /// The keepalive arm sleeps outside CONFIGURATION: with the same 20ms
+    /// `tick_interval` but a Login-protocol listener and a silent client,
+    /// `conn_loop` never wakes to call `listener.tick()` — the connection task
+    /// is not woken every `tick_interval` during handshake/login (or idle PLAY,
+    /// where the tick-side `PlayerSessionManager` owns keepalive). `TickCounter`
+    /// would count any spurious drive, so this is load-bearing: the old
+    /// unconditional `tokio::time::interval` drove the listener every interval
+    /// regardless of protocol.
+    #[tokio::test]
+    async fn conn_loop_keepalive_arm_sleeps_outside_configuration() {
+        let (task, out_tx, shutdown, ticks, _client) =
+            spawn_tick_counter_loop(ConnectionProtocol::Login).await;
+
+        // Far longer than several 20ms intervals: if the arm were unconditionally
+        // alive (the old `tokio::time::interval`), the loop would have woken and
+        // driven the listener many times by now.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            0,
+            "no periodic keepalive drive may wake the loop outside CONFIGURATION"
+        );
+
+        drop(out_tx);
+        shutdown.request();
+        let reason = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("conn_loop did not exit after shutdown")
+            .unwrap();
+        assert_eq!(reason, DisconnectReason::ServerShutdown);
     }
 }
