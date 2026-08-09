@@ -1573,9 +1573,16 @@ SPLIT_NOTES: dict[str, str] = {
         "(palette.rs, paletted_container.rs, strategy.rs, configuration.rs)"
     ),
     "mc.world.level.chunk.access": (
-        "#183: the in-memory chunk data SCC (LevelChunk/ChunkAccess/ProtoChunk/"
-        "LevelChunkSection) + the ChunkSource provider seam + UpgradeData; built "
-        "on wire (palette container) + support (leaf types)"
+        "#183: the in-memory chunk data SCC as generic value types in "
+        "rivet-world::chunk (ChunkAccess base + LevelChunk/ProtoChunk/"
+        "EmptyLevelChunk/ImposterProtoChunk) + the ChunkSource provider seam + "
+        "the UpgradeData carrier; built on wire (palette container) + support "
+        "(leaf types) + the world Heightmap.Types. BulkSectionAccess is a "
+        "chunk.access file deferred in place (owned by this unit, not ported "
+        "this slice); the set-block/fluid accessors defer with the chunk-"
+        "storage epic (#216), the blockEntities map with the block-entity "
+        "unit, the ticks surface with the world.ticks unit, and the Starlight "
+        "light arrays with the lighting units (#184)"
     ),
     "mc.world.level.chunk.support": (
         "#183: the dependency-free leaf types (BlockColumn/CarvingMask/DataLayer/"

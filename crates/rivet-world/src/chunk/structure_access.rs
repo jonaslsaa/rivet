@@ -92,6 +92,19 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
             .insert(reference);
     }
 
+    /// `ChunkAccess.getAllStarts()` — `Collections.unmodifiableMap(this.structureStarts)`.
+    /// The `markUnsaved` side effect of `setAllStarts` lives on `ChunkAccess`.
+    pub fn get_all_starts(&self) -> &HashMap<S, i64> {
+        &self.structure_starts
+    }
+
+    /// `ChunkAccess.setAllStarts(Map)` — `structureStarts.clear()` + `putAll`
+    /// (the `markUnsaved` side effect lives on `ChunkAccess`).
+    pub fn set_all_starts(&mut self, starts: HashMap<S, i64>) {
+        self.structure_starts.clear();
+        self.structure_starts.extend(starts);
+    }
+
     /// `getAllReferences()` — `Collections.unmodifiableMap(...)` (read-only
     /// view; the port returns a reference).
     pub fn get_all_references(&self) -> &HashMap<S, IndexSet<u64>> {

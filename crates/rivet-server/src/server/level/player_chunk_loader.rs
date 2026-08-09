@@ -345,22 +345,27 @@ impl PlayerChunkLoader {
 /// all 117 bodies differ only in the 8-byte coordinate header), so any other
 /// view position resolves the spawn chunk's content.
 ///
+/// The light is the deterministic superflat light (`#184`): Java queries the
+/// `LevelLightEngine`; the engine is not ported, so every chunk carries the
+/// fixed superflat sky/block layers the golden fixture pins. The payload is
+/// computed once at `LevelChunk` construction and cloned here, so a per-chunk
+/// per-player encode never rebuilds the 26 layer arrays.
+///
 /// RivetTodo(#185): the chunk pipeline loads every view chunk; until then the
 /// content is the deterministic superflat build for every position.
 fn encode_chunk_with_light(pos: ChunkPos, world: &ServerLevel) -> Result<Vec<u8>, String> {
-    let content = match world.chunk_map().get_chunk(pos) {
-        Some(chunk) => chunk.content(),
+    let chunk = match world.chunk_map().get_chunk(pos) {
+        Some(chunk) => chunk,
         None => world
             .chunk_map()
             .get_chunk(world.view().center())
-            .expect("spawn chunk loaded")
-            .content(),
+            .expect("spawn chunk loaded"),
     };
     let packet = ClientboundLevelChunkWithLightPacket::new(
         pos.x(),
         pos.z(),
-        content.chunk_packet_data(),
-        content.light_data.clone(),
+        chunk.chunk_packet_data(),
+        chunk.light_data(),
     );
     encode_chunk_body(&packet)
 }

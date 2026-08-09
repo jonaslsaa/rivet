@@ -151,13 +151,24 @@ where
 
     let heightmaps = heightmaps_for_sections(&sections, SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT, &flags);
 
-    let light_data = build_light_update_data(&superflat_sky_layers(), &superflat_block_layers());
+    let light_data = superflat_light_data();
 
     SuperflatChunkContent {
         sections,
         heightmaps,
         light_data,
     }
+}
+
+/// The deterministic full-sky light payload for a superflat chunk — the light
+/// the `ClientboundLevelChunkWithLightPacket` body carries (Java queries the
+/// `LevelLightEngine`; the engine is not ported, so the M1 send path uses the
+/// fixed superflat light).
+///
+/// RivetTodo(#184): the real `LevelLightEngine` replaces this filler when the
+/// lighting engine unit lands.
+pub fn superflat_light_data() -> LightUpdatePacketData {
+    build_light_update_data(&superflat_sky_layers(), &superflat_block_layers())
 }
 
 /// `primeHeightmaps` for a superflat chunk: the topmost opaque block per column
