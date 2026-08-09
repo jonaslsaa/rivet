@@ -561,9 +561,9 @@ fn server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
 /// The shared fixture's `generator-settings={}` makes Paper fall back to the
 /// default FLAT preset (bedrock ×1 + dirt ×2 + grass ×1 = 4 layers), which
 /// spawns at y=-60 — while Rivet serves its single-stone world at
-/// `transcript::JOIN_SPAWN_Y`. The scenario's one-layer stone generator makes
-/// Paper spawn at `transcript::JOIN_SPAWN_Y` too, so
-/// `position.y` becomes a genuinely compared field instead of a spawn-height
+/// `transcript::JOIN_SPAWN_Y`. The scenario's one-layer stone generator also
+/// makes Paper spawn at `transcript::JOIN_SPAWN_Y`, so `position.y` becomes a
+/// genuinely compared field instead of a spawn-height
 /// "documented gap".
 fn single_stone_server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
     fixture_server_properties(crate_root, "server-single-stone.properties")
@@ -1142,8 +1142,8 @@ fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), Ru
 ///
 /// The single-stone superflat fixture aligns Paper's spawn height with Rivet's
 /// (both `transcript::JOIN_SPAWN_Y`), so the compared move transcripts must be
-/// byte-identical: the
-/// sampled walk geometry, velocity, teleport echo, and `last_sent` are all
+/// byte-identical: sampled walk geometry, velocity, teleport echo, and
+/// `last_sent` are all
 /// deterministic per server and Paper-vs-Rivet equal (the comparator below is
 /// what proves it on each run). There is deliberately no documented gap — unlike
 /// the join differential's health-component gap, which the fixture does not
@@ -1275,7 +1275,7 @@ fn verdict_last_sent(paper_t: &Value, rivet_t: &Value) -> String {
         }
         (Some(p), Some(r)) => format!(
             "Paper last_sent {p} vs Rivet last_sent {r} — a compared divergence that should have \
-             failed the comparator"
+             been caught by the comparator"
         ),
         (Some(p), None) => {
             format!("Paper last_sent {p}; the Rivet transcript carried no walk.last_sent")
@@ -2519,9 +2519,9 @@ mod tests {
         })
     }
 
-    /// A transcript that dropped `walk.last_sent` (a schema regression) must be
-    /// surfaced by the narration naming the missing side and the value that is
-    /// still present, never printed as if both matched.
+    /// A normalized transcript carrying `walk.last_sent: null` must be surfaced
+    /// by the narration naming the side with no present value and the value that
+    /// is still present, never printed as if both matched.
     #[test]
     fn verdict_surfaces_a_missing_last_sent() {
         let paper = move_transcript(25.0, false);
