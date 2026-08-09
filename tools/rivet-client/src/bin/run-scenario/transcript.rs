@@ -794,6 +794,146 @@ pub fn rivet_dwell_verdict(t: &Value) -> Result<&'static str, String> {
     )
 }
 
+/// The translation key Rivet's anti-cheat gate answers a NaN movement frame
+/// with (`session.rs` `dispatch_move_player` → `disconnect_invalid_movement`:
+/// `multiplayer.disconnect.invalid_player_movement`, issues #86/#158). The
+/// `kick` scenario requires the real Azalea client to have decoded exactly this
+/// key from the `ClientboundDisconnectPacket` Rivet encoded before closing.
+pub const KICK_REASON_KEY: &str = "multiplayer.disconnect.invalid_player_movement";
+
+/// Project a client run onto the canonical `kick` transcript.
+///
+/// The client's `disconnect` record carries the decoded disconnect reason: the
+/// raw Debug rendering (`reason`), the translation key of a translatable reason
+/// (`reason_key`), and whether the client had reached spawn (`after_spawn`).
+/// This normalizer projects that record onto the canonical shape and attaches
+/// the lifecycle and pinned Azalea revision, so the verdict can require the real
+/// Azalea client decoded Rivet's exact invalid-movement key.
+///
+/// A `kick` run that never reaches the kick — a `timeout`/`connection_failed`
+/// (the NaN frame never reached a server that answered), or a disconnect before
+/// spawn — normalizes to those failure outcomes, minus the kick observables.
+pub fn normalize_kick(raw: &str) -> Result<Value, String> {
+    let records = parse_records(raw)?;
+
+    let lifecycle: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.get("event").and_then(Value::as_str))
+        .filter(|e| LIFECYCLE_EVENTS.contains(e))
+        .map(str::to_owned)
+        .collect();
+
+    let disconnect = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("disconnect")))
+        .cloned();
+    let outcome = outcome(&records);
+    check_outcome_terminal(&records, outcome)?;
+
+    // The `starting` record carries the client binary's pinned Azalea build
+    // revision; surface it so the verdict can prove the client was built from
+    // the pinned unmodified revision.
+    let azalea_revision = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("starting")))
+        .and_then(|r| r.get("azalea_revision").and_then(Value::as_str))
+        .map(str::to_owned);
+
+    let mut transcript = json!({
+        "protocol": PROTOCOL,
+        "scenario": "kick",
+        "outcome": outcome,
+        "lifecycle": lifecycle,
+        "azalea_revision": azalea_revision,
+        "excluded": serde_json::Map::new(),
+    });
+
+    if let Some(disconnect) = disconnect {
+        transcript["kick"] = json!({
+            "reason": disconnect.get("reason").cloned().unwrap_or(Value::Null),
+            "reason_key": disconnect.get("reason_key").cloned().unwrap_or(Value::Null),
+            "after_spawn": disconnect.get("after_spawn").cloned().unwrap_or(Value::Null),
+        });
+    }
+
+    Ok(transcript)
+}
+
+/// Verify a normalized `kick` transcript proves the real Azalea client decoded
+/// Rivet's exact disconnect reason after a genuine play session: outcome
+/// `disconnected`, lifecycle containing both `login` and `spawn`, the pinned
+/// Azalea revision, `after_spawn == true` (the anti-cheat gate answered a NaN
+/// movement frame the client sent after it reached spawn), and
+/// `reason_key == KICK_REASON_KEY` (the decoded translatable key from the
+/// `ClientboundDisconnectPacket`).
+///
+/// Returns a human-readable description of the decoded-reason boundary reached.
+/// Errors when the transcript does not prove that:
+///
+/// - the outcome is anything but `disconnected` — a `timeout`/`connection_failed`
+///   means the NaN frame never reached a server that answered, and `spawned`
+///   means the client never got kicked (a regression in the anti-cheat gate).
+/// - the lifecycle does not contain both `login` and `spawn`.
+/// - `azalea_revision != PINNED_AZALEA_REVISION` — the client was not built from
+///   the pinned unmodified Azalea revision.
+/// - `after_spawn != true` — the disconnect happened before the client reached
+///   spawn, not via the play anti-cheat gate.
+/// - `reason_key != KICK_REASON_KEY` — the decoded reason was not Rivet's
+///   invalid-player-movement translatable (a literal/plain-text reason, a
+///   different key, or no reason at all).
+///
+/// The companion server-side check (in the runner) is the `connection
+/// established` log proving the client genuinely reached the Rivet port.
+pub fn rivet_kick_verdict(t: &Value) -> Result<&'static str, String> {
+    let outcome = t
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if outcome != "disconnected" {
+        return Err(format!(
+            "kick transcript outcome is {outcome} (expected disconnected): the client never \
+             received the invalid-movement kick — a timeout/connection_failed means the NaN frame \
+             never reached a server that answered, and spawned means the server never kicked"
+        ));
+    }
+    let lifecycle: Vec<&str> = t
+        .get("lifecycle")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !lifecycle.contains(&"login") || !lifecycle.contains(&"spawn") {
+        return Err(format!(
+            "kick transcript lifecycle is {lifecycle:?} (expected to contain login and spawn) — \
+             malformed transcript or the client never reached play"
+        ));
+    }
+    if t.get("azalea_revision").and_then(Value::as_str) != Some(PINNED_AZALEA_REVISION) {
+        return Err(format!(
+            "kick transcript azalea_revision is {:?} (expected {PINNED_AZALEA_REVISION}) — the \
+             client was not built from the pinned unmodified Azalea revision",
+            t.get("azalea_revision").and_then(Value::as_str)
+        ));
+    }
+    let kick = t.get("kick").and_then(Value::as_object).ok_or_else(|| {
+        "kick transcript has no kick record — the client never emitted a disconnect".to_owned()
+    })?;
+    if kick.get("after_spawn").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "kick after_spawn is {:?} (expected true): the disconnect happened before the client \
+             reached spawn, not via the play anti-cheat gate",
+            kick.get("after_spawn")
+        ));
+    }
+    if kick.get("reason_key").and_then(Value::as_str) != Some(KICK_REASON_KEY) {
+        return Err(format!(
+            "kick reason_key is {:?} (expected {KICK_REASON_KEY}): the decoded disconnect reason \
+             was not Rivet's invalid-player-movement translatable",
+            kick.get("reason_key").and_then(Value::as_str)
+        ));
+    }
+    Ok("disconnect (decoded multiplayer.disconnect.invalid_player_movement after spawn)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1473,5 +1613,146 @@ mod tests {
             rivet_dwell_verdict(&t).is_err(),
             "an inverted offset pair must fail the span verdict"
         );
+    }
+
+    /// A genuine kick-mode client run: the pinned Azalea client spawned into
+    /// play, sent a NaN movement frame, and was disconnected by Rivet's
+    /// anti-cheat gate. The disconnect record carries the decoded translatable
+    /// reason's key.
+    fn kick_records() -> String {
+        [
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":40,"mode":"kick","azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            r#"{"event":"disconnect","reason":"Some(Translatable(TranslatableComponent { key: \"multiplayer.disconnect.invalid_player_movement\", .. }))","reason_key":"multiplayer.disconnect.invalid_player_movement","after_spawn":true,"protocol":1}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn normalizes_a_successful_kick() {
+        let t = normalize_kick(&kick_records()).expect("normalize");
+        assert_eq!(t["outcome"], "disconnected");
+        assert_eq!(t["scenario"], "kick");
+        assert_eq!(t["lifecycle"], json!(["init", "login", "spawn"]));
+        assert_eq!(
+            t["kick"]["reason_key"],
+            json!("multiplayer.disconnect.invalid_player_movement")
+        );
+        assert_eq!(t["kick"]["after_spawn"], json!(true));
+        // The raw Debug rendering is carried as a diagnostic but never
+        // verdict-checked (only the decoded key is).
+        assert!(t["kick"]["reason"].is_string());
+    }
+
+    #[test]
+    fn kick_verdict_accepts_a_genuine_kick_run() {
+        let t = normalize_kick(&kick_records()).expect("normalize");
+        let verdict = rivet_kick_verdict(&t).expect("kick verdict");
+        assert!(
+            verdict.contains("disconnect"),
+            "verdict must name the decoded-reason boundary, got {verdict}"
+        );
+    }
+
+    #[test]
+    fn kick_verdict_rejects_a_wrong_reason_key() {
+        // The negative control: a decoded reason that is not Rivet's
+        // invalid-player-movement key (a literal/plain-text reason, a different
+        // key, or no reason) must refuse PASS — this is what proves the verdict
+        // actually checks the decoded reason and cannot be waved through by a
+        // transcript that never decoded the real key.
+        let mut t = normalize_kick(&kick_records()).expect("normalize");
+        t["kick"]["reason_key"] = json!("disconnect.genericReason");
+        let err = rivet_kick_verdict(&t).expect_err("wrong reason key");
+        assert!(
+            err.contains("reason_key"),
+            "error must name the reason key, got {err}"
+        );
+    }
+
+    #[test]
+    fn kick_verdict_rejects_a_null_reason_key() {
+        // A disconnect with no decodable translatable reason (reason_key null:
+        // a plain-text/literal reason) must not pass — the client did not decode
+        // Rivet's translatable key.
+        let mut t = normalize_kick(&kick_records()).expect("normalize");
+        t["kick"]["reason_key"] = Value::Null;
+        assert!(
+            rivet_kick_verdict(&t).is_err(),
+            "a null reason_key means the reason was not decoded as translatable"
+        );
+    }
+
+    #[test]
+    fn kick_verdict_rejects_a_pre_spawn_disconnect() {
+        // after_spawn=false: the disconnect record claims the client never
+        // reached spawn, so it is not a play anti-cheat kick. The transcript
+        // still passes the earlier structural checks (outcome disconnected,
+        // lifecycle login+spawn, pinned revision) so the after_spawn check is
+        // the discriminating one — a client that reached spawn would record
+        // after_spawn=true.
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":5,"mode":"kick","azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            r#"{"event":"disconnect","reason":"Server closed the connection before login","reason_key":null,"after_spawn":false,"protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_kick(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "disconnected");
+        let err = rivet_kick_verdict(&t).expect_err("pre-spawn disconnect is not a kick");
+        assert!(
+            err.contains("after_spawn"),
+            "error must name after_spawn, got {err}"
+        );
+    }
+
+    #[test]
+    fn kick_verdict_rejects_a_timeout() {
+        // The server never kicks (a regression in the anti-cheat gate or the
+        // disconnect path): the client times out without ever emitting a
+        // disconnect terminal.
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":5,"mode":"kick","azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            r#"{"event":"timeout","timeout_seconds":5,"protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_kick(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "timeout");
+        let err = rivet_kick_verdict(&t).expect_err("timeout is not a kick");
+        assert!(
+            err.contains("disconnected"),
+            "error must demand the disconnected outcome, got {err}"
+        );
+    }
+
+    #[test]
+    fn kick_verdict_rejects_a_wrong_azalea_revision() {
+        let mut t = normalize_kick(&kick_records()).expect("normalize");
+        t["azalea_revision"] = json!("deadbeef");
+        assert!(
+            rivet_kick_verdict(&t).is_err(),
+            "a client not built from the pinned Azalea revision must not pass"
+        );
+    }
+
+    #[test]
+    fn failed_kick_normalizes_without_kick_observables() {
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"mode":"kick","azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"connection_failed","reason":"failed to create connection","protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_kick(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "connection_failed");
+        assert_eq!(t["lifecycle"], json!(["init"]));
+        assert!(t.get("kick").is_none());
     }
 }

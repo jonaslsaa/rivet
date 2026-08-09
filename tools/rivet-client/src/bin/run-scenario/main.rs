@@ -56,6 +56,20 @@
 //!   exceed it by more than `DWELL_TIMEOUT_HEADROOM_SECONDS` so the client's
 //!   post-window settle loop and pre-spawn login time cannot let the timeout
 //!   cut the `dwell` record off.
+//! - `kick` (issue #86: decoded disconnect reason): the Rivet-only anti-cheat
+//!   disconnect gate. Boots exactly one rivet-server; the pinned Azalea client
+//!   spawns into PLAY, then sends one movement frame whose position is NaN, so
+//!   the server's `contains_invalid_values` gate (`session.rs`
+//!   `dispatch_move_player` → `disconnect_invalid_movement`) answers with a
+//!   `ClientboundDisconnectPacket` carrying the translatable
+//!   `multiplayer.disconnect.invalid_player_movement` reason (issue #158). Passes
+//!   only if the real client decodes that reason — the transcript's
+//!   `reason_key` must equal `transcript::KICK_REASON_KEY` with `after_spawn` set
+//!   — proven via the rivet log's `connection established` line, the
+//!   `rivet_kick_verdict`, and a tamper negative on `reason_key`. `kick` always
+//!   boots exactly one Rivet server, so any explicit `--runs` or `--pairs` is
+//!   rejected (exit 64) rather than silently ignored, and `--server` other than
+//!   `rivet` is refused the same way.
 //!
 //! ## Connection proof (Rivet modes)
 //!
@@ -184,6 +198,7 @@ enum Subcommand {
     Join,
     Move,
     Dwell,
+    Kick,
     Capture,
     Help,
 }
@@ -274,6 +289,7 @@ impl Args {
                 "join" => Subcommand::Join,
                 "move" => Subcommand::Move,
                 "dwell" => Subcommand::Dwell,
+                "kick" => Subcommand::Kick,
                 "capture" => Subcommand::Capture,
                 "--help" | "-h" | "help" => Subcommand::Help,
                 _ => return Err(format!("unknown subcommand: {sub}\n\n{}", usage())),
@@ -323,14 +339,15 @@ impl Args {
         }
 
         // `--dwell-seconds` only has meaning for the dwell scenario; on
-        // join/move/capture the client is never asked to dwell, so an explicit
-        // value would be a silent no-op. Reject it (exit 64) rather than ignore
-        // it — the same no-silent-noop policy as --runs/--pairs on dwell.
+        // join/move/kick/capture the client is never asked to dwell, so an
+        // explicit value would be a silent no-op. Reject it (exit 64) rather
+        // than ignore it — the same no-silent-noop policy as --runs/--pairs on
+        // dwell.
         if dwell_explicit && command != Subcommand::Dwell {
             return Err(
                 "--dwell-seconds only applies to the dwell scenario (the keepalive-survival \
-                 gate); join/move/capture never dwell, so an explicit value would be a silent \
-                 no-op — drop it"
+                 gate); join/move/kick/capture never dwell, so an explicit value would be a \
+                 silent no-op — drop it"
                     .to_owned(),
             );
         }
@@ -500,6 +517,43 @@ impl Args {
             }
         }
 
+        if command == Subcommand::Kick {
+            // The kick scenario is a Rivet headless-boot decoded-reason probe
+            // (issue #86): it always boots rivet-server (never Paper, which has
+            // no decoded `ClientboundDisconnectPacket` reason in this slice).
+            // Only --server rivet (or the default, which the server-defaulting
+            // logic below pins to rivet) is valid.
+            if server_explicit && server != ServerSelection::Rivet {
+                return Err(format!(
+                    "kick only supports --server rivet (the decoded-disconnect-reason probe is a \
+                     Rivet headless-boot check); got --server {}",
+                    server.as_str()
+                ));
+            }
+            server = ServerSelection::Rivet;
+            // kick has no comparison concept (it boots exactly one Rivet server
+            // and checks the decoded reason), so an explicit --pairs is a
+            // silent no-op. Reject it rather than ignore it.
+            if pairs_explicit {
+                return Err(
+                    "kick has no --pairs comparison (it boots exactly one Rivet server); drop it"
+                        .to_owned(),
+                );
+            }
+            // kick always boots exactly one Rivet server, so any explicit
+            // --runs — even `--runs 1`, which equals the implicit default — is
+            // a silent no-op. Reject every explicit value (like the dwell
+            // precedent) rather than accept one that does nothing.
+            if runs_explicit {
+                return Err(
+                    "kick always boots exactly one Rivet server, so --runs is a silent no-op; \
+                     drop it"
+                        .to_owned(),
+                );
+            }
+            runs = 1;
+        }
+
         Ok(Self {
             command,
             server,
@@ -520,9 +574,9 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: run-scenario <join|move|dwell|capture> [options]\n\
+        "Usage: run-scenario <join|move|dwell|kick|capture> [options]\n\
          Options:\n\
-         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell is always rivet)\n\
+         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick are always rivet)\n\
          \x20 --pairs paper:paper|paper:rivet\n\
          \x20                            comparison to run (default paper:paper)\n\
          \x20 --address HOST:PORT        server address (default {DEFAULT_ADDRESS})\n\
@@ -2256,6 +2310,125 @@ fn run_dwell(args: &Args) -> Result<(), RunnerError> {
     Ok(())
 }
 
+fn run_kick(args: &Args) -> Result<(), RunnerError> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/scenario-kick");
+    fs::create_dir_all(&work)?;
+    let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
+    let client_bin = ensure_client_binary()?;
+    let base = base_address(args)?;
+
+    println!("rivet scenario runner: kick (decoded disconnect reason)");
+    println!("    rivet-server bin  : {}", rivet_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    address           : {}", args.address);
+    println!();
+    println!(
+        "    the client sends one NaN movement frame after spawn; the server's anti-cheat gate"
+    );
+    println!("    must answer with a ClientboundDisconnectPacket carrying the translatable");
+    println!(
+        "    '{}', and the real Azalea client must decode and report that exact key.",
+        transcript::KICK_REASON_KEY
+    );
+    println!();
+
+    let run_dir = work.join("rivet1");
+    let log_path = work.join("rivet1.log");
+    let mut srv = server::boot(
+        server::ServerKind::Rivet,
+        &run_dir,
+        &log_path,
+        &rivet_bin,
+        None,
+        base,
+        None,
+        &[],
+    )?;
+    println!("[run  1] kicking via rivet-client (kick mode) ...");
+    let client_run = run_client(
+        &client_bin,
+        &ClientSpec {
+            address: base.to_string(),
+            username: args.username.clone(),
+            timeout_seconds: args.timeout_seconds,
+            dwell_seconds: 0,
+            mode: "kick".to_owned(),
+        },
+        &work,
+        "kick1",
+    )?;
+    server::shutdown(&mut srv)?;
+    // Server-side half of the connection proof: the real rivet-server must have
+    // accepted the client (connection established on TCP accept).
+    verify_rivet_connection(&log_path)?;
+
+    let normalized =
+        transcript::normalize_kick(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+    let transcript_path = work.join("kick1.transcript.json");
+    fs::write(&transcript_path, serde_json::to_string_pretty(&normalized)?)?;
+    let boundary = transcript::rivet_kick_verdict(&normalized)?;
+    println!(
+        "[run  1] outcome={} reason_key={:?} after_spawn={} \
+         (decoded-reason boundary: {boundary}) — transcript in {}",
+        normalized["outcome"],
+        normalized["kick"]["reason_key"],
+        normalized["kick"]["after_spawn"],
+        transcript_path.display()
+    );
+
+    // Negative case: prove the verdict path just exercised is non-vacuous.
+    // Tamper the *decoded reason key* the verdict strictly requires and require
+    // the real verdict to refuse PASS. Without this, a verdict that never
+    // checked the decoded key (or a transcript shaped to satisfy a vacuous
+    // check) would pass.
+    println!();
+    println!("Negative case (tamper reason_key through the real verdict path)");
+    {
+        let mut tampered = normalized.clone();
+        tampered["kick"]["reason_key"] = json!("disconnect.genericReason");
+        match transcript::rivet_kick_verdict(&tampered) {
+            Err(e) if e.contains("reason_key") => {
+                println!(
+                    "    tampered reason_key -> disconnect.genericReason — the verdict refused \
+                     PASS, so the decoded reason is genuinely verified"
+                );
+            }
+            Err(e) => {
+                return Err(RunnerError::Gate(format!(
+                    "negative case FAILED: the kick verdict refused PASS for a reason other than \
+                     the tampered reason_key: {e}"
+                )));
+            }
+            Ok(_) => {
+                return Err(RunnerError::Gate(
+                    "negative case FAILED: the kick verdict PASSED with a wrong reason_key — the \
+                     decoded reason is not genuinely checked"
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+
+    println!();
+    println!("VERDICT: PASS — the real Azalea client decoded Rivet's disconnect reason");
+    println!();
+    println!("      * The client spawned into PLAY, then sent a NaN movement frame that the");
+    println!("        server's contains_invalid_values anti-cheat gate answered with a");
+    println!("        ClientboundDisconnectPacket (issue #86).");
+    println!("      * The connection is proven two ways: the rivet log shows 'connection");
+    println!("        established' (only the real rivet-server emits it), and the client");
+    println!("        transcript is outcome=disconnected with after_spawn=true and the pinned");
+    println!("        Azalea revision — so the kick happened in play, not at the login boundary.");
+    println!("      * The real client decoded the translatable reason and reported exactly the");
+    println!("        key '{}'.", transcript::KICK_REASON_KEY);
+    println!("      * The negative case proved the verdict path is non-vacuous: a tampered");
+    println!("        reason_key was refused PASS by the real verdict, so a transcript that never");
+    println!("        decoded the real reason cannot be waved through.");
+    println!("    artifacts: {}", work.display());
+    Ok(())
+}
+
 fn run_join(args: &Args) -> Result<(), RunnerError> {
     match (args.server, args.pairs) {
         (ServerSelection::Paper, Pairs::PaperPaper) => run_paper_self_check(args),
@@ -2343,6 +2516,7 @@ fn main() -> ExitCode {
         Subcommand::Join => run_join(&args),
         Subcommand::Move => run_move(&args),
         Subcommand::Dwell => run_dwell(&args),
+        Subcommand::Kick => run_kick(&args),
         Subcommand::Capture => run_capture(&args),
         Subcommand::Help => {
             println!("{}", usage());
@@ -2799,6 +2973,95 @@ mod tests {
         );
         // The untampered transcript passes — the negative is not vacuous.
         assert!(transcript::rivet_dwell_verdict(&t).is_ok());
+    }
+
+    #[test]
+    fn kick_parses_and_defaults_to_a_single_rivet_boot() {
+        let a = parse(&["kick"]).unwrap();
+        assert_eq!(a.command, Subcommand::Kick);
+        assert_eq!(
+            a.server,
+            ServerSelection::Rivet,
+            "kick is always a Rivet boot"
+        );
+        assert_eq!(a.runs, 1, "kick runs exactly one boot");
+    }
+
+    #[test]
+    fn kick_rejects_a_paper_or_both_boot() {
+        // The decoded-disconnect-reason probe is a Rivet headless-boot check;
+        // Paper has no place in it.
+        for server in ["paper", "both"] {
+            let err = parse(&["kick", "--server", server]).unwrap_err();
+            assert!(
+                err.contains("--server rivet"),
+                "{server} must be refused as not --server rivet, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn kick_rejects_an_explicit_runs_count() {
+        // kick always boots exactly one Rivet server; a --runs other than 1 is
+        // a silent no-op and must be rejected (no-silent-noop policy, like dwell
+        // and the both-server precedent).
+        let err = parse(&["kick", "--runs", "2"]).unwrap_err();
+        assert!(err.contains("--runs"), "error must name --runs, got {err}");
+        assert!(
+            err.contains("silent no-op"),
+            "error must explain --runs is a no-op, got {err}"
+        );
+    }
+
+    #[test]
+    fn kick_rejects_explicit_runs_one() {
+        // kick always boots exactly one Rivet server; an explicit --runs 1 —
+        // equal to the implicit default — is still a silent no-op and must be
+        // rejected.
+        let err = parse(&["kick", "--runs", "1"]).unwrap_err();
+        assert!(err.contains("--runs"), "error must name --runs, got {err}");
+    }
+
+    #[test]
+    fn kick_rejects_an_explicit_pairs() {
+        // kick has no comparison concept (exactly one Rivet boot), so an
+        // explicit --pairs would be a silent no-op. Reject it with the CLI
+        // misuse error (which exits 64), like --runs.
+        let err = parse(&["kick", "--pairs", "paper:rivet"]).unwrap_err();
+        assert!(
+            err.contains("--pairs"),
+            "error must name --pairs, got {err}"
+        );
+        assert!(
+            err.contains("no --pairs"),
+            "error must explain kick has no comparison, got {err}"
+        );
+    }
+
+    #[test]
+    fn kick_negative_rejects_a_wrong_decoded_reason_key() {
+        // The kick verdict must reject a transcript whose decoded reason key is
+        // not Rivet's invalid-player-movement translatable — the controlled
+        // negative the live scenario runs. A verdict that passed a wrong
+        // reason_key would be vacuous.
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":40,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            r#"{"event":"disconnect","reason":"Some(Translatable(TranslatableComponent { key: \"multiplayer.disconnect.invalid_player_movement\", .. }))","reason_key":"multiplayer.disconnect.invalid_player_movement","after_spawn":true,"protocol":1}"#,
+        ]
+        .join("\n");
+        let t = transcript::normalize_kick(&raw).expect("normalize");
+        let mut tampered = t.clone();
+        tampered["kick"]["reason_key"] = json!("disconnect.genericReason");
+        let err = transcript::rivet_kick_verdict(&tampered).unwrap_err();
+        assert!(
+            err.contains("reason_key"),
+            "a wrong decoded reason key must be refused, got {err}"
+        );
+        // The untampered transcript passes — the negative is not vacuous.
+        assert!(transcript::rivet_kick_verdict(&t).is_ok());
     }
 
     fn diff_with(path: &str) -> comparator::TranscriptDiff {

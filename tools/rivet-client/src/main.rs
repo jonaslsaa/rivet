@@ -25,6 +25,7 @@ use azalea::packet::game::SendGamePacketEvent;
 use azalea::physics::PhysicsSystems;
 use azalea::physics::client_movement::ClientMovementState;
 use azalea::prelude::*;
+use azalea::protocol::common::movements::MoveFlags;
 use azalea::protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use serde_json::{Value, json};
 
@@ -106,6 +107,13 @@ enum Mode {
     /// `dwell` record (challenge ids, echo ids, wall-clock span). Proves a real
     /// client survives in PLAY past the server's keepalive kick limit (30s).
     Dwell,
+    /// Join, then send a movement frame whose position is NaN so the server's
+    /// `contains_invalid_values` anti-cheat gate answers with a
+    /// `ClientboundDisconnectPacket` carrying
+    /// `multiplayer.disconnect.invalid_player_movement`. The decoded reason
+    /// (the translatable key) is emitted by the `disconnect` handler, proving
+    /// the real client decodes Rivet's reason (the `kick` scenario, issue #86).
+    Kick,
 }
 
 impl Mode {
@@ -114,6 +122,7 @@ impl Mode {
             Mode::Join => "join",
             Mode::Move => "move",
             Mode::Dwell => "dwell",
+            Mode::Kick => "kick",
         }
     }
 
@@ -122,6 +131,7 @@ impl Mode {
             "join" => Some(Mode::Join),
             "move" => Some(Mode::Move),
             "dwell" => Some(Mode::Dwell),
+            "kick" => Some(Mode::Kick),
             _ => None,
         }
     }
@@ -162,7 +172,7 @@ impl Args {
                 "--mode" => {
                     let value = next_value(&mut args, "--mode")?;
                     mode = Mode::parse(&value).ok_or_else(|| {
-                        format!("invalid --mode value: {value} (expected join|move|dwell)")
+                        format!("invalid --mode value: {value} (expected join|move|dwell|kick)")
                     })?;
                 }
                 "--dwell-seconds" => {
@@ -177,12 +187,12 @@ impl Args {
             }
         }
 
-        // --dwell-seconds only has meaning in dwell mode; on join/move an
+        // --dwell-seconds only has meaning in dwell mode; on join/move/kick an
         // explicit value would be a silent no-op, so it is rejected (exit 64)
         // rather than ignored.
         if dwell_explicit && mode != Mode::Dwell {
             return Err(
-                "--dwell-seconds only applies to --mode dwell; join/move never dwell, so an \
+                "--dwell-seconds only applies to --mode dwell; join/move/kick never dwell, so an \
                  explicit value would be a silent no-op — drop it"
                     .to_owned(),
             );
@@ -239,7 +249,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: rivet-client [--mode join|move|dwell] [--address HOST:PORT] [--username NAME] \
+        "Usage: rivet-client [--mode join|move|dwell|kick] [--address HOST:PORT] [--username NAME] \
          [--timeout-seconds N] [--dwell-seconds N]\n\
          Defaults: --mode {DEFAULT_MODE} --address {DEFAULT_ADDRESS} --username {DEFAULT_USERNAME} \
          --timeout-seconds {DEFAULT_TIMEOUT_SECONDS} --dwell-seconds {DEFAULT_DWELL_SECONDS}"
@@ -489,6 +499,22 @@ fn round_position(p: azalea::core::position::Vec3) -> Value {
         "y": round_to(p.y, 3),
         "z": round_to(p.z, 3),
     })
+}
+
+/// The translation key of a disconnect reason that azalea decoded as a
+/// translatable component, or `None` for a literal/plain-text reason. The
+/// `kick` scenario needs the raw key (e.g.
+/// `multiplayer.disconnect.invalid_player_movement`) — not its Debug rendering
+/// or a resolved-language string — so it can assert Rivet's exact reason was
+/// decoded and reported. `Event::Disconnect(Some(reason))` carries azalea's
+/// `FormattedText`; a plain-text reason is `FormattedText::Text`, and the
+/// translatable reason from `ClientboundDisconnectPacket` is
+/// `FormattedText::Translatable` whose `key` field is the wire key.
+fn translatable_key(reason: &azalea::FormattedText) -> Option<String> {
+    match reason {
+        azalea::FormattedText::Translatable(c) => Some(c.key.clone()),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Resource)]
@@ -1025,6 +1051,32 @@ async fn dwell_and_emit(bot: Client, state: State) {
     hard_exit(0);
 }
 
+/// Send one movement frame whose position is NaN so Rivet's
+/// `contains_invalid_values` anti-cheat gate (session.rs `dispatch_move_player`)
+/// answers with a `ClientboundDisconnectPacket` carrying the
+/// `multiplayer.disconnect.invalid_player_movement` translatable. The
+/// `Event::Disconnect` handler decodes that reason and emits the transcript
+/// terminal; the `kick` scenario asserts the decoded key. After sending, this
+/// parks forever: the disconnect handler's `hard_exit` ends the process, and if
+/// the server never kicks (a regression in the gate or the disconnect path), the
+/// outer `--timeout-seconds` branch exits with `timeout` and the scenario FAILs.
+async fn kick_and_wait(bot: Client, _state: State) {
+    bot.write_packet(
+        azalea::protocol::packets::game::ServerboundMovePlayerPosRot {
+            pos: azalea::Vec3 {
+                x: f64::NAN,
+                y: 0.0,
+                z: 0.0,
+            },
+            look_direction: azalea::entity::LookDirection::new(0.0, 0.0),
+            flags: MoveFlags::default(),
+        },
+    );
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 async fn handle(bot: Client, event: Event, state: State) {
     match event {
         Event::Init => emit(json!({ "event": "init" })),
@@ -1057,6 +1109,7 @@ async fn handle(bot: Client, event: Event, state: State) {
                 Mode::Move => runtime.spawn(move_and_emit(bot, state)),
                 Mode::Join => runtime.spawn(observe_and_emit(bot, state)),
                 Mode::Dwell => runtime.spawn(dwell_and_emit(bot, state)),
+                Mode::Kick => runtime.spawn(kick_and_wait(bot, state)),
             };
         }
         // Move-mode packet observables. Recorded alongside the per-tick samples
@@ -1110,7 +1163,8 @@ async fn handle(bot: Client, event: Event, state: State) {
             state.terminal_emitted.store(true, Ordering::Release);
             emit(json!({
                 "event": "disconnect",
-                "reason": reason.map(|reason| format!("{reason:?}")),
+                "reason": reason.as_ref().map(|reason| format!("{reason:?}")),
+                "reason_key": reason.as_ref().and_then(translatable_key),
                 "after_spawn": state.spawned.load(Ordering::Acquire),
             }));
             // Preserve the original exit-code contract: 0 if we got to spawn,
