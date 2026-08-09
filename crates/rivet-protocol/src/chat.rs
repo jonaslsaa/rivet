@@ -2,12 +2,15 @@
 //!
 //! Java: `ComponentSerialization.java` in `working/Paper` (vanilla 26.2). The
 //! class holds the recursive `CODEC` (ported in `rivet-text` as
-//! [`rivet_text::component_serialization`]) and the six `STREAM_CODEC`s that
+//! [`rivet_text::component_serialization`]) and the `STREAM_CODEC` family that
 //! serialize a `Component` to NBT on the wire. The `CODEC` lives in
 //! `rivet-text` (it is the value-model serializer); this module is the wire
-//! half — the stream codecs over the NBT `Tag` via [`byte_buf_codecs::from_codec`].
+//! half — the stream codec family over the NBT `Tag` via
+//! [`byte_buf_codecs::from_codec`].
 //!
-//! The six Java constants, 1:1:
+//! The five Java constants, 1:1 — plus [`component`], the generic
+//! `ByteBufCodecs.fromCodec(Codec)` sibling (no constant in
+//! `ComponentSerialization`):
 //! - [`component_with_registries`] — `STREAM_CODEC`
 //!   (`tagCodec(defaultQuota)` over `RegistryFriendlyByteBuf`, with the codec
 //!   run over `RegistryOps` from the buffer's `RegistryAccess`).
