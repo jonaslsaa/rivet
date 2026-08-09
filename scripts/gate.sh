@@ -105,6 +105,7 @@ ORACLE_UNVERIFIED=0
 VERIFY_RUNNABLE=0
 PARITY_RUNNABLE=0
 CAPTURE_RUNNABLE=0
+SCENARIO_RUNNABLE=0
 
 # Directory of this script via bash builtins only (no external tools at load
 # time — sourcing must stay side-effect-free so tests can shim PATH).
@@ -124,9 +125,9 @@ oracle_prereq_check() {
   local missing=0
   JAVA_BARE_OK=0; PYTHON3_OK=0; DISK_OK=0; JAVAC25_OK=0
   PAPERCLIP_JAR=""; COMPILE_JAR=""; LIBRARIES_DIR=""; RUNTIME_JAR=""
-  # VERIFY_RUNNABLE / PARITY_RUNNABLE / CAPTURE_RUNNABLE are globals (the step
-  # runners read them).
-  VERIFY_RUNNABLE=0; PARITY_RUNNABLE=0; CAPTURE_RUNNABLE=0
+  # VERIFY_RUNNABLE / PARITY_RUNNABLE / CAPTURE_RUNNABLE / SCENARIO_RUNNABLE are
+  # globals (the step runners read them).
+  VERIFY_RUNNABLE=0; PARITY_RUNNABLE=0; CAPTURE_RUNNABLE=0; SCENARIO_RUNNABLE=0
 
   # rivet-oracle verify boots `java` directly, so bare java 25+ must be on PATH.
   if command -v java >/dev/null 2>&1; then
@@ -212,6 +213,31 @@ oracle_prereq_check() {
     missing=$((missing + 1))
   fi
 
+  # paperclip jar for the scenario runner's Paper rows (join/move Paper-vs-Rivet
+  # differentials). The scenario harness resolves it through its own ensure_jar
+  # discovery — RIVET_ORACLE_JAR, tools/rivet-client/work/jars/, then a
+  # paper-paperclip-*.jar under working/Paper — so the gate mirrors exactly those
+  # locations (RIVET_ORACLE_JAR is already handled by the PAPERCLIP_JAR check
+  # above). The Paper rows must never run against a missing jar, and equally must
+  # never silently skip: SCENARIO_RUNNABLE is consumed by run_scenario_paper_rows
+  # to report UNVERIFIED (or hard-fail under --require-oracle) instead of the bare
+  # SKIPPED the pre-#160 gate printed.
+  SCENARIO_PAPERCLIP_JAR=""
+  if [ -n "$PAPERCLIP_JAR" ]; then
+    # A verified paperclip (oracle jars/working) is exactly the bundler the
+    # scenario harness boots, so reuse it rather than re-discovering.
+    SCENARIO_PAPERCLIP_JAR="$PAPERCLIP_JAR"
+  elif [ -f "$REPO_DIR/tools/rivet-client/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar" ]; then
+    SCENARIO_PAPERCLIP_JAR="$REPO_DIR/tools/rivet-client/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar"
+  else
+    for c in "$REPO_DIR"/working/Paper/paper-server/build/libs/paper-paperclip-*.jar; do
+      if [ -f "$c" ]; then
+        SCENARIO_PAPERCLIP_JAR="$c"
+        break
+      fi
+    done
+  fi
+
   # Java 25 JDK for the reference oracle (rivet-parity compiles against Paper via
   # run.sh) — mirror run.sh's discovery order.
   local javac25="" h mac_home
@@ -288,6 +314,14 @@ oracle_prereq_check() {
   # Azalea client binary.
   if [ "$JAVA_BARE_OK" = 1 ] && [ "$DISK_OK" = 1 ] && [ -n "$PAPERCLIP_JAR" ] && [ -n "$CLIENT_BIN" ]; then
     CAPTURE_RUNNABLE=1
+  fi
+  # The scenario runner's Paper rows (join --server both / move --server both)
+  # boot Paper (java + paperclip) AND drive the client binary (the harness's
+  # run-scenario.sh builds the rivet-server on demand, so no server binary is a
+  # prereq here). The Paper rows therefore run exactly when the paperclip jar is
+  # present and the client binary exists.
+  if [ "$JAVA_BARE_OK" = 1 ] && [ "$DISK_OK" = 1 ] && [ -n "$SCENARIO_PAPERCLIP_JAR" ] && [ -n "$CLIENT_BIN" ]; then
+    SCENARIO_RUNNABLE=1
   fi
   if [ "$JAVAC25_OK" = 1 ] && [ -n "$COMPILE_JAR" ] && [ -n "$LIBRARIES_DIR" ] && [ -n "$RUNTIME_JAR" ]; then
     PARITY_RUNNABLE=1
@@ -591,6 +625,30 @@ run_join_capture() {
   fi
 }
 
+# The scenario runner's Paper-vs-Rivet rows: `join --server both` (#192/#159)
+# and `move --server both` (#53). They boot a real Paper server and drive the
+# client against both servers, so they need the paperclip jar AND the
+# rivet-client binary — SCENARIO_RUNNABLE is set by oracle_prereq_check. Like
+# every other oracle step they must never silently skip: with the prereqs
+# present they run the differentials (0 PASS / 1 FAIL); with a prereq missing
+# they report UNVERIFIED and set ORACLE_UNVERIFIED so the gate exits 3 (and
+# --require-oracle hard-fails at the prereq pre-check, exit 1). This replaces
+# the pre-#160 bare "SKIPPED" which concealed the missing comparison behind a
+# green-looking outcome.
+run_scenario_paper_rows() {
+  if [ "$SCENARIO_RUNNABLE" = 1 ]; then
+    echo "==> scenario runner (join: Paper-vs-Paper + negative case)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" join
+    echo "==> scenario runner (join: Rivet-vs-Paper differential)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" join --server both
+    echo "==> scenario runner (move: Rivet-vs-Paper authoritative-walk differential)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" move --server both
+  else
+    echo "    UNVERIFIED — scenario Paper rows (join/move Paper-vs-Rivet) did not run (paperclip jar or rivet-client binary missing; see the prereq report above)"
+    ORACLE_UNVERIFIED=1
+  fi
+}
+
 # ---- main --------------------------------------------------------------------
 
 main() {
@@ -868,24 +926,18 @@ main() {
   #                         exactly `multiplayer.disconnect.invalid_player_movement`
   #                         (plus a tamper negative on the decoded reason key).
   #
-  # The Paper rows run when a paperclip jar is materialized (same guard style as
-  # oracle verify). The dwell/kick rows are Rivet-only — they need no jar, only
-  # the rivet-server binary (which run-scenario.sh builds on demand). Every row
+  # The Paper rows run when the paperclip jar and the rivet-client binary are
+  # present (SCENARIO_RUNNABLE, set by the prereq pre-check); when either is
+  # missing they report UNVERIFIED and set ORACLE_UNVERIFIED so the gate exits 3
+  # (--require-oracle hard-fails at the pre-check) — never the bare "SKIPPED"
+  # that could conceal the missing comparison behind a green-looking run (issue
+  # #160). The dwell/kick rows are Rivet-only — they need no jar, only the
+  # rivet-server binary (which run-scenario.sh builds on demand). Every row
   # exits 0 PASS / 1 FAIL / 3 UNVERIFIED, so a missing prereq or a failed
   # scenario can never look green. Skipped when gating a crate subset (the
   # scenario drives a whole server).
   if [ "$FULL_GATE" = true ]; then
-    if [ -n "${RIVET_ORACLE_JAR:-}" ] || [ -f "$REPO_DIR/tools/rivet-client/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar" ] || \
-       ls "$REPO_DIR"/working/Paper/paper-server/build/libs/paper-paperclip*.jar >/dev/null 2>&1; then
-      echo "==> scenario runner (join: Paper-vs-Paper + negative case)"
-      "$REPO_DIR/tools/rivet-client/run-scenario.sh" join
-      echo "==> scenario runner (join: Rivet-vs-Paper differential)"
-      "$REPO_DIR/tools/rivet-client/run-scenario.sh" join --server both
-      echo "==> scenario runner (move: Rivet-vs-Paper authoritative-walk differential)"
-      "$REPO_DIR/tools/rivet-client/run-scenario.sh" move --server both
-    else
-      echo "    SKIPPED (no paperclip jar: set RIVET_ORACLE_JAR or materialize working/Paper first)"
-    fi
+    run_scenario_paper_rows
     echo "==> scenario runner (dwell: wall-clock keepalive survival past the 30s kick limit)"
     "$REPO_DIR/tools/rivet-client/run-scenario.sh" dwell --server rivet
     echo "==> scenario runner (kick: decoded disconnect reason from the anti-cheat gate)"
