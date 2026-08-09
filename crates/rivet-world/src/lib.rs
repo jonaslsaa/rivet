@@ -20,8 +20,15 @@
 //! Bit packing lives in `rivet-util` (`SimpleBitStorage`/`ZeroBitStorage`).
 //! No world state or chunk-send plumbing here yet (#100 keeps the content
 //! construction pure; `PlayerChunkSender` is deferred).
+//!
+//! #232 (M2) — the Level value slice. `level` ports the non-ticking
+//! `LevelHeightAccessor`/`BlockGetter`/`LevelReader`/`LevelAccessor`/`Level`
+//! interface chain plus the `LevelData` game-time seam (`getGameTime`) and
+//! re-exports the registry-owned `ChunkPos` (issue #125); the concrete world
+//! (`ServerLevel`) lives in `rivet-server`.
 
 pub mod chunk;
+pub mod level;
 pub mod levelgen;
 pub mod lighting;
 pub mod superflat;
