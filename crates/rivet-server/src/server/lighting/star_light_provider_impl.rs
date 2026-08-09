@@ -12,9 +12,11 @@
 //! lives in `rivet-world`.
 //!
 //! [`StubStarLightProvider`] is the concrete impl for Phase A — a no-op engine
-//! matching `StarLightInterface`'s empty-world semantics (mutators do nothing,
-//! readers return 0/`None`). It exists so the seam can be exercised end to end
-//! inside the acyclic dependency graph before any propagation is ported.
+//! (mutators do nothing, readers return 0/`None`). It exists so the seam can be
+//! exercised end to end inside the acyclic dependency graph before any
+//! propagation is ported. The reader defaults are the stub's own: they do not
+//! reproduce every Java branch (e.g. `getSkyLightValue` returns 15 for a null
+//! chunk when `hasSkyLight` is true — see its method doc).
 //!
 //! STUB(ca.spottedleaf.moonrise.patches.starlight.light): the real
 //! `StarLightInterface` and its sky/block propagation engines are not ported;
@@ -41,7 +43,7 @@ impl StarLightProvider for StubStarLightProvider {
         // queueing.
     }
 
-    fn light_chunk(&mut self, _pos: ChunkPos, _empty_sections: &[bool]) {
+    fn light_chunk(&mut self, _pos: ChunkPos, _empty_sections: &[Option<bool>]) {
         // `StarLightInterface.lightChunk` propagates light across the chunk's
         // sections; the stub lights nothing.
     }
@@ -57,8 +59,10 @@ impl StarLightProvider for StubStarLightProvider {
     }
 
     fn get_sky_light_value(&self, _pos: BlockPos) -> i32 {
-        // `StarLightInterface.getSkyLightValue` with `!hasSkyLight` (or no
-        // world) returns 0.
+        // `StarLightInterface.getSkyLightValue` with `!hasSkyLight` returns 0.
+        // The stub cannot reproduce the `hasSkyLight && chunk == null` branch
+        // (Java returns 15 there) because it resolves no chunk, so it returns 0
+        // in that case too — a stub simplification, not a Java behavior.
         0
     }
 
@@ -111,7 +115,7 @@ mod tests {
         let provider = engine.provider_mut().expect("attached");
         provider.block_change(BlockPos::new(1, 64, 2));
         provider.section_change(SectionPos::of(0, 4, 0), true);
-        provider.light_chunk(ChunkPos::new(0, 0), &[false]);
+        provider.light_chunk(ChunkPos::new(0, 0), &[Some(false), None]);
         provider.relight_chunks(&Default::default());
         provider.check_chunk_edges(ChunkPos::new(0, 0));
 

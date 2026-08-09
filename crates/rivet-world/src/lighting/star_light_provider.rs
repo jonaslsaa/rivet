@@ -51,15 +51,19 @@ pub trait StarLightProvider {
     fn block_change(&mut self, pos: BlockPos);
 
     /// `StarLightInterface.sectionChange(SectionPos, boolean)` — queue a
-    /// section-emptiness change for `pos` (Java's `notReady`).
+    /// section-emptiness change for `pos` (Java's `newEmptyValue`).
     fn section_change(&mut self, pos: SectionPos, new_empty_value: bool);
 
     /// `StarLightInterface.lightChunk(ChunkAccess, Boolean[])` — light a chunk
-    /// whose per-section emptiness is `empty_sections`. Java passes the
-    /// `ChunkAccess`; the object-safe seam passes the chunk *position* and the
-    /// impl resolves the chunk through its own light access (as
+    /// whose per-section emptiness is `empty_sections`. Java's `Boolean[]` is
+    /// tri-state, mirrored as `Option<bool>`: `Some(true)`/`Some(false)` are
+    /// `Boolean.TRUE`/`Boolean.FALSE` (section empty / has blocks), `None` is
+    /// Java `null` (unspecified — `StarLightEngine` derives it from the section
+    /// on first load and leaves it unchanged for an existing chunk). Java passes
+    /// the `ChunkAccess`; the object-safe seam passes the chunk *position* and
+    /// the impl resolves the chunk through its own light access (as
     /// `StarLightInterface` holds a `LightChunkGetter`).
-    fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[bool]);
+    fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]);
 
     /// `StarLightInterface.relightChunks(Set<ChunkPos>, Consumer<ChunkPos>,
     /// IntConsumer)` — recompute light for the given chunks. The completion
@@ -97,7 +101,7 @@ mod tests {
     struct RecordingLog {
         block_changes: Vec<BlockPos>,
         section_changes: Vec<(SectionPos, bool)>,
-        lit_chunks: Vec<ChunkPos>,
+        lit_chunks: Vec<(ChunkPos, Vec<Option<bool>>)>,
         relit_chunks: Vec<ChunkPos>,
         edge_checks: Vec<ChunkPos>,
     }
@@ -127,8 +131,12 @@ mod tests {
                 .section_changes
                 .push((pos, new_empty_value));
         }
-        fn light_chunk(&mut self, pos: ChunkPos, _empty_sections: &[bool]) {
-            self.log.lock().unwrap().lit_chunks.push(pos);
+        fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
+            self.log
+                .lock()
+                .unwrap()
+                .lit_chunks
+                .push((pos, empty_sections.to_vec()));
         }
         fn relight_chunks(&mut self, chunks: &HashSet<ChunkPos>) {
             self.log
@@ -153,7 +161,9 @@ mod tests {
 
     /// The trait must be usable as a `Box<dyn StarLightProvider + Send>` holder
     /// (object safety) and mutating calls through the `dyn` reference must reach
-    /// the concrete impl (delegation).
+    /// the concrete impl (delegation). `light_chunk`'s `empty_sections` mirror
+    /// Java's `Boolean[]` tri-state, so the call passes all three values and the
+    /// log proves they survive the `dyn` boundary unchanged.
     #[test]
     fn object_safe_and_delegates_through_dyn() {
         let recording = RecordingProvider::new();
@@ -163,7 +173,7 @@ mod tests {
         provider.block_change(BlockPos::new(1, 2, 3));
         let pos = SectionPos::of(4, 5, 6);
         provider.section_change(pos, true);
-        provider.light_chunk(ChunkPos::new(7, 8), &[false, true]);
+        provider.light_chunk(ChunkPos::new(7, 8), &[Some(false), None, Some(true)]);
         let mut chunks = HashSet::new();
         chunks.insert(ChunkPos::new(9, 10));
         provider.relight_chunks(&chunks);
@@ -172,7 +182,10 @@ mod tests {
         let seen = log.lock().unwrap();
         assert_eq!(seen.block_changes, vec![BlockPos::new(1, 2, 3)]);
         assert_eq!(seen.section_changes, vec![(pos, true)]);
-        assert_eq!(seen.lit_chunks, vec![ChunkPos::new(7, 8)]);
+        assert_eq!(
+            seen.lit_chunks,
+            vec![(ChunkPos::new(7, 8), vec![Some(false), None, Some(true)])]
+        );
         assert_eq!(seen.relit_chunks, vec![ChunkPos::new(9, 10)]);
         assert_eq!(seen.edge_checks, vec![ChunkPos::new(11, 12)]);
     }
