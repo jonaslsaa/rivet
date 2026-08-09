@@ -561,9 +561,8 @@ fn server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
 /// The shared fixture's `generator-settings={}` makes Paper fall back to the
 /// default FLAT preset (bedrock ×1 + dirt ×2 + grass ×1 = 4 layers), which
 /// spawns at y=-60 — while Rivet serves its single-stone world at
-/// `transcript::JOIN_SPAWN_Y`. With
-/// `generator-settings={"layers":[{"height":1,"block":"minecraft:stone"}]}`
-/// Paper has exactly one layer and spawns at `transcript::JOIN_SPAWN_Y` too, so
+/// `transcript::JOIN_SPAWN_Y`. The scenario's one-layer stone generator makes
+/// Paper spawn at `transcript::JOIN_SPAWN_Y` too, so
 /// `position.y` becomes a genuinely compared field instead of a spawn-height
 /// "documented gap".
 fn single_stone_server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
@@ -1671,9 +1670,8 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
 /// default-flat world spawns at y=-60, so every walk sample and `last_sent`
 /// would carry y=-60 vs Rivet's `transcript::JOIN_SPAWN_Y` — a spawn-height
 /// fixture artifact, not a movement difference. With one stone layer both
-/// servers walk at `transcript::JOIN_SPAWN_Y` and the whole walk (samples,
-/// velocity,
-/// teleport echo, `last_sent`) must be byte-identical: there are no documented
+/// servers walk at `transcript::JOIN_SPAWN_Y`, so the samples, velocity,
+/// teleport echo, and `last_sent` must be byte-identical with no documented
 /// gaps.
 ///
 /// The Rivet side is additionally proven authoritative: the trace must be
