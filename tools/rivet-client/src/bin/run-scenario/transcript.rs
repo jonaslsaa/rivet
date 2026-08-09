@@ -472,11 +472,12 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
             // normalization for the Rivet-trace cross-check.
             "spawn_origin": walk.get("spawn_origin").cloned().unwrap_or(Value::Null),
             // The client already normalizes `last_sent` to spawn-relative X/Z
-            // (matching the samples), so it is copied verbatim and compared:
-            // the evidence across fresh boots (the `differing_last_sent_is_compared`
-            // parity test) shows it is deterministic per server and Paper-vs-Rivet
-            // equal on X/Z, so a differing `last_sent` is a real movement
-            // divergence, not per-boot noise.
+            // (matching the samples), so it is copied verbatim and compared: a
+            // differing `last_sent` surfaces as a compared diff and fails
+            // parity — it is not absorbed by an exclusion. Paper-vs-Rivet
+            // equality on X/Z is not assumed here; the live both-mode
+            // differential verifies it each run (its comparator and divergence
+            // gate require the compared fields to match).
             "last_sent": walk.get("last_sent").cloned().unwrap_or(Value::Null),
             "samples": samples,
             "teleport_ack_echo": set_equality(&teleports, &teleport_acks),
@@ -669,9 +670,9 @@ mod tests {
         assert!(t["excluded"]["walk.corrections"].is_string());
         assert!(t["excluded"]["walk.corrections_count"].is_string());
         // The final sent position is recorded (copied verbatim) and compared —
-        // the evidence in `differing_last_sent_is_compared` shows it is
-        // deterministic per server and Paper-vs-Rivet equal on X/Z, so it is
-        // not an excluded diagnostic.
+        // `differing_last_sent_is_compared` pins that a differing last_sent is
+        // surfaced as a compared diff, never an excluded diagnostic; the live
+        // both-mode differential verifies Paper-vs-Rivet equality each run.
         assert_eq!(t["walk"]["last_sent"]["x"], json!(25.0));
         assert_eq!(t["walk"]["last_sent"]["y"], json!(-60.0));
         assert_eq!(t["walk"]["last_sent"]["z"], json!(0.0));
@@ -689,12 +690,11 @@ mod tests {
     #[test]
     fn differing_last_sent_is_compared() {
         // The walk's final sent position is a *compared* field, promoted out of
-        // the excluded nondeterministic set by the both-mode differential: on a
-        // single server the normalized last_sent is deterministic (Paper's spawn
-        // X/Z offset is already removed by the spawn-relative normalization), so
-        // it cannot be absorbed by an exclusion the way the per-boot fields are.
-        // A differing `last_sent` is therefore a real movement divergence and
-        // must FAIL parity.
+        // the excluded nondeterministic set by the both-mode differential. This
+        // test pins the comparator contract: a differing `last_sent` is surfaced
+        // as a compared diff and must FAIL parity — it must never be absorbed by
+        // an exclusion. Paper-vs-Rivet equality on X/Z is not proved here; the
+        // live both-mode differential verifies it each run.
         let a = normalize_move(&move_records()).expect("normalize");
         // `move_records()` renders the `json!` walk compactly, so the
         // `last_sent` object is an exact substring to tamper.
