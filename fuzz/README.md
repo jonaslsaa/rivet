@@ -161,7 +161,8 @@ The seeds cover the cases the targets assert on:
 The rivet-nbt binary readers are a faithful port of Java's `NbtIo`, which
 crashes (unchecked `RuntimeException`) on inputs the byte-level codec does not
 guard — negative list length, missing list element type, oversized array
-(`< 1 << 24`), and `NbtAccounter` quota/depth overruns. Feeding arbitrary bytes
+(`length >= 1 << 24`), and `NbtAccounter` quota/depth overruns. Feeding
+arbitrary bytes
 hits those immediately, and a fuzzer that dies on them is useless.
 
 `libfuzzer-sys` installs a panic hook that aborts the process on *every* panic,
