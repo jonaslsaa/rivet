@@ -1664,6 +1664,8 @@ async fn live_trace_records_teleport_ack_move_and_session_end() {
     assert_eq!(end.field("x"), Some("42.5"));
     assert_eq!(end.field("y"), Some("-63"));
     assert_eq!(end.field("z"), Some("-17.25"));
+    server_task.abort();
+}
 
 // ---- issue #283: configuration-phase keepalive lifecycle ----
 
