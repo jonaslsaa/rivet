@@ -2511,8 +2511,8 @@ mod tests {
 
     /// A normalized move transcript whose walk carried no `last_sent`.
     /// `normalize_move` records an absent raw value as explicit JSON `null`, so
-    /// this is the exact shape a schema regression produces on the wire — not a
-    /// stripped-down `walk: {}` that could hide a null-vs-absent confusion.
+    /// this mirrors the normalized wire shape. `verdict_last_sent` intentionally
+    /// treats both a missing key and explicit `null` as no present value.
     fn move_transcript_without_last_sent() -> Value {
         json!({
             "outcome": "moved",

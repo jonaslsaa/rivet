@@ -258,8 +258,8 @@ pub const JOIN_SPAWN_Y: f64 = -63.0;
 ///   transcript, or the client never reached play).
 /// - `chunk_count != 117` — the server did not send the deterministic
 ///   view-distance-4 send-set.
-/// - `position.y != -63.0` — the server did not spawn the player at Rivet's
-///   fixed superflat spawn (a Paper-like y=-60 spawn fails here).
+/// - `position.y != JOIN_SPAWN_Y` — the server did not spawn the player at
+///   Rivet's fixed superflat spawn (the default-flat Paper spawn fails here).
 /// - `azalea_revision != PINNED_AZALEA_REVISION` — the client binary was built
 ///   against a different Azalea revision than the pinned one.
 ///
