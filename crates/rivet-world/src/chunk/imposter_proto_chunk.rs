@@ -6,15 +6,17 @@
 //! gating every mutator behind `allowWrites`. Per OWNERSHIP.md there is no
 //! inheritance, so this chunk holds the wrapped `LevelChunk` and its
 //! `allowWrites` flag, plus the `ProtoChunk`-side carriers Java's `super.*`
-//! calls touch (the `status` field, `carvingMask`, and the default all-air
-//! sections). The `entities` list is never read (every accessor delegates),
-//! so it is not stored.
+//! calls touch (the `status` field and `carvingMask`). The `entities` list and
+//! the base's default all-air sections are never read, so they are not stored.
 //!
-//! The `ProtoChunk`-side default sections are built in the constructor from
-//! the wrapped chunk's `palettedContainerFactory` (Java's `super(...)`
-//! `replaceMissingSections` with `sections == null`): `getSection` returns
-//! them when writes are disallowed — a read-only caller indexing a non-air
-//! section sees Java's all-air default, not the wrapped chunk's contents.
+//! `getSection` is Java's `allowWrites ? wrapped.getSection : super.getSection`,
+//! but `super.getSection(i)` is `this.getSections()[i]` — a virtual call that
+//! dispatches to the `getSections` override (`wrapped.getSections()`), and
+//! `LevelChunk` does not override `getSection`, so the write branch reads the
+//! same `wrapped.getSections()[i]`. The two branches are behaviorally
+//! identical: a read-only caller sees the wrapped chunk's contents, and the
+//! base `this.sections` all-air defaults that `super(...)`'s
+//! `replaceMissingSections` fills are unreachable through `getSection`.
 //!
 //! The heightmap `fixType` maps the worldgen-only `WORLD_SURFACE_WG`/
 //! `OCEAN_FLOOR_WG` types to their client-facing forms because the wrapped
@@ -45,8 +47,6 @@ use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::ChunkStatus;
 use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::level_chunk_section::LevelChunkSection;
-use crate::chunk::paletted_container_factory::PalettedContainerFactory;
-use crate::level::height_accessor::LevelHeightAccessor;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::heightmap::Types;
 use rivet_nbt::compound_tag::CompoundTag;
@@ -69,10 +69,6 @@ where
     /// The `ProtoChunk`-side `carvingMask`, written only when writes are
     /// allowed (Java's `super.getOrCreateCarvingMask()`).
     carving_mask: Option<CarvingMask>,
-    /// The `ProtoChunk`-side default all-air sections (Java's `super(...)`
-    /// `replaceMissingSections`), built from the wrapped chunk's factory —
-    /// returned by [`get_section`] when writes are disallowed.
-    default_sections: Vec<LevelChunkSection<T, B>>,
 }
 
 impl<T, B, S> ImposterProtoChunk<T, B, S>
@@ -81,33 +77,13 @@ where
     B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
-    /// `ImposterProtoChunk(LevelChunk, boolean allowWrites)` — the wrapped
-    /// chunk's factory builds the `ProtoChunk`-side default sections (Java's
-    /// `super(wrapped.getPos(), ..., wrapped.getLevel().palettedContainerFactory(),
-    /// ...)`), which `replaceMissingSections` fills with all-air containers.
-    /// `is_air` classifies states for those defaults' recalc (the caller's
-    /// `BlockBehaviour.isAir`).
-    pub fn new(
-        wrapped: LevelChunk<T, B, S>,
-        allow_writes: bool,
-        container_factory: &PalettedContainerFactory<T, B>,
-        is_air: &dyn Fn(&T) -> bool,
-    ) -> Self {
-        let count = wrapped.height_accessor().get_sections_count() as usize;
-        let mut default_sections = Vec::with_capacity(count);
-        for _ in 0..count {
-            default_sections.push(LevelChunkSection::new(
-                container_factory.create_for_block_states(),
-                container_factory.create_for_biomes(),
-                is_air,
-            ));
-        }
+    /// `ImposterProtoChunk(LevelChunk, boolean allowWrites)`.
+    pub fn new(wrapped: LevelChunk<T, B, S>, allow_writes: bool) -> Self {
         ImposterProtoChunk {
             wrapped,
             allow_writes,
             status: ChunkStatus::Empty,
             carving_mask: None,
-            default_sections,
         }
     }
 
@@ -140,14 +116,10 @@ where
     }
 
     /// `getSection(int)` — Java's `allowWrites ? wrapped.getSection :
-    /// super.getSection`: writes allowed → the wrapped chunk's section, else
-    /// the `ProtoChunk` base's default all-air sections.
+    /// super.getSection`, which resolves to `wrapped.getSections()[i]` on both
+    /// branches (see the module docs): always the wrapped chunk's section.
     pub fn get_section(&self, section_index: usize) -> &LevelChunkSection<T, B> {
-        if self.allow_writes {
-            self.wrapped.get_section(section_index)
-        } else {
-            &self.default_sections[section_index]
-        }
+        self.wrapped.get_section(section_index)
     }
 
     /// `getSections()` — always the wrapped chunk's sections (Java's override).
@@ -378,7 +350,7 @@ mod tests {
         wrapped: LevelChunk<u8, u8, &'static str>,
         allow_writes: bool,
     ) -> ImposterProtoChunk<u8, u8, &'static str> {
-        ImposterProtoChunk::new(wrapped, allow_writes, &factory(), &|s| *s == 0)
+        ImposterProtoChunk::new(wrapped, allow_writes)
     }
 
     /// A wrapped chunk with stone (1) at (0, 0, 0) of section 0 and air (0)
@@ -431,20 +403,21 @@ mod tests {
     }
 
     #[test]
-    fn read_only_get_section_returns_all_air_defaults_not_the_wrapped_contents() {
-        // The wrapped chunk has stone at (0, -64, 0), so its section 0 is not
-        // all-air. Java's read-only imposter returns `super.getSection(0)`
-        // (the `ProtoChunk` base's all-air default), while a write-allowed
-        // imposter returns the wrapped chunk's section — the divergence the
-        // port now mirrors.
+    fn get_section_always_returns_the_wrapped_chunk_sections() {
+        // Java's `getSection` is `allowWrites ? wrapped.getSection :
+        // super.getSection`, and `super.getSection(i)` is
+        // `this.getSections()[i]` — a virtual call that dispatches to the
+        // `getSections` override (`wrapped.getSections()`). `LevelChunk` does
+        // not override `getSection`, so the write branch reads the same
+        // `wrapped.getSections()[i]`: both branches return the wrapped chunk's
+        // section (the base all-air defaults are unreachable through
+        // `getSection`).
         let read_only = imposter(wrapped_chunk(), false);
-        assert_eq!(read_only.get_section(0).get_block_state(0, 0, 0), 0);
-        assert_eq!(read_only.get_section(0).non_empty_block_count(), 0);
+        assert_eq!(read_only.get_section(0).get_block_state(0, 0, 0), 1);
+        assert_eq!(read_only.get_section(0).non_empty_block_count(), 1);
         let writable = imposter(wrapped_chunk(), true);
         assert_eq!(writable.get_section(0).get_block_state(0, 0, 0), 1);
         assert_eq!(writable.get_section(0).non_empty_block_count(), 1);
-        // The defaults are per-index independent of the wrapped sections.
-        assert_eq!(read_only.get_section(5).get_block_state(0, 0, 0), 0);
     }
 
     #[test]

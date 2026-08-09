@@ -283,9 +283,10 @@ impl<
     /// port defers) and forces `specialCollidingBlocks` to the
     /// `CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS` sentinel when the section has
     /// any non-empty block and `maybeHas` a special-colliding state, else 0.
-    /// Java leaves `tickingBlocks` untouched here; the port's read-in sections
-    /// are freshly constructed, so the list stays empty (client bookkeeping
-    /// starts at the first `setBlockState`).
+    /// Java leaves `tickingBlocks` untouched on read — a read-in client
+    /// section's list is repopulated only by a later `recalcBlockCounts` or a
+    /// block mutation. The port's read-in sections are freshly constructed, so
+    /// the list stays empty, matching Java's read-in state.
     ///
     /// `is_special_colliding` is the caller's `CollisionUtil.isSpecialCollidingBlock`
     /// equivalent — the section is generic over `T`, so the real `BlockBehaviour`
