@@ -196,7 +196,7 @@ record codec of two fields:
   (zero-bit storage).
 - `bitsPerEntry = bitsOnDisc`.
 
-### 4.2 `unpack` (read) — L305-345
+### 4.2 `unpack` (read) — PalettedContainer.java L305-345
 
 - `bitsOnDisc = getConfigurationForPaletteSize(paletteEntries.size()).bitsInStorage()`.
 - If `PackedData.bitsPerEntry != -1 && bitsOnDisc != bitsPerEntry` → error
