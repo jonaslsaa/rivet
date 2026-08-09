@@ -327,6 +327,21 @@ set -e
 grep -q "^    FAILED" "$TMP/out12c" || fail "self-test: FAILED not printed for top-level ok:false"
 pass "self-test: top-level ok:false -> FAILED"
 
+# Counterfeit: a trailing blank line after the JSON (`{"ok":true}\n\n`). The
+# old `$()` capture stripped trailing newlines, so the summary "passed"; the
+# protocol is exactly one bare JSON line, so a trailing blank line is a broken
+# raw-stdout shape and must FAIL (exit 1).
+self_run_sh $'{"ok":true,"protocol":1,"tests":9}\n'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out12d" 2>&1 )
+rc12d=$?
+set -e
+[ "$rc12d" = 1 ] || fail "self-test: trailing blank line should exit 1 (got $rc12d)"
+grep -q "^    FAILED" "$TMP/out12d" || fail "self-test: FAILED not printed for trailing blank line"
+grep -q "^    VERIFIED" "$TMP/out12d" && fail "self-test: VERIFIED printed despite trailing blank line"
+pass "self-test: trailing blank line -> FAILED"
+
 # Not runnable: UNVERIFIED, ORACLE_UNVERIFIED=1, no hard failure.
 ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=0
 run_oracle_self_test > "$TMP/out13" 2>&1
