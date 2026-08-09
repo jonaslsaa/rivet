@@ -361,10 +361,11 @@ mod tests {
     #[test]
     fn copy_from_clears_high_bits_when_target_is_larger() {
         let mut a = RegionBitmap::new();
-        a.force(0, 2);
+        a.force(0, 2); // one word: capacity 64
         let mut b = RegionBitmap::new();
-        b.force(0, 8);
-        // `other.get` past `a`'s capacity is false, so those bits are cleared.
+        b.force(0, 70); // two words: capacity 128 — target is larger
+        // Bits 64..70 sit past `a`'s capacity, so `other.get` is false there
+        // and `copy_from` clears them — the genuinely past-the-source path.
         b.copy_from(&a);
         assert_eq!(used_bits(&b), vec![0, 1]);
     }
