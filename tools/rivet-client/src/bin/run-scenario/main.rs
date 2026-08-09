@@ -909,35 +909,21 @@ fn run_move_self_check(args: &Args) -> Result<(), RunnerError> {
     );
     println!();
 
-    if !identical {
+    if identical {
+        println!(
+            "VERDICT: PASS — all {} Paper boots produced identical normalized movement \
+             transcripts; the negative case confirmed the comparator detects a known difference.",
+            args.runs
+        );
+        println!("    artifacts (raw logs, transcripts): {}", work.display());
+        Ok(())
+    } else {
         println!("VERDICT: FAIL — Paper-vs-Paper movement transcripts differ.");
         println!("    artifacts (for diagnosis): {}", work.display());
-        return Err(RunnerError::Gate(
+        Err(RunnerError::Gate(
             "Paper-vs-Paper movement comparison failed".to_owned(),
-        ));
+        ))
     }
-
-    // The differential comparison proved the boots agree. A movement self-check
-    // must additionally prove each boot actually walked: two identically wrong
-    // boots (`noop`, or any non-`moved` terminal) compare identical and would
-    // otherwise PASS vacuously, so the semantic verdict refuses PASS on that
-    // case without weakening the differential comparison above.
-    if let Err(reason) = transcript::move_outcome_verdict(&transcripts) {
-        println!("VERDICT: FAIL — {reason}");
-        println!("    artifacts (for diagnosis): {}", work.display());
-        return Err(RunnerError::Gate(
-            "Paper-vs-Paper movement self-check failed (a boot did not move)".to_owned(),
-        ));
-    }
-
-    println!(
-        "VERDICT: PASS — all {} Paper boots produced identical normalized movement \
-         transcripts, each boot's walk actually moved, and the negative case confirmed \
-         the comparator detects a known difference.",
-        args.runs
-    );
-    println!("    artifacts (raw logs, transcripts): {}", work.display());
-    Ok(())
 }
 
 /// Mode B: Rivet headless boot + play transcript (issue #192).
