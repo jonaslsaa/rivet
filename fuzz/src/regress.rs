@@ -142,10 +142,11 @@ fn intended_reachable_seeds_reach_their_core_work() {
         });
     }
 
-    // data_io_modified_utf8: canonicalization idempotence only runs on inputs
-    // the decoder accepts — these are the decodable set. (`too_long_write`
-    // decodes fine; its canonical re-encode exceeds 65535 bytes, which the
-    // body treats as a faithful error, not a bug.)
+    // data_io_modified_utf8: the body returns early unless the decoder accepts
+    // the input — these are the decodable set. `too_long_write` decodes fine
+    // but its canonical re-encode exceeds 65535 bytes, so the body returns on
+    // the faithful write-overflow error before the idempotence assertion; it is
+    // still pinned because the seed must decode to reach that overflow path.
     for name in [
         "ascii",
         "c080_nul",
@@ -160,6 +161,26 @@ fn intended_reachable_seeds_reach_their_core_work() {
         let data = seed_bytes("data_io_modified_utf8", name);
         decode_modified_utf8(&data).unwrap_or_else(|e| {
             panic!("data_io seed {name} must decode so canonicalization runs, got: {e}")
+        });
+    }
+
+    // codec_decode: on a parse failure the battery falls back to the empty tag,
+    // so a seed that stops parsing would still "pass" while no longer reaching
+    // its real content — pin the parseable set so the battery sees it.
+    for name in [
+        "array_typed",
+        "empty",
+        "lists",
+        "nested",
+        "numbers",
+        "strings_quoted",
+        "unicode_escape",
+    ] {
+        let data = seed_bytes("codec_decode", name);
+        let input = String::from_utf8_lossy(&data);
+        let parser = TagParser::create(NbtOps::instance());
+        parser.parse_fully(&input).unwrap_or_else(|e| {
+            panic!("codec_decode seed {name} must parse so the battery sees its content, got: {e}")
         });
     }
 
