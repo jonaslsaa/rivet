@@ -504,9 +504,12 @@ Dependency map (verified 2026-08-09; #230 and #233 have landed on `origin/main`,
 the rest remain OPEN):
 
 - **#230 (`chunk.wire` closure + `chunk.support`)** — LANDED. `PalettedContainerRO`,
-  `DataLayer`/`CarvingMask`/`BlockColumn`/`LightChunk`, the palette read path,
-  and the starlight **read** of section light data. The section-tag shape in §3
-  is its acceptance surface.
+  `PalettedContainerFactory`, `DataLayer`/`CarvingMask`/`BlockColumn`/`LightChunk`/
+  `LightChunkGetter`/`StructureAccess`, and the `block_states`/`biomes` palette
+  read path — the read-view of a §3/§4 section tag is its acceptance surface. It
+  does **not** read the light tags: `BlockLight`/`SkyLight` byte arrays and the
+  starlight state ints are consumed by `SerializableChunkData.parse` (§5),
+  deferred with the #231 wave and its starlight-save-format dependency #184.
 - **#232 (Level-root value slice + GameTime)** — the `getGameTime()`
   dependency (§8). Without it `LastUpdate`/`t` cannot be produced; the
   round-trip fixture must come from a world that has a game time.
