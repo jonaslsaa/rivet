@@ -237,7 +237,9 @@ fn all_24_section_boundaries_parse_and_reencode_byte_identical() {
             PalettedContainer::new(BiomeId(40), biome_strategy()),
             is_air,
         );
-        section.read(&mut buf);
+        // The golden superflat content is air + stone: no special-colliding
+        // blocks, so the default predicate matches Java's result.
+        section.read(&mut buf, &|_| false);
         let end = buffer.len() - buf.into_inner().len();
         offset = end;
         let size = end - start;

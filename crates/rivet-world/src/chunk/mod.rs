@@ -29,6 +29,7 @@ pub mod level_chunk;
 pub mod level_chunk_section;
 pub mod light_chunk;
 pub mod light_chunk_getter;
+pub mod moonrise_short_list;
 pub mod palette;
 pub mod paletted_container;
 pub mod paletted_container_factory;
