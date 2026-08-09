@@ -622,8 +622,14 @@ impl PlayerSessionManager {
     /// disconnect(reason)))`. The reason packet is encoded and queued *before*
     /// the `OutboundEvent::Disconnect` so the network side flushes the reason
     /// frame before closing (`handle_outbound` drains queued frames first; issue
-    /// #86, #158). If the reason cannot be encoded or queued the disconnect still
-    /// happens, with the explicit `Unsupported` reason — never silently dropped.
+    /// #86, #158).
+    ///
+    /// When the reason cannot be *encoded* the connection is still live, so the
+    /// `Unsupported` reason is queued and delivered. When the reason frame cannot
+    /// be queued — outbound overflow or a closed channel — `ConnectionRegistry::send`
+    /// prunes the connection and records `Overflow`/`EndOfStream` as the terminal
+    /// reason, and the follow-up `Disconnect` is a `Gone` no-op: the socket still
+    /// closes, just under that terminal reason instead of `Unsupported`.
     fn disconnect_invalid_movement(&mut self, ctx: &mut TickContext, id: ConnectionId) {
         let packet = ClientboundDisconnectPacket::new(Component::translatable(
             "multiplayer.disconnect.invalid_player_movement",
@@ -1787,6 +1793,68 @@ mod tests {
             } => {}
             other => panic!("expected InvalidPlayerMovement Disconnect, got {other:?}"),
         }
+    }
+
+    /// The overflow branch of `disconnect_invalid_movement`: a connection whose
+    /// outbound channel is full cannot take the reason frame, so
+    /// `ConnectionRegistry::send` prunes it and records `Overflow` as the
+    /// terminal reason. The follow-up `OutboundEvent::Disconnect { Unsupported }`
+    /// is then a `Gone` no-op — the socket still closes, but no `Unsupported`
+    /// reason ever surfaces and no reason frame is queued. This pins the honest
+    /// contract of the `disconnect_invalid_movement` doc (the `Unsupported`
+    /// fallback only delivers on the encode-fault branch, where the connection is
+    /// still live).
+    #[test]
+    fn invalid_movement_kick_on_full_outbound_records_overflow_and_closes() {
+        let mut registry = ConnectionRegistry::new();
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel(4);
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(1);
+        registry.apply(LifecycleEvent::Connect {
+            id: ID,
+            remote: "127.0.0.1:25565".parse().unwrap(),
+            in_rx,
+            out_tx,
+            drained: InboundDrained::new(),
+        });
+        let _ = in_tx;
+        // Fill the single-slot channel: a client that cannot keep up.
+        registry
+            .send(
+                ID,
+                OutboundEvent::Packet {
+                    frame: Bytes::from_static(b"a"),
+                },
+            )
+            .expect("the single-slot channel takes one queued frame");
+
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut ctx = TickContext {
+            tick: 1,
+            now_ns: 0,
+            now_ms: 0,
+            connections: &mut registry,
+            inbound: Vec::new(),
+        };
+        manager.disconnect_invalid_movement(&mut ctx, ID);
+
+        assert!(
+            !registry.contains(ID),
+            "overflow prunes the connection (the reason frame cannot be queued)"
+        );
+        assert_eq!(
+            registry.take_disconnect_reason(ID),
+            Some(DisconnectReason::Overflow),
+            "the terminal reason is the overflow, not the Unsupported fallback"
+        );
+        let mut out_rx = out_rx;
+        assert!(
+            matches!(out_rx.try_recv(), Ok(OutboundEvent::Packet { .. })),
+            "the pre-existing queued frame is still delivered"
+        );
+        assert!(
+            out_rx.try_recv().is_err(),
+            "no reason frame and no Disconnect fit: both are gone"
+        );
     }
 
     /// A `move_player` frame for a connection whose handoff has not landed is
