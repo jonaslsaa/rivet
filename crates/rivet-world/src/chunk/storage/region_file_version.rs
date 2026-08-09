@@ -46,8 +46,9 @@ pub struct RegionFileVersion {
 }
 
 /// `RegionFileVersion.selected` — the codec the writer uses for a whole region
-/// file, switched by `configure`. `AtomicI32` mirrors Java's `volatile` field
-/// without a lock; it only ever holds a registered write-side id (never 127).
+/// file, switched by `configure`. `AtomicI32` stores the startup-selected
+/// registered write-side id without a lock; it does not model Java `volatile`
+/// ordering.
 static SELECTED_ID: AtomicI32 = AtomicI32::new(RegionFileVersion::DEFAULT.id());
 
 impl RegionFileVersion {
