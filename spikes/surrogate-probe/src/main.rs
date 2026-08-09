@@ -30,11 +30,20 @@ fn main() {
     for (key, bytes) in [
         ("rust_mutf8_decode_high", &[0xEDu8, 0xA0, 0x80][..]),
         ("rust_mutf8_decode_low", &[0xED, 0xB0, 0x80][..]),
-        ("rust_mutf8_decode_pair", &[0xED, 0xA0, 0x80, 0xED, 0xB0, 0x80][..]),
+        (
+            "rust_mutf8_decode_pair",
+            &[0xED, 0xA0, 0x80, 0xED, 0xB0, 0x80][..],
+        ),
     ] {
         match decode_modified_utf8(bytes) {
-            Ok(s) => out(key, format!("ok units={} chars={}", s.encode_utf16().count(), q(&s))),
-            Err(e) => out(key, format!("ERR kind={:?} msg={}", e.kind(), q(&e.to_string()))),
+            Ok(s) => out(
+                key,
+                format!("ok units={} chars={}", s.encode_utf16().count(), q(&s)),
+            ),
+            Err(e) => out(
+                key,
+                format!("ERR kind={:?} msg={}", e.kind(), q(&e.to_string())),
+            ),
         }
     }
 
@@ -47,11 +56,17 @@ fn main() {
         let enc = match write_utf_body(s) {
             Ok(b) => b,
             Err(e) => {
-                out("rust_mutf8_encode_err", format!("ERR {}", q(&e.to_string())));
+                out(
+                    "rust_mutf8_encode_err",
+                    format!("ERR {}", q(&e.to_string())),
+                );
                 Vec::new()
             }
         };
-        out(key, format!("units={} bytes={}", s.encode_utf16().count(), hex(&enc)));
+        out(
+            key,
+            format!("units={} bytes={}", s.encode_utf16().count(), hex(&enc)),
+        );
     }
 
     // 3. WHATWG decode (utf8_string::decode_utf8) — must match Java new String.
@@ -61,7 +76,10 @@ fn main() {
         ("rust_whatwg_pair", &[0xF0, 0x9F, 0x92, 0xA9][..]),
     ] {
         let s = crate::whatwg::decode(bytes);
-        out(key, format!("units={} chars={}", s.encode_utf16().count(), q(&s)));
+        out(
+            key,
+            format!("units={} chars={}", s.encode_utf16().count(), q(&s)),
+        );
     }
 
     // 4. serde_json parse of a lone-surrogate escape (Gson parses to lone
@@ -74,7 +92,15 @@ fn main() {
         match serde_json::from_str::<serde_json::Value>(json) {
             Ok(v) => {
                 let s = v.as_str().unwrap_or("<non-string>");
-                out(key, format!("units={} chars={} reserialized={}", s.encode_utf16().count(), q(s), q(&v.to_string())));
+                out(
+                    key,
+                    format!(
+                        "units={} chars={} reserialized={}",
+                        s.encode_utf16().count(),
+                        q(s),
+                        q(&v.to_string())
+                    ),
+                );
             }
             Err(e) => out(key, format!("ERR {}", q(&e.to_string()))),
         }
@@ -97,30 +123,61 @@ mod whatwg {
             if bytes_needed == 0 {
                 match byte {
                     0x00..=0x7F => out.push(char::from_u32(byte).unwrap()),
-                    0xC2..=0xDF => { bytes_needed = 1; code_point = byte & 0x1F; lower_byte = 0x80; upper_byte = 0xBF; }
-                    0xE0..=0xEF => { bytes_needed = 2; code_point = byte & 0x0F; lower_byte = if byte == 0xE0 { 0xA0 } else { 0x80 }; upper_byte = 0xBF; }
+                    0xC2..=0xDF => {
+                        bytes_needed = 1;
+                        code_point = byte & 0x1F;
+                        lower_byte = 0x80;
+                        upper_byte = 0xBF;
+                    }
+                    0xE0..=0xEF => {
+                        bytes_needed = 2;
+                        code_point = byte & 0x0F;
+                        lower_byte = if byte == 0xE0 { 0xA0 } else { 0x80 };
+                        upper_byte = 0xBF;
+                    }
                     0xF0..=0xF4 => {
-                        bytes_needed = 3; code_point = byte & 0x07;
-                        if byte == 0xF0 { lower_byte = 0x90; upper_byte = 0xBF; }
-                        else if byte == 0xF4 { lower_byte = 0x80; upper_byte = 0x8F; }
-                        else { lower_byte = 0x80; upper_byte = 0xBF; }
+                        bytes_needed = 3;
+                        code_point = byte & 0x07;
+                        if byte == 0xF0 {
+                            lower_byte = 0x90;
+                            upper_byte = 0xBF;
+                        } else if byte == 0xF4 {
+                            lower_byte = 0x80;
+                            upper_byte = 0x8F;
+                        } else {
+                            lower_byte = 0x80;
+                            upper_byte = 0xBF;
+                        }
                     }
                     _ => out.push('\u{FFFD}'),
                 }
             } else if (0x80..=0xBF).contains(&byte) {
                 if byte < lower_byte || byte > upper_byte {
-                    bytes_needed = 0; code_point = 0; lower_byte = 0x80; upper_byte = 0xBF;
-                    out.push('\u{FFFD}'); i -= 1;
+                    bytes_needed = 0;
+                    code_point = 0;
+                    lower_byte = 0x80;
+                    upper_byte = 0xBF;
+                    out.push('\u{FFFD}');
+                    i -= 1;
                 } else {
                     code_point = (code_point << 6) | (byte & 0x3F);
-                    bytes_needed -= 1; lower_byte = 0x80; upper_byte = 0xBF;
-                    if bytes_needed == 0 { out.push(char::from_u32(code_point).unwrap_or('\u{FFFD}')); }
+                    bytes_needed -= 1;
+                    lower_byte = 0x80;
+                    upper_byte = 0xBF;
+                    if bytes_needed == 0 {
+                        out.push(char::from_u32(code_point).unwrap_or('\u{FFFD}'));
+                    }
                 }
             } else {
-                bytes_needed = 0; code_point = 0; out.push('\u{FFFD}'); i -= 1;
+                bytes_needed = 0;
+                code_point = 0;
+                out.push('\u{FFFD}');
+                i -= 1;
             }
         }
-        if bytes_needed != 0 { out.push('\u{FFFD}'); }
+        if bytes_needed != 0 {
+            out.push('\u{FFFD}');
+        }
         out
     }
 }

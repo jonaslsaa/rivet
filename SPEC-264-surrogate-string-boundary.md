@@ -70,6 +70,7 @@ Two facts are load-bearing:
 | B10 | Registry/identifier | `Identifier.parse` (ASCII-only) | `rivet-registry::identifier` | n/a (ASCII), doc-only |
 | B11 | Filesystem paths | `java.nio.file.Path` (UTF-8/OS encoding) | `std::path::PathBuf` / `to_string_lossy` | n/a in current tree (no `Path` port yet); specify `to_string_lossy`+document when the `Path` wave lands |
 | B12 | JVM-adapter FFI | Java `String` → C `char*` | `rivet-ffi` (future) | Specify in §4 / §7 Stage 4: marshal UTF-8, lone surrogate → `?` on the Java side (matches netty) or `Err` |
+| B13 | Filesystem file **contents** (configs, datapacks) | Java `Files.readString` (UTF-8) / `Properties.load` (ISO-8859-1) | serde/toml (future server-properties, `world/` files) | n/a in current tree (no config/datapack loader yet); specify `from_utf8`+error when the loader wave lands — a lone surrogate in a config file cannot round-trip through Rust `String` |
 
 ## 4. Canonical decision (D14 candidate)
 
@@ -89,6 +90,36 @@ replace.**
 - **Never** map a lone surrogate to `?` in internal state (that is netty/Gson's serialization behavior, not a
   storage invariant). If a future wave needs byte-identity on hostile NBT fixtures, revisit via a `SurrogatePolicy`
   enum at the decoder — explicitly deferred, not speculative now.
+
+### Implications of the decision
+
+- **Fidelity.** Byte-for-byte parity where Java *preserves*: the protocol boundary (B7/B8) is already identical
+  (WHATWG decode produces the same single U+FFFD, and the post-decode UTF-16 length check counts 1 unit on both
+  sides, so a surrogate byte sequence can never diverge in the bounds check). The only divergent surfaces are the
+  MUTF-8/SNBT read paths (B1/B3/B4/B5), classified `diverged` in `rivet-parity`: Java preserves the lone surrogate,
+  Rivet errors. No byte stream a Rivet `String` can legitimately produce is ever re-encoded differently from Java;
+  the error is deterministic and names the code point (SNBT) or is the generic decoder error (MUTF-8), so it is
+  greppable and reproducible, never a silent alteration.
+- **Ergonomics.** Keeping `String` canonical means `StringTag.value`, `CompoundTag` keys, `NbtOps`, `Component`,
+  `Identifier`, and every codec surface keep Java's own `String` type with no boundary wrapper to unwrap or convert
+  at tag-visitor/DFU/Component boundaries. Module mirroring and names stay greppable per PORTING.md. A hostile input
+  is rejected once, at the decoder, where the message can name it — not at a downstream consumer that lacks context.
+- **Allocation.** `decode_modified_utf8` already mirrors Java's `char[]` → `String` with a transient `Vec<u16>`; the
+  unpaired-surrogate error short-circuits before the final `String` is built. The rejected `Vec<u16>` boundary type
+  would tax the NBT hot path on *every* tag, not just hostile ones: each value/compound key would need a decode when
+  read and an encode when converted to `&str`, a recurring copy-and-convert cost paid for a case that cannot
+  legitimately occur.
+- **Security.** Erroring — never lossy-replacing — at the MUTF-8/SNBT read boundaries means a lone surrogate can
+  never enter internal `String` state, where a later re-encode would silently corrupt byte identity or confuse a
+  downstream check. At the protocol boundary, replacing with U+FFFD matches Java exactly, and the WHATWG decode
+  never panics on a surrogate byte sequence — it always yields a `String` (a single U+FFFD), so a lone-surrogate
+  payload is confined to the same `maxLength` accounting as any other decoded string. serde_json's rejection of
+  `"\ud800"` (B9) fails hostile chat JSON at parse time instead of carrying a lone surrogate into a `Component` that
+  Gson would later flatten to `?` — a deterministic error instead of silent alteration.
+- **Migration.** Because `String` stays canonical, nothing is migrated: every consumer already holds valid UTF-8.
+  The single extension point for a future byte-identity need is a `SurrogatePolicy` enum parameter on
+  `decode_modified_utf8` (noted above), added only when a concrete wave demonstrates the need. No compatibility
+  layer is preserved; the `diverged` classification in `rivet-parity` is the durable record.
 
 ## 5. Options compared (why not the alternatives)
 
