@@ -337,11 +337,19 @@ run_oracle_hash() {
   echo "    VERIFIED — xxh3_64 matches the pinned known-answer vectors"
   echo "==> oracle hash-paper (rebuild committed Paper manifest; must be git-clean)"
   cargo run -q -p rivet-oracle -- hash-paper
-  if ! git diff --exit-code -- tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json; then
-    echo "    FAILED — committed Paper hash manifest drifted from a fresh rebuild; regenerate and commit it"
-    exit 1
+  # The byte-identity check needs a git work tree to compare the rebuild against
+  # the committed manifest. The gate shell tests drive gate.sh from a non-git
+  # sandbox (cargo stubbed), where the manifest cannot be tracked; there the
+  # check is recorded as a NOTICE — never a silent skip or a false abort.
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! git diff --exit-code -- tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json; then
+      echo "    FAILED — committed Paper hash manifest drifted from a fresh rebuild; regenerate and commit it"
+      exit 1
+    fi
+    echo "    VERIFIED — Paper manifest rebuilds byte-identically (2 FULL: the_nether/0.0 + the_end/0.0)"
+  else
+    echo "    NOTICE — skipped the Paper manifest git-clean check (not inside a git work tree)"
   fi
-  echo "    VERIFIED — Paper manifest rebuilds byte-identically (2 FULL: the_nether/0.0 + the_end/0.0)"
   local paper_dir="$REPO_DIR/tools/rivet-oracle/fixtures/chunk-hash/paper"
   local rivet_dir="${RIVET_HASH_DIR:-}"
   if [ -z "$rivet_dir" ]; then
