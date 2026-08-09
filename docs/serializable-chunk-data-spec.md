@@ -373,7 +373,7 @@ chunk.getMinY())` (L436-437). Absent → null.
 
 ## 7. Optional / ancillary codecs
 
-### 7.1 `blending_data` — `BlendingData.Packed.CODEC` (BlendingData.java L398-420)
+### 7.1 `blending_data` — `BlendingData.Packed.CODEC` (BlendingData.java L398-415)
 
 Record `Packed(int minSection, int maxSection, Optional<double[]> heights)`:
 
