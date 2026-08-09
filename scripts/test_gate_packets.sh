@@ -32,6 +32,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Shared dwell-stub setup + counterfactual (scripts/test-stubs/dwell-stub-setup.sh).
+source "$PWD/scripts/test-stubs/dwell-stub-setup.sh"
+
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -66,6 +69,9 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/t
 # prerequisites present.
 mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
 : > "$SANDBOX/tools/rivet-client/target/debug/rivet-client"
+# The full gate's scenario runner also invokes tools/rivet-client/run-scenario.sh
+# for the unconditional dwell row (issue #160); install the shared sandbox stub.
+install_dwell_stub "$SANDBOX"
 
 # The real gate script under test.
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
@@ -151,7 +157,12 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # Fully controlled PATH: sandbox bin + minimal system dirs. gate.sh prepends
 # $HOME/.cargo/bin itself. JAVA_HOME points at the sandbox jdk so the
 # reference-oracle javac probe is deterministic on hosts with their own JDK.
-GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+# The RIVET_* oracle env vars are unset so a developer's real oracle installation
+# cannot leak in and flip the scenario-runner's paperclip guard (which would
+# route the join/move rows into the strict dwell-only stub). DWELL_STUB_LOG /
+# DWELL_STUB_FAIL (set by install_dwell_stub) reach the sandbox's run-scenario
+# stub through the env.
+GATE="env -u RIVET_ORACLE_JAR -u RIVET_PAPER_JAR -u RIVET_PAPER_LIBRARIES -u RIVET_PAPER_RUNTIME_JAR -u RIVET_JAVA_HOME HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk DWELL_STUB_LOG=$DWELL_STUB_LOG DWELL_STUB_FAIL=$DWELL_STUB_FAIL PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # Assertions shared by every scenario: the packets step must be scoped to
 # `-p rivet-protocol --features packets` — never widened to `--all-features` or
@@ -194,6 +205,10 @@ run_scenarios() {
   # --- scenario 0: green full gate runs the packets step and reaches GATE GREEN --
   rm -f "$FAIL_PACKETS_TEST" "$FAIL_PACKETS_CLIPPY"
   : > "$TEST_LOG"
+  # The dwell stub's invocation log must be empty going in so
+  # assert_dwell_invoked below reflects only this run's gate, not a stale entry
+  # left by an earlier profile's counterfactuals.
+  : > "$DWELL_STUB_LOG"
   if ! eval "$GATE" > "$SANDBOX/$profile.green.log" 2>&1; then
     echo "FAIL ($profile, scenario 0): green full gate did not exit 0" >&2
     exit 1
@@ -204,6 +219,9 @@ run_scenarios() {
     || { echo "FAIL ($profile, scenario 0): packets step did not run on the full gate" >&2; exit 1; }
   assert_packets_ran "$profile" "$TEST_LOG"
   assert_no_workspace_wide_features "$profile/scenario-0" "$TEST_LOG"
+  # The dwell row (issue #160) must actually have run — a green gate that drops
+  # it would leave the stub's invocation log empty.
+  assert_dwell_invoked "$profile, scenario 0"
   echo "ok ($profile): green full gate runs packets clippy+test and reaches GATE GREEN"
 
   # --- scenario 1: full gate is red when the packets-feature test fails ---------
@@ -264,6 +282,9 @@ run_scenarios() {
   fi
   assert_no_workspace_wide_features "$profile/scenario-4" "$TEST_LOG"
   echo "ok ($profile): scoped rivet-nbt gate skips the packets step"
+
+  # --- dwell counterfactuals (shared: failing verdict, wrong invocation, removal, leaked jar) --
+  dwell_gate_counterfactuals
 }
 
 run_scenarios "nextest" nextest

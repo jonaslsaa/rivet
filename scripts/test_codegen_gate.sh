@@ -34,6 +34,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Shared dwell-stub setup + counterfactual (scripts/test-stubs/dwell-stub-setup.sh).
+source "$PWD/scripts/test-stubs/dwell-stub-setup.sh"
+
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -72,6 +75,9 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/t
 # prerequisites present.
 mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
 : > "$SANDBOX/tools/rivet-client/target/debug/rivet-client"
+# The full gate's scenario runner also invokes tools/rivet-client/run-scenario.sh
+# for the unconditional dwell row (issue #160); install the shared sandbox stub.
+install_dwell_stub "$SANDBOX"
 
 # --- satisfy the oracle pre-check ---------------------------------------------
 # oracle_prereq_check (gate.sh, full gate only) probes for java 25+, python3,
@@ -162,8 +168,12 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # $HOME/.cargo/bin itself, so a host with cargo-nextest installed in its own
 # ~/.cargo/bin cannot leak in and flip the fallback profile non-deterministically.
 # JAVA_HOME points at the sandbox jdk so the reference-oracle javac probe is
-# deterministic on hosts that have their own JDK configured.
-GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+# deterministic on hosts that have their own JDK configured. The RIVET_* oracle
+# env vars are unset so a developer's real oracle installation cannot leak in
+# and flip the scenario-runner's paperclip guard (which would route the join/move
+# rows into the strict dwell-only stub). DWELL_STUB_LOG / DWELL_STUB_FAIL (set by
+# install_dwell_stub) reach the sandbox's run-scenario stub through the env.
+GATE="env -u RIVET_ORACLE_JAR -u RIVET_PAPER_JAR -u RIVET_PAPER_LIBRARIES -u RIVET_PAPER_RUNTIME_JAR -u RIVET_JAVA_HOME HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk DWELL_STUB_LOG=$DWELL_STUB_LOG DWELL_STUB_FAIL=$DWELL_STUB_FAIL PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # run_scenarios <profile-name> <nextest-presence>
 #   nextest-presence: "nextest" installs the cargo-nextest stub; anything else
@@ -183,6 +193,10 @@ run_scenarios() {
   # the exit-3 (ORACLE UNVERIFIED) path.
   rm -f "$FAIL_CODEGEN_TEST" "$FAIL_MACHETE"
   : > "$TEST_LOG"
+  # The dwell stub's invocation log must be empty going in so
+  # assert_dwell_invoked below reflects only this run's gate, not a stale entry
+  # left by an earlier profile's counterfactuals.
+  : > "$DWELL_STUB_LOG"
   if ! eval "$GATE" > "$SANDBOX/$profile.green.log" 2>&1; then
     echo "FAIL ($profile, scenario 0): green full gate did not exit 0" >&2
     exit 1
@@ -191,6 +205,9 @@ run_scenarios() {
     || { echo "FAIL ($profile, scenario 0): green full gate did not reach GATE GREEN" >&2; exit 1; }
   grep -q "rivet-codegen (workspace-excluded tool) fmt/clippy/test" "$SANDBOX/$profile.green.log" \
     || { echo "FAIL ($profile, scenario 0): codegen step did not run on the full gate" >&2; exit 1; }
+  # The dwell row (issue #160) must actually have run — a green gate that drops
+  # it would leave the stub's invocation log empty.
+  assert_dwell_invoked "$profile, scenario 0"
   echo "ok ($profile): green full gate reaches GATE GREEN"
 
   # --- scenario 1: full gate is red when codegen test fails -------------------
@@ -260,6 +277,13 @@ run_scenarios() {
     exit 1
   fi
   echo "ok ($profile): full gate is red when the codegen machete check fails"
+
+  # --- dwell counterfactuals (shared: failing verdict, wrong invocation, removal, leaked jar) --
+  # The machete scenario above leaves FAIL_MACHETE set; clear it so the
+  # counterfactuals' red is attributable to the dwell behavior, not a stale
+  # machete marker.
+  rm -f "$FAIL_CODEGEN_TEST" "$FAIL_MACHETE"
+  dwell_gate_counterfactuals
 }
 
 run_scenarios "nextest" nextest
