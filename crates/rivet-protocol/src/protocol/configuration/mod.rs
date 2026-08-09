@@ -14,10 +14,13 @@
 //! packets; `update_tags`' `TagNetworkSerialization.NetworkPayload` wire shape
 //! lives in `crate::protocol::common::tag_network_payload`.
 //!
-//! Deferred, not stubbed (not on the M1 offline join path): `accept_code_of_conduct`
-//! is decoded by the configuration listener's `handleAcceptCodeOfConduct`
-//! (issue #236), which always closes on the mismatch — no CoC task is ever
-//! queued (`MinecraftServer.getCodeOfConducts()` is `Map.of()`). The
+//! `accept_code_of_conduct` is ported (issue #236): the fieldless
+//! `ServerboundAcceptCodeOfConductPacket` decodes via `StreamCodec.unit`, and
+//! the configuration listener's `handleAcceptCodeOfConduct` always closes on the
+//! mismatch — no CoC task is ever queued (`MinecraftServer.getCodeOfConducts()`
+//! is `Map.of()`).
+//!
+//! Deferred, not stubbed (not on the M1 offline join path): the
 //! `reset_chat`/`code_of_conduct` bodies stay deferred with the CoC task that
 //! would send them.
 //!

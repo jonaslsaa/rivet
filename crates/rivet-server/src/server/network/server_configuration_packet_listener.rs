@@ -363,14 +363,16 @@ impl ServerConfigurationPacketListener {
         // and the connection reaches the play handoff; the join burst fires
         // tick-side via the play listener (issue #101 Slice B), so `spawnPlayer`
         // needs no configuration-phase task here.
-        // `addOptionalTasks` queues nothing in this slice: the
-        // `ServerCodeOfConductConfigurationTask` and
-        // `ServerResourcePackConfigurationTask` tasks (and the Paper
-        // `AsyncPlayerConnectionConfigureEvent` task) are optional and this
-        // Paper's `MinecraftServer.getCodeOfConducts()`/`getServerResourcePack()`
-        // are empty (`Map.of()` / `Optional.empty()`), so the conditionals in
-        // Paper's `addOptionalTasks` never add a task (the CoC event listener
-        // count is plugin-layer, deferred with the JVM adapter #26).
+        // `addOptionalTasks` queues nothing in this slice: this Paper's
+        // `MinecraftServer.getCodeOfConducts()`/`getServerResourcePack()` are
+        // empty (`Map.of()` / `Optional.empty()`) and the CoC condition also
+        // checks the `PlayerCodeOfConductSendEvent` listener count (plugin-layer,
+        // deferred with the JVM adapter #26), so neither
+        // `ServerCodeOfConductConfigurationTask` nor
+        // `ServerResourcePackConfigurationTask` is added. The `PaperConfigurationTask`
+        // (the `AsyncPlayerConnectionConfigureEvent`) IS added unconditionally in
+        // Java, but its `start` finishes immediately when no listeners are
+        // registered — the same no-op here since the plugin bridge is deferred.
         self.configuration_tasks
             .push_back(Box::new(SynchronizeRegistriesTask::new()));
         self.configuration_tasks.push_back(Box::new(JoinWorldTask));
