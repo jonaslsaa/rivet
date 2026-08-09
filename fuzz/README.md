@@ -24,7 +24,7 @@ cargo install cargo-fuzz                   # once
 | `nbt_binary`           | `NbtIo.read_any_tag` / `read_unnamed_tag` / `read` / `read_compressed` over raw bytes (gzip + ungzipped) |
 | `nbt_binary_visitor`   | `NbtIo.parse` / `parse_compressed` with an always-`Continue` visitor, forcing full tree traversal through the stream-visitor dispatch |
 | `codec_decode`         | DFU codec combinators (`int`/`string`/`bool`/`list`/`pair`/`either`/`unbounded_map`/`compound_list`/`RecordCodecBuilder`/`passthrough`) decoding SNBT-parsed `Tag` values over `NbtOps` |
-| `nbt_binary_roundtrip` | `NbtIo.writeUnnamedTagWithFallback` canonicalization idempotence — write → re-read → write is byte-identical (covers the MUTF-8 encoder, NaN canonicalization, `StringFallbackDataOutput`) |
+| `nbt_binary_roundtrip` | `NbtIo.writeUnnamedTagWithFallback` canonicalization idempotence on successfully-parsed input — write → re-read → write is byte-identical (covers the MUTF-8 encoder, NaN re-canonicalization, and the `StringFallbackDataOutput` overflow path) |
 | `data_io_modified_utf8` | the modified-UTF-8 wire codec (`decode_modified_utf8` / `write_utf_body`) — canonicalization idempotence `decode(encode(decode(x))) == decode(x)`, no panic on malformed input |
 | `codec_compressed_decode` | the DFU compressed-map decode path (`compressMaps() == true`) over `JsonOps::COMPRESSED` + `JsonOps::INSTANCE` — `KeyCompressor`, packed-list slots, null slots, list-length bounds |
 | `packet_status`        | `rivet-protocol` status/serverbound decode through the registration-built id-dispatch codec (`status_request` + `ping_request` bodies, issue #46) |
@@ -122,11 +122,17 @@ The seeds cover the cases the targets assert on:
 
 - **Binary NBT** (`nbt_binary*`): negative list length, missing list element
   type, oversized array (`>= 1 << 24`), truncated streams, deep nesting,
-  gzip-compressed input, and the write-path canonicalization cases for
-  `nbt_binary_roundtrip` — non-canonical NaN float/double payloads, overlong
-  modified-UTF-8 (`C1 80`), raw NUL bytes, malformed UTF-8, and a 40 KB
-  raw-NUL string that re-encodes past the 65535-byte write limit
-  (`too_long_write`).
+  gzip-compressed input, malformed modified-UTF-8, non-canonical NaN float/
+  double payloads, and — for `nbt_binary_roundtrip` — the roundtrip-writeable
+  seeds (`nbt_empty_root`, `nbt_rich`, `too_long_write`). The remaining
+  compound-rooted seeds (`nbt_nan_float`, `nbt_nan_double`,
+  `nbt_overlong_utf8`, `nbt_raw_nul_utf8`, `nbt_bad_utf8`) are *truncated*
+  compounds (no trailing END byte) and are rejected on the read path; they
+  exercise the
+  read-rejection side of `nbt_binary`/`nbt_binary_visitor`, not the roundtrip
+  write path. `too_long_write` is a 40 KB raw-NUL string that re-encodes past
+  the 65535-byte write limit and is the seed that exercises the
+  `StringFallbackDataOutput` write-path fallback.
 - **Modified UTF-8** (`data_io_modified_utf8`): raw NUL, overlong `C1 80`,
   canonical `C0 80`, 2/3-byte forms, astral surrogate pairs, unpaired
   surrogates (high/low), truncated leads, bad continuation bytes, the 4-byte
