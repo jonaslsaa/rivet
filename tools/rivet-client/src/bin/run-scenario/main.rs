@@ -39,9 +39,10 @@
 //!   reference and requires the real comparator/divergence path to report the
 //!   tampered value and refuse PASS, so the live acceptance cannot pass
 //!   vacuously.
-//! - `dwell` (issue #160, terminal M1 acceptance): the Rivet-only wall-clock
-//!   keepalive-survival gate. Boots exactly one rivet-server; the pinned Azalea
-//!   client spawns into PLAY and stays connected for `--dwell-seconds` of wall
+//! - `dwell` (issues #157/#160: keepalive survival + terminal M1 gate): the
+//!   Rivet-only wall-clock keepalive-survival gate. Boots exactly one
+//!   rivet-server; the pinned Azalea client spawns into PLAY and stays connected
+//!   for `--dwell-seconds` of wall
 //!   clock while auto-echoing every live keepalive. Passes only if the client
 //!   survived past the server's 30 s kick limit, proven via the rivet log's
 //!   `connection established` line, the absence of a `read timeout` kick, the
@@ -2086,9 +2087,9 @@ fn run_move(args: &Args) -> Result<(), RunnerError> {
     }
 }
 
-/// Mode E: the wall-clock keepalive-survival gate (issue #160, terminal M1
-/// acceptance). Boots a real rivet-server headlessly, drives the pinned Azalea
-/// client's `dwell` mode (spawn into PLAY, stay connected for
+/// Mode E: the wall-clock keepalive-survival gate (issues #157/#160: keepalive
+/// survival + terminal M1 gate). Boots a real rivet-server headlessly, drives
+/// the pinned Azalea client's `dwell` mode (spawn into PLAY, stay connected for
 /// `--dwell-seconds` wall-clock seconds while azalea auto-echoes every live
 /// keepalive), and verifies the client survived past the server's 30 s keepalive
 /// kick limit.
