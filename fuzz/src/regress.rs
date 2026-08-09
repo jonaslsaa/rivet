@@ -184,6 +184,23 @@ fn intended_reachable_seeds_reach_their_core_work() {
         });
     }
 
+    // `trailing_garbage` ("{} xyz") is not `parse_fully`-parseable (trailing
+    // input), but the body falls back to `parse_as_argument` — which leaves the
+    // trailing input unconsumed — so the battery still sees the leading `{}`.
+    // Pin it via that reach: if the seed ever regressed to fail both parses the
+    // battery would silently drop to the empty-tag fallback, exactly the
+    // silent no-op class this test exists to catch. `bad_token`, `deep`, and
+    // `unclosed` are the deliberate both-parses-fail seeds and stay unpinned.
+    let name = "trailing_garbage";
+    let data = seed_bytes("codec_decode", name);
+    let input = String::from_utf8_lossy(&data);
+    let parser = TagParser::create(NbtOps::instance());
+    parser.parse_as_argument(&input).unwrap_or_else(|e| {
+        panic!(
+            "codec_decode seed {name} must parse-as-argument so the battery sees its content, got: {e}"
+        )
+    });
+
     // codec_compressed_decode: the codec battery only runs when the input
     // yields a first JSON value — every committed seed must reach it.
     for (name, data) in seed_files("codec_compressed_decode") {
