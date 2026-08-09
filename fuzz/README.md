@@ -95,6 +95,13 @@ byte-array seed declaring `0x01000000` at the byte-array offset (proving the
 length guard fires before any 16 MiB allocation) and the
 `StringFallbackDataOutput` write-path fallback.
 
+Because a target body silently `return`s when a seed stops parsing (the
+roundtrip/SNBT/MUTF-8/compressed bodies all gate on a successful parse),
+`intended_reachable_seeds_reach_their_core_work` pins the seeds each target is
+documented to run its core assertion on — a seed that regresses to a rejected
+form (the bug that previously left the roundtrip write path uncovered) fails
+the test instead of silently no-oping.
+
 ## Seed corpus & regressions
 
 `fuzz/seeds/<target>/` holds committed seed inputs that pin the known edge

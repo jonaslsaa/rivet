@@ -10,6 +10,10 @@
 //! list type, oversized array, accounter quota/depth, compressed-map
 //! out-of-bounds) are classified and tolerated — they are the intended outcome
 //! for those seeds.
+//!
+//! A target body that silently `return`s when a seed stops parsing would hide a
+//! seed regressing to a rejected form, so `intended_reachable_seeds_reach_their_core_work`
+//! pins the seeds each target is documented to run its core assertion on.
 
 use std::fs;
 use std::io::Cursor;
@@ -18,7 +22,9 @@ use std::path::PathBuf;
 
 use rivet_nbt::nbt_accounter::NbtAccounter;
 use rivet_nbt::nbt_io::{read_unnamed_tag, write_unnamed_tag, write_unnamed_tag_with_fallback};
-use rivet_util::data_io::{DataInputStream, DataOutputStream};
+use rivet_nbt::nbt_ops::NbtOps;
+use rivet_nbt::tag_parser::TagParser;
+use rivet_util::data_io::{DataInputStream, DataOutputStream, decode_modified_utf8};
 
 use crate::{common, seeds, targets};
 
@@ -84,6 +90,86 @@ fn all_seeded_targets_run_every_committed_seed() {
                 });
             }
         }
+    }
+}
+
+/// The seed names whose target body is *documented* to run its core assertion
+/// on them. The bodies silently `return` when a seed stops parsing
+/// (`let Ok(tag) = ... else { return; }`), so a seed that regresses to a
+/// rejected form would no-op without failing `all_seeded_targets_run_every_committed_seed`
+/// (which only classifies panics, not silent skips). This test pins the
+/// intended-reach seeds: it is exactly the class of regression that produced
+/// the truncated roundtrip seeds repaired in the seed-repair commit, where the
+/// roundtrip write path went uncovered.
+#[test]
+fn intended_reachable_seeds_reach_their_core_work() {
+    // nbt_binary_roundtrip: the write-path canonicalization assertion only runs
+    // when `read_unnamed_tag` succeeds — these are the roundtrip-writeable set.
+    for name in [
+        "nbt_bad_utf8",
+        "nbt_empty_root",
+        "nbt_nan_double",
+        "nbt_nan_float",
+        "nbt_overlong_utf8",
+        "nbt_raw_nul_utf8",
+        "nbt_rich",
+        "too_long_write",
+    ] {
+        let data = seed_bytes("nbt_binary_roundtrip", name);
+        let mut dis = DataInputStream::new(Cursor::new(&data));
+        let mut acc = NbtAccounter::default_quota();
+        read_unnamed_tag(&mut dis, &mut acc).unwrap_or_else(|e| {
+            panic!("roundtrip seed {name} must parse so the write path runs, got: {e}")
+        });
+    }
+
+    // snbt_roundtrip: `parse(print(tag)) == tag` only runs on inputs the parser
+    // accepts — these are the parseable set.
+    for name in [
+        "array_typed",
+        "empty",
+        "lists",
+        "nested",
+        "numbers",
+        "strings_quoted",
+        "unicode_escape",
+    ] {
+        let data = seed_bytes("snbt_roundtrip", name);
+        let input = String::from_utf8_lossy(&data);
+        let parser = TagParser::create(NbtOps::instance());
+        parser.parse_fully(&input).unwrap_or_else(|e| {
+            panic!("snbt_roundtrip seed {name} must parse so the round-trip runs, got: {e}")
+        });
+    }
+
+    // data_io_modified_utf8: canonicalization idempotence only runs on inputs
+    // the decoder accepts — these are the decodable set. (`too_long_write`
+    // decodes fine; its canonical re-encode exceeds 65535 bytes, which the
+    // body treats as a faithful error, not a bug.)
+    for name in [
+        "ascii",
+        "c080_nul",
+        "empty",
+        "nul",
+        "overlong_c180",
+        "surrogate_pair",
+        "three_byte",
+        "too_long_write",
+        "two_byte",
+    ] {
+        let data = seed_bytes("data_io_modified_utf8", name);
+        decode_modified_utf8(&data).unwrap_or_else(|e| {
+            panic!("data_io seed {name} must decode so canonicalization runs, got: {e}")
+        });
+    }
+
+    // codec_compressed_decode: the codec battery only runs when the input
+    // yields a first JSON value — every committed seed must reach it.
+    for (name, data) in seed_files("codec_compressed_decode") {
+        assert!(
+            targets::compressed_decode_input(&data).is_some(),
+            "codec_compressed_decode seed {name} must yield a JSON value"
+        );
     }
 }
 
