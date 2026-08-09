@@ -43,7 +43,7 @@
 //! depend on insertion order; equality deliberately does not, keeping the two
 //! separate exactly like Java.
 
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 

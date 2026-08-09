@@ -1605,8 +1605,8 @@ mod tests {
 
     // ---- game profile / properties (issue #198) ---------------------------
 
-    fn uuid(most: i64, least: i64) -> rivet_util::mth::Uuid {
-        rivet_util::mth::Uuid { most, least }
+    fn uuid(most: i64, least: i64) -> rivet_util::uuid::Uuid {
+        rivet_util::uuid::Uuid { most, least }
     }
 
     fn property(name: &str, value: &str) -> rivet_registry::core::Property {

@@ -20,7 +20,7 @@ pub mod session;
 use std::collections::HashMap;
 
 use rivet_registry::core::{GameProfile, GameType, Vec3};
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 use crate::server::network::connection_id::ConnectionId;
 

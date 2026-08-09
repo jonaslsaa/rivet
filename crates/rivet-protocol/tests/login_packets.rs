@@ -37,7 +37,7 @@ use rivet_protocol::protocol::{
     Packet, PacketType, ProtocolInfoBuilder, clientbound_protocol, serverbound_protocol,
 };
 use rivet_registry::core::{GameProfile, Property, PropertyMap};
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 use std::fmt;
 use std::panic::catch_unwind;
 

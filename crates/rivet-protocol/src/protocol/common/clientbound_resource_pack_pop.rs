@@ -10,7 +10,7 @@ use crate::friendly_byte_buf::FriendlyByteBuf;
 use crate::protocol::common::packet_types::clientbound_resource_pack_pop;
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 /// `net.minecraft.network.protocol.common.ClientboundResourcePackPopPacket`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

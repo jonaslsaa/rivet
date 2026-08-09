@@ -16,7 +16,7 @@ use crate::friendly_byte_buf::FriendlyByteBuf;
 use crate::protocol::game::packet_types::clientbound_player_info_remove;
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 /// `ClientboundPlayerInfoRemovePacket` — the record `(List<UUID> profileIds)`.
 #[derive(Debug, Clone, PartialEq)]

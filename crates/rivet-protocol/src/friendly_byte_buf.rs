@@ -46,7 +46,7 @@ use rivet_nbt::nbt_io;
 use rivet_nbt::tag::Tag;
 use rivet_registry::core::ChunkPos;
 use rivet_util::data_io::{DataInput, DataOutput};
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 /// `FriendlyByteBuf.MAX_STRING_LENGTH`.
 pub const MAX_STRING_LENGTH: i32 = 32767;

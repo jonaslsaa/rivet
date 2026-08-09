@@ -16,7 +16,7 @@
 //! and `createOfflineProfile` (a `GameProfile` convenience — #99's offline login
 //! construction, not this codec slice).
 
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 /// `UUIDUtil.createOfflinePlayerUUID(String playerName)`.
 ///

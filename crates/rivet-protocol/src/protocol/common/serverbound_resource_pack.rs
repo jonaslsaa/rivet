@@ -12,7 +12,7 @@ use crate::friendly_byte_buf::FriendlyByteBuf;
 use crate::protocol::common::packet_types::serverbound_resource_pack;
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 /// `ServerboundResourcePackPacket.Action` — the client's resource-pack response.
 #[repr(i32)]

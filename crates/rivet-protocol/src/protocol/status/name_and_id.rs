@@ -28,7 +28,7 @@ use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec;
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 use std::sync::Arc;
 
 /// `net.minecraft.server.players.NameAndId` — `(UUID id, String name)`.

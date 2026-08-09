@@ -16,7 +16,7 @@ use crate::codec::StreamCodec;
 use crate::protocol::packet::{Packet, codec};
 use crate::protocol::packet_type::PacketType;
 use crate::registry_friendly_byte_buf::RegistryFriendlyByteBuf;
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 /// `ClientboundAddEntityPacket` — the spawn packet. STUB (blocked note above);
 /// the struct shape is declared so the packet type and the wire fields are

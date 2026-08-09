@@ -71,7 +71,7 @@ use rivet_registry::holder::Holder;
 use rivet_registry::registries;
 use rivet_registry::registries::{DimensionType, WorldClock};
 use rivet_registry::{Identifier, RegistrationInfo, RegistryAccess, RegistryBuilder, ResourceKey};
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 use std::fmt;
 use std::panic::catch_unwind;
 use std::sync::Arc;

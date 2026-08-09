@@ -8,6 +8,13 @@
 //!
 //! `net.minecraft.util.RandomSource` is NOT stubbed here — `mth.rs` uses the
 //! real trait from `random.rs` (unit `mc.util.random`).
+//!
+//! NOTE: a second `Vec3` exists at `rivet_registry::core::Vec3` — a wire-only
+//! slice of the same Java `world.phys.Vec3` for `PositionMoveRotation` (#87).
+//! The two cannot merge yet: `rivet-util` must not depend on `rivet-registry`
+//! (cycle — `rivet-registry` depends on `rivet-util`), and JOML is not in the
+//! workspace. Consolidate both into one real `world.phys.Vec3` port when the
+//! JOML unit lands.
 
 /// `net.minecraft.world.phys.Vec3` — the double-precision 3-vector.
 #[derive(Clone, Copy, Debug)]

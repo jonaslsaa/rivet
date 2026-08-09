@@ -185,7 +185,7 @@ mod tests {
                 20,
                 1,
                 vec![NameAndId::new(
-                    rivet_util::mth::Uuid {
+                    rivet_util::uuid::Uuid {
                         most: 0x00112233_44556677,
                         least: 0x8899aabb_ccddeeffu64 as i64,
                     },

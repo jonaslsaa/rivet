@@ -1293,7 +1293,7 @@ mod tests {
         // timeout (5s) is longer, so the keepalive closes the connection first.
         let config_listener = ServerConfigurationPacketListener::new(
             GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
+                rivet_util::uuid::Uuid { most: 0, least: 0 },
                 String::new(),
             ),
             conn.monotonic_nanos(),
@@ -1426,7 +1426,7 @@ mod tests {
         // throttle — far beyond the 150ms read deadline.
         let config_listener = ServerConfigurationPacketListener::new(
             GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
+                rivet_util::uuid::Uuid { most: 0, least: 0 },
                 String::new(),
             ),
             conn.monotonic_nanos(),

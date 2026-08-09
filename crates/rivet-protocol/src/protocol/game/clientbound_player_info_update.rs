@@ -91,7 +91,7 @@ impl Action {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     /// `profileId` — the player UUID, always present.
-    profile_id: rivet_util::mth::Uuid,
+    profile_id: rivet_util::uuid::Uuid,
     /// `profile` — Java `@Nullable GameProfile`.
     profile: Option<GameProfile>,
     /// `listed`.
@@ -120,7 +120,7 @@ impl Entry {
     /// The record's canonical constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        profile_id: rivet_util::mth::Uuid,
+        profile_id: rivet_util::uuid::Uuid,
         profile: Option<GameProfile>,
         listed: bool,
         latency: i32,
@@ -144,7 +144,7 @@ impl Entry {
     }
 
     /// `Entry.profileId()`.
-    pub fn profile_id(&self) -> rivet_util::mth::Uuid {
+    pub fn profile_id(&self) -> rivet_util::uuid::Uuid {
         self.profile_id
     }
 
@@ -198,7 +198,7 @@ impl Entry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteChatSessionData {
     /// `sessionId`.
-    session_id: rivet_util::mth::Uuid,
+    session_id: rivet_util::uuid::Uuid,
     /// `profilePublicKey`.
     profile_public_key: ProfilePublicKeyData,
 }

@@ -12,6 +12,10 @@
 //! `rivet-protocol` can hold it below itself), with the `StreamCodec` impl in
 //! `rivet-protocol`. This is a deliberate, documented wire-only slice of a
 //! deferred JOML type; the JOML unit replaces it with the real vector math.
+//!
+//! NOTE: a parallel math-surface `Vec3` lives at `rivet_util::mth_stubs::Vec3`
+//! (`Mth.lerp_vec3`/`Mth.ray_intersects_aabb`). Both slice the same Java
+//! `world.phys.Vec3`; consolidate into one real port when the JOML unit lands.
 
 /// `Vec3` — a 3-component double vector (`Vector3d`), as the position-move
 /// wire reads/writes it.

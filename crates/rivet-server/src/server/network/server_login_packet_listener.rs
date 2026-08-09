@@ -10,7 +10,7 @@ use rivet_protocol::protocol::login::serverbound_login_acknowledged_packet::{
     ServerboundLoginAcknowledgedPacket, stream_codec,
 };
 use rivet_registry::core::{GameProfile, create_offline_player_uuid};
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 use super::connection::Connection;
 use super::packet_listener::{

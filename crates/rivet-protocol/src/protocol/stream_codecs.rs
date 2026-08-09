@@ -28,7 +28,7 @@ use crate::codec::{CodecError, StreamCodec, StreamDecoder, StreamEncoder, compos
 use crate::friendly_byte_buf::{FriendlyByteBuf, MAX_STRING_LENGTH};
 use rivet_registry::{Identifier, Registry, ResourceKey};
 use rivet_util::KnownPack;
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 /// `Identifier.STREAM_CODEC` — a `MAX_STRING_LENGTH`-bounded UTF string
 /// parsed through `Identifier.parse` on decode and rendered by

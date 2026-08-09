@@ -400,7 +400,7 @@ mod tests {
             20,
             3,
             vec![NameAndId::new(
-                rivet_util::mth::Uuid {
+                rivet_util::uuid::Uuid {
                     most: 0x00112233_44556677,
                     least: 0x8899aabb_ccddeeffu64 as i64,
                 },
@@ -488,7 +488,7 @@ mod tests {
             10,
             1,
             vec![NameAndId::new(
-                rivet_util::mth::Uuid { most: 1, least: 2 },
+                rivet_util::uuid::Uuid { most: 1, least: 2 },
                 "A".to_string(),
             )],
         );

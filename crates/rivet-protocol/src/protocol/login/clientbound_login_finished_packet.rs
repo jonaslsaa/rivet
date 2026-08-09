@@ -22,7 +22,7 @@ use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
 use crate::protocol::stream_codecs::uuid_codec;
 use rivet_registry::core::GameProfile;
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 /// `net.minecraft.network.protocol.login.ClientboundLoginFinishedPacket` — the
 /// record `(GameProfile gameProfile, UUID sessionId)`.

@@ -19,7 +19,7 @@ use crate::friendly_byte_buf::FriendlyByteBuf;
 use crate::protocol::login::packet_types::serverbound_hello;
 use crate::protocol::packet::Packet;
 use crate::protocol::packet_type::PacketType;
-use rivet_util::mth::Uuid;
+use rivet_util::uuid::Uuid;
 
 /// `net.minecraft.network.protocol.login.ServerboundHelloPacket` — the record
 /// `(String name, UUID profileId)`.

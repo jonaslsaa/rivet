@@ -847,7 +847,7 @@ mod tests {
     fn test_listener() -> ServerConfigurationPacketListener {
         ServerConfigurationPacketListener::new(
             GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
+                rivet_util::uuid::Uuid { most: 0, least: 0 },
                 String::new(),
             ),
             0,
