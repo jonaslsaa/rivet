@@ -445,7 +445,7 @@ fn base_address(args: &Args) -> Result<SocketAddr, RunnerError> {
 }
 
 /// Reserve `n` distinct ephemeral loopback ports, held so the OS cannot hand
-/// out the same port twice. The held [`PortReservation`]s are released only
+/// out the same port twice. The held [`rivet_harness_common::port::PortReservation`]s are released only
 /// immediately before each server spawns (inside `server::boot`), so the
 /// bind-drop-boot race narrows to the spawn->child-bind gap.
 fn reserve_ports(
