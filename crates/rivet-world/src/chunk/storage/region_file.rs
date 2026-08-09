@@ -662,9 +662,12 @@ impl RegionFile {
     /// `close()` — Paper's nested `finally` order: `padToFullSector()` in the
     /// try, then `force(true)` in the finally, then the `FileChannel.close()`.
     /// The innermost close always runs, so the descriptor is released even if
-    /// padding or forcing failed. Mirroring Java's precedence, a pad error
-    /// (from the try) is reported over a force error (from the finally); the
-    /// close itself is a `drop` and cannot fail.
+    /// padding or forcing failed. Per JLS 14.20.2 a `try` that completes
+    /// abruptly and whose `finally` also completes abruptly propagates the
+    /// `finally`'s reason, so when both pad and force fail the **force** error
+    /// is reported and the pad error discarded — the `force_result.and(...)`
+    /// below mirrors that ordering; the close itself is a `drop` and cannot
+    /// fail.
     pub fn close(&mut self) -> io::Result<()> {
         let pad_result = self.pad_to_full_sector();
         let force_result = self.file_mut().sync_all();
