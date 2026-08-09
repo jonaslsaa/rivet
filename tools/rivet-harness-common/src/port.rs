@@ -16,8 +16,8 @@
 use std::io;
 use std::net::TcpListener;
 
-/// A bound loopback listener whose port is reserved until [`release`]
-/// (`PortReservation::release`) or drop.
+/// A bound loopback listener whose port is reserved until
+/// [`PortReservation::release`] or drop.
 pub struct PortReservation {
     listener: TcpListener,
 }
