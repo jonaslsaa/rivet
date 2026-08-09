@@ -221,7 +221,11 @@ for (let r = 1; r <= MAX; r++) {
     return { merge_ready: false, gate_failed: true, findings: all, rounds: r, worktree: WT }
   }
   all = all.concat(verdict.findings.map((f) => ({ ...f, round: r })))
-  if (verdict.merge_ready) {
+  const blockingFindings = verdict.findings.filter((f) => f.severity === 'critical' || f.severity === 'major')
+  if (verdict.merge_ready && blockingFindings.length > 0) {
+    log(`gate r${r} returned merge_ready=true with ${blockingFindings.length} blocking finding(s); treating it as not ready`)
+  }
+  if (verdict.merge_ready && blockingFindings.length === 0) {
     log(`converged after ${r} gate round(s)`)
     return { merge_ready: true, findings: all, rounds: r, worktree: WT, impl_report: impl }
   }
