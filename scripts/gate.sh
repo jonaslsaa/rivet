@@ -849,10 +849,16 @@ main() {
   #                         stays in PLAY past the 30 s kick limit echoing every
   #                         live keepalive, and the rivet log must show the
   #                         connection and never a `read timeout` kick.
+  #   kick                  Rivet-only decoded-disconnect-reason check (issue #86):
+  #                         the client sends a NaN movement frame after spawn so
+  #                         the anti-cheat gate answers with a
+  #                         ClientboundDisconnectPacket, and the client must decode
+  #                         exactly `multiplayer.disconnect.invalid_player_movement`
+  #                         (plus a tamper negative on the decoded reason key).
   #
   # The Paper rows run when a paperclip jar is materialized (same guard style as
-  # oracle verify). The dwell row is Rivet-only — it needs no jar, only the
-  # rivet-server binary (which run-scenario.sh builds on demand). Every row
+  # oracle verify). The dwell/kick rows are Rivet-only — they need no jar, only
+  # the rivet-server binary (which run-scenario.sh builds on demand). Every row
   # exits 0 PASS / 1 FAIL / 3 UNVERIFIED, so a missing prereq or a failed
   # scenario can never look green. Skipped when gating a crate subset (the
   # scenario drives a whole server).
@@ -870,6 +876,8 @@ main() {
     fi
     echo "==> scenario runner (dwell: wall-clock keepalive survival past the 30s kick limit)"
     "$REPO_DIR/tools/rivet-client/run-scenario.sh" dwell --server rivet
+    echo "==> scenario runner (kick: decoded disconnect reason from the anti-cheat gate)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" kick --server rivet
   fi
 
   # --- unused dependencies (cargo-machete) -------------------------------------
