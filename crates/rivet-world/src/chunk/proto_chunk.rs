@@ -12,9 +12,10 @@
 //! Deferred with their owning units:
 //! - `getFluidState` (the `FluidState` type lives with the material/block-state
 //!   units);
-//! - `setBlockState`'s mutators, the `INITIALIZE_LIGHT`-status light writes,
-//!   and the heightmap `primeHeightmaps`/`update` walk (the mutators and
-//!   per-state predicates defer with #216 / the worldgen heightmap unit #287);
+//! - `setBlockState`'s block-state mutation and the `INITIALIZE_LIGHT`-status
+//!   light writes (the #216 section write); its heightmap half is ported here
+//!   as [`ProtoChunk::update_heightmaps_after`] (#287), which #216 calls after
+//!   the section's `setBlockState`;
 //! - `setBlockEntity`/`getBlockEntity`/`getBlockEntities` (the block-entity
 //!   unit); the port keeps `pendingBlockEntities` on the base and
 //!   `removeBlockEntity`'s pending half;
@@ -40,6 +41,7 @@ use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
+use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, StateFlags, Types, WORLDGEN_HEIGHTMAPS};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
 
@@ -76,7 +78,8 @@ where
     /// `inhabitedTime = 0`, an empty `status`, and no carving mask.
     ///
     /// `air`/`void_air` are the read defaults; `is_air` classifies states for
-    /// the default-section recalc.
+    /// the default-section recalc; `resolve` classifies states for the
+    /// heightmap predicates (see [`ChunkAccess::new`]).
     #[allow(clippy::too_many_arguments)] // Java's constructor has 8 parameters.
     pub fn new(
         pos: ChunkPos,
@@ -86,7 +89,8 @@ where
         sections: Option<Vec<LevelChunkSection<T, B>>>,
         air: T,
         void_air: T,
-        is_air: &dyn Fn(&T) -> bool,
+        is_air: &'static dyn Fn(&T) -> bool,
+        resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
     ) -> Self {
         ProtoChunk {
             base: ChunkAccess::new(
@@ -97,6 +101,7 @@ where
                 0,
                 sections,
                 is_air,
+                resolve,
             ),
             entities: Vec::new(),
             status: ChunkStatus::Empty,
@@ -104,6 +109,32 @@ where
             air,
             void_air,
         }
+    }
+
+    /// `ProtoChunk.setBlockState`'s heightmap half — Java collects the
+    /// missing `getPersistedStatus().heightmapsAfter()` types, primes them,
+    /// then runs `Heightmap.update` on every type in the set. The #216 section
+    /// write calls this after the section's `setBlockState`; `placed` is the
+    /// placed state's behavior flags.
+    ///
+    /// `ChunkStatus.EMPTY`'s `heightmapsAfter()` is `WORLDGEN_HEIGHTMAPS`
+    /// (the two `Usage.WORLDGEN` types); `FULL` (the `LevelChunk` status) is
+    /// `FINAL_HEIGHTMAPS`. The slice-local status maps `Empty` →
+    /// `WORLDGEN_HEIGHTMAPS` (the persisted `EMPTY` status) so the worldgen
+    /// live update is faithful; a `Full` `ProtoChunk` uses `FINAL_HEIGHTMAPS`.
+    pub fn update_heightmaps_after(
+        &mut self,
+        local_x: i32,
+        y: i32,
+        local_z: i32,
+        placed: StateFlags,
+    ) {
+        let after: &[Types] = match self.status {
+            ChunkStatus::Empty => &WORLDGEN_HEIGHTMAPS,
+            ChunkStatus::Full => &FINAL_HEIGHTMAPS,
+        };
+        self.base
+            .update_heightmaps_after(after, local_x, y, local_z, placed);
     }
 
     /// `ProtoChunk.getBlockState(BlockPos)` — `VOID_AIR` outside build height,
@@ -352,6 +383,13 @@ mod tests {
             0,
             255,
             &|s| *s == 0,
+            // u8 tests: 0 is air, 1 is stone (blocks motion).
+            &|s: &u8| StateFlags {
+                is_air: *s == 0,
+                blocks_motion: *s != 0,
+                has_fluid: false,
+                is_leaves: false,
+            },
         )
     }
 
@@ -453,5 +491,52 @@ mod tests {
         // All default biomes (0): the base clamp path returns 0 everywhere.
         assert_eq!(proto.get_noise_biome(0, -16, 0), 0);
         assert_eq!(proto.get_noise_biome(0, 76, 0), 0);
+    }
+
+    #[test]
+    fn update_heightmaps_after_dispatches_on_persisted_status() {
+        // `ChunkStatus.EMPTY`'s `heightmapsAfter()` is the two
+        // `WORLDGEN_HEIGHTMAPS`; `FULL`'s is `FINAL_HEIGHTMAPS`. The worldgen
+        // constructor primed nothing, so the first update primes (creates) the
+        // status's types and leaves the other four absent.
+        let mut empty = stone_proto();
+        assert_eq!(empty.get_persisted_status(), ChunkStatus::Empty);
+        empty.update_heightmaps_after(
+            0,
+            -64,
+            0,
+            StateFlags {
+                is_air: false,
+                blocks_motion: true,
+                has_fluid: false,
+                is_leaves: false,
+            },
+        );
+        for ty in WORLDGEN_HEIGHTMAPS {
+            assert!(empty.base.has_primed_heightmap(ty), "EMPTY primes {ty:?}");
+        }
+        for ty in FINAL_HEIGHTMAPS {
+            assert!(!empty.base.has_primed_heightmap(ty), "EMPTY skips {ty:?}");
+        }
+        // A `FULL`-status chunk updates the four `FINAL_HEIGHTMAPS` instead.
+        let mut full = stone_proto();
+        full.set_persisted_status(ChunkStatus::Full);
+        full.update_heightmaps_after(
+            0,
+            -64,
+            0,
+            StateFlags {
+                is_air: false,
+                blocks_motion: true,
+                has_fluid: false,
+                is_leaves: false,
+            },
+        );
+        for ty in FINAL_HEIGHTMAPS {
+            assert!(full.base.has_primed_heightmap(ty), "FULL primes {ty:?}");
+        }
+        for ty in WORLDGEN_HEIGHTMAPS {
+            assert!(!full.base.has_primed_heightmap(ty), "FULL skips {ty:?}");
+        }
     }
 }

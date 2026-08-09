@@ -44,7 +44,7 @@ use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
-use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, Heightmap, Types};
+use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, Heightmap, StateFlags, Types};
 use indexmap::IndexSet;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
@@ -81,7 +81,8 @@ where
     /// The ticks, `postLoad`, and `blendingData` parameters are omitted with
     /// their units. `air` is the default state for the read spine; `is_air`
     /// classifies states for the default-section recalc (the caller's
-    /// `BlockBehaviour.isAir`).
+    /// `BlockBehaviour.isAir`); `resolve` classifies states for the heightmap
+    /// predicates (see [`ChunkAccess::new`]).
     #[allow(clippy::too_many_arguments)] // Java's constructor has 9 parameters.
     pub fn new(
         pos: ChunkPos,
@@ -91,7 +92,8 @@ where
         inhabited_time: i64,
         sections: Option<Vec<LevelChunkSection<T, B>>>,
         air: T,
-        is_air: &dyn Fn(&T) -> bool,
+        is_air: &'static dyn Fn(&T) -> bool,
+        resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
     ) -> Self {
         let mut base = ChunkAccess::new(
             pos,
@@ -101,6 +103,7 @@ where
             inhabited_time,
             sections,
             is_air,
+            resolve,
         );
         for ty in FINAL_HEIGHTMAPS {
             base.get_or_create_heightmap_unprimed(ty);
@@ -189,8 +192,9 @@ where
     }
 
     /// `ChunkAccess.getHeight(Types, int, int)` — the heightmap read (named
-    /// `get_height_at` to avoid the `getHeight()` overload clash).
-    pub fn get_height_at(&self, ty: Types, x: i32, z: i32) -> i32 {
+    /// `get_height_at` to avoid the `getHeight()` overload clash). Priming a
+    /// missing entry walks the sections, so the read takes `&mut self`.
+    pub fn get_height_at(&mut self, ty: Types, x: i32, z: i32) -> i32 {
         self.base.get_height_at(ty, x, z)
     }
 
@@ -445,6 +449,13 @@ mod tests {
             Some(sections),
             0,
             &|s| *s == 0,
+            // u8 tests: 0 is air, 1 is stone (blocks motion).
+            &|s: &u8| StateFlags {
+                is_air: *s == 0,
+                blocks_motion: *s != 0,
+                has_fluid: false,
+                is_leaves: false,
+            },
         )
     }
 
@@ -466,7 +477,7 @@ mod tests {
 
     #[test]
     fn constructor_primes_exactly_final_heightmaps_unprimed() {
-        let chunk = stone_chunk();
+        let mut chunk = stone_chunk();
         for ty in Types::all() {
             assert_eq!(
                 chunk.heightmaps()[ty as usize].is_some(),
@@ -474,8 +485,11 @@ mod tests {
                 "type {ty:?}"
             );
         }
-        // The four primed entries are unprimed (no data): reading a height
-        // falls back to `minY - 1`.
+        // The constructor creates the FINAL_HEIGHTMAPS entries as all-zero
+        // storage, exactly like Java (`new Heightmap(this, type)`); because an
+        // entry exists, `getHeight` does NOT prime — even the stone column
+        // reads `0 + minY - 1` = -65. Java logs "Unprimed heightmap" here but
+        // returns the same value.
         assert_eq!(chunk.get_height_at(Types::WorldSurface, 0, 0), -65);
         assert_eq!(chunk.get_height_at(Types::MotionBlocking, 7, 9), -65);
     }

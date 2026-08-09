@@ -24,6 +24,7 @@ use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
+use crate::levelgen::heightmap::StateFlags;
 use rivet_registry::core::{BlockPos, ChunkPos};
 
 /// `net.minecraft.world.level.chunk.EmptyLevelChunk`.
@@ -57,14 +58,16 @@ where
     ///
     /// `void_air` is the read default; `is_air` classifies states for the
     /// default-section recalc. The `container_factory` builds the default
-    /// sections the base constructor requires.
+    /// sections the base constructor requires. `resolve` classifies states for
+    /// the heightmap predicates (see [`ChunkAccess::new`]).
     pub fn new(
         pos: ChunkPos,
         height_accessor: SimpleLevelHeightAccessor,
         container_factory: &PalettedContainerFactory<T, B>,
         biome: B,
         void_air: T,
-        is_air: &dyn Fn(&T) -> bool,
+        is_air: &'static dyn Fn(&T) -> bool,
+        resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
     ) -> Self {
         EmptyLevelChunk {
             base: ChunkAccess::new(
@@ -75,6 +78,7 @@ where
                 0,
                 None,
                 is_air,
+                resolve,
             ),
             biome,
             void_air,
@@ -205,6 +209,14 @@ mod tests {
             7,   // the single biome id.
             255, // void air.
             &|s| *s == 0,
+            // Everything the chunk reads is void air: not air-in-test-terms
+            // (255 != 0), blocks motion, no fluid, not leaves.
+            &|_| StateFlags {
+                is_air: false,
+                blocks_motion: true,
+                has_fluid: false,
+                is_leaves: false,
+            },
         )
     }
 

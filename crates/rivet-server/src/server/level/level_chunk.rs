@@ -104,6 +104,15 @@ impl LevelChunk {
             Some(content.sections),
             StateId(0),
             &|s: &StateId| s.0 == 0,
+            // The same predicates as the superflat build above: the server's
+            // block state is the local `StateId` newtype, air is 0, everything
+            // else blocks motion, and nothing here has a fluid or is leaves.
+            &|s: &StateId| rivet_world::levelgen::heightmap::StateFlags {
+                is_air: s.0 == 0,
+                blocks_motion: s.0 != 0,
+                has_fluid: false,
+                is_leaves: false,
+            },
         );
         // The constructor primes `FINAL_HEIGHTMAPS` (which includes the three
         // client types) as unprimed (all-zero) entries; `set_heightmap` fills

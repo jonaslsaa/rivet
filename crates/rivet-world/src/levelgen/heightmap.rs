@@ -25,9 +25,13 @@
 //! chunk's heightmap bytes, and issue #183's `ChunkAccess` needs the `Types`
 //! storage key (like #100 pulled `LevelChunkSection` ahead).
 //!
-//! RivetTodo(#177): the `update`/`updateFromChunk` worldgen mutators and the
-//! live `Heightmap` plumbing used during generation are not ported (owned by
-//! the `mc.world.level.levelgen.noise` unit's wave-1 port).
+//! Issue #287 Part A adds the worldgen/live slice this module deferred: the
+//! four `FINAL_HEIGHTMAPS`/`WORLDGEN_HEIGHTMAPS` predicates (`is_opaque`),
+//! the per-block `update` mutator, the local leaves classifier, and the
+//! on-demand `primeHeightmaps`/`getHeight` compute on `ChunkAccess` (see
+//! `chunk::chunk_access`). Note `updateFromChunk` does NOT exist in the pinned
+//! Paper 26.2 `Heightmap` — only `update` — so the issue's mention of it is
+//! stale and only `update` is ported.
 
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_util::bit_storage::BitStorage;
@@ -63,6 +67,55 @@ pub const FINAL_HEIGHTMAPS: [Types; 4] = [
     Types::MotionBlocking,
     Types::MotionBlockingNoLeaves,
 ];
+
+/// `ChunkStatus.WORLDGEN_HEIGHTMAPS` — the two `Usage.WORLDGEN` types a
+/// `ProtoChunk` updates while its persisted status is below `CARVERS`
+/// (`EnumSet.of(OCEAN_FLOOR_WG, WORLD_SURFACE_WG)`, iterated in declaration
+/// order).
+pub const WORLDGEN_HEIGHTMAPS: [Types; 2] = [Types::OceanFloorWg, Types::WorldSurfaceWg];
+
+/// The per-state `BlockBehaviour` flags `Types.isOpaque()` needs. The caller
+/// resolves them from the merged generated behavior table (`rivet-registry`'s
+/// `BlockState` at the world sites; the superflat/server sites supply their
+/// own flag predicates), keeping `Heightmap` a pure value (OWNERSHIP.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateFlags {
+    /// `state.isAir()`.
+    pub is_air: bool,
+    /// `state.blocksMotion()`.
+    pub blocks_motion: bool,
+    /// `!state.getFluidState().isEmpty()` — true when the state carries a
+    /// non-empty fluid state (the `MotionBlocking` predicate's disjunct).
+    pub has_fluid: bool,
+    /// `state.getBlock() instanceof LeavesBlock`.
+    pub is_leaves: bool,
+}
+
+/// `BlockTags.LEAVES` — the 11 `minecraft:leaves` blocks `LeavesBlock`
+/// covers. Issue #287's "smallest local leaves classifier": `rivet-registry`'s
+/// generated tag table lives behind the dev-only `blocks` feature, so the
+/// world slice hard-codes the tag it needs for `MOTION_BLOCKING_NO_LEAVES`.
+pub const LEAVES_BLOCKS: [&str; 11] = [
+    "minecraft:jungle_leaves",
+    "minecraft:oak_leaves",
+    "minecraft:spruce_leaves",
+    "minecraft:pale_oak_leaves",
+    "minecraft:dark_oak_leaves",
+    "minecraft:acacia_leaves",
+    "minecraft:birch_leaves",
+    "minecraft:azalea_leaves",
+    "minecraft:flowering_azalea_leaves",
+    "minecraft:mangrove_leaves",
+    "minecraft:cherry_leaves",
+];
+
+/// `state.getBlock() instanceof LeavesBlock` — the local leaves classifier over
+/// a block name (the caller passes `BlockState::block().name()` where it has
+/// the registry; `rivet-world` production cannot name a `BlockId` because the
+/// `blocks` feature is dev-only).
+pub fn is_leaves_block(name: &str) -> bool {
+    LEAVES_BLOCKS.contains(&name)
+}
 
 impl Types {
     /// The enum `id` (the wire form), `Heightmap.Types` `id` field.
@@ -187,8 +240,56 @@ impl Heightmap {
     }
 
     /// `setHeight(x, z, height)` — `data.set(getIndex(x, z), height - minY)`.
-    fn set_height(&mut self, x: i32, z: i32, height: i32, min_y: i32) {
+    pub(crate) fn set_height(&mut self, x: i32, z: i32, height: i32, min_y: i32) {
         self.data.set(get_index(x, z), height - min_y);
+    }
+
+    /// `getFirstAvailable(x, z)` — `data.get(getIndex(x, z)) + chunk.getMinY()`
+    /// (the insertion slot one above the column's topmost opaque block; a
+    /// never-set entry stores 0, so it reads `minY`).
+    pub fn first_available_at(&self, x: i32, z: i32, min_y: i32) -> i32 {
+        self.data.get(get_index(x, z)) + min_y
+    }
+
+    /// `Heightmap.update(localX, localY, localZ, BlockState)` — the per-block
+    /// worldgen/live mutator. `localY` is the absolute block Y (Java passes
+    /// `ProtoChunk`'s `y`, not `sectionRelative(y)`, to the heightmap update).
+    ///
+    /// `placed` is the placed state's behavior flags; `flags_at(abs_y)`
+    /// resolves the flags of the state at `(localX, abs_y, localZ)` for the
+    /// downward re-scan Java reads through `chunk.getBlockState`. Resolving
+    /// both through closures keeps `Heightmap` a pure value (OWNERSHIP.md).
+    #[allow(clippy::too_many_arguments)] // Java's `update` has 4 parameters; the port adds the flags resolver.
+    pub fn update(
+        &mut self,
+        local_x: i32,
+        local_y: i32,
+        local_z: i32,
+        ty: Types,
+        placed: StateFlags,
+        min_y: i32,
+        flags_at: impl Fn(i32) -> StateFlags,
+    ) -> bool {
+        let first_available = self.first_available_at(local_x, local_z, min_y);
+        if local_y <= first_available - 2 {
+            return false;
+        }
+        if Self::is_opaque(ty, placed) {
+            if local_y >= first_available {
+                self.set_height(local_x, local_z, local_y + 1, min_y);
+                return true;
+            }
+        } else if first_available - 1 == local_y {
+            for y in (min_y..=local_y - 1).rev() {
+                if Self::is_opaque(ty, flags_at(y)) {
+                    self.set_height(local_x, local_z, y + 1, min_y);
+                    return true;
+                }
+            }
+            self.set_height(local_x, local_z, min_y, min_y);
+            return true;
+        }
+        false
     }
 
     /// `getRawData()`.
@@ -197,15 +298,12 @@ impl Heightmap {
     }
 
     /// `setRawData(ChunkAccess, Types, long[])` — copies the packed storage
-    /// in place when the length matches; Java logs a warning and re-primes on
-    /// a mismatch. The port cannot re-prime without the per-state behavior
-    /// predicates (#287), so a mismatched array is ignored (a documented
-    /// no-op) — the callers in this slice always supply a matching-length
-    /// storage.
-    ///
-    /// RivetTodo(#287): the re-prime fallback on a length mismatch needs the
-    /// `Heightmap.update`/`updateFromChunk` compute, deferred with the
-    /// worldgen heightmap unit.
+    /// in place when the length matches. Java logs a warning and re-primes on
+    /// a mismatch; the re-prime walks the chunk's blocks, which this pure
+    /// value has no handle to, so the port ignores a mismatched array (a
+    /// documented no-op). The re-prime path is [`ChunkAccess::prime_heightmaps`]
+    /// (issue #287), which no `setHeightmap` caller here needs — they all
+    /// supply a matching-length storage.
     pub fn set_raw_data(&mut self, data: &[i64]) {
         if self.data.get_raw().len() == data.len() {
             self.data.get_raw_mut().copy_from_slice(data);
@@ -223,26 +321,25 @@ impl Heightmap {
 
     /// `Heightmap.Types.isOpaque()` — the per-type block predicate, resolved
     /// over per-state flags because `rivet-registry`'s generated tables carry
-    /// ids, not `BlockBehaviour` behavior flags.
+    /// ids, not `BlockBehaviour` behavior flags:
+    /// - `WORLD_SURFACE_WG`/`WORLD_SURFACE` — `NOT_AIR` (`!state.isAir()`);
+    /// - `OCEAN_FLOOR_WG`/`OCEAN_FLOOR` — `MATERIAL_MOTION_BLOCKING`
+    ///   (`state.blocksMotion()`);
+    /// - `MOTION_BLOCKING` — `blocksMotion || !fluidState.isEmpty()`;
+    /// - `MOTION_BLOCKING_NO_LEAVES` — the same, and not a `LeavesBlock`.
     ///
     /// Only `WorldSurface`/`MotionBlocking`/`MotionBlockingNoLeaves` are sent
     /// to clients (the `Usage.CLIENT` set); the other three are worldgen/live
     /// types never emitted, but their predicates are ported for fidelity. The
     /// superflat chunk's single stone layer exercises only the "non-air,
     /// blocks-motion, no fluid, not leaves" path.
-    pub fn is_opaque(
-        heightmap_type: HeightmapType,
-        state_is_air: bool,
-        state_blocks_motion: bool,
-        state_has_fluid: bool,
-        state_is_leaves: bool,
-    ) -> bool {
-        match heightmap_type {
-            HeightmapType::WorldSurfaceWg | HeightmapType::WorldSurface => !state_is_air,
-            HeightmapType::OceanFloorWg | HeightmapType::OceanFloor => state_blocks_motion,
-            HeightmapType::MotionBlocking => state_blocks_motion || state_has_fluid,
-            HeightmapType::MotionBlockingNoLeaves => {
-                (state_blocks_motion || state_has_fluid) && !state_is_leaves
+    pub fn is_opaque(ty: Types, flags: StateFlags) -> bool {
+        match ty {
+            Types::WorldSurfaceWg | Types::WorldSurface => !flags.is_air,
+            Types::OceanFloorWg | Types::OceanFloor => flags.blocks_motion,
+            Types::MotionBlocking => flags.blocks_motion || flags.has_fluid,
+            Types::MotionBlockingNoLeaves => {
+                (flags.blocks_motion || flags.has_fluid) && !flags.is_leaves
             }
         }
     }
@@ -298,6 +395,16 @@ fn get_index(x: i32, z: i32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The superflat air (id 0) / stone (id 1) flags, driven by value.
+    fn state_flags(value: u8) -> StateFlags {
+        StateFlags {
+            is_air: value == 0,
+            blocks_motion: value != 0,
+            has_fluid: false,
+            is_leaves: false,
+        }
+    }
 
     #[test]
     fn flat_single_stone_layer_packs_all_ones() {
@@ -395,6 +502,213 @@ mod tests {
     }
 
     #[test]
+    fn leaves_classifier_covers_the_tag_and_nothing_else() {
+        // `BlockTags.LEAVES` — the 11 blocks `LeavesBlock` accepts (verified
+        // against the generated tag table, which is dev-only in rivet-world).
+        assert!(LEAVES_BLOCKS.contains(&"minecraft:oak_leaves"));
+        assert!(LEAVES_BLOCKS.contains(&"minecraft:cherry_leaves"));
+        assert_eq!(LEAVES_BLOCKS.len(), 11);
+        for name in LEAVES_BLOCKS {
+            assert!(is_leaves_block(name), "{name}");
+        }
+        // Not leaves: stone, logs (a separate tag), and a namespace-less name.
+        assert!(!is_leaves_block("minecraft:stone"));
+        assert!(!is_leaves_block("minecraft:oak_log"));
+        assert!(!is_leaves_block("oak_leaves"));
+    }
+
+    #[test]
+    fn is_opaque_implements_the_four_predicates() {
+        // The four `Heightmap.Types.isOpaque` predicates, exercised over the
+        // four flag combinations the state flags can hold:
+        // air (id 0) and stone (id 1) exercise NOT_AIR + blocksMotion; a
+        // water-like flag set exercises the fluid disjunct; a leaf-like flag
+        // set exercises the MOTION_BLOCKING_NO_LEAVES exclusion.
+        let air = state_flags(0);
+        let stone = state_flags(1);
+        let water = StateFlags {
+            is_air: false,
+            blocks_motion: false,
+            has_fluid: true,
+            is_leaves: false,
+        };
+        let leaves = StateFlags {
+            is_air: false,
+            blocks_motion: true,
+            has_fluid: false,
+            is_leaves: true,
+        };
+        // WORLD_SURFACE: NOT_AIR.
+        for ty in [Types::WorldSurfaceWg, Types::WorldSurface] {
+            assert!(!Heightmap::is_opaque(ty, air));
+            assert!(Heightmap::is_opaque(ty, stone));
+        }
+        // OCEAN_FLOOR: blocksMotion.
+        for ty in [Types::OceanFloorWg, Types::OceanFloor] {
+            assert!(!Heightmap::is_opaque(ty, air));
+            assert!(Heightmap::is_opaque(ty, stone));
+            assert!(
+                !Heightmap::is_opaque(ty, water),
+                "water does not block motion"
+            );
+        }
+        // MOTION_BLOCKING: blocksMotion || hasFluid.
+        assert!(!Heightmap::is_opaque(Types::MotionBlocking, air));
+        assert!(Heightmap::is_opaque(Types::MotionBlocking, stone));
+        assert!(Heightmap::is_opaque(Types::MotionBlocking, water));
+        // MOTION_BLOCKING_NO_LEAVES: the same, but not a leaf.
+        assert!(!Heightmap::is_opaque(Types::MotionBlockingNoLeaves, air));
+        assert!(Heightmap::is_opaque(Types::MotionBlockingNoLeaves, stone));
+        assert!(Heightmap::is_opaque(Types::MotionBlockingNoLeaves, water));
+        assert!(
+            !Heightmap::is_opaque(Types::MotionBlockingNoLeaves, leaves),
+            "leaves block motion but are excluded"
+        );
+    }
+
+    #[test]
+    fn update_places_and_lowers_like_java() {
+        // A fresh WorldSurface heightmap: every stored entry is 0, so
+        // `first_available` is `min_y` (-64) everywhere (Java: never-set ->
+        // `min_y`). Local coords are absolute Y for the update (Java passes
+        // ProtoChunk's `y`).
+        let mut hm = Heightmap::new(384);
+        let min_y = -64;
+        // Place stone (id 1) at y=-64: localY >= firstAvailable (-64 >= -64),
+        // opaque -> set height -64 + 1 = -63 (stored 1). getHeight is
+        // `firstAvailable - 1`, the topmost opaque block's Y: -64.
+        assert!(hm.update(
+            0,
+            -64,
+            0,
+            Types::WorldSurface,
+            state_flags(1),
+            min_y,
+            |_| { state_flags(0) }
+        ));
+        assert_eq!(hm.get_height_at(0, 0, min_y), -64);
+        // Now first_available is -63. Placing a second stone at y=-64 is
+        // opaque but one below the top (-64 < -63), so the opaque branch's
+        // `localY >= firstAvailable` check fails and the method falls through
+        // to Java's trailing `return false`.
+        assert!(!hm.update(
+            0,
+            -64,
+            0,
+            Types::WorldSurface,
+            state_flags(1),
+            min_y,
+            |_| { state_flags(0) }
+        ));
+        // Raising the column: place stone at y=-63 (>= -63). The stored height
+        // becomes -62, i.e. the topmost opaque is now at -63 -> getHeight -63.
+        assert!(hm.update(
+            0,
+            -63,
+            0,
+            Types::WorldSurface,
+            state_flags(1),
+            min_y,
+            |_| { state_flags(0) }
+        ));
+        assert_eq!(hm.get_height_at(0, 0, min_y), -63);
+    }
+
+    #[test]
+    fn update_removal_rescans_downward_for_the_next_opaque() {
+        let mut hm = Heightmap::new(384);
+        let min_y = -64;
+        // Two stacked stones: place at -64 then -63 -> topmost -63.
+        assert!(hm.update(
+            0,
+            -64,
+            0,
+            Types::WorldSurface,
+            state_flags(1),
+            min_y,
+            |_| { state_flags(0) }
+        ));
+        assert!(hm.update(
+            0,
+            -63,
+            0,
+            Types::WorldSurface,
+            state_flags(1),
+            min_y,
+            |_| { state_flags(0) }
+        ));
+        assert_eq!(hm.get_height_at(0, 0, min_y), -63);
+        // Remove the top stone (place air at -63): firstAvailable - 1 == -63,
+        // so Java walks down from -62. The flags_at closure resolves the real
+        // below state (stone at -64) -> new topmost -64 -> getHeight -64.
+        assert!(
+            hm.update(0, -63, 0, Types::WorldSurface, state_flags(0), min_y, |y| {
+                state_flags(if y == -64 { 1 } else { 0 })
+            })
+        );
+        assert_eq!(hm.get_height_at(0, 0, min_y), -64);
+    }
+
+    #[test]
+    fn update_removal_with_no_opaque_below_sets_min_y() {
+        let mut hm = Heightmap::new(384);
+        let min_y = -64;
+        // A single stone at -64: stored height -63, getHeight -64.
+        assert!(hm.update(
+            0,
+            -64,
+            0,
+            Types::WorldSurface,
+            state_flags(1),
+            min_y,
+            |_| { state_flags(0) }
+        ));
+        assert_eq!(hm.get_height_at(0, 0, min_y), -64);
+        // Remove it: the downward scan finds nothing -> `setHeight(minY)`,
+        // which stores 0; getHeight is then `minY - 1` (an empty column).
+        assert!(hm.update(
+            0,
+            -64,
+            0,
+            Types::WorldSurface,
+            state_flags(0),
+            min_y,
+            |_| { state_flags(0) }
+        ));
+        assert_eq!(hm.get_height_at(0, 0, min_y), -65);
+        // A removal not at the top edge is a no-op: with the column empty,
+        // `firstAvailable` is `minY`, so air at -63 is neither the opaque
+        // raise branch nor `firstAvailable - 1 == localY` (-65 == -63 is
+        // false) — Java falls through to `return false` and the column stays
+        // empty.
+        assert!(!hm.update(
+            0,
+            -63,
+            0,
+            Types::WorldSurface,
+            state_flags(0),
+            min_y,
+            |_| { state_flags(0) }
+        ));
+        assert_eq!(hm.get_height_at(0, 0, min_y), -65);
+    }
+
+    #[test]
+    fn worldgen_heightmaps_is_the_two_worldgen_types() {
+        // `ChunkStatus.WORLDGEN_HEIGHTMAPS` — `EnumSet.of(OCEAN_FLOOR_WG,
+        // WORLD_SURFACE_WG)`, the two `Usage.WORLDGEN` types a `ProtoChunk`
+        // updates before it reaches `CARVERS`.
+        assert_eq!(
+            WORLDGEN_HEIGHTMAPS,
+            [Types::OceanFloorWg, Types::WorldSurfaceWg]
+        );
+        for ty in WORLDGEN_HEIGHTMAPS {
+            assert!(!ty.send_to_client(), "worldgen types are never sent");
+            assert!(!ty.keep_after_worldgen(), "worldgen types are dropped");
+        }
+    }
+
+    #[test]
     fn set_raw_data_and_get_height_at_round_trip() {
         // A primed flat-world heightmap: stored offset 1 at every column
         // (stone at y=-64 -> stored `-63 + 64`), so `get_height` returns -64.
@@ -412,9 +726,9 @@ mod tests {
 
     #[test]
     fn set_raw_data_ignores_mismatched_length() {
-        // Java warns and re-primes on a length mismatch; the port ignores the
-        // data (see the `RivetTodo(#287)` on `set_raw_data`). A shorter array
-        // must not clobber or panic.
+        // Java warns and re-primes on a length mismatch; the pure value ignores
+        // the data (the re-prime lives on `ChunkAccess::prime_heightmaps`). A
+        // shorter array must not clobber or panic.
         let mut hm = Heightmap::new(384);
         hm.set_raw_data(&[1, 2, 3]);
         assert!(hm.get_raw_data().iter().all(|&v| v == 0));
