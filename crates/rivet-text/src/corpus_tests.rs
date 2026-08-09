@@ -8,33 +8,24 @@
 //! JVM and fail loudly if the corpus is absent or vacuous, so the fixture can
 //! never silently stop being exercised.
 //!
-//! The one honest divergence is the `ClickEvent`/`HoverEvent` STUB (RivetTodo
-//! #89, epic #12): `click-copy-to-clipboard`, `click-open-url`,
-//! `click-run-command`, and `hover-show-text` are all Paper-accepted (their
-//! codec field names match Paper 26.2: ShowText `value`, OpenUrl `url`,
-//! RunCommand `command`, CopyToClipboard `value`) but rejected by the Rust STUB
-//! codec. Those entries are tracked as a documented divergence, and
-//! `accepted-but-Rust-rejects` must equal exactly the documented set. The
-//! `malformed-*-wrong-key` negatives are the same content with a wrong field
-//! name (show_text `contents`, open_url `href`, run_command `value`,
-//! copy_to_clipboard `text`): Paper rejects them, pinning the field names as
-//! load-bearing so the corrected fixtures fail in Rust only at the real
-//! codec/STUB boundary — never for registry/Holder context or malformed fields.
+//! The click/hover entries (`click-open-url`, `click-run-command`,
+//! `click-copy-to-clipboard`, `hover-show-text`) exercise the ported
+//! `ClickEvent`/`HoverEvent` codecs; the deferred actions (`show_dialog`,
+//! `custom`, `show_item`, `show_entity`) are STUB (RivetTodo #85, epic #12) and
+//! no corpus entry exercises them. `accepted-but-Rust-rejects` must be empty —
+//! every Paper-accepted entry re-encodes byte-identical to the golden — and the
+//! `malformed-*-wrong-key` negatives pin the codec field names as load-bearing
+//! so a schema drift fails in Rust at the real codec boundary.
 
 use crate::component::Component;
 use crate::corpus::{CorpusError, TextFixtureEntry, text_corpus};
 use rivet_serialization::codec::Codec;
 use rivet_serialization::json_ops::JsonOps;
 
-/// Accepted corpus entries the Rust STUB codec cannot decode yet (RivetTodo
-/// #89, epic #12). If this set grows, the divergence list must be updated with
-/// the codecs that landed — the test below enforces the match.
-const DOCUMENTED_STUB_DIVERGENCES: &[&str] = &[
-    "click-copy-to-clipboard",
-    "click-open-url",
-    "click-run-command",
-    "hover-show-text",
-];
+/// Accepted corpus entries the Rust codec cannot decode yet. Empty after the
+/// `ClickEvent`/`HoverEvent` codecs landed (#85): every Paper-accepted entry
+/// must re-encode byte-identical, enforced below.
+const DOCUMENTED_STUB_DIVERGENCES: &[&str] = &[];
 
 /// The Rust mirror of the Paper oracle op, run through ONE codec graph.
 ///
@@ -185,15 +176,15 @@ fn accepted_components_reencode_byte_identical_to_golden() {
         }
     }
 
-    // Paper-accepted entries the Rust STUB codec rejects must be exactly the
-    // documented divergences — never a silent surprise.
+    // Paper-accepted entries the Rust codec rejects must be exactly the
+    // documented divergences (empty now that ClickEvent/HoverEvent landed) —
+    // never a silent surprise.
     let mut expected: Vec<&str> = DOCUMENTED_STUB_DIVERGENCES.to_vec();
     accepted_but_rejected.sort_unstable();
     expected.sort_unstable();
     assert_eq!(
         accepted_but_rejected, expected,
-        "accepted-but-rejected set must equal the documented ClickEvent/\
-         HoverEvent STUB divergences (RivetTodo #89, epic #12)"
+        "accepted-but-rejected set must equal the documented codec divergences"
     );
 }
 
@@ -301,8 +292,8 @@ fn wrong_key_negatives_are_recorded_as_rejected() {
         );
         assert!(
             rust_component_json(&entry.input, &codec).is_err(),
-            "Rust must reject {id} too (the ClickEvent/HoverEvent codec is a STUB, \
-             and the field name is wrong either way)"
+            "Rust must reject {id} too (the field name is wrong for the ported \
+             ClickEvent/HoverEvent codec)"
         );
     }
 }
@@ -399,4 +390,38 @@ fn malformed_field_name_mutations_reject() {
     assert!(!parses(
         "{\"text\":\"cp\",\"click_event\":{\"action\":\"copy_to_clipboard\",\"text\":\"x\"}}"
     ));
+}
+
+/// Issue #207: a `hover_event.show_text` whose value is itself a styled
+/// `Component` recurses into the `Component` graph through `Style.Serializer`
+/// -> `HoverEvent` -> `ComponentSerialization.CODEC` (the threaded `top`).
+/// Repeated encodes must reuse the single cached graph — `CODEC_BUILD_COUNT`
+/// (a thread-local counter of `component_serialization::codec()` constructions)
+/// must stay flat, never growing one strong `Arc` cycle per encode.
+#[test]
+fn hover_show_text_nested_component_reuses_component_graph() {
+    use crate::component_serialization::CODEC_BUILD_COUNT;
+
+    let graph_count = || CODEC_BUILD_COUNT.with(|c| c.get());
+
+    // A nested show_text value that does NOT collapse to a bare string (styled
+    // bold), so it decodes as a true `Component` arg and the encode re-enters
+    // the Component codec through the hover path.
+    let input = "{\"text\":\"root\",\"hover_event\":{\"action\":\"show_text\",\
+                 \"value\":{\"text\":\"nested\",\"bold\":true}}}";
+
+    let codec = component_codec();
+    let first = rust_component_json(input, &codec)
+        .unwrap_or_else(|e| panic!("hover show_text must decode+re-encode: {e}"));
+    let after_first = graph_count();
+
+    for _ in 0..50 {
+        let again = rust_component_json(input, &codec).expect("repeated encode must succeed");
+        assert_eq!(again, first, "hover show_text re-encode must be stable");
+    }
+    let after_repeat = graph_count();
+    assert_eq!(
+        after_repeat, after_first,
+        "nested hover show_text rebuilt the recursive Component graph per use (leak)"
+    );
 }
