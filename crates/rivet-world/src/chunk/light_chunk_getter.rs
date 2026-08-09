@@ -5,16 +5,17 @@
 //! `onLightUpdate(LightLayer, SectionPos)` no-op, and `getLevel()`.
 //!
 //! The port keeps `get_chunk_for_lighting`. `onLightUpdate(LightLayer,
-//! SectionPos)` is a default no-op, but `LightLayer` and `SectionPos` are not
-//! ported yet, so the method is omitted rather than stubbed with substitutes;
-//! the owning unit re-adds it. `getLevel()` (`BlockGetter`) is omitted with
-//! the world/access units.
+//! SectionPos)` is a default no-op, but `LightLayer` is not ported yet
+//! (`SectionPos` is, in `rivet-registry`), so the method is omitted rather
+//! than stubbed with substitutes; the owning unit re-adds it. `getLevel()`
+//! (`BlockGetter`) is omitted with the world/access units.
 //!
-//! RivetTodo(#184): `onLightUpdate(LightLayer, SectionPos)` and `getLevel()`
-//! (`BlockGetter`) are omitted — `LightLayer`/`SectionPos` are deferred with
-//! the lighting engine unit (#184) and `BlockGetter` with the world/access
-//! unit (#232), so this module ports `getChunkForLighting` alone; the owning
-//! units re-add the methods when those types land.
+//! RivetTodo(#184): `onLightUpdate(LightLayer, SectionPos)` is omitted —
+//! `LightLayer` is deferred with the lighting engine unit (#184), while its
+//! `SectionPos` parameter is already ported (`rivet-registry`); `getLevel()`
+//! (`BlockGetter`) is deferred with the world/access unit (#232), so this
+//! module ports `getChunkForLighting` alone; the owning units re-add the
+//! methods when those types land.
 //!
 //! The value is a `Fn(i32, i32) -> Option<T>` closure resolving the chunk
 //! back-reference by chunk coordinates, following the pure-value pattern of
