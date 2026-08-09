@@ -445,9 +445,10 @@ fn base_address(args: &Args) -> Result<SocketAddr, RunnerError> {
 }
 
 /// Reserve `n` distinct ephemeral loopback ports, held so the OS cannot hand
-/// out the same port twice. The held [`rivet_harness_common::port::PortReservation`]s are released only
-/// immediately before each server spawns (inside `server::boot`), so the
-/// bind-drop-boot race narrows to the spawn->child-bind gap.
+/// out the same port twice. The held [`rivet_harness_common::port::PortReservation`]s
+/// are released only immediately before each server spawns (inside
+/// `server::boot`), so the bind-drop-boot race narrows to the spawn->child-bind
+/// gap.
 fn reserve_ports(
     n: usize,
 ) -> Result<Vec<rivet_harness_common::port::PortReservation>, RunnerError> {
@@ -2568,6 +2569,50 @@ mod tests {
         assert!(
             text.contains("neither transcript carried a walk.last_sent"),
             "must surface that both sides carried no last_sent: {text}"
+        );
+    }
+
+    /// A normalized move transcript whose `walk` object truly omits the
+    /// `last_sent` key — not explicit `null`, but no key at all. This is the
+    /// shape a raw transcript would have before `normalize_move` fills in an
+    /// explicit `null`; `verdict_last_sent` reads via
+    /// `pointer("/walk/last_sent")`, so an absent key and an explicit `null`
+    /// must both resolve to "no present value".
+    fn move_transcript_without_last_sent_key() -> Value {
+        json!({
+            "outcome": "moved",
+            "walk": {},
+            "excluded": {},
+        })
+    }
+
+    /// A truly absent `last_sent` key (not `null`) must surface the exact same
+    /// side-specific missing narration as the explicit-`null` wire shape: the
+    /// helper contract is that a missing key is "no present value", never a
+    /// value to match. Pins both one-sided branches so a future helper change
+    /// cannot silently stop treating an absent key as missing.
+    #[test]
+    fn verdict_surfaces_a_truly_absent_last_sent_key() {
+        let paper = move_transcript(25.0, false);
+        let rivet = move_transcript_without_last_sent_key();
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("Paper last_sent") && text.contains("25.0"),
+            "must keep naming Paper's present last_sent: {text}"
+        );
+        assert!(
+            text.contains("the Rivet transcript carried no walk.last_sent"),
+            "an absent key must hit the missing-Rivet branch: {text}"
+        );
+
+        let paper = move_transcript_without_last_sent_key();
+        let rivet = move_transcript(31.0, false);
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("the Paper transcript carried no walk.last_sent")
+                && text.contains("Rivet last_sent")
+                && text.contains("31.0"),
+            "an absent key must hit the missing-Paper branch: {text}"
         );
     }
 
