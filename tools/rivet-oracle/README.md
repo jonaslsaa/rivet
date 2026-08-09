@@ -52,6 +52,9 @@ rivet-oracle/
     regions/overworld-normal/       # M2 normal-overworld region payloads
       manifest.json     # 408 chunk NBT payloads, region-file-compression=none
       chunk/<dim>/0.0/<cx>.<cz>.nbt # decompressed normal-overworld chunk NBT
+    chunk-hash/         # #54 xxh3_64 seed-hash gate (see 'Chunk-hash engine')
+      corpus.json       # deterministic seed/coordinate corpus (single source of truth)
+      paper/manifest.json  # Paper xxh3_64 digest table over the M2 region payloads
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
@@ -367,6 +370,55 @@ Never hand-edit fixtures; regenerate from a clean run instead. Every boot in the
 pipeline is pinned to `chunk-system` 1/1 and runs with entity spawning
 suppressed (spawn-limits 0) per the sections above.
 
+## Chunk-hash engine (issue #54)
+
+The xxh3_64 seed-hash gate compares Paper's chunk digests against Rivet's once
+Rivet can serialize FULL chunks. It deliberately never boots Paper — the digests
+come from the committed M2 region payloads via the rivet-nbt codec.
+
+- `hash-self-check` — verifies the `xxh3_64` implementation against pinned
+  known-answer vectors (anchor `xxh3_64(b"") = 2d06800538d394c2`). A wrong
+  variant or an endianness slip fails loudly instead of silently corrupting every
+  digest. Exit 0 = pass, 1 = fail.
+- `hash-paper` — rebuilds `fixtures/chunk-hash/paper/manifest.json` from the
+  committed M2 region payloads. Must be byte-identical (git-clean). The manifest
+  **stamps `status` from each payload's root `Status` string** — never assumed —
+  so the committed capture honestly reports 2 genuine FULL chunks
+  (the_nether/0.0 + the_end/0.0; overworld has 0). Its working seed (42) is not
+  a corpus seed, so its sweep coverage is honestly 0/N (see below). Exit 0.
+- `hash-rivet <dir>` — reads a Rivet region tree (`chunk/<dim>/<region>/<cx>.<cz>.nbt`).
+  There is no Rivet FULL serialization yet, so it exits **3 UNVERIFIED**, never
+  green (Rivet chunk serialization is #231/#15; #51 must capture status-FULL
+  regions).
+- `hash-diff <paper> <rivet>` — compares Paper vs Rivet manifests. Refuses
+  differing provenance (seed/algorithm/paper/concurrency) AND refuses a
+  Paper-vs-Paper self-diff (both args the same tree — canonicalized, so a
+  symlink alias is caught too): a self-comparison can never imply Paper ==
+  Rivet parity, so it is UNVERIFIED (3), never a PASS. Only FULL entries are
+  compared; a Paper-only or Rivet-only FULL chunk, a raw-digest difference, or a
+  missing required corpus coordinate are each real divergence — never a vacuous
+  green. Exit 0 = PASS, 1 = FAIL (names each chunk), 3 = UNVERIFIED, 64 = usage.
+- `hash-diff --expect-fail <paper> <rivet> [kind]` — negative control: corrupt a
+  copy of the **Rivet** baseline and require the tampered chunk named. `kind` is
+  `block`/`light`/`heightmap`/`nbt-order`/`all` (runs every class, so a future
+  mutation the comparator silently ignores is caught). Order-only `nbt-order`
+  tampering is flagged as triage (canonical-identical) but still fails — order
+  divergence is divergence. The corrupted copy keeps the original manifest's
+  seed so the tamper is the only divergence.
+
+The corpus (`corpus.json`) is the single source of truth for which seeds and
+coordinates a green sweep must cover; coverage is always reported against it,
+never assumed. Coverage is seed-aware: a manifest records one world seed, and
+only a corpus seed satisfies sweep cells — a capture under the committed working
+seed (42, not a corpus seed) honestly reports 0/N sweep coverage. Live
+FULL-chunk generation is blocked (#51/#231/#15), so the gate always runs
+`hash-self-check` + `hash-paper` and, with `RIVET_HASH_DIR` unset (the default),
+skips the Paper-vs-Rivet comparison with an explicit NOTICE (never a self-diff,
+never a claim of parity it does not have). Setting `RIVET_HASH_DIR` to a Rivet
+region tree opts into the strict check: the comparison and the tamper negatives
+then run for real, and any UNVERIFIED (incomplete corpus coverage, or a self-diff
+if it aliases the paper tree) or FAILED divergence is gate-fatal.
+
 ## Conventions
 
 - Never weaken fixtures to pass; regenerate them from a clean run instead.
@@ -374,4 +426,7 @@ suppressed (spawn-limits 0) per the sections above.
 - This crate is deliberately std-only-plus-{serde,serde_json,sha2}. Its deps
   live in this crate's `Cargo.toml` (not the shared `[workspace.dependencies]`),
   but like any workspace member the resolve still updates the shared
-  `Cargo.lock` — expect that when adding deps here.
+  `Cargo.lock` — expect that when adding deps here. Exception: `xxhash-rust`
+  (the #54 engine's only third-party crypto, xxh3 feature only) is declared at
+  workspace scope so every member sees one identical digest family and the
+  feature set cannot drift per-crate.

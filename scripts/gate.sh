@@ -312,6 +312,77 @@ run_oracle_verify() {
   fi
 }
 
+# The #54 chunk-hash engine (xxh3_64 seed-hash gate). Unlike the other oracle
+# stages it does not boot Paper: `hash-self-check` pins the xxh3_64 known-answer
+# vectors (a wrong variant/endianness fails loudly, never silently corrupting
+# digests), and `hash-paper` rebuilds the committed Paper manifest from the
+# committed M2 region payloads — which must be git-clean, proving the FULL-status
+# stamping and digest table are deterministic.
+#
+# The Paper-vs-Rivet `hash-diff` needs FULL chunks at every corpus coordinate on
+# both sides. Pre-worldgen there is no Rivet FULL serialization (#231/#15; #51
+# must capture status-FULL regions), so with RIVET_HASH_DIR unset (the default)
+# the gate records an explicit NOTICE and stays mergeable — it never runs Paper
+# against Paper (a self-diff proves nothing about Rivet, and `hash-diff` refuses
+# one), and it never claims parity it does not have. This is a milestone-gated
+# comparison, not an oracle prereq: an absent comparison is not ORACLE_UNVERIFIED
+# and does not fail the gate. Setting RIVET_HASH_DIR opts into the strict check —
+# the comparison is then required, and any UNVERIFIED (incomplete corpus coverage
+# or a Paper-vs-Paper self-diff) or FAILED divergence is gate-fatal, never a
+# silent or vacuous green.
+run_oracle_hash() {
+  echo "==> chunk-hash engine (issue #54: xxh3_64 seed-hash gate)"
+  echo "==> oracle hash self-check (xxh3_64 known-answer vectors)"
+  cargo run -q -p rivet-oracle -- hash-self-check
+  echo "    VERIFIED — xxh3_64 matches the pinned known-answer vectors"
+  echo "==> oracle hash-paper (rebuild committed Paper manifest; must be git-clean)"
+  cargo run -q -p rivet-oracle -- hash-paper
+  # The byte-identity check needs a git work tree to compare the rebuild against
+  # the committed manifest. The gate shell tests drive gate.sh from a non-git
+  # sandbox (cargo stubbed), where the manifest cannot be tracked; there the
+  # check is recorded as a NOTICE — never a silent skip or a false abort.
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! git diff --exit-code -- tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json; then
+      echo "    FAILED — committed Paper hash manifest drifted from a fresh rebuild; regenerate and commit it"
+      exit 1
+    fi
+    echo "    VERIFIED — Paper manifest rebuilds byte-identically (2 FULL: the_nether/0.0 + the_end/0.0)"
+  else
+    echo "    NOTICE — skipped the Paper manifest git-clean check (not inside a git work tree)"
+  fi
+  local paper_dir="$REPO_DIR/tools/rivet-oracle/fixtures/chunk-hash/paper"
+  local rivet_dir="${RIVET_HASH_DIR:-}"
+  if [ -z "$rivet_dir" ]; then
+    # No Rivet chunk manifest exists yet. Record the milestone gap honestly and
+    # move on — this is the documented pre-worldgen state, not an oracle failure.
+    echo "    NOTICE — Paper-vs-Rivet hash-diff did not run: no Rivet chunk manifest yet"
+    echo "      (pre-worldgen, #231/#15 serialization + #51 status-FULL capture pending;"
+    echo "      set RIVET_HASH_DIR to a Rivet region tree to enable the comparison)"
+    return 0
+  fi
+  # `hash-diff` itself refuses a Paper-vs-Paper self-diff (a self-comparison can
+  # never imply Paper == Rivet parity); if RIVET_HASH_DIR aliases the paper tree,
+  # surface that as a hard failure rather than a silent UNVERIFIED.
+  local rc=0
+  cargo run -q -p rivet-oracle -- hash-diff "$paper_dir" "$rivet_dir" 2>&1 || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    # RIVET_HASH_DIR was set, so the comparison was requested and could not
+    # complete (incomplete corpus coverage, or a self-diff if it aliases the
+    # paper tree). A green gate must not claim M2 parity it does not have.
+    echo "    UNVERIFIED — Paper-vs-Rivet hash-diff could not complete"
+    echo "      (needs FULL chunks at every corpus coordinate on both sides; #51 + #231/#15 pending)"
+    exit 1
+  elif [ "$rc" -eq 0 ]; then
+    echo "    VERIFIED — Paper-vs-Rivet FULL digests match across the corpus matrix"
+    echo "==> oracle hash-diff --expect-fail (tamper negatives: every mutation class must be detected)"
+    cargo run -q -p rivet-oracle -- hash-diff --expect-fail "$paper_dir" "$rivet_dir" all
+    echo "    VERIFIED — block/light/heightmap/NBT-order tampering all detected and named"
+  else
+    echo "    FAILED — hash-diff exited $rc (see the output above)"
+    exit 1
+  fi
+}
+
 run_rivet_parity() {
   echo "==> rivet-parity (byte-for-byte NBT/SNBT vs Paper oracle)"
   if [ "$PARITY_RUNNABLE" = 1 ]; then
@@ -630,6 +701,7 @@ main() {
   # --- oracle steps (full gate only; the oracle verifies the whole server) -----
   if [ "$FULL_GATE" = true ]; then
     run_oracle_verify
+    run_oracle_hash
     run_rivet_parity
     run_join_capture
   fi
