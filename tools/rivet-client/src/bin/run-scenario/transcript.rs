@@ -688,16 +688,13 @@ mod tests {
 
     #[test]
     fn differing_last_sent_is_compared() {
-        // The walk's final sent position is a *compared* field: the genuine
-        // artifacts show it is deterministic per server (identical across two
-        // fresh Paper boots — transcript1.json and transcript2.json both record
-        // last_sent x=25.428 z=0.0 despite corrections differing 127 vs 105) and
-        // Paper-vs-Rivet equal on X/Z (Rivet's probe records the same 25.428).
-        // The only divergence seen is the fixture artifact on y (Paper's
-        // default-flat spawn -60.0 vs the single-stone fixture's -63.0), which
-        // the both-mode scenario removes by booting Paper from the same
-        // single-stone fixture. So a differing `last_sent` is a real movement
-        // divergence and must FAIL parity, not be absorbed by an exclusion.
+        // The walk's final sent position is a *compared* field, promoted out of
+        // the excluded nondeterministic set by the both-mode differential: on a
+        // single server the normalized last_sent is deterministic (Paper's spawn
+        // X/Z offset is already removed by the spawn-relative normalization), so
+        // it cannot be absorbed by an exclusion the way the per-boot fields are.
+        // A differing `last_sent` is therefore a real movement divergence and
+        // must FAIL parity.
         let a = normalize_move(&move_records()).expect("normalize");
         // `move_records()` renders the `json!` walk compactly, so the
         // `last_sent` object is an exact substring to tamper.

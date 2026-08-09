@@ -1137,11 +1137,11 @@ fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), Ru
 /// The single-stone superflat fixture aligns Paper's spawn height with Rivet's
 /// (both y=-63.0), so the compared move transcripts must be byte-identical: the
 /// sampled walk geometry, velocity, teleport echo, and `last_sent` are all
-/// deterministic per server and Paper-vs-Rivet equal (verified on genuine
-/// artifacts). There is deliberately no documented gap — unlike the join
-/// differential's health-component gap, which the fixture does not remove — so
-/// any compared-field divergence is a genuine movement mismatch and fails the
-/// run.
+/// deterministic per server and Paper-vs-Rivet equal (the comparator below is
+/// what proves it on each run). There is deliberately no documented gap — unlike
+/// the join differential's health-component gap, which the fixture does not
+/// remove — so any compared-field divergence is a genuine movement mismatch and
+/// fails the run.
 fn check_move_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerError> {
     if let Some(f) = d.diffs.first() {
         let mut msg = format!(
@@ -1170,8 +1170,9 @@ fn check_move_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerErr
 /// actually flows through the comparator and the divergence gate: a comparator
 /// that reports nothing, or a `walk.last_sent` silently moved back into
 /// `excluded`, would PASS vacuously without this negative. A fixed +1.0 offset
-/// is safe here because Paper and Rivet record the *same* final x (verified
-/// 25.428 on both), so the tampered value cannot silently collide with the
+/// is safe here because the move differential just proved Paper and Rivet
+/// record the *same* final x (the comparator reported zero diffs on the
+/// compared fields), so the tampered value cannot silently collide with the
 /// other server's.
 fn prove_move_differential_non_vacuous(
     paper_t: &Value,
@@ -1231,6 +1232,39 @@ fn prove_move_differential_non_vacuous(
              walk.last_sent must be a compared field read by the divergence gate"
                 .to_owned(),
         )),
+    }
+}
+
+/// Render the move verdict's compared-`last_sent` evidence from the actual
+/// normalized transcripts.
+///
+/// The move differential just proved the compared fields byte-identical
+/// (`check_move_divergence` found zero diffs), so Paper and Rivet's `last_sent`
+/// are equal and the printed object is whatever the pinned clients produced on
+/// *this run* — never a hardcoded snapshot. A future walk-geometry change (the
+/// fixture, the client's walk length, spawn offset) therefore cannot leave a
+/// stale success claim quoting an earlier run's coordinates: the verdict always
+/// narrates the live value. If the transcripts ever diverge here (a shape change
+/// or a comparator regression), the narration names both sides instead of
+/// printing one value as if they matched.
+fn verdict_last_sent(paper_t: &Value, rivet_t: &Value) -> String {
+    let paper = paper_t.pointer("/walk/last_sent");
+    let rivet = rivet_t.pointer("/walk/last_sent");
+    match (paper, rivet) {
+        (Some(p), Some(r)) if p == r => {
+            format!("Paper and Rivet both record the same compared last_sent {p}")
+        }
+        (Some(p), Some(r)) => format!(
+            "Paper last_sent {p} vs Rivet last_sent {r} — a compared divergence that should have \
+             failed the comparator"
+        ),
+        (Some(p), None) => {
+            format!("Paper last_sent {p}; the Rivet transcript carried no walk.last_sent")
+        }
+        (None, Some(r)) => {
+            format!("the Paper transcript carried no walk.last_sent; Rivet last_sent {r}")
+        }
+        (None, None) => "neither transcript carried a walk.last_sent".to_owned(),
     }
 }
 
@@ -1803,7 +1837,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
     println!(
         "        the final sent position `last_sent` are byte-identical on the compared fields"
     );
-    println!("        (Paper and Rivet both record last_sent x=25.428 z=0.0 and the same walk).");
+    println!("        — {}", verdict_last_sent(&paper_t, &rivet_t));
     println!(
         "      * Paper boots the single-stone superflat fixture (Git-Commit pinned) so the walk"
     );
@@ -2405,6 +2439,53 @@ mod tests {
         assert!(
             err.to_string().contains("excluded"),
             "an excluded walk.last_sent must trip the vacuous-guard, got {err}"
+        );
+    }
+
+    /// The verdict narrates the compared `last_sent` it was actually given, not
+    /// a hardcoded coordinate: a transcript whose last_sent is far from any
+    /// historically-observed value (e.g. 123.75) must be echoed verbatim. This
+    /// is what keeps a future walk-geometry change from leaving a stale success
+    /// claim in the PASS narration — a narrator that hardcoded an old coordinate
+    /// would fail the `contains("123.75")` assertion, so no stale literal is
+    /// relied on.
+    #[test]
+    fn verdict_narrates_non_default_live_last_sent() {
+        let paper = move_transcript(123.75, false);
+        let rivet = move_transcript(123.75, false);
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("123.75"),
+            "must narrate the live value: {text}"
+        );
+    }
+
+    /// The verdict must not silently print one value as if both sides matched:
+    /// if Paper and Rivet's last_sent differ (a comparator/divergence-gate
+    /// regression, since the gate should have refused before the verdict), the
+    /// narration names both sides.
+    #[test]
+    fn verdict_names_both_sides_when_last_sent_diverges() {
+        let paper = move_transcript(25.0, false);
+        let rivet = move_transcript(26.0, false);
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("25.0") && text.contains("26.0"),
+            "must name both divergent last_sent values: {text}"
+        );
+        assert!(text.contains("vs"), "must flag the divergence: {text}");
+    }
+
+    /// A transcript that dropped `walk.last_sent` (a schema regression) must be
+    /// surfaced by the narration rather than printed as if it matched.
+    #[test]
+    fn verdict_surfaces_a_missing_last_sent() {
+        let paper = move_transcript(25.0, false);
+        let rivet = json!({ "outcome": "moved", "walk": {}, "excluded": {} });
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("no walk.last_sent"),
+            "must surface the missing last_sent: {text}"
         );
     }
 
