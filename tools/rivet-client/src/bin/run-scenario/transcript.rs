@@ -171,6 +171,7 @@ fn check_outcome_terminal(records: &[Value], outcome: &str) -> Result<(), String
     let terminal = match outcome {
         "spawned" => "joined",
         "moved" => "moved",
+        "dwelled" => "dwell",
         "timeout" => "timeout",
         "connection_failed" => "connection_failed",
         "disconnected" => "disconnect",
@@ -520,6 +521,235 @@ fn walk_progress(samples: &[Value]) -> f64 {
 fn walk_moved(samples: &Value) -> bool {
     let samples = samples.as_array().map(|a| a.as_slice()).unwrap_or(&[]);
     walk_progress(samples) >= MOVED_DISTANCE_BLOCKS
+}
+
+/// The server's keepalive kick limit (keepalive.rs `KEEPALIVE_LIMIT_MS` = 30 s).
+/// Wall-clock survival requires the client to stay connected in PLAY strictly
+/// longer than this window while echoing every live challenge.
+pub const DWELL_SURVIVAL_SECONDS: f64 = 30.0;
+/// The minimum challenge/echo count a surviving dwell must show. The server
+/// transmits one keepalive per second (the 1 s throttle), so surviving past the
+/// 30 s kick limit requires at least 30 challenges, each echoed.
+pub const DWELL_MIN_CHALLENGES: usize = 30;
+/// The minimum wall-clock span (ms) between the first and last challenge
+/// receipt — the challenges must actually span the survival window, not cluster
+/// at its start.
+pub const DWELL_MIN_SPAN_MS: u64 = 30_000;
+
+/// Nondeterministic fields of the `dwell` transcript, with justification.
+///
+/// Rivet's keepalive challenge id is the `TickTime` millis reading at transmit
+/// time (keepalive.rs `now_ms` — `Util.getMillis()` semantics), monotonic per
+/// boot, so the raw challenge/echo ids differ every boot and are excluded from
+/// parity. The wall-clock survival window (`connected_wall_seconds`), the
+/// challenge count, the span, and the 1:1 challenge->echo relationship are
+/// deterministic-in-outcome and are compared/verdict-checked, not excluded.
+fn excluded_dwell_fields() -> serde_json::Map<String, Value> {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "dwell.challenge_ids".to_owned(),
+        json!("Rivet's keepalive challenge id is the TickTime millis reading at transmit time (keepalive.rs now_ms, Util.getMillis() semantics) — monotonic per boot, so the raw ids differ every boot; the 1:1 challenge->echo relationship is compared structurally via echo_relationship"),
+    );
+    map.insert(
+        "dwell.echo_ids".to_owned(),
+        json!("echo of the per-boot keepalive ids; relationship compared structurally via echo_relationship"),
+    );
+    map
+}
+
+/// Project a client run onto the canonical `dwell` transcript.
+///
+/// The client's `dwell` record carries the wall-clock survival window
+/// (`connected_wall_seconds`, measured on the client's monotonic clock from
+/// spawn), the raw challenge/echo keepalive ids, and the first/last challenge
+/// offsets. This normalizer projects that record onto the canonical shape, adds
+/// the structural echo-relationship flag (set equality on the raw ids — every
+/// challenge must have exactly one matching echo), and attaches the explicit
+/// nondeterminism declaration (the per-boot id values). The survival scalars —
+/// `connected_wall_seconds`, `challenge_count`, `echo_count`, and the span — are
+/// the verdict-checked acceptance invariants.
+///
+/// A `dwell` run that never completes the window (timeout / connection_failed /
+/// disconnect before the `dwell` record — a server that kicked the client, or a
+/// client that never spawned) normalizes to the same failure outcomes as the
+/// other scenarios, minus the dwell observables.
+pub fn normalize_dwell(raw: &str) -> Result<Value, String> {
+    let records = parse_records(raw)?;
+
+    let lifecycle: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.get("event").and_then(Value::as_str))
+        .filter(|e| LIFECYCLE_EVENTS.contains(e))
+        .map(str::to_owned)
+        .collect();
+
+    let dwell = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("dwell")))
+        .cloned();
+    let outcome = if dwell.is_some() {
+        "dwelled"
+    } else {
+        outcome(&records)
+    };
+    check_outcome_terminal(&records, outcome)?;
+
+    // The `starting` record carries the client binary's pinned Azalea build
+    // revision; surface it so the verdict can prove the client was built from
+    // the pinned unmodified revision.
+    let azalea_revision = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("starting")))
+        .and_then(|r| r.get("azalea_revision").and_then(Value::as_str))
+        .map(str::to_owned);
+
+    let mut transcript = json!({
+        "protocol": PROTOCOL,
+        "scenario": "dwell",
+        "outcome": outcome,
+        "lifecycle": lifecycle,
+        "azalea_revision": azalea_revision,
+        "excluded": excluded_dwell_fields(),
+    });
+
+    if let Some(dwell) = dwell {
+        let challenge_ids = dwell.get("challenge_ids").cloned().unwrap_or(json!([]));
+        let echo_ids = dwell.get("echo_ids").cloned().unwrap_or(json!([]));
+        transcript["dwell"] = json!({
+            "requested_dwell_seconds": dwell.get("requested_dwell_seconds").cloned().unwrap_or(Value::Null),
+            "connected_wall_seconds": dwell.get("connected_wall_seconds").cloned().unwrap_or(Value::Null),
+            "challenge_count": dwell.get("challenge_count").cloned().unwrap_or(Value::Null),
+            "echo_count": dwell.get("echo_count").cloned().unwrap_or(Value::Null),
+            "challenge_ids": challenge_ids,
+            "echo_ids": echo_ids,
+            "echo_relationship": set_equality(&challenge_ids, &echo_ids),
+            "first_challenge_offset_ms": dwell.get("first_challenge_offset_ms").cloned().unwrap_or(Value::Null),
+            "last_challenge_offset_ms": dwell.get("last_challenge_offset_ms").cloned().unwrap_or(Value::Null),
+            "challenge_span_ms": dwell.get("challenge_span_ms").cloned().unwrap_or(Value::Null),
+        });
+    }
+
+    Ok(transcript)
+}
+
+/// Verify a normalized `dwell` transcript proves wall-clock keepalive survival
+/// against a genuine Rivet boot: the unmodified pinned Azalea client spawned
+/// into PLAY, stayed connected strictly past the server's 30 s keepalive kick
+/// limit, and echoed every live keepalive challenge.
+///
+/// Returns a human-readable description of the survival boundary reached. Errors
+/// when the transcript does not prove that:
+///
+/// - the outcome is anything but `dwelled` — a kicked/disconnected client, or
+///   one that never spawned, emits a terminal before the `dwell` record.
+/// - the lifecycle does not contain both `login` and `spawn`.
+/// - `azalea_revision != PINNED_AZALEA_REVISION` — the client was not built from
+///   the pinned unmodified Azalea revision.
+/// - `connected_wall_seconds <= DWELL_SURVIVAL_SECONDS` — the client did not
+///   survive past the kick limit (a client that stopped echoing would be kicked
+///   ~1 s after the first unanswered challenge exceeds 30 s).
+/// - `challenge_count < DWELL_MIN_CHALLENGES` — the server did not keep issuing
+///   live challenges across the window (its 1 s cadence implies >= 30).
+/// - `echo_count != challenge_count` or `echo_relationship == false` — a client
+///   that stopped echoing every challenge would be kicked; the transcript must
+///   show a 1:1 challenge->echo pairing.
+/// - `challenge_span_ms < DWELL_MIN_SPAN_MS` — the challenges did not span the
+///   survival window.
+///
+/// The companion server-side checks (in the runner) are the `connection
+/// established` log (the client genuinely reached the Rivet port) and the
+/// absence of the `read timeout` kick log.
+pub fn rivet_dwell_verdict(t: &Value) -> Result<&'static str, String> {
+    let outcome = t
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if outcome != "dwelled" {
+        return Err(format!(
+            "dwell transcript outcome is {outcome} (expected dwelled): the client never completed \
+             the dwell window — a kicked or disconnected client emits a terminal before the dwell \
+             record"
+        ));
+    }
+    let lifecycle: Vec<&str> = t
+        .get("lifecycle")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !lifecycle.contains(&"login") || !lifecycle.contains(&"spawn") {
+        return Err(format!(
+            "dwell transcript lifecycle is {lifecycle:?} (expected to contain login and spawn) — \
+             malformed transcript or the client never reached play"
+        ));
+    }
+    if t.get("azalea_revision").and_then(Value::as_str) != Some(PINNED_AZALEA_REVISION) {
+        return Err(format!(
+            "dwell transcript azalea_revision is {:?} (expected {PINNED_AZALEA_REVISION}) — the \
+             client was not built from the pinned unmodified Azalea revision",
+            t.get("azalea_revision").and_then(Value::as_str)
+        ));
+    }
+    let dwell = t.get("dwell").and_then(Value::as_object).ok_or_else(|| {
+        "dwell transcript has no dwell record — the client never emitted the dwell outcome"
+            .to_owned()
+    })?;
+    let connected = dwell
+        .get("connected_wall_seconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if connected <= DWELL_SURVIVAL_SECONDS {
+        return Err(format!(
+            "dwell connected_wall_seconds is {connected} (expected > {DWELL_SURVIVAL_SECONDS}): \
+             the client did not survive past the server's {DWELL_SURVIVAL_SECONDS}s keepalive kick \
+             limit"
+        ));
+    }
+    let challenge_count = dwell
+        .get("challenge_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if (challenge_count as usize) < DWELL_MIN_CHALLENGES {
+        return Err(format!(
+            "dwell challenge_count is {challenge_count} (expected >= {DWELL_MIN_CHALLENGES}): the \
+             server did not keep issuing live keepalives across the window (its 1 s cadence over \
+             >{DWELL_SURVIVAL_SECONDS}s implies at least {DWELL_MIN_CHALLENGES})"
+        ));
+    }
+    let echo_count = dwell.get("echo_count").and_then(Value::as_u64).unwrap_or(0);
+    if echo_count != challenge_count {
+        return Err(format!(
+            "dwell echo_count {echo_count} != challenge_count {challenge_count}: a client that \
+             stops echoing keepalives would be kicked by the server, so survival requires every \
+             challenge echoed"
+        ));
+    }
+    if dwell.get("echo_relationship").and_then(Value::as_bool) != Some(true) {
+        return Err(
+            "dwell challenge->echo relationship is not 1:1 (echo_relationship is false): every \
+             challenge must have exactly one matching echo"
+                .to_owned(),
+        );
+    }
+    let span = dwell
+        .get("challenge_span_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if span < DWELL_MIN_SPAN_MS {
+        return Err(format!(
+            "dwell challenge_span_ms is {span} (expected >= {DWELL_MIN_SPAN_MS}): the challenges \
+             did not span the full survival window"
+        ));
+    }
+    if dwell.get("first_challenge_offset_ms").is_none() {
+        return Err(
+            "dwell has no first_challenge_offset_ms: no keepalive challenge arrived during the \
+             window"
+                .to_owned(),
+        );
+    }
+    Ok(
+        "dwell (wall-clock survival past the 30 s keepalive kick limit with a 1:1 challenge->echo cadence)",
+    )
 }
 
 #[cfg(test)]
@@ -947,6 +1177,166 @@ mod tests {
         assert!(
             rivet_play_verdict(&t).is_err(),
             "a spawned transcript without login is malformed"
+        );
+    }
+
+    /// A genuine dwell-mode client run: spawned into play, stayed connected for
+    /// 41 wall-clock seconds, echoed all 41 keepalive challenges (a monotonic
+    /// per-boot millis id sequence), and emitted the dwell record.
+    fn dwell_records() -> String {
+        let ids: Vec<i64> = (1000..1041).collect();
+        [
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":50,"mode":"dwell","dwell_seconds":41,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            &json!({
+                "event": "dwell",
+                "requested_dwell_seconds": 41,
+                "connected_wall_seconds": 41.2,
+                "challenge_count": ids.len(),
+                "echo_count": ids.len(),
+                "challenge_ids": ids,
+                "echo_ids": ids,
+                "first_challenge_offset_ms": 1200,
+                "last_challenge_offset_ms": 41100,
+                "challenge_span_ms": 39900,
+                "protocol": 1,
+            })
+            .to_string(),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn normalizes_a_successful_dwell() {
+        let t = normalize_dwell(&dwell_records()).expect("normalize");
+        assert_eq!(t["outcome"], "dwelled");
+        assert_eq!(t["scenario"], "dwell");
+        assert_eq!(t["lifecycle"], json!(["init", "login", "spawn"]));
+        assert_eq!(t["dwell"]["requested_dwell_seconds"], json!(41));
+        assert_eq!(t["dwell"]["connected_wall_seconds"], json!(41.2));
+        assert_eq!(t["dwell"]["challenge_count"], json!(41));
+        assert_eq!(t["dwell"]["echo_count"], json!(41));
+        assert_eq!(t["dwell"]["echo_relationship"], json!(true));
+        assert_eq!(t["dwell"]["challenge_span_ms"], json!(39900));
+        // The raw ids are per-boot and excluded from parity but recorded as
+        // diagnostics.
+        assert!(t["dwell"]["challenge_ids"].is_array());
+        assert!(t["excluded"]["dwell.challenge_ids"].is_string());
+        assert!(t["excluded"]["dwell.echo_ids"].is_string());
+    }
+
+    #[test]
+    fn dwell_echo_relationship_detects_a_missing_echo() {
+        // Three challenges, but only two echoes: the multiset differs, so the
+        // 1:1 relationship must report false (a client that stops echoing would
+        // be kicked by the server).
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":50,"mode":"dwell","dwell_seconds":41,"azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            r#"{"event":"dwell","requested_dwell_seconds":41,"connected_wall_seconds":41.2,"challenge_count":3,"echo_count":2,"challenge_ids":[1000,1001,1002],"echo_ids":[1000,1001],"first_challenge_offset_ms":1200,"last_challenge_offset_ms":40000,"challenge_span_ms":38800,"protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_dwell(&raw).expect("normalize");
+        assert_eq!(t["dwell"]["echo_relationship"], json!(false));
+        assert_eq!(t["dwell"]["challenge_count"], json!(3));
+        assert_eq!(t["dwell"]["echo_count"], json!(2));
+    }
+
+    #[test]
+    fn failed_dwell_normalizes_without_dwell_observables() {
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"mode":"dwell","dwell_seconds":41,"azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"disconnect","reason":"read timeout","after_spawn":true,"protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_dwell(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "disconnected");
+        assert!(t.get("dwell").is_none());
+    }
+
+    #[test]
+    fn dwell_verdict_accepts_a_genuine_survival_run() {
+        let t = normalize_dwell(&dwell_records()).expect("normalize");
+        let verdict = rivet_dwell_verdict(&t).expect("dwell verdict");
+        assert!(
+            verdict.contains("survival"),
+            "verdict must name the survival boundary, got {verdict}"
+        );
+    }
+
+    #[test]
+    fn dwell_verdict_rejects_a_kicked_client() {
+        // A client kicked by the server (read timeout) emits a terminal before
+        // the dwell record — survival never completed.
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"mode":"dwell","dwell_seconds":41,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            r#"{"event":"disconnect","reason":"read timeout","after_spawn":true,"protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_dwell(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "disconnected");
+        let err = rivet_dwell_verdict(&t).expect_err("a kicked client did not survive");
+        assert!(
+            err.contains("dwelled"),
+            "error must demand the dwelled outcome, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_verdict_rejects_short_connected_window() {
+        // A client that disconnected at exactly the 30 s boundary (or a transcript
+        // claiming less) did not survive *past* the kick limit.
+        let mut t = normalize_dwell(&dwell_records()).expect("normalize");
+        t["dwell"]["connected_wall_seconds"] = json!(30.0);
+        let err = rivet_dwell_verdict(&t).expect_err("30s is not survival past the limit");
+        assert!(
+            err.contains("connected_wall_seconds"),
+            "error must name the short window, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_verdict_rejects_a_missing_challenge_span() {
+        // Challenges clustered at the start of the window (no span) cannot prove
+        // the server kept issuing live keepalives across the survival window.
+        let mut t = normalize_dwell(&dwell_records()).expect("normalize");
+        t["dwell"]["challenge_span_ms"] = json!(5000);
+        let err = rivet_dwell_verdict(&t).expect_err("span below the window");
+        assert!(
+            err.contains("challenge_span_ms"),
+            "error must name the span, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_verdict_rejects_an_unanswered_challenge() {
+        // echo_count != challenge_count: a client that stops echoing would be
+        // kicked, so a mismatch is a survival violation.
+        let mut t = normalize_dwell(&dwell_records()).expect("normalize");
+        t["dwell"]["echo_count"] = json!(40);
+        t["dwell"]["echo_relationship"] = json!(false);
+        let err = rivet_dwell_verdict(&t).expect_err("unanswered challenge");
+        assert!(
+            err.contains("echo_count"),
+            "error must name the echo mismatch, got {err}"
+        );
+    }
+
+    #[test]
+    fn dwell_verdict_rejects_a_wrong_azalea_revision() {
+        let mut t = normalize_dwell(&dwell_records()).expect("normalize");
+        t["azalea_revision"] = json!("deadbeef");
+        assert!(
+            rivet_dwell_verdict(&t).is_err(),
+            "a client not built from the pinned Azalea revision must not pass"
         );
     }
 }
