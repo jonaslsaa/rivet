@@ -249,9 +249,12 @@ impl BitStorage for SimpleBitStorage {
     /// `HashMap` in the second. Each palette id's index list is appended in
     /// ascending storage order (`index` only moves forward), matching Java's
     /// `(short)index` truncation exactly. The id → list pairs are returned in
-    /// first-appearance order (a deterministic canonical order; Java's map
-    /// iteration is hash-bucket order, and the counting consumer sums each
-    /// list's length, so the outer order is unobservable).
+    /// first-appearance order — a deterministic canonical order; Java's map
+    /// iteration is hash-bucket order, so the outer order is not portable. It
+    /// is observable only as the element order `LevelChunkSection`'s recalc
+    /// appends to its `tickingBlocks` ShortList, which no current ported
+    /// consumer reads (the count fields and the set of ticking positions are
+    /// order-independent, and the wire never carries the list).
     fn count_entries(&self) -> Vec<(i32, Vec<i16>)> {
         let values_per_long = self.values_per_long;
         let bits = self.bits;
@@ -505,7 +508,8 @@ mod tests {
 
     /// A `get(index)`-based reference for `count_entries`, mirroring Java's
     /// default `BitStorage.moonrise$countEntries` (`computeIfAbsent` over
-    /// `get`, first-appearance id order, ascending index lists).
+    /// `get`), with the port's deterministic first-appearance id order and
+    /// ascending index lists.
     fn count_entries_reference(size: usize, s: &SimpleBitStorage) -> Vec<(i32, Vec<i16>)> {
         let mut order: Vec<i32> = Vec::new();
         let mut lists: std::collections::HashMap<i32, Vec<i16>> = std::collections::HashMap::new();
@@ -557,7 +561,7 @@ mod tests {
             s.set(i, 1);
         }
         // Ids are returned in first-appearance order (3, 1, 5), each with its
-        // ascending index list — Java's `ret.put` insertion order.
+        // ascending index list.
         assert_eq!(
             s.count_entries(),
             vec![

@@ -64,7 +64,10 @@ pub trait BitStorage: Send {
     /// `moonrise$countEntries()` — the Paper/Moonrise block-counting
     /// extension. Maps every distinct palette-local id to the ascending list
     /// of storage indices holding it, in first-appearance order of the ids
-    /// (the map's insertion order in Java).
+    /// (a deterministic canonical order; Java's `Int2ObjectOpenHashMap`
+    /// iteration is hash-bucket order, so the outer order is not portable —
+    /// it only feeds `tickingBlocks` element order, which no current ported
+    /// consumer reads).
     ///
     /// This is the default implementation from `BitStorage.java`
     /// (`computeIfAbsent` over `get(index)`, kept as a compatibility default

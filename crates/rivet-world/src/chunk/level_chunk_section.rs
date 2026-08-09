@@ -168,14 +168,17 @@ impl<
     /// `recalcBlockCounts()` — resets the count fields and the Moonrise lists,
     /// then tallies them from the container's palette via the storage walk.
     ///
-    /// Java's Moonrise fast path (issue #216) is ported faithfully: when the
-    /// palette holds a single value, `FULL_LIST` (the ascending `0..4096`
-    /// index list) is used instead of `moonrise$countEntries()`; otherwise the
+    /// Java's Moonrise fast path (issue #216) is ported: when the palette
+    /// holds a single value, `FULL_LIST` (the ascending `0..4096` index list)
+    /// is used instead of `moonrise$countEntries()`; otherwise the
     /// per-palette-id coordinate groups are read from the storage directly.
     /// Each group contributes the palette value's counts; the packed positions
     /// of randomly-ticking values are appended to `tickingBlocks` (Java's
     /// `setMinCapacity` + `add` loop — the `ShortList` dedupes, so the
     /// coordinate list ends up with exactly the distinct ticking positions).
+    /// `tickingBlocks`'s element order follows `count_entries`' first-appearance
+    /// order (Java's hash-bucket order is not portable); the list never reaches
+    /// the wire and no ported consumer reads its order.
     ///
     /// Three simplifications are superflat-safe and deferred with the owning
     /// unit (#216): `is_randomly_ticking` doubles for both the block and the
