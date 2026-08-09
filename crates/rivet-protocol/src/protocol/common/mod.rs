@@ -7,8 +7,8 @@
 //!
 //! The `custom` module (`...protocol.common.custom`) holds the custom-payload
 //! dispatch machinery. Bodies that are not ported yet are deferred as STUB
-//! modules with a note in their doc — see the `clientbound_disconnect`,
-//! `clientbound_resource_pack_push`, and `clientbound_show_dialog` modules.
+//! modules with a note in their doc — see the `clientbound_resource_pack_push`
+//! and `clientbound_show_dialog` modules.
 //!
 //! The `ClientInformation` payload value type and its three enums
 //! (`chat_visiblity`, `humanoid_arm`, `particle_status`) are
