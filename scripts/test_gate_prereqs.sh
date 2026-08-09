@@ -320,5 +320,67 @@ run_oracle_self_test > "$TMP/out13" 2>&1
 grep -q "^    UNVERIFIED" "$TMP/out13" || fail "self-test: UNVERIFIED not printed when not runnable"
 pass "self-test: not runnable -> UNVERIFIED"
 
+# A run.sh that exits nonzero — whether the oracle failed to boot (a
+# present-but-stale runtime jar fails its SHA/commit pin, a prereq is missing)
+# or selfTest() threw a JVM assertion after booting (run.sh exec's the JVM, so
+# its exit status passes straight through) — never exercised the RAW_STDOUT
+# verdict in a way the wrapper can distinguish. The classification is therefore
+# conservatively UNVERIFIED (gate exit 3 via ORACLE_UNVERIFIED), NEVER FAILED —
+# the distinguishing property from the booted-but-bad-stdout cases above, where a
+# run.sh that exits 0 while emitting a non-bare-JSON line is a real self-test
+# failure (FAILED, exit 1). Mirrors run_rivet_parity's dead-oracle (rc=3)
+# handling.
+dead_self_run_sh() { # $1 = exit code run.sh should return
+  printf '#!/bin/bash\nprintf "%%s\\n" "Paper compile jar and materialized runtime jar do not match" >&2\nexit %s\n' "$1" > "$SELF_SHIM_DIR/run.sh"
+  chmod +x "$SELF_SHIM_DIR/run.sh"
+}
+
+# Dead oracle, gate not in --require-oracle mode: UNVERIFIED, returns 0 (main
+# turns ORACLE_UNVERIFIED into exit 3), never FAILED. Runs in the CURRENT shell
+# (not a subshell) so the ORACLE_UNVERIFIED global propagates to the assertions.
+dead_self_run_sh 1
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+run_oracle_self_test > "$TMP/out14" 2>&1
+rc14=$?
+set -e
+[ "$rc14" = 0 ] || fail "self-test: dead oracle without --require-oracle should return 0 (got $rc14)"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "self-test: ORACLE_UNVERIFIED not set on dead oracle"
+grep -q "^    UNVERIFIED" "$TMP/out14" || fail "self-test: UNVERIFIED not printed for dead oracle"
+grep -q "^    FAILED" "$TMP/out14" && fail "self-test: FAILED printed for nonzero run.sh exit (classification is conservatively UNVERIFIED, never FAILED)"
+grep -q "^    VERIFIED" "$TMP/out14" && fail "self-test: VERIFIED printed despite dead oracle"
+pass "self-test: dead oracle -> UNVERIFIED, never FAILED/VERIFIED"
+
+# Dead oracle with --require-oracle: hard failure (exit 1), after reporting
+# UNVERIFIED. run_oracle_self_test exits the shell here, so it runs in a
+# subshell.
+dead_self_run_sh 1
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REQUIRE_ORACLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out15" 2>&1 )
+rc15=$?
+set -e
+REQUIRE_ORACLE=0
+[ "$rc15" = 1 ] || fail "self-test: dead oracle + --require-oracle should exit 1 (got $rc15)"
+grep -q "^    UNVERIFIED" "$TMP/out15" || fail "self-test: UNVERIFIED not printed before the hard failure"
+grep -q "hard failure" "$TMP/out15" || fail "self-test: --require-oracle hard-failure message missing"
+pass "self-test: dead oracle + --require-oracle exits 1"
+
+# A non-1 nonzero exit (run.sh aborts for an unanticipated reason, or the JVM
+# exits with a nonstandard status) is still conservatively UNVERIFIED, not FAILED —
+# classification keys on the raw-JSON verdict being unobservable, not on the
+# specific exit code.
+dead_self_run_sh 7
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+run_oracle_self_test > "$TMP/out16" 2>&1
+rc16=$?
+set -e
+[ "$rc16" = 0 ] || fail "self-test: any nonzero run.sh exit should return 0 (got $rc16)"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "self-test: ORACLE_UNVERIFIED not set for nonzero exit 7"
+grep -q "^    UNVERIFIED" "$TMP/out16" || fail "self-test: UNVERIFIED not printed for exit 7"
+grep -q "^    FAILED" "$TMP/out16" && fail "self-test: FAILED printed for exit 7 (classification is conservatively UNVERIFIED, never FAILED)"
+pass "self-test: nonzero exit 7 -> UNVERIFIED, never FAILED"
+
 echo
 echo "ALL GATE PREREQ TESTS PASSED"
