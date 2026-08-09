@@ -49,7 +49,7 @@ Issue #231 amendment (the `world.level.chunk.storage` slice). Region-file IO is 
 
 - Per-`RegionFile` mutual exclusion (Java `synchronized` on `write`/`getChunkDataInputStream`) maps to a `Mutex<RegionFile>` held by the region's single IO task, or a region-keyed single-writer queue (`chunkX >> 5, chunkZ >> 5`). This cross-thread IO lock is explicitly inside the "cross-thread queues only" exception below — a worker/queue mutex, never a lock on game state.
 - Chunk ownership is unchanged: the chunk is owned by `ChunkMap` by value; `SerializableChunkData` builds/reads a plain value `CompoundTag` on the worker side. Starlight light arrays survive load→save as opaque bytes in the compound — no engine, no shared state.
-- Value types: `ChunkPos` (region math `& ~31`, `getRegionLocalX/Z`, `pack`) and `RegionStorageInfo` are `Copy` value types. Java's `info.dfuType()[0] = dataFixType` mutable-array hack becomes a plain `is_chunk_data: bool` field — do not reproduce a shared-mutable array.
+- Value types: `ChunkPos` (region math `& ~31`, `getRegionLocalX/Z`, `pack`) is a `Copy` value type; `RegionStorageInfo` is a `Clone` value type (it owns `String`/`ResourceKey` fields, so it cannot be `Copy`). Java's `info.dfuType()[0] = dataFixType` mutable-array hack becomes a plain `is_chunk_data: bool` field — do not reproduce a shared-mutable array.
 - Codec selection is a frozen value: the `RegionFileVersion` chosen by `configure` is shared freely like `GameData`; the gzip/deflate/lz4 stream wrappers are pure functions over `Read`/`Write`.
 - `RegionBitmap` is an owned `BitSet`-equivalent inside each `RegionFile` — sector allocation is per-file derived state, never global.
 
