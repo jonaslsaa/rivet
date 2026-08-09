@@ -119,7 +119,11 @@ mod tests {
         provider.relight_chunks(&Default::default());
         provider.check_chunk_edges(ChunkPos::new(0, 0));
 
-        // Readers report the empty-engine defaults (Java's 0 / null).
+        // Readers report the stub's empty-engine defaults: the sky-light 0 is
+        // a stub simplification (Java returns 15 for a null chunk when
+        // hasSkyLight — see the method doc), while the block-light 0 is
+        // faithful to Java (it too returns 0 for a null chunk), and the data
+        // layer is None, Java's null.
         assert_eq!(provider.get_sky_light_value(BlockPos::new(0, 64, 0)), 0);
         assert_eq!(provider.get_block_light_value(BlockPos::new(0, 64, 0)), 0);
         assert!(
