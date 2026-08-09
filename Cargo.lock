@@ -641,12 +641,21 @@ dependencies = [
  "rivet-nbt",
  "rivet-protocol",
  "rivet-registry",
+ "rivet-test-support",
  "rivet-text",
  "rivet-util",
  "rivet-world",
  "serde_json",
  "thiserror",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rivet-test-support"
+version = "0.1.0-dev+mc26.2"
+dependencies = [
  "tracing",
  "tracing-subscriber",
 ]

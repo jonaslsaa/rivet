@@ -719,8 +719,13 @@ async fn move_and_emit(bot: Client, state: State) {
             // moving ticks after the last sample — comparing `last_sent` to the
             // final sample would always disagree and is not done here. Like the
             // samples, X/Z are spawn-relative (the server randomizes the spawn
-            // offset each boot), so the record is deterministic across boots;
-            // `y` is absolute (the superflat spawn height is fixed).
+            // offset each boot) and `y` is absolute (the superflat spawn height
+            // is fixed), so the record is normalized the same way — but it is
+            // NOT guaranteed identical across boots: it is a snapshot of the
+            // unsampled tail, the region a mid-walk server re-sync
+            // (`player_position`) perturbation lands in. It is recorded as a
+            // diagnostic and excluded from the #53 differential (see the
+            // `walk.last_sent` entry in `excluded_move_fields`).
             "walk_ticks": MOVE_TICKS,
             "movement_ticks": MOVE_TICKS - 1,
             "sampled_ticks": samples.len(),

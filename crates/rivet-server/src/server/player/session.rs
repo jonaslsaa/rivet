@@ -1964,7 +1964,10 @@ mod tests {
     /// test writer — so a regression that emitted a record would be captured.
     #[test]
     fn trace_pre_ack_move_emits_no_acceptance() {
-        let _sub = crate::server::movement_trace::test_support::install_for_tests(true);
+        let _sub = rivet_test_support::install_for_tests(
+            crate::server::movement_trace::set_trace_gate_for_tests,
+            true,
+        );
         let (mut registry, _out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(default_session_config(256));
         apply_enter_play(&mut registry);
@@ -2009,7 +2012,10 @@ mod tests {
     /// emits nothing (zero behavior when unset).
     #[test]
     fn trace_accepted_move_is_post_ack_and_carries_snapped_values() {
-        let _sub = crate::server::movement_trace::test_support::install_for_tests(true);
+        let _sub = rivet_test_support::install_for_tests(
+            crate::server::movement_trace::set_trace_gate_for_tests,
+            true,
+        );
         let (mut registry, _out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(default_session_config(256));
         apply_enter_play(&mut registry);
@@ -2072,7 +2078,10 @@ mod tests {
     /// the session stays intact (no kick on the trace path).
     #[test]
     fn trace_malformed_frame_emits_no_acceptance() {
-        let _sub = crate::server::movement_trace::test_support::install_for_tests(true);
+        let _sub = rivet_test_support::install_for_tests(
+            crate::server::movement_trace::set_trace_gate_for_tests,
+            true,
+        );
         let (mut registry, _out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(default_session_config(256));
         apply_enter_play(&mut registry);
@@ -2100,7 +2109,10 @@ mod tests {
     /// disabled.
     #[test]
     fn trace_zero_behavior_when_gate_off() {
-        let _sub = crate::server::movement_trace::test_support::install_for_tests(false);
+        let _sub = rivet_test_support::install_for_tests(
+            crate::server::movement_trace::set_trace_gate_for_tests,
+            false,
+        );
         let (mut registry, _out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(default_session_config(256));
         apply_enter_play(&mut registry);
@@ -2132,7 +2144,10 @@ mod tests {
     /// for the live session either way, so the reason map never retains it.
     #[test]
     fn trace_session_end_distinguishes_close_reasons() {
-        let _sub = crate::server::movement_trace::test_support::install_for_tests(true);
+        let _sub = rivet_test_support::install_for_tests(
+            crate::server::movement_trace::set_trace_gate_for_tests,
+            true,
+        );
         let (mut registry, _out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(default_session_config(256));
         let cases: &[(DisconnectReason, bool, Option<&str>)] = &[

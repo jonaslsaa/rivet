@@ -18,7 +18,9 @@
 //! and no channel/`Arc`/`Mutex`: the records are plain `tracing::info!` events
 //! flowing through the existing subscriber, so zero new shared state exists.
 //! Tests pin the gate with [`set_trace_gate_for_tests`] (the one-time read is
-//! unchanged in production; the setter only overwrites the cached value).
+//! unchanged in production; the setter only overwrites the cached value). The
+//! tracing-subscriber recording machinery the tests assert against lives in the
+//! dev-dependency crate `rivet-test-support`, not in this library.
 //!
 //! # Records
 //!
@@ -255,7 +257,7 @@ mod tests {
     /// reinstalling and emitting the *same* callsite again must still capture.
     #[test]
     fn reinstall_still_captures_same_callsite() {
-        let sub = super::test_support::install_for_tests(true);
+        let sub = rivet_test_support::install_for_tests(super::set_trace_gate_for_tests, true);
         trace_teleport_ack(
             ConnectionId(1),
             1,
@@ -272,7 +274,7 @@ mod tests {
             "first install captures the event"
         );
         drop(sub);
-        let sub2 = super::test_support::install_for_tests(true);
+        let sub2 = rivet_test_support::install_for_tests(super::set_trace_gate_for_tests, true);
         trace_teleport_ack(
             ConnectionId(1),
             1,
@@ -288,226 +290,5 @@ mod tests {
             1,
             "reinstall still captures the same callsite"
         );
-    }
-}
-
-/// Test-only tracing subscriber infrastructure shared by the movement-trace
-/// unit tests (`player::session`) and the live-TCP integration test
-/// (`tests/movement_trace.rs`). Nothing in production reads trace records back —
-/// the trace is fire-and-forget `tracing::info!` events — so this is pinned
-/// behind a doc-hide: it exists so the tests can assert the schema (fields and
-/// their types) instead of scraping rendered log lines.
-#[doc(hidden)]
-pub mod test_support {
-    use std::collections::BTreeMap;
-    use std::fmt;
-    use std::sync::{Arc, Mutex};
-
-    use tracing::Subscriber;
-    use tracing::field::{Field, Visit};
-    use tracing_subscriber::Layer;
-    use tracing_subscriber::layer::Context;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::registry::LookupSpan;
-
-    /// Serializes the trace tests in a binary: the env gate is a process-wide
-    /// one-time value, so gate-sensitive tests must not run concurrently with
-    /// each other. Production code never touches this lock. The lock is
-    /// recovered from poisoning so a single failing trace test does not cascade
-    /// into every later trace test.
-    pub static TRACE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-        TRACE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// One captured trace record: the `RIVET_*` message tag and the raw field
-    /// name → value pairs (each value stringified by the visitor).
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
-    pub struct TraceRecord {
-        pub tag: String,
-        pub fields: BTreeMap<String, String>,
-    }
-
-    impl TraceRecord {
-        pub fn field(&self, name: &str) -> Option<&str> {
-            self.fields.get(name).map(String::as_str)
-        }
-    }
-
-    /// A shared sink the recording layer appends captured records to.
-    #[derive(Clone, Default)]
-    pub struct Recorder {
-        records: Arc<Mutex<Vec<TraceRecord>>>,
-    }
-
-    impl Recorder {
-        pub fn snapshot(&self) -> Vec<TraceRecord> {
-            self.records.lock().expect("recorder lock poisoned").clone()
-        }
-
-        pub fn clear(&self) {
-            self.records.lock().expect("recorder lock poisoned").clear();
-        }
-    }
-
-    /// A [`Visit`] that captures every field of a tracing event as a string,
-    /// keyed by field name. The typed record methods are all overridden so the
-    /// schema's value types are observable (a bare `record_debug` only would
-    /// collapse them); `DisplayValue`/`DebugValue` (`%id`, `%reason`) land in
-    /// `record_debug` and render as their Display/Debug text.
-    struct FieldCollector<'a> {
-        fields: &'a mut BTreeMap<String, String>,
-    }
-
-    impl Visit for FieldCollector<'_> {
-        fn record_f64(&mut self, field: &Field, value: f64) {
-            self.fields
-                .insert(field.name().to_owned(), value.to_string());
-        }
-
-        fn record_i64(&mut self, field: &Field, value: i64) {
-            self.fields
-                .insert(field.name().to_owned(), value.to_string());
-        }
-
-        fn record_u64(&mut self, field: &Field, value: u64) {
-            self.fields
-                .insert(field.name().to_owned(), value.to_string());
-        }
-
-        fn record_bool(&mut self, field: &Field, value: bool) {
-            self.fields
-                .insert(field.name().to_owned(), value.to_string());
-        }
-
-        fn record_str(&mut self, field: &Field, value: &str) {
-            self.fields
-                .insert(field.name().to_owned(), value.to_owned());
-        }
-
-        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-            self.fields
-                .insert(field.name().to_owned(), format!("{value:?}"));
-        }
-    }
-
-    /// A [`Layer`] that captures every event whose message is a `RIVET_*` tag
-    /// into a [`Recorder`], with its structured fields. The message field (the
-    /// tag) is stripped out into `TraceRecord::tag`.
-    #[derive(Clone, Default)]
-    pub struct RecordingLayer {
-        recorder: Recorder,
-    }
-
-    impl<S> Layer<S> for RecordingLayer
-    where
-        S: Subscriber + for<'a> LookupSpan<'a>,
-    {
-        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-            let mut fields = BTreeMap::new();
-            event.record(&mut FieldCollector {
-                fields: &mut fields,
-            });
-            let Some(tag) = fields.remove("message") else {
-                return;
-            };
-            if tag.starts_with("RIVET_") {
-                self.recorder
-                    .records
-                    .lock()
-                    .expect("recorder lock poisoned")
-                    .push(TraceRecord { tag, fields });
-            }
-        }
-    }
-
-    pub fn recording_layer(recorder: &Recorder) -> RecordingLayer {
-        RecordingLayer {
-            recorder: recorder.clone(),
-        }
-    }
-
-    /// A handle the in-process trace tests hold for their duration: the
-    /// thread-local subscriber guard (keeps the recording + fmt layers
-    /// installed) and the gate lock (keeps concurrent trace tests from flipping
-    /// the env gate mid-test).
-    pub struct TestSubscriber {
-        pub recorder: Recorder,
-        _guard: tracing::subscriber::DefaultGuard,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    /// Pin the env gate and install a thread-local subscriber — a recording
-    /// layer for the structured assertions plus `tracing_subscriber::fmt` with
-    /// the test writer, so cargo captures the rendered stderr — for the
-    /// duration of the returned guard. The in-process (unit) trace tests use
-    /// this; the live-TCP test installs the process-global variant so the tick
-    /// OS thread's events are captured too.
-    pub fn install_for_tests(enabled: bool) -> TestSubscriber {
-        let lock = test_lock();
-        force_multi_dispatch();
-        super::set_trace_gate_for_tests(enabled);
-        let recorder = Recorder::default();
-        let guard = tracing::subscriber::set_default(composed_subscriber(&recorder));
-        TestSubscriber {
-            recorder,
-            _guard: guard,
-            _lock: lock,
-        }
-    }
-
-    /// Pin the env gate and install the process-global subscriber, so a server's
-    /// tick thread (a separate OS thread) emits into the returned recorder. Only
-    /// installed once per test binary; the recorder is shared across calls so
-    /// every live test observes every run.
-    pub fn install_global_for_tests(enabled: bool) -> Recorder {
-        static GLOBAL: std::sync::OnceLock<Recorder> = std::sync::OnceLock::new();
-        let _lock = test_lock();
-        force_multi_dispatch();
-        super::set_trace_gate_for_tests(enabled);
-        GLOBAL
-            .get_or_init(|| {
-                let recorder = Recorder::default();
-                tracing::subscriber::set_global_default(composed_subscriber(&recorder))
-                    .expect("global default installed once per test binary");
-                recorder
-            })
-            .clone()
-    }
-
-    /// Keep tracing-core's dispatch set multi-registered for the process
-    /// lifetime, so every callsite-interest rebuild evaluates against the
-    /// registered dispatches instead of the single-dispatch `JustOne` fast path.
-    ///
-    /// That fast path re-evaluates all callsites against `get_default` — the
-    /// process-global default (or `NONE` in the lib test binary) when no scoped
-    /// dispatch is live on the calling thread. Between trace tests no guard is
-    /// held, so `Dispatch::new` inside the next `set_default` would re-cache any
-    /// already-registered `RIVET_*` callsite as `Interest::never()` and those
-    /// events would be silently dropped for the rest of the process. Leaking one
-    /// extra dispatch keeps `has_just_one == false`, so rebuilds iterate the
-    /// registered list (which always includes the caller's own composed
-    /// subscriber) and never consult the thread-local. The leaked dispatch is a
-    /// bare registry — `always` interest, no layers, never observed.
-    fn force_multi_dispatch() {
-        static LEAKED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        LEAKED.get_or_init(|| {
-            // Deliberately leak the dispatch: its registrar must outlive every
-            // scoped install so the dispatch set never collapses back to one.
-            std::mem::forget(tracing::Dispatch::new(tracing_subscriber::registry()));
-        });
-    }
-
-    fn composed_subscriber(recorder: &Recorder) -> impl Subscriber + Send + Sync + 'static {
-        tracing_subscriber::registry()
-            .with(recording_layer(recorder))
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_test_writer()
-                    .with_level(false)
-                    .without_time()
-                    .with_target(false),
-            )
     }
 }

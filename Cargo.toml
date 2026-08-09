@@ -34,6 +34,10 @@ rivet-text = { path = "crates/rivet-text" }
 rivet-util = { path = "crates/rivet-util" }
 rivet-world = { path = "crates/rivet-world" }
 rayon = "1"
+# Test-only tracing-subscriber machinery for asserting the RIVET_* trace
+# records (issue #53). Dev-dependency of rivet-server only; nothing production
+# links it (see crates/rivet-test-support).
+rivet-test-support = { path = "crates/rivet-test-support" }
 ryu = "1.0"
 phf = "0.11"
 serde_json = { version = "1", features = ["preserve_order"] }

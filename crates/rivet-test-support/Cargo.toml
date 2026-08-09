@@ -1,0 +1,16 @@
+[package]
+name = "rivet-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A dev-dependency-only helper crate. Nothing in production links it; the
+# recorder/subscriber machinery lives here so it is never compiled into a
+# shipped binary (issue #53 movement-trace tests use it from `rivet-server`'s
+# unit + integration tests).
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

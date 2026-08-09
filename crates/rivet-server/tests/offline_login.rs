@@ -1498,11 +1498,13 @@ async fn live_matching_ack_with_no_pending_teleport_disconnects() {
 // The unit tests in `server::player::session` prove the `RIVET_*` records'
 // contents against the tick-owned state directly. This test proves the same
 // records flow out of a real server: the process-global tracing subscriber is
-// installed once per test binary (`install_global_for_tests`), so the tick OS
-// thread's events land in the shared recorder while a raw `TcpStream` drives a
-// join → ack → move → disconnect. The subscriber composes the recording layer
-// with `tracing_subscriber::fmt::layer().with_test_writer()`, so the rendered
-// records are also captured by cargo.
+// installed once per test binary (`rivet_test_support::install_global_for_tests`),
+// so the tick OS thread's events land in the shared recorder while a raw
+// `TcpStream` drives a join → ack → move → disconnect. The subscriber composes
+// the recording layer with `tracing_subscriber::fmt::layer().with_test_writer()`,
+// so the rendered records are also captured by cargo. The machinery lives in the
+// dev-dependency crate `rivet-test-support` (not in the production library); the
+// env gate is pinned via `movement_trace::set_trace_gate_for_tests`.
 
 /// Poll `pred` until it returns true or `timeout` elapses (a stalled tick or
 /// conn_loop fails loudly instead of hanging the test).
@@ -1555,8 +1557,10 @@ async fn wait_until(
 /// the distinctive `42.5` x-coordinate only this test sends.
 #[tokio::test]
 async fn live_trace_records_teleport_ack_move_and_session_end() {
-    let recorder =
-        rivet_server::server::movement_trace::test_support::install_global_for_tests(true);
+    let recorder = rivet_test_support::install_global_for_tests(
+        rivet_server::server::movement_trace::set_trace_gate_for_tests,
+        true,
+    );
     let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
 
     client
