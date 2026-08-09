@@ -13,6 +13,22 @@
 //! - `chunk::level_chunk_section` — `LevelChunkSection` wire write/size/recalc
 //! - `chunk::data_layer` — `DataLayer` (16³ light layer)
 //! - `levelgen::heightmap` — `Heightmap`/`primeHeightmaps`
+//! - `levelgen::feature::configurations` — the `FeatureConfiguration` trait,
+//!   `NoneFeatureConfiguration` and their DFU codecs (the
+//!   `mc.world.level.levelgen.feature.configurations.core` unit), plus an
+//!   out-of-unit proactive port of `ProbabilityFeatureConfiguration` (owned by
+//!   the `.probabilityfeature` unit)
+//! - `levelgen::generation_step` — the `GenerationStep.Decoration` enum,
+//!   proactively ported from the pending `mc.world.level.levelgen.settings`
+//!   unit (the settings wave must not re-port it)
+//! - `levelgen::placement` — the placement core slice (the
+//!   `mc.world.level.levelgen.placement.core` unit): `PlacedFeature`/
+//!   `PlacementContext`/`PlacementFilter`/`PlacementModifier`/
+//!   `PlacementModifierType`; the `#181` codegen modifier dispatch
+//!   (`placement_get_positions`) stays a STUB
+//! - `levelgen::world_generation_context` — the `WorldGenerationContext`
+//!   minY/height window (the `mc.world.level.levelgen.noise` unit's class; only
+//!   the Paper `level()` accessor defers — RivetTodo #232)
 //! - `lighting::light_update_data` — the light payload producer
 //! - `superflat` — the deterministic single-stone superflat content builder
 //!   (issue #100) that feeds the #94 `ClientboundLevelChunkWithLightPacket`.

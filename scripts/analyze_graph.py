@@ -1516,9 +1516,16 @@ SPLIT_NOTES: dict[str, str] = {
     "mc.world.level.levelgen.feature.core": (
         "#181 hub: generated content — Feature.java is the static registry hub "
         "(register(\"tree\", new TreeFeature(...)) x ~60); its registration table "
-        "is emitted by rivet-codegen (extend #49/#154), so the 39 feature leaf "
+        "is emitted by rivet-codegen (per the #181 hub), so the 39 feature leaf "
         "units and 8 family clusters -> core is a clean DAG and the feature "
         "package's 68-class SCC dissolves"
+    ),
+    "mc.world.level.levelgen.feature.configurations.probabilityfeature": (
+        "#306 feature-shell wave: ProbabilityFeatureConfiguration.java (the "
+        "unit's single file) is proactively ported out-of-unit "
+        "(levelgen::feature::configurations::probability_feature_configuration — "
+        "the value class + floatRange record codec); the .probabilityfeature "
+        "wave must not re-port it"
     ),
     "mc.world.level.levelgen.structure": (
         "#182 hub: BuiltinStructures/BuiltinStructureSets registration "
@@ -1552,7 +1559,7 @@ SPLIT_NOTES: dict[str, str] = {
     "mc.world.level.levelgen.placement.core": (
         "#181: PlacementModifierType is the register() registry hub over all "
         "concrete placement modifiers; its reverse registration edges are "
-        "generated content like Feature.java (extend #49/#154), so the 21-file "
+        "generated content like Feature.java (per the #181 hub), so the 21-file "
         "class-level 'SCC' dissolves into core + leaves. The core itself holds "
         "the PlacedFeature <-> PlacementContext and PlacementModifier <-> "
         "PlacementModifierType 2-node cycles (cycle 27, co-schedule)"
@@ -1619,9 +1626,12 @@ SPLIT_NOTES: dict[str, str] = {
         "base noise and noisegen build on"
     ),
     "mc.world.level.levelgen.settings": (
-        "#179/#183: the settings sources (FlatLevelSource/DebugLevelSource/"
+        "#179: the settings sources (FlatLevelSource/DebugLevelSource/"
         "WorldGenSettings/WorldDimensions/Geode*Settings); flat feeds M1.3 "
-        "superflat (#100/#156)"
+        "superflat (#100/#156). GenerationStep.java (the outer namespace "
+        "holder for the Decoration enum) is proactively ported by the #306 "
+        "feature-shell wave (levelgen::generation_step); the settings wave "
+        "must not re-port it"
     ),
     "mc.world.level.levelgen.surface": (
         "#179 wave-3: the surface-rules system (SurfaceRules/SurfaceSystem); "
