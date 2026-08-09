@@ -119,14 +119,16 @@ pub struct Concurrency {
 }
 
 impl HashManifest {
-    /// Recorded provenance (seed + algorithm + concurrency + paper + scope)
-    /// used by the comparator to refuse comparing manifests of different
-    /// provenance (threat 9).
+    /// Recorded provenance (seed + algorithm + concurrency + paper + scope +
+    /// compression + corpus revision) used by the comparator to refuse
+    /// comparing manifests of different provenance (threat 9).
     pub fn provenance(&self) -> Provenance {
         Provenance {
             seed: self.seed.clone(),
             hash_algorithm: self.hash_algorithm.clone(),
             hash_scope: self.hash_scope.clone(),
+            corpus_version: self.corpus_version.clone(),
+            region_file_compression: self.region_file_compression.clone(),
             paper: self.paper.clone(),
             concurrency: self.chunk_concurrency,
             level_type: self.level_type.clone(),
@@ -148,6 +150,8 @@ pub struct Provenance {
     pub seed: String,
     pub hash_algorithm: String,
     pub hash_scope: String,
+    pub corpus_version: String,
+    pub region_file_compression: String,
     pub paper: String,
     pub concurrency: Concurrency,
     pub level_type: String,
@@ -157,10 +161,13 @@ impl Provenance {
     /// Serialize to a stable, human-readable identity string for diff output.
     pub fn describe(&self) -> String {
         format!(
-            "seed={} algorithm={} scope={} paper={} concurrency={}/{} level-type={}",
+            "seed={} algorithm={} scope={} corpus-version={} compression={} paper={} \
+             concurrency={}/{} level-type={}",
             self.seed,
             self.hash_algorithm,
             self.hash_scope,
+            self.corpus_version,
+            self.region_file_compression,
             self.paper,
             self.concurrency.worker_threads,
             self.concurrency.io_threads,
@@ -169,14 +176,102 @@ impl Provenance {
     }
 }
 
+/// The capture provenance that makes a digest table meaningful, read out of a
+/// source region manifest (the same `Manifest` struct `extract_fixtures.py`
+/// writes): the world seed, level-type, region-file-compression, and corpus
+/// version the payloads were generated under. A hash manifest must record
+/// exactly what its source capture recorded — a digest table stamped with a
+/// hardcoded compression or corpus revision would silently compare worlds
+/// generated under different region framing. `None` fields (a broken or
+/// pre-provenance source manifest) are never invented: `build_from_payloads`
+/// falls back to the same constants the committed captures use. The world seed
+/// is deliberately *not* part of the provenance struct: it names the payloads
+/// themselves and flows through `build_from_payloads_with`'s `seed` argument
+/// (read from the source capture), so carrying it twice could only drift.
+#[derive(Debug, Clone)]
+pub struct CaptureProvenance {
+    pub level_type: String,
+    pub region_file_compression: String,
+    pub corpus_version: String,
+}
+
+impl Default for CaptureProvenance {
+    fn default() -> Self {
+        CaptureProvenance {
+            level_type: "minecraft\\:normal".to_string(),
+            region_file_compression: "none".to_string(),
+            corpus_version: CORPUS_VERSION.to_string(),
+        }
+    }
+}
+
+impl CaptureProvenance {
+    /// Build the provenance from a source region capture's manifest fields
+    /// (the ones `extract_fixtures.py` writes). `None` fields fall back to the
+    /// same defaults `build_from_payloads` always used, so a pre-provenance or
+    /// broken source never invents values.
+    pub fn from_region_manifest(
+        level_type: Option<&str>,
+        region_file_compression: Option<&str>,
+    ) -> CaptureProvenance {
+        CaptureProvenance {
+            level_type: inherited_level_type(level_type),
+            region_file_compression: inherited_compression(region_file_compression),
+            corpus_version: CORPUS_VERSION.to_string(),
+        }
+    }
+}
+
+/// `level-type` inherited from a source capture, or the default when absent.
+pub fn inherited_level_type(level_type: Option<&str>) -> String {
+    level_type
+        .filter(|s| !s.is_empty())
+        .unwrap_or("minecraft\\:normal")
+        .to_string()
+}
+
+/// `region-file-compression` inherited from a source capture, or the default
+/// (`none`) when absent.
+pub fn inherited_compression(compression: Option<&str>) -> String {
+    compression
+        .filter(|s| !s.is_empty())
+        .unwrap_or("none")
+        .to_string()
+}
+
 /// Build a `HashManifest` from a fixtures tree laid out exactly like the
 /// region capture: `chunk/<dim>/<region>/<cx>.<cz>.nbt`. Reads each payload
 /// with the rivet-nbt codec, stamps its root `Status`, and records FULL vs
 /// non-FULL (threat 2: status is stamped, never assumed).
+///
+/// `seed` and `level_type` name the world the payloads were generated under
+/// (read from the source capture, never magic literals); the hash manifest's
+/// `region_file_compression` and `corpus_version` are inherited from
+/// `CaptureProvenance` so a digest table always records the framing + corpus
+/// revision its source capture used.
+///
+/// Test-only convenience wrapper (production callers thread explicit provenance
+/// through `build_from_payloads_with`): builds under the default provenance.
+#[cfg(test)]
 pub fn build_from_payloads(
     dir: &Path,
     seed: &str,
     level_type: &str,
+) -> Result<HashManifest, String> {
+    build_from_payloads_with(dir, seed, level_type, &CaptureProvenance::default())
+}
+
+/// Like `build_from_payloads`, but with full capture provenance from a source
+/// manifest (`CaptureProvenance::from_region_manifest`). Every FULL payload is
+/// additionally checked for the structure a FULL chunk must carry (root
+/// `structures`, final heightmaps, `isLightOn`, starlight version — issue #51),
+/// so a chunk stamped FULL that Paper did not actually finish is a hard error,
+/// never silently compared.
+pub fn build_from_payloads_with(
+    dir: &Path,
+    seed: &str,
+    level_type: &str,
+    provenance: &CaptureProvenance,
 ) -> Result<HashManifest, String> {
     let chunk_dir = dir.join("chunk");
     let mut entries = Vec::new();
@@ -222,6 +317,7 @@ pub fn build_from_payloads(
                         .unwrap_or_else(|| "unknown".to_string());
                     if is_full_status(&status) {
                         full_count += 1;
+                        validate_full_payload(&compound, &dim, cx, cz)?;
                     }
                     entries.push(ChunkHashEntry {
                         dim: dim.clone(),
@@ -254,10 +350,10 @@ pub fn build_from_payloads(
         format: 1,
         hash_algorithm: HASH_ALGORITHM.to_string(),
         hash_scope: HASH_SCOPE.to_string(),
-        corpus_version: CORPUS_VERSION.to_string(),
+        corpus_version: provenance.corpus_version.clone(),
         seed: seed.to_string(),
         level_type: level_type.to_string(),
-        region_file_compression: "none".to_string(),
+        region_file_compression: provenance.region_file_compression.clone(),
         paper: format!("26.2-DEV-main@{PAPER_PIN}"),
         chunk_concurrency: Concurrency {
             worker_threads: 1,
@@ -267,6 +363,117 @@ pub fn build_from_payloads(
         full_count,
         entries,
     })
+}
+
+/// `starlight.light_version` written by a light-correct FULL chunk
+/// (`SaveUtil.STARLIGHT_LIGHT_VERSION`, 10).
+const STARLIGHT_LIGHT_VERSION: i32 = 10;
+
+/// The root keys a chunk stamped `minecraft:full` must carry (per the
+/// SerializableChunkData spec §2/§5/§6, verified against the live superflat
+/// Paper FULL captures): `structures` (starts + References), the four FINAL
+/// heightmaps (`OCEAN_FLOOR`, `WORLD_SURFACE`, `MOTION_BLOCKING`,
+/// `MOTION_BLOCKING_NO_LEAVES`) as 37-long arrays, `isLightOn`, and the
+/// `starlight.light_version` state.
+///
+/// `isLightOn` and `starlight.light_version` are **required**, not optional:
+/// `SerializableChunkData`'s `lightCorrect` (spec §6) is true exactly when the
+/// chunk's status is at-or-after `LIGHT` and `isLightOn` is non-null and
+/// `starlight.light_version == 10`, and a chunk that has reached `minecraft:full`
+/// writes both (isLightOn then clobbered to false). Every genuine FULL payload
+/// captured — the M2 seed-42 spawn boot's the_nether/0.0 and the_end/0.0, and
+/// the corpus-forced superflat capture's 8 per dimension across
+/// overworld/nether/end — carries both, so a FULL chunk missing either was not
+/// finished by Paper and must never be silently compared.
+fn validate_full_payload(
+    compound: &rivet_nbt::compound_tag::CompoundTag,
+    dim: &str,
+    cx: i32,
+    cz: i32,
+) -> Result<(), String> {
+    let at = format!("{dim}/{cx}.{cz}");
+
+    if compound.get_string("Status").map(String::as_str) != Some("minecraft:full")
+        && compound.get_string("Status").map(String::as_str) != Some("full")
+    {
+        return Err(format!(
+            "chunk {at} stamped FULL but root Status is not minecraft:full — status/spec drift"
+        ));
+    }
+    let mut missing: Vec<&'static str> = Vec::new();
+    if !matches!(
+        compound.tags.get("structures"),
+        Some(rivet_nbt::tag::Tag::Compound(_))
+    ) {
+        missing.push("structures");
+    }
+    // lightCorrect (spec §6) is the gate for isLightOn/starlight.light_version
+    // being written at all: a FULL chunk without them was not light-correct.
+    if compound.get_byte("isLightOn").is_none() {
+        missing.push("isLightOn");
+    }
+    match compound.get_int("starlight.light_version") {
+        Some(ver) if ver == STARLIGHT_LIGHT_VERSION => {}
+        Some(ver) => {
+            return Err(format!(
+                "chunk {at} stamped FULL but starlight.light_version is {ver}, expected \
+                 {STARLIGHT_LIGHT_VERSION} — the light engine did not finalize this chunk"
+            ));
+        }
+        None => missing.push("starlight.light_version"),
+    }
+    let final_heightmaps = [
+        "OCEAN_FLOOR",
+        "WORLD_SURFACE",
+        "MOTION_BLOCKING",
+        "MOTION_BLOCKING_NO_LEAVES",
+    ];
+    let heightmaps = compound
+        .get_compound("Heightmaps")
+        .ok_or_else(|| format!("chunk {at} has no Heightmaps compound"))?;
+    for key in final_heightmaps {
+        match heightmaps.tags.get(key) {
+            Some(rivet_nbt::tag::Tag::LongArray(arr)) => {
+                if arr.data.len() != 37 {
+                    return Err(format!(
+                        "chunk {at} heightmap {key} has {} longs, expected 37 (256 entries packed)",
+                        arr.data.len()
+                    ));
+                }
+            }
+            _ => missing.push(key),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "chunk {at} stamped FULL but missing FULL-time structure fields: {} — a chunk \
+             Paper did not actually finish to FULL, refusing to compare it",
+            missing.join(", ")
+        ));
+    }
+    // Section-local light shape (spec §5): every `SkyLight`/`BlockLight` byte
+    // array on a section is exactly 2048 bytes (16x16x16 nibbles). A wrong
+    // length is a hard IllegalArgumentException in Java (`DataLayer`) — the
+    // validator refuses to compare a chunk whose light data is malformed.
+    if let Some(sections) = compound.get_list("sections") {
+        for sec in &sections.list {
+            let rivet_nbt::tag::Tag::Compound(sec) = sec else {
+                continue;
+            };
+            for key in ["SkyLight", "BlockLight"] {
+                if let Some(rivet_nbt::tag::Tag::ByteArray(arr)) = sec.tags.get(key)
+                    && arr.data.len() != 2048
+                {
+                    return Err(format!(
+                        "chunk {at} section {key} has {} bytes, expected 2048 \
+                         (16x16x16 nibble array)",
+                        arr.data.len()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse `<cx>.<cz>.nbt` from a fixture path.
@@ -537,5 +744,157 @@ mod tests {
         let mut b = a.clone();
         b.seed = "different-seed".to_string();
         assert_ne!(a.provenance(), b.provenance());
+    }
+
+    /// Provenance is a tuple over seed/algorithm/scope/corpus/compression/
+    /// paper/concurrency/level-type: any field drift refuses the diff. The
+    /// comparator compares `HashManifest::provenance()` whole (main.rs
+    /// `run_diff`), so a manifest recorded under a different region compression,
+    /// corpus revision, or level-type must never compare green against another —
+    /// a digest table stamped with a hardcoded "none"/"v1"/"normal" would
+    /// silently compare worlds generated under different framing (issue #51).
+    #[test]
+    fn provenance_refuses_compression_corpus_and_level_drift() {
+        let base = sample_manifest(vec![]);
+
+        let mut compression = base.clone();
+        compression.region_file_compression = "deflate".to_string();
+        assert_ne!(base.provenance(), compression.provenance());
+
+        let mut corpus = base.clone();
+        corpus.corpus_version = "v2".to_string();
+        assert_ne!(base.provenance(), corpus.provenance());
+
+        let mut level = base.clone();
+        level.level_type = "minecraft\\:flat".to_string();
+        assert_ne!(base.provenance(), level.provenance());
+    }
+
+    /// The committed superflat status-FULL region capture (issue #51) is the
+    /// deliverable: a genuine corpus-forced Paper capture under corpus seed 0
+    /// (5207638315753790570) of the four regions around the origin. The
+    /// two-boot ticket-injection capture (`regenerate --full`) loads level-33
+    /// `minecraft:forced` tickets for every corpus coordinate in all three
+    /// dimensions, so all 8 corpus coordinates are stamped `minecraft:full` per
+    /// dimension — 24 FULL chunks (8 coords × 3 dims), zero outside the corpus.
+    /// This test pins the acceptance: corpus coverage is 8 present / 24 missing
+    /// (seed 0's row fully owned; the other 3 seeds' rows are unreachable from a
+    /// single-seed manifest) / 0 extra. The level-type/compression are inherited
+    /// from the source capture.
+    #[test]
+    fn committed_superflat_full_capture_covers_corpus_seed_zero() {
+        let dir = crate_dir().join("fixtures/regions/superflat-full");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let prov = CaptureProvenance::from_region_manifest(Some("minecraft\\:flat"), Some("none"));
+        let m = build_from_payloads_with(&dir, "5207638315753790570", "minecraft\\:flat", &prov)
+            .expect("committed superflat FULL payloads build and FULL-validate");
+        assert_eq!(m.level_type, "minecraft\\:flat");
+        assert_eq!(m.region_file_compression, "none");
+        assert_eq!(m.corpus_version, CORPUS_VERSION);
+
+        // The corpus-forced capture spans the four origin regions per dimension
+        // (r.0.0, r.-1.-1, r.-1.0, r.0.-1).
+        assert_eq!(
+            m.full_count, 24,
+            "all 8 corpus coordinates per dimension × 3 dimensions are status-FULL"
+        );
+
+        let cov = coverage(&m, &Corpus::from_committed());
+        assert_eq!(cov.expected, 4 * 8, "corpus = 4 seeds × 8 coordinates");
+        assert_eq!(
+            cov.present, 8,
+            "every corpus coordinate of the recorded seed (seed 0) is FULL"
+        );
+        // `missing` enumerates only the recorded seed's row (the other seeds'
+        // rows are never reachable from a single-seed manifest): seed 0's 8
+        // coordinates are all present, so its row is complete. The 24 uncovered
+        // sweep cells are the other 3 seeds' rows, which this manifest can
+        // never own — covered by `expected - present` below.
+        assert_eq!(cov.missing.len(), 0, "seed 0's row is fully owned");
+        assert!(
+            cov.is_complete(),
+            "seed 0's row is complete (8/8 coordinates FULL)"
+        );
+        assert_eq!(
+            cov.extra,
+            Vec::<String>::new(),
+            "no FULL chunk exists outside the corpus coordinates"
+        );
+        assert_eq!(cov.expected - cov.present, 24);
+    }
+
+    /// The FULL-structure validator accepts a genuine FULL payload and rejects
+    /// each shape that would let an unfinished chunk be silently compared as if
+    /// Paper had finished it (issue #51): no `structures` compound, a FINAL
+    /// heightmap missing or not 37-long, a section light array not 2048 bytes,
+    /// and a non-FULL status stamped FULL.
+    #[test]
+    fn validate_full_payload_accepts_genuine_full_and_rejects_shapes() {
+        use crate::mutate::{fixture_full_payload, parse_payload};
+        use rivet_nbt::byte_array_tag::ByteArrayTag;
+        use rivet_nbt::long_array_tag::LongArrayTag;
+        use rivet_nbt::tag::Tag;
+
+        let compound = parse_payload(&fixture_full_payload(0, 0)).unwrap();
+        validate_full_payload(&compound, "overworld", 0, 0).expect("genuine FULL validates");
+
+        let mut no_structures = compound.clone();
+        no_structures.tags.swap_remove("structures");
+        assert!(validate_full_payload(&no_structures, "overworld", 0, 0).is_err());
+
+        let mut short_hm = compound.clone();
+        short_hm
+            .get_compound_or_empty_mut("Heightmaps")
+            .tags
+            .insert(
+                "OCEAN_FLOOR".to_string(),
+                Tag::LongArray(LongArrayTag::new(vec![0; 5])),
+            );
+        assert!(validate_full_payload(&short_hm, "overworld", 0, 0).is_err());
+
+        let mut missing_hm = compound.clone();
+        missing_hm
+            .get_compound_or_empty_mut("Heightmaps")
+            .tags
+            .swap_remove("MOTION_BLOCKING_NO_LEAVES");
+        assert!(validate_full_payload(&missing_hm, "overworld", 0, 0).is_err());
+
+        let mut bad_light = compound.clone();
+        let sections = bad_light.get_list_or_empty_mut("sections");
+        if let Tag::Compound(sec) = &mut sections.list[0] {
+            sec.tags.insert(
+                "SkyLight".to_string(),
+                Tag::ByteArray(ByteArrayTag::new(vec![0i8; 10])),
+            );
+        }
+        assert!(validate_full_payload(&bad_light, "overworld", 0, 0).is_err());
+
+        let mut no_light_flag = compound.clone();
+        no_light_flag.tags.swap_remove("isLightOn");
+        assert!(
+            validate_full_payload(&no_light_flag, "overworld", 0, 0).is_err(),
+            "a FULL chunk without isLightOn was not light-correct and must be refused"
+        );
+
+        let mut no_starlight = compound.clone();
+        no_starlight.tags.swap_remove("starlight.light_version");
+        assert!(
+            validate_full_payload(&no_starlight, "overworld", 0, 0).is_err(),
+            "a FULL chunk without starlight.light_version must be refused"
+        );
+
+        let mut stale_starlight = compound.clone();
+        stale_starlight.put_int("starlight.light_version", 9);
+        assert!(
+            validate_full_payload(&stale_starlight, "overworld", 0, 0).is_err(),
+            "a FULL chunk with a stale starlight.light_version (not {STARLIGHT_LIGHT_VERSION}) \
+             must be refused"
+        );
+
+        let mut not_full = compound.clone();
+        not_full.put_string("Status", "minecraft:structure_starts");
+        assert!(validate_full_payload(&not_full, "overworld", 0, 0).is_err());
     }
 }
