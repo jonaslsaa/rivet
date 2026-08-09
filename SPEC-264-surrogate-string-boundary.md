@@ -40,6 +40,12 @@ This spec confirms, rationalizes, and canonizes that policy; it does not propose
 | SNBT `\uHHHH` / `\N{name}` | `\uD800` / `HIGH SURROGATES D800` | accepted, `Character.toString(0xD800)` → lone surrogate | `ERROR_INVALID_CODEPOINT` |
 | `StringTag.quoteAndEscape` (SNBT printer) | `"\uD800"` | `"` + raw U+D800 + `"` | n/a (value can't exist) |
 
+Provenance of the SNBT rows (Java and Rust): the Java side uses a hand-rolled `quoteAndEscape` *equivalent* (the real
+`StringTag.quoteAndEscape` needs the M0 materialized Paper jar, deferred to #264-b); the Rust side is verified by the
+tree unit tests in `tag_parser.rs` (`apply_hex_escape` / `\N{}` → `ERROR_INVALID_CODEPOINT`) and
+`unicode_name_table.rs` (`CodePointOfError::LoneSurrogate`), not by the standalone probe (which deliberately avoids a
+`rivet-nbt` dependency chain).
+
 Two facts are load-bearing:
 
 1. **The protocol boundary is already byte-faithful.** `Utf8String.read` in Java does
@@ -71,6 +77,11 @@ Two facts are load-bearing:
 | B11 | Filesystem paths | `java.nio.file.Path` (UTF-8/OS encoding) | `std::path::PathBuf` / `to_string_lossy` | n/a in current tree (no `Path` port yet); specify `to_string_lossy`+document when the `Path` wave lands |
 | B12 | JVM-adapter FFI | Java `String` → C `char*` | `rivet-ffi` (future) | Specify in §4 / §7 Stage 4: marshal UTF-8, lone surrogate → `?` on the Java side (matches netty) or `Err` |
 | B13 | Filesystem file **contents** (configs, datapacks) | Java `Files.readString` (UTF-8) / `Properties.load` (ISO-8859-1) | serde/toml (future server-properties, `world/` files) | n/a in current tree (no config/datapack loader yet); specify `from_utf8`+error when the loader wave lands — a lone surrogate in a config file cannot round-trip through Rust `String` |
+
+The inventory is about **lone** surrogates. A *paired* surrogate (`𐀀` = U+10000) is a valid code point and
+round-trips on every boundary: Java keeps the two UTF-16 units while Rust yields one scalar (`𐀀`), but both re-encode
+to the same bytes (probe `readUTF_pair`/`rust_mutf8_decode_pair`, `writeUTF_pair`/`rust_mutf8_encode_pair`), so it is
+not a divergence.
 
 ## 4. Canonical decision (D14 candidate)
 
