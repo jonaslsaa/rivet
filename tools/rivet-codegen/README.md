@@ -17,7 +17,9 @@ JVM and to use `anyhow`/`serde`.
   property enum structure), consumes `data/reports/registries.json` to emit the
   static-builtin registry tables into the same `src/generated/` (see
   `registries` below), consumes `data/reports/blocks.json` to emit the
-  block-state global-id table (see `block_states.rs`, issue #154), and consumes
+  block-state global-id table (see `block_states.rs`, issue #154), consumes
+  `data/block_behaviors.json` to emit the per-`StateId` behavior table (see
+  `block_behaviors.rs`, issue #228), and consumes
   `data/reports/packets.json` to emit the packet-ID tables into
   `crates/rivet-protocol/src/generated/`.
 - **`registries`** — reads the pinned vanilla `data/reports/registries.json`
@@ -51,6 +53,18 @@ JVM and to use `anyhow`/`serde`.
   id space, defaults in range, and the representative anchor ids. This is the
   live half of the fixture-pinned conformance test in `generate`'s
   `block_states.rs` tests.
+- **`extract-block-behaviors`** — compiles and runs `java/BlockBehaviourProbe.java`
+  against the real Paper jar, boots `Bootstrap` + the `Blocks` static init
+  (which `initCache`s every state against `EmptyBlockGetter`), evaluates all
+  32,366 states' worldgen/heightmap/lighting accessors, and writes the
+  run-length-encoded per-`StateId` behavior table to `data/block_behaviors.json`
+  (+ provenance manifest), issue #228.
+- **`probe-block-behaviors`** — re-runs `BlockBehaviourProbe` against the real
+  Paper jar and requires byte-identity with the committed `data/block_behaviors.json`
+  plus the anchor counts (state_count 32366, run_count, and the representative
+  air/stone/water/lava/oak_leaves/glass/torch words). This is the live half of
+  the fixture-pinned conformance tests in `generate`'s `block_behaviors.rs`
+  tests and the `rivet-registry` `BlockState` behavior-decode tests.
 - **`reports`** — runs the vanilla `net.minecraft.data.Main --reports` datagen
   against the materialized Paper 26.2 server jar and pins the canonical
   `packets.json` / `registries.json` / `blocks.json` reports (with provenance)
@@ -65,6 +79,8 @@ rivet-codegen mth-gen    [--bundler <path>] [--output <dir>]
 rivet-codegen extract-biomes-tags [--bundler <path>] [--output <path>]
 rivet-codegen probe-biomes-tags  [--bundler <path>]
 rivet-codegen probe-block-states [--bundler <path>]
+rivet-codegen extract-block-behaviors [--bundler <path>] [--output <path>]
+rivet-codegen probe-block-behaviors  [--bundler <path>]
 rivet-codegen reports    [--jar <path>] [--output <dir>] [--verify]
 ```
 
@@ -80,12 +96,14 @@ checkout; the tool needs a jar produced elsewhere.
 ```
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
-target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_states.rs, registries.rs, biomes.rs, tags.rs, synchronized.rs, registry_data.rs} + crates/rivet-protocol/src/generated/
+target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_behaviors.rs, block_states.rs, registries.rs, biomes.rs, tags.rs, synchronized.rs, registry_data.rs} + crates/rivet-protocol/src/generated/
 target/release/rivet-codegen registries       # -> crates/rivet-registry/src/generated/registries.rs (report-driven half only)
 target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
 target/release/rivet-codegen extract-biomes-tags  # -> data/biomes_tags.json + manifest
 target/release/rivet-codegen probe-biomes-tags    # verify biome ids + tag network content against live Paper
 target/release/rivet-codegen probe-block-states   # verify the emitted block-state global ids against live Paper
+target/release/rivet-codegen extract-block-behaviors  # -> data/block_behaviors.json + manifest
+target/release/rivet-codegen probe-block-behaviors    # verify the per-StateId behavior table against live Paper
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
@@ -93,14 +111,15 @@ target/release/rivet-codegen reports          # -> data/reports/{packets,registr
 static-builtin registry tables (from `data/reports/registries.json`, the
 `RegistryDumpReport` fixture), the block-state global-id table (from
 `data/reports/blocks.json`, the `BlockListReport` fixture), the biome id +
-tag network tables (from `data/biomes_tags.json`), the synchronized
-configuration-registry element tables (from `data/synchronized_registries.json`),
-the pre-baked registry NBT payloads (from `data/registry_data.json`, the
-canonical join capture), and the packet-ID tables (from
-`data/reports/packets.json`, the `PacketReport` fixture). Regenerate all of them
-with a single `generate` run; `--input`/`--output` control the block half,
-`--packets`/`--packets-output` control the packet half. (The `registries`
-subcommand emits just the report-driven registry tables.)
+tag network tables (from `data/biomes_tags.json`), the per-`StateId` behavior
+table (from `data/block_behaviors.json`, the `BlockBehaviourProbe` fixture),
+the synchronized configuration-registry element tables (from
+`data/synchronized_registries.json`), the pre-baked registry NBT payloads
+(from `data/registry_data.json`, the canonical join capture), and the packet-ID
+tables (from `data/reports/packets.json`, the `PacketReport` fixture).
+Regenerate all of them with a single `generate` run; `--input`/`--output`
+control the block half, `--packets`/`--packets-output` control the packet half.
+(The `registries` subcommand emits just the report-driven registry tables.)
 
 `extract` and `mth-gen` cache the unpacked classpath in `.cache/` (gitignored)
 so reruns are fast. Pass `--bundler` to point at a different jar.
