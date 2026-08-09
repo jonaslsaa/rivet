@@ -20,6 +20,7 @@ use crate::Component;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
+use rivet_serialization::extra_codecs;
 use rivet_serialization::key_dispatch_codec;
 use rivet_serialization::map_codec::{self, MapCodec};
 use std::sync::Arc;
@@ -55,6 +56,19 @@ impl HoverEventAction {
             _ => return None,
         })
     }
+
+    /// `Action.values()[ordinal]` — the compressed int-id branch of Java's
+    /// `StringRepresentable.EnumCodec` (`rec$ -> rec$.ordinal()`). The enum's
+    /// declaration order mirrors Java's `Action` constant order exactly, so
+    /// `*action as i32` and this `from_ordinal` agree with Java's ordinals.
+    fn from_ordinal(ordinal: i32) -> Option<HoverEventAction> {
+        Some(match ordinal {
+            0 => HoverEventAction::ShowText,
+            1 => HoverEventAction::ShowItem,
+            2 => HoverEventAction::ShowEntity,
+            _ => return None,
+        })
+    }
 }
 
 impl std::fmt::Display for HoverEventAction {
@@ -69,17 +83,39 @@ impl std::fmt::Display for HoverEventAction {
 /// errors `"Action not allowed: {action}"`, an unknown name errors
 /// `"Unknown element name:{name}"` (DFU `Codec.stringResolver` decode message —
 /// no space before the name, matching `rivet-serialization`'s `string_resolver`).
+///
+/// Java's `StringRepresentable.fromValues` is `ExtraCodecs.orCompressed(
+/// Codec.stringResolver(getSerializedName, byName),
+/// idResolverCodec(rec$ -> rec$.ordinal(), i -> values[i], -1))`, so under
+/// `ops.compressMaps()` (`JsonOps.COMPRESSED`) the action is an ordinal int, not
+/// a name string. The port mirrors both branches; `filterForSerialization`
+/// (the outer `flat_xmap`) wraps the whole `orCompressed`, exactly like Java's
+/// `validate`. The compressed branch is unreachable on the current chat path
+/// (rivet-text uses `JsonOps::INSTANCE`), but is ported for fidelity and
+/// exercised by the `action_codec_compressed_*` tests.
 fn action_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<HoverEventAction, Ops>> {
     codec::flat_xmap(
-        codec::string_codec(),
-        Arc::new(|name: &String| match HoverEventAction::from_name(name) {
-            Some(action) if action.is_allowed_from_server() => DataResult::success(action),
-            Some(action) => DataResult::error(format!("Action not allowed: {}", action)),
-            None => DataResult::error(format!("Unknown element name:{}", name)),
+        extra_codecs::or_compressed(
+            codec::string_resolver(
+                Arc::new(|a: &HoverEventAction| Some(a.get_serialized_name().to_string())),
+                Arc::new(|name: &String| HoverEventAction::from_name(name)),
+            ),
+            extra_codecs::id_resolver_codec(
+                Arc::new(|a: &HoverEventAction| *a as i32),
+                Arc::new(HoverEventAction::from_ordinal),
+                -1,
+            ),
+        ),
+        Arc::new(|action: &HoverEventAction| {
+            if action.is_allowed_from_server() {
+                DataResult::success(*action)
+            } else {
+                DataResult::error(format!("Action not allowed: {}", action))
+            }
         }),
         Arc::new(|action: &HoverEventAction| {
             if action.is_allowed_from_server() {
-                DataResult::success(action.get_serialized_name().to_string())
+                DataResult::success(*action)
             } else {
                 DataResult::error(format!("Action not allowed: {}", action))
             }
@@ -287,5 +323,72 @@ mod tests {
                 "{action}: expected not-yet-ported error, got {err:?}"
             );
         }
+    }
+
+    /// The compressed int-id branch of `HoverEvent.Action.CODEC` (Java's
+    /// `StringRepresentable.EnumCodec` second half): under `JsonOps.COMPRESSED`
+    /// the action is its ordinal int, not the name string — the counterfactual
+    /// that proves the `or_compressed` wiring is live.
+    #[test]
+    fn action_codec_compressed_round_trips_ordinals() {
+        let codec = action_codec::<JsonOps>();
+        let ordinals = [
+            (0, HoverEventAction::ShowText),
+            (1, HoverEventAction::ShowItem),
+            (2, HoverEventAction::ShowEntity),
+        ];
+        for (ordinal, action) in ordinals {
+            let encoded = codec
+                .encode_start(&JsonOps::COMPRESSED, &action)
+                .result()
+                .cloned()
+                .unwrap_or_else(|| panic!("{action} must encode under compressed ops"));
+            assert_eq!(
+                encoded,
+                serde_json::json!(ordinal),
+                "{action} must encode as its ordinal int under compressed ops"
+            );
+            let decoded = codec
+                .parse(&JsonOps::COMPRESSED, &serde_json::json!(ordinal))
+                .result()
+                .cloned()
+                .expect("ordinal must decode");
+            assert_eq!(decoded, action);
+        }
+    }
+
+    /// The compressed branch errors with Java's `idResolverCodec` message on an
+    /// out-of-range ordinal.
+    #[test]
+    fn action_codec_compressed_rejects_out_of_range_id() {
+        let codec = action_codec::<JsonOps>();
+        let err = error_message(&codec.parse(&JsonOps::COMPRESSED, &serde_json::json!(42)));
+        assert_eq!(err, "Unknown element id: 42");
+    }
+
+    /// The full `HoverEvent.CODEC` dispatch round-trips under compressed ops,
+    /// with the discriminator slot as the ordinal int (0 for `show_text`).
+    #[test]
+    fn hover_event_compressed_dispatch_round_trips() {
+        let event = HoverEvent::ShowText(ShowText {
+            value: Box::new(crate::Component::literal("hover!")),
+        });
+        let encoded = codec()
+            .encode_start(&JsonOps::COMPRESSED, &event)
+            .result()
+            .cloned()
+            .expect("must encode under compressed ops");
+        let decoded = codec()
+            .parse(&JsonOps::COMPRESSED, &encoded)
+            .result()
+            .cloned()
+            .expect("must decode under compressed ops");
+        assert_eq!(decoded, event);
+        let list = encoded.as_array().expect("compressed map is a list");
+        assert_eq!(
+            list[0],
+            serde_json::json!(0),
+            "action slot is the ordinal int"
+        );
     }
 }
