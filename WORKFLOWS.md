@@ -52,7 +52,7 @@ Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/
 
 ## Workflow catalog (`.claude/workflows/`)
 
-`translate-wave`, `check-burndown`, `review-pr`, and `worktree-task` exist as executable scripts in `.claude/workflows/` — invoke them by name with `args` built from MANIFEST.tsv rows (the controller selects units and passes them in; scripts never read the manifest themselves). The rest below are designs to be scripted when their phase begins.
+`translate-wave`, `check-burndown`, `review-pr`, `worktree-task`, and `release-prep` exist as executable scripts in `.claude/workflows/` — invoke them by name with explicit `args`; manifest workflows receive rows selected by the controller and never read MANIFEST.tsv themselves. The rest below are designs to be scripted when their phase begins.
 
 | Workflow | Shape | Purpose |
 |---|---|---|
@@ -61,6 +61,7 @@ Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/
 | `translate-wave` | pipeline per unit | The core loop (below) |
 | `check-burndown` | loop until clean | Compiler-error work queue, partitioned by module |
 | `worktree-task` | impl → gate→fix loop | Non-translation tasks (tooling, harnesses, codegen, infra) in an isolated worktree |
+| `release-prep` | refresh → check → review→fix loop | Bring an already-implemented worktree to a clean, current-main, exact-reviewed head for the controller's serialized strict gate |
 | `review-pr` | single max-effort agent | Pre-merge "nuke": whole-PR cross-unit review, then `gate.sh` |
 | `verify-oracle` | parallel scenarios | Differential tests vs vanilla/Paper; failures → new manifest rows |
 | `shim-gen` | pipeline per API class | JVM adapter codegen (below) |
@@ -86,6 +87,12 @@ Notes:
 - Review catches drift early; the oracle is the truth. "Zero findings" never substitutes for parity fixtures — the merge gate stays `review-pr` + `gate.sh` + oracle scoreboard.
 - Agents return structured reports; the **main session** updates MANIFEST.tsv and commits per wave. Agents never `git commit`, never `git stash/reset` (forbidden in every prompt — Bun learned this the hard way).
 - Implementer prompt hard rules: no TODO-and-skip, no inventing APIs, wrapping arithmetic everywhere Java arithmetic exists, `blocked` verdict with reason if the unit can't translate faithfully.
+
+## `release-prep`
+
+Use `.claude/workflows/release-prep.js` for a branch whose implementation is already complete. Args are `{worktree, task, maxRounds?, checks?}`. Each round fetches and rebases a clean branch onto current `origin/main`, runs focused mechanical checks, and gives the exact head to a fresh read-only reviewer. Confirmed findings go to a fixer that commits locally; disputed findings must be justified and are rechecked by the next fresh reviewer.
+
+Success is fail-closed: the reviewed head/base must match the refreshed and checked hashes, the branch must be clean, ahead of and zero commits behind current `origin/main`, and the reviewer must return an empty findings list. Empty agent results, contradictory verdicts, dirty leftovers, or moving-head evidence cannot produce readiness. The result includes exact head/base/check/review evidence and `strict_gate_ready: true`, but the workflow never runs `scripts/gate.sh`, pushes, opens a PR, or merges — those remain serialized controller actions.
 
 ### The Java→Rust semantic-drift checklist (reviewer lens 1)
 
