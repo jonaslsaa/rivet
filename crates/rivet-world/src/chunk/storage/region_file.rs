@@ -230,7 +230,10 @@ enum ScanRead {
 pub struct RegionFile {
     path: PathBuf,
     external_file_dir: PathBuf,
-    file: fs::File,
+    /// The live file handle — `None` after `close()`. Accessing it after close
+    /// panics, mirroring Java's `ClosedChannelException` on a closed
+    /// `FileChannel`.
+    file: Option<fs::File>,
     version: RegionFileVersion,
     /// The 8192-byte header buffer — the source of truth for offsets and
     /// timestamps, byte-for-byte the Java `ByteBuffer.allocateDirect(8192)`.
@@ -250,6 +253,12 @@ pub struct RegionFile {
 }
 
 impl RegionFile {
+    /// The live file handle, or a panic after `close()` — the Rust analogue of
+    /// Java's `ClosedChannelException` on a closed `FileChannel`.
+    fn file_mut(&mut self) -> &mut fs::File {
+        self.file.as_mut().expect("RegionFile accessed after close")
+    }
+
     /// The full constructor — `RegionFile(info, path, externalFileDir, version, sync)`.
     ///
     /// Validates the external-file directory, opens the region file
@@ -283,7 +292,7 @@ impl RegionFile {
         let mut region = Self {
             path,
             external_file_dir,
-            file,
+            file: Some(file),
             version,
             header: [0u8; 8192],
             used_sectors: RegionBitmap::new(),
@@ -296,8 +305,8 @@ impl RegionFile {
         // Read the 8192-byte header at position 0. Rust `read` returns 0 at
         // EOF where Java's FileChannel returns -1 — both mean "no header".
         let mut buf = [0u8; 8192];
-        region.file.seek(SeekFrom::Start(0))?;
-        let read_header_bytes = region.file.read(&mut buf)?;
+        region.file_mut().seek(SeekFrom::Start(0))?;
+        let read_header_bytes = region.file_mut().read(&mut buf)?;
         if read_header_bytes != 0 {
             if read_header_bytes != 8192 {
                 eprintln!(
@@ -308,7 +317,7 @@ impl RegionFile {
             }
             region.header[..read_header_bytes].copy_from_slice(&buf[..read_header_bytes]);
 
-            let size = region.file.metadata()?.len();
+            let size = region.file_mut().metadata()?.len();
             let mut needs_header_recalc = false;
             let mut has_backed_up = false;
             for i in 0..1024 {
@@ -319,8 +328,13 @@ impl RegionFile {
                     if num_sectors == 255 {
                         // Spigot sentinel: read the real length from the chunk's
                         // own first sector (unchecked read, zero-filled tail).
-                        num_sectors =
-                            (region.read_length_unchecked(sector_number as u64)? + 4) / 4096 + 1;
+                        // Java `(realLen.getInt(0) + 4) / 4096 + 1` wraps on int
+                        // overflow; a corrupt length must not panic.
+                        num_sectors = (region
+                            .read_length_unchecked(sector_number as u64)?
+                            .wrapping_add(4))
+                            / 4096
+                            + 1;
                     }
                     if sector_number < 2 || num_sectors <= 0 || (sector_number as u64) * 4096 > size
                     {
@@ -433,7 +447,9 @@ impl RegionFile {
             if length == 0 {
                 return false;
             }
-            let stream_length = length - 1;
+            // Java `int streamLength = length - 1` wraps; a corrupt length must
+            // follow the negative/oversize corruption path, not panic.
+            let stream_length = length.wrapping_sub(1);
             stream_length >= 0 && (stream_length as u64) <= 4096 * num_sectors as u64
         }
     }
@@ -458,15 +474,31 @@ impl RegionFile {
             let sector_number = get_sector_number(offset);
             let mut num_sectors = get_num_sectors(offset);
             if num_sectors == 255 {
-                num_sectors = (self.read_length_unchecked(sector_number as u64)? + 4) / 4096 + 1;
+                num_sectors = (self
+                    .read_length_unchecked(sector_number as u64)?
+                    .wrapping_add(4))
+                    / 4096
+                    + 1;
+            }
+            if num_sectors < 0 {
+                // A corrupt Spigot-sentinel length wraps to a negative sector
+                // count. Java's `ByteBuffer.allocate(numSectors * 4096)` throws
+                // a `NegativeArraySizeException` (an unchecked crash); per this
+                // port's corruption convention the chunk is treated as absent
+                // rather than panicking on the allocation size.
+                eprintln!("Chunk {} has a negative sector count {}", pos, num_sectors);
+                if self.can_recalc_header && self.recalculate_header()? {
+                    continue;
+                }
+                return Ok(None);
             }
             let sectors_length = (num_sectors as u64) * 4096;
             let mut buffer = vec![0u8; sectors_length as usize];
-            self.file
+            self.file_mut()
                 .seek(SeekFrom::Start(sector_number as u64 * 4096))?;
             // Java reads into the ByteBuffer and relies on `remaining()` after
             // flip — i.e. the actual bytes read — for the truncation checks.
-            let remaining = self.file.read(&mut buffer)?;
+            let remaining = self.file_mut().read(&mut buffer)?;
 
             if remaining < 5 {
                 eprintln!(
@@ -487,7 +519,9 @@ impl RegionFile {
                 }
                 return Ok(None);
             }
-            let stream_length = length - 1;
+            // Java `int streamLength = length - 1` wraps; a corrupt length must
+            // follow the negative/truncated corruption path, not panic.
+            let stream_length = length.wrapping_sub(1);
             if is_external_stream_chunk(version_id) {
                 if stream_length != 0 {
                     // "has both internal and external streams" — a warning that
@@ -601,7 +635,7 @@ impl RegionFile {
 
     /// `flush()` — `file.force(true)` (fsync including metadata).
     pub fn flush(&mut self) -> io::Result<()> {
-        self.file.sync_all()
+        self.file_mut().sync_all()
     }
 
     /// `clear(pos)` — zero the location, write a fresh timestamp, rewrite the
@@ -625,11 +659,16 @@ impl RegionFile {
         Ok(())
     }
 
-    /// `close()` — `padToFullSector()` in the try, then `force(true)` in the
-    /// finally; the finally's error, if any, wins. The File is closed on drop.
+    /// `close()` — Paper's nested `finally` order: `padToFullSector()` in the
+    /// try, then `force(true)` in the finally, then the `FileChannel.close()`.
+    /// The innermost close always runs, so the descriptor is released even if
+    /// padding or forcing failed. Mirroring Java's precedence, a pad error
+    /// (from the try) is reported over a force error (from the finally); the
+    /// close itself is a `drop` and cannot fail.
     pub fn close(&mut self) -> io::Result<()> {
         let pad_result = self.pad_to_full_sector();
-        let force_result = self.file.sync_all();
+        let force_result = self.file_mut().sync_all();
+        self.file.take(); // FileChannel.close() — releases the descriptor
         force_result.and(pad_result)
     }
 
@@ -721,7 +760,7 @@ impl RegionFile {
         // RivetTodo(#231): every slot is treated as not-Aikar-oversized, which
         // is exactly the modern-world outcome.
 
-        let file_length = self.file.metadata().map(|m| m.len()).unwrap_or(0);
+        let file_length = self.file_mut().metadata().map(|m| m.len()).unwrap_or(0);
         let total_sectors = round_to_sectors(file_length as i64);
 
         // Scan sectors 2..maxSector looking for valid chunk streams. The bound
@@ -756,7 +795,9 @@ impl RegionFile {
                         continue; // don't overwrite newer data
                     }
                     compounds[location] = Some(compound);
-                    raw_lengths[location] = chunk_data_length + 4;
+                    // Java `rawLengths[location] = chunkDataLength + 4` wraps on
+                    // int overflow; the sector math must not panic on corrupt data.
+                    raw_lengths[location] = chunk_data_length.wrapping_add(4);
                     sector_offsets[location] = i as i32;
                     // Java: `i += chunkSectorLength; --i;` then the for-loop's
                     // `++i` — net advance is exactly chunkSectorLength.
@@ -979,7 +1020,7 @@ impl RegionFile {
         // Repaired header stays memory-only: recalc never calls write_header.
         // The "Successfully wrote new header to disk" log is misleading in
         // Paper too — this is just flush + an extra force.
-        match self.flush().and_then(|_| self.file.sync_all()) {
+        match self.flush().and_then(|_| self.file_mut().sync_all()) {
             Ok(()) => eprintln!(
                 "Successfully wrote new header to disk for regionfile {}",
                 self.path.display()
@@ -1057,8 +1098,8 @@ impl RegionFile {
     /// replay and `get_chunk_data_input_stream`.
     fn read_length_unchecked(&mut self, sector: u64) -> io::Result<i32> {
         let mut b = [0u8; 4];
-        self.file.seek(SeekFrom::Start(sector * 4096))?;
-        let _n = self.file.read(&mut b)?;
+        self.file_mut().seek(SeekFrom::Start(sector * 4096))?;
+        let _n = self.file_mut().read(&mut b)?;
         Ok(i32::from_be_bytes(b))
     }
 
@@ -1074,7 +1115,7 @@ impl RegionFile {
             .map(|f| f.to_string_lossy().into_owned())
             .unwrap_or_default();
         let backup = parent.join(format!("{}.{}.backup", file_name, next_random_long()));
-        if let Err(e) = self.file.sync_all() {
+        if let Err(e) = self.file_mut().sync_all() {
             eprintln!("Failed to backup to {}: {}", backup.display(), e);
             return;
         }
@@ -1091,12 +1132,15 @@ impl RegionFile {
 
     /// `writeHeader()` — rewrite all 8192 header bytes at position 0.
     fn write_header(&mut self) -> io::Result<()> {
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&self.header)?;
+        self.file_mut().seek(SeekFrom::Start(0))?;
+        // Copy the 8KiB header first: `file_mut` borrows all of `self`, so the
+        // header can't be re-borrowed inside the same call.
+        let header = self.header;
+        self.file_mut().write_all(&header)?;
         if self.sync {
             // Java opens the channel with DSYNC when `sync` is set; Rivet
             // emulates it with a sync after each header write.
-            self.file.sync_data()?;
+            self.file_mut().sync_data()?;
         }
         Ok(())
     }
@@ -1104,11 +1148,12 @@ impl RegionFile {
     /// `padToFullSector()` — extend a non-sector-multiple file to a full final
     /// sector by writing one zero byte at `paddedSize - 1`.
     fn pad_to_full_sector(&mut self) -> io::Result<()> {
-        let file_size = self.file.metadata()?.len() as i32;
+        let file_size = self.file_mut().metadata()?.len() as i32;
         let padded_size = size_to_sectors(file_size) * 4096;
         if file_size != padded_size {
-            self.file.seek(SeekFrom::Start((padded_size - 1) as u64))?;
-            self.file.write_all(&[0u8])?;
+            self.file_mut()
+                .seek(SeekFrom::Start((padded_size - 1) as u64))?;
+            self.file_mut().write_all(&[0u8])?;
         }
         Ok(())
     }
@@ -1175,14 +1220,14 @@ impl RegionFile {
 
     /// Positioned `read_exact`.
     fn seek_read_exact(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_exact(buf)
+        self.file_mut().seek(SeekFrom::Start(offset))?;
+        self.file_mut().read_exact(buf)
     }
 
     /// Positioned `write_all`.
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<()> {
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(bytes)
+        self.file_mut().seek(SeekFrom::Start(offset))?;
+        self.file_mut().write_all(bytes)
     }
 }
 
@@ -1725,6 +1770,63 @@ mod tests {
         region.close().unwrap();
         let len = fs::metadata(&path).unwrap().len();
         assert_eq!(len % 4096, 0, "close pads to a full sector");
+    }
+
+    #[test]
+    fn close_releases_descriptor_and_panics_on_access() {
+        // `close()` takes the live handle (Java's `FileChannel.close()`), so the
+        // descriptor is released even though the file stays on disk; any later
+        // access panics, mirroring Java's `ClosedChannelException`.
+        let dir = tempfile::tempdir().unwrap();
+        let mut region = open_region(dir.path(), RegionFileVersion::VERSION_NONE);
+        let path = region.get_path().to_path_buf();
+        region.close().unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            region.flush().unwrap();
+        }));
+        assert!(result.is_err(), "accessing a closed RegionFile panics");
+
+        // The file itself is untouched on disk (and re-openable).
+        let mut reopened = open_region(dir.path(), RegionFileVersion::VERSION_NONE);
+        assert_eq!(fs::metadata(&path).unwrap().len() % 4096, 0);
+        assert!(
+            reopened
+                .get_chunk_data_input_stream(&ChunkPos::new(0, 0))
+                .unwrap()
+                .is_none(),
+            "empty region has no chunk"
+        );
+    }
+
+    #[test]
+    fn spigot_sentinel_negative_length_returns_none_without_panic() {
+        // A Spigot-255 location whose chunk's first sector declares a negative
+        // length wraps to a negative sector count on read. Java would crash on
+        // `ByteBuffer.allocate`; the port treats the chunk as absent. The
+        // header is corrupted *after* open because `open()` itself repairs a
+        // corrupt sentinel at startup — this simulates the region file being
+        // modified beneath the open handle.
+        let dir = tempfile::tempdir().unwrap();
+        let mut region = open_region(dir.path(), RegionFileVersion::VERSION_NONE);
+        // Spigot sentinel on location[0], pointing at sector 2.
+        region.write_offset(0, (2 << 8) | 255);
+        // Negative declared length (`0x80000000`) at sector 2.
+        {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .open(region.get_path())
+                .unwrap();
+            f.seek(SeekFrom::Start(2 * 4096)).unwrap();
+            f.write_all(&i32::MIN.to_be_bytes()).unwrap();
+        }
+        assert!(
+            region
+                .get_chunk_data_input_stream(&ChunkPos::new(0, 0))
+                .unwrap()
+                .is_none(),
+            "negative sector count follows the corruption path"
+        );
     }
 
     #[test]
