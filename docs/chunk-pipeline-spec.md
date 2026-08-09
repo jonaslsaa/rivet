@@ -426,9 +426,13 @@ owner, not on the tokio side and not in shared locks:
   save-order discipline comes from the storage spec (§11 of `region-file-format-spec.md`).
 - **The #184 light seam** (`ThreadedLevelLightEngine` → starlight provider) is
   the boundary where light computation crosses to the starlight compute units.
-  The provider seam (`LightingProvider`) lands with #184 on branch
-  `feature/184-lighting-provider-seam` (not yet on main — see §11); until that
-  merges, the pipeline's light seam is the `EMPTY` stub (§1).
+  The seam is on main: `LevelLightEngine` (`rivet-world`) is the facade that
+  owns the world's vertical extent and an `Option<Box<dyn StarLightProvider>>`
+  (the `starlight$getLightEngine()` surface), and `rivet-server` supplies the
+  concrete provider — currently `StubStarLightProvider`, a no-op stand-in for
+  the real `StarLightInterface` propagation engines (still deferred with the
+  Starlight unit, `RivetTodo(#184)`). Until a `LIGHT`-status wave plugs in, the
+  pipeline's light seam is the `EMPTY` stub (§1).
 
 Java's `ReentrantAreaLock`/`schedulingLockArea` (region locks) are the *mechanism*
 Paper uses to serialize stage-1/3 of unload and task scheduling across its worker
@@ -645,11 +649,11 @@ replaced, not all at once.
   the caller.
 - **#184 lighting seam** — `INITIALIZE_LIGHT`/`LIGHT` statuses and the
   `pipeline.light` unit are where the seam plugs in; `LIGHT` is not parallel
-  (§3.4) because the starlight compute units own it. The seam itself
-  (`LightingProvider` in `rivet-world`, `ThreadedLevelLightEngine` stub in
-  `rivet-server`) is **not yet on main**: it lands with #184 on branch
-  `feature/184-lighting-provider-seam`, so a wave touching `LIGHT` must wait for
-  that merge (merge-ordering dependency).
+  (§3.4) because the starlight compute units own it. The seam itself is on main
+  (#309): `LevelLightEngine` in `rivet-world` owns `Box<dyn StarLightProvider>`
+  (the `starlight$getLightEngine()` surface), and `rivet-server` provides the
+  concrete impl — `StubStarLightProvider` until the real `StarLightInterface`
+  propagation engines land (deferred with the Starlight unit, `RivetTodo(#184)`).
 - **#175/#54 hash parity** — the determinism invariants in §7 are the pipeline's
   contract with the hash gate; a pipeline change that breaks two-run-identical
   hashes is a release blocker.
