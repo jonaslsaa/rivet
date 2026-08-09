@@ -231,17 +231,10 @@ impl KeepaliveState {
     /// the transmit throttle state and ping history but starts with an empty
     /// pending queue ("listener handoff should reset pending keepalive
     /// expectations", `createCookie`). Not currently wired into any production
-<<<<<<< HEAD
     /// handoff: the configuration listener owns its own `KeepaliveState`
     /// (issue #283), and the play path seeds a fresh machine in `spawn_session`
     /// — so no `KeepaliveState` carries across the finish→play seam and the
     /// only caller is the unit test below.
-=======
-    /// handoff: the configuration listener owns its own `KeepaliveState`
-    /// (issue #283), and the play path seeds a fresh machine in `spawn_session`
-    /// — so no `KeepaliveState` carries across the finish→play seam and the
-    /// only caller is the unit test below.
->>>>>>> b812a89 (fix(server): correct stale copyForListenerHandoff doc + guard fresh-seed divergence)
     pub fn copy_for_listener_handoff(&self) -> Self {
         let mut copy =
             KeepaliveState::new_with_timeout(self.last_keep_alive_tx_ns, self.timeout_ns);
