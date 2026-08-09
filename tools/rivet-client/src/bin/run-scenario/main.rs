@@ -31,9 +31,10 @@
 //!   transcripts must diverge only on the excluded per-boot nondeterminism and
 //!   the documented health default gap — any other divergence, including a
 //!   position.y mismatch, FAILS the run. Paper boots with the single-stone
-//!   superflat fixture so both servers spawn at y=-63.0 and `position.y` is a
-//!   genuinely compared field (issue #159: the old default-flat Paper reference
-//!   spawned at y=-60 and position.y was wrongly treated as a "documented gap").
+//!   superflat fixture so both servers spawn at the deterministic superflat
+//!   height `JOIN_SPAWN_Y` and `position.y` is a genuinely compared field (issue
+//!   #159: the old default-flat Paper reference spawned at y=-60 and position.y
+//!   was wrongly treated as a "documented gap").
 //!   A controlled negative then tampers the compared `position.y` on the Paper
 //!   reference and requires the real comparator/divergence path to report the
 //!   tampered value and refuse PASS, so the live acceptance cannot pass
@@ -52,9 +53,9 @@
 //! 2. the client transcript is judged by [`transcript::rivet_play_verdict`]:
 //!    outcome `spawned`, lifecycle containing `login` and `spawn`, the pinned
 //!    Azalea build revision, exactly `JOIN_CHUNK_COUNT` (117) chunks, and the
-//!    deterministic superflat spawn y `JOIN_SPAWN_Y` (-63.0). A stale pre-play
-//!    Rivet build, a fake/non-Rivet endpoint, or a Paper-like y=-60 spawn all
-//!    fail the verdict.
+//!    deterministic superflat spawn y `JOIN_SPAWN_Y`. A stale pre-play Rivet
+//!    build, a fake/non-Rivet endpoint, or a Paper-like y=-60 spawn all fail the
+//!    verdict.
 //!
 //! Raw diagnostics (server logs, client stdout/stderr, normalized transcripts)
 //! are preserved under `work/`.
@@ -444,9 +445,10 @@ fn base_address(args: &Args) -> Result<SocketAddr, RunnerError> {
 }
 
 /// Reserve `n` distinct ephemeral loopback ports, held so the OS cannot hand
-/// out the same port twice. The held [`PortReservation`]s are released only
-/// immediately before each server spawns (inside `server::boot`), so the
-/// bind-drop-boot race narrows to the spawn->child-bind gap.
+/// out the same port twice. The held [`rivet_harness_common::port::PortReservation`]s
+/// are released only immediately before each server spawns (inside
+/// `server::boot`), so the bind-drop-boot race narrows to the spawn->child-bind
+/// gap.
 fn reserve_ports(
     n: usize,
 ) -> Result<Vec<rivet_harness_common::port::PortReservation>, RunnerError> {
@@ -559,10 +561,11 @@ fn server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
 ///
 /// The shared fixture's `generator-settings={}` makes Paper fall back to the
 /// default FLAT preset (bedrock ×1 + dirt ×2 + grass ×1 = 4 layers), which
-/// spawns at y=-60 — while Rivet serves its single-stone world at y=-63. With
-/// `generator-settings={"layers":[{"height":1,"block":"minecraft:stone"}]}`
-/// Paper has exactly one layer and spawns at y=-63 too, so `position.y` becomes
-/// a genuinely compared field instead of a 3-block "documented gap".
+/// spawns at y=-60 — while Rivet serves its single-stone world at
+/// `transcript::JOIN_SPAWN_Y`. The scenario's one-layer stone generator also
+/// makes Paper spawn at `transcript::JOIN_SPAWN_Y`, so `position.y` becomes a
+/// genuinely compared field instead of a spawn-height
+/// "documented gap".
 fn single_stone_server_properties(crate_root: &Path) -> Result<PathBuf, RunnerError> {
     fixture_server_properties(crate_root, "server-single-stone.properties")
 }
@@ -1069,17 +1072,18 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
     println!("    pinned unmodified Azalea client through offline login, configuration (registry");
     println!("    sync), and the play handoff to spawn, receiving exactly the deterministic");
     println!(
-        "    {}-chunk send-set at Rivet's fixed superflat spawn y={}. The connection is proven",
+        "    {}-chunk send-set at Rivet's fixed superflat spawn y={}.",
         transcript::JOIN_CHUNK_COUNT,
         transcript::JOIN_SPAWN_Y
     );
+    println!("    The connection is proven two ways: the rivet log shows 'connection established'");
+    println!("    (only the real rivet-server emits it), and the client transcript is");
+    println!("    outcome=spawned with lifecycle init->login->spawn, the pinned Azalea");
     println!(
-        "    two ways: the rivet log shows 'connection established' (only the real rivet-server"
+        "    revision, 117 chunks, and spawn y={} — which a stale pre-play build, a",
+        transcript::JOIN_SPAWN_Y
     );
-    println!("    emits it), and the client transcript is outcome=spawned with lifecycle");
-    println!("    init->login->spawn, the pinned Azalea revision, 117 chunks, and spawn y=-63.0 —");
-    println!("    which a stale pre-play build, a fake/non-Rivet endpoint, or a Paper-like y=-60");
-    println!("    spawn all fail.");
+    println!("    fake/non-Rivet endpoint, or a Paper-like y=-60 spawn all fail.");
     println!("    artifacts: {}", work.display());
     Ok(())
 }
@@ -1091,9 +1095,10 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
 /// load-bearing even when an explicit `RIVET_SERVER_BIN` override is used.
 ///
 /// `position.y` is deliberately NOT here (issue #159): the Paper reference now
-/// boots the single-stone superflat fixture and spawns at y=-63.0 like Rivet,
-/// so a position.y divergence is a real server mismatch and must fail the run —
-/// never be normalized or excluded to make the test pass. The only remaining
+/// boots the single-stone superflat fixture and spawns at
+/// `transcript::JOIN_SPAWN_Y` like Rivet, so a position.y divergence is a real
+/// server mismatch and must fail the run — never be normalized or excluded to
+/// make the test pass. The only remaining
 /// documented gap is the health component default, and it is value-bound:
 /// Rivet's join burst does not send `set_health` (play-state gap tracked
 /// separately), so azalea reports 1.0 against Rivet vs 20.0 against Paper. A
@@ -1135,13 +1140,14 @@ fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), Ru
 /// The both-mode movement differential's divergence gate (issue #53).
 ///
 /// The single-stone superflat fixture aligns Paper's spawn height with Rivet's
-/// (both y=-63.0), so the compared move transcripts must be byte-identical: the
-/// sampled walk geometry, velocity, teleport echo, and `last_sent` are all
-/// deterministic per server and Paper-vs-Rivet equal (verified on genuine
-/// artifacts). There is deliberately no documented gap — unlike the join
-/// differential's health-component gap, which the fixture does not remove — so
-/// any compared-field divergence is a genuine movement mismatch and fails the
-/// run.
+/// (both `transcript::JOIN_SPAWN_Y`), so the compared move transcripts must be
+/// byte-identical: sampled walk geometry, velocity, teleport echo, and
+/// `last_sent` are all
+/// deterministic per server and Paper-vs-Rivet equal (the comparator below is
+/// what proves it on each run). There is deliberately no documented gap — unlike
+/// the join differential's health-component gap, which the fixture does not
+/// remove — so any compared-field divergence is a genuine movement mismatch and
+/// fails the run.
 fn check_move_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerError> {
     if let Some(f) = d.diffs.first() {
         let mut msg = format!(
@@ -1170,8 +1176,9 @@ fn check_move_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerErr
 /// actually flows through the comparator and the divergence gate: a comparator
 /// that reports nothing, or a `walk.last_sent` silently moved back into
 /// `excluded`, would PASS vacuously without this negative. A fixed +1.0 offset
-/// is safe here because Paper and Rivet record the *same* final x (verified
-/// 25.428 on both), so the tampered value cannot silently collide with the
+/// is safe here because the move differential just proved Paper and Rivet
+/// record the *same* final x (the comparator reported zero diffs on the
+/// compared fields), so the tampered value cannot silently collide with the
 /// other server's.
 fn prove_move_differential_non_vacuous(
     paper_t: &Value,
@@ -1234,6 +1241,52 @@ fn prove_move_differential_non_vacuous(
     }
 }
 
+/// Render the move verdict's compared-`last_sent` evidence from the actual
+/// normalized transcripts.
+///
+/// The move differential just proved the compared fields byte-identical
+/// (`check_move_divergence` found zero diffs), so Paper and Rivet's `last_sent`
+/// are equal and the printed object is whatever the pinned clients produced on
+/// *this run* — never a hardcoded snapshot. A future walk-geometry change (the
+/// fixture, the client's walk length, spawn offset) therefore cannot leave a
+/// stale success claim quoting an earlier run's coordinates: the verdict always
+/// narrates the live value. If the transcripts ever diverge here (a shape
+/// change or a comparator regression), the narration names both sides instead
+/// of printing one value as if they matched.
+///
+/// `last_sent` presence is judged by [`transcript::normalize_move`]: an absent
+/// raw value is normalized to explicit JSON `null`, so a `null` or missing
+/// `walk.last_sent` means the transcript carried no value — never a value to
+/// compare. Treating it as "same last_sent null" would print a successful-looking
+/// `null` on a schema regression; instead the narration surfaces the missing
+/// side(s) exactly.
+fn verdict_last_sent(paper_t: &Value, rivet_t: &Value) -> String {
+    fn present(v: &Value) -> Option<&Value> {
+        match v {
+            Value::Null => None,
+            other => Some(other),
+        }
+    }
+    let paper = paper_t.pointer("/walk/last_sent").and_then(present);
+    let rivet = rivet_t.pointer("/walk/last_sent").and_then(present);
+    match (paper, rivet) {
+        (Some(p), Some(r)) if p == r => {
+            format!("Paper and Rivet both record the same compared last_sent {p}")
+        }
+        (Some(p), Some(r)) => format!(
+            "Paper last_sent {p} vs Rivet last_sent {r} — a compared divergence that should have \
+             been caught by the comparator"
+        ),
+        (Some(p), None) => {
+            format!("Paper last_sent {p}; the Rivet transcript carried no walk.last_sent")
+        }
+        (None, Some(r)) => {
+            format!("the Paper transcript carried no walk.last_sent; Rivet last_sent {r}")
+        }
+        (None, None) => "neither transcript carried a walk.last_sent".to_owned(),
+    }
+}
+
 /// Prove the Rivet movement trace is authoritative evidence for the client's
 /// actual walk, not just internally consistent: the server's final accepted
 /// position must match the client's final sent position (modulo the in-flight
@@ -1241,11 +1294,15 @@ fn prove_move_differential_non_vacuous(
 ///
 /// The client's `last_sent` is its own `LastSentPosition` at the tick the walk
 /// stopped; the server keeps accepting the trailing position frames that arrive
-/// after that snapshot, so the final authoritative position lands a fraction of
-/// a tick past `last_sent` (observed +0.217 on a genuine boot). The bound is
-/// deliberately loose (a few ticks of movement) so timing noise cannot fail the
-/// run, yet tight enough that a server which never moved the player (final ≈
-/// spawn, ~25 blocks short) or teleported it elsewhere fails.
+/// after that snapshot, so the final authoritative position lands at or a little
+/// past `last_sent` — how far depends on how many trailing frames the server
+/// processes before the trace's session end. The x acceptance band below is
+/// therefore a fixed forward window from the reconstructed absolute `last_sent`
+/// (one block of slack behind it, a few blocks ahead), not a fixed absolute
+/// coordinate — so a walk-geometry change cannot make the bound stale. It is
+/// deliberately loose so timing noise cannot fail the run, yet tight enough that
+/// a server which never moved the player (final lands at spawn, far short of the
+/// client's last_sent) or teleported it elsewhere fails.
 ///
 /// Coordinate frames: the client transcript is spawn-relative — `last_sent` X/Z
 /// are the absolute position minus the full-precision `spawn_origin` the client
@@ -1349,8 +1406,9 @@ fn check_rivet_authoritative(
 /// rivet's y if the two spawn heights were ever adjacent, and the negative would
 /// fail on a healthy tree. Because `position.y` is a *compared* field in this
 /// scenario (issue #159: the single-stone fixture spawns both servers at
-/// y=-63), the divergence gate must refuse PASS on the tamper — a position.y
-/// divergence is a real server mismatch, never a documented gap to wave through.
+/// `transcript::JOIN_SPAWN_Y`), the divergence gate must refuse PASS on the
+/// tamper — a position.y divergence is a real server mismatch, never a
+/// documented gap to wave through.
 fn prove_both_mode_non_vacuous(paper_t: &Value, rivet_t: &Value) -> Result<(), RunnerError> {
     let mut tampered = paper_t.clone();
     let y = tampered["position"]["y"].as_f64().ok_or_else(|| {
@@ -1417,8 +1475,8 @@ fn prove_both_mode_non_vacuous(paper_t: &Value, rivet_t: &Value) -> Result<(), R
 /// spawn; the transcripts are compared field-level and differ only on the
 /// excluded per-boot nondeterminism and the documented health default gap.
 /// Paper boots the single-stone superflat fixture so both servers spawn at
-/// y=-63.0 and `position.y` is a compared field (never excluded or normalized
-/// to pass).
+/// `transcript::JOIN_SPAWN_Y` and `position.y` is a compared field (never
+/// excluded or normalized to pass).
 fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-both");
@@ -1568,7 +1626,8 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     println!("        Rivet reached RIVET_READY on its own isolated port ({rivet_addr}) and took");
     println!("        the client through the {boundary}.");
     println!(
-        "      * Both spawn at the same superflat height y=-63.0, so position.y is a compared"
+        "      * Both spawn at the same superflat height y={}, so position.y is a compared",
+        transcript::JOIN_SPAWN_Y
     );
     println!(
         "        field — the negative case proved the comparator reads a tampered spawn height"
@@ -1582,8 +1641,11 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         "        established' (only the real rivet-server emits it), and the client transcript"
     );
     println!("        is outcome=spawned with the pinned Azalea revision, 117 chunks, and spawn");
-    println!("        y=-63.0 — which a stale pre-play build, a fake/non-Rivet endpoint, or a");
-    println!("        Paper-like y=-60 spawn all fail.");
+    println!(
+        "        y={} — which a stale pre-play build, a fake/non-Rivet endpoint, or any",
+        transcript::JOIN_SPAWN_Y
+    );
+    println!("        other spawn height fails.");
     println!("      * The compared transcripts differ only on the documented Rivet/Paper gap");
     println!("        (health default: Rivet omits set_health so azalea reports 1.0 vs Paper's");
     println!("        20.0) — any other divergence, including position.y, fails the run, so a");
@@ -1606,10 +1668,11 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
 ///
 /// The single-stone fixture is what makes the movement comparable: Paper's
 /// default-flat world spawns at y=-60, so every walk sample and `last_sent`
-/// would carry y=-60 vs Rivet's -63 — a 3-block fixture artifact, not a
-/// movement difference. With one stone layer both servers walk at y=-63.0 and
-/// the whole walk (samples, velocity, teleport echo, `last_sent`) must be
-/// byte-identical: there are no documented gaps.
+/// would carry y=-60 vs Rivet's `transcript::JOIN_SPAWN_Y` — a spawn-height
+/// fixture artifact, not a movement difference. With one stone layer both
+/// servers walk at `transcript::JOIN_SPAWN_Y`, so the samples, velocity,
+/// teleport echo, and `last_sent` must be byte-identical with no documented
+/// gaps.
 ///
 /// The Rivet side is additionally proven authoritative: the trace must be
 /// internally consistent (teleport ack accepted at spawn, the accepted-move
@@ -1803,12 +1866,13 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
     println!(
         "        the final sent position `last_sent` are byte-identical on the compared fields"
     );
-    println!("        (Paper and Rivet both record last_sent x=25.428 z=0.0 and the same walk).");
+    println!("        — {}", verdict_last_sent(&paper_t, &rivet_t));
     println!(
         "      * Paper boots the single-stone superflat fixture (Git-Commit pinned) so the walk"
     );
     println!(
-        "        y aligns with Rivet's -63.0 — the old default-flat y=-60 fixture artifact is"
+        "        y aligns with Rivet's {} — the old default-flat y=-60 fixture artifact is",
+        transcript::JOIN_SPAWN_Y
     );
     println!("        removed, so `last_sent.y` and every sample y are compared fields, not gaps.");
     println!("      * The Rivet connection is proven two ways: the rivet log shows 'connection");
@@ -2220,10 +2284,11 @@ mod tests {
     #[test]
     fn paper_rivet_divergence_rejects_position_y_as_undocumented() {
         // Issue #159: the Paper reference now boots the single-stone superflat
-        // and spawns at y=-63.0 like Rivet, so a position.y divergence is a real
-        // server mismatch and must FAIL — never a "documented gap" to be waved
-        // through. The counterfactual keeps the old (wrong) Paper reference at
-        // y=-60 and asserts the both-mode refuses PASS instead of accepting it.
+        // and spawns at `transcript::JOIN_SPAWN_Y` like Rivet, so a position.y
+        // divergence is a real server mismatch and must FAIL — never a
+        // "documented gap" to be waved through. The counterfactual keeps the old
+        // (wrong) Paper reference at a different spawn height and asserts the
+        // both-mode refuses PASS instead of accepting it.
         let err = check_paper_rivet_divergence(&diff_with("position.y")).unwrap_err();
         assert!(
             err.to_string().contains("position.y"),
@@ -2261,11 +2326,11 @@ mod tests {
     #[test]
     fn both_mode_negative_passes_when_tampered_position_y_is_reported() {
         // The genuine Paper-vs-Rivet shape (issue #159): both servers spawn at
-        // the same superflat height y=-63, so the transcripts diverge only on
-        // the documented health default gap (Paper 20 / Rivet 1). Tampering
-        // Paper's position.y through the real comparator/divergence path must be
-        // reported with the tampered value and refused PASS (position.y is a
-        // compared field).
+        // the same superflat height `transcript::JOIN_SPAWN_Y`, so the transcripts
+        // diverge only on the documented health default gap (Paper 20 / Rivet 1).
+        // Tampering Paper's position.y through the real comparator/divergence path
+        // must be reported with the tampered value and refused PASS (position.y is
+        // a compared field).
         let paper = join_transcript(-63.0, 20.0);
         let rivet = join_transcript(-63.0, 1.0);
         assert!(prove_both_mode_non_vacuous(&paper, &rivet).is_ok());
@@ -2405,6 +2470,149 @@ mod tests {
         assert!(
             err.to_string().contains("excluded"),
             "an excluded walk.last_sent must trip the vacuous-guard, got {err}"
+        );
+    }
+
+    /// The verdict narrates the compared `last_sent` it was actually given, not
+    /// a hardcoded coordinate: a transcript whose last_sent is far from any
+    /// historically-observed value (e.g. 123.75) must be echoed verbatim. This
+    /// is what keeps a future walk-geometry change from leaving a stale success
+    /// claim in the PASS narration — a narrator that hardcoded an old coordinate
+    /// would fail the `contains("123.75")` assertion, so no stale literal is
+    /// relied on.
+    #[test]
+    fn verdict_narrates_non_default_live_last_sent() {
+        let paper = move_transcript(123.75, false);
+        let rivet = move_transcript(123.75, false);
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("123.75"),
+            "must narrate the live value: {text}"
+        );
+    }
+
+    /// The verdict must not silently print one value as if both sides matched:
+    /// if Paper and Rivet's last_sent differ (a comparator/divergence-gate
+    /// regression, since the gate should have refused before the verdict), the
+    /// narration names both sides.
+    #[test]
+    fn verdict_names_both_sides_when_last_sent_diverges() {
+        let paper = move_transcript(25.0, false);
+        let rivet = move_transcript(26.0, false);
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("25.0") && text.contains("26.0"),
+            "must name both divergent last_sent values: {text}"
+        );
+        assert!(text.contains("vs"), "must flag the divergence: {text}");
+    }
+
+    /// A normalized move transcript whose walk carried no `last_sent`.
+    /// `normalize_move` records an absent raw value as explicit JSON `null`, so
+    /// this mirrors the normalized wire shape. `verdict_last_sent` intentionally
+    /// treats both a missing key and explicit `null` as no present value.
+    fn move_transcript_without_last_sent() -> Value {
+        json!({
+            "outcome": "moved",
+            "walk": { "last_sent": Value::Null },
+            "excluded": {},
+        })
+    }
+
+    /// A normalized transcript carrying `walk.last_sent: null` must be surfaced
+    /// by the narration naming the side with no present value and the value that
+    /// is still present, never printed as if both matched.
+    #[test]
+    fn verdict_surfaces_a_missing_last_sent() {
+        let paper = move_transcript(25.0, false);
+        let rivet = move_transcript_without_last_sent();
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("Paper last_sent") && text.contains("25.0"),
+            "must keep naming Paper's present last_sent: {text}"
+        );
+        assert!(
+            text.contains("the Rivet transcript carried no walk.last_sent"),
+            "must name the exact missing-Rivet branch: {text}"
+        );
+    }
+
+    /// The one-sided missing shape on the other side: the narration must name
+    /// the exact missing-Paper branch, distinguishing it from the missing-Rivet
+    /// branch above.
+    #[test]
+    fn verdict_surfaces_a_missing_last_sent_on_paper() {
+        let paper = move_transcript_without_last_sent();
+        let rivet = move_transcript(31.0, false);
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("the Paper transcript carried no walk.last_sent")
+                && text.contains("Rivet last_sent")
+                && text.contains("31.0"),
+            "must name the exact missing-Paper branch and the present Rivet value: {text}"
+        );
+    }
+
+    /// Both sides carrying `last_sent: null` is not proof that the compared
+    /// value is `null` — it is a transcript that never recorded the walk's final
+    /// sent position. The narration must surface that rather than print a
+    /// successful-looking "same compared last_sent null".
+    #[test]
+    fn verdict_never_prints_a_successful_null() {
+        let paper = move_transcript_without_last_sent();
+        let rivet = move_transcript_without_last_sent();
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            !text.contains("same compared last_sent null"),
+            "a null/absent last_sent is missing, not a matched value: {text}"
+        );
+        assert!(
+            text.contains("neither transcript carried a walk.last_sent"),
+            "must surface that both sides carried no last_sent: {text}"
+        );
+    }
+
+    /// A normalized move transcript whose `walk` object truly omits the
+    /// `last_sent` key — not explicit `null`, but no key at all. This is the
+    /// shape a raw transcript would have before `normalize_move` fills in an
+    /// explicit `null`; `verdict_last_sent` reads via
+    /// `pointer("/walk/last_sent")`, so an absent key and an explicit `null`
+    /// must both resolve to "no present value".
+    fn move_transcript_without_last_sent_key() -> Value {
+        json!({
+            "outcome": "moved",
+            "walk": {},
+            "excluded": {},
+        })
+    }
+
+    /// A truly absent `last_sent` key (not `null`) must surface the exact same
+    /// side-specific missing narration as the explicit-`null` wire shape: the
+    /// helper contract is that a missing key is "no present value", never a
+    /// value to match. Pins both one-sided branches so a future helper change
+    /// cannot silently stop treating an absent key as missing.
+    #[test]
+    fn verdict_surfaces_a_truly_absent_last_sent_key() {
+        let paper = move_transcript(25.0, false);
+        let rivet = move_transcript_without_last_sent_key();
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("Paper last_sent") && text.contains("25.0"),
+            "must keep naming Paper's present last_sent: {text}"
+        );
+        assert!(
+            text.contains("the Rivet transcript carried no walk.last_sent"),
+            "an absent key must hit the missing-Rivet branch: {text}"
+        );
+
+        let paper = move_transcript_without_last_sent_key();
+        let rivet = move_transcript(31.0, false);
+        let text = verdict_last_sent(&paper, &rivet);
+        assert!(
+            text.contains("the Paper transcript carried no walk.last_sent")
+                && text.contains("Rivet last_sent")
+                && text.contains("31.0"),
+            "an absent key must hit the missing-Paper branch: {text}"
         );
     }
 
