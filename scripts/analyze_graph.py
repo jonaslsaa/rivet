@@ -1499,7 +1499,13 @@ SPLIT_NOTES: dict[str, str] = {
         "siblings/Noises/NoiseSettings). No STUBs: the reverse surface/settings "
         "back-refs live in noisegen (the NoiseGeneratorSettings -> SurfaceRules, "
         "RandomState -> SurfaceSystem and NoiseBasedChunkGenerator -> "
-        "BelowZeroRetrogen edges are noisegen -> surface/settings STUBs)"
+        "BelowZeroRetrogen edges are noisegen -> surface/settings STUBs) | "
+        "Pulled ahead for #100: Heightmap + primeHeightmaps (the client heightmap "
+        "long[] producer) in rivet-world::levelgen::heightmap; the update()/"
+        "worldgen/live types stay deferred with this owning unit | "
+        "#306 feature-shell wave: WorldGenerationContext.java (the minY/depth "
+        "window) is proactively ported out-of-unit "
+        "(levelgen::world_generation_context); the noise wave must not re-port it"
     ),
     "mc.world.level.levelgen.noisegen": (
         "#177 wave-1 + #183/#185: the noise-based chunk generator SCC (Aquifer, "
@@ -1512,6 +1518,14 @@ SPLIT_NOTES: dict[str, str] = {
         "NoiseBasedChunkGenerator -> BelowZeroRetrogen (settings); translate-wave "
         "absorbs SurfaceRules/SurfaceSystem/BelowZeroRetrogen as stubs until the "
         "surface/settings units land"
+    ),
+    "mc.world.level.levelgen.carver": (
+        "#306 feature-shell wave: the ConfiguredWorldCarver type shell is ported "
+        "(levelgen::carver — the CarverConfiguration bound as a marker trait, "
+        "WorldCarverId/WorldCarverBehavior, the ConfiguredWorldCarver record with "
+        "isStartChunk dispatching through a STUB); the #180 algorithm (carve, "
+        "CarvingContext, the concrete carvers + configurations, CarverDebugSettings) "
+        "lands with this unit"
     ),
     "mc.world.level.levelgen.feature.core": (
         "#181 hub: generated content — Feature.java is the static registry hub "
@@ -1596,9 +1610,21 @@ SPLIT_NOTES: dict[str, str] = {
         "LightChunk/LightChunkGetter/StructureAccess) that access builds on; "
         "zero cross-edge to access/generator"
     ),
+    "mc.world.level": (
+        "#306 feature-shell wave: WorldGenLevel.java (the worldgen write/read "
+        "gate) is proactively ported out-of-unit (trait WorldGenLevel in "
+        "rivet-world::level::world_gen_level — getSeed + ensureCanWrite, "
+        "extending LevelHeightAccessor; setCurrentlyGenerating defers via "
+        "RivetTodo #232); the mc.world.level wave must not re-port it"
+    ),
     "mc.world.level.chunk.generator": (
         "#185: the generator stack (ChunkGenerator/ChunkGenerators/"
-        "ChunkGeneratorStructureState) the pipeline-facing generator wave builds on"
+        "ChunkGeneratorStructureState) the pipeline-facing generator wave builds "
+        "on | #306 feature-shell wave: the abstract ChunkGenerator seam is "
+        "proactively ported out-of-unit (trait ChunkGenerator in "
+        "rivet-world::chunk::chunk_generator — getMinY/getGenDepth pass-through; "
+        "levelgen::feature/placement/WorldGenerationContext consume it as "
+        "&dyn ChunkGenerator); the .chunk.generator wave must not re-port it"
     ),
     "mc.world.level.storage": (
         "#183: M2 hub — LevelStorageSource is the on-disk access hub "
@@ -1961,12 +1987,19 @@ def main() -> None:
 
     def carry(unit_id: str, authored_notes: str) -> tuple[str, str, str]:
         # Regenerated content and human workflow state share the notes column:
-        # keep the preserved note (human triage) and add the authored note
-        # (structural, e.g. cycle back-edges) when it is not already present, so
-        # regeneration is idempotent and never clobbers a human note.
+        # keep the preserved note (human triage) and add the authored notes
+        # (structural, e.g. cycle back-edges) when not already present, so
+        # regeneration is idempotent and never clobbers a human note. Authored
+        # notes may carry several " | "-separated segments; each segment lands
+        # in the column independently so a unit with multiple structural notes
+        # (e.g. a wave seam on top of its owning-note) survives a fresh
+        # regeneration without being duplicated on the next carry.
         status, attempts, notes = prev_state.get(unit_id, ("pending", "0", ""))
-        if authored_notes and (not notes or authored_notes not in notes.split(" | ")):
-            notes = f"{notes} | {authored_notes}".strip(" |")
+        existing = notes.split(" | ") if notes else []
+        for seg in (s for s in authored_notes.split(" | ") if s):
+            if seg not in existing:
+                notes = f"{notes} | {seg}".strip(" |")
+                existing.append(seg)
         return status, attempts, notes
 
     def java_paths(pkg: str) -> str:
