@@ -123,15 +123,20 @@ The seeds cover the cases the targets assert on:
 - **Binary NBT** (`nbt_binary*`): negative list length, missing list element
   type, oversized array (`>= 1 << 24`), truncated streams, deep nesting,
   gzip-compressed input, malformed modified-UTF-8, non-canonical NaN float/
-  double payloads, and — for `nbt_binary_roundtrip` — the roundtrip-writeable
-  seeds (`nbt_empty_root`, `nbt_rich`, `too_long_write`). The remaining
-  compound-rooted seeds (`nbt_nan_float`, `nbt_nan_double`,
-  `nbt_overlong_utf8`, `nbt_raw_nul_utf8`, `nbt_bad_utf8`) are *truncated*
-  compounds (no trailing END byte) and are rejected on the read path; they
-  exercise the
-  read-rejection side of `nbt_binary`/`nbt_binary_visitor`, not the roundtrip
-  write path. `too_long_write` is a 40 KB raw-NUL string that re-encodes past
-  the 65535-byte write limit and is the seed that exercises the
+  double payloads, and — for `nbt_binary_roundtrip` — the write-path
+  canonicalization seeds. In the roundtrip corpus the NaN / overlong-MUTF-8 /
+  raw-NUL seeds (`nbt_nan_float`, `nbt_nan_double`, `nbt_overlong_utf8`,
+  `nbt_raw_nul_utf8`, `nbt_bad_utf8`) are well-formed compounds that parse, so
+  the write → re-read → write idempotence assertion actually runs on them: a
+  non-canonical NaN float (`0x7fc01234`) and double (`0x7ff8000000000001`) are
+  re-canonicalized to `0x7fc00000` / `0x7ff8000000000000`, an overlong `C1 80`
+  string re-encodes to its canonical single-byte form, a raw-NUL string
+  re-encodes as `C0 80`, and a 3-byte overlong `E0 80 80` re-encodes as the
+  2-byte NUL `C0 80`; `nbt_empty_root` and `nbt_rich` round out the
+  roundtrip-writeable set. The *same seed names* in `nbt_binary` /
+  `nbt_binary_visitor` are the truncated read-rejection forms shared with
+  `nbt_truncated`. `too_long_write` is a 40 KB raw-NUL string that re-encodes
+  past the 65535-byte write limit and is the seed that exercises the
   `StringFallbackDataOutput` write-path fallback.
 - **Modified UTF-8** (`data_io_modified_utf8`): raw NUL, overlong `C1 80`,
   canonical `C0 80`, 2/3-byte forms, astral surrogate pairs, unpaired
