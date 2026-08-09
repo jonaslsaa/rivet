@@ -10,10 +10,10 @@ honor; it does not implement storage code and it does not invent APIs.
 **This document is the payload companion to the region-file container spec.**
 The 4096-byte-sector framing, compression ids, external/oversized chunks,
 header recalc, and IOWorker ordering live in
-`docs/region-file-format-spec.md` (branch `docs/region-file-format-spec`,
-commits `1d8a061..08e6584`); do not duplicate them here. §4 of that spec
-defines the per-chunk stream (`length`, `compression_type`, codec-wrapped NBT)
-that this document's CompoundTag is wrapped in.
+`docs/region-file-format-spec.md` (branch `docs/region-file-format-spec`);
+do not duplicate them here. §4 of that spec defines the per-chunk stream
+(`length`, `compression_type`, codec-wrapped NBT) that this document's
+CompoundTag is wrapped in.
 
 **Sources of truth (read before changing this document):**
 
