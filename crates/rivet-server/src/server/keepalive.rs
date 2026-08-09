@@ -232,7 +232,7 @@ impl KeepaliveState {
     /// pending queue ("listener handoff should reset pending keepalive
     /// expectations", `createCookie`). Not currently wired into any production
     /// handoff: the play path seeds a fresh machine in `spawn_session`, and the
-    /// configuration listener owns no `KeepaliveState` yet (RivetTodo #157), so
+    /// configuration listener owns no `KeepaliveState` yet (RivetTodo #283), so
     /// the only caller is the unit test below.
     pub fn copy_for_listener_handoff(&self) -> Self {
         let mut copy =

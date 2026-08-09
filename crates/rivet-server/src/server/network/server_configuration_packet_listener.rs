@@ -1,7 +1,8 @@
 use std::collections::{HashSet, VecDeque};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
+use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_protocol::generated::protocol::ConnectionProtocol;
 use rivet_protocol::protocol::common::client_information::ClientInformation;
 use rivet_protocol::protocol::common::clientbound_custom_payload::ClientboundCustomPayloadPacket;
@@ -19,6 +20,9 @@ use rivet_protocol::protocol::configuration::clientbound_finish_configuration::{
 use rivet_protocol::protocol::configuration::clientbound_registry_data::ClientboundRegistryDataPacket;
 use rivet_protocol::protocol::configuration::clientbound_select_known_packs::ClientboundSelectKnownPacks;
 use rivet_protocol::protocol::configuration::clientbound_update_enabled_features::ClientboundUpdateEnabledFeaturesPacket;
+use rivet_protocol::protocol::configuration::serverbound_accept_code_of_conduct::{
+    ServerboundAcceptCodeOfConductPacket, stream_codec as accept_code_of_conduct_stream_codec,
+};
 use rivet_protocol::protocol::configuration::serverbound_finish_configuration::ServerboundFinishConfigurationPacket;
 use rivet_protocol::protocol::configuration::serverbound_select_known_packs::ServerboundSelectKnownPacks;
 use rivet_registry::Identifier;
@@ -66,14 +70,75 @@ const DISCONNECT_UNEXPECTED_QUERY: &str = "multiplayer.disconnect.unexpected_que
 /// brand in `startConfiguration` via `ClientboundCustomPayloadPacket(Brand)`.
 const SERVER_BRAND: &str = "Rivet";
 
+/// `ServerCommonPacketListenerImpl.CUSTOM_REGISTER` — the `minecraft:register`
+/// channel-registration payload id (the 0-separated channel list).
+const CUSTOM_REGISTER: &str = "register";
+/// `ServerCommonPacketListenerImpl.CUSTOM_UNREGISTER`.
+const CUSTOM_UNREGISTER: &str = "unregister";
+/// `ServerCommonPacketListenerImpl.MINECRAFT_BRAND` — the `minecraft:brand`
+/// payload id (Paper); the client's brand is a `utf` string read at max 256.
+const MINECRAFT_BRAND: &str = "brand";
+
+/// `Messenger.MAX_CHANNEL_SIZE` — `Integer.getInteger("paper.maxCustomChannelName",
+/// Short.MAX_VALUE)`, the max length `validateAndCorrectChannel` permits.
+const MAX_CUSTOM_CHANNEL_SIZE: usize = 32767;
+
+/// The disconnect `handleCustomPayload` sends on any payload parse failure:
+/// `Component.literal("Invalid custom payload payload!")`. This slice closes the
+/// connection deterministically (the observable Java behavior) without a
+/// formatted disconnect body, so the reason is only descriptive.
+fn invalid_custom_payload() -> DisconnectReason {
+    DisconnectReason::Malformed("Invalid custom payload payload!".into())
+}
+
+/// `StandardMessenger.validateAndCorrectChannel` — the per-segment validation
+/// the plugin bridge applies in `addChannel`/`removeChannel`. Java CORRECTS
+/// (accepts) the legacy `BungeeCord` ↔ `bungeecord:main` spellings, then
+/// rejects a channel over 32767 chars, without a `:`, or not entirely
+/// lowercase — every rejection is an exception the `handleCustomPayload` catch
+/// converts to the invalid-payload disconnect. The corrected value has no
+/// observable effect here: the tracked channel set is the plugin bridge,
+/// deferred (#26), so only acceptance vs rejection matters.
+///
+/// `readChannelIdentifier` skips empty segments before validating, mirrored by
+/// the `is_empty` early return below.
+fn validate_register_channel(channel: &[u8]) -> Result<(), DisconnectReason> {
+    if channel.is_empty() {
+        return Ok(());
+    }
+    // US-ASCII decoding (`new String(..., US_ASCII)`) maps every byte to one
+    // char (non-ASCII bytes become U+FFFD), so byte and char lengths agree and
+    // only `A`-`Z` change under `toLowerCase(Locale.ROOT)` — the byte checks
+    // mirror the string checks exactly.
+    if channel == b"BungeeCord" || channel == b"bungeecord:main" {
+        return Ok(());
+    }
+    if channel.len() > MAX_CUSTOM_CHANNEL_SIZE {
+        return Err(invalid_custom_payload());
+    }
+    if !channel.contains(&b':') {
+        return Err(invalid_custom_payload());
+    }
+    if channel.iter().any(u8::is_ascii_uppercase) {
+        return Err(invalid_custom_payload());
+    }
+    Ok(())
+}
+
 /// `ConfigurationTask.Type` id for `SynchronizeRegistriesTask` — queued first;
 /// the registry-sync negotiation (`select_known_packs` reply → registry/tag data).
 const SYNCHRONIZE_REGISTRIES_TASK_TYPE: &str = "synchronize_registries";
 /// `ConfigurationTask.Type` id for `JoinWorldTask` — queued last so the client's
 /// `finish_configuration` reply finishes it and the connection hands off to play
-/// (issue #96). `PrepareSpawnTask` (#100) is deferred; the join burst
-/// (`spawnPlayer`) runs tick-side via the play listener (issue #101 Slice B).
+/// (issue #96). Rivet bypasses `PrepareSpawnTask`: chunks send via the delivered
+/// direct-send path (#100) and the join burst runs tick-side via the play
+/// listener (#101 Slice B).
 const JOIN_WORLD_TASK_TYPE: &str = "join_world";
+/// `ConfigurationTask.Type` id for `ServerCodeOfConductConfigurationTask` —
+/// never queued in this slice (`MinecraftServer.getCodeOfConducts()` is
+/// `Map.of()`), so `handleAcceptCodeOfConduct`'s `finishCurrentTask` always
+/// mismatches and closes exactly like Java's `IllegalStateException`.
+const SERVER_CODE_OF_CONDUCT_TASK_TYPE: &str = "server_code_of_conduct";
 
 /// `net.minecraft.server.network.ConfigurationTask` — one deferred step of the
 /// configuration phase.
@@ -142,11 +207,10 @@ impl ConfigurationTask for SynchronizeRegistriesTask {
 /// `ClientboundFinishConfigurationPacket.INSTANCE`; the client's
 /// `ServerboundFinishConfigurationPacket` reply finishes the task in
 /// `handleConfigurationFinished`, after which the connection hands off to the
-/// play state. In Paper, `PrepareSpawnTask` (the spawn-chunk load, #100) runs
-/// immediately before this task; that task is deferred, so configuration
-/// completes and reaches play without a spawn-chunk load. The join burst
-/// (`spawnPlayer`) is not part of the configuration phase — it runs tick-side
-/// via the play listener (issue #101 Slice B).
+/// play state. Paper runs `PrepareSpawnTask` immediately before this task. Rivet
+/// instead uses the delivered Moonrise direct-send path (#100), so configuration
+/// reaches play before the join burst runs tick-side via the play listener
+/// (issue #101 Slice B).
 struct JoinWorldTask;
 
 impl ConfigurationTask for JoinWorldTask {
@@ -177,9 +241,10 @@ impl ConfigurationTask for JoinWorldTask {
 /// (`FeatureFlags.REGISTRY.toNames(worldData.enabledFeatures())` — `{minecraft:vanilla}`
 /// on the M1 offline world), then queues the configuration tasks and starts the
 /// first. The registry-sync task (`SynchronizeRegistriesTask`) and the terminal
-/// `JoinWorldTask` are the M1 queue; the spawn-chunk load (`PrepareSpawnTask`,
-/// #100) that Paper runs between them is deferred. The queue is
-/// [sync, join_world]: the client replies to `select_known_packs`, the server
+/// `JoinWorldTask` are the M1 queue; Paper's `PrepareSpawnTask` between them is
+/// not ported — the M1 superflat chunks are delivered tick-side via the
+/// direct-send path (#100). The queue is [sync, join_world]: the client replies
+/// to `select_known_packs`, the server
 /// sends the registry/tag data and finishes the sync, `JoinWorldTask` sends
 /// `ClientboundFinishConfigurationPacket`, and the client's `finish_configuration`
 /// reply finishes it — the connection then hands off to the play state
@@ -201,6 +266,15 @@ pub struct ServerConfigurationPacketListener {
     /// `CommonListenerCookie` (`ClientInformation.createDefault()`); the
     /// deferred field is updated by `handleClientInformation`.
     client_information: ClientInformation,
+    /// `ServerCommonPacketListenerImpl.clientBrand` — the `minecraft:brand`
+    /// payload decoded by `handleCustomPayload` (`readUtf(256)`). Stored on
+    /// this listener only: the finish→play handoff
+    /// (`set_play_handoff(profile, client_information)`) carries just the
+    /// profile + `ClientInformation`, so the brand is dropped at that seam.
+    /// Java carries it into play via `CommonListenerCookie`; the play-side
+    /// consumer (`Player.getClientBrandName()`, Paper API) is plugin-layer,
+    /// deferred with the JVM adapter (#26).
+    client_brand: Option<String>,
     /// The authenticated `GameProfile` the login phase built for this connection
     /// (`CommonListenerCookie.profile`, issue #101 Slice B). Carried across the
     /// finish→play handoff so the tick thread can spawn the join burst.
@@ -216,6 +290,7 @@ impl Default for ServerConfigurationPacketListener {
             configuration_tasks: VecDeque::new(),
             current_task: None,
             client_information: ClientInformation::create_default(),
+            client_brand: None,
             profile: GameProfile::new_without_properties(
                 rivet_util::mth::Uuid { most: 0, least: 0 },
                 String::new(),
@@ -232,6 +307,7 @@ impl ServerConfigurationPacketListener {
             configuration_tasks: VecDeque::new(),
             current_task: None,
             client_information: ClientInformation::create_default(),
+            client_brand: None,
             profile,
         }
     }
@@ -241,7 +317,8 @@ impl ServerConfigurationPacketListener {
     /// the first (`startNextTask`).
     ///
     /// This slice queues the registry sync + `JoinWorldTask` (the finish→play
-    /// seam); `PrepareSpawnTask` (#100) is deferred. The join burst
+    /// seam); Paper's `PrepareSpawnTask` is not ported — the M1 superflat chunks
+    /// are delivered tick-side via the direct-send path (#100). The join burst
     /// (`spawnPlayer`) runs tick-side via the play listener (issue #101 Slice B).
     pub fn start_configuration(&mut self, conn: &mut Connection) -> Result<(), String> {
         // `send(new ClientboundCustomPayloadPacket(new BrandPayload(server
@@ -279,18 +356,23 @@ impl ServerConfigurationPacketListener {
         // this.configurationTasks.add(this.synchronizeRegistriesTask);
         // this.addOptionalTasks(); this.configurationTasks.add(
         //   new PaperConfigurationTask(this)); this.returnToWorld();`
-        // `returnToWorld` queues `PrepareSpawnTask` (the spawn-chunk load, #100)
-        // then `JoinWorldTask`. `PrepareSpawnTask` is deferred, so the queue is
-        // [sync, join_world]: configuration completes and the connection reaches
-        // the play handoff; the join burst fires tick-side via the play listener
-        // (issue #101 Slice B), so `spawnPlayer` needs no configuration-phase
-        // task here.
-        // RivetTodo(#100): `PrepareSpawnTask` — the spawn-chunk load that in
-        // Paper gates `JoinWorldTask`; it belongs between the sync and
-        // `JoinWorldTask` in the queue.
-        // RivetTodo(#236): `addOptionalTasks` — the code-of-conduct and
-        // resource-pack configuration tasks, and the Paper configuration event
-        // task (`AsyncPlayerConnectionConfigureEvent`).
+        // `returnToWorld` queues `PrepareSpawnTask` (the spawn-chunk load that
+        // gates `JoinWorldTask` in Paper) then `JoinWorldTask`. It is not ported:
+        // the M1 superflat chunks are sent tick-side via the Moonrise direct-send
+        // path (#100), so the queue is [sync, join_world]: configuration completes
+        // and the connection reaches the play handoff; the join burst fires
+        // tick-side via the play listener (issue #101 Slice B), so `spawnPlayer`
+        // needs no configuration-phase task here.
+        // `addOptionalTasks` queues nothing in this slice: this Paper's
+        // `MinecraftServer.getCodeOfConducts()`/`getServerResourcePack()` are
+        // empty (`Map.of()` / `Optional.empty()`) and the CoC condition also
+        // checks the `PlayerCodeOfConductSendEvent` listener count (plugin-layer,
+        // deferred with the JVM adapter #26), so neither
+        // `ServerCodeOfConductConfigurationTask` nor
+        // `ServerResourcePackConfigurationTask` is added. The `PaperConfigurationTask`
+        // (the `AsyncPlayerConnectionConfigureEvent`) IS added unconditionally in
+        // Java, but its `start` finishes immediately when no listeners are
+        // registered — the same no-op here since the plugin bridge is deferred.
         self.configuration_tasks
             .push_back(Box::new(SynchronizeRegistriesTask::new()));
         self.configuration_tasks.push_back(Box::new(JoinWorldTask));
@@ -339,6 +421,154 @@ impl ServerConfigurationPacketListener {
         self.start_next_task(conn)
             .map_err(DisconnectReason::Unsupported)
     }
+
+    /// `ServerCommonPacketListenerImpl.handleCustomPayload(packet)` (Paper fork).
+    ///
+    /// Java:
+    /// ```java
+    /// if (!(packet.payload() instanceof DiscardedPayload discardedPayload)) {
+    ///     return; // never happens here — the serverbound codec always discards
+    /// }
+    /// Identifier identifier = packet.payload().type().id();
+    /// byte[] data = discardedPayload.data();
+    /// try {
+    ///     boolean registerChannel = CUSTOM_REGISTER.equals(identifier);
+    ///     if (registerChannel || CUSTOM_UNREGISTER.equals(identifier)) {
+    ///         // strings separated by zeros
+    ///         ...
+    ///         return;
+    ///     }
+    ///     if (identifier.equals(MINECRAFT_BRAND)) {
+    ///         this.clientBrand = new FriendlyByteBuf(wrappedBuffer(data)).readUtf(256);
+    ///     }
+    ///     this.cserver.getMessenger().dispatchIncomingMessage(...);
+    /// } catch (Exception e) {
+    ///     LOGGER.error(...);
+    ///     this.disconnect(Component.literal("Invalid custom payload payload!"), INVALID_PAYLOAD);
+    /// }
+    /// ```
+    ///
+    /// The register/unregister payload is a list of US-ASCII channel ids
+    /// separated by `\0` (no length prefixes). Paper validates each channel
+    /// against `StandardMessenger.validateAndCorrectChannel` (via the plugin
+    /// bridge's `addChannel`/`removeChannel`) and fires register/unregister
+    /// events — the only observable Java effect besides the connection
+    /// state is that an invalid channel throws and disconnects, so this slice
+    /// validates the same way and discards the corrected value. The bridge
+    /// itself (the 128-channel limit and the events) is plugin-layer, deferred
+    /// with the JVM adapter (#26). Empty segments (leading/consecutive/trailing
+    /// `\0`) are skipped by `readChannelIdentifier` before validation.
+    /// The brand decode is `readUtf(256)` — a truncated/oversize brand throws
+    /// `DecoderException` (empty data throws netty `IndexOutOfBoundsException`),
+    /// caught by the try/catch; here the panic-equivalent
+    /// (`FriendlyByteBuf::read_utf_max` on the raw bytes) is caught and mapped
+    /// to the same disconnect.
+    ///
+    fn handle_custom_payload(
+        &mut self,
+        packet: &ServerboundCustomPayloadPacket,
+    ) -> Result<(), DisconnectReason> {
+        let identifier = packet.payload().type_id();
+        let data = match packet.payload() {
+            CustomPacketPayload::Discarded(d) => d.data().to_vec(),
+            CustomPacketPayload::Brand(_) => {
+                // Unreachable: the serverbound codec's empty known-types list
+                // never decodes to `Brand`. Guarded so a future known-type change
+                // is a no-op rather than a panic.
+                return Ok(());
+            }
+        };
+
+        // `CUSTOM_REGISTER.equals(identifier)` compares the full identifier, so
+        // a hostile `foo:register` payload does NOT match — `with_default_namespace`
+        // is the `minecraft:register` Java compares against.
+        if identifier == Identifier::with_default_namespace(CUSTOM_REGISTER)
+            || identifier == Identifier::with_default_namespace(CUSTOM_UNREGISTER)
+        {
+            // `readChannelIdentifier` over the 0-separated channel list. The
+            // validated channel is discarded (there is no plugin bridge yet): the
+            // only observable Java effect here is that an invalid channel throws
+            // and disconnects — the plugin surface (`bridge.addChannel`/
+            // `removeChannel`, the 128-channel limit, the register/unregister
+            // events) is deferred with the JVM adapter (#26).
+            // RivetTodo(#26): the plugin bridge — `addChannel`/`removeChannel`,
+            // the 128-channel limit, and the
+            // `PlayerRegisterChannelEvent`/`PlayerUnregisterChannelEvent`.
+            let mut start = 0;
+            for (i, b) in data.iter().enumerate() {
+                if *b == 0 {
+                    validate_register_channel(&data[start..i])?;
+                    start = i + 1;
+                }
+            }
+            validate_register_channel(&data[start..])?;
+            return Ok(());
+        }
+
+        if identifier == Identifier::with_default_namespace(MINECRAFT_BRAND) {
+            // `new FriendlyByteBuf(wrappedBuffer(data)).readUtf(256)` — Java
+            // throws `DecoderException` for a truncated or over-max utf (from
+            // `Utf8String.read`'s available-bytes and decoded-length checks) and
+            // netty `IndexOutOfBoundsException` for an empty buffer (`VarInt.read`
+            // on no bytes); every one is caught by `handleCustomPayload`'s
+            // `catch (Exception)` → the invalid-payload disconnect. `read_utf_max`
+            // panics on the same inputs, so the panic is caught and mapped here.
+            let brand = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                FriendlyByteBuf::new(BytesMut::from(data.as_slice())).read_utf_max(256)
+            }))
+            .map_err(|_| invalid_custom_payload())?;
+            self.client_brand = Some(brand);
+        }
+
+        // `this.cserver.getMessenger().dispatchIncomingMessage(...)` — the
+        // plugin-messaging dispatch (CraftBukkit's `CraftServer` messenger) is
+        // plugin-layer, deferred with the JVM adapter (#26).
+        // RivetTodo(#26): `CraftServer.getMessenger().dispatchIncomingMessage`
+        // for plugin channels.
+        Ok(())
+    }
+
+    /// `ServerCommonPacketListenerImpl.handleResourcePackResponse(packet)` —
+    /// the common-impl resource-pack-required kick plus the config listener
+    /// override's `ServerResourcePackConfigurationTask` finish.
+    ///
+    /// Java: `if (action() == DECLINED && server.isResourcePackRequired())
+    /// disconnect("multiplayer.requiredTexturePrompt.disconnect")` — never fires
+    /// here because `getServerResourcePack()` is `Optional.empty()`. The
+    /// adventure pack callbacks (`packCallbacks`, `ResourcePackCallback`) are
+    /// plugin-layer, deferred (#26). The terminal task-finish branch
+    /// (`action().isTerminal() && id == serverResourcePack.id()`) can never match
+    /// with no pushed pack, so nothing finishes — exactly Java's behavior with an
+    /// empty pack.
+    fn handle_resource_pack_response(
+        &self,
+        packet: &ServerboundResourcePackPacket,
+    ) -> Result<(), DisconnectReason> {
+        // RivetTodo(#26): the adventure `ResourcePackCallback` callbacks, which
+        // need the adventure audience wiring. The configuration-task finish is
+        // unreachable without a pushed resource pack, as described above.
+        let _ = packet;
+        Ok(())
+    }
+
+    /// `ServerCommonPacketListenerImpl.handleCustomClickAction(packet)` —
+    /// `server.handleCustomClickAction(id, payload)` which only debug-logs
+    /// `"Received custom click action {} with payload {}"`, then the Paper
+    /// `PaperPlayerCustomClickEvent` + dialog/adventure click-callback managers
+    /// (plugin-layer, deferred #26).
+    fn handle_custom_click_action(&self, packet: &ServerboundCustomClickActionPacket) {
+        // `MinecraftServer.handleCustomClickAction` — the debug log.
+        tracing::debug!(
+            "Received custom click action {} with payload {}",
+            packet.id(),
+            packet
+                .payload()
+                .map_or_else(|| "null".to_string(), |t| t.to_string())
+        );
+        // RivetTodo(#26): the `PaperPlayerCustomClickEvent` and the dialog/
+        // adventure click-callback managers (`ClickCallbackProviderImpl`), which
+        // need the adventure audience + callback registry.
+    }
 }
 
 impl PacketListener for ServerConfigurationPacketListener {
@@ -363,38 +593,30 @@ impl PacketListener for ServerConfigurationPacketListener {
             }
             CUSTOM_PAYLOAD_PACKET_ID => {
                 // `handleCustomPayload` → `ServerCommonPacketListenerImpl
-                // .handleCustomPayload`. CraftBukkit's empty known-types list
-                // decodes every serverbound payload as `DiscardedPayload`; the
-                // register/unregister/brand handling (plugin messaging bridge,
-                // `clientBrand`) is deferred with the plugin API.
+                // .handleCustomPayload` (Paper fork): decode to
+                // `DiscardedPayload`, then register/unregister/brand handling.
+                // CraftBukkit's empty known-types list decodes every serverbound
+                // payload as `DiscardedPayload`, so `payload().type().id()` is
+                // the raw id (Paper's `identifier`).
                 let packet: ServerboundCustomPayloadPacket =
                     decode_packet(frame, ServerboundCustomPayloadPacket::stream_codec())?;
-                let _ = packet;
-                // RivetTodo(#236): the serverbound custom-payload handling —
-                // `minecraft:register`/`unregister` channel tracking and the
-                // `minecraft:brand` decode (`clientBrand`). The body decodes as
-                // `DiscardedPayload` here and is otherwise ignored.
+                self.handle_custom_payload(&packet)?;
                 Ok(ListenerOutcome::Keep)
             }
             KEEP_ALIVE_PACKET_ID => {
                 // `handleKeepAlive` — Paper's keepalive challenge tracking. The
-                // periodic clientbound keepalive is deferred (#157); a serverbound
-                // keepalive with no pending challenge would disconnect in Java
-                // ("without matching challenge").
+                // configuration-phase challenge lifecycle is deferred (#283); a
+                // serverbound keepalive with no pending challenge would disconnect
+                // in Java ("without matching challenge").
                 let packet: ServerboundKeepAlivePacket =
                     decode_packet(frame, ServerboundKeepAlivePacket::stream_codec())?;
                 let _ = packet;
-                // RivetTodo(#157): the listener-side wiring — this listener does
-                // not yet own a `KeepaliveState`, so the periodic
-                // `ClientboundKeepAlivePacket` (1 s throttle) and the serverbound
-                // challenge matching (`handleKeepAlive`: pending queue,
-                // out-of-order / no-challenge TIMEOUT disconnects, 30 s kick) are
-                // not driven here. The pure state machine + `KeepaliveSink` seam
-                // live in `server::keepalive` / `server::network::keepalive`; the
-                // configuration tick hook that drives them needs a tick source for
-                // the tokio-side listener (Paper ticks `keepConnectionAlive` from
-                // the server thread) — the `PacketListener::tick` driver, shared
-                // with #157's play listener.
+                // RivetTodo(#283): the configuration listener does not yet own a
+                // `KeepaliveState`, so periodic challenges, reply matching, and
+                // timeout disconnects are not driven here. The play listener's
+                // delivered keepalive wiring (#157) provides the state-machine
+                // pattern; configuration still needs its own tick source and
+                // lifecycle integration.
                 Ok(ListenerOutcome::Keep)
             }
             PONG_PACKET_ID => {
@@ -405,27 +627,26 @@ impl PacketListener for ServerConfigurationPacketListener {
             }
             RESOURCE_PACK_PACKET_ID => {
                 // `handleResourcePackResponse` — `super.handleResourcePackResponse`
-                // (the resource-pack-required kick + callbacks) plus the
+                // (the resource-pack-required kick, never fired here — no pack is
+                // required, see below) plus the configuration listener override's
                 // `finishCurrentTask(ServerResourcePackConfigurationTask.TYPE)`.
-                // No resource pack is ever pushed (#236), so no task finish fires.
+                // `MinecraftServer.getServerResourcePack()` is `Optional.empty()`
+                // in this Paper, so no pack is ever pushed and no
+                // `ServerResourcePackConfigurationTask` is current — the terminal
+                // task-finish branch (`packet.id() == serverResourcePack.id()`)
+                // can never match, exactly like Java with an empty pack.
                 let packet: ServerboundResourcePackPacket =
                     decode_packet(frame, ServerboundResourcePackPacket::stream_codec())?;
-                let _ = packet;
-                // RivetTodo(#236): `handleResourcePackResponse` — the
-                // resource-pack-required disconnect and the adventure pack
-                // callbacks; no pack is pushed in this slice so there is no
-                // current `ServerResourcePackConfigurationTask` to finish.
+                self.handle_resource_pack_response(&packet)?;
                 Ok(ListenerOutcome::Keep)
             }
             CUSTOM_CLICK_ACTION_PACKET_ID => {
                 // `handleCustomClickAction` — `server.handleCustomClickAction`
-                // plus the Paper dialog/adventure click callbacks.
+                // (a debug log) plus the Paper dialog/adventure click callbacks
+                // (plugin-layer, deferred with the JVM adapter #26).
                 let packet: ServerboundCustomClickActionPacket =
                     decode_packet(frame, ServerboundCustomClickActionPacket::stream_codec())?;
-                let _ = packet;
-                // RivetTodo(#236): `handleCustomClickAction` — the server-side
-                // custom-click-action routing (server handler + click-callback
-                // managers); the packet decodes here and is otherwise ignored.
+                self.handle_custom_click_action(&packet);
                 Ok(ListenerOutcome::Keep)
             }
             COOKIE_RESPONSE_PACKET_ID => {
@@ -486,13 +707,18 @@ impl PacketListener for ServerConfigurationPacketListener {
             ACCEPT_CODE_OF_CONDUCT_PACKET_ID => {
                 // `handleAcceptCodeOfConduct` → `finishCurrentTask(
                 // ServerCodeOfConductConfigurationTask.TYPE)`. No code-of-conduct
-                // task is ever queued (#236), so any response is unexpected.
-                // RivetTodo(#236): `ServerCodeOfConductConfigurationTask` and the
-                // `accept_code_of_conduct` handshake — no CodeOfConduct packet is
-                // ever sent in this slice, so the response is unsupported.
-                Err(DisconnectReason::Unsupported(
-                    "multiplayer.disconnect.configuration_error".into(),
-                ))
+                // task is ever queued (`getCodeOfConducts()` is `Map.of()`), so
+                // `finish_current_task` always mismatches — Java's
+                // `IllegalStateException("Unexpected request for task finish, current
+                // task: ..., requested: server_code_of_conduct")` — surfaced as a
+                // deterministic Malformed close, exactly like Java.
+                let _: ServerboundAcceptCodeOfConductPacket =
+                    decode_packet(frame, accept_code_of_conduct_stream_codec())?;
+                self.finish_current_task(SERVER_CODE_OF_CONDUCT_TASK_TYPE, conn)?;
+                // Unreachable: no CoC task is ever current, so `finish_current_task`
+                // always errors above. Kept for the type — the Ok path mirrors the
+                // other task-finishing branches.
+                Ok(ListenerOutcome::Keep)
             }
             other => Err(DisconnectReason::Malformed(format!(
                 "unknown configuration packet id {other}"
@@ -622,8 +848,10 @@ mod tests {
     #[tokio::test]
     async fn start_configuration_queues_sync_then_join_world() {
         // The M1 queue is [synchronize_registries, join_world]: the sync starts
-        // first; `PrepareSpawnTask` (#100) is deferred. Finishing the sync starts
-        // `JoinWorldTask`, whose `start` sends the finish_configuration packet.
+        // first; Paper's `PrepareSpawnTask` is not ported — the M1 superflat
+        // chunks are delivered tick-side via the direct-send path (#100).
+        // Finishing the sync starts `JoinWorldTask`, whose `start` sends the
+        // finish_configuration packet.
         let mut conn = config_connection().await;
         let mut listener =
             ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
@@ -714,6 +942,341 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, DisconnectReason::Malformed(ref m) if m.contains("Unexpected request for task finish"))
+        );
+    }
+
+    /// Frame a serverbound `custom_payload` packet (`[id 2] ++ [identifier] ++
+    /// [raw payload bytes]`), the decompressed body `handle_frame` receives.
+    fn custom_payload_frame(id: &str, data: &[u8]) -> Vec<u8> {
+        let mut body = varint(CUSTOM_PAYLOAD_PACKET_ID);
+        let id_bytes = id.as_bytes();
+        body.extend_from_slice(&varint(id_bytes.len() as i32));
+        body.extend_from_slice(id_bytes);
+        body.extend_from_slice(data);
+        body
+    }
+
+    #[tokio::test]
+    async fn custom_payload_register_keeps_open() {
+        // `minecraft:register` with a 0-separated channel list (`bungeecord:main`
+        // then `my:plugin`) — every segment is valid, so the connection stays
+        // open (the plugin bridge is deferred, #26; `bungeecord:main` corrects
+        // to `BungeeCord` but the corrected value is discarded).
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let data = b"bungeecord:main\x00my:plugin";
+        let frame = Bytes::from(custom_payload_frame("minecraft:register", data));
+        let outcome = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap();
+        assert!(matches!(outcome, ListenerOutcome::Keep));
+        assert!(listener.client_brand.is_none());
+    }
+
+    #[tokio::test]
+    async fn custom_payload_unregister_keeps_open() {
+        // `minecraft:unregister` — same validation path; the trailing empty
+        // segment after `\0` is skipped by `readChannelIdentifier`, and the valid
+        // `a:one` segment keeps the connection open.
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let frame = Bytes::from(custom_payload_frame("minecraft:unregister", b"a:one\x00"));
+        let outcome = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap();
+        assert!(matches!(outcome, ListenerOutcome::Keep));
+    }
+
+    #[tokio::test]
+    async fn custom_payload_brand_sets_client_brand() {
+        // `minecraft:brand` data is a `utf` string (`\x05Paper`); the handler
+        // stores it as the client brand.
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let frame = Bytes::from(custom_payload_frame("minecraft:brand", b"\x05Paper"));
+        listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap();
+        assert_eq!(listener.client_brand.as_deref(), Some("Paper"));
+    }
+
+    #[tokio::test]
+    async fn custom_payload_brand_truncated_closes_invalid_payload() {
+        // A brand utf that declares 5 bytes but carries 2 throws Java's
+        // `DecoderException("Not enough bytes in buffer, ...")` from
+        // `Utf8String.read` → the catch block's `"Invalid custom payload
+        // payload!"` disconnect. The panic is caught here and surfaced as that
+        // Malformed reason.
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let frame = Bytes::from(custom_payload_frame("minecraft:brand", b"\x05Pa"));
+        let err = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DisconnectReason::Malformed("Invalid custom payload payload!".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_payload_brand_oversize_closes_invalid_payload() {
+        // A brand whose decoded length exceeds the 256 `readUtf(256)` max throws
+        // Java's `DecoderException("The received string length is longer than
+        // maximum allowed ...")` — a different `Utf8String.read` check than the
+        // truncated case but the same shared disconnect. (257 ASCII 'a' units,
+        // length varint `0x81 0x02`.)
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let mut data = vec![0x81u8, 0x02]; // varint 257
+        data.extend(vec![b'a'; 257]);
+        let frame = Bytes::from(custom_payload_frame("minecraft:brand", &data));
+        let err = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DisconnectReason::Malformed("Invalid custom payload payload!".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_payload_brand_empty_data_closes_invalid_payload() {
+        // An empty brand data buffer — `VarInt.read` on zero bytes throws
+        // Java's netty `IndexOutOfBoundsException` (the one case that is NOT a
+        // `DecoderException`), still caught by `catch (Exception)` → the same
+        // disconnect. Here the varint read on an empty buffer panics.
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let frame = Bytes::from(custom_payload_frame("minecraft:brand", b""));
+        let err = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DisconnectReason::Malformed("Invalid custom payload payload!".into())
+        );
+    }
+
+    /// Drive a `minecraft:register`/`minecraft:unregister` payload and return
+    /// whether the connection stayed open. The channel-validation behavior is
+    /// identical for both ids (Paper's `readChannelIdentifier` uses the same
+    /// `validateAndCorrectChannel` in `addChannel` and `removeChannel`).
+    async fn register_payload_keeps_open(id: &str, data: &[u8]) -> bool {
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let frame = Bytes::from(custom_payload_frame(id, data));
+        matches!(
+            listener.handle_frame(frame, &mut conn, &crate::server::ServerConfig::default()),
+            Ok(ListenerOutcome::Keep)
+        )
+    }
+
+    #[tokio::test]
+    async fn register_invalid_channel_closes_invalid_payload() {
+        // A `minecraft:register` channel with an uppercase segment is rejected by
+        // `validateAndCorrectChannel` (`"Channel must be entirely lowercase"` →
+        // `IllegalArgumentException`), which `handleCustomPayload` converts to
+        // the invalid-payload disconnect.
+        assert!(!register_payload_keeps_open("minecraft:register", b"Foo:Bar").await);
+    }
+
+    #[tokio::test]
+    async fn register_no_separator_closes_invalid_payload() {
+        // A channel without a `:` separator is rejected
+        // (`"Channel must contain : separator"` → `IllegalArgumentException`).
+        assert!(!register_payload_keeps_open("minecraft:register", b"no-separator").await);
+    }
+
+    #[tokio::test]
+    async fn register_oversize_payload_rejected_at_decode() {
+        // A 32770-byte channel-list payload exceeds the `DiscardedPayload`
+        // 32767-byte decode cap, so the packet is rejected at DECODE — exactly
+        // like Java's `DiscardedPayload.streamCodec(identifier, 32767)`, which
+        // throws before `handleCustomPayload` runs. The `> 32767` channel
+        // length check in `validateAndCorrectChannel` is therefore unreachable
+        // through the real payload path (a single segment is bounded by the
+        // payload size) and is exercised directly by
+        // `validate_register_channel_oversize` below. Either way the connection
+        // closes.
+        let mut oversize = vec![b'a'; 32768];
+        oversize.extend_from_slice(b":y");
+        assert!(!register_payload_keeps_open("minecraft:register", &oversize).await);
+    }
+
+    #[test]
+    fn validate_register_channel_oversize() {
+        // Mirror of `validateAndCorrectChannel`'s max-length branch
+        // (`ChannelNameTooLongException`, > 32767 chars). Unreachable through
+        // `handleCustomPayload` (the payload decode cap bounds a segment), kept
+        // for exact method fidelity. The boundary is exact: 32767 chars passes,
+        // 32770 chars (`32768 'a'` + `:y`) throws on length before the other
+        // checks.
+        let mut oversize = vec![b'a'; 32768];
+        oversize.extend_from_slice(b":y");
+        assert!(validate_register_channel(&oversize).is_err());
+        let mut at_limit = vec![b'a'; 32765];
+        at_limit.extend_from_slice(b":y");
+        assert!(validate_register_channel(&at_limit).is_ok());
+    }
+
+    #[tokio::test]
+    async fn unregister_invalid_channel_closes_invalid_payload() {
+        // `minecraft:unregister` validates through the same path — an invalid
+        // channel closes the connection just like register.
+        assert!(!register_payload_keeps_open("minecraft:unregister", b"Foo:Bar").await);
+    }
+
+    #[tokio::test]
+    async fn register_bungeecord_correction_keeps_open() {
+        // `BungeeCord` and `bungeecord:main` are CORRECTED (accepted) by
+        // `validateAndCorrectChannel`, not rejected — the corrected value has no
+        // observable effect here (the bridge is deferred, #26), so the
+        // connection stays open.
+        assert!(register_payload_keeps_open("minecraft:register", b"BungeeCord").await);
+        assert!(register_payload_keeps_open("minecraft:register", b"bungeecord:main").await);
+    }
+
+    #[tokio::test]
+    async fn register_empty_segments_are_skipped() {
+        // Empty segments (leading/consecutive/trailing `\0`) are skipped by
+        // `readChannelIdentifier` before validation, so a payload of only empty
+        // segments or with an empty trailing segment stays open. The valid
+        // `a:one`/`b:two` segments validate normally.
+        assert!(register_payload_keeps_open("minecraft:register", b"").await);
+        assert!(register_payload_keeps_open("minecraft:register", b"\x00").await);
+        assert!(
+            register_payload_keeps_open("minecraft:register", b"\x00a:one\x00\x00b:two\x00").await
+        );
+    }
+
+    #[tokio::test]
+    async fn register_mixed_valid_then_invalid_closes() {
+        // Validation is per segment: a valid channel before an invalid one still
+        // throws on the invalid segment and closes.
+        assert!(!register_payload_keeps_open("minecraft:register", b"a:ok\x00Foo:Bar").await);
+    }
+
+    #[tokio::test]
+    async fn custom_payload_other_namespace_register_is_ignored() {
+        // Java's `CUSTOM_REGISTER.equals(identifier)` compares the FULL
+        // identifier, so a hostile `foo:register` payload is neither a register
+        // nor a brand — it falls through to the plugin dispatch (deferred, #26),
+        // no channel validation runs, and `client_brand` stays unset. The invalid
+        // channel bytes make this load-bearing: a namespace-insensitive match
+        // would reject them.
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let frame = Bytes::from(custom_payload_frame("foo:register", b"Foo:Bar"));
+        listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap();
+        assert!(listener.client_brand.is_none());
+    }
+
+    #[tokio::test]
+    async fn resource_pack_response_keeps_open() {
+        // No pack is ever pushed (`getServerResourcePack()` is empty), so a
+        // DECLINED terminal response must NOT close (the required-kick never
+        // fires) and the task-finish branch can never match — the connection
+        // stays open. Body: `[uuid 16][action ordinal varint]`.
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        let mut body = varint(RESOURCE_PACK_PACKET_ID);
+        body.extend_from_slice(&[0u8; 16]);
+        body.push(1); // Action.DECLINED ordinal
+        let outcome = listener
+            .handle_frame(
+                Bytes::from(body),
+                &mut conn,
+                &crate::server::ServerConfig::default(),
+            )
+            .unwrap();
+        assert!(matches!(outcome, ListenerOutcome::Keep));
+        // The current task is unchanged (the sync) — nothing was finished.
+        assert_eq!(
+            listener.current_task.as_ref().map(|t| t.type_id()),
+            Some(SYNCHRONIZE_REGISTRIES_TASK_TYPE)
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_code_of_conduct_always_mismatches_closes() {
+        // No CoC task is ever queued, so `finishCurrentTask("server_code_of_conduct")`
+        // always mismatches — Java's `IllegalStateException` — a Malformed close.
+        let mut conn = config_connection().await;
+        let mut listener =
+            ServerConfigurationPacketListener::new(GameProfile::new_without_properties(
+                rivet_util::mth::Uuid { most: 0, least: 0 },
+                String::new(),
+            ));
+        listener.start_configuration(&mut conn).unwrap();
+
+        // Fieldless body: `[id 9]` with no trailing bytes.
+        let frame = Bytes::from(varint(ACCEPT_CODE_OF_CONDUCT_PACKET_ID));
+        let err = listener
+            .handle_frame(frame, &mut conn, &crate::server::ServerConfig::default())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DisconnectReason::Malformed(
+                "Unexpected request for task finish, current task: synchronize_registries, requested: server_code_of_conduct"
+                    .into()
+            )
         );
     }
 }

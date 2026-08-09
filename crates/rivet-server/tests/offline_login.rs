@@ -41,6 +41,15 @@ const CONFIG_CLIENT_INFORMATION_ID: i32 = 0;
 const CONFIG_CLIENTBOUND_CUSTOM_PAYLOAD_ID: i32 = 1;
 /// Configuration clientbound id for `finish_configuration` (0-byte body).
 const CONFIG_CLIENTBOUND_FINISH_CONFIGURATION_ID: i32 = 3;
+/// Configuration serverbound id for `custom_payload` (the serverbound response
+/// direction, distinguished from the clientbound brand by flow).
+const CONFIG_CUSTOM_PAYLOAD_ID: i32 = 2;
+/// Configuration serverbound id for `resource_pack` (the response).
+const CONFIG_RESOURCE_PACK_ID: i32 = 6;
+/// Configuration serverbound id for `custom_click_action`.
+const CONFIG_CUSTOM_CLICK_ACTION_ID: i32 = 8;
+/// Configuration serverbound id for `accept_code_of_conduct` (0-byte body).
+const CONFIG_ACCEPT_CODE_OF_CONDUCT_ID: i32 = 9;
 
 /// Play serverbound id for `keep_alive` (a long body) — the play packet this
 /// slice forwards to the tick thread after the configuration→play handoff.
@@ -1642,5 +1651,245 @@ async fn live_trace_records_teleport_ack_move_and_session_end() {
     assert_eq!(end.field("y"), Some("-63"));
     assert_eq!(end.field("z"), Some("-17.25"));
 
+    server_task.abort();
+}
+
+/// Frame a serverbound configuration `custom_payload` (id 2) with the given
+/// payload id + raw data, compressed (`varint(0)` declaredLength — sub-threshold).
+fn config_custom_payload_frame(payload_id: &str, data: &[u8]) -> Vec<u8> {
+    let mut body = varint(CONFIG_CUSTOM_PAYLOAD_ID);
+    body.extend_from_slice(&varint(payload_id.len() as i32));
+    body.extend_from_slice(payload_id.as_bytes());
+    body.extend_from_slice(data);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+#[tokio::test]
+async fn config_custom_payload_register_keeps_open() {
+    // A `minecraft:register` channel-list payload decodes and the connection
+    // stays open. Channel tracking lives in the plugin bridge, deferred with
+    // #26. The 0/1/3 harness semantics are preserved: the serverbound
+    // `custom_payload` id (2) is distinct from the clientbound brand id (1).
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:register",
+            b"bungeecord:main\x00my:plugin",
+        ))
+        .await
+        .expect("write register");
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_brand_keeps_open() {
+    // A valid `minecraft:brand` payload (utf `\x05Paper`) decodes and the
+    // connection stays open.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:brand",
+            b"\x05Paper",
+        ))
+        .await
+        .expect("write brand");
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_brand_truncated_closes() {
+    // A brand utf that declares 5 bytes but carries 2 throws Java's
+    // `DecoderException` from `Utf8String.read`'s not-enough-bytes check —
+    // caught by `handleCustomPayload`'s try/catch → the `"Invalid custom
+    // payload payload!"` disconnect, surfaced here as a deterministic Malformed
+    // close (EOF).
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_custom_payload_frame("minecraft:brand", b"\x05Pa"))
+        .await
+        .expect("write truncated brand");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_register_malformed_channel_closes() {
+    // A `minecraft:register` channel that `validateAndCorrectChannel` rejects
+    // (here: not entirely lowercase) throws inside `readChannelIdentifier` —
+    // caught by `handleCustomPayload`'s try/catch → the invalid-payload
+    // disconnect (EOF). The channel is never tracked (the bridge is deferred,
+    // #26); validation alone closes.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:register",
+            b"Foo:Bar",
+        ))
+        .await
+        .expect("write malformed register");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_register_oversize_channel_closes() {
+    // A 32770-byte channel-list payload exceeds the `DiscardedPayload`
+    // 32767-byte decode cap, so it is rejected at DECODE — before the channel
+    // validation runs — like Java's `DiscardedPayload.streamCodec(identifier,
+    // 32767)`. Either way the connection closes with the invalid-payload
+    // disconnect.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut oversize = vec![b'a'; 32768];
+    oversize.extend_from_slice(b":y");
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:register",
+            &oversize,
+        ))
+        .await
+        .expect("write oversize register");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_brand_oversize_closes() {
+    // A brand whose decoded length exceeds the `readUtf(256)` max throws Java's
+    // `DecoderException` (the decoded-length check — distinct from the truncated
+    // not-enough-bytes check) → the same invalid-payload disconnect. 257 units
+    // (`varint 0x81 0x02`) is one past the 256 max; 256 would be exactly at the
+    // limit and pass.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut data = vec![0x81u8, 0x02]; // varint 257
+    data.extend(vec![b'a'; 257]);
+    client
+        .write_all(&config_custom_payload_frame("minecraft:brand", &data))
+        .await
+        .expect("write oversize brand");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+/// Frame a serverbound configuration `resource_pack` (id 6): `[uuid 16] ++
+/// [action ordinal varint]`, compressed.
+fn config_resource_pack_frame(action_ordinal: u8) -> Vec<u8> {
+    let mut body = varint(CONFIG_RESOURCE_PACK_ID);
+    body.extend_from_slice(&[0u8; 16]);
+    body.push(action_ordinal);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+#[tokio::test]
+async fn config_resource_pack_declined_keeps_open() {
+    // No pack is ever required (`getServerResourcePack()` is empty), so a
+    // DECLINED terminal response does NOT disconnect — Java's required-kick
+    // branch is dead with an empty pack, and the task-finish branch can never
+    // match. The connection stays open.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_resource_pack_frame(1)) // Action.DECLINED
+        .await
+        .expect("write resource_pack DECLINED");
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_click_action_keeps_open() {
+    // A custom click action (`[id] ++ optional tag`) decodes and the connection
+    // stays open (the server only debug-logs; the callbacks are plugin-layer).
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    // `id` "minecraft:button", then `optionalTag` = present empty compound,
+    // matching `optionalTagCodec(...).apply(lengthPrefixed(65536))`: the whole
+    // optional-tag encoding (NBT type 10 + empty-compound end marker) is
+    // wrapped in a length varint — `varint(2) ++ [0x0A, 0x00]`.
+    let mut body = varint(CONFIG_CUSTOM_CLICK_ACTION_ID);
+    body.extend_from_slice(&varint(16));
+    body.extend_from_slice(b"minecraft:button");
+    body.extend_from_slice(&varint(2));
+    body.extend_from_slice(&[0x0A, 0x00]);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write custom_click_action");
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_accept_code_of_conduct_closes() {
+    // `handleAcceptCodeOfConduct` -> `finishCurrentTask("server_code_of_conduct")`
+    // with no CoC task ever current — Java's `IllegalStateException`, a
+    // deterministic Malformed close (EOF). The fieldless body is `[id 9]`.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut wire = varint(0);
+    wire.extend_from_slice(&varint(CONFIG_ACCEPT_CODE_OF_CONDUCT_ID));
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write accept_code_of_conduct");
+
+    expect_eof(&mut client).await;
     server_task.abort();
 }
