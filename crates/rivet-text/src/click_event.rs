@@ -396,7 +396,8 @@ mod tests {
                 "OpenUrl must keep the validated source string"
             );
 
-            // Re-encode produces the dispatch map; `action` encodes first here.
+            // Re-encode produces the dispatch map; the record value encodes
+            // first and the `action` key last, matching Paper and the golden.
             let encoded = codec()
                 .encode_start(&JsonOps::INSTANCE, &decoded)
                 .result()
@@ -404,7 +405,7 @@ mod tests {
                 .expect("must re-encode");
             assert_eq!(
                 encoded,
-                serde_json::json!({"action": "open_url", "url": url}),
+                serde_json::json!({"url": url, "action": "open_url"}),
                 "open_url re-encode must be stable"
             );
         }

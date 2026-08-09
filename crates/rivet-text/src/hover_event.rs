@@ -224,7 +224,7 @@ mod tests {
             .expect("must re-encode");
         assert_eq!(
             encoded,
-            serde_json::json!({"action": "show_text", "value": "hover!"})
+            serde_json::json!({"value": "hover!", "action": "show_text"})
         );
     }
 
@@ -250,7 +250,7 @@ mod tests {
             .expect("must re-encode");
         assert_eq!(
             encoded,
-            serde_json::json!({"action": "show_text", "value": {"text": "nested", "bold": true}})
+            serde_json::json!({"value": {"text": "nested", "bold": true}, "action": "show_text"})
         );
     }
 
