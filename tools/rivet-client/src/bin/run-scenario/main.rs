@@ -1255,7 +1255,7 @@ fn prove_move_differential_non_vacuous(
 /// or a comparator regression), the narration names both sides instead of
 /// printing one value as if they matched.
 ///
-/// `last_sent` presence is judged by [`normalize_move`]: an absent raw value is
+/// `last_sent` presence is judged by [`transcript::normalize_move`]: an absent raw value is
 /// normalized to explicit JSON `null`, so a `null` or missing `walk.last_sent`
 /// means the transcript carried no value — never a value to compare. Treating it
 /// as "same last_sent null" would print a successful-looking `null` on a schema
