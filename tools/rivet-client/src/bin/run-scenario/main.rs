@@ -592,15 +592,38 @@ struct ClientRun {
 }
 
 /// Client-launch parameters forwarded to the headless `rivet-client` binary for
-/// a single run. `dwell_seconds` is only meaningful in `dwell` mode; join/move
-/// runs always pass 0 (an explicit non-dwell value would be a silent no-op that
-/// both CLIs reject, and the runner never supplies one).
+/// a single run. `dwell_seconds` is only meaningful in `dwell` mode; non-dwell
+/// runs set it to 0 and [`client_argv`] omits `--dwell-seconds` entirely,
+/// because the client rejects an explicit non-dwell `--dwell-seconds` as a
+/// silent no-op.
 struct ClientSpec {
     address: String,
     username: String,
     timeout_seconds: u64,
     dwell_seconds: u64,
     mode: String,
+}
+
+/// Build the `rivet-client` argv for one run. `--dwell-seconds` is appended
+/// only for `dwell` mode: the client rejects an explicit `--dwell-seconds` on
+/// join/move as a silent no-op, so forwarding the runner's non-dwell 0 would
+/// make every non-dwell invocation fail at parse time.
+fn client_argv(spec: &ClientSpec) -> Vec<String> {
+    let mut argv = vec![
+        "--mode".to_owned(),
+        spec.mode.clone(),
+        "--address".to_owned(),
+        spec.address.clone(),
+        "--username".to_owned(),
+        spec.username.clone(),
+        "--timeout-seconds".to_owned(),
+        spec.timeout_seconds.to_string(),
+    ];
+    if spec.mode == "dwell" {
+        argv.push("--dwell-seconds".to_owned());
+        argv.push(spec.dwell_seconds.to_string());
+    }
+    argv
 }
 
 /// Run the headless client once and preserve its raw stdout/stderr.
@@ -613,18 +636,7 @@ fn run_client(
     let stdout_path = work.join(format!("{prefix}.stdout.jsonl"));
     let stderr_path = work.join(format!("{prefix}.stderr.log"));
     let output = Command::new(binary)
-        .args([
-            "--mode",
-            &spec.mode,
-            "--address",
-            &spec.address,
-            "--username",
-            &spec.username,
-            "--timeout-seconds",
-            &spec.timeout_seconds.to_string(),
-            "--dwell-seconds",
-            &spec.dwell_seconds.to_string(),
-        ])
+        .args(client_argv(spec))
         .stdin(Stdio::null())
         .output()
         .map_err(|e| {
@@ -2665,6 +2677,60 @@ mod tests {
         }
         // dwell still accepts an explicit value.
         assert!(parse(&["dwell", "--dwell-seconds", "41"]).is_ok());
+    }
+
+    #[test]
+    fn client_argv_omits_dwell_seconds_for_non_dwell_modes() {
+        // Counterfactual for the release-blocking regression: `run_client`
+        // unconditionally forwarded `--dwell-seconds 0`, which the client
+        // rejects on join/move as an explicit silent-no-op value (exit 64),
+        // breaking every non-dwell run. The argv builder must append the flag
+        // only for dwell and forward the runner's non-dwell 0 as nothing at all.
+        let join = client_argv(&ClientSpec {
+            address: DEFAULT_ADDRESS.to_owned(),
+            username: DEFAULT_USERNAME.to_owned(),
+            timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
+            dwell_seconds: 0,
+            mode: "join".to_owned(),
+        });
+        assert_eq!(
+            join,
+            vec![
+                "--mode".to_owned(),
+                "join".to_owned(),
+                "--address".to_owned(),
+                DEFAULT_ADDRESS.to_owned(),
+                "--username".to_owned(),
+                DEFAULT_USERNAME.to_owned(),
+                "--timeout-seconds".to_owned(),
+                DEFAULT_TIMEOUT_SECONDS.to_string(),
+            ],
+            "non-dwell argv must be exactly the mode/address/username/timeout set"
+        );
+        for mode in ["join", "move"] {
+            let argv = client_argv(&ClientSpec {
+                address: DEFAULT_ADDRESS.to_owned(),
+                username: DEFAULT_USERNAME.to_owned(),
+                timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
+                dwell_seconds: 0,
+                mode: mode.to_owned(),
+            });
+            assert!(
+                !argv.iter().any(|a| a == "--dwell-seconds"),
+                "{mode} argv must omit --dwell-seconds, got {argv:?}"
+            );
+        }
+        // dwell forwards its value so the client's parse-time window and
+        // timeout-headroom validation can run.
+        let dwell = client_argv(&ClientSpec {
+            address: DEFAULT_ADDRESS.to_owned(),
+            username: DEFAULT_USERNAME.to_owned(),
+            timeout_seconds: 48,
+            dwell_seconds: 41,
+            mode: "dwell".to_owned(),
+        });
+        assert_eq!(dwell[dwell.len() - 2], "--dwell-seconds");
+        assert_eq!(dwell[dwell.len() - 1], "41");
     }
 
     #[test]
