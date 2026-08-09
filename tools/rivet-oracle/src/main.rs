@@ -2903,9 +2903,7 @@ fn print_usage() {
     println!(
         "                                              --to <dir> — exactly one of --m0/--m2/--full"
     );
-    println!(
-        "                                              — writes into a scratch dir for"
-    );
+    println!("                                              — writes into a scratch dir for");
     println!(
         "                                              gate validation; --samples/--text always"
     );
