@@ -446,21 +446,21 @@ mod tests {
         sections.push(LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            &is_air,
-            &is_randomly_ticking,
-            &fluid_is_empty,
-            &fluid_is_randomly_ticking,
-            &is_special_colliding,
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
         ));
         for _ in 1..24 {
             sections.push(LevelChunkSection::new(
                 PalettedContainer::new(0u8, block_strategy()),
                 PalettedContainer::new(0u8, biome_strategy()),
-                &is_air,
-                &is_randomly_ticking,
-                &fluid_is_empty,
-                &fluid_is_randomly_ticking,
-                &is_special_colliding,
+                is_air,
+                is_randomly_ticking,
+                fluid_is_empty,
+                fluid_is_randomly_ticking,
+                is_special_colliding,
             ));
         }
         LevelChunk::new(

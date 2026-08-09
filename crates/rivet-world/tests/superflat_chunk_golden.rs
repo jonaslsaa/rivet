@@ -276,10 +276,10 @@ fn all_24_section_boundaries_parse_and_reencode_byte_identical() {
             PalettedContainer::new(StateId(0), block_state_strategy()),
             PalettedContainer::new(BiomeId(40), biome_strategy()),
             is_air,
-            &is_randomly_ticking,
-            &fluid_is_empty,
-            &fluid_is_randomly_ticking,
-            &is_special_colliding,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
         );
         // The golden superflat content is air + stone: no special-colliding
         // blocks, so a non-matching predicate leaves the sentinel unforced,

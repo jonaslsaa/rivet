@@ -854,11 +854,11 @@ mod tests {
         let stone = LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            &is_air,
-            &is_randomly_ticking,
-            &fluid_is_empty,
-            &fluid_is_randomly_ticking,
-            &is_special_colliding,
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
         );
         // A mismatched-length array is rejected wholesale, exactly like Java's
         // `arraycopy` guard: it logs a warning and keeps the all-default array
@@ -883,11 +883,11 @@ mod tests {
             sections.push(LevelChunkSection::new(
                 PalettedContainer::new(0u8, block_strategy()),
                 PalettedContainer::new(0u8, biome_strategy()),
-                &is_air,
-                &is_randomly_ticking,
-                &fluid_is_empty,
-                &fluid_is_randomly_ticking,
-                &is_special_colliding,
+                is_air,
+                is_randomly_ticking,
+                fluid_is_empty,
+                fluid_is_randomly_ticking,
+                is_special_colliding,
             ));
         }
         let mut states = PalettedContainer::new(0u8, block_strategy());
@@ -895,11 +895,11 @@ mod tests {
         sections[0] = LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            &is_air,
-            &is_randomly_ticking,
-            &fluid_is_empty,
-            &fluid_is_randomly_ticking,
-            &is_special_colliding,
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
         );
         let base = ChunkAccess::<u8, u8, &str>::new(
             ChunkPos::ZERO,
@@ -1106,11 +1106,11 @@ mod tests {
         base.sections[0] = LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            &is_air,
-            &is_randomly_ticking,
-            &fluid_is_empty,
-            &fluid_is_randomly_ticking,
-            &is_special_colliding,
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
         );
         assert!(!base.is_y_space_empty(-64, 0));
         assert!(!base.is_y_space_empty(-1000, 1000));
@@ -1126,11 +1126,11 @@ mod tests {
         base.sections[0] = LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            &is_air,
-            &is_randomly_ticking,
-            &fluid_is_empty,
-            &fluid_is_randomly_ticking,
-            &is_special_colliding,
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
         );
         let mut found = Vec::new();
         base.find_block_light_sources(&|s| *s != 0, |pos, state| found.push((pos, state)));
