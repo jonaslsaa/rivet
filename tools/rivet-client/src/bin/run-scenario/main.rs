@@ -68,6 +68,7 @@
 
 mod comparator;
 mod server;
+mod trace;
 mod transcript;
 
 use std::env;
@@ -274,17 +275,20 @@ impl Args {
             }
         }
 
-        if command == Subcommand::Join {
-            // When --pairs is omitted, derive it from --server: rivet/both only
-            // ever compare Paper-vs-Rivet, so the paper:paper default would be
-            // invalid. An explicit --pairs is still validated below.
-            if !pairs_explicit {
-                pairs = match server {
-                    ServerSelection::Paper => Pairs::PaperPaper,
-                    ServerSelection::Rivet | ServerSelection::Both => Pairs::PaperRivet,
-                };
-            }
+        // When --pairs is omitted, derive it from --server: rivet/both only
+        // ever compare Paper-vs-Rivet, so the paper:paper default would be
+        // invalid. This applies to the commands with a pairs concept (join and
+        // the move self-check/differential); `capture` only uses `--server`
+        // (which kind to boot once) and ignores pairs. An explicit --pairs is
+        // still validated below.
+        if (command == Subcommand::Join || command == Subcommand::Move) && !pairs_explicit {
+            pairs = match server {
+                ServerSelection::Paper => Pairs::PaperPaper,
+                ServerSelection::Rivet | ServerSelection::Both => Pairs::PaperRivet,
+            };
+        }
 
+        if command == Subcommand::Join {
             // Valid --server/--pairs combinations: paper:paper needs a Paper
             // boot; paper:rivet needs a Rivet boot (and a Paper reference when
             // `both`). `capture` only uses `--server` (which kind to boot once),
@@ -324,23 +328,46 @@ impl Args {
         }
 
         if command == Subcommand::Move {
-            // `move` is a Paper-vs-Paper movement self-check (issue #53): it
-            // always boots Paper and compares Paper movement transcripts.
+            // `move` has two modes (issue #53):
+            // 1. Paper-vs-Paper movement self-check (`--server paper
+            //    --pairs paper:paper`): boot `--runs` Paper servers and require
+            //    identical normalized movement transcripts.
+            // 2. Paper-vs-Rivet movement differential (`--server both
+            //    --pairs paper:rivet`): boot exactly one Paper + one Rivet on
+            //    isolated ports, drive the walk against each, and compare the
+            //    authoritative movement evidence.
             match (server, pairs) {
                 (ServerSelection::Paper, Pairs::PaperPaper) => {}
+                (ServerSelection::Both, Pairs::PaperRivet) => {}
                 (server, pairs) => {
                     return Err(format!(
-                        "move only supports --server paper with --pairs paper:paper (got \
-                         --server {} --pairs {})",
+                        "move only supports --server paper --pairs paper:paper (self-check) or \
+                         --server both --pairs paper:rivet (differential) (got --server {} \
+                         --pairs {})",
                         server.as_str(),
                         pairs.as_str()
                     ));
                 }
             }
-            if runs <= 1 {
-                return Err(
-                    "--runs must be at least 2 for move (Paper-vs-Paper needs a pair)".to_owned(),
-                );
+            // The self-check needs at least a pair of Paper boots; the
+            // differential always boots exactly one Paper + one Rivet, so an
+            // explicit --runs is a silent no-op (rejected like the join
+            // both-mode).
+            match (server, runs_explicit) {
+                (ServerSelection::Paper, _) if runs <= 1 => {
+                    return Err(
+                        "--runs must be at least 2 for move (Paper-vs-Paper needs a pair)"
+                            .to_owned(),
+                    );
+                }
+                (ServerSelection::Both, true) => {
+                    return Err(
+                        "--server both always boots exactly one Paper + one Rivet, so --runs is a \
+                         silent no-op; drop it (or use --server paper for a run count)"
+                            .to_owned(),
+                    );
+                }
+                _ => {}
             }
         }
 
@@ -575,6 +602,7 @@ fn one_join(
         Some(server_properties),
         address,
         None,
+        &[],
     )?;
     println!("[run  {idx}] joining via rivet-client ...");
     let client_run = run_client(
@@ -758,6 +786,7 @@ fn one_move(
         Some(server_properties),
         address,
         None,
+        &[],
     )?;
     println!("[run  {idx}] walking via rivet-client (move mode) ...");
     let client_run = run_client(
@@ -962,6 +991,7 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
             None,
             base,
             None,
+            &[],
         )?;
         println!("[run  {idx}] connecting via rivet-client ...");
         let client_run = run_client(
@@ -1102,6 +1132,207 @@ fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), Ru
     Ok(())
 }
 
+/// The both-mode movement differential's divergence gate (issue #53).
+///
+/// The single-stone superflat fixture aligns Paper's spawn height with Rivet's
+/// (both y=-63.0), so the compared move transcripts must be byte-identical: the
+/// sampled walk geometry, velocity, teleport echo, and `last_sent` are all
+/// deterministic per server and Paper-vs-Rivet equal (verified on genuine
+/// artifacts). There is deliberately no documented gap — unlike the join
+/// differential's health-component gap, which the fixture does not remove — so
+/// any compared-field divergence is a genuine movement mismatch and fails the
+/// run.
+fn check_move_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerError> {
+    if let Some(f) = d.diffs.first() {
+        let mut msg = format!(
+            "Paper-vs-Rivet movement divergence on {}: expected {} got {} — the move \
+             differential has no documented gaps (the single-stone fixture aligns Paper's \
+             superflat spawn y with Rivet's, and the sampled walk + last_sent are deterministic \
+             and Paper-vs-Rivet equal); refusing PASS",
+            f.path, f.expected, f.actual
+        );
+        for f in &d.diffs[1..] {
+            msg.push_str(&format!("\n    {f}"));
+        }
+        return Err(RunnerError::Gate(msg));
+    }
+    Ok(())
+}
+
+/// Prove the both-mode movement differential is non-vacuous: tamper a *compared*
+/// movement field (`walk.last_sent.x`, the final sent position the evidence
+/// promoted to a compared field) on the Paper reference and re-run the exact
+/// comparator + divergence gate the live comparison used, requiring the reported
+/// `walk.last_sent` divergence to observe the tampered value and the gate to
+/// refuse PASS.
+///
+/// The live acceptance cannot pass unless a tampered compared movement field
+/// actually flows through the comparator and the divergence gate: a comparator
+/// that reports nothing, or a `walk.last_sent` silently moved back into
+/// `excluded`, would PASS vacuously without this negative. A fixed +1.0 offset
+/// is safe here because Paper and Rivet record the *same* final x (verified
+/// 25.428 on both), so the tampered value cannot silently collide with the
+/// other server's.
+fn prove_move_differential_non_vacuous(
+    paper_t: &Value,
+    rivet_t: &Value,
+) -> Result<(), RunnerError> {
+    let mut tampered = paper_t.clone();
+    let x = tampered["walk"]["last_sent"]["x"].as_f64().ok_or_else(|| {
+        RunnerError::Gate(
+            "negative case FAILED: paper transcript has no walk.last_sent to tamper".to_owned(),
+        )
+    })?;
+    let tampered_x = x + 1.0;
+    tampered["walk"]["last_sent"]["x"] = json!(tampered_x);
+    let neg = comparator::diff(&tampered, rivet_t);
+    // The comparator reports leaf paths, so the tampered `walk.last_sent.x` is
+    // the exact path the divergence surfaces under.
+    match neg.diffs.iter().find(|f| f.path == "walk.last_sent.x") {
+        Some(f) if f.expected.as_f64() == Some(tampered_x) => {
+            // The tampered value was read by the real comparator. Now the real
+            // divergence gate must refuse PASS: walk.last_sent is a compared
+            // field, so a divergence on it is a genuine movement mismatch.
+            match check_move_divergence(&neg) {
+                Err(e) if e.to_string().contains("walk.last_sent") => {}
+                Err(e) => {
+                    return Err(RunnerError::Gate(format!(
+                        "negative case FAILED: the move divergence gate refused PASS for a reason \
+                         other than the tampered walk.last_sent: {e}"
+                    )));
+                }
+                Ok(()) => {
+                    return Err(RunnerError::Gate(
+                        "negative case FAILED: the move divergence gate PASSED despite the \
+                         tampered walk.last_sent — walk.last_sent must be a compared field, not a \
+                         documented gap to wave through"
+                            .to_owned(),
+                    ));
+                }
+            }
+            println!(
+                "    tampered paper walk.last_sent.x {x} -> {tampered_x} — the divergence path \
+                 reported 'walk.last_sent: expected {tampered_x}, got {}' and refused PASS, so \
+                 walk.last_sent is genuinely compared and read by the gate",
+                f.actual
+            );
+            Ok(())
+        }
+        Some(f) => Err(RunnerError::Gate(format!(
+            "negative case FAILED: the divergence path reported 'walk.last_sent: expected {} got \
+             {}', but paper walk.last_sent.x was tampered to {tampered_x} — the reported \
+             divergence must observe the tampered value (walk.last_sent must never be excluded or \
+             normalized to make the comparison pass)",
+            f.expected, f.actual
+        ))),
+        None => Err(RunnerError::Gate(
+            "negative case FAILED: tampering paper walk.last_sent.x produced no compared \
+             'walk.last_sent' diff (it is excluded, absent, or the comparator reported nothing) — \
+             walk.last_sent must be a compared field read by the divergence gate"
+                .to_owned(),
+        )),
+    }
+}
+
+/// Prove the Rivet movement trace is authoritative evidence for the client's
+/// actual walk, not just internally consistent: the server's final accepted
+/// position must match the client's final sent position (modulo the in-flight
+/// frames the server processes past the client's recorded last tick).
+///
+/// The client's `last_sent` is its own `LastSentPosition` at the tick the walk
+/// stopped; the server keeps accepting the trailing position frames that arrive
+/// after that snapshot, so the final authoritative position lands a fraction of
+/// a tick past `last_sent` (observed +0.217 on a genuine boot). The bound is
+/// deliberately loose (a few ticks of movement) so timing noise cannot fail the
+/// run, yet tight enough that a server which never moved the player (final ≈
+/// spawn, ~25 blocks short) or teleported it elsewhere fails.
+///
+/// Coordinate frames: the client transcript is spawn-relative — `last_sent` X/Z
+/// are the absolute position minus the full-precision `spawn_origin` the client
+/// recorded (so the walk compares across the server's randomized spawn X/Z
+/// offset). The trace's authoritative position, by contrast, is absolute world
+/// coordinates. This cross-check therefore adds `spawn_origin` back to the
+/// spawn-relative `last_sent` X/Z before comparing, so it holds for any spawn
+/// origin — not just the (0, 0) case. The origin is carried in the transcript
+/// (and excluded from parity — `excluded_move_fields`'s `walk.spawn_origin`)
+/// precisely so this inversion is lossless; a transcript without it is a schema
+/// violation and fails loudly here rather than silently assuming origin (0, 0).
+fn check_rivet_authoritative(
+    trace: &trace::MovementTrace,
+    rivet_walk: &Value,
+) -> Result<String, RunnerError> {
+    let summary = trace.check_authoritative().map_err(RunnerError::Gate)?;
+    let last_sent = rivet_walk.get("last_sent").cloned().unwrap_or(Value::Null);
+    let last_sent_x = last_sent.get("x").and_then(Value::as_f64).ok_or_else(|| {
+        RunnerError::Gate(
+            "rivet walk transcript has no last_sent.x to cross-check the authoritative position \
+             against"
+                .to_owned(),
+        )
+    })?;
+    let last_sent_y = last_sent
+        .get("y")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| RunnerError::Gate("rivet walk transcript has no last_sent.y".to_owned()))?;
+    let last_sent_z = last_sent
+        .get("z")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| RunnerError::Gate("rivet walk transcript has no last_sent.z".to_owned()))?;
+    let origin = rivet_walk
+        .get("spawn_origin")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            RunnerError::Gate(
+                "rivet walk transcript has no spawn_origin — without the full-precision spawn \
+                 position the spawn-relative last_sent cannot be mapped back to the trace's \
+                 absolute coordinates; refusing to assume origin (0, 0)"
+                    .to_owned(),
+            )
+        })?;
+    let origin_x = origin
+        .get("x")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| RunnerError::Gate("rivet walk spawn_origin has no x".to_owned()))?;
+    let origin_z = origin
+        .get("z")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| RunnerError::Gate("rivet walk spawn_origin has no z".to_owned()))?;
+    let [fx, fy, fz] = trace.final_position().ok_or_else(|| {
+        RunnerError::Gate("movement trace has no final authoritative position".to_owned())
+    })?;
+    // last_sent.x/z are spawn-relative; add the origin back to compare in the
+    // trace's absolute frame.
+    let sent_abs_x = last_sent_x + origin_x;
+    let sent_abs_z = last_sent_z + origin_z;
+    if !(fx >= sent_abs_x - 1.0 && fx <= sent_abs_x + 5.0) {
+        return Err(RunnerError::Gate(format!(
+            "rivet authoritative final x={fx} is outside [{sent_abs_x}, {sent_abs_x}+5] — the \
+             server's accepted walk does not match the client's last sent position (a server \
+             that never moved the player, or accepted frames it was not sent)"
+        )));
+    }
+    // y/z are non-movement axes on this fixture (the walk is a straight forward
+    // run along x), so the final authoritative y/z must match the client's last
+    // sent y/z — modulo precision, not exactly. The client rounds to 3 decimals,
+    // and the z reconstruction (`round3(last_sent.z - origin.z) + origin.z`)
+    // carries a rounding-unit error, so exact f64 equality would spuriously fail
+    // on any spawn offset whose low bits the 3-decimal rounding discards. Compare
+    // with a small epsilon — an order of magnitude above the 1e-3 rounding — the
+    // tight analogue of x's movement-axis band (x legitimately overshoots past
+    // last_sent via the in-flight frames the server processes; y/z must agree to
+    // within the client's own precision).
+    const AXIS_EPSILON: f64 = 1e-2;
+    if (fy - last_sent_y).abs() > AXIS_EPSILON || (fz - sent_abs_z).abs() > AXIS_EPSILON {
+        return Err(RunnerError::Gate(format!(
+            "rivet authoritative final position ({fx}, {fy}, {fz}) disagrees with the client's \
+             last sent (absolute {sent_abs_x}, {last_sent_y}, {sent_abs_z}; spawn-relative \
+             {last_sent_x}, {last_sent_y}, {last_sent_z}) on y/z — the server's authoritative \
+             height/direction does not match the client's walk"
+        )));
+    }
+    Ok(summary)
+}
+
 /// Prove the both-mode divergence path is non-vacuous: tamper the compared
 /// `position.y` on the Paper reference and re-run the exact comparator +
 /// divergence gate the live comparison used, requiring the reported
@@ -1231,6 +1462,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         Some(&server_properties),
         paper_addr,
         Some(reservations.remove(0)),
+        &[],
     )?;
     let paper_client = run_client(
         &client_bin,
@@ -1275,6 +1507,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         None,
         rivet_addr,
         Some(reservations.remove(0)),
+        &[],
     )?;
     let rivet_client = run_client(
         &client_bin,
@@ -1363,6 +1596,259 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     Ok(())
 }
 
+/// Mode D: Paper-vs-Rivet movement differential (issue #53).
+///
+/// Boots Paper (single-stone superflat fixture, provenance-verified) and Rivet
+/// (with `RIVET_TRACE_MOVEMENT=1` so the tick thread emits its authoritative
+/// movement audit) on isolated ports, drives the pinned Azalea client's `move`
+/// mode (a bounded forward walk) against each, and compares the normalized
+/// movement transcripts field-level.
+///
+/// The single-stone fixture is what makes the movement comparable: Paper's
+/// default-flat world spawns at y=-60, so every walk sample and `last_sent`
+/// would carry y=-60 vs Rivet's -63 — a 3-block fixture artifact, not a
+/// movement difference. With one stone layer both servers walk at y=-63.0 and
+/// the whole walk (samples, velocity, teleport echo, `last_sent`) must be
+/// byte-identical: there are no documented gaps.
+///
+/// The Rivet side is additionally proven authoritative: the trace must be
+/// internally consistent (teleport ack accepted at spawn, the accepted-move
+/// counter matching the record trail, the session-end position equaling the
+/// last accepted move) and the server's final accepted position must match the
+/// client's `last_sent` modulo the in-flight frames the server processes after
+/// the client's last tick.
+fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/scenario-move-both");
+    fs::create_dir_all(&work)?;
+    let server_properties = single_stone_server_properties(&crate_root)?;
+    let jar = server::ensure_jar(&crate_root)?;
+    let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
+    let client_bin = ensure_client_binary()?;
+    let base = base_address(args)?;
+    // Port isolation: Paper and Rivet get distinct ephemeral ports, so the
+    // client provably targets the server the harness points it at.
+    let mut reservations = reserve_ports(2)?;
+    let paper_addr = SocketAddr::new(base.ip(), reservations[0].port());
+    let rivet_addr = SocketAddr::new(base.ip(), reservations[1].port());
+
+    println!("rivet scenario runner: move (Paper-vs-Rivet movement differential)");
+    println!("    paperclip jar     : {}", jar.display());
+    println!("    rivet-server bin  : {}", rivet_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.display());
+    println!(
+        "    server.properties : {} (single-stone superflat)",
+        server_properties.display()
+    );
+    println!(
+        "    paper pin         : {} (verified from the materialized jar)",
+        server::PAPER_PIN_COMMIT
+    );
+    println!("    paper address     : {paper_addr}");
+    println!("    rivet address     : {rivet_addr}");
+    println!(
+        "    rivet trace       : RIVET_TRACE_MOVEMENT=1 (authoritative movement audit on stderr)"
+    );
+    println!();
+
+    // Paper reference — boots the single-stone fixture so the walk y aligns
+    // with Rivet's, and walks in `move` mode.
+    let mut paper_srv = server::boot(
+        server::ServerKind::Paper,
+        &work.join("paper"),
+        &work.join("paper.log"),
+        &jar,
+        Some(&server_properties),
+        paper_addr,
+        Some(reservations.remove(0)),
+        &[],
+    )?;
+    let paper_client = run_client(
+        &client_bin,
+        &paper_addr.to_string(),
+        &args.username,
+        args.timeout_seconds,
+        &work,
+        "paper",
+        "move",
+    )?;
+    server::shutdown(&mut paper_srv)?;
+    // Load-bearing provenance (same as the join differential): the Paper
+    // reference this differential compares Rivet against must be the pinned
+    // oracle commit.
+    server::verify_paper_provenance(paper_srv.run_dir())?;
+    let paper_t =
+        transcript::normalize_move(&paper_client.stdout_text).map_err(RunnerError::Transcript)?;
+    let paper_tp = work.join("paper.transcript.json");
+    fs::write(&paper_tp, serde_json::to_string_pretty(&paper_t)?)?;
+    println!(
+        "    Paper outcome      : {} (transcript in {})",
+        paper_t["outcome"],
+        paper_tp.display()
+    );
+    if paper_t["outcome"] != "moved" {
+        return Err(RunnerError::Gate(format!(
+            "Paper did not move (outcome={}) — regression in the reference server; refusing the \
+             comparison",
+            paper_t["outcome"]
+        )));
+    }
+
+    // Rivet SUT — booted with the movement trace enabled so the tick thread
+    // emits its authoritative movement audit.
+    let mut rivet_srv = server::boot(
+        server::ServerKind::Rivet,
+        &work.join("rivet"),
+        &work.join("rivet.log"),
+        &rivet_bin,
+        None,
+        rivet_addr,
+        Some(reservations.remove(0)),
+        &[(trace::TRACE_MOVEMENT_ENV, "1")],
+    )?;
+    let rivet_client = run_client(
+        &client_bin,
+        &rivet_addr.to_string(),
+        &args.username,
+        args.timeout_seconds,
+        &work,
+        "rivet",
+        "move",
+    )?;
+    server::shutdown(&mut rivet_srv)?;
+    // Server-side half of the connection proof: the rivet log must show the
+    // real rivet-server accepted the client.
+    verify_rivet_connection(&work.join("rivet.log"))?;
+    let rivet_t =
+        transcript::normalize_move(&rivet_client.stdout_text).map_err(RunnerError::Transcript)?;
+    let rivet_tp = work.join("rivet.transcript.json");
+    fs::write(&rivet_tp, serde_json::to_string_pretty(&rivet_t)?)?;
+    println!(
+        "    Rivet outcome      : {} (transcript in {})",
+        rivet_t["outcome"],
+        rivet_tp.display()
+    );
+    if rivet_t["outcome"] != "moved" {
+        return Err(RunnerError::Gate(format!(
+            "Rivet did not move (outcome={}) — the movement scenario did not complete; refusing \
+             the comparison",
+            rivet_t["outcome"]
+        )));
+    }
+
+    // Rivet authoritative movement evidence: parse the trace from the rivet log
+    // and prove it is internally consistent and matches the client's walk.
+    let rivet_log = fs::read_to_string(work.join("rivet.log"))?;
+    let movement_trace = trace::parse(&rivet_log).map_err(RunnerError::Transcript)?;
+    let trace_summary = check_rivet_authoritative(&movement_trace, &rivet_t["walk"])?;
+    let trace_tp = work.join("rivet.trace.json");
+    // Preserve the parsed trace as a diagnostic artifact (the `MovementTrace`
+    // types are not serde-serializable — the crate has no serde dep — so the
+    // dump is built by hand from the fields the differential consumed).
+    let trace_dump = serde_json::json!({
+        "teleport_acks": movement_trace.teleport_acks.iter().map(|a| json!({
+            "ack_id": a.ack_id,
+            "outcome": a.outcome,
+            "position": a.position,
+        })).collect::<Vec<_>>(),
+        "moves": movement_trace.moves.len(),
+        "final_position": movement_trace.final_position(),
+        "session_end_reason": movement_trace.session_end.as_ref().map(|e| e.reason.clone()),
+        "move_frames_seen": movement_trace.session_end.as_ref().map(|e| e.move_frames_seen),
+    });
+    fs::write(&trace_tp, serde_json::to_string_pretty(&trace_dump)?)?;
+    println!(
+        "    Rivet trace        : {trace_summary} (parsed in {})",
+        trace_tp.display()
+    );
+
+    println!();
+    println!("Paper-vs-Rivet movement comparator:");
+    let d = comparator::diff(&paper_t, &rivet_t);
+    check_move_divergence(&d)?;
+    println!(
+        "    {} compared field(s) differ — the move differential has no documented gaps,",
+        d.diffs.len()
+    );
+    println!("    so any compared-field divergence fails the run:");
+    for f in &d.diffs {
+        println!("        {f}");
+    }
+    for f in &d.excluded {
+        println!("        (excluded) {f}");
+    }
+    if d.excluded_policy_diffs.is_empty() {
+        println!("    the excluded sets match (same per-boot nondeterminism declared)");
+    } else {
+        for f in &d.excluded_policy_diffs {
+            println!("        (exclusion policy) {f}");
+        }
+    }
+
+    // Negative case: prove the movement divergence path just exercised is
+    // non-vacuous by tampering a *compared* movement field (walk.last_sent.x).
+    println!();
+    println!("Negative case (tamper paper walk.last_sent.x through the real divergence path)");
+    prove_move_differential_non_vacuous(&paper_t, &rivet_t)?;
+
+    println!();
+    println!("VERDICT: PASS — Paper and Rivet produced identical authoritative movement");
+    println!("    evidence:");
+    println!(
+        "      * Both servers took the pinned Azalea client through a bounded forward walk; the"
+    );
+    println!(
+        "        sampled walk (position deltas, velocity, on-ground), the teleport ack echo, and"
+    );
+    println!(
+        "        the final sent position `last_sent` are byte-identical on the compared fields"
+    );
+    println!("        (Paper and Rivet both record last_sent x=25.428 z=0.0 and the same walk).");
+    println!(
+        "      * Paper boots the single-stone superflat fixture (Git-Commit pinned) so the walk"
+    );
+    println!(
+        "        y aligns with Rivet's -63.0 — the old default-flat y=-60 fixture artifact is"
+    );
+    println!("        removed, so `last_sent.y` and every sample y are compared fields, not gaps.");
+    println!("      * The Rivet connection is proven two ways: the rivet log shows 'connection");
+    println!("        established' (only the real rivet-server emits it), and the movement trace");
+    println!("        parsed from the same log is internally consistent (teleport ack accepted at");
+    println!(
+        "        spawn, accepted-move counter matching the record trail, session-end position"
+    );
+    println!(
+        "        equal to the last accepted move) and its final authoritative position matches"
+    );
+    println!(
+        "        the client's last_sent modulo in-flight frames — so the server really tracked"
+    );
+    println!("        the walk, and the compared evidence is Rivet's server-side movement, not a");
+    println!("        client-side artifact.");
+    println!("      * The negative case proved the movement divergence path is non-vacuous: a");
+    println!(
+        "        tampered compared walk.last_sent.x on the Paper reference was reported by the"
+    );
+    println!(
+        "        real comparator/divergence gate and refused PASS — the acceptance cannot pass"
+    );
+    println!("        while ignoring a changed compared movement field.");
+    println!("    artifacts: {}", work.display());
+    Ok(())
+}
+
+fn run_move(args: &Args) -> Result<(), RunnerError> {
+    match (args.server, args.pairs) {
+        (ServerSelection::Paper, Pairs::PaperPaper) => run_move_self_check(args),
+        (ServerSelection::Both, Pairs::PaperRivet) => run_paper_vs_rivet_move(args),
+        (server, pairs) => Err(RunnerError::Gate(format!(
+            "unhandled --server {} / --pairs {} combination",
+            server.as_str(),
+            pairs.as_str()
+        ))),
+    }
+}
+
 fn run_join(args: &Args) -> Result<(), RunnerError> {
     match (args.server, args.pairs) {
         (ServerSelection::Paper, Pairs::PaperPaper) => run_paper_self_check(args),
@@ -1414,6 +1900,7 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         server_properties.as_deref(),
         base,
         None,
+        &[],
     )?;
     let client_run = run_client(
         &client_bin,
@@ -1444,7 +1931,7 @@ fn main() -> ExitCode {
     };
     let result = match args.command {
         Subcommand::Join => run_join(&args),
-        Subcommand::Move => run_move_self_check(&args),
+        Subcommand::Move => run_move(&args),
         Subcommand::Capture => run_capture(&args),
         Subcommand::Help => {
             println!("{}", usage());
@@ -1497,17 +1984,57 @@ mod tests {
     }
 
     #[test]
-    fn move_rejects_non_paper_configuration() {
-        // `move` is a Paper-vs-Paper movement self-check: it must reject any
-        // server/pairs combination that would not compare Paper against Paper.
+    fn move_rejects_unsupported_configurations() {
+        // `move` has exactly two modes: Paper-vs-Paper self-check and the
+        // Paper-vs-Rivet both-mode differential. A rivet-only boot, a
+        // paper:rivet pair on a paper-only server, and other combinations are
+        // invalid.
         assert!(parse(&["move", "--server", "rivet"]).is_err());
         assert!(parse(&["move", "--pairs", "paper:rivet"]).is_err());
+        assert!(
+            parse(&["move", "--server", "both"]).is_ok(),
+            "both defaults to paper:rivet"
+        );
+        assert!(
+            parse(&["move", "--server", "both", "--pairs", "paper:rivet"]).is_ok(),
+            "the Paper-vs-Rivet movement differential is a valid move mode"
+        );
+        assert!(parse(&["move", "--server", "both", "--pairs", "paper:paper"]).is_err());
     }
 
     #[test]
-    fn move_requires_two_runs() {
+    fn move_requires_two_runs_for_paper_self_check() {
+        // The self-check needs a pair of Paper boots; the both-mode differential
+        // always boots exactly one of each (explicit --runs rejected, see
+        // `move_both_rejects_explicit_runs`).
         assert!(parse(&["move"]).is_ok());
-        assert!(parse(&["move", "--runs", "1"]).is_err(), "move needs >=2");
+        assert!(
+            parse(&["move", "--runs", "1"]).is_err(),
+            "move paper needs >=2"
+        );
+        assert!(
+            parse(&["move", "--server", "both", "--runs", "1"]).is_err(),
+            "both always boots exactly one Paper + one Rivet; --runs is a no-op"
+        );
+    }
+
+    #[test]
+    fn move_both_rejects_explicit_runs() {
+        // `both` always boots exactly one Paper + one Rivet; an explicit --runs
+        // would be a silent no-op.
+        assert!(
+            parse(&[
+                "move",
+                "--server",
+                "both",
+                "--pairs",
+                "paper:rivet",
+                "--runs",
+                "2"
+            ])
+            .is_err(),
+            "explicit --runs with move both must be rejected"
+        );
     }
 
     #[test]
@@ -1837,6 +2364,168 @@ mod tests {
             "scenario PAPER_PIN_COMMIT drifted from the oracle manifest pin ({pin} vs {}); \
              keep them in lockstep so the differential targets the same Paper reference",
             server::PAPER_PIN_COMMIT
+        );
+    }
+
+    /// A minimal normalized move transcript for the negative-case counterfactual.
+    fn move_transcript(last_sent_x: f64, exclude_last_sent: bool) -> Value {
+        let mut excluded = serde_json::Map::new();
+        if exclude_last_sent {
+            excluded.insert(
+                "walk.last_sent".to_owned(),
+                json!("would make the negative vacuous"),
+            );
+        }
+        json!({
+            "outcome": "moved",
+            "walk": { "last_sent": { "x": last_sent_x, "y": -63.0, "z": 0.0 } },
+            "excluded": excluded,
+        })
+    }
+
+    /// Tampering the *compared* `walk.last_sent.x` on Paper must produce a
+    /// `walk.last_sent.x` diff (the comparator reports leaf paths) that the
+    /// divergence gate refuses — this is what the live both-mode negative runs.
+    #[test]
+    fn move_negative_tamper_observes_the_leaf_path() {
+        let paper = move_transcript(25.0, false);
+        let rivet = move_transcript(25.0, false);
+        prove_move_differential_non_vacuous(&paper, &rivet)
+            .expect("tampered walk.last_sent.x must be detected and refused");
+    }
+
+    /// If `walk.last_sent` were silently moved back into the `excluded` map, the
+    /// comparator would no longer surface the tampered leaf in `diffs`, and the
+    /// negative must FAIL rather than pass vacuously.
+    #[test]
+    fn move_negative_fails_when_last_sent_is_excluded() {
+        let paper = move_transcript(25.0, true);
+        let rivet = move_transcript(25.0, true);
+        let err = prove_move_differential_non_vacuous(&paper, &rivet).unwrap_err();
+        assert!(
+            err.to_string().contains("excluded"),
+            "an excluded walk.last_sent must trip the vacuous-guard, got {err}"
+        );
+    }
+
+    /// A rivet walk transcript with the given spawn-relative `last_sent` and the
+    /// full-precision `spawn_origin` the client subtracted. Both the comparator
+    /// negative and the authoritative cross-check consume this shape.
+    fn rivet_walk(last_sent: [f64; 3], origin: [f64; 3]) -> Value {
+        json!({
+            "last_sent": { "x": last_sent[0], "y": last_sent[1], "z": last_sent[2] },
+            "spawn_origin": { "x": origin[0], "y": origin[1], "z": origin[2] },
+        })
+    }
+
+    /// A movement trace that passes `check_authoritative` and ends at the given
+    /// absolute position: an accepted spawn teleport, a two-move trail whose last
+    /// move equals the session-end position, and a traced end-of-stream reason.
+    fn authoritative_trace_at(final_pos: [f64; 3]) -> trace::MovementTrace {
+        trace::MovementTrace {
+            teleport_acks: vec![trace::TeleportAck {
+                ack_id: 1,
+                outcome: "accepted".to_owned(),
+                position: Some([0.0, -63.0, 0.0]),
+            }],
+            moves: vec![
+                trace::MoveAccepted {
+                    x: 0.0,
+                    y: -63.0,
+                    z: 0.0,
+                    accepted_frames: 1,
+                },
+                trace::MoveAccepted {
+                    x: final_pos[0],
+                    y: final_pos[1],
+                    z: final_pos[2],
+                    accepted_frames: 2,
+                },
+            ],
+            session_end: Some(trace::SessionEnd {
+                reason: "disconnect.endOfStream".to_owned(),
+                x: final_pos[0],
+                y: final_pos[1],
+                z: final_pos[2],
+                accepted_frames: 2,
+                move_frames_seen: 3,
+            }),
+        }
+    }
+
+    /// The genuine zero-origin path: the player spawns at the world origin, the
+    /// client records last_sent x=25 (spawn-relative == absolute), and the server
+    /// keeps accepting trailing frames so its final authoritative position lands
+    /// a fraction of a tick past last_sent (the documented in-flight overshoot).
+    #[test]
+    fn rivet_authoritative_matches_at_zero_spawn_origin() {
+        let trace = authoritative_trace_at([25.5, -63.0, 0.0]);
+        let walk = rivet_walk([25.0, -63.0, 0.0], [0.0, -63.0, 0.0]);
+        let summary = check_rivet_authoritative(&trace, &walk).expect("must match");
+        assert!(summary.contains("accepted moves"), "{summary}");
+    }
+
+    /// Counterfactual: the spawn origin is nowhere near (0, 0) — the server
+    /// randomized the spawn X/Z offset to (9.5, -3.5), so the client's
+    /// spawn-relative last_sent (25, 0) maps to absolute (34.5, -3.5). The
+    /// cross-check must add the origin back before comparing against the trace's
+    /// absolute position; a check that assumed origin (0, 0) would compare the
+    /// trace's x=35.0 against 25.0 and fail on a healthy tree.
+    #[test]
+    fn rivet_authoritative_matches_at_nonzero_spawn_origin() {
+        // Absolute last_sent = spawn-relative (25, -63, 0) + origin (9.5, -3.5) =
+        // (34.5, -63, -3.5); the server's final position overshoots x by +0.5
+        // (in-flight frames) and z exactly matches the reconstructed absolute z.
+        let trace = authoritative_trace_at([35.0, -63.0, -3.5]);
+        let walk = rivet_walk([25.0, -63.0, 0.0], [9.5, -63.0, -3.5]);
+        let summary = check_rivet_authoritative(&trace, &walk).expect("must match");
+        assert!(summary.contains("accepted moves"), "{summary}");
+    }
+
+    /// The y/z cross-check must tolerate the client's own precision: `last_sent`
+    /// is rounded to 3 decimals and the z reconstruction carries a rounding-unit
+    /// error, so a trace final that differs from the reconstructed value by a
+    /// sub-rounding delta (here 5e-4 on z) is precision loss, not a divergence —
+    /// it must not spuriously fail the gate.
+    #[test]
+    fn rivet_authoritative_tolerates_rounding_precision_on_y_z() {
+        let trace = authoritative_trace_at([35.0, -63.0, -3.5005]);
+        let walk = rivet_walk([25.0, -63.0, 0.0], [9.5, -63.0, -3.5]);
+        let summary = check_rivet_authoritative(&trace, &walk).expect("must match");
+        assert!(summary.contains("accepted moves"), "{summary}");
+    }
+
+    /// The epsilon is tight, not a free pass: a real y/z divergence (here 1.0 on
+    /// z — the server accepted a frame at a height/direction the client never
+    /// walked) must still fail the gate.
+    #[test]
+    fn rivet_authoritative_rejects_real_y_z_divergence() {
+        let trace = authoritative_trace_at([35.0, -63.0, -2.5]);
+        let walk = rivet_walk([25.0, -63.0, 0.0], [9.5, -63.0, -3.5]);
+        let err = check_rivet_authoritative(&trace, &walk)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("on y/z"),
+            "a real y/z divergence must fail the cross-check, got {err}"
+        );
+    }
+
+    /// A spawn-origin offset large enough that ignoring it would flip the verdict
+    /// must still be handled: this pins that the origin addition is genuinely
+    /// load-bearing, not a cosmetic branch.
+    #[test]
+    fn rivet_authoritative_requires_spawn_origin() {
+        // Without spawn_origin the cross-check cannot map the spawn-relative
+        // last_sent to the trace's absolute frame — it must fail loudly rather
+        // than silently assume the player spawned at (0, 0).
+        let trace = authoritative_trace_at([25.5, -63.0, 0.0]);
+        let walk = json!({ "last_sent": { "x": 25.0, "y": -63.0, "z": 0.0 } });
+        let err = check_rivet_authoritative(&trace, &walk).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("spawn_origin") && msg.contains("assume origin"),
+            "missing spawn_origin must fail loudly and refuse a (0,0) assumption, got {msg}"
         );
     }
 }
