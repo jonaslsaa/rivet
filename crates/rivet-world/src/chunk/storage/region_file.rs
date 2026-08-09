@@ -861,57 +861,68 @@ impl RegionFile {
         let mut new_sector_allocations = RegionBitmap::new();
         new_sector_allocations.force(0, 2); // make space for header
 
-        for location in 0..1024 {
-            if oversized[location] {
-                continue;
-            }
-            let raw_length = raw_lengths[location];
-            let sector_offset = sector_offsets[location];
-            let sector_length = round_to_sectors(raw_length as i64) as i32;
-            if new_sector_allocations.try_allocate(sector_offset, sector_length) {
-                calculated_offsets[location] = sector_offset << 8
-                    | (if sector_length > 255 {
-                        255
-                    } else {
-                        sector_length
-                    });
-            } else {
-                eprintln!(
-                    "Failed to allocate space for local chunk (overlapping data??) at ({},{}) in regionfile {}, chunk will be regenerated",
-                    location & 31,
-                    location >> 5,
-                    self.path.display()
-                );
-            }
-        }
-
-        for location in 0..1024 {
-            if !oversized[location] {
-                continue;
-            }
-            let sector_offset = new_sector_allocations.allocate(1);
-            let sector_length = 1;
-            let stub = self.create_external_stub(
-                oversized_compression_types[location].unwrap_or(self.version),
-            );
-            match self.write_at(sector_offset as u64 * 4096, &stub) {
-                Ok(()) => {
+        // Paper iterates `chunkX` outer, `chunkZ` inner, so a sector span is
+        // claimed in Z-major order (`location = chunkX | chunkZ << 5`); the
+        // first claimant wins, which decides overlapping corrupt data.
+        for chunk_x in 0..32 {
+            for chunk_z in 0..32 {
+                let location = (chunk_x | (chunk_z << 5)) as usize;
+                if oversized[location] {
+                    continue;
+                }
+                let raw_length = raw_lengths[location];
+                let sector_offset = sector_offsets[location];
+                let sector_length = round_to_sectors(raw_length as i64) as i32;
+                if new_sector_allocations.try_allocate(sector_offset, sector_length) {
                     calculated_offsets[location] = sector_offset << 8
                         | (if sector_length > 255 {
                             255
                         } else {
                             sector_length
                         });
-                }
-                Err(e) => {
-                    new_sector_allocations.free(sector_offset, sector_length);
+                } else {
                     eprintln!(
-                        "Failed to write new oversized chunk data holder, local chunk at ({},{}) in regionfile {} will be regenerated: {}",
-                        location & 31,
-                        location >> 5,
-                        self.path.display(),
-                        e
+                        "Failed to allocate space for local chunk (overlapping data??) at ({},{}) in regionfile {}, chunk will be regenerated",
+                        chunk_x,
+                        chunk_z,
+                        self.path.display()
                     );
+                }
+            }
+        }
+
+        // Same Z-major order: oversized stubs claim single sectors in the same
+        // sequence Paper does, so the assigned sector numbers line up.
+        for chunk_x in 0..32 {
+            for chunk_z in 0..32 {
+                let location = (chunk_x | (chunk_z << 5)) as usize;
+                if !oversized[location] {
+                    continue;
+                }
+                let sector_offset = new_sector_allocations.allocate(1);
+                let sector_length = 1;
+                let stub = self.create_external_stub(
+                    oversized_compression_types[location].unwrap_or(self.version),
+                );
+                match self.write_at(sector_offset as u64 * 4096, &stub) {
+                    Ok(()) => {
+                        calculated_offsets[location] = sector_offset << 8
+                            | (if sector_length > 255 {
+                                255
+                            } else {
+                                sector_length
+                            });
+                    }
+                    Err(e) => {
+                        new_sector_allocations.free(sector_offset, sector_length);
+                        eprintln!(
+                            "Failed to write new oversized chunk data holder, local chunk at ({},{}) in regionfile {} will be regenerated: {}",
+                            chunk_x,
+                            chunk_z,
+                            self.path.display(),
+                            e
+                        );
+                    }
                 }
             }
         }
@@ -1000,6 +1011,12 @@ impl RegionFile {
             .seek_read_exact(offset as u64, &mut chunk_data)
             .is_err()
         {
+            return ScanRead::None;
+        }
+        if chunk_data.is_empty() {
+            // A zero-length sector (freed/never-written) — Java's
+            // `chunkData.get()` on the empty flipped buffer throws
+            // BufferUnderflowException, caught → null.
             return ScanRead::None;
         }
         let compression_type = chunk_data[0];
@@ -1612,6 +1629,81 @@ mod tests {
             (1 << 8) | 1,
             "recalc leaves the on-disk header corrupt"
         );
+    }
+
+    #[test]
+    fn recalc_skips_zeroed_sectors_between_chunks() {
+        // A freed/never-written sector (length 0) inside the scan range must be
+        // skipped, not panic — Java's `chunkData.get()` on the empty buffer
+        // throws BufferUnderflowException, caught → null.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.0.0.mca");
+        let tag = chunk_tag(0, 0, 7);
+
+        // Chunk at sector 2 (a 1-sector stream).
+        let mut stream = Vec::new();
+        let mut payload = Vec::new();
+        nbt_io::write(&tag, &mut DataOutputStream::new(&mut payload)).unwrap();
+        stream.extend_from_slice(&((payload.len() as i32) + 1).to_be_bytes());
+        stream.push(3);
+        stream.extend_from_slice(&payload);
+        write_raw_stream_region(&path, 0, &stream, 2, 1);
+
+        // Leave sector 3 zeroed (length 0) and pad the file past it so the
+        // scan reaches it, then corrupt the header to force recalc.
+        {
+            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
+            f.seek(SeekFrom::Start(3 * 4096 + 4096 - 1)).unwrap();
+            f.write_all(&[0u8]).unwrap();
+        }
+        {
+            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
+            f.write_all(&((1i32 << 8) | 1).to_be_bytes()).unwrap();
+        }
+
+        let mut region = open_region(dir.path(), RegionFileVersion::VERSION_NONE);
+        assert!(region.get_recalculate_count() >= 1, "recalc ran at open");
+        assert_eq!(
+            read_chunk(&mut region, ChunkPos::new(0, 0)).expect("recovered chunk"),
+            tag
+        );
+    }
+
+    #[test]
+    fn recalc_assigns_oversized_stub_sectors_in_z_major_order() {
+        // Paper's recalc allocates oversized stubs in Z-major order (chunkX
+        // outer, chunkZ inner). Two oversized chunks whose X-major and Z-major
+        // orderings disagree (1,2) vs (2,1) must get sectors in Paper's order:
+        // (1,2) is visited at x=1 before (2,1) at x=2, so (1,2) → sector 2.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.0.0.mca");
+
+        // Header-only file with location[0] pointing at sector 1 (invalid),
+        // forcing recalc; no local chunk data.
+        let mut header = [0u8; 8192];
+        header[0..4].copy_from_slice(&((1i32 << 8) | 1).to_be_bytes());
+        fs::write(&path, header).unwrap();
+
+        // Two oversized (.mcc) payloads in the external dir, raw NBT (none).
+        for (x, z) in [(1, 2), (2, 1)] {
+            let tag = chunk_tag(x, z, 100);
+            let mut payload = Vec::new();
+            nbt_io::write(&tag, &mut DataOutputStream::new(&mut payload)).unwrap();
+            fs::write(dir.path().join(format!("c.{}.{}.mcc", x, z)), &payload).unwrap();
+        }
+
+        let region = open_region(dir.path(), RegionFileVersion::VERSION_NONE);
+        assert!(region.get_recalculate_count() >= 1, "recalc ran at open");
+        let a = region.get_offset(&ChunkPos::new(1, 2));
+        let b = region.get_offset(&ChunkPos::new(2, 1));
+        assert_eq!(get_num_sectors(a), 1, "oversized stub uses 1 sector");
+        assert_eq!(get_num_sectors(b), 1, "oversized stub uses 1 sector");
+        assert_eq!(
+            get_sector_number(a),
+            2,
+            "Z-major: chunk (1,2) is visited before (2,1) and claims sector 2"
+        );
+        assert_eq!(get_sector_number(b), 3);
     }
 
     #[test]
