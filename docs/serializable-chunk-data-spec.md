@@ -17,9 +17,9 @@ CompoundTag is wrapped in.
 
 **Sources of truth (read before changing this document):**
 
-- `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/level/chunk/storage/SerializableChunkData.java` — the primary file (847 lines; all line refs below are to it)
+- `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/level/chunk/storage/SerializableChunkData.java` — the primary file (847 lines). Bare `L###` citations throughout refer to it; citations into other files are always qualified with the filename (e.g. `LevelAccessor.java L41-43`).
 - `.../net/minecraft/nbt/NbtIo.java` — root-tag framing (`writeUnnamedTagWithFallback`, `read`)
-- `.../net/minecraft/nbt/NbtUtils.java` — `addCurrentDataVersion` (L522-527)
+- `.../net/minecraft/nbt/NbtUtils.java` — `addCurrentDataVersion` (L522-525)
 - `.../net/minecraft/world/level/chunk/status/ChunkStatus.java` — status ordering, chunk type, heightmap sets
 - `.../net/minecraft/world/level/chunk/PalettedContainer.java`, `.../PalettedContainerRO.java`, `.../Strategy.java`, `.../Configuration.java`, `.../PalettedContainerFactory.java` — `block_states`/`biomes` codecs
 - `.../net/minecraft/world/level/levelgen/Heightmap.java` — serialization keys
@@ -46,9 +46,9 @@ spec's guarantees. All integers are Java `DataInput`/`DataOutput` big-endian.
 `SerializableChunkData.write()` and stored as the codec-wrapped payload of one
 region-file record (§4 of the region spec: 4-byte length + 1 compression byte +
 payload). On read, `SerializableChunkData.parse()` (L141-264) rehydrates that
-compound; `ChunkLoadTask.runOffMain` (L331-365) runs `upgradeChunkTag` (DFU) on
-the raw compound **before** `parse`, then `chunkData.read(...)` builds the
-`ProtoChunk`.
+compound; `ChunkLoadTask.runOffMain` (ChunkLoadTask.java L331-365) runs
+`upgradeChunkTag` (DFU) on the raw compound **before** `parse`, then
+`chunkData.read(...)` builds the `ProtoChunk`.
 
 **[Rivet]** This document pins the *bytes inside the record*: root key order,
 per-section tags, palette/data codecs, light tags, and the read-default
@@ -245,7 +245,7 @@ closure (merged on `origin/main`) is the reference for the read path.
 
 `BlockLight` and `SkyLight` are `ByteArrayTag`s of exactly 2048 bytes
 (`DataLayer.SIZE`, DataLayer.java L11). Read: `DataLayer` panics (thrown as
-`IllegalArgumentException`) if the length differs (L27-29). The starlight light
+`IllegalArgumentException`) if the length differs (DataLayer.java L27-29). The starlight light
 **engine** (SWMRNibbleArray propagation, `StarLightEngine`, `WorldUtil` light
 section bounds) is **[Deferred]** to the #231 wave; the **tag schema** here is
 current.
@@ -274,8 +274,9 @@ Write: `write()` clobbers `isLightOn` → `false` and writes root
 mixin `saveLightHook`/`saveLightHookReal` (SaveUtil.java L32-127) strips and
 re-injects `BlockLight`/`SkyLight`/state tags, and `loadLightHookReal`
 (SaveUtil.java L139-194) only reads light when `lit && status.isOrAfter(LIGHT)`,
-defaulting state 0 when absent (L169/L182), and `setLightCorrect(lit)` last
-(L193). SaveUtil L17: "keep in-sync with SerializableChunkDataMixin".
+defaulting state 0 when absent (SaveUtil.java L169/L182), and
+`setLightCorrect(lit)` last (SaveUtil.java L193). SaveUtil.java L17:
+"keep in-sync with SerializableChunkDataMixin".
 
 **[Rivet]** For the NBT round-trip, the schema is: root `starlight.light_version`
 int 10 + clobbered `isLightOn` false + per-section state ints (omitted when 0)
@@ -325,16 +326,17 @@ type to `toPrime` and `Heightmap.primeHeightmaps` is called (L398-410).
 
 | key | type | source |
 |---|---|---|
-| `i` | id codec (`BuiltInRegistries.BLOCK/FLOOR.byNameCodec()`) | L35 |
-| `x` | int | L29 |
-| `y` | int | L29 |
-| `z` | int | L29 |
-| `t` | int (delay) | L37 |
-| `p` | int (TickPriority; `TickPriority.CODEC = Codec.INT.xmap(...)`) | L38 |
+| `i` | id codec (`BuiltInRegistries.BLOCK/FLOOR.byNameCodec()`) | SavedTick.java L35 |
+| `x` | int | SavedTick.java L29 |
+| `y` | int | SavedTick.java L29 |
+| `z` | int | SavedTick.java L29 |
+| `t` | int (delay) | SavedTick.java L37 |
+| `p` | int (TickPriority; `TickPriority.CODEC = Codec.INT.xmap(...)`) | SavedTick.java L38 |
 
 Read filters to the current chunk via `SavedTick.filterTickListForChunk`
-(L44-47, `ChunkPos.pack(pos) == posKey`). Packing
-(`LevelChunkTicks.pack` L117-132, `ProtoChunkTicks.pack` L36) writes
+(SavedTick.java L44-47, `ChunkPos.pack(pos) == posKey`). Packing
+(`LevelChunkTicks.pack` LevelChunkTicks.java L117-132, `ProtoChunkTicks.pack`
+ProtoChunkTicks.java L36) writes
 `pendingTicks` first, then the scheduled `tickQueue` sorted by
 `SUB_TICK_ORDERING` (`Comparator.comparingLong(ScheduledTick::subTickOrder)`),
 each `toSavedTick(currentTick)` = `delay = triggerTick - currentTick`
@@ -347,7 +349,7 @@ derived** — a Rivet seam (see §8).
 A `ListTag` with **one entry per block section**, not per `sections`-list
 entry. `packOffsets` emits one entry per element of `postProcessingSections`
 (L768-783), which `copyOf` copies 1:1 from `chunk.getPostProcessing()`
-(L521-525) — an array sized `new ShortList[levelHeightAccessor.getSectionsCount()]`
+(L522-524) — an array sized `new ShortList[levelHeightAccessor.getSectionsCount()]`
 (ChunkAccess.java L153), i.e. the block-section count (`getMaxSectionY() -
 getMinSectionY() + 1`, LevelHeightAccessor.java L15-17). Each entry is a
 `ListTag` of shorts (`ShortTag.valueOf(...)`), or an **empty** list when the
@@ -379,18 +381,20 @@ Record `Packed(int minSection, int maxSection, Optional<double[]> heights)`:
 - `max_section` int (`fieldOf`).
 - `heights` — double list (`Codec.DOUBLE.listOf().xmap(Doubles::toArray, ...)`),
   **lenient optional**. `pack()` stores the heights as a list only if any cell
-  differs from `Double.MAX_VALUE` (L84-97); otherwise `heights` is absent.
-  `unpack` fills missing cells with `Double.MAX_VALUE` (L69-70).
+  differs from `Double.MAX_VALUE` (BlendingData.java L84-99); otherwise `heights` is absent.
+  `unpack` fills missing cells with `Double.MAX_VALUE` (BlendingData.java L69-70).
 
 **[Deferred]** `BlendingData.unpack` application (density blending) is not part
 of the NBT round-trip; only the codec shape is current. The tag is optional and
 null in a fresh world.
 
-### 7.2 `below_zero_retrogen` — `BelowZeroRetrogen.CODEC` (L35-43)
+### 7.2 `below_zero_retrogen` — `BelowZeroRetrogen.CODEC` (BelowZeroRetrogen.java L35-42)
 
 - `target_status` — a **non-empty** `ChunkStatus` string (`fieldOf`, with a
-  `DataResult.error("target_status cannot be empty")` guard for `EMPTY`, L32).
-- `missing_bedrock` — long-stream → BitSet, **lenient optional** (L38).
+  `DataResult.error("target_status cannot be empty")` guard for `EMPTY`,
+  BelowZeroRetrogen.java L32).
+- `missing_bedrock` — long-stream → BitSet, **lenient optional**
+  (BelowZeroRetrogen.java L38).
 
 **[Deferred]** retrogen application deferred; only the codec round-trip is
 current. Tag is optional and null in a fresh world.
@@ -400,38 +404,40 @@ current. Tag is optional and null in a fresh world.
 Written only when `!upgradeData.isEmpty()` (L565-567). `UpgradeData.write()`:
 
 - `Indices` compound — keys `"0".."N"` (per upgrade index), value int array,
-  only non-empty arrays written; the compound itself omitted if empty (L232-241).
+  only non-empty arrays written; the compound itself omitted if empty
+  (UpgradeData.java L232-241).
 - `Sides` byte — bitmask of `1 << Direction8.ordinal()` over `this.sides`,
-  **always written** (L244-247; `sides` is an `EnumSet`, empty → 0).
+  **always written** (UpgradeData.java L243-249; `putByte` at L249; `sides` is an
+  `EnumSet`, empty → 0).
 - `neighbor_block_ticks` / `neighbor_fluid_ticks` — `SavedTick` codec lists,
-  only if non-empty (L250-255).
+  only if non-empty (UpgradeData.java L250-256).
 
-**[Deferred]** the block-fixer upgrade application (`UpgradeData.MAP`, L109-226)
-is deferred; only the `Indices`/`Sides`/neighbor-tick NBT round-trip is
-current.
+**[Deferred]** the block-fixer upgrade application (`UpgradeData.MAP`,
+UpgradeData.java L109-226) is deferred; only the `Indices`/`Sides`/neighbor-tick
+NBT round-trip is current.
 
 ---
 
 ## 8. Read/write orchestration and the `getGameTime` dependency
 
-- **Callers.** Read: `ChunkLoadTask.runOffMain` (L331-365) —
+- **Callers.** Read: `ChunkLoadTask.runOffMain` (ChunkLoadTask.java L331-365) —
   `upgradeChunkTag` (DFU, SimpleRegionStorage.java L84-120: converts below
   `DataVersion` then `addDataVersion`) **before** `SerializableChunkData.parse`,
   then `.read(world, poiManager, chunkMap.storageInfo(), pos)`. Save:
-  `NewChunkHolder.saveChunk` (L1706-1728): `copyOf` on the main thread, then
-  `chunkData.write()` on the save executor; `PlatformHooks.chunkSyncSave`
-  (PaperHooks.java L89) runs between them.
+  `NewChunkHolder.saveChunk` (NewChunkHolder.java L1706-1728): `copyOf` on the
+  main thread, then `chunkData.write()` on the save executor;
+  `PlatformHooks.chunkSyncSave` (PaperHooks.java L89) runs between them.
 - **Misplaced-chunk guard.** `SimpleRegionStorage.write` throws
   `IllegalArgumentException` when `dataFixType == CHUNK` and
-  `!pos.equals(getChunkCoordinate(nbt))` (L61-82). `read()` logs +
-  `reportMisplacedChunk` (L320-323). `getChunkCoordinate` reads `xPos`/`zPos`
+  `!pos.equals(getChunkCoordinate(nbt))` (SimpleRegionStorage.java L61-82). `read()`
+  logs + `reportMisplacedChunk` (L320-323). `getChunkCoordinate` reads `xPos`/`zPos`
   from root, or from the `Level` sub-tag when `DataVersion < 2842` (L113-121);
   `getLastWorldSaveTime` reads `LastUpdate` likewise (L125-133) — used by region
   header recalc (region spec §8).
 - **`getGameTime` dependency.** `copyOf` writes `LastUpdate = level.getGameTime()`
   (L536) and `ticksForSerialization = chunk.getTicksForSerialization(level.getGameTime())`
   (L521). `getGameTime()` is `LevelAccessor` default →
-  `getLevelData().getGameTime()` (LevelAccessor.java L41-44); `ServerLevel`'s
+  `getLevelData().getGameTime()` (LevelAccessor.java L41-43); `ServerLevel`'s
   `getLevelData()` is the live `ServerLevelData.gameTime`. So `LastUpdate` and
   every `t` are **tick-thread-time derived** — a Rivet seam requirement: a
   server-level game time must exist before a chunk can be serialized. This is
@@ -447,7 +453,7 @@ Each default below is a load-bearing behavior for read parity:
 
 | field | missing/empty → | source |
 |---|---|---|
-| `Status` (empty string) | `parse` returns **null**; caller drops the chunk (`ChunkLoadTask` L350-352) | L145-147 |
+| `Status` (empty string) | `parse` returns **null**; caller drops the chunk (ChunkLoadTask.java L350-352) | L145-147 |
 | `Status` (absent) | `ChunkStatus.EMPTY` | L160, L652-654 |
 | `DataVersion` > current | `printStackTrace()` + `System.exit(1)` unless `-DPaper.ignoreWorldDataVersion` | L150-155 |
 | `xPos`/`zPos` | 0 | L157 |
@@ -484,11 +490,11 @@ spec) is `NbtIo.write` = `writeUnnamedTagWithFallback`:
 - Type byte `10` (CompoundTag) + `writeUTF("")` (2-byte length 0) + body
   (NbtIo.java L124-126, L162-167, L170-172).
 - `StringFallbackDataOutput.writeUTF` catches `UTFDataFormatException` and
-  writes `""` instead (L196-209) — a string longer than 65535 modified-UTF-8
-  bytes degrades to empty rather than failing the whole write.
+  writes `""` instead (NbtIo.java L202-209) — a string longer than 65535
+  modified-UTF-8 bytes degrades to empty rather than failing the whole write.
 
 Read: `NbtIo.read` requires a Compound root else
-`IOException("Root tag must be a named compound tag")` (L117-121).
+`IOException("Root tag must be a named compound tag")` (NbtIo.java L117-121).
 
 **[Rivet]** The `readUTF`/`writeUTF` framing is the OpenJDK-faithful
 modified-UTF-8 codec already ported in `rivet-util::data_io` (#265/#212); this
