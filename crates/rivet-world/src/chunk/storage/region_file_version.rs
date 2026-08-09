@@ -25,14 +25,15 @@
 //! The id `127` custom codec has no `option_name` and so can never be selected
 //! (it is absent from `VERSIONS_BY_NAME`), exactly like Paper.
 
-// RivetTodo(#231): the id-127 read path (read a modified-UTF-8 id, log
-// "Unrecognized custom compression" / "Invalid custom compression id", return
-// null), lz4 read (the lz4-java "LZ4 Block" format: `lz4_flex` + `xxhash-rust`'s
-// xxh32 with seed `0x9747b28c`, see CRATES.md), and deflate/lz4 **write** land
-// with the file-backed `RegionFile` read/write wave. deflate write stays
+// RivetTodo(#231): lz4 read (the lz4-java "LZ4 Block" format: `lz4_flex` +
+// `xxhash-rust`'s xxh32 with seed `0x9747b28c`, see CRATES.md) and deflate/lz4
+// **write** are the remaining deferred codec paths. deflate write stays
 // deferred (Java `Deflater` is not `flate2`-reproducible in general — D13);
-// lz4 write is not ported. gzip read/write and deflate read (zlib-wrapped,
-// via `flate2`'s `ZlibDecoder`) are wired on `flate2` here.
+// lz4 write is not ported. The id-127 read path lives in
+// `RegionFile::create_chunk_input_stream` (region_file.rs), which reads the
+// modified-UTF-8 id, logs, and returns null like Paper. gzip read/write and
+// deflate read (zlib-wrapped, via `flate2`'s `ZlibDecoder`) are wired on
+// `flate2` here.
 
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicI32, Ordering};

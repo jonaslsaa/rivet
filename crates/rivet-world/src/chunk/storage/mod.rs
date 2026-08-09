@@ -29,8 +29,9 @@
 
 // RivetTodo(#231): `RegionFileStorage` (the LRU `Long2ObjectLinkedOpenHashMap`
 // region cache + `nonExistingRegionFiles` negative cache; `getRegionFile`,
-// `read`/`write`/`flush`/`close`, `RegionFileSizeException`) is deferred with
-// the rest of the storage wave. Its thin read-side surface is implementable
+// `read`/`write`/`flush`/`close` — the `RegionFileSizeException` it throws is
+// already ported in `region_file.rs`) is deferred with the rest of the storage
+// wave. Its thin read-side surface is implementable
 // without IOWorker/async, but `read`'s coordinate guard
 // (`SerializableChunkData.getChunkCoordinate` vs the requested pos) and the
 // Aikar `readOversizedChunk` merge duplicate the helpers already ported here,
