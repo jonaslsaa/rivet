@@ -369,6 +369,15 @@ pub fn build_from_payloads_with(
 /// (`SaveUtil.STARLIGHT_LIGHT_VERSION`, 10).
 const STARLIGHT_LIGHT_VERSION: i32 = 10;
 
+/// The packed length of a FINAL heightmap as `long[]`. A heightmap is a
+/// `SimpleBitStorage` over 256 entries at 9 bits each: `valuesPerLong =
+/// floor(64 / 9) = 7`, so `requiredLength = ceil(256 / 7) = 37` longs. It is
+/// *not* `ceil(256 * 9 / 64) = 36` — the per-long packing rounds the divisor
+/// before dividing, which is exactly why the 37 is pinned here (verified
+/// against the pinned Paper's `SimpleBitStorage` and every committed FULL
+/// payload) rather than recomputed inline and silently "simplified" to 36.
+const FINAL_HEIGHTMAP_LONGS: usize = 37;
+
 /// The root keys a chunk stamped `minecraft:full` must carry (per the
 /// SerializableChunkData spec §2/§5/§6, verified against the live superflat
 /// Paper FULL captures): `structures` (starts + References), the four FINAL
@@ -434,9 +443,10 @@ fn validate_full_payload(
     for key in final_heightmaps {
         match heightmaps.tags.get(key) {
             Some(rivet_nbt::tag::Tag::LongArray(arr)) => {
-                if arr.data.len() != 37 {
+                if arr.data.len() != FINAL_HEIGHTMAP_LONGS {
                     return Err(format!(
-                        "chunk {at} heightmap {key} has {} longs, expected 37 (256 entries packed)",
+                        "chunk {at} heightmap {key} has {} longs, expected \
+                         {FINAL_HEIGHTMAP_LONGS} (256 entries packed into longs)",
                         arr.data.len()
                     ));
                 }

@@ -1273,6 +1273,14 @@ const FORCED_TICKET_LEVEL: i32 = 33;
 /// `ticks_left = Long.MIN_VALUE` — a forced ticket never counts down, so it
 /// holds the chunk persistent for the whole boot.
 const FORCED_TICKET_TICKS_LEFT: i64 = i64::MIN;
+/// The world data version written into `chunk_tickets.dat`, pinned alongside
+/// the Paper pin: `SharedConstants.getCurrentVersion()` reports
+/// `new DataVersion(4903, "main")` for MC 26.2 (`DetectedVersion`). A SavedData
+/// written with a data version the pinned Paper has since moved past would be
+/// run through the `SAVED_DATA_FORCED_CHUNKS` datafix on load — or misparsed —
+/// so a drift that stops the forced chunks from loading is caught loudly by
+/// `verify_forced_load`, never silently.
+const FORCED_TICKET_DATA_VERSION: i32 = 4903;
 
 /// The three dimensions + their Moonrise SavedData subpaths. Every dimension
 /// (incl. the overworld) stores its `chunk_tickets.dat` SavedData under
@@ -1310,7 +1318,7 @@ fn inject_forced_tickets(world_dir: &Path) -> Result<(), Error> {
         Tag::List(ListTag::with_list(tickets)),
     );
     let mut root = CompoundTag::new();
-    root.put_int("DataVersion", 4903);
+    root.put_int("DataVersion", FORCED_TICKET_DATA_VERSION);
     root.put("data".to_string(), Tag::Compound(data));
 
     for (_, sub) in TICKET_DIMS {
@@ -1340,6 +1348,13 @@ fn inject_forced_tickets(world_dir: &Path) -> Result<(), Error> {
 /// normalizes it before comparing: `LastUpdate` is a save-clock artifact, not
 /// worldgen content. Returns `None` when the payload has no `LastUpdate` (a
 /// partial chunk that never records one — left untouched by the tree pass).
+///
+/// Note the gate this feeds is a *determinism* proof between two Paper captures
+/// (both re-encoded through the rivet-nbt serializer), not a byte-parity check
+/// of rivet-nbt's output against Paper's own serializer — that byte-for-byte
+/// parity is rivet-parity's job. The re-encode is identical on both sides, so a
+/// serializer divergence could not produce a false green here; it would only
+/// make the gate's bytes differ from a hypothetical Paper-native extraction.
 fn normalize_last_update(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut compound =
         nbt_io::read_unlimited(&mut DataInputStream::new(Cursor::new(bytes))).ok()?;
@@ -1422,23 +1437,62 @@ fn rehash_captured(dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Require the capture boot to have loaded the 8 forced persistent chunks in
+/// Require the capture boot to have loaded the forced persistent chunks in
 /// every dimension — the proof that corpus-forced generation actually ran. A
 /// boot that loaded 0 (the ticket injection silently failed) is refused instead
 /// of re-committing a plain spawn boot.
+///
+/// Paper logs one line per dimension:
+/// `Loading N persistent chunks for level 'minecraft:<dim>'...`. Instead of
+/// matching one exact message (which would go silently stale if Paper ever
+/// reported a different count or wording), this parses the per-dimension count
+/// out of each `Loading N persistent chunks` line and requires every ticket
+/// dimension to have loaded at least `COORDINATES.len()` chunks. The check is
+/// dimension-aware, so a partially-succeeded injection (some dimensions loaded,
+/// others 0) is refused too.
 fn verify_forced_load(log_path: &Path) -> Result<(), Error> {
     let log_text = fs::read(log_path)?;
     let log_text = String::from_utf8_lossy(&log_text);
-    let loads = log_text
-        .lines()
-        .filter(|l| l.contains("Loading 8 persistent chunks"))
-        .count();
-    if loads < TICKET_DIMS.len() {
+    let expected = crate::corpus::COORDINATES.len();
+    let mut per_dim: Vec<(String, usize)> = Vec::new();
+    for line in log_text.lines() {
+        let marker = "persistent chunks for level 'minecraft:";
+        let Some(marker_at) = line.find(marker) else {
+            continue;
+        };
+        // Count: the "Loading N" immediately before the marker.
+        let count = line[..marker_at]
+            .rsplit_once("Loading ")
+            .and_then(|(_, n)| n.trim().parse::<usize>().ok());
+        // Dim: the "<dim>" between the marker and the closing quote.
+        let dim = line[marker_at + marker.len()..]
+            .split('\'')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if let Some(count) = count
+            && !dim.is_empty()
+        {
+            per_dim.push((dim, count));
+        }
+    }
+    let mut short: Vec<String> = Vec::new();
+    for (dim, _) in TICKET_DIMS {
+        let loaded = per_dim
+            .iter()
+            .find(|(d, _)| d == dim)
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        if loaded < expected {
+            short.push(format!("{dim} loaded {loaded}"));
+        }
+    }
+    if !short.is_empty() {
         return Err(Error::Gate(format!(
-            "forced-capture boot did not load 8 persistent chunks in all {} dimensions \
-             (found {loads} 'Loading 8 persistent chunks' lines in {}) — the ticket \
-             injection silently failed; refusing to commit a spawn boot",
-            TICKET_DIMS.len(),
+            "forced-capture boot did not load the {expected} forced persistent chunks in every \
+             dimension ({}) — the ticket injection silently failed; refusing to commit a spawn \
+             boot (log {})",
+            short.join("; "),
             log_path.display()
         )));
     }
@@ -4688,6 +4742,72 @@ mod tests {
             hash_manifest::build_from_payloads(&paper, "42", "minecraft\\:normal").is_err(),
             "FULL validator refuses a FULL chunk whose section light data is malformed"
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// `verify_forced_load` is dimension-aware: it parses the per-dimension
+    /// `Loading N persistent chunks for level 'minecraft:<dim>'` count and
+    /// requires every ticket dimension to have loaded the forced corpus chunks.
+    /// A create boot (0 loaded in every dimension), a partial injection (one
+    /// dimension short), and a boot whose log line the parser cannot match are
+    /// all refused loudly; a genuine capture boot passes.
+    #[test]
+    fn verify_forced_load_parses_per_dimension_counts() {
+        let tmp = hash_tmp("forced-load");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let log = tmp.join("boot.log");
+
+        // A genuine capture: all three dimensions loaded the 8 forced chunks.
+        fs::write(
+            &log,
+            concat!(
+                "[00:00:01 INFO]: Loading 8 persistent chunks for level 'minecraft:overworld'...\n",
+                "[00:00:01 INFO]: Loading 8 persistent chunks for level 'minecraft:the_nether'...\n",
+                "[00:00:01 INFO]: Loading 8 persistent chunks for level 'minecraft:the_end'...\n",
+            ),
+        )
+        .unwrap();
+        verify_forced_load(&log).expect("all dimensions loaded the forced chunks");
+
+        // A create boot: zero persistent chunks everywhere — the injection never ran.
+        fs::write(
+            &log,
+            concat!(
+                "[00:00:01 INFO]: Loading 0 persistent chunks for level 'minecraft:overworld'...\n",
+                "[00:00:01 INFO]: Loading 0 persistent chunks for level 'minecraft:the_nether'...\n",
+                "[00:00:01 INFO]: Loading 0 persistent chunks for level 'minecraft:the_end'...\n",
+            ),
+        )
+        .unwrap();
+        assert!(
+            verify_forced_load(&log).is_err(),
+            "a spawn boot must be refused"
+        );
+
+        // A partial injection: the_nether never loaded its forced chunks.
+        fs::write(
+            &log,
+            concat!(
+                "[00:00:01 INFO]: Loading 8 persistent chunks for level 'minecraft:overworld'...\n",
+                "[00:00:01 INFO]: Loading 0 persistent chunks for level 'minecraft:the_nether'...\n",
+                "[00:00:01 INFO]: Loading 8 persistent chunks for level 'minecraft:the_end'...\n",
+            ),
+        )
+        .unwrap();
+        assert!(
+            verify_forced_load(&log).is_err(),
+            "a partial injection must be refused"
+        );
+
+        // A boot whose message the parser cannot match is refused (never silently
+        // accepted as a forced capture).
+        fs::write(&log, "[00:00:01 INFO]: Done (7.2s)!\n").unwrap();
+        assert!(
+            verify_forced_load(&log).is_err(),
+            "an unmatchable log must be refused"
+        );
+
         let _ = fs::remove_dir_all(&tmp);
     }
 
