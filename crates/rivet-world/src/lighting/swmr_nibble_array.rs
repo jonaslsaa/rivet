@@ -413,8 +413,10 @@ impl SwmrNibbleArray {
     /// visible one; returns `false` (Java's early return) when not dirty. A
     /// `Null`/`Uninitialised` updating state drops the visible storage; an
     /// initialised one copies the updating bytes into the existing visible
-    /// buffer (preserving its identity in Java; the port copies content) and
-    /// re-shares the bytes.
+    /// buffer (preserving its identity in Java; the port copies content). After
+    /// the publish the updating buffer's content equals the visible snapshot —
+    /// Java re-aliases the arrays, while the port keeps its `Box`es distinct
+    /// and the next write CoWs `storage_updating` regardless.
     pub fn update_visible(&mut self) -> bool {
         if !self.is_dirty() {
             return false;
@@ -436,9 +438,6 @@ impl SwmrNibbleArray {
                         .unwrap()
                         .copy_from_slice(src);
                 }
-                // Java aliases storageUpdating onto storageVisible; the port
-                // clones so the next CoW stays correct.
-                self.storage_updating = self.storage_visible.clone();
             }
         }
         self.updating_dirty = false;
