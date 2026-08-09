@@ -59,3 +59,9 @@ float_cmp = "allow"
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Backtraces keep file:line; interactive-debugger variable info is dropped.
+# Nothing in the agent/gate pipeline uses a debugger, and full debuginfo was
+# the bulk of every worktree's multi-GB target/.
+[profile.dev]
+debug = "line-tables-only"
