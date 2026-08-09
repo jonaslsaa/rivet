@@ -289,6 +289,20 @@ set -e
 grep -q "^    FAILED" "$TMP/out12" || fail "self-test: FAILED not printed for multi-line stdout"
 pass "self-test: multi-line stdout -> FAILED"
 
+# Leading/trailing whitespace around the JSON object (a padded line, or a JVM
+# that emitted a stray blank/indent) is not the bare JSON line the contract
+# requires — json.loads would tolerate it, so the exact-shape check must reject.
+self_run_sh '  {"ok":true,"protocol":1,"tests":9}'
+ORACLE_UNVERIFIED=0; PARITY_RUNNABLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_oracle_self_test > "$TMP/out12a" 2>&1 )
+rc12a=$?
+set -e
+[ "$rc12a" = 1 ] || fail "self-test: whitespace-padded stdout should exit 1 (got $rc12a)"
+grep -q "^    FAILED" "$TMP/out12a" || fail "self-test: FAILED not printed for whitespace-padded stdout"
+grep -q "^    VERIFIED" "$TMP/out12a" && fail "self-test: VERIFIED printed despite whitespace-padded stdout"
+pass "self-test: whitespace-padded stdout -> FAILED"
+
 # Counterfeit: a *nested* {"ok":true} with no top-level ok. The old substring
 # glob accepted this ("...ok":true..." matches); the structural parse must fail.
 self_run_sh '{"result":{"ok":true,"protocol":1,"tests":9}}'

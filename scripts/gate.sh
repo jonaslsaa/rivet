@@ -414,14 +414,21 @@ run_oracle_hash() {
 # log4j `[HH:mm:ss LEVEL]: [STDOUT]: ...` prefix — Bootstrap.bootStrap()
 # re-wires System.out through SysOutOverSLF4J, so a regression of selfTest()
 # back to System.out.println either prefixes the summary or swallows it
-# entirely. Empty stdout, a `[`-prefixed log line, or extra lines means the
-# protocol broke.
+# entirely. Empty stdout, a `[`-prefixed log line, extra lines, or leading/
+# trailing whitespace around the JSON object means the protocol broke — the
+# line must be *exactly* the bare JSON object.
 oracle_self_test_stdout_is_raw_json() {
   [ "$#" -eq 1 ] || return 1
   [ -n "$1" ] || return 1
   printf '%s\n' "$1" | python3 -c '
 import json, sys
-line = sys.stdin.read()
+raw = sys.stdin.read()
+# The wrapper pipe appends one newline after command substitution strips the
+# captured trailing newlines. Remove only that wrapper newline so any remaining
+# leading or trailing whitespace fails the bare-JSON contract.
+line = raw[:-1] if raw.endswith("\n") else raw
+if line != line.strip():
+    sys.exit(1)
 try:
     data = json.loads(line)
 except ValueError:
