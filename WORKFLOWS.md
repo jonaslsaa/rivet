@@ -92,7 +92,7 @@ Notes:
 
 Use `.claude/workflows/release-prep.js` for a branch whose implementation is already complete. Args are `{worktree, task, maxRounds?, checks?}`. Each round fetches and rebases a clean branch onto current `origin/main`, runs focused mechanical checks, and gives the exact head to a fresh read-only reviewer. Confirmed findings go to a fixer that commits locally; disputed findings must be justified and are rechecked by the next fresh reviewer.
 
-Success is fail-closed: the reviewed head/base must match the refreshed and checked hashes, the branch must be clean, ahead of and zero commits behind current `origin/main`, and the reviewer must return an empty findings list. Empty agent results, contradictory verdicts, dirty leftovers, or moving-head evidence cannot produce readiness. The result includes exact head/base/check/review evidence and `strict_gate_ready: true`, but the workflow never runs `scripts/gate.sh`, pushes, opens a PR, or merges — those remain serialized controller actions.
+Success is fail-closed: the reviewed head/base must match the refreshed and checked hashes, focused checks must report at least one command, every changed file must be inspected, the branch must be clean, ahead of and zero commits behind current `origin/main`, and the reviewer must return an empty findings list. Empty agent results, contradictory verdicts, dirty leftovers, incomplete inspection, or moving-head evidence cannot produce readiness. The result includes exact head/base/check/review evidence and `strict_gate_ready: true`, but the workflow never runs `scripts/gate.sh`, pushes, opens a PR, or merges — those remain serialized controller actions.
 
 ### The Java→Rust semantic-drift checklist (reviewer lens 1)
 

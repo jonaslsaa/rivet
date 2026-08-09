@@ -9,13 +9,13 @@ const A = typeof args === 'string' ? JSON.parse(args) : args
 if (!A || !A.worktree || !A.task) throw new Error('release-prep requires {worktree, task}')
 const WT = A.worktree
 const TASK = A.task
-const MAX = A.maxRounds || 6
+const MAX = A.maxRounds ?? 6
 const CHECKS = A.checks || ''
 const SLUG = WT.split('/').pop()
 
 const REFRESH = {
   type: 'object',
-  required: ['ready', 'head', 'base', 'ahead', 'behind', 'clean', 'summary'],
+  required: ['ready', 'head', 'base', 'ahead', 'behind', 'clean', 'files', 'summary'],
   properties: {
     ready: { type: 'boolean' },
     head: { type: 'string' },
@@ -23,6 +23,7 @@ const REFRESH = {
     ahead: { type: 'integer' },
     behind: { type: 'integer' },
     clean: { type: 'boolean' },
+    files: { type: 'array', items: { type: 'string' }, description: 'repo-relative deliverable files in the merge-base diff' },
     summary: { type: 'string' },
     blocker: { type: 'string' },
   },
@@ -35,8 +36,8 @@ const CHECK = {
     pass: { type: 'boolean' },
     head: { type: 'string' },
     base: { type: 'string' },
-    commands: { type: 'array', items: { type: 'string' } },
-    output: { type: 'string' },
+    commands: { type: 'array', minItems: 1, items: { type: 'string' } },
+    output: { type: 'string', minLength: 1 },
   },
 }
 
@@ -64,7 +65,7 @@ const VERDICT = {
       },
     },
     summary: { type: 'string' },
-    files_inspected: { type: 'array', items: { type: 'string' } },
+    files_inspected: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'repo-relative paths' },
   },
 }
 
@@ -115,14 +116,19 @@ async function resilientAgent(prompt, opts, attempts = 2) {
 const HARD_RULES =
   `Never git stash/reset/force-push, never push, never open or merge a PR, and never run ` +
   `\`scripts/gate.sh\` or \`scripts/gate.sh --require-oracle\`; the coordinator owns the serialized strict gate and release. ` +
-  `Never weaken tests or fixtures. Never modify or commit anything from \`${WT}/working\`.`
+  `Never weaken tests or fixtures. Never abort a rebase or discard conflicting/unexplained files; resolve in place or stop blocked. ` +
+  `Never modify or commit anything from \`${WT}/working\`.`
+
+const RESUME_NOTE =
+  `This workflow may resume after interruption. Re-read branch, status, log, and rebase state from disk before acting. ` +
+  `If a rebase is already in progress, resolve it faithfully and continue it; never abort it or assume a clean starting state.`
 
 const REVIEW_SCOPE =
-  `In \`${WT}\`, fetch origin, record \`git rev-parse HEAD\` and \`git rev-parse origin/main\`, then inspect ` +
+  `In \`${WT}\`, fetch origin, record full 40-character hashes from \`git rev-parse HEAD\` and \`git rev-parse origin/main\`, then inspect ` +
   `\`git log --oneline origin/main..HEAD\`, \`git diff $(git merge-base origin/main HEAD) HEAD\`, and \`git status --short\`. ` +
   `Read every changed and untracked deliverable file. A dirty tree, untracked deliverable, detached HEAD, zero commits ahead, ` +
   `or any commit behind current origin/main is a release-blocking process finding. You are READ-ONLY: do not edit files, ` +
-  `commit, rebase, or create scratch files in the worktree. List every file actually read in files_inspected.`
+  `commit, rebase, or create scratch files in the worktree. List every file actually read as a repo-relative path in files_inspected.`
 
 function processFinding(description) {
   return [{ file: '(git)', description, severity: 'critical' }]
@@ -137,7 +143,8 @@ function fixPrompt(findings, disputes) {
     `belong to this task and are correct; never delete or overwrite unexplained work. Correct confirmed findings against ` +
     `project docs and pinned Paper where relevant. If a finding is factually wrong, do not apply it; record a precise dispute. ` +
     `Reconsider comments before committing. Run focused checks, commit all intended deliverable changes conventionally, and ` +
-    `finish with a clean tree. If safe completion is impossible, return status=blocked and preserve the state.\n` +
+    `finish with a clean tree. Report the resulting full HEAD hash, cleanliness, changed files, disputes, and check evidence. ` +
+    `If safe completion is impossible, return status=blocked and preserve the state.\n` +
     `${CHECKS ? `Required focused checks:\n${CHECKS}` : ''}`
   )
 }
@@ -150,17 +157,18 @@ for (let round = 1; round <= MAX; round++) {
   phase('Refresh')
   const refresh = await resilientAgent(
     `Refresh the already-implemented branch in \`${WT}\` onto current \`origin/main\` before release review. ` +
-      `${HARD_RULES} First inspect branch, status, and commits. Run \`git fetch origin\`. If the tree is clean, rebase onto ` +
+      `${HARD_RULES} ${RESUME_NOTE} Run \`git fetch origin\`. If the tree is clean, rebase onto ` +
       `\`origin/main\` when behind; resolve any rebase conflicts faithfully using the task and current main, then continue the ` +
       `rebase without weakening or dropping the deliverable. If the tree is dirty, do not rebase or discard anything: report ` +
-      `ready=false so the fix phase can inspect and commit legitimate task work. Finish by reporting exact full hashes, ` +
-      `ahead/behind counts, and cleanliness. ready=true requires a named feature/fix/chore/refactor branch, clean tree, ` +
+      `ready=false so the fix phase can inspect and commit legitimate task work. Finish by reporting full 40-character hashes, ` +
+      `ahead/behind counts, cleanliness, and every merge-base-diff deliverable file as a repo-relative path. ready=true requires ` +
+      `a named feature/fix/chore/refactor branch, clean tree, ` +
       `ahead>0, and behind=0. Task:\n${TASK}`,
     { label: `refresh:${SLUG}:r${round}`, phase: 'Refresh', schema: REFRESH },
   )
   if (!refresh) {
     log(`refresh r${round} failed after retries`)
-    return { merge_ready: false, refresh_failed: true, findings: all, rounds: round, worktree: WT }
+    return { merge_ready: false, strict_gate_ready: false, refresh_failed: true, findings: all, rounds: round, worktree: WT }
   }
   if (!refresh.ready) {
     const findings = processFinding(refresh.blocker || refresh.summary || 'branch refresh did not reach a release-reviewable state')
@@ -171,9 +179,9 @@ for (let round = 1; round <= MAX; round++) {
       fixPrompt(findings, disputes),
       { label: `fix-refresh:${SLUG}:r${round}`, phase: 'Fix', schema: FIX_REPORT },
     )
-    if (!fixed || fixed.status === 'blocked') {
-      log(`refresh fix r${round} did not complete`)
-      return { merge_ready: false, fix_failed: !fixed, blocked: !!fixed, findings: all, rounds: round, worktree: WT }
+    if (!fixed || fixed.status === 'blocked' || !fixed.clean) {
+      log(`refresh fix r${round} did not complete cleanly`)
+      return { merge_ready: false, strict_gate_ready: false, fix_failed: !fixed || !fixed.clean, blocked: !!fixed && fixed.status === 'blocked', findings: all, rounds: round, worktree: WT }
     }
     prior = findings
     disputes = fixed.disputed
@@ -182,26 +190,30 @@ for (let round = 1; round <= MAX; round++) {
 
   phase('Check')
   const check = await resilientAgent(
-    `Run focused mechanical checks for the exact current head in \`${WT}\`. ${HARD_RULES} Determine touched files and ` +
-      `crates from the merge-base diff. Stop at the first failure. For Rust run cargo fmt --check, clippy with -Dwarnings, ` +
+    `Run focused mechanical checks for the exact current head in \`${WT}\`. ${HARD_RULES} Run \`git fetch origin\` first, ` +
+      `then determine touched files and crates from the merge-base diff. Stop at the first failure. For Rust run cargo fmt ` +
+      `--check, clippy with -Dwarnings, ` +
       `check, and tests scoped to every touched crate/all relevant targets. For changed shell run bash -n and shellcheck if ` +
       `installed, plus safe focused tests. For changed Python run py_compile and focused tests. Validate generated/manifest ` +
-      `artifacts when touched. Do not edit anything. Report the exact HEAD and origin/main hashes observed before the checks, ` +
+      `artifacts when touched. Do not edit anything. Report the full 40-character HEAD and origin/main hashes observed after ` +
+      `the fetch and before the checks, ` +
       `every command, and concise failure output or "all green".\n${CHECKS ? `Required checks:\n${CHECKS}` : ''}`,
     { label: `check:${SLUG}:r${round}`, phase: 'Check', schema: CHECK, effort: 'low' },
   )
   if (!check) {
     log(`check r${round} failed after retries`)
-    return { merge_ready: false, check_failed: true, findings: all, rounds: round, worktree: WT }
+    return { merge_ready: false, strict_gate_ready: false, check_failed: true, findings: all, rounds: round, worktree: WT }
   }
   if (check.head !== refresh.head || check.base !== refresh.base) {
     const findings = processFinding(`head/base changed during preparation: refresh ${refresh.head}/${refresh.base}, check ${check.head}/${check.base}`)
     all = all.concat(findings.map((finding) => ({ ...finding, round })))
     prior = findings
-  } else if (!check.pass) {
-    const findings = [{ file: '(build)', description: `focused mechanical checks failed:\n${check.output}`, severity: 'critical' }]
+    disputes = []
+  } else if (!check.pass || check.commands.length === 0) {
+    const findings = [{ file: '(build)', description: `focused mechanical checks failed or ran no commands:\n${check.output}`, severity: 'critical' }]
     all = all.concat(findings.map((finding) => ({ ...finding, round })))
     prior = findings
+    disputes = []
   } else {
     phase('Review')
     const verdict = await resilientAgent(
@@ -210,18 +222,21 @@ for (let round = 1; round <= MAX; round++) {
         : `You are a FRESH full-lens release reviewer. Review the whole CURRENT diff independently FIRST, then verify prior findings and disputes.\nPrior findings:\n${JSON.stringify(prior, null, 2)}\nDisputes:\n${JSON.stringify(disputes, null, 2)}`}\n\n` +
         `Task/deliverable:\n${TASK}\n\n${REVIEW_SCOPE} Check correctness, fidelity to pinned Paper and project docs where relevant, ` +
         `test strength, generated artifacts, and process integrity. Report only concrete actionable defects, not preferences. ` +
-        `merge_ready=true requires: exact reviewed HEAD=${refresh.head}, base=${refresh.base}, clean=true, ahead>0, behind=0, ` +
-        `and an EMPTY findings array. Any finding of any severity means merge_ready=false. The full strict gate was intentionally ` +
+        `The refresh phase reports these repo-relative deliverable files, all of which must appear in files_inspected: ` +
+        `${JSON.stringify(refresh.files)}. merge_ready=true requires: exact reviewed HEAD=${refresh.head}, base=${refresh.base}, ` +
+        `clean=true, ahead>0, behind=0, every changed file inspected, and an EMPTY findings array. Any finding of any severity ` +
+        `means merge_ready=false. The full strict gate was intentionally ` +
         `not run and must not be requested as a finding; it is the coordinator's next step after this workflow.`,
       { label: `review:${SLUG}:r${round}`, phase: 'Review', schema: VERDICT, effort: 'high' },
     )
     if (!verdict) {
       log(`review r${round} failed after retries`)
-      return { merge_ready: false, review_failed: true, findings: all, rounds: round, worktree: WT }
+      return { merge_ready: false, strict_gate_ready: false, review_failed: true, findings: all, rounds: round, worktree: WT }
     }
     all = all.concat(verdict.findings.map((finding) => ({ ...finding, round })))
     const exactState = verdict.head === refresh.head && verdict.base === refresh.base
-    const consistentReady = verdict.merge_ready && verdict.findings.length === 0 && verdict.clean && verdict.ahead > 0 && verdict.behind === 0 && exactState
+    const inspectionComplete = refresh.files.length > 0 && refresh.files.every((file) => verdict.files_inspected.includes(file))
+    const consistentReady = verdict.merge_ready && verdict.findings.length === 0 && verdict.clean && verdict.ahead > 0 && verdict.behind === 0 && exactState && inspectionComplete
     if (verdict.merge_ready && !consistentReady) {
       log(`review r${round} returned an inconsistent merge-ready verdict; treating it as not ready`)
     }
@@ -243,9 +258,16 @@ for (let round = 1; round <= MAX; round++) {
         worktree: WT,
       }
     }
-    prior = verdict.findings.length > 0
-      ? verdict.findings
-      : processFinding(`review state/verdict was not release-ready: ${verdict.summary}`)
+    if (verdict.findings.length > 0) {
+      prior = verdict.findings
+      disputes = []
+    } else {
+      prior = processFinding(
+        `review state/verdict was not release-ready (exactState=${exactState}, inspectionComplete=${inspectionComplete}): ${verdict.summary}`,
+      )
+      all = all.concat(prior.map((finding) => ({ ...finding, round })))
+      disputes = []
+    }
   }
 
   if (round === MAX) break
@@ -254,9 +276,9 @@ for (let round = 1; round <= MAX; round++) {
     fixPrompt(prior, disputes),
     { label: `fix:${SLUG}:r${round}`, phase: 'Fix', schema: FIX_REPORT },
   )
-  if (!fixed || fixed.status === 'blocked') {
-    log(`fix r${round} did not complete`)
-    return { merge_ready: false, fix_failed: !fixed, blocked: !!fixed, findings: all, rounds: round, worktree: WT }
+  if (!fixed || fixed.status === 'blocked' || !fixed.clean) {
+    log(`fix r${round} did not complete cleanly`)
+    return { merge_ready: false, strict_gate_ready: false, fix_failed: !fixed || !fixed.clean, blocked: !!fixed && fixed.status === 'blocked', findings: all, rounds: round, worktree: WT }
   }
   disputes = fixed.disputed
 }
