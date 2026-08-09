@@ -322,6 +322,41 @@ and the two must agree. Any drift — a manifest without provenance, provenance
 other than 1/1, or a run that actually used a different thread count — fails
 loudly before the diff runs.
 
+## FULL region gate: `verify --full` (issue #51)
+
+The FULL gate proves the **superflat status-FULL region capture** is genuine
+and reproducible: a fresh superflat Paper boot (issue #51,
+`fixtures/server-full.properties` — `level-type=minecraft:flat`,
+`region-file-compression=none` per DECISIONS D13, corpus seed 0) is diffed
+against the committed `fixtures/regions/superflat-full` baseline. The fixtures
+are produced by a twin-boot under the #266 1/1 concurrency pin (a `regenerate
+--full` requires the two fresh extractions to be byte-identical before it
+commits anything).
+
+```bash
+cargo run -p rivet-oracle -- verify --full
+cargo run -p rivet-oracle -- verify --full --expect-fail   # negative control
+```
+
+The capture is **corpus-forced**: between boot 1 (world create) and boot 2
+(capture), level-33 `minecraft:forced` tickets for every corpus coordinate are
+injected into each dimension's `chunk_tickets.dat` (see
+`full_forced_extraction`), so boot 2 loads "8 persistent chunks" per dimension
+and finishes every corpus coordinate to `minecraft:full`. The extraction spans
+the four regions around the origin (`r.0.0`, `r.-1.-1`, `r.-1.0`, `r.0.-1`) so
+positive, negative, and the x/z=31 region seams all land in captured region
+files. The save-clock `LastUpdate` long is normalized to 0 (a boot-timing
+artifact, not worldgen content) so the two boots are byte-identical.
+
+The FULL baseline therefore carries 8 status-FULL chunks per dimension
+(overworld, the_nether, the_end) plus the non-FULL neighbours, and coverage
+against the #54 corpus reports 8 present / 24 missing / 0 extra: all 8 corpus
+coordinates of the recorded seed reach FULL (seed 0's row fully owned), and the
+24 missing are the other three corpus seeds' rows, which are unreachable from a
+single-seed manifest — never a false green. `--expect-fail` corrupts a copy of
+the baseline and requires the tampered chunk to be detected and named, guarding
+against a vacuously green boot→extract→diff chain.
+
 ## M2 worldgen semantic samples: `sample`
 
 The `worldgen/` fixtures are regenerated without a full server boot — the
@@ -385,13 +420,13 @@ into a scratch destination (`--to <dir>`) validates the produced tree before it
 is committed anywhere: `cargo run -p rivet-oracle -- regenerate --m0 --to /tmp/x`
 must produce a manifest that verifies clean and requires no M2 chunk-concurrency
 provenance (proving the regenerated M0 is not misclassified as a region capture,
-issue #266). `--to` requires exactly one of `--m0`/`--m2`: bare
+issue #266). `--to` requires exactly one of `--m0`/`--m2`/`--full`: bare
 `regenerate --to /dir` and multi-kind `--m0 --m2 --to /dir` are refused (they
-would share one destination across kinds and M2's twin-boot replaces the whole
-directory, silently discarding M0's output), and the derived kinds `--samples`
-and `--text` are refused with `--to` (worldgen samples regenerate the committed
-`fixtures/worldgen` tree; the text corpus regenerates the committed
-`fixtures/text` tree via the Paper reference oracle).
+would share one destination across kinds and the M2/FULL twin-boots replace the
+whole directory, silently discarding the other kind's output), and the derived
+kinds `--samples` and `--text` are refused with `--to` (worldgen samples
+regenerate the committed `fixtures/worldgen` tree; the text corpus regenerates
+the committed `fixtures/text` tree via the Paper reference oracle).
 
 The gate's hash verification is the safety net against a bad regeneration.
 Never hand-edit fixtures; regenerate from a clean run instead. Every boot in the
@@ -408,16 +443,19 @@ come from the committed M2 region payloads via the rivet-nbt codec.
   known-answer vectors (anchor `xxh3_64(b"") = 2d06800538d394c2`). A wrong
   variant or an endianness slip fails loudly instead of silently corrupting every
   digest. Exit 0 = pass, 1 = fail.
-- `hash-paper` — rebuilds `fixtures/chunk-hash/paper/manifest.json` from the
-  committed M2 region payloads. Must be byte-identical (git-clean). The manifest
-  **stamps `status` from each payload's root `Status` string** — never assumed —
-  so the committed capture honestly reports 2 genuine FULL chunks
+- `hash-paper [dir]` — rebuilds `fixtures/chunk-hash/paper/manifest.json` from
+  the committed M2 region payloads. Must be byte-identical (git-clean). The
+  manifest **stamps `status` from each payload's root `Status` string** — never
+  assumed — so the committed M2 capture honestly reports 2 genuine FULL chunks
   (the_nether/0.0 + the_end/0.0; overworld has 0). Its working seed (42) is not
-  a corpus seed, so its sweep coverage is honestly 0/N (see below). Exit 0.
+  a corpus seed, so its sweep coverage is honestly 0/N (see below). The single
+  `dir` argument overrides both source and destination (one tree): point it at a
+  scratch copy of the corpus-forced superflat-full capture (#51) to report that
+  tree's 8 FULL chunks per dimension without touching committed fixtures. Exit 0.
 - `hash-rivet <dir>` — reads a Rivet region tree (`chunk/<dim>/<region>/<cx>.<cz>.nbt`).
   There is no Rivet FULL serialization yet, so it exits **3 UNVERIFIED**, never
-  green (Rivet chunk serialization is #231/#15; #51 must capture status-FULL
-  regions).
+  green (Rivet chunk serialization is #231/#15; the Paper FULL side is now
+  covered by #51's corpus-forced superflat capture).
 - `hash-diff <paper> <rivet>` — compares Paper vs Rivet manifests. Refuses
   differing provenance (seed/algorithm/paper/concurrency) AND refuses a
   Paper-vs-Paper self-diff (both args the same tree — canonicalized, so a
