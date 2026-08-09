@@ -17,8 +17,10 @@
 //! only required to emit id 3; the other ids are read-side-only requirements.
 //!
 //! `wrap_input`/`wrap_output` (Java's `StreamWrapper` functional interface)
-//! unwrap/rewrap a stream with the registered codec. gzip/deflate **read** and
-//! gzip/none **write** are wired on `flate2`; everything else errors.
+//! unwrap/rewrap a stream with the registered codec. gzip read and gzip/none
+//! write are wired on `flate2`; deflate **read** is zlib-wrapped — Java's
+//! `InflaterInputStream` defaults to `nowrap=false`, the RFC 1950 zlib framing
+//! that `flate2`'s `ZlibDecoder` reads — and everything else errors.
 //!
 //! The id `127` custom codec has no `option_name` and so can never be selected
 //! (it is absent from `VERSIONS_BY_NAME`), exactly like Paper.
@@ -29,8 +31,8 @@
 // xxh32 with seed `0x9747b28c`, see CRATES.md), and deflate/lz4 **write** land
 // with the file-backed `RegionFile` read/write wave. deflate write stays
 // deferred (Java `Deflater` is not `flate2`-reproducible in general — D13);
-// lz4 write is not ported. gzip read/write and deflate read are wired on
-// `flate2` here.
+// lz4 write is not ported. gzip read/write and deflate read (zlib-wrapped,
+// via `flate2`'s `ZlibDecoder`) are wired on `flate2` here.
 
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -111,13 +113,28 @@ impl RegionFileVersion {
     /// `server.properties` `region-file-compression`. An unregistered name
     /// keeps the current selection; Paper's error log routes through the
     /// codebase's `log_and_pause_if_in_ide` error-and-continue seam.
+    ///
+    /// The "please use one of" list is derived from [`Self::option_names`] in
+    /// Rivet's registration order. It is NOT Java's ordering: Paper joins
+    /// `VERSIONS_BY_NAME.keySet()`, a fastutil `Object2ObjectOpenHashMap`
+    /// whose iteration order is hash-slot order — an implementation artifact
+    /// (it spells "lz4, deflate, none, gzip" for the pinned fastutil 8.5.18
+    /// default table), not a spec'd format. Rivet keeps its own stable order
+    /// and claims no parity on the exact string.
     pub fn configure(option_name: &str) {
         match Self::from_name(option_name) {
             Some(version) => SELECTED_ID.store(version.id, Ordering::Relaxed),
             None => rivet_util::log_and_pause_if_in_ide(&format!(
-                "Invalid `region-file-compression` value `{option_name}` in server.properties. Please use one of: gzip, deflate, none, lz4"
+                "Invalid `region-file-compression` value `{option_name}` in server.properties. Please use one of: {}",
+                Self::option_names().join(", ")
             )),
         }
+    }
+
+    /// The `option_name`s of every selectable codec, in registration order —
+    /// the `server.properties` `region-file-compression` choices.
+    fn option_names() -> [&'static str; 4] {
+        ["gzip", "deflate", "none", "lz4"]
     }
 
     /// `getSelected()` — the codec `RegionFile.write` uses for new streams.
@@ -144,9 +161,9 @@ impl RegionFileVersion {
             1 => Ok(RegionFileReader::Gzip(flate2::read::MultiGzDecoder::new(
                 input,
             ))),
-            2 => Ok(RegionFileReader::Deflate(
-                flate2::read::DeflateDecoder::new(input),
-            )),
+            2 => Ok(RegionFileReader::Deflate(flate2::read::ZlibDecoder::new(
+                input,
+            ))),
             3 => Ok(RegionFileReader::Identity(input)),
             4 => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -162,7 +179,8 @@ impl RegionFileVersion {
     /// `wrap(OutputStream)` — rewrap a chunk stream with this codec (Java's
     /// `StreamWrapper<OutputStream>`). Only `none` and `gzip` are writable:
     /// D13 pins the gate to `none`, and gzip write is proven in `rivet-nbt`;
-    /// deflate/lz4 writes and custom error.
+    /// deflate/lz4 writes and custom error. The returned writer must be
+    /// finalized with [`RegionFileWriter::finish`] to emit a complete stream.
     pub fn wrap_output<W: Write>(self, output: W) -> io::Result<RegionFileWriter<W>> {
         match self.id {
             1 => Ok(RegionFileWriter::Gzip(flate2::write::GzEncoder::new(
@@ -194,8 +212,10 @@ pub enum RegionFileReader<R: Read> {
     /// `FastBufferedInputStream(GZIPInputStream(in))` — reads concatenated
     /// gzip members like Java (the `rivet-nbt` precedent).
     Gzip(flate2::read::MultiGzDecoder<R>),
-    /// `FastBufferedInputStream(InflaterInputStream(in))` — raw deflate.
-    Deflate(flate2::read::DeflateDecoder<R>),
+    /// `FastBufferedInputStream(InflaterInputStream(in))` — zlib-wrapped
+    /// deflate (Java's `InflaterInputStream` defaults to `nowrap=false`, the
+    /// RFC 1950 zlib framing; NOT raw RFC 1951 deflate).
+    Deflate(flate2::read::ZlibDecoder<R>),
     /// `FastBufferedInputStream(in)` — byte-transparent.
     Identity(R),
 }
@@ -210,7 +230,13 @@ impl<R: Read> Read for RegionFileReader<R> {
     }
 }
 
-/// The unwrapped write stream — Java's `StreamWrapper<OutputStream>` result.
+/// The wrapped write stream — Java's `StreamWrapper<OutputStream>` result.
+///
+/// The variants are private: the only way to recover the underlying writer is
+/// [`RegionFileWriter::finish`], which also finalizes the codec stream. A gzip
+/// stream that is `Write::flush`ed but never `finish`ed is not a valid gzip
+/// member — the 8-byte trailer is missing; `finish` writes it and surfaces any
+/// trailer-write error (dropping the encoder would swallow it silently).
 #[derive(Debug)]
 pub enum RegionFileWriter<W: Write> {
     /// `BufferedOutputStream(GZIPOutputStream(out))` — `Compression::default()`
@@ -218,6 +244,25 @@ pub enum RegionFileWriter<W: Write> {
     Gzip(flate2::write::GzEncoder<W>),
     /// `BufferedOutputStream(out)` — byte-transparent.
     Identity(W),
+}
+
+impl<W: Write> RegionFileWriter<W> {
+    /// Finalize the stream and recover the underlying writer.
+    ///
+    /// gzip: writes the 8-byte trailer, completing the gzip member — the
+    /// counterpart of Java closing the `GZIPOutputStream` (which writes the
+    /// trailer). `Write::flush` deliberately does *not* write the trailer.
+    /// none: returns the identity writer unchanged.
+    ///
+    /// This is the only way to unwrap the writer. `RegionFile` calls it after
+    /// writing a chunk's payload, mirroring `out.close()` on the wrapped
+    /// `OutputStream` in `RegionFile.getChunkDataOutputStream`.
+    pub fn finish(self) -> io::Result<W> {
+        match self {
+            RegionFileWriter::Gzip(w) => w.finish(),
+            RegionFileWriter::Identity(w) => Ok(w),
+        }
+    }
 }
 
 impl<W: Write> Write for RegionFileWriter<W> {
@@ -229,6 +274,8 @@ impl<W: Write> Write for RegionFileWriter<W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        // Flushes compressed data out of the encoder but does NOT write the
+        // gzip trailer — only `RegionFileWriter::finish` does.
         match self {
             RegionFileWriter::Gzip(w) => w.flush(),
             RegionFileWriter::Identity(w) => w.flush(),
@@ -238,7 +285,9 @@ impl<W: Write> Write for RegionFileWriter<W> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::io::{Read as _, Write as _};
+    use std::rc::Rc;
     use std::sync::Mutex;
 
     use super::*;
@@ -362,11 +411,7 @@ mod tests {
             .wrap_output(Vec::new())
             .unwrap();
         writer.write_all(b"chunk payload").unwrap();
-        writer.flush().unwrap();
-        let bytes = match writer {
-            RegionFileWriter::Identity(v) => v,
-            _ => panic!("none must be the identity writer"),
-        };
+        let bytes = writer.finish().unwrap();
         assert_eq!(bytes, b"chunk payload");
         let mut reader = RegionFileVersion::VERSION_NONE
             .wrap_input(bytes.as_slice())
@@ -377,18 +422,24 @@ mod tests {
     }
 
     #[test]
-    fn gzip_wrap_round_trips() {
+    fn gzip_wrap_finish_round_trips() {
         let mut writer = RegionFileVersion::VERSION_GZIP
             .wrap_output(Vec::new())
             .unwrap();
         writer.write_all(b"hello hello hello").unwrap();
-        writer.flush().unwrap();
-        let compressed = match writer {
-            RegionFileWriter::Gzip(g) => g.finish().unwrap(),
-            _ => panic!("gzip must wrap in a GzEncoder"),
-        };
-        // gzip is lossy for tiny inputs only when smaller than the header; this
-        // fixture is long enough to stay a real deflate stream and round-trip.
+        // `finish` is the only way to unwrap the writer, and it is what writes
+        // the gzip trailer — the round-trip below only works on a *finished*
+        // member.
+        let compressed = writer.finish().unwrap();
+        // A finished gzip member: the RFC 1952 magic header (10 bytes) at the
+        // front and the 8-byte trailer (CRC32 + ISIZE) at the back. gzip is
+        // lossy for tiny inputs only when smaller than the header; this fixture
+        // is long enough to stay a real deflate stream and round-trip.
+        assert_eq!(&compressed[..2], &[0x1f, 0x8b]);
+        assert!(
+            compressed.len() >= 18,
+            "must fit header + deflate + trailer"
+        );
         assert_ne!(compressed, b"hello hello hello");
         let mut reader = RegionFileVersion::VERSION_GZIP
             .wrap_input(compressed.as_slice())
@@ -398,20 +449,112 @@ mod tests {
         assert_eq!(out, b"hello hello hello");
     }
 
+    /// A `Write` sink that keeps the produced bytes reachable after the writer
+    /// is dropped — the only way to observe a `RegionFileWriter` that was
+    /// abandoned without `finish`.
+    #[derive(Debug, Clone)]
+    struct SharedSink(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
-    fn deflate_wrap_reads_flate2_deflate() {
+    fn gzip_drop_without_finish_still_finalizes() {
+        // The not-finalized path must not silently lose the trailer: dropping
+        // the writer without `finish` still writes the gzip trailer (flate2's
+        // encoder finalizes on drop, best-effort). `finish` is what surfaces
+        // trailer errors; drop swallows them but never omits the trailer.
+        let sink = SharedSink(Rc::new(RefCell::new(Vec::new())));
+        let mut writer = RegionFileVersion::VERSION_GZIP
+            .wrap_output(SharedSink(Rc::clone(&sink.0)))
+            .unwrap();
+        writer.write_all(b"hello hello hello").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let bytes = sink.0.borrow();
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip magic");
+        assert!(
+            bytes.len() >= 18,
+            "drop must still finalize header + deflate + trailer"
+        );
+        // Trailer tail: ISIZE, the uncompressed length mod 2^32, little-endian.
+        assert_eq!(
+            &bytes[bytes.len() - 4..],
+            &(b"hello hello hello".len() as u32).to_le_bytes(),
+            "ISIZE must be written even on the drop path"
+        );
+    }
+
+    #[test]
+    fn gzip_flush_without_finish_is_not_a_valid_member() {
+        // The not-finalized failure mode: a stream that is written and flushed
+        // but never `finish`ed lacks the 8-byte trailer, so the reader rejects
+        // it. The unfinished stream is built with flate2's `get_ref()` snapshot
+        // (header + deflate, no trailer) because the unfinished state is not
+        // observable through `RegionFileWriter`'s public API — the encoder's
+        // `Drop` would finalize it, silently swallowing the trailer write.
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"hello hello hello").unwrap();
+        encoder.flush().unwrap();
+        let unfinished = encoder.get_ref().clone();
+        let mut reader = RegionFileVersion::VERSION_GZIP
+            .wrap_input(unfinished.as_slice())
+            .unwrap();
+        assert!(
+            reader.read_to_end(&mut Vec::new()).is_err(),
+            "a trailer-less gzip member must be rejected"
+        );
+    }
+
+    #[test]
+    fn deflate_wrap_reads_java_zlib_stream() {
         // The write side is deferred (D13), so the reader is exercised against
-        // a flate2-produced raw-deflate stream — what InflaterInputStream reads.
+        // Java/Paper-compatible bytes: Java's `DeflaterOutputStream` (default
+        // `nowrap=false`) writes RFC 1950 zlib-wrapped deflate, which flate2's
+        // `ZlibEncoder` produces byte-for-byte compatibly (a `0x78` CMF header
+        // byte — deflate with a 32K window — and an adler32 trailer).
         let mut encoder =
-            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(b"deflate payload").unwrap();
         let compressed = encoder.finish().unwrap();
+        assert_eq!(
+            compressed[0], 0x78,
+            "must be a zlib header, not raw deflate"
+        );
         let mut reader = RegionFileVersion::VERSION_DEFLATE
             .wrap_input(compressed.as_slice())
             .unwrap();
         let mut out = Vec::new();
         reader.read_to_end(&mut out).unwrap();
         assert_eq!(out, b"deflate payload");
+    }
+
+    #[test]
+    fn deflate_wrap_rejects_raw_deflate_stream() {
+        // Counterfactual proving the raw-vs-zlib distinction: the id-2 reader
+        // must NOT accept raw (RFC 1951) deflate — Java's `InflaterInputStream`
+        // expects zlib framing and fails on raw streams. This guards against
+        // regressing the reader back to flate2's raw `DeflateDecoder`.
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"deflate payload").unwrap();
+        let raw = encoder.finish().unwrap();
+        assert_ne!(raw[0], 0x78, "raw deflate has no zlib CMF header");
+        let mut reader = RegionFileVersion::VERSION_DEFLATE
+            .wrap_input(raw.as_slice())
+            .unwrap();
+        assert!(
+            reader.read_to_end(&mut Vec::new()).is_err(),
+            "raw deflate must not decode as zlib-wrapped deflate"
+        );
     }
 
     #[test]
