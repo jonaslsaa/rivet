@@ -2,15 +2,18 @@
 //! client-heightmap slice (`Heightmap`, issue #100), the
 //! `GenerationStep.Decoration` enum (proactively ported from the pending
 //! `mc.world.level.levelgen.settings` unit — see `generation_step.rs`), the
-//! the `feature` core slice (the `mc.world.level.levelgen.feature.core` unit —
+//! `feature` core slice (the `mc.world.level.levelgen.feature.core` unit —
 //! `feature_place`'s `#181` codegen dispatch stays a STUB) and its
 //! `configurations` slice (the
 //! `mc.world.level.levelgen.feature.configurations.core` unit), the `placement`
 //! core slice (the
-//! `mc.world.level.levelgen.placement.core` unit), and the
+//! `mc.world.level.levelgen.placement.core` unit), the `carver` type shell
+//! (the `mc.world.level.levelgen.carver` unit's `ConfiguredWorldCarver`
+//! record/identity skeleton — the `#180` algorithm stays a STUB), and the
 //! `WorldGenerationContext` window are ported so far; the generators/feature
 //! worldgen live under the owning manifest unit.
 
+pub mod carver;
 pub mod feature;
 pub mod generation_step;
 pub mod heightmap;
