@@ -6,26 +6,29 @@ export const meta = {
 }
 
 const MAX_REVIEW_ROUNDS = 6
-const FALLBACK_MODEL = args && args.fallbackModel
 
-// A stalled provider call or mid-stream disconnect must cost one retry, not a
-// silently dropped unit: agent() throws on harness-level stall and returns null
-// on terminal API errors. The attempt preamble also makes each retry a distinct
+// A stalled provider call must cost one retry, not a silently dropped unit:
+// agent() throws on harness-level stall exhaustion and returns null on terminal
+// API errors. One extra attempt only — the harness already retries internally.
+// Never retry a user abort. The retry preamble makes the attempt a distinct
 // journal key, so a resumed run never replays a half-dead attempt as completed.
-async function resilientAgent(prompt, opts, attempts = 3) {
+async function resilientAgent(prompt, opts, attempts = 2) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const attemptOpts = { ...opts }
     let attemptPrompt = prompt
     if (attempt > 1) {
-      attemptPrompt = `(Retry ${attempt}/${attempts}: the previous attempt died mid-run from a provider error. Its partial file changes may still be on disk — reconcile, don't assume a clean slate.)\n\n${prompt}`
-      if (FALLBACK_MODEL && attempt === attempts) attemptOpts.model = FALLBACK_MODEL
+      attemptPrompt =
+        `(Retry ${attempt}/${attempts}: the previous attempt did not complete — stall, provider error, or interruption. ` +
+        `Redo the task from the current on-disk state; if your task writes files, reconcile any partial changes from ` +
+        `the prior attempt rather than assuming a clean slate.)\n\n${prompt}`
     }
     try {
-      const result = await agent(attemptPrompt, attemptOpts)
+      const result = await agent(attemptPrompt, opts)
       if (result !== null) return result
       log(`${opts.label}: attempt ${attempt}/${attempts} returned no result`)
     } catch (e) {
-      log(`${opts.label}: attempt ${attempt}/${attempts} failed: ${e && e.message}`)
+      const msg = `${(e && e.message) || e}`
+      if (/abort/i.test(msg)) throw e
+      log(`${opts.label}: attempt ${attempt}/${attempts} failed: ${msg}`)
     }
   }
   return null
@@ -81,7 +84,8 @@ code under working/Paper. HARD RULES (from GOAL.md — read it, plus PORTING.md,
 - Wrapping arithmetic for all Java int/long math; >>> is a logical shift; exact RNG and
   Mth tables; UTF-16-aware string indices where observable. See PORTING.md drift checklist.
 - No todo!() without status=blocked + blocked_reason. Never invent APIs or "improve" logic.
-- Never copy from working/Pumpkin.`
+- Never copy from working/Pumpkin.
+- Use PATH=$HOME/.cargo/bin:$PATH for cargo commands.`
 
 const LENSES = {
   'semantic-drift': `LENS — SEMANTIC DRIFT. Hunt ONLY translation bugs, using PORTING.md's drift checklist:
@@ -159,7 +163,12 @@ async function reviewRound(u, report, round) {
       schema: FINDINGS,
       effort: 'high',
     })))
-  return results.filter(Boolean).flatMap(r => r.findings)
+  const ok = results.filter(Boolean)
+  // All reviewers dead is an infrastructure failure, not a clean review — the
+  // caller must not mistake it for zero findings.
+  if (ok.length === 0) return null
+  if (ok.length < results.length) log(`rev:${u.id}:r${round}: ${results.length - ok.length} reviewer(s) failed after retries`)
+  return ok.flatMap(r => r.findings)
 }
 
 async function converge(u, impl) {
@@ -167,6 +176,16 @@ async function converge(u, impl) {
   let totalFindings = 0
   for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
     const findings = await reviewRound(u, report, round)
+    if (findings === null) {
+      return {
+        ...report,
+        status: 'blocked',
+        blocked_reason: `review round ${round}: all reviewers failed after retries`,
+        review_rounds: round,
+        review_findings: totalFindings,
+        converged: false,
+      }
+    }
     if (findings.length === 0) {
       return { ...report, review_rounds: round, review_findings: totalFindings, converged: true }
     }
@@ -186,7 +205,17 @@ async function converge(u, impl) {
     const fixed = await resilientAgent(fixPrompt(u, report, findings), {
       label: `fix:${u.id}:r${round}`, phase: 'Fix', schema: IMPL_REPORT,
     })
-    if (!fixed || fixed.status === 'blocked') return fixed
+    if (!fixed) {
+      return {
+        ...report,
+        status: 'blocked',
+        blocked_reason: `fix round ${round}: fixer failed after retries`,
+        review_rounds: round,
+        review_findings: totalFindings,
+        converged: false,
+      }
+    }
+    if (fixed.status === 'blocked') return fixed
     report = fixed
     if (lastRound) {
       // Minor-only tail: fixed but unverified — converged with a caveat, not blocked.
@@ -204,7 +233,10 @@ const results = await pipeline(
   args.units,
   u => resilientAgent(implementPrompt(u), { label: `impl:${u.id}`, phase: 'Translate', schema: IMPL_REPORT }),
   (impl, u) => {
-    if (!impl || impl.status === 'blocked') return impl
+    if (!impl) {
+      return { unit: u.id, status: 'blocked', blocked_reason: 'implementer failed after retries', files_written: [], summary: '' }
+    }
+    if (impl.status === 'blocked') return impl
     return converge(u, impl)
   }
 )

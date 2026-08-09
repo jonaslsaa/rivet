@@ -7,7 +7,7 @@ export const meta = {
 
 const ERRORS = {
   type: 'object',
-  required: ['clean', 'groups'],
+  required: ['clean', 'total_errors', 'groups'],
   properties: {
     clean: { type: 'boolean' },
     total_errors: { type: 'integer' },
@@ -46,28 +46,31 @@ correcting the translation against the Java original in working/Paper (PORTING.m
 Never weaken types to () or Box<dyn Any> as an escape hatch.`
 
 const maxRounds = (args && args.maxRounds) || 8
-const FALLBACK_MODEL = args && args.fallbackModel
 let lastTotal = Infinity
 
-// A stalled provider call or mid-stream disconnect must cost one retry, not the
-// whole run or a silently skipped crate: agent() throws on harness-level stall
-// and returns null on terminal API errors. The attempt preamble also makes each
-// retry a distinct journal key, so a resumed run never replays a half-dead
+// A stalled provider call must cost one retry, not the whole run or a silently
+// skipped crate: agent() throws on harness-level stall exhaustion and returns
+// null on terminal API errors. One extra attempt only — the harness already
+// retries internally. Never retry a user abort. The retry preamble makes the
+// attempt a distinct journal key, so a resumed run never replays a half-dead
 // attempt as completed.
-async function resilientAgent(prompt, opts, attempts = 3) {
+async function resilientAgent(prompt, opts, attempts = 2) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const attemptOpts = { ...opts }
     let attemptPrompt = prompt
     if (attempt > 1) {
-      attemptPrompt = `(Retry ${attempt}/${attempts}: the previous attempt died mid-run from a provider error. Its partial file changes may still be on disk — reconcile, don't assume a clean slate.)\n\n${prompt}`
-      if (FALLBACK_MODEL && attempt === attempts) attemptOpts.model = FALLBACK_MODEL
+      attemptPrompt =
+        `(Retry ${attempt}/${attempts}: the previous attempt did not complete — stall, provider error, or interruption. ` +
+        `Redo the task from the current on-disk state; if your task writes files, reconcile any partial changes from ` +
+        `the prior attempt rather than assuming a clean slate.)\n\n${prompt}`
     }
     try {
-      const result = await agent(attemptPrompt, attemptOpts)
+      const result = await agent(attemptPrompt, opts)
       if (result !== null) return result
       log(`${opts.label}: attempt ${attempt}/${attempts} returned no result`)
     } catch (e) {
-      log(`${opts.label}: attempt ${attempt}/${attempts} failed: ${e && e.message}`)
+      const msg = `${(e && e.message) || e}`
+      if (/abort/i.test(msg)) throw e
+      log(`${opts.label}: attempt ${attempt}/${attempts} failed: ${msg}`)
     }
   }
   return null
