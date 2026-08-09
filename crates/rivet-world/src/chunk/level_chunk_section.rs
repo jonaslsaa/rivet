@@ -228,7 +228,16 @@ impl<
                 }
                 if is_randomly_ticking(&state) {
                     ticking_block += palette_count;
-                    self.ticking_blocks.set_min_capacity(SECTION_SIZE);
+                    // Java's setMinCapacity(Math.min((rawLen + size) * 3 / 2,
+                    // 16*16*16)) — a capacity-only allocation hint; its exact
+                    // value is unobservable (`ShortList` contents never change).
+                    // `rawLen` is Java's raw backing-array length (>= the
+                    // logical size); `coordinates.len()` is the logical length,
+                    // so the hint value may differ, but the effect is identical.
+                    self.ticking_blocks.set_min_capacity(std::cmp::min(
+                        (coordinates.len() + self.ticking_blocks.size()) * 3 / 2,
+                        SECTION_SIZE,
+                    ));
                     for packed in coordinates {
                         self.ticking_blocks.add(packed);
                     }
@@ -266,12 +275,14 @@ impl<
     }
 
     /// `read(FriendlyByteBuf)` — adopts the wire containers and the wire counts
-    /// (Java does not recalc on read). Like Java, a read-in section is
-    /// `isClient = true`: `specialCollidingBlocks` is forced to the
+    /// (Java does not recalc on read). Java's read sets `isClient = true`
+    /// (stored only for its `setBlockState` client-side shortcut, which the
+    /// port defers) and forces `specialCollidingBlocks` to the
     /// `CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS` sentinel when the section has
     /// any non-empty block and `maybeHas` a special-colliding state, else 0.
-    /// `tickingBlocks` stays empty (client bookkeeping starts at the first
-    /// `setBlockState`).
+    /// Java leaves `tickingBlocks` untouched here; the port's read-in sections
+    /// are freshly constructed, so the list stays empty (client bookkeeping
+    /// starts at the first `setBlockState`).
     ///
     /// `is_special_colliding` is the caller's `CollisionUtil.isSpecialCollidingBlock`
     /// equivalent — the section is generic over `T`, so the real `BlockBehaviour`
@@ -294,7 +305,6 @@ impl<
         } else {
             0
         };
-        self.ticking_blocks.clear();
     }
 
     /// `tickingBlockCount`.
