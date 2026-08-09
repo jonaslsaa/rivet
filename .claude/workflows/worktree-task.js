@@ -5,11 +5,14 @@ export const meta = {
   phases: [{ title: 'Implement' }, { title: 'Gate' }, { title: 'Fix' }],
 }
 
-const MAX = (args && args.maxRounds) || 6
-if (!args || !args.worktree || !args.task) throw new Error('worktree-task requires {worktree, task}')
-const WT = args.worktree
+// args sometimes arrives JSON-encoded as a string instead of an object.
+const A = typeof args === 'string' ? JSON.parse(args) : args
+const MAX = (A && A.maxRounds) || 6
+if (!A || !A.worktree || !A.task) throw new Error('worktree-task requires {worktree, task}')
+const WT = A.worktree
+const TASK = A.task
 const SLUG = WT.split('/').pop()
-const COMMIT = !args || args.commit === undefined ? true : !!args.commit
+const COMMIT = A.commit === undefined ? true : !!A.commit
 
 const IMPL_REPORT = {
   type: 'object',
@@ -44,6 +47,16 @@ const VERDICT = {
       },
     },
     summary: { type: 'string' },
+    files_inspected: { type: 'array', items: { type: 'string' } },
+  },
+}
+
+const CHECK = {
+  type: 'object',
+  required: ['pass', 'output'],
+  properties: {
+    pass: { type: 'boolean' },
+    output: { type: 'string', description: 'first ~60 lines of the first failing command, or "all green"' },
   },
 }
 
@@ -115,11 +128,13 @@ const REVIEW_SCOPE =
   `untracked files — read those too, they are part of the work${COMMIT ? ', though with commit policy on, uncommitted leftovers are a finding' : ''}). ` +
   `${COMMIT ? 'Agents are expected to commit on this branch; judge the commit stack and the tree.' : 'The work is intentionally UNCOMMITTED (the controller commits): zero commits over origin/main is expected and is NOT a finding; judge the working tree.'} ` +
   `A \`PROGRESS.md\` at the worktree root is this workflow's gitignored resume scaffolding — never ` +
-  `evidence about the deliverable. Do NOT modify any files.`
+  `evidence about the deliverable. You are READ-ONLY: do not Edit/Write any file or create scratch ` +
+  `files inside the worktree (probe in /tmp if you must). List every file you actually read in ` +
+  `files_inspected.`
 
 phase('Implement')
 const impl = await resilientAgent(
-  `${args.task}\n\nWork in the git worktree at \`${WT}\` (its branch is already checked out). ` +
+  `${TASK}\n\nWork in the git worktree at \`${WT}\` (its branch is already checked out). ` +
     `Java source of truth is at \`${WT}/working\` (read-only symlink — never modify or commit from it). ` +
     `${COMMIT_POLICY} Use PATH=\`$HOME/.cargo/bin:$PATH\` for cargo. ` +
     `${RESUME_NOTE}\n\n` +
@@ -148,7 +163,7 @@ let priorDisputes = null
 function fixPrompt(findings) {
   return (
     `Apply the reviewer findings in worktree \`${WT}\`. Findings:\n${JSON.stringify(findings, null, 2)}\n\n` +
-    `Task context: ${args.task}\n\n${RESUME_NOTE}\n\n` +
+    `Task context: ${TASK}\n\n${RESUME_NOTE}\n\n` +
     `Fix correctness/fidelity/process issues; do NOT weaken tests or invent shortcuts; mark any deliberately ` +
     `omitted part // STUB with a reason. If a finding is factually WRONG, do not apply it — list it under ` +
     `disputed with why_wrong. ${COMMIT_POLICY} Re-run the deliverable's check (cargo build/test where ` +
@@ -158,11 +173,37 @@ function fixPrompt(findings) {
 
 for (let r = 1; r <= MAX; r++) {
   phase('Gate')
+  // Mechanical pre-check: never spend a high-effort review round on what a
+  // compiler prints in 30 seconds (13% of historical findings were fmt/clippy/
+  // compile failures, and each poisoned a full review+fix+re-review cycle).
+  const mech = await resilientAgent(
+    `In \`${WT}\` (PATH=\`$HOME/.cargo/bin:$PATH\`), determine what the deliverable touches via ` +
+      `\`git status\` and \`git diff $(git merge-base origin/main HEAD) --stat\`, then run the checks ` +
+      `appropriate to it, stopping at the first failure: for Rust — cargo fmt --check, cargo clippy ` +
+      `-Dwarnings, cargo check, cargo test, each scoped to the touched crates (-p); for shell scripts — ` +
+      `bash -n plus shellcheck if installed, and execute the script if it is safe/read-only; for Python — ` +
+      `python3 -m py_compile. Report results ONLY: do not edit or fix anything.`,
+    { label: `check:${SLUG}:r${r}`, phase: 'Gate', schema: CHECK, effort: 'low' },
+  )
+  if (mech && !mech.pass) {
+    const mechFindings = [{ file: '(build)', description: `mechanical check failed:\n${mech.output}`, severity: 'critical' }]
+    all = all.concat(mechFindings.map((f) => ({ ...f, round: r })))
+    if (r === MAX) break
+    phase('Fix')
+    const fixed = await resilientAgent(fixPrompt(mechFindings), { label: `fix:${SLUG}:r${r}`, phase: 'Fix', schema: FIX_REPORT })
+    if (!fixed) {
+      log(`fix r${r} failed after retries — stopping for controller triage`)
+      return { merge_ready: false, fix_failed: true, findings: all, rounds: r, worktree: WT }
+    }
+    prior = mechFindings
+    priorDisputes = fixed.disputed || []
+    continue
+  }
   const verdict = await resilientAgent(
     `${r === 1
       ? 'You are a FRESH adversarial reviewer of a newly built deliverable. The implementer already ran a self-review — do not trust that; it is not your input.'
       : `You are a FRESH full-lens verifier. Do your own complete review of the CURRENT state FIRST. Only then check the previous round's findings below: confirm each was actually fixed. The fixer disputed some findings as factually wrong (disputes listed after the findings) — a disputed finding counts as resolved ONLY if the dispute holds up against the code.\nPrevious findings:\n${JSON.stringify(prior, null, 2)}\nFixer disputes:\n${JSON.stringify(priorDisputes, null, 2)}`}\n\n` +
-      `Task: ${args.task}\n` +
+      `Task: ${TASK}\n` +
       `Files the implementer reports touching: ${JSON.stringify(impl.files)}\n` +
       `${REVIEW_SCOPE}\n` +
       `Check against the task, the project docs (GOAL.md/PORTING.md/OWNERSHIP.md in the worktree), and the ` +

@@ -5,6 +5,9 @@ export const meta = {
   phases: [{ title: 'Translate' }, { title: 'Review' }, { title: 'Fix' }],
 }
 
+// args sometimes arrives JSON-encoded as a string instead of an object.
+const A = typeof args === 'string' ? JSON.parse(args) : args
+
 const MAX_REVIEW_ROUNDS = 6
 
 // A stalled provider call must cost one retry, not a silently dropped unit:
@@ -224,13 +227,13 @@ async function converge(u, impl) {
   }
 }
 
-if (!args || !Array.isArray(args.units) || args.units.length === 0) {
+if (!A || !Array.isArray(A.units) || A.units.length === 0) {
   throw new Error('translate-wave requires args {waveId, units: [...]}')
 }
-log(`wave ${args.waveId}: ${args.units.length} units`)
+log(`wave ${A.waveId}: ${A.units.length} units`)
 
 const results = await pipeline(
-  args.units,
+  A.units,
   u => resilientAgent(implementPrompt(u), { label: `impl:${u.id}`, phase: 'Translate', schema: IMPL_REPORT }),
   (impl, u) => {
     if (!impl) {
@@ -243,5 +246,5 @@ const results = await pipeline(
 
 const done = results.filter(Boolean)
 const blocked = done.filter(r => r.status === 'blocked')
-log(`wave ${args.waveId} complete: ${done.length}/${args.units.length} reported, ${blocked.length} blocked`)
-return { waveId: args.waveId, results: done }
+log(`wave ${A.waveId} complete: ${done.length}/${A.units.length} reported, ${blocked.length} blocked`)
+return { waveId: A.waveId, results: done }

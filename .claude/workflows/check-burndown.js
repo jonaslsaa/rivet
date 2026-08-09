@@ -5,6 +5,9 @@ export const meta = {
   phases: [{ title: 'Survey' }, { title: 'Fix' }],
 }
 
+// args sometimes arrives JSON-encoded as a string instead of an object.
+const A = typeof args === 'string' ? JSON.parse(args) : args
+
 const ERRORS = {
   type: 'object',
   required: ['clean', 'total_errors', 'groups'],
@@ -45,7 +48,7 @@ by changing another crate's stub, extend that stub minimally (marked // STUB). F
 correcting the translation against the Java original in working/Paper (PORTING.md governs).
 Never weaken types to () or Box<dyn Any> as an escape hatch.`
 
-const maxRounds = (args && args.maxRounds) || 8
+const maxRounds = (A && A.maxRounds) || 8
 let lastTotal = Infinity
 
 // A stalled provider call must cost one retry, not the whole run or a silently
