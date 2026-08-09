@@ -47,6 +47,13 @@
 #[cfg(feature = "blocks")]
 pub mod generated;
 
+/// Hand-written `BlockState` value type over the generated global-id + behavior
+/// tables (issue #228). The "pure table ops, no world types" surface the
+/// worldgen/heightmap/lighting work consumes; gated behind `blocks` like the
+/// tables it decodes.
+#[cfg(feature = "blocks")]
+pub mod block_state;
+
 // ---------------------------------------------------------------------------
 // Ownership A — resources / keys (`net.minecraft.resources`, `net.minecraft.tags`,
 // `net.minecraft.core.registries.Registries`, `net.minecraft.IdentifierException`)

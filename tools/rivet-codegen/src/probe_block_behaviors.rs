@@ -1,0 +1,157 @@
+//! `rivet-codegen probe-block-behaviors` — re-run the behavior-table extractor
+//! against the real Paper 26.2 jar and require byte-identity with the committed
+//! `data/block_behaviors.json`, plus the anchor counts (issue #228).
+//!
+//! This is the *live* half of the block-behavior gate: it boots the real
+//! `Block.BLOCK_STATE_REGISTRY` (evaluating every one of the 32,366 states
+//! through its cached accessors) and asserts, against the running JVM, that a
+//! fresh dump is byte-identical to the committed fixture and that every anchor
+//! the probe documents (state_count 32366, run_count, and the representative
+//! air/stone/water/lava/oak_leaves/glass/torch words) is present with the
+//! pinned state_count. The anchor *values* are not re-checked here — a probe
+//! bit-packing bug would reproduce consistently — so they are pinned
+//! independently by the word-level and field-level decode tests in
+//! `rivet-registry` (`behavior_queries_match_probe_anchors` and
+//! `behavior_word_fields_match_paper_semantics`). Together these guard against
+//! a fixture that was hand-edited, generated from a different jar, or emitted
+//! by a mis-packed probe.
+//!
+//! Requires the same runtime as `extract`: the bundler jar (`--bundler`,
+//! default `working/Paper`), java + javac on PATH or JAVA_HOME, and unzip.
+
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
+
+use crate::extract;
+
+/// The anchor counts a live Paper 26.2 load must reproduce.
+const ANCHORS: &[&str] = &[
+    "state_count",
+    "run_count",
+    "air",
+    "stone",
+    "water",
+    "lava",
+    "oak_leaves",
+    "glass",
+    "torch",
+];
+
+pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
+    let repo_root = extract::find_repo_root()?;
+    let bundler = match bundler_flag {
+        Some(p) => p.to_path_buf(),
+        None => extract::default_bundler(&repo_root),
+    };
+    anyhow::ensure!(
+        bundler.is_file(),
+        "bundler jar not found at {} — pass --bundler or build Paper first",
+        bundler.display()
+    );
+
+    let committed = crate::extract_block_behaviors::default_output(&repo_root);
+    let scratch = repo_root.join("tools/rivet-codegen/.cache/probe-block-behaviors.json");
+
+    let out = crate::extract_block_behaviors::run_extractor(&repo_root, &bundler, &scratch)?;
+    check_probe_stdout(&out)?;
+
+    let fresh_bytes = fs::read(&scratch).context("read fresh fixture")?;
+    let committed_bytes =
+        fs::read(&committed).with_context(|| format!("read committed {}", committed.display()))?;
+    if fresh_bytes != committed_bytes {
+        bail!(
+            "probe-block-behaviors: a fresh Paper dump of block_behaviors.json differs from the \
+             committed fixture ({} bytes fresh vs {} bytes committed) — run \
+             `rivet-codegen extract-block-behaviors` and commit the result",
+            fresh_bytes.len(),
+            committed_bytes.len()
+        );
+    }
+    let _ = fs::remove_file(&scratch);
+    println!(
+        "Block behavior table verified against live Paper (byte-identical, {} bytes, anchors match)",
+        committed_bytes.len()
+    );
+    Ok(())
+}
+
+fn check_probe_stdout(out: &str) -> Result<()> {
+    if !out.contains("PROBE OK") {
+        bail!(
+            "BlockBehaviourProbe did not report PROBE OK — the live Paper state \
+             behaviors disagree with the probe's invariants.\n{out}"
+        );
+    }
+    let probes: std::collections::HashMap<&str, &str> = out
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .collect();
+    for anchor in ANCHORS {
+        if !probes.contains_key(*anchor) {
+            bail!("probe anchor `{anchor}` was not emitted by BlockBehaviourProbe");
+        }
+    }
+    if probes.get("state_count") != Some(&"32366") {
+        bail!(
+            "probe state_count = {:?} but the emitted table expects 32366",
+            probes.get("state_count")
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe_output() -> String {
+        format!(
+            "{}\nPROBE OK\n",
+            ANCHORS
+                .iter()
+                .map(|k| {
+                    // `state_count` must be the pinned 32366 (the checker
+                    // enforces it); the other anchors are opaque words.
+                    if *k == "state_count" {
+                        format!("{k}=32366")
+                    } else {
+                        format!("{k}=1")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    }
+
+    #[test]
+    fn matching_output_passes() {
+        check_probe_stdout(&probe_output()).unwrap();
+    }
+
+    #[test]
+    fn missing_probe_key_fails() {
+        let out = probe_output().replace("torch=1", "");
+        let err = check_probe_stdout(&out).unwrap_err();
+        assert!(err.to_string().contains("was not emitted"), "got: {err}");
+    }
+
+    #[test]
+    fn wrong_state_count_fails() {
+        let out = probe_output().replace("state_count=32366", "state_count=32365");
+        let err = check_probe_stdout(&out).unwrap_err();
+        assert!(err.to_string().contains("expects 32366"), "got: {err}");
+    }
+
+    #[test]
+    fn missing_probe_ok_fails() {
+        let out = probe_output().replace("PROBE OK", "SOMETHING ELSE");
+        let err = check_probe_stdout(&out).unwrap_err();
+        assert!(
+            err.to_string().contains("did not report PROBE OK"),
+            "got: {err}"
+        );
+    }
+}
