@@ -154,8 +154,14 @@ impl RegionFileVersion {
     }
 
     /// `wrap(InputStream)` — unwrap a chunk stream with this codec (Java's
-    /// `StreamWrapper<InputStream>`). gzip/deflate/none are supported; the
-    /// unported codecs error (Java's `StreamWrapper.wrap` throws `IOException`).
+    /// `StreamWrapper<InputStream>`). gzip/deflate/none reads are supported.
+    /// lz4 read is deferred in Rivet: it returns [`io::ErrorKind::Unsupported`]
+    /// while Java reads lz4 fine (`LZ4BlockInputStream`) — a Rivet gap, not a
+    /// Java error. Custom id 127 also returns [`io::ErrorKind::Unsupported`]
+    /// here as Rivet's deferral boundary; Java's reader instead reads a
+    /// modified-UTF-8 id — dispatching to `LZ4BlockInputStream` when it spells
+    /// `"lz4"`, otherwise logging and returning null — its `wrap` never throws,
+    /// while its *writer* throws `UnsupportedOperationException`.
     pub fn wrap_input<R: Read>(self, input: R) -> io::Result<RegionFileReader<R>> {
         match self.id {
             1 => Ok(RegionFileReader::Gzip(flate2::read::MultiGzDecoder::new(
@@ -496,23 +502,41 @@ mod tests {
 
     #[test]
     fn gzip_flush_without_finish_is_not_a_valid_member() {
-        // The not-finalized failure mode: a stream that is written and flushed
-        // but never `finish`ed lacks the 8-byte trailer, so the reader rejects
-        // it. The unfinished stream is built with flate2's `get_ref()` snapshot
-        // (header + deflate, no trailer) because the unfinished state is not
-        // observable through `RegionFileWriter`'s public API — the encoder's
-        // `Drop` would finalize it, silently swallowing the trailer write.
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(b"hello hello hello").unwrap();
-        encoder.flush().unwrap();
-        let unfinished = encoder.get_ref().clone();
-        let mut reader = RegionFileVersion::VERSION_GZIP
-            .wrap_input(unfinished.as_slice())
+        // A stream that is written and flushed but never `finish`ed must not be
+        // a complete gzip member: `flush` pushes compressed data out of the
+        // encoder but must NOT write the 8-byte trailer — only `finish` does.
+        // The shared sink keeps the produced bytes reachable so the flush-only
+        // state can be observed BEFORE the writer is dropped (flate2's encoder
+        // finalizes on drop, best-effort, which would append the trailer and
+        // hide it).
+        let sink = SharedSink(Rc::new(RefCell::new(Vec::new())));
+        let mut writer = RegionFileVersion::VERSION_GZIP
+            .wrap_output(SharedSink(Rc::clone(&sink.0)))
             .unwrap();
-        assert!(
-            reader.read_to_end(&mut Vec::new()).is_err(),
-            "a trailer-less gzip member must be rejected"
-        );
+        writer.write_all(b"hello hello hello").unwrap();
+        writer.flush().unwrap();
+
+        {
+            // Observe the flushed bytes while the writer is still alive: the
+            // gzip magic is present, but the stream must NOT decode as a valid
+            // member — `MultiGzDecoder` hits unexpected-EOF on the missing
+            // trailer. If `flush` ever began finalizing the stream, this read
+            // would round-trip the payload and the assertion would fail.
+            let bytes = sink.0.borrow();
+            assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip magic must be present");
+            let mut reader = RegionFileVersion::VERSION_GZIP
+                .wrap_input(bytes.as_slice())
+                .unwrap();
+            assert!(
+                reader.read_to_end(&mut Vec::new()).is_err(),
+                "flush must not finalize a gzip member: trailer-less bytes must be rejected"
+            );
+        }
+
+        // Dropping the writer finalizes best-effort and appends the trailer;
+        // that path is `gzip_drop_without_finish_still_finalizes`'s concern,
+        // so the writer is just released here after the flush-only state was
+        // verified.
     }
 
     #[test]
