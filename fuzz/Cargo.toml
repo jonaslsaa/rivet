@@ -27,6 +27,7 @@ rivet-nbt = { path = "../crates/rivet-nbt" }
 rivet-protocol = { path = "../crates/rivet-protocol" }
 rivet-serialization = { path = "../crates/rivet-serialization" }
 rivet-util = { path = "../crates/rivet-util" }
+serde_json = { workspace = true }
 
 # The `packets` feature forwards to `rivet-protocol/packets` (the generated
 # packet-ID tables + packet bodies). The generic workspace invocation
@@ -35,6 +36,18 @@ rivet-util = { path = "../crates/rivet-util" }
 # explicitly via `cargo check/clippy -p rivet-fuzz --features packets`.
 [features]
 packets = ["rivet-protocol/packets"]
+
+# The `src/lib.rs` library is the workspace-shared home of the factored
+# target bodies (`targets`), the panic filter (`common`), seed discovery
+# (`seeds`), and the deterministic seed regressions (`regress`, compiled only
+# under `cargo test`). Each [[bin]] below is a thin shim handing raw bytes to
+# the corresponding `targets::*` body, so libFuzzer and the regressions drive
+# the exact same code. The library also lets `cargo test -p rivet-fuzz` build
+# and run the regressions on the pinned stable toolchain — the bins stay
+# `#![no_main]` (linked only by cargo-fuzz on nightly).
+[lib]
+name = "rivet_fuzz"
+path = "src/lib.rs"
 
 [[bin]]
 name = "snbt"
@@ -53,6 +66,27 @@ bench = false
 [[bin]]
 name = "nbt_binary_visitor"
 path = "fuzz_targets/nbt_binary_visitor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nbt_binary_roundtrip"
+path = "fuzz_targets/nbt_binary_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "data_io_modified_utf8"
+path = "fuzz_targets/data_io_modified_utf8.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_compressed_decode"
+path = "fuzz_targets/codec_compressed_decode.rs"
 test = false
 doc = false
 bench = false

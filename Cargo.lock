@@ -549,6 +549,7 @@ dependencies = [
  "rivet-protocol",
  "rivet-serialization",
  "rivet-util",
+ "serde_json",
 ]
 
 [[package]]
