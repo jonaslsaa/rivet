@@ -2103,9 +2103,9 @@ fn run_move(args: &Args) -> Result<(), RunnerError> {
 /// 3. the client transcript is judged by [`transcript::rivet_dwell_verdict`]:
 ///    outcome `dwelled`, lifecycle containing login and spawn, the pinned Azalea
 ///    revision, wall-clock survival past 30 s, >= 30 challenges, a 1:1
-///    challenge->echo pairing, and a challenge span across the window, and
-///    (issue #160: controlled negative) the verdict rejects a transcript whose
-///    challenge->echo relationship is missing,
+///    challenge->echo pairing, and a challenge span across the window — the
+///    verdict rejects a transcript whose 1:1 challenge->echo relationship is
+///    missing,
 /// 4. a controlled negative: tamper the compared survival scalar
 ///    (`connected_wall_seconds`) to 0 and require the real verdict path to
 ///    refuse PASS — the acceptance cannot pass vacuously.
