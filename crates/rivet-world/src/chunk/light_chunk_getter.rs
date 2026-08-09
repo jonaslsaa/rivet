@@ -5,16 +5,19 @@
 //! `onLightUpdate(LightLayer, SectionPos)` no-op, and `getLevel()`.
 //!
 //! The port keeps `get_chunk_for_lighting`. `onLightUpdate(LightLayer,
-//! SectionPos)` is a default no-op, but `LightLayer` and `SectionPos` are not
-//! ported yet, so the method is omitted rather than stubbed with substitutes;
-//! the owning unit re-adds it. `getLevel()` (`BlockGetter`) is omitted with
-//! the world/access units.
+//! SectionPos)` is a default no-op, but the method is omitted rather than
+//! stubbed with substitutes: `LightLayer` landed with the lighting seam
+//! (#184), yet no light-engine consumer drives `onLightUpdate` yet, so it is
+//! re-added with the owning engine unit. `getLevel()` (`BlockGetter`) is
+//! omitted with the world/access units.
 //!
-//! RivetTodo(#184): `onLightUpdate(LightLayer, SectionPos)` and `getLevel()`
-//! (`BlockGetter`) are omitted — `LightLayer`/`SectionPos` are deferred with
-//! the lighting engine unit (#184) and `BlockGetter` with the world/access
-//! unit (#232), so this module ports `getChunkForLighting` alone; the owning
-//! units re-add the methods when those types land.
+//! RivetTodo(#184): `onLightUpdate(LightLayer, SectionPos)` is omitted — the
+//! light-engine consumer that would call it is not ported (the
+//! `mc.world.level.lighting` units); `LightLayer` itself now lives in
+//! `crate::lighting::light_layer`. `getLevel()` (`BlockGetter`) is deferred
+//! with the world/access unit (#232), so this module ports
+//! `getChunkForLighting` alone; the owning units re-add the methods when the
+//! engine/access types land.
 //!
 //! The value is a `Fn(i32, i32) -> Option<T>` closure resolving the chunk
 //! back-reference by chunk coordinates, following the pure-value pattern of

@@ -9,6 +9,7 @@
 
 pub mod keepalive;
 pub mod level;
+pub mod lighting;
 pub mod movement_math;
 pub mod movement_trace;
 pub mod network;
