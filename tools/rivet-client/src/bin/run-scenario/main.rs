@@ -1071,20 +1071,18 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
     println!("    pinned unmodified Azalea client through offline login, configuration (registry");
     println!("    sync), and the play handoff to spawn, receiving exactly the deterministic");
     println!(
-        "    {}-chunk send-set at Rivet's fixed superflat spawn y={}. The connection is proven",
+        "    {}-chunk send-set at Rivet's fixed superflat spawn y={}.",
         transcript::JOIN_CHUNK_COUNT,
         transcript::JOIN_SPAWN_Y
     );
+    println!("    The connection is proven two ways: the rivet log shows 'connection established'");
+    println!("    (only the real rivet-server emits it), and the client transcript is");
+    println!("    outcome=spawned with lifecycle init->login->spawn, the pinned Azalea");
     println!(
-        "    two ways: the rivet log shows 'connection established' (only the real rivet-server"
-    );
-    println!("    emits it), and the client transcript is outcome=spawned with lifecycle");
-    println!(
-        "    init->login->spawn, the pinned Azalea revision, 117 chunks, and spawn y={} —",
+        "    revision, 117 chunks, and spawn y={} — which a stale pre-play build, a",
         transcript::JOIN_SPAWN_Y
     );
-    println!("    which a stale pre-play build, a fake/non-Rivet endpoint, or a Paper-like y=-60");
-    println!("    spawn all fail.");
+    println!("    fake/non-Rivet endpoint, or a Paper-like y=-60 spawn all fail.");
     println!("    artifacts: {}", work.display());
     Ok(())
 }
@@ -1251,15 +1249,16 @@ fn prove_move_differential_non_vacuous(
 /// *this run* — never a hardcoded snapshot. A future walk-geometry change (the
 /// fixture, the client's walk length, spawn offset) therefore cannot leave a
 /// stale success claim quoting an earlier run's coordinates: the verdict always
-/// narrates the live value. If the transcripts ever diverge here (a shape change
-/// or a comparator regression), the narration names both sides instead of
-/// printing one value as if they matched.
+/// narrates the live value. If the transcripts ever diverge here (a shape
+/// change or a comparator regression), the narration names both sides instead
+/// of printing one value as if they matched.
 ///
-/// `last_sent` presence is judged by [`transcript::normalize_move`]: an absent raw value is
-/// normalized to explicit JSON `null`, so a `null` or missing `walk.last_sent`
-/// means the transcript carried no value — never a value to compare. Treating it
-/// as "same last_sent null" would print a successful-looking `null` on a schema
-/// regression; instead the narration surfaces the missing side(s) exactly.
+/// `last_sent` presence is judged by [`transcript::normalize_move`]: an absent
+/// raw value is normalized to explicit JSON `null`, so a `null` or missing
+/// `walk.last_sent` means the transcript carried no value — never a value to
+/// compare. Treating it as "same last_sent null" would print a successful-looking
+/// `null` on a schema regression; instead the narration surfaces the missing
+/// side(s) exactly.
 fn verdict_last_sent(paper_t: &Value, rivet_t: &Value) -> String {
     fn present(v: &Value) -> Option<&Value> {
         match v {
