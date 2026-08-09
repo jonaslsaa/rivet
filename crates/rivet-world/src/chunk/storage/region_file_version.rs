@@ -161,9 +161,11 @@ impl RegionFileVersion {
     /// here as Rivet's deferral boundary; Java never reaches this wrapper for
     /// id 127 — `RegionFile.createChunkInputStream` special-cases it first,
     /// reading a modified-UTF-8 id, logging "Unrecognized custom compression"
-    /// / "Invalid custom compression id", and returning null. `VERSION_CUSTOM`'s
-    /// registered input wrapper throws `UnsupportedOperationException` but is
-    /// never invoked on read — only the write-side output wrapper reaches it.
+    /// / "Invalid custom compression id", and returning null. Both of
+    /// `VERSION_CUSTOM`'s registered wrappers throw
+    /// `UnsupportedOperationException`; neither is reachable through
+    /// `RegionFile` — the read side special-cases id 127, and the id is absent
+    /// from `VERSIONS_BY_NAME`, so `getSelected()` never selects it.
     pub fn wrap_input<R: Read>(self, input: R) -> io::Result<RegionFileReader<R>> {
         match self.id {
             1 => Ok(RegionFileReader::Gzip(flate2::read::MultiGzDecoder::new(
