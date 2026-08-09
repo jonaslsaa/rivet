@@ -35,8 +35,17 @@
 //! ported — `LevelLightEngine`/`StarLightEngine` live with the
 //! `mc.world.level.lighting` units and `BlendingData` with the blending unit.
 //! RivetTodo(#287): `getHeight` primes a missing heightmap on demand in Java
-//! (`Heightmap.primeHeightmaps`); the prime walk needs the per-state
-//! predicates, deferred with the worldgen heightmap unit. RivetTodo(#185): the
+//! (`Heightmap.primeHeightmaps`). The port reads the never-primed default
+//! `minY - 1` instead (see [`get_height_at`]). The prime walk needs the
+//! per-state `isAir`/`blocksMotion`/`hasFluid`/`isLeaves` predicates
+//! (`Heightmap.Types.isOpaque`); those live at the construction sites
+//! (`superflat::BlockFlags`, the server's local flags) and with the deferred
+//! block-behavior/worldgen units, not on this base, so the create-on-read side
+//! effect is deferred with the worldgen heightmap unit rather than storing the
+//! predicates speculatively here. No production caller reads a missing type —
+//! the server send path reads `client_heightmaps()` (always the three primed
+//! `Usage.CLIENT` types) and the no-arg `getHeight` accessor — so the
+//! divergence is test-only. RivetTodo(#185): the
 //! `mc.world.level.chunk.status` unit replaces the slice-local `ChunkStatus`
 //! with the real status ladder and `isOrAfter`. RivetTodo(#216): the
 //! `setBlockState` mutators (section set-block/fluid + heightmap `update`
@@ -308,9 +317,10 @@ where
     }
 
     /// `ChunkAccess.getHeight(Types, x, z)` — `getFirstAvailable(x & 15, z & 15)
-    /// - 1`. Java primes a missing heightmap on demand (and logs in IDE for a
-    /// `LevelChunk`); the prime walk needs the per-state predicates, so a
-    /// missing entry reads as the never-primed default `minY - 1`.
+    /// - 1`. Java primes a missing heightmap on demand
+    /// (`getOrCreateHeightmapUnprimed` + `Heightmap.primeHeightmaps`) and logs
+    /// in IDE for a `LevelChunk`; the port reads the never-primed default
+    /// `minY - 1` instead.
     ///
     /// Named `get_height_at` (Java has two `getHeight` overloads — the
     /// no-arg `LevelHeightAccessor` accessor and this heightmap read; Rust
@@ -318,7 +328,8 @@ where
     /// `LevelChunk::get_height_at`).
     ///
     /// RivetTodo(#287): the on-demand `primeHeightmaps` fallback is not
-    /// ported (see the worldgen heightmap unit).
+    /// ported (see the module doc for the scope argument — the per-state
+    /// predicates live at the construction sites, not on this base).
     pub fn get_height_at(&self, ty: Types, x: i32, z: i32) -> i32 {
         let min_y = self.height_accessor.get_min_y();
         self.heightmaps[ty as usize]
@@ -757,10 +768,19 @@ mod tests {
 
     #[test]
     fn missing_heightmap_reads_as_unprimed_default() {
-        // No entry: Java primes on demand (deferred #287); the port reads the
-        // never-primed default `minY - 1`.
+        // A base with no heightmap entries (the concrete types prime them).
         let base = default_base();
+        assert!(base.heightmaps().iter().all(Option::is_none));
+        // A missing entry reads as the never-primed default `minY - 1`.
         assert_eq!(base.get_height_at(Types::MotionBlocking, 0, 0), -65);
+        assert_eq!(base.get_height_at(Types::WorldSurfaceWg, 15, 15), -65);
+        // Java would create-on-read (prime) here; the port's documented
+        // divergence (RivetTodo #287) is scoped to the never-primed default
+        // and is test-only — the server send path reads `client_heightmaps()`
+        // (always the primed `Usage.CLIENT` types) and the no-arg `getHeight`
+        // accessor, never a missing type. The read must not mutate: a missing
+        // entry stays missing after the call.
+        assert!(!base.has_primed_heightmap(Types::MotionBlocking));
     }
 
     #[test]
@@ -836,19 +856,34 @@ mod tests {
 
     #[test]
     fn get_pos_from_tag_corrects_wrong_chunk_like_java() {
-        // `BlockEntity.getPosFromTag` with a chunk base at (1, -2).
-        let base = ChunkPos::new(1, -2);
-        let mut tag = CompoundTag::new();
-        tag.put_int("x", 20); // chunk 1, offset 4
-        tag.put_int("y", 64);
-        tag.put_int("z", -27); // chunk -2, offset 5
-        let pos = get_pos_from_tag(Some(&base), &tag);
-        // x stays 20 (already chunk 1); z is re-anchored to -2*16+5 = -27.
         use rivet_registry::core::Vec3iLike;
-        assert_eq!(pos.coords(), (20, 64, -27));
+        // `BlockEntity.getPosFromTag` with a chunk base at (2, -3): x spans
+        // [32, 47], z spans [-48, -33].
+        let base = ChunkPos::new(2, -3);
+        // x = 5 (section 0) and z = -21 (section -2) are in genuinely different
+        // chunks than the base (sections 2 and -3), so both coordinates are
+        // re-anchored to the base chunk's local offsets: 2*16 + (5 & 15) = 37,
+        // -3*16 + (-21 & 15) = -48 + 11 = -37.
+        let mut tag = CompoundTag::new();
+        tag.put_int("x", 5);
+        tag.put_int("y", 64);
+        tag.put_int("z", -21);
+        let pos = get_pos_from_tag(Some(&base), &tag);
+        assert_eq!(pos.coords(), (37, 64, -37));
+        // When only one coordinate is in the wrong chunk, Java still re-anchors
+        // both (`i != base.x() || j != base.z()`); z = -37 is already in the
+        // base chunk, so re-anchoring it is a no-op at value level.
+        let mut tag_z_ok = CompoundTag::new();
+        tag_z_ok.put_int("x", 5);
+        tag_z_ok.put_int("y", 64);
+        tag_z_ok.put_int("z", -37); // section -3 == base.z(), offset 11
+        assert_eq!(
+            get_pos_from_tag(Some(&base), &tag_z_ok).coords(),
+            (37, 64, -37)
+        );
         // A `None` base (items) skips the correction.
         let pos = get_pos_from_tag(None, &tag);
-        assert_eq!(pos.coords(), (20, 64, -27));
+        assert_eq!(pos.coords(), (5, 64, -21));
     }
 
     /// A 37-long 9-bit storage of all-`1` offsets — what a flat stone floor
