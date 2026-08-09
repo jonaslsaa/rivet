@@ -58,8 +58,10 @@ use rivet_protocol::game::serversbound_move_player_packet::{
     ServerboundMovePlayerPacket, pos_codec, pos_rot_codec, rot_codec, status_only_codec,
 };
 use rivet_protocol::generated::packets::play::serverbound::PacketType as ServerboundPacketType;
+use rivet_protocol::protocol::common::clientbound_disconnect::ClientboundDisconnectPacket;
 use rivet_protocol::protocol::common::clientbound_keep_alive::ClientboundKeepAlivePacket;
 use rivet_protocol::protocol::common::serverbound_keep_alive::ServerboundKeepAlivePacket;
+use rivet_text::Component;
 
 use crate::server::keepalive::{KEEPALIVE_LIMIT_NS, KeepaliveResponseOutcome, KeepaliveState};
 use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
@@ -100,6 +102,13 @@ pub const MAX_PENDING_SESSION_FRAMES: usize = 1024;
 /// `keep_alive` id 4, which the network-side `ConnectionKeepaliveSink` uses.
 pub const PLAY_CLIENTBOUND_KEEP_ALIVE_ID: u32 =
     rivet_protocol::generated::packets::play::clientbound::PacketType::KeepAlive.id();
+
+/// The clientbound `disconnect` packet id in the play protocol — the play
+/// clientbound table's `minecraft:disconnect` is 32 (the configuration table
+/// registers the same packet at id 2, but the invalid-movement kick runs in
+/// play, so only the play id is needed here).
+pub const PLAY_CLIENTBOUND_DISCONNECT_ID: u32 =
+    rivet_protocol::generated::packets::play::clientbound::PacketType::Disconnect.id();
 
 /// The tick-owned play session manager — one instance per server, owning the
 /// `ServerLevel` (tick-confined), the `PlaySender`, the player indices, and the
@@ -599,17 +608,40 @@ impl PlayerSessionManager {
             TeleportAckOutcome::InvalidMovementKick => {
                 tracing::warn!(%id, "teleport ack with no pending teleport");
                 trace_teleport_ack(id, ack_id, AckOutcome::Invalid, None);
-                let _ = ctx.connections.send(
-                    id,
-                    OutboundEvent::Disconnect {
-                        reason: DisconnectReason::InvalidPlayerMovement,
-                    },
-                );
+                self.disconnect_invalid_movement(ctx, id);
             }
             TeleportAckOutcome::Ignored => {
                 trace_teleport_ack(id, ack_id, AckOutcome::Ignored, None);
             }
         }
+    }
+
+    /// Paper `ServerGamePacketListenerImpl.disconnect(reason)` (the
+    /// `invalid_player_movement` kick) — `send(new
+    /// ClientboundDisconnectPacket(reason), PacketSendListener.thenRun(() ->
+    /// disconnect(reason)))`. The reason packet is encoded and queued *before*
+    /// the `OutboundEvent::Disconnect` so the network side flushes the reason
+    /// frame before closing (`handle_outbound` drains queued frames first; issue
+    /// #86, #158). If the reason cannot be encoded or queued the disconnect still
+    /// happens, with the explicit `Unsupported` reason — never silently dropped.
+    fn disconnect_invalid_movement(&mut self, ctx: &mut TickContext, id: ConnectionId) {
+        let packet = ClientboundDisconnectPacket::new(Component::translatable(
+            "multiplayer.disconnect.invalid_player_movement",
+        ));
+        let reason = match self
+            .sender
+            .encode_body(ClientboundDisconnectPacket::stream_codec(), &packet)
+            .and_then(|body| {
+                self.sender
+                    .send_packet(ctx.connections, id, PLAY_CLIENTBOUND_DISCONNECT_ID, &body)
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(()) => DisconnectReason::InvalidPlayerMovement,
+            Err(e) => DisconnectReason::Unsupported(format!("send disconnect: {e}")),
+        };
+        let _ = ctx
+            .connections
+            .send(id, OutboundEvent::Disconnect { reason });
     }
 
     /// `ServerGamePacketListenerImpl.handleMovePlayer` (the M1 subset) — the
@@ -650,12 +682,7 @@ impl PlayerSessionManager {
             packet.get_y_rot(0.0),
             packet.get_x_rot(0.0),
         ) {
-            let _ = ctx.connections.send(
-                id,
-                OutboundEvent::Disconnect {
-                    reason: DisconnectReason::InvalidPlayerMovement,
-                },
-            );
+            self.disconnect_invalid_movement(ctx, id);
             return;
         }
         let Some(session) = self.sessions.get_mut(&id) else {
@@ -1681,6 +1708,85 @@ mod tests {
             Some(DisconnectReason::InvalidPlayerMovement),
             "NaN position is the Paper-faithful kick"
         );
+    }
+
+    /// The DoD payload-ordering contract (#86, #158): `disconnect_invalid_
+    /// movement` encodes + queues the `ClientboundDisconnectPacket` frame (a
+    /// `Packet` event for `PLAY_CLIENTBOUND_DISCONNECT_ID`) *before* the
+    /// `OutboundEvent::Disconnect` — the per-connection task flushes queued
+    /// frames before closing, so the client receives the reason. The channel is
+    /// FIFO, so draining in order pins the ordering the tests above skip past
+    /// (`drained_disconnect_reason` drops `Packet` events). The queued body is
+    /// decoded too, proving it is the invalid_player_movement reason and not
+    /// just some packet.
+    #[test]
+    fn invalid_movement_kick_queues_disconnect_frame_before_disconnect() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+
+        // NaN rotation fires `containsInvalidValues` — the same kick the
+        // existing tests drain past.
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_rot_frame(f32::NAN, 30.0))],
+        );
+        assert_eq!(manager.move_frames_seen(), 1, "body parsed before the gate");
+
+        let mut events = Vec::new();
+        while let Ok(event) = out_rx.try_recv() {
+            events.push(event);
+        }
+        assert!(
+            !events.is_empty(),
+            "the tick queued at least the reason frame and the Disconnect"
+        );
+
+        let reason_frame = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    OutboundEvent::Packet { frame }
+                        if frame_parts(frame).0 == PLAY_CLIENTBOUND_DISCONNECT_ID
+                )
+            })
+            .expect("a disconnect reason frame is queued");
+        let disconnect_at = events
+            .iter()
+            .position(|e| matches!(e, OutboundEvent::Disconnect { .. }))
+            .expect("a Disconnect is queued");
+        assert!(
+            reason_frame < disconnect_at,
+            "reason frame precedes the Disconnect (frame@{reason_frame} < disconnect@{disconnect_at})"
+        );
+
+        let (packet_id, body) = match &events[reason_frame] {
+            OutboundEvent::Packet { frame } => frame_parts(frame),
+            _ => unreachable!("reason_frame was located as a Packet"),
+        };
+        assert_eq!(packet_id, PLAY_CLIENTBOUND_DISCONNECT_ID);
+        let mut input = FriendlyByteBuf::new(bytes::BytesMut::from(body.as_slice()));
+        let decoded = ClientboundDisconnectPacket::stream_codec()
+            .decode(&mut input)
+            .expect("the queued reason body decodes");
+        assert_eq!(
+            decoded.reason(),
+            &Component::translatable("multiplayer.disconnect.invalid_player_movement"),
+            "the queued reason is the Paper-faithful kick reason"
+        );
+        assert_eq!(
+            input.readable_bytes(),
+            0,
+            "the reason body is fully consumed"
+        );
+        match &events[disconnect_at] {
+            OutboundEvent::Disconnect {
+                reason: DisconnectReason::InvalidPlayerMovement,
+            } => {}
+            other => panic!("expected InvalidPlayerMovement Disconnect, got {other:?}"),
+        }
     }
 
     /// A `move_player` frame for a connection whose handoff has not landed is

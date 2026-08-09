@@ -116,10 +116,10 @@ pub enum DisconnectReason {
     /// fails validation (issue #158): a NaN position / non-finite rotation in
     /// `handleMovePlayer` or a teleport ack whose id matches with no pending
     /// position in `handleAcceptTeleportPacket`. The reason records Paper's
-    /// `multiplayer.disconnect.invalid_player_movement` translation key. No
-    /// clientbound disconnect body is transmitted for it yet — `ClientboundDisconnectPacket`
-    /// is still a STUB — so the observable behavior is the socket closing with
-    /// a server-side log, not the client showing the key.
+    /// `multiplayer.disconnect.invalid_player_movement` translation key. The
+    /// session manager encodes the same key into a `ClientboundDisconnectPacket`
+    /// and queues it *before* this disconnect so the frame flushes ahead of the
+    /// close (issue #86) — the client decodes and reports the key.
     #[error("multiplayer.disconnect.invalid_player_movement")]
     InvalidPlayerMovement,
     /// Slice-local outbound-overload disconnect: the tick side dropped this
