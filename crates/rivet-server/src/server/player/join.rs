@@ -68,8 +68,9 @@
 //! normalized capture's (or the raw capture's) positional order. It also
 //! normalizes racy ids to fixed values (the teleport id, entity_event's
 //! `entityId -> 1`, `eventId -> 0`); the deterministic real values this slice
-//! emits (entity id 1, event id 24) are the Paper source facts, asserted inline
-//! in `join_burst.rs`. The teleport id is *not* a fixed 0: `place_new_player`
+//! emits (event id 24, and the server-allocated entity id — 1 for the M1
+//! single player, GitHub #222) are the Paper source facts, asserted inline in
+//! `join_burst.rs`. The teleport id is *not* a fixed 0: `place_new_player`
 //! runs the live `awaitingTeleport` machine (issue #158) and embeds the
 //! session's real id (1 for the spawn teleport), which `join_burst.rs` pins by
 //! rewriting the fixture's leading id varint.
@@ -282,11 +283,11 @@ pub fn place_new_player(
 
     // `this.sendPlayerPermissionLevel(player)` — `ClientboundEntityEventPacket`
     // with `EntityEvent.PLAYER_OP_PERMISSION_LEVEL_ALL` (24): the op-level
-    // event. The entity id is the login `playerId` (1 on the M1 world), encoded
-    // as a 4-byte BE int (NOT a VarInt — the packet's wire quirk). The capture's
-    // id-34 body normalizes `entityId -> 1, eventId -> 0`, so the fixture does
-    // not pin the real event id; Paper's source sends 24, asserted inline in
-    // `join_burst.rs`.
+    // event. The entity id is the player's `Entity.getId()` (the server-allocated
+    // entity id), encoded as a 4-byte BE int (NOT a VarInt — the packet's wire
+    // quirk). The capture's id-34 body normalizes `entityId -> 1, eventId -> 0`,
+    // so the fixture does not pin the real event id; Paper's source sends 24,
+    // asserted inline in `join_burst.rs`.
     let body = sender.encode_body(
         entity_event_codec(),
         &ClientboundEntityEventPacket::new(player.player_id(), PERMISSION_LEVEL_ALL),

@@ -64,6 +64,7 @@ use rivet_protocol::protocol::common::serverbound_keep_alive::ServerboundKeepAli
 use rivet_text::Component;
 
 use crate::server::keepalive::{KEEPALIVE_LIMIT_NS, KeepaliveResponseOutcome, KeepaliveState};
+use crate::server::level::entity_id_allocator::EntityIdAllocator;
 use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
 use crate::server::movement_math::{
     DEFAULT_MOVED_TOO_QUICKLY_MULTIPLIER, MoveState, build_move_targets, contains_invalid_values,
@@ -111,11 +112,19 @@ pub const PLAY_CLIENTBOUND_DISCONNECT_ID: u32 =
     rivet_protocol::generated::packets::play::clientbound::PacketType::Disconnect.id();
 
 /// The tick-owned play session manager — one instance per server, owning the
-/// `ServerLevel` (tick-confined), the `PlaySender`, the player indices, and the
-/// per-connection pending-frame buffers. Confined to the tick thread (moved in
-/// via `Server::serve`); the counters are plain fields readable by tests.
+/// `ServerLevel` (tick-confined), the entity-id allocator (`ServerLevel.
+/// ENTITY_COUNTER` is `static`, so the counter lives here at the server play
+/// scope, shared across every level — GitHub #222), the `PlaySender`, the
+/// player indices, and the per-connection pending-frame buffers. Confined to
+/// the tick thread (moved in via `Server::serve`); the counters are plain
+/// fields readable by tests.
 pub struct PlayerSessionManager {
     level: ServerLevel,
+    /// `ServerLevel.ENTITY_COUNTER` + `getNextEntityId()` (GitHub #222) — the
+    /// server-global entity-id allocator, tick-thread-owned. Java's counter is
+    /// `static` to `ServerLevel`, so one counter is shared across dimensions and
+    /// world instances; the manager is that shared scope in Rivet.
+    entity_ids: EntityIdAllocator,
     sender: PlaySender,
     join: JoinConfig,
     indices: PlayerIndices,
@@ -220,6 +229,7 @@ impl PlayerSessionManager {
         );
         PlayerSessionManager {
             level: config.level,
+            entity_ids: EntityIdAllocator::new(),
             sender,
             join: config.join,
             indices: PlayerIndices::default(),
@@ -299,6 +309,13 @@ impl PlayerSessionManager {
         self.sessions.get(&id).map(|s| s.player.pitch())
     }
 
+    /// The entity id of a live session (GitHub #222 test observability: proves
+    /// each session's `ServerPlayer` carries a distinct non-zero id). `None`
+    /// when the connection has no session.
+    pub fn player_entity_id(&self, id: ConnectionId) -> Option<i32> {
+        self.sessions.get(&id).map(|s| s.player.player_id())
+    }
+
     /// The first `firstGood` anchor of a live session (issue #158 test
     /// observability for the per-tick `resetPosition` mirror). `None` when the
     /// connection has no session.
@@ -333,14 +350,20 @@ impl PlayerSessionManager {
     ) {
         // The M1 world spawn: the level's respawn geometry (the superflat
         // `(0, -63, 0)` spawn, zero rotation, survival). The per-player
-        // `ServerPlayer` carries the authenticated profile + the login `playerId`
-        // (the deterministic superflat world's first entity id is 1).
+        // `ServerPlayer` carries the authenticated profile + the entity id:
+        // Paper's `new ServerPlayer(...)` runs `Entity`'s constructor, which
+        // calls `level.getNextEntityId()` — the server-global `ENTITY_COUNTER`
+        // (GitHub #222). The allocation happens BEFORE the join burst fires, so
+        // a burst failure consumes the id without registering it — exactly
+        // Paper, which never rolls the counter back. Each session gets a
+        // distinct non-zero id, so concurrent sessions never collide.
+        let entity_id = self.entity_ids.next_id();
         let respawn = self.level.get_respawn_data();
         let pos = respawn.pos();
         let player = ServerPlayer::new(
             connection_id,
             profile,
-            1,
+            entity_id,
             rivet_registry::core::Vec3::new(
                 pos.get_x() as f64,
                 pos.get_y() as f64,
@@ -400,6 +423,14 @@ impl PlayerSessionManager {
             self.indices.remove(&player.uuid());
             return;
         }
+
+        // The player has joined the level: `addEntity`-equivalent registration —
+        // `chunkSource.hasEntityWithId` now reports the id in use, so later
+        // allocations skip it. This runs only after the burst SUCCEEDED: a
+        // failed burst (rollback above) consumed the allocated id without
+        // registering it, the faithful Paper failure behavior. Released when the
+        // session's connection is lost (`prune_lost`).
+        self.entity_ids.mark_in_use(entity_id);
 
         // The session is live: the tick-owned player (the movement/teleport
         // write target) plus the ack/anchors state, keyed by connection.
@@ -801,6 +832,12 @@ impl PlayerSessionManager {
         let session_ids: Vec<ConnectionId> = self.sessions.keys().copied().collect();
         for id in session_ids {
             if !ctx.connections.contains(id) {
+                // The player left the level: release its entity id so the
+                // world's `hasEntityWithId` no longer reports it (GitHub #222).
+                // The counter is untouched, so the freed id is never reused.
+                if let Some(session) = self.sessions.get(&id) {
+                    self.entity_ids.release(session.player.player_id());
+                }
                 // The registry recorded the reason when the connection was
                 // removed (a `Disconnect` event, a closed inbound channel, or
                 // an overflow prune). The trace reports the session end only
@@ -1525,6 +1562,34 @@ mod tests {
             manager.indices.connection_for(&probe_profile().id()),
             Some(ID),
             "playersByUUID forward lookup"
+        );
+    }
+
+    /// A genuine `hasEntityWithId` skip through the real spawn path (GitHub
+    /// #222) — the highest practical integration seam where the skip is
+    /// reachable. The pure forward counter never re-encounters an id it already
+    /// handed out (it only allocates newer ids), so Paper's guard fires for
+    /// wrap-around or for a pre-existing entity holding an id the counter
+    /// collides with — an entity loaded from disk, in the M1 model the only
+    /// foreign ids. Seed the manager's allocator at a collision point (counter
+    /// advanced to 1, id 2 held by a pre-existing entity) and prove the
+    /// session's spawn skips 2.
+    #[test]
+    fn spawn_skips_an_in_use_id_at_the_spawn_seam() {
+        let (mut registry, _out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        // Advance the counter to 1 (id 1 consumed, unused) and hold id 2 in
+        // use, as a pre-existing entity in the world would.
+        assert_eq!(manager.entity_ids.next_id(), 1);
+        manager.entity_ids.mark_in_use(2);
+
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![]);
+        assert_eq!(manager.session_count(), 1);
+        assert_eq!(
+            manager.player_entity_id(ID),
+            Some(3),
+            "the spawn skips the in-use id 2 (hasEntityWithId)"
         );
     }
 
