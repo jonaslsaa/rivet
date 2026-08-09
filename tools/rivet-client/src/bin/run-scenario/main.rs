@@ -85,10 +85,9 @@ const DEFAULT_USERNAME: &str = "RivetProbe";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_RUNS: usize = 2;
 
-// Machine-stable exit codes (see module doc).
-const EXIT_OK: u8 = 0;
-const EXIT_FAIL: u8 = 1;
-const EXIT_UNVERIFIED: u8 = 3;
+// Machine-stable exit codes. PASS/FAIL/UNVERIFIED are the shared contract
+// (rivet-harness-common::exit); usage errors are a separate 64.
+use rivet_harness_common::exit::{EXIT_FAIL, EXIT_PASS, EXIT_UNVERIFIED};
 const EXIT_USAGE: u8 = 64;
 
 #[derive(Debug)]
@@ -417,26 +416,15 @@ fn base_address(args: &Args) -> Result<SocketAddr, RunnerError> {
         })
 }
 
-/// Reserve `n` distinct ephemeral loopback ports by binding `n` listeners
-/// simultaneously (so the OS cannot hand out the same port twice), reading
-/// their addresses, and dropping the listeners. The small bind-drop-boot race
-/// is standard practice for test harnesses; a collision surfaces as a loud
-/// UNVERIFIED bind failure, never as silent cross-talk between servers.
-fn reserve_ports(n: usize) -> Result<Vec<u16>, RunnerError> {
-    let mut listeners = Vec::with_capacity(n);
-    let mut ports = Vec::with_capacity(n);
-    for _ in 0..n {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| RunnerError::Gate(format!("failed to reserve an ephemeral port: {e}")))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| RunnerError::Gate(format!("failed to read an ephemeral port: {e}")))?
-            .port();
-        ports.push(port);
-        listeners.push(listener);
-    }
-    drop(listeners);
-    Ok(ports)
+/// Reserve `n` distinct ephemeral loopback ports, held so the OS cannot hand
+/// out the same port twice. The held [`PortReservation`]s are released only
+/// immediately before each server spawns (inside `server::boot`), so the
+/// bind-drop-boot race narrows to the spawn->child-bind gap.
+fn reserve_ports(
+    n: usize,
+) -> Result<Vec<rivet_harness_common::port::PortReservation>, RunnerError> {
+    rivet_harness_common::port::reserve(n)
+        .map_err(|e| RunnerError::Gate(format!("failed to reserve ephemeral ports: {e}")))
 }
 
 struct ClientRun {
@@ -586,6 +574,7 @@ fn one_join(
         jar,
         Some(server_properties),
         address,
+        None,
     )?;
     println!("[run  {idx}] joining via rivet-client ...");
     let client_run = run_client(
@@ -768,6 +757,7 @@ fn one_move(
         jar,
         Some(server_properties),
         address,
+        None,
     )?;
     println!("[run  {idx}] walking via rivet-client (move mode) ...");
     let client_run = run_client(
@@ -971,6 +961,7 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
             &rivet_bin,
             None,
             base,
+            None,
         )?;
         println!("[run  {idx}] connecting via rivet-client ...");
         let client_run = run_client(
@@ -1208,10 +1199,12 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     let base = base_address(args)?;
     // Port isolation: Paper and Rivet get distinct ephemeral ports, so the
     // client provably targets the server the harness points it at (no two
-    // servers in one scenario can collide).
-    let ports = reserve_ports(2)?;
-    let paper_addr = SocketAddr::new(base.ip(), ports[0]);
-    let rivet_addr = SocketAddr::new(base.ip(), ports[1]);
+    // servers in one scenario can collide). The reservations are held until
+    // each server's `boot` releases them right before spawning, so the ports
+    // cannot be stolen during the slow run-dir preparation.
+    let mut reservations = reserve_ports(2)?;
+    let paper_addr = SocketAddr::new(base.ip(), reservations[0].port());
+    let rivet_addr = SocketAddr::new(base.ip(), reservations[1].port());
 
     println!("rivet scenario runner: join (Paper-vs-Rivet play)");
     println!("    paperclip jar     : {}", jar.display());
@@ -1237,6 +1230,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         &jar,
         Some(&server_properties),
         paper_addr,
+        Some(reservations.remove(0)),
     )?;
     let paper_client = run_client(
         &client_bin,
@@ -1280,6 +1274,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         &rivet_bin,
         None,
         rivet_addr,
+        Some(reservations.remove(0)),
     )?;
     let rivet_client = run_client(
         &client_bin,
@@ -1418,6 +1413,7 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         &artifact,
         server_properties.as_deref(),
         base,
+        None,
     )?;
     let client_run = run_client(
         &client_bin,
@@ -1456,7 +1452,7 @@ fn main() -> ExitCode {
         }
     };
     match result {
-        Ok(()) => ExitCode::from(EXIT_OK),
+        Ok(()) => ExitCode::from(EXIT_PASS),
         Err(e) => {
             eprintln!("run-scenario: {e}");
             ExitCode::from(e.exit_code())
@@ -1614,7 +1610,8 @@ mod tests {
 
     #[test]
     fn reserve_ports_gives_distinct_usable_ports() {
-        let ports = reserve_ports(3).unwrap();
+        let held = reserve_ports(3).unwrap();
+        let ports: Vec<u16> = held.iter().map(|r| r.port()).collect();
         let unique: std::collections::BTreeSet<u16> = ports.iter().copied().collect();
         assert_eq!(unique.len(), 3, "ports must be distinct: {ports:?}");
         assert!(
@@ -1622,9 +1619,9 @@ mod tests {
             "ephemeral ports must be nonzero: {ports:?}"
         );
         // Distinctness is the load-bearing guarantee (two servers in one scenario
-        // must never share a port). The bind-drop-boot race is intentionally not
-        // asserted here: rebinding after `reserve_ports` drops its listeners races
-        // with other tests binding ephemeral ports in parallel.
+        // must never share a port). Holding the listeners is what makes the
+        // ports non-stealable during boot prep; the shared crate owns and tests
+        // that contract (a held reservation blocks rebind, release frees it).
     }
 
     #[test]

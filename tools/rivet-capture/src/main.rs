@@ -49,6 +49,7 @@ mod structured;
 mod variance;
 
 use std::env;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
@@ -86,34 +87,119 @@ fn state_str(s: State) -> &'static str {
 }
 
 /// Locate the rivet-client binary (offline Azalea bot) the harness drives.
-fn client_binary() -> Result<PathBuf, String> {
-    if let Ok(p) = env::var(CLIENT_BIN_ENV) {
+fn client_binary() -> Result<PathBuf, CaptureError> {
+    let default_bin = crate_root().join("../rivet-client/target/debug/rivet-client");
+    resolve_client_binary(env::var(CLIENT_BIN_ENV).ok(), default_bin)
+}
+
+/// Resolve the client binary from an explicit override or the default sibling
+/// build. A missing binary is a missing prerequisite, not a failure: the shared
+/// exit contract (and `rivet-client run-scenario`) classifies it as UNVERIFIED
+/// — nothing was compared. The resolution core is split from the env read so a
+/// counterfactual test can pin that classification without mutating the process
+/// environment (a global that would race across parallel tests).
+fn resolve_client_binary(
+    override_path: Option<String>,
+    default_bin: PathBuf,
+) -> Result<PathBuf, CaptureError> {
+    if let Some(p) = override_path {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Ok(p);
         }
-        return Err(format!(
+        return Err(CaptureError::Unverified(format!(
             "{CLIENT_BIN_ENV} is set to {} but it is not a file",
             p.display()
-        ));
+        )));
     }
-    let sibling = crate_root().join("../rivet-client/target/debug/rivet-client");
-    if sibling.is_file() {
-        return Ok(sibling);
+    if default_bin.is_file() {
+        return Ok(default_bin);
     }
-    Err(format!(
+    Err(CaptureError::Unverified(format!(
         "rivet-client binary not found at {} — build it first (tools/rivet-client/run.sh or \
          `cd tools/rivet-client && cargo build --locked`) or set {CLIENT_BIN_ENV}",
-        sibling.display()
-    ))
+        default_bin.display()
+    )))
 }
 
-/// Pick a free localhost port for the proxy (bind-then-release; fine for a harness).
-fn free_port() -> io::Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+/// Resolve the capture's own fixture config (`fixtures/server.properties` and
+/// `fixtures/paper-world-defaults.yml`). A missing fixture is a missing
+/// prerequisite — the deterministic join scenario's config cannot be
+/// reproduced, so nothing is actually compared — and is UNVERIFIED (exit 3)
+/// under the shared 0/1/3 contract, not FAIL (exit 1), matching how
+/// `rivet-client run-scenario` classifies its own missing fixtures. Split from
+/// `capture_one` so a counterfactual test can pin that classification against
+/// real temp paths without booting Paper.
+fn resolve_fixture_config(crate_root: &Path) -> Result<(PathBuf, PathBuf), CaptureError> {
+    let server_properties = crate_root.join("fixtures/server.properties");
+    if !server_properties.is_file() {
+        return Err(CaptureError::Unverified(format!(
+            "server.properties not found at {} (rivet-capture fixtures)",
+            server_properties.display()
+        )));
+    }
+    let world_defaults = crate_root.join("fixtures/paper-world-defaults.yml");
+    if !world_defaults.is_file() {
+        return Err(CaptureError::Unverified(format!(
+            "paper-world-defaults.yml not found at {} (rivet-capture fixtures)",
+            world_defaults.display()
+        )));
+    }
+    Ok((server_properties, world_defaults))
+}
+
+/// The capture harness's error type. Carries the machine-stable exit code so
+/// `main` can honor the shared 0 PASS / 1 FAIL / 3 UNVERIFIED contract: a
+/// missing prerequisite or a server that never booted is UNVERIFIED (nothing
+/// was compared), every other failure is FAIL.
+#[derive(Debug)]
+enum CaptureError {
+    Unverified(String),
+    Fail(String),
+}
+
+impl CaptureError {
+    fn exit_code(&self) -> u8 {
+        match self {
+            CaptureError::Unverified(_) => rivet_harness_common::exit::EXIT_UNVERIFIED,
+            CaptureError::Fail(_) => rivet_harness_common::exit::EXIT_FAIL,
+        }
+    }
+}
+
+impl fmt::Display for CaptureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CaptureError::Unverified(m) | CaptureError::Fail(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl From<String> for CaptureError {
+    fn from(m: String) -> Self {
+        CaptureError::Fail(m)
+    }
+}
+
+impl From<&str> for CaptureError {
+    fn from(m: &str) -> Self {
+        CaptureError::Fail(m.to_owned())
+    }
+}
+
+impl From<io::Error> for CaptureError {
+    fn from(e: io::Error) -> Self {
+        CaptureError::Fail(e.to_string())
+    }
+}
+
+impl From<server::Error> for CaptureError {
+    fn from(e: server::Error) -> Self {
+        match e {
+            server::Error::Unverified(m) => CaptureError::Unverified(m),
+            other => CaptureError::Fail(other.to_string()),
+        }
+    }
 }
 
 struct ClientRun {
@@ -170,8 +256,8 @@ fn client_joined(stdout: &str) -> bool {
 async fn capture_one(
     work: &Path,
     idx: usize,
-) -> Result<(Vec<CapturedPacket>, Vec<NormalizedPacket>), String> {
-    let jar = server::ensure_jar(&crate_root()).map_err(|e| e.to_string())?;
+) -> Result<(Vec<CapturedPacket>, Vec<NormalizedPacket>), CaptureError> {
+    let jar = server::ensure_jar(&crate_root())?;
     let client_bin = client_binary()?;
     // The capture's own server config (seed 42 / superflat / offline, mob
     // spawning disabled so the world is empty apart from the player — the
@@ -179,20 +265,7 @@ async fn capture_one(
     // from the M0 config: random mob spawns would break the byte identity of
     // the join capture (see fixtures/server.properties,
     // fixtures/paper-world-defaults.yml and the manifest provenance).
-    let server_properties = crate_root().join("fixtures/server.properties");
-    if !server_properties.is_file() {
-        return Err(format!(
-            "server.properties not found at {} (rivet-capture fixtures)",
-            server_properties.display()
-        ));
-    }
-    let world_defaults = crate_root().join("fixtures/paper-world-defaults.yml");
-    if !world_defaults.is_file() {
-        return Err(format!(
-            "paper-world-defaults.yml not found at {} (rivet-capture fixtures)",
-            world_defaults.display()
-        ));
-    }
+    let (server_properties, world_defaults) = resolve_fixture_config(&crate_root())?;
 
     let run_dir = work.join(format!("run{idx}"));
     let log_path = work.join(format!("boot{idx}.log"));
@@ -203,10 +276,16 @@ async fn capture_one(
         &jar,
         &server_properties,
         &world_defaults,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
-    let proxy_port = free_port().map_err(|e| e.to_string())?;
+    // Reserve the proxy port after the (already-completed) server boot and
+    // hold the bound listener until the proxy task spawns. The hold is short —
+    // it covers only the gap between this bind and the proxy's own bind — but
+    // it prevents the OS from handing this exact ephemeral port to a concurrent
+    // binder in that window. Release it immediately before the proxy binds, so
+    // the bind-drop-boot race narrows to the spawn->bind gap.
+    let proxy_reservation = rivet_harness_common::port::PortReservation::bind()?;
+    let proxy_port = proxy_reservation.port();
     let proxy_addr: SocketAddr = format!("127.0.0.1:{proxy_port}")
         .parse()
         .expect("proxy addr");
@@ -214,6 +293,7 @@ async fn capture_one(
         .parse()
         .expect("server addr");
     println!("[proxy {idx}] 127.0.0.1:{proxy_port} -> 127.0.0.1:{SERVER_PORT}");
+    proxy_reservation.release();
 
     let proxy_task = tokio::spawn(proxy::run(proxy_addr, server_addr));
 
@@ -229,7 +309,7 @@ async fn capture_one(
         );
     }
     println!("[run   {idx}] client joined; shutting down Paper cleanly (SIGTERM)...");
-    server::shutdown(&mut srv).map_err(|e| e.to_string())?;
+    server::shutdown(&mut srv)?;
 
     let shared = proxy_task
         .await
@@ -321,47 +401,96 @@ fn verify_committed_fixture(dir: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
+/// Read the `Git-Commit: <sha>` attribute from a Paper server jar's
+/// `META-INF/MANIFEST.MF` by shelling out to `unzip -p` (mirrors
+/// `rivet-client`'s `run-scenario/server.rs`). Returns `None` when the jar has
+/// no such attribute (a paperclip wrapper, not a compiled server). The helper
+/// is duplicated rather than shared because the two harnesses classify failures
+/// through their own error types (`CaptureError` here, `RunnerError` there).
+fn read_jar_git_commit(jar: &Path) -> io::Result<Option<String>> {
+    let out = Command::new("unzip")
+        .arg("-p")
+        .arg(jar)
+        .arg("META-INF/MANIFEST.MF")
+        .output()?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("Git-Commit:")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        }))
+}
+
+/// Classify a `read_jar_git_commit` failure. A missing `unzip` binary is a
+/// missing prerequisite — the pin cannot be established without reading the
+/// materialized jar — so it is UNVERIFIED (exit 3), not FAIL. Any other
+/// failure is a genuine IO error (FAIL), so an unreadable jar cannot
+/// masquerade as "no provenance".
+fn classify_commit_lookup_error(e: io::Error) -> CaptureError {
+    if e.kind() == io::ErrorKind::NotFound {
+        CaptureError::Unverified(
+            "cannot verify the Paper pin: `unzip` is not installed (needed to read the \
+             materialized server jar's Git-Commit attribute)"
+                .to_string(),
+        )
+    } else {
+        CaptureError::Fail(e.to_string())
+    }
+}
+
 /// Enforce the pinned Paper commit (manifest `paper` provenance) against the
 /// Git-Commit attribute of the server jar the paperclip materialized.
-fn check_pin(fixtures_dir: &Path, run_dir: &Path) -> Result<(), String> {
+///
+/// Every failure mode — an unreadable or unpinned fixture manifest, a missing
+/// `unzip`, a missing or provenance-less materialized jar, or a commit
+/// mismatch — is a missing/unverifiable prerequisite, not executed divergence:
+/// without the pin holding, nothing was actually compared against the pinned
+/// baseline, so all are UNVERIFIED (exit 3), exactly like `rivet-client`
+/// run-scenario's `verify_paper_provenance`.
+fn check_pin(fixtures_dir: &Path, run_dir: &Path) -> Result<(), CaptureError> {
     let raw = fs::read_to_string(fixtures_dir.join("manifest.json"))
-        .map_err(|e| format!("cannot read fixture manifest: {e}"))?;
-    let manifest: Manifest = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        .map_err(|e| CaptureError::Unverified(format!("cannot read fixture manifest: {e}")))?;
+    let manifest: Manifest = serde_json::from_str(&raw)
+        .map_err(|e| CaptureError::Unverified(format!("invalid fixture manifest: {e}")))?;
     let expected = manifest
         .paper
         .rsplit_once('@')
         .map(|(_, c)| c.trim().to_string())
         .filter(|c| !c.is_empty())
-        .ok_or_else(|| "fixture manifest carries no `@<commit>` Paper pin".to_string())?;
+        .ok_or_else(|| {
+            CaptureError::Unverified(
+                "fixture manifest carries no `@<commit>` Paper pin".to_string(),
+            )
+        })?;
 
     let jar = run_dir.join("versions/26.2/paper-26.2.jar");
-    let out = Command::new("unzip")
-        .arg("-p")
-        .arg(&jar)
-        .arg("META-INF/MANIFEST.MF")
-        .output()
-        .map_err(|e| format!("failed to run unzip on {}: {e}", jar.display()))?;
-    let actual = if out.status.success() {
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .find_map(|line| {
-                line.trim()
-                    .strip_prefix("Git-Commit:")
-                    .map(|v| v.trim().to_string())
-                    .filter(|v| !v.is_empty())
-            })
-    } else {
-        None
+    if !jar.is_file() {
+        return Err(CaptureError::Unverified(format!(
+            "materialized server jar {} missing — the paperclip did not materialize a server",
+            jar.display()
+        )));
     }
-    .ok_or_else(|| "the materialized server jar carries no readable Git-Commit".to_string())?;
+    let actual = read_jar_git_commit(&jar)
+        .map_err(classify_commit_lookup_error)?
+        .ok_or_else(|| {
+            CaptureError::Unverified(format!(
+                "the materialized server jar {} carries no readable Git-Commit",
+                jar.display()
+            ))
+        })?;
 
     if expected != actual {
-        return Err(format!(
+        return Err(CaptureError::Unverified(format!(
             "Paper commit mismatch: the server jar that actually booted carries Git-Commit \
              {actual}, but the fixture baseline (fixtures/join/manifest.json) is pinned to \
              {expected}. Regenerate the fixture against the pinned Paper and re-pin the manifest \
              before relying on this gate — never fudge fixtures to pass."
-        ));
+        )));
     }
     println!(
         "   paper pin      : {} (fixtures/join provenance) — enforced (booted jar is Git-Commit {actual})",
@@ -530,7 +659,7 @@ fn parse_args() -> Result<Subcommand, String> {
 /// The negative control: copy the committed fixture, corrupt one packet body
 /// and its manifest SHA-256 (so the copy is internally consistent), then boot
 /// fresh and require the divergence to name the tampered packet.
-async fn run_negative_control() -> Result<(), String> {
+async fn run_negative_control() -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/verify");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -544,7 +673,8 @@ async fn run_negative_control() -> Result<(), String> {
     if scratch.exists() {
         fs::remove_dir_all(&scratch).map_err(|e| e.to_string())?;
     }
-    copy_dir_recursive(&baseline, &scratch).map_err(|e| e.to_string())?;
+    rivet_harness_common::negative::copy_dir_recursive(&baseline, &scratch)
+        .map_err(|e| e.to_string())?;
     let (tampered_index, tampered_identity) = tamper_fixture_copy(&scratch)?;
     println!(
         "   fixture copied to {} and packet [{tampered_index}] ({tampered_identity}) corrupted",
@@ -562,51 +692,31 @@ async fn run_negative_control() -> Result<(), String> {
     // The negative control passes only when the tampered packet is the one
     // named in the mismatch list. A clean diff (false negative) or a divergence
     // naming a different packet must fail.
-    let names: Vec<usize> = diff
+    let tampered_index = tampered_index.to_string();
+    let mismatched: Vec<String> = diff
         .mismatched
         .iter()
-        .filter(|(i, _, _, _)| *i == tampered_index)
-        .map(|(i, _, _, _)| *i)
+        .map(|(i, _, _, _)| i.to_string())
         .collect();
-    if !names.is_empty() {
-        println!();
-        println!(
-            "PASS: the fresh capture differs from the corrupted copy at exactly the tampered \
-             packet [{tampered_index}] ({tampered_identity})."
-        );
-        let _ = fs::remove_dir_all(&scratch);
-        Ok(())
-    } else if diff.is_clean() {
-        let _ = fs::remove_dir_all(&scratch);
-        Err(format!(
-            "negative control FAILED: the pipeline reported ZERO divergence against a fixture \
-             copy whose packet [{tampered_index}] ({tampered_identity}) was corrupted — the \
-             capture->normalize->diff chain is vacuously green."
-        ))
-    } else {
-        let _ = fs::remove_dir_all(&scratch);
-        Err(format!(
-            "negative control FAILED: the pipeline diverged but did not name the tampered packet \
-             [{tampered_index}] ({tampered_identity}); mismatched: {diff}"
-        ))
-    }
-}
-
-/// Copy a directory tree (used by the negative control so the tamper never
-/// touches the committed fixture).
-fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
+    match rivet_harness_common::negative::verdict(&tampered_index, &mismatched) {
+        rivet_harness_common::negative::Verdict::Detected(_) => {
+            println!();
+            println!(
+                "PASS: the fresh capture differs from the corrupted copy at exactly the tampered \
+                 packet [{tampered_index}] ({tampered_identity})."
+            );
+            let _ = fs::remove_dir_all(&scratch);
+            Ok(())
+        }
+        v => {
+            let _ = fs::remove_dir_all(&scratch);
+            Err(format!(
+                "negative control FAILED: {v} — the capture->normalize->diff chain did not name \
+                 the tampered packet [{tampered_index}] ({tampered_identity}); {diff}"
+            )
+            .into())
         }
     }
-    Ok(())
 }
 
 /// Corrupt one packet body in a copy of the fixture and its manifest SHA-256,
@@ -670,7 +780,7 @@ fn tamper_fixture_copy(dir: &Path) -> Result<(usize, String), String> {
     Ok((idx, identity))
 }
 
-async fn run_verify() -> Result<(), String> {
+async fn run_verify() -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/verify");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -777,7 +887,7 @@ fn read_raw_jsonl(path: &Path) -> Result<Vec<CapturedPacket>, String> {
 /// `verify --mutate <kind>`: apply a controlled mutation to the fresh raw
 /// capture (or its canonical form) and require the named detector failure. A
 /// clean run is itself a failure (false-negative trap).
-async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), String> {
+async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/verify-mutate");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -800,7 +910,8 @@ async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), Stri
             "verify --mutate {}: the clean capture already fails {} invariant(s) — fix the harness before testing the mutation:\n  {clean_failures:?}",
             kind.name(),
             clean_failures.len()
-        ));
+        )
+        .into());
     }
 
     let mutated = crate::mutate::mutate_raw(kind, &raw);
@@ -823,9 +934,11 @@ async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), Stri
         return Err(format!(
             "verify --mutate {} FAILED (false negative): the mutation produced NO failure of the expected kinds {expected:?} — the detectors are not discriminating.\n  actual failures: {failures:?}",
             kind.name()
-        ));
+        )
+        .into());
     }
     let _ = expected;
+
     println!();
     println!(
         "PASS: verify --mutate {} detected and named the defect ({}) — the #195 detectors are discriminating.",
@@ -841,7 +954,7 @@ async fn run_verify_mutate(kind: crate::mutate::MutationKind) -> Result<(), Stri
 /// `audit --runs N`: boot N Papers, collect the raw captures, and report per
 /// packet identity how many distinct raw bodies were observed (the multi-boot
 /// field-variance evidence that justifies each normalization rewrite).
-async fn run_audit(runs: usize) -> Result<(), String> {
+async fn run_audit(runs: usize) -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/audit");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -871,7 +984,7 @@ async fn run_audit(runs: usize) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_capture(runs: usize) -> Result<(), String> {
+async fn run_capture(runs: usize) -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/capture");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -921,7 +1034,7 @@ async fn run_capture(runs: usize) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_fixture() -> Result<(), String> {
+async fn run_fixture() -> Result<(), CaptureError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/fixture");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
@@ -964,7 +1077,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("rivet-capture: {e}");
-            ExitCode::FAILURE
+            ExitCode::from(e.exit_code())
         }
     }
 }
@@ -979,6 +1092,56 @@ mod real_capture_tests {
 
     fn raw_path() -> PathBuf {
         crate_root().join("work/capture/raw1.jsonl")
+    }
+
+    /// Offline counterfactual of the negative-control machinery (no Paper boot):
+    /// copy the committed fixture, corrupt one packet, and prove the diff names
+    /// exactly the tampered index — a clean diff or a wrong-index diff must fail
+    /// the control.
+    #[test]
+    fn tamper_fixture_copy_detects_and_names_the_tampered_packet() {
+        // The wrong-path tampering control must be load-bearing: the committed
+        // fixture (fixtures/join/capture.jsonl) is the ground truth, so a missing
+        // fixture is a hard failure, not a silent skip that would mask the control
+        // being untested.
+        let baseline = crate_root().join("fixtures/join");
+        assert!(
+            baseline.join("capture.jsonl").is_file(),
+            "no committed fixture at {} — the wrong-path tampering control is untested",
+            baseline.display()
+        );
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-capture-tamper-{}", std::process::id()));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        rivet_harness_common::negative::copy_dir_recursive(&baseline, &scratch).unwrap();
+        let (tampered_index, _identity) = tamper_fixture_copy(&scratch).unwrap();
+
+        let original = fixture::read_capture(&baseline).unwrap();
+        let corrupted = fixture::read_capture(&scratch).unwrap();
+        let mismatched: Vec<String> = fixture::diff_packets(&original, &corrupted)
+            .mismatched
+            .iter()
+            .map(|(i, _, _, _)| i.to_string())
+            .collect();
+
+        // The tamper is detected and named by index. A clean diff (the pipeline
+        // never saw the injection) or a wrong-index diff must fail the control.
+        let v = rivet_harness_common::negative::verdict(&tampered_index.to_string(), &mismatched);
+        assert!(
+            v.passed(),
+            "the tampered packet was not detected and named: {v}"
+        );
+        assert!(
+            !rivet_harness_common::negative::verdict(
+                &(tampered_index + 1).to_string(),
+                &mismatched
+            )
+            .passed(),
+            "a wrong-path verdict must not satisfy the negative control"
+        );
+        let _ = fs::remove_dir_all(&scratch);
     }
 
     #[test]
@@ -1096,5 +1259,473 @@ mod real_capture_tests {
                 kind.name()
             );
         }
+    }
+}
+
+/// The exit classification of a missing/invalid rivet-client binary, pinned
+/// against the shared 0/1/3 contract (see `rivet-harness-common::exit`).
+#[cfg(test)]
+mod client_binary_tests {
+    use super::*;
+
+    /// Path that is guaranteed to exist as a file, so the positive resolution
+    /// branch is deterministic regardless of whether a rivet-client has been
+    /// built in this checkout.
+    fn existing_file() -> PathBuf {
+        let p = crate_root().join("Cargo.toml");
+        assert!(p.is_file(), "rivet-capture Cargo.toml must exist");
+        p
+    }
+
+    /// Path that is guaranteed not to be a file, so the missing-prerequisite
+    /// branch is deterministic regardless of the build state.
+    fn non_file() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "rivet-capture-no-such-client-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        assert!(
+            !p.is_file(),
+            "temp path must not already be a file: {}",
+            p.display()
+        );
+        p
+    }
+
+    /// Counterfactual for the exit contract: a missing or invalid rivet-client
+    /// binary is UNVERIFIED (exit 3), not FAIL (exit 1) — the shared
+    /// 0/1/3 classification, matching what `rivet-client run-scenario` does for
+    /// its own missing client. Both the default and the override path are
+    /// injected so the test is load-bearing without mutating the process
+    /// environment (a global that would race across parallel tests).
+    #[test]
+    fn missing_or_invalid_client_binary_classifies_unverified() {
+        let missing = non_file();
+
+        // Default path: the sibling rivet-client build does not exist.
+        let err = resolve_client_binary(None, missing.clone()).unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "a missing default client binary must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "a missing default client binary must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        assert!(
+            err.to_string().contains("rivet-client binary not found"),
+            "the Unverified error must name the missing default binary, got: {err}"
+        );
+
+        // Override path: RIVET_CLIENT_BIN points at a path that is not a file.
+        let err = resolve_client_binary(Some(missing.display().to_string()), missing.clone())
+            .unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "an invalid RIVET_CLIENT_BIN must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "an invalid RIVET_CLIENT_BIN must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        assert!(
+            err.to_string().contains(CLIENT_BIN_ENV),
+            "the Unverified error must name RIVET_CLIENT_BIN, got: {err}"
+        );
+    }
+
+    /// A resolvable client binary (default or override) still succeeds.
+    #[test]
+    fn existing_client_binary_resolves() {
+        let real = existing_file();
+        assert_eq!(
+            resolve_client_binary(None, real.clone()).expect("default existing path resolves"),
+            real
+        );
+        assert_eq!(
+            resolve_client_binary(Some(real.display().to_string()), real.clone())
+                .expect("override existing path resolves"),
+            real
+        );
+    }
+}
+
+/// Exit classification of the capture's missing/unverifiable prerequisites —
+/// the fixture config and the Paper pin — pinned against the shared 0/1/3
+/// contract. Each is a missing prerequisite, not executed divergence: nothing
+/// was actually compared against the pinned baseline, so all classify
+/// UNVERIFIED (exit 3), exactly like `rivet-client run-scenario`'s
+/// `verify_paper_provenance` and missing-fixture errors.
+#[cfg(test)]
+mod prerequisite_tests {
+    use super::*;
+
+    /// A guaranteed-absent path under a fresh temp dir (never already a file),
+    /// so the missing-prerequisite branch is deterministic.
+    fn non_file() -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "rivet-capture-no-such-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        assert!(
+            !p.is_file(),
+            "temp path must not already be a file: {}",
+            p.display()
+        );
+        p
+    }
+
+    /// CRC-32 (IEEE) over `data`, matching what zip tools verify. The test
+    /// builds real jar files so `unzip` reads the MANIFEST without a bad-CRC
+    /// warning (a bad CRC makes `unzip -p` exit nonzero, which
+    /// `read_jar_git_commit` treats as "no attribute").
+    fn crc32(data: &[u8]) -> u32 {
+        let mut table = [0u32; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+            *slot = c;
+        }
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        !crc
+    }
+
+    /// Write a minimal valid zip (one stored `META-INF/MANIFEST.MF` entry) to
+    /// `dir/paper.jar`. `commit` is the `Git-Commit` attribute value, or omitted
+    /// to emulate a jar with no provenance.
+    fn make_jar(dir: &Path, commit: Option<&str>) -> PathBuf {
+        let manifest = match commit {
+            Some(c) => format!(
+                "Manifest-Version: 1.0\r\nGit-Commit: {c}\r\nSpecification-Version: 26.2\r\n"
+            ),
+            None => "Manifest-Version: 1.0\r\nSpecification-Version: 26.2\r\n".to_owned(),
+        };
+        let name = b"META-INF/MANIFEST.MF";
+        let data = manifest.as_bytes();
+        let crc = crc32(data);
+        let jar = dir.join("paper.jar");
+
+        let mut bytes = Vec::new();
+        // Local file header (method 0 = store, so sizes match data).
+        bytes.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&20u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(data);
+        let local_offset = 0u32;
+        let central_start = bytes.len() as u32;
+
+        // Central directory entry.
+        bytes.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&20u16.to_le_bytes());
+        bytes.extend_from_slice(&20u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&local_offset.to_le_bytes());
+        bytes.extend_from_slice(name);
+        let central_size = bytes.len() as u32 - central_start;
+
+        // End of central directory.
+        bytes.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&central_size.to_le_bytes());
+        bytes.extend_from_slice(&central_start.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+
+        fs::write(&jar, bytes).expect("write jar");
+        jar
+    }
+
+    /// A fixtures dir whose manifest.json pins `paper` to `commit`.
+    fn fixtures_dir(tag: &str, paper: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rivet-capture-fixtures-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut manifest = manifest_provenance();
+        manifest.paper = paper.to_owned();
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// A run dir laid out like a Paper boot: the materialized server jar under
+    /// `versions/26.2/`. `commit` is the jar's Git-Commit attribute.
+    fn run_dir_with_materialized_jar(tag: &str, commit: Option<&str>) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rivet-capture-jar-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let versions = dir.join("versions/26.2");
+        fs::create_dir_all(&versions).unwrap();
+        let jar = make_jar(&versions, commit);
+        fs::rename(&jar, versions.join("paper-26.2.jar")).unwrap();
+        dir
+    }
+
+    /// Whether `unzip` is on PATH; the jar-based pin tests need the real binary
+    /// (they shell out exactly like `check_pin` does at runtime).
+    fn unzip_available() -> bool {
+        Command::new("unzip")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Counterfactual for the exit contract: a missing capture fixture config
+    /// (server.properties / paper-world-defaults.yml) is UNVERIFIED (exit 3),
+    /// not FAIL (exit 1) — without the deterministic scenario config, nothing
+    /// was actually compared. Both fixtures are resolved from real temp paths so
+    /// the test is load-bearing without mutating the process environment.
+    #[test]
+    fn missing_fixture_config_classifies_unverified() {
+        // server.properties missing: the first branch fires.
+        let base = non_file();
+        let err = resolve_fixture_config(&base).unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "a missing server.properties must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "a missing server.properties must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        assert!(
+            err.to_string().contains("server.properties"),
+            "the Unverified error must name the missing fixture, got: {err}"
+        );
+
+        // server.properties present, paper-world-defaults.yml missing: the
+        // second branch fires.
+        let dir = std::env::temp_dir().join(format!(
+            "rivet-capture-fixtures-partial-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("fixtures")).unwrap();
+        fs::write(dir.join("fixtures/server.properties"), "level-seed=42\n").unwrap();
+        let err = resolve_fixture_config(&dir).unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "a missing paper-world-defaults.yml must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "a missing paper-world-defaults.yml must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        assert!(
+            err.to_string().contains("paper-world-defaults.yml"),
+            "the Unverified error must name the missing fixture, got: {err}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Both capture fixtures present still resolve.
+    #[test]
+    fn present_fixture_config_resolves() {
+        let dir =
+            std::env::temp_dir().join(format!("rivet-capture-fixtures-ok-{}", std::process::id()));
+        fs::create_dir_all(dir.join("fixtures")).unwrap();
+        fs::write(dir.join("fixtures/server.properties"), "level-seed=42\n").unwrap();
+        fs::write(
+            dir.join("fixtures/paper-world-defaults.yml"),
+            "spawn-limits:\n",
+        )
+        .unwrap();
+        let (props, defaults) = resolve_fixture_config(&dir).expect("present fixtures resolve");
+        assert_eq!(props.file_name().unwrap(), "server.properties");
+        assert_eq!(defaults.file_name().unwrap(), "paper-world-defaults.yml");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A missing `unzip` binary is a missing prerequisite — the pin cannot be
+    /// established without reading the materialized jar — so it is UNVERIFIED
+    /// (exit 3), not FAIL. Fabricate the io::Error directly rather than mutating
+    /// PATH (unsafe on this toolchain and racy across parallel tests).
+    #[test]
+    fn missing_unzip_classifies_unverified() {
+        let err = classify_commit_lookup_error(io::Error::new(
+            io::ErrorKind::NotFound,
+            "program not found",
+        ));
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "a missing unzip binary must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "a missing unzip binary must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        assert!(
+            err.to_string().contains("unzip"),
+            "must name unzip as the missing prereq, got {err}"
+        );
+    }
+
+    /// A non-NotFound unzip failure stays a genuine FAIL (a corrupt or
+    /// unreadable jar must not masquerade as "no provenance" UNVERIFIED).
+    #[test]
+    fn non_notfound_commit_lookup_error_is_fail() {
+        let err = classify_commit_lookup_error(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ));
+        assert!(
+            matches!(err, CaptureError::Fail(_)),
+            "a non-NotFound read failure must stay FAIL, got {err:?}"
+        );
+    }
+
+    /// The materialized jar's Git-Commit must equal the fixture manifest's pin;
+    /// when it does not, the pin cannot be enforced and the run classifies
+    /// UNVERIFIED (exit 3) — a missing/unverifiable prerequisite, not a FAIL.
+    #[test]
+    fn pin_mismatch_classifies_unverified() {
+        if !unzip_available() {
+            eprintln!("skipping: unzip not on PATH");
+            return;
+        }
+        let fixtures = fixtures_dir("mismatch", "26.2-DEV-main@0a99345");
+        let run_dir = run_dir_with_materialized_jar("mismatch", Some("deadbeef"));
+        let err = check_pin(&fixtures, &run_dir).unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "a pin mismatch must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "a pin mismatch must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        assert!(
+            err.to_string().contains("Paper commit mismatch"),
+            "must name the commit mismatch, got {err}"
+        );
+        let _ = fs::remove_dir_all(&fixtures);
+        let _ = fs::remove_dir_all(&run_dir);
+    }
+
+    /// The matching pin still passes (and prints the enforced provenance).
+    #[test]
+    fn matching_pin_passes() {
+        if !unzip_available() {
+            eprintln!("skipping: unzip not on PATH");
+            return;
+        }
+        let fixtures = fixtures_dir("match", "26.2-DEV-main@0a99345");
+        let run_dir = run_dir_with_materialized_jar("match", Some("0a99345"));
+        check_pin(&fixtures, &run_dir).expect("matching pin must pass");
+        let _ = fs::remove_dir_all(&fixtures);
+        let _ = fs::remove_dir_all(&run_dir);
+    }
+
+    /// A materialized jar with no Git-Commit attribute cannot have its pin
+    /// enforced: UNVERIFIED (exit 3), not FAIL.
+    #[test]
+    fn no_git_commit_attribute_classifies_unverified() {
+        if !unzip_available() {
+            eprintln!("skipping: unzip not on PATH");
+            return;
+        }
+        let fixtures = fixtures_dir("noattr", "26.2-DEV-main@0a99345");
+        let run_dir = run_dir_with_materialized_jar("noattr", None);
+        let err = check_pin(&fixtures, &run_dir).unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "a jar without provenance must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "a jar without provenance must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        let _ = fs::remove_dir_all(&fixtures);
+        let _ = fs::remove_dir_all(&run_dir);
+    }
+
+    /// A missing materialized jar (e.g. a paperclip boot that never wrote
+    /// `versions/`) cannot have its pin enforced: UNVERIFIED, not FAIL.
+    #[test]
+    fn missing_materialized_jar_classifies_unverified() {
+        let fixtures = fixtures_dir("nojar", "26.2-DEV-main@0a99345");
+        let run_dir =
+            std::env::temp_dir().join(format!("rivet-capture-nojar-{}", std::process::id()));
+        fs::create_dir_all(run_dir.join("versions/26.2")).unwrap();
+        let err = check_pin(&fixtures, &run_dir).unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "a missing materialized jar must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "a missing materialized jar must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        let _ = fs::remove_dir_all(&fixtures);
+        let _ = fs::remove_dir_all(&run_dir);
+    }
+
+    /// A fixture manifest with no `@<commit>` pin cannot be enforced:
+    /// UNVERIFIED, not FAIL.
+    #[test]
+    fn unpinned_manifest_classifies_unverified() {
+        let fixtures = fixtures_dir("unpinned", "26.2-DEV-main");
+        let run_dir = run_dir_with_materialized_jar("unpinned", Some("0a99345"));
+        let err = check_pin(&fixtures, &run_dir).unwrap_err();
+        assert!(
+            matches!(err, CaptureError::Unverified(_)),
+            "an unpinned manifest must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            rivet_harness_common::exit::EXIT_UNVERIFIED,
+            "an unpinned manifest must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        let _ = fs::remove_dir_all(&fixtures);
+        let _ = fs::remove_dir_all(&run_dir);
     }
 }

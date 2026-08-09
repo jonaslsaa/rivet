@@ -163,10 +163,7 @@ pub fn read_capture(dir: &Path) -> io::Result<Vec<NormalizedPacket>> {
     let path = dir.join("capture.jsonl");
     let raw = fs::read_to_string(&path)?;
     let mut packets = Vec::new();
-    for line in raw.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
+    for line in rivet_harness_common::transcript::lines(&raw) {
         let line: PacketLine = serde_json::from_str(line)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         packets.push(NormalizedPacket {
