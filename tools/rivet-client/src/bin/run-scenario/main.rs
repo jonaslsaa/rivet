@@ -1669,9 +1669,10 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
 ///
 /// The single-stone fixture is what makes the movement comparable: Paper's
 /// default-flat world spawns at y=-60, so every walk sample and `last_sent`
-/// would carry y=-60 vs Rivet's `transcript::JOIN_SPAWN_Y` — a 3-block fixture
-/// artifact, not a movement difference. With one stone layer both servers walk
-/// at `transcript::JOIN_SPAWN_Y` and the whole walk (samples, velocity,
+/// would carry y=-60 vs Rivet's `transcript::JOIN_SPAWN_Y` — a spawn-height
+/// fixture artifact, not a movement difference. With one stone layer both
+/// servers walk at `transcript::JOIN_SPAWN_Y` and the whole walk (samples,
+/// velocity,
 /// teleport echo, `last_sent`) must be byte-identical: there are no documented
 /// gaps.
 ///
@@ -2285,10 +2286,11 @@ mod tests {
     #[test]
     fn paper_rivet_divergence_rejects_position_y_as_undocumented() {
         // Issue #159: the Paper reference now boots the single-stone superflat
-        // and spawns at y=-63.0 like Rivet, so a position.y divergence is a real
-        // server mismatch and must FAIL — never a "documented gap" to be waved
-        // through. The counterfactual keeps the old (wrong) Paper reference at
-        // y=-60 and asserts the both-mode refuses PASS instead of accepting it.
+        // and spawns at `transcript::JOIN_SPAWN_Y` like Rivet, so a position.y
+        // divergence is a real server mismatch and must FAIL — never a
+        // "documented gap" to be waved through. The counterfactual keeps the old
+        // (wrong) Paper reference at a different spawn height and asserts the
+        // both-mode refuses PASS instead of accepting it.
         let err = check_paper_rivet_divergence(&diff_with("position.y")).unwrap_err();
         assert!(
             err.to_string().contains("position.y"),
@@ -2326,11 +2328,11 @@ mod tests {
     #[test]
     fn both_mode_negative_passes_when_tampered_position_y_is_reported() {
         // The genuine Paper-vs-Rivet shape (issue #159): both servers spawn at
-        // the same superflat height y=-63, so the transcripts diverge only on
-        // the documented health default gap (Paper 20 / Rivet 1). Tampering
-        // Paper's position.y through the real comparator/divergence path must be
-        // reported with the tampered value and refused PASS (position.y is a
-        // compared field).
+        // the same superflat height `transcript::JOIN_SPAWN_Y`, so the transcripts
+        // diverge only on the documented health default gap (Paper 20 / Rivet 1).
+        // Tampering Paper's position.y through the real comparator/divergence path
+        // must be reported with the tampered value and refused PASS (position.y is
+        // a compared field).
         let paper = join_transcript(-63.0, 20.0);
         let rivet = join_transcript(-63.0, 1.0);
         assert!(prove_both_mode_non_vacuous(&paper, &rivet).is_ok());
