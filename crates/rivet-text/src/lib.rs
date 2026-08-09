@@ -8,6 +8,7 @@ pub mod component;
 pub mod component_contents;
 pub mod component_serialization;
 pub mod contents;
+pub mod corpus;
 pub mod font_description;
 pub mod hover_event;
 pub mod style;

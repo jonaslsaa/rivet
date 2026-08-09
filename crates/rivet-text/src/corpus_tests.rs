@@ -22,6 +22,7 @@
 //! codec/STUB boundary — never for registry/Holder context or malformed fields.
 
 use crate::component::Component;
+use crate::corpus::{TextFixtureEntry, text_corpus};
 use rivet_serialization::codec::Codec;
 use rivet_serialization::json_ops::JsonOps;
 
@@ -34,58 +35,6 @@ const DOCUMENTED_STUB_DIVERGENCES: &[&str] = &[
     "click-run-command",
     "hover-show-text",
 ];
-
-/// Locate the committed `fixtures/text/` corpus + golden relative to the
-/// workspace root (this crate is two levels under it, like `tools/rivet-parity`).
-fn text_fixtures_dir() -> Option<std::path::PathBuf> {
-    let ws = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .parent()?;
-    let dir = ws.join("tools/rivet-oracle/fixtures/text");
-    dir.is_dir().then_some(dir)
-}
-
-struct CorpusEntry {
-    id: String,
-    input: String,
-    accept: bool,
-    canonical: Option<String>,
-}
-
-/// Load corpus.json + golden.json, merged by id in corpus order. A missing
-/// file or malformed pair is `None` so the non-vacuous test can fail loudly.
-fn load_text_corpus() -> Option<Vec<CorpusEntry>> {
-    let dir = text_fixtures_dir()?;
-    let corpus: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("corpus.json")).ok()?).ok()?;
-    let golden: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("golden.json")).ok()?).ok()?;
-    let golden_by_id: std::collections::HashMap<&str, &serde_json::Value> = golden["entries"]
-        .as_array()?
-        .iter()
-        .map(|e| (e["id"].as_str().unwrap_or_default(), e))
-        .collect();
-
-    let mut out = Vec::new();
-    for entry in corpus["entries"].as_array()? {
-        let id = entry["id"].as_str().map(str::to_string)?;
-        let input = entry["input"].as_str().map(str::to_string)?;
-        let accept = entry["accept"].as_bool()?;
-        let g = golden_by_id.get(id.as_str()).copied()?;
-        let canonical = if accept {
-            Some(g.get("canonical")?.as_str()?.to_string())
-        } else {
-            None
-        };
-        out.push(CorpusEntry {
-            id,
-            input,
-            accept,
-            canonical,
-        });
-    }
-    Some(out)
-}
 
 /// The Rust mirror of the Paper oracle op. Shared with `rivet-parity` via
 /// `component_serialization::json_canonical`, so the offline and live compare
@@ -101,7 +50,7 @@ fn component_codec() -> std::sync::Arc<dyn Codec<Component, JsonOps>> {
 
 #[test]
 fn text_corpus_present_and_non_vacuous() {
-    let corpus = load_text_corpus().expect(
+    let corpus = text_corpus().expect(
         "issue-#98 text corpus + golden must be present at \
          tools/rivet-oracle/fixtures/text/ — the fixture is the test",
     );
@@ -134,7 +83,7 @@ fn text_corpus_present_and_non_vacuous() {
 
 #[test]
 fn accepted_components_reencode_byte_identical_to_golden() {
-    let corpus = load_text_corpus().expect("corpus present (see non-vacuous test)");
+    let corpus = text_corpus().expect("corpus present (see non-vacuous test)");
     let mut accepted_but_rejected: Vec<&str> = Vec::new();
 
     for e in corpus.iter().filter(|e| e.accept) {
@@ -168,8 +117,8 @@ fn accepted_components_reencode_byte_identical_to_golden() {
 
 #[test]
 fn rejected_entries_are_rejected_by_rust() {
-    let corpus = load_text_corpus().expect("corpus present (see non-vacuous test)");
-    let rejects: Vec<&CorpusEntry> = corpus.iter().filter(|e| !e.accept).collect();
+    let corpus = text_corpus().expect("corpus present (see non-vacuous test)");
+    let rejects: Vec<&TextFixtureEntry> = corpus.iter().filter(|e| !e.accept).collect();
     assert!(!rejects.is_empty(), "corpus must include rejected fixtures");
     for e in rejects {
         assert!(
@@ -193,8 +142,8 @@ fn rejected_entries_are_rejected_by_rust() {
 /// and could mask a mislabelled fixture).
 #[test]
 fn corrected_click_hover_fixtures_use_paper_schemas_and_canonicals() {
-    let corpus = load_text_corpus().expect("corpus present (see non-vacuous test)");
-    let by_id: std::collections::HashMap<&str, &CorpusEntry> =
+    let corpus = text_corpus().expect("corpus present (see non-vacuous test)");
+    let by_id: std::collections::HashMap<&str, &TextFixtureEntry> =
         corpus.iter().map(|e| (e.id.as_str(), e)).collect();
 
     // (id, input, Paper canonical under non-compressed JsonOps).
@@ -250,8 +199,8 @@ fn corrected_click_hover_fixtures_use_paper_schemas_and_canonicals() {
 /// the field-name pin has drifted.
 #[test]
 fn wrong_key_negatives_are_recorded_as_rejected() {
-    let corpus = load_text_corpus().expect("corpus present (see non-vacuous test)");
-    let by_id: std::collections::HashMap<&str, &CorpusEntry> =
+    let corpus = text_corpus().expect("corpus present (see non-vacuous test)");
+    let by_id: std::collections::HashMap<&str, &TextFixtureEntry> =
         corpus.iter().map(|e| (e.id.as_str(), e)).collect();
     for id in [
         "malformed-hover-show-text-wrong-key",
