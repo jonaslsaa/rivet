@@ -168,6 +168,11 @@ pub struct KeepaliveTickOutcome {
 /// owned by the tick thread. Every time is injected (`tx_time_ns` from the
 /// `TickTime` monotonic clock, `now_ms` from a millis source), so the machine
 /// is fully deterministic under simulated time — no wall clock anywhere.
+///
+/// Construction always takes an explicit seed (`first_now_ns`, Paper's
+/// `System.nanoTime()` at `new KeepAlive()`): there is deliberately no
+/// `Default`, because a time-zero machine would transmit its first challenge
+/// on the very first tick.
 #[derive(Debug, Clone)]
 pub struct KeepaliveState {
     /// `KeepAlive.lastKeepAliveTx` — `System.nanoTime()` at construction
@@ -190,29 +195,19 @@ pub struct KeepaliveState {
     timeout_ns: i64,
 }
 
-impl Default for KeepaliveState {
-    fn default() -> Self {
+impl KeepaliveState {
+    /// `new KeepAlive()` with the initial `lastKeepAliveTx` reading and the
+    /// pinned `KEEPALIVE_LIMIT_NS` kick limit. `first_now_ns` is Paper's
+    /// `System.nanoTime()` at construction — the tick that is `>= 1s` past it
+    /// transmits the first challenge.
+    pub fn new(first_now_ns: i64) -> Self {
         KeepaliveState {
-            // `KeepAlive.lastKeepAliveTx = System.nanoTime()` runs once at
-            // construction. Simulated callers pass the epoch's first reading
-            // via `new(first_now_ns)`; this default is the pure fallback.
-            last_keep_alive_tx_ns: 0,
+            last_keep_alive_tx_ns: first_now_ns,
             pending: VecDeque::new(),
             ping_calculator_1m: PingCalculator::one_minute(),
             ping_calculator_5s: PingCalculator::five_seconds(),
             latency_ms: 0,
             timeout_ns: KEEPALIVE_LIMIT_NS,
-        }
-    }
-}
-
-impl KeepaliveState {
-    /// `new KeepAlive()` with the initial `lastKeepAliveTx` reading and the
-    /// pinned `KEEPALIVE_LIMIT_NS` kick limit.
-    pub fn new(first_now_ns: i64) -> Self {
-        KeepaliveState {
-            last_keep_alive_tx_ns: first_now_ns,
-            ..KeepaliveState::default()
         }
     }
 
@@ -221,9 +216,8 @@ impl KeepaliveState {
     /// timeout the tick fires at; the 1s transmit cadence is unchanged.
     pub fn new_with_timeout(first_now_ns: i64, timeout_ns: i64) -> Self {
         KeepaliveState {
-            last_keep_alive_tx_ns: first_now_ns,
             timeout_ns,
-            ..KeepaliveState::default()
+            ..KeepaliveState::new(first_now_ns)
         }
     }
 

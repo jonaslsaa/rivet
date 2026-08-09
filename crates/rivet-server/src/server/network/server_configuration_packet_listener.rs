@@ -291,25 +291,6 @@ pub struct ServerConfigurationPacketListener {
     keepalive: KeepaliveState,
 }
 
-impl Default for ServerConfigurationPacketListener {
-    fn default() -> Self {
-        // Java builds the listener from the `CommonListenerCookie`, which always
-        // carries the authenticated profile; the `Default` is only for the
-        // handoff tests and starts from the offline empty profile.
-        ServerConfigurationPacketListener {
-            configuration_tasks: VecDeque::new(),
-            current_task: None,
-            client_information: ClientInformation::create_default(),
-            client_brand: None,
-            profile: GameProfile::new_without_properties(
-                rivet_util::mth::Uuid { most: 0, least: 0 },
-                String::new(),
-            ),
-            keepalive: KeepaliveState::default(),
-        }
-    }
-}
-
 impl ServerConfigurationPacketListener {
     /// `new ServerConfigurationPacketListenerImpl(server, connection, cookie)` —
     /// the listener for a connection whose login phase authenticated `profile`.
