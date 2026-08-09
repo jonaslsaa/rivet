@@ -2086,7 +2086,7 @@ fn run_move(args: &Args) -> Result<(), RunnerError> {
     }
 }
 
-/// Mode E: the wall-clock keepalive-survival gate (issue #157, terminal M1
+/// Mode E: the wall-clock keepalive-survival gate (issue #714, terminal M1
 /// acceptance). Boots a real rivet-server headlessly, drives the pinned Azalea
 /// client's `dwell` mode (spawn into PLAY, stay connected for
 /// `--dwell-seconds` wall-clock seconds while azalea auto-echoes every live
