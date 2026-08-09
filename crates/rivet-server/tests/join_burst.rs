@@ -468,7 +468,7 @@ fn place_new_player_sends_paper_order_and_byte_exact_bodies() {
             ids::GAME_EVENT => assert_eq!(body, &hex_bytes("0d00000000")),
             ids::SET_HELD_SLOT => assert_eq!(body, &hex_bytes("00")),
             // `sendPlayerPermissionLevel`'s op-level event: `[entityId 4B BE
-            // 00000001][eventId 24]` — the login playerId 1, PERMISSION_LEVEL_ALL.
+            // 00000001][eventId 24]` — the probe's entity id 1, PERMISSION_LEVEL_ALL.
             ids::ENTITY_EVENT => assert_eq!(body, &hex_bytes("0000000118")),
             ids::PLAYER_INFO_UPDATE => assert_eq!(
                 body,
