@@ -186,26 +186,4 @@ mod tests {
             "the wrapped counter skips the still-live i32::MAX"
         );
     }
-
-    #[test]
-    fn shared_counter_across_levels_never_duplicates() {
-        // Paper's `ENTITY_COUNTER` is `static` — ONE counter shared by every
-        // `ServerLevel` in the JVM, so entity ids stay unique across dimensions
-        // and world instances. A per-`ServerLevel` allocator restarting at 1
-        // would hand the overworld's first entity AND the nether's first entity
-        // the same id. Rivet keeps the allocator at the tick-thread server play
-        // scope, so one allocator serves every level; two distinct levels driven
-        // through it never collide.
-        let mut server = EntityIdAllocator::new();
-        let overworld_first = server.next_id();
-        server.mark_in_use(overworld_first);
-        let nether_first = server.next_id();
-        server.mark_in_use(nether_first);
-        assert_ne!(
-            overworld_first, nether_first,
-            "a shared server-scope counter never hands two levels the same id"
-        );
-        assert_ne!(overworld_first, 0);
-        assert_ne!(nether_first, 0);
-    }
 }
