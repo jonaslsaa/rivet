@@ -392,9 +392,7 @@ CODEC` decode->re-encode under non-compressed `JsonOps` (stored as verbatim JSON
 strings so the byte identity is preserved). The four Paper-accepted
 click/hover entries use exactly Paper 26.2's codec field names (ShowText
 `value`, OpenUrl `url`, RunCommand `command`, CopyToClipboard `value`) and none
-needs registry/Holder context, so the only reason Rivet rejects them is the
-unported `ClickEvent`/`HoverEvent` STUB codec (epic #12) — never a malformed
-field or registry/Holder context; the four `malformed-*-wrong-key` negatives
+needs registry/Holder context; the four `malformed-*-wrong-key` negatives
 carry the same content with a wrong field name and Paper rejects them, pinning
 the field names as load-bearing. `regenerate --text` boots the Paper oracle
 (like `--m0`/`--m2`). The `text_manifest_regeneration_is_byte_identical` unit

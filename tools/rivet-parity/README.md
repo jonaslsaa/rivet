@@ -33,22 +33,15 @@ human-readable summary goes to stderr.
   separately from hard mismatches. **The SNBT text checks do not suffer this**:
   both printers sort compound keys, so `snbt.parse` and `nbt.decode` compare
   byte-for-byte.
-- **`component_click_hover_stub`** — the issue-#98 text corpus carries four
-  Paper-accepted click/hover components (`click-copy-to-clipboard`,
-  `click-open-url`, `click-run-command`, `hover-show-text`) whose Rust
-  `ClickEvent`/`HoverEvent` codecs are STUBs (RivetTodo #89, epic #12) and
-  therefore reject. The fixtures use exactly Paper 26.2's codec field names
-  (ShowText `value`, OpenUrl `url`, RunCommand `command`, CopyToClipboard
-  `value`) and none needs registry/Holder context, so Paper accepts all four
-  and the only reason Rivet rejects them is the unported STUB codec — never a
-  malformed field or registry/Holder context. The four `malformed-*-wrong-key`
-  negatives carry the same content with a wrong field name (show_text
-  `contents`, open_url `href`, run_command `value`, copy_to_clipboard `text`);
-  Paper rejects them, pinning the field names as load-bearing. Those checks are
-  marked `"divergences": ["component_click_hover_stub"]` with a soft `accept`
-  field, counted under `diverged` not `mismatched`. Once the STUBs are ported
-  the divergence closes and the checks become hard accept-parity. Everything
-  else in `component.json` must match Paper byte-for-byte.
+- **`component.json`** — the issue-#98 text corpus must match Paper
+  byte-for-byte: accept/reject parity and, for accepted entries, the canonical
+  decode->re-encode under non-compressed `JsonOps`. The four
+  `malformed-*-wrong-key` negatives carry the corrected click/hover fixtures
+  with a wrong field name (show_text `contents`, open_url `href`,
+  run_command `value`, copy_to_clipboard `text`); Paper rejects them, pinning
+  the `ClickEvent`/`HoverEvent` codec field names (ShowText `value`, OpenUrl
+  `url`, RunCommand `command`, CopyToClipboard `value`) as load-bearing. Any
+  divergence in `component.json` is a hard mismatch.
 
 ## How to run
 
