@@ -1311,7 +1311,18 @@ fn check_rivet_authoritative(
              that never moved the player, or accepted frames it was not sent)"
         )));
     }
-    if fy != last_sent_y || fz != sent_abs_z {
+    // y/z are non-movement axes on this fixture (the walk is a straight forward
+    // run along x), so the final authoritative y/z must match the client's last
+    // sent y/z — modulo precision, not exactly. The client rounds to 3 decimals,
+    // and the z reconstruction (`round3(last_sent.z - origin.z) + origin.z`)
+    // carries a rounding-unit error, so exact f64 equality would spuriously fail
+    // on any spawn offset whose low bits the 3-decimal rounding discards. Compare
+    // with a small epsilon — an order of magnitude above the 1e-3 rounding — the
+    // tight analogue of x's movement-axis band (x legitimately overshoots past
+    // last_sent via the in-flight frames the server processes; y/z must agree to
+    // within the client's own precision).
+    const AXIS_EPSILON: f64 = 1e-2;
+    if (fy - last_sent_y).abs() > AXIS_EPSILON || (fz - sent_abs_z).abs() > AXIS_EPSILON {
         return Err(RunnerError::Gate(format!(
             "rivet authoritative final position ({fx}, {fy}, {fz}) disagrees with the client's \
              last sent (absolute {sent_abs_x}, {last_sent_y}, {sent_abs_z}; spawn-relative \
@@ -2469,6 +2480,35 @@ mod tests {
         let walk = rivet_walk([25.0, -63.0, 0.0], [9.5, -63.0, -3.5]);
         let summary = check_rivet_authoritative(&trace, &walk).expect("must match");
         assert!(summary.contains("accepted moves"), "{summary}");
+    }
+
+    /// The y/z cross-check must tolerate the client's own precision: `last_sent`
+    /// is rounded to 3 decimals and the z reconstruction carries a rounding-unit
+    /// error, so a trace final that differs from the reconstructed value by a
+    /// sub-rounding delta (here 5e-4 on z) is precision loss, not a divergence —
+    /// it must not spuriously fail the gate.
+    #[test]
+    fn rivet_authoritative_tolerates_rounding_precision_on_y_z() {
+        let trace = authoritative_trace_at([35.0, -63.0, -3.5005]);
+        let walk = rivet_walk([25.0, -63.0, 0.0], [9.5, -63.0, -3.5]);
+        let summary = check_rivet_authoritative(&trace, &walk).expect("must match");
+        assert!(summary.contains("accepted moves"), "{summary}");
+    }
+
+    /// The epsilon is tight, not a free pass: a real y/z divergence (here 1.0 on
+    /// z — the server accepted a frame at a height/direction the client never
+    /// walked) must still fail the gate.
+    #[test]
+    fn rivet_authoritative_rejects_real_y_z_divergence() {
+        let trace = authoritative_trace_at([35.0, -63.0, -2.5]);
+        let walk = rivet_walk([25.0, -63.0, 0.0], [9.5, -63.0, -3.5]);
+        let err = check_rivet_authoritative(&trace, &walk)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("on y/z"),
+            "a real y/z divergence must fail the cross-check, got {err}"
+        );
     }
 
     /// A spawn-origin offset large enough that ignoring it would flip the verdict
