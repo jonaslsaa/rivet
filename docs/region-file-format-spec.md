@@ -78,7 +78,9 @@ open time and mutated as chunks are written/cleared:
 - `force(start, size)` — mark `[start, start+size)` used (unchecked).
 - `free(start, size)` — clear `[start, start+size)`.
 - `tryAllocate(start, size)` — allocate exactly `[start, start+size)` **only if** that run contains no
-  used bit; fails (returns false) if any used sector intersects.
+  used bit; fails (returns false) if any used sector intersects. Paper's guard is `firstSet > 0`
+  (RegionBitmap.java), so a used bit at index exactly `0` would be ignored — unreachable in practice,
+  because every call site uses `start >= 2`.
 - `allocate(size)` — first-fit: starting from sector 0 each call, find the first free run of at least
   `size` clear bits and claim its first `size` bits (`current` is a per-call local, not a persistent
   cursor).
@@ -146,10 +148,10 @@ selected.
 
 | id | name | paper on read | paper on write | `fromId` |
 | --- | --- | --- | --- | --- |
-| `1` | gzip | `GZIPInputStream` | `GZIPOutputStream` | yes |
-| `2` | deflate | `InflaterInputStream` | `DeflaterOutputStream` | yes |
-| `3` | none | identity | identity | yes |
-| `4` | lz4 | `LZ4BlockInputStream` | `LZ4BlockOutputStream` | yes |
+| `1` | gzip | `FastBufferedInputStream(GZIPInputStream)` | `BufferedOutputStream(GZIPOutputStream)` | yes |
+| `2` | deflate | `FastBufferedInputStream(InflaterInputStream)` | `BufferedOutputStream(DeflaterOutputStream)` | yes |
+| `3` | none | `FastBufferedInputStream` (byte-transparent) | `BufferedOutputStream` (byte-transparent) | yes |
+| `4` | lz4 | `FastBufferedInputStream(LZ4BlockInputStream)` | `BufferedOutputStream(LZ4BlockOutputStream)` | yes |
 | `127` | custom | unwrap path reads a modified-UTF-8 string id, logs, returns null — when the string reads; malformed/truncated input propagates `UTFDataFormatException`/`EOFException` | never writable (output wrapper throws `UnsupportedOperationException`) | yes |
 
 - **Selection:** `RegionFileVersion.DEFAULT = VERSION_DEFLATE`; `configure(optionName)` switches the
@@ -288,8 +290,10 @@ treated as "empty chunk".
 **Tier 1 — per-read soft failure.** Any anomaly in §7 returns null (chunk treated as absent) after
 logging; on `CHUNK`-type region files (`canRecalcHeader == true`) it first attempts
 `recalculateHeader()` and recursively retries after each successful recalc. In practice a successful
-recalc relinks the slot to valid data or clears it, terminating the retry. Non-CHUNK files (e.g.
-POI/entities with `DataFixTypes`
+recalc relinks the slot to valid data or clears it, terminating the retry. Note the recursion is not
+bounded by construction: `recalculateHeader()` returns true for CHUNK files whenever the filename
+parses, so a fundamentally corrupt file can loop recalc→retry indefinitely — this mirrors Paper and
+is not a fidelity divergence. Non-CHUNK files (e.g. POI/entities with `DataFixTypes`
 other than `CHUNK`) do not recalc — the read simply returns null; the slot is left untouched on the
 per-read path. (The "log and delete the slot" behavior for non-CHUNK files exists only in the
 constructor's header-replay loop, below, when an *open-time* header entry is invalid — not on read.)
