@@ -78,11 +78,13 @@ fn validate_untrusted_uri(uri: &String) -> DataResult<String> {
         Ok(scheme) => scheme,
     };
     let Some(scheme) = scheme else {
-        return DataResult::error(format!("Missing protocol in URI: {}", uri));
+        // `URISyntaxException.getMessage()` = reason + ": " + input, so the
+        // input is repeated after the Paper-constructed reason.
+        return DataResult::error(format!("Missing protocol in URI: {}: {}", uri, uri));
     };
     let protocol = scheme.to_ascii_lowercase();
     if protocol != "http" && protocol != "https" {
-        return DataResult::error(format!("Unsupported protocol in URI: {}", uri));
+        return DataResult::error(format!("Unsupported protocol in URI: {}: {}", uri, uri));
     }
     DataResult::success(uri.clone())
 }

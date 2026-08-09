@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn open_url_missing_protocol_carries_exact_message() {
         let err = error_message(&decode("{\"action\":\"open_url\",\"url\":\"example.com\"}"));
-        assert_eq!(err, "Missing protocol in URI: example.com");
+        assert_eq!(err, "Missing protocol in URI: example.com: example.com");
     }
 
     /// A URI with a non-http(s) scheme fails with the exact Java message.
@@ -465,7 +465,10 @@ mod tests {
         let err = error_message(&decode(
             "{\"action\":\"open_url\",\"url\":\"ftp://example.com\"}",
         ));
-        assert_eq!(err, "Unsupported protocol in URI: ftp://example.com");
+        assert_eq!(
+            err,
+            "Unsupported protocol in URI: ftp://example.com: ftp://example.com"
+        );
     }
 
     /// A URI that fails the JDK parser carries the exact `URISyntaxException`
