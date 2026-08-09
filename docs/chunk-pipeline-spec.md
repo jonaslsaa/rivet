@@ -192,9 +192,11 @@ during I/O:
   `saveChunk(...)`/`MoonriseRegionFileIO.scheduleSave`, entity data via
   `saveEntities`, poi via `savePOI` when dirty — and unload the entity/poi
   slices.
-- **Stage 3** (relock): drop the save-task references and **re-check
-  `isSafeToUnload`**; if anything was reloaded mid-unload (entity/poi/chunk
-  present again) the unload aborts and the holder is retained.
+- **Stage 3** (relock): `unloadStage3()` drops the save-task references and
+  **re-checks**: if anything was reloaded mid-unload (`entityChunk`/`poiChunk`/
+  `currentChunk` present again) or `isSafeToUnload()` is no longer `null`, the
+  unload **aborts** and the holder is retained; otherwise the holder is dropped
+  from the map.
 
 `isSafeToUnload` returns `null` (safe) only when all of: ticket level `> 44`; no
 neighbour is using the chunk for generation (`neighboursGenerating`),
@@ -202,16 +204,19 @@ neighbour is using the chunk for generation (`neighboursGenerating`),
 task; no requested generation; no pending entity/poi load; no pending
 entity/poi/chunk serialization. Light tasks do not need a check (they hold a
 ticket). Neighbour checks use `NEIGHBOUR_RADIUS = 2` (the 5×5 square around the
-column). On unload the holder adds an `UNLOAD_COOLDOWN` ticket (timeout
-`5L * 20L = 100` ticks) so a column that toggles in/out of range is not
-saved-and-reloaded churn; the final `releaseChunkData` is the drop from the map.
+column). When stage 1 finds nothing to save it removes the holder immediately;
+when stage 3 aborts, `ChunkHolderManager` adds an `UNLOAD_COOLDOWN` ticket
+(timeout `5L * 20L = 100` ticks) at `MAX_TICKET_LEVEL` so the next unload retry
+is not immediately next tick. Only a successful stage 3 calls
+`removeChunkHolder`; the final `releaseChunkData` is the drop from the map.
 
 **[Rivet]** Port the 3-stage unload shape and the cancellation rule verbatim —
 they are the backpressure/cancellation contract (§6). The lock in Rivet is not
 Java's `ReentrantAreaLock`; the D5 model (§5) gives the single tick thread the
 same exclusive ownership, so Stage 1/3 run on the tick thread and Stage 2 on the
-storage/IO worker set. `UNLOAD_COOLDOWN` is a plain `100`-tick ticket, not a
-cooldown mechanism.
+storage/IO worker set. `UNLOAD_COOLDOWN` is a plain `100`-tick ticket at
+`MAX_TICKET_LEVEL`, added only when a stage-3 unload aborts; it is precisely the
+retry-spacing cooldown, not a save/drop mechanism.
 
 ---
 
