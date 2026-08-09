@@ -27,12 +27,13 @@
 //! `rivet-world/tests/superflat_chunk_golden.rs`, until the owning unit replaces
 //! them.
 //!
-//! RivetTodo(#184): the send path uses the deterministic superflat light
-//! (`rivet_world::superflat::superflat_light_data`) instead of the
-//! `LevelLightEngine`; the lighting engine unit replaces it when it lands.
+//! RivetTodo(#184): the send path carries the deterministic superflat light
+//! (computed once at construction from `rivet_world::superflat`) instead of
+//! the `LevelLightEngine`; the lighting engine unit replaces it when it lands.
 
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_protocol::protocol::game::level_chunk_packet_data::LevelChunkPacketData;
+use rivet_protocol::protocol::game::light_update_packet_data::LightUpdatePacketData;
 use rivet_registry::core::ChunkPos;
 use rivet_world::chunk::level_chunk::LevelChunk as WorldLevelChunk;
 use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
@@ -77,6 +78,13 @@ pub struct BiomeId(pub u16);
 pub struct LevelChunk {
     /// The generic rivet-world chunk value.
     chunk: WorldLevelChunk<StateId, BiomeId, StructureKey>,
+    /// The deterministic superflat light payload, computed once at
+    /// construction and cloned per send (issue #184). Java queries the
+    /// `LevelLightEngine` per packet; the engine is not ported, so the M1 send
+    /// path carries this fixed payload. Building it on every encode would
+    /// reallocate the 26 sky/block layer arrays per chunk per player, so the
+    /// prebuilt value is reused instead.
+    light_data: LightUpdatePacketData,
 }
 
 impl LevelChunk {
@@ -84,6 +92,7 @@ impl LevelChunk {
     /// single-stone superflat content for the given chunk.
     pub fn new(pos: ChunkPos) -> Self {
         let content = superflat_content();
+        let light_data = content.light_data;
         let height_accessor = create_accessor(SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT);
         let mut chunk = WorldLevelChunk::new(
             pos,
@@ -102,7 +111,13 @@ impl LevelChunk {
         for (ty, raw) in content.heightmaps {
             chunk.set_heightmap(Types::from_protocol(ty), &raw);
         }
-        LevelChunk { chunk }
+        LevelChunk { chunk, light_data }
+    }
+
+    /// The prebuilt superflat light payload — a clone of the value computed
+    /// once at construction (the packet body takes it by value).
+    pub fn light_data(&self) -> LightUpdatePacketData {
+        self.light_data.clone()
     }
 
     /// `LevelChunk.getPos()`.
@@ -225,7 +240,7 @@ fn strategies() -> (Strategy<StateId>, Strategy<BiomeId>) {
 /// Builds the deterministic single-stone superflat chunk content (air = state
 /// 0, stone = state 1, plains biome = id 40) — byte-identical to the
 /// `rivet-world` golden test's `build_superflat` output. The light payload is
-/// discarded here (the send path uses `superflat_light_data` directly).
+/// retained by `LevelChunk::new` (prebuilt once, cloned per send).
 fn superflat_content() -> rivet_world::superflat::SuperflatChunkContent<StateId, BiomeId> {
     let (block_strategy, biome_strategy) = strategies();
 

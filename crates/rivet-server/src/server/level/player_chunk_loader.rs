@@ -60,7 +60,6 @@ use rivet_protocol::var_int;
 use rivet_protocol::varint21_length_field_prepender::encode_frame;
 use rivet_registry::RegistryAccess;
 use rivet_registry::core::ChunkPos;
-use rivet_world::superflat::superflat_light_data;
 
 use super::chunk_tracking_view::ChunkTrackingView;
 use super::server_level::ServerLevel;
@@ -348,7 +347,9 @@ impl PlayerChunkLoader {
 ///
 /// The light is the deterministic superflat light (`#184`): Java queries the
 /// `LevelLightEngine`; the engine is not ported, so every chunk carries the
-/// fixed superflat sky/block layers the golden fixture pins.
+/// fixed superflat sky/block layers the golden fixture pins. The payload is
+/// computed once at `LevelChunk` construction and cloned here, so a per-chunk
+/// per-player encode never rebuilds the 26 layer arrays.
 ///
 /// RivetTodo(#185): the chunk pipeline loads every view chunk; until then the
 /// content is the deterministic superflat build for every position.
@@ -364,7 +365,7 @@ fn encode_chunk_with_light(pos: ChunkPos, world: &ServerLevel) -> Result<Vec<u8>
         pos.x(),
         pos.z(),
         chunk.chunk_packet_data(),
-        superflat_light_data(),
+        chunk.light_data(),
     );
     encode_chunk_body(&packet)
 }
