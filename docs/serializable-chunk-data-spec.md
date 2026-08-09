@@ -29,6 +29,7 @@ that this document's CompoundTag is wrapped in.
 - `.../net/minecraft/world/level/chunk/DataLayer.java` — 2048-byte light layer
 - `.../ca/spottedleaf/moonrise/patches/starlight/util/SaveUtil.java`, `.../patches/starlight/storage/StarlightSectionData.java` — starlight light tags
 - `.../ca/spottedleaf/moonrise/patches/chunk_system/scheduling/task/ChunkLoadTask.java`, `.../chunk_system/scheduling/NewChunkHolder.java` — read/write orchestration callers
+- `.../ca/spottedleaf/moonrise/common/PlatformHooks.java`, `.../ca/spottedleaf/moonrise/paper/PaperHooks.java` — `chunkSyncSave` (PaperHooks.java L89) between `copyOf` and `write`
 - `.../net/minecraft/world/level/chunk/storage/SimpleRegionStorage.java` — misplaced-chunk guard, `upgradeChunkTag`
 - `.../net/minecraft/world/level/LevelAccessor.java` — `getGameTime`
 
@@ -234,7 +235,7 @@ record codec of two fields:
 exist in `crates/rivet-world/src/chunk/` (`paletted_container.rs`,
 `strategy.rs`, `palette.rs`, `configuration.rs`) and are the exact substrate
 this spec's `block_states`/`biomes` tags serialize onto. The `#230` chunk-wire
-closure worktree is the reference for the read path.
+closure (merged on `origin/main`) is the reference for the read path.
 
 ---
 
@@ -246,7 +247,7 @@ closure worktree is the reference for the read path.
 (`DataLayer.SIZE`, DataLayer.java L11). Read: `DataLayer` panics (thrown as
 `IllegalArgumentException`) if the length differs (L27-29). The starlight light
 **engine** (SWMRNibbleArray propagation, `StarLightEngine`, `WorldUtil` light
-section bounds) is **[Deferred]** to #230/#231; the **tag schema** here is
+section bounds) is **[Deferred]** to the #231 wave; the **tag schema** here is
 current.
 
 ### 5.2 Starlight tags (Paper 26.2 + Moonrise)
@@ -311,7 +312,7 @@ Keys are `Heightmap.Types.getSerializationKey()` (Heightmap.java L144-172):
 - `WORLDGEN_HEIGHTMAPS = {OCEAN_FLOOR_WG, WORLD_SURFACE_WG}` for statuses
   `empty`..`surface`.
 - `FINAL_HEIGHTMAPS = {OCEAN_FLOOR, WORLD_SURFACE, MOTION_BLOCKING,
-  MOTION_BLOCKING_NO_LEAVES}` for `carvers`..`full` (ChunkStatus.java L17-20).
+  MOTION_BLOCKING_NO_LEAVES}` for `carvers`..`full` (ChunkStatus.java L18-20).
 
 Write iterates **all** map entries regardless of status (L627-629); `copyOf`
 only saves `persistedStatus.heightmapsAfter()` types (L514-518). Read only
@@ -499,9 +500,10 @@ byte-identical in `rivet-nbt` (the D12 golden test, §1).
 ## 11. Staged implementation boundaries (what belongs where)
 
 The NBT spec is the contract; the code lands across several in-flight units.
-Dependency map (all OPEN as of this writing, verified 2026-08-09):
+Dependency map (verified 2026-08-09; #230 and #233 have landed on `origin/main`,
+the rest remain OPEN):
 
-- **#230 (`chunk.wire` closure + `chunk.support`)** — `PalettedContainerRO`,
+- **#230 (`chunk.wire` closure + `chunk.support`)** — LANDED. `PalettedContainerRO`,
   `DataLayer`/`CarvingMask`/`BlockColumn`/`LightChunk`, the palette read path,
   and the starlight **read** of section light data. The section-tag shape in §3
   is its acceptance surface.
@@ -512,8 +514,8 @@ Dependency map (all OPEN as of this writing, verified 2026-08-09):
   `ProtoChunk`/`LevelChunk`; the read path builds these from §3/§9.
 - **#228 (worldgen-reachable block slice)** — `BlockState`/`Properties` codec
   used by §4.4.
-- **#233 (deps wiring)** — workspace deps (indexmap for D12 order, bitflags,
-  slotmap, etc.) that the chunk.storage implementation needs.
+- **#233 (deps wiring)** — LANDED. Workspace deps (indexmap for D12 order,
+  bitflags, slotmap, etc.) that the chunk.storage implementation needs.
 - **#231 (`chunk.storage` wave)** — `SerializableChunkData`, `RegionFile`
   (spec'd in the region-file doc), `SimpleRegionStorage`, the save pipeline.
 
@@ -594,7 +596,7 @@ is a regression against this spec.
 ## 13. Deferred / out-of-scope summary
 
 - **[Deferred]** starlight light engine, `saveLightHook`/`loadLightHook` mixin
-  wiring, `WorldUtil` light-section bounds → #230/#231.
+  wiring, `WorldUtil` light-section bounds → #231.
 - **[Deferred]** entity/block-entity content parsing (verbatim tag round-trip
   only) → entity cluster.
 - **[Deferred]** `StructureStart`/`StructurePieceSerializationContext` payload
