@@ -416,10 +416,10 @@ async fn conn_loop(
     // listener each server tick (`ServerConnectionListener.tick()`); Rivet
     // drives the configuration listener's keepalive from this interval at
     // `config.tick_interval`. The select precondition below polls it only while
-    // a CONFIGURATION listener is current — handshake/login listeners tick as
-    // no-ops and PLAY owns keepalive on the tick thread (`PlayerSessionManager`)
-    // — so outside CONFIGURATION no timer is armed and the loop is not woken
-    // every `tick_interval` for nothing.
+    // a CONFIGURATION listener is current. Handshake/login listeners are never
+    // driven, and PLAY owns keepalive on the tick thread (`PlayerSessionManager`),
+    // so outside CONFIGURATION no timer is armed and the loop is not woken every
+    // `tick_interval` for nothing.
     let mut keepalive_tick = tokio::time::interval(config.tick_interval);
     keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Paper's `ReadTimeoutHandler(30)` — the read-idle deadline. It gates socket
@@ -1329,14 +1329,11 @@ mod tests {
         assert_eq!(challenge.len(), 9, "id varint + 8-byte body");
     }
 
-    /// The read-idle timeout is Paper's `ReadTimeoutHandler(30)`, independent of
-    /// the keepalive: a silent client under a handshake listener (nothing for
-    /// the keepalive to drive) with a 100ms read timeout and a 20ms tick is
-    /// closed at the deadline. Before the deadline fix, the tick arm restarted
-    /// the `timeout(pending())` select arm every 20ms, so the read-idle timer
-    /// never expired and the loop spun forever at the tick cadence.
+    /// A silent handshake client reaches the read-idle deadline even though its
+    /// protocol keeps the CONFIGURATION-only keepalive arm disabled. The sibling
+    /// configuration test covers read-idle while that arm is actively polling.
     #[tokio::test]
-    async fn conn_loop_read_idle_timeout_fires_despite_keepalive_tick() {
+    async fn conn_loop_read_idle_timeout_fires_without_keepalive_arm() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let client = TcpStream::connect(addr).await.unwrap();
