@@ -478,14 +478,34 @@ mod tests {
 
     #[test]
     fn heightmaps_are_primed_via_the_wrapped_chunk() {
-        // `getOrCreateHeightmapUnprimed` delegates to the wrapped chunk, which
-        // primes on first access. The `FINAL_HEIGHTMAPS` entries already exist
-        // unprimed from the `LevelChunk` constructor.
+        // `getOrCreateHeightmapUnprimed` delegates to the wrapped chunk. The
+        // `LevelChunk` constructor creates an (unprimed) entry for exactly the
+        // `FINAL_HEIGHTMAPS` types; calling through the imposter must leave
+        // every one of those entries present and `Some` (idempotent, Java's
+        // `computeIfAbsent`), and must never spuriously create an entry for a
+        // type that was not requested.
         let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), true);
         for ty in FINAL_HEIGHTMAPS {
             imposter.get_or_create_heightmap_unprimed(ty);
         }
-        assert_eq!(imposter.get_wrapped().heightmaps().len(), 6);
+        let heightmaps = imposter.get_wrapped().heightmaps();
+        // Each `FINAL_HEIGHTMAPS` entry exists (created by the `LevelChunk`
+        // constructor and returned through the imposter's delegation).
+        for ty in FINAL_HEIGHTMAPS {
+            assert!(
+                heightmaps[ty as usize].is_some(),
+                "FINAL_HEIGHTMAPS entry {ty:?} is primed through the imposter"
+            );
+        }
+        // The worldgen-only types (`WORLD_SURFACE_WG`/`OCEAN_FLOOR_WG`) are
+        // not in `FINAL_HEIGHTMAPS` and were never requested, so they stay
+        // unprimed — proving the delegation creates entries only on request.
+        for ty in [Types::WorldSurfaceWg, Types::OceanFloorWg] {
+            assert!(
+                heightmaps[ty as usize].is_none(),
+                "worldgen-only {ty:?} stays unprimed"
+            );
+        }
     }
 
     #[test]
