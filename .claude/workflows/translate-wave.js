@@ -5,7 +5,35 @@ export const meta = {
   phases: [{ title: 'Translate' }, { title: 'Review' }, { title: 'Fix' }],
 }
 
-const MAX_REVIEW_ROUNDS = 3
+const MAX_REVIEW_ROUNDS = 6
+const FALLBACK_MODEL = args && args.fallbackModel
+
+// A stalled provider call or mid-stream disconnect must cost one retry, not a
+// silently dropped unit: agent() throws on harness-level stall and returns null
+// on terminal API errors. The attempt preamble also makes each retry a distinct
+// journal key, so a resumed run never replays a half-dead attempt as completed.
+async function resilientAgent(prompt, opts, attempts = 3) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const attemptOpts = { ...opts }
+    let attemptPrompt = prompt
+    if (attempt > 1) {
+      attemptPrompt = `(Retry ${attempt}/${attempts}: the previous attempt died mid-run from a provider error. Its partial file changes may still be on disk — reconcile, don't assume a clean slate.)\n\n${prompt}`
+      if (FALLBACK_MODEL && attempt === attempts) attemptOpts.model = FALLBACK_MODEL
+    }
+    try {
+      const result = await agent(attemptPrompt, attemptOpts)
+      if (result !== null) return result
+      log(`${opts.label}: attempt ${attempt}/${attempts} returned no result`)
+    } catch (e) {
+      log(`${opts.label}: attempt ${attempt}/${attempts} failed: ${e && e.message}`)
+    }
+  }
+  return null
+}
+
+const RESUME_NOTE = `This workflow gets paused and resumed: the target crate may already contain
+partial files for this unit from an interrupted prior attempt. Check what exists before writing
+and continue from that state instead of starting over.`
 
 const IMPL_REPORT = {
   type: 'object',
@@ -80,6 +108,7 @@ ${COMMON_RULES}
 Unit: Java package ${u.java_package} (${u.files} files) in working/Paper (source root: ${u.source_root}).
 Target: crate crates/${u.crate}, module path mirroring the Java package per PORTING.md naming.
 ${u.notes ? `Unit notes: ${u.notes}` : ''}
+${RESUME_NOTE}
 
 Steps:
 1. Read GOAL.md, PORTING.md, and the relevant OWNERSHIP.md section for this crate.
@@ -109,6 +138,7 @@ minor = style). An empty findings list is a valid result — do not manufacture 
 function fixPrompt(u, report, findings) {
   return `You are the FIXER for Rivet port unit "${u.id}".
 ${COMMON_RULES}
+${RESUME_NOTE}
 
 Apply these reviewer findings to the files ${JSON.stringify(report.files_written)}:
 ${JSON.stringify(findings, null, 1)}
@@ -123,7 +153,7 @@ async function reviewRound(u, report, round) {
   // Round 1 gets both lenses (highest yield); later rounds one fresh full-lens verifier.
   const lenses = round === 1 ? ['semantic-drift', 'ownership-api'] : ['combined']
   const results = await parallel(lenses.map(lens => () =>
-    agent(reviewPrompt(u, report, lens), {
+    resilientAgent(reviewPrompt(u, report, lens), {
       label: `rev:${u.id}:r${round}${lenses.length > 1 ? `:${lens}` : ''}`,
       phase: 'Review',
       schema: FINDINGS,
@@ -153,7 +183,7 @@ async function converge(u, impl) {
         converged: false,
       }
     }
-    const fixed = await agent(fixPrompt(u, report, findings), {
+    const fixed = await resilientAgent(fixPrompt(u, report, findings), {
       label: `fix:${u.id}:r${round}`, phase: 'Fix', schema: IMPL_REPORT,
     })
     if (!fixed || fixed.status === 'blocked') return fixed
@@ -172,7 +202,7 @@ log(`wave ${args.waveId}: ${args.units.length} units`)
 
 const results = await pipeline(
   args.units,
-  u => agent(implementPrompt(u), { label: `impl:${u.id}`, phase: 'Translate', schema: IMPL_REPORT }),
+  u => resilientAgent(implementPrompt(u), { label: `impl:${u.id}`, phase: 'Translate', schema: IMPL_REPORT }),
   (impl, u) => {
     if (!impl || impl.status === 'blocked') return impl
     return converge(u, impl)

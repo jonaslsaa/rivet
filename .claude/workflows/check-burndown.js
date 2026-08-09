@@ -46,16 +46,44 @@ correcting the translation against the Java original in working/Paper (PORTING.m
 Never weaken types to () or Box<dyn Any> as an escape hatch.`
 
 const maxRounds = (args && args.maxRounds) || 8
+const FALLBACK_MODEL = args && args.fallbackModel
 let lastTotal = Infinity
 
+// A stalled provider call or mid-stream disconnect must cost one retry, not the
+// whole run or a silently skipped crate: agent() throws on harness-level stall
+// and returns null on terminal API errors. The attempt preamble also makes each
+// retry a distinct journal key, so a resumed run never replays a half-dead
+// attempt as completed.
+async function resilientAgent(prompt, opts, attempts = 3) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const attemptOpts = { ...opts }
+    let attemptPrompt = prompt
+    if (attempt > 1) {
+      attemptPrompt = `(Retry ${attempt}/${attempts}: the previous attempt died mid-run from a provider error. Its partial file changes may still be on disk — reconcile, don't assume a clean slate.)\n\n${prompt}`
+      if (FALLBACK_MODEL && attempt === attempts) attemptOpts.model = FALLBACK_MODEL
+    }
+    try {
+      const result = await agent(attemptPrompt, attemptOpts)
+      if (result !== null) return result
+      log(`${opts.label}: attempt ${attempt}/${attempts} returned no result`)
+    } catch (e) {
+      log(`${opts.label}: attempt ${attempt}/${attempts} failed: ${e && e.message}`)
+    }
+  }
+  return null
+}
+
 for (let round = 1; round <= maxRounds; round++) {
-  const survey = await agent(
+  const survey = await resilientAgent(
     `Run \`cargo check --workspace --message-format=short 2>&1\` in the repo root. Group the
 errors by crate (and dominant module within it). Return the structured summary — clean=true only
 if there are zero errors (warnings do not count).`,
     { label: `survey:r${round}`, phase: 'Survey', schema: ERRORS, effort: 'low' },
   )
-  if (!survey) throw new Error('survey agent failed')
+  if (!survey) {
+    log('survey failed after retries — stopping for controller triage')
+    return { clean: false, survey_failed: true, rounds: round }
+  }
   if (survey.clean) { log(`round ${round}: workspace clean`); return { clean: true, rounds: round } }
   log(`round ${round}: ${survey.total_errors} errors in ${survey.groups.length} crates`)
   if (survey.total_errors >= lastTotal && round > 2) {
@@ -65,9 +93,11 @@ if there are zero errors (warnings do not count).`,
   lastTotal = survey.total_errors
 
   await parallel(survey.groups.map(g => () =>
-    agent(
+    resilientAgent(
       `Fix the cargo check errors in crate ${g.crate}${g.module ? ` (focus: ${g.module})` : ''}.
 ${RULES}
+This workflow gets paused and resumed: the crate may contain partial fixes from an interrupted
+prior attempt — re-run cargo check first and work from the current state.
 Currently ~${g.error_count} errors. Sample:
 ${g.sample}
 Work until \`cargo check -p ${g.crate}\` is clean or you cannot proceed without violating the
