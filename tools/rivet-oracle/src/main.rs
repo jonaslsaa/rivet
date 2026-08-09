@@ -87,7 +87,8 @@
 //!   cargo run -p rivet-oracle -- verify --m2 --expect-fail [dir]
 //!                                # M2 negative control against the region baseline
 //!   cargo run -p rivet-oracle -- sample                # regenerate worldgen/ semantic samples + manifest
-//!   cargo run -p rivet-oracle -- regenerate            # regenerate all fixture kinds (--m0/--m2/--samples)
+//!   cargo run -p rivet-oracle -- regenerate            # regenerate all fixture kinds
+//!                                                      # (sub-select: --m0/--m2/--samples/--text)
 //!   RIVET_ORACLE_JAR=/path/jar.jar cargo run -p rivet-oracle -- verify
 //!
 //! Every gate mode enforces the Paper pin recorded in the relevant
@@ -1888,46 +1889,46 @@ fn regenerate_m2(dest: &Path) -> Result<(), Error> {
 }
 
 /// `regenerate`: full regeneration of every fixture kind (or a sub-selection
-/// via `--m0` / `--m2` / `--samples`).
+/// via `--m0` / `--m2` / `--samples` / `--text`). A bare invocation regenerates
+/// all four kinds — M0, M2, the derived worldgen samples, and the derived text
+/// corpus (issue #98).
 ///
 /// Each kind defaults to its committed location (M0 -> `fixtures/`, M2 ->
-/// `fixtures/regions/overworld-normal/`), so the official path refreshes the
-/// golden fixtures in place. An explicit `--to <dir>` overrides the destination
-/// for a single kind (refused for bare/combined selections or `--samples`),
-/// regenerating into a scratch dir for gate validation before anything is
-/// committed — the M0-verify-in-a-temporary-destination path.
+/// `fixtures/regions/overworld-normal/`; the derived kinds always regenerate
+/// their committed `fixtures/worldgen` / `fixtures/text` trees), so the official
+/// path refreshes the golden fixtures in place. An explicit `--to <dir>`
+/// overrides the destination for a single *booting* kind (`--m0`/`--m2` only;
+/// refused for bare/combined selections and for the derived kinds), regenerating
+/// into a scratch dir for gate validation before anything is committed — the
+/// M0-verify-in-a-temporary-destination path.
 fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     for flag in only {
         if !matches!(*flag, "--m0" | "--m2" | "--samples" | "--text") {
             return Err(Error::Gate(format!("unknown regenerate flag: {flag}")));
         }
     }
-    // `--to <dir>` must name exactly one *booting* kind. A shared destination
-    // across kinds would clobber M0's output when M2's twin-boot copy replaces
-    // the whole directory (silently discarding M0), and the derived kinds
-    // (worldgen samples, text corpus) regenerate their committed fixture trees
-    // and ignore a destination entirely — so refuse instead of misbehaving.
-    let booting = only
-        .iter()
-        .filter(|flag| matches!(**flag, "--m0" | "--m2"))
-        .count();
-    if to.is_some() && booting != 1 {
+    // `--to <dir>` is only meaningful for a single booting kind (see
+    // `to_targets_single_booting_kind`): the derived kinds always regenerate
+    // their committed fixture trees and ignore a destination, and a shared
+    // destination across the booting kinds would let M2's twin-boot copy replace
+    // the whole directory, silently discarding M0's output.
+    if to.is_some() && !to_targets_single_booting_kind(only) {
         let what = if only.is_empty() {
             String::from("all kinds (bare regenerate)")
         } else {
             only.join(" ")
         };
         return Err(Error::Gate(format!(
-            "regenerate --to <dir> requires exactly one of --m0/--m2 (--samples \
-             regenerates the committed fixtures/worldgen tree and ignores --to; --text \
-             regenerates the committed fixtures/text tree and ignores --to); \
-             got {what}"
+            "regenerate --to <dir> requires exactly one of --m0/--m2 — bare and \
+             combined selections, and the derived kinds --samples/--text (which \
+             regenerate their committed fixture trees and ignore --to), are \
+             refused; got {what}"
         )));
     }
-    let m0 = only.is_empty() || only.contains(&"--m0");
-    let m2 = only.is_empty() || only.contains(&"--m2");
-    let samples = only.is_empty() || only.contains(&"--samples");
-    let text = only.is_empty() || only.contains(&"--text");
+    let m0 = regenerates_kind("--m0", only);
+    let m2 = regenerates_kind("--m2", only);
+    let samples = regenerates_kind("--samples", only);
+    let text = regenerates_kind("--text", only);
     let m0_default = crate_dir().join("fixtures");
     let m2_default = crate_dir().join("fixtures/regions/overworld-normal");
     let m0_dest = to.unwrap_or(&m0_default);
@@ -1949,6 +1950,21 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
         regenerate_text()?;
     }
     Ok(())
+}
+
+/// Whether `--flag` is part of a `regenerate` selection: a bare invocation
+/// selects every kind; otherwise only the explicitly named kinds run.
+fn regenerates_kind(flag: &str, only: &[&str]) -> bool {
+    only.is_empty() || only.contains(&flag)
+}
+
+/// Whether a `regenerate` selection may legally be combined with `--to <dir>`.
+/// Only exactly one of the *booting* kinds (`--m0`/`--m2`) writes to the
+/// destination; bare/combined selections and the derived kinds
+/// (`--samples`/`--text`, which regenerate their committed fixture trees and
+/// ignore a destination) are refused.
+fn to_targets_single_booting_kind(only: &[&str]) -> bool {
+    matches!(only, ["--m0"] | ["--m2"])
 }
 
 // ---- #54 chunk-hash engine commands -----------------------------------------
@@ -2474,12 +2490,18 @@ fn print_usage() {
     );
     println!("  cargo run -p rivet-oracle -- regenerate     regenerate ALL fixture kinds");
     println!("                                             (sub-select: --m0 / --m2 / --samples /");
-    println!("                                              --text; --to <dir> regenerates into a");
+    println!("                                              --text; --to <dir> — exactly one of");
     println!(
-        "                                              scratch destination instead of the fixtures"
+        "                                              --m0/--m2 — writes into a scratch dir for"
     );
     println!(
-        "                                              tree; --text needs the Paper oracle runtime)"
+        "                                              gate validation; --samples/--text always"
+    );
+    println!(
+        "                                              regenerate their committed fixture trees,"
+    );
+    println!(
+        "                                              needing the materialized Paper runtime)"
     );
     println!();
     println!(
@@ -2530,9 +2552,10 @@ fn run() -> Result<(), Error> {
         }
         Some("sample") => regenerate_samples(),
         Some("regenerate") => {
-            // `--to <dir>` overrides the destination for a single kind
+            // `--to <dir>` overrides the destination for a single booting kind
             // (regenerate into a scratch dir for gate validation before
-            // committing); run_regenerate refuses bare/combined `--to`.
+            // committing); run_regenerate refuses bare/combined selections and
+            // the derived kinds.
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
             let mut to: Option<PathBuf> = None;
             let mut flags: Vec<&str> = Vec::new();
@@ -2785,6 +2808,24 @@ mod tests {
         );
     }
 
+    /// Bare `regenerate` intentionally regenerates every fixture kind —
+    /// including the derived worldgen samples and the text corpus (issue #98).
+    /// Each `--flag` sub-selects only its own kind. This pins the selection
+    /// semantics so a future change cannot silently drop (or add) a kind from
+    /// the bare invocation.
+    #[test]
+    fn regenerate_selection_includes_text_on_bare() {
+        assert!(regenerates_kind("--m0", &[]));
+        assert!(regenerates_kind("--m2", &[]));
+        assert!(regenerates_kind("--samples", &[]));
+        assert!(regenerates_kind("--text", &[]));
+        assert!(regenerates_kind("--m0", &["--m0"]));
+        assert!(!regenerates_kind("--m0", &["--text"]));
+        assert!(regenerates_kind("--text", &["--text"]));
+        assert!(!regenerates_kind("--text", &["--m0"]));
+        assert!(!regenerates_kind("--samples", &["--m0"]));
+    }
+
     /// A freshly regenerated M0 manifest has the exact shape the gate must
     /// accept: `kind: "m0"` (stamped by the regenerate path), `region-file-compression=none`
     /// (emitted by extract_fixtures.py from the M0 props), `chunk-count`, and
@@ -2892,20 +2933,33 @@ mod tests {
         let _ = fs::remove_dir_all(&scratch);
     }
 
-    /// `regenerate --to <dir>` must refuse any selection that would silently
-    /// misbehave: a shared destination across kinds (M2's twin-boot replaces
-    /// the whole directory, discarding M0's output) or a kind that ignores the
-    /// destination entirely (worldgen samples). Each refusal happens before any
-    /// boot, so no Paper jar is needed.
+    /// `regenerate --to <dir>` must refuse every selection that is not exactly
+    /// one of the *booting* kinds: bare, multi-kind, a derived kind on its own,
+    /// and — critically — a booting kind mixed with a derived kind (e.g. `--m0
+    /// --text --to` would silently rewrite the committed `fixtures/text` golden
+    /// while the M0 slice went to the scratch dir). A shared destination across
+    /// the booting kinds would also misbehave (M2's twin-boot replaces the whole
+    /// directory, discarding M0's output). Each refusal happens before any boot,
+    /// so no Paper jar is needed.
     #[test]
     fn regenerate_to_requires_single_booting_kind() {
         let to = Some(Path::new("/tmp/rivet-oracle-refused"));
         for (flags, needle) in [
             (&[][..], "all kinds (bare regenerate)"),
             (&["--m0", "--m2"][..], "--m0 --m2"),
-            (&["--samples"][..], "ignores --to"),
-            (&["--text"][..], "ignores --to"),
+            (&["--samples"][..], "ignore --to"),
+            (&["--text"][..], "ignore --to"),
+            (&["--m0", "--samples"][..], "--m0 --samples"),
+            (&["--m0", "--text"][..], "--m0 --text"),
+            (&["--m2", "--samples"][..], "--m2 --samples"),
+            (&["--m2", "--text"][..], "--m2 --text"),
+            (&["--m0", "--m2", "--samples"][..], "--m0 --m2 --samples"),
+            (&["--m0", "--m2", "--text"][..], "--m0 --m2 --text"),
         ] {
+            assert!(
+                !to_targets_single_booting_kind(flags),
+                "--to must be refused for {flags:?}"
+            );
             match run_regenerate(flags, to) {
                 Err(Error::Gate(m)) => assert!(
                     m.contains(needle),
@@ -2914,6 +2968,9 @@ mod tests {
                 other => panic!("expected Gate refusal for {flags:?}, got {other:?}"),
             }
         }
+        // Exactly one booting kind is the only legal `--to` target.
+        assert!(to_targets_single_booting_kind(&["--m0"]));
+        assert!(to_targets_single_booting_kind(&["--m2"]));
     }
 
     /// The committed `fixtures/paper-world-defaults.yml` (the pinned Paper
