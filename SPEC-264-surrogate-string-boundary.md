@@ -106,9 +106,9 @@ replace.**
   is rejected once, at the decoder, where the message can name it — not at a downstream consumer that lacks context.
 - **Allocation.** `decode_modified_utf8` already mirrors Java's `char[]` → `String` with a transient `Vec<u16>`; the
   unpaired-surrogate error short-circuits before the final `String` is built. The rejected `Vec<u16>` boundary type
-  would tax the NBT hot path on *every* tag, not just hostile ones: each value/compound key would need a decode when
-  read and an encode when converted to `&str`, a recurring copy-and-convert cost paid for a case that cannot
-  legitimately occur.
+  would not save the read-side conversion — it would *move* it to the write/consumer side, costing a copy-and-convert
+  on every tag value and compound key that reaches a `&str` consumer (`Identifier`, `Component`, DFU ops), paid for a
+  case that cannot legitimately occur.
 - **Security.** Erroring — never lossy-replacing — at the MUTF-8/SNBT read boundaries means a lone surrogate can
   never enter internal `String` state, where a later re-encode would silently corrupt byte identity or confuse a
   downstream check. At the protocol boundary, replacing with U+FFFD matches Java exactly, and the WHATWG decode
