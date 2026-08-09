@@ -1,16 +1,18 @@
 //! Port of `net.minecraft.world.level.chunk.LevelChunk` (MC 26.2) — the
-//! in-memory chunk data structure, minimal M1 slice (issue #156).
+//! in-memory chunk data structure, M1 server slice (issue #156).
 //!
 //! Java source: `working/Paper/paper-server/src/minecraft/java/net/minecraft/
 //! world/level/chunk/LevelChunk.java`.
 //!
 //! Owned by the `mc.world.level.chunk.access` manifest unit (#183). This slice
-//! ports only what issue #100/#156 need: the chunk identity (`ChunkPos`) and
-//! the deterministic superflat content — the 24 sections + the three client
-//! heightmaps + the full-sky light data produced by
-//! `rivet-world::superflat::build_superflat`. The block/fluid mutators,
-//! block-entity map, and the full `ChunkAccess` surface are deferred with the
-//! owning unit.
+//! is the server-side value wrapper: it owns a generic
+//! `rivet_world::chunk::level_chunk::LevelChunk<StateId, BiomeId, StructureKey>`
+//! built from the deterministic superflat content (issue #100) and exposes the
+//! read spine the M1 join path needs (`pos`/`get_min_y`/`get_height`/the
+//! chunk-data accessors). The `ChunkAccess` base surface, the block/fluid
+//! mutators, and the block-entity map are provided by the rivet-world value;
+//! the remaining deferred items are listed on the rivet-world `LevelChunk`
+//! module doc.
 //!
 //! The content is instantiated with thin local wrappers over the dense
 //! block-state / biome global ids — `StateId(pub u16)` (a global block-state
@@ -25,18 +27,27 @@
 //! `rivet-world/tests/superflat_chunk_golden.rs`, until the owning unit replaces
 //! them.
 //!
-//! RivetTodo(#183): the `ChunkAccess` base surface (`getBlockState` at absolute
-//! height, section accessors, `setSectionIndex`), the block-entity map, and the
-//! mutators are deferred to the owning chunk.access unit, which replaces this
-//! slice's content (including the local `StateId` wrapper) with the real
-//! generated chunk data.
+//! RivetTodo(#184): the send path uses the deterministic superflat light
+//! (`rivet_world::superflat::superflat_light_data`) instead of the
+//! `LevelLightEngine`; the lighting engine unit replaces it when it lands.
 
+use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
+use rivet_protocol::protocol::game::level_chunk_packet_data::LevelChunkPacketData;
 use rivet_registry::core::ChunkPos;
-use rivet_world::chunk::palette::GlobalIdMap;
+use rivet_world::chunk::level_chunk::LevelChunk as WorldLevelChunk;
+use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
 use rivet_world::chunk::strategy::Strategy;
-use rivet_world::superflat::{
-    BlockFlags, SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y, SuperflatChunkContent, build_superflat,
-};
+use rivet_world::chunk::upgrade_data::UpgradeData;
+use rivet_world::level::LevelHeightAccessor;
+use rivet_world::level::height_accessor::create as create_accessor;
+use rivet_world::levelgen::heightmap::Types;
+use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y, build_superflat};
+
+/// The chunk's structure-key type. Rivet has no `Structure` type yet, so the
+/// chunk is instantiated with the unit key (no structures). RivetTodo(#185):
+/// the real `Structure` value type keys the structure maps when the worldgen
+/// structure unit lands.
+pub type StructureKey = ();
 
 /// A dense global block-state id (index into the global palette). `rivet-registry`
 ///'s generated table is the canonical source (`BLOCK_STATE_COUNT = 32366`, air =
@@ -59,58 +70,103 @@ pub struct BiomeId(pub u16);
 
 /// `net.minecraft.world.level.chunk.LevelChunk` — the world's loaded chunk
 /// content plus its chunk position.
+///
+/// Wraps the generic rivet-world `LevelChunk<StateId, BiomeId, StructureKey>`
+/// value (OWNERSHIP.md — no inheritance; the server chunk *contains* the value
+/// chunk). All reads delegate to it.
 pub struct LevelChunk {
-    pos: ChunkPos,
-    content: SuperflatChunkContent<StateId, BiomeId>,
+    /// The generic rivet-world chunk value.
+    chunk: WorldLevelChunk<StateId, BiomeId, StructureKey>,
 }
 
 impl LevelChunk {
     /// `new LevelChunk(ServerLevel, ChunkPos)` — builds the deterministic
     /// single-stone superflat content for the given chunk.
     pub fn new(pos: ChunkPos) -> Self {
-        let content = build_superflat_content();
-        LevelChunk { pos, content }
+        let content = superflat_content();
+        let height_accessor = create_accessor(SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT);
+        let mut chunk = WorldLevelChunk::new(
+            pos,
+            UpgradeData::empty(height_accessor.get_sections_count() as usize),
+            height_accessor,
+            &container_factory(),
+            0,
+            Some(content.sections),
+            StateId(0),
+            &|s: &StateId| s.0 == 0,
+        );
+        // The constructor primes `FINAL_HEIGHTMAPS` (which includes the three
+        // client types) as unprimed (all-zero) entries; `set_heightmap` fills
+        // the client types with the deterministic superflat data the golden
+        // fixture pins.
+        for (ty, raw) in content.heightmaps {
+            chunk.set_heightmap(Types::from_protocol(ty), &raw);
+        }
+        LevelChunk { chunk }
     }
 
     /// `LevelChunk.getPos()`.
     pub fn pos(&self) -> ChunkPos {
-        self.pos
+        self.chunk.get_pos()
     }
 
     /// `LevelChunk.getX()`.
     pub fn get_x(&self) -> i32 {
-        self.pos.x()
+        self.chunk.get_x()
     }
 
     /// `LevelChunk.getZ()`.
     pub fn get_z(&self) -> i32 {
-        self.pos.z()
-    }
-
-    /// The superflat content — sections, heightmaps, light — ready for the
-    /// #94 `ClientboundLevelChunkWithLightPacket` body.
-    pub fn content(&self) -> &SuperflatChunkContent<StateId, BiomeId> {
-        &self.content
+        self.chunk.get_z()
     }
 
     /// `LevelChunk.getMinY()` — the overworld superflat min Y (the world's
     /// `LevelHeightAccessor.getMinY()`).
     pub fn get_min_y(&self) -> i32 {
-        SUPERFLAT_MIN_Y
+        self.chunk.get_min_y()
     }
 
     /// `LevelChunk.getHeight()` — the overworld superflat world height.
     pub fn get_height(&self) -> i32 {
-        SUPERFLAT_HEIGHT
+        self.chunk.get_height()
+    }
+
+    /// The three `Usage.CLIENT` heightmaps as the `LevelChunkPacketData`
+    /// `(HeightmapType, long[])` pairs, in the client `EnumMap` order — the
+    /// `#94 ClientboundLevelChunkWithLightPacket` heightmap payload.
+    pub fn client_heightmaps(&self) -> Vec<(HeightmapType, Vec<i64>)> {
+        self.chunk.client_heightmaps()
+    }
+
+    /// The opaque sections buffer — the `[bits][palette][raw]` wire bytes of
+    /// every section concatenated (Java `calculateChunkSize` +
+    /// `extractChunkData`).
+    pub fn sections_buffer(&self) -> Vec<u8> {
+        self.chunk.sections_buffer()
+    }
+
+    /// `new ClientboundLevelChunkPacketData(levelChunk, null)` — the send
+    /// payload (no block entities).
+    pub fn chunk_packet_data(&self) -> LevelChunkPacketData {
+        LevelChunkPacketData::new(self.client_heightmaps(), self.sections_buffer(), vec![])
+    }
+
+    /// `ChunkAccess.getBlockState(int, int, int)` — the Paper `getBlockStateFinal`
+    /// read through the base.
+    pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> StateId {
+        self.chunk.get_block_state(x, y, z)
     }
 }
 
-/// Builds the deterministic single-stone superflat content (air = state 0,
-/// stone = state 1, plains biome = id 40) with the dense global id maps —
-/// byte-identical to the `rivet-world` golden test's `build_superflat` output.
-fn build_superflat_content() -> SuperflatChunkContent<StateId, BiomeId> {
+/// The dense global-id maps the superflat content is built against: air =
+/// state 0, stone = state 1, plains biome = id 40 — the exact pair the
+/// `rivet-world` golden test drives, so the wire bytes byte-compare.
+mod maps {
+    use super::{BiomeId, StateId};
+    use rivet_world::chunk::palette::GlobalIdMap;
+
     #[derive(Clone, Copy)]
-    struct BlockStateGlobalMap;
+    pub struct BlockStateGlobalMap;
     impl GlobalIdMap<StateId> for BlockStateGlobalMap {
         fn get_id(&self, value: &StateId) -> i32 {
             value.0 as i32
@@ -131,7 +187,7 @@ fn build_superflat_content() -> SuperflatChunkContent<StateId, BiomeId> {
     }
 
     #[derive(Clone, Copy)]
-    struct BiomeGlobalMap;
+    pub struct BiomeGlobalMap;
     impl GlobalIdMap<BiomeId> for BiomeGlobalMap {
         fn get_id(&self, value: &BiomeId) -> i32 {
             value.0 as i32
@@ -150,13 +206,28 @@ fn build_superflat_content() -> SuperflatChunkContent<StateId, BiomeId> {
             Box::new(*self)
         }
     }
+}
 
-    fn block_state_strategy() -> Strategy<StateId> {
-        Strategy::create_for_block_states(Box::new(BlockStateGlobalMap))
-    }
-    fn biome_strategy() -> Strategy<BiomeId> {
-        Strategy::create_for_biomes(Box::new(BiomeGlobalMap))
-    }
+/// The `PalettedContainerFactory` the `LevelChunk` constructor uses for any
+/// default (all-air) sections.
+fn container_factory() -> PalettedContainerFactory<StateId, BiomeId> {
+    let (block_strategy, biome_strategy) = strategies();
+    PalettedContainerFactory::new(block_strategy, StateId(0), biome_strategy, BiomeId(40))
+}
+
+fn strategies() -> (Strategy<StateId>, Strategy<BiomeId>) {
+    (
+        Strategy::create_for_block_states(Box::new(maps::BlockStateGlobalMap)),
+        Strategy::create_for_biomes(Box::new(maps::BiomeGlobalMap)),
+    )
+}
+
+/// Builds the deterministic single-stone superflat chunk content (air = state
+/// 0, stone = state 1, plains biome = id 40) — byte-identical to the
+/// `rivet-world` golden test's `build_superflat` output. The light payload is
+/// discarded here (the send path uses `superflat_light_data` directly).
+fn superflat_content() -> rivet_world::superflat::SuperflatChunkContent<StateId, BiomeId> {
+    let (block_strategy, biome_strategy) = strategies();
 
     // The superflat air + stone content: air (state 0) is air, stone (state 1)
     // blocks motion, neither has a fluid nor is leaves — the exact predicates
@@ -173,7 +244,7 @@ fn build_superflat_content() -> SuperflatChunkContent<StateId, BiomeId> {
     fn is_leaves(_s: &StateId) -> bool {
         false
     }
-    let flags = BlockFlags {
+    let flags = rivet_world::superflat::BlockFlags {
         is_air: &is_air,
         blocks_motion: &blocks_motion,
         has_fluid: &has_fluid,
@@ -181,8 +252,8 @@ fn build_superflat_content() -> SuperflatChunkContent<StateId, BiomeId> {
     };
 
     build_superflat(
-        block_state_strategy(),
-        biome_strategy(),
+        block_strategy,
+        biome_strategy,
         StateId(0),
         StateId(1),
         BiomeId(40),
