@@ -284,10 +284,11 @@ pub struct ServerConfigurationPacketListener {
     /// `ServerCommonPacketListenerImpl.keepAlive` — the configuration-phase
     /// keepalive state (issue #283). Owned by this listener on the tokio side
     /// of OWNERSHIP; `conn_loop` drives it every `config.tick_interval` via
-    /// [`PacketListener::tick`] → [`Self::keep_connection_alive`]. Dropped at
-    /// `ListenerOutcome::Play`: play seeds a fresh machine in
-    /// `spawn_session`, so no keepalive timestamps or ping history carry into
-    /// PLAY (the #283 rule).
+    /// [`PacketListener::tick`] → [`Self::keep_connection_alive`]. Disarmed at
+    /// `ListenerOutcome::Play`: `conn_loop` stops driving `tick` once `in_play`
+    /// is set (the tick arm's precondition), retiring the listener rather than
+    /// dropping it, and play seeds a fresh machine in `spawn_session` — so no
+    /// keepalive timestamps or ping history carry into PLAY (the #283 rule).
     keepalive: KeepaliveState,
 }
 

@@ -3,7 +3,7 @@
 //! Port of `io.papermc.paper.util.KeepAlive` + the keepalive halves of
 //! `ServerCommonPacketListenerImpl.keepConnectionAlive`/`handleKeepAlive`, split
 //! out of the play/configuration listeners so the *state* is testable
-//! exhaustively with a simulated clock before the #96 play handoff exists.
+//! exhaustively with a simulated clock, independent of either listener.
 //!
 //! Two independent clock axes, mirroring Paper:
 //!   - **monotonic nanos** (`tx_time_ns` on every pending challenge, the
@@ -12,12 +12,16 @@
 //!   - **millis** (`now_ms` on the timeout check, the `closed_listener_time`
 //!     guard) — in Java `Util.getMillis()`.
 //!
-//! Both are `i64`/`u128` monotonic values injected at the call site, never a
-//! wall clock, so every branch is deterministic under the Rivet `TickTime`
-//! clock. All Java arithmetic wraps silently; the code uses `i64` (never `u64`
-//! for these axes) so `wrapping_sub`/`wrapping_add` keep the exact Paper
-//! behavior when the monotonic counters reach `i64::MAX` and roll over
-//! (PORTING.md: wrapping arithmetic is sacred).
+//! Both axes are `i64` monotonic readings injected at the call site, never a
+//! wall clock, so the machine is deterministic under whichever monotonic
+//! source the caller injects. The two owners inject from their own clocks:
+//! PLAY session state drives on the `TickTime` axes (`TickContext::now_ns` /
+//! `now_ms`), and the configuration listener drives on the connection's
+//! per-connection `Instant` epoch (`Connection::monotonic_nanos` plus derived
+//! millis) — see [`KeepaliveState`]. All Java arithmetic wraps silently; the
+//! code uses `i64` (never `u64` for these axes) so `wrapping_sub`/`wrapping_add`
+//! keep the exact Paper behavior when the monotonic counters reach `i64::MAX`
+//! and roll over (PORTING.md: wrapping arithmetic is sacred).
 
 use std::collections::VecDeque;
 
@@ -164,10 +168,13 @@ pub struct KeepaliveTickOutcome {
     pub timeout: bool,
 }
 
-/// `KeepAlive` + the keepalive fields of `ServerCommonPacketListenerImpl`,
-/// owned by the tick thread. Every time is injected (`tx_time_ns` from the
-/// `TickTime` monotonic clock, `now_ms` from a millis source), so the machine
-/// is fully deterministic under simulated time — no wall clock anywhere.
+/// `KeepAlive` + the keepalive fields of `ServerCommonPacketListenerImpl` — a
+/// shared machine with two owners (issue #283). PLAY session state is
+/// tick-thread-owned and drives it on the `TickTime` axes (`TickContext`
+/// `now_ns`/`now_ms`); CONFIGURATION state is tokio listener-owned and drives
+/// it on `Connection::monotonic_nanos` plus derived millis. Every time is
+/// injected at the call site, so the machine is deterministic under whichever
+/// monotonic source the owner injects — no wall clock anywhere.
 ///
 /// Construction always takes an explicit seed (`first_now_ns`, Paper's
 /// `System.nanoTime()` at `new KeepAlive()`): there is deliberately no

@@ -1631,4 +1631,130 @@ mod tests {
             .unwrap();
         assert_eq!(reason, DisconnectReason::ServerShutdown);
     }
+
+    /// A CONFIGURATION listener that counts `tick()` calls and transitions to
+    /// the play state on its first frame — the disarm-at-play-handoff test.
+    struct PlayAfterFirst {
+        ticks: Arc<AtomicUsize>,
+        played: Arc<tokio::sync::Notify>,
+    }
+
+    impl PacketListener for PlayAfterFirst {
+        fn protocol(&self) -> ConnectionProtocol {
+            ConnectionProtocol::Configuration
+        }
+
+        fn handle_frame(
+            &mut self,
+            _frame: Bytes,
+            _conn: &mut Connection,
+            _config: &ServerConfig,
+        ) -> Result<ListenerOutcome, DisconnectReason> {
+            self.played.notify_one();
+            Ok(ListenerOutcome::Play)
+        }
+
+        fn tick(
+            &mut self,
+            _conn: &mut Connection,
+            _now_ns: i64,
+            _now_ms: i64,
+        ) -> Result<(), DisconnectReason> {
+            self.ticks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The config→play seam disarms the keepalive arm: once the listener
+    /// reports `ListenerOutcome::Play`, `conn_loop` sets `in_play`, and the
+    /// tick arm's precondition (`!in_play && protocol == Configuration`) gates
+    /// it off — the retired configuration listener is never ticked again, so
+    /// its keepalive cannot transmit after the handoff. PLAY owns keepalive on
+    /// the tick thread (`PlayerSessionManager`), which seeds a fresh
+    /// `KeepaliveState` in `spawn_session` (the
+    /// `fresh_seed_resets_the_throttle_not_copy` unit test). The converse — the
+    /// arm drives while CONFIGURATION is current — is
+    /// `conn_loop_keepalive_arm_ticks_within_configuration`.
+    #[tokio::test]
+    async fn conn_loop_keepalive_arm_disarms_at_play_handoff() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server_sock, _) = listener.accept().await.unwrap();
+        let (read, write) = server_sock.into_split();
+        let config = Arc::new(ServerConfig {
+            tick_interval: Duration::from_millis(20),
+            read_timeout: Duration::from_secs(30),
+            ..ServerConfig::default()
+        });
+        let shutdown = Arc::new(Shutdown::new());
+        let mut conn = Connection::new(
+            ConnectionId(1),
+            addr,
+            Arc::clone(&config),
+            Arc::clone(&shutdown),
+            write,
+            InboundDrained::new(),
+        );
+        let (in_tx, _in_rx) = mpsc::channel::<ServerboundFrame>(4);
+        let (out_tx, out_rx) = mpsc::channel::<OutboundEvent>(4);
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let played = Arc::new(tokio::sync::Notify::new());
+        let mut listener_box: Box<dyn PacketListener> = Box::new(PlayAfterFirst {
+            ticks: Arc::clone(&ticks),
+            played: Arc::clone(&played),
+        });
+        let endpoint = test_endpoint();
+        let shutdown_for_task = Arc::clone(&shutdown);
+        let task = tokio::spawn(async move {
+            conn_loop(
+                &mut conn,
+                &mut listener_box,
+                &config,
+                read,
+                out_rx,
+                &in_tx,
+                &endpoint,
+                shutdown_for_task,
+            )
+            .await
+        });
+
+        // While the CONFIGURATION listener is current the arm drives it at the
+        // tick cadence (`conn_loop_keepalive_arm_ticks_within_configuration`).
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while ticks.load(Ordering::SeqCst) < 8 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the keepalive arm must drive the CONFIGURATION listener");
+
+        // A single frame transitions the listener to play. `played` fires when
+        // the frame is dispatched; `conn_loop` sets `in_play` synchronously in
+        // the same task before yielding, so once the waiter resumes the arm is
+        // already gated off. A settle covers any scheduler lag, then the tick
+        // count must stay frozen.
+        client
+            .write_all(&encode_frame(&[0x00]).unwrap())
+            .await
+            .unwrap();
+        played.notified().await;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let before = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            before,
+            "no keepalive drive may fire after the config→play handoff"
+        );
+
+        drop(out_tx);
+        shutdown.request();
+        let reason = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("conn_loop did not exit after shutdown")
+            .unwrap();
+        assert_eq!(reason, DisconnectReason::ServerShutdown);
+    }
 }
