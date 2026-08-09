@@ -701,7 +701,9 @@ dependencies = [
  "rivet-nbt",
  "rivet-protocol",
  "rivet-registry",
+ "rivet-serialization",
  "rivet-util",
+ "serde_json",
 ]
 
 [[package]]

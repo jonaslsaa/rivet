@@ -26,6 +26,14 @@ indexmap = { workspace = true }
 # `HeightmapType` (all feature-gated in rivet-protocol).
 rivet-protocol = { workspace = true, features = ["packets"] }
 rivet-registry = { workspace = true }
+# Rivet-serialization's `DynamicOps`/codec surface is used two ways in this
+# crate: the `feature.configurations` codec factories (`unit_codec` /
+# `record_builder` / `codec::float_range`) in none_feature_configuration.rs and
+# probability_feature_configuration.rs, and the `GenerationStep.Decoration`
+# codec's factory (`decoration_codec::<Ops>()`). Both are ops-generic — the
+# same shape `rivet-registry::core::rotations` takes for its `CODEC`; `JsonOps`
+# is used only in tests.
+rivet-serialization = { workspace = true }
 # The chunk-access carrier types hold `CompoundTag`s (`ChunkAccess` pending
 # block entities, `ProtoChunk` entities) and the `UpgradeData`/`ProtoChunk`
 # read `CompoundTag`; rivet-nbt is now a production dependency.
@@ -35,6 +43,9 @@ rivet-util = { workspace = true }
 [dev-dependencies]
 # Tests build real containers (BytesMut-backed FriendlyByteBuf).
 bytes = { workspace = true }
+# The `feature.configurations` codec tests decode/encode through
+# `JsonOps::INSTANCE` (serde_json::Value backed).
+serde_json = { workspace = true }
 # The PalettedContainer<StateId> golden tests drive the real global
 # block-state table (rivet-registry `blocks` feature). Dev-only: normal
 # builds of rivet-world stay feature-free.

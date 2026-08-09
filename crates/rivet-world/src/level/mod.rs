@@ -22,6 +22,9 @@ pub mod level;
 pub mod level_accessor;
 pub mod level_reader;
 pub mod storage;
+// STUB(mc.world.level) — `WorldGenLevel`, the world
+// surface feature placement runs against.
+pub mod world_gen_level;
 
 pub use block_getter::BlockGetter;
 pub use height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor, create};
@@ -30,3 +33,4 @@ pub use level_accessor::LevelAccessor;
 pub use level_reader::LevelReader;
 pub use rivet_registry::core::ChunkPos;
 pub use storage::{LevelData, RespawnData, default_respawn_data};
+pub use world_gen_level::WorldGenLevel;

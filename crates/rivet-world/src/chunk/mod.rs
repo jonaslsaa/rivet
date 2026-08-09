@@ -16,6 +16,10 @@
 pub mod block_column;
 pub mod carving_mask;
 pub mod chunk_access;
+// STUB(mc.world.level.chunk.generator) — `ChunkGenerator`, the opaque
+// parameter behind every feature placement; owned by the worldgen unit.
+pub mod chunk_generator;
+pub use chunk_generator::ChunkGenerator;
 pub mod chunk_source;
 pub mod configuration;
 pub mod data_layer;
