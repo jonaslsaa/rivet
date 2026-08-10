@@ -32,9 +32,16 @@
 //! (capacity - 1)`, slot-first. The `HashSet` "value" hash for an
 //! `Identifier` is its `hashCode` (`31 * nsHash + pathHash`), so the port
 //! computes it via `rivet_util::java_hash::string_hash` exactly like
-//! `rivet-registry::Identifier`'s `Hash` impl. This is a **documented
-//! JDK-25-grounded reproduction**, not a general hash-table port; any future
-//! key set beyond the four canonical flags must be re-validated against Java.
+//! `rivet-registry::Identifier`'s `Hash` impl.
+//!
+//! Two `HashSet`-specific behaviors are reproduced because the port collects
+//! ids into a `Vec`, not a set: equal ids **deduplicate** before the capacity
+//! and order run (Java's set collapses them), and the spread is JDK 25's
+//! **logical** `h ^ (h >>> 16)` (an arithmetic `>>` on a negative `i32` would
+//! sign-extend and diverge once the modeled capacity exceeds 2^16). This is a
+//! **documented JDK-25-grounded reproduction**, not a general hash-table port;
+//! any future key set beyond the four canonical flags must be re-validated
+//! against Java.
 
 use super::feature_flag::FeatureFlag;
 use super::feature_flag_set::FeatureFlagSet;
@@ -246,18 +253,29 @@ impl Builder {
 /// probe order; the port's key sets have distinct buckets and are documented as
 /// such.
 fn hash_set_order(ids: &[Identifier]) -> Vec<Identifier> {
-    if ids.is_empty() {
+    // Java collects into a `HashSet<Identifier>`, so equal ids collapse before
+    // the capacity/order calculation runs. Dedup by value equality first.
+    let mut deduped: Vec<Identifier> = Vec::new();
+    for id in ids {
+        if !deduped.contains(id) {
+            deduped.push(id.clone());
+        }
+    }
+    if deduped.is_empty() {
         return Vec::new();
     }
     let mut capacity = 16usize;
-    while 4 * ids.len() > 3 * capacity {
+    while 4 * deduped.len() > 3 * capacity {
         capacity *= 2;
     }
     let mask = capacity - 1;
     let mut slots: Vec<Vec<&Identifier>> = (0..capacity).map(|_| Vec::new()).collect();
-    for id in ids {
+    for id in &deduped {
         let hash = identifier_hash(id);
-        let spread = hash ^ (hash >> 16);
+        // JDK 25: `h ^ (h >>> 16)` — a LOGICAL right shift (the spread of a
+        // negative hash must not sign-extend). Arithmetic `>>` would diverge
+        // once the modeled capacity exceeds 2^16.
+        let spread = hash ^ ((hash as u32) >> 16) as i32;
         let bucket = (spread as usize) & mask;
         slots[bucket].push(id);
     }
@@ -511,5 +529,88 @@ mod tests {
         let input = ops.create_list(vec![ops.create_string("minecraft:vanilla".to_string())]);
         let decoded = codec.decode(&ops, &input).get_or_throw("decode").clone();
         assert_eq!(decoded.0.mask(), 0b0001);
+    }
+
+    #[test]
+    fn codec_dedups_repeated_unknown_ids_like_hashset() {
+        // Java collects unknown ids into a `HashSet`, so a repeated id appears
+        // once in the error message. The port must collapse duplicates before
+        // the capacity/order calculation too.
+        use rivet_serialization::json_ops::JsonOps;
+        let registry = main_registry();
+        let codec = registry.codec::<JsonOps>();
+        let ops = JsonOps::INSTANCE;
+        let input = ops.create_list(vec![
+            ops.create_string("minecraft:bogus".to_string()),
+            ops.create_string("minecraft:bogus".to_string()),
+        ]);
+        let result = codec.decode(&ops, &input);
+        let err = result.error_ref().unwrap();
+        assert_eq!(err.message(), "Unknown feature ids: [minecraft:bogus]");
+        // The partial is the empty set (all unknown).
+        assert!(err.partial().as_ref().unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn codec_dedups_repeated_known_and_unknown_ids() {
+        use rivet_serialization::json_ops::JsonOps;
+        let registry = main_registry();
+        let codec = registry.codec::<JsonOps>();
+        let ops = JsonOps::INSTANCE;
+        // Repeated known ids collapse in `fromNames` (identity set); repeated
+        // unknown ids collapse in the error HashSet.
+        let input = ops.create_list(vec![
+            ops.create_string("minecraft:vanilla".to_string()),
+            ops.create_string("minecraft:vanilla".to_string()),
+            ops.create_string("minecraft:nope".to_string()),
+            ops.create_string("minecraft:nope".to_string()),
+        ]);
+        let result = codec.decode(&ops, &input);
+        let err = result.error_ref().unwrap();
+        assert_eq!(err.message(), "Unknown feature ids: [minecraft:nope]");
+        let partial = err.partial().as_ref().unwrap();
+        assert_eq!(partial.0.mask(), 0b0001);
+    }
+
+    #[test]
+    fn hash_set_order_uses_logical_shift_for_negative_hashes() {
+        // JDK 25's spread is `h ^ (h >>> 16)` — a LOGICAL right shift. An
+        // arithmetic `>>` on a negative i32 would sign-extend and diverge once
+        // the modeled capacity exceeds 2^16. This id set forces a 131,072-capacity
+        // table (49,153 distinct keys); assert the returned order is exactly the
+        // slot-first ascending order of the LOGICAL buckets.
+        let ids: Vec<Identifier> = (0..49_153)
+            .map(|i| Identifier::with_default_namespace(&format!("u{i}")))
+            .collect();
+        let ordered = hash_set_order(&ids);
+        assert_eq!(ordered.len(), ids.len()); // all distinct -> no dedup
+        let mut expected: Vec<(usize, usize)> = ids
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| {
+                let h = identifier_hash(id);
+                let spread = h ^ ((h as u32) >> 16) as i32;
+                let capacity = 131_072usize; // 4 * 49153 > 3 * 65536
+                (spread as usize & (capacity - 1), idx)
+            })
+            .collect();
+        expected.sort();
+        let logical: Vec<Identifier> = expected.iter().map(|&(_, idx)| ids[idx].clone()).collect();
+        assert_eq!(ordered, logical);
+    }
+
+    #[test]
+    fn logical_shift_diverges_from_arithmetic_for_large_capacity() {
+        // Find an id whose JDK (logical) bucket differs from an arithmetic
+        // `>>` bucket at capacity 131072 — proving the fix is load-bearing
+        // (the four canonical ids never exercise this).
+        let found = (0..49_153).find(|&i| {
+            let id = Identifier::with_default_namespace(&format!("u{i}"));
+            let h = identifier_hash(&id);
+            let logical = h ^ ((h as u32) >> 16) as i32;
+            let arithmetic = h ^ (h >> 16);
+            logical as usize & 131_071 != arithmetic as usize & 131_071
+        });
+        assert!(found.is_some(), "expected at least one diverging id");
     }
 }
