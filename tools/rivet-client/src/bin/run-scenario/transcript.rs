@@ -993,6 +993,10 @@ pub fn normalize_loaded(raw: &str) -> Result<Value, String> {
             "position": loaded.get("position").cloned().unwrap_or(Value::Null),
             "spawn_chunk": loaded.get("spawn_chunk").cloned().unwrap_or(Value::Null),
             "chunk_count": loaded.get("chunk_count").cloned().unwrap_or(Value::Null),
+            // The walk evidence (position before/after a bounded forward walk)
+            // is carried through so the runner can record the join/dwell/walk
+            // evidence, not assert it.
+            "walk": loaded.get("walk").cloned().unwrap_or(Value::Null),
             "samples": loaded.get("samples").cloned().unwrap_or_else(|| json!([])),
         });
     }
@@ -1915,7 +1919,7 @@ mod tests {
             r#"{"event":"init","protocol":1}"#,
             r#"{"event":"login","protocol":1}"#,
             r#"{"event":"spawn","position":{"x":9.5,"y":-60.0,"z":-3.5},"protocol":1}"#,
-            r#"{"event":"loaded","position":{"x":9.5,"y":-60.0,"z":-3.5},"spawn_chunk":[0,0],"chunk_count":81,"samples":[{"chunk_x":0,"chunk_z":0,"sample_x":8,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"},{"chunk_x":1,"chunk_z":0,"sample_x":24,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"}],"observation_ms":4100,"protocol":1}"#,
+            r#"{"event":"loaded","position":{"x":9.5,"y":-60.0,"z":-3.5},"spawn_chunk":[0,-1],"chunk_count":81,"walk":{"before":{"x":9.5,"y":-60.0,"z":-3.5},"after":{"x":10.9,"y":-60.0,"z":-3.5}},"samples":[{"chunk_x":0,"chunk_z":0,"sample_x":8,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"},{"chunk_x":1,"chunk_z":0,"sample_x":24,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"}],"observation_ms":4100,"protocol":1}"#,
         ]
         .join("\n")
     }

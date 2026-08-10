@@ -759,7 +759,10 @@ async fn observe_and_emit(bot: Client, state: State) {
 ///
 /// The record is deliberately small and canonical: the runner compares
 /// `samples` against the manifest and refuses PASS when any #369 capability
-/// flag is present. UNVERIFIED until the #339 world-loading capability lands.
+/// flag is present. After sampling, the client takes a short bounded forward
+/// walk and reports its `before`/`after` position as the walk evidence (the
+/// per-coordinate grid, not the walk delta, is the load-bearing content
+/// check). UNVERIFIED until the #339 world-loading capability lands.
 async fn loaded_and_emit(bot: Client, state: State) {
     let chunks = Arc::clone(&state.chunks);
     let started = Instant::now();
@@ -780,41 +783,52 @@ async fn loaded_and_emit(bot: Client, state: State) {
         });
     let spawn_chunk = spawn_pos.map(|p| (p.x.div_euclid(16), p.z.div_euclid(16)));
 
-    // Sample the block content the server served. `sample_surface` walks the
-    // loaded world downward from the world ceiling, so `sample_cell` and the
-    // runner compare genuine per-coordinate content.
-    let holder = bot
-        .component::<WorldHolder>()
-        .map_err(|_| "client has no loaded WorldHolder".to_owned())
-        .expect("loaded mode requires a joined client");
-    let samples: Vec<Value> = match (spawn_chunk, position.as_ref()) {
-        (Some((cx, cz)), Some(_)) => {
-            let shared = holder.shared.read();
-            let mut out = Vec::new();
-            for dx in -2..=2i32 {
-                for dz in -2..=2i32 {
-                    let chunk_x = cx + dx;
-                    let chunk_z = cz + dz;
-                    // World-anchored sample point: chunk origin + center offset,
-                    // so the manifest's per-coordinate surface matches.
-                    let origin_x = chunk_x * 16 + 8;
-                    let origin_z = chunk_z * 16 + 8;
-                    let (surface, bedrock, below_feet) = sample_cell(&shared, origin_x, origin_z);
-                    out.push(json!({
-                        "chunk_x": chunk_x,
-                        "chunk_z": chunk_z,
-                        "sample_x": origin_x,
-                        "sample_z": origin_z,
-                        "surface": surface,
-                        "bedrock": bedrock,
-                        "below_feet": below_feet,
-                    }));
+    // Sample the block content the server served. `sample_cell` walks the
+    // loaded world downward from the world ceiling, so the runner compares
+    // genuine per-coordinate content. The `WorldHolder` read guard is scoped
+    // and dropped before the walk below, so the future stays `Send`.
+    let samples: Vec<Value> = {
+        let holder = bot
+            .component::<WorldHolder>()
+            .map_err(|_| "client has no loaded WorldHolder".to_owned())
+            .expect("loaded mode requires a joined client");
+        match (spawn_chunk, position.as_ref()) {
+            (Some((cx, cz)), Some(_)) => {
+                let shared = holder.shared.read();
+                let mut out = Vec::new();
+                for dx in -2..=2i32 {
+                    for dz in -2..=2i32 {
+                        let chunk_x = cx + dx;
+                        let chunk_z = cz + dz;
+                        // World-anchored sample point: chunk origin + center
+                        // offset, so the manifest's per-coordinate surface
+                        // matches.
+                        let origin_x = chunk_x * 16 + 8;
+                        let origin_z = chunk_z * 16 + 8;
+                        let (surface, bedrock, below_feet) =
+                            sample_cell(&shared, origin_x, origin_z);
+                        out.push(json!({
+                            "chunk_x": chunk_x,
+                            "chunk_z": chunk_z,
+                            "sample_x": origin_x,
+                            "sample_z": origin_z,
+                            "surface": surface,
+                            "bedrock": bedrock,
+                            "below_feet": below_feet,
+                        }));
+                    }
                 }
+                out
             }
-            out
+            _ => Vec::new(),
         }
-        _ => Vec::new(),
     };
+
+    // A bounded forward walk proves the loaded client can move in the served
+    // world (the task's join/dwell/walk evidence). The position delta is
+    // recorded, not asserted — the per-coordinate sample grid is the
+    // load-bearing content check.
+    let walk = loaded_walk(&bot).await;
 
     emit(json!({
         "event": "loaded",
@@ -822,10 +836,30 @@ async fn loaded_and_emit(bot: Client, state: State) {
         "spawn_chunk": spawn_chunk.map(|(x, z)| [x, z]),
         "chunk_count": chunks.lock().expect("chunks lock poisoned").len(),
         "samples": samples,
+        "walk": walk,
         "observation_ms": started.elapsed().as_millis() as u64,
     }));
 
     hard_exit(0);
+}
+
+/// How long the loaded-mode walk runs (wall-clock): long enough to move at
+/// least one block in the served world, short enough to stay well inside the
+/// client timeout.
+const LOADED_WALK: Duration = Duration::from_millis(1500);
+
+/// Drive a short bounded forward walk (yaw -90 faces +x) and report the
+/// position before and after as the walk evidence. A server that accepted the
+/// client but served a frozen world yields `before == after`; the runner
+/// records it honestly rather than fabricating movement.
+async fn loaded_walk(bot: &Client) -> Value {
+    let before = bot.position().ok().map(round_position);
+    let _ = bot.set_direction(-90.0, 0.0);
+    bot.walk(WalkDirection::Forward);
+    tokio::time::sleep(LOADED_WALK).await;
+    bot.walk(WalkDirection::None);
+    let after = bot.position().ok().map(round_position);
+    json!({ "before": before, "after": after })
 }
 
 /// The overworld world-ceiling Y (the launcher world is full-height 384).
@@ -836,17 +870,31 @@ const LOADED_BEDROCK_Y: i32 = -60;
 /// `BELOW_BEDROCK_Y`).
 const LOADED_BELOW_BEDROCK_Y: i32 = -61;
 
+/// Canonicalize an azalea block id for the transcript: azalea's
+/// `BlockTrait::id()` returns the bare registry name (`grass_block`), while the
+/// ground-truth manifest stores namespaced names (`minecraft:grass_block`).
+/// The loaded transcript must match the manifest's namespace so the runner's
+/// per-coordinate comparison is not defeated by a representation mismatch.
+fn namespaced_block_name(id: &str) -> String {
+    if id.contains(':') {
+        id.to_owned()
+    } else {
+        format!("minecraft:{id}")
+    }
+}
+
 /// Sample one world column at `(x, z)`: the surface block (highest non-air),
 /// the block at the bedrock slab, and the block below it. `world` is the
 /// client's loaded `World` (its `ChunkStorage`). Returns `minecraft:air` for
 /// any coordinate the client has not loaded — the runner treats a missing
 /// chunk as a FAIL (the server did not serve the loaded world), never as a
-/// vacuous pass.
+/// vacuous pass. Every emitted name is namespaced (see
+/// [`namespaced_block_name`]).
 fn sample_cell(world: &azalea::world::World, x: i32, z: i32) -> (String, String, String) {
     let block_at = |y: i32| {
         world
             .get_block_state(BlockPos { x, y, z })
-            .map(|s| s.to_trait().id().to_owned())
+            .map(|s| namespaced_block_name(s.to_trait().id()))
             .unwrap_or_else(|| "minecraft:air".to_owned())
     };
     let mut surface = "minecraft:air".to_owned();
@@ -855,7 +903,7 @@ fn sample_cell(world: &azalea::world::World, x: i32, z: i32) -> (String, String,
         if let Some(s) = state
             && !s.is_air()
         {
-            surface = s.to_trait().id().to_owned();
+            surface = namespaced_block_name(s.to_trait().id());
             break;
         }
     }
