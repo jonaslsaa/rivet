@@ -21,7 +21,7 @@ level.dat, player data, world data, or other private metadata.
 
 Determinism follows the M0/M2 chunk fixtures (see extract_fixtures.py): raw
 region files are not byte-stable, but the decompressed chunk-NBT payloads of a
-fixed save ARE. `--verify` re-extracts into a scratch dir and diffs the
+fixed save ARE. `--verify` re-extracts the corpus in memory and diffs the
 payloads byte-for-byte against the committed `.nbt` fixtures, then re-verifies
 the committed manifest SHA-256s and the source fingerprint. When the disposable
 source is absent (e.g. CI), verification exits nonzero with UNVERIFIED — it
@@ -341,7 +341,7 @@ def cmd_extract(source: Path) -> int:
 
 
 def cmd_verify(source: Path) -> int:
-    """Re-extract the corpus into a scratch dir and prove byte-identity with the
+    """Re-extract the corpus in memory and prove byte-identity with the
     committed fixtures, plus manifest hashes and the source fingerprint."""
     src = resolve_source(source)
     fixtures_dir = FIXTURES_DIR
@@ -435,7 +435,7 @@ def main() -> int:
     ap.add_argument(
         "--verify",
         action="store_true",
-        help="re-extract into a scratch dir and prove byte-identity with the committed fixtures",
+        help="re-extract the corpus and prove byte-identity with the committed fixtures",
     )
     ap.add_argument(
         "--expect-fail",
@@ -446,7 +446,7 @@ def main() -> int:
         "--scratch",
         type=Path,
         default=Path("/tmp/rivet-loaded-world-control"),
-        help="scratch dir for --verify / --expect-fail",
+        help="scratch dir for the --expect-fail negative control",
     )
     args = ap.parse_args()
 
