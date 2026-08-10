@@ -291,7 +291,7 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                         closed = true;
                         break;
                     }
-                    if class_char == '/' {
+                    if class_char == '/' || (windows && class_char == '\\') {
                         return Err(format!(
                             "Explicit 'name separator' in class near index {}",
                             i - 1
@@ -316,9 +316,8 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                         if range_end < last {
                             return Err(format!("Invalid range near index {}", i - 3));
                         }
-                        if matches!(range_end, '\\' | '[' | ']') {
-                            regex.push('\\');
-                        }
+                        // OpenJDK appends range endpoints without applying the
+                        // direct-class-member escaping or separator check.
                         regex.push(range_end);
                         has_range_start = false;
                     } else {
@@ -730,7 +729,7 @@ mod tests {
         let mut builder = RegexBuilder::new();
         builder.utf(true).ucp(false).caseless(true);
         for (glob, matching_path) in [
-            ("C:/safe[!-~]secret", &br"C:\safe-secret"[..]),
+            ("C:/safe[Z-^]secret", &br"C:\safe[secret"[..]),
             ("C:/safe[^[-^]secret", &br"C:\safe[secret"[..]),
         ] {
             let expression = glob_to_regex(glob, true).unwrap();
@@ -740,6 +739,36 @@ mod tests {
             assert!(regex.is_match(matching_path).unwrap());
             assert!(!regex.is_match(br"C:\safe\secret").unwrap());
         }
+    }
+
+    #[test]
+    fn glob_class_separator_quirks_match_openjdk_on_every_build_host() {
+        for windows in [false, true] {
+            assert!(glob_to_regex("[a/b]", windows).is_err());
+            assert!(glob_to_regex("[.-/]", windows).is_ok());
+            assert!(glob_to_regex("[.-0]", windows).is_ok());
+            assert!(glob_to_regex("[Z-^]", windows).is_ok());
+
+            // OpenJDK bypasses the direct-member separator check for a range
+            // endpoint, then emits this endpoint verbatim. The resulting
+            // regex is invalid rather than the glob conversion itself.
+            let range_end = glob_to_regex(r"[Z-\]", windows).unwrap();
+            assert!(Regex::new(&range_end).is_err());
+        }
+
+        assert!(glob_to_regex(r"[a\b]", false).is_ok());
+        assert!(glob_to_regex(r"[a\b]", true).is_err());
+        assert!(glob_to_regex(r"[\]", false).is_ok());
+        assert!(glob_to_regex(r"[\]", true).is_err());
+    }
+
+    #[test]
+    fn range_end_backslash_regex_failure_disables_the_whole_allow_list() {
+        let list = PathAllowList::new(vec![
+            ConfigEntry::prefix("otherwise-matching"),
+            ConfigEntry::glob(r"[Z-\]"),
+        ]);
+        assert!(!list.matches(Path::new("otherwise-matching")));
     }
 
     #[cfg(windows)]
@@ -753,11 +782,22 @@ mod tests {
         assert!(question.matches(Path::new(r"C:\a\world")));
         assert!(!question.matches(Path::new(r"C:\\\world")));
 
-        // '\\' lies inside the broad printable-ASCII range. The positive
+        // '\\' lies inside the 'Z'..='^' range. The positive
         // class still may not consume Windows' native separator.
-        let ranged_class = PathAllowList::new(vec![ConfigEntry::glob("C:/safe[!-~]secret")]);
-        assert!(ranged_class.matches(Path::new(r"C:\safe.secret")));
+        let ranged_class = PathAllowList::new(vec![ConfigEntry::glob("C:/safe[Z-^]secret")]);
+        assert!(ranged_class.matches(Path::new(r"C:\safe[secret")));
         assert!(!ranged_class.matches(Path::new(r"C:\safe\secret")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_explicit_backslash_class_disables_the_whole_allow_list() {
+        let list = PathAllowList::new(vec![
+            ConfigEntry::prefix("otherwise-matching"),
+            ConfigEntry::glob(r"C:/safe[\]secret"),
+        ]);
+        assert!(!list.matches(Path::new("otherwise-matching")));
+        assert!(!list.matches(Path::new(r"C:\safe\secret")));
     }
 
     #[test]
