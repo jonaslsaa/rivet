@@ -8,7 +8,9 @@
 pub mod chat_formatting;
 pub mod crash_report;
 pub mod identifier_exception;
+pub mod shared_constants;
 
 pub use chat_formatting::ChatFormatting;
 pub use crash_report::{CrashReport, CrashReportCategory, ReportedException};
 pub use identifier_exception::IdentifierException;
+pub use shared_constants::{SERIES, SNAPSHOT, STABLE, VERSION_ID, VERSION_NAME, WORLD_VERSION};

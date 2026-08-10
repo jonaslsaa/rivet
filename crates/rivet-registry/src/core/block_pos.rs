@@ -12,15 +12,19 @@
 //! `Iterable`s can be pulled again; Rivet returns one pass). `Rotation`,
 //! `TraversalNodeStatus`, and `RandomSource` are in `core`/`rivet-util`.
 //!
-//! RivetTodo(#126): `CODEC`/`STREAM_CODEC` (codec surface →
-//! rivet-protocol). `betweenCornersInDirection`/`clampLocationWithin` (JOML
+//! `CODEC` landed here (`Codec.INT_STREAM.comapFlatMap(Util::fixedSize(…, 3))`).
+//! RivetTodo(#126): `STREAM_CODEC` (codec surface → rivet-protocol).
+//! `betweenCornersInDirection`/`clampLocationWithin` (JOML
 //! `Vec3`) defer with the JOML unit.
 
 use super::axis_cycle::AxisCycle;
 use super::direction::{Axis, Direction};
 use super::rotation::Rotation;
 use super::vec3i::{Vec3i, Vec3iLike, compare_coords};
+use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_util::mth;
+use std::sync::Arc;
 
 /// Block-position packing constants (`BlockPos` Paper-inlined bit operations).
 const PACKED_X_MASK: i64 = 67108863; // 26 bits
@@ -774,6 +778,28 @@ impl std::fmt::Display for BlockPos {
             super::vec3i::format_helper("BlockPos", self.x, self.y, self.z)
         )
     }
+}
+
+/// `BlockPos.CODEC` — `Codec.INT_STREAM.comapFlatMap(Util::fixedSize, ...)` as
+/// the ops-generic `block_pos_codec::<Ops>()` factory.
+///
+/// Java: `Codec.INT_STREAM.<BlockPos>comapFlatMap(input ->
+/// Util.fixedSize(input, 3).map(ints -> new BlockPos(ints[0], ints[1],
+/// ints[2])), pos -> IntStream.of(pos.getX(), pos.getY(), pos.getZ()))`. The
+/// int stream is a `Vec<i32>` here (`get_int_stream`); `Util.fixedSize(input,
+/// 3)` (rivet-util `fixed_size_i32`) returns a `DataResult<Vec<i32>>` with the
+/// same "Input is not a list of 3 elements" error/partial semantics, mapped to
+/// a `BlockPos`. The `RivetTodo(#126)` on this module's header tracks the
+/// remaining `STREAM_CODEC`.
+pub fn block_pos_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<BlockPos, Ops>> {
+    codec::comap_flat_map::<Vec<i32>, BlockPos, Ops>(
+        codec::int_stream_codec::<Ops>(),
+        Arc::new(|input: &Vec<i32>| {
+            rivet_util::fixed_size_i32(input, 3)
+                .map(|ints| BlockPos::new(ints[0], ints[1], ints[2]))
+        }),
+        Arc::new(|pos: &BlockPos| vec![pos.get_x(), pos.get_y(), pos.get_z()]),
+    )
 }
 
 /// `BlockPos.MutableBlockPos` — a mutable block position.

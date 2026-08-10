@@ -10,9 +10,14 @@
 //! `fillCrashReportCategory` default defers with the crash-report surface.
 
 use rivet_registry::ResourceKey;
-use rivet_registry::core::{BlockPos, Difficulty, GlobalPos};
+use rivet_registry::core::{BlockPos, Difficulty, GlobalPos, global_pos_map_codec};
 use rivet_registry::registries::Level as LevelKey;
+use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::dynamic_ops::DynamicOps;
+use rivet_serialization::map_codec::{MapCodec, codec_of};
+use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use rivet_util::mth;
+use std::sync::Arc;
 
 /// `LevelData` — the read side of the world's persistent data.
 ///
@@ -125,10 +130,147 @@ pub fn default_respawn_data() -> RespawnData {
     )
 }
 
+/// `LevelData.RespawnData.MAP_CODEC` — `RecordCodecBuilder.mapCodec(i ->
+/// i.group(GlobalPos.MAP_CODEC.forGetter(RespawnData::globalPos),
+/// Codec.floatRange(-180, 180).fieldOf("yaw"), Codec.floatRange(-90,
+/// 90).fieldOf("pitch")).apply(i, RespawnData::new))`.
+///
+/// Exposed as the ops-generic `respawn_data_map_codec::<Ops>()` factory
+/// (Java's `static final` constant). The yaw/pitch bounds run on both decode
+/// and encode, exactly like `Codec.floatRange`'s `flatXMap`.
+pub fn respawn_data_map_codec<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<RespawnData, Ops>>
+where
+    RespawnData: 'static,
+{
+    record_builder::map_codec(|instance| {
+        instance
+            .group(RecordCodecBuilder::of(
+                Arc::new(|r: &RespawnData| r.global_pos.clone()),
+                global_pos_map_codec::<Ops>(),
+            ))
+            .and(RecordCodecBuilder::of_named(
+                Arc::new(|r: &RespawnData| r.yaw),
+                "yaw".to_string(),
+                codec::float_range::<Ops>(-180.0, 180.0),
+            ))
+            .and(RecordCodecBuilder::of_named(
+                Arc::new(|r: &RespawnData| r.pitch),
+                "pitch".to_string(),
+                codec::float_range::<Ops>(-90.0, 90.0),
+            ))
+            .apply(instance, Arc::new(RespawnData::new))
+    })
+}
+
+/// `LevelData.RespawnData.CODEC` — `MAP_CODEC.codec()`.
+pub fn respawn_data_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<RespawnData, Ops>>
+where
+    RespawnData: 'static,
+{
+    codec_of(respawn_data_map_codec::<Ops>())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::level::level::overworld;
+    use rivet_nbt::nbt_io;
+    use rivet_nbt::nbt_ops::NbtOps;
+    use rivet_serialization::Dynamic;
+
+    /// Decode the real 26.2 `level.dat` fixture's `spawn` compound through
+    /// `LevelData.RespawnData.CODEC` end-to-end.
+    #[test]
+    fn respawn_data_codec_decodes_real_fixture_spawn() {
+        let Some(path) =
+            workspace_root().map(|ws| ws.join("tools/rivet-oracle/fixtures/level.dat"))
+        else {
+            eprintln!("fixtures not present — skipping");
+            return;
+        };
+        if !path.is_file() {
+            eprintln!("fixtures not present — skipping");
+            return;
+        }
+        let bytes = std::fs::read(&path).expect("level.dat readable");
+        let tag = nbt_io::read_compressed(
+            &bytes[..],
+            &mut rivet_nbt::nbt_accounter::NbtAccounter::unlimited_heap(),
+        )
+        .expect("read_compressed must read Paper's gzip level.dat");
+        let data = tag
+            .get_compound("Data")
+            .expect("level.dat must carry a Data compound");
+        let ops = NbtOps::instance();
+        let dynamic = Dynamic::new(&ops, rivet_nbt::tag::Tag::Compound(data.clone()));
+        // The fixture's spawn: pos (0,-60,0), pitch 0.0, yaw 0.0, dimension minecraft:overworld.
+        let spawn = dynamic
+            .get(&ops, "spawn")
+            .decode(&ops, &*respawn_data_codec::<NbtOps>())
+            .result()
+            .expect("spawn decode must succeed")
+            .0
+            .clone();
+        assert_eq!(spawn.pos(), BlockPos::new(0, -60, 0));
+        assert_eq!(spawn.pitch(), 0.0);
+        assert_eq!(spawn.yaw(), 0.0);
+        assert_eq!(spawn.dimension(), &overworld());
+    }
+
+    /// The `RespawnData` codec round-trips through `NbtOps`.
+    #[test]
+    fn respawn_data_codec_round_trips() {
+        let ops = NbtOps::instance();
+        let mut spawn = rivet_nbt::compound_tag::CompoundTag::new();
+        spawn.put(
+            "pos".to_string(),
+            rivet_nbt::tag::Tag::IntArray(rivet_nbt::int_array_tag::IntArrayTag::new(vec![
+                1, 2, 3,
+            ])),
+        );
+        spawn.put(
+            "pitch".to_string(),
+            rivet_nbt::tag::Tag::Float(rivet_nbt::float_tag::FloatTag::new(10.0)),
+        );
+        spawn.put(
+            "yaw".to_string(),
+            rivet_nbt::tag::Tag::Float(rivet_nbt::float_tag::FloatTag::new(20.0)),
+        );
+        spawn.put(
+            "dimension".to_string(),
+            rivet_nbt::tag::Tag::String(rivet_nbt::string_tag::StringTag::value_of(
+                "minecraft:overworld".to_string(),
+            )),
+        );
+        let dynamic = Dynamic::new(&ops, rivet_nbt::tag::Tag::Compound(spawn));
+        let decoded = dynamic
+            .decode(&ops, &*respawn_data_codec::<NbtOps>())
+            .result()
+            .expect("decode must succeed")
+            .0
+            .clone();
+        assert_eq!(decoded.pos(), BlockPos::new(1, 2, 3));
+        assert_eq!(decoded.yaw(), 20.0);
+        assert_eq!(decoded.pitch(), 10.0);
+        assert_eq!(decoded.dimension(), &overworld());
+        // Encode back.
+        let encoded = respawn_data_codec::<NbtOps>()
+            .encode_start(&ops, &decoded)
+            .result()
+            .expect("encode must succeed")
+            .clone();
+        assert!(
+            matches!(encoded, rivet_nbt::tag::Tag::Compound(_)),
+            "encode must produce a compound"
+        );
+    }
+
+    fn workspace_root() -> Option<std::path::PathBuf> {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .parent()
+            .map(|p| p.to_path_buf())
+    }
 
     /// A fake `LevelData` exercising the value seam.
     struct FakeLevelData {
