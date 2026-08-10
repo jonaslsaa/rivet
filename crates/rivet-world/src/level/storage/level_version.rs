@@ -37,11 +37,11 @@ impl LevelVersion {
     /// `LevelVersion.parse(Dynamic)`.
     ///
     /// Mirrors the Java field-by-field: `version` (default `0`), `LastPlayed`
-    /// (default `0L`), then the optional `Version` compound (defaults to the
-    /// pinned current version when absent). When the `Version` compound is
-    /// absent, the Java `LevelVersion` stores `""`, `0`, `"main"`, `false`
-    /// for the version fields (NOT the current-version fallbacks — the
-    /// fallbacks are only applied *inside* the present `Version` compound).
+    /// (default `0L`), then the optional `Version` compound. When the `Version`
+    /// compound is absent, the Java `LevelVersion` stores `""`, `0`, `"main"`,
+    /// `false` for the version fields (NOT the current-version fallbacks); the
+    /// current-version fallbacks apply only per-field *inside* a present
+    /// `Version` compound (see the module doc).
     pub fn parse<O>(input: &Dynamic<O>, ops: &impl DynamicOps<Output = O>) -> Self
     where
         O: Clone + std::fmt::Debug,
