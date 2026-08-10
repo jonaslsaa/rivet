@@ -70,10 +70,13 @@ impl RegistryAccess {
         }
     }
 
-    /// Build an access from raw (key, erased-registry) pairs. Crate-internal:
-    /// `from_registry_of_registries` (the ROOT view) and the layered composite
-    /// are the two construction sites; typed entry points go through `lookup`.
-    pub(crate) fn from_pairs(pairs: Vec<(RegistryKey<()>, AnyBox)>) -> Self {
+    /// Build an access from raw (key, erased-registry) pairs.
+    ///
+    /// Used by `from_registry_of_registries` (the ROOT view), the layered
+    /// composite, and — since #382 — by external consumers (the level-storage
+    /// value layer) to build a populated provider for a serialization context.
+    /// Typed entry points go through `lookup`.
+    pub fn from_pairs(pairs: Vec<(RegistryKey<()>, AnyBox)>) -> Self {
         RegistryAccess {
             registries: pairs.into_iter().map(Arc::new).collect(),
         }
