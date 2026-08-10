@@ -303,7 +303,11 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                             i - 1
                         ));
                     }
-                    if matches!(class_char, '\\' | '[' | ']') {
+                    // OpenJDK escapes a doubled '&' so Java's class
+                    // intersection cannot reinterpret a literal ampersand.
+                    if matches!(class_char, '\\' | '[' | ']')
+                        || (class_char == '&' && chars.get(i) == Some(&'&'))
+                    {
                         regex.push('\\');
                     }
                     regex.push(class_char);
@@ -778,6 +782,34 @@ mod tests {
         assert!(glob_to_regex(r"[a\b]", true).is_err());
         assert!(glob_to_regex(r"[\]", false).is_ok());
         assert!(glob_to_regex(r"[\]", true).is_err());
+    }
+
+    #[test]
+    fn glob_class_doubled_ampersand_is_a_literal_member_like_openjdk() {
+        // OpenJDK escapes a doubled '&' inside a glob class, so it is a
+        // literal member; without the escape PCRE2 would treat it as class
+        // intersection and match nothing.
+        for windows in [false, true] {
+            assert!(glob_to_regex("[a&&b]", windows).is_ok());
+            let expression = glob_to_regex("[a&&b]", windows).unwrap();
+            let expression = format!(r"\A(?:{expression})\z");
+            let mut builder = RegexBuilder::new();
+            builder.utf(true).ucp(false);
+            let regex = builder.build(&expression).unwrap();
+            for matching in [b"a".as_slice(), b"&".as_slice(), b"b".as_slice()] {
+                assert!(
+                    regex.is_match(matching).unwrap(),
+                    "[a&&b] must match literal '&' member for windows={windows}"
+                );
+            }
+            assert!(!regex.is_match(b"c").unwrap());
+        }
+
+        let list = PathAllowList::new(vec![ConfigEntry::glob("[a&&b]")]);
+        assert!(list.matches(Path::new("a")));
+        assert!(list.matches(Path::new("&")));
+        assert!(list.matches(Path::new("b")));
+        assert!(!list.matches(Path::new("c")));
     }
 
     #[test]
