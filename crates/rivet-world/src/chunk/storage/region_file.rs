@@ -245,6 +245,11 @@ pub struct RegionFile {
     /// `sync` — Java opens the FileChannel with `DSYNC` when set. Rivet
     /// emulates it with a `sync_data` after each `write_header`.
     sync: bool,
+    /// Existing-only mode used by the loaded-world extractor and region-backed
+    /// boot. It forbids header repair/backups, treats an allocated corrupt
+    /// chunk as a hard `InvalidData` error rather than an absent chunk, and
+    /// makes close descriptor-only.
+    read_only: bool,
     /// Legacy Aikar oversized flags loaded from `<region>.oversized.nbt`.
     /// This slice only reads them; the legacy mutation surface stays absent.
     oversized: [u8; 1024],
@@ -270,6 +275,29 @@ impl RegionFile {
         version: RegionFileVersion,
         sync: bool,
     ) -> io::Result<Self> {
+        Self::open_with_mode(info, path, external_file_dir, version, sync, false)
+    }
+
+    /// Open an already-existing region through a read-only descriptor. Header
+    /// corruption is reported instead of repaired, backed up, or rewritten, so
+    /// a disposable-world extractor can never mutate the copy it reads.
+    pub fn open_read_only(
+        info: RegionStorageInfo,
+        path: PathBuf,
+        external_file_dir: PathBuf,
+        version: RegionFileVersion,
+    ) -> io::Result<Self> {
+        Self::open_with_mode(info, path, external_file_dir, version, false, true)
+    }
+
+    fn open_with_mode(
+        info: RegionStorageInfo,
+        path: PathBuf,
+        external_file_dir: PathBuf,
+        version: RegionFileVersion,
+        sync: bool,
+        read_only: bool,
+    ) -> io::Result<Self> {
         // Paper initializes Aikar metadata before validating the external
         // directory or opening the region channel; preserve that error order.
         let oversized = read_oversized_state(&path)?;
@@ -282,14 +310,20 @@ impl RegionFile {
         // `FileChannel.open(path, CREATE, READ, WRITE)` — deliberately no
         // TRUNCATE_EXISTING: a re-open must read the existing header (Paper
         // `RegionFile` constructor), and the header is only written by
-        // `write_header`/`recalculate_header`.
-        #[allow(clippy::suspicious_open_options)]
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&path)?;
-        let can_recalc_header = info.is_chunk_data;
+        // `write_header`/`recalculate_header`. The existing-only extractor
+        // instead opens a plain read descriptor, so the disposable copy can
+        // never be created, truncated, or modified.
+        let file = if read_only {
+            OpenOptions::new().read(true).open(&path)?
+        } else {
+            #[allow(clippy::suspicious_open_options)]
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&path)?
+        };
+        let can_recalc_header = info.is_chunk_data && !read_only;
         let mut region = Self {
             path,
             external_file_dir,
@@ -300,6 +334,7 @@ impl RegionFile {
             can_recalc_header,
             recalculate_count: 0,
             sync,
+            read_only,
             oversized,
         };
         region.used_sectors.force(0, 2);
@@ -316,6 +351,15 @@ impl RegionFile {
                     region.path.display(),
                     read_header_bytes
                 );
+                if region.read_only {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "truncated header in read-only region {}: {read_header_bytes} bytes",
+                            region.path.display()
+                        ),
+                    ));
+                }
             }
             region.header[..read_header_bytes].copy_from_slice(&buf[..read_header_bytes]);
 
@@ -340,6 +384,17 @@ impl RegionFile {
                     }
                     if sector_number < 2 || num_sectors <= 0 || (sector_number as u64) * 4096 > size
                     {
+                        if region.read_only {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "invalid header in read-only region {} at local chunk ({},{})",
+                                    region.path.display(),
+                                    i & 31,
+                                    i >> 5
+                                ),
+                            ));
+                        }
                         if region.can_recalc_header {
                             eprintln!(
                                 "Detected invalid header for regionfile {}! Recalculating header...",
@@ -372,6 +427,17 @@ impl RegionFile {
                             i >> 5,
                             region.path.display()
                         );
+                    }
+                    if failed_to_allocate && region.read_only {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "overlapping header allocation in read-only region {} at local chunk ({},{})",
+                                region.path.display(),
+                                i & 31,
+                                i >> 5
+                            ),
+                        ));
                     }
                     if failed_to_allocate && !region.can_recalc_header {
                         eprintln!(
@@ -411,6 +477,12 @@ impl RegionFile {
     /// the moonrise read path compares it to detect a recalc during a read.
     pub fn get_recalculate_count(&self) -> u64 {
         self.recalculate_count
+    }
+
+    /// Whether this region is the existing-only read descriptor used by the
+    /// loaded-world extractor and region-backed boot.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Paper's package-private `isOversized(x, z)` legacy Aikar flag lookup.
@@ -510,7 +582,7 @@ impl RegionFile {
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "negative sector count");
             }
             let sectors_length = (num_sectors as u64) * 4096;
             let mut buffer = vec![0u8; sectors_length as usize];
@@ -528,7 +600,7 @@ impl RegionFile {
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "truncated stream header");
             }
             let length = i32::from_be_bytes(buffer[0..4].try_into().unwrap());
             let version_id = buffer[4];
@@ -537,7 +609,7 @@ impl RegionFile {
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "allocated stream is missing");
             }
             // Java `int streamLength = length - 1` wraps; a corrupt length must
             // follow the negative/truncated corruption path, not panic.
@@ -558,7 +630,11 @@ impl RegionFile {
                 if ret.is_none() && self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(ret);
+                return if ret.is_none() {
+                    self.corrupt_chunk(pos, "external stream is missing or unsupported")
+                } else {
+                    Ok(ret)
+                };
             } else if stream_length > (remaining - 5) as i32 {
                 eprintln!(
                     "Chunk {} stream is truncated: expected {} but read {}",
@@ -569,21 +645,36 @@ impl RegionFile {
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "truncated stream payload");
             } else if stream_length < 0 {
                 eprintln!("Declared size {} of chunk {} is negative", length, pos);
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "negative declared stream size");
             } else {
                 let payload = buffer[5..5 + stream_length as usize].to_vec();
                 let ret = self.create_chunk_input_stream(pos, version_id as i32, payload)?;
                 if ret.is_none() && self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(ret);
+                return if ret.is_none() {
+                    self.corrupt_chunk(pos, "unsupported stream compression")
+                } else {
+                    Ok(ret)
+                };
             }
+        }
+    }
+
+    fn corrupt_chunk<T>(&self, pos: &ChunkPos, reason: &str) -> io::Result<Option<T>> {
+        if self.read_only {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("corrupt chunk {pos} in read-only region: {reason}"),
+            ))
+        } else {
+            Ok(None)
         }
     }
 
@@ -657,12 +748,14 @@ impl RegionFile {
         &self,
         pos: &ChunkPos,
     ) -> io::Result<RegionFileWriter<ChunkBuffer>> {
+        self.ensure_writable()?;
         let buffer = ChunkBuffer::new(*pos, self.version.id() as u8);
         self.version.wrap_output(buffer)
     }
 
     /// `flush()` — `file.force(true)` (fsync including metadata).
     pub fn flush(&mut self) -> io::Result<()> {
+        self.ensure_writable()?;
         self.file_mut().sync_all()
     }
 
@@ -670,6 +763,7 @@ impl RegionFile {
     /// header, delete the `.mcc` file if present, then free the old sectors.
     /// Freed sectors are not zeroed and the file is not truncated.
     pub fn clear(&mut self, pos: &ChunkPos) -> io::Result<()> {
+        self.ensure_writable()?;
         let offset_index = Self::get_offset_index(pos);
         let offset = self.read_offset(offset_index);
         if offset != 0 {
@@ -695,8 +789,13 @@ impl RegionFile {
     /// `finally`'s reason, so when both pad and force fail the **force** error
     /// is reported and the pad error discarded — the `force_result.and(...)`
     /// below mirrors that ordering; the close itself is a `drop` and cannot
-    /// fail.
+    /// fail. An existing-only region closes by releasing the descriptor only:
+    /// it never pads, fsyncs, or repairs.
     pub fn close(&mut self) -> io::Result<()> {
+        if self.read_only {
+            self.file.take();
+            return Ok(());
+        }
         let pad_result = self.pad_to_full_sector();
         let force_result = self.file_mut().sync_all();
         self.file.take(); // FileChannel.close() — releases the descriptor
@@ -709,6 +808,7 @@ impl RegionFile {
     /// location+timestamp patched, header written, the commit op run, and the
     /// old sectors freed *last*.
     pub(crate) fn write(&mut self, pos: &ChunkPos, data: &[u8]) -> io::Result<()> {
+        self.ensure_writable()?;
         let offset_index = Self::get_offset_index(pos);
         let offset = self.read_offset(offset_index);
         let sector_number = get_sector_number(offset);
@@ -765,6 +865,7 @@ impl RegionFile {
     /// Paper); file IO failures propagate as `io::Error` (Java `throws
     /// IOException`). The Aikar oversized branches are `RivetTodo(#231)`.
     pub fn recalculate_header(&mut self) -> io::Result<bool> {
+        self.ensure_writable()?;
         if !self.can_recalc_header {
             return Ok(false);
         }
@@ -1134,6 +1235,18 @@ impl RegionFile {
         self.file_mut().seek(SeekFrom::Start(sector * 4096))?;
         let _n = self.file_mut().read(&mut b)?;
         Ok(i32::from_be_bytes(b))
+    }
+
+    /// Refuse every write-side API on an existing-only region descriptor.
+    fn ensure_writable(&self) -> io::Result<()> {
+        if self.read_only {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("region {} is open read-only", self.path.display()),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// `backupRegionFile()` — `file.force(true)` then copy to

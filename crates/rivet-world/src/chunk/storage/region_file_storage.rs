@@ -34,6 +34,7 @@ pub struct RegionFileStorage {
     info: RegionStorageInfo,
     folder: PathBuf,
     sync: bool,
+    read_only: bool,
     region_cache: Vec<(i64, RegionFile)>,
     non_existing_region_files: Vec<i64>,
     #[cfg(test)]
@@ -46,6 +47,25 @@ impl RegionFileStorage {
             info,
             folder,
             sync,
+            read_only: false,
+            region_cache: Vec::new(),
+            non_existing_region_files: Vec::new(),
+            #[cfg(test)]
+            closed_region_files: Vec::new(),
+        }
+    }
+
+    /// Existing-only storage for the loaded-world extractor and world boot: no
+    /// create/write descriptor, repair, backup, padding, or sync-on-close
+    /// behavior. A corrupt allocated chunk is a hard `InvalidData` error, never
+    /// an absent chunk, so a disposable copy can never be mistaken for a
+    /// different world.
+    pub fn new_read_only(info: RegionStorageInfo, folder: PathBuf) -> Self {
+        Self {
+            info,
+            folder,
+            sync: false,
+            read_only: true,
             region_cache: Vec::new(),
             non_existing_region_files: Vec::new(),
             #[cfg(test)]
@@ -91,6 +111,15 @@ impl RegionFileStorage {
                     get_chunk_coordinate(&serialised_chunk_data),
                     region.get_path().display()
                 );
+                if region.is_read_only() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "chunk coordinate mismatch in read-only region {}",
+                            region.get_path().display()
+                        ),
+                    ));
+                }
                 if region.recalculate_header()? {
                     continue;
                 }
@@ -159,13 +188,22 @@ impl RegionFileStorage {
         self.non_existing_region_files
             .retain(|cached| *cached != key);
 
-        let region = RegionFile::open(
-            self.info.clone(),
-            region_path,
-            self.folder.clone(),
-            RegionFileVersion::get_selected(),
-            self.sync,
-        )?;
+        let region = if self.read_only {
+            RegionFile::open_read_only(
+                self.info.clone(),
+                region_path,
+                self.folder.clone(),
+                RegionFileVersion::get_selected(),
+            )?
+        } else {
+            RegionFile::open(
+                self.info.clone(),
+                region_path,
+                self.folder.clone(),
+                RegionFileVersion::get_selected(),
+                self.sync,
+            )?
+        };
         self.region_cache.insert(0, (key, region));
         Ok(Some(0))
     }
@@ -303,6 +341,105 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(payload).unwrap();
         encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn read_only_storage_does_not_pad_or_modify_existing_region() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.0.0.mca");
+        let bytes = vec![0u8; 8193];
+        fs::write(&path, &bytes).unwrap();
+
+        let mut storage = RegionFileStorage::new_read_only(info(true), dir.path().into());
+        assert!(storage.read(&ChunkPos::ZERO).unwrap().is_none());
+        storage.close().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn read_only_storage_rejects_corrupt_header_without_backup_or_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.0.0.mca");
+        let mut bytes = vec![0u8; 8192];
+        bytes[..4].copy_from_slice(&((1i32 << 8) | 1).to_be_bytes());
+        fs::write(&path, &bytes).unwrap();
+
+        let mut storage = RegionFileStorage::new_read_only(info(true), dir.path().into());
+        let error = storage.read(&ChunkPos::ZERO).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        storage.close().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn read_only_storage_rejects_truncated_header_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.0.0.mca");
+        let bytes = vec![7u8; 128];
+        fs::write(&path, &bytes).unwrap();
+
+        let mut storage = RegionFileStorage::new_read_only(info(true), dir.path().into());
+        let error = storage.read(&ChunkPos::ZERO).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        storage.close().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn read_only_region_rejects_every_mutation_entry_before_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        write_region(dir.path(), ChunkPos::ZERO, 3, PAPER_CHUNK_0_0);
+        let path = dir.path().join("r.0.0.mca");
+        let before = fs::read(&path).unwrap();
+        let mut region = RegionFile::open_read_only(
+            info(true),
+            path.clone(),
+            dir.path().into(),
+            RegionFileVersion::get_selected(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            region
+                .get_chunk_data_output_stream(&ChunkPos::ZERO)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            region.flush().unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            region.clear(&ChunkPos::ZERO).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            region.write(&ChunkPos::ZERO, &[0; 16]).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            region.recalculate_header().unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            region
+                .get_chunk_data_input_stream(&ChunkPos::ZERO)
+                .unwrap()
+                .is_some(),
+            "failed clear must not change the in-memory header"
+        );
+        region.close().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     fn deflate(payload: &[u8]) -> Vec<u8> {
