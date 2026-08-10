@@ -57,10 +57,9 @@
 //!   that Rust's derived `Hash` would NOT reproduce, and no consumer in this
 //!   value layer needs hashing.
 //!
-//! The network `StreamCodec` overloads (`Weighted.streamCodec`,
+//! RivetTodo(#126): the network `StreamCodec` overloads (`Weighted.streamCodec`,
 //! `WeightedList.streamCodec`) are omitted — the protocol crate owns that
-//! surface and no consumer in this value layer needs it (mirrors the
-//! `PositionalRandomFactory` omission note in `random.rs`).
+//! surface and no consumer in this value layer needs it.
 
 use crate::random::RandomSource;
 use crate::util::log_and_pause_if_in_ide;
