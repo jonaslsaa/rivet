@@ -81,13 +81,29 @@ fn hex_f32(s: &str) -> f32 {
 /// (`net.minecraft.util.BoundedFloatFunction$1`), while the Rust `Identity`
 /// renders its own type name. Normalize that one token so the fixture's Java
 /// parity strings are asserted byte-for-byte against Rust for everything else
-/// (locations, derivatives, values, and the `%.3f` formatting).
+/// (locations, derivatives, values, and the `%.3f` formatting). The `$1`
+/// ordinal is a javac source-order number — match any ordinal so a Paper pin
+/// advance that renumbers the anonymous class keeps working — and a raw
+/// `toString` also appends a per-JVM identity hash (`@<hex>`, which
+/// `SplineProbe.parityOf` already strips), normalized away here too.
 fn normalize_coordinate(s: &str) -> String {
-    s.replace(
-        "coordinate=net.minecraft.util.BoundedFloatFunction$1",
-        "coordinate=<coordinate>",
-    )
-    .replace("coordinate=Identity", "coordinate=<coordinate>")
+    let s = s.replace("coordinate=Identity", "coordinate=<coordinate>");
+    let marker = "coordinate=net.minecraft.util.BoundedFloatFunction$";
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s.as_str();
+    while let Some(start) = rest.find(marker) {
+        // Skip `<class>$<ordinal>[@<hex>]`: the ordinal digits, an optional
+        // `@`, then the hash's hex digits. `rest` continues past the token.
+        out.push_str(&rest[..start]);
+        out.push_str("coordinate=<coordinate>");
+        rest = &rest[start + marker.len()..];
+        rest = rest
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start_matches('@')
+            .trim_start_matches(|c: char| c.is_ascii_hexdigit());
+    }
+    out.push_str(rest);
+    out
 }
 
 /// One `SplineProbe` spline case: constructor-computed bounds, the sample
