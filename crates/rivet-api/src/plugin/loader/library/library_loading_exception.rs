@@ -50,9 +50,10 @@ impl LibraryLoadingException {
 }
 
 impl std::fmt::Display for LibraryLoadingException {
-    /// Java `Throwable.toString()` — `"LibraryLoadingException: <message>"`,
-    /// the first stack-trace line Paper surfaces when a plugin's library load
-    /// fails. `get_message()` stays raw; this is the display form.
+    /// Rust simple-type analogue of Java `Throwable.toString()`:
+    /// `"LibraryLoadingException: <message>"`, using the simple type name
+    /// rather than Java's fully-qualified class name. The exact raw message
+    /// is preserved; `get_message()` is the authoritative raw accessor.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "LibraryLoadingException: {}", self.message)
     }
@@ -81,8 +82,8 @@ mod tests {
             "Could not find library at libs/missing.jar"
         );
         assert!(error.get_cause().is_none());
-        // Display mirrors Java `Throwable.toString()`: class name, colon,
-        // message — the line Paper surfaces when a plugin library load fails.
+        // Display is the Rust simple-type analogue of Java
+        // `Throwable.toString()`: simple type name, colon, exact raw message.
         assert_eq!(
             error.to_string(),
             "LibraryLoadingException: Could not find library at libs/missing.jar"
