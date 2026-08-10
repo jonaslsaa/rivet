@@ -15,13 +15,24 @@
 //! per-node `Rc<RefCell<…>>` plus a `sync` closure that copies the node's
 //! current content into its parent slot and propagates the parent's own sync.
 //! Every mutation ends in `sync()`, so the root (and `build_result()`) reflects
-//! children; a node's sync only writes back while its parent slot still holds
-//! the last snapshot it placed, so a child retained after the parent
-//! `discard()`s or replaces its field is detached and its writes stay invisible
-//! (Java's shared-object identity). There is no reference cycle: a node holds
-//! its parent's `sync` closure (an `Rc<dyn Fn>`), while a parent only ever
-//! holds *snapshot clones* of its children's content — never the children's
-//! `Rc`.
+//! children.
+//!
+//! Slot ownership is tracked by a **unique token** per placed parent slot (the
+//! `Rc` address of the node's own cell), not by value equality: a node's sync
+//! only writes back while the parent's slot-token registry still maps its key
+//! to the node's token. The parent clears the token when it `discard()`s or
+//! replaces a field, and a recreated `child()`/`childrenList()`/`list()` or
+//! `addChild()` registers a fresh token — so a retained child after a
+//! discard/replace (even against an equal empty recreated slot) is detached and
+//! its writes stay invisible, matching Java's shared-object identity. There is
+//! no reference cycle: a node holds its parent's `sync` closure (an
+//! `Rc<dyn Fn>`), while a parent only ever holds *snapshot clones* of its
+//! children's content — never the children's `Rc`.
+//!
+//! The wrapping factories (`createWrappingWithContext`/`createWrappingGlobal`)
+//! take an `Rc<RefCell<CompoundTag>>` — the caller keeps the cell and shares
+//! it with the output, matching Java's shared-object `CompoundTag` parameter
+//! (writes through the output are visible to the caller's cell and vice versa).
 //!
 //! ## Ops/context
 //!
@@ -50,9 +61,16 @@ use rivet_util::problem_reporter::{
     FieldPathElement, IndexedFieldPathElement, Problem, ProblemReporter,
 };
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
+
+/// A unique token identifying a node's ownership of a parent slot — the `Rc`
+/// address of the node's own content cell (unique and stable for the node's
+/// lifetime; a retained node keeps its cell alive, so addresses never collide
+/// within a live tree).
+type SlotToken = usize;
 
 /// `net.minecraft.world.level.storage.TagValueOutput`.
 pub struct TagValueOutput {
@@ -62,6 +80,10 @@ pub struct TagValueOutput {
     /// Propagates this node's current content into its parent slot and up —
     /// `None` for the root.
     sync: Option<Rc<dyn Fn()>>,
+    /// Field name → slot token of the child currently owning that field slot.
+    /// Cleared when this node discards or replaces a field; set when a child
+    /// is created at a field.
+    slot_tokens: Rc<RefCell<HashMap<String, SlotToken>>>,
 }
 
 impl fmt::Debug for TagValueOutput {
@@ -80,12 +102,14 @@ impl TagValueOutput {
         ops: Arc<TagContextOps>,
         output: Rc<RefCell<CompoundTag>>,
         sync: Option<Rc<dyn Fn()>>,
+        slot_tokens: Rc<RefCell<HashMap<String, SlotToken>>>,
     ) -> Self {
         TagValueOutput {
             problem_reporter,
             ops,
             output,
             sync,
+            slot_tokens,
         }
     }
 
@@ -100,6 +124,7 @@ impl TagValueOutput {
             context_ops(provider),
             Rc::new(RefCell::new(CompoundTag::new())),
             None,
+            Rc::new(RefCell::new(HashMap::new())),
         ))
     }
 
@@ -116,16 +141,23 @@ impl TagValueOutput {
 
     /// `TagValueOutput.createWrappingWithContext(ProblemReporter,
     /// HolderLookup.Provider, CompoundTag)` — writes into an existing tag.
+    ///
+    /// Java passes the `CompoundTag` *object* and shares it with the caller;
+    /// the Rust port takes an `Rc<RefCell<CompoundTag>>` so the caller keeps
+    /// the cell and mutations are visible both ways (writes through the output
+    /// appear in the caller's cell, and the caller's own writes appear in
+    /// `buildResult()`).
     pub fn create_wrapping_with_context(
         problem_reporter: Reporter,
         provider: RegistryAccess,
-        output: CompoundTag,
+        output: Rc<RefCell<CompoundTag>>,
     ) -> ValueOutput {
         ValueOutput::Tag(TagValueOutput::new(
             problem_reporter,
             context_ops(provider),
-            Rc::new(RefCell::new(output)),
+            output,
             None,
+            Rc::new(RefCell::new(HashMap::new())),
         ))
     }
 
@@ -134,7 +166,10 @@ impl TagValueOutput {
     /// Same `TagContextOps` pinning as `createWithoutContext` (see the
     /// `RivetTodo` there): empty `RegistryAccess` instead of Java's plain
     /// `NbtOps`.
-    pub fn create_wrapping_global(problem_reporter: Reporter, output: CompoundTag) -> ValueOutput {
+    pub fn create_wrapping_global(
+        problem_reporter: Reporter,
+        output: Rc<RefCell<CompoundTag>>,
+    ) -> ValueOutput {
         TagValueOutput::create_wrapping_with_context(
             problem_reporter,
             RegistryAccess::empty(),
@@ -157,6 +192,13 @@ impl TagValueOutput {
         if let Some(sync) = &self.sync {
             sync();
         }
+    }
+
+    /// Detach any child that currently owns the `name` field slot — this node
+    /// is about to overwrite or remove it (Java `CompoundTag.put`/`remove`
+    /// replaces the object reference, so the retained child becomes invisible).
+    fn detach_field(&self, name: &str) {
+        self.slot_tokens.borrow_mut().remove(name);
     }
 }
 
@@ -192,6 +234,9 @@ impl TagValueOutput {
                 }
             }
         }
+        // Storing replaces any child slot at `name` (Java `CompoundTag.put`),
+        // detaching a retained child.
+        self.slot_tokens.borrow_mut().remove(name);
         self.sync();
     }
 
@@ -220,7 +265,14 @@ impl TagValueOutput {
         let result = encoder.encode_start(self.ops.as_ref(), value);
         match result.result() {
             Some(Tag::Compound(compound)) => {
+                let merged_keys: Vec<String> = compound.key_set().cloned().collect();
                 self.output.borrow_mut().merge(compound);
+                // `merge` is `putAll` — every merged key replaces the prior
+                // entry, detaching any retained child at those fields.
+                let mut tokens = self.slot_tokens.borrow_mut();
+                for key in merged_keys {
+                    tokens.remove(&key);
+                }
             }
             Some(other) => {
                 // Java's unchecked `(CompoundTag)` cast on a non-compound
@@ -237,7 +289,12 @@ impl TagValueOutput {
                 if let Some(partial) = error.partial().clone() {
                     match partial {
                         Tag::Compound(compound) => {
+                            let merged_keys: Vec<String> = compound.key_set().cloned().collect();
                             self.output.borrow_mut().merge(&compound);
+                            let mut tokens = self.slot_tokens.borrow_mut();
+                            for key in merged_keys {
+                                tokens.remove(&key);
+                            }
                         }
                         other => panic!(
                             "TagValueOutput.store(MapCodec): expected compound partial, got {other}"
@@ -252,54 +309,63 @@ impl TagValueOutput {
     /// `ValueOutput.putBoolean(String, boolean)`.
     pub fn put_boolean(&self, name: &str, value: bool) {
         self.output.borrow_mut().put_boolean(name, value);
+        self.detach_field(name);
         self.sync();
     }
 
     /// `ValueOutput.putByte(String, byte)`.
     pub fn put_byte(&self, name: &str, value: i8) {
         self.output.borrow_mut().put_byte(name, value);
+        self.detach_field(name);
         self.sync();
     }
 
     /// `ValueOutput.putShort(String, short)`.
     pub fn put_short(&self, name: &str, value: i16) {
         self.output.borrow_mut().put_short(name, value);
+        self.detach_field(name);
         self.sync();
     }
 
     /// `ValueOutput.putInt(String, int)`.
     pub fn put_int(&self, name: &str, value: i32) {
         self.output.borrow_mut().put_int(name, value);
+        self.detach_field(name);
         self.sync();
     }
 
     /// `ValueOutput.putLong(String, long)`.
     pub fn put_long(&self, name: &str, value: i64) {
         self.output.borrow_mut().put_long(name, value);
+        self.detach_field(name);
         self.sync();
     }
 
     /// `ValueOutput.putFloat(String, float)`.
     pub fn put_float(&self, name: &str, value: f32) {
         self.output.borrow_mut().put_float(name, value);
+        self.detach_field(name);
         self.sync();
     }
 
     /// `ValueOutput.putDouble(String, double)`.
     pub fn put_double(&self, name: &str, value: f64) {
         self.output.borrow_mut().put_double(name, value);
+        self.detach_field(name);
         self.sync();
     }
 
     /// `ValueOutput.putString(String, String)`.
     pub fn put_string(&self, name: &str, value: &str) {
         self.output.borrow_mut().put_string(name, value);
+        self.detach_field(name);
         self.sync();
     }
 
     /// `ValueOutput.putIntArray(String, int[])`.
     pub fn put_int_array(&self, name: &str, value: &[i32]) {
         self.output.borrow_mut().put_int_array(name, value.to_vec());
+        self.detach_field(name);
         self.sync();
     }
 
@@ -307,34 +373,22 @@ impl TagValueOutput {
     pub fn child(&self, name: &str) -> ValueOutput {
         let name = name.to_string();
         let child_cell = Rc::new(RefCell::new(CompoundTag::new()));
-        // The snapshot this node last wrote into its parent slot. A write-back
-        // only happens while the parent slot still holds that exact snapshot —
-        // once the parent discards or replaces the field (or `discardLast`
-        // removes a list slot), the retained child is detached and its writes
-        // stay invisible, matching Java's shared-object identity semantics.
-        let last_placed = Rc::new(RefCell::new(Some(Tag::Compound(CompoundTag::new()))));
+        let token = Rc::as_ptr(&child_cell) as SlotToken;
         {
             let mut output = self.output.borrow_mut();
             output.put(name.to_string(), Tag::Compound(child_cell.borrow().clone()));
         }
+        self.slot_tokens.borrow_mut().insert(name.clone(), token);
         let parent_cell = Rc::clone(&self.output);
+        let parent_slot_tokens = Rc::clone(&self.slot_tokens);
         let parent_sync = self.sync.clone();
         let sync_child_cell = Rc::clone(&child_cell);
         let sync_name = name.clone();
-        let sync_last_placed = Rc::clone(&last_placed);
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            let still_owned = {
-                let parent = parent_cell.borrow();
-                let last = sync_last_placed.borrow();
-                match (last.as_ref(), parent.get(&sync_name)) {
-                    (Some(prev), Some(cur)) => prev == cur,
-                    _ => false,
-                }
-            };
+            let still_owned = parent_slot_tokens.borrow().get(&sync_name) == Some(&token);
             if still_owned {
                 let tag = Tag::Compound(sync_child_cell.borrow().clone());
                 parent_cell.borrow_mut().put(sync_name.clone(), tag.clone());
-                *sync_last_placed.borrow_mut() = Some(tag);
                 if let Some(parent_sync) = &parent_sync {
                     parent_sync();
                 }
@@ -345,6 +399,7 @@ impl TagValueOutput {
             Arc::clone(&self.ops),
             child_cell,
             Some(sync),
+            Rc::new(RefCell::new(HashMap::new())),
         ))
     }
 
@@ -352,29 +407,22 @@ impl TagValueOutput {
     pub fn children_list(&self, name: &str) -> ValueOutputList {
         let name = name.to_string();
         let list_cell = Rc::new(RefCell::new(ListTag::new()));
-        let last_placed = Rc::new(RefCell::new(Some(Tag::List(ListTag::new()))));
+        let token = Rc::as_ptr(&list_cell) as SlotToken;
         {
             let mut output = self.output.borrow_mut();
             output.put(name.to_string(), Tag::List(list_cell.borrow().clone()));
         }
+        self.slot_tokens.borrow_mut().insert(name.clone(), token);
         let parent_cell = Rc::clone(&self.output);
+        let parent_slot_tokens = Rc::clone(&self.slot_tokens);
         let parent_sync = self.sync.clone();
         let sync_list_cell = Rc::clone(&list_cell);
         let sync_name = name.clone();
-        let sync_last_placed = Rc::clone(&last_placed);
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            let still_owned = {
-                let parent = parent_cell.borrow();
-                let last = sync_last_placed.borrow();
-                match (last.as_ref(), parent.get(&sync_name)) {
-                    (Some(prev), Some(cur)) => prev == cur,
-                    _ => false,
-                }
-            };
+            let still_owned = parent_slot_tokens.borrow().get(&sync_name) == Some(&token);
             if still_owned {
                 let tag = Tag::List(sync_list_cell.borrow().clone());
                 parent_cell.borrow_mut().put(sync_name.clone(), tag.clone());
-                *sync_last_placed.borrow_mut() = Some(tag);
                 if let Some(parent_sync) = &parent_sync {
                     parent_sync();
                 }
@@ -386,6 +434,7 @@ impl TagValueOutput {
             ops: Arc::clone(&self.ops),
             output: list_cell,
             sync: Some(sync),
+            slot_tokens: Rc::new(RefCell::new(Vec::new())),
         })
     }
 
@@ -396,29 +445,22 @@ impl TagValueOutput {
     {
         let name = name.to_string();
         let list_cell = Rc::new(RefCell::new(ListTag::new()));
-        let last_placed = Rc::new(RefCell::new(Some(Tag::List(ListTag::new()))));
+        let token = Rc::as_ptr(&list_cell) as SlotToken;
         {
             let mut output = self.output.borrow_mut();
             output.put(name.to_string(), Tag::List(list_cell.borrow().clone()));
         }
+        self.slot_tokens.borrow_mut().insert(name.clone(), token);
         let parent_cell = Rc::clone(&self.output);
+        let parent_slot_tokens = Rc::clone(&self.slot_tokens);
         let parent_sync = self.sync.clone();
         let sync_list_cell = Rc::clone(&list_cell);
         let sync_name = name.clone();
-        let sync_last_placed = Rc::clone(&last_placed);
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            let still_owned = {
-                let parent = parent_cell.borrow();
-                let last = sync_last_placed.borrow();
-                match (last.as_ref(), parent.get(&sync_name)) {
-                    (Some(prev), Some(cur)) => prev == cur,
-                    _ => false,
-                }
-            };
+            let still_owned = parent_slot_tokens.borrow().get(&sync_name) == Some(&token);
             if still_owned {
                 let tag = Tag::List(sync_list_cell.borrow().clone());
                 parent_cell.borrow_mut().put(sync_name.clone(), tag.clone());
-                *sync_last_placed.borrow_mut() = Some(tag);
                 if let Some(parent_sync) = &parent_sync {
                     parent_sync();
                 }
@@ -437,6 +479,7 @@ impl TagValueOutput {
     /// `ValueOutput.discard(String)`.
     pub fn discard(&self, name: &str) {
         self.output.borrow_mut().remove(name);
+        self.detach_field(name);
         self.sync();
     }
 
@@ -537,6 +580,8 @@ pub struct ListWrapper {
     ops: Arc<TagContextOps>,
     output: Rc<RefCell<ListTag>>,
     sync: Option<Rc<dyn Fn()>>,
+    /// Element index → slot token of the child currently owning that element.
+    slot_tokens: Rc<RefCell<Vec<SlotToken>>>,
 }
 
 impl ListWrapper {
@@ -549,31 +594,22 @@ impl ListWrapper {
     /// `ValueOutputList.addChild()`.
     pub fn add_child(&self) -> ValueOutput {
         let child_cell = Rc::new(RefCell::new(CompoundTag::new()));
-        // The snapshot this node last wrote into its list slot (see the
-        // `last_placed` note in `TagValueOutput::child`).
-        let last_placed = Rc::new(RefCell::new(Some(Tag::Compound(CompoundTag::new()))));
+        let token = Rc::as_ptr(&child_cell) as SlotToken;
         let index = {
             let mut list = self.output.borrow_mut();
             list.add(Tag::Compound(child_cell.borrow().clone()));
             list.size() - 1
         };
+        self.slot_tokens.borrow_mut().push(token);
         let list_cell = Rc::clone(&self.output);
+        let list_slot_tokens = Rc::clone(&self.slot_tokens);
         let list_sync = self.sync.clone();
         let sync_child_cell = Rc::clone(&child_cell);
-        let sync_last_placed = Rc::clone(&last_placed);
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            let still_owned = {
-                let list = list_cell.borrow();
-                let last = sync_last_placed.borrow();
-                match (last.as_ref(), list.get_nullable(index)) {
-                    (Some(prev), Some(cur)) => prev == cur,
-                    _ => false,
-                }
-            };
+            let still_owned = list_slot_tokens.borrow().get(index) == Some(&token);
             if still_owned {
                 let tag = Tag::Compound(sync_child_cell.borrow().clone());
                 list_cell.borrow_mut().set(index, tag.clone());
-                *sync_last_placed.borrow_mut() = Some(tag);
                 if let Some(list_sync) = &list_sync {
                     list_sync();
                 }
@@ -593,13 +629,24 @@ impl ListWrapper {
             Arc::clone(&self.ops),
             child_cell,
             Some(sync),
+            Rc::new(RefCell::new(HashMap::new())),
         ))
     }
 
     /// `ValueOutputList.discardLast()`.
+    ///
+    /// Java's `ListTag.removeLast()` (via `AbstractList`/`SequencedCollection`)
+    /// throws `NoSuchElementException` on an empty list; the port panics with
+    /// that message instead of underflowing a `usize` index.
     pub fn discard_last(&self) {
         let size = self.output.borrow().size();
+        if size == 0 {
+            panic!(
+                "TagValueOutput.ListWrapper.discardLast() on an empty list (Java: NoSuchElementException)"
+            );
+        }
         self.output.borrow_mut().remove(size - 1);
+        self.slot_tokens.borrow_mut().pop();
         self.sync();
     }
 
@@ -1027,21 +1074,127 @@ mod tests {
         );
     }
 
-    /// Wrapping an existing tag (Paper's `createWrappingGlobal`) writes into it.
+    /// A **never-written** old child must not clobber a recreated equal empty
+    /// slot after `discard` + `child` at the same name. Java detaches by object
+    /// identity: the recreated slot is a different (but value-identical empty)
+    /// `CompoundTag`, so the old handle's write stays invisible.
     #[test]
-    fn wrapping_global_writes_into_existing_tag() {
-        let existing = CompoundTag::with_map(
-            [("keep".to_string(), Tag::Int(IntTag::new(5)))]
-                .into_iter()
-                .collect(),
-        );
-        let out = TagValueOutput::create_wrapping_global(reporter(), existing);
-        out.put_int("new", 6);
+    fn never_written_child_does_not_clobber_recreated_slot() {
+        let out = output(reporter());
+        let old = out.child("x");
+        out.discard("x");
+        out.child("x");
+        old.put_int("a", 1);
         let result = match &out {
             ValueOutput::Tag(tag) => tag.build_result(),
         };
-        assert_eq!(result.get_int("keep"), Some(5), "existing key preserved");
+        let x = result.get_compound("x").expect("recreated x present");
+        assert!(
+            x.is_empty(),
+            "old handle's write must not clobber the recreated empty slot, got: {result:?}"
+        );
+    }
+
+    /// The `childrenList` analogue: a never-written old element must not
+    /// clobber a recreated equal empty element after `discardLast` + `addChild`.
+    #[test]
+    fn never_written_list_child_does_not_clobber_recreated_slot() {
+        let out = output(reporter());
+        let list = out.children_list("items");
+        let old = list.add_child();
+        list.discard_last();
+        list.add_child();
+        old.put_int("v", 1);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let items = result.get_list("items").expect("list present");
+        assert_eq!(items.size(), 1, "got: {result:?}");
+        let slot = items.get_compound(0).expect("element compound");
+        assert!(
+            slot.is_empty(),
+            "old handle's write must not clobber the recreated empty slot, got: {result:?}"
+        );
+    }
+
+    /// A never-written `childrenList` itself must not clobber a recreated equal
+    /// empty list after `discard` + `childrenList` at the same name.
+    #[test]
+    fn never_written_list_does_not_clobber_recreated_slot() {
+        let out = output(reporter());
+        let old_list = out.children_list("items");
+        out.discard("items");
+        out.children_list("items");
+        old_list.add_child().put_int("v", 1);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let items = result.get_list("items").expect("recreated list present");
+        assert!(
+            items.is_empty(),
+            "old list handle's add must not clobber the recreated empty list, got: {result:?}"
+        );
+    }
+
+    /// Wrapping an existing tag (Paper's `createWrappingGlobal`) writes into it
+    /// and shares the cell with the caller: the output's writes are visible in
+    /// the caller's cell, and the caller's writes are visible in the output's
+    /// `buildResult` (Java's shared-object `CompoundTag` parameter).
+    #[test]
+    fn wrapping_global_writes_into_existing_tag_and_shares() {
+        let cell = Rc::new(RefCell::new(CompoundTag::with_map(
+            [("keep".to_string(), Tag::Int(IntTag::new(5)))]
+                .into_iter()
+                .collect(),
+        )));
+        let out = TagValueOutput::create_wrapping_global(reporter(), Rc::clone(&cell));
+        out.put_int("new", 6);
+        cell.borrow_mut().put_int("caller", 7);
+        assert_eq!(
+            cell.borrow().get_int("keep"),
+            Some(5),
+            "existing key preserved"
+        );
+        assert_eq!(
+            cell.borrow().get_int("new"),
+            Some(6),
+            "output write visible in caller cell"
+        );
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        assert_eq!(
+            result.get_int("caller"),
+            Some(7),
+            "caller write visible in buildResult"
+        );
         assert_eq!(result.get_int("new"), Some(6));
+    }
+
+    /// Output-side children propagate into the shared wrapping cell (Java
+    /// shared-mutation includes the child/`childrenList` subtrees).
+    #[test]
+    fn wrapping_child_write_visible_in_shared_cell() {
+        let cell = Rc::new(RefCell::new(CompoundTag::new()));
+        let out = TagValueOutput::create_wrapping_global(reporter(), Rc::clone(&cell));
+        out.child("sub").put_int("x", 1);
+        out.children_list("items").add_child().put_int("v", 2);
+        let tags = cell.borrow();
+        let sub = tags.get_compound("sub").expect("sub compound");
+        assert_eq!(sub.get_int("x"), Some(1));
+        let items = tags.get_list("items").expect("items list");
+        assert_eq!(items.get_compound(0).and_then(|c| c.get_int("v")), Some(2));
+    }
+
+    /// Java's `ListWrapper.discardLast()` on an empty list throws
+    /// `NoSuchElementException`; the port panics with that message instead of
+    /// underflowing the `usize` index.
+    #[test]
+    #[should_panic(expected = "NoSuchElementException")]
+    fn discard_last_on_empty_panics_like_java() {
+        let out = output(reporter());
+        let list = out.children_list("items");
+        list.discard_last();
     }
 
     // -----------------------------------------------------------------------
