@@ -200,9 +200,7 @@ fn hostile_equal_order() {
 
 #[test]
 fn hostile_empty_builder() {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        identity_spline_build()
-    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| identity_spline_build()));
     assert!(result.is_err());
     let msg = panic_message(result);
     assert_eq!(msg, "No elements added");
@@ -210,9 +208,7 @@ fn hostile_empty_builder() {
 
 #[test]
 fn hostile_empty_builder_matches_probe() {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        identity_spline_build()
-    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| identity_spline_build()));
     assert!(result.is_err());
     let msg = panic_message(result);
     // SplineProbe: IllegalStateException "No elements added"

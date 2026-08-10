@@ -196,7 +196,12 @@ impl<I> CubicSpline<I> {
 
 impl<I> CubicSpline<I> {
     /// `CubicSpline.sample(CubicSpline<I>, C)`.
-    pub fn sample<C: Copy>(&self, c: C) -> f32
+    ///
+    /// Java passes the same coordinate reference `c` to the coordinate
+    /// `apply` and to every nested value `sample`; the Rust port clones it
+    /// (`C: Clone`), so the coordinate type only needs `Clone` — never the
+    /// stronger `Copy`.
+    pub fn sample<C: Clone>(&self, c: C) -> f32
     where
         I: BoundedFloatFunction<C>,
     {
@@ -208,7 +213,7 @@ impl<I> CubicSpline<I> {
 
     /// `CubicSpline.asSampler(CubicSpline<I>)` — a `BoundedFloatFunction<C>`
     /// wrapping the spline's `sample`.
-    pub fn sampler<C: Copy>(self) -> Sampler<I, C>
+    pub fn sampler<C: Clone>(self) -> Sampler<I, C>
     where
         I: BoundedFloatFunction<C>,
     {
@@ -234,7 +239,7 @@ impl<I: BoundedFloat, C: 'static> BoundedFloat for Sampler<I, C> {
     }
 }
 
-impl<I, C: Copy + 'static> BoundedFloatFunction<C> for Sampler<I, C>
+impl<I, C: Clone + 'static> BoundedFloatFunction<C> for Sampler<I, C>
 where
     I: BoundedFloatFunction<C>,
 {
@@ -452,7 +457,7 @@ impl<I> Multipoint<I> {
 
 impl<I> Multipoint<I> {
     /// `Multipoint.sample(Multipoint, C)`.
-    pub fn sample<C: Copy>(&self, c: C) -> f32
+    pub fn sample<C: Clone>(&self, c: C) -> f32
     where
         I: BoundedFloatFunction<C>,
     {
@@ -582,7 +587,7 @@ fn validate_sizes<I>(locations: &[f32], values: &[CubicSpline<I>], derivatives: 
 }
 
 /// The private `sample(Coordinate, float[], float[], List<CubicSpline>, C)`.
-fn sample_impl<I, C: Copy>(
+fn sample_impl<I, C: Clone>(
     coordinate: &I,
     derivatives: &[f32],
     locations: &[f32],
@@ -592,17 +597,23 @@ fn sample_impl<I, C: Copy>(
 where
     I: BoundedFloatFunction<C>,
 {
-    let input = coordinate.apply(c);
+    let input = coordinate.apply(c.clone());
     let start = find_interval_start(locations, input);
     let last_index = (locations.len() - 1) as i32;
     if start < 0 {
-        return linear_extend(input, locations, values[0].sample(c), derivatives, 0);
+        return linear_extend(
+            input,
+            locations,
+            values[0].sample(c.clone()),
+            derivatives,
+            0,
+        );
     }
     if start == last_index {
         return linear_extend(
             input,
             locations,
-            values[last_index as usize].sample(c),
+            values[last_index as usize].sample(c.clone()),
             derivatives,
             last_index as usize,
         );
@@ -616,7 +627,7 @@ where
     let f2 = &values[start + 1];
     let d1 = derivatives[start];
     let d2 = derivatives[start + 1];
-    let y1 = f1.sample(c);
+    let y1 = f1.sample(c.clone());
     let y2 = f2.sample(c);
     let a = d1 * (x2 - x1) - (y2 - y1);
     let b = -d2 * (x2 - x1) + (y2 - y1);
