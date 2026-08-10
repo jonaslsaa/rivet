@@ -468,6 +468,33 @@ mod tests {
     }
 
     #[test]
+    fn inside_world_bounds_offset_codec_rejects_out_of_range() {
+        // `Vec3i.offsetCodec(16)` rejects any axis with `Math.abs(v) >= 16`:
+        // `"Position out of range, expected at most 16: {value}"`.
+        let codec = block_predicate_codec::<JsonOps>();
+        let result = codec.parse(
+            &JsonOps::INSTANCE,
+            &json!({"type": "minecraft:inside_world_bounds", "offset": [16, 0, 0]}),
+        );
+        assert!(result.is_error());
+        let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
+        assert!(
+            msg.starts_with("Position out of range, expected at most 16: "),
+            "got: {msg}"
+        );
+        // The boundary is inclusive: exactly 15 per axis is accepted.
+        let ok = codec.parse(
+            &JsonOps::INSTANCE,
+            &json!({"type": "minecraft:inside_world_bounds", "offset": [15, -15, 15]}),
+        );
+        assert!(
+            ok.is_success(),
+            "got: {:?}",
+            ok.error_ref().map(|e| e.message().to_string())
+        );
+    }
+
+    #[test]
     fn all_of_codec_round_trips_nested() {
         let nested = wrap(all_of(vec![
             always_true(),

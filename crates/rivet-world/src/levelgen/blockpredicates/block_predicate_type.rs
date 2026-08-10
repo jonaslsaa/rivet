@@ -8,14 +8,14 @@
 //! `Feature`/`PlacementModifierType`'s identity split: the predicate's type
 //! identity is the opaque [`BlockPredicateTypeId`] handle (the registry element
 //! identity — element id == insertion index), and [`BlockPredicateType`] is the
-//! behavior-carrying marker (the object-safe carrier whose `codec()` the
-//! dispatch reads). The per-type `MapCodec`s are resolved by the `#399`
-//! dispatch table in `block_predicate`, not stored on the id.
+//! behavior-carrying marker (the object-safe carrier concrete predicates are
+//! keyed by). The per-type `MapCodec`s are resolved by the `#399` dispatch
+//! table in `block_predicate`, not stored on the id or the trait.
 //!
 //! All fourteen Paper constants are declared with their exact registry
-//! identity/declaration order; only the seven in-scope predicates
+//! identity/declaration order; only the five in-scope predicates
 //! (`inside_world_bounds`, `any_of`, `all_of`, `not`, `true`) have codecs
-//! wired — dispatching to the remaining seven fails explicitly
+//! wired — dispatching to the remaining nine fails explicitly
 //! (RivetTodo #399, see `block_predicate::codec_for_type`).
 
 use std::fmt::Debug;
