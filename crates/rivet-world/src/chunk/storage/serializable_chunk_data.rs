@@ -243,6 +243,10 @@ const DATA_VERSION_TAG: &str = "DataVersion";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChunkParseDiagnostic {
     UnknownStatus(String),
+    MisplacedChunk {
+        stored: ChunkPos,
+        requested: ChunkPos,
+    },
 }
 
 /// Typed failures at the extraction/construction boundary.
@@ -276,6 +280,16 @@ pub enum SerializableChunkDataError {
     UnsupportedPersistentData,
     #[error("PostProcessing section {index} is outside the {section_count}-section chunk")]
     PostProcessingOutOfBounds { index: usize, section_count: usize },
+    #[error("decoded {actual} sections; construction accessor requires {expected}")]
+    SectionCountMismatch { expected: usize, actual: usize },
+    #[error(
+        "parsed minimum section Y {parsed}; construction accessor has minimum section Y {construction}"
+    )]
+    HeightAccessorMismatch { parsed: i32, construction: i32 },
+    #[error(
+        "parsed accessor has {parsed} sections; construction accessor has {construction} sections"
+    )]
+    HeightAccessorSectionCountMismatch { parsed: usize, construction: usize },
 }
 
 /// The current-version, top-level extraction result from Paper's
@@ -284,27 +298,55 @@ pub enum SerializableChunkDataError {
 pub struct SerializableChunkData {
     stored_pos: ChunkPos,
     min_section_y: i32,
+    section_count: usize,
     last_update_time: i64,
     inhabited_time: i64,
     status: ChunkStatus,
     diagnostics: Vec<ChunkParseDiagnostic>,
     upgrade_data: UpgradeData,
-    upgrade_neighbor_block_ticks: bool,
-    upgrade_neighbor_fluid_ticks: bool,
+    raw_upgrade_data: Option<CompoundTag>,
+    effective_upgrade_neighbor_block_ticks: bool,
+    effective_upgrade_neighbor_fluid_ticks: bool,
     light_correct: bool,
-    blending_data: Option<CompoundTag>,
-    below_zero_retrogen: Option<CompoundTag>,
+    raw_blending_data: Option<CompoundTag>,
+    raw_below_zero_retrogen: Option<CompoundTag>,
+    effective_blending_data: bool,
+    effective_below_zero_retrogen: bool,
     carving_mask: Option<Vec<i64>>,
     heightmaps: StoredHeightmaps,
-    block_ticks: ListTag,
-    fluid_ticks: ListTag,
+    raw_block_ticks: ListTag,
+    raw_fluid_ticks: ListTag,
+    effective_block_ticks: bool,
+    effective_fluid_ticks: bool,
     post_processing_sections: Vec<Option<Vec<i16>>>,
     entities: Vec<CompoundTag>,
     block_entities: Vec<CompoundTag>,
     structure_data: CompoundTag,
     section_tags: ListTag,
-    section_lights: Vec<SectionLightData>,
     persistent_data_container: Option<Tag>,
+}
+
+/// Output of the single ordered section traversal owned by #336. That
+/// traversal decodes block states, biomes, block light, then sky light for
+/// each raw section tag before composing this construction input.
+pub struct FullChunkReconstruction<T, B>
+where
+    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+{
+    pub sections: Vec<LevelChunkSection<T, B>>,
+    pub lights: Vec<SectionLightData>,
+}
+
+/// A constructed FULL chunk together with ordered, non-fatal read reports.
+pub struct FullChunkConstruction<T, B, S>
+where
+    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash,
+{
+    pub chunk: ImposterProtoChunk<T, B, S>,
+    pub diagnostics: Vec<ChunkParseDiagnostic>,
 }
 
 impl SerializableChunkData {
@@ -341,54 +383,69 @@ impl SerializableChunkData {
             ),
         };
         let upgrade_tag = chunk_data.get_compound("UpgradeData");
+        let raw_upgrade_data = upgrade_tag.cloned();
         let upgrade_data = upgrade_tag.map_or_else(
             || UpgradeData::empty(level_height.get_sections_count() as usize),
             |tag| UpgradeData::from_tag(tag, level_height.get_sections_count() as usize),
         );
-        let upgrade_neighbor_block_ticks = upgrade_tag
+        let effective_upgrade_neighbor_block_ticks = upgrade_tag
             .and_then(|tag| tag.get_list("neighbor_block_ticks"))
-            .is_some_and(|ticks| !ticks.list.is_empty());
-        let upgrade_neighbor_fluid_ticks = upgrade_tag
+            .is_some_and(|ticks| saved_tick_list_is_effectively_non_empty(ticks, None));
+        let effective_upgrade_neighbor_fluid_ticks = upgrade_tag
             .and_then(|tag| tag.get_list("neighbor_fluid_ticks"))
-            .is_some_and(|ticks| !ticks.list.is_empty());
+            .is_some_and(|ticks| saved_tick_list_is_effectively_non_empty(ticks, None));
         let light_correct = parse_light_correct(chunk_data, status.is_or_after(ChunkStatus::Light));
-        let blending_data = chunk_data.get_compound("blending_data").cloned();
-        let below_zero_retrogen = chunk_data.get_compound("below_zero_retrogen").cloned();
+        let raw_blending_data = chunk_data.get_compound("blending_data").cloned();
+        let raw_below_zero_retrogen = chunk_data.get_compound("below_zero_retrogen").cloned();
+        let effective_blending_data = raw_blending_data
+            .as_ref()
+            .is_some_and(blending_data_decodes);
+        let effective_below_zero_retrogen = raw_below_zero_retrogen
+            .as_ref()
+            .is_some_and(below_zero_retrogen_decodes);
         let carving_mask = chunk_data.get_long_array("carving_mask").cloned();
         let heightmaps = parse_heightmaps(chunk_data, status.heightmaps_after());
-        let block_ticks = chunk_data.get_list_or_empty("block_ticks");
-        let fluid_ticks = chunk_data.get_list_or_empty("fluid_ticks");
+        let raw_block_ticks = chunk_data.get_list_or_empty("block_ticks");
+        let raw_fluid_ticks = chunk_data.get_list_or_empty("fluid_ticks");
+        let effective_block_ticks =
+            saved_tick_list_is_effectively_non_empty(&raw_block_ticks, Some(stored_pos));
+        let effective_fluid_ticks =
+            saved_tick_list_is_effectively_non_empty(&raw_fluid_ticks, Some(stored_pos));
         let post_processing_sections = parse_post_processing(chunk_data);
         let entities = compound_entries(chunk_data.get_list("entities"));
         let block_entities = compound_entries(chunk_data.get_list("block_entities"));
         let structure_data = chunk_data.get_compound_or_empty("structures");
         let section_tags = chunk_data.get_list_or_empty(SECTIONS_TAG);
-        let section_lights = try_parse_section_lights_from_list(&section_tags)?;
         let persistent_data_container = chunk_data.get("ChunkBukkitValues").cloned();
 
         Ok(Some(Self {
             stored_pos,
             min_section_y: level_height.get_min_section_y(),
+            section_count: level_height.get_sections_count() as usize,
             last_update_time,
             inhabited_time,
             status,
             diagnostics,
             upgrade_data,
-            upgrade_neighbor_block_ticks,
-            upgrade_neighbor_fluid_ticks,
+            raw_upgrade_data,
+            effective_upgrade_neighbor_block_ticks,
+            effective_upgrade_neighbor_fluid_ticks,
             light_correct,
-            blending_data,
-            below_zero_retrogen,
+            raw_blending_data,
+            raw_below_zero_retrogen,
+            effective_blending_data,
+            effective_below_zero_retrogen,
             carving_mask,
             heightmaps,
-            block_ticks,
-            fluid_ticks,
+            raw_block_ticks,
+            raw_fluid_ticks,
+            effective_block_ticks,
+            effective_fluid_ticks,
             post_processing_sections,
             entities,
             block_entities,
             structure_data,
             section_tags,
-            section_lights,
             persistent_data_container,
         }))
     }
@@ -414,6 +471,9 @@ impl SerializableChunkData {
     pub fn upgrade_data(&self) -> &UpgradeData {
         &self.upgrade_data
     }
+    pub fn raw_upgrade_data(&self) -> Option<&CompoundTag> {
+        self.raw_upgrade_data.as_ref()
+    }
     pub fn light_correct(&self) -> bool {
         self.light_correct
     }
@@ -438,8 +498,17 @@ impl SerializableChunkData {
     pub fn section_tags(&self) -> &ListTag {
         &self.section_tags
     }
-    pub fn section_lights(&self) -> &[SectionLightData] {
-        &self.section_lights
+    pub fn raw_block_ticks(&self) -> &ListTag {
+        &self.raw_block_ticks
+    }
+    pub fn raw_fluid_ticks(&self) -> &ListTag {
+        &self.raw_fluid_ticks
+    }
+    pub fn raw_blending_data(&self) -> Option<&CompoundTag> {
+        self.raw_blending_data.as_ref()
+    }
+    pub fn raw_below_zero_retrogen(&self) -> Option<&CompoundTag> {
+        self.raw_below_zero_retrogen.as_ref()
     }
     pub fn persistent_data_container(&self) -> Option<&Tag> {
         self.persistent_data_container.as_ref()
@@ -454,24 +523,45 @@ impl SerializableChunkData {
         requested_pos: ChunkPos,
         height_accessor: SimpleLevelHeightAccessor,
         container_factory: &PalettedContainerFactory<T, B>,
-        sections: Vec<LevelChunkSection<T, B>>,
+        reconstruction: FullChunkReconstruction<T, B>,
         air: T,
         resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
         has_sky_light: bool,
-    ) -> Result<ImposterProtoChunk<T, B, S>, SerializableChunkDataError>
+    ) -> Result<FullChunkConstruction<T, B, S>, SerializableChunkDataError>
     where
         T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
         B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
-        self.validate_full_construction(height_accessor.get_sections_count() as usize)?;
+        let section_count = height_accessor.get_sections_count() as usize;
+        if height_accessor.get_min_section_y() != self.min_section_y {
+            return Err(SerializableChunkDataError::HeightAccessorMismatch {
+                parsed: self.min_section_y,
+                construction: height_accessor.get_min_section_y(),
+            });
+        }
+        if section_count != self.section_count {
+            return Err(
+                SerializableChunkDataError::HeightAccessorSectionCountMismatch {
+                    parsed: self.section_count,
+                    construction: section_count,
+                },
+            );
+        }
+        if reconstruction.sections.len() != section_count {
+            return Err(SerializableChunkDataError::SectionCountMismatch {
+                expected: section_count,
+                actual: reconstruction.sections.len(),
+            });
+        }
+        self.validate_full_construction(section_count)?;
         let mut chunk = LevelChunk::new(
             requested_pos,
             self.upgrade_data.copy(),
             height_accessor,
             container_factory,
             self.inhabited_time,
-            Some(sections),
+            Some(reconstruction.sections),
             air,
             resolve,
         );
@@ -488,14 +578,24 @@ impl SerializableChunkData {
         }
         let light = reconstruct_lights(
             height_accessor,
-            &self.section_lights,
+            &reconstruction.lights,
             self.light_correct,
             has_sky_light,
         );
         chunk.set_block_nibbles(light.block_nibbles);
         chunk.set_sky_nibbles(light.sky_nibbles);
         chunk.set_light_correct(light.light_correct);
-        Ok(ImposterProtoChunk::new(chunk, false))
+        let mut diagnostics = self.diagnostics.clone();
+        if requested_pos != self.stored_pos {
+            diagnostics.push(ChunkParseDiagnostic::MisplacedChunk {
+                stored: self.stored_pos,
+                requested: requested_pos,
+            });
+        }
+        Ok(FullChunkConstruction {
+            chunk: ImposterProtoChunk::new(chunk, false),
+            diagnostics,
+        })
     }
 
     fn validate_full_construction(
@@ -507,33 +607,36 @@ impl SerializableChunkData {
                 status: self.status,
             });
         }
-        if self.upgrade_neighbor_block_ticks {
+        if self.effective_upgrade_neighbor_block_ticks {
             return Err(SerializableChunkDataError::UnsupportedUpgradeData {
                 field: "neighbor_block_ticks",
             });
         }
-        if self.upgrade_neighbor_fluid_ticks {
+        if self.effective_upgrade_neighbor_fluid_ticks {
             return Err(SerializableChunkDataError::UnsupportedUpgradeData {
                 field: "neighbor_fluid_ticks",
             });
         }
-        if !self.block_ticks.list.is_empty() {
+        if self.effective_block_ticks {
             return Err(SerializableChunkDataError::UnsupportedTicks {
                 field: "block_ticks",
             });
         }
-        if !self.fluid_ticks.list.is_empty() {
+        if self.effective_fluid_ticks {
             return Err(SerializableChunkDataError::UnsupportedTicks {
                 field: "fluid_ticks",
             });
         }
-        if self.blending_data.is_some() {
+        if self.effective_blending_data {
             return Err(SerializableChunkDataError::UnsupportedBlendingData);
         }
-        if self.below_zero_retrogen.is_some() {
+        if self.effective_below_zero_retrogen {
             return Err(SerializableChunkDataError::UnsupportedBelowZeroRetrogen);
         }
-        if matches!(self.persistent_data_container, Some(Tag::Compound(_))) {
+        if matches!(
+            self.persistent_data_container,
+            Some(Tag::Compound(ref compound)) if !compound.is_empty()
+        ) {
             return Err(SerializableChunkDataError::UnsupportedPersistentData);
         }
         if !structures_are_empty(&self.structure_data) {
@@ -593,6 +696,47 @@ fn structures_are_empty(structures: &CompoundTag) -> bool {
         matches!(key.as_str(), "starts" | "References")
             && matches!(value, Tag::Compound(compound) if compound.is_empty())
     })
+}
+
+fn blending_data_decodes(tag: &CompoundTag) -> bool {
+    tag.get_int("min_section").is_some() && tag.get_int("max_section").is_some()
+}
+
+fn below_zero_retrogen_decodes(tag: &CompoundTag) -> bool {
+    tag.get_string("target_status")
+        .and_then(|status| ChunkStatus::from_identifier(status))
+        .is_some_and(|status| status != ChunkStatus::Empty)
+}
+
+/// Paper's SavedTick list codec defaults a malformed list to empty. A valid
+/// top-level list is then filtered to ticks stored in this chunk.
+fn saved_tick_list_is_effectively_non_empty(list: &ListTag, stored_pos: Option<ChunkPos>) -> bool {
+    let mut positions = Vec::with_capacity(list.list.len());
+    for entry in &list.list {
+        let Tag::Compound(tick) = entry else {
+            return false;
+        };
+        let Some(id) = tick.get_string("i") else {
+            return false;
+        };
+        let (Some(x), Some(y), Some(z), Some(delay), Some(priority)) = (
+            tick.get_int("x"),
+            tick.get_int("y"),
+            tick.get_int("z"),
+            tick.get_int("t"),
+            tick.get_int("p"),
+        ) else {
+            return false;
+        };
+        if id.is_empty() {
+            return false;
+        }
+        let _ = (y, delay, priority);
+        positions.push(ChunkPos::new(x >> 4, z >> 4));
+    }
+    positions
+        .into_iter()
+        .any(|tick_pos| stored_pos.is_none_or(|stored_pos| tick_pos == stored_pos))
 }
 
 /// The stored `Map<Heightmap.Types, long[]>`, in enum ordinal order.
@@ -673,6 +817,46 @@ pub struct SectionLightData {
     pub sky_state: i32,
 }
 
+/// Decode light only after the caller has decoded this section's block-state
+/// and biome palettes. This narrow operation lets #336 preserve Paper's
+/// per-section hard-error order without top-level parsing touching light.
+pub fn decode_section_light(
+    section: &CompoundTag,
+) -> Result<SectionLightData, SerializableChunkDataError> {
+    let y = section.get_byte_or("Y", 0) as i32;
+    let block_light = section
+        .get_byte_array(BLOCK_LIGHT_TAG)
+        .map(|bytes| signed_bytes(bytes));
+    let sky_light = section
+        .get_byte_array(SKY_LIGHT_TAG)
+        .map(|bytes| signed_bytes(bytes));
+    if let Some(bytes) = &block_light
+        && bytes.len() != 2048
+    {
+        return Err(SerializableChunkDataError::MalformedDataLayer {
+            section_y: y,
+            field: BLOCK_LIGHT_TAG,
+            length: bytes.len(),
+        });
+    }
+    if let Some(bytes) = &sky_light
+        && bytes.len() != 2048
+    {
+        return Err(SerializableChunkDataError::MalformedDataLayer {
+            section_y: y,
+            field: SKY_LIGHT_TAG,
+            length: bytes.len(),
+        });
+    }
+    Ok(SectionLightData {
+        y,
+        block_light,
+        sky_light,
+        block_state: state_or_absent(section, BLOCKLIGHT_STATE_TAG),
+        sky_state: state_or_absent(section, SKYLIGHT_STATE_TAG),
+    })
+}
+
 /// Parse the light-only portion of the `sections` list. Non-compound list
 /// entries are ignored; absent/wrong-tag arrays remain absent. Explicit arrays
 /// are validated at Paper's `DataLayer(byte[])` boundary and therefore panic
@@ -694,40 +878,7 @@ fn try_parse_section_lights_from_list(
             rivet_nbt::tag::Tag::Compound(section) => Some(section),
             _ => None,
         })
-        .map(|section| {
-            let y = section.get_byte_or("Y", 0) as i32;
-            let block_light = section
-                .get_byte_array(BLOCK_LIGHT_TAG)
-                .map(|bytes| signed_bytes(bytes));
-            let sky_light = section
-                .get_byte_array(SKY_LIGHT_TAG)
-                .map(|bytes| signed_bytes(bytes));
-            if let Some(bytes) = &block_light
-                && bytes.len() != 2048
-            {
-                return Err(SerializableChunkDataError::MalformedDataLayer {
-                    section_y: y,
-                    field: BLOCK_LIGHT_TAG,
-                    length: bytes.len(),
-                });
-            }
-            if let Some(bytes) = &sky_light
-                && bytes.len() != 2048
-            {
-                return Err(SerializableChunkDataError::MalformedDataLayer {
-                    section_y: y,
-                    field: SKY_LIGHT_TAG,
-                    length: bytes.len(),
-                });
-            }
-            Ok(SectionLightData {
-                y,
-                block_light,
-                sky_light,
-                block_state: state_or_absent(section, BLOCKLIGHT_STATE_TAG),
-                sky_state: state_or_absent(section, SKYLIGHT_STATE_TAG),
-            })
-        })
+        .map(decode_section_light)
         .collect()
 }
 
@@ -923,6 +1074,34 @@ mod tests {
             has_fluid: false,
             is_leaves: false,
         }
+    }
+
+    fn test_sections(count: usize) -> Vec<LevelChunkSection<u8, u8>> {
+        let factory = test_factory();
+        (0..count)
+            .map(|_| {
+                LevelChunkSection::new(
+                    factory.create_for_block_states(),
+                    factory.create_for_biomes(),
+                    |state| *state == 0,
+                    |_| false,
+                    |_| true,
+                    |_| false,
+                    |_| false,
+                )
+            })
+            .collect()
+    }
+
+    fn saved_tick(x: i32, z: i32) -> CompoundTag {
+        let mut tick = CompoundTag::new();
+        tick.put_string("i", "minecraft:stone");
+        tick.put_int("x", x);
+        tick.put_int("y", 0);
+        tick.put_int("z", z);
+        tick.put_int("t", 1);
+        tick.put_int("p", 0);
+        tick
     }
 
     fn section_tag(y: i8) -> CompoundTag {
@@ -1424,8 +1603,13 @@ mod tests {
             SECTIONS_TAG.into(),
             Tag::List(ListTag::with_list(vec![Tag::Compound(section)])),
         );
+        let parsed = SerializableChunkData::parse(height, &malformed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.section_tags().list.len(), 1);
+        let section = parsed.section_tags().get_compound(0).unwrap();
         assert!(matches!(
-            SerializableChunkData::parse(height, &malformed),
+            decode_section_light(section),
             Err(SerializableChunkDataError::MalformedDataLayer { section_y: 4, .. })
         ));
     }
@@ -1548,19 +1732,7 @@ mod tests {
     fn synthetic_full_seam_constructs_at_requested_position_read_only() {
         let height = height_accessor::create(-64, 384);
         let factory = test_factory();
-        let sections = (0..24)
-            .map(|_| {
-                LevelChunkSection::new(
-                    factory.create_for_block_states(),
-                    factory.create_for_biomes(),
-                    |state| *state == 0,
-                    |_| false,
-                    |_| true,
-                    |_| false,
-                    |_| false,
-                )
-            })
-            .collect();
+        let sections = test_sections(24);
         let mut root = top_level("minecraft:full");
         root.put_int("xPos", 8);
         root.put_int("zPos", 9);
@@ -1568,18 +1740,29 @@ mod tests {
             .unwrap()
             .unwrap();
         let requested = ChunkPos::new(10, 11);
-        let imposter = parsed
+        let constructed = parsed
             .construct_full::<u8, u8, &'static str>(
                 requested,
                 height,
                 &factory,
-                sections,
+                FullChunkReconstruction {
+                    sections,
+                    lights: Vec::new(),
+                },
                 0,
                 &test_state_flags,
                 true,
             )
             .unwrap();
         assert_eq!(parsed.stored_pos(), ChunkPos::new(8, 9));
+        assert_eq!(
+            constructed.diagnostics,
+            vec![ChunkParseDiagnostic::MisplacedChunk {
+                stored: ChunkPos::new(8, 9),
+                requested,
+            }]
+        );
+        let imposter = constructed.chunk;
         assert_eq!(imposter.get_pos(), requested);
         assert_eq!(imposter.get_persisted_status(), ChunkStatus::Full);
         assert!(!imposter.can_be_serialized());
@@ -1589,31 +1772,99 @@ mod tests {
     }
 
     #[test]
+    fn full_construction_rejects_off_by_one_sections_and_accessor_mismatch() {
+        let parsed_height = height_accessor::create(-64, 384);
+        let factory = test_factory();
+        let parsed = SerializableChunkData::parse(parsed_height, &top_level("minecraft:full"))
+            .unwrap()
+            .unwrap();
+
+        for count in [23, 25] {
+            let result = parsed.construct_full::<u8, u8, &'static str>(
+                ChunkPos::ZERO,
+                parsed_height,
+                &factory,
+                FullChunkReconstruction {
+                    sections: test_sections(count),
+                    lights: Vec::new(),
+                },
+                0,
+                &test_state_flags,
+                true,
+            );
+            assert!(matches!(
+                result,
+                Err(SerializableChunkDataError::SectionCountMismatch {
+                    expected: 24,
+                    actual
+                }) if actual == count
+            ));
+        }
+
+        let result = parsed.construct_full::<u8, u8, &'static str>(
+            ChunkPos::ZERO,
+            height_accessor::create(-80, 384),
+            &factory,
+            FullChunkReconstruction {
+                sections: test_sections(24),
+                lights: Vec::new(),
+            },
+            0,
+            &test_state_flags,
+            true,
+        );
+        assert!(matches!(
+            result,
+            Err(SerializableChunkDataError::HeightAccessorMismatch {
+                parsed: -4,
+                construction: -5
+            })
+        ));
+
+        let result = parsed.construct_full::<u8, u8, &'static str>(
+            ChunkPos::ZERO,
+            height_accessor::create(-64, 400),
+            &factory,
+            FullChunkReconstruction {
+                sections: test_sections(25),
+                lights: Vec::new(),
+            },
+            0,
+            &test_state_flags,
+            true,
+        );
+        assert!(matches!(
+            result,
+            Err(
+                SerializableChunkDataError::HeightAccessorSectionCountMismatch {
+                    parsed: 24,
+                    construction: 25
+                }
+            )
+        ));
+    }
+
+    #[test]
     fn ancillary_surfaces_have_named_unsupported_markers() {
         let height = height_accessor::create(-64, 384);
         let cases: Vec<(&str, Tag, SerializableChunkDataError)> = vec![
             (
-                "block_ticks",
-                Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
-                SerializableChunkDataError::UnsupportedTicks {
-                    field: "block_ticks",
-                },
-            ),
-            (
-                "fluid_ticks",
-                Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
-                SerializableChunkDataError::UnsupportedTicks {
-                    field: "fluid_ticks",
-                },
-            ),
-            (
                 "blending_data",
-                Tag::Compound(CompoundTag::new()),
+                Tag::Compound({
+                    let mut tag = CompoundTag::new();
+                    tag.put_int("min_section", -4);
+                    tag.put_int("max_section", 19);
+                    tag
+                }),
                 SerializableChunkDataError::UnsupportedBlendingData,
             ),
             (
                 "below_zero_retrogen",
-                Tag::Compound(CompoundTag::new()),
+                Tag::Compound({
+                    let mut tag = CompoundTag::new();
+                    tag.put_string("target_status", "minecraft:noise");
+                    tag
+                }),
                 SerializableChunkDataError::UnsupportedBelowZeroRetrogen,
             ),
             (
@@ -1628,7 +1879,11 @@ mod tests {
             ),
             (
                 "ChunkBukkitValues",
-                Tag::Compound(CompoundTag::new()),
+                Tag::Compound({
+                    let mut tag = CompoundTag::new();
+                    tag.put_int("plugin:value", 1);
+                    tag
+                }),
                 SerializableChunkDataError::UnsupportedPersistentData,
             ),
         ];
@@ -1642,6 +1897,21 @@ mod tests {
                 parsed.validate_full_construction(24),
                 Err(expected),
                 "{field}"
+            );
+        }
+
+        for field in ["block_ticks", "fluid_ticks"] {
+            let mut chunk = top_level("minecraft:full");
+            chunk.put(
+                field.into(),
+                Tag::List(ListTag::with_list(vec![Tag::Compound(saved_tick(0, 0))])),
+            );
+            assert_eq!(
+                SerializableChunkData::parse(height, &chunk)
+                    .unwrap()
+                    .unwrap()
+                    .validate_full_construction(24),
+                Err(SerializableChunkDataError::UnsupportedTicks { field })
             );
         }
 
@@ -1663,7 +1933,7 @@ mod tests {
             let mut upgrade = CompoundTag::new();
             upgrade.put(
                 field.into(),
-                Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
+                Tag::List(ListTag::with_list(vec![Tag::Compound(saved_tick(0, 0))])),
             );
             let mut chunk = top_level("minecraft:full");
             chunk.put("UpgradeData".into(), Tag::Compound(upgrade));
@@ -1686,6 +1956,67 @@ mod tests {
     }
 
     #[test]
+    fn malformed_defaulted_and_relocated_optional_data_is_effectively_empty() {
+        let height = height_accessor::create(-64, 384);
+        let mut chunk = top_level("minecraft:full");
+        chunk.put_int("xPos", 3);
+        chunk.put_int("zPos", -2);
+        chunk.put("blending_data".into(), Tag::Compound(CompoundTag::new()));
+        chunk.put(
+            "below_zero_retrogen".into(),
+            Tag::Compound(CompoundTag::new()),
+        );
+        chunk.put(
+            "ChunkBukkitValues".into(),
+            Tag::Compound(CompoundTag::new()),
+        );
+        chunk.put(
+            "block_ticks".into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
+        );
+        chunk.put(
+            "fluid_ticks".into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(saved_tick(0, 0))])),
+        );
+        let mut upgrade = CompoundTag::new();
+        upgrade.put(
+            "neighbor_block_ticks".into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
+        );
+        chunk.put("UpgradeData".into(), Tag::Compound(upgrade));
+
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.raw_block_ticks().list.len(), 1);
+        assert_eq!(parsed.raw_fluid_ticks().list.len(), 1);
+        assert!(parsed.raw_blending_data().is_some());
+        assert!(parsed.raw_below_zero_retrogen().is_some());
+        assert!(parsed.raw_upgrade_data().is_some());
+        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+    }
+
+    #[test]
+    fn top_level_parse_defers_mixed_palette_and_light_failures() {
+        let height = height_accessor::create(-64, 384);
+        let mut section = section_tag(-4);
+        section.put_int("block_states", 7);
+        section.put_byte_array(BLOCK_LIGHT_TAG, vec![0; 3]);
+        let mut chunk = top_level("minecraft:full");
+        chunk.put(
+            SECTIONS_TAG.into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(section)])),
+        );
+
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        let raw = parsed.section_tags().get_compound(0).unwrap();
+        assert_eq!(raw.get_int_or("block_states", 0), 7);
+        assert_eq!(raw.get_byte_array(BLOCK_LIGHT_TAG).unwrap().len(), 3);
+    }
+
+    #[test]
     fn real_full_and_partial_fixture_metadata_is_pinned() {
         let full = [
             (
@@ -1697,7 +2028,7 @@ mod tests {
             ("the_nether", height_accessor::create(0, 256), 17, 16),
             ("the_end", height_accessor::create(0, 256), 17, 16),
         ];
-        for (dimension, height, light_sections, post_sections) in full {
+        for (dimension, height, section_tags, post_sections) in full {
             let root = named_fixture(dimension, "0.0", "0.0.nbt");
             assert_eq!(root.get_int_or(DATA_VERSION_TAG, -1), CURRENT_DATA_VERSION);
             let parsed = SerializableChunkData::parse(height, &root)
@@ -1705,7 +2036,11 @@ mod tests {
                 .unwrap();
             assert_eq!(parsed.stored_pos(), ChunkPos::new(0, 0), "{dimension}");
             assert_eq!(parsed.status(), ChunkStatus::Full, "{dimension}");
-            assert_eq!(parsed.section_lights().len(), light_sections, "{dimension}");
+            assert_eq!(
+                parsed.section_tags().list.len(),
+                section_tags,
+                "{dimension}"
+            );
             assert_eq!(
                 parsed.post_processing_sections().len(),
                 post_sections,

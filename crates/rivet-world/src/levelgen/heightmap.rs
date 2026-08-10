@@ -72,7 +72,7 @@ pub const FINAL_HEIGHTMAPS: [Types; 4] = [
 /// `ProtoChunk` updates while its persisted status is below `CARVERS`
 /// (`EnumSet.of(OCEAN_FLOOR_WG, WORLD_SURFACE_WG)`, iterated in declaration
 /// order).
-pub const WORLDGEN_HEIGHTMAPS: [Types; 2] = [Types::OceanFloorWg, Types::WorldSurfaceWg];
+pub const WORLDGEN_HEIGHTMAPS: [Types; 2] = [Types::WorldSurfaceWg, Types::OceanFloorWg];
 
 /// The per-state `BlockBehaviour` flags `Types.isOpaque()` needs. The caller
 /// resolves them from the merged generated behavior table (`rivet-registry`'s
@@ -727,7 +727,7 @@ mod tests {
         // updates before it reaches `CARVERS`.
         assert_eq!(
             WORLDGEN_HEIGHTMAPS,
-            [Types::OceanFloorWg, Types::WorldSurfaceWg]
+            [Types::WorldSurfaceWg, Types::OceanFloorWg]
         );
         for ty in WORLDGEN_HEIGHTMAPS {
             assert!(!ty.send_to_client(), "worldgen types are never sent");
