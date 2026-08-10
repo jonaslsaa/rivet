@@ -270,8 +270,6 @@ pub enum SerializableChunkDataError {
     UnsupportedTicks { field: &'static str },
     #[error("blending_data requires blending reconstruction (#336)")]
     UnsupportedBlendingData,
-    #[error("below_zero_retrogen requires retrogen reconstruction (#336)")]
-    UnsupportedBelowZeroRetrogen,
     #[error("non-empty entities require post-load entity reconstruction")]
     UnsupportedEntities,
     #[error("non-empty block_entities require block-entity materialization (#341)")]
@@ -630,6 +628,9 @@ impl SerializableChunkData {
                 field: "fluid_ticks",
             });
         }
+        // `below_zero_retrogen` is deliberately not checked here: Paper's
+        // LEVELCHUNK branch of `SerializableChunkData.read` never consults it
+        // (only the proto branch does), so a FULL chunk carrying one loads as-is.
         if self.effective_blending_data {
             return Err(SerializableChunkDataError::UnsupportedBlendingData);
         }
