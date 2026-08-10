@@ -457,11 +457,18 @@ fn typed_helpers_absent_property_behavior() {
         .try_set_value(BlockStateProperties::WATERLOGGED, PropertyValue::Bool(true))
         .unwrap();
     assert_eq!(same.id(), stone.id());
-    // setValue errors for the absent property.
-    assert!(
-        stone
-            .set_value(BlockStateProperties::WATERLOGGED, PropertyValue::Bool(true))
-            .is_err()
+    // setValue errors for the absent property — and it errors with the
+    // absent-property error *before* value validation, matching Paper's
+    // optimised-table `setValue` (absent property returns null first; the
+    // "not an allowed value" check only runs for a present property).
+    assert_eq!(
+        stone.set_value(
+            BlockStateProperties::WATERLOGGED,
+            PropertyValue::Enum("not_a_bool")
+        ),
+        Err(crate::block_state::BlockStateError::PropertyNotPresent(
+            crate::generated::block_properties::BlockPropertyId::Waterlogged
+        ))
     );
 
     // An invalid typed value for a *present* property errors (Java
@@ -490,4 +497,53 @@ fn typed_helpers_absent_property_behavior() {
             )
             .is_err()
     );
+}
+
+/// The typed leaf enums convert to `PropertyValue` and can be passed directly
+/// to the typed helpers — the `state.setValue(SlabBlock.TYPE, SlabType.DOUBLE)`
+/// ergonomics Java's worldgen code uses.
+#[test]
+fn typed_leaf_enums_flow_through_set_value() {
+    use crate::block_state_properties::{DoubleBlockHalf, SlabType, StairsShape};
+
+    // SlabType::Double on a slab (StrongholdPieces builds SlabType.DOUBLE).
+    let slab = default_state_of("minecraft:oak_slab");
+    let dbl = slab
+        .set_value(BlockStateProperties::SLAB_TYPE, SlabType::Double)
+        .unwrap();
+    assert_eq!(
+        dbl.get_value(BlockStateProperties::SLAB_TYPE),
+        Some(PropertyValue::Enum("double"))
+    );
+
+    // DoubleBlockHalf::Upper on a door (StrongholdPieces doors).
+    let door = default_state_of("minecraft:oak_door");
+    let top = door
+        .set_value(
+            BlockStateProperties::DOUBLE_BLOCK_HALF,
+            DoubleBlockHalf::Upper,
+        )
+        .unwrap();
+    assert_eq!(
+        top.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF),
+        Some(PropertyValue::Enum("upper"))
+    );
+
+    // StairsShape::OuterLeft on stairs (SwampHutPiece).
+    let stairs = default_state_of("minecraft:oak_stairs");
+    let outer = stairs
+        .set_value(BlockStateProperties::STAIRS_SHAPE, StairsShape::OuterLeft)
+        .unwrap();
+    assert_eq!(
+        outer.get_value(BlockStateProperties::STAIRS_SHAPE),
+        Some(PropertyValue::Enum("outer_left"))
+    );
+
+    // try_set_value also accepts the typed enums, and no-ops for a block
+    // without the property (Paper `trySetValue`).
+    let stone = default_state_of("minecraft:stone");
+    let same = stone
+        .try_set_value(BlockStateProperties::SLAB_TYPE, SlabType::Double)
+        .unwrap();
+    assert_eq!(same.id(), stone.id());
 }

@@ -37,15 +37,18 @@
 //! `DoorHingeSide`, `NoteBlockInstrument`, `PistonType`, `Tilt`,
 //! `SculkSensorPhase`, `StructureMode`, `TestBlockMode`, `PotentSulfurState`,
 //! `WoodType`, `BlockSetType`), and `EnumProperty`'s filtered-constructor
-//! variants (`FACING_HOPPER`, `HORIZONTAL_FACING`, `RAIL_SHAPE_STRAIGHT`,
-//! `VERTICAL_DIRECTION`) where the filter needs the enum's per-value
-//! predicates. Three Java constants have **no generated id at all** because no
-//! 26.2 *block* registers their property (`FALLING`, `MAP`) or their exact
-//! value range (`LEVEL_FLOWING`'s `level` 1..=8; water/lava use `level`
-//! 0..=15), so they are omitted rather than fabricated. The `material` fluid
-//! surface (`Fluid`/`FluidState`/`Fluids`) stays deferred too — the heightmap
-//! `has_fluid` predicate is already served by the behavior word's
-//! `fluid_empty` bit, so no worldgen slice needs the fluid classes yet.
+//! variants whose value set is not already a generated id: `FACING_HOPPER`'s
+//! `facing` = `Facing3` ([down, north, south, west, east]) and
+//! `VERTICAL_DIRECTION`'s `vertical_direction` = `VerticalDirection` ([up,
+//! down]) ARE representable and ported; `RAIL_SHAPE_STRAIGHT`'s four-shape
+//! filter is deferred with the full unit. Three Java constants have **no
+//! generated id at all** because no 26.2 *block* registers their property
+//! (`FALLING`, `MAP`) or their exact value range (`LEVEL_FLOWING`'s `level`
+//! 1..=8; water/lava use `level` 0..=15), so they are omitted rather than
+//! fabricated. The `material` fluid surface (`Fluid`/`FluidState`/`Fluids`)
+//! stays deferred too — the heightmap `has_fluid` predicate is already served
+//! by the behavior word's `fluid_empty` bit, so no worldgen slice needs the
+//! fluid classes yet.
 //!
 //! ## Placement
 //!
@@ -57,7 +60,7 @@
 //! like the tables they decode; `rivet-world` worldgen reads them through this
 //! crate.
 
-use crate::block_state_property::Property;
+use crate::block_state_property::{Property, PropertyValue};
 use crate::core::Direction;
 use crate::generated::block_properties::BlockPropertyId;
 use rivet_util::string_representable::StringRepresentable;
@@ -350,6 +353,54 @@ impl StringRepresentable for CreakingHeartState {
 }
 
 // ---------------------------------------------------------------------------
+// From<leaf enum> for PropertyValue — connect the typed values to BlockState
+// ---------------------------------------------------------------------------
+
+// Each leaf enum is its property's typed value class (`state.setValue(
+// SlabBlock.TYPE, SlabType.DOUBLE)` in Java). The `From` impls let callers pass
+// the enum directly to the typed `BlockState::set_value`/`try_set_value`
+// helpers instead of hand-writing the `PropertyValue::Enum("...")` string.
+
+macro_rules! impl_from_leaf_enum {
+    ($($enum:ident => { $($variant:ident => $name:literal),+ $(,)? }),+ $(,)?) => {
+        $(
+            impl From<$enum> for PropertyValue {
+                fn from(value: $enum) -> PropertyValue {
+                    match value {
+                        $($enum::$variant => PropertyValue::Enum($name),)+
+                    }
+                }
+            }
+        )+
+    };
+}
+
+impl_from_leaf_enum! {
+    DoubleBlockHalf => { Upper => "upper", Lower => "lower" },
+    Half => { Top => "top", Bottom => "bottom" },
+    SlabType => { Top => "top", Bottom => "bottom", Double => "double" },
+    AttachFace => { Floor => "floor", Wall => "wall", Ceiling => "ceiling" },
+    RailShape => {
+        NorthSouth => "north_south", EastWest => "east_west",
+        AscendingEast => "ascending_east", AscendingWest => "ascending_west",
+        AscendingNorth => "ascending_north", AscendingSouth => "ascending_south",
+        SouthEast => "south_east", SouthWest => "south_west",
+        NorthWest => "north_west", NorthEast => "north_east"
+    },
+    RedstoneSide => { Up => "up", Side => "side", None => "none" },
+    StairsShape => {
+        Straight => "straight", InnerLeft => "inner_left",
+        InnerRight => "inner_right", OuterLeft => "outer_left", OuterRight => "outer_right"
+    },
+    SpeleothemThickness => {
+        TipMerge => "tip_merge", Tip => "tip",
+        Frustum => "frustum", Middle => "middle", Base => "base"
+    },
+    BambooLeaves => { None => "none", Small => "small", Large => "large" },
+    CreakingHeartState => { Uprooted => "uprooted", Dormant => "dormant", Awake => "awake" },
+}
+
+// ---------------------------------------------------------------------------
 // BlockStateProperties — the named constant facade
 // ---------------------------------------------------------------------------
 
@@ -594,6 +645,11 @@ impl BlockStateProperties {
     pub const FACING: Property = Property::from_id(BlockPropertyId::Facing);
     /// `HORIZONTAL_FACING` (`facing`: north, south, west, east).
     pub const HORIZONTAL_FACING: Property = Property::from_id(BlockPropertyId::Facing2);
+    /// `FACING_HOPPER` (`facing`: down, north, south, west, east) — the
+    /// hopper filter `direction != UP`.
+    pub const FACING_HOPPER: Property = Property::from_id(BlockPropertyId::Facing3);
+    /// `VERTICAL_DIRECTION` (`vertical_direction`: up, down).
+    pub const VERTICAL_DIRECTION: Property = Property::from_id(BlockPropertyId::VerticalDirection);
 
     // --- the ten leaf-enum value classes ------------------------------------
 
@@ -985,6 +1041,11 @@ mod tests {
             ("axis", BlockStateProperties::AXIS),
             ("facing", BlockStateProperties::FACING),
             ("facing", BlockStateProperties::HORIZONTAL_FACING),
+            ("facing", BlockStateProperties::FACING_HOPPER),
+            (
+                "vertical_direction",
+                BlockStateProperties::VERTICAL_DIRECTION,
+            ),
             ("half", BlockStateProperties::DOUBLE_BLOCK_HALF),
             ("half", BlockStateProperties::HALF),
             ("type", BlockStateProperties::SLAB_TYPE),

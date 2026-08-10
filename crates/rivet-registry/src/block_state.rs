@@ -224,9 +224,23 @@ impl BlockState {
     }
 
     /// `state.setValue(property, value)` — set a typed value, erroring when
-    /// the property is not on the block or the value is not one of its allowed
-    /// values (Paper's `IllegalArgumentException`).
-    pub fn set_value(self, prop: Property, value: PropertyValue) -> Result<Self, BlockStateError> {
+    /// the property is not on the block (Paper's optimised-table `setValue`
+    /// returns null for an absent property, throwing "Cannot set property … on
+    /// …") or, for a present property, when the value is not one of its allowed
+    /// values (`setValueInternal`'s "not an allowed value").
+    ///
+    /// `value` accepts any `Into<PropertyValue>` — the raw `PropertyValue`
+    /// union or the typed leaf enums (`state.set_value(SlabBlock.TYPE,
+    /// SlabType::Double)`).
+    pub fn set_value(
+        self,
+        prop: Property,
+        value: impl Into<PropertyValue>,
+    ) -> Result<Self, BlockStateError> {
+        let value = value.into();
+        if !self.has_property(prop) {
+            return Err(BlockStateError::PropertyNotPresent(prop.id()));
+        }
         let idx = prop
             .value_index(value)
             .ok_or(BlockStateError::ValueNotAllowed(prop, value))?;
@@ -239,8 +253,9 @@ impl BlockState {
     pub fn try_set_value(
         self,
         prop: Property,
-        value: PropertyValue,
+        value: impl Into<PropertyValue>,
     ) -> Result<Self, BlockStateError> {
+        let value = value.into();
         if !self.has_property(prop) {
             return Ok(self);
         }
