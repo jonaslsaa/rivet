@@ -30,7 +30,6 @@ use rivet_registry::block_entity_type::BlockEntityType;
 use rivet_registry::core::{BlockPos, ChunkPos};
 use rivet_registry::generated::blocks::BLOCK_BY_NAME;
 use rivet_registry::generated::registries::FLUID_BY_NAME;
-use rivet_registry::identifier::Identifier;
 
 pub const HEIGHTMAPS_TAG: &str = "Heightmaps";
 pub const IS_LIGHT_ON_TAG: &str = "isLightOn";
