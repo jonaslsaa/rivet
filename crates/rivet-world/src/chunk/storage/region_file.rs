@@ -33,10 +33,11 @@
 //!   (Paper's "don't write garbage data to disk"); the caller converts it to a
 //!   `clear`.
 //!
-//! The read-only Aikar surface (`.oversized.nbt` flags plus deflate-compressed
-//! `*_oversized_<x>_<z>.nbt` data) is present for `RegionFileStorage`; its
-//! legacy `setOversized` mutation path and recalc-only Aikar detection/meta
-//! rewrites remain deferred. Modern `.mcc` re-linking is fully ported.
+//! The Aikar surface (`.oversized.nbt` flags plus deflate-compressed
+//! `*_oversized_<x>_<z>.nbt` data) is present for `RegionFileStorage`; the
+//! `set_oversized` clear path is wired into the write lifecycle, while the
+//! recalc-only Aikar detection/meta rewrites remain deferred. Modern `.mcc`
+//! re-linking is fully ported.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -193,11 +194,7 @@ impl CommitOp {
                 // the move (the old path no longer exists).
                 fs::rename(&tmp, &target)
             }
-            CommitOp::DeleteExternal(p) => match fs::remove_file(&p) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e),
-            },
+            CommitOp::DeleteExternal(p) => remove_file_if_exists(&p),
         }
     }
 }
@@ -511,30 +508,19 @@ impl RegionFile {
         let offset = get_chunk_index(x, z);
         let previous = self.oversized[offset] == 1;
         self.oversized[offset] = if oversized { 1 } else { 0 };
-        if !previous && oversized {
-            self.oversized_count += 1;
-        } else if !oversized && previous {
-            self.oversized_count -= 1;
-        }
+        // `oversizedCount` — recomputed from the flag array with Java's
+        // signed-byte sum (0xFF contributes -1), so it can never drift from the
+        // flags. This is the same sum `open_with_mode` computes on load.
+        self.oversized_count = self.oversized.iter().map(|&b| i32::from(b as i8)).sum();
         if previous && !oversized {
-            let oversized_file = self.get_oversized_file(x, z);
-            match fs::remove_file(&oversized_file) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+            remove_file_if_exists(&self.get_oversized_file(x, z))?;
         }
         if self.oversized_count > 0 {
             if previous != oversized {
                 fs::write(self.get_oversized_meta_file(), self.oversized)?;
             }
         } else if previous {
-            let meta_file = self.get_oversized_meta_file();
-            match fs::remove_file(&meta_file) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+            remove_file_if_exists(&self.get_oversized_meta_file())?;
         }
         Ok(())
     }
@@ -827,11 +813,7 @@ impl RegionFile {
             self.write_offset(offset_index, 0);
             self.write_timestamp(offset_index, get_timestamp());
             self.write_header()?;
-            match fs::remove_file(self.get_external_chunk_path(pos)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+            remove_file_if_exists(&self.get_external_chunk_path(pos))?;
             self.used_sectors
                 .free(get_sector_number(offset), get_num_sectors(offset));
         }
@@ -1478,6 +1460,16 @@ fn get_timestamp() -> i32 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     (millis / 1000) as i32
+}
+
+/// `Files.deleteIfExists(path)` — remove a file, treating a missing file as a
+/// no-op. Shared by `set_oversized`, `clear`, and `CommitOp::DeleteExternal`.
+fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn read_oversized_state(path: &Path) -> io::Result<[u8; 1024]> {

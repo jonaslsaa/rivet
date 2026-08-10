@@ -217,15 +217,7 @@ impl RegionFileStorage {
     /// boundary. In read-only mode this rejects before any region is touched.
     pub fn flush(&mut self) -> io::Result<()> {
         self.ensure_writable()?;
-        let mut first_error = None;
-        for (_, region) in &mut self.region_cache {
-            if let Err(error) = region.flush()
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-            }
-        }
-        first_error.map_or(Ok(()), Err)
+        self.try_all_regions(|region| region.flush())
     }
 
     /// Close every cached region, attempting all closes and returning the first
@@ -233,15 +225,26 @@ impl RegionFileStorage {
     /// descriptor-only (no pad/force), so a read-only storage close is a no-op
     /// on disk.
     pub fn close(&mut self) -> io::Result<()> {
+        let result = self.try_all_regions(|region| region.close());
+        self.region_cache.clear();
+        result
+    }
+
+    /// Run `op` on every cached region, attempting all and returning the first
+    /// error — Paper's `ExceptionCollector` boundary (it keeps going past a
+    /// failure, then throws the first collected one).
+    fn try_all_regions(
+        &mut self,
+        mut op: impl FnMut(&mut RegionFile) -> io::Result<()>,
+    ) -> io::Result<()> {
         let mut first_error = None;
         for (_, region) in &mut self.region_cache {
-            if let Err(error) = region.close()
+            if let Err(error) = op(region)
                 && first_error.is_none()
             {
                 first_error = Some(error);
             }
         }
-        self.region_cache.clear();
         first_error.map_or(Ok(()), Err)
     }
 
@@ -1121,8 +1124,15 @@ mod tests {
     /// `region_file_version`'s own `configure`-mutating tests. Recovers from a
     /// poisoned mutex (a panicking lock-holder) so one failure does not cascade.
     fn with_selection_none<T>(f: impl FnOnce() -> T) -> T {
+        with_selection("none", f)
+    }
+
+    /// Pin the process-global region-file compression selection to `codec` for
+    /// the test body and serialize against `region_file_version`'s own
+    /// `configure`-mutating tests.
+    fn with_selection<T>(codec: &str, f: impl FnOnce() -> T) -> T {
         let _guard = SELECTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        RegionFileVersion::configure("none");
+        RegionFileVersion::configure(codec);
         f()
     }
 
@@ -1180,40 +1190,40 @@ mod tests {
         // storage folder and an empty region file (Paper opens the region with
         // CREATE before wrapping the output stream). This pins that exact
         // ordering — the failure is loud, and no chunk bytes reach disk.
-        let _guard = SELECTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        RegionFileVersion::configure("deflate");
-        let root = tempfile::tempdir().unwrap();
-        let folder = root.path().join("region");
-        let pos = ChunkPos::new(0, 0);
-        let mut storage = RegionFileStorage::new(info(true), folder.clone(), false);
-        assert_eq!(
-            storage
-                .write(&pos, Some(chunk_tag(0, 0)))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::Unsupported,
-            "a deferred codec write fails loudly"
-        );
-        assert!(
-            folder.is_dir(),
-            "the storage folder is created before wrap_output is reached"
-        );
-        let region_file = folder.join("r.0.0.mca");
-        assert!(
-            region_file.is_file(),
-            "the region file is opened (CREATE) before wrap_output is reached"
-        );
-        assert_eq!(
-            fs::metadata(&region_file).unwrap().len(),
-            0,
-            "no chunk bytes reach disk for a deferred codec"
-        );
-        assert_eq!(
-            fs::read_dir(&folder).unwrap().count(),
-            1,
-            "only the empty region file exists — no .mcc or supplements"
-        );
-        storage.close().unwrap();
+        with_selection("deflate", || {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join("region");
+            let pos = ChunkPos::new(0, 0);
+            let mut storage = RegionFileStorage::new(info(true), folder.clone(), false);
+            assert_eq!(
+                storage
+                    .write(&pos, Some(chunk_tag(0, 0)))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::Unsupported,
+                "a deferred codec write fails loudly"
+            );
+            assert!(
+                folder.is_dir(),
+                "the storage folder is created before wrap_output is reached"
+            );
+            let region_file = folder.join("r.0.0.mca");
+            assert!(
+                region_file.is_file(),
+                "the region file is opened (CREATE) before wrap_output is reached"
+            );
+            assert_eq!(
+                fs::metadata(&region_file).unwrap().len(),
+                0,
+                "no chunk bytes reach disk for a deferred codec"
+            );
+            assert_eq!(
+                fs::read_dir(&folder).unwrap().count(),
+                1,
+                "only the empty region file exists — no .mcc or supplements"
+            );
+            storage.close().unwrap();
+        });
     }
 
     #[test]
