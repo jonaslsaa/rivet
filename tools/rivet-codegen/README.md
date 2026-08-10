@@ -68,6 +68,25 @@ JVM and to use `anyhow`/`serde`.
   (`behavior_queries_match_probe_anchors` /
   `behavior_word_fields_match_paper_semantics`). This is the live half of the
   fixture-pinned conformance tests in `generate`'s `block_behaviors.rs` tests.
+- **`extract-worldgen`** — compiles and runs `java/WorldgenDataExtractor.java`
+  against the real Paper jar, reproducing `WorldLoader.load` (vanilla pack ->
+  STATIC layer -> `TagLoader.loadTagsForExistingRegistries` ->
+  `RegistryDataLoader.load(WORLDGEN_REGISTRIES)`), and writes the deterministic
+  worldgen noise registry, per-biome climate configuration, and multi-noise
+  biome-source preset parameter points to `data/worldgen.json` (issue #354).
+  The three surfaces are datapack-loaded or hardcoded in Paper:
+  `minecraft:worldgen/noise` (`NormalNoise.NoiseParameters`, dense `0..n`),
+  `minecraft:worldgen/biome` (`Biome.ClimateSettings` per biome), and
+  `MultiNoiseBiomeSourceParameterList.knownPresets()` (overworld +
+  `OverworldBiomeBuilder` / nether inline list). Parameter spans are the
+  quantized longs (`Climate.quantizeCoord`, `(long)(coord * 10000.0F)`) exactly
+  as stored in the runtime `Climate.ParameterPoint`, so the generated Rust table
+  reconstructs the exact values with no float round-trip.
+- **`probe-worldgen`** — re-runs `WorldgenDataExtractor` against the real Paper
+  jar and requires byte-identity with the committed `data/worldgen.json` plus
+  the anchor counts (63 noises / 66 biome climates / 2 presets, nether 5 points,
+  overworld 7594 points). This is the live half of the fixture-pinned
+  conformance test in `generate`'s `worldgen.rs` tests.
 - **`reports`** — runs the vanilla `net.minecraft.data.Main --reports` datagen
   against the materialized Paper 26.2 server jar and pins the canonical
   `packets.json` / `registries.json` / `blocks.json` reports (with provenance)
@@ -84,6 +103,8 @@ rivet-codegen probe-biomes-tags  [--bundler <path>]
 rivet-codegen probe-block-states [--bundler <path>]
 rivet-codegen extract-block-behaviors [--bundler <path>] [--output <path>]
 rivet-codegen probe-block-behaviors  [--bundler <path>]
+rivet-codegen extract-worldgen [--bundler <path>] [--output <path>]
+rivet-codegen probe-worldgen  [--bundler <path>]
 rivet-codegen reports    [--jar <path>] [--output <dir>] [--verify]
 ```
 
@@ -99,7 +120,7 @@ checkout; the tool needs a jar produced elsewhere.
 ```
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
-target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_behaviors.rs, block_states.rs, registries.rs, biomes.rs, tags.rs, synchronized.rs, registry_data.rs} + crates/rivet-protocol/src/generated/
+target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_behaviors.rs, block_states.rs, registries.rs, biomes.rs, tags.rs, synchronized.rs, registry_data.rs, worldgen.rs} + crates/rivet-protocol/src/generated/
 target/release/rivet-codegen registries       # -> crates/rivet-registry/src/generated/registries.rs (report-driven half only)
 target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
 target/release/rivet-codegen extract-biomes-tags  # -> data/biomes_tags.json + manifest
@@ -107,6 +128,8 @@ target/release/rivet-codegen probe-biomes-tags    # verify biome ids + tag netwo
 target/release/rivet-codegen probe-block-states   # verify the emitted block-state global ids against live Paper
 target/release/rivet-codegen extract-block-behaviors  # -> data/block_behaviors.json + manifest
 target/release/rivet-codegen probe-block-behaviors    # verify the per-StateId behavior table against live Paper
+target/release/rivet-codegen extract-worldgen         # -> data/worldgen.json + manifest
+target/release/rivet-codegen probe-worldgen           # verify the worldgen noise/biome/preset data against live Paper
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
@@ -118,8 +141,10 @@ tag network tables (from `data/biomes_tags.json`), the per-`StateId` behavior
 table (from `data/block_behaviors.json`, the `BlockBehaviourProbe` fixture),
 the synchronized configuration-registry element tables (from
 `data/synchronized_registries.json`), the pre-baked registry NBT payloads
-(from `data/registry_data.json`, the canonical join capture), and the packet-ID
-tables (from `data/reports/packets.json`, the `PacketReport` fixture).
+(from `data/registry_data.json`, the canonical join capture), the worldgen
+noise/biome-climate/preset tables (from `data/worldgen.json`, the
+`WorldgenDataExtractor` fixture), and the packet-ID tables (from
+`data/reports/packets.json`, the `PacketReport` fixture).
 Regenerate all of them with a single `generate` run; `--input`/`--output`
 control the block half, `--packets`/`--packets-output` control the packet half.
 (The `registries` subcommand emits just the report-driven registry tables.)
