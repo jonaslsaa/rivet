@@ -201,7 +201,12 @@ public final class SynthNoiseProbe {
                         {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}, {0.5, -1.5, 2.5}, {10.0, 10.0, 10.0},
                         {-10.0, 10.0, -10.0}, {100.0, -100.0, 100.0}, {0.1, 0.2, 0.3},
                         {123.456, -789.012, 3.14159}, {255.0, 256.0, -255.0},
-                        {1.0e6, -1.0e6, 1.0e6}, {1.0e-7, 1.0e-7, 1.0e-7}
+                        {1.0e6, -1.0e6, 1.0e6}, {1.0e-7, 1.0e-7, 1.0e-7},
+                        // Hostile: |coord * factor| far exceeds PerlinNoise.wrap's
+                        // ROUND_OFF (3.3554432e7), so the wrap branch fires in
+                        // real worldgen (block coords reach ±30M and scale by up
+                        // to 684.412). Pins the wrap path against Paper.
+                        {1.0e9, -1.0e9, 3.0e8}
                     };
                     JsonArray vals = new JsonArray();
                     for (double[] pt : xyz) {

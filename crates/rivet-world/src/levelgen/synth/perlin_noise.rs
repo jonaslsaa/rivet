@@ -37,23 +37,13 @@ impl PerlinNoise {
     /// octave set is sorted/deduplicated (Java `IntRBTreeSet`), and amplitudes
     /// are `1.0` for each octave in the set, else `0.0`.
     pub fn create_octave_set(random: &mut impl RandomSource, octave_set: &[i32]) -> Self {
-        let mut sorted: Vec<i32> = octave_set.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        if sorted.is_empty() {
-            panic!("Need some octaves!");
-        }
-        let low_freq_octaves = -sorted[0];
-        let high_freq_octaves = *sorted.last().unwrap();
-        let octaves = low_freq_octaves + high_freq_octaves + 1;
-        if octaves < 1 {
-            panic!("Total number of octaves needs to be >= 1");
-        }
+        let (sorted, low_freq_octaves, _high_freq_octaves, octaves) =
+            super::octave_span(octave_set);
         let mut amplitudes = vec![0.0f64; octaves as usize];
         for &octave in &sorted {
-            amplitudes[(octave + low_freq_octaves) as usize] = 1.0;
+            amplitudes[octave.wrapping_add(low_freq_octaves) as usize] = 1.0;
         }
-        Self::new(random, -low_freq_octaves, amplitudes, true)
+        Self::new(random, low_freq_octaves.wrapping_neg(), amplitudes, true)
     }
 
     /// `create(RandomSource, int firstOctave, DoubleList amplitudes)` — the
@@ -68,23 +58,13 @@ impl PerlinNoise {
         random: &mut impl RandomSource,
         octave_set: &[i32],
     ) -> Self {
-        let mut sorted: Vec<i32> = octave_set.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        if sorted.is_empty() {
-            panic!("Need some octaves!");
-        }
-        let low_freq_octaves = -sorted[0];
-        let high_freq_octaves = *sorted.last().unwrap();
-        let octaves = low_freq_octaves + high_freq_octaves + 1;
-        if octaves < 1 {
-            panic!("Total number of octaves needs to be >= 1");
-        }
+        let (sorted, low_freq_octaves, _high_freq_octaves, octaves) =
+            super::octave_span(octave_set);
         let mut amplitudes = vec![0.0f64; octaves as usize];
         for &octave in &sorted {
-            amplitudes[(octave + low_freq_octaves) as usize] = 1.0;
+            amplitudes[octave.wrapping_add(low_freq_octaves) as usize] = 1.0;
         }
-        Self::new(random, -low_freq_octaves, amplitudes, false)
+        Self::new(random, low_freq_octaves.wrapping_neg(), amplitudes, false)
     }
 
     /// `createLegacyForLegacyNetherBiome(RandomSource, int firstOctave,
@@ -106,14 +86,14 @@ impl PerlinNoise {
         use_new_initialization: bool,
     ) -> Self {
         let octaves = amplitudes.len() as i32;
-        let zero_octave_index = -first_octave;
+        let zero_octave_index = first_octave.wrapping_neg();
         let mut noise_levels: Vec<Option<ImprovedNoise>> =
             (0..octaves as usize).map(|_| None).collect();
         if use_new_initialization {
             let positional = random.fork_positional();
             for i in 0..octaves {
                 if amplitudes[i as usize] != 0.0 {
-                    let octave = first_octave + i;
+                    let octave = first_octave.wrapping_add(i);
                     let mut octave_random = positional.from_hash_of(&format!("octave_{octave}"));
                     noise_levels[i as usize] = Some(ImprovedNoise::new(&mut octave_random));
                 }
@@ -126,7 +106,7 @@ impl PerlinNoise {
                     noise_levels[zero_octave_index as usize] = Some(zero_octave);
                 }
             }
-            for i in (0..=zero_octave_index - 1).rev() {
+            for i in (0..=zero_octave_index.wrapping_sub(1)).rev() {
                 if i < octaves {
                     let amplitude = amplitudes[i as usize];
                     if amplitude != 0.0 {

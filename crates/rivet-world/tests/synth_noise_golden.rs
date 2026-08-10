@@ -610,3 +610,18 @@ fn perlin_noise_legacy_rejects_positive_octaves() {
         vec![1.0, 1.0, 0.0],
     );
 }
+
+/// Java octave-span arithmetic wraps (`-IntTreeSet.firstInt()` and
+/// `lowFreq + highFreq + 1` are int ops). A hostile set whose low+high sum
+/// overflows i32 must reach the `octaves < 1` guard (not panic on the sum or
+/// the negation) exactly as Java.
+#[test]
+#[should_panic(expected = "Total number of octaves needs to be >= 1")]
+fn perlin_simplex_hostile_octave_span_wraps_like_java() {
+    // low = -(-2_000_000_000) = 2_000_000_000, high = 2_000_000_000, so
+    // `low + high + 1` overflows i32 and wraps negative, tripping the guard.
+    PerlinSimplexNoise::new(
+        &mut source("xoroshiro", 42),
+        &[-2_000_000_000, 2_000_000_000],
+    );
+}

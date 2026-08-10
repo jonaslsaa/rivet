@@ -33,19 +33,8 @@ impl PerlinSimplexNoise {
     /// `octave_set` is sorted and deduplicated into the Java `IntRBTreeSet`
     /// order (ascending, distinct) before the octave math runs.
     pub fn new(random: &mut impl RandomSource, octave_set: &[i32]) -> Self {
-        let mut octaves_sorted: Vec<i32> = octave_set.to_vec();
-        octaves_sorted.sort_unstable();
-        octaves_sorted.dedup();
-        if octaves_sorted.is_empty() {
-            panic!("Need some octaves!");
-        }
-
-        let low_freq_octaves = -octaves_sorted[0];
-        let high_freq_octaves = *octaves_sorted.last().unwrap();
-        let octaves = low_freq_octaves + high_freq_octaves + 1;
-        if octaves < 1 {
-            panic!("Total number of octaves needs to be >= 1");
-        }
+        let (octaves_sorted, _low_freq_octaves, high_freq_octaves, octaves) =
+            super::octave_span(octave_set);
 
         let mut noise_levels: Vec<Option<SimplexNoise>> =
             (0..octaves as usize).map(|_| None).collect();
@@ -66,8 +55,8 @@ impl PerlinSimplexNoise {
             noise_levels[zero_octave_index as usize] = Some(zero_octave);
         }
 
-        for i in (zero_octave_index + 1)..octaves {
-            if i >= 0 && octaves_sorted.contains(&(zero_octave_index - i)) {
+        for i in zero_octave_index.wrapping_add(1)..octaves {
+            if i >= 0 && octaves_sorted.contains(&zero_octave_index.wrapping_sub(i)) {
                 noise_levels[i as usize] = Some(SimplexNoise::new(random));
             } else {
                 random.consume_count(262);
@@ -84,8 +73,8 @@ impl PerlinSimplexNoise {
             let mut high_freq_random =
                 WorldgenRandom::new(LegacyRandomSource::new(positive_octave_seed));
 
-            for i in (0..=zero_octave_index - 1).rev() {
-                if i < octaves && octaves_sorted.contains(&(zero_octave_index - i)) {
+            for i in (0..=zero_octave_index.wrapping_sub(1)).rev() {
+                if i < octaves && octaves_sorted.contains(&zero_octave_index.wrapping_sub(i)) {
                     noise_levels[i as usize] = Some(SimplexNoise::new(&mut high_freq_random));
                 } else {
                     high_freq_random.consume_count(262);

@@ -28,3 +28,31 @@ pub mod normal_noise;
 pub mod perlin_noise;
 pub mod perlin_simplex_noise;
 pub mod simplex_noise;
+
+/// Java `IntRBTreeSet` octave-set normalization + span, shared by the
+/// `PerlinNoise`/`PerlinSimplexNoise` constructors: sort distinct octaves
+/// ascending, then compute `lowFreqOctaves = -first`, `highFreqOctaves = last`,
+/// `octaves = lowFreqOctaves + highFreqOctaves + 1` (`PerlinNoise.makeAmplitudes`
+/// / `PerlinSimplexNoise` constructor).
+///
+/// The negation and the sum are Java `int` arithmetic that **wraps** for hostile
+/// octave values (e.g. `i32::MIN`); the `octaves < 1` guard fires on the wrapped
+/// result exactly as Java's `"Total number of octaves needs to be >= 1"` check.
+/// Returns `(sorted, low_freq_octaves, high_freq_octaves, octaves)`.
+pub(crate) fn octave_span(octave_set: &[i32]) -> (Vec<i32>, i32, i32, i32) {
+    let mut sorted: Vec<i32> = octave_set.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted.is_empty() {
+        panic!("Need some octaves!");
+    }
+    let low_freq_octaves = sorted[0].wrapping_neg();
+    let high_freq_octaves = *sorted.last().unwrap();
+    let octaves = low_freq_octaves
+        .wrapping_add(high_freq_octaves)
+        .wrapping_add(1);
+    if octaves < 1 {
+        panic!("Total number of octaves needs to be >= 1");
+    }
+    (sorted, low_freq_octaves, high_freq_octaves, octaves)
+}

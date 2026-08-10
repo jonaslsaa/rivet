@@ -106,7 +106,7 @@ impl NormalNoise {
             }
         }
         let value_factor =
-            VALUE_FACTOR_NUMERATOR / Self::expected_deviation(max_octave - min_octave);
+            VALUE_FACTOR_NUMERATOR / Self::expected_deviation(max_octave.wrapping_sub(min_octave));
         let max_value = (first.max_value() + second.max_value()) * value_factor;
         NormalNoise {
             value_factor,
@@ -124,7 +124,7 @@ impl NormalNoise {
 
     /// `expectedDeviation(int octaveSpan)`.
     fn expected_deviation(octave_span: i32) -> f64 {
-        0.1 * (1.0 + 1.0 / (octave_span as f64 + 1.0))
+        0.1 * (1.0 + 1.0 / (octave_span.wrapping_add(1) as f64))
     }
 
     /// `getValue(double x, double y, double z)`.
