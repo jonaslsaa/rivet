@@ -741,6 +741,7 @@ dependencies = [
  "crc32c",
  "md5",
  "rivet-serialization",
+ "serde_json",
  "sha2",
 ]
 

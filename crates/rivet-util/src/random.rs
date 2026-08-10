@@ -37,8 +37,8 @@
 //! plain field. `ThreadSafeLegacyRandomSource` is *for* cross-thread use and
 //! keeps an `AtomicI64`.
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
@@ -206,10 +206,11 @@ pub trait BitRandomSource: RandomSource {
 /// `net.minecraft.world.level.levelgen.PositionalRandomFactory` — yields a
 /// source per position / seed / name.
 ///
-/// RivetTodo(#208): the Java default overloads taking `BlockPos` / `Identifier`
-/// are omitted — they need `rivet-registry` (which `rivet-util` cannot depend
-/// on without a Cargo cycle); the `at(x, y, z)` and `fromHashOf(String)` forms
-/// they delegate to are provided.
+/// The Java default overloads taking `BlockPos` / `Identifier` live in
+/// `rivet-world` (`levelgen::random::PositionalRandomFactoryOverloads`, issue
+/// #208): they need `rivet-registry`, which `rivet-util` cannot depend on
+/// without a Cargo cycle. The `at(x, y, z)` and `fromHashOf(String)` forms
+/// they delegate to are provided here.
 // `from_hash_of`/`from_seed` are faithful mirrors of the Java instance methods
 // `fromHashOf`/`fromSeed`, so the `from_*`-taking-`&self` convention lint is a
 // false positive here (renaming would break API fidelity).
@@ -393,14 +394,13 @@ impl Xoroshiro128PlusPlus {
 /// r.seedHi)`; decode reads `longs[0]` as `seedLo` and `longs[1]` as `seedHi`
 /// (the `new_lo_hi` constructor also re-applies the all-zero golden-ratio
 /// fallback, exactly like the Java constructor).
-pub fn xoroshiro128plusplus_codec<Ops: DynamicOps + 'static>(
-) -> Arc<dyn Codec<Xoroshiro128PlusPlus, Ops>> {
+pub fn xoroshiro128plusplus_codec<Ops: DynamicOps + 'static>()
+-> Arc<dyn Codec<Xoroshiro128PlusPlus, Ops>> {
     codec::comap_flat_map::<Vec<i64>, Xoroshiro128PlusPlus, Ops>(
         codec::long_stream_codec::<Ops>(),
         Arc::new(|seed: &Vec<i64>| {
-            crate::util::fixed_size_i64(seed, 2).map(|longs| {
-                Xoroshiro128PlusPlus::new_lo_hi(longs[0], longs[1])
-            })
+            crate::util::fixed_size_i64(seed, 2)
+                .map(|longs| Xoroshiro128PlusPlus::new_lo_hi(longs[0], longs[1]))
         }),
         Arc::new(|r: &Xoroshiro128PlusPlus| vec![r.seed_lo, r.seed_hi]),
     )
