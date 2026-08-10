@@ -51,10 +51,11 @@
 //!   `isEmpty()` with `"Weighted list must contain at least one entry with
 //!   non-zero weight"`. `Weighted.map`/`WeightedList.map` preserve weights
 //!   and iteration order.
-//! - Equality/hash: `WeightedList` compares `totalWeight` and `items`
-//!   (order-sensitive), hash is `31 * totalWeight + items.hashCode()`
-//!   (Java's `List.hashCode` is order-sensitive, so `Vec<T>`'s derived hash
-//!   matches when `T`'s hash matches — `Weighted` is a value type).
+//! - Equality: `WeightedList` compares `totalWeight` and `items`
+//!   (order-sensitive), matching Java's `equals`. No `Hash` impl is provided —
+//!   Java's `hashCode` (`31 * totalWeight + items.hashCode()`) is a formula
+//!   that Rust's derived `Hash` would NOT reproduce, and no consumer in this
+//!   value layer needs hashing.
 //!
 //! The network `StreamCodec` overloads (`Weighted.streamCodec`,
 //! `WeightedList.streamCodec`) are omitted — the protocol crate owns that
