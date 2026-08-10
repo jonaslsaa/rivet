@@ -157,6 +157,23 @@ impl Types {
         }
     }
 
+    /// The exact inverse of [`serialization_key`](Self::serialization_key).
+    ///
+    /// `SerializableChunkData.parse` only accepts the six canonical,
+    /// case-sensitive `Heightmap.Types.getSerializationKey()` names. Unknown,
+    /// differently-cased, or otherwise malformed keys are not aliases.
+    pub fn from_serialization_key(key: &str) -> Option<Types> {
+        match key {
+            "WORLD_SURFACE_WG" => Some(Types::WorldSurfaceWg),
+            "WORLD_SURFACE" => Some(Types::WorldSurface),
+            "OCEAN_FLOOR_WG" => Some(Types::OceanFloorWg),
+            "OCEAN_FLOOR" => Some(Types::OceanFloor),
+            "MOTION_BLOCKING" => Some(Types::MotionBlocking),
+            "MOTION_BLOCKING_NO_LEAVES" => Some(Types::MotionBlockingNoLeaves),
+            _ => None,
+        }
+    }
+
     /// `Heightmap.Types.sendToClient()` — `usage == CLIENT`.
     pub const fn send_to_client(self) -> bool {
         matches!(
@@ -468,6 +485,16 @@ mod tests {
         }
         assert_eq!(Types::from_wire_id(99), Types::WorldSurfaceWg);
         assert_eq!(Types::from_wire_id(-1), Types::WorldSurfaceWg);
+
+        for ty in Types::all() {
+            assert_eq!(
+                Types::from_serialization_key(ty.serialization_key()),
+                Some(ty)
+            );
+        }
+        assert_eq!(Types::from_serialization_key("world_surface"), None);
+        assert_eq!(Types::from_serialization_key("WORLD_SURFACE_"), None);
+        assert_eq!(Types::from_serialization_key("UNKNOWN"), None);
     }
 
     #[test]

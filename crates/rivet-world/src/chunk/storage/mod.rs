@@ -52,6 +52,7 @@ pub mod region_bitmap;
 pub mod region_file;
 pub mod region_file_version;
 pub mod region_storage_info;
+pub mod serializable_chunk_data;
 
 pub use region_bitmap::RegionBitmap;
 pub use region_file::{

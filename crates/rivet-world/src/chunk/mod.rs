@@ -11,7 +11,8 @@
 //! `ChunkAccess` base, the concrete chunk values (`LevelChunk`/`ProtoChunk`/
 //! `EmptyLevelChunk`/`ImposterProtoChunk`), the `UpgradeData` carrier, and the
 //! `ChunkSource` provider seam. `storage` holds the `world.level.chunk.storage`
-//! region-file foundation (issue #231).
+//! region-file foundation (issue #231) and the disjoint heightmap/light read
+//! carriers from `SerializableChunkData` (issue #337).
 
 pub mod block_column;
 pub mod carving_mask;

@@ -83,6 +83,18 @@ impl InitState {
     pub const fn to_i32(self) -> i32 {
         self as i32
     }
+
+    /// Decode the persisted Starlight state integer. Only the four constants
+    /// accepted by `SWMRNibbleArray` are valid current-version save states.
+    pub const fn from_i32(state: i32) -> Option<Self> {
+        match state {
+            0 => Some(Self::Null),
+            1 => Some(Self::Uninitialised),
+            2 => Some(Self::Initialised),
+            3 => Some(Self::Hidden),
+            _ => None,
+        }
+    }
 }
 
 /// `SWMRNibbleArray.SaveState` — the persistent form `getSaveState` returns,

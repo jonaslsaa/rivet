@@ -23,16 +23,16 @@
 //! - the `blockEntities` map and `setBlockEntity`/`getBlockEntity` (the block-
 //!   entity unit, `mc.world.level.block.entity`); the port carries only the
 //!   `pendingBlockEntities` NBT map;
-//! - the Starlight light arrays (`blockNibbles`/`skyNibbles`/emptiness maps),
-//!   `setBlockEntityNbt`'s `!blockEntities.containsKey` guard, and the
-//!   `blendingData` field — all with the lighting/blending units (#184);
+//! - the Starlight emptiness maps, `setBlockEntityNbt`'s
+//!   `!blockEntities.containsKey` guard, and the `blendingData` field — with
+//!   their lighting/blending units; the merged #184 nibble value surface and
+//!   #337 persistence slice now back `blockNibbles`/`skyNibbles` here;
 //! - the `tick`/`getBlockTicks`/`getFluidTicks`/`getTicksForSerialization`
 //!   surface and the `PackedTicks` record (the `world.ticks` unit);
 //! - `getBlockState`/`setBlockState` — overridden per concrete type;
 //!   `setBlockState`'s mutators defer with #216.
 //!
-//! RivetTodo(#184): the Starlight light arrays and `blendingData` are not
-//! ported — `LevelLightEngine`/`StarLightEngine` live with the
+//! `LevelLightEngine`/`StarLightEngine` propagation still lives with the
 //! `mc.world.level.lighting` units and `BlendingData` with the blending unit.
 //! Issue #287 Part A adds `getHeight`'s on-demand `primeHeightmaps` and the
 //! per-block `update` walk: [`get_height_at`] primes a missing entry
@@ -60,12 +60,19 @@ use crate::chunk::structure_access::StructureAccess;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
+use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
 
 /// `ChunkAccess.NO_FILLED_SECTION` — `getHighestFilledSectionIndex()` for a
 /// chunk with no non-air section.
 pub const NO_FILLED_SECTION: i32 = -1;
+
+fn filled_empty_light(count: usize) -> Vec<SwmrNibbleArray> {
+    (0..count)
+        .map(|_| SwmrNibbleArray::new_with_bytes_and_null(None, true))
+        .collect()
+}
 
 /// `net.minecraft.world.level.chunk.status.ChunkStatus` — the persisted chunk
 /// status, slice-local: the real status ladder (with `isOrAfter`/`heightmapsAfter`)
@@ -120,6 +127,11 @@ where
     /// `heightmaps` — the `EnumMap<Heightmap.Types, Heightmap>`, keyed by the
     /// world `Types` ordinal (see the module doc).
     heightmaps: [Option<Heightmap>; 6],
+    /// Starlight's block-light nibbles, indexed from `minSectionY - 1` through
+    /// `maxSectionY + 1` (the two light-only boundary sections included).
+    block_nibbles: Vec<SwmrNibbleArray>,
+    /// Starlight's sky-light nibbles with the same light-section indexing.
+    sky_nibbles: Vec<SwmrNibbleArray>,
     /// The per-state behavior flags the heightmap predicates need. Java's
     /// `Heightmap` holds a `ChunkAccess` and calls `state.isAir()`/
     /// `state.blocksMotion()`/`getFluidState()`/`instanceof LeavesBlock`; the
@@ -182,6 +194,7 @@ where
                 container_factory.create_for_biomes(),
             ));
         }
+        let light_section_count = count + 2;
         ChunkAccess {
             pos,
             upgrade_data,
@@ -194,6 +207,8 @@ where
             structure_access: StructureAccess::new(),
             pending_block_entities: HashMap::new(),
             heightmaps: [None, None, None, None, None, None],
+            block_nibbles: filled_empty_light(light_section_count),
+            sky_nibbles: filled_empty_light(light_section_count),
             resolve,
         }
     }
@@ -443,6 +458,26 @@ where
     pub fn set_heightmap(&mut self, key: Types, data: &[i64]) {
         self.get_or_create_heightmap_unprimed(key)
             .set_raw_data(data);
+    }
+
+    /// `StarlightChunk.starlight$getBlockNibbles()`.
+    pub fn block_nibbles(&self) -> &[SwmrNibbleArray] {
+        &self.block_nibbles
+    }
+
+    /// `StarlightChunk.starlight$setBlockNibbles(SWMRNibbleArray[])`.
+    pub fn set_block_nibbles(&mut self, nibbles: Vec<SwmrNibbleArray>) {
+        self.block_nibbles = nibbles;
+    }
+
+    /// `StarlightChunk.starlight$getSkyNibbles()`.
+    pub fn sky_nibbles(&self) -> &[SwmrNibbleArray] {
+        &self.sky_nibbles
+    }
+
+    /// `StarlightChunk.starlight$setSkyNibbles(SWMRNibbleArray[])`.
+    pub fn set_sky_nibbles(&mut self, nibbles: Vec<SwmrNibbleArray>) {
+        self.sky_nibbles = nibbles;
     }
 
     /// `ChunkAccess.getNoiseBiome(int, int, int)` — Paper's get-block-chunk
