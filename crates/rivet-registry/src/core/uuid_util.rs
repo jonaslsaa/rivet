@@ -22,7 +22,7 @@
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_util::mth::Uuid;
-use rivet_util::util::fixed_size;
+use rivet_util::util::fixed_size_i32;
 use std::sync::Arc;
 
 /// `UUIDUtil.createOfflinePlayerUUID(String playerName)`.
@@ -98,22 +98,22 @@ pub fn uuid_to_int_array(uuid: Uuid) -> [i32; 4] {
 /// Util.fixedSize(list, 4).map(UUIDUtil::uuidFromIntArray), uuid ->
 /// IntStream.of(uuidToIntArray(uuid)))`.
 ///
-/// The encode side (`comap`) produces the 4-int list
-/// `[most>>32, most, least>>32, least]` via `int_stream_codec`'s
-/// `create_int_list`. The decode side is the INT_STREAM read (`get_int_stream`)
-/// through `comap_flat_map`'s `flat_map`, which applies `fixed_size(&[i32], 4)`
-/// — the **`List`** overload (Java passes a `List<Integer>`, not an
-/// `IntStream`), so a wrong-length input errors with
-/// `"Input is not a list of 4 elements"` and, when longer than 4, carries the
-/// first 4 ints as the partial. That partial is then mapped by
+/// `Codec.INT_STREAM` is `Codec<IntStream>`, so Java resolves
+/// `Util.fixedSize(list, 4)` to the **`IntStream`** overload
+/// (`fixedSize(IntStream, int)`) — same shape as `BlockPos`/`Vec3i` `CODEC`s
+/// with size 3. The port's `fixed_size_i32` is that overload: a wrong-length
+/// input errors with `"Input is not a list of 4 ints"` and, when longer than 4,
+/// carries the first 4 ints as the partial. That partial is then mapped by
 /// `uuid_from_int_array` into a partial `Uuid` on the same error (the DFU
-/// `flatMap` keeps an error-with-partial as an error). Ops-generic in the port,
-/// hence the `uuid_codec::<Ops>()` factory.
+/// `flatMap` keeps an error-with-partial as an error). The encode side (`comap`)
+/// produces the 4-int list `[most>>32, most, least>>32, least]` via
+/// `int_stream_codec`'s `create_int_list`. Ops-generic in the port, hence the
+/// `uuid_codec::<Ops>()` factory.
 pub fn uuid_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Uuid, Ops>> {
     codec::comap_flat_map::<Vec<i32>, Uuid, Ops>(
         codec::int_stream_codec::<Ops>(),
         Arc::new(|list: &Vec<i32>| {
-            fixed_size(list, 4).map(|fs| uuid_from_int_array(&[fs[0], fs[1], fs[2], fs[3]]))
+            fixed_size_i32(list, 4).map(|fs| uuid_from_int_array(&[fs[0], fs[1], fs[2], fs[3]]))
         }),
         Arc::new(|uuid: &Uuid| uuid_to_int_array(*uuid).to_vec()),
     )
@@ -261,19 +261,21 @@ mod tests {
             let input = ops.create_int_list((0..len as i32).collect());
             let result = codec.decode(&ops, &input);
             assert!(result.result().is_none(), "length {len} should fail");
-            // `Util.fixedSize(List, 4)` — the List overload, so the message is
-            // "elements", not the IntStream overload's "ints".
+            // `Codec.INT_STREAM` is `Codec<IntStream>`, so Java resolves
+            // `Util.fixedSize(list, 4)` to the IntStream overload (as
+            // `BlockPos`/`Vec3i` `CODEC`s do) — the message is "ints", not the
+            // List overload's "elements".
             assert_eq!(
                 result.error_ref().map(|e| e.message().to_string()),
-                Some("Input is not a list of 4 elements".to_string())
+                Some("Input is not a list of 4 ints".to_string())
             );
         }
     }
 
     #[test]
     fn codec_long_input_keeps_partial_error_ordering() {
-        // A 5-int input: `Util.fixedSize(list, 4)` errors with the first 4 ints
-        // as the partial, and the `flatMap` continuation maps that partial
+        // A 5-int input: `Util.fixedSize(IntStream, 4)` errors with the first 4
+        // ints as the partial, and the `flatMap` continuation maps that partial
         // through `uuidFromIntArray` — so the error carries a partial `Uuid`,
         // not the raw int list, exactly as Java's
         // `Codec.INT_STREAM.comapFlatMap(Util.fixedSize(...))` does.
@@ -284,7 +286,7 @@ mod tests {
         assert!(result.result().is_none());
         assert_eq!(
             result.error_ref().map(|e| e.message().to_string()),
-            Some("Input is not a list of 4 elements".to_string())
+            Some("Input is not a list of 4 ints".to_string())
         );
         assert_eq!(
             result
