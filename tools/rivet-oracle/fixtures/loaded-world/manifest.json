@@ -1,0 +1,60 @@
+{
+  "captured": [
+    {
+      "bytes": 30275,
+      "chunk": "-1.-3",
+      "dim": "overworld",
+      "path": "chunk/-1.-3.nbt",
+      "region": "-1.-1",
+      "role": "clean-spawn",
+      "sha256": "e5a7e829999097440652b18d15fcf5e9fd7095ee1f7fab4823e5e82452855922"
+    },
+    {
+      "bytes": 31270,
+      "chunk": "-17.-19",
+      "dim": "overworld",
+      "path": "chunk/-17.-19.nbt",
+      "region": "-1.-1",
+      "role": "block-ticks",
+      "sha256": "26787853c30438033fe4f2042e0448bd0f494570dbb595d3106dfdf8b8932498"
+    },
+    {
+      "bytes": 33630,
+      "chunk": "-19.-21",
+      "dim": "overworld",
+      "path": "chunk/-19.-21.nbt",
+      "region": "-1.-1",
+      "role": "chest-block-entity",
+      "sha256": "98fe07cb1e4802d9823477fcb4534a22b947c839593622166f0857bda180712f"
+    },
+    {
+      "bytes": 40752,
+      "chunk": "-2.-2",
+      "dim": "overworld",
+      "path": "chunk/-2.-2.nbt",
+      "region": "-1.-1",
+      "role": "fluid-ticks",
+      "sha256": "549ce72347e4e19e51eb2bd3c4071806429cd5cde78e9b99234f57358b539957"
+    },
+    {
+      "bytes": 30352,
+      "chunk": "0.-4",
+      "dim": "overworld",
+      "path": "chunk/0.-4.nbt",
+      "region": "0.-1",
+      "role": "mineshaft-structure-refs",
+      "sha256": "0172a39665837cb8b6e5a45840084f6a3288aad4486d627a1ae645f4ba51c472"
+    }
+  ],
+  "chunk-count": 5,
+  "data-version": 4903,
+  "format": 1,
+  "kind": "loaded-world",
+  "minecraft": "26.2",
+  "paper": "26.2-DEV-main@0a99345",
+  "paper-commit": "0a993450f129c4942c2a9ed45ba047412b4667cf",
+  "source": {
+    "fingerprint-file": "source-fingerprint.txt",
+    "path": "working/client-worlds/New World (disposable copy)"
+  }
+}

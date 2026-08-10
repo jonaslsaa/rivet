@@ -3299,6 +3299,174 @@ mod tests {
         assert_eq!(dims.get("the_end"), Some(&144));
     }
 
+    /// The committed `fixtures/loaded-world/` corpus (issue #371) must verify
+    /// clean against its manifest, and each chunk payload must actually carry
+    /// the aux-data shape it is named for: a clean FULL spawn chunk, a chunk
+    /// with mineshaft `structures.References`, a chunk with saved `fluid_ticks`,
+    /// a chunk with saved `block_ticks`, and a chunk with a chest
+    /// `block_entities` entry. The payloads are read back through the proven
+    /// rivet-nbt codec, so the test is grounded in the real fixture bytes, not
+    /// in the extraction script's claims.
+    #[test]
+    fn loaded_world_fixtures_verify() {
+        let dir = fixtures_dir().join("loaded-world");
+        if !dir.join("manifest.json").is_file() {
+            // The corpus isn't checked out (or was pruned) — nothing to verify.
+            return;
+        }
+        let manifest = verify_fixtures(&dir).expect("loaded-world fixtures should match manifest");
+        assert_eq!(manifest.format, 1);
+        assert_eq!(manifest.kind.as_deref(), Some("loaded-world"));
+        assert_eq!(manifest.chunk_count, Some(5));
+        assert_eq!(manifest.captured.len(), 5);
+        assert_eq!(
+            parse_paper_pin(manifest.paper.as_deref()),
+            Some("0a99345".into())
+        );
+        assert!(
+            !is_region_capture(&manifest),
+            "loaded-world is a curated per-chunk corpus, never a region capture"
+        );
+
+        // Metadata beyond the Manifest subset is read from the raw JSON.
+        let raw: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("manifest.json")).expect("committed manifest readable"),
+        )
+        .expect("committed manifest is valid JSON");
+        assert_eq!(raw["data-version"], 4903);
+        assert_eq!(raw["minecraft"], "26.2");
+
+        let mut by_role: std::collections::BTreeMap<&str, &serde_json::Value> =
+            std::collections::BTreeMap::new();
+        for cap in raw["captured"].as_array().expect("captured is an array") {
+            let role = cap["role"].as_str().expect("role present");
+            assert!(
+                by_role.insert(role, cap).is_none(),
+                "role {role} appears once"
+            );
+            let chunk_path = dir.join(cap["path"].as_str().expect("path present"));
+            let bytes = fs::read(&chunk_path).expect("fixture file readable");
+            let mut input = DataInputStream::new(std::io::Cursor::new(bytes));
+            let root = nbt_io::read(
+                &mut input,
+                &mut rivet_nbt::nbt_accounter::NbtAccounter::unlimited_heap(),
+            )
+            .expect("fixture parses as NBT");
+
+            assert_eq!(root.get_int("DataVersion"), Some(4903));
+            assert_eq!(
+                root.get_string("Status").map(String::as_str),
+                Some("minecraft:full")
+            );
+            assert_eq!(
+                root.get_int("xPos"),
+                Some(
+                    cap["chunk"]
+                        .as_str()
+                        .expect("chunk present")
+                        .split('.')
+                        .next()
+                        .unwrap()
+                        .parse::<i32>()
+                        .expect("xPos parses")
+                )
+            );
+            assert_eq!(
+                root.get_int("zPos"),
+                Some(
+                    cap["chunk"]
+                        .as_str()
+                        .expect("chunk present")
+                        .split('.')
+                        .nth(1)
+                        .unwrap()
+                        .parse::<i32>()
+                        .expect("zPos parses")
+                )
+            );
+
+            let ticks_len = |key: &str| -> usize {
+                match root.get(key) {
+                    Some(Tag::List(l)) => l.size(),
+                    Some(_) => panic!("{key} is not a list in {}", cap["path"]),
+                    None => 0,
+                }
+            };
+            match role {
+                "clean-spawn" => {
+                    assert_eq!(
+                        ticks_len("fluid_ticks"),
+                        0,
+                        "clean spawn has no fluid_ticks"
+                    );
+                    assert_eq!(
+                        ticks_len("block_ticks"),
+                        0,
+                        "clean spawn has no block_ticks"
+                    );
+                    assert!(
+                        ticks_len("block_entities") == 0,
+                        "clean spawn has no block_entities"
+                    );
+                    // A FULL chunk always carries the structures compound; the
+                    // clean-spawn property is that both References and Starts are
+                    // empty, so no structure reference blocks the FULL construction.
+                    if let Some(structures) = root.get_compound("structures") {
+                        let refs_empty = structures
+                            .get_compound("References")
+                            .map(|r| r.tags.is_empty())
+                            .unwrap_or(true);
+                        assert!(refs_empty, "clean spawn has no structure references");
+                    }
+                }
+                "mineshaft-structure-refs" => {
+                    let structures = root.get_compound("structures").expect("structures present");
+                    let refs = structures
+                        .get_compound("References")
+                        .expect("References present");
+                    assert!(
+                        refs.contains("minecraft:mineshaft"),
+                        "chunk 0.-4 carries a mineshaft structure reference"
+                    );
+                }
+                "fluid-ticks" => {
+                    assert_eq!(
+                        ticks_len("fluid_ticks"),
+                        1,
+                        "fluid-ticks chunk has one saved fluid tick"
+                    );
+                }
+                "block-ticks" => {
+                    assert_eq!(
+                        ticks_len("block_ticks"),
+                        1,
+                        "block-ticks chunk has one saved block tick"
+                    );
+                }
+                "chest-block-entity" => {
+                    let bes = root.get("block_entities").expect("block_entities present");
+                    let Tag::List(list) = bes else {
+                        panic!("block_entities is a list in {}", cap["path"])
+                    };
+                    let mut chest = false;
+                    for i in 0..list.size() {
+                        if let Tag::Compound(be) = list.get(i)
+                            && be.get_string("id").map(String::as_str) == Some("minecraft:chest")
+                        {
+                            chest = true;
+                        }
+                    }
+                    assert!(
+                        chest,
+                        "chest-block-entity chunk contains a chest block entity"
+                    );
+                }
+                other => panic!("unexpected role {other}"),
+            }
+        }
+        assert_eq!(by_role.len(), 5, "all five corpus roles present");
+    }
+
     /// The committed `fixtures/paper-global.yml` (the pinned Paper global config
     /// every oracle boot runs under) must set chunk-system to exactly 1 worker
     /// and 1 I/O thread (issue #266).
