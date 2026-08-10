@@ -21,13 +21,16 @@
 
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
 /// Default launcher-created Minecraft 26.2 world name (local-official-minecraft-client).
 const LAUNCHER_WORLD_NAME: &str = "New World";
+
+/// Fixed upper bound for each file-content read while fingerprinting a world.
+const HASH_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub enum Error {
@@ -96,11 +99,44 @@ pub fn resolve_source_world() -> Result<PathBuf, Error> {
     )
 }
 
-/// SHA-256 of a byte buffer (the copy-fidelity and no-mutation fingerprints).
-pub fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
+/// Original whole-buffer SHA-256 path, retained as the streaming test oracle.
+#[cfg(test)]
+fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(&Sha256::digest(bytes));
     out
+}
+
+/// Stream a reader into SHA-256 without allocating in proportion to its size.
+fn hash_reader(reader: impl Read) -> io::Result<[u8; 32]> {
+    let mut reader = BufReader::with_capacity(HASH_BUFFER_SIZE, reader);
+    let mut hasher = Sha256::new();
+    loop {
+        let bytes = reader.fill_buf()?;
+        if bytes.is_empty() {
+            break;
+        }
+        hasher.update(bytes);
+        let consumed = bytes.len();
+        reader.consume(consumed);
+    }
+
+    Ok(hasher.finalize().into())
+}
+
+fn hash_file(path: &Path) -> Result<[u8; 32], Error> {
+    let file = fs::File::open(path).map_err(|error| {
+        Error::Io(io::Error::new(
+            error.kind(),
+            format!("open {} for fingerprinting: {error}", path.display()),
+        ))
+    })?;
+    hash_reader(file).map_err(|error| {
+        Error::Io(io::Error::new(
+            error.kind(),
+            format!("read {} for fingerprinting: {error}", path.display()),
+        ))
+    })
 }
 
 /// The type and, for a file, contents of one entry in a tree fingerprint.
@@ -141,7 +177,7 @@ pub fn hash_tree(root: &Path) -> Result<Vec<TreeEntry>, Error> {
                 out.push((rel, EntryFingerprint::Directory));
                 walk(root, &path, out)?;
             } else if meta.is_file() {
-                out.push((rel, EntryFingerprint::File(hash_bytes(&fs::read(&path)?))));
+                out.push((rel, EntryFingerprint::File(hash_file(&path)?)));
             } else {
                 return Err(Error::Gate(format!(
                     "refusing non-regular filesystem entry {} under {}",
@@ -376,6 +412,20 @@ impl Drop for TempWorld {
 mod tests {
     use super::*;
 
+    struct InstrumentedReader<'a> {
+        inner: io::Cursor<&'a [u8]>,
+        largest_request: usize,
+        read_count: usize,
+    }
+
+    impl Read for InstrumentedReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.largest_request = self.largest_request.max(buf.len());
+            self.read_count += 1;
+            self.inner.read(buf)
+        }
+    }
+
     fn fixture_world(tag: &str) -> PathBuf {
         let base =
             std::env::temp_dir().join(format!("rivet-load-world-{tag}-{}", std::process::id()));
@@ -474,6 +524,31 @@ mod tests {
         assert_ne!(a, c, "a content change must change the tree hash");
 
         cleanup(&world);
+    }
+
+    #[test]
+    fn hash_reader_uses_bounded_chunks_and_matches_the_original_hash() {
+        let bytes: Vec<u8> = (0..(HASH_BUFFER_SIZE * 32 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let mut reader = InstrumentedReader {
+            inner: io::Cursor::new(bytes.as_slice()),
+            largest_request: 0,
+            read_count: 0,
+        };
+
+        let streamed = hash_reader(&mut reader).unwrap();
+
+        assert_eq!(streamed, hash_bytes(&bytes));
+        assert!(
+            reader.largest_request <= HASH_BUFFER_SIZE,
+            "fingerprinting requested {} bytes at once",
+            reader.largest_request
+        );
+        assert!(
+            reader.read_count > 2,
+            "the multi-buffer input must require chunked reads"
+        );
     }
 
     #[test]
