@@ -17,8 +17,9 @@
 //!   `minValue`/`maxValue` BEFORE delegating. The order is observable: an
 //!   empty locations array fails size validation; a single location with
 //!   unbounded coordinate bounds extrapolates to `±Infinity`. The Rust
-//!   `Multipoint::new` mirrors the delegating constructor and
-//!   `new_with_bounds` the canonical one.
+//!   `Multipoint::new` mirrors the delegating constructor (and is what the
+//!   builder and codec use); the record's canonical constructor is not ported
+//!   because nothing calls it.
 //! - `Math.min`/`Math.max` NaN propagation is `mth::min_f32`/`max_f32`.
 //! - The parity string replicates Java's `%.3f` formatting of the locations /
 //!   derivatives / values (`fmt_f32_3`), including the half-away-from-zero
@@ -426,30 +427,6 @@ impl<I> Multipoint<I> {
                 max_value = mth::max_f32(max_value, max_lerp1 + 0.25 * max_lerp2);
             }
         }
-        Multipoint {
-            coordinate,
-            locations,
-            values,
-            derivatives,
-            min_value,
-            max_value,
-        }
-    }
-
-    /// The canonical 6-arg constructor — validates sizes, then stores the
-    /// caller-supplied bounds. Mirrors the record's canonical constructor,
-    /// for callers that already know the bounds (e.g. a serialized form that
-    /// carries them). Callers that must compute bounds use `Multipoint::new`
-    /// instead.
-    pub fn new_with_bounds(
-        coordinate: I,
-        locations: Vec<f32>,
-        values: Vec<CubicSpline<I>>,
-        derivatives: Vec<f32>,
-        min_value: f32,
-        max_value: f32,
-    ) -> Multipoint<I> {
-        validate_sizes(&locations, &values, &derivatives);
         Multipoint {
             coordinate,
             locations,
