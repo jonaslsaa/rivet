@@ -4,8 +4,8 @@
 //! Rivet currently has one native filesystem, so Paper's per-provider cache is
 //! represented by one lazily compiled matcher list. Glob conversion follows
 //! OpenJDK's platform-specific `sun.nio.fs.Globs` rules. Regex entries use
-//! PCRE2's Java-compatible surface, with incompatible syntax rejected instead
-//! of risking a broader authorization match.
+//! a deliberately small Java-compatible subset compiled by PCRE2. Syntax
+//! outside that subset is rejected rather than risking a broader rule.
 
 use std::io::{self, BufRead};
 use std::path::Path;
@@ -99,6 +99,7 @@ impl ConfigEntry {
                 } else {
                     return Err(format!("Syntax '{syntax}' not recognized"));
                 };
+                let expression = java_dots_to_pcre2(&expression);
                 let mut builder = RegexBuilder::new();
                 builder.utf(true).ucp(false);
                 #[cfg(windows)]
@@ -106,9 +107,7 @@ impl ConfigEntry {
                 // Matcher.matches() constrains the engine while it evaluates
                 // alternatives; checking the span of an unconstrained find
                 // would incorrectly reject `short|longer` after `short` wins.
-                // ANY gives dot/anchors Java's full line-terminator set rather
-                // than PCRE2's narrower LF-only default.
-                let expression = format!(r"(*ANY)\A(?:{expression})\z");
+                let expression = format!(r"\A(?:{expression})\z");
                 builder
                     .build(&expression)
                     .map(CompiledMatcher::Regex)
@@ -262,6 +261,7 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                 let class_start = i - 1;
                 let mut negated = false;
                 if chars.get(i) == Some(&'^') {
+                    regex.push_str(if windows { "(?!\\\\)" } else { "(?!/)" });
                     regex.push_str("[\\^");
                     i += 1;
                 } else {
@@ -366,97 +366,266 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
     Ok(regex)
 }
 
-/// Reject Java Pattern syntax that PCRE2 accepts with a different meaning.
-/// Unsupported constructs fail compilation, which keeps the entire allow list
-/// closed just as a Java `PatternSyntaxException` would. Everything accepted
-/// here is then compiled by PCRE2, including lookarounds and backreferences.
+/// Accept only the Java `Pattern` surface whose PCRE2 behavior this matcher
+/// relies on. This is intentionally an allowlist: a new PCRE2 extension cannot
+/// silently become authorization syntax. PCRE2 still performs the final
+/// structural validation after this compatibility scan.
 fn validate_java_regex(pattern: &str) -> Result<(), String> {
     let chars: Vec<char> = pattern.chars().collect();
-    let mut in_class = false;
-    let mut quoted = false;
+    let mut groups = Vec::new();
     let mut i = 0;
 
     while i < chars.len() {
         let c = chars[i];
         if c == '\\' {
-            let Some(&escaped) = chars.get(i + 1) else {
-                break;
-            };
-            if escaped == 'Q' && !quoted {
-                quoted = true;
-            } else if escaped == 'E' && quoted {
-                quoted = false;
-            } else if !quoted && matches!(escaped, 'p' | 'P' | 'N') {
-                return Err(format!(
-                    "Java regex escape \\{escaped} is unsupported because PCRE2's Unicode property syntax differs"
-                ));
-            } else if !quoted && matches!(escaped, 'C' | 'K' | 'g' | 'o') {
-                return Err(format!(
-                    "PCRE2-only regex escape \\{escaped} is not valid Java Pattern syntax"
-                ));
-            } else if !quoted
-                && escaped == 'k'
-                && chars.get(i + 2).is_some_and(|delimiter| *delimiter != '<')
-            {
-                return Err(
-                    "only Java's \\k<name> named-backreference syntax is supported".to_string(),
-                );
-            }
-            i += 2;
+            i = scan_java_escape(&chars, i, false, groups.contains(&GroupKind::Lookbehind))?;
             continue;
         }
-        if quoted {
+        match c {
+            '[' => i = scan_java_class(&chars, i + 1)?,
+            '(' => {
+                if groups.contains(&GroupKind::Lookbehind) {
+                    return Err("groups inside lookbehind are outside the supported subset".into());
+                }
+                let (kind, next) = scan_java_group(&chars, i)?;
+                groups.push(kind);
+                i = next;
+            }
+            ')' => {
+                groups.pop();
+                i += 1;
+            }
+            '*' | '+' | '?' => {
+                if groups.contains(&GroupKind::Lookbehind) {
+                    return Err("variable-length lookbehind is outside the supported subset".into());
+                }
+                i += 1;
+                if chars
+                    .get(i)
+                    .is_some_and(|suffix| matches!(suffix, '?' | '+'))
+                {
+                    i += 1;
+                }
+            }
+            '{' => {
+                if groups.contains(&GroupKind::Lookbehind) {
+                    return Err("variable-length lookbehind is outside the supported subset".into());
+                }
+                i = scan_java_quantifier(&chars, i)?;
+            }
+            '|' if groups.contains(&GroupKind::Lookbehind) => {
+                return Err("alternation in lookbehind is outside the supported subset".into());
+            }
+            '^' | '$' => {
+                return Err("line anchors are outside the supported Java-compatible subset".into());
+            }
+            '}' => return Err("unmatched '}' is outside the supported subset".into()),
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Java's dot excludes CR, LF, NEL, line separator, and paragraph separator,
+/// but not vertical tab or form feed. No PCRE2 newline mode has exactly that
+/// set, so translate unescaped dots and enable DOTALL only for the replacement.
+fn java_dots_to_pcre2(pattern: &str) -> String {
+    const JAVA_DOT: &str = r"(?s:(?![\n\r\x{85}\x{2028}\x{2029}]).)";
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut translated = String::with_capacity(pattern.len());
+    let mut in_class = false;
+    let mut class_has_member = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            translated.push(c);
             i += 1;
+            if let Some(&escaped) = chars.get(i) {
+                translated.push(escaped);
+                if in_class {
+                    class_has_member = true;
+                }
+                i += 1;
+            }
             continue;
         }
-        if c == '(' && chars.get(i + 1) == Some(&'*') {
-            return Err("PCRE2 control verbs are not valid Java Pattern syntax".to_string());
-        }
-        if c == '[' {
-            if in_class {
-                return Err(
-                    "Java nested/intersection character classes are unsupported".to_string()
-                );
+        match c {
+            '[' if !in_class => {
+                in_class = true;
+                class_has_member = false;
+                translated.push(c);
             }
-            in_class = true;
-        } else if c == ']' {
-            in_class = false;
-        } else if in_class && c == '&' && chars.get(i + 1) == Some(&'&') {
-            return Err("Java character-class intersection is unsupported".to_string());
-        } else if !in_class && c == '(' && chars.get(i + 1) == Some(&'?') {
-            if chars
-                .get(i + 2)
-                .is_some_and(|marker| matches!(marker, '|' | '(' | '[' | '\''))
-            {
-                return Err("PCRE2-only group syntax is not valid Java Pattern syntax".to_string());
+            '^' if in_class && !class_has_member => translated.push(c),
+            ']' if in_class && class_has_member => {
+                in_class = false;
+                translated.push(c);
             }
-            let mut j = i + 2;
-            if chars.get(j) == Some(&'-') {
-                j += 1;
-            }
-            while let Some(flag) = chars.get(j) {
-                if matches!(flag, ':' | ')') {
-                    break;
+            '.' if !in_class => translated.push_str(JAVA_DOT),
+            _ => {
+                translated.push(c);
+                if in_class {
+                    class_has_member = true;
                 }
-                if !flag.is_ascii_alphabetic() && *flag != '-' {
-                    break;
-                }
-                if matches!(flag, 'd' | 'i' | 'u' | 'U' | 'x') {
-                    return Err(format!(
-                        "Java embedded regex flag '{flag}' is unsupported because PCRE2's behavior differs"
-                    ));
-                }
-                if !matches!(flag, 'm' | 's' | '-') {
-                    return Err(format!(
-                        "PCRE2 regex flag or group marker '{flag}' is not valid supported Java Pattern syntax"
-                    ));
-                }
-                j += 1;
             }
         }
         i += 1;
     }
-    Ok(())
+    translated
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GroupKind {
+    Regular,
+    Lookbehind,
+}
+
+fn scan_java_group(chars: &[char], start: usize) -> Result<(GroupKind, usize), String> {
+    if chars.get(start + 1) != Some(&'?') {
+        if chars.get(start + 1) == Some(&'*') {
+            return Err("group construct is outside the supported Java-compatible subset".into());
+        }
+        return Ok((GroupKind::Regular, start + 1));
+    }
+    match (chars.get(start + 2), chars.get(start + 3)) {
+        (Some(':' | '=' | '!' | '>'), _) => Ok((GroupKind::Regular, start + 3)),
+        (Some('<'), Some('=' | '!')) => Ok((GroupKind::Lookbehind, start + 4)),
+        (Some('<'), _) => {
+            let mut i = start + 3;
+            if !chars.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
+                return Err("Java named groups must start with a Latin letter".into());
+            }
+            i += 1;
+            while chars.get(i).is_some_and(|c| c.is_ascii_alphanumeric()) {
+                i += 1;
+            }
+            if chars.get(i) != Some(&'>') {
+                return Err("invalid Java named-group syntax".into());
+            }
+            Ok((GroupKind::Regular, i + 1))
+        }
+        _ => Err("group construct is outside the supported Java-compatible subset".into()),
+    }
+}
+
+fn scan_java_class(chars: &[char], mut i: usize) -> Result<usize, String> {
+    if chars.get(i) == Some(&'^') {
+        i += 1;
+    }
+    if chars.get(i) == Some(&']') {
+        i += 1;
+    }
+    while let Some(&c) = chars.get(i) {
+        match c {
+            ']' => return Ok(i + 1),
+            '[' => {
+                return Err(
+                    "nested Java character classes are outside the supported subset".into(),
+                );
+            }
+            '&' if chars.get(i + 1) == Some(&'&') => {
+                return Err(
+                    "Java character-class intersection is outside the supported subset".into(),
+                );
+            }
+            '\\' => i = scan_java_escape(chars, i, true, false)?,
+            _ => i += 1,
+        }
+    }
+    Ok(i) // PCRE2 reports the unclosed class.
+}
+
+fn scan_java_escape(
+    chars: &[char],
+    start: usize,
+    in_class: bool,
+    in_lookbehind: bool,
+) -> Result<usize, String> {
+    let Some(&escaped) = chars.get(start + 1) else {
+        return Ok(start + 1); // PCRE2 reports the trailing slash.
+    };
+    if escaped.is_ascii_digit() {
+        if in_class
+            || in_lookbehind
+            || escaped == '0'
+            || chars.get(start + 2).is_some_and(char::is_ascii_digit)
+        {
+            return Err("only unambiguous single-digit Java backreferences are supported".into());
+        }
+        return Ok(start + 2);
+    }
+    if escaped == 'k' && !in_class {
+        if in_lookbehind {
+            return Err("backreferences in lookbehind are outside the supported subset".into());
+        }
+        let mut i = start + 2;
+        if chars.get(i) != Some(&'<') {
+            return Err("only Java's \\k<name> named-backreference syntax is supported".into());
+        }
+        i += 1;
+        if !chars.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
+            return Err("invalid Java named backreference".into());
+        }
+        i += 1;
+        while chars.get(i).is_some_and(|c| c.is_ascii_alphanumeric()) {
+            i += 1;
+        }
+        if chars.get(i) != Some(&'>') {
+            return Err("invalid Java named backreference".into());
+        }
+        return Ok(i + 1);
+    }
+    if escaped == 'x' {
+        let end = start + 4;
+        if chars
+            .get(start + 2..end)
+            .is_none_or(|digits| digits.len() != 2 || !digits.iter().all(char::is_ascii_hexdigit))
+        {
+            return Err("only Java's two-digit \\xhh escape is supported".into());
+        }
+        return Ok(end);
+    }
+    let allowed_alpha = if in_class {
+        "tnrfaedDsSwWb"
+    } else {
+        "tnrfaedDsSwWAz"
+    };
+    if escaped.is_alphanumeric()
+        && !(escaped.is_ascii_alphabetic() && allowed_alpha.contains(escaped))
+    {
+        return Err(format!(
+            "Java alphabetic escape \\{escaped} is outside the supported subset"
+        ));
+    }
+    Ok(start + 2)
+}
+
+fn scan_java_quantifier(chars: &[char], start: usize) -> Result<usize, String> {
+    let mut i = start + 1;
+    let lower_start = i;
+    while chars.get(i).is_some_and(char::is_ascii_digit) {
+        i += 1;
+    }
+    if i == lower_start {
+        return Err("Java counted quantifiers require a lower bound".into());
+    }
+    if chars.get(i) == Some(&',') {
+        i += 1;
+        while chars.get(i).is_some_and(char::is_ascii_digit) {
+            i += 1;
+        }
+    }
+    if chars.get(i) != Some(&'}') {
+        return Err("invalid Java counted quantifier".into());
+    }
+    i += 1;
+    if chars
+        .get(i)
+        .is_some_and(|suffix| matches!(suffix, '?' | '+'))
+    {
+        i += 1;
+    }
+    Ok(i)
 }
 
 fn is_regex_meta(c: char) -> bool {
@@ -547,19 +716,30 @@ mod tests {
         assert!(ranged_class.matches(Path::new("/srv/safe.secret")));
         assert!(ranged_class.matches(Path::new("/srv/safe0secret")));
         assert!(!ranged_class.matches(Path::new("/srv/safe/secret")));
+
+        // OpenJDK treats a leading '^' as a literal, not negation, and still
+        // intersects the positive class with the separator's complement.
+        let caret_class = PathAllowList::new(vec![ConfigEntry::glob("/srv/safe[^.-0]secret")]);
+        assert!(caret_class.matches(Path::new("/srv/safe^secret")));
+        assert!(caret_class.matches(Path::new("/srv/safe.secret")));
+        assert!(!caret_class.matches(Path::new("/srv/safe/secret")));
     }
 
     #[test]
     fn windows_glob_conversion_is_testable_on_every_build_host() {
-        let expression = glob_to_regex("C:/safe[!-~]secret", true).unwrap();
-        let expression = format!(r"(*ANY)\A(?:{expression})\z");
         let mut builder = RegexBuilder::new();
         builder.utf(true).ucp(false).caseless(true);
-        let regex = builder.build(&expression).unwrap();
+        for (glob, matching_path) in [
+            ("C:/safe[!-~]secret", &br"C:\safe-secret"[..]),
+            ("C:/safe[^[-^]secret", &br"C:\safe[secret"[..]),
+        ] {
+            let expression = glob_to_regex(glob, true).unwrap();
+            let expression = format!(r"(*ANY)\A(?:{expression})\z");
+            let regex = builder.build(&expression).unwrap();
 
-        assert!(regex.is_match(br"C:\safe.secret").unwrap());
-        assert!(regex.is_match(br"c:\SAFE0secret").unwrap());
-        assert!(!regex.is_match(br"C:\safe\secret").unwrap());
+            assert!(regex.is_match(matching_path).unwrap());
+            assert!(!regex.is_match(br"C:\safe\secret").unwrap());
+        }
     }
 
     #[cfg(windows)]
@@ -599,6 +779,8 @@ mod tests {
         assert!(list.matches(Path::new("/srv/alice")));
         assert!(!list.matches(Path::new("/srv/alice\rbob")));
         assert!(!list.matches(Path::new("/srv/alice\u{2028}bob")));
+        assert!(list.matches(Path::new("/srv/alice\u{000b}bob")));
+        assert!(list.matches(Path::new("/srv/alice\u{000c}bob")));
     }
 
     #[test]
@@ -642,12 +824,81 @@ mod tests {
     }
 
     #[test]
+    fn regex_accepts_only_the_supported_java_pattern_subset() {
+        for pattern in [
+            r"/srv/([a-z]+)/\1",
+            r"/srv/(?<name>[a-z]+)/\k<name>",
+            r"(?=/srv/)(?!.*forbidden).+",
+            r"/srv/[a-z]+(?<=alice)",
+            r"/srv/a{1,3}+",
+            r"/srv/\x61+",
+        ] {
+            ConfigEntry::regex(pattern).compile().unwrap();
+        }
+        assert!(
+            PathAllowList::new(vec![ConfigEntry::regex(r"/srv/a{1,3}+")])
+                .matches(Path::new("/srv/aaa"))
+        );
+        assert!(
+            PathAllowList::new(vec![ConfigEntry::regex(r"/srv/\x61+")])
+                .matches(Path::new("/srv/aaa"))
+        );
+
+        for pattern in [
+            r"(?#comment)",
+            r"a{,3}",
+            r"(?i:a)",
+            r"(?R)",
+            r"(?1)",
+            r"(?(1)a|b)",
+            r"(?|a|b)",
+            r"(?P<name>a)",
+            r"(?'name'a)",
+            r"(*ACCEPT)",
+            r"\C",
+            r"\K",
+            r"\g{name}",
+            r"\o{141}",
+            r"\R",
+            r"\X",
+            r"\Qquoted\E",
+            r"\bword\b",
+            r"[[:alpha:]]",
+            r"[a-z&&[^m-p]]",
+            r"\p{javaLowerCase}",
+            r"a^b",
+            r"a{1, 3}",
+            r"(a)\10",
+            r"(?<=a+)b",
+        ] {
+            assert!(
+                ConfigEntry::regex(pattern).compile().is_err(),
+                "unexpectedly accepted {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn regex_rejections_disable_the_whole_allow_list() {
+        for invalid in [r"/srv/ok(?#comment)", r"/srv/a{,3}"] {
+            let list = PathAllowList::new(vec![
+                ConfigEntry::prefix("/otherwise/allowed"),
+                ConfigEntry::regex(invalid),
+            ]);
+            assert!(!list.matches(Path::new("/otherwise/allowed")));
+            assert!(!list.matches(Path::new("/srv/ok")));
+            assert!(!list.matches(Path::new("/srv/")));
+            assert!(!list.matches(Path::new("/srv/a")));
+        }
+    }
+
+    #[test]
     fn regex_rejects_java_syntax_with_different_pcre2_meaning() {
         assert!(
             ConfigEntry::regex(r"(?U)\w+")
                 .compile()
                 .unwrap_err()
-                .contains("embedded regex flag 'U'")
+                .contains("group construct")
         );
         assert!(
             ConfigEntry::regex(r"[a-z&&[^m-p]]+")
@@ -659,19 +910,19 @@ mod tests {
             ConfigEntry::regex(r"\p{javaLowerCase}+")
                 .compile()
                 .unwrap_err()
-                .contains("Unicode property syntax differs")
+                .contains("outside the supported subset")
         );
         assert!(
             ConfigEntry::regex(r"(*ACCEPT)")
                 .compile()
                 .unwrap_err()
-                .contains("control verbs")
+                .contains("group construct")
         );
         assert!(
             ConfigEntry::regex(r"\C+")
                 .compile()
                 .unwrap_err()
-                .contains("not valid Java Pattern syntax")
+                .contains("outside the supported subset")
         );
     }
 
