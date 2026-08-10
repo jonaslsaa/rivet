@@ -425,17 +425,32 @@ fn prepare_run_dir(
         patch_server_port(&properties, port)?;
     }
     if kind == ServerKind::Paper {
-        if let Some(src) = world_defaults_src {
-            // The deterministic world-defaults must be installed into the
-            // server's `config/` dir so Paper merges them into
-            // `paper-world-defaults.yml` on boot. Overwrite unconditionally:
-            // the run dir may already hold a stale copy (from a prior boot, or
-            // Paper-generated defaults with the vanilla spawn limits intact),
-            // and only the pinned fixture is deterministic.
-            let config_dir = run_dir.join("config");
-            fs::create_dir_all(&config_dir)?;
-            fs::copy(src, config_dir.join("paper-world-defaults.yml"))?;
-        }
+        // The deterministic world-defaults are load-bearing for every Paper
+        // boot: without the pinned spawn-limits (all seven categories at 0), a
+        // fresh world re-enables natural spawning and the sampled walk (and
+        // `last_sent`) becomes nondeterministic — the issue #333 failure mode.
+        // Requiring the source here (not silently skipping on `None`) makes the
+        // invariant enforceable: a future Paper boot site that forgets to
+        // resolve the fixture fails UNVERIFIED instead of booting nondeterministic.
+        let world_defaults_src = world_defaults_src.ok_or_else(|| {
+            Error::Unverified(
+                "a Paper boot requires the pinned config/paper-world-defaults.yml source \
+                 (issue #266/#333): without it the spawn-limits stay at the vanilla defaults and \
+                 the sampled walk is nondeterministic"
+                    .to_owned(),
+            )
+        })?;
+        // Install into the server's `config/` dir so Paper merges them into
+        // `paper-world-defaults.yml` on boot. Overwrite unconditionally: the
+        // run dir may already hold a stale copy (from a prior boot, or
+        // Paper-generated defaults with the vanilla spawn limits intact), and
+        // only the pinned fixture is deterministic.
+        let config_dir = run_dir.join("config");
+        fs::create_dir_all(&config_dir)?;
+        fs::copy(
+            world_defaults_src,
+            config_dir.join("paper-world-defaults.yml"),
+        )?;
         // Paper refuses to boot without eula=true.
         fs::write(run_dir.join("eula.txt"), EULA)?;
     }
@@ -1056,8 +1071,10 @@ mod tests {
         // A stale materialized jar from a *prior* boot (e.g. the pinned commit).
         let stale = make_jar(&dir.join("versions/26.2"), Some("0a99345"));
         fs::rename(&stale, dir.join("versions/26.2/paper-26.2.jar")).unwrap();
+        let src = temp_world_defaults_src("wipe");
+        fs::write(&src, b"spawn-limits:\n").unwrap();
 
-        prepare_run_dir(&dir, ServerKind::Paper, None, None, 25599).unwrap();
+        prepare_run_dir(&dir, ServerKind::Paper, None, Some(&src), 25599).unwrap();
 
         assert!(
             !dir.join("versions").exists(),
@@ -1068,6 +1085,34 @@ mod tests {
             "libraries/ must be preserved"
         );
         assert!(dir.join("cache").is_dir(), "cache/ must be preserved");
+        assert!(
+            dir.join("config/paper-world-defaults.yml").is_file(),
+            "the pinned world-defaults must be installed on every Paper boot"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+        let _ = fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    /// A Paper boot with no world-defaults source must fail UNVERIFIED, never
+    /// silently boot with the vanilla spawn-limits: without the pinned fixture
+    /// the sampled walk is nondeterministic (issue #333), so skipping the
+    /// install is the same defect the guard exists to prevent. The message must
+    /// name the required fixture.
+    #[test]
+    fn prepare_run_dir_paper_requires_world_defaults_source() {
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-wdreq-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let err = prepare_run_dir(&dir, ServerKind::Paper, None, None, 25599).unwrap_err();
+        assert!(
+            matches!(err, Error::Unverified(_)),
+            "a Paper boot without the world-defaults source must be UNVERIFIED, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("paper-world-defaults.yml"),
+            "the Unverified error must name the required fixture, got {err}"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
