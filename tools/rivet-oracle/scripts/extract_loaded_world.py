@@ -395,9 +395,9 @@ def cmd_verify(source: Path) -> int:
 
 def guard_scratch_path(scratch: Path) -> None:
     """Refuse to rmtree a --scratch that overlaps the committed fixtures dir or
-    resolves to a broad/system path (filesystem root, the home tree, the temp
-    dir root, or the current working directory), so a typo'd flag can never
-    destroy the corpus, the repo, or the machine."""
+    resolves to a broad/system path or an ancestor of one (filesystem root, the
+    home tree, the current working directory, or the temp dir), so a typo'd
+    flag can never destroy the corpus, the repo, or the machine."""
     sc = scratch.resolve()
     fs = FIXTURES_DIR.resolve()
     cwd = Path.cwd().resolve()
@@ -408,16 +408,50 @@ def guard_scratch_path(scratch: Path) -> None:
             f"REFUSED: --scratch {scratch} overlaps the committed fixtures dir "
             f"{FIXTURES_DIR} — pick a separate scratch path"
         )
-    if sc == cwd:
+    if (
+        len(sc.parts) == 1
+        or home.is_relative_to(sc)
+        or cwd.is_relative_to(sc)
+        or temp_root.is_relative_to(sc)
+    ):
         raise SystemExit(
-            f"REFUSED: --scratch {scratch} is the current working directory "
-            f"({cwd}) — pick a dedicated scratch path"
+            f"REFUSED: --scratch {scratch} is a broad/system path or an ancestor "
+            f"of one — pick a dedicated scratch path"
         )
-    if len(sc.parts) == 1 or home.is_relative_to(sc) or sc == temp_root:
-        raise SystemExit(
-            f"REFUSED: --scratch {scratch} is a broad/system path — pick a "
-            f"dedicated scratch path"
-        )
+
+
+def cmd_guard_check() -> int:
+    """Hostile guard test: guard_scratch_path must refuse every broad/system
+    path (filesystem root, home, cwd and all its ancestors, the temp root and
+    all its ancestors, and the fixtures dir) BEFORE any deletion, and must
+    accept a dedicated scratch under the temp root. Pure guard logic — never
+    touches the source world, the fixtures, or the filesystem."""
+    fs = FIXTURES_DIR.resolve()
+    cwd = Path.cwd().resolve()
+    home = Path.home().resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
+
+    hostile: list[Path] = [fs, home, cwd, temp_root]
+    p = cwd.parent
+    while p != p.parent:
+        hostile.append(p)
+        p = p.parent
+    p = temp_root.parent
+    while p != p.parent:
+        hostile.append(p)
+        p = p.parent
+
+    for sc in hostile:
+        try:
+            guard_scratch_path(sc)
+        except SystemExit:
+            continue
+        raise SystemExit(f"FAIL: guard accepted hostile scratch path {sc}")
+
+    guard_scratch_path(temp_root / "rivet-lw-guard-ok")
+    print("guard: refuses root, home, cwd + ancestors, temp-root + ancestors, fixtures overlap: OK")
+    print("guard: accepts a dedicated scratch under the temp root: OK")
+    return 0
 
 
 def cmd_expect_fail(source: Path, scratch: Path) -> int:
@@ -519,8 +553,15 @@ def main() -> int:
         default=Path("/tmp/rivet-loaded-world-control"),
         help="scratch dir for the --expect-fail negative control",
     )
+    ap.add_argument(
+        "--guard-check",
+        action="store_true",
+        help="hostile guard test: prove broad/system --scratch paths are refused before deletion",
+    )
     args = ap.parse_args()
 
+    if args.guard_check:
+        return cmd_guard_check()
     if args.expect_fail:
         return cmd_expect_fail(args.source, args.scratch)
     if args.verify:
