@@ -73,8 +73,9 @@
 //! - `load-world` (#316 independent harness slice): resolve the known local
 //!   Minecraft 26.2 save, fingerprint it, create and verify a deterministic
 //!   disposable copy, and pass only that copy through Rivet's future
-//!   `--level <path>` seam. The source and copy are re-fingerprinted and the
-//!   copy is removed on every probe outcome. Until #339 supplies the server
+//!   `--level <path>` seam. The retained source and copy are re-fingerprinted
+//!   and ordinary-operation cleanup removes the copy on every probe outcome.
+//!   Until #339 supplies the server
 //!   world-path/loading capability and real official-client acceptance, the
 //!   command returns UNVERIFIED (exit 3), never a placeholder PASS.
 //!
@@ -2587,13 +2588,14 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
 fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-loaded-world");
-    let source = load_world::resolve_source_world()?;
+    let source_path = load_world::resolve_source_world()?;
+    let source = load_world::SourceTree::open(&source_path)?;
     // Resolve the prospective destination and reject both containment
     // directions before create_dir_all or any other filesystem mutation.
     load_world::validate_prospective_storage(&source, &work)?;
     fs::create_dir_all(&work)?;
 
-    let source_before = load_world::hash_tree(&source)?;
+    let source_before = source.fingerprint()?;
     let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
     let base = base_address(args)?;
     let run_dir = work.join("rivet");
@@ -2606,7 +2608,7 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
         println!("rivet scenario runner: load-world (#316 independent harness slice)");
         println!(
             "    source world      : {} (read only; never passed to a server)",
-            source.display()
+            source.configured_path().display()
         );
         println!("    disposable copy  : {}", temp.path().display());
         println!("    rivet-server bin : {}", rivet_bin.display());
@@ -2647,8 +2649,7 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     let copy_check = temp
         .hash_tree()
         .and_then(|after| load_world::assert_copy_equals_source(&source_before, &after));
-    let source_check = load_world::hash_tree(&source)
-        .and_then(|after| load_world::assert_source_unchanged(&source_before, &after));
+    let source_check = source.verify_unchanged(&source_before);
     let cleanup = temp.cleanup();
 
     source_check?;

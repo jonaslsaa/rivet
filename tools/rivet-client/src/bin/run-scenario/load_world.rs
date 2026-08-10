@@ -4,14 +4,17 @@
 //! This module owns the acceptance-harness machinery that is independent of the
 //! server's world-loading capability:
 //!
-//! - resolving the known local Minecraft 26.2 world (the launcher-created
-//!   save, overridable via `RIVET_WORLD_SRC`);
+//! - resolving and opening the known local Minecraft 26.2 world once (the
+//!   launcher-created save, overridable via `RIVET_WORLD_SRC`), rejecting
+//!   symlinks in every configured path component and retaining that identity;
 //! - copying it beneath a fresh private disposable directory ([`TempWorld`]),
 //!   refusing symlinks and retaining a directory handle so pathname replacement
 //!   cannot redirect the server to the source;
-//! - asserting the copy is byte-faithful to the source and that two non-atomic
-//!   pre/post source snapshots match. This detects differences visible in
-//!   those snapshots; it cannot prove that no transient write occurred;
+//! - asserting the copy is byte-faithful to that retained source and that two
+//!   non-atomic pre/post source snapshots match, then proving the visible
+//!   configured root still resolves without symlinks to the retained identity.
+//!   This detects differences visible in those snapshots; it cannot prove that
+//!   no transient write occurred;
 //!
 //! It deliberately does NOT parse `level.dat`, check `DataVersion`, or read
 //! Anvil region files — those belong to #323 (level validation) and #231
@@ -82,23 +85,14 @@ fn default_world_src(home: &Path) -> PathBuf {
         .join(LAUNCHER_WORLD_NAME)
 }
 
-/// Resolve the source world from an optional override path and a home
-/// directory (pure, so tests exercise the override/default/missing branches
-/// without touching the process env).
+/// Select the configured source path from an optional override and home
+/// directory without opening it. [`SourceTree::open`] owns the single source
+/// validation/open and classifies a missing root as UNVERIFIED.
 fn resolve_from(override_path: Option<&Path>, home: &Path) -> Result<PathBuf, Error> {
-    let p = match override_path {
+    Ok(match override_path {
         Some(p) => p.to_path_buf(),
         None => default_world_src(home),
-    };
-    if p.is_dir() {
-        Ok(p)
-    } else {
-        Err(Error::Unverified(format!(
-            "Minecraft 26.2 world not found at {} — set RIVET_WORLD_SRC to point at a world \
-             save directory",
-            p.display()
-        )))
-    }
+    })
 }
 
 /// Resolve the known local Minecraft 26.2 world: `RIVET_WORLD_SRC` wins, then
@@ -190,13 +184,54 @@ fn file_type(fd: &impl AsFd) -> io::Result<FileType> {
 }
 
 #[cfg(unix)]
-fn open_root(path: &Path) -> Result<OwnedFd, Error> {
-    let fd = rustix::fs::open(
+fn open_root_no_symlinks(path: &Path) -> Result<OwnedFd, Error> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let fd = rustix::fs::openat2(
+        rustix::fs::CWD,
         path,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
+        rustix::fs::ResolveFlags::NO_SYMLINKS | rustix::fs::ResolveFlags::NO_MAGICLINKS,
     )
     .map_err(io::Error::from)?;
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let fd = {
+        use std::path::Component;
+
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let mut current = rustix::fs::open(
+            "/",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?;
+        for component in absolute.components() {
+            match component {
+                Component::RootDir | Component::CurDir => {}
+                Component::Normal(name) => {
+                    current = rustix::fs::openat(
+                        &current,
+                        name,
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(io::Error::from)?;
+                }
+                Component::ParentDir | Component::Prefix(_) => {
+                    return Err(Error::Gate(format!(
+                        "source world {} must not contain parent-directory components",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        current
+    };
     if file_type(&fd)? != FileType::Directory {
         return Err(Error::Gate(format!(
             "{} must be a concrete directory",
@@ -253,13 +288,14 @@ fn hash_tree_fd(root: &OwnedFd) -> Result<Vec<TreeEntry>, Error> {
     Ok(out)
 }
 
-pub fn hash_tree(root: &Path) -> Result<Vec<TreeEntry>, Error> {
+#[cfg(test)]
+fn hash_tree(root: &Path) -> Result<Vec<TreeEntry>, Error> {
     #[cfg(not(unix))]
     return Err(Error::Gate(
         "the loaded-world safety boundary requires Unix directory descriptors".to_owned(),
     ));
     #[cfg(unix)]
-    hash_tree_fd(&open_root(root)?)
+    hash_tree_fd(&open_root_no_symlinks(root)?)
 }
 
 /// Recursively copy `src` into `dst`, refusing symlinks so the copy is a full
@@ -329,9 +365,9 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), Error> {
     ));
     #[cfg(unix)]
     {
-        let source = open_root(src)?;
+        let source = open_root_no_symlinks(src)?;
         fs::create_dir(dst)?;
-        let destination = open_root(dst)?;
+        let destination = open_root_no_symlinks(dst)?;
         copy_tree_fd(&source, &destination, Path::new(""))
     }
 }
@@ -403,23 +439,29 @@ pub fn assert_source_unchanged(before: &[TreeEntry], after: &[TreeEntry]) -> Res
 /// child shutdown. Linux fingerprints and launches through that descriptor;
 /// other Unix platforms retain it as ownership evidence but use the private
 /// path because their fd namespace is not portably directory-traversable.
-/// [`TempWorld::cleanup`] (or [`Drop`]) removes the unique parent only while
-/// its retained storage entry still names the exact device/inode created by
-/// this instance. Path substitution therefore fails closed and leaks the
-/// owned tree instead of recursively deleting an attacker-selected substitute.
+/// [`TempWorld::cleanup`] (or [`Drop`]) revalidates each visible entry against
+/// its retained descriptor immediately before name-based unlink and checks the
+/// retained object's link count afterwards. A substitution observed before
+/// unlink is refused. Portable Unix has no unlink-by-fd, so a malicious
+/// same-uid process can still win the final statat-to-unlinkat race; that race
+/// is detected afterwards when possible but cannot be made damage-free here.
 #[derive(Debug)]
 pub struct TempWorld {
     path: PathBuf,
     #[cfg(unix)]
-    storage_dir: OwnedFd,
-    #[cfg(unix)]
-    parent_dir: OwnedFd,
-    #[cfg(unix)]
-    parent_name: OsString,
-    #[cfg(unix)]
-    parent_identity: Identity,
+    parent: PrivateParent,
     #[cfg(unix)]
     world_dir: OwnedFd,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct PrivateParent {
+    storage_dir: OwnedFd,
+    parent_dir: OwnedFd,
+    parent_name: OsString,
+    parent_identity: Identity,
+    path: PathBuf,
     active: bool,
 }
 
@@ -465,6 +507,102 @@ fn opened_directory_path(fd: &OwnedFd, _original: &Path) -> Result<PathBuf, Erro
     _original.canonicalize().map_err(Error::from)
 }
 
+/// One owned, stable view of the configured source tree.
+///
+/// The configured path is opened exactly once for all source reads. The
+/// retained descriptor supplies both fingerprints and the copy, while the
+/// recorded device/inode is used to reject a visible root replacement before
+/// the final source evidence is accepted.
+#[derive(Debug)]
+pub struct SourceTree {
+    configured_path: PathBuf,
+    #[cfg(unix)]
+    root_dir: OwnedFd,
+    #[cfg(unix)]
+    root_identity: Identity,
+    opened_path: PathBuf,
+}
+
+impl SourceTree {
+    pub fn open(configured_path: &Path) -> Result<Self, Error> {
+        #[cfg(not(unix))]
+        return Err(Error::Gate(
+            "the loaded-world safety boundary requires Unix directory descriptors".to_owned(),
+        ));
+
+        #[cfg(unix)]
+        {
+            let root_dir = match open_root_no_symlinks(configured_path) {
+                Ok(root_dir) => root_dir,
+                Err(Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(Error::Unverified(format!(
+                        "Minecraft 26.2 world not found at {} — set RIVET_WORLD_SRC to point at a world save directory",
+                        configured_path.display()
+                    )));
+                }
+                Err(error) => {
+                    return Err(Error::Gate(format!(
+                        "source world {} could not be opened without following symlinks: {error}",
+                        configured_path.display()
+                    )));
+                }
+            };
+            let root_identity = fd_identity(&root_dir)?;
+            let opened_path =
+                opened_directory_path(&root_dir, configured_path).map_err(|error| {
+                    Error::Gate(format!(
+                        "opened source world {} cannot be resolved: {error}",
+                        configured_path.display()
+                    ))
+                })?;
+            Ok(Self {
+                configured_path: configured_path.to_owned(),
+                root_dir,
+                root_identity,
+                opened_path,
+            })
+        }
+    }
+
+    pub fn configured_path(&self) -> &Path {
+        &self.configured_path
+    }
+
+    pub fn fingerprint(&self) -> Result<Vec<TreeEntry>, Error> {
+        #[cfg(not(unix))]
+        return Err(Error::Gate(
+            "the loaded-world safety boundary requires Unix directory descriptors".to_owned(),
+        ));
+        #[cfg(unix)]
+        hash_tree_fd(&self.root_dir)
+    }
+
+    /// Require both stable contents on the retained descriptor and a visible
+    /// configured root that still opens, without symlinks, as the same object.
+    pub fn verify_unchanged(&self, before: &[TreeEntry]) -> Result<(), Error> {
+        let after = self.fingerprint()?;
+        assert_source_unchanged(before, &after)?;
+
+        #[cfg(unix)]
+        {
+            let visible = open_root_no_symlinks(&self.configured_path).map_err(|error| {
+                Error::Gate(format!(
+                    "configured source root {} no longer resolves without symlinks: {error}",
+                    self.configured_path.display()
+                ))
+            })?;
+            let visible_identity = fd_identity(&visible)?;
+            if visible_identity != self.root_identity {
+                return Err(Error::Gate(format!(
+                    "configured source root {} changed identity during the run",
+                    self.configured_path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn reject_aliasing(source: &Path, destination: &Path) -> Result<(), Error> {
     if source == destination || destination.starts_with(source) || source.starts_with(destination) {
         return Err(Error::Gate(format!(
@@ -480,20 +618,7 @@ fn reject_aliasing(source: &Path, destination: &Path) -> Result<(), Error> {
 /// ancestor, then reject equality and containment in either direction. This
 /// function is deliberately mutation-free so callers can run it before
 /// `create_dir_all`.
-pub fn validate_prospective_storage(source: &Path, storage: &Path) -> Result<(), Error> {
-    if fs::symlink_metadata(source)?.file_type().is_symlink() {
-        return Err(Error::Gate(format!(
-            "source world {} is a symlink; the harness requires a concrete directory",
-            source.display()
-        )));
-    }
-    let source_abs = source.canonicalize().map_err(|error| {
-        Error::Gate(format!(
-            "source world {} is not readable: {error}",
-            source.display()
-        ))
-    })?;
-
+pub fn validate_prospective_storage(source: &SourceTree, storage: &Path) -> Result<(), Error> {
     let mut existing = storage;
     let mut missing = Vec::new();
     while !existing.exists() {
@@ -520,7 +645,7 @@ pub fn validate_prospective_storage(source: &Path, storage: &Path) -> Result<(),
     for component in missing.iter().rev() {
         prospective.push(component);
     }
-    reject_aliasing(&source_abs, &prospective)
+    reject_aliasing(&source.opened_path, &prospective)
 }
 
 #[cfg(unix)]
@@ -538,18 +663,52 @@ fn random_parent_name() -> Result<OsString, Error> {
 }
 
 #[cfg(unix)]
-fn create_private_parent(storage: &OwnedFd) -> Result<(OsString, OwnedFd), Error> {
+fn create_private_parent(storage: OwnedFd, storage_path: &Path) -> Result<PrivateParent, Error> {
     for _ in 0..128 {
         let name = random_parent_name()?;
-        match rustix::fs::mkdirat(storage, &name, Mode::from_raw_mode(0o700)) {
+        match rustix::fs::mkdirat(&storage, &name, Mode::from_raw_mode(0o700)) {
             Ok(()) => {
                 // Open the newly-created single component relative to storage;
                 // never resolve it again through the storage pathname.
                 let c_name = std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| {
                     Error::Gate("generated private-directory name contained NUL".to_owned())
                 })?;
-                let fd = open_child(storage, &c_name, OFlags::RDONLY | OFlags::DIRECTORY)?;
-                return Ok((name, fd));
+                match open_child(&storage, &c_name, OFlags::RDONLY | OFlags::DIRECTORY) {
+                    Ok(parent_dir) => match fd_identity(&parent_dir) {
+                        Ok(parent_identity) => {
+                            let path = storage_path.join(&name);
+                            return Ok(PrivateParent {
+                                storage_dir: storage,
+                                parent_dir,
+                                parent_name: name,
+                                parent_identity,
+                                path,
+                                active: true,
+                            });
+                        }
+                        Err(identity_error) => {
+                            let cleanup =
+                                rustix::fs::unlinkat(&storage, &c_name, AtFlags::REMOVEDIR)
+                                    .map_err(io::Error::from);
+                            return match cleanup {
+                                Ok(()) => Err(identity_error.into()),
+                                Err(cleanup_error) => Err(Error::Gate(format!(
+                                    "identifying a newly-created private parent failed ({identity_error}) and immediate cleanup failed ({cleanup_error})"
+                                ))),
+                            };
+                        }
+                    },
+                    Err(open_error) => {
+                        let cleanup = rustix::fs::unlinkat(&storage, &c_name, AtFlags::REMOVEDIR)
+                            .map_err(io::Error::from);
+                        return match cleanup {
+                            Ok(()) => Err(open_error.into()),
+                            Err(cleanup_error) => Err(Error::Gate(format!(
+                                "opening a newly-created private parent failed ({open_error}) and immediate cleanup failed ({cleanup_error})"
+                            ))),
+                        };
+                    }
+                }
             }
             Err(rustix::io::Errno::EXIST) => continue,
             Err(error) => return Err(io::Error::from(error).into()),
@@ -564,6 +723,39 @@ fn create_private_parent(storage: &OwnedFd) -> Result<(OsString, OwnedFd), Error
 fn entry_identity(dir: &OwnedFd, name: &CStr) -> io::Result<(Identity, FileType)> {
     let stat = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
     Ok((identity(&stat), FileType::from_raw_mode(stat.st_mode)))
+}
+
+#[cfg(unix)]
+fn link_count(fd: &impl AsFd) -> io::Result<u64> {
+    rustix::fs::fstat(fd)
+        .map(|stat| u64::from(stat.st_nlink))
+        .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn verify_unlink_affected_opened_entry(
+    parent: &OwnedFd,
+    name: &CStr,
+    child: &OwnedFd,
+    links_before: u64,
+    relative: &Path,
+    expect_link_count_change: bool,
+) -> Result<(), Error> {
+    let links_after = link_count(child)?;
+    if expect_link_count_change && links_after >= links_before {
+        return Err(Error::Gate(format!(
+            "cleanup unlink did not remove the retained identity for {}; a same-uid substitution may have won the residual statat-to-unlinkat race",
+            relative.display()
+        )));
+    }
+    match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => Ok(()),
+        Ok(_) => Err(Error::Gate(format!(
+            "cleanup name {} reappeared after unlink; concurrent same-uid mutation prevents cleanup certification",
+            relative.display()
+        ))),
+        Err(error) => Err(io::Error::from(error).into()),
+    }
 }
 
 #[cfg(unix)]
@@ -592,23 +784,24 @@ fn remove_owned_tree(dir: &OwnedFd, relative: &Path) -> Result<(), Error> {
         })?;
         let expected = fd_identity(&child)?;
         let kind = file_type(&child)?;
+        let links_before = link_count(&child)?;
         if kind == FileType::Directory {
             remove_owned_tree(&child, &rel)?;
         } else if kind != FileType::RegularFile {
             return Err(Error::Gate(format!(
-                "cleanup refused non-regular entry {}; leaking the private tree",
+                "cleanup refused non-regular entry {}; preserving the private tree",
                 rel.display()
             )));
         }
         let (visible, visible_kind) = entry_identity(dir, &name).map_err(|error| {
             Error::Gate(format!(
-                "cleanup could not revalidate {}: {error}; leaking the private tree",
+                "cleanup could not revalidate {}: {error}; preserving the private tree",
                 rel.display()
             ))
         })?;
         if visible != expected || visible_kind != kind {
             return Err(Error::Gate(format!(
-                "cleanup identity changed for {}; leaking the private tree",
+                "cleanup identity changed for {}; preserving the private tree",
                 rel.display()
             )));
         }
@@ -622,18 +815,93 @@ fn remove_owned_tree(dir: &OwnedFd, relative: &Path) -> Result<(), Error> {
             },
         )
         .map_err(io::Error::from)?;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let expect_link_count_change = true;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let expect_link_count_change = kind == FileType::RegularFile;
+        verify_unlink_affected_opened_entry(
+            dir,
+            &name,
+            &child,
+            links_before,
+            &rel,
+            expect_link_count_change,
+        )?;
     }
     Ok(())
 }
 
+#[cfg(unix)]
+impl PrivateParent {
+    fn cleanup(&mut self) -> Result<(), Error> {
+        if !self.active {
+            return Ok(());
+        }
+        let c_name = std::ffi::CString::new(self.parent_name.as_encoded_bytes())
+            .map_err(|_| Error::Gate("private-directory name contained NUL".to_owned()))?;
+        let (visible, kind) = entry_identity(&self.storage_dir, &c_name).map_err(|error| {
+            Error::Gate(format!(
+                "cleanup cannot revalidate {}: {error}; preserving the owned tree",
+                self.path.display()
+            ))
+        })?;
+        if visible != self.parent_identity || kind != FileType::Directory {
+            return Err(Error::Gate(format!(
+                "cleanup identity changed for {}; preserving the owned tree rather than traversing a substitute",
+                self.path.display()
+            )));
+        }
+        remove_owned_tree(&self.parent_dir, Path::new(""))?;
+        let (visible, kind) = entry_identity(&self.storage_dir, &c_name).map_err(|error| {
+            Error::Gate(format!(
+                "cleanup cannot revalidate private parent after emptying it: {error}; preserving it"
+            ))
+        })?;
+        if visible != self.parent_identity || kind != FileType::Directory {
+            return Err(Error::Gate(
+                "cleanup private-parent identity changed; preserving the owned tree rather than traversing a substitute"
+                    .to_owned(),
+            ));
+        }
+        let links_before = link_count(&self.parent_dir)?;
+        rustix::fs::unlinkat(&self.storage_dir, &c_name, AtFlags::REMOVEDIR)
+            .map_err(io::Error::from)?;
+        verify_unlink_affected_opened_entry(
+            &self.storage_dir,
+            &c_name,
+            &self.parent_dir,
+            links_before,
+            &self.path,
+            cfg!(any(target_os = "linux", target_os = "android")),
+        )?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PrivateParent {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
 impl TempWorld {
-    /// Create a fresh disposable copy of `source` beneath `storage`.
+    /// Create a fresh disposable copy of the retained `source` beneath `storage`.
     ///
     /// Canonical equality and containment are rejected in both directions
     /// before the first filesystem mutation. This is essential when an
     /// override accidentally points inside the harness storage directory: no
     /// cleanup or setup may then touch the source.
-    pub fn create(source: &Path, storage: &Path) -> Result<Self, Error> {
+    pub fn create(source: &SourceTree, storage: &Path) -> Result<Self, Error> {
+        Self::create_inner(source, storage, false)
+    }
+
+    fn create_inner(
+        source: &SourceTree,
+        storage: &Path,
+        inject_failure_after_parent: bool,
+    ) -> Result<Self, Error> {
         #[cfg(not(unix))]
         return Err(Error::Gate(
             "the loaded-world safety boundary requires Unix directory descriptors".to_owned(),
@@ -666,30 +934,28 @@ impl TempWorld {
                     storage.display()
                 ))
             })?;
-            let source_dir = open_root(source)?;
-            let opened_source = opened_directory_path(&source_dir, source).map_err(|error| {
-                Error::Gate(format!(
-                    "opened source world {} cannot be resolved: {error}",
-                    source.display()
-                ))
-            })?;
-            reject_aliasing(&opened_source, &storage_abs)?;
-            let (parent_name, parent_dir) = create_private_parent(&storage_dir)?;
-            let parent_identity = fd_identity(&parent_dir)?;
-            rustix::fs::mkdirat(&parent_dir, "world", Mode::from_raw_mode(0o700))
+            reject_aliasing(&source.opened_path, &storage_abs)?;
+            let parent = create_private_parent(storage_dir, &storage_abs)?;
+            let parent_path = parent.path.clone();
+            if inject_failure_after_parent {
+                return Err(Error::Gate(
+                    "injected failure after private-parent creation".to_owned(),
+                ));
+            }
+            rustix::fs::mkdirat(&parent.parent_dir, "world", Mode::from_raw_mode(0o700))
                 .map_err(io::Error::from)?;
-            let world_dir = open_child(&parent_dir, c"world", OFlags::RDONLY | OFlags::DIRECTORY)?;
-            let world_path = storage_abs.join(&parent_name).join("world");
+            let world_dir = open_child(
+                &parent.parent_dir,
+                c"world",
+                OFlags::RDONLY | OFlags::DIRECTORY,
+            )?;
+            let world_path = parent_path.join("world");
             let mut temp = Self {
                 path: world_path,
-                storage_dir,
-                parent_dir,
-                parent_name,
-                parent_identity,
+                parent,
                 world_dir,
-                active: true,
             };
-            if let Err(error) = copy_tree_fd(&source_dir, &temp.world_dir, Path::new("")) {
+            if let Err(error) = copy_tree_fd(&source.root_dir, &temp.world_dir, Path::new("")) {
                 if let Err(cleanup_error) = temp.cleanup() {
                     return Err(Error::Gate(format!(
                         "world copy failed ({error}) and identity-safe partial-copy cleanup also failed: {cleanup_error}"
@@ -732,41 +998,9 @@ impl TempWorld {
 
     /// Deterministically remove the copy. Idempotent.
     pub fn cleanup(&mut self) -> Result<(), Error> {
-        if !self.active {
-            return Ok(());
-        }
         #[cfg(unix)]
-        {
-            let c_name = std::ffi::CString::new(self.parent_name.as_encoded_bytes())
-                .map_err(|_| Error::Gate("private-directory name contained NUL".to_owned()))?;
-            let (visible, kind) = entry_identity(&self.storage_dir, &c_name).map_err(|error| {
-                Error::Gate(format!(
-                    "cleanup cannot revalidate {}: {error}; leaking the private tree",
-                    self.path.parent().unwrap().display()
-                ))
-            })?;
-            if visible != self.parent_identity || kind != FileType::Directory {
-                return Err(Error::Gate(format!(
-                    "cleanup identity changed for {}; leaking the private tree rather than deleting a substitute",
-                    self.path.parent().unwrap().display()
-                )));
-            }
-            remove_owned_tree(&self.parent_dir, Path::new(""))?;
-            let (visible, kind) = entry_identity(&self.storage_dir, &c_name).map_err(|error| {
-                Error::Gate(format!(
-                    "cleanup cannot revalidate private parent after emptying it: {error}; leaking it"
-                ))
-            })?;
-            if visible != self.parent_identity || kind != FileType::Directory {
-                return Err(Error::Gate(
-                    "cleanup private-parent identity changed; leaking it rather than deleting a substitute"
-                        .to_owned(),
-                ));
-            }
-            rustix::fs::unlinkat(&self.storage_dir, &c_name, AtFlags::REMOVEDIR)
-                .map_err(io::Error::from)?;
-        }
-        self.active = false;
+        return self.parent.cleanup();
+        #[cfg(not(unix))]
         Ok(())
     }
 }
@@ -796,8 +1030,10 @@ mod tests {
     }
 
     fn fixture_world(tag: &str) -> PathBuf {
-        let base =
-            std::env::temp_dir().join(format!("rivet-load-world-{tag}-{}", std::process::id()));
+        let base = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("rivet-load-world-{tag}-{}", std::process::id()));
         let region = base.join("dimensions/minecraft/overworld/region");
         fs::create_dir_all(&region).unwrap();
         fs::write(base.join("level.dat"), [0u8, 1, 2, 3]).unwrap();
@@ -817,10 +1053,21 @@ mod tests {
         ))
     }
 
+    fn source_tree(path: &Path) -> SourceTree {
+        SourceTree::open(path).unwrap()
+    }
+
+    fn temp_world(source: &Path, storage: &Path) -> Result<TempWorld, Error> {
+        TempWorld::create(&SourceTree::open(source)?, storage)
+    }
+
     #[test]
-    fn resolve_from_prefers_the_override_and_rejects_a_missing_world() {
+    fn source_selection_prefers_override_and_open_classifies_missing_world() {
         let world = fixture_world("resolve");
-        let home = std::env::temp_dir().join(format!("rivet-load-home-{}", std::process::id()));
+        let home = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("rivet-load-home-{}", std::process::id()));
 
         // An explicit override pointing at a real world resolves.
         assert_eq!(
@@ -828,16 +1075,19 @@ mod tests {
             world,
             "the override must win over the home default"
         );
-        // An override pointing at nothing is a missing prerequisite (UNVERIFIED).
+        // Selection does no preliminary pathname open. The owned source open
+        // performs the one validation and classifies absence as UNVERIFIED.
         let missing = world.join("does-not-exist");
+        assert_eq!(resolve_from(Some(&missing), &home).unwrap(), missing);
         assert!(matches!(
-            resolve_from(Some(&missing), &home),
+            SourceTree::open(&missing),
             Err(Error::Unverified(_))
         ));
-        // No override: the default launcher path under the fake home is absent,
-        // so the resolution fails as UNVERIFIED rather than guessing a path.
+        // No override selects the documented default without opening it.
+        let default = default_world_src(&home);
+        assert_eq!(resolve_from(None, &home).unwrap(), default);
         assert!(matches!(
-            resolve_from(None, &home),
+            SourceTree::open(&default),
             Err(Error::Unverified(_))
         ));
 
@@ -1015,8 +1265,8 @@ mod tests {
         cleanup(&storage);
         fs::create_dir_all(&storage).unwrap();
 
-        let mut first = TempWorld::create(&src, &storage).unwrap();
-        let mut second = TempWorld::create(&src, &storage).unwrap();
+        let mut first = temp_world(&src, &storage).unwrap();
+        let mut second = temp_world(&src, &storage).unwrap();
         assert_ne!(
             first.path().parent(),
             second.path().parent(),
@@ -1063,14 +1313,14 @@ mod tests {
     fn temp_world_refuses_aliasing_destinations() {
         let src = fixture_world("alias");
         // Storage may not be the source itself, nor nested inside it.
-        let err = TempWorld::create(&src, &src).unwrap_err();
+        let err = temp_world(&src, &src).unwrap_err();
         assert!(
             matches!(err, Error::Gate(_)),
             "self-copy must be refused: {err}"
         );
         let nested = src.join("inner");
         fs::create_dir_all(&nested).unwrap();
-        let err = TempWorld::create(&src, &nested).unwrap_err();
+        let err = temp_world(&src, &nested).unwrap_err();
         assert!(
             matches!(err, Error::Gate(_)),
             "a destination nested in the source must be refused: {err}"
@@ -1084,7 +1334,8 @@ mod tests {
         let storage = src.join("missing/scenario-loaded-world");
         assert!(!storage.exists());
 
-        let err = validate_prospective_storage(&src, &storage).unwrap_err();
+        let source = source_tree(&src);
+        let err = validate_prospective_storage(&source, &storage).unwrap_err();
         assert!(
             matches!(err, Error::Gate(_)) && err.to_string().contains("contained by source"),
             "a missing destination beneath RIVET_WORLD_SRC must be rejected: {err}"
@@ -1097,9 +1348,98 @@ mod tests {
         cleanup(&src);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn source_tree_refuses_a_symlinked_ancestor_component() {
+        let real_parent = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "rivet-load-world-real-parent-{}",
+            std::process::id()
+        ));
+        let alias_parent = real_parent.with_file_name(format!(
+            "rivet-load-world-alias-parent-{}",
+            std::process::id()
+        ));
+        cleanup(&real_parent);
+        cleanup(&alias_parent);
+        let world = real_parent.join("world");
+        fs::create_dir_all(&world).unwrap();
+        fs::write(world.join("level.dat"), b"source").unwrap();
+        std::os::unix::fs::symlink(&real_parent, &alias_parent).unwrap();
+
+        let err = SourceTree::open(&alias_parent.join("world")).unwrap_err();
+        assert!(
+            matches!(err, Error::Gate(_)) && err.to_string().contains("without following symlinks"),
+            "a symlink in any configured source component must be refused: {err}"
+        );
+
+        fs::remove_file(&alias_parent).unwrap();
+        cleanup(&real_parent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_source_identity_defeats_root_replacement_for_copy_and_certification() {
+        let visible = fixture_world("source-root-replacement");
+        let displaced = sibling(&visible, "displaced-source");
+        let storage = sibling(&visible, "replacement-storage");
+        cleanup(&displaced);
+        cleanup(&storage);
+        fs::create_dir(&storage).unwrap();
+
+        let source = SourceTree::open(&visible).unwrap();
+        let before = source.fingerprint().unwrap();
+        fs::rename(&visible, &displaced).unwrap();
+        copy_tree(&displaced, &visible).unwrap();
+        fs::write(visible.join("level.dat"), b"replacement bytes").unwrap();
+
+        let mut temp = TempWorld::create(&source, &storage).unwrap();
+        assert_copy_equals_source(&before, &temp.hash_tree().unwrap()).unwrap();
+        assert_ne!(
+            hash_tree(&visible).unwrap(),
+            temp.hash_tree().unwrap(),
+            "copying must remain bound to the retained source, never the replacement pathname"
+        );
+
+        fs::write(visible.join("level.dat"), [0u8, 1, 2, 3]).unwrap();
+        let err = source.verify_unchanged(&before).unwrap_err();
+        assert!(
+            matches!(err, Error::Gate(_)) && err.to_string().contains("changed identity"),
+            "a byte-identical visible substitute must not certify the retained source: {err}"
+        );
+
+        temp.cleanup().unwrap();
+        cleanup(&visible);
+        cleanup(&displaced);
+        cleanup(&storage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failure_immediately_after_private_parent_creation_is_cleaned() {
+        let src = fixture_world("early-parent-guard");
+        let storage = sibling(&src, "early-parent-storage");
+        cleanup(&storage);
+        fs::create_dir(&storage).unwrap();
+        let source = SourceTree::open(&src).unwrap();
+
+        let err = TempWorld::create_inner(&source, &storage, true).unwrap_err();
+        assert!(
+            matches!(err, Error::Gate(_)) && err.to_string().contains("injected failure"),
+            "the deterministic injection must exercise the armed parent guard: {err}"
+        );
+        assert_eq!(
+            fs::read_dir(&storage).unwrap().count(),
+            0,
+            "the armed guard must remove the private parent on pre-world failure"
+        );
+
+        cleanup(&src);
+        cleanup(&storage);
+    }
+
     #[test]
     fn temp_world_refuses_source_nested_under_stale_storage_without_mutation() {
-        let storage = std::env::temp_dir().join(format!(
+        let storage = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "rivet-load-world-reverse-containment-{}",
             std::process::id()
         ));
@@ -1110,7 +1450,7 @@ mod tests {
         fs::write(&sentinel, b"launcher source must survive").unwrap();
         fs::write(storage.join("stale.txt"), b"stale destination evidence").unwrap();
 
-        let err = TempWorld::create(&source, &storage).unwrap_err();
+        let err = temp_world(&source, &storage).unwrap_err();
         assert!(
             matches!(err, Error::Gate(_)) && err.to_string().contains("contains"),
             "reverse containment must fail as a safety gate: {err}"
@@ -1140,7 +1480,7 @@ mod tests {
         std::os::unix::fs::symlink(&src, &stale).unwrap();
         let source_before = hash_tree(&src).unwrap();
 
-        let mut temp = TempWorld::create(&src, &storage).unwrap();
+        let mut temp = temp_world(&src, &storage).unwrap();
         assert_ne!(
             temp.path(),
             stale,
@@ -1169,7 +1509,7 @@ mod tests {
         let storage = sibling(&src, "descriptor-storage");
         cleanup(&storage);
         fs::create_dir_all(&storage).unwrap();
-        let mut temp = TempWorld::create(&src, &storage).unwrap();
+        let mut temp = temp_world(&src, &storage).unwrap();
         let visible_world = temp.path().to_owned();
         let displaced_world = visible_world.with_file_name("displaced-world");
 
@@ -1219,7 +1559,7 @@ mod tests {
         let storage = sibling(&src, "cleanup-parent-storage");
         cleanup(&storage);
         fs::create_dir_all(&storage).unwrap();
-        let mut temp = TempWorld::create(&src, &storage).unwrap();
+        let mut temp = temp_world(&src, &storage).unwrap();
         let visible_parent = temp.path().parent().unwrap().to_owned();
         let displaced_parent = storage.join("displaced-owned-parent");
 
@@ -1316,9 +1656,9 @@ mod tests {
         std::os::unix::fs::symlink(&src, &source_link).unwrap();
 
         fs::create_dir_all(&dest).unwrap();
-        let err = TempWorld::create(&source_link, &dest).unwrap_err();
+        let err = SourceTree::open(&source_link).unwrap_err();
         assert!(
-            matches!(err, Error::Gate(_)) && err.to_string().contains("is a symlink"),
+            matches!(err, Error::Gate(_)) && err.to_string().contains("without following symlinks"),
             "the root source alias must be refused: {err}"
         );
         assert_eq!(
