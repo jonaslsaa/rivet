@@ -25,14 +25,8 @@ pub const WORLD_VERSION: i32 = 4903;
 /// `SharedConstants.SERIES` — `"main"` (the default `DataVersion.series`).
 pub const SERIES: &str = "main";
 
-/// `SharedConstants.SNAPSHOT` — `false` in a release build (26.2 is stable).
-pub const SNAPSHOT: bool = false;
-
 /// `SharedConstants.getCurrentVersion().name()` — 26.2's `WorldVersion.name`.
 pub const VERSION_NAME: &str = "26.2";
-
-/// `SharedConstants.getCurrentVersion().id()` — 26.2's `WorldVersion.id`.
-pub const VERSION_ID: &str = "26.2";
 
 /// `SharedConstants.getCurrentVersion().stable()` — 26.2 is a stable release.
 pub const STABLE: bool = true;
@@ -45,11 +39,8 @@ mod tests {
     fn pinned_26_2_values_match_version_json() {
         // `version.json`: id 26.2, world_version 4903, series_id main, stable true.
         assert_eq!(VERSION_NAME, "26.2");
-        assert_eq!(VERSION_ID, "26.2");
         assert_eq!(WORLD_VERSION, 4903);
         assert_eq!(SERIES, "main");
         assert!(STABLE);
-        // `Snapshot` is `!stable`.
-        assert_eq!(SNAPSHOT, !STABLE);
     }
 }

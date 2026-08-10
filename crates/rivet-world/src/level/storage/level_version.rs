@@ -11,10 +11,8 @@
 //! 26.2 build) when the `Version` block is absent.
 //!
 //! The read side of this is exactly what `PrimaryLevelData.parse` needs first
-//! (issue #54 codec cascade); the write side (`LevelVersion` appears in
-//! `PrimaryLevelData.createTag`'s `Version` compound) is exercised by the
-//! `LevelVersion::write_version_tag` helper, which mirrors
-//! `PrimaryLevelData.writeVersionTag`.
+//! (issue #54 codec cascade). The write side (`PrimaryLevelData.writeVersionTag`)
+//! defers with the full `PrimaryLevelData` port.
 
 use crate::level::storage::data_version::DataVersion;
 use rivet_core::shared_constants::{SERIES, STABLE, VERSION_NAME, WORLD_VERSION};
@@ -120,7 +118,6 @@ mod tests {
 
     fn nbt_compound() -> CompoundTag {
         let mut tag = CompoundTag::new();
-        tag.put_string("Data", "");
         tag.put_int("version", 19133);
         tag.put_long("LastPlayed", 1786152964225);
         let mut version = CompoundTag::new();
