@@ -131,3 +131,93 @@ where
 {
     RecordCodecBuilder::of(getter, offset_field_codec::<Ops>())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::level::WorldGenLevel;
+    use crate::level::height_accessor::LevelHeightAccessor;
+    use rivet_registry::core::BlockPos;
+    use rivet_registry::core::Vec3i;
+    use rivet_serialization::json_ops::JsonOps;
+    use serde_json::json;
+    use std::panic;
+
+    /// A `WorldGenLevel` double whose `get_block_state` is the unavailable
+    /// capability (RivetTodo #399) — it panics, exactly like every production
+    /// `WorldGenLevel` before the real world-access lands.
+    #[derive(Clone, Copy)]
+    struct CapabilityGapLevel;
+
+    impl LevelHeightAccessor for CapabilityGapLevel {
+        fn get_height(&self) -> i32 {
+            384
+        }
+        fn get_min_y(&self) -> i32 {
+            -64
+        }
+    }
+
+    impl WorldGenLevel for CapabilityGapLevel {
+        fn get_seed(&self) -> i64 {
+            0
+        }
+        fn get_block_state(&self, _pos: &BlockPos) -> rivet_registry::block_state::BlockState {
+            panic!("WorldGenLevel.getBlockState is not implemented (RivetTodo #399)")
+        }
+    }
+
+    /// A minimal `StateTestingPredicate` whose pure `test_state` is fully
+    /// ported (always true) but whose `test` resolves through the
+    /// unavailable `get_block_state` seam.
+    #[derive(Debug)]
+    struct TriviallyTrue {
+        offset: Vec3i,
+    }
+
+    impl StateTestingPredicate for TriviallyTrue {
+        fn offset(&self) -> &Vec3i {
+            &self.offset
+        }
+        fn test_state(&self, _state: &BlockState) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_shell_fails_loudly_when_world_access_unavailable() {
+        // The state-testing `test` resolves `level.getBlockState(origin.offset(
+        // offset))` — a capability no production world provides yet — and must
+        // fail loudly (never fabricate a state). The offset arithmetic runs
+        // first (origin 0 + offset (1,0,0)), then the seam panics.
+        let p = TriviallyTrue {
+            offset: Vec3i::new(1, 0, 0),
+        };
+        let origin = BlockPos::new(0, 0, 0);
+        let result = panic::catch_unwind(|| state_testing_test(&p, &CapabilityGapLevel, &origin));
+        assert!(
+            result.is_err(),
+            "state-testing test must fail loudly, not fabricate a state"
+        );
+    }
+
+    #[test]
+    fn offset_codec_rejects_axis_at_or_past_max_and_accepts_below() {
+        // `Vec3i.offsetCodec(16)` — `Math.abs(v) < 16` per axis, error
+        // `"Position out of range, expected at most 16: {value}"`. The codec
+        // is ops-generic; under JsonOps the int stream is a JSON array.
+        let codec = vec3i_offset_codec::<JsonOps>(16);
+        let ok = codec.parse(&JsonOps::INSTANCE, &json!([0, 15, -15]));
+        assert!(
+            ok.is_success(),
+            "got: {:?}",
+            ok.error_ref().map(|e| e.message().to_string())
+        );
+        let bad = codec.parse(&JsonOps::INSTANCE, &json!([0, 16, 0]));
+        let msg = bad.error_ref().map(|e| e.message().to_string()).unwrap();
+        assert!(
+            msg.starts_with("Position out of range, expected at most 16: "),
+            "got: {msg}"
+        );
+    }
+}
