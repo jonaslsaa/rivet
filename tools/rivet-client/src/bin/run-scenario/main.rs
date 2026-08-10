@@ -2776,14 +2776,15 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
 /// manifest (`rivet-oracle extract-world`), boots Rivet against the copy with
 /// `--level <copy>`, drives the real Azalea client in `loaded` mode (join,
 /// wait for chunk quiescence, sample the genuine per-coordinate block content
-/// the server served), and compares the client's observed content against the
-/// manifest.
+/// the server served, then take a short bounded walk), and compares the
+/// client's observed content against the manifest.
 ///
 /// The PASS contract is deliberately strict and honest:
 ///
-/// - The client must actually join, spawn, and sample per-coordinate content
-///   (never a vacuous green) — `rivet_loaded_verdict` enforces the transcript
-///   boundary.
+/// - The client must actually join, spawn, sample per-coordinate content, and
+///   walk (never a vacuous green) — `rivet_loaded_verdict` enforces the
+///   transcript boundary. The walk is recorded as `before`/`after` position
+///   evidence; the per-coordinate grid is the load-bearing content check.
 /// - The sampled surface/bedrock/below_feet block names must match the
 ///   ground-truth manifest at the same coordinates. A server that merely
 ///   echoes repeated superflat bytes cannot match a genuine terrain chunk's
@@ -2952,6 +2953,19 @@ fn run_extract_world(world: &Path, work: &Path) -> Result<Value, RunnerError> {
     Ok(out)
 }
 
+/// Canonicalize an observed block name into the manifest's namespaced form.
+/// The client emits azalea bare registry ids (`grass_block`); the manifest
+/// stores namespaced names (`minecraft:grass_block`). Comparison must be on a
+/// single representation, so a bare id is prefixed with `minecraft:` before it
+/// is matched against ground truth.
+fn canonicalize_block_name(name: Option<&str>) -> String {
+    match name {
+        Some(n) if n.contains(':') => n.to_owned(),
+        Some(n) => format!("minecraft:{n}"),
+        None => "minecraft:air".to_owned(),
+    }
+}
+
 /// Compare the client's observed per-coordinate block content against the
 /// ground-truth manifest. The `loaded` record's `samples` carry
 /// `surface`/`bedrock`/`below_feet` block names at world coordinates; the
@@ -3005,6 +3019,22 @@ fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), Ru
                  content, so this acceptance stays UNVERIFIED"
             )));
         }
+        // A FULL chunk may still carry content the #369 capability boundary
+        // cannot yet construct (block entities, structures, ticks, entities).
+        // The extractor records these flags honestly; refusing PASS here keeps
+        // the capability boundary honest instead of comparing a chunk the
+        // server could not have served faithfully.
+        let flags: Vec<&str> = fingerprint["capability_flags"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if !flags.is_empty() {
+            return Err(RunnerError::Unverified(format!(
+                "loaded-world sampled chunk {key} is minecraft:full but carries #369-uncarried \
+                 capability flags {flags:?}; the runner refuses PASS rather than trusting an \
+                 incomplete server"
+            )));
+        }
         // The manifest stores surface/bedrock/below_feet as 16×16 arrays
         // indexed row-major `z*16+x`. The client samples the chunk center
         // offset (8,8), so the index is `8*16+8 = 136`.
@@ -3018,9 +3048,12 @@ fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), Ru
         let manifest_below = fingerprint["below_feet"][CENTER]
             .as_str()
             .unwrap_or("minecraft:air");
-        let observed_surface = sample["surface"].as_str().unwrap_or("minecraft:air");
-        let observed_bedrock = sample["bedrock"].as_str().unwrap_or("minecraft:air");
-        let observed_below = sample["below_feet"].as_str().unwrap_or("minecraft:air");
+        // Canonicalize the observed names into the manifest's namespace: the
+        // client emits azalea bare ids (`grass_block`) which must compare equal
+        // to the manifest's namespaced names (`minecraft:grass_block`).
+        let observed_surface = canonicalize_block_name(sample["surface"].as_str());
+        let observed_bedrock = canonicalize_block_name(sample["bedrock"].as_str());
+        let observed_below = canonicalize_block_name(sample["below_feet"].as_str());
 
         let surface_match = observed_surface == manifest_surface;
         let bedrock_match = observed_bedrock == manifest_bedrock;
@@ -3209,9 +3242,12 @@ mod tests {
             "chunk_z": chunk_z,
             "sample_x": chunk_x * 16 + 8,
             "sample_z": chunk_z * 16 + 8,
-            "surface": "minecraft:grass_block",
-            "bedrock": "minecraft:bedrock",
-            "below_feet": "minecraft:stone",
+            // Bare azalea ids (`grass_block`) — the form the real client emits
+            // via `BlockTrait::id()` — must still match the namespaced manifest
+            // names (`minecraft:grass_block`) once canonicalized.
+            "surface": "grass_block",
+            "bedrock": "bedrock",
+            "below_feet": "stone",
         })
     }
 
@@ -3284,6 +3320,62 @@ mod tests {
         assert!(
             compare_loaded_content(&manifest, &transcript).is_err(),
             "an empty sample set must fail (never a vacuous pass)"
+        );
+    }
+
+    /// A minimal ground-truth manifest whose FULL chunk carries the given
+    /// #369-uncarried capability flags.
+    fn manifest_with_flags(chunk_x: i32, chunk_z: i32, flags: &[&str]) -> Value {
+        let mut m = manifest_with(
+            chunk_x,
+            chunk_z,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        m["chunks"][format!("{chunk_x},{chunk_z}")]["capability_flags"] =
+            json!(flags.iter().map(|f| f.to_string()).collect::<Vec<_>>());
+        m
+    }
+
+    #[test]
+    fn compare_loaded_content_is_unverified_on_uncarried_capability_flags() {
+        // A FULL chunk that carries block entities/ticks/structures/entities is
+        // beyond the #369 full-construction capability boundary even though its
+        // status is minecraft:full. The runner must refuse PASS — comparing its
+        // content would trust a server that could not have served it
+        // faithfully.
+        let manifest = manifest_with_flags(0, 0, &["block_entities"]);
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        match compare_loaded_content(&manifest, &transcript) {
+            Err(RunnerError::Unverified(message)) => {
+                assert!(
+                    message.contains("block_entities") && message.contains("refuses PASS"),
+                    "must name the flag and the refusal, got {message}"
+                );
+            }
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_loaded_content_normalizes_observed_bare_ids() {
+        // The client emits azalea bare registry ids (`grass_block`); the
+        // manifest stores namespaced names. The comparison must canonicalize
+        // the observed side so a genuine content match is not defeated by the
+        // representation difference (the anti-superflat contract).
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        // `matching_sample` now emits bare ids; a pass proves normalization.
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_ok(),
+            "bare observed ids must match namespaced ground truth after canonicalization"
         );
     }
 
