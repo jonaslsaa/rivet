@@ -2599,8 +2599,8 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
     let base = base_address(args)?;
     let run_dir = work.join("rivet");
-    let log_path = work.join("rivet.log");
     let mut temp = load_world::TempWorld::create(&source, &work)?;
+    let log_path = temp.probe_log_path();
     let probe_result = (|| -> Result<(), RunnerError> {
         load_world::assert_copy_equals_source(&source_before, &temp.hash_tree()?)?;
         let server_world_path = temp.server_path();
@@ -2611,6 +2611,10 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
             source.configured_path().display()
         );
         println!("    disposable copy  : {}", temp.path().display());
+        println!(
+            "    private probe log: {}",
+            temp.probe_log_visible_path().display()
+        );
         println!("    rivet-server bin : {}", rivet_bin.display());
         println!(
             "    launch seam      : {} <disposable-copy>",

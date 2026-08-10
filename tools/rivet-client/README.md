@@ -57,6 +57,11 @@ the visible configured root to resolve without symlinks to the same identity
 before accepting the source evidence. The copy lives beneath a fresh
 unpredictable private (`0700`) directory and is verified byte-for-byte; storage,
 private-parent, and world descriptors remain open through server shutdown.
+The probe log is created before spawn as a fresh owner-only regular file inside
+that same private parent using descriptor-relative exclusive/no-follow
+creation. Linux gives the existing boot API the retained log identity through
+`/proc/self/fd`; macOS uses the unpredictable private path. The old predictable
+`work/scenario-loaded-world/rivet.log` is never opened, truncated, or removed.
 Cleanup revalidates every visible entry against its opened device/inode before
 descriptor-relative recursion and immediately before name-based unlink. An
 identity substitution observed by those checks is preserved rather than

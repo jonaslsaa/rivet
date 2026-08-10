@@ -8,8 +8,9 @@
 //!   launcher-created save, overridable via `RIVET_WORLD_SRC`), rejecting
 //!   symlinks in every configured path component and retaining that identity;
 //! - copying it beneath a fresh private disposable directory ([`TempWorld`]),
-//!   refusing symlinks and retaining a directory handle so pathname replacement
-//!   cannot redirect the server to the source;
+//!   refusing symlinks and retaining directory handles so pathname replacement
+//!   cannot redirect the server to the source, and exclusively creating the
+//!   server probe log inside that same owned lifecycle;
 //! - asserting the copy is byte-faithful to that retained source and that two
 //!   non-atomic pre/post source snapshots match, then proving the visible
 //!   configured root still resolves without symlinks to the retained identity.
@@ -439,6 +440,8 @@ pub fn assert_source_unchanged(before: &[TreeEntry], after: &[TreeEntry]) -> Res
 /// child shutdown. Linux fingerprints and launches through that descriptor;
 /// other Unix platforms retain it as ownership evidence but use the private
 /// path because their fd namespace is not portably directory-traversable.
+/// The probe log is likewise created descriptor-relative with `O_EXCL` and
+/// `O_NOFOLLOW`, retained through shutdown, and removed with the private tree.
 /// [`TempWorld::cleanup`] (or [`Drop`]) revalidates each visible entry against
 /// its retained descriptor immediately before name-based unlink and checks the
 /// retained object's link count afterwards. A substitution observed before
@@ -448,10 +451,13 @@ pub fn assert_source_unchanged(before: &[TreeEntry], after: &[TreeEntry]) -> Res
 #[derive(Debug)]
 pub struct TempWorld {
     path: PathBuf,
+    log_path: PathBuf,
     #[cfg(unix)]
     parent: PrivateParent,
     #[cfg(unix)]
     world_dir: OwnedFd,
+    #[cfg(unix)]
+    _probe_log: OwnedFd,
 }
 
 #[cfg(unix)]
@@ -950,10 +956,23 @@ impl TempWorld {
                 OFlags::RDONLY | OFlags::DIRECTORY,
             )?;
             let world_path = parent_path.join("world");
+            // The log name is safe because its parent was freshly allocated
+            // with an unpredictable name and is held by descriptor. EXCL and
+            // NOFOLLOW ensure an unexpected entry cannot redirect creation.
+            let probe_log = rustix::fs::openat(
+                &parent.parent_dir,
+                c"rivet.log",
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )
+            .map_err(io::Error::from)?;
+            let log_path = parent_path.join("rivet.log");
             let mut temp = Self {
                 path: world_path,
+                log_path,
                 parent,
                 world_dir,
+                _probe_log: probe_log,
             };
             if let Err(error) = copy_tree_fd(&source.root_dir, &temp.world_dir, Path::new("")) {
                 if let Err(cleanup_error) = temp.cleanup() {
@@ -985,6 +1004,21 @@ impl TempWorld {
         return descriptor_path(&self.world_dir);
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         self.path.clone()
+    }
+
+    /// Path the existing server boot API may safely truncate for its log.
+    /// Linux addresses the retained file identity directly. Other Unix
+    /// platforms use the unpredictable path within the owned private parent.
+    pub fn probe_log_path(&self) -> PathBuf {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        return descriptor_path(&self._probe_log);
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        self.log_path.clone()
+    }
+
+    /// Visible private path used for diagnostics and storage assertions.
+    pub fn probe_log_visible_path(&self) -> &Path {
+        &self.log_path
     }
 
     /// Hash the copy with the same walker used on the source, so copy fidelity
@@ -1292,6 +1326,19 @@ mod tests {
         );
         assert_copy_equals_source(&hash_tree(&src).unwrap(), &first.hash_tree().unwrap())
             .expect("the fresh copy is faithful");
+        #[cfg(unix)]
+        {
+            let log_meta = fs::symlink_metadata(first.probe_log_visible_path()).unwrap();
+            assert!(
+                log_meta.file_type().is_file(),
+                "the probe log must be a regular file"
+            );
+            assert_eq!(
+                log_meta.permissions().mode() & 0o777,
+                0o600,
+                "the probe log must be owner-only"
+            );
+        }
 
         let first_parent = first.path().parent().unwrap().to_owned();
         let second_parent = second.path().parent().unwrap().to_owned();
@@ -1305,6 +1352,105 @@ mod tests {
         // Idempotent: a second cleanup is a no-op, and Drop is a no-op too.
         first.cleanup().unwrap();
 
+        cleanup(&src);
+        cleanup(&storage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_fixed_probe_log_symlink_cannot_redirect_server_logging() {
+        let src = fixture_world("probe-log-symlink");
+        let storage = sibling(&src, "probe-log-symlink-storage");
+        cleanup(&storage);
+        fs::create_dir_all(&storage).unwrap();
+        let fixed_log = storage.join("rivet.log");
+        let sentinel = src.join("level.dat");
+        std::os::unix::fs::symlink(&sentinel, &fixed_log).unwrap();
+        let source_before = hash_tree(&src).unwrap();
+
+        let mut temp = temp_world(&src, &storage).unwrap();
+        let actual_log = temp.probe_log_visible_path().to_owned();
+        assert_ne!(actual_log, fixed_log, "the fixed log path must be unused");
+        assert_eq!(
+            actual_log.parent(),
+            temp.path().parent(),
+            "the probe log must share the disposable world's unique private parent"
+        );
+        let mut server_log = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(temp.probe_log_path())
+            .unwrap();
+        use std::io::Write as _;
+        server_log.write_all(b"server output").unwrap();
+        drop(server_log);
+
+        assert_eq!(fs::read(&sentinel).unwrap(), [0u8, 1, 2, 3]);
+        assert_source_unchanged(&source_before, &hash_tree(&src).unwrap()).unwrap();
+        assert!(
+            fs::symlink_metadata(&fixed_log)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&actual_log).unwrap(), b"server output");
+
+        let private_parent = actual_log.parent().unwrap().to_owned();
+        temp.cleanup().unwrap();
+        assert!(!private_parent.exists(), "cleanup must own the probe log");
+        assert!(
+            fixed_log.exists(),
+            "cleanup must not remove the stale fixed link"
+        );
+        fs::remove_file(fixed_log).unwrap();
+        cleanup(&src);
+        cleanup(&storage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_fixed_probe_log_hard_link_cannot_redirect_server_logging() {
+        let src = fixture_world("probe-log-hard-link");
+        let storage = sibling(&src, "probe-log-hard-link-storage");
+        cleanup(&storage);
+        fs::create_dir_all(&storage).unwrap();
+        let fixed_log = storage.join("rivet.log");
+        let sentinel = src.join("level.dat");
+        fs::hard_link(&sentinel, &fixed_log).unwrap();
+        let source_before = hash_tree(&src).unwrap();
+
+        let mut temp = temp_world(&src, &storage).unwrap();
+        let actual_log = temp.probe_log_visible_path().to_owned();
+        assert_ne!(actual_log, fixed_log, "the fixed log path must be unused");
+        assert_eq!(
+            actual_log.parent(),
+            temp.path().parent(),
+            "the probe log must share the disposable world's unique private parent"
+        );
+        let mut server_log = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(temp.probe_log_path())
+            .unwrap();
+        use std::io::Write as _;
+        server_log.write_all(b"server output").unwrap();
+        drop(server_log);
+
+        assert_eq!(fs::read(&sentinel).unwrap(), [0u8, 1, 2, 3]);
+        assert_source_unchanged(&source_before, &hash_tree(&src).unwrap()).unwrap();
+        assert_eq!(fs::read(&fixed_log).unwrap(), [0u8, 1, 2, 3]);
+        assert_eq!(fs::read(&actual_log).unwrap(), b"server output");
+
+        let private_parent = actual_log.parent().unwrap().to_owned();
+        temp.cleanup().unwrap();
+        assert!(!private_parent.exists(), "cleanup must own the probe log");
+        assert!(
+            fixed_log.exists(),
+            "cleanup must not remove the stale fixed link"
+        );
+        fs::remove_file(fixed_log).unwrap();
         cleanup(&src);
         cleanup(&storage);
     }
