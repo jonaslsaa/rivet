@@ -79,6 +79,16 @@
 //!   world-path/loading capability and real official-client acceptance, the
 //!   command returns UNVERIFIED (exit 3), never a placeholder PASS.
 //!
+//! ## Deterministic Paper config (issue #266 / #333)
+//!
+//! Every Paper boot installs the pinned `paper-world-defaults.yml` fixture into
+//! the run dir's `config/` (overwriting generated/stale defaults) so all seven
+//! spawn-limit categories stay at 0 and no entity can spawn into the save
+//! window. Without it, a fresh Paper world re-enables natural spawning and the
+//! sampled walk (and `last_sent`) becomes nondeterministic — the issue #333
+//! failure mode. The fixture is resolved like `server.properties`: a missing
+//! companion is UNVERIFIED (exit 3) with the exact missing path.
+//!
 //! ## Connection proof (Rivet modes)
 //!
 //! The Rivet modes prove the client actually completed a genuine play session
@@ -841,6 +851,18 @@ fn single_stone_server_properties(crate_root: &Path) -> Result<PathBuf, RunnerEr
     fixture_server_properties(crate_root, "server-single-stone.properties")
 }
 
+/// The pinned Paper world-defaults fixture (`config/paper-world-defaults.yml`,
+/// issue #266): all seven spawn-limit categories capped at 0 so no entity can
+/// spawn into the save window. Paper reads the per-category spawn limits from
+/// `config/paper-world-defaults.yml` on every boot, and the scenario runner must
+/// install this file into every Paper run dir (overwriting generated/stale
+/// defaults) or a fresh world re-enables natural spawning and the sampled walk
+/// becomes nondeterministic. A missing fixture is a missing prerequisite —
+/// UNVERIFIED (exit 3), not FAIL — exactly like a missing `server.properties`.
+fn world_defaults(crate_root: &Path) -> Result<PathBuf, RunnerError> {
+    fixture_server_properties(crate_root, "paper-world-defaults.yml")
+}
+
 fn ensure_client_binary() -> Result<PathBuf, RunnerError> {
     let bin = client_binary();
     if bin.is_file() {
@@ -856,10 +878,17 @@ fn ensure_client_binary() -> Result<PathBuf, RunnerError> {
 /// Boot one Paper server, join via the client, shut the server down, and return
 /// the normalized transcript (raw artifacts preserved). The Paper-vs-Paper
 /// self-check path; `address` is the isolated port for this boot.
+///
+/// The eight arguments are the distinct inputs a single boot needs (work dir,
+/// jar, properties source, world-defaults source, client binary, shared args,
+/// boot index, address); the excess over clippy's default limit is inherent to
+/// the operation rather than a refactorable arity smell.
+#[allow(clippy::too_many_arguments)]
 fn one_join(
     work: &Path,
     jar: &Path,
     server_properties: &Path,
+    world_defaults: &Path,
     client_bin: &Path,
     args: &Args,
     idx: usize,
@@ -874,6 +903,7 @@ fn one_join(
         &log_path,
         jar,
         Some(server_properties),
+        Some(world_defaults),
         address,
         None,
         &[],
@@ -920,6 +950,7 @@ fn run_paper_self_check(args: &Args) -> Result<(), RunnerError> {
     let work = crate_root.join("work/scenario-join");
     fs::create_dir_all(&work)?;
     let server_properties = server_properties(&crate_root)?;
+    let world_defaults = world_defaults(&crate_root)?;
     let jar = server::ensure_jar(&crate_root)?;
     let client_bin = ensure_client_binary()?;
     let base = base_address(args)?;
@@ -928,6 +959,7 @@ fn run_paper_self_check(args: &Args) -> Result<(), RunnerError> {
     println!("    paperclip jar     : {}", jar.display());
     println!("    rivet-client bin  : {}", client_bin.display());
     println!("    server.properties : {}", server_properties.display());
+    println!("    world defaults    : {}", world_defaults.display());
     println!("    address           : {}", args.address);
     println!("    paper boots       : {}", args.runs);
     println!();
@@ -940,6 +972,7 @@ fn run_paper_self_check(args: &Args) -> Result<(), RunnerError> {
             &work,
             &jar,
             &server_properties,
+            &world_defaults,
             &client_bin,
             args,
             idx,
@@ -1044,10 +1077,17 @@ fn run_paper_self_check(args: &Args) -> Result<(), RunnerError> {
 /// walk sampling per-tick position/velocity/on-ground plus the teleport and
 /// keepalive echoes), shut the server down, and return the normalized movement
 /// transcript (raw artifacts preserved).
+///
+/// The eight arguments are the distinct inputs a single boot needs (work dir,
+/// jar, properties source, world-defaults source, client binary, shared args,
+/// boot index, address); the excess over clippy's default limit is inherent to
+/// the operation rather than a refactorable arity smell.
+#[allow(clippy::too_many_arguments)]
 fn one_move(
     work: &Path,
     jar: &Path,
     server_properties: &Path,
+    world_defaults: &Path,
     client_bin: &Path,
     args: &Args,
     idx: usize,
@@ -1062,6 +1102,7 @@ fn one_move(
         &log_path,
         jar,
         Some(server_properties),
+        Some(world_defaults),
         address,
         None,
         &[],
@@ -1114,6 +1155,7 @@ fn run_move_self_check(args: &Args) -> Result<(), RunnerError> {
     let work = crate_root.join("work/scenario-move");
     fs::create_dir_all(&work)?;
     let server_properties = server_properties(&crate_root)?;
+    let world_defaults = world_defaults(&crate_root)?;
     let jar = server::ensure_jar(&crate_root)?;
     let client_bin = ensure_client_binary()?;
     let base = base_address(args)?;
@@ -1122,6 +1164,7 @@ fn run_move_self_check(args: &Args) -> Result<(), RunnerError> {
     println!("    paperclip jar     : {}", jar.display());
     println!("    rivet-client bin  : {}", client_bin.display());
     println!("    server.properties : {}", server_properties.display());
+    println!("    world defaults    : {}", world_defaults.display());
     println!("    address           : {}", args.address);
     println!("    paper boots       : {}", args.runs);
     println!();
@@ -1132,6 +1175,7 @@ fn run_move_self_check(args: &Args) -> Result<(), RunnerError> {
             &work,
             &jar,
             &server_properties,
+            &world_defaults,
             &client_bin,
             args,
             idx,
@@ -1270,6 +1314,7 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
             &run_dir,
             &log_path,
             &rivet_bin,
+            None,
             None,
             base,
             None,
@@ -1765,6 +1810,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     let work = crate_root.join("work/scenario-both");
     fs::create_dir_all(&work)?;
     let server_properties = single_stone_server_properties(&crate_root)?;
+    let world_defaults = world_defaults(&crate_root)?;
     let jar = server::ensure_jar(&crate_root)?;
     let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
     let client_bin = ensure_client_binary()?;
@@ -1786,6 +1832,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         "    server.properties : {} (single-stone superflat)",
         server_properties.display()
     );
+    println!("    world defaults    : {}", world_defaults.display());
     println!(
         "    paper pin         : {} (verified from the materialized jar)",
         server::PAPER_PIN_COMMIT
@@ -1801,6 +1848,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         &work.join("paper.log"),
         &jar,
         Some(&server_properties),
+        Some(&world_defaults),
         paper_addr,
         Some(reservations.remove(0)),
         &[],
@@ -1849,6 +1897,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         &work.join("rivet"),
         &work.join("rivet.log"),
         &rivet_bin,
+        None,
         None,
         rivet_addr,
         Some(reservations.remove(0)),
@@ -1976,6 +2025,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
     let work = crate_root.join("work/scenario-move-both");
     fs::create_dir_all(&work)?;
     let server_properties = single_stone_server_properties(&crate_root)?;
+    let world_defaults = world_defaults(&crate_root)?;
     let jar = server::ensure_jar(&crate_root)?;
     let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
     let client_bin = ensure_client_binary()?;
@@ -1994,6 +2044,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         "    server.properties : {} (single-stone superflat)",
         server_properties.display()
     );
+    println!("    world defaults    : {}", world_defaults.display());
     println!(
         "    paper pin         : {} (verified from the materialized jar)",
         server::PAPER_PIN_COMMIT
@@ -2013,6 +2064,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         &work.join("paper.log"),
         &jar,
         Some(&server_properties),
+        Some(&world_defaults),
         paper_addr,
         Some(reservations.remove(0)),
         &[],
@@ -2059,6 +2111,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         &work.join("rivet"),
         &work.join("rivet.log"),
         &rivet_bin,
+        None,
         None,
         rivet_addr,
         Some(reservations.remove(0)),
@@ -2264,6 +2317,7 @@ fn run_dwell(args: &Args) -> Result<(), RunnerError> {
         &run_dir,
         &log_path,
         &rivet_bin,
+        None,
         None,
         base,
         None,
@@ -2538,10 +2592,13 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         server::ServerKind::Rivet => server::ensure_rivet_binary(&crate_root)?,
     };
     let client_bin = ensure_client_binary()?;
-    // Rivet does not need server.properties (driven purely by --host/--port);
-    // only Paper's boot consumes the fixture.
+    // Rivet does not need server.properties or paper-world-defaults (driven
+    // purely by --host/--port); only Paper's boot consumes the fixtures.
     let server_properties = (kind == server::ServerKind::Paper)
         .then(|| server_properties(&crate_root))
+        .transpose()?;
+    let world_defaults = (kind == server::ServerKind::Paper)
+        .then(|| world_defaults(&crate_root))
         .transpose()?;
 
     let prefix = kind.as_str().to_owned();
@@ -2551,6 +2608,7 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         &work.join(format!("{prefix}1.log")),
         &artifact,
         server_properties.as_deref(),
+        world_defaults.as_deref(),
         base,
         None,
         &[],
@@ -2960,6 +3018,71 @@ mod tests {
             RunnerError::Server(server::Error::Gate("x".into())).exit_code(),
             EXIT_FAIL
         );
+    }
+
+    /// Counterfactual for the deterministic-config prerequisite (issue #333): a
+    /// missing `paper-world-defaults.yml` fixture must be UNVERIFIED (exit 3)
+    /// — without the pinned spawn-limits (all seven categories at 0) a fresh
+    /// Paper world re-enables natural spawning and the walk is nondeterministic,
+    /// so nothing is actually compared — and the message must carry the exact
+    /// missing companion path, exactly like a missing `server.properties`.
+    /// Resolved from real temp paths so the test is load-bearing.
+    #[test]
+    fn missing_world_defaults_fixture_is_unverified_with_exact_path() {
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-wdm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let err = fixture_server_properties(&dir, "paper-world-defaults.yml").unwrap_err();
+        assert!(
+            matches!(err, RunnerError::Unverified(_)),
+            "a missing paper-world-defaults.yml must be Unverified, got {err:?}"
+        );
+        assert_eq!(
+            err.exit_code(),
+            EXIT_UNVERIFIED,
+            "a missing paper-world-defaults.yml must exit UNVERIFIED (3), not FAIL (1)"
+        );
+        // The message must carry the exact missing companion path (the same
+        // resolution a real scenario would fail on) plus the fixture name.
+        let expected_path = dir
+            .join("../rivet-oracle/fixtures/paper-world-defaults.yml")
+            .to_string_lossy()
+            .to_string();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&expected_path),
+            "the Unverified error must carry the exact missing companion path {expected_path:?}, \
+             got: {msg}"
+        );
+        assert!(
+            msg.contains("paper-world-defaults.yml"),
+            "the Unverified error must name the fixture, got: {msg}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A present `paper-world-defaults.yml` fixture still resolves.
+    #[test]
+    fn present_world_defaults_fixture_resolves() {
+        // The resolver appends `../rivet-oracle/fixtures/{name}` to the crate
+        // root, so a real `rivet-oracle/fixtures/` sibling under the base makes
+        // the resolution load-bearing. The crate-root dir must exist: the `..`
+        // component can only resolve past a directory that exists (the real
+        // crate_root always does).
+        let base = std::env::temp_dir().join(format!("rivet-scenario-wdo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let dir = base.join("crate");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(base.join("rivet-oracle/fixtures")).unwrap();
+        fs::write(
+            base.join("rivet-oracle/fixtures/paper-world-defaults.yml"),
+            "spawn-limits:\n",
+        )
+        .unwrap();
+        let p = fixture_server_properties(&dir, "paper-world-defaults.yml").expect("present");
+        assert_eq!(p.file_name().unwrap(), "paper-world-defaults.yml");
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

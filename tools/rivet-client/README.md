@@ -112,6 +112,15 @@ a FAIL. Every boot gets its own isolated port (Paper's run-dir
 never collide. Rivet boots do not need `server.properties` (the binary is
 driven purely by `--host`/`--port`).
 
+Every Paper boot also installs the pinned
+`tools/rivet-oracle/fixtures/paper-world-defaults.yml` into the run dir's
+`config/` (overwriting generated/stale defaults), so all seven spawn-limit
+categories stay at 0 and no entity can spawn into the save window — without it,
+a fresh Paper world re-enables natural spawning and the sampled walk (and
+`walk.last_sent`) becomes nondeterministic (issue #333). A missing
+`paper-world-defaults.yml` fixture is UNVERIFIED (exit 3) with the exact missing
+path, exactly like a missing `server.properties`.
+
 A Rivet run only passes if the client completed a genuine play session against
 the Rivet port. Azalea fires `Event::Init` before any TCP connect, and
 `connection_failed`/`timeout` fire without completing a session, so the
