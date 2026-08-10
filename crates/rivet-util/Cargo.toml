@@ -9,8 +9,11 @@ workspace = true
 
 [dependencies]
 crc32c = { workspace = true }
-# `ProblemReporter.Collector.getReport` groups by path in first-seen order
-# (Java Guava `HashMultimap.asMap`, which preserves per-key insertion order).
+# `ProblemReporter.Collector.getReport` groups problems by path string. Java
+# groups through a Guava `HashMultimap` (backed by a `HashMap` — unordered, and
+# it de-duplicates identical entries); the port uses an ordered map so the
+# report is deterministic. First-seen order is a superset of Java's (which has
+# no order), and the grouping content is identical.
 indexmap = { workspace = true }
 md5 = { workspace = true }
 sha2 = { workspace = true }

@@ -140,13 +140,14 @@ impl Collector {
     }
 
     /// `Collector.getReport()` — one path-prefixed line per entry, grouped by
-    /// path in first-seen order.
+    /// path.
     ///
-    /// Java builds the report from a `HashMultimap` (Guava preserves per-key
-    /// insertion order); the Rust port mirrors that with an ordered
-    /// `indexmap::IndexMap<String, Vec<Rc<dyn Problem>>>` — first-seen path
-    /// order, descriptions joined `"; "` per path (Java `Collectors.joining(";
-    /// ")`).
+    /// Java groups through a Guava `HashMultimap` — a `HashMap`-backed set
+    /// multimap, so the group order is unspecified and identical entries are
+    /// de-duplicated. The port uses an ordered `indexmap::IndexMap<String,
+    /// Vec<Rc<dyn Problem>>>` so the report is deterministic: first-seen path
+    /// order (a superset of Java's unordered groups), descriptions joined
+    /// `"; "` per path (Java `Collectors.joining("; ")`).
     pub fn get_report(&self) -> String {
         let mut grouped: indexmap::IndexMap<String, Vec<Rc<dyn Problem>>> =
             indexmap::IndexMap::new();
@@ -361,7 +362,7 @@ mod tests {
     }
 
     /// `Collector.forChild(...).report(...)` accumulates; `getReport` emits the
-    /// Java path-prefixed lines in first-seen path order.
+    /// Java path-prefixed lines (grouped, ordered deterministically).
     #[test]
     fn collector_accumulates_and_reports_paths() {
         let root = Rc::new(Collector::new());

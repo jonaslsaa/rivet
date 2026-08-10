@@ -726,6 +726,20 @@ mod tests {
         );
     }
 
+    /// A child of a child propagates through two sync closures (Java shares the
+    /// nested `CompoundTag` objects) — the deepest plain-child chain.
+    #[test]
+    fn nested_child_writes_propagate_to_root() {
+        let out = output(reporter());
+        out.child("a").child("b").put_int("x", 5);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let a = result.get_compound("a").expect("a compound");
+        let b = a.get_compound("b").expect("b compound");
+        assert_eq!(b.get_int("x"), Some(5), "grandchild write visible at root");
+    }
+
     /// `childrenList` + `addChild` — a grandchild's writes propagate all the
     /// way to the root's `buildResult`.
     #[test]
