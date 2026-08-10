@@ -1,0 +1,7 @@
+**/target
+.git
+.github
+working
+logs
+PROGRESS.md
+.DS_Store

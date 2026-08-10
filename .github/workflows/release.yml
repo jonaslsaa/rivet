@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "rivet-v*-mc*"
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      rivet_version: ${{ steps.metadata.outputs.rivet_version }}
+      minecraft_version: ${{ steps.metadata.outputs.minecraft_version }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      image_full_tag: ${{ steps.metadata.outputs.image_full_tag }}
+      image_line_tag: ${{ steps.metadata.outputs.image_line_tag }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+      - name: Install Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test release scripts
+        run: python scripts/test_release_automation.py
+      - name: Validate tag and export release metadata
+        id: metadata
+        run: python scripts/validate_release_tag.py "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+
+  archives:
+    name: Archive ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+      - name: Install Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build rivet-server
+        run: cargo build --locked --release --target "${{ matrix.target }}" -p rivet-server
+      - name: Package release archive
+        run: |
+          mkdir -p dist
+          python scripts/package_release.py \
+            "${{ needs.validate.outputs.tag }}" \
+            --target "${{ matrix.target }}" \
+            --binary "target/${{ matrix.target }}/release/rivet-server" \
+            --output-dir dist
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    name: Publish GHCR image
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Refuse to overwrite full-version image tag
+        env:
+          FULL_IMAGE_TAG: ${{ needs.validate.outputs.image_full_tag }}
+        run: |
+          set -euo pipefail
+          probe="$(mktemp)"
+          trap 'rm -f "$probe"' EXIT
+          if docker buildx imagetools inspect "$IMAGE_NAME:$FULL_IMAGE_TAG" >"$probe" 2>&1; then
+            cat "$probe"
+            echo "The full-version GHCR tag already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+          if ! grep -Eiq 'no such manifest|manifest unknown|not found' "$probe"; then
+            cat "$probe"
+            echo "Could not prove that the full-version GHCR tag is absent; refusing to publish." >&2
+            exit 1
+          fi
+      - name: Build and publish image tags
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.image_full_tag }}
+            ${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.image_line_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.rivet_version }}-mc${{ needs.validate.outputs.minecraft_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  draft-release:
+    name: Create draft GitHub Release
+    needs: [validate, archives, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: release-assets
+          merge-multiple: true
+      - name: Generate SHA-256 checksums
+        working-directory: release-assets
+        run: sha256sum ./*.tar.gz | sort -k2 > SHA256SUMS
+      - name: Create draft release for manual publication
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: Rivet ${{ needs.validate.outputs.rivet_version }} for Minecraft ${{ needs.validate.outputs.minecraft_version }}
+          draft: true
+          prerelease: ${{ needs.validate.outputs.prerelease }}
+          generate_release_notes: true
+          body: |
+            This release was built from the trusted maintainer tag `${{ needs.validate.outputs.tag }}`.
+
+            The release is intentionally a draft. Review the archives and `SHA256SUMS`, then publish it manually when ready.
+
+            GHCR image tags published by this workflow:
+            - `${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.image_full_tag }}` (immutable full-version tag)
+            - `${{ env.IMAGE_NAME }}:${{ needs.validate.outputs.image_line_tag }}` (moving Minecraft-line tag)
+
+            The workflow never updates `latest`; update that tag only as a separate, deliberate stable-publication action.
+          files: |
+            release-assets/*.tar.gz
+            release-assets/SHA256SUMS

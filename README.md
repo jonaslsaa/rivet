@@ -29,6 +29,10 @@ Rivet is a faithful port of [Paper](https://papermc.io) — the world's most-use
 
 Start with [`GOAL.md`](GOAL.md) — it indexes every design doc and the rules of engagement.
 
+## Releases
+
+Release tags, the mandatory local Paper-oracle procedure, native archives, and GHCR publication are documented in [`docs/releasing.md`](docs/releasing.md).
+
 ## License & provenance
 
 Rivet is published under the [GPL-3.0-or-later](LICENSE). It is an independent project, not affiliated with Mojang, Microsoft, or PaperMC. The license covers Rivet's own contributions and grants no rights to Mojang-owned material; Rivet references Paper's sources (GPL-3/MIT for Paper's own code) as porting ground truth. See `DECISIONS.md` for the full provenance posture.
