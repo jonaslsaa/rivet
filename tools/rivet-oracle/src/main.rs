@@ -3335,6 +3335,13 @@ mod tests {
         .expect("committed manifest is valid JSON");
         assert_eq!(raw["data-version"], 4903);
         assert_eq!(raw["minecraft"], "26.2");
+        // Provenance declaration: the launcher save was never mutated. The
+        // committed source fingerprint is the enforcement backing this claim —
+        // --verify recomputes it and refuses any drift.
+        assert_eq!(
+            raw["source"]["launcher-world-mutated"], false,
+            "loaded-world provenance declares the launcher save was not mutated"
+        );
 
         let mut by_role: std::collections::BTreeMap<&str, &serde_json::Value> =
             std::collections::BTreeMap::new();
