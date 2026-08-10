@@ -334,7 +334,12 @@ impl<I> Builder<I> {
 impl<I> Multipoint<I> {
     /// The 4-arg delegating constructor — validates sizes, computes
     /// `minValue`/`maxValue` (extrapolation + knot interpolation), then stores.
-    /// Panics exactly like Java on inconsistent or empty arrays.
+    /// Panics with the same messages as Java's `IllegalArgumentException` on
+    /// inconsistent arrays. On *empty* arrays Java's 4-arg constructor instead
+    /// hits `ArrayIndexOutOfBoundsException` before its canonical `validateSizes`
+    /// runs; here we validate first and panic with the clean "no points" message
+    /// (the deviation is unreachable — the builder and the codec both reject
+    /// empty before constructing).
     pub fn new(
         coordinate: I,
         locations: Vec<f32>,
