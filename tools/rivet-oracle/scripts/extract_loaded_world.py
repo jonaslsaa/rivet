@@ -124,7 +124,10 @@ def fingerprint_tree(root: Path) -> list[tuple[str, str]]:
     outside the tree)."""
     out: list[tuple[str, str]] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+        for name in list(dirnames):
+            d = os.path.join(dirpath, name)
+            if os.path.islink(d):
+                raise SystemExit(f"REFUSED: symlink in source tree: {d}")
         for name in filenames:
             p = Path(dirpath) / name
             if p.is_symlink():
