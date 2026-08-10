@@ -36,7 +36,7 @@ rivet-text = { path = "crates/rivet-text" }
 rivet-util = { path = "crates/rivet-util" }
 rivet-world = { path = "crates/rivet-world" }
 rayon = "1"
-regex-automata = "0.4"
+pcre2 = "0.2"
 # Test-only tracing-subscriber machinery for asserting the RIVET_* trace
 # records (issue #53). Dev-dependency of rivet-server only; nothing production
 # links it (see crates/rivet-test-support).

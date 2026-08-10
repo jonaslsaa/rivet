@@ -2,14 +2,16 @@
 //!
 //! Paper delegates `glob:` and `regex:` entries to the path's `FileSystem`.
 //! Rivet currently has one native filesystem, so Paper's per-provider cache is
-//! represented by one lazily compiled matcher list. The Unix glob conversion
-//! follows OpenJDK's `sun.nio.fs.Globs.toUnixRegexPattern`.
+//! represented by one lazily compiled matcher list. Glob conversion follows
+//! OpenJDK's platform-specific `sun.nio.fs.Globs` rules. Regex entries use
+//! PCRE2's Java-compatible surface, with incompatible syntax rejected instead
+//! of risking a broader authorization match.
 
 use std::io::{self, BufRead};
 use std::path::Path;
 use std::sync::OnceLock;
 
-use regex_automata::{Anchored, Input, meta::Regex};
+use pcre2::bytes::{Regex, RegexBuilder};
 
 /// An ordered, lazily compiled `allowed_symlinks.txt` matcher list.
 #[derive(Debug)]
@@ -90,13 +92,25 @@ impl ConfigEntry {
                     "filesystem path matcher must contain a syntax prefix".to_string()
                 })?;
                 let expression = if syntax.eq_ignore_ascii_case("glob") {
-                    glob_to_unix_regex(pattern)?
+                    glob_to_native_regex(pattern)?
                 } else if syntax.eq_ignore_ascii_case("regex") {
+                    validate_java_regex(pattern)?;
                     pattern.to_string()
                 } else {
                     return Err(format!("Syntax '{syntax}' not recognized"));
                 };
-                Regex::new(&expression)
+                let mut builder = RegexBuilder::new();
+                builder.utf(true).ucp(false);
+                #[cfg(windows)]
+                builder.caseless(true);
+                // Matcher.matches() constrains the engine while it evaluates
+                // alternatives; checking the span of an unconstrained find
+                // would incorrectly reject `short|longer` after `short` wins.
+                // ANY gives dot/anchors Java's full line-terminator set rather
+                // than PCRE2's narrower LF-only default.
+                let expression = format!(r"(*ANY)\A(?:{expression})\z");
+                builder
+                    .build(&expression)
                     .map(CompiledMatcher::Regex)
                     .map_err(|error| error.to_string())
             }
@@ -184,9 +198,7 @@ impl CompiledMatcher {
         match self {
             // This is deliberately a string prefix, not Path::starts_with.
             CompiledMatcher::Prefix(prefix) => path.starts_with(prefix),
-            CompiledMatcher::Regex(regex) => regex
-                .find(Input::new(path.as_bytes()).anchored(Anchored::Yes))
-                .is_some_and(|matched| matched.end() == path.len()),
+            CompiledMatcher::Regex(regex) => regex.is_match(path.as_bytes()).unwrap_or(false),
         }
     }
 }
@@ -210,9 +222,21 @@ fn java_is_whitespace(c: char) -> bool {
     )
 }
 
-/// OpenJDK's Unix glob conversion, expressed in regex-automata's equivalent
-/// character-class syntax.
-fn glob_to_unix_regex(glob: &str) -> Result<String, String> {
+#[cfg(windows)]
+fn glob_to_native_regex(glob: &str) -> Result<String, String> {
+    glob_to_regex(glob, true)
+}
+
+#[cfg(not(windows))]
+fn glob_to_native_regex(glob: &str) -> Result<String, String> {
+    glob_to_regex(glob, false)
+}
+
+/// OpenJDK's Unix/Windows glob conversion. A positive class is preceded by a
+/// separator-negative assertion, the PCRE2 equivalent of OpenJDK's class
+/// intersection. This matters when a range (for example `[.-0]`) contains the
+/// separator without spelling it explicitly.
+fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
     let chars: Vec<char> = glob.chars().collect();
     let mut regex = String::from("^");
     let mut in_group = false;
@@ -232,6 +256,7 @@ fn glob_to_unix_regex(glob: &str) -> Result<String, String> {
                 }
                 regex.push(next);
             }
+            '/' if windows => regex.push_str("\\\\"),
             '/' => regex.push('/'),
             '[' => {
                 let class_start = i - 1;
@@ -245,8 +270,9 @@ fn glob_to_unix_regex(glob: &str) -> Result<String, String> {
                         i += 1;
                     }
                     if negated {
-                        regex.push_str("[^/");
+                        regex.push_str(if windows { "[^\\\\" } else { "[^/" });
                     } else {
+                        regex.push_str(if windows { "(?!\\\\)" } else { "(?!/)" });
                         regex.push('[');
                     }
                     if chars.get(i) == Some(&'-') {
@@ -323,8 +349,8 @@ fn glob_to_unix_regex(glob: &str) -> Result<String, String> {
                 regex.push_str(".*");
                 i += 1;
             }
-            '*' => regex.push_str("[^/]*"),
-            '?' => regex.push_str("[^/]"),
+            '*' => regex.push_str(if windows { "[^\\\\]*" } else { "[^/]*" }),
+            '?' => regex.push_str(if windows { "[^\\\\]" } else { "[^/]" }),
             other => {
                 if is_regex_meta(other) || other == '\\' {
                     regex.push('\\');
@@ -338,6 +364,99 @@ fn glob_to_unix_regex(glob: &str) -> Result<String, String> {
     }
     regex.push('$');
     Ok(regex)
+}
+
+/// Reject Java Pattern syntax that PCRE2 accepts with a different meaning.
+/// Unsupported constructs fail compilation, which keeps the entire allow list
+/// closed just as a Java `PatternSyntaxException` would. Everything accepted
+/// here is then compiled by PCRE2, including lookarounds and backreferences.
+fn validate_java_regex(pattern: &str) -> Result<(), String> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut in_class = false;
+    let mut quoted = false;
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            let Some(&escaped) = chars.get(i + 1) else {
+                break;
+            };
+            if escaped == 'Q' && !quoted {
+                quoted = true;
+            } else if escaped == 'E' && quoted {
+                quoted = false;
+            } else if !quoted && matches!(escaped, 'p' | 'P' | 'N') {
+                return Err(format!(
+                    "Java regex escape \\{escaped} is unsupported because PCRE2's Unicode property syntax differs"
+                ));
+            } else if !quoted && matches!(escaped, 'C' | 'K' | 'g' | 'o') {
+                return Err(format!(
+                    "PCRE2-only regex escape \\{escaped} is not valid Java Pattern syntax"
+                ));
+            } else if !quoted
+                && escaped == 'k'
+                && chars.get(i + 2).is_some_and(|delimiter| *delimiter != '<')
+            {
+                return Err(
+                    "only Java's \\k<name> named-backreference syntax is supported".to_string(),
+                );
+            }
+            i += 2;
+            continue;
+        }
+        if quoted {
+            i += 1;
+            continue;
+        }
+        if c == '(' && chars.get(i + 1) == Some(&'*') {
+            return Err("PCRE2 control verbs are not valid Java Pattern syntax".to_string());
+        }
+        if c == '[' {
+            if in_class {
+                return Err(
+                    "Java nested/intersection character classes are unsupported".to_string()
+                );
+            }
+            in_class = true;
+        } else if c == ']' {
+            in_class = false;
+        } else if in_class && c == '&' && chars.get(i + 1) == Some(&'&') {
+            return Err("Java character-class intersection is unsupported".to_string());
+        } else if !in_class && c == '(' && chars.get(i + 1) == Some(&'?') {
+            if chars
+                .get(i + 2)
+                .is_some_and(|marker| matches!(marker, '|' | '(' | '[' | '\''))
+            {
+                return Err("PCRE2-only group syntax is not valid Java Pattern syntax".to_string());
+            }
+            let mut j = i + 2;
+            if chars.get(j) == Some(&'-') {
+                j += 1;
+            }
+            while let Some(flag) = chars.get(j) {
+                if matches!(flag, ':' | ')') {
+                    break;
+                }
+                if !flag.is_ascii_alphabetic() && *flag != '-' {
+                    break;
+                }
+                if matches!(flag, 'd' | 'i' | 'u' | 'U' | 'x') {
+                    return Err(format!(
+                        "Java embedded regex flag '{flag}' is unsupported because PCRE2's behavior differs"
+                    ));
+                }
+                if !matches!(flag, 'm' | 's' | '-') {
+                    return Err(format!(
+                        "PCRE2 regex flag or group marker '{flag}' is not valid supported Java Pattern syntax"
+                    ));
+                }
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 fn is_regex_meta(c: char) -> bool {
@@ -410,12 +529,150 @@ mod tests {
         assert!(!list.matches(Path::new("/srv/red/r.0.0.dat")));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_glob_wildcards_and_positive_classes_cannot_consume_separator() {
+        let star = PathAllowList::new(vec![ConfigEntry::glob("/srv/*/world")]);
+        assert!(star.matches(Path::new("/srv/alice/world")));
+        assert!(!star.matches(Path::new("/srv/alice/nested/world")));
+
+        let question = PathAllowList::new(vec![ConfigEntry::glob("/srv/?/world")]);
+        assert!(question.matches(Path::new("/srv/a/world")));
+        assert!(!question.matches(Path::new("/srv///world")));
+
+        // '/' lies inside the '.'..='0' range even though the class does not
+        // spell out a separator. OpenJDK intersects every positive class with
+        // the separator's complement.
+        let ranged_class = PathAllowList::new(vec![ConfigEntry::glob("/srv/safe[.-0]secret")]);
+        assert!(ranged_class.matches(Path::new("/srv/safe.secret")));
+        assert!(ranged_class.matches(Path::new("/srv/safe0secret")));
+        assert!(!ranged_class.matches(Path::new("/srv/safe/secret")));
+    }
+
+    #[test]
+    fn windows_glob_conversion_is_testable_on_every_build_host() {
+        let expression = glob_to_regex("C:/safe[!-~]secret", true).unwrap();
+        let expression = format!(r"(*ANY)\A(?:{expression})\z");
+        let mut builder = RegexBuilder::new();
+        builder.utf(true).ucp(false).caseless(true);
+        let regex = builder.build(&expression).unwrap();
+
+        assert!(regex.is_match(br"C:\safe.secret").unwrap());
+        assert!(regex.is_match(br"c:\SAFE0secret").unwrap());
+        assert!(!regex.is_match(br"C:\safe\secret").unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_globs_use_backslash_and_never_consume_it() {
+        let star = PathAllowList::new(vec![ConfigEntry::glob("C:/*/world")]);
+        assert!(star.matches(Path::new(r"C:\alice\world")));
+        assert!(!star.matches(Path::new(r"C:\alice\nested\world")));
+
+        let question = PathAllowList::new(vec![ConfigEntry::glob("C:/?/world")]);
+        assert!(question.matches(Path::new(r"C:\a\world")));
+        assert!(!question.matches(Path::new(r"C:\\\world")));
+
+        // '\\' lies inside the broad printable-ASCII range. The positive
+        // class still may not consume Windows' native separator.
+        let ranged_class = PathAllowList::new(vec![ConfigEntry::glob("C:/safe[!-~]secret")]);
+        assert!(ranged_class.matches(Path::new(r"C:\safe.secret")));
+        assert!(!ranged_class.matches(Path::new(r"C:\safe\secret")));
+    }
+
     #[test]
     fn regex_uses_full_string_matches() {
         let list = PathAllowList::new(vec![ConfigEntry::regex("/srv/.+/world")]);
         assert!(list.matches(Path::new("/srv/alice/world")));
         assert!(!list.matches(Path::new("prefix/srv/alice/world")));
         assert!(!list.matches(Path::new("/srv/alice/world/suffix")));
+
+        // The engine must evaluate alternatives under the full-match
+        // constraint rather than accepting the first partial alternative.
+        let alternatives = PathAllowList::new(vec![ConfigEntry::regex("/srv|/srv/world")]);
+        assert!(alternatives.matches(Path::new("/srv/world")));
+    }
+
+    #[test]
+    fn regex_dot_uses_java_line_terminators() {
+        let list = PathAllowList::new(vec![ConfigEntry::regex("/srv/.*")]);
+        assert!(list.matches(Path::new("/srv/alice")));
+        assert!(!list.matches(Path::new("/srv/alice\rbob")));
+        assert!(!list.matches(Path::new("/srv/alice\u{2028}bob")));
+    }
+
+    #[test]
+    fn regex_supports_java_lookarounds() {
+        let lookahead = PathAllowList::new(vec![ConfigEntry::regex(
+            r"(?=/srv/approved/)(?!.*forbidden).*/world",
+        )]);
+        assert!(lookahead.matches(Path::new("/srv/approved/alice/world")));
+        assert!(!lookahead.matches(Path::new("/srv/approved/forbidden/world")));
+
+        let lookbehind =
+            PathAllowList::new(vec![ConfigEntry::regex(r"/srv/[a-z]+(?<=alice)/world")]);
+        assert!(lookbehind.matches(Path::new("/srv/alice/world")));
+        assert!(!lookbehind.matches(Path::new("/srv/bob/world")));
+    }
+
+    #[test]
+    fn regex_supports_java_numeric_and_named_backreferences() {
+        let numeric = PathAllowList::new(vec![ConfigEntry::regex(r"/srv/([a-z]+)/\1")]);
+        assert!(numeric.matches(Path::new("/srv/alice/alice")));
+        assert!(!numeric.matches(Path::new("/srv/alice/bob")));
+
+        let named = PathAllowList::new(vec![ConfigEntry::regex(r"/srv/(?<name>[a-z]+)/\k<name>")]);
+        assert!(named.matches(Path::new("/srv/alice/alice")));
+        assert!(!named.matches(Path::new("/srv/alice/bob")));
+    }
+
+    #[test]
+    fn regex_predefined_classes_are_ascii_by_default_like_java() {
+        let digit = PathAllowList::new(vec![ConfigEntry::regex(r"/srv/\d+")]);
+        assert!(digit.matches(Path::new("/srv/123")));
+        assert!(!digit.matches(Path::new("/srv/١٢٣")));
+
+        let word = PathAllowList::new(vec![ConfigEntry::regex(r"/srv/\w+")]);
+        assert!(word.matches(Path::new("/srv/alice_123")));
+        assert!(!word.matches(Path::new("/srv/élise")));
+
+        let whitespace = PathAllowList::new(vec![ConfigEntry::regex("/srv/\\s")]);
+        assert!(whitespace.matches(Path::new("/srv/\t")));
+        assert!(!whitespace.matches(Path::new("/srv/\u{00a0}")));
+    }
+
+    #[test]
+    fn regex_rejects_java_syntax_with_different_pcre2_meaning() {
+        assert!(
+            ConfigEntry::regex(r"(?U)\w+")
+                .compile()
+                .unwrap_err()
+                .contains("embedded regex flag 'U'")
+        );
+        assert!(
+            ConfigEntry::regex(r"[a-z&&[^m-p]]+")
+                .compile()
+                .unwrap_err()
+                .contains("character-class intersection")
+        );
+        assert!(
+            ConfigEntry::regex(r"\p{javaLowerCase}+")
+                .compile()
+                .unwrap_err()
+                .contains("Unicode property syntax differs")
+        );
+        assert!(
+            ConfigEntry::regex(r"(*ACCEPT)")
+                .compile()
+                .unwrap_err()
+                .contains("control verbs")
+        );
+        assert!(
+            ConfigEntry::regex(r"\C+")
+                .compile()
+                .unwrap_err()
+                .contains("not valid Java Pattern syntax")
+        );
     }
 
     #[test]
