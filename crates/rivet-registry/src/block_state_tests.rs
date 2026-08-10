@@ -457,10 +457,12 @@ fn typed_helpers_absent_property_behavior() {
         .try_set_value(BlockStateProperties::WATERLOGGED, PropertyValue::Bool(true))
         .unwrap();
     assert_eq!(same.id(), stone.id());
-    // setValue errors for the absent property — and it errors with the
-    // absent-property error *before* value validation, matching Paper's
-    // optimised-table `setValue` (absent property returns null first; the
-    // "not an allowed value" check only runs for a present property).
+    // setValue errors for the absent property — and it surfaces the
+    // absent-property error *before* value validation (an invalid typed value
+    // on an absent property still reports the absent property). Paper's
+    // optimised-table `setValue` throws "Cannot set property … on …" for an
+    // absent property; the "not an allowed value" error only applies to a
+    // present property.
     assert_eq!(
         stone.set_value(
             BlockStateProperties::WATERLOGGED,

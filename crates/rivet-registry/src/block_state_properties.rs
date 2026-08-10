@@ -14,11 +14,14 @@
 //! ## Boundary (chosen from actual Java imports)
 //!
 //! `working/Paper/.../world/level/block/state/properties/*.java` has 33
-//! classes. The ten enums here are the ones `levelgen`/`lighting`/structure
-//! pieces import directly (grep over `levelgen/` + `lighting/`):
-//! `DoubleBlockHalf`, `Half`, `SlabType`, `AttachFace`, `RailShape`,
-//! `RedstoneSide`, `StairsShape`, `SpeleothemThickness`, `BambooLeaves`,
-//! `CreakingHeartState`. Each is a pure `StringRepresentable` leaf (no
+//! classes. The ten enums here are the `levelgen`/`lighting`/structure pieces'
+//! leaf value classes for **setting block states** (grep over `levelgen/` +
+//! `lighting/` for `BlockStateProperties.*` usage): `DoubleBlockHalf`, `Half`,
+//! `SlabType`, `AttachFace`, `RailShape`, `RedstoneSide`, `StairsShape`,
+//! `SpeleothemThickness`, `BambooLeaves`, `CreakingHeartState`. (`StructureMode`
+//! is also imported directly by `levelgen/structure` — but only for its
+//! `LEGACY_CODEC` data-marker NBT reads, not to set a block state — and is
+//! deferred with the full unit.) Each is a pure `StringRepresentable` leaf (no
 //! `Block`/`BlockState` dependency — only `StringRepresentable`, and
 //! `DoubleBlockHalf`'s `Direction`), so they port without dragging the full
 //! block SCC. The facade constants included are exactly those whose value
@@ -37,11 +40,12 @@
 //! `DoorHingeSide`, `NoteBlockInstrument`, `PistonType`, `Tilt`,
 //! `SculkSensorPhase`, `StructureMode`, `TestBlockMode`, `PotentSulfurState`,
 //! `WoodType`, `BlockSetType`), and `EnumProperty`'s filtered-constructor
-//! variants whose value set is not already a generated id: `FACING_HOPPER`'s
-//! `facing` = `Facing3` ([down, north, south, west, east]) and
-//! `VERTICAL_DIRECTION`'s `vertical_direction` = `VerticalDirection` ([up,
-//! down]) ARE representable and ported; `RAIL_SHAPE_STRAIGHT`'s four-shape
-//! filter is deferred with the full unit. Three Java constants have **no
+//! variants: `FACING_HOPPER`'s `facing` = `Facing3` ([down, north, south,
+//! west, east]) and `VERTICAL_DIRECTION`'s `vertical_direction` =
+//! `VerticalDirection` ([up, down]) ARE representable and ported.
+//! `RAIL_SHAPE_STRAIGHT`'s six-shape filter is also representable (its set is
+//! the generated `Shape`, id 18) but has no worldgen consumer, so it stays
+//! deferred with the full unit. Three Java constants have **no
 //! generated id at all** because no 26.2 *block* registers their property
 //! (`FALLING`, `MAP`) or their exact value range (`LEVEL_FLOWING`'s `level`
 //! 1..=8; water/lava use `level` 0..=15), so they are omitted rather than
