@@ -23,12 +23,19 @@
 //! - `LateBoundIdMapper<I, V>` + the `late_bound_values`/`late_bound_entries`
 //!   accessors — required by `ComponentSerialization`'s content-type bootstrap
 //!   and `KeyDispatchCodec` discriminator.
+//! - `nonNegativeIntCodec` (`NON_NEGATIVE_INT`, an `intRangeWithMessage(0,
+//!   MAX)` — a `Codec.INT` + `validate`) — required by `Weighted.codec`
+//!   (issue #353) for the exact `"Value must be non-negative: N"` decode
+//!   error. One range member is ported here (ahead of the rest of the ranges)
+//!   because it is a pure-DFU `validate` with no Minecraft dependency; the
+//!   remaining range surface stays `mc.util` scope.
 //!
 //! RECONCILIATION: when the full `mc.util` unit is ported, these free functions
 //! move into that unit's `extra_codecs.rs`; they keep the exact same signatures
 //! and semantics documented here. The remaining `ExtraCodecs.java` surface
-//! (ranges, `compactListCodec`, `ensureHomogenous`, `orElsePartial`, ...) is
-//! not ported — that is future `mc.util` scope, not this slice.
+//! (`intRange`/`longRange`/`floatRange` and friends, `compactListCodec`,
+//! `ensureHomogenous`, `orElsePartial`, ...) is not ported — that is future
+//! `mc.util` scope, not this slice.
 
 use crate::codec::{self, Codec, ResultFunction};
 use crate::data_result::DataResult;
