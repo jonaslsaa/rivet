@@ -55,6 +55,7 @@
   "paper-commit": "0a993450f129c4942c2a9ed45ba047412b4667cf",
   "source": {
     "fingerprint-file": "source-fingerprint.txt",
+    "launcher-world-mutated": false,
     "path": "working/client-worlds/New World (disposable copy)"
   }
 }

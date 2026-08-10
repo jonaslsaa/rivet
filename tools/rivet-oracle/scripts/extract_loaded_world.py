@@ -225,6 +225,7 @@ def build_manifest(captured: list[dict]) -> dict:
         "source": {
             "path": "working/client-worlds/New World (disposable copy)",
             "fingerprint-file": FINGERPRINT_FILE,
+            "launcher-world-mutated": False,
         },
         "chunk-count": len(captured),
         "captured": captured,
