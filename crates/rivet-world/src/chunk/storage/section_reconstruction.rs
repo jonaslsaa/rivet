@@ -241,10 +241,17 @@ fn read_palette<T: Clone>(
     })
 }
 
-/// Decode one palette element with the constraints imposed by Paper's
-/// `BlockState.CODEC`. This is deliberately stricter than
-/// `NbtUtils.readBlockState`, whose separate contract ignores unknown or
-/// unparseable properties after logging a warning.
+/// Decode one palette element with the same recovery Paper's `BlockState.CODEC`
+/// applies (`StateHolder.codec` + `StateDefinition.propertiesCodec`). Only a
+/// `Name`-level failure fails the element — a missing, non-string, or unknown
+/// `Name` falls through `codecRW(BlockState.CODEC, ..., AIR, ...)`'s
+/// `orElsePartial` to the strategy default (air) with a diagnostic. Every
+/// property-level malformation instead recovers to the block's default state
+/// without a diagnostic, matching `NbtUtils.readBlockState`: the properties
+/// codec is a chain over the block's known properties only (unknown keys are
+/// ignored), each field is `orElseGet`-wrapped so a missing, invalid, or
+/// wrong-typed value recovers to the property's default, and a wrong-typed
+/// `Properties` itself is swallowed by `lenientOptionalFieldOf("Properties")`.
 fn decode_block_state(entry: &Tag) -> Result<BlockState, String> {
     let Tag::Compound(state) = entry else {
         return Err(format!("Not a map: {entry}"));
@@ -266,25 +273,25 @@ fn decode_block_state(entry: &Tag) -> Result<BlockState, String> {
         return Ok(result);
     };
     let Tag::Compound(properties) = properties_tag else {
-        return Err(format!("Not a map: {properties_tag}"));
+        return Ok(result);
     };
     let definition = StateDefinition::for_block(block);
-    for (name, value_tag) in properties.entry_set() {
-        let property = definition
-            .get_property(name)
-            .ok_or_else(|| format!("No property {name} in block state {id}"))?;
-        let Tag::String(value) = value_tag else {
-            return Err(format!("Not a string: {value_tag}"));
+    // Iterate the block's known properties, not the input's keys: Paper's
+    // properties codec decodes only fields present in `propertiesByName`, so
+    // unknown keys are ignored.
+    for property in definition.properties() {
+        let Some(value_tag) = properties.get(property.name()) else {
+            continue;
         };
-        let parsed = property.get_value(&value.value).ok_or_else(|| {
-            format!(
-                "Unable to read property: {name} with value: {} for block state {id}",
-                value.value
-            )
-        })?;
-        let index = definition
-            .value_index(property, parsed)
-            .expect("parsed property belongs to the selected block definition");
+        let Tag::String(value) = value_tag else {
+            continue;
+        };
+        let Some(parsed) = property.get_value(&value.value) else {
+            continue;
+        };
+        let Some(index) = definition.value_index(property, parsed) else {
+            continue;
+        };
         result = result
             .set_property(property.id(), index)
             .expect("validated block-state property is settable");

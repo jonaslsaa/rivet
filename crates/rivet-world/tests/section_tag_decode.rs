@@ -318,7 +318,7 @@ fn missing_containers_default_independently_and_blocks_fail_first() {
 }
 
 #[test]
-fn invalid_block_state_elements_and_biomes_use_codec_defaults() {
+fn unknown_registry_elements_use_codec_defaults_while_bad_properties_recover() {
     let factory = current_version_container_factory();
     let mut unknown = CompoundTag::new();
     unknown.put_string("Name", "minecraft:not_a_block");
@@ -350,13 +350,17 @@ fn invalid_block_state_elements_and_biomes_use_codec_defaults() {
     ]);
     let sections = reconstruct_sections(&tags, 0, 1, &factory, predicates()).unwrap();
 
+    // A Name-level failure (unknown block) falls back to air, like a biome
+    // registry miss falls back to the default biome.
     let defaults = sections[0].as_ref().unwrap();
     assert_eq!(defaults.get_block_state(0, 0, 0), block("minecraft:air"));
     assert_eq!(defaults.get_noise_biome(0, 0, 0), BiomeId::PLAINS);
+    // Property-level malformations (unknown key, invalid value) recover to the
+    // block's default state with no diagnostic, matching BlockState.CODEC.
     let log = sections[1].as_ref().unwrap();
-    assert_eq!(log.get_block_state(0, 0, 0), block("minecraft:air"));
-    assert_eq!(log.non_empty_block_count(), 0);
-    assert_eq!(sections.diagnostics.len(), 3);
+    assert_eq!(log.get_block_state(0, 0, 0), block("minecraft:oak_log"));
+    assert_eq!(log.non_empty_block_count(), 4096);
+    assert_eq!(sections.diagnostics.len(), 2);
     assert_eq!(sections.diagnostics[0].section_y, 0);
     assert_eq!(sections.diagnostics[0].container, "block_states");
     assert_eq!(sections.diagnostics[0].path, CodecPath::PaletteElement(0));
@@ -369,17 +373,10 @@ fn invalid_block_state_elements_and_biomes_use_codec_defaults() {
         sections.diagnostics[1].message,
         "(Unknown registry key in ResourceKey[minecraft:root / minecraft:worldgen/biome]: minecraft:not_a_biome -> using default)"
     );
-    assert_eq!(sections.diagnostics[2].section_y, 1);
-    assert_eq!(sections.diagnostics[2].container, "block_states");
-    assert_eq!(sections.diagnostics[2].path, CodecPath::PaletteElement(0));
-    assert_eq!(
-        sections.diagnostics[2].message,
-        "(No property bogus in block state minecraft:oak_log -> using default)"
-    );
 }
 
 #[test]
-fn every_block_state_codec_shape_error_replaces_the_whole_element() {
+fn name_level_shape_errors_replace_the_element_but_properties_recover() {
     let factory = current_version_container_factory();
 
     let block_state = |name_tag: Tag, properties: Option<Tag>| {
@@ -396,7 +393,10 @@ fn every_block_state_codec_shape_error_replaces_the_whole_element() {
         Tag::Compound(properties)
     };
     let oak_log = Tag::String(StringTag::value_of("minecraft:oak_log".into()));
-    let hostile = [
+    // Property-level malformations recover to the block's default state with
+    // no diagnostic (BlockState.CODEC): invalid value, unknown key, wrong-typed
+    // `Properties`, wrong-typed value.
+    let property_hostile = [
         block_state(
             oak_log.clone(),
             Some(properties(
@@ -416,6 +416,26 @@ fn every_block_state_codec_shape_error_replaces_the_whole_element() {
             oak_log,
             Some(properties("axis", Tag::Int(IntTag::value_of(1)))),
         ),
+    ];
+    let property_count = property_hostile.len();
+    for (y, state) in property_hostile.into_iter().enumerate() {
+        let tags = list(vec![section(
+            y as i8,
+            Some(container(vec![state], None)),
+            Some(plains()),
+        )]);
+        let sections =
+            reconstruct_sections(&tags, y as i32, y as i32, &factory, predicates()).unwrap();
+        assert_eq!(
+            sections[0].as_ref().unwrap().get_block_state(0, 0, 0),
+            block("minecraft:oak_log")
+        );
+        assert!(sections.diagnostics.is_empty());
+    }
+
+    // A Name-level failure (missing, wrong-typed, or unparsable `Name`) still
+    // replaces the whole element with the strategy default (air).
+    let name_hostile = [
         block_state(Tag::Int(IntTag::value_of(1)), None),
         Tag::Compound(CompoundTag::new()),
         block_state(
@@ -423,8 +443,8 @@ fn every_block_state_codec_shape_error_replaces_the_whole_element() {
             None,
         ),
     ];
-
-    for (y, state) in hostile.into_iter().enumerate() {
+    for (offset, state) in name_hostile.into_iter().enumerate() {
+        let y = property_count + offset;
         let tags = list(vec![section(
             y as i8,
             Some(container(vec![state], None)),
@@ -442,13 +462,10 @@ fn every_block_state_codec_shape_error_replaces_the_whole_element() {
 }
 
 #[test]
-fn hostile_property_diagnostic_precedes_biome_data_and_blocklight_failures() {
+fn block_state_diagnostic_precedes_biome_data_and_blocklight_failures() {
     let factory = current_version_container_factory();
-    let mut properties = CompoundTag::new();
-    properties.put_string("axis", "sideways");
-    let mut oak_log = CompoundTag::new();
-    oak_log.put_string("Name", "minecraft:oak_log");
-    oak_log.put("Properties".into(), Tag::Compound(properties));
+    let mut unknown = CompoundTag::new();
+    unknown.put_string("Name", "minecraft:not_a_block");
 
     let bad_biomes = container(
         vec![
@@ -459,7 +476,7 @@ fn hostile_property_diagnostic_precedes_biome_data_and_blocklight_failures() {
     );
     let tags = list(vec![section(
         0,
-        Some(container(vec![Tag::Compound(oak_log.clone())], None)),
+        Some(container(vec![Tag::Compound(unknown.clone())], None)),
         Some(bad_biomes),
     )]);
     let err = reconstruct_sections(&tags, 0, 0, &factory, predicates())
@@ -475,7 +492,7 @@ fn hostile_property_diagnostic_precedes_biome_data_and_blocklight_failures() {
 
     let mut bad_light = section(
         0,
-        Some(container(vec![Tag::Compound(oak_log)], None)),
+        Some(container(vec![Tag::Compound(unknown)], None)),
         Some(plains()),
     );
     bad_light.put_byte_array("BlockLight", vec![0]);
