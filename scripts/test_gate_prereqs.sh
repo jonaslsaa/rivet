@@ -92,6 +92,7 @@ run_check() {
 run_check "$FAKE_EMPTY" > "$TMP/out1" 2>&1
 [ "$VERIFY_RUNNABLE" = 0 ] || fail "verify runnable with no prereqs"
 [ "$PARITY_RUNNABLE" = 0 ] || fail "parity runnable with no prereqs"
+[ "$SCENARIO_RUNNABLE" = 0 ] || fail "scenario runnable with no prereqs"
 # In this scenario java/python3/javac are not on PATH, the fake repo has no jars
 # and no materialized runtime, but df IS present (so free disk should be [ok]).
 missing_marker() { # $1 = item name
@@ -126,9 +127,10 @@ add_stub python3 'Python 3.14.6'
 run_check "$FAKE_FULL" > "$TMP/out3" 2>&1
 [ "$VERIFY_RUNNABLE" = 1 ] || fail "verify not runnable with all prereqs present"
 [ "$PARITY_RUNNABLE" = 1 ] || fail "parity not runnable with all prereqs present"
+[ "$SCENARIO_RUNNABLE" = 1 ] || fail "scenario not runnable with all prereqs present"
 grep -q "all oracle prerequisites present" "$TMP/out3" || fail "present-report missing"
 grep -q "MISSING" "$TMP/out3" && fail "MISSING reported despite all prereqs present"
-pass "all prereqs present: both steps runnable, no MISSING reported"
+pass "all prereqs present: all steps runnable, no MISSING reported"
 
 # --- test 4: run_rivet_parity must not report VERIFIED when the oracle cannot boot --
 # run_rivet_parity invokes `cargo run -q -p rivet-parity -- --require-oracle`; shim only
@@ -410,6 +412,79 @@ set -e
 grep -q "^    UNVERIFIED" "$TMP/out16" || fail "self-test: UNVERIFIED not printed for exit 7"
 grep -q "^    FAILED" "$TMP/out16" && fail "self-test: FAILED printed for exit 7 (classification is conservatively UNVERIFIED, never FAILED)"
 pass "self-test: nonzero exit 7 -> UNVERIFIED, never FAILED"
+
+# --- test 6: scenario Paper rows (join/move Paper-vs-Rivet) never silently skip -
+# issue #160: pre-#160 the Paper rows printed a bare "SKIPPED (no paperclip jar)"
+# when the jar was absent, so a merge with no Paper comparison could still look
+# green. run_scenario_paper_rows now mirrors the oracle-step contract: with the
+# prereqs present (SCENARIO_RUNNABLE=1) it runs all three Paper rows (exit 0
+# PASS / 1 FAIL); with a prereq missing it reports UNVERIFIED and sets
+# ORACLE_UNVERIFIED so main exits 3, and --require-oracle hard-fails at the
+# prereq pre-check (exit 1). run_scenario_paper_rows resolves run-scenario.sh via
+# REPO_DIR, so only that file is shimmed, as in the self-test block above.
+SCENARIO_SHIM_DIR="$FAKE_FULL/tools/rivet-client"
+mkdir -p "$SCENARIO_SHIM_DIR"
+# Shim run-scenario.sh to record its argv (so we can assert the correct three
+# Paper rows are invoked) and exit 0 on success; a marker path (baked in below)
+# makes it fail for the FAIL classification test. The log/fail paths are baked
+# directly into the heredoc because the shim runs as a child process that does
+# not inherit the test's shell variables.
+SCENARIO_LOG="$TMP/scenario-invocations.log"
+FAIL_SCENARIO_MARKER="$TMP/fail-scenario"
+: > "$SCENARIO_LOG"
+cat > "$SCENARIO_SHIM_DIR/run-scenario.sh" <<SCEOF
+#!/bin/bash
+echo "\$@" >> "$SCENARIO_LOG"
+if [ -f "$FAIL_SCENARIO_MARKER" ]; then
+  exit 1
+fi
+exit 0
+SCEOF
+chmod +x "$SCENARIO_SHIM_DIR/run-scenario.sh"
+
+# Runnable (SCENARIO_RUNNABLE=1) with all prereqs present: runs all three Paper
+# rows, sets no UNVERIFIED, returns 0 (main's verdict stays green).
+SCENARIO_RUNNABLE=1; ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+: > "$SCENARIO_LOG"
+run_scenario_paper_rows > "$TMP/out_sc1" 2>&1
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "scenario: ORACLE_UNVERIFIED set on a runnable Paper-row run"
+grep -q "join --server both" "$SCENARIO_LOG" || fail "scenario: join --server both not invoked when runnable"
+grep -q "move --server both" "$SCENARIO_LOG" || fail "scenario: move --server both not invoked when runnable"
+grep -q "join$" "$SCENARIO_LOG" || fail "scenario: Paper-vs-Paper join self-check not invoked when runnable"
+[ "$(wc -l < "$SCENARIO_LOG" | tr -d ' ')" = 3 ] || fail "scenario: expected exactly 3 run-scenario invocations, got $(wc -l < "$SCENARIO_LOG")"
+grep -q "UNVERIFIED" "$TMP/out_sc1" && fail "scenario: UNVERIFIED printed despite runnable Paper rows"
+pass "scenario: runnable Paper rows invoke join + join both + move both, stay VERIFIED"
+
+# Missing prereq (SCENARIO_RUNNABLE=0): must report UNVERIFIED, set
+# ORACLE_UNVERIFIED, and return 0 (main turns it into exit 3) — never a bare
+# skip. Must NOT invoke run-scenario.sh at all.
+SCENARIO_RUNNABLE=0; ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+: > "$SCENARIO_LOG"
+set +e
+run_scenario_paper_rows > "$TMP/out_sc2" 2>&1
+rc_sc2=$?
+set -e
+[ "$rc_sc2" = 0 ] || fail "scenario: missing prereq without --require-oracle should return 0 (got $rc_sc2)"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "scenario: ORACLE_UNVERIFIED not set when Paper rows not runnable"
+grep -q "UNVERIFIED" "$TMP/out_sc2" || fail "scenario: UNVERIFIED not printed when Paper rows not runnable"
+grep -q "SKIPPED" "$TMP/out_sc2" && fail "scenario: old bare SKIPPED still printed — issue #160 guard missing"
+[ -s "$SCENARIO_LOG" ] && fail "scenario: run-scenario.sh invoked despite missing prereq"
+pass "scenario: missing prereq -> UNVERIFIED (not SKIPPED), no run-scenario invocation"
+
+# A failing Paper row (run-scenario.sh exits nonzero) must be a hard FAIL (exit 1),
+# never UNVERIFIED or green — the rows are a real differential, so a divergence is
+# a genuine failure, not an infrastructure problem. run_scenario_paper_rows exits
+# the shell in this branch, so it runs in a subshell (set -e aborts on the nonzero).
+SCENARIO_RUNNABLE=1; ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+: > "$FAIL_SCENARIO_MARKER"
+set +e
+( run_scenario_paper_rows > "$TMP/out_sc3" 2>&1 )
+rc_sc3=$?
+set -e
+[ "$rc_sc3" = 1 ] || fail "scenario: a failing Paper row should exit 1 (got $rc_sc3)"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "scenario: FAILED Paper row should not set ORACLE_UNVERIFIED"
+grep -q "UNVERIFIED" "$TMP/out_sc3" && fail "scenario: UNVERIFIED printed for a FAILED Paper row (classification is FAIL, exit 1)"
+pass "scenario: failing Paper row -> hard exit 1 (FAIL), never UNVERIFIED"
 
 echo
 echo "ALL GATE PREREQ TESTS PASSED"

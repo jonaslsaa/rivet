@@ -67,6 +67,18 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/t
 mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
 : > "$SANDBOX/tools/rivet-client/target/debug/rivet-client"
 
+# gate.sh now also runs the scenario runner's Paper rows (join/move
+# Paper-vs-Rivet differentials) whenever the paperclip jar and the client binary
+# are present (SCENARIO_RUNNABLE). Stub run-scenario.sh to succeed so a green
+# full gate reaches GATE GREEN; the scenario's own behaviour is covered by
+# test_gate_prereqs.sh and the runner's unit tests.
+mkdir -p "$SANDBOX/tools/rivet-client"
+cat > "$SANDBOX/tools/rivet-client/run-scenario.sh" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$SANDBOX/tools/rivet-client/run-scenario.sh"
+
 # The real gate script under test.
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
 chmod +x "$SANDBOX/scripts/gate.sh"
