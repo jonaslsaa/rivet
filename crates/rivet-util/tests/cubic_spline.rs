@@ -77,12 +77,42 @@ fn hex_f32(s: &str) -> f32 {
     v as f32
 }
 
-/// One `SplineProbe` spline case: constructor-computed bounds and the sample
-/// sweep, parsed from the golden fixture.
+/// Java's `BoundedFloatFunction` impls render their class name in `toString`
+/// (`net.minecraft.util.BoundedFloatFunction$1`), while the Rust `Identity`
+/// renders its own type name. Normalize that one token so the fixture's Java
+/// parity strings are asserted byte-for-byte against Rust for everything else
+/// (locations, derivatives, values, and the `%.3f` formatting). The `$1`
+/// ordinal is a javac source-order number — match any ordinal so a Paper pin
+/// advance that renumbers the anonymous class keeps working — and a raw
+/// `toString` also appends a per-JVM identity hash (`@<hex>`, which
+/// `SplineProbe.parityOf` already strips), normalized away here too.
+fn normalize_coordinate(s: &str) -> String {
+    let s = s.replace("coordinate=Identity", "coordinate=<coordinate>");
+    let marker = "coordinate=net.minecraft.util.BoundedFloatFunction$";
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s.as_str();
+    while let Some(start) = rest.find(marker) {
+        // Skip `<class>$<ordinal>[@<hex>]`: the ordinal digits, an optional
+        // `@`, then the hash's hex digits. `rest` continues past the token.
+        out.push_str(&rest[..start]);
+        out.push_str("coordinate=<coordinate>");
+        rest = &rest[start + marker.len()..];
+        rest = rest
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start_matches('@')
+            .trim_start_matches(|c: char| c.is_ascii_hexdigit());
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One `SplineProbe` spline case: constructor-computed bounds, the sample
+/// sweep, and Paper's `parityString()` output, parsed from the golden fixture.
 struct GoldenCase {
     min: f32,
     max: f32,
     samples: Vec<(f32, f32)>, // (coordinate, sample)
+    parity: String,           // Paper's parity string (coordinate token normalized)
 }
 
 /// Look up a spline case by name in the embedded golden fixture.
@@ -106,7 +136,26 @@ fn golden_case(name: &str) -> GoldenCase {
             )
         })
         .collect();
-    GoldenCase { min, max, samples }
+    let parity = case
+        .get("parity")
+        .and_then(|p| p.as_str())
+        .unwrap_or_else(|| panic!("no parity for golden case {name}"));
+    GoldenCase {
+        min,
+        max,
+        samples,
+        parity: normalize_coordinate(parity),
+    }
+}
+
+/// Assert Rust's parity string matches the fixture's (modulo the coordinate
+/// token).
+fn assert_parity(spline: &CubicSpline<Identity>, want: &str) {
+    assert_eq!(
+        normalize_coordinate(&spline.parity_string()),
+        want,
+        "parity"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +171,7 @@ fn golden_constant_raw() {
     for (c, want) in &g.samples {
         assert_eq!(s.sample(*c).to_bits(), want.to_bits(), "sample({c})");
     }
-    assert_eq!(s.parity_string(), "k=1.500");
+    assert_parity(&s, &g.parity);
 }
 
 #[test]
@@ -135,10 +184,7 @@ fn golden_constant_one_point() {
     for (c, want) in &g.samples {
         assert_eq!(s.sample(*c).to_bits(), want.to_bits(), "sample({c})");
     }
-    assert_eq!(
-        s.parity_string(),
-        "Spline{coordinate=Identity, locations=[0.000], derivatives=[0.000], values=[k=3.250]}"
-    );
+    assert_parity(&s, &g.parity);
 }
 
 #[test]
@@ -153,10 +199,7 @@ fn golden_two_point_no_deriv() {
     for (c, want) in &g.samples {
         assert_eq!(s.sample(*c).to_bits(), want.to_bits(), "sample({c})");
     }
-    assert_eq!(
-        s.parity_string(),
-        "Spline{coordinate=Identity, locations=[-1.000, 1.000], derivatives=[0.000, 0.000], values=[k=2.000, k=4.000]}"
-    );
+    assert_parity(&s, &g.parity);
 }
 
 #[test]
@@ -174,6 +217,7 @@ fn golden_three_point_deriv() {
     for (c, want) in &g.samples {
         assert_eq!(s.sample(*c).to_bits(), want.to_bits(), "sample({c})");
     }
+    assert_parity(&s, &g.parity);
 }
 
 #[test]
@@ -190,6 +234,7 @@ fn golden_neg_slope_extend() {
     for (c, want) in &g.samples {
         assert_eq!(s.sample(*c).to_bits(), want.to_bits(), "sample({c})");
     }
+    assert_parity(&s, &g.parity);
 }
 
 #[test]
@@ -209,11 +254,9 @@ fn golden_nested_values() {
     for (c, want) in &g.samples {
         assert_eq!(s.sample(*c).to_bits(), want.to_bits(), "sample({c})");
     }
-    // The nested values appear in the parity string in the packed order.
-    assert_eq!(
-        s.parity_string(),
-        "Spline{coordinate=Identity, locations=[-2.000, 2.000], derivatives=[0.000, 0.000], values=[Spline{coordinate=Identity, locations=[0.000, 2.000], derivatives=[0.000, 0.000], values=[k=1.000, k=3.000]}, k=0.500]}"
-    );
+    // The nested values appear in the parity string in the packed order
+    // (asserted against the fixture's nested Java parity string).
+    assert_parity(&s, &g.parity);
 }
 
 // ---------------------------------------------------------------------------

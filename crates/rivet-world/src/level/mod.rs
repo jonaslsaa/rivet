@@ -13,6 +13,9 @@
 //! path `world.level.ChunkPos` resolves — never re-ported.
 
 pub mod block_getter;
+// `world.level.DataPackConfig` — the `WorldDataConfiguration` prerequisite
+// (#387).
+pub mod data_pack_config;
 pub mod height_accessor;
 // The Java package `world.level` + class `Level` mirrors to `level::level`;
 // clippy's module_inception lint fires on the faithful PORTING.md name (same
@@ -28,6 +31,7 @@ pub mod validation;
 pub mod world_gen_level;
 
 pub use block_getter::BlockGetter;
+pub use data_pack_config::DataPackConfig;
 pub use height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor, create};
 pub use level::{Level, end, nether, overworld};
 pub use level_accessor::LevelAccessor;
