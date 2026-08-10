@@ -11,7 +11,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rivet_registry::block_state::BlockState;
 use rivet_registry::core::ChunkPos;
 use rivet_world::chunk::storage::serializable_chunk_data::{
     SerializableChunkData, SerializableChunkDataError,
@@ -19,7 +18,6 @@ use rivet_world::chunk::storage::serializable_chunk_data::{
 use rivet_world::chunk::storage::{RegionFileStorage, RegionStorageInfo};
 use rivet_world::level::height_accessor;
 
-use super::level_chunk::{BiomeId, StateId};
 use super::server_level::ServerLevel;
 
 /// Pure Paper overworld storage layout rooted at the supplied disposable copy.
@@ -144,10 +142,11 @@ impl RegionChunkSource {
             .ok_or(RegionBackedBootError::MissingChunkStatus(pos))
     }
 
-    /// The composition point the runtime `ChunkMap`/`LevelChunk` slice
-    /// completes. Existing serializable validation runs first so
-    /// proto/generation and blending boundaries retain their precise typed
-    /// errors.
+    /// Read, extract, and fully validate one serialized chunk for runtime
+    /// composition. Returns the validated data; the runtime
+    /// `ChunkMap`/`LevelChunk` composition slice is the next loaded-world
+    /// step, so no production path composes the result today. Proto/generation
+    /// and blending boundaries surface their precise typed errors first.
     pub fn load_for_composition(
         &mut self,
         pos: ChunkPos,
@@ -155,7 +154,7 @@ impl RegionChunkSource {
         let data = self.read_serializable(pos)?;
         data.validate_full_capabilities()
             .map_err(RegionBackedBootError::SerializableChunk)?;
-        Err(RegionBackedBootError::RuntimeChunkCompositionUnavailable)
+        Ok(data)
     }
 }
 
@@ -165,17 +164,6 @@ impl RegionChunkSource {
 pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     let _prepared = RegionLevelPreparation::prepare(root)?;
     Err(RegionBackedBootError::LevelDataCodecsUnavailable)
-}
-
-/// Minimal registry bridge for reconstructed section palettes: block states
-/// reuse the generated global id directly; biomes validate raw generated
-/// registry ids against the canonical generated count.
-pub fn bridge_block_state(state: BlockState) -> StateId {
-    state.id()
-}
-
-pub fn bridge_biome_id(id: u16) -> Result<BiomeId, RegionBackedBootError> {
-    BiomeId::try_from(id).map_err(RegionBackedBootError::UnknownBiomeId)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -196,12 +184,6 @@ pub enum RegionBackedBootError {
     MissingChunkStatus(ChunkPos),
     #[error("UNVERIFIED serialized chunk is unsupported: {0}")]
     SerializableChunk(#[source] SerializableChunkDataError),
-    #[error(
-        "UNVERIFIED runtime chunk composition into ChunkMap/LevelChunk is not yet implemented (next loaded-world slice)"
-    )]
-    RuntimeChunkCompositionUnavailable,
-    #[error("UNVERIFIED biome registry id {0} is outside the generated registry")]
-    UnknownBiomeId(u16),
 }
 
 #[cfg(test)]
@@ -211,11 +193,16 @@ mod tests {
     use rivet_nbt::compound_tag::CompoundTag;
     use rivet_nbt::nbt_io;
     use rivet_nbt::tag::Tag;
-    use rivet_registry::generated::biomes::BIOME_COUNT;
     use rivet_util::data_io::DataOutputStream;
     use rivet_world::chunk::status::ChunkStatus;
 
     use super::*;
+
+    // Fixtures here hand-craft minimal region buffers (a single version-3
+    // chunk). Exercising real launcher-created overworld regions — Spigot
+    // sentinel 255, external `.mcc`, oversized supplements, full header
+    // validation — belongs to the #316 harness once this branch can boot past
+    // the #323 `level.dat` boundary.
 
     fn layout() -> (tempfile::TempDir, RegionWorldLayout) {
         let temp = tempfile::tempdir().unwrap();
@@ -327,14 +314,14 @@ mod tests {
     }
 
     #[test]
-    fn full_region_chunk_reaches_runtime_composition_boundary() {
+    fn full_region_chunk_validates_for_runtime_composition() {
         let (_temp, layout) = layout();
         write_chunk(&layout, full_chunk());
         let mut source = RegionChunkSource::open(layout);
-        assert!(matches!(
-            source.load_for_composition(ChunkPos::ZERO),
-            Err(RegionBackedBootError::RuntimeChunkCompositionUnavailable)
-        ));
+        let data = source
+            .load_for_composition(ChunkPos::ZERO)
+            .expect("a full region chunk must validate for composition");
+        assert_eq!(data.status(), ChunkStatus::Full);
     }
 
     #[test]
@@ -366,17 +353,6 @@ mod tests {
             Err(RegionBackedBootError::SerializableChunk(
                 SerializableChunkDataError::UnsupportedBlendingData
             ))
-        ));
-    }
-
-    #[test]
-    fn registry_bridge_reuses_generated_ids_and_bounds() {
-        let state = BlockState::new(StateId(123));
-        assert_eq!(bridge_block_state(state), StateId(123));
-        assert_eq!(bridge_biome_id(40).unwrap(), BiomeId(40));
-        assert!(matches!(
-            bridge_biome_id(BIOME_COUNT as u16),
-            Err(RegionBackedBootError::UnknownBiomeId(_))
         ));
     }
 }

@@ -278,6 +278,12 @@ impl RegionFile {
 
     /// Open an already-existing region through a read-only descriptor. Header
     /// corruption is reported instead of repaired, backed up, or rewritten.
+    ///
+    /// Read-only header validation is deliberately all-or-nothing: any single
+    /// invalid or overlapping header slot rejects the entire region open,
+    /// because boot must never silently drop chunks to keep the rest readable.
+    /// Per-chunk failures on the read path remain narrower, surfacing as
+    /// `InvalidData` via `corrupt_chunk`.
     pub fn open_read_only(
         info: RegionStorageInfo,
         path: PathBuf,

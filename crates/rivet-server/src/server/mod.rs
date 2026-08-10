@@ -115,7 +115,10 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
-        Self::try_new(config).expect("Server::new only supports the default superflat boot")
+        Self::try_new(config).expect(
+            "Server::new supports only the default no-level superflat boot; \
+             use Server::try_new when config.level_path is set",
+        )
     }
 
     /// Build the server, surfacing typed region-backed capability boundaries
