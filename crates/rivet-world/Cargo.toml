@@ -39,6 +39,11 @@ rivet-serialization = { workspace = true }
 # read `CompoundTag`; rivet-nbt is now a production dependency.
 rivet-nbt = { workspace = true }
 rivet-util = { workspace = true }
+# The `.mcc` oversized-chunk commit op writes to a `tmp...` file in the
+# external-file directory and atomically renames it over the target
+# (`Files.move(tmp, target, REPLACE_EXISTING)`); the temp path must outlive
+# the `RegionFile.write` call, which only `tempfile::TempPath` guarantees.
+tempfile = { workspace = true }
 
 [dev-dependencies]
 # Tests build real containers (BytesMut-backed FriendlyByteBuf).
