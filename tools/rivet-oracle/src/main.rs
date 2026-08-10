@@ -42,9 +42,10 @@
 //!   7. **`sample`** — regenerate the `worldgen/` semantic fixtures: run the
 //!      Paper-side sampler (`scripts/run_worldgen_sampler.sh`) into
 //!      `samples.json`, re-extract the Starlight light samples from the M0
-//!      FULL superflat chunks (`scripts/extract_light_samples.py`), and rewrite
-//!      `manifest.json`. Requires the materialized Paper runtime (see the
-//!      scripts; no full server boot).
+//!      FULL superflat chunks (`scripts/extract_light_samples.py` for the
+//!      semantic nibble samples, `scripts/extract_light_full.py` for the full
+//!      2048-byte arrays, issue #229), and rewrite `manifest.json`. Requires the
+//!      materialized Paper runtime (see the scripts; no full server boot).
 //!   8. **`regenerate`** — full regeneration of all fixture kinds: M0 chunk
 //!      slice (boot + extract), M2 region payloads (twin-boot: two independent
 //!      fresh normal-overworld boots whose extracted payloads must be
@@ -1903,7 +1904,7 @@ fn regenerate_worldgen_manifest(wg_dir: &Path) -> Result<(), Error> {
         .to_string();
 
     let mut captured = Vec::new();
-    for name in ["samples.json", "light.json"] {
+    for name in ["samples.json", "light.json", "light-full.json"] {
         let data = fs::read(wg_dir.join(name))
             .map_err(|e| Error::Manifest(format!("{name} missing: {e}")))?;
         captured.push(CapturedFile {
@@ -1920,8 +1921,8 @@ fn regenerate_worldgen_manifest(wg_dir: &Path) -> Result<(), Error> {
         level_type: "minecraft:normal",
         kind: "worldgen-samples",
         note: "semantic density/biome/surface samples (Paper-side sampler) + Starlight \
-               light samples (M0 FULL superflat chunks). Deterministic across boots for \
-               the pinned Paper + seed.",
+               light samples (M0 FULL superflat chunks, semantic + full 2048-byte \
+               arrays). Deterministic across boots for the pinned Paper + seed.",
         captured,
     };
     let mut text = serde_json::to_string_pretty(&manifest)
@@ -1956,27 +1957,33 @@ fn regenerate_samples() -> Result<(), Error> {
         )));
     }
 
-    // 2. Starlight light samples from the M0 FULL superflat chunk fixtures.
-    let light = crate_root.join("scripts/extract_light_samples.py");
+    // 2. Starlight light samples from the M0 FULL superflat chunk fixtures
+    //    (semantic nibble samples + the full 2048-byte arrays, issue #229).
     let chunk_dir = crate_root.join("fixtures/chunk");
-    let out = Command::new("python3")
-        .arg(&light)
-        .arg(&chunk_dir)
-        .arg(wg.join("light.json"))
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| Error::Gate(format!("failed to run python3 {}: {e}", light.display())))?;
-    if !out.status.success() {
-        return Err(Error::Gate(format!(
-            "extract_light_samples.py failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+    for (script, out_name) in [
+        ("extract_light_samples.py", "light.json"),
+        ("extract_light_full.py", "light-full.json"),
+    ] {
+        let light = crate_root.join("scripts").join(script);
+        let out = Command::new("python3")
+            .arg(&light)
+            .arg(&chunk_dir)
+            .arg(wg.join(out_name))
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| Error::Gate(format!("failed to run python3 {}: {e}", light.display())))?;
+        if !out.status.success() {
+            return Err(Error::Gate(format!(
+                "{script} failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
     }
 
     // 3. Rewrite the worldgen manifest from the fresh hashes.
     regenerate_worldgen_manifest(&wg)?;
-    println!("regenerated worldgen semantic samples (samples.json, light.json, manifest.json)");
+    println!("regenerated worldgen semantic samples (samples.json, light.json, light-full.json, manifest.json)");
     Ok(())
 }
 
@@ -3248,10 +3255,13 @@ mod tests {
             parse_paper_pin(manifest.paper.as_deref()),
             Some("0a99345".into())
         );
-        assert_eq!(manifest.captured.len(), 2);
+        assert_eq!(manifest.captured.len(), 3);
         for cap in &manifest.captured {
             assert!(
-                cap.path == "samples.json" || cap.path == "light.json",
+                matches!(
+                    cap.path.as_str(),
+                    "samples.json" | "light.json" | "light-full.json"
+                ),
                 "unexpected worldgen capture {}",
                 cap.path
             );
@@ -3971,7 +3981,7 @@ mod tests {
             fs::remove_dir_all(&scratch).unwrap();
         }
         fs::create_dir_all(&scratch).unwrap();
-        for name in ["samples.json", "light.json"] {
+        for name in ["samples.json", "light.json", "light-full.json"] {
             fs::copy(dir.join(name), scratch.join(name)).unwrap();
         }
         regenerate_worldgen_manifest(&scratch).unwrap();

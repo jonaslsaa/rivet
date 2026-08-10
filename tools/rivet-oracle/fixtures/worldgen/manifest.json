@@ -4,7 +4,7 @@
   "seed": "42",
   "level-type": "minecraft:normal",
   "kind": "worldgen-samples",
-  "note": "semantic density/biome/surface samples (Paper-side sampler) + Starlight light samples (M0 FULL superflat chunks). Deterministic across boots for the pinned Paper + seed.",
+  "note": "semantic density/biome/surface samples (Paper-side sampler) + Starlight light samples (M0 FULL superflat chunks, semantic + full 2048-byte arrays). Deterministic across boots for the pinned Paper + seed.",
   "captured": [
     {
       "path": "samples.json",
@@ -15,6 +15,11 @@
       "path": "light.json",
       "sha256": "e55bc2f2bd8860f86d16b4d9a0deaabcc9293b2c9fd6ee6c5ab30723b45182ac",
       "bytes": 4322
+    },
+    {
+      "path": "light-full.json",
+      "sha256": "fa15dd890178e42ccb66e4eebfa1ac75c3fd3b51874c651d57820e88b48bfbe9",
+      "bytes": 37860
     }
   ]
 }
