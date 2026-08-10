@@ -3306,14 +3306,22 @@ mod tests {
     /// a chunk with saved `block_ticks`, and a chunk with a chest
     /// `block_entities` entry. The payloads are read back through the proven
     /// rivet-nbt codec, so the test is grounded in the real fixture bytes, not
-    /// in the extraction script's claims.
+    /// in the extraction script's claims. The committed source fingerprint must
+    /// also be present and well-formed — it is the enforcement backing the
+    /// never-mutated provenance declaration.
     #[test]
     fn loaded_world_fixtures_verify() {
         let dir = fixtures_dir().join("loaded-world");
-        if !dir.join("manifest.json").is_file() {
-            // The corpus isn't checked out (or was pruned) — nothing to verify.
+        if !dir.join("chunk").is_dir() {
+            // The whole corpus isn't checked out (or was pruned) — nothing to verify.
             return;
         }
+        // A partial prune (manifest missing while payloads remain) must never
+        // pass silently — the corpus is the deliverable of #371.
+        assert!(
+            dir.join("manifest.json").is_file(),
+            "loaded-world manifest.json missing while chunk payloads are present"
+        );
         let manifest = verify_fixtures(&dir).expect("loaded-world fixtures should match manifest");
         assert_eq!(manifest.format, 1);
         assert_eq!(manifest.kind.as_deref(), Some("loaded-world"));
@@ -3342,6 +3350,35 @@ mod tests {
             raw["source"]["launcher-world-mutated"], false,
             "loaded-world provenance declares the launcher save was not mutated"
         );
+        // The committed source fingerprint is the enforcement backing the
+        // never-mutated provenance claim — --verify recomputes it and refuses
+        // any drift. Its committed file must exist, be non-empty, well-formed,
+        // and be the file the manifest references, so a pruned/missing
+        // fingerprint can never pass silently.
+        let fp_name = raw["source"]["fingerprint-file"]
+            .as_str()
+            .expect("fingerprint-file present");
+        assert_eq!(fp_name, "source-fingerprint.txt");
+        let fp_text =
+            fs::read_to_string(dir.join(fp_name)).expect("committed source fingerprint readable");
+        assert!(
+            !fp_text.trim().is_empty(),
+            "source fingerprint is not empty"
+        );
+        let mut fp_entries = 0;
+        for line in fp_text.lines() {
+            let mut fields = line.split('\t');
+            let rel = fields.next().expect("fingerprint line has a path");
+            let hash = fields.next().expect("fingerprint line has a SHA-256");
+            assert!(!rel.is_empty(), "fingerprint path is non-empty");
+            assert_eq!(hash.len(), 64, "fingerprint SHA-256 is 64 hex chars");
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "fingerprint SHA-256 is hex"
+            );
+            fp_entries += 1;
+        }
+        assert!(fp_entries > 0, "source fingerprint lists at least one file");
 
         let mut by_role: std::collections::BTreeMap<&str, &serde_json::Value> =
             std::collections::BTreeMap::new();
@@ -3416,15 +3453,25 @@ mod tests {
                         "clean spawn has no block_entities"
                     );
                     // A FULL chunk always carries the structures compound; the
-                    // clean-spawn property is that both References and Starts are
+                    // clean-spawn property is that both References and starts are
                     // empty, so no structure reference blocks the FULL construction.
-                    if let Some(structures) = root.get_compound("structures") {
-                        let refs_empty = structures
-                            .get_compound("References")
-                            .map(|r| r.tags.is_empty())
-                            .unwrap_or(true);
-                        assert!(refs_empty, "clean spawn has no structure references");
-                    }
+                    let structures = root
+                        .get_compound("structures")
+                        .expect("clean spawn carries the structures compound");
+                    let refs = structures
+                        .get_compound("References")
+                        .expect("structures.References present");
+                    assert!(
+                        refs.tags.is_empty(),
+                        "clean spawn has no structure references"
+                    );
+                    let starts = structures
+                        .get_compound("starts")
+                        .expect("structures.starts present");
+                    assert!(
+                        starts.tags.is_empty(),
+                        "clean spawn has no structure starts"
+                    );
                 }
                 "mineshaft-structure-refs" => {
                     let structures = root.get_compound("structures").expect("structures present");

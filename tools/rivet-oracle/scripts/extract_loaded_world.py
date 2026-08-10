@@ -28,9 +28,9 @@ source is absent (e.g. CI), verification exits nonzero with UNVERIFIED — it
 never silently passes.
 
 Negative controls (`--expect-fail`): the committed fixtures are copied to a
-scratch dir, one file is deleted and one file's content is flipped, and the
-static verification must fail loudly naming both. `--expect-fail` never touches
-the committed fixtures.
+scratch dir, one file is deleted and one file's content is flipped, and both the
+static verification and the --verify re-extraction byte-compare must fail loudly
+naming the tamper. `--expect-fail` never touches the committed fixtures.
 
 Usage:
   python3 tools/rivet-oracle/scripts/extract_loaded_world.py            # extract fixtures from the disposable copy
@@ -42,15 +42,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import gzip
-import hashlib
 import json
 import os
 import shutil
-import struct
 import sys
-import zlib
 from pathlib import Path
+
+# Shared hashing + region-parsing helpers live in extract_fixtures.py (same dir,
+# stdlib-only, import-safe) so the M0/M2 pipeline and this pipeline never drift:
+# the parent clamps an oversized region length header and its sha256 helpers are
+# byte-for-byte the ones needed here.
+from extract_fixtures import read_region_chunks, sha256_bytes, sha256_file
 
 # ---------------------------------------------------------------------------
 # Identity of the corpus: chunk world coordinates -> role. Smallest genuine
@@ -81,19 +83,16 @@ REGION_DIR_REL = "dimensions/minecraft/overworld/region"
 
 # The default disposable source: the worktree copy, never the original save.
 DEFAULT_SOURCE = SCRIPT_DIR.parents[2] / "working" / "client-worlds" / "New World"
-LAUNCHER_SAVES_DIR = Path.home() / "Library/Application Support/minecraft/saves"
 
-
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 16), b""):
-            h.update(chunk)
-    return h.hexdigest()
+# Known launcher save roots by platform. The original "New World" save is never
+# a valid extraction source; resolve_source refuses it wherever it lives, not
+# just on the macOS path this repo was developed on.
+LAUNCHER_SAVES_DIRS = [
+    Path.home() / "Library/Application Support/minecraft/saves",
+    Path.home() / ".minecraft/saves",
+]
+if os.environ.get("APPDATA"):
+    LAUNCHER_SAVES_DIRS.append(Path(os.environ["APPDATA"]) / ".minecraft" / "saves")
 
 
 def resolve_source(source: Path) -> Path:
@@ -104,9 +103,8 @@ def resolve_source(source: Path) -> Path:
             f"UNVERIFIED: disposable world source not found at {src}\n"
             f"(run extraction on a machine that has working/client-worlds/New World)"
         )
-    if LAUNCHER_SAVES_DIR.exists():
-        orig = (LAUNCHER_SAVES_DIR / "New World").resolve()
-        if src == orig:
+    for saves_dir in LAUNCHER_SAVES_DIRS:
+        if (saves_dir / "New World").resolve() == src:
             raise SystemExit(
                 f"REFUSED: {src} is the original launcher save — #371 uses only the "
                 f"disposable copy under working/client-worlds/ and never accesses the original"
@@ -149,37 +147,6 @@ def parse_fingerprint(text: str) -> list[tuple[str, str]]:
     return out
 
 
-def read_region_chunks(path: Path) -> dict[tuple[int, int], bytes]:
-    """Return {(local_x, local_z): decompressed NBT payload} for a region file."""
-    data = path.read_bytes()
-    chunks: dict[tuple[int, int], bytes] = {}
-    for i in range(1024):
-        val = struct.unpack(">I", data[i * 4 : i * 4 + 4])[0]
-        off_sec = val >> 8
-        if off_sec == 0:
-            continue
-        base = off_sec * 4096
-        if base + 5 > len(data):
-            continue
-        length, comp = struct.unpack(">IB", data[base : base + 5])
-        data_bytes = length - 1
-        raw = data[base + 5 : base + 5 + data_bytes]
-        try:
-            if comp == 1:
-                payload = gzip.decompress(raw)
-            elif comp == 2:
-                payload = zlib.decompress(raw)
-            elif comp == 3:
-                payload = raw
-            else:
-                continue  # lz4/zstd or unknown; not in the 26.2 launcher save
-        except (zlib.error, OSError):
-            continue
-        cx, cz = i % 32, i // 32
-        chunks[(cx, cz)] = payload
-    return chunks
-
-
 def region_file_for(region_dir: Path, wx: int, wz: int) -> tuple[Path, int, int]:
     rx, rz = wx // 32, wz // 32
     return region_dir / f"r.{rx}.{rz}.mca", rx, rz
@@ -214,7 +181,18 @@ def chunk_path(wx: int, wz: int) -> str:
     return f"chunk/{wx}.{wz}.nbt"
 
 
-def build_manifest(captured: list[dict]) -> dict:
+def source_label(source: Path) -> str:
+    """Human-readable provenance label for the manifest.
+
+    The default disposable copy keeps its stable repo-relative label so the
+    committed manifest stays portable across machines; any other `--source` is
+    recorded verbatim (resolved) so provenance is never misstated."""
+    if source.resolve() == DEFAULT_SOURCE.resolve():
+        return "working/client-worlds/New World (disposable copy)"
+    return str(source.resolve())
+
+
+def build_manifest(captured: list[dict], source: Path) -> dict:
     return {
         "format": 1,
         "kind": "loaded-world",
@@ -223,7 +201,7 @@ def build_manifest(captured: list[dict]) -> dict:
         "minecraft": MINECRAFT,
         "data-version": DATA_VERSION,
         "source": {
-            "path": "working/client-worlds/New World (disposable copy)",
+            "path": source_label(source),
             "fingerprint-file": FINGERPRINT_FILE,
             "launcher-world-mutated": False,
         },
@@ -270,10 +248,10 @@ def load_committed_manifest(fixtures_dir: Path) -> dict:
     return json.loads(p.read_text())
 
 
-def verify_source_fingerprint(source: Path, committed_lines: list[tuple[str, str]]) -> list[str]:
-    """Recompute the disposable-source fingerprint and compare to the committed
-    baseline. Any diff means the source changed since capture (mutation)."""
-    actual = fingerprint_tree(source)
+def diff_fingerprint(actual: list[tuple[str, str]], committed_lines: list[tuple[str, str]]) -> list[str]:
+    """Diff a freshly computed source fingerprint against a committed baseline.
+    Any diff means the source changed since capture (mutation). Returns error
+    strings (empty = identical)."""
     if actual == committed_lines:
         return []
     actual_map = dict(actual)
@@ -323,7 +301,7 @@ def cmd_extract(source: Path) -> int:
         )
     captured.sort(key=lambda c: c["path"])
 
-    manifest = build_manifest(captured)
+    manifest = build_manifest(captured, src)
     (fixtures_dir / MANIFEST_FILE).write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )
@@ -340,28 +318,11 @@ def cmd_extract(source: Path) -> int:
     return 0
 
 
-def cmd_verify(source: Path) -> int:
-    """Re-extract the corpus in memory and prove byte-identity with the
-    committed fixtures, plus manifest hashes and the source fingerprint."""
-    src = resolve_source(source)
-    fixtures_dir = FIXTURES_DIR
-    if not fixtures_dir.is_dir():
-        raise SystemExit(f"UNVERIFIED: committed fixtures dir missing: {fixtures_dir}")
-    manifest = load_committed_manifest(fixtures_dir)
-
-    fingerprint_errors = []
-    fp_path = fixtures_dir / FINGERPRINT_FILE
-    if fp_path.is_file():
-        fingerprint_errors = verify_source_fingerprint(src, parse_fingerprint(fp_path.read_text()))
-    else:
-        fingerprint_errors = [f"committed source fingerprint missing: {fp_path}"]
-
-    before = fingerprint_tree(src)
-    payloads = extract_corpus(src)
-    after = fingerprint_tree(src)
-    if before != after:
-        raise SystemExit("FAIL: disposable source changed during verification (mutation)")
-
+def verify_re_extracted(
+    payloads: list[tuple[int, int, str, bytes]], manifest: dict, fixtures_dir: Path
+) -> list[str]:
+    """Re-extracted payloads must be byte-identical to the committed fixtures
+    (the dynamic half of --verify). Returns error strings (empty = clean)."""
     errors: list[str] = []
     by_coord = {(wx, wz): (role, payload) for wx, wz, role, payload in payloads}
     for cap in manifest.get("captured", []):
@@ -377,6 +338,34 @@ def cmd_verify(source: Path) -> int:
             errors.append(
                 f"chunk ({wx},{wz}) re-extracted bytes differ from committed fixture {cap['path']}"
             )
+    return errors
+
+
+def cmd_verify(source: Path) -> int:
+    """Re-extract the corpus in memory and prove byte-identity with the
+    committed fixtures, plus manifest hashes and the source fingerprint."""
+    src = resolve_source(source)
+    fixtures_dir = FIXTURES_DIR
+    if not fixtures_dir.is_dir():
+        raise SystemExit(f"UNVERIFIED: committed fixtures dir missing: {fixtures_dir}")
+    manifest = load_committed_manifest(fixtures_dir)
+
+    # Fingerprint the source once and reuse it for both the mutation guard and
+    # the committed-baseline comparison.
+    before = fingerprint_tree(src)
+    payloads = extract_corpus(src)
+    after = fingerprint_tree(src)
+    if before != after:
+        raise SystemExit("FAIL: disposable source changed during verification (mutation)")
+
+    fp_path = fixtures_dir / FINGERPRINT_FILE
+    if fp_path.is_file():
+        fingerprint_errors = diff_fingerprint(before, parse_fingerprint(fp_path.read_text()))
+    else:
+        fingerprint_errors = [f"committed source fingerprint missing: {fp_path}"]
+
+    errors: list[str] = []
+    errors.extend(verify_re_extracted(payloads, manifest, fixtures_dir))
     errors.extend(fingerprint_errors)
     errors.extend(verify_fixtures_dir(fixtures_dir, manifest))
 
@@ -392,9 +381,10 @@ def cmd_verify(source: Path) -> int:
 
 def cmd_expect_fail(source: Path, scratch: Path) -> int:
     """Negative control: a missing and a tampered fixture must both be detected
-    and named by static verification, and a tampered source fingerprint must be
-    flagged by the live comparison. Operates on a scratch copy / in memory —
-    never the committed fixtures and never the source tree."""
+    and named by static verification, the --verify re-extraction byte-compare
+    must also flag the tamper set, and a tampered source fingerprint must be
+    flagged and named by the live comparison. Operates on a scratch copy / in
+    memory — never the committed fixtures and never the source tree."""
     src = resolve_source(source)
     fixtures_dir = FIXTURES_DIR
     manifest = load_committed_manifest(fixtures_dir)
@@ -426,19 +416,37 @@ def cmd_expect_fail(source: Path, scratch: Path) -> int:
     print("negative control: missing fixture detected: OK")
     print("negative control: tampered fixture detected: OK")
 
+    # Dynamic negative: the --verify re-extraction byte-compare (not just the
+    # static hash check) must flag the scratch tamper set, so a bug that makes
+    # the byte-compare always-equal is caught.
+    payloads = extract_corpus(src)
+    dyn_errors = verify_re_extracted(payloads, manifest, scratch)
+    if not dyn_errors:
+        raise SystemExit(
+            "FAIL: negative control passed — re-extraction byte-compare did not detect "
+            "the missing/tampered scratch fixtures"
+        )
+    print("negative control: re-extraction byte-compare detects tamper: OK")
+
     # Source-fingerprint negative: a tampered committed baseline must be flagged
-    # by the live source comparison (in memory; never mutating the committed
-    # fingerprint file or the source).
+    # by the live source comparison and the tampered file must be named (in
+    # memory; never mutating the committed fingerprint file or the source).
     fp_path = fixtures_dir / FINGERPRINT_FILE
     if not fp_path.is_file():
         raise SystemExit(f"FAIL: committed source fingerprint missing: {fp_path}")
     committed_lines = parse_fingerprint(fp_path.read_text())
+    actual = fingerprint_tree(src)
     tampered_baseline = committed_lines[:]
     rel, h = tampered_baseline[0]
     tampered_baseline[0] = (rel, ("0" if h[0] != "0" else "1") + h[1:])
-    fp_errors = verify_source_fingerprint(src, tampered_baseline)
+    fp_errors = diff_fingerprint(actual, tampered_baseline)
     if not fp_errors:
         raise SystemExit("FAIL: tampered source fingerprint was not detected")
+    if not any(rel in e for e in fp_errors):
+        raise SystemExit(
+            "FAIL: tampered source fingerprint diff did not name the tampered file: "
+            + "; ".join(fp_errors)
+        )
     print("negative control: tampered source fingerprint detected: OK")
     return 0
 
