@@ -130,7 +130,7 @@ impl PerlinNoise {
             }
         }
 
-        let lowest_freq_input_factor = (2.0f64).powi(-zero_octave_index);
+        let lowest_freq_input_factor = (2.0f64).powi(zero_octave_index.wrapping_neg());
         let lowest_freq_value_factor = (2.0f64).powi(octaves - 1) / ((2.0f64).powi(octaves) - 1.0);
         let max_value = {
             let mut value = 0.0;
@@ -231,5 +231,24 @@ impl PerlinNoise {
     /// `amplitudes()` — protected in Java.
     pub fn amplitudes(&self) -> &[f64] {
         &self.amplitudes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivet_util::random::LegacyRandomSource;
+
+    /// Hostile regression: `PerlinNoise.create` with `firstOctave ==
+    /// Integer.MIN_VALUE`. Java negates both `-firstOctave` (`zeroOctaveIndex`)
+    /// and `-zeroOctaveIndex` as wrapping int ops, so the exponent stays `MIN`
+    /// and `lowestFreqInputFactor = pow(2.0, MIN) = 0.0`. A debug-mode unary
+    /// `-` would panic on the negation instead of wrapping; this pins the
+    /// Java-faithful wrap (factor exactly 0.0).
+    #[test]
+    fn create_first_octave_min_wraps_like_java() {
+        let mut random = LegacyRandomSource::new(42);
+        let noise = PerlinNoise::create(&mut random, i32::MIN, vec![1.0]);
+        assert_eq!(noise.lowest_freq_input_factor.to_bits(), 0.0f64.to_bits());
     }
 }
