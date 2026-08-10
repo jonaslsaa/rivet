@@ -17,19 +17,24 @@
 //! Every mutation ends in `sync()`, so the root (and `build_result()`) reflects
 //! children.
 //!
-//! Slot ownership is tracked by a **unique token** per placed parent slot (the
-//! `Rc` address of the node's own cell), not by value equality: a node's sync
-//! only writes back while the parent's slot-token registry still maps its key
-//! to the node's token. The parent clears the token when it `discard()`s or
-//! replaces a field (only when a tag was actually put — an encode error without
-//! a partial leaves the field and any retained child untouched, matching Java),
-//! and a recreated `child()`/`childrenList()`/`list()` or `addChild()` registers
-//! a fresh token — so a retained child after a discard/replace (even against an
-//! equal empty recreated slot) is detached and its writes stay invisible,
-//! matching Java's shared-object identity. There is no reference cycle: a node
-//! holds its parent's `sync` closure (an `Rc<dyn Fn>`), while a parent only
-//! ever holds *snapshot clones* of its children's content — never the
-//! children's `Rc`.
+//! Slot ownership is tracked by an **owned-slot registry** per parent: a field
+//! maps to the live `ChildHandle` (output cell + nested slot registry) of the
+//! child that created it, so a node's sync only writes back while its slot is
+//! still owned by its own cell (identity, not value equality). The parent
+//! removes the slot when it `discard()`s or replaces a field (only when a tag
+//! was actually put — an encode error without a partial leaves the field and
+//! any retained child untouched, matching Java), and a recreated
+//! `child()`/`childrenList()`/`list()` or `addChild()` registers a fresh
+//! handle — so a retained child after a discard/replace (even against an equal
+//! empty recreated slot) is detached and its writes stay invisible. Because the
+//! registry holds the child *cells* (not just identifiers), a parent-side
+//! `merge` can recurse into a child-owned compound field, mutate the child's
+//! own cell in place (Java's shared-object `CompoundTag.merge`), and refresh
+//! the parent slot from it — so merged content and the child's future writes
+//! share one object. There is no reference cycle: a node holds its parent's
+//! `sync` closure (an `Rc<dyn Fn>`), while a parent only ever holds *snapshot
+//! clones* of its children's content in the NBT and the children's `ChildHandle`
+//! cells — never the children's `TagValueOutput`/`sync`.
 //!
 //! The wrapping factories (`createWrappingWithContext`/`createWrappingGlobal`)
 //! take a `SharedCompoundTag` — the caller keeps a clone of the handle and
@@ -71,11 +76,24 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// A unique token identifying a node's ownership of a parent slot — the `Rc`
-/// address of the node's own content cell (unique and stable for the node's
-/// lifetime; a retained node keeps its cell alive, so addresses never collide
-/// within a live tree).
-type SlotToken = usize;
+/// A live child node owning a parent slot: its output cell and its own slot
+/// registry. Keeping both lets a parent-side `merge` recurse into the child at
+/// arbitrary depth (Java's shared-object `CompoundTag.merge`) and refresh the
+/// parent slot from the child's cell, so the child's future writes preserve
+/// merged content.
+struct ChildHandle {
+    output: Rc<RefCell<CompoundTag>>,
+    slots: Rc<RefCell<HashMap<String, OwnedSlot>>>,
+}
+
+/// A slot owned by a live child — identity is the cell pointer, so a retained
+/// child is detached the moment the parent replaces/discards its slot (even by
+/// an equal-value replacement), and a parent-side merge can update the child's
+/// cell in place.
+enum OwnedSlot {
+    Compound(Rc<ChildHandle>),
+    List(Rc<RefCell<ListTag>>),
+}
 
 /// `net.minecraft.world.level.storage.TagValueOutput`.
 pub struct TagValueOutput {
@@ -85,10 +103,10 @@ pub struct TagValueOutput {
     /// Propagates this node's current content into its parent slot and up —
     /// `None` for the root.
     sync: Option<Rc<dyn Fn()>>,
-    /// Field name → slot token of the child currently owning that field slot.
-    /// Cleared when this node discards or replaces a field; set when a child
-    /// is created at a field.
-    slot_tokens: Rc<RefCell<HashMap<String, SlotToken>>>,
+    /// Field name → the live child owning that field slot. Cleared when this
+    /// node discards or replaces a field; set when a child is created at a
+    /// field.
+    slot_tokens: Rc<RefCell<HashMap<String, OwnedSlot>>>,
 }
 
 impl fmt::Debug for TagValueOutput {
@@ -107,7 +125,7 @@ impl TagValueOutput {
         ops: Arc<TagContextOps>,
         output: Rc<RefCell<CompoundTag>>,
         sync: Option<Rc<dyn Fn()>>,
-        slot_tokens: Rc<RefCell<HashMap<String, SlotToken>>>,
+        slot_tokens: Rc<RefCell<HashMap<String, OwnedSlot>>>,
     ) -> Self {
         TagValueOutput {
             problem_reporter,
@@ -213,30 +231,56 @@ fn context_ops(access: RegistryAccess) -> Arc<TagContextOps> {
     Arc::new(RegistryOps::create_from_access(&NbtOps::instance(), access))
 }
 
-/// `CompoundTag.merge(other)` then detach any retained child whose field the
-/// merge *replaced* (Java `put`). A compound-over-compound merge recurses into
-/// the existing object, so a child at such a field survives.
-fn merge_and_detach(
+/// `CompoundTag.merge(other)` with Java's shared-object semantics.
+///
+/// Keys whose map value is a **live compound child** are merged *into the
+/// child's own cell* (recursing through the child's slot registry), then the
+/// parent slot is refreshed from the child's cell — so the merged content and
+/// the child's future writes share one object, exactly like Java. All other
+/// keys are merged with the ordinary `CompoundTag.merge` (compound-over-
+/// compound in the map value, `put` otherwise), and any live child whose field
+/// that ordinary merge replaced is detached.
+fn merge_compound(
     inner: &Rc<RefCell<CompoundTag>>,
-    slot_tokens: &Rc<RefCell<HashMap<String, SlotToken>>>,
+    slot_tokens: &Rc<RefCell<HashMap<String, OwnedSlot>>>,
     compound: &CompoundTag,
 ) {
+    // Partition the merged keys: those bound to a live compound child recurse
+    // into the child cell; the rest go through the ordinary merge.
+    let mut child_merges: Vec<(String, Rc<ChildHandle>, CompoundTag)> = Vec::new();
+    let mut rest = CompoundTag::new();
+    {
+        let slots = slot_tokens.borrow();
+        for (key, merged) in compound.entry_set() {
+            match (slots.get(key), merged) {
+                (Some(OwnedSlot::Compound(handle)), Tag::Compound(other_compound)) => {
+                    child_merges.push((key.clone(), Rc::clone(handle), other_compound.clone()));
+                }
+                _ => {
+                    rest.put(key.clone(), merged.copy_tag());
+                }
+            }
+        }
+    }
+    inner.borrow_mut().merge(&rest);
+    // The ordinary merge replaced (put) every `rest` field that had a live
+    // child, so detach those children.
     let replaced: Vec<String> = {
-        let output = inner.borrow();
-        compound
-            .entry_set()
-            .filter(|(key, merged)| {
-                let both_compounds = matches!(output.get(key), Some(Tag::Compound(_)))
-                    && matches!(merged, Tag::Compound(_));
-                !both_compounds
-            })
-            .map(|(key, _)| key.clone())
+        let slots = slot_tokens.borrow();
+        rest.key_set()
+            .filter(|key| slots.contains_key(*key))
+            .cloned()
             .collect()
     };
-    inner.borrow_mut().merge(compound);
-    let mut tokens = slot_tokens.borrow_mut();
     for key in replaced {
-        tokens.remove(&key);
+        slot_tokens.borrow_mut().remove(&key);
+    }
+    // Recurse into live compound children, then refresh the parent slot from
+    // the (possibly merged) child cell so the parent always reflects it.
+    for (key, handle, other_compound) in child_merges {
+        merge_compound(&handle.output, &handle.slots, &other_compound);
+        let refreshed = Tag::Compound(handle.output.borrow().clone());
+        inner.borrow_mut().put(key, refreshed);
     }
 }
 
@@ -305,7 +349,7 @@ impl TagValueOutput {
         let result = encoder.encode_start(self.ops.as_ref(), value);
         match result.result() {
             Some(Tag::Compound(compound)) => {
-                merge_and_detach(&self.output, &self.slot_tokens, compound);
+                merge_compound(&self.output, &self.slot_tokens, compound);
             }
             Some(other) => {
                 // Java's unchecked `(CompoundTag)` cast on a non-compound
@@ -322,7 +366,7 @@ impl TagValueOutput {
                 if let Some(partial) = error.partial().clone() {
                     match partial {
                         Tag::Compound(compound) => {
-                            merge_and_detach(&self.output, &self.slot_tokens, &compound);
+                            merge_compound(&self.output, &self.slot_tokens, &compound);
                         }
                         other => panic!(
                             "TagValueOutput.store(MapCodec): expected compound partial, got {other}"
@@ -401,19 +445,29 @@ impl TagValueOutput {
     pub fn child(&self, name: &str) -> ValueOutput {
         let name = name.to_string();
         let child_cell = Rc::new(RefCell::new(CompoundTag::new()));
-        let token = Rc::as_ptr(&child_cell) as SlotToken;
+        let child_slots: Rc<RefCell<HashMap<String, OwnedSlot>>> =
+            Rc::new(RefCell::new(HashMap::new()));
+        let handle = Rc::new(ChildHandle {
+            output: Rc::clone(&child_cell),
+            slots: Rc::clone(&child_slots),
+        });
         {
             let mut output = self.output.borrow_mut();
             output.put(name.to_string(), Tag::Compound(child_cell.borrow().clone()));
         }
-        self.slot_tokens.borrow_mut().insert(name.clone(), token);
+        self.slot_tokens
+            .borrow_mut()
+            .insert(name.clone(), OwnedSlot::Compound(handle));
         let parent_cell = Rc::clone(&self.output);
         let parent_slot_tokens = Rc::clone(&self.slot_tokens);
         let parent_sync = self.sync.clone();
         let sync_child_cell = Rc::clone(&child_cell);
         let sync_name = name.clone();
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            let still_owned = parent_slot_tokens.borrow().get(&sync_name) == Some(&token);
+            let still_owned = match parent_slot_tokens.borrow().get(&sync_name) {
+                Some(OwnedSlot::Compound(handle)) => Rc::ptr_eq(&handle.output, &sync_child_cell),
+                _ => false,
+            };
             if still_owned {
                 let tag = Tag::Compound(sync_child_cell.borrow().clone());
                 parent_cell.borrow_mut().put(sync_name.clone(), tag.clone());
@@ -427,7 +481,7 @@ impl TagValueOutput {
             Arc::clone(&self.ops),
             child_cell,
             Some(sync),
-            Rc::new(RefCell::new(HashMap::new())),
+            child_slots,
         ))
     }
 
@@ -435,19 +489,23 @@ impl TagValueOutput {
     pub fn children_list(&self, name: &str) -> ValueOutputList {
         let name = name.to_string();
         let list_cell = Rc::new(RefCell::new(ListTag::new()));
-        let token = Rc::as_ptr(&list_cell) as SlotToken;
         {
             let mut output = self.output.borrow_mut();
             output.put(name.to_string(), Tag::List(list_cell.borrow().clone()));
         }
-        self.slot_tokens.borrow_mut().insert(name.clone(), token);
+        self.slot_tokens
+            .borrow_mut()
+            .insert(name.clone(), OwnedSlot::List(Rc::clone(&list_cell)));
         let parent_cell = Rc::clone(&self.output);
         let parent_slot_tokens = Rc::clone(&self.slot_tokens);
         let parent_sync = self.sync.clone();
         let sync_list_cell = Rc::clone(&list_cell);
         let sync_name = name.clone();
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            let still_owned = parent_slot_tokens.borrow().get(&sync_name) == Some(&token);
+            let still_owned = match parent_slot_tokens.borrow().get(&sync_name) {
+                Some(OwnedSlot::List(cell)) => Rc::ptr_eq(cell, &sync_list_cell),
+                _ => false,
+            };
             if still_owned {
                 let tag = Tag::List(sync_list_cell.borrow().clone());
                 parent_cell.borrow_mut().put(sync_name.clone(), tag.clone());
@@ -473,19 +531,23 @@ impl TagValueOutput {
     {
         let name = name.to_string();
         let list_cell = Rc::new(RefCell::new(ListTag::new()));
-        let token = Rc::as_ptr(&list_cell) as SlotToken;
         {
             let mut output = self.output.borrow_mut();
             output.put(name.to_string(), Tag::List(list_cell.borrow().clone()));
         }
-        self.slot_tokens.borrow_mut().insert(name.clone(), token);
+        self.slot_tokens
+            .borrow_mut()
+            .insert(name.clone(), OwnedSlot::List(Rc::clone(&list_cell)));
         let parent_cell = Rc::clone(&self.output);
         let parent_slot_tokens = Rc::clone(&self.slot_tokens);
         let parent_sync = self.sync.clone();
         let sync_list_cell = Rc::clone(&list_cell);
         let sync_name = name.clone();
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            let still_owned = parent_slot_tokens.borrow().get(&sync_name) == Some(&token);
+            let still_owned = match parent_slot_tokens.borrow().get(&sync_name) {
+                Some(OwnedSlot::List(cell)) => Rc::ptr_eq(cell, &sync_list_cell),
+                _ => false,
+            };
             if still_owned {
                 let tag = Tag::List(sync_list_cell.borrow().clone());
                 parent_cell.borrow_mut().put(sync_name.clone(), tag.clone());
@@ -535,7 +597,7 @@ impl TagValueOutput {
 #[derive(Clone)]
 pub struct SharedCompoundTag {
     inner: Rc<RefCell<CompoundTag>>,
-    slot_tokens: Rc<RefCell<HashMap<String, SlotToken>>>,
+    slot_tokens: Rc<RefCell<HashMap<String, OwnedSlot>>>,
 }
 
 impl SharedCompoundTag {
@@ -568,10 +630,11 @@ impl SharedCompoundTag {
         self.slot_tokens.borrow_mut().remove(name);
     }
 
-    /// `CompoundTag.merge(CompoundTag)` — detaches only the fields the merge
-    /// replaced (a compound-over-compound merge recurses in place).
+    /// `CompoundTag.merge(CompoundTag)` — with Java's shared-object semantics:
+    /// merges into live child cells in place and detaches only the fields the
+    /// merge actually replaced.
     pub fn merge(&self, other: &CompoundTag) {
-        merge_and_detach(&self.inner, &self.slot_tokens, other);
+        merge_compound(&self.inner, &self.slot_tokens, other);
     }
 }
 
@@ -666,8 +729,8 @@ pub struct ListWrapper {
     ops: Arc<TagContextOps>,
     output: Rc<RefCell<ListTag>>,
     sync: Option<Rc<dyn Fn()>>,
-    /// Element index → slot token of the child currently owning that element.
-    slot_tokens: Rc<RefCell<Vec<SlotToken>>>,
+    /// Element index → the live child owning that element.
+    slot_tokens: Rc<RefCell<Vec<OwnedSlot>>>,
 }
 
 impl ListWrapper {
@@ -680,19 +743,29 @@ impl ListWrapper {
     /// `ValueOutputList.addChild()`.
     pub fn add_child(&self) -> ValueOutput {
         let child_cell = Rc::new(RefCell::new(CompoundTag::new()));
-        let token = Rc::as_ptr(&child_cell) as SlotToken;
+        let child_slots: Rc<RefCell<HashMap<String, OwnedSlot>>> =
+            Rc::new(RefCell::new(HashMap::new()));
+        let handle = Rc::new(ChildHandle {
+            output: Rc::clone(&child_cell),
+            slots: Rc::clone(&child_slots),
+        });
         let index = {
             let mut list = self.output.borrow_mut();
             list.add(Tag::Compound(child_cell.borrow().clone()));
             list.size() - 1
         };
-        self.slot_tokens.borrow_mut().push(token);
+        self.slot_tokens
+            .borrow_mut()
+            .push(OwnedSlot::Compound(handle));
         let list_cell = Rc::clone(&self.output);
         let list_slot_tokens = Rc::clone(&self.slot_tokens);
         let list_sync = self.sync.clone();
         let sync_child_cell = Rc::clone(&child_cell);
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            let still_owned = list_slot_tokens.borrow().get(index) == Some(&token);
+            let still_owned = match list_slot_tokens.borrow().get(index) {
+                Some(OwnedSlot::Compound(handle)) => Rc::ptr_eq(&handle.output, &sync_child_cell),
+                _ => false,
+            };
             if still_owned {
                 let tag = Tag::Compound(sync_child_cell.borrow().clone());
                 list_cell.borrow_mut().set(index, tag.clone());
@@ -715,7 +788,7 @@ impl ListWrapper {
             Arc::clone(&self.ops),
             child_cell,
             Some(sync),
-            Rc::new(RefCell::new(HashMap::new())),
+            child_slots,
         ))
     }
 
@@ -1377,6 +1450,214 @@ mod tests {
             "report was: {}",
             reporter.get_report()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // In-place merge into a live child cell (Java shared-object
+    // `CompoundTag.merge` recursion): a compound-over-compound merge at a
+    // child-owned field must update the child's own cell — not just the parent
+    // slot snapshot — so the child's next write preserves the merged fields.
+    // -----------------------------------------------------------------------
+
+    /// A `store_map` whose encoded map contains a nested compound at the
+    /// child-owned field `x` (`{a: …, x: {b: …}}`).
+    fn nested_store_map_codec()
+    -> Arc<dyn rivet_serialization::map_codec::MapCodec<(i32, i32), TagContextOps>> {
+        use rivet_serialization::map_codec::codec_of;
+        use rivet_serialization::record_builder::{self, RecordCodecBuilder};
+        // Inner map codec: a single-int compound {b: n}.
+        let inner: Arc<dyn rivet_serialization::map_codec::MapCodec<i32, TagContextOps>> =
+            record_builder::map_codec(|instance| {
+                instance
+                    .group(RecordCodecBuilder::of_named(
+                        Arc::new(|n: &i32| *n),
+                        "b".to_string(),
+                        codec::int_codec::<TagContextOps>(),
+                    ))
+                    .apply(instance, Arc::new(|b: i32| b))
+            });
+        let inner_codec = codec_of(inner);
+        // Outer map codec: {a: i32, x: {b: i32}}.
+        record_builder::map_codec(|instance| {
+            instance
+                .group(RecordCodecBuilder::of_named(
+                    Arc::new(|t: &(i32, i32)| t.0),
+                    "a".to_string(),
+                    codec::int_codec::<TagContextOps>(),
+                ))
+                .and(RecordCodecBuilder::of_named(
+                    Arc::new(|t: &(i32, i32)| t.1),
+                    "x".to_string(),
+                    inner_codec,
+                ))
+                .apply(instance, Arc::new(|a: i32, x: i32| (a, x)))
+        })
+    }
+
+    /// A **populated** child + `store_map` nested merge: the merged `b` lands
+    /// in the child's cell, survives in `buildResult`, and is not dropped by
+    /// the child's later write.
+    #[test]
+    fn store_map_nested_merge_preserves_child_content_and_writes() {
+        let out = output(reporter());
+        let child = out.child("x");
+        child.put_int("a", 1);
+        let nested = nested_store_map_codec();
+        out.store_map(&nested, &(0, 2));
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let x = result.get_compound("x").expect("x present");
+        assert_eq!(
+            x.get_int("a"),
+            Some(1),
+            "existing child content, got: {result:?}"
+        );
+        assert_eq!(
+            x.get_int("b"),
+            Some(2),
+            "merged field visible, got: {result:?}"
+        );
+        child.put_int("c", 3);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let x = result.get_compound("x").expect("x present");
+        assert_eq!(x.get_int("a"), Some(1), "got: {result:?}");
+        assert_eq!(
+            x.get_int("b"),
+            Some(2),
+            "merged field survives child write, got: {result:?}"
+        );
+        assert_eq!(x.get_int("c"), Some(3));
+    }
+
+    /// A **never-written** child + `store_map` nested merge: the merged `b`
+    /// lands in the child's empty cell and survives a later write.
+    #[test]
+    fn store_map_nested_merge_never_written_child() {
+        let out = output(reporter());
+        let child = out.child("x");
+        let nested = nested_store_map_codec();
+        out.store_map(&nested, &(0, 5));
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let x = result.get_compound("x").expect("x present");
+        assert_eq!(
+            x.get_int("b"),
+            Some(5),
+            "merged into never-written child, got: {result:?}"
+        );
+        child.put_int("c", 3);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let x = result.get_compound("x").expect("x present");
+        assert_eq!(
+            x.get_int("b"),
+            Some(5),
+            "merged field survives child write, got: {result:?}"
+        );
+        assert_eq!(x.get_int("c"), Some(3));
+    }
+
+    /// `SharedCompoundTag::merge` at a live-child field merges into the child
+    /// cell (Java shared-object semantics): merged fields survive a child
+    /// write.
+    #[test]
+    fn shared_merge_nested_into_child_cell() {
+        let shared = SharedCompoundTag::new(CompoundTag::new());
+        let out = TagValueOutput::create_wrapping_global(reporter(), shared.clone());
+        let child = out.child("x");
+        child.put_int("a", 1);
+        shared.merge(&CompoundTag::with_map(
+            [(
+                "x".to_string(),
+                Tag::Compound(CompoundTag::with_map(
+                    [("b".to_string(), Tag::Int(IntTag::new(2)))]
+                        .into_iter()
+                        .collect(),
+                )),
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        {
+            let tags = shared.borrow();
+            let x = tags.get_compound("x").expect("x present");
+            assert_eq!(
+                x.get_int("a"),
+                Some(1),
+                "existing child content, got: {x:?}"
+            );
+            assert_eq!(x.get_int("b"), Some(2), "merged field visible, got: {x:?}");
+        }
+        child.put_int("c", 3);
+        {
+            let tags = shared.borrow();
+            let x = tags.get_compound("x").expect("x present");
+            assert_eq!(
+                x.get_int("b"),
+                Some(2),
+                "merged field survives child write, got: {x:?}"
+            );
+            assert_eq!(x.get_int("c"), Some(3));
+        }
+    }
+
+    /// `SharedCompoundTag::merge` recurses through a grandchild cell: a nested
+    /// merge at `x.y` updates the grandchild cell, and both the grandchild and
+    /// child writes preserve the merged field.
+    #[test]
+    fn shared_merge_recurses_into_grandchild_cell() {
+        let shared = SharedCompoundTag::new(CompoundTag::new());
+        let out = TagValueOutput::create_wrapping_global(reporter(), shared.clone());
+        let child = out.child("x");
+        let grandchild = child.child("y");
+        grandchild.put_int("a", 1);
+        shared.merge(&CompoundTag::with_map(
+            [(
+                "x".to_string(),
+                Tag::Compound(CompoundTag::with_map(
+                    [(
+                        "y".to_string(),
+                        Tag::Compound(CompoundTag::with_map(
+                            [("b".to_string(), Tag::Int(IntTag::new(2)))]
+                                .into_iter()
+                                .collect(),
+                        )),
+                    )]
+                    .into_iter()
+                    .collect(),
+                )),
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        {
+            let tags = shared.borrow();
+            let x = tags.get_compound("x").expect("x present");
+            let y = x.get_compound("y").expect("y present");
+            assert_eq!(y.get_int("a"), Some(1), "got: {x:?}");
+            assert_eq!(
+                y.get_int("b"),
+                Some(2),
+                "merged into grandchild cell, got: {x:?}"
+            );
+        }
+        grandchild.put_int("c", 3);
+        {
+            let tags = shared.borrow();
+            let x = tags.get_compound("x").expect("x present");
+            let y = x.get_compound("y").expect("y present");
+            assert_eq!(
+                y.get_int("b"),
+                Some(2),
+                "merged field survives grandchild write, got: {x:?}"
+            );
+            assert_eq!(y.get_int("c"), Some(3));
+        }
     }
 
     /// Java's `ListWrapper.discardLast()` on an empty list throws
