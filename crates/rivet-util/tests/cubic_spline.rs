@@ -248,7 +248,7 @@ fn parity_string_rounds_ties_like_java() {
 fn parity_string_subnormal_rounds_to_zero_like_java() {
     // The smallest subnormal f32 1.4e-45 (f32::from_bits(1)) formats as
     // `0.000` in Java (the `%.3f` "round to zero" branch); this exercises the
-    // formatter's overflow guard that avoids `10u128::pow` on a 58-digit
+    // formatter's overflow guard that avoids `10u128::pow` on a 57-digit
     // shift. The smallest positive normal (1.2e-38) exercises the same guard
     // at a 51-digit shift.
     let smallest_subnormal = f32::from_bits(1);
