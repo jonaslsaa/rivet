@@ -19,10 +19,11 @@
 //! - `equals`/`hashCode` — structural `(universe, mask)`; Java's
 //!   `HashCommon.mix(mask)` is ported for the mask half.
 //!
-//! Java's universe *reference* identity (`==`) is the universe **value**
-//! equality here (see `feature_flag_universe`) — the `"main"` registry's
-//! universe is unique in practice, so this never diverges for the level.dat
-//! codec path.
+//! Java's universe *reference* identity (`==`) is preserved via the universe's
+//! `Arc` pointer identity (see `feature_flag_universe`): every `Builder` owns a
+//! fresh universe allocation, and `clone()` shares it, so flags from one
+//! builder are compatible and flags from two same-id builders are not — exactly
+//! Java's `==`.
 //!
 //! The Java `create(universe, Collection<FeatureFlag>)` / `of(flag, ...)`
 //! factories are the `from_*` constructors; the registry uses them to build
@@ -342,11 +343,17 @@ mod tests {
         let s2 = FeatureFlagSet::of_flag(&flag(&u, 0));
         assert_eq!(s1, s2);
         assert_eq!(FeatureFlagSet::of(), FeatureFlagSet::of());
-        // Different universe, same mask: NOT equal. Java's reference identity
-        // would also distinguish two same-id universes; the value port treats
-        // same-id universes as equal, so this uses a genuinely different id.
+        // Same mask, different universe: NOT equal.
         let u2 = universe("other");
         assert_ne!(s1, FeatureFlagSet::of_flag(&flag(&u2, 0)));
+        // Java reference identity: two same-id universes (separate `new`) are
+        // also NOT equal, so sets built from them are incompatible.
+        let u3 = universe("main");
+        let s3 = FeatureFlagSet::of_flag(&flag(&u3, 0));
+        assert_ne!(s1, s3);
+        // A clone shares the allocation and IS equal (same universe identity).
+        let s1_clone = s1.clone();
+        assert_eq!(s1, s1_clone);
     }
 
     #[test]
@@ -356,7 +363,7 @@ mod tests {
         // (`h = x * 0x9E3779B97F4A7C15; h ^= h >>> 32; h ^= h >>> 16`):
         //   mix(0) = 0
         //   mix(1) = 0x9e37e78e98c4e4d1
-        //   mix(3) = 0xdab0a24a9fa42aa6
+        //   mix(3) = 0xdaa6b78aca55be6a
         assert_eq!(hash_common_mix(0), 0);
         assert_eq!(hash_common_mix(1), 0x9e37_e78e_98c4_e4d1);
         assert_eq!(hash_common_mix(3), 0xdaa6_b78a_ca55_be6a);

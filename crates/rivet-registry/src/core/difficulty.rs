@@ -5,8 +5,10 @@
 //! wire codec needs: `ClientboundChangeDifficultyPacket.STREAM_CODEC` composes
 //! `Difficulty.STREAM_CODEC` (`ByteBufCodecs.idMapper(BY_ID, Difficulty::getId)`)
 //! with the locked boolean. The byte-level decode wraps out-of-range ids via
-//! `ByIdMap.continuous(..., OutOfBoundsStrategy.WRAP)` — a byte `5` maps back to
-//! `NORMAL`, `-1` to `HARD`, and so on (see `by_id`).
+//! `ByIdMap.continuous(..., OutOfBoundsStrategy.WRAP)` — `WRAP` is
+//! `Mth.positiveModulo(id, length)` (`Math.floorMod(id, 4)`), so a byte `5`
+//! wraps to `EASY` (index 1), `-1` to `HARD` (index 3), and so on (see
+//! `by_id`).
 //!
 //! Placement follows the documented `GameType` precedent (OWNERSHIP.md
 //! §Registries — "pure value types stay in `rivet-registry::core`, with only
@@ -110,7 +112,7 @@ impl Difficulty {
 
     /// `Difficulty.byId(int)` — `BY_ID.apply(id)` with the WRAP strategy:
     /// any id (negative or `>= 4`) maps around the four values
-    /// (`5 -> NORMAL`, `-1 -> HARD`).
+    /// (`5 -> EASY`, `-1 -> HARD`).
     pub fn by_id(id: i32) -> Difficulty {
         BY_ID[id.rem_euclid(4) as usize]
     }
