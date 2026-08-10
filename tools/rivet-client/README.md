@@ -43,8 +43,55 @@ tools/rivet-client/run-scenario.sh move --server both --pairs paper:rivet  # Pap
 tools/rivet-client/run-scenario.sh join --server rivet            # Rivet headless boot: pinned Azalea completes login/config/spawn, exact 117-chunk send-set
 tools/rivet-client/run-scenario.sh join --server both --pairs paper:rivet  # Paper-vs-Rivet play scenario
 tools/rivet-client/run-scenario.sh dwell --server rivet           # wall-clock keepalive survival past the 30 s kick limit (issues #157/#160)
+tools/rivet-client/run-scenario.sh load-world                     # copy the local 26.2 save, prove immutability, probe the future #339 launch seam
 tools/rivet-client/run-scenario.sh capture        # one boot; print the normalized transcript
 ```
+
+`load-world` is the independent #316 harness slice. `RIVET_WORLD_SRC` may
+override the default launcher save at
+`~/Library/Application Support/minecraft/saves/New World`. The runner opens the
+configured source once, refuses a symlink in any configured path component,
+records its device/inode, and retains that descriptor through the initial
+fingerprint, descriptor-relative copy, and final fingerprint. It also requires
+the visible configured root to resolve without symlinks to the same identity
+before accepting the source evidence. The copy lives beneath a fresh
+unpredictable private (`0700`) directory and is verified byte-for-byte; storage,
+private-parent, and world descriptors remain open through server shutdown.
+The probe log is created before spawn as a fresh owner-only regular file inside
+that same private parent using descriptor-relative exclusive/no-follow
+creation. Linux gives the existing boot API the retained log identity through
+`/proc/self/fd`; macOS uses the unpredictable private path. The old predictable
+`work/scenario-loaded-world/rivet.log` is never opened, truncated, or removed.
+Cleanup revalidates every visible entry against its opened device/inode before
+descriptor-relative recursion and immediately before name-based unlink. An
+identity substitution observed by those checks is preserved rather than
+traversed or deleted. On Linux, Rivet receives the
+inherited `/proc/self/fd/<n>` identity, so replacing the visible pathname cannot
+redirect the verified root. macOS does not provide a traversable directory-fd
+pathname;
+there the server receives the unpredictable private path, which closes the old
+deterministic-path window but does not defend against a malicious same-user
+process that discovers and races that path. Source traversal and copying open
+each entry relative to a retained directory with `O_NOFOLLOW` (and Linux
+`openat2` beneath/no-symlink/no-magic-link/no-cross-mount restrictions), so a
+symlink replacement is never followed. The before/after fingerprints are two
+non-atomic snapshots: they detect differences visible at those snapshot times,
+not every transient modify-and-restore event or every intermediate state of a
+concurrently changing tree. A same-uid process can still rename or mutate
+entries between descriptor-relative operations. In particular, portable Unix
+has no unlink-by-fd: a malicious same-uid process can replace an entry after the
+final `statat` identity check but before `unlinkat`, causing the substitute to
+be removed and the owned entry to remain. The harness performs an immediate
+post-unlink name check and, where the platform exposes useful evidence, checks
+the retained object's link count; these can report the race after the fact but
+cannot guarantee damage-free cleanup against that actor. Ordinary operation
+and misconfiguration remain bounded to the unpredictable private parent and
+cannot target the configured source. Portable Unix APIs also do not provide an
+atomic external-tree snapshot. Until #339 provides
+the world-path/loading capability and official-client acceptance, this command
+exits `3` UNVERIFIED; it never turns an accepted argument into a fake PASS.
+Because the probe starts no client, explicit `--username` and
+`--timeout-seconds` options are rejected instead of being silently ignored.
 
 Modes (`--server` selects which servers boot, `--pairs` selects the comparison):
 

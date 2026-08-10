@@ -70,6 +70,14 @@
 //!   boots exactly one Rivet server, so any explicit `--runs` or `--pairs` is
 //!   rejected (exit 64) rather than silently ignored, and `--server` other than
 //!   `rivet` is refused the same way.
+//! - `load-world` (#316 independent harness slice): resolve the known local
+//!   Minecraft 26.2 save, fingerprint it, create and verify a deterministic
+//!   disposable copy, and pass only that copy through Rivet's future
+//!   `--level <path>` seam. The retained source and copy are re-fingerprinted
+//!   and ordinary-operation cleanup removes the copy on every probe outcome.
+//!   Until #339 supplies the server
+//!   world-path/loading capability and real official-client acceptance, the
+//!   command returns UNVERIFIED (exit 3), never a placeholder PASS.
 //!
 //! ## Connection proof (Rivet modes)
 //!
@@ -99,6 +107,7 @@
 //!   64 invalid CLI arguments
 
 mod comparator;
+mod load_world;
 mod server;
 mod trace;
 mod transcript;
@@ -140,6 +149,7 @@ const EXIT_USAGE: u8 = 64;
 #[derive(Debug)]
 enum RunnerError {
     Io(io::Error),
+    LoadWorld(load_world::Error),
     Server(server::Error),
     Json(serde_json::Error),
     Transcript(String),
@@ -151,6 +161,7 @@ impl RunnerError {
     fn exit_code(&self) -> u8 {
         match self {
             RunnerError::Unverified(_) => EXIT_UNVERIFIED,
+            RunnerError::LoadWorld(load_world::Error::Unverified(_)) => EXIT_UNVERIFIED,
             RunnerError::Server(server::Error::Unverified(_)) => EXIT_UNVERIFIED,
             _ => EXIT_FAIL,
         }
@@ -161,6 +172,7 @@ impl fmt::Display for RunnerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RunnerError::Io(e) => write!(f, "io error: {e}"),
+            RunnerError::LoadWorld(e) => write!(f, "loaded-world harness error: {e}"),
             RunnerError::Server(e) => write!(f, "server error: {e}"),
             RunnerError::Json(e) => write!(f, "json error: {e}"),
             RunnerError::Transcript(m) => write!(f, "transcript error: {m}"),
@@ -175,6 +187,11 @@ impl std::error::Error for RunnerError {}
 impl From<io::Error> for RunnerError {
     fn from(e: io::Error) -> Self {
         RunnerError::Io(e)
+    }
+}
+impl From<load_world::Error> for RunnerError {
+    fn from(e: load_world::Error) -> Self {
+        RunnerError::LoadWorld(e)
     }
 }
 impl From<server::Error> for RunnerError {
@@ -200,6 +217,7 @@ enum Subcommand {
     Dwell,
     Kick,
     Capture,
+    LoadWorld,
     Help,
 }
 
@@ -283,6 +301,8 @@ impl Args {
         let mut runs_explicit = false;
         let mut pairs_explicit = false;
         let mut dwell_explicit = false;
+        let mut username_explicit = false;
+        let mut timeout_explicit = false;
 
         if let Some(sub) = args.next() {
             command = match sub.as_str() {
@@ -291,6 +311,7 @@ impl Args {
                 "dwell" => Subcommand::Dwell,
                 "kick" => Subcommand::Kick,
                 "capture" => Subcommand::Capture,
+                "load-world" => Subcommand::LoadWorld,
                 "--help" | "-h" | "help" => Subcommand::Help,
                 _ => return Err(format!("unknown subcommand: {sub}\n\n{}", usage())),
             };
@@ -299,12 +320,16 @@ impl Args {
         while let Some(argument) = args.next() {
             match argument.as_str() {
                 "--address" => address = next_value(&mut args, "--address")?,
-                "--username" => username = next_value(&mut args, "--username")?,
+                "--username" => {
+                    username = next_value(&mut args, "--username")?;
+                    username_explicit = true;
+                }
                 "--timeout-seconds" => {
                     let v = next_value(&mut args, "--timeout-seconds")?;
                     timeout_seconds = v
                         .parse()
                         .map_err(|_| format!("invalid --timeout-seconds value: {v}"))?;
+                    timeout_explicit = true;
                 }
                 "--runs" => {
                     let v = next_value(&mut args, "--runs")?;
@@ -339,14 +364,14 @@ impl Args {
         }
 
         // `--dwell-seconds` only has meaning for the dwell scenario; on
-        // join/move/kick/capture the client is never asked to dwell, so an
+        // join/move/kick/capture/load-world the client is never asked to dwell, so an
         // explicit value would be a silent no-op. Reject it (exit 64) rather
         // than ignore it — the same no-silent-noop policy as --runs/--pairs on
         // dwell.
         if dwell_explicit && command != Subcommand::Dwell {
             return Err(
                 "--dwell-seconds only applies to the dwell scenario (the keepalive-survival \
-                 gate); join/move/kick/capture never dwell, so an explicit value would be a \
+                 gate); join/move/kick/capture/load-world never dwell, so an explicit value would be a \
                  silent no-op — drop it"
                     .to_owned(),
             );
@@ -554,6 +579,45 @@ impl Args {
             runs = 1;
         }
 
+        if command == Subcommand::LoadWorld {
+            if server_explicit && server != ServerSelection::Rivet {
+                return Err(format!(
+                    "load-world only supports --server rivet (Paper does not use Rivet's \
+                     world-path launch seam); got --server {}",
+                    server.as_str()
+                ));
+            }
+            server = ServerSelection::Rivet;
+            if pairs_explicit {
+                return Err(
+                    "load-world is a single-server capability probe and has no --pairs \
+                     comparison; drop it"
+                        .to_owned(),
+                );
+            }
+            if runs_explicit {
+                return Err(
+                    "load-world always performs exactly one Rivet launch probe, so --runs is a \
+                     silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if username_explicit {
+                return Err(
+                    "load-world does not start a client, so --username is a silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if timeout_explicit {
+                return Err(
+                    "load-world does not use the client timeout, so --timeout-seconds is a silent \
+                     no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            runs = 1;
+        }
+
         Ok(Self {
             command,
             server,
@@ -574,9 +638,9 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: run-scenario <join|move|dwell|kick|capture> [options]\n\
+        "Usage: run-scenario <join|move|dwell|kick|capture|load-world> [options]\n\
          Options:\n\
-         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick are always rivet)\n\
+         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick/load-world are always rivet)\n\
          \x20 --pairs paper:paper|paper:rivet\n\
          \x20                            comparison to run (default paper:paper)\n\
          \x20 --address HOST:PORT        server address (default {DEFAULT_ADDRESS})\n\
@@ -813,6 +877,7 @@ fn one_join(
         address,
         None,
         &[],
+        None,
     )?;
     println!("[run  {idx}] joining via rivet-client ...");
     let client_run = run_client(
@@ -1000,6 +1065,7 @@ fn one_move(
         address,
         None,
         &[],
+        None,
     )?;
     println!("[run  {idx}] walking via rivet-client (move mode) ...");
     let client_run = run_client(
@@ -1208,6 +1274,7 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
             base,
             None,
             &[],
+            None,
         )?;
         println!("[run  {idx}] connecting via rivet-client ...");
         let client_run = run_client(
@@ -1737,6 +1804,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         paper_addr,
         Some(reservations.remove(0)),
         &[],
+        None,
     )?;
     let paper_client = run_client(
         &client_bin,
@@ -1785,6 +1853,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         rivet_addr,
         Some(reservations.remove(0)),
         &[],
+        None,
     )?;
     let rivet_client = run_client(
         &client_bin,
@@ -1947,6 +2016,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         paper_addr,
         Some(reservations.remove(0)),
         &[],
+        None,
     )?;
     let paper_client = run_client(
         &client_bin,
@@ -1993,6 +2063,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         rivet_addr,
         Some(reservations.remove(0)),
         &[(trace::TRACE_MOVEMENT_ENV, "1")],
+        None,
     )?;
     let rivet_client = run_client(
         &client_bin,
@@ -2197,6 +2268,7 @@ fn run_dwell(args: &Args) -> Result<(), RunnerError> {
         base,
         None,
         &[],
+        None,
     )?;
     println!("[run  1] dwelling via rivet-client (dwell mode) ...");
     let client_run = run_client(
@@ -2344,6 +2416,7 @@ fn run_kick(args: &Args) -> Result<(), RunnerError> {
         base,
         None,
         &[],
+        None,
     )?;
     println!("[run  1] kicking via rivet-client (kick mode) ...");
     let client_run = run_client(
@@ -2481,6 +2554,7 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         base,
         None,
         &[],
+        None,
     )?;
     let client_run = run_client(
         &client_bin,
@@ -2504,6 +2578,114 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
     Ok(())
 }
 
+/// Independent loaded-world harness slice for #316.
+///
+/// This deliberately stops at the #339 capability boundary: it makes and
+/// verifies a disposable copy, proves the source remains immutable, and probes
+/// the future `--level <copy>` launch seam. It does not parse or load the world
+/// and therefore cannot report PASS, even if a server unexpectedly accepts the
+/// argument and reaches READY.
+fn run_load_world(args: &Args) -> Result<(), RunnerError> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/scenario-loaded-world");
+    let source_path = load_world::resolve_source_world()?;
+    let source = load_world::SourceTree::open(&source_path)?;
+    // Resolve the prospective destination and reject both containment
+    // directions before create_dir_all or any other filesystem mutation.
+    load_world::validate_prospective_storage(&source, &work)?;
+    fs::create_dir_all(&work)?;
+
+    let source_before = source.fingerprint()?;
+    let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
+    let base = base_address(args)?;
+    let run_dir = work.join("rivet");
+    let mut temp = load_world::TempWorld::create(&source, &work)?;
+    let log_path = temp.probe_log_path();
+    let probe_result = (|| -> Result<(), RunnerError> {
+        load_world::assert_copy_equals_source(&source_before, &temp.hash_tree()?)?;
+        let server_world_path = temp.server_path();
+
+        println!("rivet scenario runner: load-world (#316 independent harness slice)");
+        println!(
+            "    source world      : {} (read only; never passed to a server)",
+            source.configured_path().display()
+        );
+        println!("    disposable copy  : {}", temp.path().display());
+        println!(
+            "    private probe log: {}",
+            temp.probe_log_visible_path().display()
+        );
+        println!("    rivet-server bin : {}", rivet_bin.display());
+        println!(
+            "    launch seam      : {} <disposable-copy>",
+            server::WORLD_PATH_ARG
+        );
+        println!();
+
+        match server::boot(
+            server::ServerKind::Rivet,
+            &run_dir,
+            &log_path,
+            &rivet_bin,
+            None,
+            base,
+            None,
+            &[],
+            Some(&server_world_path),
+        ) {
+            Ok(mut srv) => match server::shutdown(&mut srv) {
+                Ok(()) => Err(RunnerError::Unverified(
+                    "rivet-server accepted the loaded-world path and reached READY, but the #339 \
+                     loaded-chunk official-client acceptance is not part of this independent slice; \
+                     refusing to claim PASS until that real acceptance exists"
+                        .to_owned(),
+                )),
+                Err(error) => Err(error.into()),
+            },
+            Err(error) => Err(classify_load_world_boot_failure(error, &log_path)),
+        }
+    })();
+
+    // Run all safety checks even when the capability probe returns
+    // UNVERIFIED. Safety failures take precedence over the expected absence:
+    // an untouched source and an unchanged disposable copy are mandatory on
+    // every exit path, and cleanup must be deterministic.
+    let copy_check = temp
+        .hash_tree()
+        .and_then(|after| load_world::assert_copy_equals_source(&source_before, &after));
+    let source_check = source.verify_unchanged(&source_before);
+    let cleanup = temp.cleanup();
+
+    source_check?;
+    copy_check?;
+    cleanup?;
+    probe_result
+}
+
+/// Map only the post-spawn READY/exit `Unverified` result through the
+/// world-path probe classifier. `Gate` and `Io` can happen before a child is
+/// spawned (run-dir preparation or `Command::spawn`) and must remain hard
+/// failures without consulting a possibly stale log from an earlier run.
+fn classify_load_world_boot_failure(error: server::Error, log_path: &Path) -> RunnerError {
+    let boot_error = match error {
+        server::Error::Unverified(message) => message,
+        error @ (server::Error::Gate(_) | server::Error::Io(_)) => return error.into(),
+    };
+    let log = fs::read_to_string(log_path).unwrap_or_default();
+    match server::classify_probe(false, &log) {
+        server::ProbeVerdict::Absent { evidence } => RunnerError::Unverified(format!(
+            "loaded-world acceptance is UNVERIFIED: rivet-server has no world-path/loading \
+             capability yet (#339); launch evidence: {evidence}"
+        )),
+        server::ProbeVerdict::FailedToBoot { evidence } => RunnerError::Unverified(format!(
+            "loaded-world acceptance is UNVERIFIED: the launch probe did not reach READY and did \
+             not prove the expected missing #339 interface ({boot_error}); last log evidence: \
+             {evidence}"
+        )),
+        server::ProbeVerdict::Present => unreachable!("the failed boot did not reach READY"),
+    }
+}
+
 fn main() -> ExitCode {
     let args = match Args::parse() {
         Ok(args) => args,
@@ -2518,6 +2700,7 @@ fn main() -> ExitCode {
         Subcommand::Dwell => run_dwell(&args),
         Subcommand::Kick => run_kick(&args),
         Subcommand::Capture => run_capture(&args),
+        Subcommand::LoadWorld => run_load_world(&args),
         Subcommand::Help => {
             println!("{}", usage());
             Ok(())
@@ -2548,6 +2731,23 @@ mod tests {
         assert_eq!(a.pairs, Pairs::PaperPaper);
         assert_eq!(a.address, DEFAULT_ADDRESS);
         assert_eq!(a.runs, DEFAULT_RUNS);
+    }
+
+    #[test]
+    fn load_world_is_a_single_rivet_probe_with_no_silent_options() {
+        let args = parse(&["load-world"]).unwrap();
+        assert_eq!(args.command, Subcommand::LoadWorld);
+        assert_eq!(args.server, ServerSelection::Rivet);
+        assert_eq!(args.runs, 1);
+
+        assert!(parse(&["load-world", "--server", "rivet"]).is_ok());
+        assert!(parse(&["load-world", "--server", "paper"]).is_err());
+        assert!(parse(&["load-world", "--server", "both"]).is_err());
+        assert!(parse(&["load-world", "--pairs", "paper:rivet"]).is_err());
+        assert!(parse(&["load-world", "--runs", "1"]).is_err());
+        assert!(parse(&["load-world", "--dwell-seconds", "35"]).is_err());
+        assert!(parse(&["load-world", "--username", DEFAULT_USERNAME]).is_err());
+        assert!(parse(&["load-world", "--timeout-seconds", "40"]).is_err());
     }
 
     #[test]
@@ -2747,11 +2947,45 @@ mod tests {
             RunnerError::Server(server::Error::Unverified("x".into())).exit_code(),
             EXIT_UNVERIFIED
         );
+        assert_eq!(
+            RunnerError::LoadWorld(load_world::Error::Unverified("x".into())).exit_code(),
+            EXIT_UNVERIFIED
+        );
         assert_eq!(RunnerError::Gate("x".into()).exit_code(), EXIT_FAIL);
+        assert_eq!(
+            RunnerError::LoadWorld(load_world::Error::Gate("x".into())).exit_code(),
+            EXIT_FAIL
+        );
         assert_eq!(
             RunnerError::Server(server::Error::Gate("x".into())).exit_code(),
             EXIT_FAIL
         );
+    }
+
+    #[test]
+    fn load_world_pre_spawn_failures_ignore_stale_probe_logs_and_stay_hard() {
+        let log =
+            std::env::temp_dir().join(format!("rivet-load-world-stale-log-{}", std::process::id()));
+        fs::write(&log, "unknown argument \"--level\"\n").unwrap();
+
+        let gate = classify_load_world_boot_failure(
+            server::Error::Gate("non-executable binary".to_owned()),
+            &log,
+        );
+        assert!(matches!(gate, RunnerError::Server(server::Error::Gate(_))));
+        assert_eq!(gate.exit_code(), EXIT_FAIL);
+
+        let io = classify_load_world_boot_failure(
+            server::Error::Io(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "invalid run directory",
+            )),
+            &log,
+        );
+        assert!(matches!(io, RunnerError::Server(server::Error::Io(_))));
+        assert_eq!(io.exit_code(), EXIT_FAIL);
+
+        fs::remove_file(log).unwrap();
     }
 
     #[test]
