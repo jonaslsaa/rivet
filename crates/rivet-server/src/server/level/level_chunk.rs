@@ -15,7 +15,7 @@
 //! module doc.
 //!
 //! The content uses the canonical generated block-state `StateId` directly and
-//! a thin `BiomeId(pub u16)` wrapper over the generated biome registry ids
+//! a thin `BiomeId` wrapper over the generated biome registry ids
 //! (plains = 40). This is the same value pair the `rivet-world` golden test
 //! drives, so the wire bytes of the M1 spawn chunk byte-compare against the
 //! committed #153 capture fixture. Biomes need the wrapper only because the
@@ -57,7 +57,13 @@ pub type StructureKey = ();
 /// this thin wrapper. The `mc.world.level.biome.core` unit replaces it with
 /// the real `Holder<Biome>` container.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct BiomeId(pub u16);
+pub struct BiomeId(pub(crate) u16);
+
+impl BiomeId {
+    pub const fn raw(self) -> u16 {
+        self.0
+    }
+}
 
 impl TryFrom<u16> for BiomeId {
     type Error = u16;
@@ -192,6 +198,8 @@ impl LevelChunk {
 /// `rivet-world` golden test drives, so the wire bytes byte-compare.
 mod maps {
     use super::{BiomeId, StateId};
+    use rivet_registry::generated::biomes::BIOME_COUNT;
+    use rivet_registry::generated::block_states::BLOCK_STATE_COUNT;
     use rivet_world::chunk::palette::GlobalIdMap;
 
     #[derive(Clone, Copy)]
@@ -201,14 +209,19 @@ mod maps {
             value.0 as i32
         }
         fn by_id_or_throw(&self, id: i32) -> StateId {
-            assert!((0..32366).contains(&id), "No value with id {id}");
+            assert!(
+                (0..i32::from(BLOCK_STATE_COUNT)).contains(&id),
+                "No value with id {id}"
+            );
             StateId(id as u16)
         }
         fn size(&self) -> i32 {
-            32366 // `BLOCK_STATE_COUNT`.
+            i32::from(BLOCK_STATE_COUNT)
         }
         fn by_id(&self, id: i32) -> Option<StateId> {
-            (0..32366).contains(&id).then_some(StateId(id as u16))
+            (0..i32::from(BLOCK_STATE_COUNT))
+                .contains(&id)
+                .then_some(StateId(id as u16))
         }
         fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId>> {
             Box::new(*self)
@@ -222,14 +235,19 @@ mod maps {
             value.0 as i32
         }
         fn by_id_or_throw(&self, id: i32) -> BiomeId {
-            assert!((0..66).contains(&id), "No value with id {id}");
+            assert!(
+                (0..BIOME_COUNT as i32).contains(&id),
+                "No value with id {id}"
+            );
             BiomeId(id as u16)
         }
         fn size(&self) -> i32 {
-            66 // the 26.2 biome registry (plains = 40, alphabetical).
+            BIOME_COUNT as i32
         }
         fn by_id(&self, id: i32) -> Option<BiomeId> {
-            (0..66).contains(&id).then_some(BiomeId(id as u16))
+            (0..BIOME_COUNT as i32)
+                .contains(&id)
+                .then_some(BiomeId(id as u16))
         }
         fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId>> {
             Box::new(*self)

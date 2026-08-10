@@ -160,6 +160,7 @@ mod tests {
         let config = config_from_args(Vec::<String>::new().into_iter());
         assert_eq!(config.bind_host, IpAddr::from([0, 0, 0, 0]));
         assert_eq!(config.port, 25565);
+        assert!(config.level_path.is_none());
     }
 
     #[test]
@@ -184,6 +185,34 @@ mod tests {
             config.level_path.as_deref(),
             Some(std::path::Path::new("/tmp/rivet-disposable-world"))
         );
+    }
+
+    #[test]
+    fn parses_level_with_bind_overrides() {
+        let config = config_from_args(
+            [
+                "--host",
+                "127.0.0.1",
+                "--level",
+                "/tmp/rivet-disposable-world",
+                "--port",
+                "25599",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
+        assert_eq!(config.port, 25599);
+        assert_eq!(
+            config.level_path.as_deref(),
+            Some(std::path::Path::new("/tmp/rivet-disposable-world"))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "--level requires a disposable world directory path")]
+    fn level_requires_a_path() {
+        let _ = config_from_args(["--level"].into_iter().map(str::to_owned));
     }
 
     #[test]

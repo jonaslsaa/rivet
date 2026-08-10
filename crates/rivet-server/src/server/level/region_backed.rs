@@ -74,6 +74,34 @@ pub struct RegionChunkSource {
     storage: RegionFileStorage,
 }
 
+/// Retained ownership seam between layout/region preparation and the future
+/// #323/#336 `ServerLevel` composition. Dependencies can fill the next step
+/// without changing how the read-only source is owned.
+pub struct RegionLevelPreparation {
+    source: RegionChunkSource,
+}
+
+impl RegionLevelPreparation {
+    pub fn prepare(root: &Path) -> Result<Self, RegionBackedBootError> {
+        let layout = RegionWorldLayout::resolve(root)?;
+        Ok(Self {
+            source: RegionChunkSource::open(layout),
+        })
+    }
+
+    pub fn source(&self) -> &RegionChunkSource {
+        &self.source
+    }
+
+    pub fn source_mut(&mut self) -> &mut RegionChunkSource {
+        &mut self.source
+    }
+
+    pub fn into_source(self) -> RegionChunkSource {
+        self.source
+    }
+}
+
 impl RegionChunkSource {
     pub fn open(layout: RegionWorldLayout) -> Self {
         let level_name = layout
@@ -131,8 +159,7 @@ impl RegionChunkSource {
 /// copy is structurally usable; metadata must not be replaced by superflat
 /// defaults because spawn/seed/game settings belong to `level.dat`.
 pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
-    let layout = RegionWorldLayout::resolve(root)?;
-    let _source = RegionChunkSource::open(layout);
+    let _prepared = RegionLevelPreparation::prepare(root)?;
     Err(RegionBackedBootError::LevelDataCodecsUnavailable)
 }
 
@@ -226,6 +253,21 @@ mod tests {
     }
 
     #[test]
+    fn layout_reports_metadata_and_region_prerequisites_separately() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            RegionWorldLayout::resolve(temp.path()),
+            Err(RegionBackedBootError::MissingLevelDat(_))
+        ));
+
+        fs::write(temp.path().join("level.dat"), b"copied-level").unwrap();
+        assert!(matches!(
+            RegionWorldLayout::resolve(temp.path()),
+            Err(RegionBackedBootError::MissingOverworldRegion(_))
+        ));
+    }
+
+    #[test]
     fn missing_chunk_never_creates_region_or_falls_back() {
         let (_temp, layout) = layout();
         let region = layout.overworld_region().to_path_buf();
@@ -238,11 +280,45 @@ mod tests {
     }
 
     #[test]
+    fn allocated_corrupt_chunk_is_a_read_error_not_absence() {
+        let (_temp, layout) = layout();
+        let path = layout.overworld_region().join("r.0.0.mca");
+        let mut bytes = vec![0u8; 3 * 4096];
+        bytes[..4].copy_from_slice(&((2i32 << 8) | 1).to_be_bytes());
+        fs::write(&path, &bytes).unwrap();
+
+        let mut source = RegionChunkSource::open(layout);
+        assert!(matches!(
+            source.read_serializable(ChunkPos::ZERO),
+            Err(RegionBackedBootError::RegionRead(ref error))
+                if error.kind() == io::ErrorKind::InvalidData
+        ));
+        drop(source);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
     fn boot_stops_at_level_data_codec_boundary() {
         let (_temp, layout) = layout();
         assert!(matches!(
             boot_level(layout.root()),
             Err(RegionBackedBootError::LevelDataCodecsUnavailable)
+        ));
+    }
+
+    #[test]
+    fn configured_level_is_not_ignored_when_join_is_disabled() {
+        let (_temp, layout) = layout();
+        let error = crate::server::Server::try_new(crate::server::ServerConfig {
+            enable_join: false,
+            level_path: Some(layout.root().to_path_buf()),
+            ..Default::default()
+        })
+        .err()
+        .expect("configured level must fail at its current typed boundary");
+        assert!(matches!(
+            error,
+            RegionBackedBootError::LevelDataCodecsUnavailable
         ));
     }
 

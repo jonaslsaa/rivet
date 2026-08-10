@@ -346,6 +346,15 @@ impl RegionFile {
                     region.path.display(),
                     read_header_bytes
                 );
+                if region.read_only {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "truncated header in read-only region {}: {read_header_bytes} bytes",
+                            region.path.display()
+                        ),
+                    ));
+                }
             }
             region.header[..read_header_bytes].copy_from_slice(&buf[..read_header_bytes]);
 
@@ -566,7 +575,7 @@ impl RegionFile {
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "negative sector count");
             }
             let sectors_length = (num_sectors as u64) * 4096;
             let mut buffer = vec![0u8; sectors_length as usize];
@@ -584,7 +593,7 @@ impl RegionFile {
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "truncated stream header");
             }
             let length = i32::from_be_bytes(buffer[0..4].try_into().unwrap());
             let version_id = buffer[4];
@@ -593,7 +602,7 @@ impl RegionFile {
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "allocated stream is missing");
             }
             // Java `int streamLength = length - 1` wraps; a corrupt length must
             // follow the negative/truncated corruption path, not panic.
@@ -614,7 +623,11 @@ impl RegionFile {
                 if ret.is_none() && self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(ret);
+                return if ret.is_none() {
+                    self.corrupt_chunk(pos, "external stream is missing or unsupported")
+                } else {
+                    Ok(ret)
+                };
             } else if stream_length > (remaining - 5) as i32 {
                 eprintln!(
                     "Chunk {} stream is truncated: expected {} but read {}",
@@ -625,21 +638,36 @@ impl RegionFile {
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "truncated stream payload");
             } else if stream_length < 0 {
                 eprintln!("Declared size {} of chunk {} is negative", length, pos);
                 if self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(None);
+                return self.corrupt_chunk(pos, "negative declared stream size");
             } else {
                 let payload = buffer[5..5 + stream_length as usize].to_vec();
                 let ret = self.create_chunk_input_stream(pos, version_id as i32, payload)?;
                 if ret.is_none() && self.can_recalc_header && self.recalculate_header()? {
                     continue;
                 }
-                return Ok(ret);
+                return if ret.is_none() {
+                    self.corrupt_chunk(pos, "unsupported stream compression")
+                } else {
+                    Ok(ret)
+                };
             }
+        }
+    }
+
+    fn corrupt_chunk<T>(&self, pos: &ChunkPos, reason: &str) -> io::Result<Option<T>> {
+        if self.read_only {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("corrupt chunk {pos} in read-only region: {reason}"),
+            ))
+        } else {
+            Ok(None)
         }
     }
 
@@ -713,12 +741,14 @@ impl RegionFile {
         &self,
         pos: &ChunkPos,
     ) -> io::Result<RegionFileWriter<ChunkBuffer>> {
+        self.ensure_writable()?;
         let buffer = ChunkBuffer::new(*pos, self.version.id() as u8);
         self.version.wrap_output(buffer)
     }
 
     /// `flush()` — `file.force(true)` (fsync including metadata).
     pub fn flush(&mut self) -> io::Result<()> {
+        self.ensure_writable()?;
         self.file_mut().sync_all()
     }
 
@@ -726,6 +756,7 @@ impl RegionFile {
     /// header, delete the `.mcc` file if present, then free the old sectors.
     /// Freed sectors are not zeroed and the file is not truncated.
     pub fn clear(&mut self, pos: &ChunkPos) -> io::Result<()> {
+        self.ensure_writable()?;
         let offset_index = Self::get_offset_index(pos);
         let offset = self.read_offset(offset_index);
         if offset != 0 {
@@ -769,6 +800,7 @@ impl RegionFile {
     /// location+timestamp patched, header written, the commit op run, and the
     /// old sectors freed *last*.
     pub(crate) fn write(&mut self, pos: &ChunkPos, data: &[u8]) -> io::Result<()> {
+        self.ensure_writable()?;
         let offset_index = Self::get_offset_index(pos);
         let offset = self.read_offset(offset_index);
         let sector_number = get_sector_number(offset);
@@ -825,6 +857,7 @@ impl RegionFile {
     /// Paper); file IO failures propagate as `io::Error` (Java `throws
     /// IOException`). The Aikar oversized branches are `RivetTodo(#231)`.
     pub fn recalculate_header(&mut self) -> io::Result<bool> {
+        self.ensure_writable()?;
         if !self.can_recalc_header {
             return Ok(false);
         }
@@ -1126,6 +1159,17 @@ impl RegionFile {
         }
 
         Ok(true)
+    }
+
+    fn ensure_writable(&self) -> io::Result<()> {
+        if self.read_only {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("region {} is open read-only", self.path.display()),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// `attemptRead(sector, chunkDataLength, fileLength)` — the recalc scan's

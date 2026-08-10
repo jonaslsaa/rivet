@@ -366,6 +366,73 @@ mod tests {
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    #[test]
+    fn read_only_storage_rejects_truncated_header_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r.0.0.mca");
+        let bytes = vec![7u8; 128];
+        fs::write(&path, &bytes).unwrap();
+
+        let mut storage = RegionFileStorage::new_read_only(info(true), dir.path().into());
+        let error = storage.read(&ChunkPos::ZERO).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        storage.close().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn read_only_region_rejects_every_mutation_entry_before_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        write_region(dir.path(), ChunkPos::ZERO, 3, PAPER_CHUNK_0_0);
+        let path = dir.path().join("r.0.0.mca");
+        let before = fs::read(&path).unwrap();
+        let mut region = RegionFile::open_read_only(
+            info(true),
+            path.clone(),
+            dir.path().into(),
+            RegionFileVersion::get_selected(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            region
+                .get_chunk_data_output_stream(&ChunkPos::ZERO)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            region.flush().unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            region.clear(&ChunkPos::ZERO).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            region.write(&ChunkPos::ZERO, &[0; 16]).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            region.recalculate_header().unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            region
+                .get_chunk_data_input_stream(&ChunkPos::ZERO)
+                .unwrap()
+                .is_some(),
+            "failed clear must not change the in-memory header"
+        );
+        region.close().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
     fn gzip(payload: &[u8]) -> Vec<u8> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(payload).unwrap();

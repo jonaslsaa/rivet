@@ -121,6 +121,14 @@ impl Server {
     /// Build the server, surfacing typed region-backed capability boundaries
     /// before the binary announces readiness.
     pub fn try_new(config: ServerConfig) -> Result<Self, level::RegionBackedBootError> {
+        // World selection is independent of whether the live join manager is
+        // installed. A requested disk level must never be silently ignored and
+        // replaced by superflat for a library caller with `enable_join=false`.
+        let region_level = config
+            .level_path
+            .as_deref()
+            .map(level::region_backed::boot_level)
+            .transpose()?;
         let config = Arc::new(config);
         let shutdown = Arc::new(Shutdown::new());
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(config.lifecycle_capacity);
@@ -133,8 +141,8 @@ impl Server {
         // the tick thread by `serve` (`std::mem::take`).
         if config.enable_join {
             let mut session = player::session::default_session_config(config.compression_threshold);
-            if let Some(level_path) = &config.level_path {
-                session.level = level::region_backed::boot_level(level_path)?;
+            if let Some(level) = region_level {
+                session.level = level;
             }
             session.keepalive_timeout_ns = config.keepalive_timeout.as_nanos() as i64;
             tickables.push(player::session::session_manager_tickable(session));
