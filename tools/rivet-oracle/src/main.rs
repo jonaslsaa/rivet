@@ -1983,7 +1983,9 @@ fn regenerate_samples() -> Result<(), Error> {
 
     // 3. Rewrite the worldgen manifest from the fresh hashes.
     regenerate_worldgen_manifest(&wg)?;
-    println!("regenerated worldgen semantic samples (samples.json, light.json, light-full.json, manifest.json)");
+    println!(
+        "regenerated worldgen semantic samples (samples.json, light.json, light-full.json, manifest.json)"
+    );
     Ok(())
 }
 
