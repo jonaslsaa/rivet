@@ -22,6 +22,7 @@ pub mod level;
 pub mod level_accessor;
 pub mod level_reader;
 pub mod storage;
+pub mod validation;
 // STUB(mc.world.level) — `WorldGenLevel`, the world
 // surface feature placement runs against.
 pub mod world_gen_level;
