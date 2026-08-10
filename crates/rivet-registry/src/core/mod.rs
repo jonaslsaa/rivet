@@ -63,7 +63,7 @@ mod vec3i;
 
 pub use axis_cycle::AxisCycle;
 pub use block_box::BlockBox;
-pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus};
+pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus, block_pos_codec};
 pub use chunk_pos::ChunkPos;
 pub use cursor3d::Cursor3D;
 pub use difficulty::Difficulty;
@@ -71,7 +71,7 @@ pub use direction::{Axis, AxisDirection, Direction, Plane};
 pub use direction8::Direction8;
 pub use game_profile::{GameProfile, Property, PropertyMap};
 pub use game_type::{GameType, game_type_codec, game_type_legacy_id_codec};
-pub use global_pos::GlobalPos;
+pub use global_pos::{GlobalPos, global_pos_codec, global_pos_map_codec};
 pub use position::Position;
 pub use relative::Relative;
 pub use rotation::Rotation;
