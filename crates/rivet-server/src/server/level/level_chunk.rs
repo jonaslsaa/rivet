@@ -14,18 +14,12 @@
 //! the remaining deferred items are listed on the rivet-world `LevelChunk`
 //! module doc.
 //!
-//! The content is instantiated with thin local wrappers over the dense
-//! block-state / biome global ids — `StateId(pub u16)` (a global block-state
-//! id, air = 0, stone = 1) and `BiomeId(pub u16)` (the alphabetically dense
-//! biome registry id, plains = 40). This is the same value pair the
-//! `rivet-world` golden test drives, so the wire bytes of the M1 spawn chunk
-//! byte-compare against the committed #153 capture fixture. The local
-//! `StateId` mirrors `rivet-registry::generated::StateId` (which PR #244 made
-//! available to `rivet-server` via the `blocks` feature) and `BiomeId` has no
-//! generated newtype equivalent — the generated `biomes.rs` exposes only a
-//! name→id map — so the pair stays local, exactly as in
-//! `rivet-world/tests/superflat_chunk_golden.rs`, until the owning unit replaces
-//! them.
+//! The content uses the canonical generated block-state `StateId` directly and
+//! a thin `BiomeId` wrapper over the generated biome registry ids
+//! (plains = 40). This is the same value pair the `rivet-world` golden test
+//! drives, so the wire bytes of the M1 spawn chunk byte-compare against the
+//! committed #153 capture fixture. Biomes need the wrapper only because the
+//! generated table exposes dense name/id maps rather than a newtype.
 //!
 //! RivetTodo(#184): the send path carries the deterministic superflat light
 //! (computed once at construction from `rivet_world::superflat`) instead of
@@ -38,7 +32,8 @@ use rivet_registry::core::ChunkPos;
 use rivet_registry::generated::block_behaviors::{
     BEHAVIOR_FLAG_FLUID_EMPTY, BEHAVIOR_FLAG_RANDOM_TICKING, behavior_of,
 };
-use rivet_registry::generated::block_states::StateId as GeneratedStateId;
+/// Canonical dense global block-state id from the generated registry.
+pub use rivet_registry::generated::block_states::StateId;
 use rivet_world::chunk::level_chunk::LevelChunk as WorldLevelChunk;
 use rivet_world::chunk::level_chunk_section::LevelChunkSection;
 use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
@@ -55,16 +50,6 @@ use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y, build_superflat}
 /// structure unit lands.
 pub type StructureKey = ();
 
-/// A dense global block-state id (index into the global palette). `rivet-registry`
-///'s generated table is the canonical source (`BLOCK_STATE_COUNT = 32366`, air =
-/// state 0, stone = state 1 — the default states); the M1 superflat content is
-/// built against this thin wrapper, identical in shape to the generated
-/// `rivet-registry::generated::StateId` (available to `rivet-server` since
-/// #244 enabled `blocks`), so the slice stays coupled to the same value until
-/// the owning chunk.access unit replaces it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct StateId(pub u16);
-
 /// A dense biome global id. The `minecraft:worldgen/biome` registry is
 /// alphabetically dense (`0..66`; plains = 40) — the generated `biomes.rs`
 /// table is the canonical source, but it exposes a name→id map, not a newtype,
@@ -72,7 +57,23 @@ pub struct StateId(pub u16);
 /// this thin wrapper. The `mc.world.level.biome.core` unit replaces it with
 /// the real `Holder<Biome>` container.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct BiomeId(pub u16);
+pub struct BiomeId(pub(crate) u16);
+
+impl BiomeId {
+    pub const fn raw(self) -> u16 {
+        self.0
+    }
+}
+
+impl TryFrom<u16> for BiomeId {
+    type Error = u16;
+
+    fn try_from(id: u16) -> Result<Self, Self::Error> {
+        (usize::from(id) < rivet_registry::generated::biomes::BIOME_COUNT)
+            .then_some(Self(id))
+            .ok_or(id)
+    }
+}
 
 /// `net.minecraft.world.level.chunk.LevelChunk` — the world's loaded chunk
 /// content plus its chunk position.
@@ -197,6 +198,8 @@ impl LevelChunk {
 /// `rivet-world` golden test drives, so the wire bytes byte-compare.
 mod maps {
     use super::{BiomeId, StateId};
+    use rivet_registry::generated::biomes::BIOME_COUNT;
+    use rivet_registry::generated::block_states::BLOCK_STATE_COUNT;
     use rivet_world::chunk::palette::GlobalIdMap;
 
     #[derive(Clone, Copy)]
@@ -206,14 +209,19 @@ mod maps {
             value.0 as i32
         }
         fn by_id_or_throw(&self, id: i32) -> StateId {
-            assert!((0..32366).contains(&id), "No value with id {id}");
+            assert!(
+                (0..i32::from(BLOCK_STATE_COUNT)).contains(&id),
+                "No value with id {id}"
+            );
             StateId(id as u16)
         }
         fn size(&self) -> i32 {
-            32366 // `BLOCK_STATE_COUNT`.
+            i32::from(BLOCK_STATE_COUNT)
         }
         fn by_id(&self, id: i32) -> Option<StateId> {
-            (0..32366).contains(&id).then_some(StateId(id as u16))
+            (0..i32::from(BLOCK_STATE_COUNT))
+                .contains(&id)
+                .then_some(StateId(id as u16))
         }
         fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId>> {
             Box::new(*self)
@@ -227,14 +235,19 @@ mod maps {
             value.0 as i32
         }
         fn by_id_or_throw(&self, id: i32) -> BiomeId {
-            assert!((0..66).contains(&id), "No value with id {id}");
+            assert!(
+                (0..BIOME_COUNT as i32).contains(&id),
+                "No value with id {id}"
+            );
             BiomeId(id as u16)
         }
         fn size(&self) -> i32 {
-            66 // the 26.2 biome registry (plains = 40, alphabetical).
+            BIOME_COUNT as i32
         }
         fn by_id(&self, id: i32) -> Option<BiomeId> {
-            (0..66).contains(&id).then_some(BiomeId(id as u16))
+            (0..BIOME_COUNT as i32)
+                .contains(&id)
+                .then_some(BiomeId(id as u16))
         }
         fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId>> {
             Box::new(*self)
@@ -281,12 +294,12 @@ fn superflat_content() -> rivet_world::superflat::SuperflatChunkContent<StateId,
     // `state.isRandomlyTicking()` — the generated behavior-table flag (air +
     // stone are both non-randomly-ticking, matching the table).
     fn is_randomly_ticking(s: &StateId) -> bool {
-        behavior_of(GeneratedStateId(s.0)) & BEHAVIOR_FLAG_RANDOM_TICKING != 0
+        behavior_of(*s) & BEHAVIOR_FLAG_RANDOM_TICKING != 0
     }
     // `state.getFluidState().isEmpty()` — the generated behavior-table flag
     // (air + stone both carry no fluid, matching the table).
     fn fluid_is_empty(s: &StateId) -> bool {
-        behavior_of(GeneratedStateId(s.0)) & BEHAVIOR_FLAG_FLUID_EMPTY != 0
+        behavior_of(*s) & BEHAVIOR_FLAG_FLUID_EMPTY != 0
     }
     // `state.getFluidState().isRandomlyTicking()` — exact for air + stone (no
     // fluid to tick).

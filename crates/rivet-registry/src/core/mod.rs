@@ -22,7 +22,11 @@
 //! `uuid_util` (issue #198) ports `UUIDUtil.createOfflinePlayerUUID`
 //! (`UUID.nameUUIDFromBytes("OfflinePlayer:" + name)`, v3/MD5); the
 //! `STREAM_CODEC` half lives in `rivet-protocol` (`FriendlyByteBuf::read_uuid`/
-//! `write_uuid`).
+//! `write_uuid`). The codec slice (#373) adds `uuid_codec` (`Codec.INT_STREAM`
+//! `comapFlatMap` `Util.fixedSize(…, 4)`) and the exact
+//! `uuidFromIntArray`/`uuidToIntArray` conversions. `game_type` (#373) adds
+//! `game_type_codec` (`StringRepresentable.fromEnum`), `game_type_legacy_id_codec`
+//! (`Codec.INT.xmap`), and the `byName` resolvers.
 //!
 //! RivetTodo(#212): `BlockBox`, `Direction8`, `Rotations` are ported as pure
 //! value types (with `Rotations::CODEC` here). The remaining #212 gaps are the
@@ -59,21 +63,23 @@ mod vec3i;
 
 pub use axis_cycle::AxisCycle;
 pub use block_box::BlockBox;
-pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus};
+pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus, block_pos_codec};
 pub use chunk_pos::ChunkPos;
 pub use cursor3d::Cursor3D;
 pub use difficulty::Difficulty;
 pub use direction::{Axis, AxisDirection, Direction, Plane};
 pub use direction8::Direction8;
 pub use game_profile::{GameProfile, Property, PropertyMap};
-pub use game_type::GameType;
-pub use global_pos::GlobalPos;
+pub use game_type::{GameType, game_type_codec, game_type_legacy_id_codec};
+pub use global_pos::{GlobalPos, global_pos_codec, global_pos_map_codec};
 pub use position::Position;
 pub use relative::Relative;
 pub use rotation::Rotation;
 pub use rotations::{Rotations, rotations_codec};
 pub use section_pos::SectionPos;
-pub use uuid_util::create_offline_player_uuid;
+pub use uuid_util::{
+    create_offline_player_uuid, uuid_codec, uuid_from_int_array, uuid_to_int_array,
+};
 pub use vec3::Vec3;
 pub use vec3i::{Vec3i, Vec3iLike};
 
