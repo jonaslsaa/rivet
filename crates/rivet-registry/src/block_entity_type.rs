@@ -35,7 +35,7 @@ static BUILT_IN_REGISTRY_ACCESS: LazyLock<RegistryAccess> = LazyLock::new(|| {
 /// Values can only be obtained from the report-generated id/name space. An
 /// unknown numeric id or resource identifier remains `None`, matching the
 /// non-defaulted vanilla registry rather than folding to a fabricated type.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Debug)]
 pub struct BlockEntityType {
     id: u16,
 }
@@ -123,16 +123,10 @@ mod tests {
 
     #[test]
     fn unknown_ids_and_identifiers_remain_unknown() {
-        assert_eq!(BlockEntityType::from_id(49), None);
-        assert_eq!(BlockEntityType::from_id(u16::MAX), None);
-        assert_eq!(
-            BlockEntityType::from_name("minecraft:not_a_block_entity"),
-            None
-        );
-        assert_eq!(
-            BlockEntityType::from_identifier(&Identifier::parse("example:chest")),
-            None
-        );
+        assert!(BlockEntityType::from_id(49).is_none());
+        assert!(BlockEntityType::from_id(u16::MAX).is_none());
+        assert!(BlockEntityType::from_name("minecraft:not_a_block_entity").is_none());
+        assert!(BlockEntityType::from_identifier(&Identifier::parse("example:chest")).is_none());
     }
 
     #[test]
@@ -150,7 +144,12 @@ mod tests {
             assert_eq!(value.name(), *name);
             assert_eq!(value.identifier(), identifier);
             assert_eq!(registry.get_id(value), id as i32);
-            assert_eq!(registry.by_id(id as i32), Some(value));
+            assert!(std::ptr::eq(
+                registry
+                    .by_id(id as i32)
+                    .expect("generated id is registered"),
+                value
+            ));
             assert_eq!(registry.get_key(value), Some(identifier));
         }
     }
@@ -166,11 +165,15 @@ mod tests {
         );
         assert!(registry.by_id(49).is_none());
 
-        // Equal content in a fresh allocation is not the registered Java-style
-        // object identity, so the existing packet encoder must reject it.
+        // Even the same generated id in a fresh allocation is not the
+        // registered Java object identity. This can only be manufactured
+        // inside this module: the public type has no constructor or `Clone`.
         let registered = BlockEntityType::from_name("minecraft:chest").unwrap();
         assert_eq!(registry.get_id(&registered), 1);
-        let detached = Arc::new((*registered).clone());
+        let detached = Arc::new(BlockEntityType {
+            id: registered.id(),
+        });
+        assert!(!Arc::ptr_eq(&registered, &detached));
         assert_eq!(registry.get_id(&detached), -1);
     }
 }

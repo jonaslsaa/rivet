@@ -504,27 +504,6 @@ mod tests {
     }
 
     #[test]
-    fn production_chunk_encoder_rejects_a_detached_block_entity_identity() {
-        let registered = BlockEntityType::from_name("minecraft:furnace").unwrap();
-        let detached = Arc::new((*registered).clone());
-        let packet = packet_with_block_entity(detached);
-
-        let panic = std::panic::catch_unwind(|| {
-            let _ = encode_chunk_body(&packet);
-        })
-        .expect_err("equal content in a detached Arc must not encode");
-        let message = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&str>().copied())
-            .expect("registry identity panic has a string message");
-        assert!(
-            message.contains("Can't find id for value in map"),
-            "unexpected identity mismatch panic: {message}"
-        );
-    }
-
-    #[test]
     fn distance_ladder_matches_the_m1_fixture() {
         // view-distance=4, simulation-distance=4: world (tick=4, load=5, send=4).
         let world = overworld();

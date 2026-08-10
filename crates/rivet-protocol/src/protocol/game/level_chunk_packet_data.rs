@@ -42,13 +42,24 @@ pub const TWO_MEGABYTES: i32 = 2097152;
 /// (both `& 15`), `y` the absolute block Y, `type` the registry id, `tag` the
 /// update NBT (null -> EndTag, not length-prefixed).
 ///
-/// `PartialEq` only (not `Eq`): the NBT `CompoundTag` value type has no `Eq`.
-#[derive(Clone, Debug, PartialEq)]
+/// Equality is provided for packet comparisons and treats the registry value
+/// like Java does: the `Arc` allocations must be identical. `PartialEq` only
+/// (not `Eq`), because the NBT `CompoundTag` value type has no `Eq`.
+#[derive(Clone, Debug)]
 pub struct BlockEntityInfo {
     packed_xz: i8,
     y: i16,
     entity_type: Arc<BlockEntityType>,
     tag: Option<CompoundTag>,
+}
+
+impl PartialEq for BlockEntityInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.packed_xz == other.packed_xz
+            && self.y == other.y
+            && Arc::ptr_eq(&self.entity_type, &other.entity_type)
+            && self.tag == other.tag
+    }
 }
 
 impl BlockEntityInfo {
@@ -497,8 +508,14 @@ mod tests {
             .unwrap();
         assert_eq!(input.readable_bytes(), 0);
         assert_eq!(decoded.block_entities().len(), 2);
-        assert_eq!(decoded.block_entities()[0].entity_type(), &furnace);
-        assert_eq!(decoded.block_entities()[1].entity_type(), &chest);
+        assert!(Arc::ptr_eq(
+            decoded.block_entities()[0].entity_type(),
+            &furnace
+        ));
+        assert!(Arc::ptr_eq(
+            decoded.block_entities()[1].entity_type(),
+            &chest
+        ));
         assert!(decoded.block_entities()[0].tag().is_none());
         assert_eq!(
             decoded.block_entities()[1]
