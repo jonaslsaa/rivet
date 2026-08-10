@@ -436,8 +436,10 @@ impl<T> Registry<T> {
     /// - Decode lifecycle: a registered element carries its
     ///   `RegistrationInfo.lifecycle`; an element with no registration info
     ///   falls back to `Lifecycle::experimental()` (the override applies on a
-    ///   full success only). Errors keep the identifier codec's lifecycle
-    ///   (stable — `Identifier.CODEC` is `.stable()`).
+    ///   full success only). Errors from the identifier codec keep its stable
+    ///   lifecycle (a malformed identifier); an unknown-name error is
+    ///   experimental, since `DataResult::error` defaults to experimental and
+    ///   the lifecycle monoid gives experimental precedence.
     /// - Encode of an unregistered value errors `"Unregistered holder in <key>:
     ///   Direct{...}"` (`safeCastToReference` on a `wrapAsHolder` that produced
     ///   a direct holder — identity lookup, so a defaulted registry does not
@@ -1071,6 +1073,34 @@ mod by_name_codec_tests {
         let decoded = decode_value(codec.as_ref(), &ops(), &input);
         assert!(decoded.is_success());
         assert_eq!(decoded.lifecycle(), Lifecycle::Stable);
+    }
+
+    #[test]
+    fn decode_error_lifecycle_distinguishes_unknown_name_from_malformed() {
+        // Decode error lifecycles follow the Java composition:
+        // - Unknown-name: produced by the outer comapFlatMap's mapper via
+        //   `DataResult.error(...)` (experimental), and `Success.flatMap`
+        //   re-adds the identifier codec's stable — experimental wins the
+        //   monoid. `overrideLifecycle` overrides only a full success, so the
+        //   error stays experimental.
+        // - Malformed identifier: the error originates inside the identifier
+        //   codec, whose `.stable()` wrapper sets the whole result to stable.
+        let registry = registry_of(&[("air", 0)]);
+        let codec = registry.by_name_codec::<TestOps>();
+        let unknown = ops().create_string("minecraft:nope".to_string());
+        let unknown_result = decode_value(codec.as_ref(), &ops(), &unknown);
+        assert!(unknown_result.is_error());
+        assert_eq!(
+            unknown_result.error_ref().unwrap().lifecycle(),
+            Lifecycle::Experimental
+        );
+        let malformed = ops().create_string("a b:c".to_string());
+        let malformed_result = decode_value(codec.as_ref(), &ops(), &malformed);
+        assert!(malformed_result.is_error());
+        assert_eq!(
+            malformed_result.error_ref().unwrap().lifecycle(),
+            Lifecycle::Stable
+        );
     }
 
     #[test]
