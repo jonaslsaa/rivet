@@ -293,6 +293,31 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// NON_NEGATIVE_INT
+// ---------------------------------------------------------------------------
+
+/// `ExtraCodecs.NON_NEGATIVE_INT` — `Codec.INT.validate(v -> v >= 0 ?
+/// success : error("Value must be non-negative: " + v))`.
+///
+/// Java's `intRangeWithMessage(0, Integer.MAX_VALUE, n -> "Value must be
+/// non-negative: " + n)` — a plain `Codec.INT` + `validate` with that message.
+/// Note this is NOT `codec::int_range(0, i32::MAX)`: the message differs
+/// (`"Value must be non-negative: N"` vs the generic range message), and this
+/// is what `Weighted.codec` (issue #353) relies on for exact decode errors.
+pub fn non_negative_int_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i32, Ops>> {
+    codec::validate(
+        codec::int_codec::<Ops>(),
+        Arc::new(|value: &i32| {
+            if *value >= 0 {
+                DataResult::success(*value)
+            } else {
+                DataResult::error(format!("Value must be non-negative: {}", value))
+            }
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // nonEmptyList
 // ---------------------------------------------------------------------------
 
