@@ -41,6 +41,8 @@ mod tests {
         assert_eq!(VERSION_NAME, "26.2");
         assert_eq!(WORLD_VERSION, 4903);
         assert_eq!(SERIES, "main");
-        assert!(STABLE);
+        // `STABLE` is compile-time known, so assert it in a const block: the pin
+        // fails the build (not just the test) if the constant ever drifts.
+        const { assert!(STABLE) };
     }
 }
