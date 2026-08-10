@@ -3423,6 +3423,116 @@ pub static ENTITY_TYPE_BY_ID: &[&str] = &[
 /// id that `byId`/`getValue(name)` return for missing lookups.
 pub static ENTITY_TYPE_DEFAULT: &str = "minecraft:pig";
 
+/// `minecraft:block_entity_type` — element name -> registry id (dense `0..49`).
+pub static BLOCK_ENTITY_TYPE_BY_NAME: phf::Map<&'static str, u16> = phf::phf_map! {
+    "minecraft:furnace" => 0u16,
+    "minecraft:chest" => 1u16,
+    "minecraft:trapped_chest" => 2u16,
+    "minecraft:ender_chest" => 3u16,
+    "minecraft:jukebox" => 4u16,
+    "minecraft:dispenser" => 5u16,
+    "minecraft:dropper" => 6u16,
+    "minecraft:sign" => 7u16,
+    "minecraft:hanging_sign" => 8u16,
+    "minecraft:mob_spawner" => 9u16,
+    "minecraft:creaking_heart" => 10u16,
+    "minecraft:piston" => 11u16,
+    "minecraft:brewing_stand" => 12u16,
+    "minecraft:enchanting_table" => 13u16,
+    "minecraft:end_portal" => 14u16,
+    "minecraft:beacon" => 15u16,
+    "minecraft:skull" => 16u16,
+    "minecraft:daylight_detector" => 17u16,
+    "minecraft:hopper" => 18u16,
+    "minecraft:comparator" => 19u16,
+    "minecraft:banner" => 20u16,
+    "minecraft:structure_block" => 21u16,
+    "minecraft:end_gateway" => 22u16,
+    "minecraft:command_block" => 23u16,
+    "minecraft:shulker_box" => 24u16,
+    "minecraft:conduit" => 25u16,
+    "minecraft:barrel" => 26u16,
+    "minecraft:smoker" => 27u16,
+    "minecraft:blast_furnace" => 28u16,
+    "minecraft:lectern" => 29u16,
+    "minecraft:bell" => 30u16,
+    "minecraft:jigsaw" => 31u16,
+    "minecraft:campfire" => 32u16,
+    "minecraft:beehive" => 33u16,
+    "minecraft:sculk_sensor" => 34u16,
+    "minecraft:calibrated_sculk_sensor" => 35u16,
+    "minecraft:sculk_catalyst" => 36u16,
+    "minecraft:sculk_shrieker" => 37u16,
+    "minecraft:chiseled_bookshelf" => 38u16,
+    "minecraft:shelf" => 39u16,
+    "minecraft:brushable_block" => 40u16,
+    "minecraft:decorated_pot" => 41u16,
+    "minecraft:crafter" => 42u16,
+    "minecraft:trial_spawner" => 43u16,
+    "minecraft:vault" => 44u16,
+    "minecraft:test_block" => 45u16,
+    "minecraft:test_instance_block" => 46u16,
+    "minecraft:copper_golem_statue" => 47u16,
+    "minecraft:potent_sulfur" => 48u16,
+};
+
+/// `minecraft:block_entity_type` — element names indexed by registry id (id == index).
+pub static BLOCK_ENTITY_TYPE_BY_ID: &[&str] = &[
+    "minecraft:furnace",                 // 0
+    "minecraft:chest",                   // 1
+    "minecraft:trapped_chest",           // 2
+    "minecraft:ender_chest",             // 3
+    "minecraft:jukebox",                 // 4
+    "minecraft:dispenser",               // 5
+    "minecraft:dropper",                 // 6
+    "minecraft:sign",                    // 7
+    "minecraft:hanging_sign",            // 8
+    "minecraft:mob_spawner",             // 9
+    "minecraft:creaking_heart",          // 10
+    "minecraft:piston",                  // 11
+    "minecraft:brewing_stand",           // 12
+    "minecraft:enchanting_table",        // 13
+    "minecraft:end_portal",              // 14
+    "minecraft:beacon",                  // 15
+    "minecraft:skull",                   // 16
+    "minecraft:daylight_detector",       // 17
+    "minecraft:hopper",                  // 18
+    "minecraft:comparator",              // 19
+    "minecraft:banner",                  // 20
+    "minecraft:structure_block",         // 21
+    "minecraft:end_gateway",             // 22
+    "minecraft:command_block",           // 23
+    "minecraft:shulker_box",             // 24
+    "minecraft:conduit",                 // 25
+    "minecraft:barrel",                  // 26
+    "minecraft:smoker",                  // 27
+    "minecraft:blast_furnace",           // 28
+    "minecraft:lectern",                 // 29
+    "minecraft:bell",                    // 30
+    "minecraft:jigsaw",                  // 31
+    "minecraft:campfire",                // 32
+    "minecraft:beehive",                 // 33
+    "minecraft:sculk_sensor",            // 34
+    "minecraft:calibrated_sculk_sensor", // 35
+    "minecraft:sculk_catalyst",          // 36
+    "minecraft:sculk_shrieker",          // 37
+    "minecraft:chiseled_bookshelf",      // 38
+    "minecraft:shelf",                   // 39
+    "minecraft:brushable_block",         // 40
+    "minecraft:decorated_pot",           // 41
+    "minecraft:crafter",                 // 42
+    "minecraft:trial_spawner",           // 43
+    "minecraft:vault",                   // 44
+    "minecraft:test_block",              // 45
+    "minecraft:test_instance_block",     // 46
+    "minecraft:copper_golem_statue",     // 47
+    "minecraft:potent_sulfur",           // 48
+];
+
+/// `minecraft:block_entity_type` has no defaulted element (a plain `Registry`, not a
+/// `DefaultedRegistry`); lookups of missing names return `None`.
+pub static BLOCK_ENTITY_TYPE_DEFAULT: Option<&str> = None;
+
 /// `minecraft:data_component_type` — element name -> registry id (dense `0..111`).
 pub static DATA_COMPONENT_TYPE_BY_NAME: phf::Map<&'static str, u16> = phf::phf_map! {
     "minecraft:custom_data" => 0u16,

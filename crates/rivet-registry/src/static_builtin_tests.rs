@@ -10,8 +10,9 @@
 //! golden drift test asserts that dir contains exactly the generated files).
 
 use crate::generated::registries::{
-    DATA_COMPONENT_TYPE_BY_ID, DATA_COMPONENT_TYPE_BY_NAME, ENTITY_TYPE_BY_ID, ENTITY_TYPE_BY_NAME,
-    FLUID_BY_ID, FLUID_BY_NAME, GAME_EVENT_BY_ID, GAME_EVENT_BY_NAME, ITEM_BY_ID, ITEM_BY_NAME,
+    BLOCK_ENTITY_TYPE_BY_ID, BLOCK_ENTITY_TYPE_BY_NAME, DATA_COMPONENT_TYPE_BY_ID,
+    DATA_COMPONENT_TYPE_BY_NAME, ENTITY_TYPE_BY_ID, ENTITY_TYPE_BY_NAME, FLUID_BY_ID,
+    FLUID_BY_NAME, GAME_EVENT_BY_ID, GAME_EVENT_BY_NAME, ITEM_BY_ID, ITEM_BY_NAME,
     POINT_OF_INTEREST_TYPE_BY_ID, POINT_OF_INTEREST_TYPE_BY_NAME, POTION_BY_ID, POTION_BY_NAME,
 };
 
@@ -21,9 +22,10 @@ use crate::generated::registries::{
 /// (`generated_block_tables_agree_with_the_id_space`).
 #[test]
 fn report_driven_tables_are_dense_bijections() {
-    let pairs: [(&[&str], &phf::Map<&'static str, u16>); 7] = [
+    let pairs: [(&[&str], &phf::Map<&'static str, u16>); 8] = [
         (ITEM_BY_ID, &ITEM_BY_NAME),
         (ENTITY_TYPE_BY_ID, &ENTITY_TYPE_BY_NAME),
+        (BLOCK_ENTITY_TYPE_BY_ID, &BLOCK_ENTITY_TYPE_BY_NAME),
         (DATA_COMPONENT_TYPE_BY_ID, &DATA_COMPONENT_TYPE_BY_NAME),
         (FLUID_BY_ID, &FLUID_BY_NAME),
         (GAME_EVENT_BY_ID, &GAME_EVENT_BY_NAME),

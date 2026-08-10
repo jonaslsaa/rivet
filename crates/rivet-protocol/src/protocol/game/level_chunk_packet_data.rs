@@ -291,32 +291,19 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
     use rivet_registry::registry::RegistryKey;
-    use rivet_registry::{
-        Identifier, RegistrationInfo, RegistryAccess, RegistryBuilder, ResourceKey,
-    };
+    use rivet_registry::{Identifier, RegistryAccess, ResourceKey};
 
     fn registry_buf(bytes: Vec<u8>) -> RegistryFriendlyByteBuf {
         RegistryFriendlyByteBuf::new(BytesMut::from(bytes.as_slice()), RegistryAccess::empty())
     }
 
-    /// A `BLOCK_ENTITY_TYPE` registry with two placeholder types, `furnace` (id
-    /// 0) and `chest` (id 1), plus the stored allocations for the round trips.
+    /// The generated Minecraft 26.2 `BLOCK_ENTITY_TYPE` registry, plus two
+    /// representative stored allocations for packet round trips.
     fn block_entity_registry() -> (RegistryAccess, Arc<BlockEntityType>, Arc<BlockEntityType>) {
         let key: RegistryKey<BlockEntityType> = ResourceKey::create_registry_key(
             Identifier::with_default_namespace("block_entity_type"),
         );
-        let mut builder = RegistryBuilder::new(&key);
-        builder.register(
-            &ResourceKey::create(&key, Identifier::with_default_namespace("furnace")),
-            Arc::new(BlockEntityType),
-            RegistrationInfo::BUILT_IN,
-        );
-        builder.register(
-            &ResourceKey::create(&key, Identifier::with_default_namespace("chest")),
-            Arc::new(BlockEntityType),
-            RegistrationInfo::BUILT_IN,
-        );
-        let registry = builder.freeze();
+        let registry = BlockEntityType::built_in_registry();
         let access = RegistryAccess::from_single_registry(key.clone(), registry);
         let furnace = access.lookup(&key).unwrap().by_id_arc(0).unwrap().clone();
         let chest = access.lookup(&key).unwrap().by_id_arc(1).unwrap().clone();

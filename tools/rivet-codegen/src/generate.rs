@@ -151,7 +151,7 @@ fn run_blocks(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<S
 /// `registry_data.rs` (the pre-baked full NBT payloads) are added alongside the
 /// extract-driven block tables.
 fn render_mod() -> String {
-    "pub mod biomes;\npub mod block_behaviors;\npub mod block_properties;\npub mod block_states;\npub mod blocks;\npub mod registries;\npub mod registry_data;\npub mod synchronized;\npub mod tags;\n"
+    "#[cfg(feature = \"blocks\")]\npub mod biomes;\n#[cfg(feature = \"blocks\")]\npub mod block_behaviors;\npub mod block_entity_types;\n#[cfg(feature = \"blocks\")]\npub mod block_properties;\n#[cfg(feature = \"blocks\")]\npub mod block_states;\n#[cfg(feature = \"blocks\")]\npub mod blocks;\n#[cfg(feature = \"blocks\")]\npub mod registries;\n#[cfg(feature = \"blocks\")]\npub mod registry_data;\n#[cfg(feature = \"blocks\")]\npub mod synchronized;\n#[cfg(feature = \"blocks\")]\npub mod tags;\n"
         .to_string()
 }
 
@@ -332,9 +332,10 @@ mod drift_tests {
 
     use super::run;
 
-    const GENERATED_FILES: [&str; 10] = [
+    const GENERATED_FILES: [&str; 11] = [
         "biomes.rs",
         "block_behaviors.rs",
+        "block_entity_types.rs",
         "block_properties.rs",
         "block_states.rs",
         "blocks.rs",
