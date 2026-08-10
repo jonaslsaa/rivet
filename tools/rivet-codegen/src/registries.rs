@@ -1019,8 +1019,12 @@ mod tests {
         let feature_sizes = surface(&surfaces, "minecraft:worldgen/feature_size_type");
         let feature_size_identities = render_feature_size_types(feature_sizes, &source);
         assert!(feature_size_identities.contains("FEATURE_SIZE_TYPE_BY_ID"));
-        assert!(feature_size_identities.contains("minecraft:two_layers_feature_size\" => Some(0u16)"));
-        assert!(feature_size_identities.contains("minecraft:three_layers_feature_size\" => Some(1u16)"));
+        assert!(
+            feature_size_identities.contains("minecraft:two_layers_feature_size\" => Some(0u16)")
+        );
+        assert!(
+            feature_size_identities.contains("minecraft:three_layers_feature_size\" => Some(1u16)")
+        );
         // The defaulted fold renders for defaulted registries only.
         assert!(first.contains("ENTITY_TYPE_DEFAULT: &str = \"minecraft:pig\""));
         assert!(first.contains("POTION_DEFAULT: Option<&str> = None"));
