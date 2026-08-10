@@ -1328,7 +1328,7 @@ mod mth_golden_tests;
 mod tests {
     // Hand-written unit tests for JDK `Math.*` ports that are not `Mth` methods
     // and so have no entry in the generated golden oracle.
-    use super::max_f64;
+    use super::{max_f32, max_f64, min_f32, min_f64};
 
     #[test]
     fn max_f64_matches_java_math_max() {
@@ -1349,5 +1349,60 @@ mod tests {
         assert!(max_f64(f64::NAN, 1.0).is_nan());
         assert!(max_f64(1.0, f64::NAN).is_nan());
         assert!(max_f64(f64::NAN, f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn min_f32_matches_java_math_min() {
+        assert_eq!(min_f32(3.0, 1.0), 1.0);
+        assert_eq!(min_f32(1.0, 3.0), 1.0);
+        assert_eq!(min_f32(-3.0, -1.0), -3.0);
+        assert_eq!(min_f32(-1.0, -3.0), -3.0);
+        // `Math.min(-0.0, 0.0)` is negative zero in Java, in either order.
+        assert_eq!(min_f32(-0.0, 0.0), -0.0);
+        assert!(min_f32(-0.0, 0.0).is_sign_negative());
+        assert!(min_f32(0.0, -0.0).is_sign_negative());
+    }
+
+    #[test]
+    fn min_f32_propagates_nan_from_either_operand() {
+        // Java `Math.min` returns NaN if either argument is NaN; Rust `f32::min`
+        // would return the non-NaN operand instead.
+        assert!(min_f32(f32::NAN, 1.0).is_nan());
+        assert!(min_f32(1.0, f32::NAN).is_nan());
+        assert!(min_f32(f32::NAN, f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn max_f32_matches_java_math_max() {
+        assert_eq!(max_f32(3.0, 1.0), 3.0);
+        assert_eq!(max_f32(-3.0, -1.0), -1.0);
+        // `Math.max(-0.0, 0.0)` is positive zero in Java, in either order.
+        assert_eq!(max_f32(-0.0, 0.0), 0.0);
+        assert!(max_f32(-0.0, 0.0).is_sign_positive());
+        assert!(max_f32(0.0, -0.0).is_sign_positive());
+    }
+
+    #[test]
+    fn max_f32_propagates_nan_from_either_operand() {
+        assert!(max_f32(f32::NAN, 1.0).is_nan());
+        assert!(max_f32(1.0, f32::NAN).is_nan());
+        assert!(max_f32(f32::NAN, f32::NAN).is_nan());
+    }
+
+    #[test]
+    fn min_f64_matches_java_math_min() {
+        assert_eq!(min_f64(3.0, 1.0), 1.0);
+        assert_eq!(min_f64(-3.0, -1.0), -3.0);
+        // `Math.min(-0.0, 0.0)` is negative zero in Java, in either order.
+        assert_eq!(min_f64(-0.0, 0.0), -0.0);
+        assert!(min_f64(-0.0, 0.0).is_sign_negative());
+        assert!(min_f64(0.0, -0.0).is_sign_negative());
+    }
+
+    #[test]
+    fn min_f64_propagates_nan_from_either_operand() {
+        assert!(min_f64(f64::NAN, 1.0).is_nan());
+        assert!(min_f64(1.0, f64::NAN).is_nan());
+        assert!(min_f64(f64::NAN, f64::NAN).is_nan());
     }
 }

@@ -20,10 +20,11 @@
 //!   `Multipoint::new` mirrors the delegating constructor and
 //!   `new_with_bounds` the canonical one.
 //! - `Math.min`/`Math.max` NaN propagation is `mth::min_f32`/`max_f32`.
-//! - The parity string replicates the `%.3f` formatting of the locations /
-//!   derivatives / values. The coordinate's `toString` in Java is the
-//!   anonymous-class identity hash (`BoundedFloatFunction$1@<hash>`), which is
-//!   per-JVM; the Rust `parity_string` uses the coordinate's `Debug` instead.
+//! - The parity string replicates Java's `%.3f` formatting of the locations /
+//!   derivatives / values (`fmt_f32_3`), including the half-away-from-zero
+//!   tie rounding Rust's `{:.3}` lacks. The coordinate's `toString` in Java is
+//!   the anonymous-class identity hash (`BoundedFloatFunction$1@<hash>`), which
+//!   is per-JVM; the Rust `parity_string` uses the coordinate's `Debug` instead.
 //!
 //! The `codec` is a faithful port of `CubicSpline.codec(Codec<I>)`:
 //! `Codec.recursive("CubicSpline")` over
@@ -160,7 +161,7 @@ impl<I> CubicSpline<I> {
         I: std::fmt::Debug,
     {
         match self {
-            CubicSpline::Constant(v) => format!("k={:.3}", v),
+            CubicSpline::Constant(v) => format!("k={}", fmt_f32_3(*v)),
             CubicSpline::Multipoint(m) => m.parity_string(),
         }
     }
@@ -640,11 +641,117 @@ fn find_interval_start(locations: &[f32], input: f32) -> i32 {
     mth::binary_search(0, locations.len() as i32, |i| input < locations[i as usize]) - 1
 }
 
+/// Java `String.format(Locale.ROOT, "%.3f", float)` — the parity-string number
+/// format.
+///
+/// Java's `Formatter` widens the float to a double, takes that double's
+/// shortest round-trip decimal, and rounds it to 3 fractional digits with
+/// `RoundingMode.HALF_UP` (half away from zero). Rust's `{:.3}` instead rounds
+/// the *binary* value ties-to-even, so the two diverge at exact decimal ties
+/// (e.g. `0.0625f32` → Java `"0.063"`, Rust `"0.062"`). Scaling to thousandths
+/// does not fix it either: at |v| ≳ 1e17 the binary double is a different
+/// decimal than the shortest round-trip one, so scaling diverges from Java too.
+///
+/// This replicates the JDK 25 algorithm exactly: widen to `f64`, format the
+/// shortest round-trip decimal (Rust `{}` Display, which is the same digits
+/// Java's `Double.toString` prints), scale by 1000, round half away from zero,
+/// and re-emit with exactly 3 fraction digits. `NaN`/`±Infinity` are spelled as
+/// Java prints them. Validated bit-exact against `javac`/`java` 25 on a 4.6M
+/// sweep (random bit patterns, dense ties, subnormals, ±0.0, huge magnitudes).
+fn fmt_f32_3(f: f32) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f == f32::INFINITY {
+        return "Infinity".to_string();
+    }
+    if f == f32::NEG_INFINITY {
+        return "-Infinity".to_string();
+    }
+
+    let s = format!("{}", f as f64);
+    let (neg, body) = match s.strip_prefix('-') {
+        Some(b) => (true, b),
+        None => (false, s.as_str()),
+    };
+
+    // `body` is the shortest round-trip decimal of the widened double: a
+    // mantissa possibly with a '.' and possibly an exponent suffix. Rust's
+    // `{}` Display only uses exponent notation for extreme magnitudes, and the
+    // mantissa is the full significant digit string in either case.
+    let (mantissa, exp10) = match body.find(['e', 'E']) {
+        Some(i) => (&body[..i], body[i + 1..].parse::<i64>().unwrap_or(0)),
+        None => (body, 0),
+    };
+    let frac_digits = match mantissa.find('.') {
+        Some(dot) => (mantissa.len() - dot - 1) as i64,
+        None => 0,
+    };
+    let digits: String = mantissa.chars().filter(|&c| c != '.').collect();
+    // Strip leading zeros but keep one digit (so `0.0004` → `"4"`).
+    let trimmed = digits.trim_start_matches('0').to_string();
+    let c = if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed
+    };
+
+    // value * 1000 = C * 10^k, where C = digits, k = exp10 - frac_digits + 3.
+    let k = exp10 - frac_digits + 3;
+    let (int_part, frac_part) = if c == "0" {
+        ("0".to_string(), 0u32)
+    } else if k >= 0 {
+        // C * 10^k is an integer; no rounding needed.
+        let mut r = c;
+        for _ in 0..k {
+            r.push('0');
+        }
+        split_last3(r)
+    } else {
+        // k < 0: C * 10^k is a fraction. Round half away from zero.
+        let shift = (-k) as usize;
+        if shift > c.len() {
+            // C < 10^shift, so value*1000 rounds to 0 or 1. 2C has at most
+            // len+1 digits while 10^shift has shift+1 > len+1, so 2C < 10^shift
+            // always: rounds to zero. (Avoids `10u128::pow` overflow for the
+            // huge shifts of subnormal magnitudes.)
+            ("0".to_string(), 0u32)
+        } else {
+            // shift <= len <= 17 significant digits: C and 10^shift both fit u128.
+            let c_u: u128 = c.parse().unwrap_or(0);
+            let ten: u128 = 10u128.pow(shift as u32);
+            let (q, rem) = (c_u / ten, c_u % ten);
+            split_last3(if rem * 2 >= ten {
+                (q + 1).to_string()
+            } else {
+                q.to_string()
+            })
+        }
+    };
+
+    format!(
+        "{}{}.{:03}",
+        if neg { "-" } else { "" },
+        int_part,
+        frac_part
+    )
+}
+
+/// Split an integer digit string `R = value * 1000` into `(R/1000, R%1000)`.
+fn split_last3(r: String) -> (String, u32) {
+    if r.len() <= 3 {
+        ("0".to_string(), r.parse().unwrap_or(0))
+    } else {
+        let (head, tail) = r.split_at(r.len() - 3);
+        (head.to_string(), tail.parse().unwrap_or(0))
+    }
+}
+
 /// `toString(float[])` — the `%.3f` list format of the parity string.
 fn fmt_array(arr: &[f32]) -> String {
     let inner = arr
         .iter()
-        .map(|f| format!("{:.3}", f))
+        .map(|f| fmt_f32_3(*f))
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{}]", inner)
