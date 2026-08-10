@@ -10,7 +10,8 @@
 //! creates regions/directories on first write, and converts a
 //! `RegionFileSizeException` into a delete + log, exactly like Paper's
 //! `RegionFileStorage.write`, and clears any legacy Aikar oversized flag via
-//! `RegionFile::set_oversized` after a successful store. `flush`/`close`
+//! `RegionFile::set_oversized` after a successful store and on the delete and
+//! size-exception paths. `flush`/`close`
 //! iterate every cached region and attempt all closes/flushes, returning the
 //! first error like Paper's `ExceptionCollector`.
 //!
@@ -158,7 +159,10 @@ impl RegionFileStorage {
     /// region's output writer (`getChunkDataOutputStream` → `ChunkBuffer`),
     /// mirroring `NbtIo.write` then `output.close()`. A `RegionFileSizeException`
     /// from the chunk buffer deletes the chunk and logs, exactly like Paper's
-    /// "don't write garbage data to disk" handling.
+    /// "don't write garbage data to disk" handling. Both the delete path and
+    /// the size-exception delete also clear any legacy Aikar oversized flag via
+    /// `RegionFile::set_oversized`, so a removed chunk reads back as absent
+    /// rather than as corruption.
     ///
     /// The `SharedConstants.DEBUG_DONT_SAVE_WORLD` dev flag that Paper gates
     /// the whole method on is not ported (it is false in production). And like
@@ -176,7 +180,16 @@ impl RegionFileStorage {
             None => return Ok(()),
         };
         let Some(value) = value else {
-            return self.region_cache[region_index].1.clear(pos);
+            let region = &mut self.region_cache[region_index].1;
+            region.clear(pos)?;
+            // A deleted chunk must not keep a legacy Aikar oversized flag or
+            // supplement: a later `read` would route through
+            // `read_oversized_chunk` and report corruption instead of absent.
+            // Paper's `clear()` does not clear the flag (its read NPEs on this
+            // path); clearing here keeps the clear-on-write invariant uniform
+            // across the delete and success paths.
+            region.set_oversized(pos.x(), pos.z(), false)?;
+            return Ok(());
         };
 
         let result = (|| -> io::Result<()> {
@@ -198,12 +211,17 @@ impl RegionFileStorage {
         match result {
             Ok(()) => Ok(()),
             Err(error) if is_region_file_size(&error) => {
-                self.region_cache[region_index].1.clear(pos)?;
+                let region = &mut self.region_cache[region_index].1;
+                region.clear(pos)?;
+                // Same invariant as the delete path: a chunk removed by the
+                // size guard must not read back as corruption through a stale
+                // oversized flag.
+                region.set_oversized(pos.x(), pos.z(), false)?;
                 eprintln!(
                     "Chunk at ({},{}) in regionfile '{}' exceeds max size of {}MiB, it has been deleted from disk.",
                     pos.x(),
                     pos.z(),
-                    self.region_cache[region_index].1.get_path().display(),
+                    region.get_path().display(),
                     MAX_CHUNK_SIZE / (1024 * 1024)
                 );
                 Ok(())
@@ -1119,6 +1137,59 @@ mod tests {
         });
     }
 
+    #[test]
+    fn delete_clears_legacy_aikar_oversized_flag() {
+        // The delete path (`write(pos, None)`) must clear the legacy Aikar
+        // oversized flag and supplement as well, so a deliberately deleted
+        // chunk reads back as absent (`None`) instead of routing through
+        // `read_oversized_chunk` and reporting a hard corruption error.
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::ZERO;
+            {
+                let mut storage = writable_storage(dir.path());
+                storage
+                    .write(&pos, Some(chunk_tag_with_level_entities()))
+                    .unwrap();
+                storage.close().unwrap();
+            }
+            seed_aikar_oversized(dir.path(), &[Tag::Compound(chunk_tag(9, 9))]);
+            let mut storage = writable_storage(dir.path());
+            assert_eq!(
+                storage
+                    .read(&pos)
+                    .unwrap()
+                    .expect("stale supplement merges before the delete")
+                    .get_compound("Level")
+                    .unwrap()
+                    .get_list("Entities")
+                    .unwrap()
+                    .size(),
+                1,
+                "precondition: the stale supplement is served before the delete"
+            );
+
+            storage.write(&pos, None).unwrap();
+            assert!(
+                storage.read(&pos).unwrap().is_none(),
+                "a deleted flagged chunk reads back as absent, not corruption"
+            );
+            assert!(
+                !dir.path().join("r.0.0_oversized_0_0.nbt").exists(),
+                "the delete clears the per-chunk supplement"
+            );
+            assert!(
+                !dir.path().join("r.0.0.oversized.nbt").exists(),
+                "the delete clears the flag meta file"
+            );
+            assert!(
+                !storage.region_cache[0].1.is_oversized(0, 0),
+                "the delete clears the in-memory flag"
+            );
+            storage.close().unwrap();
+        });
+    }
+
     /// Pin the process-global region-file compression selection to `none` (the
     /// D13 byte-identity gate codec) for the write tests, and serialize against
     /// `region_file_version`'s own `configure`-mutating tests. Recovers from a
@@ -1387,13 +1458,38 @@ mod tests {
         with_selection_none(|| {
             let dir = tempfile::tempdir().unwrap();
             let pos = ChunkPos::new(0, 0);
+            {
+                let mut storage = writable_storage(dir.path());
+                storage
+                    .write(&pos, Some(chunk_tag_with_level_entities()))
+                    .unwrap();
+                storage.close().unwrap();
+            }
+            // Seed a legacy Aikar oversized flag + supplement so the size-guard
+            // delete must also clear it (a removed chunk must not read back as
+            // corruption through a stale flag).
+            seed_aikar_oversized(dir.path(), &[Tag::Compound(chunk_tag(9, 9))]);
             let mut storage = writable_storage(dir.path());
-            storage.write(&pos, Some(chunk_tag(0, 0))).unwrap();
-            assert!(storage.read(&pos).unwrap().is_some());
+            assert_eq!(
+                storage
+                    .read(&pos)
+                    .unwrap()
+                    .expect("stale supplement merges before the size delete")
+                    .get_compound("Level")
+                    .unwrap()
+                    .get_list("Entities")
+                    .unwrap()
+                    .size(),
+                1
+            );
 
             // A byte array at exactly MAX_CHUNK_SIZE trips the buffer guard
-            // (the buffer already holds the NBT prefix, so the sum exceeds the
-            // cap). At `none` the serialized form is the raw payload.
+            // (the buffer already holds the NBT prefix, so the running total
+            // exceeds the cap). At `none` the serialized form is the raw
+            // payload. The array cannot exceed this bound on read
+            // (`check_array_length` caps arrays at 1 << 24), so the guard only
+            // fires here because the buffer accumulates the raw payload before
+            // the read-side limit would apply.
             let mut huge = chunk_tag(0, 0);
             huge.put_byte_array("big", vec![0i8; MAX_CHUNK_SIZE]);
             storage.write(&pos, Some(huge)).unwrap();
@@ -1401,6 +1497,18 @@ mod tests {
             assert!(
                 storage.read(&pos).unwrap().is_none(),
                 "the oversized chunk is deleted, not written"
+            );
+            assert!(
+                !dir.path().join("r.0.0_oversized_0_0.nbt").exists(),
+                "the size-guard delete clears the supplement"
+            );
+            assert!(
+                !dir.path().join("r.0.0.oversized.nbt").exists(),
+                "the size-guard delete clears the meta flag file"
+            );
+            assert!(
+                !storage.region_cache[0].1.is_oversized(0, 0),
+                "the size-guard delete clears the in-memory flag"
             );
             storage.close().unwrap();
         });
