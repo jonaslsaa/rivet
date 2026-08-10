@@ -1059,6 +1059,22 @@ mod tests {
             base.get_block_entity_nbt(&BlockPos::new(20, 2, 0))
                 .is_none()
         );
+
+        // Ordered installation is the point where duplicate corrected
+        // positions collapse, with the later serialized tag winning.
+        let mut replacement = CompoundTag::new();
+        replacement.put_int("x", 4);
+        replacement.put_byte("y", 2);
+        replacement.put_int("z", 0);
+        replacement.put_string("id", "minecraft:furnace");
+        base.set_block_entity_nbt(replacement);
+        assert_eq!(base.pending_block_entities().len(), 2);
+        assert_eq!(
+            base.get_block_entity_nbt(&reanchored)
+                .and_then(|tag| tag.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:furnace")
+        );
     }
 
     #[test]
