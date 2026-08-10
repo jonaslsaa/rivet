@@ -828,6 +828,35 @@ pub fn parse_heightmaps(chunk_data: &CompoundTag, heightmaps_after: &[Types]) ->
     out
 }
 
+/// The `write()` heightmaps half: build the `Heightmaps` compound from stored
+/// columns, keyed by `Types.getSerializationKey()`.
+///
+/// Mirrors `SerializableChunkData.copyOf`/`write`: `copyOf` copies exactly the
+/// entries whose type the persisted status's `heightmapsAfter()` allows, then
+/// `write()` iterates that `EnumMap` in ordinal (declaration) order, cloning
+/// each raw `long[]` into a `LongArrayTag`. `heightmaps_after` is already the
+/// `EnumSet`'s ordinal iteration order (`FINAL_HEIGHTMAPS`/`WORLDGEN_HEIGHTMAPS`),
+/// so iterating it and keeping the present entries reproduces both the set
+/// filtering and the ordinal key order. The stored columns are borrowed, never
+/// consumed — each tag is written from `raw.clone()`.
+///
+/// The key order this produces is NOT the order Paper's own chunk files store
+/// heightmap keys in: Java's `CompoundTag` is a fastutil hash map, so the
+/// on-disk fixture order (`MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES,
+/// WORLD_SURFACE, OCEAN_FLOOR`) reflects hash order, not the `EnumMap`
+/// iteration order. Rivet's insertion-ordered `CompoundTag` therefore writes
+/// ordinal order — the `compound_key_order` divergence counted in PARITY.md —
+/// so the fixture's key order is never a byte-order oracle here.
+pub fn write_heightmaps(stored: &StoredHeightmaps, heightmaps_after: &[Types]) -> CompoundTag {
+    let mut out = CompoundTag::new();
+    for ty in heightmaps_after {
+        if let Some(raw) = &stored[*ty as usize] {
+            out.put_long_array(ty.serialization_key(), raw.clone());
+        }
+    }
+    out
+}
+
 /// Return the absent or wrong-length entries Paper must prime. The malformed
 /// stored array remains carried for diagnosis; it is never mistaken for a
 /// valid all-zero heightmap.
@@ -1060,6 +1089,7 @@ mod tests {
     use crate::chunk::palette::GlobalIdMap;
     use crate::chunk::strategy::Strategy;
     use crate::level::height_accessor;
+    use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, WORLDGEN_HEIGHTMAPS};
     use crate::lighting::swmr_nibble_array::ARRAY_SIZE;
     use rivet_nbt::int_tag::IntTag;
     use rivet_nbt::list_tag::ListTag;
@@ -2621,6 +2651,148 @@ mod tests {
             heightmaps_to_prime(384, &stored, &after),
             vec![Types::OceanFloor, Types::MotionBlocking]
         );
+    }
+
+    #[test]
+    fn write_heightmaps_emits_full_four_keys_in_ordinal_order() {
+        // `copyOf` keeps the four `FULL` types; `write()` emits the `EnumMap`
+        // in ordinal (declaration) order: WORLD_SURFACE, OCEAN_FLOOR,
+        // MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES. This is the storage key
+        // order, NOT the fixture's fastutil hash order.
+        let stored = {
+            let mut maps = CompoundTag::new();
+            maps.put_long_array("WORLD_SURFACE", vec![1; 37]);
+            maps.put_long_array("OCEAN_FLOOR", vec![2; 37]);
+            maps.put_long_array("MOTION_BLOCKING", vec![3; 37]);
+            maps.put_long_array("MOTION_BLOCKING_NO_LEAVES", vec![4; 37]);
+            let mut chunk = CompoundTag::new();
+            chunk.put(HEIGHTMAPS_TAG.to_string(), Tag::Compound(maps));
+            parse_heightmaps(&chunk, &FINAL_HEIGHTMAPS)
+        };
+        let written = write_heightmaps(&stored, &FINAL_HEIGHTMAPS);
+        let keys: Vec<&String> = written.key_set().collect();
+        assert_eq!(
+            keys,
+            vec![
+                &"WORLD_SURFACE".to_string(),
+                &"OCEAN_FLOOR".to_string(),
+                &"MOTION_BLOCKING".to_string(),
+                &"MOTION_BLOCKING_NO_LEAVES".to_string(),
+            ]
+        );
+        assert_eq!(written.get_long_array("WORLD_SURFACE"), Some(&vec![1; 37]));
+        assert_eq!(written.get_long_array("OCEAN_FLOOR"), Some(&vec![2; 37]));
+        assert_eq!(
+            written.get_long_array("MOTION_BLOCKING"),
+            Some(&vec![3; 37])
+        );
+        assert_eq!(
+            written.get_long_array("MOTION_BLOCKING_NO_LEAVES"),
+            Some(&vec![4; 37])
+        );
+    }
+
+    #[test]
+    fn write_heightmaps_omits_missing_entries() {
+        // `copyOf` only copies types the chunk actually holds; `write()` then
+        // emits only those present.
+        let stored = {
+            let mut maps = CompoundTag::new();
+            maps.put_long_array("WORLD_SURFACE", vec![1; 37]);
+            let mut chunk = CompoundTag::new();
+            chunk.put(HEIGHTMAPS_TAG.to_string(), Tag::Compound(maps));
+            parse_heightmaps(&chunk, &FINAL_HEIGHTMAPS)
+        };
+        let written = write_heightmaps(&stored, &FINAL_HEIGHTMAPS);
+        let keys: Vec<&String> = written.key_set().collect();
+        assert_eq!(keys, vec![&"WORLD_SURFACE".to_string()]);
+    }
+
+    #[test]
+    fn write_heightmaps_clones_raw_data_exactly() {
+        // `copyOf` clones each `long[]` (`data.clone()`); the writer must not
+        // alias or truncate the stored column.
+        let stored = {
+            let mut maps = CompoundTag::new();
+            let raw: Vec<i64> = (0..37).map(|i| i64::from(i).wrapping_mul(7)).collect();
+            maps.put_long_array("MOTION_BLOCKING_NO_LEAVES", raw);
+            let mut chunk = CompoundTag::new();
+            chunk.put(HEIGHTMAPS_TAG.to_string(), Tag::Compound(maps));
+            parse_heightmaps(&chunk, &FINAL_HEIGHTMAPS)
+        };
+        let written = write_heightmaps(&stored, &FINAL_HEIGHTMAPS);
+        let expected: Vec<i64> = (0..37).map(|i| i64::from(i).wrapping_mul(7)).collect();
+        assert_eq!(
+            written.get_long_array("MOTION_BLOCKING_NO_LEAVES"),
+            Some(&expected)
+        );
+        // The stored column is untouched (borrowed, not consumed).
+        assert_eq!(
+            stored[Types::MotionBlockingNoLeaves as usize],
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn write_heightmaps_filters_by_worldgen_status() {
+        // A pre-CARVERS status's `heightmapsAfter()` is `WORLDGEN_HEIGHTMAPS`
+        // (WORLD_SURFACE_WG, OCEAN_FLOOR_WG). The writer emits only those two
+        // and only when present, never the `FINAL_HEIGHTMAPS`.
+        let mut maps = CompoundTag::new();
+        maps.put_long_array("WORLD_SURFACE_WG", vec![9; 37]);
+        maps.put_long_array("OCEAN_FLOOR_WG", vec![10; 37]);
+        maps.put_long_array("WORLD_SURFACE", vec![1; 37]);
+        let mut chunk = CompoundTag::new();
+        chunk.put(HEIGHTMAPS_TAG.to_string(), Tag::Compound(maps));
+        let stored = parse_heightmaps(&chunk, &WORLDGEN_HEIGHTMAPS);
+        assert!(stored[Types::WorldSurface as usize].is_none());
+        let written = write_heightmaps(&stored, &WORLDGEN_HEIGHTMAPS);
+        let keys: Vec<&String> = written.key_set().collect();
+        assert_eq!(
+            keys,
+            vec![
+                &"WORLD_SURFACE_WG".to_string(),
+                &"OCEAN_FLOOR_WG".to_string()
+            ]
+        );
+        assert_eq!(
+            written.get_long_array("WORLD_SURFACE_WG"),
+            Some(&vec![9; 37])
+        );
+        assert_eq!(
+            written.get_long_array("OCEAN_FLOOR_WG"),
+            Some(&vec![10; 37])
+        );
+    }
+
+    #[test]
+    fn write_heightmaps_round_trips_real_fixture_values() {
+        // Parse the pinned Paper 26.2 FULL chunk, then write it back and
+        // re-parse: every column the fixture carries must survive exactly.
+        // The key order the writer emits is ordinal order (not the fixture's
+        // fastutil hash order), so this compares by value, never by key order.
+        let chunk = fixture();
+        let stored = parse_heightmaps(&chunk, &FINAL_HEIGHTMAPS);
+        let written = write_heightmaps(&stored, &FINAL_HEIGHTMAPS);
+        // The writer's insertion order is the EnumMap ordinal order.
+        assert_eq!(
+            written.key_set().collect::<Vec<_>>(),
+            vec![
+                &"WORLD_SURFACE".to_string(),
+                &"OCEAN_FLOOR".to_string(),
+                &"MOTION_BLOCKING".to_string(),
+                &"MOTION_BLOCKING_NO_LEAVES".to_string(),
+            ]
+        );
+        let mut re_chunk = CompoundTag::new();
+        re_chunk.put(HEIGHTMAPS_TAG.to_string(), Tag::Compound(written));
+        let re_parsed = parse_heightmaps(&re_chunk, &FINAL_HEIGHTMAPS);
+        for ty in FINAL_HEIGHTMAPS {
+            assert_eq!(re_parsed[ty as usize], stored[ty as usize], "{:?}", ty);
+            assert_eq!(re_parsed[ty as usize].as_ref().expect("stored").len(), 37);
+        }
+        assert!(re_parsed[Types::WorldSurfaceWg as usize].is_none());
+        assert!(re_parsed[Types::OceanFloorWg as usize].is_none());
     }
 
     #[test]
