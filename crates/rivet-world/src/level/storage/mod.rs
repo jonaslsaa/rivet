@@ -22,7 +22,7 @@ pub use data_version::DataVersion;
 pub use level_data::{LevelData, RespawnData, default_respawn_data};
 pub use level_version::LevelVersion;
 pub use tag_value_input::TagValueInput;
-pub use tag_value_output::TagValueOutput;
+pub use tag_value_output::{SharedCompoundTag, TagValueOutput};
 pub use value_input::{EmptyValueInput, TypedInputList, ValueInput, ValueInputList};
 pub use value_input_context_helper::{TagContextOps, ValueInputContextHelper};
 pub use value_output::{TypedOutputList, ValueOutput, ValueOutputList};

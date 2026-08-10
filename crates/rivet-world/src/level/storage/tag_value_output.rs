@@ -21,18 +21,23 @@
 //! `Rc` address of the node's own cell), not by value equality: a node's sync
 //! only writes back while the parent's slot-token registry still maps its key
 //! to the node's token. The parent clears the token when it `discard()`s or
-//! replaces a field, and a recreated `child()`/`childrenList()`/`list()` or
-//! `addChild()` registers a fresh token — so a retained child after a
-//! discard/replace (even against an equal empty recreated slot) is detached and
-//! its writes stay invisible, matching Java's shared-object identity. There is
-//! no reference cycle: a node holds its parent's `sync` closure (an
-//! `Rc<dyn Fn>`), while a parent only ever holds *snapshot clones* of its
-//! children's content — never the children's `Rc`.
+//! replaces a field (only when a tag was actually put — an encode error without
+//! a partial leaves the field and any retained child untouched, matching Java),
+//! and a recreated `child()`/`childrenList()`/`list()` or `addChild()` registers
+//! a fresh token — so a retained child after a discard/replace (even against an
+//! equal empty recreated slot) is detached and its writes stay invisible,
+//! matching Java's shared-object identity. There is no reference cycle: a node
+//! holds its parent's `sync` closure (an `Rc<dyn Fn>`), while a parent only
+//! ever holds *snapshot clones* of its children's content — never the
+//! children's `Rc`.
 //!
 //! The wrapping factories (`createWrappingWithContext`/`createWrappingGlobal`)
-//! take an `Rc<RefCell<CompoundTag>>` — the caller keeps the cell and shares
-//! it with the output, matching Java's shared-object `CompoundTag` parameter
-//! (writes through the output are visible to the caller's cell and vice versa).
+//! take a `SharedCompoundTag` — the caller keeps a clone of the handle and
+//! shares the underlying tag and the root slot-token registry with the output.
+//! The handle exposes only token-tracking mutations (`put`/`remove`/`merge`)
+//! plus read access, so a caller's field replacement detaches a retained child
+//! exactly as Java's shared-object `CompoundTag.put` would (including equal
+//! value replacements), and writes are visible both ways.
 //!
 //! ## Ops/context
 //!
@@ -143,21 +148,21 @@ impl TagValueOutput {
     /// HolderLookup.Provider, CompoundTag)` — writes into an existing tag.
     ///
     /// Java passes the `CompoundTag` *object* and shares it with the caller;
-    /// the Rust port takes an `Rc<RefCell<CompoundTag>>` so the caller keeps
-    /// the cell and mutations are visible both ways (writes through the output
-    /// appear in the caller's cell, and the caller's own writes appear in
+    /// the port takes a `SharedCompoundTag` so the caller keeps a handle and
+    /// mutations are visible both ways (writes through the output appear in
+    /// the caller's tag, and the caller's tracked mutations appear in
     /// `buildResult()`).
     pub fn create_wrapping_with_context(
         problem_reporter: Reporter,
         provider: RegistryAccess,
-        output: Rc<RefCell<CompoundTag>>,
+        output: SharedCompoundTag,
     ) -> ValueOutput {
         ValueOutput::Tag(TagValueOutput::new(
             problem_reporter,
             context_ops(provider),
-            output,
+            output.inner,
             None,
-            Rc::new(RefCell::new(HashMap::new())),
+            output.slot_tokens,
         ))
     }
 
@@ -168,7 +173,7 @@ impl TagValueOutput {
     /// `NbtOps`.
     pub fn create_wrapping_global(
         problem_reporter: Reporter,
-        output: Rc<RefCell<CompoundTag>>,
+        output: SharedCompoundTag,
     ) -> ValueOutput {
         TagValueOutput::create_wrapping_with_context(
             problem_reporter,
@@ -208,6 +213,33 @@ fn context_ops(access: RegistryAccess) -> Arc<TagContextOps> {
     Arc::new(RegistryOps::create_from_access(&NbtOps::instance(), access))
 }
 
+/// `CompoundTag.merge(other)` then detach any retained child whose field the
+/// merge *replaced* (Java `put`). A compound-over-compound merge recurses into
+/// the existing object, so a child at such a field survives.
+fn merge_and_detach(
+    inner: &Rc<RefCell<CompoundTag>>,
+    slot_tokens: &Rc<RefCell<HashMap<String, SlotToken>>>,
+    compound: &CompoundTag,
+) {
+    let replaced: Vec<String> = {
+        let output = inner.borrow();
+        compound
+            .entry_set()
+            .filter(|(key, merged)| {
+                let both_compounds = matches!(output.get(key), Some(Tag::Compound(_)))
+                    && matches!(merged, Tag::Compound(_));
+                !both_compounds
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    };
+    inner.borrow_mut().merge(compound);
+    let mut tokens = slot_tokens.borrow_mut();
+    for key in replaced {
+        tokens.remove(&key);
+    }
+}
+
 impl TagValueOutput {
     /// `ValueOutput.store(String, Codec<T>, T)`.
     pub fn store<A>(&self, name: &str, codec: &Arc<dyn Codec<A, TagContextOps>>, value: &A)
@@ -215,11 +247,16 @@ impl TagValueOutput {
         A: fmt::Debug + 'static,
     {
         let result = codec.encode_start(self.ops.as_ref(), value);
+        // Java only touches the field when the codec produced a tag — success
+        // or error-with-partial. An error without a partial leaves the field
+        // (and any retained child at it) untouched.
+        let mut placed = false;
         match result.result() {
             Some(encoded) => {
                 self.output
                     .borrow_mut()
                     .put(name.to_string(), encoded.clone());
+                placed = true;
             }
             None => {
                 let error = result.error_ref().unwrap();
@@ -231,12 +268,15 @@ impl TagValueOutput {
                     )));
                 if let Some(partial) = error.partial().clone() {
                     self.output.borrow_mut().put(name.to_string(), partial);
+                    placed = true;
                 }
             }
         }
-        // Storing replaces any child slot at `name` (Java `CompoundTag.put`),
-        // detaching a retained child.
-        self.slot_tokens.borrow_mut().remove(name);
+        if placed {
+            // Storing replaces any child slot at `name` (Java
+            // `CompoundTag.put`), detaching a retained child.
+            self.detach_field(name);
+        }
         self.sync();
     }
 
@@ -265,14 +305,7 @@ impl TagValueOutput {
         let result = encoder.encode_start(self.ops.as_ref(), value);
         match result.result() {
             Some(Tag::Compound(compound)) => {
-                let merged_keys: Vec<String> = compound.key_set().cloned().collect();
-                self.output.borrow_mut().merge(compound);
-                // `merge` is `putAll` — every merged key replaces the prior
-                // entry, detaching any retained child at those fields.
-                let mut tokens = self.slot_tokens.borrow_mut();
-                for key in merged_keys {
-                    tokens.remove(&key);
-                }
+                merge_and_detach(&self.output, &self.slot_tokens, compound);
             }
             Some(other) => {
                 // Java's unchecked `(CompoundTag)` cast on a non-compound
@@ -289,12 +322,7 @@ impl TagValueOutput {
                 if let Some(partial) = error.partial().clone() {
                     match partial {
                         Tag::Compound(compound) => {
-                            let merged_keys: Vec<String> = compound.key_set().cloned().collect();
-                            self.output.borrow_mut().merge(&compound);
-                            let mut tokens = self.slot_tokens.borrow_mut();
-                            for key in merged_keys {
-                                tokens.remove(&key);
-                            }
+                            merge_and_detach(&self.output, &self.slot_tokens, &compound);
                         }
                         other => panic!(
                             "TagValueOutput.store(MapCodec): expected compound partial, got {other}"
@@ -486,6 +514,64 @@ impl TagValueOutput {
     /// `ValueOutput.isEmpty()`.
     pub fn is_empty(&self) -> bool {
         self.output.borrow().is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SharedCompoundTag — the caller-held handle for the wrapping factories
+// ---------------------------------------------------------------------------
+
+/// A caller-held, shared `CompoundTag` for `createWrappingWithContext` /
+/// `createWrappingGlobal`.
+///
+/// Shares the underlying tag *and* the root output's slot-token registry with
+/// the `TagValueOutput` it wraps, so mutations through this handle detach a
+/// retained child exactly as Java's shared-object `CompoundTag.put` would:
+/// replacing or removing a field clears the owning child's token regardless of
+/// value (even an equal-value replacement), and `buildResult()` always reflects
+/// the caller's writes. The handle exposes read access (`borrow`) and
+/// token-tracking mutations (`put`/`remove`/`merge`) but deliberately no raw
+/// mutable borrow, so every external field replacement is observable.
+#[derive(Clone)]
+pub struct SharedCompoundTag {
+    inner: Rc<RefCell<CompoundTag>>,
+    slot_tokens: Rc<RefCell<HashMap<String, SlotToken>>>,
+}
+
+impl SharedCompoundTag {
+    /// Wrap an existing `CompoundTag`, sharing its content with a future
+    /// wrapping output. Clone the handle to keep one copy for the caller while
+    /// passing another to `createWrapping*`.
+    pub fn new(tag: CompoundTag) -> Self {
+        SharedCompoundTag {
+            inner: Rc::new(RefCell::new(tag)),
+            slot_tokens: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    /// Read access to the shared tag (no raw mutable borrow — use `put`/
+    /// `remove`/`merge` to mutate so detachment is tracked).
+    pub fn borrow(&self) -> std::cell::Ref<'_, CompoundTag> {
+        self.inner.borrow()
+    }
+
+    /// `CompoundTag.put(String, Tag)` — replaces the field, detaching any
+    /// retained child at it (Java object identity).
+    pub fn put(&self, name: &str, tag: Tag) {
+        self.inner.borrow_mut().put(name.to_string(), tag);
+        self.slot_tokens.borrow_mut().remove(name);
+    }
+
+    /// `CompoundTag.remove(String)`.
+    pub fn remove(&self, name: &str) {
+        self.inner.borrow_mut().remove(name);
+        self.slot_tokens.borrow_mut().remove(name);
+    }
+
+    /// `CompoundTag.merge(CompoundTag)` — detaches only the fields the merge
+    /// replaced (a compound-over-compound merge recurses in place).
+    pub fn merge(&self, other: &CompoundTag) {
+        merge_and_detach(&self.inner, &self.slot_tokens, other);
     }
 }
 
@@ -1137,28 +1223,28 @@ mod tests {
     }
 
     /// Wrapping an existing tag (Paper's `createWrappingGlobal`) writes into it
-    /// and shares the cell with the caller: the output's writes are visible in
-    /// the caller's cell, and the caller's writes are visible in the output's
-    /// `buildResult` (Java's shared-object `CompoundTag` parameter).
+    /// and shares with the caller: the output's writes are visible in the
+    /// caller's tag, and the caller's tracked mutations are visible in the
+    /// output's `buildResult` (Java's shared-object `CompoundTag` parameter).
     #[test]
     fn wrapping_global_writes_into_existing_tag_and_shares() {
-        let cell = Rc::new(RefCell::new(CompoundTag::with_map(
+        let shared = SharedCompoundTag::new(CompoundTag::with_map(
             [("keep".to_string(), Tag::Int(IntTag::new(5)))]
                 .into_iter()
                 .collect(),
-        )));
-        let out = TagValueOutput::create_wrapping_global(reporter(), Rc::clone(&cell));
+        ));
+        let out = TagValueOutput::create_wrapping_global(reporter(), shared.clone());
         out.put_int("new", 6);
-        cell.borrow_mut().put_int("caller", 7);
+        shared.put("caller", Tag::Int(IntTag::new(7)));
         assert_eq!(
-            cell.borrow().get_int("keep"),
+            shared.borrow().get_int("keep"),
             Some(5),
             "existing key preserved"
         );
         assert_eq!(
-            cell.borrow().get_int("new"),
+            shared.borrow().get_int("new"),
             Some(6),
-            "output write visible in caller cell"
+            "output write visible in caller tag"
         );
         let result = match &out {
             ValueOutput::Tag(tag) => tag.build_result(),
@@ -1171,19 +1257,126 @@ mod tests {
         assert_eq!(result.get_int("new"), Some(6));
     }
 
-    /// Output-side children propagate into the shared wrapping cell (Java
+    /// Output-side children propagate into the shared wrapping tag (Java
     /// shared-mutation includes the child/`childrenList` subtrees).
     #[test]
     fn wrapping_child_write_visible_in_shared_cell() {
-        let cell = Rc::new(RefCell::new(CompoundTag::new()));
-        let out = TagValueOutput::create_wrapping_global(reporter(), Rc::clone(&cell));
+        let shared = SharedCompoundTag::new(CompoundTag::new());
+        let out = TagValueOutput::create_wrapping_global(reporter(), shared.clone());
         out.child("sub").put_int("x", 1);
         out.children_list("items").add_child().put_int("v", 2);
-        let tags = cell.borrow();
+        let tags = shared.borrow();
         let sub = tags.get_compound("sub").expect("sub compound");
         assert_eq!(sub.get_int("x"), Some(1));
         let items = tags.get_list("items").expect("items list");
         assert_eq!(items.get_compound(0).and_then(|c| c.get_int("v")), Some(2));
+    }
+
+    /// A caller that replaces a live-child field through `SharedCompoundTag`
+    /// detaches the retained child — even when the replacement is an
+    /// equal-value empty compound (Java object identity, not value equality).
+    #[test]
+    fn wrapping_external_replacement_detaches_stale_child() {
+        let shared = SharedCompoundTag::new(CompoundTag::new());
+        let out = TagValueOutput::create_wrapping_global(reporter(), shared.clone());
+        let child = out.child("x");
+        // Caller replaces the field with an equal-value empty compound.
+        shared.put("x", Tag::Compound(CompoundTag::new()));
+        child.put_int("a", 1);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let x = result.get_compound("x").expect("x present");
+        assert!(
+            x.is_empty(),
+            "a stale child's write must not clobber the caller's replacement, got: {result:?}"
+        );
+    }
+
+    /// The caller's replacement is visible to the output immediately, and a
+    /// *fresh* child created after it writes normally.
+    #[test]
+    fn wrapping_external_put_then_new_child_writes() {
+        let shared = SharedCompoundTag::new(CompoundTag::new());
+        let out = TagValueOutput::create_wrapping_global(reporter(), shared.clone());
+        out.child("x").put_int("old", 1);
+        shared.put("x", Tag::Compound(CompoundTag::new()));
+        out.child("x").put_int("new", 2);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let x = result.get_compound("x").expect("x present");
+        assert_eq!(
+            x.get_int("new"),
+            Some(2),
+            "a fresh child owns the recreated slot, got: {result:?}"
+        );
+        assert!(
+            x.get_int("old").is_none(),
+            "stale child detached, got: {result:?}"
+        );
+    }
+
+    /// `store` on a codec that fails *without* a partial leaves a retained
+    /// child attached (Java never touches the field, so the child's object
+    /// stays in the map).
+    #[test]
+    fn store_error_without_partial_keeps_child_attached() {
+        let reporter = reporter();
+        let out = output(reporter.clone());
+        let child = out.child("x");
+        child.put_int("a", 1);
+        let no_partial: Arc<dyn Codec<i32, TagContextOps>> = codec::validate(
+            codec::int_codec::<TagContextOps>(),
+            Arc::new(|_: &i32| rivet_serialization::DataResult::error("bad")),
+        );
+        out.store("x", &no_partial, &5);
+        child.put_int("b", 2);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let x = result.get_compound("x").expect("x present");
+        assert_eq!(
+            x.get_int("a"),
+            Some(1),
+            "retained child's first write survives, got: {result:?}"
+        );
+        assert_eq!(
+            x.get_int("b"),
+            Some(2),
+            "no-partial failure does not detach the child, got: {result:?}"
+        );
+    }
+
+    /// `store` on a codec that fails *with* a partial stores the partial and
+    /// detaches the retained child (Java `Error.partialValue()` is put).
+    #[test]
+    fn store_error_with_partial_replaces_child() {
+        let reporter = reporter();
+        let out = output(reporter.clone());
+        let child = out.child("x");
+        child.put_int("a", 1);
+        let with_partial: Arc<dyn Codec<i32, TagContextOps>> = codec::validate(
+            codec::int_codec::<TagContextOps>(),
+            Arc::new(|_: &i32| rivet_serialization::DataResult::error_with_partial("bad", 99)),
+        );
+        out.store("x", &with_partial, &5);
+        child.put_int("b", 2);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        assert_eq!(
+            result.get_int("x"),
+            Some(99),
+            "the partial replaces the field, got: {result:?}"
+        );
+        assert!(
+            reporter
+                .get_report()
+                .contains("Failed to encode value '5' to field 'x': bad"),
+            "report was: {}",
+            reporter.get_report()
+        );
     }
 
     /// Java's `ListWrapper.discardLast()` on an empty list throws
