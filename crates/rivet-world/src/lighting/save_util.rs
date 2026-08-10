@@ -25,13 +25,8 @@
 //! `superflat` filler must be compared against the same fixture to falsify
 //! anything that does not match.
 
-use crate::chunk::storage::serializable_chunk_data::STARLIGHT_LIGHT_VERSION;
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
-
-/// `SaveUtil.STARLIGHT_LIGHT_VERSION` — the chunk-root `starlight.light_version`
-/// written when a chunk is fully lit.
-pub const STARLIGHT_VERSION: i32 = STARLIGHT_LIGHT_VERSION;
 
 /// The light fields of one section as Paper writes them, mirroring the
 /// `SectionLightData` shape `decode_section_light` reads back (issue #229).
@@ -69,7 +64,11 @@ pub struct SavedLightSection {
 ///
 /// `block_nibbles`/`sky_nibbles` are indexed `0..lightSectionCount` (the
 /// caller supplies the array of the right length, matching Java's
-/// `StarLightEngine.getFilledEmptyLight(world)` sizing).
+/// `StarLightEngine.getFilledEmptyLight(world)` sizing). A shorter array
+/// panics exactly where Java's `blockNibbles[i - minSection].getSaveState()`
+/// throws `ArrayIndexOutOfBoundsException` — Paper catches that in
+/// `saveLightHook` and leaves the chunk unlit so it is relit on load, and the
+/// caller of this seam must do the same rather than silently truncate the save.
 pub fn light_save_surface<H: LevelHeightAccessor>(
     height: &H,
     block_nibbles: &[SwmrNibbleArray],
@@ -81,8 +80,8 @@ pub fn light_save_surface<H: LevelHeightAccessor>(
     let mut out = Vec::new();
     for section_y in min_section..=max_section {
         let index = (section_y - min_section) as usize;
-        let block_save = block_nibbles.get(index).and_then(|n| n.get_save_state());
-        let sky_save = sky_nibbles.get(index).and_then(|n| n.get_save_state());
+        let block_save = block_nibbles[index].get_save_state();
+        let sky_save = sky_nibbles[index].get_save_state();
         let (block_state, block_light) = match &block_save {
             Some(save) => (save.state.to_i32(), save.data.clone()),
             None => (-1, None),
@@ -111,47 +110,41 @@ pub fn light_save_surface<H: LevelHeightAccessor>(
 /// the exact byte identity). Returns the list of divergent sections with a
 /// human-readable reason, empty when the surfaces are byte-identical.
 ///
-/// The comparison is independent of NBT key order (a #231 serialization
-/// concern): it compares the *decoded light surface* — the very pairs
-/// `decode_section_light` reads and `light_save_surface` writes.
+/// Sections are paired by their Y coordinate, so a missing or shifted section
+/// reports its own absence/extra rather than shifting every subsequent pair
+/// onto the wrong section. The comparison is independent of NBT key order (a
+/// #231 serialization concern): it compares the *decoded light surface* — the
+/// very pairs `decode_section_light` reads and `light_save_surface` writes.
 pub fn surface_divergences(
     expected: &[SavedLightSection],
     actual: &[SavedLightSection],
 ) -> Vec<String> {
     let mut out = Vec::new();
-    let mut e = expected.iter();
-    let mut a = actual.iter();
-    loop {
-        match (e.next(), a.next()) {
-            (None, None) => break,
-            (Some(exp), Some(act)) => {
-                if exp != act {
-                    out.push(format!(
-                        "section y={}: expected {:?}, got {:?}",
-                        exp.y, exp, act
-                    ));
-                }
+    let mut expected_by_y: std::collections::BTreeMap<i32, &SavedLightSection> =
+        expected.iter().map(|s| (s.y, s)).collect();
+    let mut actual_by_y: std::collections::BTreeMap<i32, &SavedLightSection> =
+        actual.iter().map(|s| (s.y, s)).collect();
+
+    // Draining both maps pairs every section by Y; when duplicate Ys exist the
+    // second one overwrites the first (surfaces are per-section, so duplicates
+    // are malformed input — the last wins, like a serialized section list).
+    while let Some((y, exp)) = expected_by_y.pop_first() {
+        match actual_by_y.remove(&y) {
+            Some(act) if exp != act => {
+                out.push(format!("section y={y}: expected {exp:?}, got {act:?}"))
             }
-            (Some(exp), None) => out.push(format!(
-                "section y={}: expected present, got absent ({exp:?})",
-                exp.y
-            )),
-            (None, Some(act)) => out.push(format!(
-                "section y={}: expected absent, got present ({act:?})",
-                act.y
+            Some(_) => {}
+            None => out.push(format!(
+                "section y={y}: expected present, got absent ({exp:?})"
             )),
         }
     }
+    for (y, act) in actual_by_y {
+        out.push(format!(
+            "section y={y}: expected absent, got present ({act:?})"
+        ));
+    }
     out
-}
-
-/// The tag keys Paper writes for the light surface — kept here so the seam
-/// documents the exact save-format keys without pulling in the whole writer.
-pub mod tags {
-    pub use crate::chunk::storage::serializable_chunk_data::{
-        BLOCK_LIGHT_TAG, BLOCKLIGHT_STATE_TAG, SKY_LIGHT_TAG, SKYLIGHT_STATE_TAG,
-        STARLIGHT_VERSION_TAG,
-    };
 }
 
 // The spike tests live in `spike_229` (issue #229); `light_save_surface` is the
@@ -391,5 +384,27 @@ mod tests {
         let divergences = surface_divergences(&expected, &tampered);
         assert_eq!(divergences.len(), 1);
         assert!(divergences[0].contains("section y=-4"));
+    }
+
+    /// A missing interior section is reported as its own absence — the
+    /// comparison pairs by Y, so the following section is not misattributed.
+    #[test]
+    fn spike_229_missing_section_is_reported_without_shift() {
+        let section = |y: i32, sky_state: i32| SavedLightSection {
+            y,
+            block_state: 1,
+            block_light: None,
+            sky_state,
+            sky_light: None,
+        };
+        let expected = vec![section(-5, 1), section(-4, 2), section(-3, 2)];
+        // Actual drops the middle section: y=-4 is absent, y=-3 is untouched.
+        let actual = vec![section(-5, 1), section(-3, 2)];
+        let divergences = surface_divergences(&expected, &actual);
+        assert_eq!(divergences.len(), 1);
+        assert!(
+            divergences[0].contains("section y=-4") && divergences[0].contains("expected present"),
+            "y=-4 absence must be reported, not a shifted pair: {divergences:?}"
+        );
     }
 }
