@@ -27,6 +27,7 @@ pub mod by_id_map;
 pub mod cubic_spline;
 pub mod data_io;
 pub mod delegate_data_output;
+pub mod extra_codecs;
 pub mod fast_buffered_input_stream;
 pub mod hash_ops;
 pub mod java_float_format;
@@ -56,6 +57,7 @@ pub use cubic_spline::{
 };
 pub use data_io::{DataInput, DataInputStream, DataOutput, DataOutputStream};
 pub use delegate_data_output::DelegateDataOutput;
+pub use extra_codecs::positive_int;
 pub use fast_buffered_input_stream::FastBufferedInputStream;
 pub use hash_ops::{HashCode, HashFunction, HashOps, Hasher};
 pub use known_pack::KnownPack;
