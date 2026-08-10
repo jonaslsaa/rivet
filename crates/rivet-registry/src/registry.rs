@@ -29,13 +29,15 @@
 //!   `impl RegistryLookup<T> for Registry<T>` (in `holder_lookup.rs`, which uses
 //!   only these public methods) lands on top.
 
-use crate::holder::{HolderId, RegistryId};
+use crate::holder::{Holder, HolderId, RegistryId};
 use crate::id_map::{DEFAULT_ID, IdMap};
 use crate::identifier::Identifier;
 use crate::registration_info::RegistrationInfo;
 use crate::resource_key::ResourceKey;
 use crate::tag_key::TagKey;
 
+use rivet_serialization::data_result::DataResult;
+use rivet_serialization::functions::{DecoderFn, Fn1};
 use rivet_serialization::lifecycle::Lifecycle;
 use rivet_util::random::RandomSource;
 
@@ -71,7 +73,8 @@ pub type HolderReference = HolderId;
 /// - tags: `get_tag`, `list_tags`, `get_tag_or_empty`
 ///
 /// `by_name_codec`/`holder_by_name_codec`/`reference_holder_with_lifecycle`
-/// are codec-surface #126 (`rivet-protocol`), not here.
+/// live here (#394 — a registry-owned prerequisite for the #126 by-name codec
+/// surface; `FeatureSize.CODEC` builds on `byNameCodec`).
 pub struct Registry<T> {
     /// `MappedRegistry.key`.
     key: RegistryKey<T>,
@@ -395,6 +398,211 @@ impl<T> Registry<T> {
             ids: (0..self.values.len() as u32).map(HolderId).collect(),
         }
     }
+
+    /// `Registry.byNameCodec()` — a `Codec<Arc<T>>` whose decode resolves a
+    /// serialized namespaced identifier against **this** registry (by-location
+    /// lookup, `MappedRegistry.get(Identifier)`), and whose encode emits the
+    /// identifier of the registered element.
+    ///
+    /// This is the #394 slice: `FeatureSize.CODEC` (FeatureSize.java:10) is
+    /// `BuiltInRegistries.FEATURE_SIZE_TYPE.byNameCodec().dispatch(FeatureSize::type,
+    /// FeatureSizeType::codec)`.
+    ///
+    /// Java composition (Registry.java:29-31):
+    /// ```java
+    /// default Codec<T> byNameCodec() {
+    ///     return this.referenceHolderWithLifecycle().flatComapMap(
+    ///         Holder.Reference::value, value -> this.safeCastToReference(this.wrapAsHolder((T)value)));
+    /// }
+    /// ```
+    /// where `referenceHolderWithLifecycle()` (lines 37-46) is
+    /// `ExtraCodecs.overrideLifecycle(Identifier.CODEC.comapFlatMap(name ->
+    /// this.get(name) ..., holder -> holder.key().identifier()), e ->
+    /// registrationInfo(e.key()).map(...).orElse(experimental()))`.
+    ///
+    /// The `Arc<T>` value form is the Rust stand-in for Java's *stored object
+    /// reference* (identical to `ByteBufCodecs.registry` in `rivet-protocol`):
+    /// decode returns a clone of the stored `Arc` (same allocation), so encode
+    /// resolves the identity-keyed lookup off that allocation for a real round
+    /// trip. Java needs no `T` bound (the registry holds the shared object);
+    /// the port needs `T: Debug` only for the unregistered-value error message.
+    ///
+    /// Behavior mirrors Java exactly:
+    /// - Decode of an unknown name errors `"Unknown registry key in <key>:
+    ///   <name>"` — the lookup is `get_optional` (`by_location`), which a
+    ///   `DefaultedRegistry` does **not** fall back on (Java
+    ///   `DefaultedMappedRegistry` overrides `getValue`/`getOptional` but not
+    ///   `get(Identifier)`).
+    /// - Decode lifecycle: a registered element carries its
+    ///   `RegistrationInfo.lifecycle`; an element with no registration info
+    ///   falls back to `Lifecycle::experimental()` (the override applies on a
+    ///   full success only). Errors keep the identifier codec's lifecycle
+    ///   (stable — `Identifier.CODEC` is `.stable()`).
+    /// - Encode of an unregistered value errors `"Unregistered holder in <key>:
+    ///   Direct{...}"` (`safeCastToReference` on a `wrapAsHolder` that produced
+    ///   a direct holder — identity lookup, so a defaulted registry does not
+    ///   mask it).
+    /// - Encode lifecycle is the same registration-info getter (the override's
+    ///   `co_apply` always applies).
+    pub fn by_name_codec<Ops>(&self) -> Arc<dyn rivet_serialization::codec::Codec<Arc<T>, Ops>>
+    where
+        T: std::fmt::Debug + Send + Sync + 'static,
+        Ops: rivet_serialization::dynamic_ops::DynamicOps + 'static,
+    {
+        let holder_codec = self.reference_holder_with_lifecycle::<Ops>();
+        // Owned snapshots: the frozen registry is immutable, so owned clones of
+        // its private fields are observationally identical to capturing `&self`.
+        let registry_id = self.registry_id;
+        let key = self.key.clone();
+        let values = self.values.clone();
+        let by_value = self.by_value.clone();
+        // `flatComapMap` decode mapper: `Holder.Reference::value` — resolve the
+        // reference's element by id. The reference codec decodes only
+        // `Reference`s; a `Direct` reaching here is a Java `ClassCastException`
+        // (the method reference binds `Reference`), so panicking is faithful.
+        let to: Fn1<Holder<T>, Arc<T>> = Arc::new(move |holder: &Holder<T>| match holder {
+            Holder::Direct(_) => panic!("byNameCodec decode produced a Direct holder"),
+            Holder::Reference { id, .. } => values
+                .get(*id as usize)
+                .unwrap_or_else(|| panic!("Reference holder has no value: {}", holder))
+                .clone(),
+        });
+        // `flatComapMap` encode mapper: `value -> safeCastToReference(wrapAsHolder
+        // (value))` — identity lookup; a missing element is a Direct holder ->
+        // the exact Java error.
+        let from: DecoderFn<Arc<T>, Holder<T>> = Arc::new(move |value: &Arc<T>| {
+            let id = by_value
+                .get(&(value.as_ref() as *const T as usize))
+                .copied();
+            match id {
+                Some(id) => DataResult::success(Holder::reference(registry_id, id)),
+                None => DataResult::error(format!(
+                    "Unregistered holder in {}: Direct{{{:?}}}",
+                    key, value
+                )),
+            }
+        });
+        rivet_serialization::codec::flat_comap_map(holder_codec, to, from)
+    }
+
+    /// `Registry.holderByNameCodec()` — the `Codec<Holder<T>>` twin of
+    /// `by_name_codec` (Registry.java:33-35):
+    /// ```java
+    /// return this.referenceHolderWithLifecycle().flatComapMap(holder ->
+    /// (Holder<T>)holder, this::safeCastToReference);
+    /// ```
+    ///
+    /// Decode produces `Holder::Reference` holders for registered names (and
+    /// errors on unknown ones with the same `"Unknown registry key in <key>:
+    /// <name>"`); encode accepts a registered `Reference` (emitting its
+    /// identifier) and errors on a `Direct` (`"Unregistered holder in <key>:
+    /// Direct{...}"`).
+    pub fn holder_by_name_codec<Ops>(
+        &self,
+    ) -> Arc<dyn rivet_serialization::codec::Codec<Holder<T>, Ops>>
+    where
+        T: Clone + std::fmt::Debug + Send + Sync + 'static,
+        Ops: rivet_serialization::dynamic_ops::DynamicOps + 'static,
+    {
+        let reference_codec = self.reference_holder_with_lifecycle::<Ops>();
+        let key = self.key.clone();
+        // `flatComapMap` decode mapper: `holder -> (Holder<T>)holder` (identity —
+        // the decode produces the reference holder unchanged; `T: Clone` is the
+        // derive's requirement).
+        let to: Fn1<Holder<T>, Holder<T>> = Arc::new(|h: &Holder<T>| h.clone());
+        // `flatComapMap` encode mapper: `safeCastToReference` — a registered
+        // Reference passes through; a Direct (a foreign holder) is the exact
+        // Java error.
+        let from: DecoderFn<Holder<T>, Holder<T>> =
+            Arc::new(move |holder: &Holder<T>| match holder {
+                Holder::Reference { .. } => DataResult::success(holder.clone()),
+                Holder::Direct(value) => DataResult::error(format!(
+                    "Unregistered holder in {}: Direct{{{:?}}}",
+                    key, value
+                )),
+            });
+        rivet_serialization::codec::flat_comap_map(reference_codec, to, from)
+    }
+
+    /// `Registry.referenceHolderWithLifecycle()` — the private helper behind
+    /// both by-name codecs (Registry.java:37-46):
+    /// ```java
+    /// Codec<Holder.Reference<T>> referenceCodec = Identifier.CODEC.comapFlatMap(
+    ///     name -> this.get(name).map(DataResult::success).orElseGet(() ->
+    ///         DataResult.error(() -> "Unknown registry key in " + this.key() + ": " + name)),
+    ///     holder -> holder.key().identifier());
+    /// return ExtraCodecs.overrideLifecycle(referenceCodec, e ->
+    ///     this.registrationInfo(e.key()).map(RegistrationInfo::lifecycle).orElse(Lifecycle.experimental()));
+    /// ```
+    ///
+    /// The decode lookup is `MappedRegistry.get(Identifier)` = `by_location`
+    /// (`get_optional`), which a `DefaultedRegistry` does **not** override.
+    ///
+    /// The `Ops` codec is `identifier_codec` (`Identifier.CODEC` — `.stable()`),
+    /// so a malformed identifier error propagates verbatim (e.g.
+    /// `"Not a valid resource location: ..."`), and an unknown name is the
+    /// exact Java message.
+    pub fn reference_holder_with_lifecycle<Ops>(
+        &self,
+    ) -> Arc<dyn rivet_serialization::codec::Codec<Holder<T>, Ops>>
+    where
+        T: std::fmt::Debug + Send + Sync + 'static,
+        Ops: rivet_serialization::dynamic_ops::DynamicOps + 'static,
+    {
+        // Owned snapshots of the frozen registry's private fields.
+        let key = self.key.clone();
+        let registry_id = self.registry_id;
+        let by_location = self.by_location.clone();
+        let keys = self.keys.clone();
+        let registration_infos = self.registration_infos.clone();
+        let identifier_codec = crate::identifier::identifier_codec::<Ops>();
+        // `name -> this.get(name)` (decode) and `holder -> holder.key().identifier()` (encode).
+        let reference_codec = rivet_serialization::codec::comap_flat_map(
+            identifier_codec,
+            Arc::new(
+                move |identifier: &Identifier| match by_location.get(identifier).copied() {
+                    Some(id) => DataResult::success(Holder::reference(registry_id, id)),
+                    None => DataResult::error(format!(
+                        "Unknown registry key in {}: {}",
+                        key, identifier
+                    )),
+                },
+            ),
+            {
+                let keys = keys.clone();
+                Arc::new(move |holder: &Holder<T>| {
+                    let id = match holder {
+                        Holder::Reference { id, .. } => *id,
+                        Holder::Direct(_) => panic!("Direct holder has no key"),
+                    };
+                    // Strict id -> key (no DefaultedRegistry fallback), the same
+                    // rule as holder resolution (`holder_lookup::by_id_strict`);
+                    // a lookup-constructed reference always resolves.
+                    keys.get(id as usize)
+                        .unwrap_or_else(|| panic!("Reference holder has no key: {}", holder))
+                        .identifier()
+                        .clone()
+                })
+            },
+        );
+        // `ExtraCodecs.overrideLifecycle(...)` — decode lifecycle overridden on
+        // a full success only (an error/partial passes through untouched),
+        // encode lifecycle always overridden. Registered elements carry their
+        // registration lifecycle; anything unresolvable is experimental.
+        rivet_serialization::extra_codecs::override_lifecycle_single(
+            reference_codec,
+            Arc::new(move |holder: &Holder<T>| {
+                let id = match holder {
+                    Holder::Reference { id, .. } => *id,
+                    Holder::Direct(_) => return Lifecycle::experimental(),
+                };
+                keys.get(id as usize)
+                    .and_then(|element_key| registration_infos.get(element_key))
+                    .map(|info| info.lifecycle())
+                    .unwrap_or(Lifecycle::experimental())
+            }),
+        )
+    }
 }
 
 impl<T> fmt::Debug for Registry<T> {
@@ -715,6 +923,364 @@ mod tests {
         let debug = format!("{:?}", registry);
         assert!(debug.starts_with("Registry { key: "));
         assert!(debug.contains("size: 1"));
+    }
+}
+
+/// `Registry.byNameCodec()`/`holder_by_name_codec()`/`reference_holder_with_lifecycle()`
+/// — the #394 by-name codec surface. These codecs resolve identifiers against
+/// the frozen registry they were built from (owned snapshots of its private
+/// tables), so no `RegistryOps`/`RegistryGetter` context is needed — unlike the
+/// #126 holder codecs, which resolve through the ops' provider.
+///
+/// Paper grounding: `FeatureSize.CODEC` (FeatureSize.java:10) is
+/// `BuiltInRegistries.FEATURE_SIZE_TYPE.byNameCodec().dispatch(...)`; the
+/// decode lookup is `MappedRegistry.get(Identifier)` (by-location, strict), the
+/// encode is `safeCastToReference(wrapAsHolder(value))` (identity), and the
+/// lifecycle is `ExtraCodecs.overrideLifecycle` over `registrationInfo`.
+#[cfg(test)]
+mod by_name_codec_tests {
+    use super::*;
+    use crate::builder::RegistryBuilder;
+    use rivet_serialization::codec::Codec;
+    use rivet_serialization::decoder::Decoder;
+    use rivet_serialization::dynamic_ops::DynamicOps;
+    use rivet_serialization::encoder::Encoder;
+    use rivet_serialization::json_ops::JsonOps;
+
+    type TestOps = JsonOps;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestElement(u8);
+
+    fn registry_key() -> RegistryKey<TestElement> {
+        ResourceKey::create_registry_key(Identifier::with_default_namespace("test"))
+    }
+
+    fn element_key(id: &str) -> ResourceKey<TestElement> {
+        ResourceKey::create(&registry_key(), Identifier::with_default_namespace(id))
+    }
+
+    fn ops() -> TestOps {
+        JsonOps::INSTANCE
+    }
+
+    fn registry_of(entries: &[(&str, u8)]) -> Registry<TestElement> {
+        let mut builder = RegistryBuilder::new(&registry_key());
+        for (name, value) in entries {
+            builder.register(
+                &element_key(name),
+                Arc::new(TestElement(*value)),
+                RegistrationInfo::BUILT_IN,
+            );
+        }
+        builder.freeze()
+    }
+
+    /// A defaulted registry whose default is a registered element.
+    fn defaulted_registry() -> Registry<TestElement> {
+        let mut builder = RegistryBuilder::new_defaulted(
+            &Identifier::with_default_namespace("air"),
+            &registry_key(),
+        );
+        builder.register(
+            &element_key("air"),
+            Arc::new(TestElement(0)),
+            RegistrationInfo::BUILT_IN,
+        );
+        builder.register(
+            &element_key("stone"),
+            Arc::new(TestElement(1)),
+            RegistrationInfo::BUILT_IN,
+        );
+        builder.freeze()
+    }
+
+    fn encode_value<E, Ops: DynamicOps + 'static>(
+        codec: &dyn Codec<E, Ops>,
+        value: &E,
+        ops: &Ops,
+    ) -> rivet_serialization::data_result::DataResult<Ops::Output> {
+        Encoder::encode(codec, value, ops, &ops.empty())
+    }
+
+    fn decode_value<E, Ops: DynamicOps + 'static>(
+        codec: &dyn Codec<E, Ops>,
+        ops: &Ops,
+        input: &Ops::Output,
+    ) -> rivet_serialization::data_result::DataResult<(E, Ops::Output)> {
+        Decoder::decode(codec, ops, input)
+    }
+
+    // -----------------------------------------------------------------------
+    // byNameCodec — decode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decode_resolves_a_registered_identifier() {
+        let registry = registry_of(&[("air", 0), ("stone", 1)]);
+        let codec = registry.by_name_codec::<TestOps>();
+        let input = ops().create_string("minecraft:stone".to_string());
+        let decoded = decode_value(codec.as_ref(), &ops(), &input)
+            .get_or_throw("decode")
+            .0
+            .clone();
+        // The stored `Arc` allocation — the same object identity the registry
+        // encodes by.
+        let expected = registry.by_id_arc(1).cloned().unwrap();
+        assert!(Arc::ptr_eq(&decoded, &expected));
+        assert_eq!(decoded.as_ref(), &TestElement(1));
+    }
+
+    #[test]
+    fn decode_unknown_name_errors_with_java_message() {
+        let registry = registry_of(&[("air", 0)]);
+        let codec = registry.by_name_codec::<TestOps>();
+        let input = ops().create_string("minecraft:nope".to_string());
+        let result = decode_value(codec.as_ref(), &ops(), &input);
+        assert!(result.is_error());
+        assert_eq!(
+            result.error_ref().unwrap().message(),
+            format!("Unknown registry key in {}: minecraft:nope", registry_key())
+        );
+    }
+
+    #[test]
+    fn decode_defaulted_registry_does_not_fall_back_for_unknown_names() {
+        // Java `DefaultedMappedRegistry` overrides `getValue`/`getOptional` but
+        // NOT `get(Identifier)` — `referenceHolderWithLifecycle` decodes via
+        // `this.get(name)` (by-location), so an unknown name on a defaulted
+        // registry is a strict error, never the default element.
+        let registry = defaulted_registry();
+        let codec = registry.by_name_codec::<TestOps>();
+        let input = ops().create_string("minecraft:nope".to_string());
+        let result = decode_value(codec.as_ref(), &ops(), &input);
+        assert!(result.is_error());
+        assert_eq!(
+            result.error_ref().unwrap().message(),
+            format!("Unknown registry key in {}: minecraft:nope", registry_key())
+        );
+    }
+
+    #[test]
+    fn decode_lifecycle_is_the_registration_info() {
+        // BUILT_IN registration info -> Lifecycle::stable() (Java
+        // `RegistrationInfo.BUILT_IN.lifecycle()` = `Lifecycle.stable()`).
+        let registry = registry_of(&[("air", 0)]);
+        let codec = registry.by_name_codec::<TestOps>();
+        let input = ops().create_string("minecraft:air".to_string());
+        let decoded = decode_value(codec.as_ref(), &ops(), &input);
+        assert!(decoded.is_success());
+        assert_eq!(decoded.lifecycle(), Lifecycle::Stable);
+    }
+
+    #[test]
+    fn decode_malformed_identifier_propagates_the_identifier_error() {
+        // The identifier codec's error passes through verbatim (Java
+        // `Identifier.CODEC.decode(...)` inside the comapFlatMap).
+        let registry = registry_of(&[("air", 0)]);
+        let codec = registry.by_name_codec::<TestOps>();
+        // A non-string.
+        let input = ops().create_int(42);
+        let result = decode_value(codec.as_ref(), &ops(), &input);
+        assert!(result.is_error());
+        assert_eq!(result.error_ref().unwrap().message(), "Not a string: 42");
+        // An invalid resource location.
+        let input = ops().create_string("a b:c".to_string());
+        let result = decode_value(codec.as_ref(), &ops(), &input);
+        assert!(result.is_error());
+        assert!(
+            result
+                .error_ref()
+                .unwrap()
+                .message()
+                .contains("Not a valid resource location"),
+            "unexpected message: {}",
+            result.error_ref().unwrap().message()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // byNameCodec — encode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encode_registered_value_emits_its_identifier() {
+        let registry = registry_of(&[("air", 0), ("stone", 1)]);
+        let codec = registry.by_name_codec::<TestOps>();
+        let value = registry.by_id_arc(1).cloned().unwrap();
+        let encoded = encode_value(codec.as_ref(), &value, &ops())
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(encoded, ops().create_string("minecraft:stone".to_string()));
+    }
+
+    #[test]
+    fn encode_unregistered_value_errors_with_java_message() {
+        // `wrapAsHolder` is an identity lookup: a fresh `Arc` is not the stored
+        // allocation, so it becomes a Direct holder -> the exact Java error
+        // (even on a defaulted registry — `DefaultedMappedRegistry.getId` is
+        // NOT what `wrapAsHolder` uses).
+        let registry = defaulted_registry();
+        let codec = registry.by_name_codec::<TestOps>();
+        let unregistered = Arc::new(TestElement(99));
+        let result = encode_value(codec.as_ref(), &unregistered, &ops());
+        assert!(result.is_error());
+        assert_eq!(
+            result.error_ref().unwrap().message(),
+            format!(
+                "Unregistered holder in {}: Direct{{TestElement(99)}}",
+                registry_key()
+            )
+        );
+    }
+
+    #[test]
+    fn encode_lifecycle_is_experimental() {
+        // Java `byNameCodec` encode lifecycle: the outer `flatComapMap` mapper
+        // `safeCastToReference(wrapAsHolder(value))` returns
+        // `DataResult.success(reference)` (experimental by default), and
+        // `Success.flatMap` re-adds that outer lifecycle over the inner
+        // override's `co_apply` Stable — experimental wins the monoid. So even
+        // for a BUILT_IN element the *encode* result is experimental (decode,
+        // by contrast, is Stable — the override's `apply` replaces, not adds).
+        let registry = registry_of(&[("air", 0)]);
+        let codec = registry.by_name_codec::<TestOps>();
+        let value = registry.by_id_arc(0).cloned().unwrap();
+        let encoded = encode_value(codec.as_ref(), &value, &ops());
+        assert!(encoded.is_success());
+        assert_eq!(encoded.lifecycle(), Lifecycle::Experimental);
+    }
+
+    #[test]
+    fn decode_lifecycle_reflects_experimental_registration_info() {
+        // A registry whose element has an experimental registration info decodes
+        // to experimental (the override's `apply` replaces the decode lifecycle
+        // with the element's registration lifecycle).
+        let mut builder = RegistryBuilder::new(&registry_key());
+        let key = element_key("one");
+        builder.register(
+            &key,
+            Arc::new(TestElement(1)),
+            RegistrationInfo::new(None, Lifecycle::Experimental),
+        );
+        let registry = builder.freeze();
+        let codec = registry.by_name_codec::<TestOps>();
+        let input = ops().create_string("minecraft:one".to_string());
+        let decoded = decode_value(codec.as_ref(), &ops(), &input);
+        assert!(decoded.is_success());
+        assert_eq!(decoded.lifecycle(), Lifecycle::Experimental);
+    }
+
+    #[test]
+    fn encode_decode_round_trips_through_the_same_allocation() {
+        // The codec decodes to the stored `Arc` (identity), so re-encoding the
+        // decode result reproduces the original identifier.
+        let registry = registry_of(&[("air", 0), ("stone", 1)]);
+        let codec = registry.by_name_codec::<TestOps>();
+        let input = ops().create_string("minecraft:stone".to_string());
+        let decoded = decode_value(codec.as_ref(), &ops(), &input)
+            .get_or_throw("decode")
+            .0
+            .clone();
+        let reencoded = encode_value(codec.as_ref(), &decoded, &ops())
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            reencoded,
+            ops().create_string("minecraft:stone".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // holderByNameCodec
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn holder_codec_decodes_to_a_reference_holder() {
+        let registry = registry_of(&[("air", 0), ("stone", 1)]);
+        let codec = registry.holder_by_name_codec::<TestOps>();
+        let input = ops().create_string("minecraft:stone".to_string());
+        let decoded = decode_value(codec.as_ref(), &ops(), &input)
+            .get_or_throw("decode")
+            .0
+            .clone();
+        assert_eq!(decoded, Holder::reference(registry.registry_id(), 1));
+    }
+
+    #[test]
+    fn holder_codec_encodes_a_reference_holder_as_its_identifier() {
+        let registry = registry_of(&[("air", 0), ("stone", 1)]);
+        let codec = registry.holder_by_name_codec::<TestOps>();
+        let holder = Holder::reference(registry.registry_id(), 1);
+        let encoded = encode_value(codec.as_ref(), &holder, &ops())
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(encoded, ops().create_string("minecraft:stone".to_string()));
+    }
+
+    #[test]
+    fn holder_codec_encodes_a_direct_holder_as_unregistered() {
+        let registry = registry_of(&[("air", 0)]);
+        let codec = registry.holder_by_name_codec::<TestOps>();
+        let holder = Holder::direct(TestElement(7));
+        let result = encode_value(codec.as_ref(), &holder, &ops());
+        assert!(result.is_error());
+        assert_eq!(
+            result.error_ref().unwrap().message(),
+            format!(
+                "Unregistered holder in {}: Direct{{TestElement(7)}}",
+                registry_key()
+            )
+        );
+    }
+
+    #[test]
+    fn holder_codec_unknown_name_errors_with_java_message() {
+        let registry = registry_of(&[("air", 0)]);
+        let codec = registry.holder_by_name_codec::<TestOps>();
+        let input = ops().create_string("minecraft:nope".to_string());
+        let result = decode_value(codec.as_ref(), &ops(), &input);
+        assert!(result.is_error());
+        assert_eq!(
+            result.error_ref().unwrap().message(),
+            format!("Unknown registry key in {}: minecraft:nope", registry_key())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // referenceHolderWithLifecycle — registration order is the id space
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decode_registration_order_is_the_id_space() {
+        // Entries are decoded to `Reference{registry, id}` where id == insertion
+        // order (element id == holder id == network id == insertion index).
+        let registry = registry_of(&[("first", 10), ("second", 20)]);
+        let codec = registry.by_name_codec::<TestOps>();
+        let first = decode_value(
+            codec.as_ref(),
+            &ops(),
+            &ops().create_string("minecraft:first".to_string()),
+        )
+        .get_or_throw("decode")
+        .0
+        .clone();
+        let second = decode_value(
+            codec.as_ref(),
+            &ops(),
+            &ops().create_string("minecraft:second".to_string()),
+        )
+        .get_or_throw("decode")
+        .0
+        .clone();
+        assert!(Arc::ptr_eq(
+            &first,
+            &registry.by_id_arc(0).cloned().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &second,
+            &registry.by_id_arc(1).cloned().unwrap()
+        ));
     }
 }
 
