@@ -46,7 +46,10 @@ mod tests {
     }
 
     impl ClassPathLibrary for SimpleJarLibrary {
-        fn register(&mut self, store: &mut dyn LibraryStore) -> Result<(), LibraryLoadingException> {
+        fn register(
+            &mut self,
+            store: &mut dyn LibraryStore,
+        ) -> Result<(), LibraryLoadingException> {
             store.add_library(Path::new(&self.path));
             Ok(())
         }
@@ -60,7 +63,10 @@ mod tests {
     }
 
     impl ClassPathLibrary for MissingJarLibrary {
-        fn register(&mut self, _store: &mut dyn LibraryStore) -> Result<(), LibraryLoadingException> {
+        fn register(
+            &mut self,
+            _store: &mut dyn LibraryStore,
+        ) -> Result<(), LibraryLoadingException> {
             // `Files.notExists(path)` is out of scope (no filesystem I/O in
             // this value slice), so the failure is injected directly. The
             // store is untouched, matching `JarLibrary`'s check-then-add
