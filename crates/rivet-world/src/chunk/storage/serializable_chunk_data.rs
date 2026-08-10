@@ -119,8 +119,12 @@ pub fn parse_section_lights(chunk_data: &CompoundTag) -> Vec<SectionLightData> {
             _ => None,
         })
         .map(|section| {
-            let block_light = section.get_byte_array(BLOCK_LIGHT_TAG).map(signed_bytes);
-            let sky_light = section.get_byte_array(SKY_LIGHT_TAG).map(signed_bytes);
+            let block_light = section
+                .get_byte_array(BLOCK_LIGHT_TAG)
+                .map(|bytes| signed_bytes(bytes));
+            let sky_light = section
+                .get_byte_array(SKY_LIGHT_TAG)
+                .map(|bytes| signed_bytes(bytes));
             if let Some(bytes) = &block_light {
                 crate::chunk::data_layer::DataLayer::with_data(bytes.clone());
             }
@@ -220,18 +224,18 @@ pub fn reconstruct_lights(
 }
 
 fn rebuild_nibble(bytes: Option<Vec<u8>>, state: i32) -> SwmrNibbleArray {
-    let state = InitState::from_i32(state).expect("invalid Starlight light state");
-    SwmrNibbleArray::new_with_state(bytes, state)
+    SwmrNibbleArray::new_with_state(bytes, InitState::from_i32(state))
 }
 
 fn state_or_absent(section: &CompoundTag, key: &str) -> i32 {
-    section
-        .contains(key)
-        .then(|| section.get_int_or(key, 0))
-        .unwrap_or(-1)
+    if section.contains(key) {
+        section.get_int_or(key, 0)
+    } else {
+        -1
+    }
 }
 
-fn signed_bytes(bytes: &Vec<i8>) -> Vec<u8> {
+fn signed_bytes(bytes: &[i8]) -> Vec<u8> {
     bytes.iter().map(|byte| *byte as u8).collect()
 }
 
@@ -395,32 +399,50 @@ mod tests {
     }
 
     #[test]
-    fn malformed_light_state_or_position_invalidates_the_whole_payload() {
-        let bad_state = SectionLightData {
+    fn arbitrary_raw_light_state_with_data_is_retained() {
+        let raw = SectionLightData {
             y: -4,
-            block_light: None,
+            block_light: Some(vec![0x11; ARRAY_SIZE]),
             sky_light: None,
-            block_state: 99,
+            block_state: 4,
             sky_state: -1,
         };
-        let rebuilt = reconstruct_lights(
-            height_accessor::create(-64, 384),
-            std::slice::from_ref(&bad_state),
-            true,
-            true,
-        );
-        assert!(!rebuilt.light_correct);
-        assert!(
-            rebuilt
-                .block_nibbles
-                .iter()
-                .all(|nibble| nibble.get_save_state().is_none())
-        );
+        let rebuilt = reconstruct_lights(height_accessor::create(-64, 384), &[raw], true, true);
+        assert!(rebuilt.light_correct);
+        let save = rebuilt.block_nibbles[1]
+            .get_save_state()
+            .expect("nonzero unknown state is saved");
+        assert_eq!(save.state, InitState::Other(4));
+        assert_eq!(save.data, Some(vec![0x11; ARRAY_SIZE]));
+    }
+
+    #[test]
+    fn initialised_state_without_data_or_bad_position_invalidates_the_whole_payload() {
+        for state in [InitState::Initialised, InitState::Hidden] {
+            let invalid = SectionLightData {
+                y: -4,
+                block_light: None,
+                sky_light: None,
+                block_state: state.to_i32(),
+                sky_state: -1,
+            };
+            let rebuilt =
+                reconstruct_lights(height_accessor::create(-64, 384), &[invalid], true, true);
+            assert!(!rebuilt.light_correct);
+            assert!(
+                rebuilt
+                    .block_nibbles
+                    .iter()
+                    .all(|nibble| nibble.get_save_state().is_none())
+            );
+        }
 
         let out_of_range = SectionLightData {
             y: 100,
             block_state: InitState::Uninitialised.to_i32(),
-            ..bad_state
+            block_light: None,
+            sky_light: None,
+            sky_state: -1,
         };
         let rebuilt = reconstruct_lights(
             height_accessor::create(-64, 384),

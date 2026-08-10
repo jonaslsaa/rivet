@@ -41,11 +41,9 @@
 //! Java pools working byte arrays in a `ThreadLocal<ArrayDeque<byte[]>>`
 //! (`allocateBytes`/`freeBytes`) to avoid garbage; that pooling is behaviorally
 //! unobservable and is omitted — every "fresh" buffer here is an owned
-//! `Box<[u8]>`. Java also stores the state as a raw `int` and tolerates unknown
-//! values at construction (they crash later in `getSaveState`/`toVanillaNibble`);
-//! the port's typed [`InitState`] makes those unrepresentable — only 0-3 are
-//! reachable from the constructors and `getSaveState`, so this is a
-//! type-system-honest tightening, not a behavior change on any reachable path.
+//! `Box<[u8]>`. Java also stores the state as a raw `int`; [`InitState::Other`]
+//! retains unknown persisted values so the save-state constructor matches that
+//! raw representation.
 //! Java's `toString()` (hex dump of the 4096 nibbles) is debug-only output and
 //! is omitted; the port's [`Debug`] shows the state/snapshot shape instead.
 //!
@@ -75,24 +73,32 @@ pub enum InitState {
     /// `INIT_STATE_HIDDEN` — initialised, but conversion to Vanilla data is
     /// treated as `Null`.
     Hidden,
+    /// Any other raw state accepted by `SWMRNibbleArray(byte[], int)`.
+    Other(i32),
 }
 
 impl InitState {
     /// The Java `INIT_STATE_*` int value (`getSaveState`/`SaveUtil` round-trip
     /// the state through the chunk NBT as this int).
     pub const fn to_i32(self) -> i32 {
-        self as i32
+        match self {
+            Self::Null => 0,
+            Self::Uninitialised => 1,
+            Self::Initialised => 2,
+            Self::Hidden => 3,
+            Self::Other(state) => state,
+        }
     }
 
-    /// Decode the persisted Starlight state integer. Only the four constants
-    /// accepted by `SWMRNibbleArray` are valid current-version save states.
-    pub const fn from_i32(state: i32) -> Option<Self> {
+    /// Decode a persisted Starlight state without discarding raw values
+    /// accepted by Paper's `SWMRNibbleArray(byte[], int)` constructor.
+    pub const fn from_i32(state: i32) -> Self {
         match state {
-            0 => Some(Self::Null),
-            1 => Some(Self::Uninitialised),
-            2 => Some(Self::Initialised),
-            3 => Some(Self::Hidden),
-            _ => None,
+            0 => Self::Null,
+            1 => Self::Uninitialised,
+            2 => Self::Initialised,
+            3 => Self::Hidden,
+            _ => Self::Other(state),
         }
     }
 }
@@ -232,6 +238,13 @@ impl SwmrNibbleArray {
                         state,
                     })
                 }
+            }
+            InitState::Other(_) => {
+                let zero = Self::is_all_zero(data.as_deref().expect("unknown state has storage"));
+                (!zero).then(|| SaveState {
+                    data: data.as_ref().map(|d| d.to_vec()),
+                    state,
+                })
             }
         }
     }
@@ -437,7 +450,7 @@ impl SwmrNibbleArray {
             InitState::Null | InitState::Uninitialised => {
                 self.storage_visible = None;
             }
-            InitState::Initialised | InitState::Hidden => {
+            InitState::Initialised | InitState::Hidden | InitState::Other(_) => {
                 if self.storage_visible.is_none() {
                     self.storage_visible = self.storage_updating.clone();
                 } else if self.storage_updating != self.storage_visible {
@@ -470,6 +483,7 @@ impl SwmrNibbleArray {
                     .expect("initialised has storage")
                     .to_vec(),
             )),
+            InitState::Other(_) => panic!("unknown Starlight light state"),
         }
     }
 
@@ -681,7 +695,8 @@ mod tests {
         let caught =
             std::panic::catch_unwind(|| SwmrNibbleArray::new_with_state(None, InitState::Hidden));
         assert!(caught.is_err());
-        // Null / Uninitialised with no bytes are fine, as is any state with bytes.
+        // Null / Uninitialised and raw states with no bytes are fine, as is
+        // any state with bytes.
         assert!(SwmrNibbleArray::new_with_state(None, InitState::Null).is_null_nibble_updating());
         assert!(
             SwmrNibbleArray::new_with_state(None, InitState::Uninitialised)
@@ -691,6 +706,9 @@ mod tests {
             SwmrNibbleArray::new_with_state(Some(vec![2; ARRAY_SIZE]), InitState::Hidden)
                 .is_hidden_updating()
         );
+        let raw = SwmrNibbleArray::new_with_state(None, InitState::Other(4));
+        assert!(!raw.is_null_nibble_updating());
+        assert!(!raw.is_uninitialised_updating());
     }
 
     /// `InitState.to_i32()` mirrors the Java `INIT_STATE_*` constants.
@@ -700,6 +718,8 @@ mod tests {
         assert_eq!(InitState::Uninitialised.to_i32(), 1);
         assert_eq!(InitState::Initialised.to_i32(), 2);
         assert_eq!(InitState::Hidden.to_i32(), 3);
+        assert_eq!(InitState::from_i32(4), InitState::Other(4));
+        assert_eq!(InitState::Other(99).to_i32(), 99);
     }
 
     /// `setNull` drops updating state and storage and clears updating dirtiness;
