@@ -114,9 +114,7 @@ where
         true
     }
 
-    /// `EmptyLevelChunk.getFullStatus()` — `FullChunkStatus.FULL` (the
-    /// slice-local [`ChunkStatus::Full`]; see the `RivetTodo(#185)` on the
-    /// base `ChunkStatus` for the real ladder).
+    /// `EmptyLevelChunk.getFullStatus()` — `FullChunkStatus.FULL`.
     pub fn get_persisted_status(&self) -> ChunkStatus {
         ChunkStatus::Full
     }

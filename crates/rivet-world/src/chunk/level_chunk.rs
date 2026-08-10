@@ -33,7 +33,7 @@
 //!   `get_block_state` is always the final fast path, which Paper's `if (true)`
 //!   also routes through).
 //!
-//! RivetTodo(#185): `getPersistedStatus()` returns the slice-local `FULL`; the
+//! RivetTodo(#185): `getPersistedStatus()` returns `ChunkStatus.FULL`; the
 //! `FullChunkStatus`/`fullStatus` supplier and the chunkmap pipeline surface are
 //! not ported.
 
@@ -198,6 +198,21 @@ where
     /// The heightmaps storage (read-only; the concrete chunk's base).
     pub fn heightmaps(&self) -> &[Option<Heightmap>; 6] {
         self.base.heightmaps()
+    }
+
+    /// Narrow loader seam for `SerializableChunkData.read`.
+    pub(crate) fn base_mut(&mut self) -> &mut ChunkAccess<T, B, S> {
+        &mut self.base
+    }
+
+    /// `Heightmap.primeHeightmaps(this, types)` during chunk load.
+    pub(crate) fn prime_heightmaps(&mut self, types: &[Types]) {
+        self.base.prime_heightmaps(types);
+    }
+
+    /// `ChunkAccess.addPackedPostProcess` during chunk load.
+    pub(crate) fn add_packed_post_process(&mut self, offsets: &[i16], section_index: usize) {
+        self.base.add_packed_post_process(offsets, section_index);
     }
 
     /// `ChunkAccess.setHeightmap(Types, long[])` — adopted by the chunk-load /

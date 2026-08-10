@@ -23,9 +23,8 @@
 //! matching how `ChunkMap` in `rivet-server` provides chunks.
 //!
 //! RivetTodo(#185): the convenience getters resolve `ChunkStatus.FULL` and
-//! `getChunkForLighting` resolves `ChunkStatus.EMPTY`; the slice-local
-//! `ChunkStatus` has only `Empty`/`Full`, so those two targets cover the
-//! ladder the status unit (#185) expands.
+//! `getChunkForLighting` resolves `ChunkStatus.EMPTY`; generation scheduling
+//! for the remaining persisted statuses stays with the chunk pipeline.
 //! RivetTodo(#184): `getChunkForLighting` returns the chunk's `LightChunk`
 //! view (Java casts the `ChunkAccess` to `LightChunk`); the port resolves the
 //! `ChunkAccess` base directly, and the light-engine consumers that need the

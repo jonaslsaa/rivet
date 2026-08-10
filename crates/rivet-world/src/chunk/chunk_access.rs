@@ -42,10 +42,9 @@
 //! `resolve: &dyn Fn(&T) -> StateFlags` (the world sites use `rivet-registry`'s
 //! `BlockState` behavior table; the superflat/server sites supply their own
 //! flag predicates), so no predicate is stored on the base (OWNERSHIP.md).
-//! RivetTodo(#185): the
-//! `mc.world.level.chunk.status` unit replaces the slice-local `ChunkStatus`
-//! with the real status ladder and `isOrAfter`. The `setBlockState` mutators
-//! (section set-block/fluid) defer with the
+//! The persisted 26.2 `ChunkStatus` value ladder is mirrored in
+//! `chunk::status`; generation tasks and scheduler state remain with #185.
+//! The `setBlockState` mutators (section set-block/fluid) defer with the
 //! chunk-storage epic — the heightmap `update` half is ported here
 //! ([`update_heightmaps_after`]).
 
@@ -56,6 +55,7 @@ use indexmap::IndexSet;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::light_chunk::LightChunk;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
+pub use crate::chunk::status::ChunkStatus;
 use crate::chunk::structure_access::StructureAccess;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
@@ -72,23 +72,6 @@ fn filled_empty_light(count: usize) -> Vec<SwmrNibbleArray> {
     (0..count)
         .map(|_| SwmrNibbleArray::new_with_bytes_and_null(None, true))
         .collect()
-}
-
-/// `net.minecraft.world.level.chunk.status.ChunkStatus` — the persisted chunk
-/// status, slice-local: the real status ladder (with `isOrAfter`/`heightmapsAfter`)
-/// lives in the `mc.world.level.chunk.status` unit (#185). This slice needs
-/// the two statuses its chunks reach — a fresh `ProtoChunk` is `EMPTY`, a
-/// loaded `LevelChunk`/`EmptyLevelChunk` is `FULL`.
-///
-/// RivetTodo(#185): the full `ChunkStatus` ladder (and `BelowZeroRetrogen`,
-/// which `getHighestGeneratedStatus` folds in) is not ported; this enum is a
-/// stand-in the status unit replaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChunkStatus {
-    /// `ChunkStatus.EMPTY` — the `ProtoChunk` default.
-    Empty,
-    /// `ChunkStatus.FULL` — `LevelChunk`/`EmptyLevelChunk`.
-    Full,
 }
 
 /// `net.minecraft.world.level.chunk.ChunkAccess` — the generic base value.
