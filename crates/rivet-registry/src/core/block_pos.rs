@@ -789,7 +789,7 @@ impl std::fmt::Display for BlockPos {
 /// ints[2])), pos -> IntStream.of(pos.getX(), pos.getY(), pos.getZ()))` then
 /// `.stable()`. The int stream is a `Vec<i32>` here (`get_int_stream`);
 /// `Util.fixedSize(input, 3)` (rivet-util `fixed_size_i32`) returns a
-/// `DataResult<Vec<i32>>` with the same "Input is not a list of 3 elements"
+/// `DataResult<Vec<i32>>` with the same "Input is not a list of 3 ints"
 /// error/partial semantics, mapped to a `BlockPos`; `codec::stable` applies
 /// the stable lifecycle like Java's `.stable()`. The `RivetTodo(#126)` on this
 /// module's header tracks the remaining `STREAM_CODEC`.
