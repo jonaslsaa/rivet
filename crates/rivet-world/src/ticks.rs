@@ -218,17 +218,9 @@ where
         .collect()
 }
 
-/// Execution/scheduling surfaces of `net.minecraft.world.ticks` remain
-/// deferred (#370 value layer only). `ScheduledTick`, `TickAccess`,
-/// `TickContainerAccess`, `SerializableTickContainer`, `LevelChunkTicks`,
-/// `ProtoChunkTicks`, `LevelTicks`, `WorldGenTickAccess`,
-/// `BlackholeTickAccess`, and `SavedTick.unpack` are not ported; nothing in
-/// this slice executes, schedules, generates, or writes ticks.
 // RivetTodo(#370): execution/scheduler surfaces of `net.minecraft.world.ticks`
 // (`ScheduledTick`, `LevelChunkTicks`, `ProtoChunkTicks`, ...) are deferred to
 // the tick-execution slice; this is the value/carry layer only.
-#[allow(dead_code)]
-fn _deferred_execution_surfaces() {}
 
 #[cfg(test)]
 mod tests {
