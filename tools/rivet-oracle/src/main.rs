@@ -120,6 +120,7 @@
 mod corpus;
 mod hash;
 mod hash_manifest;
+mod loaded_world;
 mod mutate;
 mod semantic_hash;
 
@@ -2450,6 +2451,29 @@ fn source_region_provenance(dir: &Path) -> Option<hash_manifest::CaptureProvenan
 /// FULL chunks are the_nether/0.0 and the_end/0.0. The single `dir` argument
 /// overrides both the payload source and the manifest destination (one tree):
 /// run it against a scratch copy of a different tree to hash that tree without
+/// Extract the loaded-world ground-truth manifest from a disposable world copy
+/// (issue #374). The extraction is strictly read-only — every region opens
+/// through a read descriptor, and an allocated corrupt chunk is a hard
+/// `InvalidData` error rather than an absent chunk. The manifest is printed as
+/// compact JSON (or written to `to` when given) for the `rivet-loaded-world`
+/// runner's PASS comparison and for the tamper negative controls.
+fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
+    let manifest = loaded_world::extract_world(world_dir).map_err(|e| match e {
+        loaded_world::ExtractError::Unverified(m) => Error::Unverified(m),
+        loaded_world::ExtractError::Gate(m) => Error::Gate(m),
+        loaded_world::ExtractError::Io(io) => Error::Io(io),
+    })?;
+    let json = serde_json::to_string(&manifest)
+        .map_err(|e| Error::Gate(format!("serializing loaded-world manifest: {e}")))?;
+    match to {
+        Some(path) => fs::write(path, json.as_bytes())
+            .map_err(Error::Io)
+            .map(|_| ())?,
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
 /// touching committed fixtures — e.g. a copy of the corpus-forced superflat-full
 /// capture reports its 8 FULL chunks per dimension (corpus seed 0,
 /// 5207638315753790570, `minecraft\:flat`, issue #51). Nothing is hardcoded;
@@ -3156,6 +3180,42 @@ fn run() -> Result<(), Error> {
             }
         }
         Some("sample") => regenerate_samples(),
+        Some("extract-world") => {
+            // Issue #374 ground-truth extraction: read a disposable world copy
+            // read-only and print the deterministic loaded-world manifest.
+            // `--to <path>` writes the manifest JSON to a file instead of
+            // stdout (the runner captures it for the PASS comparison).
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            let mut to: Option<PathBuf> = None;
+            let mut world_dir: Option<PathBuf> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--to" => {
+                        let Some(path) = rest.get(i + 1) else {
+                            return Err(Error::Gate(
+                                "extract-world --to requires a destination path".into(),
+                            ));
+                        };
+                        to = Some(PathBuf::from(path));
+                        i += 2;
+                    }
+                    other if !other.starts_with('-') => {
+                        world_dir = Some(PathBuf::from(other));
+                        i += 1;
+                    }
+                    other => {
+                        return Err(Error::Gate(format!(
+                            "extract-world: unknown option {other}"
+                        )));
+                    }
+                }
+            }
+            let world_dir = world_dir.ok_or_else(|| {
+                Error::Gate("extract-world requires a disposable world root directory".into())
+            })?;
+            run_extract_world(&world_dir, to.as_deref())
+        }
         Some("regenerate") => {
             // `--to <dir>` overrides the destination for a single booting kind
             // (regenerate into a scratch dir for gate validation before

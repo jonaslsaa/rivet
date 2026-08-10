@@ -242,8 +242,10 @@ pub struct RegionFile {
     /// `sync` — Java opens the FileChannel with `DSYNC` when set. Rivet
     /// emulates it with a `sync_data` after each `write_header`.
     sync: bool,
-    /// Existing-only mode used by region-backed boot. It forbids header
-    /// repair/backups and makes close descriptor-only.
+    /// Existing-only mode used by the loaded-world extractor and region-backed
+    /// boot. It forbids header repair/backups, treats an allocated corrupt
+    /// chunk as a hard `InvalidData` error rather than an absent chunk, and
+    /// makes close descriptor-only.
     read_only: bool,
     /// Legacy Aikar oversized flags loaded from `<region>.oversized.nbt`.
     /// `set_oversized` mutates them (mirroring Paper's `setOversized`); the
@@ -279,7 +281,8 @@ impl RegionFile {
     }
 
     /// Open an already-existing region through a read-only descriptor. Header
-    /// corruption is reported instead of repaired, backed up, or rewritten.
+    /// corruption is reported instead of repaired, backed up, or rewritten, so
+    /// a disposable-world extractor can never mutate the copy it reads.
     ///
     /// Read-only header validation is deliberately all-or-nothing: any single
     /// invalid or overlapping header slot rejects the entire region open,
@@ -315,7 +318,9 @@ impl RegionFile {
         // `FileChannel.open(path, CREATE, READ, WRITE)` — deliberately no
         // TRUNCATE_EXISTING: a re-open must read the existing header (Paper
         // `RegionFile` constructor), and the header is only written by
-        // `write_header`/`recalculate_header`.
+        // `write_header`/`recalculate_header`. The existing-only extractor
+        // instead opens a plain read descriptor, so the disposable copy can
+        // never be created, truncated, or modified.
         let file = if read_only {
             OpenOptions::new().read(true).open(&path)?
         } else {
@@ -487,6 +492,8 @@ impl RegionFile {
         self.recalculate_count
     }
 
+    /// Whether this region is the existing-only read descriptor used by the
+    /// loaded-world extractor and region-backed boot.
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
@@ -828,7 +835,8 @@ impl RegionFile {
     /// `finally`'s reason, so when both pad and force fail the **force** error
     /// is reported and the pad error discarded — the `force_result.and(...)`
     /// below mirrors that ordering; the close itself is a `drop` and cannot
-    /// fail.
+    /// fail. An existing-only region closes by releasing the descriptor only:
+    /// it never pads, fsyncs, or repairs.
     pub fn close(&mut self) -> io::Result<()> {
         if self.read_only {
             self.file.take();
@@ -1284,6 +1292,18 @@ impl RegionFile {
         self.file_mut().seek(SeekFrom::Start(sector * 4096))?;
         let _n = self.file_mut().read(&mut b)?;
         Ok(i32::from_be_bytes(b))
+    }
+
+    /// Refuse every write-side API on an existing-only region descriptor.
+    fn ensure_writable(&self) -> io::Result<()> {
+        if self.read_only {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("region {} is open read-only", self.path.display()),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// `backupRegionFile()` — `file.force(true)` then copy to

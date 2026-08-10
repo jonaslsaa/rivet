@@ -228,6 +228,7 @@ enum Subcommand {
     Kick,
     Capture,
     LoadWorld,
+    LoadedWorld,
     Help,
 }
 
@@ -322,6 +323,7 @@ impl Args {
                 "kick" => Subcommand::Kick,
                 "capture" => Subcommand::Capture,
                 "load-world" => Subcommand::LoadWorld,
+                "loaded-world" => Subcommand::LoadedWorld,
                 "--help" | "-h" | "help" => Subcommand::Help,
                 _ => return Err(format!("unknown subcommand: {sub}\n\n{}", usage())),
             };
@@ -628,6 +630,51 @@ impl Args {
             runs = 1;
         }
 
+        if command == Subcommand::LoadedWorld {
+            // `loaded-world` (issue #374) boots exactly one Rivet server against
+            // a disposable copy of the launcher world (`--level <copy>`),
+            // drives the loaded client, and compares its observed per-coordinate
+            // content against the read-only ground-truth manifest. Paper has no
+            // place here; `--pairs`/`--runs` would be silent no-ops.
+            if server_explicit && server != ServerSelection::Rivet {
+                return Err(format!(
+                    "loaded-world only supports --server rivet (Paper does not use Rivet's \
+                     world-path launch seam); got --server {}",
+                    server.as_str()
+                ));
+            }
+            server = ServerSelection::Rivet;
+            if pairs_explicit {
+                return Err(
+                    "loaded-world is a single-server acceptance probe and has no --pairs \
+                     comparison; drop it"
+                        .to_owned(),
+                );
+            }
+            if runs_explicit {
+                return Err(
+                    "loaded-world always performs exactly one Rivet launch + loaded client run, so \
+                     --runs is a silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if username_explicit {
+                return Err(
+                    "loaded-world does not take a client username override; --username is a silent \
+                     no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if timeout_explicit {
+                return Err(
+                    "loaded-world uses the client's default timeout; --timeout-seconds is a silent \
+                     no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            runs = 1;
+        }
+
         Ok(Self {
             command,
             server,
@@ -648,9 +695,9 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: run-scenario <join|move|dwell|kick|capture|load-world> [options]\n\
+        "Usage: run-scenario <join|move|dwell|kick|capture|load-world|loaded-world> [options]\n\
          Options:\n\
-         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick/load-world are always rivet)\n\
+         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick/load-world/loaded-world are always rivet)\n\
          \x20 --pairs paper:paper|paper:rivet\n\
          \x20                            comparison to run (default paper:paper)\n\
          \x20 --address HOST:PORT        server address (default {DEFAULT_ADDRESS})\n\
@@ -2722,6 +2769,289 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     probe_result
 }
 
+/// The official-client loaded-world acceptance probe (issue #374).
+///
+/// This is the honest successor to `load-world`: it makes and verifies a
+/// disposable copy of the launcher world, extracts its read-only ground-truth
+/// manifest (`rivet-oracle extract-world`), boots Rivet against the copy with
+/// `--level <copy>`, drives the real Azalea client in `loaded` mode (join,
+/// wait for chunk quiescence, sample the genuine per-coordinate block content
+/// the server served), and compares the client's observed content against the
+/// manifest.
+///
+/// The PASS contract is deliberately strict and honest:
+///
+/// - The client must actually join, spawn, and sample per-coordinate content
+///   (never a vacuous green) — `rivet_loaded_verdict` enforces the transcript
+///   boundary.
+/// - The sampled surface/bedrock/below_feet block names must match the
+///   ground-truth manifest at the same coordinates. A server that merely
+///   echoes repeated superflat bytes cannot match a genuine terrain chunk's
+///   distinct block set (verified: all 1369 FULL chunks in the launcher world
+///   have unique content signatures).
+/// - The disposable copy must be byte-for-byte unchanged after the run (the
+///   server must not mutate the loaded world), and the source world must be
+///   untouched.
+///
+/// Until the #339 world-loading capability lands, rivet-server rejects
+/// `--level` and the launch probe classifies that as UNVERIFIED (exit 3) —
+/// never a fabricated PASS.
+fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/scenario-loaded-world");
+    let source_path = load_world::resolve_source_world()?;
+    let source = load_world::SourceTree::open(&source_path)?;
+    load_world::validate_prospective_storage(&source, &work)?;
+    fs::create_dir_all(&work)?;
+
+    let source_before = source.fingerprint()?;
+    let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
+    let client_bin = ensure_client_binary()?;
+    let base = base_address(args)?;
+    let run_dir = work.join("rivet");
+    let log_path = work.join("rivet.log");
+    let mut temp = load_world::TempWorld::create(&source, &work)?;
+
+    let result = (|| -> Result<(), RunnerError> {
+        load_world::assert_copy_equals_source(&source_before, &temp.hash_tree()?)?;
+        let server_world_path = temp.server_path();
+
+        // Extract the read-only ground-truth manifest of the disposable copy
+        // BEFORE booting Rivet: the manifest is the per-coordinate world
+        // content the client's observed samples must match.
+        let manifest = run_extract_world(&server_world_path, &work)?;
+
+        println!("rivet scenario runner: loaded-world (#374 official-client acceptance)");
+        println!(
+            "    source world      : {} (read only; never passed to a server)",
+            source.configured_path().display()
+        );
+        println!("    disposable copy  : {}", temp.path().display());
+        println!(
+            "    ground-truth      : {} FULL chunks, {} non-FULL (manifest)",
+            manifest["full_count"], manifest["non_full_count"]
+        );
+        println!("    rivet-server bin : {}", rivet_bin.display());
+        println!(
+            "    launch seam      : {} <disposable-copy>",
+            server::WORLD_PATH_ARG
+        );
+        println!();
+
+        // Boot Rivet against the disposable copy. Until #339 lands the server
+        // rejects `--level` and the probe classifies that as UNVERIFIED.
+        let mut srv = match server::boot(
+            server::ServerKind::Rivet,
+            &run_dir,
+            &log_path,
+            &rivet_bin,
+            None,
+            None,
+            base,
+            None,
+            &[],
+            Some(&server_world_path),
+        ) {
+            Ok(srv) => srv,
+            Err(error) => return Err(classify_loaded_world_boot_failure(error, &log_path)),
+        };
+
+        // Drive the real Azalea client in loaded mode against the booted server.
+        let client_run = run_client(
+            &client_bin,
+            &ClientSpec {
+                address: base.to_string(),
+                username: args.username.clone(),
+                timeout_seconds: args.timeout_seconds,
+                dwell_seconds: 0,
+                mode: "loaded".to_owned(),
+            },
+            &work,
+            "loaded-client",
+        )?;
+
+        server::shutdown(&mut srv)?;
+
+        // Prove the client genuinely reached the Rivet port.
+        verify_rivet_connection(&log_path)?;
+
+        // The client transcript must prove it joined, spawned, and sampled
+        // genuine per-coordinate content.
+        let transcript = transcript::normalize_loaded(&client_run.stdout_text)
+            .map_err(RunnerError::Transcript)?;
+        let boundary =
+            transcript::rivet_loaded_verdict(&transcript).map_err(RunnerError::Transcript)?;
+
+        // Compare the client's observed block content against the ground-truth
+        // manifest. This is the load-bearing comparison: a server that only
+        // echoes repeated superflat bytes fails here.
+        compare_loaded_content(&manifest, &transcript)?;
+
+        println!("\nLoaded-world acceptance boundary reached: {boundary}");
+        Ok(())
+    })();
+
+    // Run all safety checks even when the acceptance returns UNVERIFIED: an
+    // untouched source and an unchanged disposable copy are mandatory on every
+    // exit path.
+    let copy_check = temp
+        .hash_tree()
+        .and_then(|after| load_world::assert_copy_equals_source(&source_before, &after));
+    let source_check = source.verify_unchanged(&source_before);
+    let cleanup = temp.cleanup();
+
+    source_check?;
+    copy_check?;
+    cleanup?;
+    result
+}
+
+/// Invoke `rivet-oracle extract-world <world> --to <json>` and parse the
+/// ground-truth manifest into a `serde_json::Value`.
+fn run_extract_world(world: &Path, work: &Path) -> Result<Value, RunnerError> {
+    let oracle_bin = crate_root().join("../../target/debug/rivet-oracle");
+    let out = work.join("loaded-manifest.json");
+    let status = Command::new(&oracle_bin)
+        .args(["extract-world"])
+        .arg(world)
+        .args(["--to"])
+        .arg(&out)
+        .status()
+        .map_err(|e| {
+            RunnerError::Gate(format!(
+                "failed to run rivet-oracle extract-world ({}): {e} — build it first with \
+                 cargo build -p rivet-oracle",
+                oracle_bin.display()
+            ))
+        })?;
+    if !status.success() {
+        return Err(RunnerError::Unverified(format!(
+            "rivet-oracle extract-world exited with {status}; see {}",
+            out.display()
+        )));
+    }
+    let text = fs::read_to_string(&out)?;
+    let manifest: Value = serde_json::from_str(&text).map_err(RunnerError::Json)?;
+    let full_count = manifest["chunks"]
+        .as_object()
+        .map(|m| {
+            m.values()
+                .filter(|c| c.get("status").and_then(Value::as_str) == Some("minecraft:full"))
+                .count()
+        })
+        .unwrap_or(0);
+    let non_full_count = manifest["chunks"]
+        .as_object()
+        .map(|m| m.len().saturating_sub(full_count))
+        .unwrap_or(0);
+    let mut out = manifest;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("full_count".to_owned(), json!(full_count));
+        obj.insert("non_full_count".to_owned(), json!(non_full_count));
+    }
+    Ok(out)
+}
+
+/// Compare the client's observed per-coordinate block content against the
+/// ground-truth manifest. The `loaded` record's `samples` carry
+/// `surface`/`bedrock`/`below_feet` block names at world coordinates; the
+/// manifest's per-chunk `surface`/`bedrock`/`below_feet` arrays are keyed by
+/// `"<chunk_x>,<chunk_z>"` and indexed `z*16+x` (row-major with the sample
+/// point at the chunk center offset `(8,8)`).
+///
+/// A sample whose chunk is absent from the manifest, or whose observed block
+/// name differs from ground truth, is a FAIL — the server did not serve the
+/// loaded world (or served content that does not match the read-only copy).
+fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), RunnerError> {
+    let chunks = manifest["chunks"]
+        .as_object()
+        .ok_or_else(|| RunnerError::Gate("loaded-world manifest has no chunks map".to_owned()))?;
+    let samples = transcript["loaded"]["samples"]
+        .as_array()
+        .ok_or_else(|| RunnerError::Transcript("loaded record has no samples".to_owned()))?;
+
+    if samples.is_empty() {
+        return Err(RunnerError::Transcript(
+            "loaded record has no samples; the client sampled no content".to_owned(),
+        ));
+    }
+
+    let mut checked = 0usize;
+    for sample in samples {
+        let chunk_x = sample["chunk_x"]
+            .as_i64()
+            .ok_or_else(|| RunnerError::Transcript("sample missing chunk_x".to_owned()))?;
+        let chunk_z = sample["chunk_z"]
+            .as_i64()
+            .ok_or_else(|| RunnerError::Transcript("sample missing chunk_z".to_owned()))?;
+        let key = format!("{chunk_x},{chunk_z}");
+        let fingerprint = chunks.get(&key).ok_or_else(|| {
+            RunnerError::Gate(format!(
+                "loaded-world manifest has no chunk {key} but the client sampled it — the \
+                     server served a chunk outside the ground-truth world"
+            ))
+        })?;
+        // The manifest stores surface/bedrock/below_feet as 16×16 arrays
+        // indexed row-major `z*16+x`. The client samples the chunk center
+        // offset (8,8), so the index is `8*16+8 = 136`.
+        const CENTER: usize = 8 * 16 + 8;
+        let manifest_surface = fingerprint["surface"][CENTER]
+            .as_str()
+            .unwrap_or("minecraft:air");
+        let manifest_bedrock = fingerprint["bedrock"][CENTER]
+            .as_str()
+            .unwrap_or("minecraft:air");
+        let manifest_below = fingerprint["below_feet"][CENTER]
+            .as_str()
+            .unwrap_or("minecraft:air");
+        let observed_surface = sample["surface"].as_str().unwrap_or("minecraft:air");
+        let observed_bedrock = sample["bedrock"].as_str().unwrap_or("minecraft:air");
+        let observed_below = sample["below_feet"].as_str().unwrap_or("minecraft:air");
+
+        let surface_match = observed_surface == manifest_surface;
+        let bedrock_match = observed_bedrock == manifest_bedrock;
+        let below_match = observed_below == manifest_below;
+        if !(surface_match && bedrock_match && below_match) {
+            return Err(RunnerError::Gate(format!(
+                "loaded-world content mismatch at chunk {key} (sample {},{}, center): \
+                 observed surface={observed_surface} bedrock={observed_bedrock} \
+                 below_feet={observed_below}; ground truth surface={manifest_surface} \
+                 bedrock={manifest_bedrock} below_feet={manifest_below}",
+                sample["sample_x"].as_i64().unwrap_or(chunk_x * 16),
+                sample["sample_z"].as_i64().unwrap_or(chunk_z * 16),
+            )));
+        }
+        checked += 1;
+    }
+
+    println!("\n    verified {checked} sampled chunks against the ground-truth manifest");
+    Ok(())
+}
+
+/// Map the loaded-world launch probe failure. `Gate`/`Io` before spawn remain
+/// hard; a post-spawn UNVERIFIED (server rejected `--level`) is classified
+/// through the probe classifier and reported as UNVERIFIED — the #339
+/// capability boundary.
+fn classify_loaded_world_boot_failure(error: server::Error, log_path: &Path) -> RunnerError {
+    let boot_error = match error {
+        server::Error::Unverified(message) => message,
+        error @ (server::Error::Gate(_) | server::Error::Io(_)) => return error.into(),
+    };
+    let log = fs::read_to_string(log_path).unwrap_or_default();
+    match server::classify_probe(false, &log) {
+        server::ProbeVerdict::Absent { evidence } => RunnerError::Unverified(format!(
+            "loaded-world acceptance is UNVERIFIED: rivet-server has no world-loading capability \
+             yet (#339); launch evidence: {evidence}"
+        )),
+        server::ProbeVerdict::FailedToBoot { evidence } => RunnerError::Unverified(format!(
+            "loaded-world acceptance is UNVERIFIED: the launch probe did not reach READY and did \
+             not prove the expected missing #339 interface ({boot_error}); last log evidence: \
+             {evidence}"
+        )),
+        server::ProbeVerdict::Present => unreachable!("the failed boot did not reach READY"),
+    }
+}
+
 /// Map only the post-spawn READY/exit `Unverified` result through the
 /// world-path probe classifier. `Gate` and `Io` can happen before a child is
 /// spawned (run-dir preparation or `Command::spawn`) and must remain hard
@@ -2761,6 +3091,7 @@ fn main() -> ExitCode {
         Subcommand::Kick => run_kick(&args),
         Subcommand::Capture => run_capture(&args),
         Subcommand::LoadWorld => run_load_world(&args),
+        Subcommand::LoadedWorld => run_loaded_world(&args),
         Subcommand::Help => {
             println!("{}", usage());
             Ok(())
@@ -2808,6 +3139,149 @@ mod tests {
         assert!(parse(&["load-world", "--dwell-seconds", "35"]).is_err());
         assert!(parse(&["load-world", "--username", DEFAULT_USERNAME]).is_err());
         assert!(parse(&["load-world", "--timeout-seconds", "40"]).is_err());
+    }
+
+    #[test]
+    fn loaded_world_is_a_single_rivet_acceptance_with_no_silent_options() {
+        // `loaded-world` (#374) boots exactly one Rivet server against a
+        // disposable world copy and drives the loaded client; Paper has no
+        // place, and --pairs/--runs would be silent no-ops.
+        let args = parse(&["loaded-world"]).unwrap();
+        assert_eq!(args.command, Subcommand::LoadedWorld);
+        assert_eq!(args.server, ServerSelection::Rivet);
+        assert_eq!(args.runs, 1);
+
+        assert!(parse(&["loaded-world", "--server", "rivet"]).is_ok());
+        assert!(parse(&["loaded-world", "--server", "paper"]).is_err());
+        assert!(parse(&["loaded-world", "--server", "both"]).is_err());
+        assert!(parse(&["loaded-world", "--pairs", "paper:rivet"]).is_err());
+        assert!(parse(&["loaded-world", "--runs", "1"]).is_err());
+        assert!(parse(&["loaded-world", "--dwell-seconds", "35"]).is_err());
+        assert!(parse(&["loaded-world", "--username", DEFAULT_USERNAME]).is_err());
+        assert!(parse(&["loaded-world", "--timeout-seconds", "40"]).is_err());
+    }
+
+    /// A minimal ground-truth manifest with one FULL chunk (0,0) carrying a
+    /// genuine terrain signature at the center sample index.
+    fn manifest_with(
+        chunk_x: i32,
+        chunk_z: i32,
+        surface: &str,
+        bedrock: &str,
+        below: &str,
+    ) -> Value {
+        let mut surface_arr = vec!["minecraft:air".to_owned(); 256];
+        let mut bedrock_arr = vec!["minecraft:air".to_owned(); 256];
+        let mut below_arr = vec!["minecraft:air".to_owned(); 256];
+        // Center sample index: z*16+x = 8*16+8.
+        surface_arr[8 * 16 + 8] = surface.to_owned();
+        bedrock_arr[8 * 16 + 8] = bedrock.to_owned();
+        below_arr[8 * 16 + 8] = below.to_owned();
+        json!({
+            "chunks": {
+                format!("{chunk_x},{chunk_z}"): {
+                    "status": "minecraft:full",
+                    "stored_pos": [chunk_x, chunk_z],
+                    "capability_flags": [],
+                    "distinct": [surface, bedrock, below],
+                    "surface": surface_arr,
+                    "bedrock": bedrock_arr,
+                    "below_feet": below_arr,
+                    "distinct_state_ids": 3,
+                    "section_count": 24,
+                }
+            }
+        })
+    }
+
+    fn loaded_transcript_with(sample: Value) -> Value {
+        json!({
+            "loaded": { "samples": [sample] }
+        })
+    }
+
+    fn matching_sample(chunk_x: i32, chunk_z: i32) -> Value {
+        json!({
+            "chunk_x": chunk_x,
+            "chunk_z": chunk_z,
+            "sample_x": chunk_x * 16 + 8,
+            "sample_z": chunk_z * 16 + 8,
+            "surface": "minecraft:grass_block",
+            "bedrock": "minecraft:bedrock",
+            "below_feet": "minecraft:stone",
+        })
+    }
+
+    #[test]
+    fn compare_loaded_content_passes_when_observed_matches_ground_truth() {
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_ok(),
+            "a genuine per-coordinate match must pass"
+        );
+    }
+
+    #[test]
+    fn compare_loaded_content_fails_on_a_content_mismatch() {
+        // The client observed a different surface than the ground truth — the
+        // anti-superflat negative: a server that echoes repeated superflat
+        // bytes cannot match a genuine terrain chunk.
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let mut sample = matching_sample(0, 0);
+        sample["surface"] = json!("minecraft:stone");
+        let transcript = loaded_transcript_with(sample);
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_err(),
+            "an observed content mismatch must fail"
+        );
+    }
+
+    #[test]
+    fn compare_loaded_content_fails_on_a_chunk_outside_the_manifest() {
+        // The client sampled a chunk the ground-truth manifest has no record
+        // of — the server served content that is not in the loaded world.
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let transcript = loaded_transcript_with(matching_sample(5, 5));
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_err(),
+            "a sample outside the manifest must fail"
+        );
+    }
+
+    #[test]
+    fn compare_loaded_content_fails_on_empty_samples() {
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let mut transcript = loaded_transcript_with(json!({}));
+        transcript["loaded"]["samples"] = json!([]);
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_err(),
+            "an empty sample set must fail (never a vacuous pass)"
+        );
     }
 
     #[test]
