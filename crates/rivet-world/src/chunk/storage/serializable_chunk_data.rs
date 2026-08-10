@@ -30,6 +30,7 @@ use rivet_registry::block_entity_type::BlockEntityType;
 use rivet_registry::core::{BlockPos, ChunkPos};
 use rivet_registry::generated::blocks::BLOCK_BY_NAME;
 use rivet_registry::generated::registries::FLUID_BY_NAME;
+use rivet_registry::identifier::Identifier;
 
 pub const HEIGHTMAPS_TAG: &str = "Heightmaps";
 pub const IS_LIGHT_ON_TAG: &str = "isLightOn";
@@ -735,13 +736,16 @@ fn decode_saved_tick_position(tick: &CompoundTag) -> Option<ChunkPos> {
 }
 
 /// Paper's top-level `BLOCK_TICKS_CODEC`: retain successful `ListCodec`
-/// siblings, reject unknown block ids, then keep only this chunk's ticks.
+/// siblings, normalize valid identifiers before registry lookup, reject
+/// malformed or unknown block ids, then keep only this chunk's ticks.
 fn block_ticks_decode_non_empty(list: &ListTag, stored_pos: ChunkPos) -> bool {
     list.list.iter().any(|entry| {
         let Tag::Compound(tick) = entry else {
             return false;
         };
         tick.get_string("i")
+            .and_then(|id| Identifier::by_separator_result(id, ':').ok())
+            .map(|id| id.to_string())
             .filter(|id| BLOCK_BY_NAME.contains_key(id.as_str()))
             .and_then(|_| decode_saved_tick_position(tick))
             == Some(stored_pos)
@@ -749,13 +753,16 @@ fn block_ticks_decode_non_empty(list: &ListTag, stored_pos: ChunkPos) -> bool {
 }
 
 /// Paper's top-level `FLUID_TICKS_CODEC`: the fluid registry is distinct from
-/// the block registry, so block ids and unknown ids fail only their element.
+/// the block registry, so malformed, block, and unknown ids fail only their
+/// element after valid identifiers have been normalized.
 fn fluid_ticks_decode_non_empty(list: &ListTag, stored_pos: ChunkPos) -> bool {
     list.list.iter().any(|entry| {
         let Tag::Compound(tick) = entry else {
             return false;
         };
         tick.get_string("i")
+            .and_then(|id| Identifier::by_separator_result(id, ':').ok())
+            .map(|id| id.to_string())
             .filter(|id| FLUID_BY_NAME.contains_key(id.as_str()))
             .and_then(|_| decode_saved_tick_position(tick))
             == Some(stored_pos)
@@ -2125,6 +2132,70 @@ mod tests {
             chunk.put(
                 field.into(),
                 Tag::List(ListTag::with_list(vec![Tag::Compound(tick)])),
+            );
+            assert_eq!(
+                SerializableChunkData::parse(height, &chunk)
+                    .unwrap()
+                    .unwrap()
+                    .validate_full_construction(24),
+                Ok(()),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn top_level_tick_codecs_normalize_unqualified_identifiers() {
+        let height = height_accessor::create(-64, 384);
+
+        for (field, unqualified_valid) in [
+            ("block_ticks", saved_tick_with_id("stone", 0, 0)),
+            ("fluid_ticks", saved_tick_with_id("water", 0, 0)),
+        ] {
+            let mut chunk = top_level("minecraft:full");
+            chunk.put(
+                field.into(),
+                Tag::List(ListTag::with_list(vec![
+                    Tag::Compound(saved_tick_with_id("not valid", 0, 0)),
+                    Tag::Compound(unqualified_valid),
+                ])),
+            );
+            assert_eq!(
+                SerializableChunkData::parse(height, &chunk)
+                    .unwrap()
+                    .unwrap()
+                    .validate_full_construction(24),
+                Err(SerializableChunkDataError::UnsupportedTicks { field })
+            );
+        }
+
+        for (field, relocated) in [
+            ("block_ticks", saved_tick_with_id("stone", 16, 0)),
+            ("fluid_ticks", saved_tick_with_id("water", 0, -16)),
+        ] {
+            let mut chunk = top_level("minecraft:full");
+            chunk.put(
+                field.into(),
+                Tag::List(ListTag::with_list(vec![Tag::Compound(relocated)])),
+            );
+            assert_eq!(
+                SerializableChunkData::parse(height, &chunk)
+                    .unwrap()
+                    .unwrap()
+                    .validate_full_construction(24),
+                Ok(()),
+                "{field}"
+            );
+        }
+
+        for (field, unknown) in [
+            ("block_ticks", saved_tick_with_id("not_a_block", 0, 0)),
+            ("fluid_ticks", saved_tick_with_id("not_a_fluid", 0, 0)),
+        ] {
+            let mut chunk = top_level("minecraft:full");
+            chunk.put(
+                field.into(),
+                Tag::List(ListTag::with_list(vec![Tag::Compound(unknown)])),
             );
             assert_eq!(
                 SerializableChunkData::parse(height, &chunk)
