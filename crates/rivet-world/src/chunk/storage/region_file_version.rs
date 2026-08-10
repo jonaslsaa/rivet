@@ -295,6 +295,7 @@ impl<R: Read> Lz4BlockInputStream<R> {
         ) && original_length <= max_original_length
             && original_length >= 0
             && compressed_length >= 0
+            && compressed_length <= max_original_length
             && ((original_length == 0) == (compressed_length == 0))
             && (compression_method != LZ4_COMPRESSION_METHOD_RAW
                 || compressed_length == original_length);
@@ -318,8 +319,10 @@ impl<R: Read> Lz4BlockInputStream<R> {
             return Ok(false);
         }
 
-        let compressed_length = compressed_length as usize;
-        let original_length = original_length as usize;
+        let compressed_length = usize::try_from(compressed_length)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Stream is corrupted"))?;
+        let original_length = usize::try_from(original_length)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Stream is corrupted"))?;
 
         let mut compressed = vec![0u8; compressed_length];
         self.input.read_exact(&mut compressed)?;
@@ -431,6 +434,79 @@ mod tests {
     /// Serializes the `configure`-mutating tests: `SELECTED_ID` is process
     /// global, and the test harness runs tests in parallel.
     static SELECTION_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lz4_header(token: u8, compressed_length: i32, original_length: i32) -> Vec<u8> {
+        let mut header = Vec::with_capacity(LZ4_HEADER_LENGTH);
+        header.extend_from_slice(LZ4_MAGIC);
+        header.push(token);
+        header.extend_from_slice(&compressed_length.to_le_bytes());
+        header.extend_from_slice(&original_length.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes());
+        header
+    }
+
+    fn read_lz4_error(input: &[u8]) -> io::Error {
+        let mut reader = RegionFileVersion::VERSION_LZ4.wrap_input(input).unwrap();
+        reader.read_to_end(&mut Vec::new()).unwrap_err()
+    }
+
+    #[test]
+    fn lz4_rejects_oversized_compressed_length_before_reading_payload() {
+        let mut near_i32_max = lz4_header(LZ4_COMPRESSION_METHOD_LZ4, i32::MAX - 1, 1);
+        near_i32_max.push(0);
+
+        let err = read_lz4_error(&near_i32_max);
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn lz4_length_validation_precedes_truncation_errors() {
+        let max_block_length = 1i32 << LZ4_COMPRESSION_LEVEL_BASE;
+
+        let invalid = lz4_header(
+            LZ4_COMPRESSION_METHOD_LZ4,
+            max_block_length + 1,
+            max_block_length,
+        );
+        assert_eq!(
+            read_lz4_error(&invalid).kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let valid_but_truncated = lz4_header(
+            LZ4_COMPRESSION_METHOD_RAW,
+            max_block_length,
+            max_block_length,
+        );
+        assert_eq!(
+            read_lz4_error(&valid_but_truncated).kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn lz4_reads_raw_blocks_at_declared_length_boundaries() {
+        let block_length = 1usize << LZ4_COMPRESSION_LEVEL_BASE;
+        let payloads = [vec![0x41], vec![0x5a; block_length]];
+        let mut stream = Vec::new();
+        for payload in &payloads {
+            let length = payload.len() as i32;
+            let mut header = lz4_header(LZ4_COMPRESSION_METHOD_RAW, length, length);
+            header[17..21].copy_from_slice(
+                &xxhash_rust::xxh32::xxh32(payload, LZ4_COMPRESSION_SEED).to_le_bytes(),
+            );
+            stream.extend_from_slice(&header);
+            stream.extend_from_slice(payload);
+        }
+        stream.extend_from_slice(&lz4_header(LZ4_COMPRESSION_METHOD_RAW, 0, 0));
+
+        let mut reader = RegionFileVersion::VERSION_LZ4
+            .wrap_input(stream.as_slice())
+            .unwrap();
+        let mut decoded = Vec::new();
+        reader.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, payloads.concat());
+    }
 
     #[test]
     fn default_is_deflate() {
