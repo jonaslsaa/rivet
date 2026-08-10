@@ -46,7 +46,6 @@ import gzip
 import hashlib
 import json
 import os
-import re
 import shutil
 import struct
 import sys
@@ -68,8 +67,6 @@ CORPUS: list[tuple[int, int, str]] = [
     (-19, -21, "chest-block-entity"),
 ]
 
-ROLE_NAMES = {role for _, _, role in CORPUS}
-
 # Paper pin of the save window (matches the M0/M2 fixture pin).
 PAPER_PIN = "26.2-DEV-main@0a99345"
 PAPER_COMMIT = "0a993450f129c4942c2a9ed45ba047412b4667cf"
@@ -78,7 +75,6 @@ DATA_VERSION = 4903
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = SCRIPT_DIR.parent / "fixtures" / "loaded-world"
-CHUNK_DIR = FIXTURES_DIR / "chunk"
 FINGERPRINT_FILE = "source-fingerprint.txt"
 MANIFEST_FILE = "manifest.json"
 REGION_DIR_REL = "dimensions/minecraft/overworld/region"
@@ -218,7 +214,7 @@ def chunk_path(wx: int, wz: int) -> str:
     return f"chunk/{wx}.{wz}.nbt"
 
 
-def build_manifest(captured: list[dict], source: Path, fingerprint: str) -> dict:
+def build_manifest(captured: list[dict]) -> dict:
     return {
         "format": 1,
         "kind": "loaded-world",
@@ -326,7 +322,7 @@ def cmd_extract(source: Path) -> int:
         )
     captured.sort(key=lambda c: c["path"])
 
-    manifest = build_manifest(captured, src, fingerprint_lines(before))
+    manifest = build_manifest(captured)
     (fixtures_dir / MANIFEST_FILE).write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )
