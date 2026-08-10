@@ -41,7 +41,10 @@ use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
-use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, StateFlags, Types, WORLDGEN_HEIGHTMAPS};
+use crate::levelgen::heightmap::{
+    FINAL_HEIGHTMAPS, Heightmap, StateFlags, Types, WORLDGEN_HEIGHTMAPS,
+};
+use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
 
@@ -163,6 +166,36 @@ where
     /// `ProtoChunk.getHeight()`.
     pub fn get_height(&self) -> i32 {
         self.base.get_height()
+    }
+
+    /// The inherited `ChunkAccess.getHeightmaps()` storage.
+    pub fn heightmaps(&self) -> &[Option<Heightmap>; 6] {
+        self.base.heightmaps()
+    }
+
+    /// The inherited `ChunkAccess.setHeightmap(Types, long[])` load path.
+    pub fn set_heightmap(&mut self, key: Types, data: &[i64]) {
+        self.base.set_heightmap(key, data);
+    }
+
+    /// `StarlightChunk.starlight$getBlockNibbles()`.
+    pub fn block_nibbles(&self) -> &[SwmrNibbleArray] {
+        self.base.block_nibbles()
+    }
+
+    /// `StarlightChunk.starlight$setBlockNibbles(SWMRNibbleArray[])`.
+    pub fn set_block_nibbles(&mut self, nibbles: Vec<SwmrNibbleArray>) {
+        self.base.set_block_nibbles(nibbles);
+    }
+
+    /// `StarlightChunk.starlight$getSkyNibbles()`.
+    pub fn sky_nibbles(&self) -> &[SwmrNibbleArray] {
+        self.base.sky_nibbles()
+    }
+
+    /// `StarlightChunk.starlight$setSkyNibbles(SWMRNibbleArray[])`.
+    pub fn set_sky_nibbles(&mut self, nibbles: Vec<SwmrNibbleArray>) {
+        self.base.set_sky_nibbles(nibbles);
     }
 
     /// `ProtoChunk.getSections()`.
