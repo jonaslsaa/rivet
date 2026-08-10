@@ -38,6 +38,7 @@ pub mod random;
 pub mod simple_bit_storage;
 pub mod string_representable;
 pub mod util;
+pub mod weighted;
 pub mod worldgen_random;
 pub mod zero_bit_storage;
 
@@ -60,6 +61,7 @@ pub use util::{
     LazyValueMap, fixed_size, fixed_size_i32, fixed_size_i64, get_random, get_random_safe,
     log_and_pause_if_in_ide, shuffle, shuffled_copy,
 };
+pub use weighted::{Weighted, WeightedList, WeightedListBuilder, WeightedRandom};
 pub use worldgen_random::{Algorithm, WorldgenRandom};
 
 /// `Mth.floor(float v)` = `(int)Math.floor(v)`. Rust's `as` saturates and maps

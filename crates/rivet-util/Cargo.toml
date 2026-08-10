@@ -12,3 +12,8 @@ crc32c = { workspace = true }
 md5 = { workspace = true }
 sha2 = { workspace = true }
 rivet-serialization = { workspace = true }
+
+[dev-dependencies]
+# The `weighted` codec tests (issue #353) decode/encode through
+# `JsonOps::INSTANCE` (serde_json::Value backed).
+serde_json = { workspace = true }
