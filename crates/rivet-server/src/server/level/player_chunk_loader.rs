@@ -62,6 +62,7 @@ use rivet_registry::core::ChunkPos;
 use rivet_registry::registries::BlockEntityType;
 
 use super::chunk_tracking_view::ChunkTrackingView;
+use super::server_level::MissingChunkPolicy;
 use super::server_level::ServerLevel;
 
 // `ServerChunkCache.setSendViewDistance` + `ChunkMap.setServerViewDistance` map
@@ -356,7 +357,7 @@ impl PlayerChunkLoader {
 fn encode_chunk_with_light(pos: ChunkPos, world: &ServerLevel) -> Result<Vec<u8>, String> {
     let chunk = match world.chunk_map().get_chunk(pos) {
         Some(chunk) => chunk,
-        None if !world.allows_missing_chunk_fallback() => {
+        None if world.missing_chunk_policy() == MissingChunkPolicy::RequireLoaded => {
             return Err(format!(
                 "UNVERIFIED region-backed chunk {pos} is not loaded; generation and superflat fallback are disabled"
             ));
@@ -458,7 +459,7 @@ mod tests {
     #[test]
     fn region_backed_policy_rejects_missing_chunk_without_spawn_fallback() {
         let world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
-            allow_missing_chunk_fallback: false,
+            missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
             ..Default::default()
         });
         let error = encode_chunk_with_light(ChunkPos::new(1, 0), &world).unwrap_err();

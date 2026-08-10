@@ -32,4 +32,4 @@ pub use player_chunk_loader::{
 pub use region_backed::{
     RegionBackedBootError, RegionChunkSource, RegionLevelPreparation, RegionWorldLayout,
 };
-pub use server_level::{ServerLevel, ServerLevelConfig, overworld_dimension};
+pub use server_level::{MissingChunkPolicy, ServerLevel, ServerLevelConfig, overworld_dimension};

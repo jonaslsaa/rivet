@@ -39,6 +39,15 @@ use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
 use super::chunk_map::ChunkMap;
 use super::chunk_tracking_view::ChunkTrackingView;
 
+/// How the player send path handles a position absent from `ChunkMap`.
+/// Repeating spawn content is confined to the legacy no-level fixture;
+/// region-backed worlds require an actually loaded coordinate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissingChunkPolicy {
+    RepeatSpawnFixture,
+    RequireLoaded,
+}
+
 /// `Level.OVERWORLD` — `ResourceKey.create(Registries.DIMENSION,
 /// Identifier.withDefaultNamespace("overworld"))`.
 pub fn overworld_dimension() -> ResourceKey<Level> {
@@ -76,7 +85,7 @@ pub struct ServerLevelConfig {
     /// Whether absent view chunks may repeat the deterministic spawn content.
     /// This is only true for the legacy no-level superflat fixture; a
     /// region-backed level must fail instead of synthesizing disk data.
-    pub allow_missing_chunk_fallback: bool,
+    pub missing_chunk_policy: MissingChunkPolicy,
 }
 
 impl Default for ServerLevelConfig {
@@ -93,7 +102,7 @@ impl Default for ServerLevelConfig {
             respawn_data: RespawnData::of(dimension.clone(), spawn_pos, 0.0, 0.0),
             view_distance: 4,
             simulation_distance: 4,
-            allow_missing_chunk_fallback: true,
+            missing_chunk_policy: MissingChunkPolicy::RepeatSpawnFixture,
         }
     }
 }
@@ -119,7 +128,7 @@ pub struct ServerLevel {
     /// The simulation distance (the Moonrise world `tickViewDistance` driver;
     /// the M1 world pins it to the `simulation-distance=4` fixture).
     simulation_distance: i32,
-    allow_missing_chunk_fallback: bool,
+    missing_chunk_policy: MissingChunkPolicy,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
     /// would cross threads.
@@ -147,7 +156,7 @@ impl ServerLevel {
             chunk_map,
             view,
             simulation_distance: config.simulation_distance,
-            allow_missing_chunk_fallback: config.allow_missing_chunk_fallback,
+            missing_chunk_policy: config.missing_chunk_policy,
             _confinement: std::marker::PhantomData,
         }
     }
@@ -235,8 +244,8 @@ impl ServerLevel {
 
     /// Whether the legacy no-level fixture may repeat spawn content for an
     /// unloaded position. Region-backed composition sets this to false.
-    pub fn allows_missing_chunk_fallback(&self) -> bool {
-        self.allow_missing_chunk_fallback
+    pub fn missing_chunk_policy(&self) -> MissingChunkPolicy {
+        self.missing_chunk_policy
     }
 }
 
