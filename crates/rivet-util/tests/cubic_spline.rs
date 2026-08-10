@@ -133,7 +133,7 @@ fn golden_case(name: &str) -> GoldenCase {
 }
 
 /// Assert Rust's parity string matches the fixture's (modulo the coordinate
-/// token). `msg` names the test.
+/// token).
 fn assert_parity(spline: &CubicSpline<Identity>, want: &str) {
     assert_eq!(
         normalize_coordinate(&spline.parity_string()),
