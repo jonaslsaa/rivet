@@ -392,8 +392,10 @@ def cmd_verify(source: Path) -> int:
 
 def cmd_expect_fail(source: Path, scratch: Path) -> int:
     """Negative control: a missing and a tampered fixture must both be detected
-    and named by static verification. Operates on a scratch copy, never the
-    committed fixtures."""
+    and named by static verification, and a tampered source fingerprint must be
+    flagged by the live comparison. Operates on a scratch copy / in memory —
+    never the committed fixtures and never the source tree."""
+    src = resolve_source(source)
     fixtures_dir = FIXTURES_DIR
     manifest = load_committed_manifest(fixtures_dir)
     if scratch.exists():
@@ -421,6 +423,21 @@ def cmd_expect_fail(source: Path, scratch: Path) -> int:
         )
     print("negative control: missing fixture detected: OK")
     print("negative control: tampered fixture detected: OK")
+
+    # Source-fingerprint negative: a tampered committed baseline must be flagged
+    # by the live source comparison (in memory; never mutating the committed
+    # fingerprint file or the source).
+    fp_path = fixtures_dir / FINGERPRINT_FILE
+    if not fp_path.is_file():
+        raise SystemExit(f"FAIL: committed source fingerprint missing: {fp_path}")
+    committed_lines = parse_fingerprint(fp_path.read_text())
+    tampered_baseline = committed_lines[:]
+    rel, h = tampered_baseline[0]
+    tampered_baseline[0] = (rel, ("0" if h[0] != "0" else "1") + h[1:])
+    fp_errors = verify_source_fingerprint(src, tampered_baseline)
+    if not fp_errors:
+        raise SystemExit("FAIL: tampered source fingerprint was not detected")
+    print("negative control: tampered source fingerprint detected: OK")
     return 0
 
 
