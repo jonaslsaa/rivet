@@ -2870,7 +2870,10 @@ fn mismatch_set_names_exactly(
     cx: i32,
     cz: i32,
 ) -> bool {
-    !mismatches.is_empty() && mismatches.iter().all(|m| m.dim == dim && (m.cx, m.cz) == (cx, cz))
+    !mismatches.is_empty()
+        && mismatches
+            .iter()
+            .all(|m| m.dim == dim && (m.cx, m.cz) == (cx, cz))
 }
 
 /// `<dim>/<cx>.<cz>` for a coordinate in hash-diff output.
@@ -4984,7 +4987,12 @@ mod tests {
         };
         assert!(!mismatch_set_names_exactly(&[other_dim], "overworld", 7, 7));
         // The tampered chunk plus an unrelated one: FAIL (not *exactly*).
-        assert!(!mismatch_set_names_exactly(&[t(7, 7), t(8, 8)], "overworld", 7, 7));
+        assert!(!mismatch_set_names_exactly(
+            &[t(7, 7), t(8, 8)],
+            "overworld",
+            7,
+            7
+        ));
     }
 
     /// `hash-paper` against a missing payload dir is UNVERIFIED (3) — it must
