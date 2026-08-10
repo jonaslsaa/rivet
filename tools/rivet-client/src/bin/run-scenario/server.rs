@@ -650,7 +650,89 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
+
+    fn test_socket() -> SocketAddr {
+        "127.0.0.1:25599".parse().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_executable_rivet_binary_is_a_hard_spawn_failure() {
+        let base =
+            std::env::temp_dir().join(format!("rivet-scenario-nonexec-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let artifact = base.join("rivet-server");
+        let run_dir = base.join("run");
+        let log = base.join("rivet.log");
+        fs::write(&artifact, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&artifact, fs::Permissions::from_mode(0o644)).unwrap();
+        // If pre-spawn failures were incorrectly classified from old evidence,
+        // this would look like the expected absent --level capability.
+        fs::write(&log, "unknown argument \"--level\"\n").unwrap();
+
+        let error = boot(
+            ServerKind::Rivet,
+            &run_dir,
+            &log,
+            &artifact,
+            None,
+            test_socket(),
+            None,
+            &[],
+            Some(Path::new("world")),
+        )
+        .err()
+        .expect("a non-executable binary must not spawn");
+        assert!(
+            matches!(error, Error::Gate(_)),
+            "spawn failure must remain a hard Gate error: {error}"
+        );
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn invalid_run_dir_is_a_hard_io_failure_before_spawn() {
+        let base =
+            std::env::temp_dir().join(format!("rivet-scenario-bad-run-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let run_dir = base.join("run");
+        let artifact = base.join("unused-rivet-server");
+        let log = base.join("rivet.log");
+        fs::write(&run_dir, b"not a directory").unwrap();
+        fs::write(&artifact, b"unused").unwrap();
+        fs::write(&log, "unknown argument \"--level\"\n").unwrap();
+
+        let error = boot(
+            ServerKind::Rivet,
+            &run_dir,
+            &log,
+            &artifact,
+            None,
+            test_socket(),
+            None,
+            &[],
+            Some(Path::new("world")),
+        )
+        .err()
+        .expect("a file cannot be prepared as a run directory");
+        assert!(
+            matches!(error, Error::Io(_)),
+            "run-dir preparation failure must remain a hard Io error: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "unknown argument \"--level\"\n",
+            "pre-spawn run-dir failure must not inspect or rewrite a stale log"
+        );
+
+        fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn world_path_probe_classifies_ready_absent_and_unrelated_failures() {

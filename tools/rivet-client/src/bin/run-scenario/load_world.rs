@@ -103,12 +103,25 @@ pub fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Recursively hash every regular file under `root`, keyed by its path relative
-/// to `root`, sorted by relative path. Symlinks are refused: a tree walk that
-/// follows a link could silently read content outside the tree (and, for the
-/// copy, could alias the source), so the harness fails loudly instead.
-pub fn hash_tree(root: &Path) -> Result<Vec<(PathBuf, [u8; 32])>, Error> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, [u8; 32])>) -> Result<(), Error> {
+/// The type and, for a file, contents of one entry in a tree fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryFingerprint {
+    Directory,
+    File([u8; 32]),
+}
+
+/// One deterministic tree-fingerprint entry: a relative path plus an explicit
+/// entry-type marker (and content hash for files).
+pub type TreeEntry = (PathBuf, EntryFingerprint);
+
+/// Recursively fingerprint every directory and regular file under `root`,
+/// keyed by its path relative to `root` and sorted by relative path. Recording
+/// directories explicitly makes empty-directory add/delete/rename observable.
+/// Symlinks are refused: a tree walk that follows a link could silently read
+/// content outside the tree (and, for the copy, could alias the source), so the
+/// harness fails loudly instead.
+pub fn hash_tree(root: &Path) -> Result<Vec<TreeEntry>, Error> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<TreeEntry>) -> Result<(), Error> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
@@ -125,9 +138,10 @@ pub fn hash_tree(root: &Path) -> Result<Vec<(PathBuf, [u8; 32])>, Error> {
                 .map(Path::to_path_buf)
                 .expect("walked paths stay under root");
             if meta.is_dir() {
+                out.push((rel, EntryFingerprint::Directory));
                 walk(root, &path, out)?;
             } else if meta.is_file() {
-                out.push((rel, hash_bytes(&fs::read(&path)?)));
+                out.push((rel, EntryFingerprint::File(hash_bytes(&fs::read(&path)?))));
             } else {
                 return Err(Error::Gate(format!(
                     "refusing non-regular filesystem entry {} under {}",
@@ -180,13 +194,10 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), Error> {
 /// identical contents, and nothing extra. Any divergence means the copy cannot
 /// stand in for the source, so a later server boot would be against a world the
 /// harness never validated.
-pub fn assert_copy_equals_source(
-    source: &[(PathBuf, [u8; 32])],
-    copy: &[(PathBuf, [u8; 32])],
-) -> Result<(), Error> {
+pub fn assert_copy_equals_source(source: &[TreeEntry], copy: &[TreeEntry]) -> Result<(), Error> {
     if source.len() != copy.len() {
         return Err(Error::Gate(format!(
-            "temp-world copy has {} file(s) but the source has {} — the copy is not a faithful \
+            "temp-world copy has {} entry/entries but the source has {} — the copy is not a faithful \
              mirror",
             copy.len(),
             source.len()
@@ -203,7 +214,7 @@ pub fn assert_copy_equals_source(
         }
         if s.1 != c.1 {
             return Err(Error::Gate(format!(
-                "temp-world copy of {} differs from the source — the copy is not a faithful \
+                "temp-world copy entry {} differs in type or contents from the source — the copy is not a faithful \
                  mirror",
                 c.0.display()
             )));
@@ -217,10 +228,7 @@ pub fn assert_copy_equals_source(
 /// (to copy and to hash), and anything that writes the source — the harness
 /// itself, a server booted against it, or a concurrently-running client — fails
 /// the run loudly rather than silently proceeding on a mutated save.
-pub fn assert_source_unchanged(
-    before: &[(PathBuf, [u8; 32])],
-    after: &[(PathBuf, [u8; 32])],
-) -> Result<(), Error> {
+pub fn assert_source_unchanged(before: &[TreeEntry], after: &[TreeEntry]) -> Result<(), Error> {
     if before == after {
         return Ok(());
     }
@@ -230,12 +238,12 @@ pub fn assert_source_unchanged(
         .find(|(b, a)| b != a)
         .map(|(b, a)| {
             if b.0 != a.0 {
-                format!("file set changed ({:?} present/absent)", a.0.display())
+                format!("entry set changed ({:?} present/absent)", a.0.display())
             } else {
-                format!("file {} changed contents", b.0.display())
+                format!("entry {} changed type or contents", b.0.display())
             }
         })
-        .unwrap_or_else(|| "file set and contents changed".to_owned());
+        .unwrap_or_else(|| "entry set, types, or contents changed".to_owned());
     Err(Error::Gate(format!(
         "the source world was MUTATED during the run ({detail}) — the harness and any server \
          it boots must never write to the original save; the read-only-copy guarantee is broken"
@@ -336,7 +344,7 @@ impl TempWorld {
 
     /// Hash the copy with the same walker used on the source, so copy fidelity
     /// is asserted on identical fingerprints.
-    pub fn hash_tree(&self) -> Result<Vec<(PathBuf, [u8; 32])>, Error> {
+    pub fn hash_tree(&self) -> Result<Vec<TreeEntry>, Error> {
         hash_tree(&self.path)
     }
 
@@ -459,11 +467,44 @@ mod tests {
         let a = hash_tree(&world).unwrap();
         let b = hash_tree(&world).unwrap();
         assert_eq!(a, b, "hashing the same tree twice must be identical");
-        assert_eq!(a.len(), 3, "level.dat + region + session.lock");
+        assert_eq!(a.len(), 7, "four directories plus three files");
 
         fs::write(world.join("level.dat"), [9u8, 9]).unwrap();
         let c = hash_tree(&world).unwrap();
         assert_ne!(a, c, "a content change must change the tree hash");
+
+        cleanup(&world);
+    }
+
+    #[test]
+    fn hash_tree_detects_empty_directory_add_delete_and_rename() {
+        let world = fixture_world("empty-dir");
+        let baseline = hash_tree(&world).unwrap();
+
+        let empty = world.join("empty");
+        fs::create_dir(&empty).unwrap();
+        let added = hash_tree(&world).unwrap();
+        assert_ne!(baseline, added, "adding an empty directory must be visible");
+        assert!(added.contains(&(PathBuf::from("empty"), EntryFingerprint::Directory)));
+
+        let renamed = world.join("renamed-empty");
+        fs::rename(&empty, &renamed).unwrap();
+        let renamed_fingerprint = hash_tree(&world).unwrap();
+        assert_ne!(
+            added, renamed_fingerprint,
+            "renaming an empty directory must be visible"
+        );
+        assert!(
+            renamed_fingerprint
+                .contains(&(PathBuf::from("renamed-empty"), EntryFingerprint::Directory))
+        );
+
+        fs::remove_dir(&renamed).unwrap();
+        assert_eq!(
+            baseline,
+            hash_tree(&world).unwrap(),
+            "deleting the empty directory must restore the original fingerprint"
+        );
 
         cleanup(&world);
     }
@@ -493,8 +534,8 @@ mod tests {
         let err = assert_copy_equals_source(&source, &copy_e).unwrap_err();
         assert!(
             matches!(err, Error::Gate(_))
-                && err.to_string().contains("4 file(s)")
-                && err.to_string().contains("source has 3"),
+                && err.to_string().contains("8 entry/entries")
+                && err.to_string().contains("source has 7"),
             "an extra file must fail the mirror check: {err}"
         );
 

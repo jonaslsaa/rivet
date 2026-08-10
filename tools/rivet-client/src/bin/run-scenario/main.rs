@@ -300,6 +300,8 @@ impl Args {
         let mut runs_explicit = false;
         let mut pairs_explicit = false;
         let mut dwell_explicit = false;
+        let mut username_explicit = false;
+        let mut timeout_explicit = false;
 
         if let Some(sub) = args.next() {
             command = match sub.as_str() {
@@ -317,12 +319,16 @@ impl Args {
         while let Some(argument) = args.next() {
             match argument.as_str() {
                 "--address" => address = next_value(&mut args, "--address")?,
-                "--username" => username = next_value(&mut args, "--username")?,
+                "--username" => {
+                    username = next_value(&mut args, "--username")?;
+                    username_explicit = true;
+                }
                 "--timeout-seconds" => {
                     let v = next_value(&mut args, "--timeout-seconds")?;
                     timeout_seconds = v
                         .parse()
                         .map_err(|_| format!("invalid --timeout-seconds value: {v}"))?;
+                    timeout_explicit = true;
                 }
                 "--runs" => {
                     let v = next_value(&mut args, "--runs")?;
@@ -592,6 +598,19 @@ impl Args {
                 return Err(
                     "load-world always performs exactly one Rivet launch probe, so --runs is a \
                      silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if username_explicit {
+                return Err(
+                    "load-world does not start a client, so --username is a silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if timeout_explicit {
+                return Err(
+                    "load-world does not use the client timeout, so --timeout-seconds is a silent \
+                     no-op; drop it"
                         .to_owned(),
                 );
             }
@@ -2614,27 +2633,7 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
                 )),
                 Err(error) => Err(error.into()),
             },
-            Err(boot_error) => {
-                let log = fs::read_to_string(&log_path).unwrap_or_default();
-                match server::classify_probe(false, &log) {
-                    server::ProbeVerdict::Absent { evidence } => {
-                        Err(RunnerError::Unverified(format!(
-                            "loaded-world acceptance is UNVERIFIED: rivet-server has no \
-                             world-path/loading capability yet (#339); launch evidence: {evidence}"
-                        )))
-                    }
-                    server::ProbeVerdict::FailedToBoot { evidence } => {
-                        Err(RunnerError::Unverified(format!(
-                            "loaded-world acceptance is UNVERIFIED: the launch probe did not \
-                             reach READY and did not prove the expected missing #339 interface \
-                             ({boot_error}); last log evidence: {evidence}"
-                        )))
-                    }
-                    server::ProbeVerdict::Present => {
-                        unreachable!("the failed boot did not reach READY")
-                    }
-                }
-            }
+            Err(error) => Err(classify_load_world_boot_failure(error, &log_path)),
         }
     })();
 
@@ -2653,6 +2652,30 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     copy_check?;
     cleanup?;
     probe_result
+}
+
+/// Map only the post-spawn READY/exit `Unverified` result through the
+/// world-path probe classifier. `Gate` and `Io` can happen before a child is
+/// spawned (run-dir preparation or `Command::spawn`) and must remain hard
+/// failures without consulting a possibly stale log from an earlier run.
+fn classify_load_world_boot_failure(error: server::Error, log_path: &Path) -> RunnerError {
+    let boot_error = match error {
+        server::Error::Unverified(message) => message,
+        error @ (server::Error::Gate(_) | server::Error::Io(_)) => return error.into(),
+    };
+    let log = fs::read_to_string(log_path).unwrap_or_default();
+    match server::classify_probe(false, &log) {
+        server::ProbeVerdict::Absent { evidence } => RunnerError::Unverified(format!(
+            "loaded-world acceptance is UNVERIFIED: rivet-server has no world-path/loading \
+             capability yet (#339); launch evidence: {evidence}"
+        )),
+        server::ProbeVerdict::FailedToBoot { evidence } => RunnerError::Unverified(format!(
+            "loaded-world acceptance is UNVERIFIED: the launch probe did not reach READY and did \
+             not prove the expected missing #339 interface ({boot_error}); last log evidence: \
+             {evidence}"
+        )),
+        server::ProbeVerdict::Present => unreachable!("the failed boot did not reach READY"),
+    }
 }
 
 fn main() -> ExitCode {
@@ -2715,6 +2738,8 @@ mod tests {
         assert!(parse(&["load-world", "--pairs", "paper:rivet"]).is_err());
         assert!(parse(&["load-world", "--runs", "1"]).is_err());
         assert!(parse(&["load-world", "--dwell-seconds", "35"]).is_err());
+        assert!(parse(&["load-world", "--username", DEFAULT_USERNAME]).is_err());
+        assert!(parse(&["load-world", "--timeout-seconds", "40"]).is_err());
     }
 
     #[test]
@@ -2927,6 +2952,32 @@ mod tests {
             RunnerError::Server(server::Error::Gate("x".into())).exit_code(),
             EXIT_FAIL
         );
+    }
+
+    #[test]
+    fn load_world_pre_spawn_failures_ignore_stale_probe_logs_and_stay_hard() {
+        let log =
+            std::env::temp_dir().join(format!("rivet-load-world-stale-log-{}", std::process::id()));
+        fs::write(&log, "unknown argument \"--level\"\n").unwrap();
+
+        let gate = classify_load_world_boot_failure(
+            server::Error::Gate("non-executable binary".to_owned()),
+            &log,
+        );
+        assert!(matches!(gate, RunnerError::Server(server::Error::Gate(_))));
+        assert_eq!(gate.exit_code(), EXIT_FAIL);
+
+        let io = classify_load_world_boot_failure(
+            server::Error::Io(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "invalid run directory",
+            )),
+            &log,
+        );
+        assert!(matches!(io, RunnerError::Server(server::Error::Io(_))));
+        assert_eq!(io.exit_code(), EXIT_FAIL);
+
+        fs::remove_file(log).unwrap();
     }
 
     #[test]

@@ -55,6 +55,8 @@ copy byte-for-byte, launches Rivet only against that copy, then re-verifies the
 source and removes the copy on every probe outcome. Until #339 provides the
 world-path/loading capability and official-client acceptance, this command
 exits `3` UNVERIFIED; it never turns an accepted argument into a fake PASS.
+Because the probe starts no client, explicit `--username` and
+`--timeout-seconds` options are rejected instead of being silently ignored.
 
 Modes (`--server` selects which servers boot, `--pairs` selects the comparison):
 
