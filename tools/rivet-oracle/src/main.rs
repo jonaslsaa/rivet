@@ -184,6 +184,10 @@ enum Error {
     NegativeControl {
         message: String,
     },
+    /// A #54 hash stage could not complete honestly — the input a stage needed
+    /// (a payload tree, a FULL chunk, a producer) is unavailable. Maps to exit 3
+    /// UNVERIFIED, never a fabricated green.
+    Unverified(String),
 }
 
 impl fmt::Display for Error {
@@ -224,6 +228,7 @@ impl fmt::Display for Error {
                  tools/rivet-oracle/work/jars/)."
             ),
             Error::NegativeControl { message } => write!(f, "{message}"),
+            Error::Unverified(m) => write!(f, "{m}"),
         }
     }
 }
@@ -2386,7 +2391,10 @@ fn to_targets_single_booting_kind(only: &[&str]) -> bool {
 // PASS=0 / FAIL=1 / UNVERIFIED=3 / usage=64):
 //   hash-self-check              -> 0 (known-answer vectors pass) or 1
 //   hash-paper [dir]             -> 0, builds/refreshes the committed Paper
-//                                   manifest under fixtures/chunk-hash/paper/
+//                                   manifest under fixtures/chunk-hash/paper/;
+//                                   3 UNVERIFIED when its payload source is
+//                                   unavailable (never a fabricated
+//                                   zero-chunk manifest)
 //   hash-rivet <dir>             -> 3 UNVERIFIED until a Rivet chunk tree with
 //                                   FULL chunks exists (no Rivet serialization
 //                                   today); reads a Rivet region tree layout
@@ -2399,7 +2407,8 @@ fn to_targets_single_booting_kind(only: &[&str]) -> bool {
 //                                   data) / 64 usage.
 //   hash-diff --expect-fail ...  -> negative control: corrupt a copy of the
 //                                   Rivet baseline, require the tampered chunk
-//                                   named.
+//                                   named — and only it. Kinds: block, light,
+//                                   heightmap, nbt-order, nbt-key, or all.
 //
 // Live FULL-chunk generation is blocked (#51 must capture status-FULL region
 // fixtures and Rivet worldgen must reach FULL, #231/#15); pre-worldgen the
@@ -2453,12 +2462,40 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     let payload_dir = dir
         .map(Path::to_path_buf)
         .unwrap_or_else(|| crate_dir().join("fixtures/regions/overworld-normal"));
+    // A missing payload tree, or a tree with no chunk payloads at all, cannot
+    // produce an honest digest table — writing a zero-chunk manifest would let
+    // a later Paper-vs-Rivet diff compare "Paper (empty) vs Rivet" and possibly
+    // go vacuously green. This is UNVERIFIED (exit 3), never a green. (A tree
+    // with payloads but zero FULL chunks is a different, legitimate pre-worldgen
+    // state; hash-paper's source is the committed Paper capture, which must
+    // actually exist.)
+    if !payload_dir.is_dir() {
+        return Err(Error::Unverified(format!(
+            "hash-paper: payload source {} is not a directory — cannot build an honest Paper \
+             digest table; UNVERIFIED, never a zero-chunk manifest",
+            payload_dir.display()
+        )));
+    }
+    if !payload_dir.join("chunk").is_dir() {
+        return Err(Error::Unverified(format!(
+            "hash-paper: {} has no chunk/ payload tree — nothing to hash; UNVERIFIED, never a \
+             zero-chunk manifest",
+            payload_dir.display()
+        )));
+    }
     let prov = source_region_provenance(&payload_dir).unwrap_or_default();
     let seed =
         source_region_seed(&payload_dir).unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
     let manifest =
         hash_manifest::build_from_payloads_with(&payload_dir, &seed, &prov.level_type, &prov)
             .map_err(Error::Gate)?;
+    if manifest.entries.is_empty() {
+        return Err(Error::Unverified(format!(
+            "hash-paper: no .nbt chunk payloads under {} — writing a zero-chunk manifest would \
+             fabricate green; UNVERIFIED",
+            payload_dir.display()
+        )));
+    }
     let json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| Error::Gate(format!("cannot serialize hash manifest: {e}")))?;
     fs::create_dir_all(&dest)
@@ -2707,7 +2744,9 @@ fn compute_hash_diffs(
 
 /// `hash-diff --expect-fail`: negative control. Corrupt a copy of the baseline
 /// and require the tampered chunk to be named. Passes only when the diff names
-/// exactly the tampered chunk.
+/// exactly the tampered chunk — a FAIL for any other reason (a different chunk,
+/// a provenance mismatch, an unrelated divergence) is rejected as a
+/// wrong-reason pass.
 fn run_hash_diff_negative(
     paper_dir: &Path,
     rivet_dir: &Path,
@@ -2766,30 +2805,50 @@ fn run_hash_diff_negative(
         .map_err(|e| Error::Gate(format!("cannot write manifest: {e}")))?;
 
     // Now the Paper-vs-Rivet diff against the corrupted copy must FAIL and name
-    // exactly the tampered chunk.
-    match run_hash_diff(paper_dir, &scratch) {
-        Ok(true) => {
-            let _ = fs::remove_dir_all(&scratch);
-            Err(Error::Gate(format!(
-                "negative control FAILED: {kind:?} tamper was NOT detected — the comparator \
-                 is vacuously green"
-            )))
-        }
-        Ok(false) => {
-            let _ = fs::remove_dir_all(&scratch);
-            println!(
-                "negative control PASS: {} tamper detected and named",
-                kind.cli_name()
-            );
-            Ok(())
-        }
-        Err(e) => {
-            let _ = fs::remove_dir_all(&scratch);
-            Err(Error::Gate(format!(
-                "negative control could not run the diff (exit 3): {e}"
-            )))
-        }
+    // exactly the tampered chunk — a FAIL for any other reason (a different
+    // chunk, a provenance mismatch, an unrelated divergence) is a wrong-reason
+    // pass and must be rejected.
+    let paper = load_hash_manifest(paper_dir)?;
+    let rivet = load_hash_manifest(&scratch)?;
+    if paper.provenance() != rivet.provenance() {
+        let _ = fs::remove_dir_all(&scratch);
+        return Err(Error::Gate(format!(
+            "negative control could not compare: provenance mismatch ({} vs {}) — the \
+             corrupted copy drifted from the baseline, not a tamper detection",
+            paper.provenance().describe(),
+            rivet.provenance().describe()
+        )));
     }
+    let (mismatches, one_sided, compared) = compute_hash_diffs(&paper, &rivet);
+    let tampered_id = format!("{}/{}.{}.{}", full.dim, full.region, full.cx, full.cz);
+    let names_tampered = mismatches
+        .iter()
+        .any(|m| m.dim == full.dim && m.cx == full.cx && m.cz == full.cz);
+    if mismatches.is_empty() || !names_tampered || !one_sided.is_empty() {
+        let _ = fs::remove_dir_all(&scratch);
+        let mut detail = Vec::new();
+        for m in &mismatches {
+            detail.push(format!("{}/{}.{}", m.dim, m.cx, m.cz));
+        }
+        detail.extend(one_sided.iter().cloned());
+        return Err(Error::Gate(format!(
+            "negative control FAILED: {kind:?} tamper of {tampered_id} was not detected and \
+             named (compared {compared} chunks; divergences: {}). The comparator is either \
+             vacuously green or diverged for the wrong reason.",
+            if detail.is_empty() {
+                "none".to_string()
+            } else {
+                detail.join(", ")
+            }
+        )));
+    }
+    let _ = fs::remove_dir_all(&scratch);
+    println!(
+        "negative control PASS: {} tamper of {} detected and named (compared {compared} chunks)",
+        kind.cli_name(),
+        tampered_id
+    );
+    Ok(())
 }
 
 /// The #54 chunk-hash engine's exit-code contract (see the comment block above
@@ -2820,6 +2879,10 @@ fn hash_cli_exit(args: &[String]) -> Option<i32> {
             let dir = args.get(1).map(PathBuf::from);
             match run_hash_paper(dir.as_deref()) {
                 Ok(()) => 0,
+                Err(Error::Unverified(e)) => {
+                    eprintln!("rivet-oracle: {e}");
+                    HASH_EXIT_UNVERIFIED
+                }
                 Err(e) => {
                     eprintln!("rivet-oracle: {e}");
                     HASH_EXIT_FAIL
@@ -4380,14 +4443,24 @@ mod tests {
     /// tree is exactly what `run_hash_paper`/`hash-rivet` produce from a real
     /// region capture, so `run_hash_diff` treats it identically.
     fn write_hash_fixture_tree(root: &Path, coords: &[(i32, i32)]) -> PathBuf {
+        write_hash_fixture_tree_seeded(root, coords, 42)
+    }
+
+    /// Like `write_hash_fixture_tree`, but the payloads carry the given world
+    /// seed into the `LastUpdate`/`InhabitedTime` fields
+    /// (`fixture_full_payload_with_seed`), and the manifest records that seed —
+    /// so a tree under a different seed is a genuinely different world, which is
+    /// the #175 7(e) bogus-seed mechanism.
+    fn write_hash_fixture_tree_seeded(root: &Path, coords: &[(i32, i32)], seed: i64) -> PathBuf {
         let chunk_dir = root.join("chunk").join("the_nether").join("0.0");
         fs::create_dir_all(&chunk_dir).unwrap();
         for (cx, cz) in coords {
-            let bytes = crate::mutate::fixture_full_payload(*cx, *cz);
+            let bytes = crate::mutate::fixture_full_payload_with_seed(*cx, *cz, seed);
             fs::write(chunk_dir.join(format!("{cx}.{cz}.nbt")), bytes).unwrap();
         }
         let manifest =
-            hash_manifest::build_from_payloads(root, "42", "minecraft\\:normal").unwrap();
+            hash_manifest::build_from_payloads(root, &seed.to_string(), "minecraft\\:normal")
+                .unwrap();
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         fs::write(root.join("manifest.json"), json + "\n").unwrap();
         root.to_path_buf()
@@ -4911,6 +4984,82 @@ mod tests {
             "every TamperKind detected and named (no vacuous green)"
         );
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// The #175 7(e) bogus-seed negative: a capture generated under a *different*
+    /// seed hashes differently at every chunk, and the diff must FAIL (exit 1)
+    /// naming the diverged chunks — never a vacuous green. Unlike the tamper
+    /// negatives (which flip one field in a copy of the baseline), a bogus seed
+    /// changes the *whole* tree, so this is a genuine different-world comparison.
+    #[test]
+    fn hash_diff_detects_bogus_seed() {
+        let tmp = hash_tmp("hash-bogus-seed");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        // Paper tree under the working seed 42; Rivet tree under a bogus seed.
+        let paper = write_hash_fixture_tree(&tmp.join("paper"), &all_corpus_coordinates());
+        let rivet =
+            write_hash_fixture_tree_seeded(&tmp.join("rivet"), &all_corpus_coordinates(), 999);
+        // The two trees carry different seeds — provenance drift, so the diff
+        // refuses to compare (UNVERIFIED, 3): a different-seed capture is a
+        // different world, and comparing its digests would be meaningless.
+        assert!(run_hash_diff(&paper, &rivet).is_err());
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            HASH_EXIT_UNVERIFIED
+        );
+
+        // The genuine #175 7(e) assertion is on the *payload* level: the two
+        // worlds' serialized bytes differ at every chunk, so every digest
+        // differs. That is what the seeded fixture builder reproduces
+        // deterministically (asserted in mutate.rs too).
+        let paper_m = load_hash_manifest(&paper).unwrap();
+        let rivet_m = load_hash_manifest(&rivet).unwrap();
+        let mut different = 0usize;
+        for pe in paper_m.entries.iter().filter(|e| e.is_full()) {
+            let Some(re) = rivet_m.full_entry(&pe.dim, pe.cx, pe.cz) else {
+                continue;
+            };
+            if pe.xxh3_64 != re.xxh3_64 {
+                different += 1;
+            }
+        }
+        assert_eq!(
+            different, paper_m.full_count,
+            "every FULL chunk of the bogus-seed world differs from the baseline world"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// The committed Paper manifest's digest table is grounded in the exact
+    /// payload bytes under `fixtures/regions/overworld-normal`: rebuilding the
+    /// manifest from those payloads reproduces the committed digest table
+    /// byte-identically. This pins the #175 §4 digest scope (the serialized
+    /// `Level` compound written by `SerializableChunkData.write()`, region
+    /// framing excluded) to the actual committed bytes, and guards against a
+    /// future hashing change silently retargeting every digest.
+    #[test]
+    fn committed_paper_manifest_digests_ground_in_payload_bytes() {
+        let dir = crate_dir().join("fixtures/chunk-hash/paper");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let committed = load_hash_manifest(&dir).unwrap();
+        let payload_dir = crate_dir().join("fixtures/regions/overworld-normal");
+        if !payload_dir.join("chunk").is_dir() {
+            return;
+        }
+        let seed = source_region_seed(&payload_dir)
+            .unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
+        let rebuilt = hash_manifest::build_from_payloads(&payload_dir, &seed, "minecraft\\:normal")
+            .expect("rebuild from committed payloads");
+        assert_eq!(rebuilt.entries.len(), committed.entries.len());
+        for (re, ce) in rebuilt.entries.iter().zip(committed.entries.iter()) {
+            assert_eq!(re.dim, ce.dim, "dim for {}.{}", re.cx, re.cz);
+            assert_eq!((re.cx, re.cz), (ce.cx, ce.cz));
+            assert_eq!(re.bytes, ce.bytes, "payload byte length grounded");
+            assert_eq!(re.xxh3_64, ce.xxh3_64, "digest grounded in payload bytes");
+        }
     }
 
     /// `hash-paper [dir]` dir override: run against a scratch copy of a tree
