@@ -450,6 +450,9 @@ fn java_dots_to_pcre2(pattern: &str) -> String {
     let mut translated = String::with_capacity(pattern.len());
     let mut in_class = false;
     let mut class_has_member = false;
+    // True only while the optional leading negation has not been consumed.
+    // A '^' after it (for example `[^^]`) is a literal member, not negation.
+    let mut class_at_start = false;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -460,6 +463,7 @@ fn java_dots_to_pcre2(pattern: &str) -> String {
                 translated.push(escaped);
                 if in_class {
                     class_has_member = true;
+                    class_at_start = false;
                 }
                 i += 1;
             }
@@ -469,9 +473,13 @@ fn java_dots_to_pcre2(pattern: &str) -> String {
             '[' if !in_class => {
                 in_class = true;
                 class_has_member = false;
+                class_at_start = true;
                 translated.push(c);
             }
-            '^' if in_class && !class_has_member => translated.push(c),
+            '^' if in_class && class_at_start => {
+                class_at_start = false;
+                translated.push(c);
+            }
             ']' if in_class && class_has_member => {
                 in_class = false;
                 translated.push(c);
@@ -481,6 +489,7 @@ fn java_dots_to_pcre2(pattern: &str) -> String {
                 translated.push(c);
                 if in_class {
                     class_has_member = true;
+                    class_at_start = false;
                 }
             }
         }
@@ -776,6 +785,18 @@ mod tests {
             // raw endpoint, while '/' remains a valid raw endpoint.
             assert!(glob_to_regex("[Z-]]", windows).is_ok());
             assert!(glob_to_regex("[.-/]", windows).is_ok());
+
+            // Verified against OpenJDK on Linux: '[' is a literal member when
+            // it is not the range start; ']' and '&' members behave as
+            // literals; a class closing before any member is an empty class
+            // that Java Pattern also rejects.
+            assert!(glob_to_regex("[a[]", windows).is_ok());
+            assert!(glob_to_regex("[a-]", windows).is_ok());
+            assert!(glob_to_regex("[-a]", windows).is_ok());
+            assert!(glob_to_regex("[a&b]", windows).is_ok());
+            assert!(glob_to_regex("[&&]", windows).is_ok());
+            assert!(glob_to_regex("[a[", windows).is_err());
+            assert!(glob_to_regex("[]a]", windows).is_err());
         }
 
         assert!(glob_to_regex(r"[a\b]", false).is_ok());
@@ -932,6 +953,65 @@ mod tests {
         assert!(!list.matches(Path::new("/srv/alice\u{2028}bob")));
         assert!(list.matches(Path::new("/srv/alice\u{000b}bob")));
         assert!(list.matches(Path::new("/srv/alice\u{000c}bob")));
+    }
+
+    #[test]
+    fn regex_dot_after_caret_member_class_uses_java_line_terminators() {
+        // `[^^]` is a negated class whose literal member is a caret. The dot
+        // after it must still be Java's dot: it may not consume CR/NEL/LS/PS
+        // even though the class never spells them out.
+        let list = PathAllowList::new(vec![ConfigEntry::regex("[^^].x")]);
+        assert!(list.matches(Path::new("azx")));
+        assert!(list.matches(Path::new("b^x")));
+        assert!(!list.matches(Path::new("a\rx")));
+        assert!(!list.matches(Path::new("a\u{2028}x")));
+        assert!(!list.matches(Path::new("a\u{0085}x")));
+        assert!(!list.matches(Path::new("a\u{2029}x")));
+    }
+
+    #[test]
+    fn regex_dot_after_member_class_shapes_uses_java_line_terminators() {
+        // A dot that follows any legal character class must be translated to
+        // Java's dot, whatever class members came before it. A raw PCRE2 dot
+        // would accept CR/NEL/LS/PS that Java's dot excludes.
+        // `[a&&b]` (class intersection) and `[^]`/`[]` (empty classes) are
+        // rejected by the validator and disable the whole list; they belong in
+        // a fail-closed test, not here. The first subject char must be a member
+        // of the class so the pattern actually matches the prefix.
+        for (pattern, member) in [
+            ("[^^]", "z"), // negated class, literal caret member
+            ("[^]]", "z"), // negated class, literal ] member
+            ("[]]", "]"),  // class with ] as member
+            ("[a^]", "a"), // a or caret
+            ("[^a]", "z"), // negated a
+            ("[a]", "a"),
+            ("[a-z]", "m"),
+            ("[^a-z]", "Z"), // negated a-z
+            ("[^0-9]", "a"), // negated 0-9
+            ("[-]", "-"),    // hyphen as only member
+        ] {
+            let list = PathAllowList::new(vec![ConfigEntry::regex(format!("{pattern}.x"))]);
+            let ok_subject = format!("{member}qx");
+            let cr_subject = format!("{member}\rx");
+            let ls_subject = format!("{member}\u{2028}x");
+            let nel_subject = format!("{member}\u{0085}x");
+            assert!(
+                list.matches(Path::new(&ok_subject)),
+                "{pattern}.x must match a dot over a plain char"
+            );
+            assert!(
+                !list.matches(Path::new(&cr_subject)),
+                "{pattern}.x must not let its dot consume CR"
+            );
+            assert!(
+                !list.matches(Path::new(&ls_subject)),
+                "{pattern}.x must not let its dot consume LS"
+            );
+            assert!(
+                !list.matches(Path::new(&nel_subject)),
+                "{pattern}.x must not let its dot consume NEL"
+            );
+        }
     }
 
     #[test]
