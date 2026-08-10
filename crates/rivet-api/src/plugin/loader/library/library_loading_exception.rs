@@ -50,8 +50,11 @@ impl LibraryLoadingException {
 }
 
 impl std::fmt::Display for LibraryLoadingException {
+    /// Java `Throwable.toString()` — `"LibraryLoadingException: <message>"`,
+    /// the first stack-trace line Paper surfaces when a plugin's library load
+    /// fails. `get_message()` stays raw; this is the display form.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        write!(f, "LibraryLoadingException: {}", self.message)
     }
 }
 
@@ -78,9 +81,11 @@ mod tests {
             "Could not find library at libs/missing.jar"
         );
         assert!(error.get_cause().is_none());
+        // Display mirrors Java `Throwable.toString()`: class name, colon,
+        // message — the line Paper surfaces when a plugin library load fails.
         assert_eq!(
             error.to_string(),
-            "Could not find library at libs/missing.jar"
+            "LibraryLoadingException: Could not find library at libs/missing.jar"
         );
         assert!(error.source().is_none());
     }

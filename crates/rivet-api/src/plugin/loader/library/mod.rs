@@ -129,4 +129,42 @@ mod tests {
             ]
         );
     }
+
+    /// Paper's consumption pattern (`PaperClasspathBuilder.buildLibraryPaths`)
+    /// is fail-fast: the registration loop aborts at the first
+    /// `LibraryLoadingException`, leaving the libraries registered before the
+    /// failure in the store and the later ones never registered.
+    #[test]
+    fn fail_fast_loop_aborts_at_first_error_keeping_earlier_paths() {
+        let mut store = PaperLibraryStore::new();
+        let first = SimpleJarLibrary {
+            path: "libs/before.jar".to_string(),
+        };
+        let broken = MissingJarLibrary {
+            path: "libs/broken.jar".to_string(),
+        };
+        let last = SimpleJarLibrary {
+            path: "libs/after.jar".to_string(),
+        };
+
+        first.register(&mut store).expect("first registers");
+        let error = broken
+            .register(&mut store)
+            .expect_err("broken aborts the loop");
+        assert_eq!(
+            error.get_message(),
+            "Could not find library at libs/broken.jar"
+        );
+
+        // The store holds the earlier path; the later library never ran.
+        assert_eq!(store.get_paths(), &[PathBuf::from("libs/before.jar")]);
+        last.register(&mut store).expect("still usable afterwards");
+        assert_eq!(
+            store.get_paths(),
+            &[
+                PathBuf::from("libs/before.jar"),
+                PathBuf::from("libs/after.jar")
+            ]
+        );
+    }
 }
