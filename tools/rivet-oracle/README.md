@@ -61,7 +61,7 @@ rivet-oracle/
       golden.json       # Paper's verdict + canonical decode->re-encode per input
     spline/             # CubicSpline/BoundedFloatFunction value-leaf goldens
       manifest.json     # hash of spline-goldens.json (kind: spline, issue #372)
-      spline-goldens.json  # Paper's exact min/max/parity/sample outputs (hex-float)
+      spline-goldens.json  # Paper's exact min/max/sample outputs as hex-float (plus parity strings)
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
