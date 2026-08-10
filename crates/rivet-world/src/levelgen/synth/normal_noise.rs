@@ -6,10 +6,10 @@
 //! second stack and combines both with the deviation-normalized `valueFactor`.
 //!
 //! The DFU `NoiseParameters` record is ported with its value surface
-//! (`firstOctave`/`amplitudes`) and `DIRECT_CODEC`; `NoiseParameters.CODEC`
-//! (the holder-backed `RegistryFileCodec` over `Registries.NOISE`) is
-//! deferred — RivetTodo(#177) — since the noise registry and holder dispatch
-//! live in the later worldgen waves.
+//! (`firstOctave`/`amplitudes`); both the `DIRECT_CODEC` and the
+//! holder-backed `NoiseParameters.CODEC` (`RegistryFileCodec` over
+//! `Registries.NOISE`) are deferred — RivetTodo(#177) — since the noise
+//! registry and holder dispatch live in the later worldgen waves.
 
 use rivet_util::random::RandomSource;
 

@@ -19,15 +19,6 @@ use rivet_util::random::XoroshiroRandomSource;
 
 use crate::levelgen::synth::perlin_noise::PerlinNoise;
 
-/// `BlendedNoise.SCALE_RANGE` — the `Codec.doubleRange(0.001, 1000.0)` bounds
-/// (kept for the deferred codec seam).
-#[allow(dead_code)]
-const SCALE_RANGE: (f64, f64) = (0.001, 1000.0);
-/// `BlendedNoise`'s `smear_scale_multiplier` range — `Codec.doubleRange(1.0,
-/// 8.0)`.
-#[allow(dead_code)]
-const SMEAR_SCALE_MULTIPLIER_RANGE: (f64, f64) = (1.0, 8.0);
-
 /// `net.minecraft.world.level.levelgen.synth.BlendedNoise`.
 pub struct BlendedNoise {
     min_limit_noise: PerlinNoise,
@@ -39,12 +30,6 @@ pub struct BlendedNoise {
     y_factor: f64,
     smear_scale_multiplier: f64,
     max_value: f64,
-    /// `xzScale` — the codec field.
-    #[allow(dead_code)]
-    xz_scale: f64,
-    /// `yScale` — the codec field.
-    #[allow(dead_code)]
-    y_scale: f64,
 }
 
 impl BlendedNoise {
@@ -118,8 +103,6 @@ impl BlendedNoise {
             y_factor,
             smear_scale_multiplier,
             max_value,
-            xz_scale,
-            y_scale,
         }
     }
 

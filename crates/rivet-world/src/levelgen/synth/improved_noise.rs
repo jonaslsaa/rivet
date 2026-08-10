@@ -123,17 +123,6 @@ impl ImprovedNoise {
         self.p[index]
     }
 
-    /// `parityConfigString(StringBuilder)` — the `@VisibleForTesting` config
-    /// string (used by the parity dump chain in `PerlinNoise`/`NormalNoise`/
-    /// `BlendedNoise`).
-    pub fn parity_config_string(&self) -> String {
-        let mut sb = String::new();
-        crate::levelgen::synth::noise_utils::parity_noise_octave_config_string(
-            &mut sb, self.xo, self.yo, self.zo, &self.p,
-        );
-        sb
-    }
-
     /// `sampleAndLerp(...)` — the non-derivative sampling path. The arity
     /// mirrors Java's `sampleAndLerp(int, int, int, double, double, double,
     /// double)` exactly.
