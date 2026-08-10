@@ -182,16 +182,11 @@ mod tests {
     /// `LevelData.RespawnData.CODEC` end-to-end.
     #[test]
     fn respawn_data_codec_decodes_real_fixture_spawn() {
-        let Some(path) =
-            workspace_root().map(|ws| ws.join("tools/rivet-oracle/fixtures/level.dat"))
-        else {
-            eprintln!("fixtures not present — skipping");
-            return;
-        };
-        if !path.is_file() {
-            eprintln!("fixtures not present — skipping");
-            return;
-        }
+        let path = workspace_root().join("tools/rivet-oracle/fixtures/level.dat");
+        assert!(
+            path.is_file(),
+            "fixture {path:?} is missing — the committed 26.2 level.dat is git-tracked, so a missing fixture means this end-to-end codec test silently stopped exercising the codec"
+        );
         let bytes = std::fs::read(&path).expect("level.dat readable");
         let tag = nbt_io::read_compressed(
             &bytes[..],
@@ -265,11 +260,13 @@ mod tests {
         );
     }
 
-    fn workspace_root() -> Option<std::path::PathBuf> {
+    fn workspace_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()?
             .parent()
-            .map(|p| p.to_path_buf())
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
     }
 
     /// A fake `LevelData` exercising the value seam.

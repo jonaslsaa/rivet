@@ -100,14 +100,6 @@ impl<O> OptionalDynamic<O> {
         self.as_number_or(ops, default).long_value()
     }
 
-    /// `DynamicLike.asFloat(float default)`.
-    pub fn as_float_or(&self, ops: &impl DynamicOps<Output = O>, default: Number) -> f32
-    where
-        O: Clone,
-    {
-        self.as_number_or(ops, default).float_value()
-    }
-
     /// `DynamicLike.asBoolean(boolean default)` — `asBoolean().result().orElse(default)`.
     pub fn as_boolean_or(&self, ops: &impl DynamicOps<Output = O>, default: bool) -> bool
     where

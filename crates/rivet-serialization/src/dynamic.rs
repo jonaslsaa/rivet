@@ -9,7 +9,6 @@
 
 use crate::data_result::DataResult;
 use crate::dynamic_ops::DynamicOps;
-use crate::number::Number;
 use crate::pair::Pair;
 use std::fmt::Debug;
 
@@ -208,46 +207,6 @@ impl<O> Dynamic<O> {
     /// `Dynamic.asBoolean()`.
     pub fn as_boolean(&self, ops: &impl DynamicOps<Output = O>) -> DataResult<bool> {
         ops.get_boolean_value(&self.value)
-    }
-
-    /// `DynamicLike.asNumber(Number default)` — `asNumber().result()
-    /// .orElse(default)`.
-    pub fn as_number_or(&self, ops: &impl DynamicOps<Output = O>, default: Number) -> Number {
-        self.as_number(ops).result().copied().unwrap_or(default)
-    }
-
-    /// `DynamicLike.asInt(int default)` — `asNumber(default).intValue()`.
-    ///
-    /// Java's `asNumber(default)` returns the *default* `Number` when the
-    /// underlying value is not numeric, then `.intValue()` narrows it. `Number`
-    /// is `Copy`, so the default is passed as a `Number` (the `as_number_or`
-    /// path) rather than a plain `i32` — the `intValue()` narrowing is applied
-    /// uniformly in both the present and default cases.
-    pub fn as_int_or(&self, ops: &impl DynamicOps<Output = O>, default: Number) -> i32 {
-        self.as_number_or(ops, default).int_value()
-    }
-
-    /// `DynamicLike.asLong(long default)`.
-    pub fn as_long_or(&self, ops: &impl DynamicOps<Output = O>, default: Number) -> i64 {
-        self.as_number_or(ops, default).long_value()
-    }
-
-    /// `DynamicLike.asFloat(float default)`.
-    pub fn as_float_or(&self, ops: &impl DynamicOps<Output = O>, default: Number) -> f32 {
-        self.as_number_or(ops, default).float_value()
-    }
-
-    /// `DynamicLike.asBoolean(boolean default)`.
-    pub fn as_boolean_or(&self, ops: &impl DynamicOps<Output = O>, default: bool) -> bool {
-        self.as_boolean(ops).result().copied().unwrap_or(default)
-    }
-
-    /// `DynamicLike.asString(String default)`.
-    pub fn as_string_or(&self, ops: &impl DynamicOps<Output = O>, default: &str) -> String {
-        self.as_string(ops)
-            .result()
-            .cloned()
-            .unwrap_or_else(|| default.to_string())
     }
 
     /// `Dynamic.asByteBufferOpt()`.

@@ -6,9 +6,11 @@
 //! storage/LevelVersion.java`. `LevelVersion.parse(Dynamic)` reads the
 //! level.dat header block: the top-level `"version"` (level-data format
 //! version, `19133`), `"LastPlayed"` epoch millis, and the optional `"Version"`
-//! sub-compound (the `WorldVersion` the world was written by). The Java
-//! defaults fall back to `SharedConstants.getCurrentVersion()` (the pinned
-//! 26.2 build) when the `Version` block is absent.
+//! sub-compound (the `WorldVersion` the world was written by). Inside a present
+//! `Version` block, per-field defaults fall back to
+//! `SharedConstants.getCurrentVersion()` (the pinned 26.2 build); an absent
+//! `Version` block instead stores `""` / `0` / `"main"` / `false` for the
+//! version fields (NOT the current-version fallbacks).
 //!
 //! The read side of this is exactly what `PrimaryLevelData.parse` needs first
 //! (issue #54 codec cascade). The write side (`PrimaryLevelData.writeVersionTag`)
