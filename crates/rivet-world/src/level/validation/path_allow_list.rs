@@ -260,10 +260,12 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
             '[' => {
                 let class_start = i - 1;
                 let mut negated = false;
+                let mut has_member = false;
                 if chars.get(i) == Some(&'^') {
                     regex.push_str(if windows { "(?!\\\\)" } else { "(?!/)" });
                     regex.push_str("[\\^");
                     i += 1;
+                    has_member = true;
                 } else {
                     if chars.get(i) == Some(&'!') {
                         negated = true;
@@ -278,6 +280,7 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                     if chars.get(i) == Some(&'-') {
                         regex.push('-');
                         i += 1;
+                        has_member = true;
                     }
                 }
 
@@ -288,6 +291,9 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                     let class_char = chars[i];
                     i += 1;
                     if class_char == ']' {
+                        if !has_member {
+                            return Err(format!("Empty character class near index {class_start}"));
+                        }
                         closed = true;
                         break;
                     }
@@ -301,6 +307,7 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                         regex.push('\\');
                     }
                     regex.push(class_char);
+                    has_member = true;
                     if class_char == '-' {
                         if !has_range_start {
                             return Err(format!("Invalid range near index {}", i - 1));
@@ -590,7 +597,7 @@ fn scan_java_escape(
         return Ok(end);
     }
     let allowed_alpha = if in_class {
-        "tnrfaedDsSwWb"
+        "tnrfaedDsSwW"
     } else {
         "tnrfaedDsSwWAz"
     };
@@ -774,6 +781,41 @@ mod tests {
     }
 
     #[test]
+    fn memberless_glob_classes_are_rejected_on_unix_and_windows() {
+        for windows in [false, true] {
+            for glob in ["[!]", "[]*]", "[]?]", "[][]"] {
+                assert!(
+                    glob_to_regex(glob, windows).is_err(),
+                    "memberless class {glob:?} must fail for windows={windows}"
+                );
+            }
+
+            // A leading caret is a literal class member in OpenJDK globs;
+            // leading hyphens, negated members, and ranges remain valid.
+            for glob in ["[^]", "[-]", "[!a]", "[a-z]"] {
+                assert!(
+                    glob_to_regex(glob, windows).is_ok(),
+                    "valid class {glob:?} must pass for windows={windows}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn memberless_glob_class_disables_the_whole_allow_list() {
+        for invalid in ["[!]", "[]*]", "[]?]", "[][]"] {
+            let list = PathAllowList::new(vec![
+                ConfigEntry::prefix("otherwise-matching"),
+                ConfigEntry::glob(invalid),
+            ]);
+            assert!(
+                !list.matches(Path::new("otherwise-matching")),
+                "invalid glob {invalid:?} left the prefix active"
+            );
+        }
+    }
+
+    #[test]
     fn range_end_backslash_regex_failure_disables_the_whole_allow_list() {
         let list = PathAllowList::new(vec![
             ConfigEntry::prefix("otherwise-matching"),
@@ -951,6 +993,30 @@ mod tests {
             assert!(
                 ConfigEntry::regex(pattern).compile().is_err(),
                 "unexpectedly accepted {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn regex_rejects_backspace_escapes_inside_character_classes() {
+        for pattern in [r"[\b]", r"[A\b]", r"[\b-A]"] {
+            assert!(
+                ConfigEntry::regex(pattern).compile().is_err(),
+                "Java-invalid in-class backspace escape was accepted: {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn in_class_backspace_escape_disables_the_whole_allow_list() {
+        for invalid in [r"[\b]", r"[A\b]", r"[\b-A]"] {
+            let list = PathAllowList::new(vec![
+                ConfigEntry::prefix("otherwise-matching"),
+                ConfigEntry::regex(invalid),
+            ]);
+            assert!(
+                !list.matches(Path::new("otherwise-matching")),
+                "invalid regex {invalid:?} left the prefix active"
             );
         }
     }
