@@ -809,7 +809,16 @@ fn upgrade_neighbor_fluid_ticks_decode_non_empty(list: &ListTag) -> bool {
 }
 
 /// The stored `Map<Heightmap.Types, long[]>`, in enum ordinal order.
+///
+/// Indexed by `Types` discriminant; the compile-time assertion below keeps the
+/// two in lockstep so a seventh `Types` variant fails to build instead of
+/// panicking an out-of-bounds index at runtime.
 pub type StoredHeightmaps = [Option<Vec<i64>>; 6];
+
+const _: () = assert!(
+    Types::all().len()
+        == std::mem::size_of::<StoredHeightmaps>() / std::mem::size_of::<Option<Vec<i64>>>()
+);
 
 /// Parse only the heightmap types allowed by the decoded chunk status.
 /// Missing/wrong-tag `Heightmaps`, unknown keys, wrong-tag values, and known
@@ -839,6 +848,12 @@ pub fn parse_heightmaps(chunk_data: &CompoundTag, heightmaps_after: &[Types]) ->
 /// so iterating it and keeping the present entries reproduces both the set
 /// filtering and the ordinal key order. The stored columns are borrowed, never
 /// consumed — each tag is written from `raw.clone()`.
+///
+/// Contract: `stored` must have been built from the same status's
+/// `heightmaps_after()` (i.e. `parse_heightmaps(chunk, status.heightmaps_after())`
+/// on the write side), matching how `copyOf` filters before `write` iterates.
+/// Passing a different slice than the one `stored` was built from silently drops
+/// columns Paper would persist — a caller error, not a writer fallback.
 ///
 /// The key order this produces is NOT the order Paper's own chunk files store
 /// heightmap keys in: Java's `CompoundTag` is a fastutil hash map, so the
