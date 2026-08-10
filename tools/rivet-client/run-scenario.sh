@@ -16,14 +16,14 @@ cargo test --locked --bin run-scenario
 
 # Build the rivet-server binary (main workspace, stable toolchain) when a mode
 # needs it, so the Paper-only self-check stays exactly as fast as before. The
-# `dwell` and `kick` subcommands always boot exactly one rivet-server — their
+# `dwell`, `kick`, and `load-world` subcommands always boot exactly one rivet-server — their
 # server selection is pinned to Rivet even without `--server` (issues #157,
 # #86) — and `--server rivet|both` selects Rivet for the join/move/capture
 # modes. Run from the repo root so cargo resolves the main workspace's stable
 # toolchain (the nested workspace pins nightly).
 needs_rivet=0
 case "${1:-}" in
-  dwell | kick) needs_rivet=1 ;;
+  dwell | kick | load-world) needs_rivet=1 ;;
 esac
 prev=""
 for a in "$@"; do

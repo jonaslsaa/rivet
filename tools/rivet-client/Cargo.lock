@@ -2591,6 +2591,7 @@ dependencies = [
  "azalea",
  "rivet-harness-common",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

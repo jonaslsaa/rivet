@@ -43,8 +43,18 @@ tools/rivet-client/run-scenario.sh move --server both --pairs paper:rivet  # Pap
 tools/rivet-client/run-scenario.sh join --server rivet            # Rivet headless boot: pinned Azalea completes login/config/spawn, exact 117-chunk send-set
 tools/rivet-client/run-scenario.sh join --server both --pairs paper:rivet  # Paper-vs-Rivet play scenario
 tools/rivet-client/run-scenario.sh dwell --server rivet           # wall-clock keepalive survival past the 30 s kick limit (issues #157/#160)
+tools/rivet-client/run-scenario.sh load-world                     # copy the local 26.2 save, prove immutability, probe the future #339 launch seam
 tools/rivet-client/run-scenario.sh capture        # one boot; print the normalized transcript
 ```
+
+`load-world` is the independent #316 harness slice. `RIVET_WORLD_SRC` may
+override the default launcher save at
+`~/Library/Application Support/minecraft/saves/New World`. The runner refuses
+symlinks, copies the source into deterministic disposable storage, verifies the
+copy byte-for-byte, launches Rivet only against that copy, then re-verifies the
+source and removes the copy on every probe outcome. Until #339 provides the
+world-path/loading capability and official-client acceptance, this command
+exits `3` UNVERIFIED; it never turns an accepted argument into a fake PASS.
 
 Modes (`--server` selects which servers boot, `--pairs` selects the comparison):
 

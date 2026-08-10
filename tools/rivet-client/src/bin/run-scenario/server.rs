@@ -55,6 +55,11 @@ pub const PAPER_PIN_COMMIT: &str = "0a99345";
 /// the TCP listener is bound (crates/rivet-server/src/main.rs).
 pub const RIVET_READY: &str = "RIVET_READY";
 
+/// The world-path launch option the loaded-world acceptance probe passes to
+/// rivet-server (`--level <path>`, issue #316). Kept in the seam module so the
+/// argv construction and the probe classification share one token.
+pub const WORLD_PATH_ARG: &str = "--level";
+
 /// How long to wait for Paper to reach `Done (...)!` (covers the paperclip
 /// first-boot materialization of ~160MB libraries + worldgen).
 pub const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -431,6 +436,48 @@ fn boot_timeout(kind: ServerKind) -> Duration {
     }
 }
 
+/// The outcome of the world-path launch probe (issue #316).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProbeVerdict {
+    /// The server accepted `--level <path>` and reached `RIVET_READY`: the
+    /// world-path/loading capability is present.
+    Present,
+    /// The server exited before READY and its log shows it rejected the
+    /// world-path argument: the capability is absent.
+    Absent { evidence: String },
+    /// The server exited before READY for an unrelated reason: the capability
+    /// could not be confirmed present or absent. Still UNVERIFIED per the exit
+    /// contract (the acceptance did not run), but the reason differs.
+    FailedToBoot { evidence: String },
+}
+
+/// Classify a world-path launch probe from whether the server reached READY and
+/// its log. Pure, so the classification is unit-tested on fixture logs instead
+/// of requiring a real boot.
+pub fn classify_probe(reached_ready: bool, log: &str) -> ProbeVerdict {
+    if reached_ready {
+        return ProbeVerdict::Present;
+    }
+    // The server rejected the world-path interface: it exited before READY and
+    // its log names the argument as unknown (`config_from_args` panics with
+    // `unknown argument "--level" (expected --host/--port)`).
+    let evidence = log
+        .lines()
+        .find(|l| l.contains("unknown argument") && l.contains(WORLD_PATH_ARG))
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            log.lines()
+                .last()
+                .map(str::to_owned)
+                .unwrap_or_else(|| "<empty log>".to_owned())
+        });
+    if log.contains(WORLD_PATH_ARG) && log.contains("unknown argument") {
+        ProbeVerdict::Absent { evidence }
+    } else {
+        ProbeVerdict::FailedToBoot { evidence }
+    }
+}
+
 /// Resolve an artifact path against the harness's current directory when it is
 /// relative. The child is spawned with its working directory set to `run_dir`
 /// (where the world and `server.properties` live), so a relative artifact path
@@ -458,10 +505,11 @@ fn absolutize_artifact(artifact: &Path) -> PathBuf {
 /// boots the rivet-server with `RIVET_TRACE_MOVEMENT=1` so the tick thread
 /// emits its authoritative movement audit on stderr).
 ///
-/// The eight arguments are the distinct inputs a boot needs (server kind, run
+/// The nine arguments are the distinct inputs a boot needs (server kind, run
 /// dir, log tee, artifact, optional properties source, bind address, optional
-/// held port reservation, child envs); the excess over clippy's default limit
-/// is inherent to the operation rather than a refactorable arity smell.
+/// held port reservation, child envs, optional world-path launch option); the
+/// excess over clippy's default limit is inherent to the operation rather than
+/// a refactorable arity smell.
 #[allow(clippy::too_many_arguments)]
 pub fn boot(
     kind: ServerKind,
@@ -472,6 +520,7 @@ pub fn boot(
     address: SocketAddr,
     port_reservation: Option<rivet_harness_common::port::PortReservation>,
     envs: &[(&str, &str)],
+    world_path: Option<&Path>,
 ) -> Result<Server, Error> {
     prepare_run_dir(run_dir, kind, server_properties_src, address.port())?;
     // The child runs with its cwd set to `run_dir`; a relative artifact (e.g.
@@ -479,6 +528,13 @@ pub fn boot(
     // own cwd, not the run dir, or Java cannot find the jar.
     let artifact = absolutize_artifact(artifact);
 
+    if kind == ServerKind::Paper && world_path.is_some() {
+        return Err(Error::Gate(
+            "a world-path launch option is a Rivet-only interface; Paper boots its own world \
+             from the run dir"
+                .into(),
+        ));
+    }
     let mut command = match kind {
         ServerKind::Paper => {
             let mut c = Command::new("java");
@@ -497,6 +553,14 @@ pub fn boot(
                 &address.port().to_string(),
             ])
             .current_dir(run_dir);
+            // The world-path launch interface (`--level <path>`, issue #316):
+            // the narrow seam the loaded-world acceptance probe drives. Today
+            // rivet-server rejects the arg (no world-loading capability yet) and
+            // the probe classifies that rejection; when the capability lands,
+            // the same arg boots the server against the copied world.
+            if let Some(world) = world_path {
+                c.arg(WORLD_PATH_ARG).arg(world);
+            }
             c
         }
     };
@@ -587,6 +651,34 @@ pub fn shutdown(server: &mut Server) -> Result<(), Error> {
 mod tests {
     use super::*;
     use std::process::Stdio;
+
+    #[test]
+    fn world_path_probe_classifies_ready_absent_and_unrelated_failures() {
+        assert_eq!(classify_probe(true, "anything"), ProbeVerdict::Present);
+
+        let rejected = concat!(
+            "thread 'main' panicked at crates/rivet-server/src/main.rs:\n",
+            "unknown argument \"--level\" (expected --host/--port)\n"
+        );
+        assert!(matches!(
+            classify_probe(false, rejected),
+            ProbeVerdict::Absent { evidence }
+                if evidence.contains("unknown argument \"--level\"")
+        ));
+
+        assert_eq!(
+            classify_probe(false, "server error: address already in use\n"),
+            ProbeVerdict::FailedToBoot {
+                evidence: "server error: address already in use".to_owned()
+            }
+        );
+        assert_eq!(
+            classify_probe(false, ""),
+            ProbeVerdict::FailedToBoot {
+                evidence: "<empty log>".to_owned()
+            }
+        );
+    }
 
     /// A relative artifact must resolve against the harness's cwd, not the run
     /// dir the child is spawned with — `RIVET_ORACLE_JAR=work/jars/...` is a
