@@ -585,6 +585,7 @@ dependencies = [
  "indexmap",
  "phf",
  "rivet-core",
+ "rivet-registry",
  "rivet-serialization",
  "rivet-text",
  "rivet-util",

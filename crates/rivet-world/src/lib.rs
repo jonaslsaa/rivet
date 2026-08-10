@@ -53,6 +53,7 @@
 //! re-exports the registry-owned `ChunkPos` (issue #125); the concrete world
 //! (`ServerLevel`) lives in `rivet-server`.
 
+pub mod block;
 pub mod chunk;
 pub mod level;
 pub mod levelgen;

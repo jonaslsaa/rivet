@@ -12,6 +12,11 @@ flate2 = { workspace = true }
 indexmap = { workspace = true }
 phf = { workspace = true, features = ["macros"] }
 rivet-core = { workspace = true }
+# The `blocks` feature exposes the generated block tables + the `BlockState`/
+# `StateDefinition`/`Property` value surface (issue #228) that the
+# `NbtUtils.readBlockState`/`writeBlockState` codecs decode/encode. Spike-proven
+# cycle-free: rivet-registry never depends on rivet-nbt.
+rivet-registry = { workspace = true, features = ["blocks"] }
 rivet-serialization = { workspace = true }
 rivet-text = { workspace = true }
 rivet-util = { workspace = true }

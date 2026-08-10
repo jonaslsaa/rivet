@@ -25,7 +25,10 @@ indexmap = { workspace = true }
 # content for (#94): `LevelChunkPacketData`, `LightUpdatePacketData`,
 # `HeightmapType` (all feature-gated in rivet-protocol).
 rivet-protocol = { workspace = true, features = ["packets"] }
-rivet-registry = { workspace = true }
+# The `blocks` feature exposes the generated block/state/property tables +
+# the `BlockState` value type (issue #228) this slice's `block` module and the
+# chunk/palette golden tests read.
+rivet-registry = { workspace = true, features = ["blocks"] }
 # Rivet-serialization's `DynamicOps`/codec surface is used two ways in this
 # crate: the `feature.configurations` codec factories (`unit_codec` /
 # `record_builder` / `codec::float_range`) in none_feature_configuration.rs and

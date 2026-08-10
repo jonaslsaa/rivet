@@ -54,6 +54,25 @@ pub mod generated;
 #[cfg(feature = "blocks")]
 pub mod block_state;
 
+/// `MapColor` + `Brightness` — the material color surface lighting/heightmap
+/// code reads off a `BlockState` (issue #228). Table-driven over the 62
+/// generated constants; see the module doc for the Paper 26.2 grounding.
+#[cfg(feature = "blocks")]
+pub mod map_color;
+
+/// `Property` + `PropertyValue` + `PropertyKind` — the typed block-property
+/// surface (`BooleanProperty`/`IntegerProperty`/`EnumProperty` collapsed into
+/// one id-keyed `Property`), table-driven over the generated property tables
+/// (issue #228).
+#[cfg(feature = "blocks")]
+pub mod block_state_property;
+
+/// `StateDefinition` — a block's name-sorted property map, derived from the
+/// generated shape tables (issue #228). `NbtUtils.readBlockState` resolves
+/// properties through this.
+#[cfg(feature = "blocks")]
+pub mod state_definition;
+
 // ---------------------------------------------------------------------------
 // Ownership A — resources / keys (`net.minecraft.resources`, `net.minecraft.tags`,
 // `net.minecraft.core.registries.Registries`, `net.minecraft.IdentifierException`)
