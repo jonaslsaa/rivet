@@ -59,6 +59,9 @@ rivet-oracle/
       manifest.json     # hashes of corpus.json + golden.json (kind: text)
       corpus.json       # 62 exact component-JSON inputs (issue #98)
       golden.json       # Paper's verdict + canonical decode->re-encode per input
+    spline/             # CubicSpline/BoundedFloatFunction value-leaf goldens
+      manifest.json     # hash of spline-goldens.json (kind: spline, issue #372)
+      spline-goldens.json  # Paper's exact min/max/sample outputs as hex-float (plus parity strings)
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
@@ -192,8 +195,9 @@ cargo run -p rivet-oracle -- <dir>       # check a specific fixtures dir
 The no-arg form discovers every `manifest.json` under `fixtures/` — the M0
 superflat slice (`fixtures/`), the worldgen semantic samples
 (`fixtures/worldgen/`), the normal-overworld region payloads
-(`fixtures/regions/overworld-normal/`), and the text component-JSON corpus
-(`fixtures/text/`, issue #98) — and verifies each against its own
+(`fixtures/regions/overworld-normal/`), the text component-JSON corpus
+(`fixtures/text/`, issue #98), and the spline value-leaf goldens
+(`fixtures/spline/`, issue #372) — and verifies each against its own
 manifest. Prints `OK: all N captured files match manifest SHA-256s` and a
 summary per kind (seed, level-type, region-file-compression, per-dimension
 chunk counts). Exits nonzero on any hash or size mismatch, or if any kind
@@ -384,6 +388,9 @@ cargo run -p rivet-oracle -- regenerate --m2       # M2 region payloads only
 cargo run -p rivet-oracle -- regenerate --samples  # worldgen samples only
 cargo run -p rivet-oracle -- regenerate --text     # text corpus only (Paper oracle op)
 ```
+
+The `spline/` value-leaf goldens (issue #372) are regenerated script-driven, not
+via `regenerate`: `scripts/run_spline_probe.sh` (see the fixture manifest note).
 
 The `text/` corpus (issue #98) records the exact component JSON a chat/title/
 player-info/scoreboard packet carries, Paper's accept/reject verdict in the

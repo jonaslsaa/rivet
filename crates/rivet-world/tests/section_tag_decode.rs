@@ -1,326 +1,925 @@
-//! Issue #230 / #183-a — the `chunk.wire` read-view closure DoD: a
-//! `SerializableChunkData`-style section tag decodes through the factory +
-//! `PalettedContainerRO` read-view layer.
-//!
-//! Java's `SerializableChunkData` section loop (MC 26.2) reads each `sections`
-//! entry's `block_states`/`biomes` compounds through
-//! `containerFactory.blockStatesContainerCodec()` /
-//! `biomeContainerRWCodec()`. Each codec decodes `{ palette: List<element>,
-//! data?: long[] }` into a `PackedData` and runs
-//! `PalettedContainer.unpack(strategy, packedData, defaultValue, null)` — the
-//! same `unpack` this test drives. Missing compounds fall back to
-//! `factory.createForBlockStates()/createForBiomes()` (`orElseGet`).
-//!
-//! NOTE — the palette is modeled as the **value layer only** here: entries are
-//! `IntTag`s (the port's `StateId`/`BiomeId` wire stand-ins), not the
-//! `{Name, Properties}` block-state compounds Java's `BlockState.CODEC`
-//! decodes. The test pins the container read-view/unpack behavior — the piece
-//! this closure owns — not the block-state codec; #202 adds
-//! `NbtUtils.readBlockState` and the real compound codecs. The fixture shape
-//! (section 0, `[air, stone]` 4-bit Linear palette, stone layer at section-y
-//! 0, plains biome) is the committed PR #194 golden chunk's section 0.
-//!
-//! The test hand-builds that section tag and decodes it, asserting the exact
-//! golden values (stone/air layout, 4 bits, serialized size, re-pack identity).
+//! Paper 26.2 `SerializableChunkData.sections` reconstruction fixtures and
+//! hostile counterexamples (#336).
+
+use std::io::Cursor;
 
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::int_tag::IntTag;
 use rivet_nbt::list_tag::ListTag;
+use rivet_nbt::nbt_accounter::NbtAccounter;
+use rivet_nbt::nbt_io;
+use rivet_nbt::nbt_utils::write_block_state;
+use rivet_nbt::string_tag::StringTag;
 use rivet_nbt::tag::Tag;
-use rivet_registry::generated::block_states::StateId;
-use rivet_world::chunk::palette::GlobalIdMap;
-use rivet_world::chunk::paletted_container::{PackedData, PalettedContainer, PalettedContainerRO};
-use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
-use rivet_world::chunk::strategy::Strategy;
+use rivet_registry::block_state::BlockState;
+use rivet_registry::generated::blocks::BlockId;
+use rivet_util::DataInputStream;
+use rivet_world::chunk::storage::section_reconstruction::{
+    BiomeId, CodecPath, SectionBlockPredicates, current_version_container_factory,
+    reconstruct_sections, reconstruct_sections_with_presets,
+    reconstruct_sections_with_presets_and_diagnostics,
+};
 
-/// `BiomeId` — a dense biome global-id wrapper (mirrors the superflat golden
-/// test's type; plains = 40).
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct BiomeId(u16);
-
-/// The dense generated block-state global id map.
-#[derive(Clone, Copy)]
-struct BlockStateGlobalMap;
-impl GlobalIdMap<StateId> for BlockStateGlobalMap {
-    fn get_id(&self, value: &StateId) -> i32 {
-        value.0 as i32
-    }
-    fn by_id_or_throw(&self, id: i32) -> StateId {
-        assert!(
-            (0..rivet_registry::generated::block_states::BLOCK_STATE_COUNT as i32).contains(&id),
-            "No value with id {id}"
-        );
-        StateId(id as u16)
-    }
-    fn size(&self) -> i32 {
-        rivet_registry::generated::block_states::BLOCK_STATE_COUNT as i32
-    }
-    fn by_id(&self, id: i32) -> Option<StateId> {
-        (0..rivet_registry::generated::block_states::BLOCK_STATE_COUNT as i32)
-            .contains(&id)
-            .then_some(StateId(id as u16))
-    }
-    fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId>> {
-        Box::new(*self)
+fn predicates() -> SectionBlockPredicates {
+    SectionBlockPredicates {
+        is_air: |state| state.is_air(),
+        is_randomly_ticking: |state| state.random_ticking(),
+        fluid_is_empty: |state| state.fluid_empty(),
+        // Lava is Paper's only randomly-ticking vanilla fluid; water (including
+        // waterlogged states) is not randomly ticking.
+        fluid_is_randomly_ticking: |state| {
+            !state.fluid_empty() && state.block().name() == "minecraft:lava"
+        },
+        // The real-fixture assertions do not contain large collision shapes or
+        // moving pistons. The callback seam is tested separately below.
+        is_special_colliding: |_| false,
     }
 }
 
-/// `BiomeId` global map (plains = 40, 66-entry registry).
-#[derive(Clone, Copy)]
-struct BiomeGlobalMap;
-impl GlobalIdMap<BiomeId> for BiomeGlobalMap {
-    fn get_id(&self, value: &BiomeId) -> i32 {
-        value.0 as i32
-    }
-    fn by_id_or_throw(&self, id: i32) -> BiomeId {
-        assert!((0..66).contains(&id), "No value with id {id}");
-        BiomeId(id as u16)
-    }
-    fn size(&self) -> i32 {
-        66
-    }
-    fn by_id(&self, id: i32) -> Option<BiomeId> {
-        (0..66).contains(&id).then_some(BiomeId(id as u16))
-    }
-    fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId>> {
-        Box::new(*self)
-    }
+fn block(name: &str) -> BlockState {
+    BlockState::of(BlockId::from_name(name).expect("fixture block exists"))
 }
 
-fn factory() -> PalettedContainerFactory<StateId, BiomeId> {
-    PalettedContainerFactory::new(
-        Strategy::create_for_block_states(Box::new(BlockStateGlobalMap)),
-        StateId(0),
-        Strategy::create_for_biomes(Box::new(BiomeGlobalMap)),
-        BiomeId(40),
+fn state_tag(name: &str) -> Tag {
+    Tag::Compound(write_block_state(block(name)))
+}
+
+fn container(palette: Vec<Tag>, data: Option<Vec<i64>>) -> CompoundTag {
+    let mut tag = CompoundTag::new();
+    tag.put("palette".into(), Tag::List(ListTag::with_list(palette)));
+    if let Some(data) = data {
+        tag.put_long_array("data", data);
+    }
+    tag
+}
+
+fn section(y: i8, states: Option<CompoundTag>, biomes: Option<CompoundTag>) -> CompoundTag {
+    let mut tag = CompoundTag::new();
+    tag.put_byte("Y", y);
+    if let Some(states) = states {
+        tag.put("block_states".into(), Tag::Compound(states));
+    }
+    if let Some(biomes) = biomes {
+        tag.put("biomes".into(), Tag::Compound(biomes));
+    }
+    tag
+}
+
+fn plains() -> CompoundTag {
+    container(
+        vec![Tag::String(StringTag::value_of("minecraft:plains".into()))],
+        None,
     )
 }
 
-/// The golden section-0 block `data` long array: the 256-entry stone layer at
-/// section-y 0 packs to 16 longs of `0x1111…` (4 bits per entry, value 1),
-/// the remaining 3840 air entries to 240 zero longs.
-fn golden_block_data() -> Vec<i64> {
-    let mut data = vec![0x1111_1111_1111_1111i64; 16];
-    data.resize(256, 0);
-    data
+fn list(tags: Vec<CompoundTag>) -> ListTag {
+    ListTag::with_list(tags.into_iter().map(Tag::Compound).collect())
 }
 
-/// Hand-build the `SerializableChunkData` section tag for the golden section 0
-/// (section y -4, block_states/biomes, no light arrays).
-fn golden_section_tag() -> CompoundTag {
-    let mut block_states = CompoundTag::new();
-    block_states.put(
-        "palette".into(),
-        Tag::List(ListTag::with_list(vec![
-            Tag::Int(IntTag::value_of(0)),
-            Tag::Int(IntTag::value_of(1)),
-        ])),
-    );
-    block_states.put_long_array("data", golden_block_data());
-
-    let mut biomes = CompoundTag::new();
-    biomes.put(
-        "palette".into(),
-        Tag::List(ListTag::with_list(vec![Tag::Int(IntTag::value_of(40))])),
-    );
-
-    let mut section = CompoundTag::new();
-    section.put_byte("Y", -4);
-    section.put("block_states".into(), Tag::Compound(block_states));
-    section.put("biomes".into(), Tag::Compound(biomes));
-    section
-}
-
-/// Java's `PalettedContainer.codec` decode: read the `palette` int list and
-/// optional `data` long array, build a `PackedData` (declared bits unknown),
-/// and `unpack` with the factory's strategy.
-fn decode_block_states(
-    factory: &PalettedContainerFactory<StateId, BiomeId>,
-    tag: &CompoundTag,
-) -> Result<PalettedContainer<StateId>, String> {
-    let Some(block_states) = tag.get_compound("block_states") else {
-        return Ok(factory.create_for_block_states());
-    };
-    let palette: Vec<StateId> = block_states
-        .get_list("palette")
-        .map(|list| {
-            list.iter()
-                .map(|entry| {
-                    let Tag::Int(id) = entry else {
-                        panic!("block_states.palette entries must be ints");
-                    };
-                    // Java's `BlockState.CODEC` fails on an out-of-range
-                    // registry id rather than truncating it.
-                    let count = rivet_registry::generated::block_states::BLOCK_STATE_COUNT as i32;
-                    if !(0..count).contains(&id.value) {
-                        return Err(format!(
-                            "block_states.palette id {} out of range 0..{count}",
-                            id.value
-                        ));
-                    }
-                    Ok(StateId(id.value as u16))
-                })
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let storage = block_states.get_long_array("data").cloned();
-    let packed = PackedData::new(palette, storage);
-    PalettedContainer::unpack(factory.block_states_strategy(), packed)
-}
-
-fn decode_biomes(
-    factory: &PalettedContainerFactory<StateId, BiomeId>,
-    tag: &CompoundTag,
-) -> Result<PalettedContainer<BiomeId>, String> {
-    let Some(biomes) = tag.get_compound("biomes") else {
-        return Ok(factory.create_for_biomes());
-    };
-    let palette: Vec<BiomeId> = biomes
-        .get_list("palette")
-        .map(|list| {
-            list.iter()
-                .map(|entry| {
-                    let Tag::Int(id) = entry else {
-                        panic!("biomes.palette entries must be ints");
-                    };
-                    // Java's biome codec fails on an out-of-range registry id
-                    // rather than truncating it (66 biome ids in this port).
-                    if !(0..66).contains(&id.value) {
-                        return Err(format!("biomes.palette id {} out of range 0..66", id.value));
-                    }
-                    Ok(BiomeId(id.value as u16))
-                })
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let storage = biomes.get_long_array("data").cloned();
-    let packed = PackedData::new(palette, storage);
-    PalettedContainer::unpack(factory.biome_strategy(), packed)
+fn read_fixture(bytes: &[u8]) -> CompoundTag {
+    let mut input = DataInputStream::new(Cursor::new(bytes));
+    nbt_io::read(&mut input, &mut NbtAccounter::unlimited_heap()).expect("26.2 fixture parses")
 }
 
 #[test]
-fn golden_section_tag_decodes_through_read_view() {
-    let factory = factory();
-    let tag = golden_section_tag();
-
-    let states = decode_block_states(&factory, &tag).expect("block_states decode");
-    let biomes = decode_biomes(&factory, &tag).expect("biomes decode");
-
-    // Read through the `PalettedContainerRO` trait (the read-view surface).
-    let read: &dyn PalettedContainerRO<StateId> = &states;
-    assert_eq!(read.bits_per_entry(), 4);
-    // The whole section-y-0 plane is stone; everything above is air.
-    for z in 0..16 {
-        for x in 0..16 {
-            assert_eq!(read.get(x, 0, z), StateId(1), "stone at ({x},0,{z})");
-            assert_eq!(read.get(x, 1, z), StateId(0), "air at ({x},1,{z})");
-        }
+fn real_26_2_spawn_fixtures_reconstruct_negative_y_sections() {
+    struct PaperFixtureExpectation {
+        nbt: &'static [u8],
+        provenance: &'static str,
+        block_samples: [((i32, i32, i32), &'static str); 5],
+        block_counts: [(&'static str, usize); 4],
+        biome: BiomeId,
+        packed_fingerprint: u64,
+        serialized_light_sections: (usize, i32),
     }
-    assert_eq!(read.get_serialized_size(), 1 + 3 + 256 * 8); // bits + palette + raw.
+    const PAPER_26_2_ORACLE_EXPECTATIONS: [PaperFixtureExpectation; 2] = [
+        PaperFixtureExpectation {
+            nbt: include_bytes!("../../../tools/rivet-oracle/fixtures/chunk/overworld/0.0/0.0.nbt"),
+            provenance: "Paper 26.2 superflat spawn chunk 0,0: bedrock/dirt/dirt/grass_block layers",
+            block_samples: [
+                ((0, -64, 0), "minecraft:bedrock"),
+                ((0, -63, 0), "minecraft:dirt"),
+                ((0, -62, 0), "minecraft:dirt"),
+                ((0, -61, 0), "minecraft:grass_block"),
+                ((8, -60, 8), "minecraft:air"),
+            ],
+            block_counts: [
+                ("minecraft:air", 97_280),
+                ("minecraft:grass_block", 256),
+                ("minecraft:dirt", 512),
+                ("minecraft:bedrock", 256),
+            ],
+            biome: BiomeId::PLAINS,
+            packed_fingerprint: 0xf101_4468_b7dc_ea81,
+            serialized_light_sections: (25, -5),
+        },
+        PaperFixtureExpectation {
+            nbt: include_bytes!("../../../tools/rivet-oracle/fixtures/chunk/overworld/0.0/0.1.nbt"),
+            provenance: "Paper 26.2 superflat spawn chunk 0,1: bedrock/dirt/dirt/grass_block layers",
+            block_samples: [
+                ((0, -64, 0), "minecraft:bedrock"),
+                ((0, -63, 0), "minecraft:dirt"),
+                ((0, -62, 0), "minecraft:dirt"),
+                ((0, -61, 0), "minecraft:grass_block"),
+                ((8, -60, 8), "minecraft:air"),
+            ],
+            block_counts: [
+                ("minecraft:air", 97_280),
+                ("minecraft:grass_block", 256),
+                ("minecraft:dirt", 512),
+                ("minecraft:bedrock", 256),
+            ],
+            biome: BiomeId::PLAINS,
+            packed_fingerprint: 0xf101_4468_b7dc_ea81,
+            serialized_light_sections: (24, -4),
+        },
+    ];
+    fn mix(mut hash: u64, value: u64) -> u64 {
+        hash ^= value;
+        hash.wrapping_mul(0x100000001b3)
+    }
+    let factory = current_version_container_factory();
 
-    let biome_read: &dyn PalettedContainerRO<BiomeId> = &biomes;
-    assert_eq!(biome_read.bits_per_entry(), 0);
-    assert_eq!(biome_read.get(0, 0, 0), BiomeId(40));
+    for expected in PAPER_26_2_ORACLE_EXPECTATIONS {
+        let root = read_fixture(expected.nbt);
+        let section_tags = root.get_list("sections").expect("Paper sections list");
+        let decoded = reconstruct_sections(section_tags, -4, 19, &factory, predicates())
+            .expect("real Paper section reconstruction");
+
+        assert_eq!(decoded.sections.len(), 24, "{}", expected.provenance);
+        assert!(
+            decoded.sections.iter().all(Option::is_some),
+            "{}",
+            expected.provenance
+        );
+        assert_eq!(
+            decoded.light_data.len(),
+            expected.serialized_light_sections.0,
+            "{}",
+            expected.provenance
+        );
+        assert_eq!(
+            decoded.light_data[0].y, expected.serialized_light_sections.1,
+            "{}",
+            expected.provenance
+        );
+        assert!(decoded.diagnostics.is_empty(), "{}", expected.provenance);
+
+        let mut packed_hash = 0xcbf29ce484222325;
+        let mut block_counts = std::collections::BTreeMap::new();
+        let mut biome_counts = std::collections::BTreeMap::new();
+        for section in decoded.sections.iter().flatten() {
+            for y in 0..16 {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let name = section.get_block_state(x, y, z).block().name();
+                        *block_counts.entry(name).or_insert(0usize) += 1;
+                    }
+                }
+            }
+            for y in 0..4 {
+                for z in 0..4 {
+                    for x in 0..4 {
+                        let id = section.get_noise_biome(x, y, z).0;
+                        *biome_counts.entry(id).or_insert(0usize) += 1;
+                    }
+                }
+            }
+            let blocks = section.states().pack();
+            packed_hash = mix(packed_hash, blocks.bits_per_entry as u64);
+            for state in blocks.palette_entries {
+                packed_hash = mix(packed_hash, state.id().0 as u64);
+            }
+            for word in blocks.storage.into_iter().flatten() {
+                packed_hash = mix(packed_hash, word as u64);
+            }
+            let biomes = section.biomes().pack();
+            packed_hash = mix(packed_hash, biomes.bits_per_entry as u64);
+            for biome in biomes.palette_entries {
+                packed_hash = mix(packed_hash, biome.0 as u64);
+            }
+            for word in biomes.storage.into_iter().flatten() {
+                packed_hash = mix(packed_hash, word as u64);
+            }
+        }
+
+        assert_eq!(
+            block_counts,
+            expected.block_counts.into_iter().collect(),
+            "{}",
+            expected.provenance
+        );
+        assert_eq!(
+            biome_counts,
+            [(expected.biome.0, 24 * 64)].into_iter().collect(),
+            "{}",
+            expected.provenance
+        );
+        for ((x, y, z), name) in expected.block_samples {
+            let sy = y.div_euclid(16) + 4;
+            let ly = y.rem_euclid(16);
+            let state = decoded.sections[sy as usize]
+                .as_ref()
+                .unwrap()
+                .get_block_state(x, ly, z);
+            assert_eq!(state.block().name(), name, "{}", expected.provenance);
+        }
+        assert_eq!(
+            packed_hash, expected.packed_fingerprint,
+            "{}",
+            expected.provenance
+        );
+    }
 }
 
 #[test]
-fn unpack_then_pack_reencodes_in_storage_order() {
-    // Java's `pack()` re-encodes against a fresh `HashMapPalette`, filling it
-    // in storage traversal order: storage index 0 is the stone layer (section
-    // y=0), so the re-packed palette is `[stone, air]`, not the original
-    // `[air, stone]` — and the re-packed storage re-maps stone to id 0. This
-    // pins that exact re-encode, and that the read-view `pack(Strategy)`
-    // agrees with the container's own-strategy `pack()`.
-    let factory = factory();
-    let tag = golden_section_tag();
-    let states = decode_block_states(&factory, &tag).expect("decode");
-
-    let repacked = states.pack();
-    let read_view_packed = PalettedContainerRO::pack(&states, factory.block_states_strategy());
-    // The read-view `pack(Strategy)` must match the container's own-strategy
-    // `pack()` field-for-field — comparing only the bit width would let a
-    // same-width wrong palette/storage pass.
-    assert_eq!(read_view_packed.palette_entries, repacked.palette_entries);
-    assert_eq!(read_view_packed.storage, repacked.storage);
-    assert_eq!(read_view_packed.bits_per_entry, repacked.bits_per_entry);
-    assert_eq!(repacked.palette_entries, vec![StateId(1), StateId(0)]);
-    assert_eq!(repacked.bits_per_entry, 4);
-    // Stone (id 0 in the re-packed palette) occupies indices 0..255, air
-    // (id 1) the rest.
-    let mut expected = vec![0i64; 16];
-    expected.resize(256, 0x1111_1111_1111_1111i64);
-    assert_eq!(repacked.storage.as_deref().unwrap(), &expected);
-}
-
-#[test]
-fn out_of_range_palette_id_errors_not_truncates() {
-    // Java's `BlockState.CODEC` fails on an out-of-range registry id; a
-    // truncating `as u16` would silently map 0x20000 to air (id 0) and the
-    // golden assertions would pass on the wrong state. The decode helper must
-    // error instead.
-    let factory = factory();
-    let mut tag = golden_section_tag();
-    let block_states = tag.get_compound_or_empty_mut("block_states");
-    block_states.put(
-        "palette".into(),
-        Tag::List(ListTag::with_list(vec![Tag::Int(IntTag::value_of(
-            0x20000,
-        ))])),
+fn y_mapping_defaults_to_zero_skips_bounds_and_last_duplicate_wins() {
+    let factory = current_version_container_factory();
+    let malformed = container(
+        vec![state_tag("minecraft:stone"), state_tag("minecraft:dirt")],
+        None,
     );
-    let err = decode_block_states(&factory, &tag)
+    let mut default_y = section(
+        7,
+        Some(container(vec![state_tag("minecraft:stone")], None)),
+        Some(plains()),
+    );
+    default_y.remove("Y"); // `getByteOr("Y", 0)`.
+    let tags = list(vec![
+        // These malformed containers must not be evaluated outside the bounds.
+        section(-5, Some(malformed.clone()), Some(plains())),
+        section(20, Some(malformed), Some(plains())),
+        section(
+            -4,
+            Some(container(vec![state_tag("minecraft:stone")], None)),
+            Some(plains()),
+        ),
+        default_y,
+        // Duplicate Y=0: Java's later array assignment wins.
+        section(
+            0,
+            Some(container(vec![state_tag("minecraft:dirt")], None)),
+            Some(plains()),
+        ),
+    ]);
+
+    let sections = reconstruct_sections(&tags, -4, 19, &factory, predicates()).unwrap();
+    assert_eq!(sections.len(), 24);
+    assert_eq!(
+        sections[0].as_ref().unwrap().get_block_state(0, 0, 0),
+        block("minecraft:stone")
+    );
+    assert_eq!(
+        sections[4].as_ref().unwrap().get_block_state(0, 0, 0),
+        block("minecraft:dirt")
+    );
+    assert_eq!(sections.iter().filter(|s| s.is_some()).count(), 2);
+}
+
+#[test]
+fn non_compounds_are_skipped_and_inverted_bounds_are_empty() {
+    let factory = current_version_container_factory();
+    let tags = ListTag::with_list(vec![Tag::Int(IntTag::value_of(7))]);
+    let sections = reconstruct_sections(&tags, -4, 19, &factory, predicates()).unwrap();
+    assert!(sections.iter().all(Option::is_none));
+    assert!(
+        reconstruct_sections(&tags, 1, 0, &factory, predicates())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn missing_containers_default_independently_and_blocks_fail_first() {
+    let factory = current_version_container_factory();
+    let missing_both = list(vec![section(0, None, None)]);
+    let sections = reconstruct_sections(&missing_both, 0, 0, &factory, predicates()).unwrap();
+    let decoded = sections[0].as_ref().unwrap();
+    assert_eq!(decoded.get_block_state(15, 15, 15), block("minecraft:air"));
+    assert_eq!(decoded.get_noise_biome(3, 3, 3), BiomeId::PLAINS);
+    assert_eq!(decoded.non_empty_block_count(), 0);
+
+    let malformed = CompoundTag::new(); // missing required `palette`
+    let tags = list(vec![section(0, Some(malformed.clone()), Some(malformed))]);
+    let err = reconstruct_sections(&tags, 0, 0, &factory, predicates())
         .err()
-        .expect("out-of-range id must error");
-    assert!(err.contains("out of range"), "err: {err}");
-}
+        .expect("block-state failure");
+    assert_eq!(err.container, "block_states");
+    assert_eq!(err.section_y, 0);
+    assert!(err.message.starts_with("No key palette in MapLike["));
+    assert_eq!(err.path, CodecPath::Palette);
 
-#[test]
-fn missing_block_states_defaults_to_factory_all_air() {
-    let factory = factory();
-    let mut tag = golden_section_tag();
-    tag.remove("block_states");
-
-    let states = decode_block_states(&factory, &tag).expect("default decode");
-    // `createForBlockStates()` — all air (default), 0 bits (single value).
-    assert_eq!(states.bits_per_entry(), 0);
-    assert_eq!(states.get(0, 0, 0), StateId(0));
-    assert_eq!(states.get(15, 15, 15), StateId(0));
-    assert!(!states.maybe_has(|s| *s != StateId(0)));
-}
-
-#[test]
-fn malformed_declared_bits_errors_like_java() {
-    let factory = factory();
-    let tag = golden_section_tag();
-    let mut packed = decode_block_states(&factory, &tag).expect("decode").pack();
-    // `bitsPerEntry` 99 vs calculated 4 -> `Invalid bit count, calculated 4, but
-    // container declared 99`.
-    packed.bits_per_entry = 99;
-    let err = PalettedContainer::<StateId>::unpack(factory.block_states_strategy(), packed)
+    let tags = list(vec![section(0, None, Some(CompoundTag::new()))]);
+    let err = reconstruct_sections(&tags, 0, 0, &factory, predicates())
         .err()
-        .expect("declared-bit mismatch must error");
-    assert!(err.contains("Invalid bit count"), "err: {err}");
+        .expect("biome failure");
+    assert_eq!(err.container, "biomes");
+    assert!(err.message.starts_with("No key palette in MapLike["));
 }
 
 #[test]
-fn missing_data_for_nonzero_storage_errors_like_java() {
-    let factory = factory();
-    let mut tag = golden_section_tag();
-    // Drop the `data` long array; the 2-entry palette needs 4-bit storage.
-    let block_states = tag.get_compound_or_empty_mut("block_states");
-    block_states.remove("data");
-    let err = decode_block_states(&factory, &tag)
+fn unknown_registry_elements_use_codec_defaults_while_bad_properties_recover() {
+    let factory = current_version_container_factory();
+    let mut unknown = CompoundTag::new();
+    unknown.put_string("Name", "minecraft:not_a_block");
+
+    let mut properties = CompoundTag::new();
+    properties.put_string("bogus", "x");
+    properties.put_string("axis", "sideways");
+    let mut oak_log = CompoundTag::new();
+    oak_log.put_string("Name", "minecraft:oak_log");
+    oak_log.put("Properties".into(), Tag::Compound(properties));
+
+    let unknown_biome = container(
+        vec![Tag::String(StringTag::value_of(
+            "minecraft:not_a_biome".into(),
+        ))],
+        None,
+    );
+    let tags = list(vec![
+        section(
+            0,
+            Some(container(vec![Tag::Compound(unknown)], None)),
+            Some(unknown_biome),
+        ),
+        section(
+            1,
+            Some(container(vec![Tag::Compound(oak_log)], None)),
+            Some(plains()),
+        ),
+    ]);
+    let sections = reconstruct_sections(&tags, 0, 1, &factory, predicates()).unwrap();
+
+    // A Name-level failure (unknown block) falls back to air, like a biome
+    // registry miss falls back to the default biome.
+    let defaults = sections[0].as_ref().unwrap();
+    assert_eq!(defaults.get_block_state(0, 0, 0), block("minecraft:air"));
+    assert_eq!(defaults.get_noise_biome(0, 0, 0), BiomeId::PLAINS);
+    // Property-level malformations (unknown key, invalid value) recover to the
+    // block's default state with no diagnostic, matching BlockState.CODEC.
+    let log = sections[1].as_ref().unwrap();
+    assert_eq!(log.get_block_state(0, 0, 0), block("minecraft:oak_log"));
+    assert_eq!(log.non_empty_block_count(), 4096);
+    assert_eq!(sections.diagnostics.len(), 2);
+    assert_eq!(sections.diagnostics[0].section_y, 0);
+    assert_eq!(sections.diagnostics[0].container, "block_states");
+    assert_eq!(sections.diagnostics[0].path, CodecPath::PaletteElement(0));
+    assert_eq!(
+        sections.diagnostics[0].message,
+        "(Unknown registry key in ResourceKey[minecraft:root / minecraft:block]: minecraft:not_a_block -> using default)"
+    );
+    assert_eq!(sections.diagnostics[1].container, "biomes");
+    assert_eq!(
+        sections.diagnostics[1].message,
+        "(Unknown registry key in ResourceKey[minecraft:root / minecraft:worldgen/biome]: minecraft:not_a_biome -> using default)"
+    );
+}
+
+#[test]
+fn name_level_shape_errors_replace_the_element_but_properties_recover() {
+    let factory = current_version_container_factory();
+
+    let block_state = |name_tag: Tag, properties: Option<Tag>| {
+        let mut state = CompoundTag::new();
+        state.put("Name".into(), name_tag);
+        if let Some(properties) = properties {
+            state.put("Properties".into(), properties);
+        }
+        Tag::Compound(state)
+    };
+    let properties = |name: &str, value: Tag| {
+        let mut properties = CompoundTag::new();
+        properties.put(name.into(), value);
+        Tag::Compound(properties)
+    };
+    let oak_log = Tag::String(StringTag::value_of("minecraft:oak_log".into()));
+    // Property-level malformations recover to the block's default state with
+    // no diagnostic (BlockState.CODEC): invalid value, unknown key, wrong-typed
+    // `Properties`, wrong-typed value.
+    let property_hostile = [
+        block_state(
+            oak_log.clone(),
+            Some(properties(
+                "axis",
+                Tag::String(StringTag::value_of("sideways".into())),
+            )),
+        ),
+        block_state(
+            oak_log.clone(),
+            Some(properties(
+                "bogus",
+                Tag::String(StringTag::value_of("x".into())),
+            )),
+        ),
+        block_state(oak_log.clone(), Some(Tag::Int(IntTag::value_of(1)))),
+        block_state(
+            oak_log,
+            Some(properties("axis", Tag::Int(IntTag::value_of(1)))),
+        ),
+    ];
+    let property_count = property_hostile.len();
+    for (y, state) in property_hostile.into_iter().enumerate() {
+        let tags = list(vec![section(
+            y as i8,
+            Some(container(vec![state], None)),
+            Some(plains()),
+        )]);
+        let sections =
+            reconstruct_sections(&tags, y as i32, y as i32, &factory, predicates()).unwrap();
+        assert_eq!(
+            sections[0].as_ref().unwrap().get_block_state(0, 0, 0),
+            block("minecraft:oak_log")
+        );
+        assert!(sections.diagnostics.is_empty());
+    }
+
+    // A Name-level failure (missing, wrong-typed, or unparsable `Name`) still
+    // replaces the whole element with the strategy default (air).
+    let name_hostile = [
+        block_state(Tag::Int(IntTag::value_of(1)), None),
+        Tag::Compound(CompoundTag::new()),
+        block_state(
+            Tag::String(StringTag::value_of("minecraft:bad id".into())),
+            None,
+        ),
+    ];
+    for (offset, state) in name_hostile.into_iter().enumerate() {
+        let y = property_count + offset;
+        let tags = list(vec![section(
+            y as i8,
+            Some(container(vec![state], None)),
+            Some(plains()),
+        )]);
+        let sections =
+            reconstruct_sections(&tags, y as i32, y as i32, &factory, predicates()).unwrap();
+        assert_eq!(
+            sections[0].as_ref().unwrap().get_block_state(0, 0, 0),
+            block("minecraft:air")
+        );
+        assert_eq!(sections.diagnostics.len(), 1);
+        assert_eq!(sections.diagnostics[0].path, CodecPath::PaletteElement(0));
+    }
+}
+
+#[test]
+fn block_state_diagnostic_precedes_biome_data_and_blocklight_failures() {
+    let factory = current_version_container_factory();
+    let mut unknown = CompoundTag::new();
+    unknown.put_string("Name", "minecraft:not_a_block");
+
+    let bad_biomes = container(
+        vec![
+            Tag::String(StringTag::value_of("minecraft:plains".into())),
+            Tag::String(StringTag::value_of("minecraft:desert".into())),
+        ],
+        None,
+    );
+    let tags = list(vec![section(
+        0,
+        Some(container(vec![Tag::Compound(unknown.clone())], None)),
+        Some(bad_biomes),
+    )]);
+    let err = reconstruct_sections(&tags, 0, 0, &factory, predicates())
         .err()
-        .expect("must error");
-    assert_eq!(err, "Missing values for non-zero storage");
+        .expect("biome packed data is fatal");
+    assert_eq!(err.container, "biomes");
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert_eq!(err.recoverable_diagnostics.len(), 1);
+    assert_eq!(
+        err.recoverable_diagnostics[0].path,
+        CodecPath::PaletteElement(0)
+    );
+
+    let mut bad_light = section(
+        0,
+        Some(container(vec![Tag::Compound(unknown)], None)),
+        Some(plains()),
+    );
+    bad_light.put_byte_array("BlockLight", vec![0]);
+    let tags = list(vec![bad_light]);
+    let mut observed = Vec::new();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = reconstruct_sections_with_presets_and_diagnostics(
+                &tags,
+                0,
+                0,
+                &factory,
+                predicates(),
+                |_| None,
+                |diagnostic| observed.push(diagnostic.clone()),
+            );
+        }))
+        .is_err()
+    );
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].container, "block_states");
+    assert_eq!(observed[0].path, CodecPath::PaletteElement(0));
 }
 
 #[test]
-fn factory_create_for_biomes_holds_plains_default() {
-    let factory = factory();
-    let biomes = factory.create_for_biomes();
-    assert_eq!(biomes.get(0, 0, 0), BiomeId(40));
-    assert_eq!(biomes.get(3, 3, 3), BiomeId(40));
-    assert_eq!(biomes.bits_per_entry(), 0);
+fn wrong_typed_required_palettes_keep_codec_messages_and_win_competition() {
+    let factory = current_version_container_factory();
+    let wrong_palette = || {
+        let mut container = CompoundTag::new();
+        container.put_int("palette", 7);
+        container.put_int("data", 12);
+        container
+    };
+
+    let mut bad_block = section(0, Some(wrong_palette()), Some(plains()));
+    bad_block.put_byte_array("BlockLight", vec![0]);
+    let later_bad = section(1, Some(CompoundTag::new()), Some(plains()));
+    let err = reconstruct_sections(
+        &list(vec![bad_block, later_bad]),
+        0,
+        1,
+        &factory,
+        predicates(),
+    )
+    .err()
+    .expect("wrong-typed block palette wins");
+    assert_eq!(err.container, "block_states");
+    assert_eq!(err.path, CodecPath::Palette);
+    assert_eq!(err.message, "Not a list: 7");
+
+    let mut bad_biome = section(
+        0,
+        Some(container(vec![state_tag("minecraft:air")], None)),
+        Some(wrong_palette()),
+    );
+    bad_biome.put_byte_array("BlockLight", vec![0]);
+    let err = reconstruct_sections(
+        &list(vec![bad_biome, section(1, None, Some(CompoundTag::new()))]),
+        0,
+        1,
+        &factory,
+        predicates(),
+    )
+    .err()
+    .expect("wrong-typed biome palette wins");
+    assert_eq!(err.container, "biomes");
+    assert_eq!(err.path, CodecPath::Palette);
+    assert_eq!(err.message, "Not a list: 7");
+}
+
+#[test]
+fn malformed_palette_entries_degrade_before_storage_validation() {
+    let factory = current_version_container_factory();
+    let wrong_entry = Tag::Int(IntTag::value_of(123));
+    // A wrong singleton element becomes air and needs no `data`.
+    let tags = list(vec![section(
+        0,
+        Some(container(vec![wrong_entry.clone()], None)),
+        Some(plains()),
+    )]);
+    let sections = reconstruct_sections(&tags, 0, 0, &factory, predicates()).unwrap();
+    assert_eq!(
+        sections[0].as_ref().unwrap().get_block_state(0, 0, 0),
+        block("minecraft:air")
+    );
+
+    // Two entries select non-zero storage only after both element fallbacks;
+    // absent data then fails at the unpack phase. Paper/DFU composes the
+    // element partials with the fatal unpack error via
+    // `DataResult.appendMessages` (`first + "; " + second`), prepending each
+    // new element error, so the fatal message carries them in reverse decode
+    // order (F1) — verified against pinned Paper 26.2 + DFU 10.0.21.
+    let tags = list(vec![section(
+        0,
+        Some(container(vec![wrong_entry.clone(), wrong_entry], None)),
+        Some(plains()),
+    )]);
+    let err = reconstruct_sections(&tags, 0, 0, &factory, predicates())
+        .err()
+        .expect("missing packed data");
+    assert_eq!(
+        err.message,
+        "(Not a map: 123 -> using default); (Not a map: 123 -> using default); Missing values for non-zero storage"
+    );
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert_eq!(err.recoverable_diagnostics.len(), 2);
+    assert_eq!(
+        err.recoverable_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.path)
+            .collect::<Vec<_>>(),
+        [CodecPath::PaletteElement(0), CodecPath::PaletteElement(1)]
+    );
+}
+
+#[test]
+fn section_tags_validate_palettes_then_blocklight_then_skylight_before_advancing() {
+    let factory = current_version_container_factory();
+    let valid = || {
+        section(
+            0,
+            Some(container(vec![state_tag("minecraft:air")], None)),
+            Some(plains()),
+        )
+    };
+
+    let mut unknown = CompoundTag::new();
+    unknown.put_string("Name", "minecraft:not_a_block");
+    let mut bad_first_light = section(
+        0,
+        Some(container(vec![Tag::Compound(unknown)], None)),
+        Some(plains()),
+    );
+    bad_first_light.put_byte_array("BlockLight", vec![0]);
+    let later_bad_palette = section(1, Some(CompoundTag::new()), Some(plains()));
+    let tags = list(vec![bad_first_light, later_bad_palette]);
+    let mut observed = Vec::new();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = reconstruct_sections_with_presets_and_diagnostics(
+                &tags,
+                0,
+                1,
+                &factory,
+                predicates(),
+                |_| None,
+                |diagnostic| observed.push(diagnostic.clone()),
+            );
+        }))
+        .is_err(),
+        "the first tag's BlockLight must fail before the later palette"
+    );
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].path, CodecPath::PaletteElement(0));
+
+    let mut bad_same_tag = section(0, Some(CompoundTag::new()), Some(plains()));
+    bad_same_tag.put_byte_array("BlockLight", vec![0]);
+    let tags = list(vec![bad_same_tag]);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reconstruct_sections(&tags, 0, 0, &factory, predicates())
+    }));
+    let error = result
+        .expect("block palette failure precedes same-tag light validation")
+        .err()
+        .expect("missing block palette is fatal");
+    assert_eq!(error.container, "block_states");
+    assert_eq!(error.path, CodecPath::Palette);
+
+    let mut bad_both_lights = valid();
+    bad_both_lights.put_byte_array("BlockLight", vec![0]);
+    bad_both_lights.put_byte_array("SkyLight", vec![0]);
+    let tags = list(vec![bad_both_lights]);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = reconstruct_sections(&tags, 0, 0, &factory, predicates());
+        }))
+        .is_err(),
+        "BlockLight is validated before SkyLight"
+    );
+}
+
+#[test]
+fn singleton_ignores_absent_or_malformed_optional_data() {
+    let factory = current_version_container_factory();
+    let singleton = container(vec![state_tag("minecraft:stone")], None);
+    let mut malformed_data = singleton.clone();
+    malformed_data.put_int("data", 12); // lenient optional -> absent
+    let mut extra_data = singleton.clone();
+    extra_data.put_long_array("data", vec![123]); // zero-bit path ignores it
+
+    for states in [singleton, malformed_data, extra_data] {
+        let tags = list(vec![section(0, Some(states), Some(plains()))]);
+        let sections = reconstruct_sections(&tags, 0, 0, &factory, predicates()).unwrap();
+        let decoded = sections[0].as_ref().unwrap();
+        assert_eq!(decoded.states().bits_per_entry(), 0);
+        assert_eq!(decoded.non_empty_block_count(), 4096);
+    }
+}
+
+#[test]
+fn packed_storage_length_errors_are_container_scoped() {
+    let factory = current_version_container_factory();
+    let states = container(
+        vec![state_tag("minecraft:air"), state_tag("minecraft:stone")],
+        Some(vec![0; 255]), // 4 bits * 4096 entries requires 256 longs
+    );
+    let tags = list(vec![section(0, Some(states), Some(plains()))]);
+    let err = reconstruct_sections(&tags, 0, 0, &factory, predicates())
+        .err()
+        .expect("malformed packed data");
+    assert_eq!(err.container, "block_states");
+    assert_eq!(
+        err.message,
+        "Failed to read PalettedContainer: Invalid length given for storage, got: 255 but expected: 256"
+    );
+}
+
+#[test]
+fn fatal_packed_data_retains_prior_element_partials_in_message() {
+    let factory = current_version_container_factory();
+    // A wrong-typed palette element becomes the default (air) with a partial;
+    // absent packed data then fails fatally. Paper/DFU composes the element
+    // partials with the unpack error via `appendMessages(first, second)` =
+    // `first + "; " + second`, *prepending* each new element error (verified
+    // against pinned Paper 26.2 + DFU 10.0.21), so `ChunkReadException.message`
+    // carries the failing elements in reverse decode order followed by the
+    // fatal unpack error (F1).
+    let block_tags = list(vec![section(
+        0,
+        Some(container(
+            vec![Tag::Int(IntTag::value_of(1)), Tag::Int(IntTag::value_of(2))],
+            None,
+        )),
+        Some(plains()),
+    )]);
+    let err = reconstruct_sections(&block_tags, 0, 0, &factory, predicates())
+        .err()
+        .expect("block packed data is fatal");
+    assert_eq!(
+        err.message,
+        "(Not a map: 2 -> using default); (Not a map: 1 -> using default); Missing values for non-zero storage"
+    );
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert_eq!(err.container, "block_states");
+    assert_eq!(err.recoverable_diagnostics.len(), 2);
+
+    // Biomes compose the same way.
+    let biome_tags = list(vec![section(
+        0,
+        Some(container(vec![state_tag("minecraft:air")], None)),
+        Some(container(
+            vec![Tag::Int(IntTag::value_of(1)), Tag::Int(IntTag::value_of(2))],
+            None,
+        )),
+    )]);
+    let err = reconstruct_sections(&biome_tags, 0, 0, &factory, predicates())
+        .err()
+        .expect("biome packed data is fatal");
+    assert_eq!(
+        err.message,
+        "(Not a string: 2 -> using default); (Not a string: 1 -> using default); Missing values for non-zero storage"
+    );
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert_eq!(err.container, "biomes");
+    assert_eq!(err.recoverable_diagnostics.len(), 2);
+
+    // A clean palette with a fatal unpack leaves the message unchanged.
+    let clean_tags = list(vec![section(
+        0,
+        Some(container(
+            vec![state_tag("minecraft:air"), state_tag("minecraft:stone")],
+            None,
+        )),
+        Some(plains()),
+    )]);
+    let err = reconstruct_sections(&clean_tags, 0, 0, &factory, predicates())
+        .err()
+        .expect("missing packed data is fatal");
+    assert_eq!(err.message, "Missing values for non-zero storage");
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert!(err.recoverable_diagnostics.is_empty());
+}
+
+#[test]
+fn identifier_read_errors_use_paper_not_a_valid_resource_location_text() {
+    let factory = current_version_container_factory();
+    // F2: malformed `Name`/biome identifiers must surface Paper `Identifier.read`
+    // text (`Not a valid resource location: <input> <escaped message>`) through
+    // the element diagnostic, not a local `Invalid ... identifier` wrapper.
+    let mut bad_name = CompoundTag::new();
+    bad_name.put_string("Name", "minecraft:bad id");
+    let tags = list(vec![section(
+        0,
+        Some(container(vec![Tag::Compound(bad_name.clone())], None)),
+        Some(plains()),
+    )]);
+    let sections = reconstruct_sections(&tags, 0, 0, &factory, predicates()).unwrap();
+    assert_eq!(
+        sections.diagnostics[0].message,
+        "(Not a valid resource location: minecraft:bad id Non [a-z0-9/._-] character in path of location: minecraft:bad id -> using default)"
+    );
+    assert_eq!(sections.diagnostics[0].path, CodecPath::PaletteElement(0));
+
+    // Same text flows into a composed fatal message when packed data then fails.
+    // The second element (empty compound, no `Name`) is decoded after the bad
+    // name, so Paper/DFU's prepend accumulation lists it first (F1 order).
+    let bad_name_and_data = list(vec![section(
+        0,
+        Some(container(
+            vec![Tag::Compound(bad_name), Tag::Compound(CompoundTag::new())],
+            None,
+        )),
+        Some(plains()),
+    )]);
+    let err = reconstruct_sections(&bad_name_and_data, 0, 0, &factory, predicates())
+        .err()
+        .expect("missing packed data is fatal");
+    assert_eq!(
+        err.message,
+        "(No key Name in MapLike[CompoundTag { tags: {} }] -> using default); (Not a valid resource location: minecraft:bad id Non [a-z0-9/._-] character in path of location: minecraft:bad id -> using default); Missing values for non-zero storage"
+    );
+}
+
+#[test]
+fn block_and_biome_palette_width_boundaries_match_26_2_strategies() {
+    let factory = current_version_container_factory();
+    let block_palette = |count: usize| {
+        (0..count)
+            .map(|id| {
+                let state =
+                    BlockState::new(rivet_registry::generated::block_states::StateId(id as u16));
+                Tag::Compound(write_block_state(state))
+            })
+            .collect::<Vec<_>>()
+    };
+    let biome_palette = |count: usize| {
+        rivet_registry::generated::biomes::BIOME_BY_ID[..count]
+            .iter()
+            .map(|name| Tag::String(StringTag::value_of((*name).into())))
+            .collect::<Vec<_>>()
+    };
+
+    // Block states: 16 entries stay at the forced four-bit linear palette;
+    // 17 entries cross to the five-bit hashmap palette.
+    for (count, longs, bits) in [(16, 256, 4), (17, 342, 5)] {
+        let tags = list(vec![section(
+            0,
+            Some(container(block_palette(count), Some(vec![0; longs]))),
+            Some(plains()),
+        )]);
+        let sections = reconstruct_sections(&tags, 0, 0, &factory, predicates()).unwrap();
+        assert_eq!(
+            sections[0].as_ref().unwrap().states().bits_per_entry(),
+            bits
+        );
+    }
+
+    // Biomes: 8 entries use the local three-bit palette; 9 entries select
+    // global-on-memory storage (7 bits for the 66-entry registry) after the
+    // four-bit on-disc data is repacked.
+    for (count, disc_longs, memory_bits) in [(8, 4, 3), (9, 4, 7)] {
+        let tags = list(vec![section(
+            0,
+            Some(container(vec![state_tag("minecraft:air")], None)),
+            Some(container(biome_palette(count), Some(vec![0; disc_longs]))),
+        )]);
+        let sections = reconstruct_sections(&tags, 0, 0, &factory, predicates()).unwrap();
+        assert_eq!(
+            sections[0].as_ref().unwrap().biomes().bits_per_entry(),
+            memory_bits
+        );
+    }
+}
+
+#[test]
+fn presets_are_selected_after_bounds_and_feed_unpack() {
+    let factory = current_version_container_factory();
+    let tags = list(vec![
+        section(-1, Some(CompoundTag::new()), Some(plains())),
+        section(
+            0,
+            Some(container(vec![state_tag("minecraft:stone")], None)),
+            Some(plains()),
+        ),
+        section(1, None, Some(plains())),
+    ]);
+    let mut calls = Vec::new();
+    let sections = reconstruct_sections_with_presets(&tags, 0, 1, &factory, predicates(), |y| {
+        calls.push(y);
+        Some(vec![block("minecraft:dirt")])
+    })
+    .unwrap();
+    assert_eq!(calls, [0, 1]);
+    let states = sections[0].as_ref().unwrap().states();
+    let mut palette = Vec::new();
+    states.for_each_in_palette(|state| palette.push(state));
+    assert!(palette.contains(&block("minecraft:stone")));
+    assert!(palette.contains(&block("minecraft:dirt")));
+}
+
+#[test]
+fn reconstructed_counts_use_all_supplied_216_predicates() {
+    let factory = current_version_container_factory();
+    let tags = list(vec![section(
+        0,
+        Some(container(vec![state_tag("minecraft:stone")], None)),
+        Some(plains()),
+    )]);
+    let sections = reconstruct_sections(
+        &tags,
+        0,
+        0,
+        &factory,
+        SectionBlockPredicates {
+            is_air: |_| false,
+            is_randomly_ticking: |_| true,
+            fluid_is_empty: |_| false,
+            fluid_is_randomly_ticking: |_| true,
+            is_special_colliding: |_| true,
+        },
+    )
+    .unwrap();
+    let decoded = sections[0].as_ref().unwrap();
+    assert_eq!(decoded.non_empty_block_count(), 4096);
+    assert_eq!(decoded.fluid_count(), 4096);
+    assert_eq!(decoded.ticking_block_count(), 4096);
+    assert_eq!(decoded.ticking_fluid_count(), 4096);
+    assert!(decoded.has_special_colliding_blocks());
+    assert_eq!(decoded.ticking_blocks().size(), 4096);
 }

@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "spline",
+  "note": "Paper-grounded CubicSpline/BoundedFloatFunction value-leaf goldens (issue #372): `spline-goldens.json` records Paper's exact min/max/sample outputs as hex-float, asserted bit-exactly by crates/rivet-util/tests/cubic_spline.rs; the parity strings are informational (the tests check the parity format via hardcoded strings). Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/SplineProbe.java; regenerate with `scripts/run_spline_probe.sh`.",
+  "captured": [
+    {
+      "path": "spline-goldens.json",
+      "sha256": "81a252fb2e88e78b0d923fe816be934765b53d0ec04c12ffddff9da9e488f452",
+      "bytes": 6808
+    }
+  ]
+}
