@@ -50,14 +50,11 @@ const INDENT: i32 = 2;
 #[allow(dead_code)]
 const NOT_FOUND: i32 = -1;
 
-/// RivetTodo(#202): `CURRENT_DATA_VERSION` is a stopgap local constant
-/// duplicating `SharedConstants.WORLD_VERSION` (rivet-core) — 4903 in the
-/// pinned MC 26.2 build (`DetectedVersion`: `new DataVersion(4903, "main")`,
-/// `SharedConstants.WORLD_VERSION = 4903`); it is rewired when that lands.
-/// It silently drifts if the pinned MC version changes: both this constant
-/// and the `add_current_data_version_uses_world_version` test hardcode 4903,
-/// and the oracle harness is not wired to this unit yet.
-pub const CURRENT_DATA_VERSION: i32 = 4903;
+/// `NbtUtils.CURRENT_DATA_VERSION` — `SharedConstants.WORLD_VERSION` (issue
+/// #202). Rewired to `rivet_core::shared_constants::WORLD_VERSION`; the
+/// literal 4903 pin lives in rivet-core `shared_constants.rs`, so a bump of
+/// the pinned MC version updates both together.
+pub const CURRENT_DATA_VERSION: i32 = rivet_core::shared_constants::WORLD_VERSION;
 
 /// `YXZ_LISTTAG_INT_COMPARATOR` — compare by y(1), then x(0), then z(2), each
 /// via `getIntOr(index, 0)`.
@@ -1132,11 +1129,10 @@ mod tests {
     }
 
     #[test]
-    fn add_current_data_version_uses_world_version() {
+    fn add_current_data_version_writes_shared_version() {
         let mut tag = CompoundTag::new();
         add_current_data_version(&mut tag);
         assert_eq!(tag.get_int_or("DataVersion", -1), CURRENT_DATA_VERSION);
-        assert_eq!(CURRENT_DATA_VERSION, 4903);
     }
 
     #[test]

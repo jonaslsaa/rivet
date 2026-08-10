@@ -14,7 +14,8 @@
 #   - rivet-oracle (default)  verifies ALL committed fixture kinds: the M0 chunk
 #                          slice, the M2 worldgen semantic samples, the M2
 #                          normal-overworld none-compression region payloads,
-#                          and the text component-JSON corpus (issue #98)
+#                          the text component-JSON corpus (issue #98), and the
+#                          spline value-leaf goldens (issue #372)
 #                          (each against its own manifest.json SHA-256s).
 #   - rivet-oracle verify  M0 sanity gate: boot a fresh Paper server and diff its
 #                          chunk-NBT slice against the committed golden baseline.
@@ -358,7 +359,7 @@ oracle_prereq_check() {
 # gate like any other oracle stage; the tamper never touches the committed
 # fixtures.
 run_oracle_verify() {
-  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus)"
+  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline)"
   cargo run -q -p rivet-oracle
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
     echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
