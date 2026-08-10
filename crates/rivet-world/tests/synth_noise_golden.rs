@@ -541,12 +541,10 @@ fn noise_utils_matches_paper_exactly() {
     assert_eq!(sb2, entry["parityInt"].as_str().unwrap());
 }
 
-/// Boundary behavior that is Java-observable but not covered by the sampling
-/// grid: the `wrap` function's periodic behaviour and the empty-octave-set
-/// rejections.
+/// The `wrap` function's periodic behaviour: `wrap(x) = x - lfloor(x /
+/// 3.3554432E7 + 0.5) * 3.3554432E7`.
 #[test]
 fn boundary_wrap_is_periodic_and_exact() {
-    // wrap(x) = x - lfloor(x / 3.3554432E7 + 0.5) * 3.3554432E7.
     let cases = [
         (0.0f64, 0.0f64),
         (3.3554432E7, 0.0f64),    // exactly ROUND_OFF -> wraps to 0.0
@@ -557,4 +555,46 @@ fn boundary_wrap_is_periodic_and_exact() {
         let got = PerlinNoise::wrap(x);
         assert_eq!(got.to_bits(), expected.to_bits(), "wrap({x})");
     }
+}
+
+/// Java-observable constructor rejections (Paper throws the same messages in
+/// the same order). Pinned so a future refactor cannot silently weaken or
+/// remove an error path.
+#[test]
+#[should_panic(expected = "Need some octaves!")]
+fn perlin_simplex_rejects_empty_octave_set() {
+    PerlinSimplexNoise::new(&mut source("xoroshiro", 42), &[]);
+}
+
+#[test]
+#[should_panic(expected = "Need some octaves!")]
+fn perlin_noise_rejects_empty_octave_set() {
+    PerlinNoise::create_octave_set(&mut source("xoroshiro", 42), &[]);
+}
+
+#[test]
+#[should_panic(
+    expected = "Failed to create correct number of noise levels for given non-zero amplitudes"
+)]
+fn perlin_noise_legacy_rejects_amplitude_mismatch() {
+    // octaves=3, zero_octave_index=1: the non-zero amplitude at index 2 (a
+    // positive octave) is never backed by a noise level, so the count check
+    // fires before the positive-octave guard.
+    PerlinNoise::create_legacy_for_legacy_nether_biome(
+        &mut source("legacy", 42),
+        -1,
+        vec![1.0, 0.0, 1.0],
+    );
+}
+
+#[test]
+#[should_panic(expected = "Positive octaves are temporarily disabled")]
+fn perlin_noise_legacy_rejects_positive_octaves() {
+    // octaves=3, zero_octave_index=1, non-zero amplitudes only at <= index 1,
+    // so the level-count check passes and the positive-octave guard fires.
+    PerlinNoise::create_legacy_for_legacy_nether_biome(
+        &mut source("legacy", 42),
+        -1,
+        vec![1.0, 1.0, 0.0],
+    );
 }
