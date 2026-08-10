@@ -9,6 +9,16 @@ workspace = true
 
 [dependencies]
 crc32c = { workspace = true }
+# `ProblemReporter.Collector.getReport` groups problems by path string. Java
+# groups through a Guava `HashMultimap` — a `HashMap`-backed set multimap, so
+# the group order is unspecified and identical (path, problem) pairs appear
+# once. The port uses an ordered map so the report is deterministic: first-seen
+# path order (a superset of Java's unordered groups), with duplicate
+# descriptions within a path dropped to match Java's de-duplication.
+indexmap = { workspace = true }
 md5 = { workspace = true }
 sha2 = { workspace = true }
 rivet-serialization = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
