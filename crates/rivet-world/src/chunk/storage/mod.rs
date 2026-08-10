@@ -27,29 +27,21 @@
 //! value. `RegionFile` is owned by the region's single IO worker behind a
 //! `Mutex<RegionFile>` (OWNERSHIP.md) — never `Arc<RwLock>` game state.
 
-// RivetTodo(#231): `RegionFileStorage` (the LRU `Long2ObjectLinkedOpenHashMap`
-// region cache + `nonExistingRegionFiles` negative cache; `getRegionFile`,
-// `read`/`write`/`flush`/`close` — the `RegionFileSizeException` it throws is
-// already ported in `region_file.rs`) is deferred with the rest of the storage
-// wave. Its thin read-side surface is implementable
-// without IOWorker/async, but `read`'s coordinate guard
-// (`SerializableChunkData.getChunkCoordinate` vs the requested pos) and the
-// Aikar `readOversizedChunk` merge duplicate the helpers already ported here,
-// so it lands together with the chunk-payload wave. `IOWorker`'s `PendingStore`
+// RivetTodo(#231): `RegionFileStorage` write/flush/create surfaces remain
+// deferred. This module now exposes only the existing-file direct-read slice,
+// including its LRU/negative caches, coordinate guard, and Aikar oversized
+// merge. `IOWorker`'s `PendingStore`
 // coalescing, the moonrise `RegionDataController` interfaces
 // (`moonrise$startWrite`/`moonrise$finishWrite`/`moonrise$readData`/
 // `moonrise$finishRead`), and `SimpleRegionStorage`'s coordinate guard also
 // land with that wave. The legacy Aikar oversized subsystem (§6.2) — per-chunk
-// `*.oversized_<x>_<z>.nbt` files, the `.oversized.nbt` meta, `isOversized`/
-// `setOversized`, and the recalc branches that read them — is deferred here:
-// nothing creates those files anymore, so a modern-world round-trip never
-// touches them. Codec coverage per DECISIONS.md D13: gzip/none write and
-// gzip/deflate read are wired on `flate2`; lz4 **read** (the lz4-java "LZ4
-// Block" format: `lz4_flex` + `xxhash-rust` per CRATES.md) and deflate/lz4
-// **write** (Java `Deflater` is not `flate2`-reproducible) stay deferred.
+// Aikar `setOversized` write/meta mutations and the recalc-only Aikar branches
+// remain deferred. Codec coverage per DECISIONS.md D13: all four registered
+// read codecs are wired; deflate/lz4 writes stay deferred.
 
 pub mod region_bitmap;
 pub mod region_file;
+pub mod region_file_storage;
 pub mod region_file_version;
 pub mod region_storage_info;
 pub mod serializable_chunk_data;
@@ -60,4 +52,5 @@ pub use region_file::{
     get_last_world_save_time, get_region_file_coordinates,
 };
 pub use region_file_version::RegionFileVersion;
+pub use region_file_storage::RegionFileStorage;
 pub use region_storage_info::RegionStorageInfo;

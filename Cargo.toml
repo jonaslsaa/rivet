@@ -16,6 +16,7 @@ crc32c = "0.6"
 crossfire = "3"
 flate2 = "1"
 indexmap = "2"
+lz4_flex = { version = "0.11", default-features = false }
 md5 = "0.7"
 sha2 = "0.10"
 tempfile = "3"
@@ -42,10 +43,9 @@ rivet-test-support = { path = "crates/rivet-test-support" }
 ryu = "1.0"
 phf = "0.11"
 serde_json = { version = "1", features = ["preserve_order"] }
-# xxh3_64 for the #54 chunk-hash engine (rivet-oracle). Only the xxh3 feature
-# is enabled — no xxh32/xxh64/xxh128 — so the digest family is exactly the one
-# the known-answer self-check pins.
-xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
+# xxh3_64 serves the #54 chunk-hash engine; xxh32 serves lz4-java region-block
+# checksums (seeded at the codec call site). xxh64/xxh128 remain disabled.
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3", "xxh32"] }
 
 [workspace.lints.rust]
 unsafe_code = "warn" # rivet-ffi overrides locally; see PORTING.md

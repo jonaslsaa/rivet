@@ -17,9 +17,8 @@
 //!   reader recomputes `sectors = (length + 4)/4096 + 1` from the chunk's own
 //!   first sector, reading that length *without* checking the read count
 //!   (short reads leave the zero-filled tail), exactly like Paper.
-//! - **Codec dispatch**: gzip/deflate/none reads ride on `RegionFileVersion`
-//!   (`flate2`); lz4 read is the D13 deferral and errors
-//!   ([`io::ErrorKind::Unsupported`]); id 127 reads a modified-UTF-8 id, logs
+//! - **Codec dispatch**: gzip/deflate/none/lz4 reads ride on
+//!   `RegionFileVersion`; id 127 reads a modified-UTF-8 id, logs
 //!   "Unrecognized custom compression {}" / "Invalid custom compression id {}",
 //!   and returns null — malformed/truncated ids propagate the UTF/EOF error
 //!   out of `get_chunk_data_input_stream`, exactly like Paper.
@@ -34,14 +33,10 @@
 //!   (Paper's "don't write garbage data to disk"); the caller converts it to a
 //!   `clear`.
 //!
-//! Deferred with `RivetTodo(#231)` markers: the legacy Aikar oversized
-//! subsystem (`*.oversized_<x>_<z>.nbt` per-chunk files, `.oversized.nbt` meta,
-//! `isOversized`/`setOversized`, and the recalc branches that detect Aikar
-//! files) — legacy-only, nothing creates the files anymore, and its consumer
-//! (`RegionFileStorage.readOversizedChunk`) is itself deferred. The recalc's
-//! modern `.mcc` re-linking is fully ported. lz4 read stays deferred per D13.
-//! `RegionFileStorage` (the LRU/negative-cache wrapper) is deferred with
-//! evidence in `mod.rs`.
+//! The read-only Aikar surface (`.oversized.nbt` flags plus deflate-compressed
+//! `*_oversized_<x>_<z>.nbt` data) is present for `RegionFileStorage`; its
+//! legacy `setOversized` mutation path and recalc-only Aikar detection/meta
+//! rewrites remain deferred. Modern `.mcc` re-linking is fully ported.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -250,6 +245,9 @@ pub struct RegionFile {
     /// `sync` — Java opens the FileChannel with `DSYNC` when set. Rivet
     /// emulates it with a `sync_data` after each `write_header`.
     sync: bool,
+    /// Legacy Aikar oversized flags loaded from `<region>.oversized.nbt`.
+    /// This slice only reads them; the legacy mutation surface stays absent.
+    oversized: [u8; 1024],
 }
 
 impl RegionFile {
@@ -272,6 +270,9 @@ impl RegionFile {
         version: RegionFileVersion,
         sync: bool,
     ) -> io::Result<Self> {
+        // Paper initializes Aikar metadata before validating the external
+        // directory or opening the region channel; preserve that error order.
+        let oversized = read_oversized_state(&path)?;
         if !external_file_dir.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -299,6 +300,7 @@ impl RegionFile {
             can_recalc_header,
             recalculate_count: 0,
             sync,
+            oversized,
         };
         region.used_sectors.force(0, 2);
 
@@ -409,6 +411,26 @@ impl RegionFile {
     /// the moonrise read path compares it to detect a recalc during a read.
     pub fn get_recalculate_count(&self) -> u64 {
         self.recalculate_count
+    }
+
+    /// Paper's package-private `isOversized(x, z)` legacy Aikar flag lookup.
+    /// Deliberately read-only: `setOversized` belongs to the excluded write
+    /// path and is not exposed by this porting slice.
+    pub(super) fn is_oversized(&self, x: i32, z: i32) -> bool {
+        self.oversized[get_chunk_index(x, z)] == 1
+    }
+
+    /// `getOversizedData(x, z)` — read the legacy per-chunk supplement through
+    /// Java-compatible zlib framing (`InflaterInputStream`) and parse NBT.
+    pub(super) fn get_oversized_data(
+        &self,
+        x: i32,
+        z: i32,
+    ) -> io::Result<CompoundTag> {
+        let file = fs::File::open(self.get_oversized_file(x, z))?;
+        let reader = flate2::read::ZlibDecoder::new(std::io::BufReader::new(file));
+        let mut input = DataInputStream::new(reader);
+        nbt_io::read_unlimited(&mut input)
     }
 
     /// `hasChunk(pos)` — location nonzero.
@@ -589,8 +611,6 @@ impl RegionFile {
             }
             Ok(None)
         } else if let Some(version) = RegionFileVersion::from_id(version_id) {
-            // lz4 (id 4) returns io::ErrorKind::Unsupported here — the D13
-            // read deferral; Java reads lz4 fine.
             let reader = version.wrap_input(std::io::Cursor::new(chunk_stream))?;
             Ok(Some(reader))
         } else {
@@ -620,6 +640,15 @@ impl RegionFile {
             let bytes = fs::read(&external_file)?;
             self.create_chunk_input_stream(pos, version_id, bytes)
         }
+    }
+
+    fn get_oversized_file(&self, x: i32, z: i32) -> PathBuf {
+        let base = self
+            .path
+            .file_stem()
+            .expect("region file path has a filename")
+            .to_string_lossy();
+        self.path.with_file_name(format!("{base}_oversized_{x}_{z}.nbt"))
     }
 
     /// `getChunkDataOutputStream(pos)` — `new DataOutputStream(version.wrap(new
@@ -874,7 +903,7 @@ impl RegionFile {
                             Err(_) => continue,
                         }
                     }
-                    Err(_) => continue, // id 127/lz4 wrappers throw → try next
+                    Err(_) => continue, // id 127 wrapper throws → try next
                 }
             }
             let Some(compound) = compound else {
@@ -1248,6 +1277,11 @@ const fn get_num_sectors(offset: i32) -> i32 {
     offset & 0xFF
 }
 
+/// Aikar oversized metadata slot: `(x & 31) + (z & 31) * 32`.
+const fn get_chunk_index(x: i32, z: i32) -> usize {
+    ((x & 31) + (z & 31) * 32) as usize
+}
+
 /// `sizeToSectors(size)` — `(size + 4096 - 1) / 4096`, wrapping int arithmetic.
 const fn size_to_sectors(size: i32) -> i32 {
     size.wrapping_add(4095) / 4096
@@ -1279,6 +1313,26 @@ fn get_timestamp() -> i32 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     (millis / 1000) as i32
+}
+
+fn read_oversized_state(path: &Path) -> io::Result<[u8; 1024]> {
+    let meta_file = path.with_extension("oversized.nbt");
+    if !meta_file.exists() {
+        return Ok([0; 1024]);
+    }
+    let read = fs::read(meta_file)?;
+    if read.len() < 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "oversized metadata is truncated: expected 1024 but read {}",
+                read.len()
+            ),
+        ));
+    }
+    let mut oversized = [0; 1024];
+    oversized.copy_from_slice(&read[..1024]);
+    Ok(oversized)
 }
 
 /// A random `long` for the backup filename's suffix — Java `new

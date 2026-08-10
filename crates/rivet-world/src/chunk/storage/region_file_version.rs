@@ -20,14 +20,14 @@
 //! unwrap/rewrap a stream with the registered codec. gzip read and gzip/none
 //! write are wired on `flate2`; deflate **read** is zlib-wrapped — Java's
 //! `InflaterInputStream` defaults to `nowrap=false`, the RFC 1950 zlib framing
-//! that `flate2`'s `ZlibDecoder` reads — and everything else errors.
+//! that `flate2`'s `ZlibDecoder` reads. LZ4 read ports lz4-java's framed
+//! `LZ4BlockInputStream` over `lz4_flex`, including its seeded xxHash32 check.
 //!
 //! The id `127` custom codec has no `option_name` and so can never be selected
 //! (it is absent from `VERSIONS_BY_NAME`), exactly like Paper.
 
-// RivetTodo(#231): lz4 read (the lz4-java "LZ4 Block" format: `lz4_flex` +
-// `xxhash-rust`'s xxh32 with seed `0x9747b28c`, see CRATES.md) and deflate/lz4
-// **write** are the remaining deferred codec paths. deflate write stays
+// RivetTodo(#231): deflate/lz4 **write** are the remaining deferred codec
+// paths. deflate write stays
 // deferred (Java `Deflater` is not `flate2`-reproducible in general — D13);
 // lz4 write is not ported. The id-127 read path lives in
 // `RegionFile::create_chunk_input_stream` (region_file.rs), which reads the
@@ -37,6 +37,14 @@
 
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicI32, Ordering};
+
+const LZ4_MAGIC: &[u8; 8] = b"LZ4Block";
+const LZ4_HEADER_LENGTH: usize = 21;
+const LZ4_COMPRESSION_METHOD_RAW: u8 = 0x10;
+const LZ4_COMPRESSION_METHOD_LZ4: u8 = 0x20;
+const LZ4_COMPRESSION_METHOD_MASK: u8 = 0xf0;
+const LZ4_COMPRESSION_LEVEL_BASE: u32 = 10;
+const LZ4_COMPRESSION_SEED: u32 = 0x9747_b28c;
 
 /// A registered region-file codec (Java `RegionFileVersion`). A value type: the
 /// five registered codecs are `Copy` and shared freely like `GameData`.
@@ -156,10 +164,8 @@ impl RegionFileVersion {
     }
 
     /// `wrap(InputStream)` — unwrap a chunk stream with this codec (Java's
-    /// `StreamWrapper<InputStream>`). gzip/deflate/none reads are supported.
-    /// lz4 read is deferred in Rivet: it returns [`io::ErrorKind::Unsupported`]
-    /// while Java reads lz4 fine (`LZ4BlockInputStream`) — a Rivet gap, not a
-    /// Java error. Custom id 127 also returns [`io::ErrorKind::Unsupported`]
+    /// `StreamWrapper<InputStream>`). gzip/deflate/none/lz4 reads are
+    /// supported. Custom id 127 returns [`io::ErrorKind::Unsupported`]
     /// here as Rivet's deferral boundary; Java's normal read path never reaches
     /// this wrapper for id 127 — `RegionFile.createChunkInputStream`
     /// special-cases it first, reading a modified-UTF-8 id, logging
@@ -181,10 +187,7 @@ impl RegionFileVersion {
                 input,
             ))),
             3 => Ok(RegionFileReader::Identity(input)),
-            4 => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "lz4 read is not ported yet (lz4-java \"LZ4 Block\" format, issue #231)",
-            )),
+            4 => Ok(RegionFileReader::Lz4(Lz4BlockInputStream::new(input))),
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "custom region-file compression has no stream wrapper",
@@ -232,6 +235,9 @@ pub enum RegionFileReader<R: Read> {
     /// deflate (Java's `InflaterInputStream` defaults to `nowrap=false`, the
     /// RFC 1950 zlib framing; NOT raw RFC 1951 deflate).
     Deflate(flate2::read::ZlibDecoder<R>),
+    /// `FastBufferedInputStream(LZ4BlockInputStream(in))` — lz4-java's
+    /// repeated `LZ4Block` framing, not a raw LZ4 block or LZ4 frame.
+    Lz4(Lz4BlockInputStream<R>),
     /// `FastBufferedInputStream(in)` — byte-transparent.
     Identity(R),
 }
@@ -241,8 +247,122 @@ impl<R: Read> Read for RegionFileReader<R> {
         match self {
             RegionFileReader::Gzip(r) => r.read(buf),
             RegionFileReader::Deflate(r) => r.read(buf),
+            RegionFileReader::Lz4(r) => r.read(buf),
             RegionFileReader::Identity(r) => r.read(buf),
         }
+    }
+}
+
+/// Read-only port of lz4-java's `LZ4BlockInputStream` framing.
+#[derive(Debug)]
+pub struct Lz4BlockInputStream<R: Read> {
+    input: R,
+    block: Vec<u8>,
+    position: usize,
+    finished: bool,
+}
+
+impl<R: Read> Lz4BlockInputStream<R> {
+    fn new(input: R) -> Self {
+        Self {
+            input,
+            block: Vec::new(),
+            position: 0,
+            finished: false,
+        }
+    }
+
+    fn refill(&mut self) -> io::Result<bool> {
+        let mut header = [0u8; LZ4_HEADER_LENGTH];
+        self.input.read_exact(&mut header)?;
+        if &header[..8] != LZ4_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Stream is corrupted",
+            ));
+        }
+
+        let token = header[8];
+        let compression_method = token & LZ4_COMPRESSION_METHOD_MASK;
+        let compression_level = LZ4_COMPRESSION_LEVEL_BASE + u32::from(token & 0x0f);
+        let compressed_length = i32::from_le_bytes(header[9..13].try_into().unwrap());
+        let original_length = i32::from_le_bytes(header[13..17].try_into().unwrap());
+        let expected_checksum = u32::from_le_bytes(header[17..21].try_into().unwrap());
+        let max_original_length = 1i32 << compression_level;
+        let lengths_valid = matches!(
+            compression_method,
+            LZ4_COMPRESSION_METHOD_RAW | LZ4_COMPRESSION_METHOD_LZ4
+        ) && original_length <= max_original_length
+            && original_length >= 0
+            && compressed_length >= 0
+            && ((original_length == 0) == (compressed_length == 0))
+            && (compression_method != LZ4_COMPRESSION_METHOD_RAW
+                || compressed_length == original_length);
+        if !lengths_valid {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Stream is corrupted",
+            ));
+        }
+
+        if original_length == 0 {
+            if expected_checksum != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Stream is corrupted",
+                ));
+            }
+            self.finished = true;
+            self.block.clear();
+            self.position = 0;
+            return Ok(false);
+        }
+
+        let compressed_length = compressed_length as usize;
+        let original_length = original_length as usize;
+
+        let mut compressed = vec![0u8; compressed_length];
+        self.input.read_exact(&mut compressed)?;
+        self.block.resize(original_length, 0);
+        match compression_method {
+            LZ4_COMPRESSION_METHOD_RAW => self.block.copy_from_slice(&compressed),
+            LZ4_COMPRESSION_METHOD_LZ4 => {
+                let written = lz4_flex::block::decompress_into(&compressed, &mut self.block)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Stream is corrupted"))?;
+                if written != original_length {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Stream is corrupted",
+                    ));
+                }
+            }
+            _ => unreachable!("compression method validated above"),
+        }
+        if xxhash_rust::xxh32::xxh32(&self.block, LZ4_COMPRESSION_SEED) != expected_checksum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Stream is corrupted",
+            ));
+        }
+        self.position = 0;
+        Ok(true)
+    }
+}
+
+impl<R: Read> Read for Lz4BlockInputStream<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        while self.position == self.block.len() {
+            if self.finished || !self.refill()? {
+                return Ok(0);
+            }
+        }
+        let count = out.len().min(self.block.len() - self.position);
+        out[..count].copy_from_slice(&self.block[self.position..self.position + count]);
+        self.position += count;
+        Ok(count)
     }
 }
 
@@ -593,22 +713,16 @@ mod tests {
     }
 
     #[test]
-    fn wrap_input_rejects_unported_codecs() {
-        for version in [
-            RegionFileVersion::VERSION_LZ4,
-            RegionFileVersion::VERSION_CUSTOM,
-        ] {
-            let err = version.wrap_input(std::io::empty()).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                std::io::ErrorKind::Unsupported,
-                "codec {version:?}"
-            );
-        }
+    fn wrap_input_rejects_custom_codec_wrapper() {
+        let err = RegionFileVersion::VERSION_CUSTOM
+            .wrap_input(std::io::empty())
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         for version in [
             RegionFileVersion::VERSION_GZIP,
             RegionFileVersion::VERSION_DEFLATE,
             RegionFileVersion::VERSION_NONE,
+            RegionFileVersion::VERSION_LZ4,
         ] {
             assert!(
                 version.wrap_input(std::io::empty()).is_ok(),
