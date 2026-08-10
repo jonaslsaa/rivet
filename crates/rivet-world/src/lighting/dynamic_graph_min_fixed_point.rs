@@ -19,8 +19,8 @@
 //! [`DynamicGraphNode`] is the subclass seam. Every base method takes the
 //! graph alongside `&mut self` — the caller owns both, mirroring Java's single
 //! `this`. `check_neighbors_after_update` receives the base back so the
-//! subclass can call [`check_neighbor`](Self::check_neighbor), exactly as the
-//! Java subclass calls `this.checkNeighbor`.
+//! subclass can call [`check_neighbor`](DynamicGraphMinFixedPoint::check_neighbor),
+//! exactly as the Java subclass calls `this.checkNeighbor`.
 //!
 //! `computedLevels` is fastutil's `Long2ByteOpenHashMap` with `minMapSize`
 //! no-shrink and `defaultReturnValue((byte)-1)`; the Rust `HashMap` never
