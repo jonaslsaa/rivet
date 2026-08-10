@@ -22,7 +22,9 @@
 //! adapter, issue #205). See each module's provenance header.
 
 pub mod bit_storage;
+pub mod bounded_float_function;
 pub mod by_id_map;
+pub mod cubic_spline;
 pub mod data_io;
 pub mod delegate_data_output;
 pub mod fast_buffered_input_stream;
@@ -42,7 +44,14 @@ pub mod worldgen_random;
 pub mod zero_bit_storage;
 
 pub use bit_storage::BitStorage;
+pub use bounded_float_function::{
+    BoundedFloat, BoundedFloatFunction, Comapped, Constant, Identity,
+};
 pub use by_id_map::{OutOfBoundsStrategy, continuous, sparse};
+pub use cubic_spline::{
+    Builder as CubicSplineBuilder, CubicSpline, Multipoint as CubicSplineMultipoint,
+    Point as CubicSplinePoint, Sampler as CubicSplineSampler,
+};
 pub use data_io::{DataInput, DataInputStream, DataOutput, DataOutputStream};
 pub use delegate_data_output::DelegateDataOutput;
 pub use fast_buffered_input_stream::FastBufferedInputStream;
