@@ -13,9 +13,12 @@ workspace = true
 # backed; the #100 superflat content builder writes sections through it.
 bytes = { workspace = true }
 # Region-file codecs (#231, `world.level.chunk.storage`): gzip/deflate read and
-# gzip write ride on flate2 (gzip proven via rivet-nbt); lz4 read/write and
-# deflate write are deferred (see CRATES.md).
+# gzip write ride on flate2 (gzip proven via rivet-nbt). Paper's lz4-java
+# block stream is decoded with lz4_flex + xxHash32; lz4 and deflate writes stay
+# deferred (see CRATES.md).
 flate2 = { workspace = true }
+lz4_flex = { workspace = true }
+xxhash-rust = { workspace = true }
 # `StructureAccess`'s reference sets are an `IndexSet<u64>` — the Rust stand-in
 # for Java's `LongOpenHashSet`. Dedup and first-insertion order are the
 # IndexSet's, not Java's (which iterates in hash-probe slot order; see the
