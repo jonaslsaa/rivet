@@ -51,6 +51,6 @@ pub use region_file::{
     ChunkBuffer, RegionFile, RegionFileSizeException, get_chunk_coordinate,
     get_last_world_save_time, get_region_file_coordinates,
 };
-pub use region_file_version::RegionFileVersion;
 pub use region_file_storage::RegionFileStorage;
+pub use region_file_version::RegionFileVersion;
 pub use region_storage_info::RegionStorageInfo;

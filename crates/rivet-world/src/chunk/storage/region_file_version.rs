@@ -331,7 +331,9 @@ impl<R: Read> Lz4BlockInputStream<R> {
             LZ4_COMPRESSION_METHOD_RAW => self.block.copy_from_slice(&compressed),
             LZ4_COMPRESSION_METHOD_LZ4 => {
                 let written = lz4_flex::block::decompress_into(&compressed, &mut self.block)
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Stream is corrupted"))?;
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "Stream is corrupted")
+                    })?;
                 if written != original_length {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -468,10 +470,7 @@ mod tests {
             max_block_length + 1,
             max_block_length,
         );
-        assert_eq!(
-            read_lz4_error(&invalid).kind(),
-            io::ErrorKind::InvalidData
-        );
+        assert_eq!(read_lz4_error(&invalid).kind(), io::ErrorKind::InvalidData);
 
         let valid_but_truncated = lz4_header(
             LZ4_COMPRESSION_METHOD_RAW,

@@ -67,11 +67,10 @@ impl RegionFileStorage {
                 return Ok(None);
             };
 
-            if self.region_cache[index].1.is_oversized(pos.x(), pos.z()) {
-                return self.read_oversized_chunk(index, pos).map(Some);
-            }
-
-            let serialised_chunk_data = {
+            let serialised_chunk_data = if self.region_cache[index].1.is_oversized(pos.x(), pos.z())
+            {
+                self.read_oversized_chunk(index, pos)?
+            } else {
                 let region = &mut self.region_cache[index].1;
                 let Some(reader) = region.get_chunk_data_input_stream(pos)? else {
                     return Ok(None);
@@ -80,9 +79,7 @@ impl RegionFileStorage {
                 nbt_io::read_unlimited(&mut input)?
             };
 
-            if self.info.is_chunk_data
-                && get_chunk_coordinate(&serialised_chunk_data) != *pos
-            {
+            if self.info.is_chunk_data && get_chunk_coordinate(&serialised_chunk_data) != *pos {
                 let region = &mut self.region_cache[index].1;
                 eprintln!(
                     "Attempting to read chunk data at {} but got chunk data for {} instead! Attempting regionfile recalculation for regionfile {}",
@@ -146,12 +143,15 @@ impl RegionFileStorage {
             return Ok(None);
         }
 
-        let region_path = self.folder.join(Self::get_region_file_name(chunk_x, chunk_z));
+        let region_path = self
+            .folder
+            .join(Self::get_region_file_name(chunk_x, chunk_z));
         if !region_path.exists() {
             self.mark_non_existing(key);
             return Ok(None);
         }
-        self.non_existing_region_files.retain(|cached| *cached != key);
+        self.non_existing_region_files
+            .retain(|cached| *cached != key);
 
         if self.region_cache.len() >= MAX_CACHE_SIZE
             && let Some((_, mut evicted)) = self.region_cache.pop()
@@ -207,12 +207,7 @@ impl RegionFileStorage {
         let oversized_level = oversized_data.get_compound_or_empty("Level");
         if let Some(Tag::Compound(level)) = chunk.tags.get_mut("Level") {
             merge_chunk_list(level, &oversized_level, "Entities", "Entities");
-            merge_chunk_list(
-                level,
-                &oversized_level,
-                "TileEntities",
-                "TileEntities",
-            );
+            merge_chunk_list(level, &oversized_level, "TileEntities", "TileEntities");
         }
         Ok(chunk)
     }
@@ -303,9 +298,7 @@ mod tests {
         framed.push(method | 4); // 1 << (10 + 4) = 16 KiB maximum block.
         framed.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
         framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        framed.extend_from_slice(
-            &xxhash_rust::xxh32::xxh32(payload, 0x9747_b28c).to_le_bytes(),
-        );
+        framed.extend_from_slice(&xxhash_rust::xxh32::xxh32(payload, 0x9747_b28c).to_le_bytes());
         framed.extend_from_slice(&compressed);
         framed.extend_from_slice(b"LZ4Block");
         framed.push(0x10);
@@ -349,7 +342,10 @@ mod tests {
         let before = fs::read(&path).unwrap();
 
         let mut storage = RegionFileStorage::new(info(true), dir.path().to_path_buf(), false);
-        let tag = storage.read(&ChunkPos::ZERO).unwrap().expect("captured chunk");
+        let tag = storage
+            .read(&ChunkPos::ZERO)
+            .unwrap()
+            .expect("captured chunk");
         assert_eq!(get_chunk_coordinate(&tag), ChunkPos::ZERO);
         storage.close().unwrap();
 
@@ -374,7 +370,11 @@ mod tests {
             write_region(dir.path(), ChunkPos::ZERO, version, &payload);
             let mut storage = RegionFileStorage::new(info(true), dir.path().to_path_buf(), false);
             let tag = storage.read(&ChunkPos::ZERO).unwrap().expect("codec chunk");
-            assert_eq!(get_chunk_coordinate(&tag), ChunkPos::ZERO, "codec {version}");
+            assert_eq!(
+                get_chunk_coordinate(&tag),
+                ChunkPos::ZERO,
+                "codec {version}"
+            );
         }
     }
 
@@ -388,7 +388,10 @@ mod tests {
         )
         .unwrap();
         let mut storage = RegionFileStorage::new(info(true), dir.path().to_path_buf(), false);
-        let tag = storage.read(&ChunkPos::ZERO).unwrap().expect("external chunk");
+        let tag = storage
+            .read(&ChunkPos::ZERO)
+            .unwrap()
+            .expect("external chunk");
         assert_eq!(get_chunk_coordinate(&tag), ChunkPos::ZERO);
     }
 
@@ -469,12 +472,7 @@ mod tests {
     #[test]
     fn chunk_coordinate_mismatch_recalculates_then_returns_absent() {
         let dir = tempfile::tempdir().unwrap();
-        write_region(
-            dir.path(),
-            ChunkPos::ZERO,
-            3,
-            &encode(&chunk_tag(1, 0)),
-        );
+        write_region(dir.path(), ChunkPos::ZERO, 3, &encode(&chunk_tag(1, 0)));
         let mut storage = RegionFileStorage::new(info(true), dir.path().to_path_buf(), false);
         assert!(storage.read(&ChunkPos::ZERO).unwrap().is_none());
     }
@@ -509,7 +507,10 @@ mod tests {
         fs::write(dir.path().join("r.0.0.oversized.nbt"), meta).unwrap();
 
         let mut storage = RegionFileStorage::new(info(true), dir.path().to_path_buf(), false);
-        let merged = storage.read(&ChunkPos::ZERO).unwrap().expect("merged chunk");
+        let merged = storage
+            .read(&ChunkPos::ZERO)
+            .unwrap()
+            .expect("merged chunk");
         assert_eq!(
             merged
                 .get_compound("Level")
@@ -519,5 +520,87 @@ mod tests {
                 .size(),
             1
         );
+    }
+
+    #[test]
+    fn legacy_aikar_oversized_coordinate_mismatch_recalculates_without_mutating_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let region_path = dir.path().join("r.0.0.mca");
+
+        let mut misplaced = chunk_tag(1, 0);
+        misplaced.put_int("DataVersion", 2500);
+        let mut misplaced_level = CompoundTag::new();
+        misplaced_level.put_int("xPos", 1);
+        misplaced_level.put_int("zPos", 0);
+        misplaced.put("Level".to_string(), Tag::Compound(misplaced_level));
+
+        let mut expected = chunk_tag(0, 0);
+        expected.put_int("DataVersion", 2500);
+        let mut expected_level = CompoundTag::new();
+        expected_level.put_int("xPos", 0);
+        expected_level.put_int("zPos", 0);
+        expected_level.put("Entities".to_string(), Tag::List(ListTag::new()));
+        expected.put("Level".to_string(), Tag::Compound(expected_level));
+
+        let misplaced = encode(&misplaced);
+        let expected = encode(&expected);
+        let mut region = vec![0u8; 4 * 4096];
+        // The stale slot for (0,0) points at sector 2, whose payload belongs to
+        // (1,0). Sector 3 contains the correct, currently unlinked payload.
+        region[..4].copy_from_slice(&((2i32 << 8) | 1).to_be_bytes());
+        for (sector, payload) in [(2usize, misplaced), (3usize, expected)] {
+            let start = sector * 4096;
+            region[start..start + 4].copy_from_slice(&((payload.len() as i32) + 1).to_be_bytes());
+            region[start + 4] = 3;
+            region[start + 5..start + 5 + payload.len()].copy_from_slice(&payload);
+        }
+        fs::write(&region_path, &region).unwrap();
+
+        let mut extra = CompoundTag::new();
+        let mut extra_level = CompoundTag::new();
+        let mut entities = ListTag::new();
+        entities.add(Tag::Compound(chunk_tag(9, 9)));
+        extra_level.put("Entities".to_string(), Tag::List(entities));
+        extra.put("Level".to_string(), Tag::Compound(extra_level));
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&encode(&extra)).unwrap();
+        let oversized_path = dir.path().join("r.0.0_oversized_0_0.nbt");
+        fs::write(&oversized_path, encoder.finish().unwrap()).unwrap();
+
+        let mut meta = [0u8; 1024];
+        meta[0] = 1;
+        let meta_path = dir.path().join("r.0.0.oversized.nbt");
+        fs::write(&meta_path, meta).unwrap();
+
+        let before_region = fs::read(&region_path).unwrap();
+        let before_oversized = fs::read(&oversized_path).unwrap();
+        let before_meta = fs::read(&meta_path).unwrap();
+
+        let mut storage = RegionFileStorage::new(info(true), dir.path().to_path_buf(), false);
+        let merged = storage
+            .read(&ChunkPos::ZERO)
+            .unwrap()
+            .expect("recalculated oversized chunk");
+        assert_eq!(
+            storage.region_cache[0].1.get_recalculate_count(),
+            1,
+            "the oversized coordinate mismatch must enter the shared retry path"
+        );
+        assert_eq!(get_chunk_coordinate(&merged), ChunkPos::ZERO);
+        assert_eq!(
+            merged
+                .get_compound("Level")
+                .unwrap()
+                .get_list("Entities")
+                .unwrap()
+                .size(),
+            1,
+            "the oversized supplement is merged into the corrected base payload"
+        );
+        storage.close().unwrap();
+
+        assert_eq!(fs::read(&region_path).unwrap(), before_region);
+        assert_eq!(fs::read(&oversized_path).unwrap(), before_oversized);
+        assert_eq!(fs::read(&meta_path).unwrap(), before_meta);
     }
 }

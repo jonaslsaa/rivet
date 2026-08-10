@@ -422,11 +422,7 @@ impl RegionFile {
 
     /// `getOversizedData(x, z)` — read the legacy per-chunk supplement through
     /// Java-compatible zlib framing (`InflaterInputStream`) and parse NBT.
-    pub(super) fn get_oversized_data(
-        &self,
-        x: i32,
-        z: i32,
-    ) -> io::Result<CompoundTag> {
+    pub(super) fn get_oversized_data(&self, x: i32, z: i32) -> io::Result<CompoundTag> {
         let file = fs::File::open(self.get_oversized_file(x, z))?;
         let reader = flate2::read::ZlibDecoder::new(std::io::BufReader::new(file));
         let mut input = DataInputStream::new(reader);
@@ -648,7 +644,8 @@ impl RegionFile {
             .file_stem()
             .expect("region file path has a filename")
             .to_string_lossy();
-        self.path.with_file_name(format!("{base}_oversized_{x}_{z}.nbt"))
+        self.path
+            .with_file_name(format!("{base}_oversized_{x}_{z}.nbt"))
     }
 
     /// `getChunkDataOutputStream(pos)` — `new DataOutputStream(version.wrap(new
