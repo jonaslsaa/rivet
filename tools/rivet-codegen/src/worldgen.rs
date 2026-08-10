@@ -437,9 +437,7 @@ fn validate_biomes(value: &Value) -> Result<Vec<BiomeClimate>> {
             .and_then(Value::as_str)
             .with_context(|| format!("biome `{name}` `temperature_modifier` is not a string"))?;
         if !matches!(temperature_modifier, "none" | "frozen") {
-            bail!(
-                "biome `{name}` has unknown `temperature_modifier` `{temperature_modifier}`"
-            );
+            bail!("biome `{name}` has unknown `temperature_modifier` `{temperature_modifier}`");
         }
         climates.push(BiomeClimate {
             name: name.clone(),
@@ -489,7 +487,10 @@ fn validate_presets(value: &Value) -> Result<Vec<Preset>> {
         for (i, point) in points.iter().enumerate() {
             parsed.push(validate_parameter_point(id, i, point)?);
         }
-        presets.push(Preset { id: id.clone(), points: parsed });
+        presets.push(Preset {
+            id: id.clone(),
+            points: parsed,
+        });
     }
     presets.sort_unstable_by(|a, b| a.id.cmp(&b.id));
     // Only the two known presets exist; a third would be a stale/mutated
@@ -598,14 +599,20 @@ fn read_biome_ids(repo_root: &Path) -> Result<HashMap<String, u16>> {
         let id = id
             .as_u64()
             .with_context(|| format!("biome `{name}` in biomes_tags.json has a non-integer id"))?;
-        out.insert(name.clone(), u16::try_from(id).context("biome id out of u16 range")?);
+        out.insert(
+            name.clone(),
+            u16::try_from(id).context("biome id out of u16 range")?,
+        );
     }
     Ok(out)
 }
 
 /// The biome climate surface and the #49 biome element table must agree on name
 /// set + ids (two independent captures of the same registry).
-fn check_biome_surface_matches(climates: &[BiomeClimate], biome_ids: &HashMap<String, u16>) -> Result<()> {
+fn check_biome_surface_matches(
+    climates: &[BiomeClimate],
+    biome_ids: &HashMap<String, u16>,
+) -> Result<()> {
     if climates.len() != biome_ids.len() {
         bail!(
             "worldgen.json has {} biome climate entries but biomes_tags.json has {} biome ids",
@@ -618,7 +625,8 @@ fn check_biome_surface_matches(climates: &[BiomeClimate], biome_ids: &HashMap<St
             Some(&id) if id == c.id => {}
             Some(&id) => bail!(
                 "biome climate/table id mismatch for `{}`: worldgen.json {} vs biomes_tags.json {id}",
-                c.name, c.id
+                c.name,
+                c.id
             ),
             None => bail!(
                 "biome climate `{}` is absent from the biomes_tags.json biome table",
@@ -768,7 +776,10 @@ fn render_noises(noises: &[Noise]) -> String {
             .map(|a| format!("{a:?}"))
             .collect::<Vec<_>>()
             .join(", ");
-        out.push_str(&format!("    ({}, &[{amps}]), // {}\n", n.first_octave, n.name));
+        out.push_str(&format!(
+            "    ({}, &[{amps}]), // {}\n",
+            n.first_octave, n.name
+        ));
     }
     out.push_str("];\n\n");
 
@@ -783,7 +794,9 @@ fn render_biome_climates(climates: &[BiomeClimate]) -> String {
          /// by the `minecraft:worldgen/biome` name. Same element set + ids as\n\
          /// `BIOME_BY_NAME`/`BIOME_BY_ID` in biomes.rs (a live-load cross-check pins this).\n",
     );
-    out.push_str("pub static BIOME_CLIMATE: phf::Map<&'static str, BiomeClimate> = phf::phf_map! {\n");
+    out.push_str(
+        "pub static BIOME_CLIMATE: phf::Map<&'static str, BiomeClimate> = phf::phf_map! {\n",
+    );
     for c in climates {
         let precip = if c.has_precipitation { "true" } else { "false" };
         out.push_str(&format!(
@@ -797,9 +810,7 @@ fn render_biome_climates(climates: &[BiomeClimate]) -> String {
     }
     out.push_str("};\n\n");
 
-    out.push_str(
-        "/// Per-biome climate configuration, in registry-id order (id == index).\n",
-    );
+    out.push_str("/// Per-biome climate configuration, in registry-id order (id == index).\n");
     out.push_str("pub static BIOME_CLIMATE_BY_ID: &[BiomeClimate] = &[\n");
     for c in climates {
         let precip = if c.has_precipitation { "true" } else { "false" };
@@ -843,7 +854,9 @@ fn render_preset(preset: &Preset) -> String {
          /// value order (never sorted — the R-tree `findValue` tie-breaks on it).\n",
         preset.id
     ));
-    out.push_str(&format!("pub static {const_name}: &[ParameterPoint] = &[\n"));
+    out.push_str(&format!(
+        "pub static {const_name}: &[ParameterPoint] = &[\n"
+    ));
     for p in &preset.points {
         out.push_str(&format!(
             "    ParameterPoint {{\n\
@@ -952,7 +965,8 @@ mod tests {
         ]);
         let err = validate_structural(&v).unwrap_err();
         assert!(
-            err.to_string().contains("has 3 presets but a live Paper 26.2 load has 2"),
+            err.to_string()
+                .contains("has 3 presets but a live Paper 26.2 load has 2"),
             "got: {err}"
         );
     }
@@ -968,10 +982,12 @@ mod tests {
     #[test]
     fn unknown_temperature_modifier_is_rejected() {
         let mut v = fixture();
-        v["biomes"]["minecraft:badlands"]["temperature_modifier"] =
-            serde_json::json!("nope");
+        v["biomes"]["minecraft:badlands"]["temperature_modifier"] = serde_json::json!("nope");
         let err = validate_structural(&v).unwrap_err();
-        assert!(err.to_string().contains("unknown `temperature_modifier`"), "got: {err}");
+        assert!(
+            err.to_string().contains("unknown `temperature_modifier`"),
+            "got: {err}"
+        );
     }
 
     #[test]

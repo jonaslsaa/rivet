@@ -146,7 +146,8 @@ fn write_manifest(repo_root: &Path, output: &Path, bundler: &Path) -> Result<()>
     source.jar = canonical;
     let bytes = fs::read(output).with_context(|| format!("read {}", output.display()))?;
     let manifest = FixtureManifest {
-        generator: "WorldgenDataExtractor (Bootstrap + RegistryDataLoader + knownPresets)".to_string(),
+        generator: "WorldgenDataExtractor (Bootstrap + RegistryDataLoader + knownPresets)"
+            .to_string(),
         source,
         file: FixtureFile {
             bytes: bytes.len() as u64,
