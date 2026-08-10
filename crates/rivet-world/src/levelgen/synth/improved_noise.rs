@@ -137,20 +137,43 @@ impl ImprovedNoise {
         zr: f64,
         yr_original: f64,
     ) -> f64 {
+        // Java `p(x + 1)` / `p(xy00 + z)` are int arithmetic that wraps for
+        // hostile lattice coords (floor saturates to `i32::MAX`); the `& 0xFF`
+        // in `p()` then re-masks the wrapped index, exactly as Java.
         let x0 = self.p(x);
-        let x1 = self.p(x + 1);
-        let xy00 = self.p(x0 + y);
-        let xy01 = self.p(x0 + y + 1);
-        let xy10 = self.p(x1 + y);
-        let xy11 = self.p(x1 + y + 1);
-        let d000 = Self::grad_dot(self.p(xy00 + z), xr, yr, zr);
-        let d100 = Self::grad_dot(self.p(xy10 + z), xr - 1.0, yr, zr);
-        let d010 = Self::grad_dot(self.p(xy01 + z), xr, yr - 1.0, zr);
-        let d110 = Self::grad_dot(self.p(xy11 + z), xr - 1.0, yr - 1.0, zr);
-        let d001 = Self::grad_dot(self.p(xy00 + z + 1), xr, yr, zr - 1.0);
-        let d101 = Self::grad_dot(self.p(xy10 + z + 1), xr - 1.0, yr, zr - 1.0);
-        let d011 = Self::grad_dot(self.p(xy01 + z + 1), xr, yr - 1.0, zr - 1.0);
-        let d111 = Self::grad_dot(self.p(xy11 + z + 1), xr - 1.0, yr - 1.0, zr - 1.0);
+        let x1 = self.p(x.wrapping_add(1));
+        let xy00 = self.p(x0.wrapping_add(y));
+        let xy01 = self.p(x0.wrapping_add(y).wrapping_add(1));
+        let xy10 = self.p(x1.wrapping_add(y));
+        let xy11 = self.p(x1.wrapping_add(y).wrapping_add(1));
+        let d000 = Self::grad_dot(self.p(xy00.wrapping_add(z)), xr, yr, zr);
+        let d100 = Self::grad_dot(self.p(xy10.wrapping_add(z)), xr - 1.0, yr, zr);
+        let d010 = Self::grad_dot(self.p(xy01.wrapping_add(z)), xr, yr - 1.0, zr);
+        let d110 = Self::grad_dot(self.p(xy11.wrapping_add(z)), xr - 1.0, yr - 1.0, zr);
+        let d001 = Self::grad_dot(
+            self.p(xy00.wrapping_add(z).wrapping_add(1)),
+            xr,
+            yr,
+            zr - 1.0,
+        );
+        let d101 = Self::grad_dot(
+            self.p(xy10.wrapping_add(z).wrapping_add(1)),
+            xr - 1.0,
+            yr,
+            zr - 1.0,
+        );
+        let d011 = Self::grad_dot(
+            self.p(xy01.wrapping_add(z).wrapping_add(1)),
+            xr,
+            yr - 1.0,
+            zr - 1.0,
+        );
+        let d111 = Self::grad_dot(
+            self.p(xy11.wrapping_add(z).wrapping_add(1)),
+            xr - 1.0,
+            yr - 1.0,
+            zr - 1.0,
+        );
         let x_alpha = mth::smoothstep(xr);
         let y_alpha = mth::smoothstep(yr_original);
         let z_alpha = mth::smoothstep(zr);
@@ -173,20 +196,21 @@ impl ImprovedNoise {
         zr: f64,
         derivative_out: &mut [f64; 3],
     ) -> f64 {
+        // Same Java int-wrapping semantics as `sample_and_lerp`.
         let x0 = self.p(x);
-        let x1 = self.p(x + 1);
-        let xy00 = self.p(x0 + y);
-        let xy01 = self.p(x0 + y + 1);
-        let xy10 = self.p(x1 + y);
-        let xy11 = self.p(x1 + y + 1);
-        let p000 = self.p(xy00 + z);
-        let p100 = self.p(xy10 + z);
-        let p010 = self.p(xy01 + z);
-        let p110 = self.p(xy11 + z);
-        let p001 = self.p(xy00 + z + 1);
-        let p101 = self.p(xy10 + z + 1);
-        let p011 = self.p(xy01 + z + 1);
-        let p111 = self.p(xy11 + z + 1);
+        let x1 = self.p(x.wrapping_add(1));
+        let xy00 = self.p(x0.wrapping_add(y));
+        let xy01 = self.p(x0.wrapping_add(y).wrapping_add(1));
+        let xy10 = self.p(x1.wrapping_add(y));
+        let xy11 = self.p(x1.wrapping_add(y).wrapping_add(1));
+        let p000 = self.p(xy00.wrapping_add(z));
+        let p100 = self.p(xy10.wrapping_add(z));
+        let p010 = self.p(xy01.wrapping_add(z));
+        let p110 = self.p(xy11.wrapping_add(z));
+        let p001 = self.p(xy00.wrapping_add(z).wrapping_add(1));
+        let p101 = self.p(xy10.wrapping_add(z).wrapping_add(1));
+        let p011 = self.p(xy01.wrapping_add(z).wrapping_add(1));
+        let p111 = self.p(xy11.wrapping_add(z).wrapping_add(1));
         let g000 = &GRADIENT[(p000 & 15) as usize];
         let g100 = &GRADIENT[(p100 & 15) as usize];
         let g010 = &GRADIENT[(p010 & 15) as usize];

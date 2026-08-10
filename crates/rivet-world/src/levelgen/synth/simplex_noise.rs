@@ -1,11 +1,14 @@
 //! Port of `net.minecraft.world.level.levelgen.synth.SimplexNoise` (class,
 //! 26.2).
 //!
-//! 2D/3D simplex noise over a 512-entry shuffled permutation `p`. The
-//! constructor consumes exactly `3 * nextDouble()` + the Fisher-Yates `256 +
-//! 255 + ... + 1` `nextInt(bound)` calls from the given `RandomSource`; both
-//! the xoroshiro and legacy sources in `rivet-util::random` are bit-exact, so
-//! the permutation and origin offsets reproduce exactly.
+//! 2D/3D simplex noise over a shuffled 256-entry permutation `p`. Java
+//! declares `int[] p = new int[512]` but fills only `[0, 256)` and reads only
+//! `p[x & 0xFF]`, so the effective permutation is 256 entries; the Rust port
+//! stores exactly that (`[u8; 256]`). The constructor consumes exactly
+//! `3 * nextDouble()` + the Fisher-Yates `256 + 255 + ... + 1` `nextInt(bound)`
+//! calls from the given `RandomSource`; both the xoroshiro and legacy sources
+//! in `rivet-util::random` are bit-exact, so the permutation and origin offsets
+//! reproduce exactly.
 //!
 //! Exactness notes (from the Java):
 //! - `getValue` gradient indices are `p[..] % 12` — Java's `%` on a non-negative
@@ -50,8 +53,8 @@ const G2: f64 = (3.0 - SQRT_3) / 6.0;
 
 /// `net.minecraft.world.level.levelgen.synth.SimplexNoise`.
 pub struct SimplexNoise {
-    /// The 512-entry doubled permutation.
-    p: [u8; 512],
+    /// The 256-entry permutation (Java's `int[512]` fills/reads only `[0,256)`).
+    p: [u8; 256],
     /// `xo` — the x-origin offset (`nextDouble() * 256.0`).
     pub xo: f64,
     /// `yo` — the y-origin offset.
@@ -66,7 +69,7 @@ impl SimplexNoise {
         let xo = random.next_double() * 256.0;
         let yo = random.next_double() * 256.0;
         let zo = random.next_double() * 256.0;
-        let mut p = [0u8; 512];
+        let mut p = [0u8; 256];
         for (i, slot) in p.iter_mut().enumerate() {
             *slot = i as u8;
         }

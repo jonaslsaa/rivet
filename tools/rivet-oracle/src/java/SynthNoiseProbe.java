@@ -113,7 +113,11 @@ public final class SynthNoiseProbe {
                     {-10.0, 10.0, -10.0}, {100.0, -100.0, 100.0}, {0.1, 0.2, 0.3},
                     {-0.5, 0.5, -0.5}, {123.456, -789.012, 3.14159}, {255.0, 256.0, -255.0},
                     {1.0e6, -1.0e6, 1.0e6}, {1.0e-7, 1.0e-7, 1.0e-7},
-                    {-1.0e9, 1.0e-3, 7.0}, {Double.MIN_VALUE, 0.0, 0.0}
+                    {-1.0e9, 1.0e-3, 7.0}, {Double.MIN_VALUE, 0.0, 0.0},
+                    // Hostile: floor saturates to Integer.MAX_VALUE, so
+                    // `p(x + 1)` etc. must wrap (Java int arithmetic) rather
+                    // than overflow.
+                    {Double.MAX_VALUE / 1.0e9, Double.MAX_VALUE / 1.0e9, Double.MAX_VALUE / 1.0e9}
                 };
                 JsonArray vals = new JsonArray();
                 for (double[] p : xyz) {
@@ -345,6 +349,15 @@ public final class SynthNoiseProbe {
             for (int i = 0; i < 256; i++) pi[i] = i * 37;
             NoiseUtils.parityNoiseOctaveConfigString(sb2, 1.2345678, -9.8765432, 0.000123456, pi);
             e.addProperty("parityInt", sb2.toString());
+            // Exact decimal ties: 1.0625 / -2.0625 are exact binary halves, so
+            // Java's `%.3f` must round half-away-from-zero ("1.063"/"-2.063"),
+            // not half-even ("1.062"). Pins the midpoint formatting exactly.
+            StringBuilder sb3 = new StringBuilder();
+            NoiseUtils.parityNoiseOctaveConfigString(sb3, 1.0625, -2.0625, 0.0625, p);
+            e.addProperty("parityByteTie", sb3.toString());
+            StringBuilder sb4 = new StringBuilder();
+            NoiseUtils.parityNoiseOctaveConfigString(sb4, 1.0625, -2.0625, 0.0625, pi);
+            e.addProperty("parityIntTie", sb4.toString());
             noiseUtils.add(e);
         }
         root.add("noise_utils", noiseUtils);

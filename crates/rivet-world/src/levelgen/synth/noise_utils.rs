@@ -5,11 +5,11 @@
 //! `1.2345678f32 -> "1.235"`, `-9.8765432f32 -> "-9.877"`, `0.000123456f32 ->
 //! "0.000"`.
 //!
-//! Rounding-edge note: Rust `{:.3}` on an `f32` rounds half-to-even while
-//! Java's `%.3f` can round half-up on an exact `0.0005` midpoint (e.g.
-//! `1.0625f32` formats as `"1.062"`). This is diagnostic-only
-//! (`@VisibleForTesting` parity output, not gameplay), and none of the pinned
-//! fixture values land on such a midpoint, so the two agree bit-for-bit there.
+//! Java's `%.3f` rounds half-away-from-zero, which Rust's `{:.3}` (half-even)
+//! does not: `1.0625f32` formats as `"1.063"` in Java but `"1.062"` with
+//! `{:.3}`. The parity strings therefore format through
+//! `rivet_util::fmt_java_3` (the JDK-exact `%.3f` used by the cubic-spline
+//! parity strings), so exact decimal midpoints print like Java.
 
 /// `NoiseUtils.biasTowardsExtreme(double noise, double factor)`.
 ///
@@ -23,12 +23,13 @@ pub fn bias_towards_extreme(noise: f64, factor: f64) -> f64 {
 /// `NoiseUtils.parityNoiseOctaveConfigString(StringBuilder, double xo, double
 /// yo, double zo, byte[] p)`.
 pub fn parity_noise_octave_config_string(sb: &mut String, xo: f64, yo: f64, zo: f64, p: &[i8]) {
-    let xo_f = xo as f32;
-    let yo_f = yo as f32;
-    let zo_f = zo as f32;
     sb.push_str(&format!(
-        "xo={:.3}, yo={:.3}, zo={:.3}, p0={}, p255={}",
-        xo_f, yo_f, zo_f, p[0], p[255]
+        "xo={}, yo={}, zo={}, p0={}, p255={}",
+        rivet_util::fmt_java_3(xo as f32),
+        rivet_util::fmt_java_3(yo as f32),
+        rivet_util::fmt_java_3(zo as f32),
+        p[0],
+        p[255]
     ));
 }
 
@@ -41,12 +42,13 @@ pub fn parity_noise_octave_config_string_i32(
     zo: f64,
     p: &[i32],
 ) {
-    let xo_f = xo as f32;
-    let yo_f = yo as f32;
-    let zo_f = zo as f32;
     sb.push_str(&format!(
-        "xo={:.3}, yo={:.3}, zo={:.3}, p0={}, p255={}",
-        xo_f, yo_f, zo_f, p[0], p[255]
+        "xo={}, yo={}, zo={}, p0={}, p255={}",
+        rivet_util::fmt_java_3(xo as f32),
+        rivet_util::fmt_java_3(yo as f32),
+        rivet_util::fmt_java_3(zo as f32),
+        p[0],
+        p[255]
     ));
 }
 

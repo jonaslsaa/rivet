@@ -539,6 +539,18 @@ fn noise_utils_matches_paper_exactly() {
         &int_p,
     );
     assert_eq!(sb2, entry["parityInt"].as_str().unwrap());
+
+    // Exact decimal midpoint ties: `1.0625`/`-2.0625`/`0.0625` are exact
+    // binary halves, so Java's `%.3f` rounds half-away-from-zero
+    // ("1.063"/"-2.063"/"0.063"), which Rust's `{:.3}` (half-even) would not.
+    // Pins the JDK-exact midpoint formatting on both overloads.
+    let mut sb3 = String::new();
+    noise_utils::parity_noise_octave_config_string(&mut sb3, 1.0625, -2.0625, 0.0625, &byte_p);
+    assert_eq!(sb3, entry["parityByteTie"].as_str().unwrap());
+
+    let mut sb4 = String::new();
+    noise_utils::parity_noise_octave_config_string_i32(&mut sb4, 1.0625, -2.0625, 0.0625, &int_p);
+    assert_eq!(sb4, entry["parityIntTie"].as_str().unwrap());
 }
 
 /// The `wrap` function's periodic behaviour: `wrap(x) = x - lfloor(x /
