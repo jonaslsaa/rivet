@@ -1,12 +1,28 @@
-//! Read-only port of Paper 26.2's `RegionFileStorage` direct-read slice.
+//! Port of Paper 26.2's `RegionFileStorage` direct-read slice plus the
+//! storage-level write lifecycle (issue #395, an M2G prerequisite under #231).
 //!
-//! This intentionally stops before `SerializableChunkData`, `IOWorker`, world
-//! boot, generation, and every write/delete/flush API. Reads open only an
-//! already-existing `r.<regionX>.<regionZ>.mca`, retain Paper's LRU and
-//! negative-cache ordering, delegate stream corruption handling to
-//! `RegionFile`, parse NBT, apply the chunk-coordinate guard, and merge legacy
-//! Aikar oversized supplements.
+//! Reads open only an already-existing `r.<regionX>.<regionZ>.mca`, retain
+//! Paper's LRU and negative-cache ordering, delegate stream corruption handling
+//! to `RegionFile`, parse NBT, apply the chunk-coordinate guard, and merge
+//! legacy Aikar oversized supplements. The write lifecycle composes the
+//! existing `RegionFile` output stream: `write(pos, value)` streams a
+//! `CompoundTag` through `getChunkDataOutputStream` (or `clear`s on `None`),
+//! creates regions/directories on first write, and converts a
+//! `RegionFileSizeException` into a delete + log, exactly like Paper's
+//! `RegionFileStorage.write`. `flush`/`close` iterate every cached region and
+//! attempt all closes/flushes, returning the first error like Paper's
+//! `ExceptionCollector`.
+//!
+//! The strict M2L read-only boundary is preserved: `new_read_only` rejects
+//! every mutation entry — `write` (create/update), delete (`None`), and
+//! `flush` — with `PermissionDenied` *before* any side effect, so no directory
+//! is created, no region is opened for writing, no bytes change, and no backup
+//! or repair runs. Deliberately not ported here: `SerializableChunkData.write`,
+//! `IOWorker`, the moonrise `RegionDataController` interfaces
+//! (`moonrise$startWrite`/`moonrise$finishWrite`), `scanChunk`, chunk
+//! generation, upgrades, repair, and migration.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -14,9 +30,11 @@ use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::nbt_io;
 use rivet_nbt::tag::Tag;
 use rivet_registry::core::ChunkPos;
-use rivet_util::data_io::DataInputStream;
+use rivet_util::data_io::{DataInputStream, DataOutputStream};
 
-use super::region_file::{RegionFile, get_chunk_coordinate};
+use super::region_file::{
+    MAX_CHUNK_SIZE, RegionFile, RegionFileSizeException, get_chunk_coordinate,
+};
 use super::region_file_version::RegionFileVersion;
 use super::region_storage_info::RegionStorageInfo;
 
@@ -25,11 +43,12 @@ const MAX_CACHE_SIZE: usize = 256;
 const REGION_SHIFT: i32 = 5;
 const MAX_NON_EXISTING_CACHE: usize = 1024 * 4;
 
-/// The synchronous region-file cache used by Paper's direct storage reads.
+/// The synchronous region-file cache used by Paper's direct storage IO.
 ///
 /// Entries are stored most-recent-first, matching
 /// `Long2ObjectLinkedOpenHashMap.getAndMoveToFirst`; the last entry is closed
-/// on eviction. The type exposes no write, delete, create, or flush operation.
+/// on eviction. Writes create regions on demand (`getRegionFile(pos, false)`);
+/// reads and deletes never create (`moonrise$getRegionFileIfExists`).
 pub struct RegionFileStorage {
     info: RegionStorageInfo,
     folder: PathBuf,
@@ -132,8 +151,76 @@ impl RegionFileStorage {
         }
     }
 
+    /// `write(pos, value)` — the storage-level write lifecycle. `None` is the
+    /// delete path: `clear` the chunk (no-op when the region does not exist, so
+    /// no file is created for a delete). `Some` streams the NBT through the
+    /// region's output writer (`getChunkDataOutputStream` → `ChunkBuffer`),
+    /// mirroring `NbtIo.write` then `output.close()`. A `RegionFileSizeException`
+    /// from the chunk buffer deletes the chunk and logs, exactly like Paper's
+    /// "don't write garbage data to disk" handling.
+    ///
+    /// The `SharedConstants.DEBUG_DONT_SAVE_WORLD` dev flag that Paper gates
+    /// the whole method on is not ported (it is false in production).
+    pub fn write(&mut self, pos: &ChunkPos, value: Option<CompoundTag>) -> io::Result<()> {
+        self.ensure_writable()?;
+        let region_index = match self.get_region_file(pos, value.is_none())? {
+            Some(index) => index,
+            None => return Ok(()),
+        };
+        let Some(value) = value else {
+            return self.region_cache[region_index].1.clear(pos);
+        };
+
+        let result = (|| -> io::Result<()> {
+            let region = &mut self.region_cache[region_index].1;
+            let mut writer = region.get_chunk_data_output_stream(pos)?;
+            {
+                let mut out = DataOutputStream::new(&mut writer);
+                nbt_io::write(&value, &mut out)?;
+            }
+            // Paper clears the legacy Aikar flag here
+            // (`region.setOversized(x, z, false)`); that meta-mutation surface
+            // stays deferred with the rest of the Aikar subsystem (RivetTodo(#231)).
+            let mut buffer = writer.finish()?;
+            buffer.close(region)
+        })();
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if is_region_file_size(&error) => {
+                self.region_cache[region_index].1.clear(pos)?;
+                eprintln!(
+                    "Chunk at ({}) in regionfile '{}' exceeds max size of {}MiB, it has been deleted from disk.",
+                    pos,
+                    self.region_cache[region_index].1.get_path().display(),
+                    MAX_CHUNK_SIZE / (1024 * 1024)
+                );
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `flush()` — `file.force(true)` on every cached region, attempting all
+    /// flushes and returning the first error like Paper's `ExceptionCollector`
+    /// boundary. In read-only mode this rejects before any region is touched.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.ensure_writable()?;
+        let mut first_error = None;
+        for (_, region) in &mut self.region_cache {
+            if let Err(error) = region.flush()
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     /// Close every cached region, attempting all closes and returning the first
-    /// error like Paper's `ExceptionCollector` boundary.
+    /// error like Paper's `ExceptionCollector` boundary. Read-only regions close
+    /// descriptor-only (no pad/force), so a read-only storage close is a no-op
+    /// on disk.
     pub fn close(&mut self) -> io::Result<()> {
         let mut first_error = None;
         for (_, region) in &mut self.region_cache {
@@ -145,6 +232,71 @@ impl RegionFileStorage {
         }
         self.region_cache.clear();
         first_error.map_or(Ok(()), Err)
+    }
+
+    /// `getRegionFile(pos, existingOnly)` — Paper's region selection. The
+    /// existing-only path is `moonrise$getRegionFileIfExists` (never creates;
+    /// the read and delete paths). The create path is reached only by writes:
+    /// it evicts the LRU, drops the negative-cache entry (`createRegionFile`),
+    /// creates the storage folder (`FileUtil.createDirectoriesSafe`), opens the
+    /// region with CREATE+READ+WRITE, and caches it. Rejects with
+    /// `PermissionDenied` in read-only mode before any filesystem side effect.
+    fn get_region_file(
+        &mut self,
+        pos: &ChunkPos,
+        existing_only: bool,
+    ) -> io::Result<Option<usize>> {
+        if existing_only {
+            return self.get_region_file_if_exists(pos.x(), pos.z());
+        }
+        self.ensure_writable()?;
+        let key = ChunkPos::pack_coords(pos.x() >> REGION_SHIFT, pos.z() >> REGION_SHIFT);
+        if let Some(index) = self.region_cache.iter().position(|(k, _)| *k == key) {
+            let entry = self.region_cache.remove(index);
+            self.region_cache.insert(0, entry);
+            return Ok(Some(0));
+        }
+
+        self.evict_lru_if_full()?;
+
+        let region_path = self
+            .folder
+            .join(Self::get_region_file_name(pos.x(), pos.z()));
+        // `createRegionFile(key)` — a prior read may have negative-cached this
+        // region as missing; the create path always clears that so the fresh
+        // region is served.
+        self.non_existing_region_files
+            .retain(|cached| *cached != key);
+        // `FileUtil.createDirectoriesSafe(folder)` — `Files.createDirectories`
+        // on the (real) path; `create_dir_all` matches it: no-op for an
+        // existing directory, creates parents, and errors when a file occupies
+        // the path.
+        fs::create_dir_all(&self.folder)?;
+
+        let region = RegionFile::open(
+            self.info.clone(),
+            region_path,
+            self.folder.clone(),
+            RegionFileVersion::get_selected(),
+            self.sync,
+        )?;
+        self.region_cache.insert(0, (key, region));
+        Ok(Some(0))
+    }
+
+    /// The strict M2L read-only boundary. Paper has no read-only storage; Rivet
+    /// adds this so boot never writes. Every storage-level mutation entry
+    /// checks it *before* touching the filesystem: no directory is created, no
+    /// region is opened for writing, no bytes change, no backup/repair runs.
+    fn ensure_writable(&self) -> io::Result<()> {
+        if self.read_only {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("region file storage {} is read-only", self.folder.display()),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     pub fn info(&self) -> &RegionStorageInfo {
@@ -263,6 +415,15 @@ impl RegionFileStorage {
     }
 }
 
+/// Whether `error` is Paper's `RegionFileSizeException` — the chunk-buffer cap
+/// thrown by `ChunkBuffer.write`. The write lifecycle converts it into a
+/// delete + log ("don't write garbage data to disk").
+fn is_region_file_size(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|e| e.is::<RegionFileSizeException>())
+}
+
 fn merge_chunk_list(
     level: &mut CompoundTag,
     oversized_level: &CompoundTag,
@@ -286,8 +447,8 @@ pub fn get_region_file_coordinates(file: &Path) -> Option<ChunkPos> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::io::Write as _;
+    use std::fs::{self, OpenOptions};
+    use std::io::{Seek, SeekFrom, Write as _};
 
     use flate2::Compression;
     use flate2::write::{GzEncoder, ZlibEncoder};
@@ -296,6 +457,7 @@ mod tests {
     use rivet_util::data_io::DataOutputStream;
 
     use super::*;
+    use crate::chunk::storage::region_file_version::SELECTION_LOCK;
 
     const PAPER_CHUNK_0_0: &[u8] = include_bytes!(
         "../../../../../tools/rivet-oracle/fixtures/regions/superflat-full/chunk/overworld/0.0/0.0.nbt"
@@ -836,5 +998,304 @@ mod tests {
         assert_eq!(fs::read(&region_path).unwrap(), before_region);
         assert_eq!(fs::read(&oversized_path).unwrap(), before_oversized);
         assert_eq!(fs::read(&meta_path).unwrap(), before_meta);
+    }
+
+    /// Pin the process-global region-file compression selection to `none` (the
+    /// D13 byte-identity gate codec) for the write tests, and serialize against
+    /// `region_file_version`'s own `configure`-mutating tests.
+    fn with_selection_none<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = SELECTION_LOCK.lock().unwrap();
+        RegionFileVersion::configure("none");
+        f()
+    }
+
+    fn writable_storage(dir: &Path) -> RegionFileStorage {
+        RegionFileStorage::new(info(true), dir.to_path_buf(), false)
+    }
+
+    #[test]
+    fn write_creates_region_then_reads_back_and_reopens() {
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::new(3, 5);
+            let tag = chunk_tag(3, 5);
+            {
+                let mut storage = writable_storage(dir.path());
+                storage.write(&pos, Some(tag.clone())).unwrap();
+                assert_eq!(
+                    storage.read(&pos).unwrap().expect("written chunk"),
+                    tag,
+                    "write then read in the same storage"
+                );
+                assert!(
+                    dir.path().join("r.0.0.mca").is_file(),
+                    "write creates the region file"
+                );
+                storage.close().unwrap();
+            }
+            // Reopen: the chunk is on disk and readable through a fresh storage.
+            let mut reopened = writable_storage(dir.path());
+            assert_eq!(reopened.read(&pos).unwrap().expect("reopened chunk"), tag);
+            reopened.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn write_creates_missing_folder_chain() {
+        with_selection_none(|| {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join("deep/nested/region");
+            let pos = ChunkPos::new(0, 0);
+            let mut storage = RegionFileStorage::new(info(true), folder.clone(), false);
+            storage.write(&pos, Some(chunk_tag(0, 0))).unwrap();
+            assert!(
+                folder.join("r.0.0.mca").is_file(),
+                "write creates the folder chain like FileUtil.createDirectoriesSafe"
+            );
+            storage.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn write_rewrites_grown_chunk_and_reads_back() {
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::new(0, 0);
+            let mut storage = writable_storage(dir.path());
+            storage.write(&pos, Some(chunk_tag(0, 0))).unwrap();
+
+            let mut big = chunk_tag(0, 0);
+            big.put_byte_array("filler", vec![0i8; 20_000]);
+            storage.write(&pos, Some(big.clone())).unwrap();
+            assert_eq!(storage.read(&pos).unwrap().expect("rewritten chunk"), big);
+            storage.close().unwrap();
+
+            let mut reopened = writable_storage(dir.path());
+            assert_eq!(reopened.read(&pos).unwrap().expect("rewritten chunk"), big);
+            reopened.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn delete_clears_chunk_and_is_a_noop_when_region_absent() {
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::new(1, 1);
+            {
+                let mut storage = writable_storage(dir.path());
+                storage.write(&pos, Some(chunk_tag(1, 1))).unwrap();
+                assert!(storage.read(&pos).unwrap().is_some());
+                storage.write(&pos, None).unwrap();
+                assert!(
+                    storage.read(&pos).unwrap().is_none(),
+                    "delete clears the chunk"
+                );
+                storage.close().unwrap();
+            }
+            assert!(
+                dir.path().join("r.0.0.mca").is_file(),
+                "delete keeps the region file"
+            );
+            let mut reopened = writable_storage(dir.path());
+            assert!(reopened.read(&pos).unwrap().is_none());
+            reopened.close().unwrap();
+
+            // Deleting a chunk in a region that does not exist creates nothing:
+            // Paper's `getRegionFile(pos, true)` returns null for a missing
+            // region, and the delete returns early.
+            let root = tempfile::tempdir().unwrap();
+            let missing_folder = root.path().join("missing");
+            let mut storage = RegionFileStorage::new(info(true), missing_folder.clone(), false);
+            storage.write(&ChunkPos::new(0, 0), None).unwrap();
+            assert!(
+                !missing_folder.exists(),
+                "delete must not create the folder"
+            );
+            storage.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn write_clears_negative_cache_entry() {
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::new(0, 0);
+            let mut storage = writable_storage(dir.path());
+            // Seed the negative cache: reading a missing region marks it missing.
+            assert!(storage.read(&pos).unwrap().is_none());
+            assert_eq!(storage.non_existing_region_files[0], region_key(0, 0));
+
+            // Paper's create path (`getRegionFile(pos, false)`) calls
+            // `createRegionFile`, clearing the negative-cache entry, then opens
+            // the fresh file — so a write is served even after a miss.
+            storage.write(&pos, Some(chunk_tag(0, 0))).unwrap();
+            assert!(
+                !storage
+                    .non_existing_region_files
+                    .contains(&region_key(0, 0)),
+                "write clears the negative-cache entry"
+            );
+            assert_eq!(
+                storage.read(&pos).unwrap().expect("written chunk"),
+                chunk_tag(0, 0)
+            );
+            storage.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn cross_region_cache_serves_two_regions() {
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let a = ChunkPos::new(0, 0); // r.0.0.mca
+            let b = ChunkPos::new(32, 32); // r.1.1.mca
+            let mut storage = writable_storage(dir.path());
+            storage.write(&a, Some(chunk_tag(0, 0))).unwrap();
+            storage.write(&b, Some(chunk_tag(32, 32))).unwrap();
+            assert_eq!(storage.region_cache.len(), 2);
+            assert_eq!(
+                storage.read(&a).unwrap().expect("region 0 chunk"),
+                chunk_tag(0, 0)
+            );
+            assert_eq!(
+                storage.read(&b).unwrap().expect("region 1 chunk"),
+                chunk_tag(32, 32)
+            );
+            storage.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn oversized_chunk_write_uses_external_mcc_and_reads_back() {
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::new(2, 2);
+            let mut storage = writable_storage(dir.path());
+            let mut tag = chunk_tag(2, 2);
+            // A > 256-sector record (1.2 MiB at `none`) redirects to `.mcc`.
+            tag.put_byte_array("big", vec![0i8; 1_200_000]);
+            storage.write(&pos, Some(tag.clone())).unwrap();
+            assert!(
+                dir.path().join("c.2.2.mcc").is_file(),
+                "oversized chunk is written to the external .mcc file"
+            );
+            assert_eq!(storage.read(&pos).unwrap().expect("oversized chunk"), tag);
+            storage.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn flush_persists_then_reopen_reads() {
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::new(0, 0);
+            let mut storage = writable_storage(dir.path());
+            storage.write(&pos, Some(chunk_tag(0, 0))).unwrap();
+            storage.flush().unwrap();
+            storage.close().unwrap();
+
+            let mut reopened = writable_storage(dir.path());
+            assert!(reopened.read(&pos).unwrap().is_some());
+            reopened.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn region_file_size_error_is_recognized() {
+        let size_error: io::Error = RegionFileSizeException { count: 42 }.into();
+        assert!(is_region_file_size(&size_error));
+        assert!(!is_region_file_size(&io::Error::other("not a size error")));
+    }
+
+    #[test]
+    fn corrupt_stream_write_is_treated_absent_like_paper() {
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::new(0, 0);
+            {
+                let mut storage = writable_storage(dir.path());
+                storage.write(&pos, Some(chunk_tag(0, 0))).unwrap();
+                storage.close().unwrap();
+            }
+            // Corrupt the written chunk's stream length to a huge value; the
+            // readable region degrades it to absent (recalc relinks to 0).
+            let path = dir.path().join("r.0.0.mca");
+            {
+                let mut f = OpenOptions::new().write(true).open(&path).unwrap();
+                f.seek(SeekFrom::Start(2 * 4096)).unwrap();
+                f.write_all(&i32::MAX.to_be_bytes()).unwrap();
+            }
+            let mut storage = writable_storage(dir.path());
+            assert!(
+                storage.read(&pos).unwrap().is_none(),
+                "corrupt stream is treated as absent"
+            );
+            storage.close().unwrap();
+        });
+    }
+
+    #[test]
+    fn read_only_storage_rejects_every_write_mutation_before_side_effects() {
+        // The strict M2L read-only boundary: no create, no delete, no flush may
+        // touch the filesystem. Every attempt rejects with PermissionDenied
+        // before the folder is created or a region is loaded, and no bytes or
+        // files change.
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("world/region");
+        let mut storage = RegionFileStorage::new_read_only(info(true), folder.clone());
+
+        // Create: rejects before the folder is created.
+        assert_eq!(
+            storage
+                .write(&ChunkPos::new(0, 0), Some(chunk_tag(0, 0)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            !folder.exists(),
+            "a read-only write must not create the storage folder"
+        );
+        assert!(storage.region_cache.is_empty());
+
+        // Delete: rejects before the region is loaded or touched.
+        fs::create_dir_all(&folder).unwrap();
+        write_region(&folder, ChunkPos::ZERO, 3, PAPER_CHUNK_0_0);
+        let region_path = folder.join("r.0.0.mca");
+        let before = fs::read(&region_path).unwrap();
+        assert_eq!(
+            storage.write(&ChunkPos::ZERO, None).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            fs::read(&region_path).unwrap(),
+            before,
+            "a read-only delete must not mutate region bytes"
+        );
+        assert_eq!(
+            fs::read_dir(&folder).unwrap().count(),
+            1,
+            "a read-only delete must not create or remove files"
+        );
+        assert!(
+            storage.region_cache.is_empty(),
+            "a read-only delete must not load the region"
+        );
+
+        // Flush: rejects in read-only mode.
+        assert_eq!(
+            storage.flush().unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        // Reads still work, and close is descriptor-only.
+        assert!(storage.read(&ChunkPos::ZERO).unwrap().is_some());
+        storage.close().unwrap();
+        assert_eq!(
+            fs::read(&region_path).unwrap(),
+            before,
+            "close must not mutate bytes"
+        );
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
     }
 }

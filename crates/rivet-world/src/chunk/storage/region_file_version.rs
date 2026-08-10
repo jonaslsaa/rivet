@@ -424,18 +424,21 @@ impl<W: Write> Write for RegionFileWriter<W> {
     }
 }
 
+/// Serializes the `configure`-mutating tests: `SELECTED_ID` is process global,
+/// and the test harness runs tests in parallel. Shared with
+/// `region_file_storage`'s write tests, which must pin the selection to `none`
+/// (the D13 gate codec) while they write. `#[cfg(test)]` so the lock never
+/// exists in non-test builds.
+#[cfg(test)]
+pub(crate) static SELECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::io::{Read as _, Write as _};
     use std::rc::Rc;
-    use std::sync::Mutex;
 
     use super::*;
-
-    /// Serializes the `configure`-mutating tests: `SELECTED_ID` is process
-    /// global, and the test harness runs tests in parallel.
-    static SELECTION_LOCK: Mutex<()> = Mutex::new(());
 
     fn lz4_header(token: u8, compressed_length: i32, original_length: i32) -> Vec<u8> {
         let mut header = Vec::with_capacity(LZ4_HEADER_LENGTH);
