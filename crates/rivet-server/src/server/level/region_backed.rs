@@ -2,8 +2,11 @@
 //!
 //! This module deliberately has no launcher-save discovery, generation, or
 //! write API. The caller supplies the already-copied root created by the #316
-//! harness. Construction stops at explicit dependency boundaries until #323
-//! and #336 land.
+//! harness. Section/palette reconstruction (#336) and heightmap/light/
+//! block-entity reconstruction (#337) are available on main; construction
+//! still stops at the runtime `ChunkMap`/`LevelChunk` composition slice, the
+//! #323 `level.dat` metadata boundary, and real structures/ticks/block
+//! entities (#369).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -75,7 +78,7 @@ pub struct RegionChunkSource {
 }
 
 /// Retained ownership seam between layout/region preparation and the future
-/// #323/#336 `ServerLevel` composition. Dependencies can fill the next step
+/// runtime `ServerLevel` composition. The next slice can adopt the source
 /// without changing how the read-only source is owned.
 pub struct RegionLevelPreparation {
     source: RegionChunkSource,
@@ -141,9 +144,10 @@ impl RegionChunkSource {
             .ok_or(RegionBackedBootError::MissingChunkStatus(pos))
     }
 
-    /// The composition point that #336 completes. Existing serializable
-    /// validation runs first so proto/generation and blending boundaries retain
-    /// their precise typed errors.
+    /// The composition point the runtime `ChunkMap`/`LevelChunk` slice
+    /// completes. Existing serializable validation runs first so
+    /// proto/generation and blending boundaries retain their precise typed
+    /// errors.
     pub fn load_for_composition(
         &mut self,
         pos: ChunkPos,
@@ -151,7 +155,7 @@ impl RegionChunkSource {
         let data = self.read_serializable(pos)?;
         data.validate_full_capabilities()
             .map_err(RegionBackedBootError::SerializableChunk)?;
-        Err(RegionBackedBootError::SectionReconstructionUnavailable)
+        Err(RegionBackedBootError::RuntimeChunkCompositionUnavailable)
     }
 }
 
@@ -163,15 +167,15 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     Err(RegionBackedBootError::LevelDataCodecsUnavailable)
 }
 
-/// Minimal registry bridge for #336 output: block states reuse the generated
-/// global id directly; biomes validate raw generated registry ids against the
-/// canonical generated count.
+/// Minimal registry bridge for reconstructed section palettes: block states
+/// reuse the generated global id directly; biomes validate raw generated
+/// registry ids against the canonical generated count.
 pub fn bridge_block_state(state: BlockState) -> StateId {
     state.id()
 }
 
 pub fn bridge_biome_id(id: u16) -> Result<BiomeId, RegionBackedBootError> {
-    BiomeId::try_from(id).map_err(|id| RegionBackedBootError::UnknownBiomeId(id))
+    BiomeId::try_from(id).map_err(RegionBackedBootError::UnknownBiomeId)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -192,8 +196,10 @@ pub enum RegionBackedBootError {
     MissingChunkStatus(ChunkPos),
     #[error("UNVERIFIED serialized chunk is unsupported: {0}")]
     SerializableChunk(#[source] SerializableChunkDataError),
-    #[error("UNVERIFIED section/palette reconstruction is unavailable (dependency #336)")]
-    SectionReconstructionUnavailable,
+    #[error(
+        "UNVERIFIED runtime chunk composition into ChunkMap/LevelChunk is not yet implemented (next loaded-world slice)"
+    )]
+    RuntimeChunkCompositionUnavailable,
     #[error("UNVERIFIED biome registry id {0} is outside the generated registry")]
     UnknownBiomeId(u16),
 }
@@ -321,13 +327,13 @@ mod tests {
     }
 
     #[test]
-    fn full_region_chunk_reaches_section_reconstruction_boundary() {
+    fn full_region_chunk_reaches_runtime_composition_boundary() {
         let (_temp, layout) = layout();
         write_chunk(&layout, full_chunk());
         let mut source = RegionChunkSource::open(layout);
         assert!(matches!(
             source.load_for_composition(ChunkPos::ZERO),
-            Err(RegionBackedBootError::SectionReconstructionUnavailable)
+            Err(RegionBackedBootError::RuntimeChunkCompositionUnavailable)
         ));
     }
 
