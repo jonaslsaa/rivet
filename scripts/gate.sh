@@ -416,7 +416,16 @@ run_oracle_hash() {
       echo "    FAILED — committed Paper hash manifest drifted from a fresh rebuild; regenerate and commit it"
       exit 1
     fi
-    echo "    VERIFIED — Paper manifest rebuilds byte-identically (2 FULL: the_nether/0.0 + the_end/0.0)"
+    # Narrate the FULL facts from the live manifest, never a hardcoded count (a
+    # manifest whose FULL set changes must be caught here, not stale-narrated).
+    local full_narration
+    full_narration="$(python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+full = sorted((e["dim"], e["cx"], e["cz"]) for e in m["entries"] if e["status"] == "minecraft:full")
+print(f"{len(full)} FULL: " + ", ".join(f"{d}/{cx}.{cz}" for d, cx, cz in full))
+' "$REPO_DIR/tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json")"
+    echo "    VERIFIED — Paper manifest rebuilds byte-identically ($full_narration)"
   else
     echo "    NOTICE — skipped the Paper manifest git-clean check (not inside a git work tree)"
   fi
