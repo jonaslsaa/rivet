@@ -35,6 +35,10 @@ use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_protocol::protocol::game::level_chunk_packet_data::LevelChunkPacketData;
 use rivet_protocol::protocol::game::light_update_packet_data::LightUpdatePacketData;
 use rivet_registry::core::ChunkPos;
+use rivet_registry::generated::block_behaviors::{
+    BEHAVIOR_FLAG_FLUID_EMPTY, BEHAVIOR_FLAG_RANDOM_TICKING, behavior_of,
+};
+use rivet_registry::generated::block_states::StateId as GeneratedStateId;
 use rivet_world::chunk::level_chunk::LevelChunk as WorldLevelChunk;
 use rivet_world::chunk::level_chunk_section::LevelChunkSection;
 use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
@@ -103,7 +107,6 @@ impl LevelChunk {
             0,
             Some(content.sections),
             StateId(0),
-            &|s: &StateId| s.0 == 0,
             // The same predicates as the superflat build above: the server's
             // block state is the local `StateId` newtype, air is 0, everything
             // else blocks motion, and nothing here has a fluid or is leaves.
@@ -275,11 +278,41 @@ fn superflat_content() -> rivet_world::superflat::SuperflatChunkContent<StateId,
     fn is_leaves(_s: &StateId) -> bool {
         false
     }
+    // `state.isRandomlyTicking()` — the generated behavior-table flag (air +
+    // stone are both non-randomly-ticking, matching the table).
+    fn is_randomly_ticking(s: &StateId) -> bool {
+        behavior_of(GeneratedStateId(s.0)) & BEHAVIOR_FLAG_RANDOM_TICKING != 0
+    }
+    // `state.getFluidState().isEmpty()` — the generated behavior-table flag
+    // (air + stone both carry no fluid, matching the table).
+    fn fluid_is_empty(s: &StateId) -> bool {
+        behavior_of(GeneratedStateId(s.0)) & BEHAVIOR_FLAG_FLUID_EMPTY != 0
+    }
+    // `state.getFluidState().isRandomlyTicking()` — exact for air + stone (no
+    // fluid to tick).
+    //
+    // The generated behavior table has no fluid-random-tick flag; this
+    // predicate is exact for the superflat content (air + stone have no fluid).
+    fn fluid_is_randomly_ticking(_s: &StateId) -> bool {
+        false
+    }
+    // `CollisionUtil.isSpecialCollidingBlock(state)` — exact for air + stone
+    // (neither has a large collision shape nor is `MOVING_PISTON`).
+    //
+    // The generated behavior table has no special-colliding flag; this
+    // predicate is exact for the superflat content (air + stone never match).
+    fn is_special_colliding(_s: &StateId) -> bool {
+        false
+    }
     let flags = rivet_world::superflat::BlockFlags {
         is_air: &is_air,
         blocks_motion: &blocks_motion,
         has_fluid: &has_fluid,
         is_leaves: &is_leaves,
+        is_randomly_ticking: &is_randomly_ticking,
+        fluid_is_empty: &fluid_is_empty,
+        fluid_is_randomly_ticking: &fluid_is_randomly_ticking,
+        is_special_colliding: &is_special_colliding,
     };
 
     build_superflat(

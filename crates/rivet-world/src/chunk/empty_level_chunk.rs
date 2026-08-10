@@ -56,17 +56,15 @@ where
     /// `LevelChunk` constructor (`UpgradeData.EMPTY`, `inhabitedTime` 0, no
     /// sections).
     ///
-    /// `void_air` is the read default; `is_air` classifies states for the
-    /// default-section recalc. The `container_factory` builds the default
-    /// sections the base constructor requires. `resolve` classifies states for
-    /// the heightmap predicates (see [`ChunkAccess::new`]).
+    /// `void_air` is the read default. The `container_factory` builds the
+    /// default (all-air) sections the base constructor requires. `resolve`
+    /// classifies states for the heightmap predicates (see [`ChunkAccess::new`]).
     pub fn new(
         pos: ChunkPos,
         height_accessor: SimpleLevelHeightAccessor,
         container_factory: &PalettedContainerFactory<T, B>,
         biome: B,
         void_air: T,
-        is_air: &'static dyn Fn(&T) -> bool,
         resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
     ) -> Self {
         EmptyLevelChunk {
@@ -77,7 +75,6 @@ where
                 container_factory,
                 0,
                 None,
-                is_air,
                 resolve,
             ),
             biome,
@@ -208,7 +205,6 @@ mod tests {
             &factory(),
             7,   // the single biome id.
             255, // void air.
-            &|s| *s == 0,
             // Everything the chunk reads is void air: not air-in-test-terms
             // (255 != 0), blocks motion, no fluid, not leaves.
             &|_| StateFlags {

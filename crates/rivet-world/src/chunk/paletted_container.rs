@@ -396,6 +396,28 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
         self.data.palette.maybe_has(&mut predicate)
     }
 
+    /// `data.palette().getSize()` — the number of distinct entries in the
+    /// palette. The section-level Moonrise `recalcBlockCounts` (issue #216)
+    /// uses it to pick the `FULL_LIST` single-value shortcut over the
+    /// per-palette-id `count_entries` walk.
+    pub fn palette_size(&self) -> i32 {
+        self.data.palette.get_size()
+    }
+
+    /// `palette.valueFor(paletteIdx)` — the value a palette-local id maps to
+    /// (the section recalc's `state` per count-entry group).
+    pub fn value_for_palette(&self, palette_idx: i32) -> T {
+        self.data.palette.value_for(palette_idx)
+    }
+
+    /// `data.storage().moonrise$countEntries()` — per-palette-id coordinate
+    /// groups in first-appearance order (issue #216). Consumed by the section
+    /// recalc; the returned indices are the flat storage positions, which for a
+    /// block section equal the Moonrise packed position `x | z<<4 | y<<8`.
+    pub fn count_entries(&self) -> Vec<(i32, Vec<i16>)> {
+        self.data.storage.count_entries()
+    }
+
     /// `forEachInPalette(Consumer<T>)`.
     pub fn for_each_in_palette(&self, mut consumer: impl FnMut(T)) {
         for i in 0..self.data.palette.get_size() {
@@ -606,7 +628,7 @@ pub trait PalettedContainerRO<T: Clone + PartialEq + Send + std::fmt::Debug + 's
     fn get_all(&self, consumer: &mut dyn FnMut(T));
     /// `write(FriendlyByteBuf)` — the deprecated no-Anti-Xray-info variant.
     ///
-    /// RivetTodo(#216): the Anti-Xray overload `write(FriendlyByteBuf,
+    /// The Anti-Xray overload `write(FriendlyByteBuf,
     /// @Nullable ChunkPacketInfo<T>, int chunkSectionIndex)` is omitted —
     /// `ChunkPacketInfo` is deferred with the `paper.antixray` chunk-storage
     /// unit; re-add it when that type lands.

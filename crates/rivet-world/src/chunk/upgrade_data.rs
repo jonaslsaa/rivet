@@ -14,7 +14,7 @@
 //! takes the section count directly (Java's `LevelHeightAccessor` constructor
 //! arg is only used to size `index`).
 //!
-//! RivetTodo(#216): the `SavedTick<Block>`/`SavedTick<Fluid>` neighbor-tick
+//! The `SavedTick<Block>`/`SavedTick<Fluid>` neighbor-tick
 //! codecs (`BLOCK_TICKS_CODEC`/`FLUID_TICKS_CODEC`) are not ported —
 //! `SavedTick` lives with the `world.ticks` unit.
 //! RivetTodo(#228): `BlockFixers`/`BlockFixer` and the `upgrade`/

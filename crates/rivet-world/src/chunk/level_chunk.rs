@@ -79,10 +79,8 @@ where
     /// an unprimed entry for each `ChunkStatus.FULL.heightmapsAfter()` type.
     ///
     /// The ticks, `postLoad`, and `blendingData` parameters are omitted with
-    /// their units. `air` is the default state for the read spine; `is_air`
-    /// classifies states for the default-section recalc (the caller's
-    /// `BlockBehaviour.isAir`); `resolve` classifies states for the heightmap
-    /// predicates (see [`ChunkAccess::new`]).
+    /// their units. `air` is the default state for the read spine; `resolve`
+    /// classifies states for the heightmap predicates (see [`ChunkAccess::new`]).
     #[allow(clippy::too_many_arguments)] // Java's constructor has 9 parameters.
     pub fn new(
         pos: ChunkPos,
@@ -92,7 +90,6 @@ where
         inhabited_time: i64,
         sections: Option<Vec<LevelChunkSection<T, B>>>,
         air: T,
-        is_air: &'static dyn Fn(&T) -> bool,
         resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
     ) -> Self {
         let mut base = ChunkAccess::new(
@@ -102,7 +99,6 @@ where
             container_factory,
             inhabited_time,
             sections,
-            is_air,
             resolve,
         );
         for ty in FINAL_HEIGHTMAPS {
@@ -278,9 +274,8 @@ where
     /// and the registry-dependent save are unported, so the port returns the
     /// pending tag directly.
     ///
-    /// RivetTodo(#216): the `blockEntities.containsKey` guard and the
-    /// `saveWithFullMetadata`/`keepPacked` copy live with the block-entity
-    /// unit.
+    /// The `blockEntities.containsKey` guard and the
+    /// `saveWithFullMetadata`/`keepPacked` copy live with the block-entity unit.
     pub fn get_block_entity_nbt_for_saving(&self, pos: &BlockPos) -> Option<&CompoundTag> {
         self.base.get_block_entity_nbt(pos)
     }
@@ -422,6 +417,25 @@ mod tests {
         PalettedContainerFactory::new(block_strategy(), 0, biome_strategy(), 0)
     }
 
+    /// The `BlockBehaviour` predicates for the test sections: air is `0`,
+    /// nothing randomly ticks, everything is fluid-empty, nothing is
+    /// special-colliding.
+    fn is_air(s: &u8) -> bool {
+        *s == 0
+    }
+    fn is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn fluid_is_empty(_s: &u8) -> bool {
+        true
+    }
+    fn fluid_is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn is_special_colliding(_s: &u8) -> bool {
+        false
+    }
+
     /// A loaded chunk with a stone block at section-local (0,0,0) of section 0
     /// (absolute y -64).
     fn stone_chunk() -> LevelChunk<u8, u8, &'static str> {
@@ -431,13 +445,21 @@ mod tests {
         sections.push(LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            |s: &u8| *s == 0,
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
         ));
         for _ in 1..24 {
             sections.push(LevelChunkSection::new(
                 PalettedContainer::new(0u8, block_strategy()),
                 PalettedContainer::new(0u8, biome_strategy()),
-                |s: &u8| *s == 0,
+                is_air,
+                is_randomly_ticking,
+                fluid_is_empty,
+                fluid_is_randomly_ticking,
+                is_special_colliding,
             ));
         }
         LevelChunk::new(
@@ -448,7 +470,6 @@ mod tests {
             0,
             Some(sections),
             0,
-            &|s| *s == 0,
             // u8 tests: 0 is air, 1 is stone (blocks motion).
             &|s: &u8| StateFlags {
                 is_air: *s == 0,

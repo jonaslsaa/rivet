@@ -6,9 +6,17 @@
 //! gating every mutator behind `allowWrites`. Per OWNERSHIP.md there is no
 //! inheritance, so this chunk holds the wrapped `LevelChunk` and its
 //! `allowWrites` flag, plus the `ProtoChunk`-side carriers Java's `super.*`
-//! calls touch (the `status` field and `carvingMask`). The `ProtoChunk`-side
-//! default sections and the `entities` list are never read (every accessor
-//! delegates), so they are not stored.
+//! calls touch (the `status` field and `carvingMask`). The `entities` list and
+//! the base's default all-air sections are never read, so they are not stored.
+//!
+//! `getSection` is Java's `allowWrites ? wrapped.getSection : super.getSection`,
+//! but `super.getSection(i)` is `this.getSections()[i]` — a virtual call that
+//! dispatches to the `getSections` override (`wrapped.getSections()`), and
+//! `LevelChunk` does not override `getSection`, so the write branch reads the
+//! same `wrapped.getSections()[i]`. The two branches are behaviorally
+//! identical: a read-only caller sees the wrapped chunk's contents, and the
+//! base `this.sections` all-air defaults that `super(...)`'s
+//! `replaceMissingSections` fills are unreachable through `getSection`.
 //!
 //! The heightmap `fixType` maps the worldgen-only `WORLD_SURFACE_WG`/
 //! `OCEAN_FLOOR_WG` types to their client-facing forms because the wrapped
@@ -31,15 +39,8 @@
 //! when writes are disallowed (Java `Util.pauseInIde`); the port panics in
 //! that case.
 //!
-//! RivetTodo(#216): Java's read-only `getSection` returns the `ProtoChunk`
-//! base's default all-air sections (`super.getSection`); the port always
-//! returns the wrapped chunk's section, which reads identically for an
-//! all-air section but diverges if a read-only caller indexes a non-air
-//! section. The `ProtoChunk`-side section storage defers with the mutator
-//! unit.
-//! RivetTodo(#216): `setBlockState`'s `allowWrites ? wrapped.setBlockState :
-//! null` gate is not ported — the `LevelChunk` write path defers with the
-//! mutator unit.
+//! `setBlockState`'s `allowWrites ? wrapped.setBlockState : null` gate is not
+//! ported — the `LevelChunk` write path defers with the mutator unit.
 
 use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::ChunkStatus;
@@ -113,9 +114,9 @@ where
             .get_block_state(pos.get_x(), pos.get_y(), pos.get_z())
     }
 
-    /// `getSection(int)` — the wrapped chunk's section. Java gates this:
-    /// writes allowed → wrapped, else the `ProtoChunk` base's default all-air
-    /// sections (see the module `RivetTodo(#216)`).
+    /// `getSection(int)` — Java's `allowWrites ? wrapped.getSection :
+    /// super.getSection`, which resolves to `wrapped.getSections()[i]` on both
+    /// branches (see the module docs): always the wrapped chunk's section.
     pub fn get_section(&self, section_index: usize) -> &LevelChunkSection<T, B> {
         self.wrapped.get_section(section_index)
     }
@@ -343,6 +344,33 @@ mod tests {
         PalettedContainerFactory::new(block_strategy(), 0, biome_strategy(), 0)
     }
 
+    /// The `BlockBehaviour` predicates for the test sections: air is `0`,
+    /// nothing randomly ticks, everything is fluid-empty, nothing is
+    /// special-colliding.
+    fn is_air(s: &u8) -> bool {
+        *s == 0
+    }
+    fn is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn fluid_is_empty(_s: &u8) -> bool {
+        true
+    }
+    fn fluid_is_randomly_ticking(_s: &u8) -> bool {
+        false
+    }
+    fn is_special_colliding(_s: &u8) -> bool {
+        false
+    }
+
+    /// An imposter over the wrapped chunk (see [`wrapped_chunk`]).
+    fn imposter(
+        wrapped: LevelChunk<u8, u8, &'static str>,
+        allow_writes: bool,
+    ) -> ImposterProtoChunk<u8, u8, &'static str> {
+        ImposterProtoChunk::new(wrapped, allow_writes)
+    }
+
     /// A wrapped chunk with stone (1) at (0, 0, 0) of section 0 and air (0)
     /// elsewhere.
     fn wrapped_chunk() -> LevelChunk<u8, u8, &'static str> {
@@ -352,13 +380,21 @@ mod tests {
         sections.push(crate::chunk::level_chunk_section::LevelChunkSection::new(
             states,
             PalettedContainer::new(0u8, biome_strategy()),
-            |s: &u8| *s == 0,
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
         ));
         for _ in 1..24 {
             sections.push(crate::chunk::level_chunk_section::LevelChunkSection::new(
                 PalettedContainer::new(0u8, block_strategy()),
                 PalettedContainer::new(0u8, biome_strategy()),
-                |s: &u8| *s == 0,
+                is_air,
+                is_randomly_ticking,
+                fluid_is_empty,
+                fluid_is_randomly_ticking,
+                is_special_colliding,
             ));
         }
         LevelChunk::new(
@@ -369,7 +405,6 @@ mod tests {
             0,
             Some(sections),
             0,
-            &|s| *s == 0,
             // u8 tests: 0 is air, 1 is stone (blocks motion).
             &|s: &u8| StateFlags {
                 is_air: *s == 0,
@@ -382,7 +417,7 @@ mod tests {
 
     #[test]
     fn reads_delegate_to_the_wrapped_chunk() {
-        let imposter = ImposterProtoChunk::new(wrapped_chunk(), false);
+        let imposter = imposter(wrapped_chunk(), false);
         assert_eq!(imposter.get_block_state(0, -64, 0), 1);
         assert_eq!(imposter.get_block_state_pos(&BlockPos::new(0, -64, 0)), 1);
         assert_eq!(imposter.get_block_state(0, 0, 0), 0);
@@ -393,20 +428,38 @@ mod tests {
     }
 
     #[test]
+    fn get_section_always_returns_the_wrapped_chunk_sections() {
+        // Java's `getSection` is `allowWrites ? wrapped.getSection :
+        // super.getSection`, and `super.getSection(i)` is
+        // `this.getSections()[i]` — a virtual call that dispatches to the
+        // `getSections` override (`wrapped.getSections()`). `LevelChunk` does
+        // not override `getSection`, so the write branch reads the same
+        // `wrapped.getSections()[i]`: both branches return the wrapped chunk's
+        // section (the base all-air defaults are unreachable through
+        // `getSection`).
+        let read_only = imposter(wrapped_chunk(), false);
+        assert_eq!(read_only.get_section(0).get_block_state(0, 0, 0), 1);
+        assert_eq!(read_only.get_section(0).non_empty_block_count(), 1);
+        let writable = imposter(wrapped_chunk(), true);
+        assert_eq!(writable.get_section(0).get_block_state(0, 0, 0), 1);
+        assert_eq!(writable.get_section(0).non_empty_block_count(), 1);
+    }
+
+    #[test]
     fn set_persisted_status_is_gated_and_marks_the_wrapped_unsaved() {
         // Read-only: no-op (Java's `if (this.allowWrites)` guard).
-        let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), false);
-        imposter.set_persisted_status(ChunkStatus::Full);
-        assert!(!imposter.get_wrapped().is_unsaved());
+        let mut read_only = imposter(wrapped_chunk(), false);
+        read_only.set_persisted_status(ChunkStatus::Full);
+        assert!(!read_only.get_wrapped().is_unsaved());
 
         // Write-allowed: Java's `super.setPersistedStatus` writes the
         // ProtoChunk-side status and the virtual `markUnsaved` forwards to the
         // wrapped chunk. The written status is never read back.
-        let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), true);
-        assert!(!imposter.get_wrapped().is_unsaved());
-        imposter.set_persisted_status(ChunkStatus::Full);
-        assert!(imposter.get_wrapped().is_unsaved());
-        assert_eq!(imposter.get_persisted_status(), ChunkStatus::Full);
+        let mut writable = imposter(wrapped_chunk(), true);
+        assert!(!writable.get_wrapped().is_unsaved());
+        writable.set_persisted_status(ChunkStatus::Full);
+        assert!(writable.get_wrapped().is_unsaved());
+        assert_eq!(writable.get_persisted_status(), ChunkStatus::Full);
     }
 
     #[test]
@@ -431,7 +484,7 @@ mod tests {
 
     #[test]
     fn serialization_flags_match_java() {
-        let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), false);
+        let mut imposter = imposter(wrapped_chunk(), false);
         assert!(!imposter.can_be_serialized());
         assert!(!imposter.try_mark_saved());
         assert!(!imposter.is_unsaved());
@@ -446,7 +499,7 @@ mod tests {
         // `minY - 1` = -65 (Java's fresh-chunk behavior). The WG types map to
         // their client forms first (WorldSurfaceWg -> WorldSurface,
         // OceanFloorWg -> OceanFloor), which the `-65` reads exercise.
-        let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), false);
+        let mut imposter = imposter(wrapped_chunk(), false);
         assert_eq!(imposter.get_height_at(Types::WorldSurfaceWg, 0, 0), -65);
         assert_eq!(imposter.get_height_at(Types::WorldSurface, 0, 0), -65);
         assert_eq!(imposter.get_height_at(Types::OceanFloorWg, 5, 7), -65);
@@ -455,13 +508,13 @@ mod tests {
     #[test]
     #[should_panic]
     fn carving_mask_throws_when_writes_disallowed() {
-        let imposter = ImposterProtoChunk::new(wrapped_chunk(), false);
+        let imposter = imposter(wrapped_chunk(), false);
         let _ = imposter.get_carving_mask();
     }
 
     #[test]
     fn carving_mask_reuses_when_writes_allowed() {
-        let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), true);
+        let mut imposter = imposter(wrapped_chunk(), true);
         imposter.get_or_create_carving_mask().set(1, -64, 2);
         let mask = imposter.get_carving_mask().expect("created");
         assert!(mask.get(1, -64, 2));
@@ -471,7 +524,7 @@ mod tests {
 
     #[test]
     fn noop_setters_do_not_touch_the_wrapped_chunk() {
-        let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), true);
+        let mut imposter = imposter(wrapped_chunk(), true);
         imposter.set_heightmap(Types::WorldSurface, &[]);
         imposter.mark_pos_for_post_processing(&BlockPos::new(0, 0, 0));
         imposter.set_block_entity_nbt(Default::default());
@@ -495,7 +548,7 @@ mod tests {
         // every one of those entries present and `Some` (idempotent, Java's
         // `computeIfAbsent`), and must never spuriously create an entry for a
         // type that was not requested.
-        let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), true);
+        let mut imposter = imposter(wrapped_chunk(), true);
         for ty in FINAL_HEIGHTMAPS {
             imposter.get_or_create_heightmap_unprimed(ty);
         }
@@ -521,7 +574,7 @@ mod tests {
 
     #[test]
     fn light_correct_flag_forwards_to_the_wrapped_chunk() {
-        let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), false);
+        let mut imposter = imposter(wrapped_chunk(), false);
         assert!(!imposter.is_light_correct());
         imposter.set_light_correct(true);
         assert!(imposter.is_light_correct());

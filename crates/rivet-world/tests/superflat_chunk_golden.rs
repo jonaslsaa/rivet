@@ -19,6 +19,9 @@ use rivet_protocol::protocol::game::clientbound_level_chunk_with_light::Clientbo
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_protocol::registry_friendly_byte_buf::RegistryFriendlyByteBuf;
 use rivet_registry::RegistryAccess;
+use rivet_registry::generated::block_behaviors::{
+    BEHAVIOR_FLAG_FLUID_EMPTY, BEHAVIOR_FLAG_RANDOM_TICKING, behavior_of,
+};
 use rivet_registry::generated::block_states::{BLOCK_STATE_COUNT, StateId};
 use rivet_world::chunk::level_chunk_section::LevelChunkSection;
 use rivet_world::chunk::palette::GlobalIdMap;
@@ -125,13 +128,47 @@ fn is_leaves(_s: &StateId) -> bool {
     false
 }
 
-/// The `BlockFlags` for the superflat content (air + stone).
+/// `state.isRandomlyTicking()` — the generated behavior-table flag (air +
+/// stone are both non-randomly-ticking, matching the table).
+fn is_randomly_ticking(s: &StateId) -> bool {
+    behavior_of(*s) & BEHAVIOR_FLAG_RANDOM_TICKING != 0
+}
+/// `state.getFluidState().isEmpty()` — the generated behavior-table flag (air
+/// + stone both carry no fluid, matching the table).
+fn fluid_is_empty(s: &StateId) -> bool {
+    behavior_of(*s) & BEHAVIOR_FLAG_FLUID_EMPTY != 0
+}
+/// `state.getFluidState().isRandomlyTicking()` — exact for air + stone (no
+/// fluid to tick).
+///
+/// The generated behavior table has no fluid-random-tick flag; this predicate
+/// is exact for the superflat content (air + stone have no fluid).
+fn fluid_is_randomly_ticking(_s: &StateId) -> bool {
+    false
+}
+/// `CollisionUtil.isSpecialCollidingBlock(state)` — exact for air + stone
+/// (neither has a large collision shape nor is `MOVING_PISTON`).
+///
+/// The generated behavior table has no special-colliding flag; this predicate
+/// is exact for the superflat content (air + stone never match).
+fn is_special_colliding(_s: &StateId) -> bool {
+    false
+}
+
+/// The `BlockFlags` for the superflat content (air + stone): the generated
+/// table drives `is_air`/`blocks_motion`/`is_randomly_ticking`/`fluid_is_empty`
+/// and exact-for-content predicates drive the two flags the table does not
+/// carry.
 fn superflat_flags() -> BlockFlags<StateId> {
     BlockFlags {
         is_air: &is_air,
         blocks_motion: &blocks_motion,
         has_fluid: &has_fluid,
         is_leaves: &is_leaves,
+        is_randomly_ticking: &is_randomly_ticking,
+        fluid_is_empty: &fluid_is_empty,
+        fluid_is_randomly_ticking: &fluid_is_randomly_ticking,
+        is_special_colliding: &is_special_colliding,
     }
 }
 
@@ -236,8 +273,15 @@ fn all_24_section_boundaries_parse_and_reencode_byte_identical() {
             PalettedContainer::new(StateId(0), block_state_strategy()),
             PalettedContainer::new(BiomeId(40), biome_strategy()),
             is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
         );
-        section.read(&mut buf);
+        // The golden superflat content is air + stone: no special-colliding
+        // blocks, so a non-matching predicate leaves the sentinel unforced,
+        // matching Java's client read of this content.
+        section.read(&mut buf, &|_| false);
         let end = buffer.len() - buf.into_inner().len();
         offset = end;
         let size = end - start;
