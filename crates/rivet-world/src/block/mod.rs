@@ -38,6 +38,14 @@ impl Block {
         self.0
     }
 
+    /// The minimal by-name accessor (#370): resolve a namespaced registry id
+    /// (e.g. `"minecraft:stone"`) to the id-handle. Unknown names are `None`,
+    /// matching `BlockId::from_name` (no defaulted fallback).
+    #[inline]
+    pub fn from_name(name: &str) -> Option<Self> {
+        BlockId::from_name(name).map(Self)
+    }
+
     /// The registry key (`BuiltInRegistries.BLOCK.getKey(block).toString()`,
     /// e.g. `"minecraft:stone"`).
     #[inline]
