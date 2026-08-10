@@ -89,8 +89,11 @@ public final class SeqProbe {
         out.add("at", at);
 
         JsonArray fromHashOf = new JsonArray();
+        // "overworld" (no colon) exercises Identifier.parse's default-namespace
+        // normalization: it yields minecraft:overworld, so its samples must equal
+        // the explicit "minecraft:overworld" row's (locked by the Rust golden test).
         for (String id : List.of(
-            "minecraft:overworld", "minecraft:stone", "minecraft:foo/bar",
+            "overworld", "minecraft:overworld", "minecraft:stone", "minecraft:foo/bar",
             "a:b", "minecraft:custom_thing"
         )) {
             JsonObject e = new JsonObject();

@@ -15,10 +15,11 @@
 //! ```
 //!
 //! `PositionalRandomFactoryOverloads` is the blanket-implemented extension of
-//! the base trait; `at_pos` / `from_hash_of_identifier` delegate to the exact
-//! base-trait calls the Java defaults delegate to, so the seed derived is
-//! identical (verified by the `SeqProbe` goldens in
-//! `tools/rivet-oracle/fixtures/seq/seq-random.json`).
+//! the base trait; `at_pos` / `from_hash_of_identifier` return the base trait's
+//! associated `Output` type (`Self::Output`, the `RandomSource` each factory
+//! yields) and delegate to the exact base-trait calls the Java defaults
+//! delegate to, so the seed derived is identical (verified by the `SeqProbe`
+//! goldens in `tools/rivet-oracle/fixtures/seq/seq-random.json`).
 
 use rivet_registry::Identifier;
 use rivet_registry::core::BlockPos;
@@ -57,7 +58,9 @@ mod tests {
     /// constructors below seed them, and each sample is the raw
     /// `nextInt()` x3 / `nextLong()` x2 output of the source yielded by the
     /// Java default overload — exactly what `at_pos` / `from_hash_of_identifier`
-    /// must reproduce.
+    /// must reproduce. The `overworld` row (no colon) locks
+    /// `Identifier.parse`'s default-namespace normalization followed by Java
+    /// `toString()`: it must reproduce the `minecraft:overworld` row exactly.
     fn fixture() -> Value {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tools/rivet-oracle/fixtures/seq/seq-random.json");
