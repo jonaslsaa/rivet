@@ -14,10 +14,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_FILE="${1:?usage: run_lighting_core_probe.sh <out-file>}"
-case "$OUT_FILE" in
-  /*) OUT_FILE="$OUT_FILE" ;;
-  *)  OUT_FILE="$(pwd)/$OUT_FILE" ;;
-esac
+if [[ "$OUT_FILE" != /* ]]; then
+  OUT_FILE="$(pwd)/$OUT_FILE"
+fi
 cd "$ROOT"
 
 RUNTIME_JAR="${RIVET_PAPER_RUNTIME_JAR:-$ROOT/work/run/versions/26.2/paper-26.2.jar}"
