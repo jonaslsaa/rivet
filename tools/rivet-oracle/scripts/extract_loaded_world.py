@@ -46,6 +46,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 # Shared hashing + region-parsing helpers live in extract_fixtures.py (same dir,
@@ -394,14 +395,28 @@ def cmd_verify(source: Path) -> int:
 
 def guard_scratch_path(scratch: Path) -> None:
     """Refuse to rmtree a --scratch that overlaps the committed fixtures dir or
-    one of its ancestors/descendants, so a typo'd flag can never destroy the
-    corpus (or the repo)."""
+    resolves to a broad/system path (filesystem root, the home tree, the temp
+    dir root, or the current working directory), so a typo'd flag can never
+    destroy the corpus, the repo, or the machine."""
     sc = scratch.resolve()
     fs = FIXTURES_DIR.resolve()
+    cwd = Path.cwd().resolve()
+    home = Path.home().resolve()
+    temp_root = Path(tempfile.gettempdir()).resolve()
     if sc == fs or sc.is_relative_to(fs) or fs.is_relative_to(sc):
         raise SystemExit(
             f"REFUSED: --scratch {scratch} overlaps the committed fixtures dir "
             f"{FIXTURES_DIR} — pick a separate scratch path"
+        )
+    if sc == cwd:
+        raise SystemExit(
+            f"REFUSED: --scratch {scratch} is the current working directory "
+            f"({cwd}) — pick a dedicated scratch path"
+        )
+    if len(sc.parts) == 1 or home.is_relative_to(sc) or sc == temp_root:
+        raise SystemExit(
+            f"REFUSED: --scratch {scratch} is a broad/system path — pick a "
+            f"dedicated scratch path"
         )
 
 
