@@ -18,7 +18,7 @@
 //! caller's real `BlockBehaviour` predicates (there is no placeholder default
 //! that silently zeroes the ticking/special-colliding fields). The superflat
 //! callers wire the generated behavior table where it covers a flag and
-//! exact-for-content stand-ins plus `RivetTodo(#216)` where it does not.
+//! exact-for-content stand-ins where it does not.
 //!
 //! Deferred with the owning unit: the Anti-Xray `chunkPacketInfo`/
 //! `chunkSectionIndex` write params (with `paper.antixray`), and the
@@ -230,8 +230,8 @@ impl<
     /// table for `is_randomly_ticking`/`fluid_is_empty`, and the two flags the
     /// table does not yet carry are tracked below.
     ///
-    /// RivetTodo(#216): the generated `block_behaviors` table has no
-    /// fluid-random-tick or special-colliding flags; the superflat callers
+    /// The generated `block_behaviors` table has no fluid-random-tick or
+    /// special-colliding flags; the superflat callers
     /// pass exact-for-content stand-ins (the air + stone content has no fluid
     /// and no special-colliding block) and the real `CollisionUtil`
     /// `isSpecialCollidingBlock` / `fluid.isRandomlyTicking()` equivalents
@@ -241,9 +241,10 @@ impl<
     /// order (Java's hash-bucket order is not portable); the list never reaches
     /// the wire and no ported consumer reads its order yet.
     ///
-    /// RivetTodo(#216): `count_entries`' first-appearance outer order diverges
-    /// from Java's hash-bucket `tickingBlocks` order; the random-tick
-    /// scheduling unit must revisit this before consuming the list's order.
+    /// `count_entries`' first-appearance outer order differs from Java's
+    /// hash-bucket `tickingBlocks` order. No current consumer observes the
+    /// list order; a future random-tick scheduler must define that boundary
+    /// before consuming it.
     pub fn recalc_block_counts(
         &mut self,
         is_air: &dyn Fn(&T) -> bool,

@@ -108,12 +108,20 @@ fn base_with_section_entries(entries: &[(i32, i32, i32, u8)]) -> ChunkAccess<u8,
         states,
         PalettedContainer::new(0u8, biome_strategy()),
         |s: &u8| *s == 0,
+        |_| false,
+        |s: &u8| !test_flags(s).has_fluid,
+        |_| false,
+        |_| false,
     ));
     for _ in 1..24 {
         sections.push(LevelChunkSection::new(
             PalettedContainer::new(0u8, block_strategy()),
             PalettedContainer::new(0u8, biome_strategy()),
             |s: &u8| *s == 0,
+            |_| false,
+            |s: &u8| !test_flags(s).has_fluid,
+            |_| false,
+            |_| false,
         ));
     }
     ChunkAccess::new(
@@ -123,7 +131,6 @@ fn base_with_section_entries(entries: &[(i32, i32, i32, u8)]) -> ChunkAccess<u8,
         &factory(),
         0,
         Some(sections),
-        &|s: &u8| *s == 0,
         &test_flags,
     )
 }

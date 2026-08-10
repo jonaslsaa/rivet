@@ -291,19 +291,16 @@ fn superflat_content() -> rivet_world::superflat::SuperflatChunkContent<StateId,
     // `state.getFluidState().isRandomlyTicking()` — exact for air + stone (no
     // fluid to tick).
     //
-    // RivetTodo(#216): the generated `block_behaviors` table has no
-    // fluid-random-tick flag; this stand-in is exact for the superflat content
-    // and the real flag replaces it when the owning block slice lands.
+    // The generated behavior table has no fluid-random-tick flag; this
+    // predicate is exact for the superflat content (air + stone have no fluid).
     fn fluid_is_randomly_ticking(_s: &StateId) -> bool {
         false
     }
     // `CollisionUtil.isSpecialCollidingBlock(state)` — exact for air + stone
     // (neither has a large collision shape nor is `MOVING_PISTON`).
     //
-    // RivetTodo(#216): the generated `block_behaviors` table has no
-    // special-colliding flag; this stand-in is exact for the superflat content
-    // and the real `CollisionUtil` flag replaces it when the owning block slice
-    // lands.
+    // The generated behavior table has no special-colliding flag; this
+    // predicate is exact for the superflat content (air + stone never match).
     fn is_special_colliding(_s: &StateId) -> bool {
         false
     }

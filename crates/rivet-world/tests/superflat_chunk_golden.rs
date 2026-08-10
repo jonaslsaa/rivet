@@ -141,27 +141,24 @@ fn fluid_is_empty(s: &StateId) -> bool {
 /// `state.getFluidState().isRandomlyTicking()` — exact for air + stone (no
 /// fluid to tick).
 ///
-/// RivetTodo(#216): the generated `block_behaviors` table has no
-/// fluid-random-tick flag; this stand-in is exact for the superflat content
-/// and the real flag replaces it when the owning block slice lands.
+/// The generated behavior table has no fluid-random-tick flag; this predicate
+/// is exact for the superflat content (air + stone have no fluid).
 fn fluid_is_randomly_ticking(_s: &StateId) -> bool {
     false
 }
 /// `CollisionUtil.isSpecialCollidingBlock(state)` — exact for air + stone
 /// (neither has a large collision shape nor is `MOVING_PISTON`).
 ///
-/// RivetTodo(#216): the generated `block_behaviors` table has no
-/// special-colliding flag; this stand-in is exact for the superflat content
-/// and the real `CollisionUtil` flag replaces it when the owning block slice
-/// lands.
+/// The generated behavior table has no special-colliding flag; this predicate
+/// is exact for the superflat content (air + stone never match).
 fn is_special_colliding(_s: &StateId) -> bool {
     false
 }
 
 /// The `BlockFlags` for the superflat content (air + stone): the generated
 /// table drives `is_air`/`blocks_motion`/`is_randomly_ticking`/`fluid_is_empty`
-/// and exact-for-content stand-ins (with `RivetTodo(#216)`) drive the two
-/// flags the table does not yet carry.
+/// and exact-for-content predicates drive the two flags the table does not
+/// carry.
 fn superflat_flags() -> BlockFlags<StateId> {
     BlockFlags {
         is_air: &is_air,

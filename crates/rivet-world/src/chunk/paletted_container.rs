@@ -628,7 +628,7 @@ pub trait PalettedContainerRO<T: Clone + PartialEq + Send + std::fmt::Debug + 's
     fn get_all(&self, consumer: &mut dyn FnMut(T));
     /// `write(FriendlyByteBuf)` — the deprecated no-Anti-Xray-info variant.
     ///
-    /// RivetTodo(#216): the Anti-Xray overload `write(FriendlyByteBuf,
+    /// The Anti-Xray overload `write(FriendlyByteBuf,
     /// @Nullable ChunkPacketInfo<T>, int chunkSectionIndex)` is omitted —
     /// `ChunkPacketInfo` is deferred with the `paper.antixray` chunk-storage
     /// unit; re-add it when that type lands.

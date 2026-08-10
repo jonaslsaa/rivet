@@ -105,11 +105,9 @@ impl<
 ///
 /// The heightmap predicates (`is_air`/`blocks_motion`/`has_fluid`/`is_leaves`)
 /// and the block-counting recalc predicates are threaded from the caller's
-/// `BlockBehaviour` equivalents — there is no placeholder default. `RivetTodo(#216)`
-/// covers the two recalc flags the generated `block_behaviors` table does not
-/// yet carry (`fluid_is_randomly_ticking` and `is_special_colliding`); the
-/// caller passes exact-for-content stand-ins for them until the owning block
-/// slice adds the real flags.
+/// `BlockBehaviour` equivalents — there is no placeholder default. The caller
+/// supplies exact-for-content predicates for the two flags the generated table
+/// does not carry (`fluid_is_randomly_ticking` and `is_special_colliding`).
 pub struct BlockFlags<T: 'static> {
     /// `state.isAir()`.
     pub is_air: &'static dyn Fn(&T) -> bool,

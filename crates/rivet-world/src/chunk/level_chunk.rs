@@ -274,9 +274,8 @@ where
     /// and the registry-dependent save are unported, so the port returns the
     /// pending tag directly.
     ///
-    /// RivetTodo(#216): the `blockEntities.containsKey` guard and the
-    /// `saveWithFullMetadata`/`keepPacked` copy live with the block-entity
-    /// unit.
+    /// The `blockEntities.containsKey` guard and the
+    /// `saveWithFullMetadata`/`keepPacked` copy live with the block-entity unit.
     pub fn get_block_entity_nbt_for_saving(&self, pos: &BlockPos) -> Option<&CompoundTag> {
         self.base.get_block_entity_nbt(pos)
     }

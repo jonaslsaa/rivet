@@ -39,9 +39,8 @@
 //! when writes are disallowed (Java `Util.pauseInIde`); the port panics in
 //! that case.
 //!
-//! RivetTodo(#216): `setBlockState`'s `allowWrites ? wrapped.setBlockState :
-//! null` gate is not ported — the `LevelChunk` write path defers with the
-//! mutator unit.
+//! `setBlockState`'s `allowWrites ? wrapped.setBlockState : null` gate is not
+//! ported — the `LevelChunk` write path defers with the mutator unit.
 
 use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::ChunkStatus;

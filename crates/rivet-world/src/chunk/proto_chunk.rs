@@ -32,8 +32,8 @@
 //! ChunkStatus.BIOMES)` guard is not ported — the slice-local `ChunkStatus`
 //! has no `BIOMES` ladder position. The port delegates to the base's read; the
 //! status unit re-adds the guard when the real `ChunkStatus` ladder lands.
-//! RivetTodo(#216): `markPosForPostProcessing`'s parent `postProcessGeneration`
-//! consumer and `addPackedPostProcess`'s `ShortList` read path are not ported.
+//! `markPosForPostProcessing`'s parent `postProcessGeneration` consumer and
+//! `addPackedPostProcess`'s `ShortList` read path remain with that owning unit.
 
 use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};

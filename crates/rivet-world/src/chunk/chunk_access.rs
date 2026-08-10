@@ -44,8 +44,8 @@
 //! flag predicates), so no predicate is stored on the base (OWNERSHIP.md).
 //! RivetTodo(#185): the
 //! `mc.world.level.chunk.status` unit replaces the slice-local `ChunkStatus`
-//! with the real status ladder and `isOrAfter`. RivetTodo(#216): the
-//! `setBlockState` mutators (section set-block/fluid) defer with the
+//! with the real status ladder and `isOrAfter`. The `setBlockState` mutators
+//! (section set-block/fluid) defer with the
 //! chunk-storage epic — the heightmap `update` half is ported here
 //! ([`update_heightmaps_after`]).
 

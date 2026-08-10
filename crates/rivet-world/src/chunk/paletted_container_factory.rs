@@ -22,7 +22,7 @@
 //! container, `biomes.holderByNameCodec()` for the biome container), and
 //! `BlockState.CODEC` is deferred with #202's `NbtUtils.readBlockState`
 //! marker.
-//! RivetTodo(#216): the Anti-Xray `createForBlockStates(Level, ChunkPos, int)`
+//! The Anti-Xray `createForBlockStates(Level, ChunkPos, int)`
 //! overload (preset block states from the `ChunkPacketBlockController`) is
 //! omitted — `Level`/`ChunkPacketBlockController` are not ported, deferred
 //! with the `paper.antixray` chunk-storage unit.
