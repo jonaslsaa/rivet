@@ -163,7 +163,31 @@ mod tests {
     }
 
     #[test]
-    fn missing_scalars_fall_back_to_current_version() {
+    fn present_version_block_falls_back_to_current_version_per_field() {
+        // Java: a *present* Version block with missing fields falls back to
+        // the current version per-field (`version.get("Name").asString(
+        // SharedConstants.getCurrentVersion().getName())`). This differs from
+        // the absent-block branch (`""`/`0`).
+        let mut tag = CompoundTag::new();
+        tag.put_int("version", 19133);
+        let mut version = CompoundTag::new();
+        version.put_int("Id", 4903); // present
+        // Name / Series / Snapshot absent.
+        tag.put(
+            "Version".to_string(),
+            rivet_nbt::tag::Tag::Compound(version),
+        );
+        let d = dynamic(tag);
+        let ops = NbtOps::instance();
+        let lv = LevelVersion::parse(&d, &ops);
+        assert_eq!(lv.minecraft_version_name(), VERSION_NAME);
+        assert_eq!(lv.minecraft_version().version, 4903);
+        assert_eq!(lv.minecraft_version().series, SERIES);
+        assert!(!lv.snapshot()); // `!stable` (26.2 is stable)
+    }
+
+    #[test]
+    fn empty_input_uses_all_defaults() {
         let tag = CompoundTag::new();
         // No version / LastPlayed / Version keys at all.
         let d = dynamic(tag);
@@ -173,6 +197,9 @@ mod tests {
         // branch: "" / 0 / "main" / false.
         assert_eq!(lv.level_data_version(), 0);
         assert_eq!(lv.last_played(), 0);
+        assert_eq!(lv.minecraft_version_name(), "");
         assert_eq!(lv.minecraft_version().version, 0);
+        assert_eq!(lv.minecraft_version().series, "main");
+        assert!(!lv.snapshot());
     }
 }
