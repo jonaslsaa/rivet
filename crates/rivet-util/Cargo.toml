@@ -9,6 +9,9 @@ workspace = true
 
 [dependencies]
 crc32c = { workspace = true }
+# `ProblemReporter.Collector.getReport` groups by path in first-seen order
+# (Java Guava `HashMultimap.asMap`, which preserves per-key insertion order).
+indexmap = { workspace = true }
 md5 = { workspace = true }
 sha2 = { workspace = true }
 rivet-serialization = { workspace = true }

@@ -34,6 +34,7 @@ pub mod mth;
 pub mod mth_atan_tables;
 pub mod mth_sin_table;
 pub mod mth_stubs;
+pub mod problem_reporter;
 pub mod random;
 pub mod simple_bit_storage;
 pub mod string_representable;
@@ -48,6 +49,10 @@ pub use delegate_data_output::DelegateDataOutput;
 pub use fast_buffered_input_stream::FastBufferedInputStream;
 pub use hash_ops::{HashCode, HashFunction, HashOps, Hasher};
 pub use known_pack::KnownPack;
+pub use problem_reporter::{
+    Collector, DiscardingReporter, FieldPathElement, IndexedFieldPathElement, IndexedPathElement,
+    PathElement, Problem, ProblemReporter,
+};
 // `BitRandomSource` is deliberately NOT re-exported at the root: it declares
 // `next_int`/`next_long`/... (same names as `RandomSource`), so importing both
 // makes every LCG call ambiguous (E0034). It lives at `rivet_util::random`.

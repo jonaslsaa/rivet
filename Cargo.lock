@@ -740,6 +740,7 @@ name = "rivet-util"
 version = "0.1.0-dev+mc26.2"
 dependencies = [
  "crc32c",
+ "indexmap",
  "md5",
  "rivet-serialization",
  "sha2",
