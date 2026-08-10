@@ -341,7 +341,7 @@ impl TagValueOutput {
         });
         ValueOutputList::Tag(ListWrapper {
             field_name: name.clone(),
-            problem_reporter: self.reporter_for_child(&name),
+            problem_reporter: Rc::clone(&self.problem_reporter),
             ops: Arc::clone(&self.ops),
             output: list_cell,
             sync: Some(sync),
@@ -703,6 +703,27 @@ mod tests {
         };
         let sub = result.get_compound("sub").expect("sub compound present");
         assert_eq!(sub.get_int("x"), Some(9), "child write visible in parent");
+    }
+
+    /// `childrenList` child problems report against the *root* reporter with a
+    /// path of just the field + index — Java passes the current reporter (not a
+    /// field-scoped child) to `ListWrapper`, and `addChild` forks it with
+    /// `IndexedFieldPathElement(field, index)`.
+    #[test]
+    fn children_list_child_reports_field_indexed_path() {
+        let reporter = reporter();
+        let out = output(reporter.clone());
+        let list = out.children_list("items");
+        let failing: Arc<dyn Codec<i32, TagContextOps>> = codec::validate(
+            codec::int_codec::<TagContextOps>(),
+            Arc::new(|_: &i32| rivet_serialization::DataResult::error_with_partial("bad", 99)),
+        );
+        list.add_child().store("v", &failing, &5);
+        let report = reporter.get_report();
+        assert!(
+            report.contains(" at .items[0]: Failed to encode value '5' to field 'v': bad"),
+            "Java path is field+index only (no extra field segment), report was: {report}"
+        );
     }
 
     /// `childrenList` + `addChild` — a grandchild's writes propagate all the
