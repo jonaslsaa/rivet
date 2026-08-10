@@ -84,8 +84,11 @@ impl Difficulty {
             .copied()
     }
 
-    /// `Difficulty.byName(String, Difficulty _default)` —
-    /// `Objects.requireNonNullElse(CODEC.byName(name), _default)`.
+    /// `byName(name)` then fall back to `default` on an unknown name — the
+    /// `Objects.requireNonNullElse` pattern of `GameType.byName(String,
+    /// GameType)`. `Difficulty.java` only declares the single-arg nullable
+    /// `byName(String)`, so this two-arg helper is the GameType-mirroring
+    /// convenience for the `DifficultySettings.CODEC` consumer.
     pub fn by_name_or(name: &str, default: Difficulty) -> Difficulty {
         Self::by_name(name).unwrap_or(default)
     }
