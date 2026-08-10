@@ -51,3 +51,35 @@ impl fmt::Display for ContentValidationException {
 }
 
 impl std::error::Error for ContentValidationException {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn empty_issue_list_keeps_papers_trailing_space() {
+        assert_eq!(
+            ContentValidationException::format(Path::new("world"), &[]),
+            "Failed to validate 'world'. Found forbidden symlinks: "
+        );
+    }
+
+    #[test]
+    fn display_formats_aggregated_entries_in_input_order() {
+        let exception = ContentValidationException::new(
+            PathBuf::from("copied/world"),
+            vec![
+                ForbiddenSymlinkInfo::new(
+                    PathBuf::from("copied/world/a"),
+                    PathBuf::from("../../original"),
+                ),
+                ForbiddenSymlinkInfo::new(PathBuf::from("copied/world/b"), PathBuf::from("/etc")),
+            ],
+        );
+        assert_eq!(
+            exception.to_string(),
+            "Failed to validate 'copied/world'. Found forbidden symlinks: copied/world/a->../../original, copied/world/b->/etc"
+        );
+    }
+}

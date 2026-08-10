@@ -1,48 +1,35 @@
-//! `net.minecraft.world.level.validation.DirectoryValidator` — validates a
-//! directory tree's symlinks against an allow list.
+//! `net.minecraft.world.level.validation.DirectoryValidator`.
 //!
-//! Java source: `working/Paper/paper-server/src/minecraft/java/net/minecraft/
-//! world/level/validation/DirectoryValidator.java`. Java's `Files.walkFileTree`
-//! with a `SimpleFileVisitor` visits each directory and file exactly once; the
-//! Rust port recurses with `std::fs::read_dir` in pre-order, which visits the
-//! same entries in the same relative order (directory first, then each child).
-//!
-//! Fidelity notes (mapped in `validate_directory` below):
-//! - Java `Files.readAttributes(path, BasicFileAttributes, NOFOLLOW_LINKS)`
-//!   returns the attributes of the link itself, so a symlink appears as
-//!   `isSymbolicLink()` and the regular-file check (`isRegularFile()`) is
-//!   false for a symlink. `std::fs::symlink_metadata` is the equivalent
-//!   no-follow read.
-//! - Java `NoSuchFileException` on the top path is swallowed (returns an empty
-//!   issue list); other read errors, and "path is a regular file", throw.
+//! The walker mirrors `Files.walkFileTree` without `FOLLOW_LINKS`: attributes
+//! are read without following links, every symlink is visited as a leaf, and
+//! traversal stops on the first I/O error after accumulating earlier issues.
 
 use std::io;
 use std::path::Path;
 
-use super::ForbiddenSymlinkInfo;
-use super::PathAllowList;
+use super::{ForbiddenSymlinkInfo, PathAllowList};
 
-/// `DirectoryValidator` — validates symlinks under a directory against a
-/// [`PathAllowList`].
+/// Validates every symbolic-link target encountered beneath a path.
 pub struct DirectoryValidator {
     symlink_target_allow_list: PathAllowList,
 }
 
 impl DirectoryValidator {
-    /// `new DirectoryValidator(PathMatcher)` — the constructor.
+    /// `new DirectoryValidator(PathMatcher)`.
     pub fn new(symlink_target_allow_list: PathAllowList) -> Self {
-        DirectoryValidator {
+        Self {
             symlink_target_allow_list,
         }
     }
 
-    /// `validateSymlink(Path, List)` — reads one symbolic link and, if its
-    /// target is not allow-listed, appends a [`ForbiddenSymlinkInfo`].
+    /// `validateSymlink(Path, List)`.
     pub fn validate_symlink(
         &self,
         path: &Path,
         issues: &mut Vec<ForbiddenSymlinkInfo>,
     ) -> io::Result<()> {
+        // `read_link` preserves the stored target. In particular, relative
+        // targets and `.`/`..` components are not resolved or normalized.
         let target = std::fs::read_link(path)?;
         if !self.symlink_target_allow_list.matches(&target) {
             issues.push(ForbiddenSymlinkInfo::new(path.to_path_buf(), target));
@@ -50,7 +37,7 @@ impl DirectoryValidator {
         Ok(())
     }
 
-    /// `validateSymlink(Path)` — the variadic convenience form.
+    /// `validateSymlink(Path)`.
     pub fn validate_symlink_owned(&self, path: &Path) -> io::Result<Vec<ForbiddenSymlinkInfo>> {
         let mut result = Vec::new();
         self.validate_symlink(path, &mut result)?;
@@ -58,42 +45,34 @@ impl DirectoryValidator {
     }
 
     /// `validateDirectory(Path, boolean)`.
-    ///
-    /// - A top path that does not exist (`NoSuchFileException`) yields no
-    ///   issues.
-    /// - A top path that is a regular file throws (`"Path <dir> is not a
-    ///   directory"`).
-    /// - A top symlink is validated (and not descended into) unless
-    ///   `allow_top_symlink` is true, in which case the walk descends through
-    ///   the link's target.
-    /// - Otherwise the whole known directory tree is walked, validating every
-    ///   symlink found within.
     pub fn validate_directory(
         &self,
         directory: &Path,
         allow_top_symlink: bool,
     ) -> io::Result<Vec<ForbiddenSymlinkInfo>> {
         let mut issues = Vec::new();
-
-        let top_is_symlink = match std::fs::symlink_metadata(directory) {
-            Ok(meta) => meta.file_type().is_symlink(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(issues),
-            Err(e) => return Err(e),
+        let attributes = match std::fs::symlink_metadata(directory) {
+            Ok(attributes) => attributes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(issues),
+            Err(error) => return Err(error),
         };
 
-        if !top_is_symlink && directory.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("Path {} is not a directory", directory.display()),
-            ));
+        if attributes.is_file() {
+            return Err(io::Error::other(format!(
+                "Path {} is not a directory",
+                directory.display()
+            )));
         }
 
-        if top_is_symlink {
+        if attributes.file_type().is_symlink() {
             if !allow_top_symlink {
                 self.validate_symlink(directory, &mut issues)?;
                 return Ok(issues);
             }
 
+            // This intentionally does not resolve a relative target against
+            // the link's parent. Paper assigns Files.readSymbolicLink's raw
+            // Path and passes it directly to Files.walkFileTree.
             let target = std::fs::read_link(directory)?;
             self.validate_known_directory(&target, &mut issues)?;
             return Ok(issues);
@@ -103,49 +82,29 @@ impl DirectoryValidator {
         Ok(issues)
     }
 
-    /// `validateKnownDirectory(Path, List)` — walks the directory tree,
-    /// validating every symlink (directory or file) encountered.
+    /// `validateKnownDirectory(Path, List)`.
     pub fn validate_known_directory(
         &self,
         directory: &Path,
         issues: &mut Vec<ForbiddenSymlinkInfo>,
     ) -> io::Result<()> {
-        // `Files.walkFileTree(root, visitor)` visits root itself via
-        // `preVisitDirectory` (validating it if it is a symlink), then each
-        // child in pre-order. A recursive `read_dir` walk visits the same set
-        // in the same relative order: the root first, then each child, with a
-        // symlink child validated but never descended into (the follow is
-        // never entered) — matching Java, which only validates a symlink
-        // directory and never visits its contents.
-        self.walk_directory(directory, issues, true)
+        self.walk_path(directory, issues)
     }
 
-    fn walk_directory(
-        &self,
-        dir: &Path,
-        issues: &mut Vec<ForbiddenSymlinkInfo>,
-        is_root: bool,
-    ) -> io::Result<()> {
-        if is_root {
-            // `preVisitDirectory(root, attrs)` — the walk target itself. Java
-            // reads the root's no-follow attributes here; the only reachable
-            // case where this is a symlink is a top symlink resolved through
-            // `allow_top_symlink=true` whose target is itself a symlink.
-            let meta = std::fs::symlink_metadata(dir)?;
-            if meta.file_type().is_symlink() {
-                self.validate_symlink(dir, issues)?;
-            }
+    fn walk_path(&self, path: &Path, issues: &mut Vec<ForbiddenSymlinkInfo>) -> io::Result<()> {
+        let attributes = std::fs::symlink_metadata(path)?;
+        if attributes.file_type().is_symlink() {
+            self.validate_symlink(path, issues)?;
+            return Ok(());
+        }
+        if !attributes.is_dir() {
+            // `walkFileTree` invokes visitFile for regular and "other" roots;
+            // the visitor only acts on symbolic links.
+            return Ok(());
         }
 
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let meta = entry.metadata()?;
-            if meta.file_type().is_symlink() {
-                self.validate_symlink(&path, issues)?;
-            } else if meta.is_dir() {
-                self.walk_directory(&path, issues, false)?;
-            }
+        for entry in std::fs::read_dir(path)? {
+            self.walk_path(&entry?.path(), issues)?;
         }
         Ok(())
     }
@@ -154,98 +113,191 @@ impl DirectoryValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::level::validation::ConfigEntry;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// `PathAllowList` matching only the temp root (for prefix matches of the
-    /// resolved targets).
-    fn allowlist_under(root: &Path) -> PathAllowList {
-        let rule = format!("{}", root.display());
-        PathAllowList::new(vec![crate::level::validation::path_allow_list::ConfigEntry::parse(&rule)
-            .unwrap()
-            .unwrap()])
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "rivet-directory-validator-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn deny_all() -> DirectoryValidator {
+        DirectoryValidator::new(PathAllowList::new(Vec::new()))
+    }
+
+    fn allow_prefix(prefix: &Path) -> DirectoryValidator {
+        DirectoryValidator::new(PathAllowList::new(vec![ConfigEntry::prefix(
+            prefix.to_string_lossy(),
+        )]))
     }
 
     #[test]
-    #[cfg(unix)]
-    fn missing_directory_yields_no_issues() {
-        let v = DirectoryValidator::new(PathAllowList::new(vec![]));
-        let issues = v
-            .validate_directory(
-                Path::new("/nonexistent/path/for/rivet-test"),
-                false,
-            )
+    fn missing_top_path_returns_empty_list() {
+        let root = TestDir::new("missing");
+        let issues = deny_all()
+            .validate_directory(&root.path().join("absent"), false)
             .unwrap();
         assert!(issues.is_empty());
     }
 
     #[test]
-    #[cfg(unix)]
-    fn regular_file_is_not_a_directory() {
-        let dir = std::env::temp_dir().join(format!("rivet-dv-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("file.txt");
-        fs::write(&f, "x").unwrap();
-
-        let v = DirectoryValidator::new(PathAllowList::new(vec![]));
-        let err = v.validate_directory(&f, false).unwrap_err();
-        assert!(err.to_string().contains("is not a directory"));
-
-        fs::remove_dir_all(&dir).unwrap();
+    fn regular_file_uses_papers_exact_error_text() {
+        let root = TestDir::new("file");
+        let file = root.path().join("level.dat");
+        fs::write(&file, b"not relevant to validation").unwrap();
+        let error = deny_all().validate_directory(&file, false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("Path {} is not a directory", file.display())
+        );
     }
 
     #[test]
     #[cfg(unix)]
-    fn forbidden_symlink_in_tree_is_flagged() {
-        let dir = std::env::temp_dir().join(format!("rivet-dv-{}", std::process::id()));
-        fs::create_dir_all(dir.join("a/b")).unwrap();
-        // Symlink target outside the allow list.
-        let outside = std::env::temp_dir().join(format!("rivet-dv-out-{}", std::process::id()));
-        fs::create_dir_all(&outside).unwrap();
-        let _ = std::os::unix::fs::symlink(&outside, dir.join("a/evil"));
+    fn nested_allowed_and_forbidden_links_are_aggregated_without_traversal() {
+        use std::os::unix::fs::symlink;
 
-        let v = DirectoryValidator::new(PathAllowList::new(vec![]));
-        let issues = v.validate_directory(&dir, false).unwrap();
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].link().ends_with("a/evil"));
-        assert_eq!(issues[0].target(), &outside);
+        let root = TestDir::new("nested");
+        let allowed = root.path().join("allowed-target");
+        let outside = TestDir::new("outside");
+        fs::create_dir(&allowed).unwrap();
+        fs::create_dir_all(root.path().join("world/region/deep")).unwrap();
+        symlink(&allowed, root.path().join("world/allowed-link")).unwrap();
+        symlink(outside.path(), root.path().join("world/region/hostile-dir")).unwrap();
+        symlink(
+            "../../../../escape",
+            root.path().join("world/region/deep/hostile-file"),
+        )
+        .unwrap();
+        // If directory symlinks were followed, this nested link would add a
+        // second issue for the outside tree.
+        symlink(
+            "still-forbidden",
+            outside.path().join("must-not-be-visited"),
+        )
+        .unwrap();
 
-        fs::remove_dir_all(&dir).unwrap();
-        fs::remove_dir_all(&outside).unwrap();
+        let mut issues = allow_prefix(&allowed)
+            .validate_directory(&root.path().join("world"), false)
+            .unwrap();
+        issues.sort_by(|left, right| left.link().cmp(right.link()));
+
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].target(), Path::new("../../../../escape"));
+        assert_eq!(issues[1].target(), outside.path());
+        assert!(
+            issues
+                .iter()
+                .all(|issue| !issue.link().starts_with(outside.path()))
+        );
     }
 
     #[test]
     #[cfg(unix)]
-    fn allowed_symlink_is_not_flagged() {
-        let root = std::env::temp_dir().join(format!("rivet-dv-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
-        let target = root.join("real");
-        fs::create_dir_all(&target).unwrap();
-        let _ = std::os::unix::fs::symlink(&target, root.join("alias"));
+    fn forbidden_top_symlink_is_reported_and_not_followed() {
+        use std::os::unix::fs::symlink;
 
-        let v = DirectoryValidator::new(allowlist_under(&target));
-        let issues = v.validate_directory(&root, false).unwrap();
-        // The target itself is allow-listed (its path starts with the rule), so
-        // the alias's target matches and nothing is flagged.
-        assert!(issues.is_empty());
+        let root = TestDir::new("top-denied");
+        let target = root.path().join("target");
+        fs::create_dir(&target).unwrap();
+        symlink("nested-target", target.join("nested-link")).unwrap();
+        let top = root.path().join("world");
+        symlink(&target, &top).unwrap();
 
-        fs::remove_dir_all(&root).unwrap();
+        let issues = deny_all().validate_directory(&top, false).unwrap();
+        assert_eq!(issues, vec![ForbiddenSymlinkInfo::new(top, target)]);
     }
 
     #[test]
     #[cfg(unix)]
-    fn top_symlink_not_allowed_is_not_descended() {
-        let dir = std::env::temp_dir().join(format!("rivet-dv-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("real");
-        fs::create_dir_all(&target).unwrap();
+    fn allowed_absolute_top_symlink_walks_target_but_not_top_link() {
+        use std::os::unix::fs::symlink;
 
-        let v = DirectoryValidator::new(PathAllowList::new(vec![]));
-        // `allow_top_symlink=false`: the top symlink itself is flagged, and the
-        // walk does not cross into the target.
-        let _ = std::os::unix::fs::symlink(&target, dir.join("top"));
-        let issues = v.validate_directory(&dir.join("top"), false).unwrap();
-        assert_eq!(issues.len(), 1);
+        let root = TestDir::new("top-allowed");
+        let target = root.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let nested = target.join("nested-link");
+        symlink("../forbidden", &nested).unwrap();
+        let top = root.path().join("world");
+        symlink(&target, &top).unwrap();
 
-        fs::remove_dir_all(&dir).unwrap();
+        let issues = deny_all().validate_directory(&top, true).unwrap();
+        assert_eq!(
+            issues,
+            vec![ForbiddenSymlinkInfo::new(
+                nested,
+                std::path::PathBuf::from("../forbidden")
+            )]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn relative_top_target_is_interpreted_from_process_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDir::new("relative-top");
+        let relative_target = format!(
+            "rivet-relative-top-target-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        );
+        let process_target = std::env::current_dir().unwrap().join(&relative_target);
+        fs::create_dir(&process_target).unwrap();
+        let nested = process_target.join("nested-link");
+        symlink("forbidden", &nested).unwrap();
+        let top = root.path().join("world");
+        symlink(&relative_target, &top).unwrap();
+
+        let issues = deny_all().validate_directory(&top, true).unwrap();
+        fs::remove_dir_all(&process_target).unwrap();
+
+        assert_eq!(
+            issues,
+            vec![ForbiddenSymlinkInfo::new(
+                Path::new(&relative_target).join("nested-link"),
+                std::path::PathBuf::from("forbidden")
+            )]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn raw_dot_dot_target_is_matched_and_reported_unchanged() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDir::new("raw-target");
+        let link = root.path().join("raw-link");
+        symlink("safe/../outside//payload", &link).unwrap();
+
+        let allowed = DirectoryValidator::new(PathAllowList::new(vec![ConfigEntry::prefix(
+            "safe/../outside",
+        )]));
+        assert!(allowed.validate_symlink_owned(&link).unwrap().is_empty());
+
+        let issues = deny_all().validate_symlink_owned(&link).unwrap();
+        assert_eq!(issues[0].target(), Path::new("safe/../outside//payload"));
     }
 }

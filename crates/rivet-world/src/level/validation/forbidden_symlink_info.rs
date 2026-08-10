@@ -5,11 +5,11 @@
 //! world/level/validation/ForbiddenSymlinkInfo.java`, a two-field `record
 //! ForbiddenSymlinkInfo(Path link, Path target)`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `ForbiddenSymlinkInfo` — a `(link, target)` pair for a symlink that did not
 /// pass the allow list.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ForbiddenSymlinkInfo {
     link: PathBuf,
     target: PathBuf,
@@ -23,12 +23,12 @@ impl ForbiddenSymlinkInfo {
     }
 
     /// `ForbiddenSymlinkInfo.link()`.
-    pub fn link(&self) -> &PathBuf {
+    pub fn link(&self) -> &Path {
         &self.link
     }
 
     /// `ForbiddenSymlinkInfo.target()`.
-    pub fn target(&self) -> &PathBuf {
+    pub fn target(&self) -> &Path {
         &self.target
     }
 }

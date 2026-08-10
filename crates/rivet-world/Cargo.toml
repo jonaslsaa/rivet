@@ -24,6 +24,9 @@ xxhash-rust = { workspace = true }
 # IndexSet's, not Java's (which iterates in hash-probe slot order; see the
 # module `RivetTodo(#185)` in structure_access).
 indexmap = { workspace = true }
+# OpenJDK's Unix `glob:` rules are translated to anchored regular expressions;
+# `regex:` rules use the same full-string matcher surface.
+regex-automata = { workspace = true }
 # The `packets` feature unlocks the game packet bodies this crate produces
 # content for (#94): `LevelChunkPacketData`, `LightUpdatePacketData`,
 # `HeightmapType` (all feature-gated in rivet-protocol).

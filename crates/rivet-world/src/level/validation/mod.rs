@@ -1,5 +1,5 @@
 //! `net.minecraft.world.level.validation` — path/symlink validation primitives
-//! (issue #323, the read-only world-loading slice).
+//! (issue #340, the read-only world-loading slice).
 //!
 //! Java source: `working/Paper/paper-server/src/minecraft/java/net/minecraft/
 //! world/level/validation/`. This is the smallest coherent slice needed to
@@ -16,9 +16,8 @@
 //! - `content_validation_exception` — `ContentValidationException`, thrown
 //!   when a validated directory contains forbidden symlinks.
 //!
-//! The allow list's `glob:`/`regex:` entry types defer until a regex engine
-//! lands in the workspace (RivetTodo(#323) in `path_allow_list`); the prefix
-//! type Paper ships for normal worlds is complete.
+//! Matching preserves Paper's entry order and OpenJDK Unix path-matcher
+//! behavior; walking never follows a nested symbolic link.
 
 mod content_validation_exception;
 mod directory_validator;

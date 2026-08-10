@@ -724,6 +724,7 @@ dependencies = [
  "flate2",
  "indexmap",
  "lz4_flex",
+ "regex-automata",
  "rivet-nbt",
  "rivet-protocol",
  "rivet-registry",
