@@ -2853,7 +2853,7 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
             Some(&server_world_path),
         ) {
             Ok(srv) => srv,
-            Err(error) => return Err(classify_loaded_world_boot_failure(error, &log_path)),
+            Err(error) => return Err(classify_load_world_boot_failure(error, &log_path)),
         };
 
         // Drive the real Azalea client in loaded mode against the booted server.
@@ -3040,30 +3040,6 @@ fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), Ru
 
     println!("\n    verified {checked} sampled chunks against the ground-truth manifest");
     Ok(())
-}
-
-/// Map the loaded-world launch probe failure. `Gate`/`Io` before spawn remain
-/// hard; a post-spawn UNVERIFIED (server rejected `--level`) is classified
-/// through the probe classifier and reported as UNVERIFIED — the #339
-/// capability boundary.
-fn classify_loaded_world_boot_failure(error: server::Error, log_path: &Path) -> RunnerError {
-    let boot_error = match error {
-        server::Error::Unverified(message) => message,
-        error @ (server::Error::Gate(_) | server::Error::Io(_)) => return error.into(),
-    };
-    let log = fs::read_to_string(log_path).unwrap_or_default();
-    match server::classify_probe(false, &log) {
-        server::ProbeVerdict::Absent { evidence } => RunnerError::Unverified(format!(
-            "loaded-world acceptance is UNVERIFIED: rivet-server has no world-loading capability \
-             yet (#339); launch evidence: {evidence}"
-        )),
-        server::ProbeVerdict::FailedToBoot { evidence } => RunnerError::Unverified(format!(
-            "loaded-world acceptance is UNVERIFIED: the launch probe did not reach READY and did \
-             not prove the expected missing #339 interface ({boot_error}); last log evidence: \
-             {evidence}"
-        )),
-        server::ProbeVerdict::Present => unreachable!("the failed boot did not reach READY"),
-    }
 }
 
 /// Map only the post-spawn READY/exit `Unverified` result through the
