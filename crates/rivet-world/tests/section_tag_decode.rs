@@ -15,8 +15,9 @@ use rivet_registry::block_state::BlockState;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_util::DataInputStream;
 use rivet_world::chunk::storage::section_reconstruction::{
-    BiomeId, SectionBlockPredicates, current_version_container_factory, reconstruct_sections,
-    reconstruct_sections_with_presets,
+    BiomeId, CodecPath, SectionBlockPredicates, current_version_container_factory,
+    reconstruct_sections, reconstruct_sections_with_presets,
+    reconstruct_sections_with_presets_and_diagnostics,
 };
 
 fn predicates() -> SectionBlockPredicates {
@@ -82,30 +83,151 @@ fn read_fixture(bytes: &[u8]) -> CompoundTag {
 
 #[test]
 fn real_26_2_spawn_fixtures_reconstruct_negative_y_sections() {
-    const FIXTURES: [&[u8]; 2] = [
-        include_bytes!("../../../tools/rivet-oracle/fixtures/chunk/overworld/0.0/0.0.nbt"),
-        include_bytes!("../../../tools/rivet-oracle/fixtures/chunk/overworld/0.0/0.1.nbt"),
+    struct PaperFixtureExpectation {
+        nbt: &'static [u8],
+        provenance: &'static str,
+        block_samples: [((i32, i32, i32), &'static str); 5],
+        block_counts: [(&'static str, usize); 4],
+        biome: BiomeId,
+        packed_fingerprint: u64,
+        serialized_light_sections: (usize, i32),
+    }
+    const PAPER_26_2_ORACLE_EXPECTATIONS: [PaperFixtureExpectation; 2] = [
+        PaperFixtureExpectation {
+            nbt: include_bytes!("../../../tools/rivet-oracle/fixtures/chunk/overworld/0.0/0.0.nbt"),
+            provenance: "Paper 26.2 superflat spawn chunk 0,0: bedrock/dirt/dirt/grass_block layers",
+            block_samples: [
+                ((0, -64, 0), "minecraft:bedrock"),
+                ((0, -63, 0), "minecraft:dirt"),
+                ((0, -62, 0), "minecraft:dirt"),
+                ((0, -61, 0), "minecraft:grass_block"),
+                ((8, -60, 8), "minecraft:air"),
+            ],
+            block_counts: [
+                ("minecraft:air", 97_280),
+                ("minecraft:grass_block", 256),
+                ("minecraft:dirt", 512),
+                ("minecraft:bedrock", 256),
+            ],
+            biome: BiomeId::PLAINS,
+            packed_fingerprint: 0xf101_4468_b7dc_ea81,
+            serialized_light_sections: (25, -5),
+        },
+        PaperFixtureExpectation {
+            nbt: include_bytes!("../../../tools/rivet-oracle/fixtures/chunk/overworld/0.0/0.1.nbt"),
+            provenance: "Paper 26.2 superflat spawn chunk 0,1: bedrock/dirt/dirt/grass_block layers",
+            block_samples: [
+                ((0, -64, 0), "minecraft:bedrock"),
+                ((0, -63, 0), "minecraft:dirt"),
+                ((0, -62, 0), "minecraft:dirt"),
+                ((0, -61, 0), "minecraft:grass_block"),
+                ((8, -60, 8), "minecraft:air"),
+            ],
+            block_counts: [
+                ("minecraft:air", 97_280),
+                ("minecraft:grass_block", 256),
+                ("minecraft:dirt", 512),
+                ("minecraft:bedrock", 256),
+            ],
+            biome: BiomeId::PLAINS,
+            packed_fingerprint: 0xf101_4468_b7dc_ea81,
+            serialized_light_sections: (24, -4),
+        },
     ];
+    fn mix(mut hash: u64, value: u64) -> u64 {
+        hash ^= value;
+        hash.wrapping_mul(0x100000001b3)
+    }
     let factory = current_version_container_factory();
 
-    for bytes in FIXTURES {
-        let root = read_fixture(bytes);
+    for expected in PAPER_26_2_ORACLE_EXPECTATIONS {
+        let root = read_fixture(expected.nbt);
         let section_tags = root.get_list("sections").expect("Paper sections list");
-        let sections = reconstruct_sections(section_tags, -4, 19, &factory, predicates())
+        let decoded = reconstruct_sections(section_tags, -4, 19, &factory, predicates())
             .expect("real Paper section reconstruction");
 
-        assert_eq!(sections.len(), 24);
-        assert!(sections.iter().all(Option::is_some));
-        // The pinned overworld fixture carries the negative lower block bound.
-        // Hostile -5/20 padding-boundary exclusions are pinned separately.
+        assert_eq!(decoded.sections.len(), 24, "{}", expected.provenance);
         assert!(
-            section_tags
-                .compound_stream()
-                .any(|tag| tag.get_byte_or("Y", 0) == -4)
+            decoded.sections.iter().all(Option::is_some),
+            "{}",
+            expected.provenance
         );
         assert_eq!(
-            sections[0].as_ref().unwrap().get_noise_biome(0, 0, 0),
-            BiomeId::PLAINS
+            decoded.light_data.len(),
+            expected.serialized_light_sections.0,
+            "{}",
+            expected.provenance
+        );
+        assert_eq!(
+            decoded.light_data[0].y, expected.serialized_light_sections.1,
+            "{}",
+            expected.provenance
+        );
+        assert!(decoded.diagnostics.is_empty(), "{}", expected.provenance);
+
+        let mut packed_hash = 0xcbf29ce484222325;
+        let mut block_counts = std::collections::BTreeMap::new();
+        let mut biome_counts = std::collections::BTreeMap::new();
+        for section in decoded.sections.iter().flatten() {
+            for y in 0..16 {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let name = section.get_block_state(x, y, z).block().name();
+                        *block_counts.entry(name).or_insert(0usize) += 1;
+                    }
+                }
+            }
+            for y in 0..4 {
+                for z in 0..4 {
+                    for x in 0..4 {
+                        let id = section.get_noise_biome(x, y, z).0;
+                        *biome_counts.entry(id).or_insert(0usize) += 1;
+                    }
+                }
+            }
+            let blocks = section.states().pack();
+            packed_hash = mix(packed_hash, blocks.bits_per_entry as u64);
+            for state in blocks.palette_entries {
+                packed_hash = mix(packed_hash, state.id().0 as u64);
+            }
+            for word in blocks.storage.into_iter().flatten() {
+                packed_hash = mix(packed_hash, word as u64);
+            }
+            let biomes = section.biomes().pack();
+            packed_hash = mix(packed_hash, biomes.bits_per_entry as u64);
+            for biome in biomes.palette_entries {
+                packed_hash = mix(packed_hash, biome.0 as u64);
+            }
+            for word in biomes.storage.into_iter().flatten() {
+                packed_hash = mix(packed_hash, word as u64);
+            }
+        }
+
+        assert_eq!(
+            block_counts,
+            expected.block_counts.into_iter().collect(),
+            "{}",
+            expected.provenance
+        );
+        assert_eq!(
+            biome_counts,
+            [(expected.biome.0, 24 * 64)].into_iter().collect(),
+            "{}",
+            expected.provenance
+        );
+        for ((x, y, z), name) in expected.block_samples {
+            let sy = y.div_euclid(16) + 4;
+            let ly = y.rem_euclid(16);
+            let state = decoded.sections[sy as usize]
+                .as_ref()
+                .unwrap()
+                .get_block_state(x, ly, z);
+            assert_eq!(state.block().name(), name, "{}", expected.provenance);
+        }
+        assert_eq!(
+            packed_hash, expected.packed_fingerprint,
+            "{}",
+            expected.provenance
         );
     }
 }
@@ -184,7 +306,8 @@ fn missing_containers_default_independently_and_blocks_fail_first() {
         .expect("block-state failure");
     assert_eq!(err.container, "block_states");
     assert_eq!(err.section_y, 0);
-    assert_eq!(err.message, "Missing required field: palette");
+    assert_eq!(err.message, "No palette list in paletted container");
+    assert_eq!(err.path, CodecPath::Palette);
 
     let tags = list(vec![section(0, None, Some(CompoundTag::new()))]);
     let err = reconstruct_sections(&tags, 0, 0, &factory, predicates())
@@ -232,6 +355,19 @@ fn unknown_block_properties_and_biomes_use_codec_defaults() {
     let log = sections[1].as_ref().unwrap();
     assert_eq!(log.get_block_state(0, 0, 0), block("minecraft:oak_log"));
     assert_eq!(log.non_empty_block_count(), 4096);
+    assert_eq!(sections.diagnostics.len(), 2);
+    assert_eq!(sections.diagnostics[0].section_y, 0);
+    assert_eq!(sections.diagnostics[0].container, "block_states");
+    assert_eq!(sections.diagnostics[0].path, CodecPath::PaletteElement(0));
+    assert_eq!(
+        sections.diagnostics[0].message,
+        "(Unknown registry key in ResourceKey[minecraft:root / minecraft:block]: minecraft:not_a_block -> using default)"
+    );
+    assert_eq!(sections.diagnostics[1].container, "biomes");
+    assert_eq!(
+        sections.diagnostics[1].message,
+        "(Unknown registry key in ResourceKey[minecraft:root / minecraft:worldgen/biome]: minecraft:not_a_biome -> using default)"
+    );
 }
 
 #[test]
@@ -261,6 +397,81 @@ fn malformed_palette_entries_degrade_before_storage_validation() {
         .err()
         .expect("missing packed data");
     assert_eq!(err.message, "Missing values for non-zero storage");
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert_eq!(err.recoverable_diagnostics.len(), 2);
+    assert_eq!(
+        err.recoverable_diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.path)
+            .collect::<Vec<_>>(),
+        [CodecPath::PaletteElement(0), CodecPath::PaletteElement(1)]
+    );
+}
+
+#[test]
+fn section_tags_validate_palettes_then_blocklight_then_skylight_before_advancing() {
+    let factory = current_version_container_factory();
+    let valid = || {
+        section(
+            0,
+            Some(container(vec![state_tag("minecraft:air")], None)),
+            Some(plains()),
+        )
+    };
+
+    let mut unknown = CompoundTag::new();
+    unknown.put_string("Name", "minecraft:not_a_block");
+    let mut bad_first_light = section(
+        0,
+        Some(container(vec![Tag::Compound(unknown)], None)),
+        Some(plains()),
+    );
+    bad_first_light.put_byte_array("BlockLight", vec![0]);
+    let later_bad_palette = section(1, Some(CompoundTag::new()), Some(plains()));
+    let tags = list(vec![bad_first_light, later_bad_palette]);
+    let mut observed = Vec::new();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = reconstruct_sections_with_presets_and_diagnostics(
+                &tags,
+                0,
+                1,
+                &factory,
+                predicates(),
+                |_| None,
+                |diagnostic| observed.push(diagnostic.clone()),
+            );
+        }))
+        .is_err(),
+        "the first tag's BlockLight must fail before the later palette"
+    );
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].path, CodecPath::PaletteElement(0));
+
+    let mut bad_same_tag = section(0, Some(CompoundTag::new()), Some(plains()));
+    bad_same_tag.put_byte_array("BlockLight", vec![0]);
+    let tags = list(vec![bad_same_tag]);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reconstruct_sections(&tags, 0, 0, &factory, predicates())
+    }));
+    let error = result
+        .expect("block palette failure precedes same-tag light validation")
+        .err()
+        .expect("missing block palette is fatal");
+    assert_eq!(error.container, "block_states");
+    assert_eq!(error.path, CodecPath::Palette);
+
+    let mut bad_both_lights = valid();
+    bad_both_lights.put_byte_array("BlockLight", vec![0]);
+    bad_both_lights.put_byte_array("SkyLight", vec![0]);
+    let tags = list(vec![bad_both_lights]);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = reconstruct_sections(&tags, 0, 0, &factory, predicates());
+        }))
+        .is_err(),
+        "BlockLight is validated before SkyLight"
+    );
 }
 
 #[test]

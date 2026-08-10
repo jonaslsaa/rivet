@@ -56,6 +56,7 @@ pub use region_file_storage::RegionFileStorage;
 pub use region_file_version::RegionFileVersion;
 pub use region_storage_info::RegionStorageInfo;
 pub use section_reconstruction::{
-    BiomeId, ChunkReadException, SectionBlockPredicates, current_version_container_factory,
-    reconstruct_sections, reconstruct_sections_with_presets,
+    BiomeId, ChunkReadException, CodecPath, SectionBlockPredicates, SectionCodecDiagnostic,
+    SectionReconstruction, current_version_container_factory, reconstruct_sections,
+    reconstruct_sections_with_presets, reconstruct_sections_with_presets_and_diagnostics,
 };

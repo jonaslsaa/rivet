@@ -1,11 +1,9 @@
 //! Current-version `SerializableChunkData.sections` reconstruction (MC 26.2).
 //!
-//! This is the section-only seam used by the later top-level chunk loader. It
-//! deliberately does not parse light, block entities, heightmaps, or any other
-//! `SerializableChunkData` field. The ordering here mirrors Paper's section
-//! loop: bounds are checked before either container is decoded, block states
-//! are decoded before biomes, and each missing container gets its factory
-//! default independently.
+//! This is the section-list seam used by the later top-level chunk loader. It
+//! reconstructs palettes and carries light fields in the same per-tag pass;
+//! block entities, heightmaps, and other `SerializableChunkData` fields remain
+//! outside this unit. The ordering mirrors Paper's section loop exactly.
 
 use std::fmt;
 
@@ -23,6 +21,7 @@ use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::palette::GlobalIdMap;
 use crate::chunk::paletted_container::{PackedData, PalettedContainer};
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
+use crate::chunk::storage::serializable_chunk_data::{SectionLightData, parse_section_light};
 use crate::chunk::strategy::Strategy;
 
 /// Dense id into the current vanilla biome registry.
@@ -134,6 +133,48 @@ pub struct ChunkReadException {
     pub container: &'static str,
     /// The underlying paletted-container codec error.
     pub message: String,
+    /// Structured location within the container codec input.
+    pub path: CodecPath,
+    /// Recoverable diagnostics promoted before this fatal codec error.
+    pub recoverable_diagnostics: Vec<SectionCodecDiagnostic>,
+}
+
+/// Location of a paletted-container codec diagnostic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodecPath {
+    /// The required `palette` field itself.
+    Palette,
+    /// One recoverable element error within `palette`.
+    PaletteElement(usize),
+    /// Validation while unpacking the decoded palette and optional `data`.
+    PackedData,
+}
+
+/// Paper's recoverable `promotePartial(logErrors)` payload, retained for the
+/// future top-level chunk logger instead of being discarded after fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionCodecDiagnostic {
+    pub section_y: i32,
+    pub container: &'static str,
+    pub path: CodecPath,
+    pub message: String,
+}
+
+/// The products of Paper's single `sections` loop. Keeping chunk sections,
+/// light data, and recoverable diagnostics together prevents later callers
+/// from reintroducing whole-list passes with different error ordering.
+pub struct SectionReconstruction {
+    pub sections: Vec<Option<LevelChunkSection<BlockState, BiomeId>>>,
+    pub light_data: Vec<SectionLightData>,
+    pub diagnostics: Vec<SectionCodecDiagnostic>,
+}
+
+impl std::ops::Deref for SectionReconstruction {
+    type Target = [Option<LevelChunkSection<BlockState, BiomeId>>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.sections
+    }
 }
 
 impl fmt::Display for ChunkReadException {
@@ -144,36 +185,77 @@ impl fmt::Display for ChunkReadException {
 
 impl std::error::Error for ChunkReadException {}
 
+type PartialDiagnostics = Vec<(usize, String)>;
+
+struct Decoded<T> {
+    value: T,
+    partials: PartialDiagnostics,
+}
+
+struct ContainerCodecError {
+    path: CodecPath,
+    message: String,
+    partials: PartialDiagnostics,
+}
+
 fn read_palette<T: Clone>(
     container: &CompoundTag,
     default: T,
-    decode: impl Fn(&Tag) -> Option<T>,
-) -> Result<Vec<T>, String> {
+    decode: impl Fn(&Tag) -> Result<T, String>,
+) -> Result<Decoded<Vec<T>>, ContainerCodecError> {
     // `palette` is `fieldOf`, so it is validated before lenient optional
     // `data`. `orElsePartial(default)` applies to each element independently.
     let palette = container
         .get_list("palette")
-        .ok_or_else(|| "Missing required field: palette".to_string())?;
-    Ok(palette
-        .iter()
-        .map(|entry| decode(entry).unwrap_or_else(|| default.clone()))
-        .collect())
+        .ok_or_else(|| ContainerCodecError {
+            path: CodecPath::Palette,
+            message: "No palette list in paletted container".to_string(),
+            partials: Vec::new(),
+        })?;
+    let mut values = Vec::with_capacity(palette.size());
+    let mut diagnostics = Vec::new();
+    for (index, entry) in palette.iter().enumerate() {
+        match decode(entry) {
+            Ok(value) => values.push(value),
+            Err(message) => {
+                diagnostics.push((index, format!("({message} -> using default)")));
+                values.push(default.clone());
+            }
+        }
+    }
+    Ok(Decoded {
+        value: values,
+        partials: diagnostics,
+    })
 }
 
 fn decode_block_states(
     container: &CompoundTag,
     factory: &PalettedContainerFactory<BlockState, BiomeId>,
     preset_values: Option<Vec<BlockState>>,
-) -> Result<PalettedContainer<BlockState>, String> {
-    let palette_entries = read_palette(container, *factory.default_block_state(), |entry| {
+) -> Result<Decoded<PalettedContainer<BlockState>>, ContainerCodecError> {
+    let decoded_palette = read_palette(container, *factory.default_block_state(), |entry| {
         let Tag::Compound(state) = entry else {
-            return None;
+            return Err(format!("Not a map: {entry}"));
         };
-        Some(read_block_state(state))
+        let name = state
+            .get_string("Name")
+            .ok_or_else(|| "No key Name in block state".to_string())?;
+        let id = Identifier::by_separator_result(name, ':')
+            .map_err(|error| format!("Invalid block identifier {name}: {error}"))?;
+        if BlockId::from_name(&id.to_string()).is_none() {
+            return Err(format!(
+                "Unknown registry key in ResourceKey[minecraft:root / minecraft:block]: {id}"
+            ));
+        }
+        Ok(read_block_state(state))
     })?;
     // `lenientOptionalFieldOf`: a missing or wrong-typed `data` is `None`.
-    let packed = PackedData::new(palette_entries, container.get_long_array("data").cloned());
-    match preset_values {
+    let packed = PackedData::new(
+        decoded_palette.value,
+        container.get_long_array("data").cloned(),
+    );
+    let decoded = match preset_values {
         Some(presets) => PalettedContainer::unpack_with_preset_values(
             factory.block_states_strategy(),
             packed,
@@ -182,24 +264,53 @@ fn decode_block_states(
         ),
         None => PalettedContainer::unpack(factory.block_states_strategy(), packed),
     }
+    .map_err(|message| ContainerCodecError {
+        path: CodecPath::PackedData,
+        message,
+        partials: decoded_palette.partials.clone(),
+    })?;
+    Ok(Decoded {
+        value: decoded,
+        partials: decoded_palette.partials,
+    })
 }
 
 fn decode_biomes(
     container: &CompoundTag,
     factory: &PalettedContainerFactory<BlockState, BiomeId>,
-) -> Result<PalettedContainer<BiomeId>, String> {
-    let palette_entries = read_palette(container, *factory.default_biome(), |entry| {
+) -> Result<Decoded<PalettedContainer<BiomeId>>, ContainerCodecError> {
+    let decoded_palette = read_palette(container, *factory.default_biome(), |entry| {
         let Tag::String(name) = entry else {
-            return None;
+            return Err(format!("Not a string: {entry}"));
         };
-        let id = Identifier::by_separator_result(&name.value, ':').ok()?;
+        let id = Identifier::by_separator_result(&name.value, ':')
+            .map_err(|error| format!("Invalid biome identifier {}: {error}", name.value))?;
         BIOME_BY_NAME
             .get(id.to_string().as_str())
             .copied()
             .map(BiomeId)
+            .ok_or_else(|| {
+                format!(
+                    "Unknown registry key in ResourceKey[minecraft:root / minecraft:worldgen/biome]: {id}"
+                )
+            })
     })?;
-    let packed = PackedData::new(palette_entries, container.get_long_array("data").cloned());
-    PalettedContainer::unpack(factory.biome_strategy(), packed)
+    let packed = PackedData::new(
+        decoded_palette.value,
+        container.get_long_array("data").cloned(),
+    );
+    let decoded =
+        PalettedContainer::unpack(factory.biome_strategy(), packed).map_err(|message| {
+            ContainerCodecError {
+                path: CodecPath::PackedData,
+                message,
+                partials: decoded_palette.partials.clone(),
+            }
+        })?;
+    Ok(Decoded {
+        value: decoded,
+        partials: decoded_palette.partials,
+    })
 }
 
 /// Reconstruct the in-bounds block-section array from a current-version
@@ -211,7 +322,7 @@ pub fn reconstruct_sections(
     max_section_y: i32,
     factory: &PalettedContainerFactory<BlockState, BiomeId>,
     predicates: SectionBlockPredicates,
-) -> Result<Vec<Option<LevelChunkSection<BlockState, BiomeId>>>, ChunkReadException> {
+) -> Result<SectionReconstruction, ChunkReadException> {
     reconstruct_sections_with_presets(
         section_tags,
         min_section_y,
@@ -231,8 +342,32 @@ pub fn reconstruct_sections_with_presets(
     max_section_y: i32,
     factory: &PalettedContainerFactory<BlockState, BiomeId>,
     predicates: SectionBlockPredicates,
+    preset_values: impl FnMut(i32) -> Option<Vec<BlockState>>,
+) -> Result<SectionReconstruction, ChunkReadException> {
+    reconstruct_sections_with_presets_and_diagnostics(
+        section_tags,
+        min_section_y,
+        max_section_y,
+        factory,
+        predicates,
+        preset_values,
+        |_| {},
+    )
+}
+
+/// As [`reconstruct_sections_with_presets`], while delivering each recoverable
+/// palette diagnostic at Paper's `promotePartial(logErrors)` point. The result
+/// also retains the diagnostics; the callback matters when a later light-array
+/// validation panics before a result can be returned.
+pub fn reconstruct_sections_with_presets_and_diagnostics(
+    section_tags: &ListTag,
+    min_section_y: i32,
+    max_section_y: i32,
+    factory: &PalettedContainerFactory<BlockState, BiomeId>,
+    predicates: SectionBlockPredicates,
     mut preset_values: impl FnMut(i32) -> Option<Vec<BlockState>>,
-) -> Result<Vec<Option<LevelChunkSection<BlockState, BiomeId>>>, ChunkReadException> {
+    mut on_diagnostic: impl FnMut(&SectionCodecDiagnostic),
+) -> Result<SectionReconstruction, ChunkReadException> {
     let section_count = if max_section_y < min_section_y {
         0
     } else {
@@ -240,52 +375,116 @@ pub fn reconstruct_sections_with_presets(
     };
     let mut sections: Vec<Option<LevelChunkSection<BlockState, BiomeId>>> =
         (0..section_count).map(|_| None).collect();
+    let mut light_data = Vec::with_capacity(section_tags.size());
+    let mut diagnostics = Vec::new();
 
     for section_tag in section_tags.compound_stream() {
         let y = section_tag.get_byte_or("Y", 0) as i32;
-        if y < min_section_y || y > max_section_y {
-            continue;
+        if y >= min_section_y && y <= max_section_y {
+            // Paper selects presets, decodes blocks, then biomes before this
+            // same tag's BlockLight and SkyLight validation.
+            let presets = preset_values(y);
+            let blocks = match section_tag.get_compound("block_states") {
+                Some(container) => {
+                    let decoded = match decode_block_states(container, factory, presets) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            record_diagnostics(
+                                &mut diagnostics,
+                                &mut on_diagnostic,
+                                y,
+                                "block_states",
+                                error.partials,
+                            );
+                            return Err(ChunkReadException {
+                                section_y: y,
+                                container: "block_states",
+                                message: error.message,
+                                path: error.path,
+                                recoverable_diagnostics: diagnostics,
+                            });
+                        }
+                    };
+                    record_diagnostics(
+                        &mut diagnostics,
+                        &mut on_diagnostic,
+                        y,
+                        "block_states",
+                        decoded.partials,
+                    );
+                    decoded.value
+                }
+                None => factory.create_for_block_states(),
+            };
+            let biomes = match section_tag.get_compound("biomes") {
+                Some(container) => {
+                    let decoded = match decode_biomes(container, factory) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            record_diagnostics(
+                                &mut diagnostics,
+                                &mut on_diagnostic,
+                                y,
+                                "biomes",
+                                error.partials,
+                            );
+                            return Err(ChunkReadException {
+                                section_y: y,
+                                container: "biomes",
+                                message: error.message,
+                                path: error.path,
+                                recoverable_diagnostics: diagnostics,
+                            });
+                        }
+                    };
+                    record_diagnostics(
+                        &mut diagnostics,
+                        &mut on_diagnostic,
+                        y,
+                        "biomes",
+                        decoded.partials,
+                    );
+                    decoded.value
+                }
+                None => factory.create_for_biomes(),
+            };
+            let section = LevelChunkSection::new(
+                blocks,
+                biomes,
+                predicates.is_air,
+                predicates.is_randomly_ticking,
+                predicates.fluid_is_empty,
+                predicates.fluid_is_randomly_ticking,
+                predicates.is_special_colliding,
+            );
+            sections[y.wrapping_sub(min_section_y) as usize] = Some(section);
         }
 
-        // Keep Java's evaluation/default/error order exactly: blocks first,
-        // then biomes, then `LevelChunkSection` count reconstruction.
-        // Paper selects Anti-Xray presets before checking whether the
-        // `block_states` compound exists; the missing fallback does not use
-        // them, but the callback ordering remains observable.
-        let presets = preset_values(y);
-        let blocks = match section_tag.get_compound("block_states") {
-            Some(container) => {
-                decode_block_states(container, factory, presets).map_err(|message| {
-                    ChunkReadException {
-                        section_y: y,
-                        container: "block_states",
-                        message,
-                    }
-                })?
-            }
-            None => factory.create_for_block_states(),
-        };
-        let biomes = match section_tag.get_compound("biomes") {
-            Some(container) => {
-                decode_biomes(container, factory).map_err(|message| ChunkReadException {
-                    section_y: y,
-                    container: "biomes",
-                    message,
-                })?
-            }
-            None => factory.create_for_biomes(),
-        };
-        let section = LevelChunkSection::new(
-            blocks,
-            biomes,
-            predicates.is_air,
-            predicates.is_randomly_ticking,
-            predicates.fluid_is_empty,
-            predicates.fluid_is_randomly_ticking,
-            predicates.is_special_colliding,
-        );
-        sections[y.wrapping_sub(min_section_y) as usize] = Some(section);
+        light_data.push(parse_section_light(section_tag));
     }
 
-    Ok(sections)
+    Ok(SectionReconstruction {
+        sections,
+        light_data,
+        diagnostics,
+    })
+}
+
+fn record_diagnostics(
+    diagnostics: &mut Vec<SectionCodecDiagnostic>,
+    on_diagnostic: &mut impl FnMut(&SectionCodecDiagnostic),
+    section_y: i32,
+    container: &'static str,
+    partials: PartialDiagnostics,
+) {
+    for (index, message) in partials {
+        let diagnostic = SectionCodecDiagnostic {
+            section_y,
+            container,
+            path: CodecPath::PaletteElement(index),
+            message,
+        };
+        on_diagnostic(&diagnostic);
+        diagnostics.push(diagnostic);
+    }
 }
