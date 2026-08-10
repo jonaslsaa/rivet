@@ -13,6 +13,10 @@
 //! path `world.level.ChunkPos` resolves — never re-ported.
 
 pub mod block_getter;
+// The `mc.world.level.dimension` unit's `DimensionType` height constants are
+// ported here (the minimal slice issue #388 needs); the full record/codec
+// defers with the owning unit. Never re-ported.
+pub mod dimension;
 pub mod height_accessor;
 // The Java package `world.level` + class `Level` mirrors to `level::level`;
 // clippy's module_inception lint fires on the faithful PORTING.md name (same
