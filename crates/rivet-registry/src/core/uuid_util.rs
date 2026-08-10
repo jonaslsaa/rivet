@@ -67,9 +67,11 @@ pub fn create_offline_player_uuid(player_name: &str) -> Uuid {
 /// `0xFFFFFFFFL` — the POSITIVE long `4294967295` in Java (bit 63 is clear, so
 /// the `i64` here matches as a positive value), never `-1`; `-1` appears only
 /// when the upper int's sign bit lands at bit 63 (e.g. `[-1, -1, ...]`). The
-/// upper int is cast to `i64` and shifted — `(long)0xFFFFFFFF << 32` stays
-/// positive in Java (`0xFFFFFFFF00000000L`), and the `i64 << 32` in Rust is the
-/// same wrapping shift. Mirrored by `uuid_to_int_array`.
+/// upper int is cast to `i64` and shifted — `(long)0xFFFFFFFF << 32`
+/// sign-extends to `-1L` then wraps to `0xFFFFFFFF00000000`, the negative long
+/// `-4294967296` (bit 63 set), matching Rust's wrapping `i64 << 32`; only an
+/// upper int whose bit 31 is clear keeps the high bit clear in the result.
+/// Mirrored by `uuid_to_int_array`.
 ///
 /// Java indexes `intArray[0..3]` unchecked (no length validation — `CODEC`
 /// feeds it through `Util.fixedSize`); the port takes a `&[i32; 4]` so a caller
