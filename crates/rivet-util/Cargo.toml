@@ -12,3 +12,9 @@ crc32c = { workspace = true }
 md5 = { workspace = true }
 sha2 = { workspace = true }
 rivet-serialization = { workspace = true }
+
+[dev-dependencies]
+# Codec round-trip tests drive `xoroshiro128plusplus_codec` through
+# `JsonOps::INSTANCE` (serde_json::Value backed), the same ops the codecs run
+# on in `rivet-registry`/`rivet-world`.
+serde_json = { workspace = true }
