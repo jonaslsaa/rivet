@@ -20,7 +20,6 @@ use crate::level::storage::data_version::DataVersion;
 use rivet_core::shared_constants::{SERIES, STABLE, VERSION_NAME, WORLD_VERSION};
 use rivet_serialization::dynamic::Dynamic;
 use rivet_serialization::dynamic_ops::DynamicOps;
-use rivet_serialization::number::Number;
 
 /// `net.minecraft.world.level.storage.LevelVersion` — the parsed level-data
 /// version block.
@@ -46,18 +45,14 @@ impl LevelVersion {
     where
         O: Clone + std::fmt::Debug,
     {
-        let level_data_version = input.get(ops, "version").as_int_or(ops, Number::Int(0));
-        let last_played = input
-            .get(ops, "LastPlayed")
-            .as_long_or(ops, Number::Long(0));
+        let level_data_version = input.get(ops, "version").as_int_or(ops, 0);
+        let last_played = input.get(ops, "LastPlayed").as_long_or(ops, 0);
         let version = input.get(ops, "Version");
         if version.result().is_some() {
             let minecraft_version_name = version
                 .get_field(ops, "Name")
                 .as_string_or(ops, VERSION_NAME);
-            let minecraft_version_id = version
-                .get_field(ops, "Id")
-                .as_int_or(ops, Number::Int(WORLD_VERSION));
+            let minecraft_version_id = version.get_field(ops, "Id").as_int_or(ops, WORLD_VERSION);
             let series = version.get_field(ops, "Series").as_string_or(ops, SERIES);
             let snapshot = version
                 .get_field(ops, "Snapshot")

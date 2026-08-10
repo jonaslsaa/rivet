@@ -248,15 +248,45 @@ mod tests {
         assert_eq!(decoded.yaw(), 20.0);
         assert_eq!(decoded.pitch(), 10.0);
         assert_eq!(decoded.dimension(), &overworld());
-        // Encode back.
+        // Encode back to the Java wire shape. `RespawnData.MAP_CODEC` writes
+        // the `GlobalPos` fields first ("dimension", "pos"), then "yaw", then
+        // "pitch" — exactly the group order of `LevelData.RespawnData.MAP_CODEC`.
         let encoded = respawn_data_codec::<NbtOps>()
             .encode_start(&ops, &decoded)
             .result()
             .expect("encode must succeed")
             .clone();
-        assert!(
-            matches!(encoded, rivet_nbt::tag::Tag::Compound(_)),
-            "encode must produce a compound"
+        let compound = match &encoded {
+            rivet_nbt::tag::Tag::Compound(c) => c,
+            other => panic!("encode must produce a compound, got {other:?}"),
+        };
+        assert_eq!(
+            compound.tags.keys().cloned().collect::<Vec<_>>(),
+            vec!["dimension", "pos", "yaw", "pitch"]
+        );
+        assert_eq!(
+            compound.get("dimension"),
+            Some(&rivet_nbt::tag::Tag::String(
+                rivet_nbt::string_tag::StringTag::value_of("minecraft:overworld".to_string())
+            ))
+        );
+        assert_eq!(
+            compound.get("pos"),
+            Some(&rivet_nbt::tag::Tag::IntArray(
+                rivet_nbt::int_array_tag::IntArrayTag::new(vec![1, 2, 3])
+            ))
+        );
+        assert_eq!(
+            compound.get("yaw"),
+            Some(&rivet_nbt::tag::Tag::Float(
+                rivet_nbt::float_tag::FloatTag::new(20.0)
+            ))
+        );
+        assert_eq!(
+            compound.get("pitch"),
+            Some(&rivet_nbt::tag::Tag::Float(
+                rivet_nbt::float_tag::FloatTag::new(10.0)
+            ))
         );
     }
 

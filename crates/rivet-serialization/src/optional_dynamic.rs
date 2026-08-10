@@ -84,20 +84,24 @@ impl<O> OptionalDynamic<O> {
         self.as_number(ops).result().copied().unwrap_or(default)
     }
 
-    /// `DynamicLike.asInt(int default)`.
-    pub fn as_int_or(&self, ops: &impl DynamicOps<Output = O>, default: Number) -> i32
+    /// `DynamicLike.asInt(int default)` — the default is a primitive `int`
+    /// (autoboxed to `Integer` for the `asNumber(Number)` fallback), not a
+    /// `Number` of arbitrary variant.
+    pub fn as_int_or(&self, ops: &impl DynamicOps<Output = O>, default: i32) -> i32
     where
         O: Clone,
     {
-        self.as_number_or(ops, default).int_value()
+        self.as_number_or(ops, Number::Int(default)).int_value()
     }
 
-    /// `DynamicLike.asLong(long default)`.
-    pub fn as_long_or(&self, ops: &impl DynamicOps<Output = O>, default: Number) -> i64
+    /// `DynamicLike.asLong(long default)` — the default is a primitive `long`
+    /// (autoboxed to `Long` for the `asNumber(Number)` fallback), not a
+    /// `Number` of arbitrary variant.
+    pub fn as_long_or(&self, ops: &impl DynamicOps<Output = O>, default: i64) -> i64
     where
         O: Clone,
     {
-        self.as_number_or(ops, default).long_value()
+        self.as_number_or(ops, Number::Long(default)).long_value()
     }
 
     /// `DynamicLike.asBoolean(boolean default)` — `asBoolean().result().orElse(default)`.
