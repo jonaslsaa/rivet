@@ -127,8 +127,9 @@ where
 
     /// `getHeight(Heightmap.Types, int, int)` — the wrapped chunk, with the
     /// type `fixType`d first. Named `get_height_at` (the `getHeight()` overload
-    /// clash — see `ChunkAccess::get_height_at`).
-    pub fn get_height_at(&self, ty: Types, x: i32, z: i32) -> i32 {
+    /// clash — see `ChunkAccess::get_height_at`). The wrapped chunk primes a
+    /// missing entry on read, so the imposter takes `&mut self`.
+    pub fn get_height_at(&mut self, ty: Types, x: i32, z: i32) -> i32 {
         self.wrapped.get_height_at(Self::fix_type(ty), x, z)
     }
 
@@ -310,7 +311,7 @@ mod tests {
     use crate::chunk::strategy::Strategy;
     use crate::chunk::upgrade_data::UpgradeData;
     use crate::level::height_accessor::create as create_accessor;
-    use crate::levelgen::heightmap::FINAL_HEIGHTMAPS;
+    use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, StateFlags};
 
     #[derive(Clone, Copy)]
     struct TestGlobalMap;
@@ -369,6 +370,13 @@ mod tests {
             Some(sections),
             0,
             &|s| *s == 0,
+            // u8 tests: 0 is air, 1 is stone (blocks motion).
+            &|s: &u8| StateFlags {
+                is_air: *s == 0,
+                blocks_motion: *s != 0,
+                has_fluid: false,
+                is_leaves: false,
+            },
         )
     }
 
@@ -433,9 +441,12 @@ mod tests {
 
     #[test]
     fn height_queries_go_through_fix_type() {
-        // The wrapped chunk has unprimed heightmaps -> get_height_at returns
-        // min_y - 1 = -65 for every column.
-        let imposter = ImposterProtoChunk::new(wrapped_chunk(), false);
+        // The wrapped `LevelChunk`'s `FINAL_HEIGHTMAPS` entries pre-exist as
+        // all-zero storage, so the reads do not prime and every column reads
+        // `minY - 1` = -65 (Java's fresh-chunk behavior). The WG types map to
+        // their client forms first (WorldSurfaceWg -> WorldSurface,
+        // OceanFloorWg -> OceanFloor), which the `-65` reads exercise.
+        let mut imposter = ImposterProtoChunk::new(wrapped_chunk(), false);
         assert_eq!(imposter.get_height_at(Types::WorldSurfaceWg, 0, 0), -65);
         assert_eq!(imposter.get_height_at(Types::WorldSurface, 0, 0), -65);
         assert_eq!(imposter.get_height_at(Types::OceanFloorWg, 5, 7), -65);

@@ -34,7 +34,7 @@ use crate::chunk::data_layer::DataLayer;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container::PalettedContainer;
 use crate::chunk::strategy::Strategy;
-use crate::levelgen::heightmap::{Heightmap, prime_heightmaps};
+use crate::levelgen::heightmap::{Heightmap, StateFlags, Types, prime_heightmaps};
 use crate::lighting::light_update_data::build_light_update_data;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
@@ -199,13 +199,13 @@ where
     prime_heightmaps(height, min_y, |ty, x, z| {
         for y in (min_y..=scan_top).rev() {
             let state = block_state_at(sections, min_y, x, y, z);
-            if Heightmap::is_opaque(
-                ty,
-                (flags.is_air)(&state),
-                (flags.blocks_motion)(&state),
-                (flags.has_fluid)(&state),
-                (flags.is_leaves)(&state),
-            ) {
+            let state_flags = StateFlags {
+                is_air: (flags.is_air)(&state),
+                blocks_motion: (flags.blocks_motion)(&state),
+                has_fluid: (flags.has_fluid)(&state),
+                is_leaves: (flags.is_leaves)(&state),
+            };
+            if Heightmap::is_opaque(Types::from_protocol(ty), state_flags) {
                 return Some(y);
             }
         }

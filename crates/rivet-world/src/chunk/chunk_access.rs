@@ -34,22 +34,20 @@
 //! RivetTodo(#184): the Starlight light arrays and `blendingData` are not
 //! ported — `LevelLightEngine`/`StarLightEngine` live with the
 //! `mc.world.level.lighting` units and `BlendingData` with the blending unit.
-//! RivetTodo(#287): `getHeight` primes a missing heightmap on demand in Java
-//! (`Heightmap.primeHeightmaps`). The port reads the never-primed default
-//! `minY - 1` instead (see [`get_height_at`]). The prime walk needs the
-//! per-state `isAir`/`blocksMotion`/`hasFluid`/`isLeaves` predicates
-//! (`Heightmap.Types.isOpaque`); those live at the construction sites
-//! (`superflat::BlockFlags`, the server's local flags) and with the deferred
-//! block-behavior/worldgen units, not on this base, so the create-on-read side
-//! effect is deferred with the worldgen heightmap unit rather than storing the
-//! predicates speculatively here. No production caller reads a missing type —
-//! the server send path reads `client_heightmaps()` (always the three primed
-//! `Usage.CLIENT` types) and the no-arg `getHeight` accessor — so the
-//! divergence is test-only. RivetTodo(#185): the
+//! Issue #287 Part A adds `getHeight`'s on-demand `primeHeightmaps` and the
+//! per-block `update` walk: [`get_height_at`] primes a missing entry
+//! (Java `Heightmap.primeHeightmaps(this, EnumSet.of(type))`) and
+//! [`prime_heightmaps`]/[`update_heightmaps_after`] drive the worldgen/live
+//! compute. The per-state predicates resolve through the caller-supplied
+//! `resolve: &dyn Fn(&T) -> StateFlags` (the world sites use `rivet-registry`'s
+//! `BlockState` behavior table; the superflat/server sites supply their own
+//! flag predicates), so no predicate is stored on the base (OWNERSHIP.md).
+//! RivetTodo(#185): the
 //! `mc.world.level.chunk.status` unit replaces the slice-local `ChunkStatus`
 //! with the real status ladder and `isOrAfter`. RivetTodo(#216): the
-//! `setBlockState` mutators (section set-block/fluid + heightmap `update`
-//! walks) defer with the chunk-storage epic.
+//! `setBlockState` mutators (section set-block/fluid) defer with the
+//! chunk-storage epic — the heightmap `update` half is ported here
+//! ([`update_heightmaps_after`]).
 
 use std::collections::HashMap;
 
@@ -61,7 +59,7 @@ use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::structure_access::StructureAccess;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
-use crate::levelgen::heightmap::{Heightmap, Types};
+use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
 
@@ -122,6 +120,15 @@ where
     /// `heightmaps` — the `EnumMap<Heightmap.Types, Heightmap>`, keyed by the
     /// world `Types` ordinal (see the module doc).
     heightmaps: [Option<Heightmap>; 6],
+    /// The per-state behavior flags the heightmap predicates need. Java's
+    /// `Heightmap` holds a `ChunkAccess` and calls `state.isAir()`/
+    /// `state.blocksMotion()`/`getFluidState()`/`instanceof LeavesBlock`; the
+    /// base stores the caller's `&dyn Fn(&T) -> StateFlags` so `getHeight`'s
+    /// on-demand prime and the `update` walk can classify (OWNERSHIP.md — no
+    /// stored `&ChunkAccess`). The resolver must be `Sync` (in addition to
+    /// `Send`) so a chunk stays `Send`: `ChunkMap` moves chunks to the tick
+    /// thread. The concrete closures are stateless.
+    resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
 }
 
 impl<T, B, S> ChunkAccess<T, B, S>
@@ -142,6 +149,14 @@ where
     /// the port needs the caller's `is_air` predicate for that recalc.
     /// `blendingData` is omitted (deferred, #184). `is_air` is `&dyn` because
     /// the default-section construction outlives the call.
+    ///
+    /// `resolve` classifies states for the heightmap predicates (`isOpaque`).
+    /// Java reaches the same flags through `BlockState` methods; the port
+    /// takes them from the caller because `rivet-world`'s production build
+    /// has no `BlockBehaviour` table (the `blocks` feature is dev-only), and
+    /// the predicate is stored `&'static` so a base can outlive a borrowed
+    /// local (the concrete chunk types keep their resolver).
+    #[allow(clippy::too_many_arguments)] // Java's constructor has 7 parameters; the port adds the is_air and resolve predicates.
     pub fn new(
         pos: ChunkPos,
         upgrade_data: UpgradeData,
@@ -149,7 +164,8 @@ where
         container_factory: &PalettedContainerFactory<T, B>,
         inhabited_time: i64,
         sections: Option<Vec<LevelChunkSection<T, B>>>,
-        is_air: &dyn Fn(&T) -> bool,
+        is_air: &'static dyn Fn(&T) -> bool,
+        resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
     ) -> Self {
         let count = height_accessor.get_sections_count() as usize;
         let mut sections_vec = match sections {
@@ -183,6 +199,7 @@ where
             structure_access: StructureAccess::new(),
             pending_block_entities: HashMap::new(),
             heightmaps: [None, None, None, None, None, None],
+            resolve,
         }
     }
 
@@ -309,32 +326,128 @@ where
         self.heightmaps[ty as usize].is_some()
     }
 
-    /// `ChunkAccess.setHeightmap(Types, long[])` — `getOrCreateHeightmapUnprimed(key)
-    /// .setRawData(this, key, data)`.
-    pub fn set_heightmap(&mut self, key: Types, data: &[i64]) {
-        self.get_or_create_heightmap_unprimed(key)
-            .set_raw_data(data);
+    /// `Heightmap.update`'s `chunk.getBlockState(x, y, z)` read — resolves the
+    /// per-state flags at an absolute `(x, y, z)` through the section stack
+    /// (Java reads the concrete chunk's `getBlockState`; the base has the
+    /// sections and the caller's resolver).
+    fn flags_at(&self, x: i32, y: i32, z: i32) -> StateFlags {
+        flags_at(&self.sections, &self.height_accessor, self.resolve, x, y, z)
+    }
+
+    /// `ChunkAccess.primeHeightmaps(Set<Types>)` — the on-demand and
+    /// `setBlockState` priming walk (Java `Heightmap.primeHeightmaps`): for
+    /// each of the requested types, walk every column from the highest filled
+    /// section down to `getMinY()`, and set the first `isOpaque` block's
+    /// `y + 1` as the column height. A column with no opaque block keeps its
+    /// entry at 0 (decodes as `minY`).
+    pub fn prime_heightmaps(&mut self, types: &[Types]) {
+        if types.is_empty() {
+            return;
+        }
+        let min_y = self.get_min_y();
+        let highest_section_position = match self.get_highest_filled_section_index() {
+            NO_FILLED_SECTION => min_y + 15,
+            index => {
+                let section_y = self.get_section_y_from_section_index(index);
+                SectionPos::section_to_block_coord(section_y + 1) - 1
+            }
+        };
+        for ty in types {
+            self.get_or_create_heightmap_unprimed(*ty);
+        }
+        for x in 0..16 {
+            for z in 0..16 {
+                for ty in types {
+                    for y in (min_y..=highest_section_position).rev() {
+                        let flags = self.flags_at(x, y, z);
+                        if Heightmap::is_opaque(*ty, flags) {
+                            self.heightmaps[*ty as usize]
+                                .as_mut()
+                                .expect("just created")
+                                .set_height(x, z, y + 1, min_y);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// `ChunkAccess.getHeight(Types, x, z)` — `getFirstAvailable(x & 15, z & 15)
     /// - 1`. Java primes a missing heightmap on demand
-    /// (`getOrCreateHeightmapUnprimed` + `Heightmap.primeHeightmaps`) and logs
-    /// in IDE for a `LevelChunk`; the port reads the never-primed default
-    /// `minY - 1` instead.
+    /// (`Heightmap.primeHeightmaps(this, EnumSet.of(type))`) and logs in IDE
+    /// for a `LevelChunk`; the port primes without the IDE-only log.
     ///
     /// Named `get_height_at` (Java has two `getHeight` overloads — the
     /// no-arg `LevelHeightAccessor` accessor and this heightmap read; Rust
     /// cannot overload, so the heightmap read takes the `_at` suffix like
     /// `LevelChunk::get_height_at`).
-    ///
-    /// RivetTodo(#287): the on-demand `primeHeightmaps` fallback is not
-    /// ported (see the module doc for the scope argument — the per-state
-    /// predicates live at the construction sites, not on this base).
-    pub fn get_height_at(&self, ty: Types, x: i32, z: i32) -> i32 {
-        let min_y = self.height_accessor.get_min_y();
+    pub fn get_height_at(&mut self, ty: Types, x: i32, z: i32) -> i32 {
+        if self.heightmaps[ty as usize].is_none() {
+            self.prime_heightmaps(&[ty]);
+        }
+        let min_y = self.get_min_y();
         self.heightmaps[ty as usize]
             .as_ref()
             .map_or(min_y - 1, |hm| hm.get_height_at(x & 15, z & 15, min_y))
+    }
+
+    /// `ChunkAccess.getHighestSectionPosition()` — `getMinY()` when no section
+    /// is filled, else `sectionToBlockCoord(getSectionYFromSectionIndex(
+    /// getHighestFilledSectionIndex()))`.
+    pub fn get_highest_section_position(&self) -> i32 {
+        match self.get_highest_filled_section_index() {
+            NO_FILLED_SECTION => self.get_min_y(),
+            index => {
+                let section_y = self.get_section_y_from_section_index(index);
+                SectionPos::section_to_block_coord(section_y)
+            }
+        }
+    }
+
+    /// `setBlockState`'s heightmap `update` loop — Java walks
+    /// `getPersistedStatus().heightmapsAfter()` and calls `update(localX, y,
+    /// localZ, state)` on each present heightmap, priming missing entries
+    /// first. The port's `setBlockState` (the #216 section write half) will
+    /// call this after the section write; `types` is the caller's
+    /// `heightmapsAfter()` set (`WORLDGEN_HEIGHTMAPS` or `FINAL_HEIGHTMAPS`).
+    pub fn update_heightmaps_after(
+        &mut self,
+        types: &[Types],
+        local_x: i32,
+        y: i32,
+        local_z: i32,
+        placed: StateFlags,
+    ) {
+        let missing: Vec<Types> = types
+            .iter()
+            .copied()
+            .filter(|ty| self.heightmaps[*ty as usize].is_none())
+            .collect();
+        if !missing.is_empty() {
+            self.prime_heightmaps(&missing);
+        }
+        let min_y = self.get_min_y();
+        // The update walk's re-scan (`Heightmap.update`'s downward `getBlockState`
+        // read) resolves flags through the free `flags_at` so it only borrows the
+        // sections/accessor, leaving the heightmap entry (mutably borrowed by
+        // `.update`) unborrowed.
+        let (sections, accessor, resolve) = (&self.sections, &self.height_accessor, self.resolve);
+        for ty in types {
+            self.heightmaps[*ty as usize]
+                .as_mut()
+                .expect("primed above")
+                .update(local_x, y, local_z, *ty, placed, min_y, |abs_y| {
+                    flags_at(sections, accessor, resolve, local_x, abs_y, local_z)
+                });
+        }
+    }
+
+    /// `ChunkAccess.setHeightmap(Types, long[])` — `getOrCreateHeightmapUnprimed(key)
+    /// .setRawData(this, key, data)`.
+    pub fn set_heightmap(&mut self, key: Types, data: &[i64]) {
+        self.get_or_create_heightmap_unprimed(key)
+            .set_raw_data(data);
     }
 
     /// `ChunkAccess.getNoiseBiome(int, int, int)` — Paper's get-block-chunk
@@ -576,6 +689,46 @@ where
     }
 }
 
+/// `Heightmap`'s `chunk.getBlockState(x, y, z)` read, resolved to the per-state
+/// behavior flags. Takes the section stack, accessor, and resolver as
+/// parameters so `update_heightmaps_after` can call it while a heightmap entry
+/// is mutably borrowed (the free function borrows only the sections).
+fn flags_at<T, B>(
+    sections: &[LevelChunkSection<T, B>],
+    height_accessor: &SimpleLevelHeightAccessor,
+    resolve: &(dyn Fn(&T) -> StateFlags + Sync),
+    x: i32,
+    y: i32,
+    z: i32,
+) -> StateFlags
+where
+    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+{
+    if height_accessor.is_outside_build_height(y) {
+        // `Blocks.VOID_AIR` — `isAir`, not opaque.
+        return StateFlags {
+            is_air: true,
+            blocks_motion: false,
+            has_fluid: false,
+            is_leaves: false,
+        };
+    }
+    let index = height_accessor.get_section_index(y);
+    let section = &sections[index as usize];
+    if section.has_only_air() {
+        // `Blocks.AIR` — the same `isAir`, not opaque, classification.
+        return StateFlags {
+            is_air: true,
+            blocks_motion: false,
+            has_fluid: false,
+            is_leaves: false,
+        };
+    }
+    let state = section.get_block_state(x & 15, y & 15, z & 15);
+    resolve(&state)
+}
+
 /// `BlockEntity.getPosFromTag(ChunkPos base, CompoundTag)` — the position a
 /// block-entity tag stores, with Paper's wrong-chunk correction: when the
 /// tag's `x`/`z` land in a different chunk than `base`, they are re-anchored
@@ -644,6 +797,17 @@ mod tests {
         PalettedContainerFactory::new(block_strategy(), 0, biome_strategy(), 0)
     }
 
+    /// The per-state behavior flags for the u8 test values: 0 is air, anything
+    /// else is opaque (blocks motion).
+    fn test_flags(s: &u8) -> StateFlags {
+        StateFlags {
+            is_air: *s == 0,
+            blocks_motion: *s != 0,
+            has_fluid: false,
+            is_leaves: false,
+        }
+    }
+
     /// A base with all-default air sections.
     fn default_base() -> ChunkAccess<u8, u8, &'static str> {
         ChunkAccess::new(
@@ -654,6 +818,7 @@ mod tests {
             0,
             None,
             &|s| *s == 0,
+            &test_flags,
         )
     }
 
@@ -691,6 +856,7 @@ mod tests {
             0,
             Some(vec![stone]),
             is_air,
+            &test_flags,
         );
         assert_eq!(base.get_sections().len(), 24);
         assert!(base.get_sections().iter().all(|s| s.has_only_air()));
@@ -720,6 +886,7 @@ mod tests {
             0,
             Some(sections),
             is_air,
+            &test_flags,
         );
         assert_eq!(base.get_sections().len(), 24);
         assert!(!base.get_sections()[0].has_only_air());
@@ -767,20 +934,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_heightmap_reads_as_unprimed_default() {
+    fn missing_heightmap_read_primes_then_returns_the_empty_column_default() {
         // A base with no heightmap entries (the concrete types prime them).
-        let base = default_base();
+        let mut base = default_base();
         assert!(base.heightmaps().iter().all(Option::is_none));
-        // A missing entry reads as the never-primed default `minY - 1`.
+        // Java `getHeight` primes a missing heightmap on demand
+        // (`Heightmap.primeHeightmaps(this, EnumSet.of(type))`), then reads.
+        // An all-air column primes to stored 0, which decodes as `minY - 1`.
         assert_eq!(base.get_height_at(Types::MotionBlocking, 0, 0), -65);
         assert_eq!(base.get_height_at(Types::WorldSurfaceWg, 15, 15), -65);
-        // Java would create-on-read (prime) here; the port's documented
-        // divergence (RivetTodo #287) is scoped to the never-primed default
-        // and is test-only — the server send path reads `client_heightmaps()`
-        // (always the primed `Usage.CLIENT` types) and the no-arg `getHeight`
-        // accessor, never a missing type. The read must not mutate: a missing
-        // entry stays missing after the call.
-        assert!(!base.has_primed_heightmap(Types::MotionBlocking));
+        // The create-on-read side effect: the entries now exist.
+        assert!(base.has_primed_heightmap(Types::MotionBlocking));
+        assert!(base.has_primed_heightmap(Types::WorldSurfaceWg));
     }
 
     #[test]
