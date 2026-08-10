@@ -171,7 +171,16 @@ impl Identifier {
 
     /// `Identifier.tryParse(String)` — `@Nullable`.
     pub fn try_parse(identifier: &str) -> Option<Self> {
-        Self::try_by_separator(identifier, ':')
+        Self::try_parse_result(identifier).unwrap_or_else(panic_on_err)
+    }
+
+    /// Fallible form of Paper's nullable `Identifier.tryParse(String)`.
+    ///
+    /// Invalid characters remain `Ok(None)`, while the private constructor's
+    /// unchecked Paper length guard is returned as `Err`. This lets callers
+    /// preserve that exceptional boundary without relying on a Rust panic.
+    pub fn try_parse_result(identifier: &str) -> Result<Option<Self>, IdentifierException> {
+        Self::try_by_separator_result(identifier, ':')
     }
 
     /// `Identifier.tryBuild(String, String)` — `@Nullable`.
@@ -185,35 +194,36 @@ impl Identifier {
 
     /// `Identifier.tryBySeparator(String, char)` — `@Nullable`.
     pub fn try_by_separator(identifier: &str, separator: char) -> Option<Self> {
+        Self::try_by_separator_result(identifier, separator).unwrap_or_else(panic_on_err)
+    }
+
+    /// Fallible form of `tryBySeparator`: invalid characters are nullable,
+    /// but Paper's constructor length guard remains an error.
+    pub fn try_by_separator_result(
+        identifier: &str,
+        separator: char,
+    ) -> Result<Option<Self>, IdentifierException> {
         // Java's nullable variant. Note the Paper length guard in the private
-        // constructor still throws (panics here) on an over-long identifier —
-        // char validity is the only thing that maps to `null`.
+        // constructor still throws; char validity is the only thing that maps
+        // to `null`.
         if let Some(separator_index) = identifier.find(separator) {
             let path = &identifier[separator_index + separator.len_utf8()..];
             if !Self::is_valid_path(path) {
-                return None;
+                return Ok(None);
             }
             if separator_index != 0 {
                 let namespace = &identifier[..separator_index];
                 if !Self::is_valid_namespace(namespace) {
-                    return None;
+                    return Ok(None);
                 }
-                Some(
-                    Self::new(namespace.to_string(), path.to_string()).unwrap_or_else(panic_on_err),
-                )
+                Self::new(namespace.to_string(), path.to_string()).map(Some)
             } else {
-                Some(
-                    Self::new(DEFAULT_NAMESPACE.to_string(), path.to_string())
-                        .unwrap_or_else(panic_on_err),
-                )
+                Self::new(DEFAULT_NAMESPACE.to_string(), path.to_string()).map(Some)
             }
         } else if Self::is_valid_path(identifier) {
-            Some(
-                Self::new(DEFAULT_NAMESPACE.to_string(), identifier.to_string())
-                    .unwrap_or_else(panic_on_err),
-            )
+            Self::new(DEFAULT_NAMESPACE.to_string(), identifier.to_string()).map(Some)
         } else {
-            None
+            Ok(None)
         }
     }
 

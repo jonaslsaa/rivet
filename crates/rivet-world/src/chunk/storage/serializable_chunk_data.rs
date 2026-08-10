@@ -15,9 +15,9 @@ use crate::levelgen::heightmap::Types;
 use crate::lighting::swmr_nibble_array::{InitState, SwmrNibbleArray};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::tag::Tag;
-use rivet_registry::Identifier;
 use rivet_registry::block_entity_type::BlockEntityType;
 use rivet_registry::core::{BlockPos, ChunkPos};
+use rivet_registry::{Identifier, IdentifierParseError};
 
 pub const HEIGHTMAPS_TAG: &str = "Heightmaps";
 pub const IS_LIGHT_ON_TAG: &str = "isLightOn";
@@ -71,10 +71,34 @@ pub struct ResolvedSerializedBlockEntity {
 /// failed entry retains the complete tag needed to reproduce diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockEntityTypeError {
-    MissingId,
-    WrongIdType { tag_type: i8 },
-    MalformedId { value: String },
-    UnknownId { identifier: Identifier },
+    /// Paper's shared invalid-type diagnostic path for an absent or non-string
+    /// `id`. The untouched `raw_tag` retains the underlying tag distinction.
+    InvalidIdType,
+    MalformedId {
+        value: String,
+    },
+    UnknownId {
+        identifier: Identifier,
+    },
+}
+
+/// The unpacked entry at which reconstruction stopped. Paper's unchecked
+/// Identifier length guard is fatal to the ordered list, unlike malformed
+/// identifier syntax, but is surfaced as data rather than a Rust panic.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FatalSerializedBlockEntity {
+    pub source_index: usize,
+    pub position: BlockPos,
+    pub cause: IdentifierParseError,
+    pub raw_tag: CompoundTag,
+}
+
+/// Fatal ordered reconstruction result. `completed_outcomes` contains exactly
+/// the source entries before `failed`; no later entry has been inspected.
+#[derive(Clone, Debug)]
+pub struct BlockEntityReconstructionError {
+    pub completed_outcomes: Vec<SerializedBlockEntityOutcome>,
+    pub failed: FatalSerializedBlockEntity,
 }
 
 /// A failed unpacked level entry. Position correction has already happened,
@@ -137,21 +161,27 @@ pub fn parse_block_entities(chunk_data: &CompoundTag) -> Vec<CompoundTag> {
         .collect()
 }
 
-/// Interpret all retained tags in source order. Every entry produces one
-/// outcome; malformed unpacked IDs never abort later entries.
+/// Interpret retained tags in source order. Ordinary malformed unpacked IDs
+/// are entry-local outcomes. Paper's unchecked Identifier length guard stops
+/// reconstruction before later entries and is returned as a typed error.
 pub fn reconstruct_block_entities(
     chunk_pos: &ChunkPos,
     block_entities: &[CompoundTag],
     chunk_kind: BlockEntityChunkKind,
-) -> Vec<SerializedBlockEntityOutcome> {
-    block_entities
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(source_index, raw_tag)| {
-            reconstruct_block_entity(chunk_pos, source_index, raw_tag, chunk_kind)
-        })
-        .collect()
+) -> Result<Vec<SerializedBlockEntityOutcome>, Box<BlockEntityReconstructionError>> {
+    let mut completed_outcomes = Vec::with_capacity(block_entities.len());
+    for (source_index, raw_tag) in block_entities.iter().cloned().enumerate() {
+        match reconstruct_block_entity(chunk_pos, source_index, raw_tag, chunk_kind) {
+            Ok(outcome) => completed_outcomes.push(outcome),
+            Err(failed) => {
+                return Err(Box::new(BlockEntityReconstructionError {
+                    completed_outcomes,
+                    failed,
+                }));
+            }
+        }
+    }
+    Ok(completed_outcomes)
 }
 
 fn reconstruct_block_entity(
@@ -159,64 +189,77 @@ fn reconstruct_block_entity(
     source_index: usize,
     raw_tag: CompoundTag,
     chunk_kind: BlockEntityChunkKind,
-) -> SerializedBlockEntityOutcome {
+) -> Result<SerializedBlockEntityOutcome, FatalSerializedBlockEntity> {
     if chunk_kind == BlockEntityChunkKind::Proto {
-        return SerializedBlockEntityOutcome::Pending(PendingSerializedBlockEntity {
-            source_index,
-            position: get_pos_from_tag(Some(chunk_pos), &raw_tag),
-            reason: PendingBlockEntityReason::ProtoChunk,
-            raw_tag,
-        });
+        return Ok(SerializedBlockEntityOutcome::Pending(
+            PendingSerializedBlockEntity {
+                source_index,
+                position: get_pos_from_tag(Some(chunk_pos), &raw_tag),
+                reason: PendingBlockEntityReason::ProtoChunk,
+                raw_tag,
+            },
+        ));
     }
 
     // Paper reads this before position or id on the LEVELCHUNK branch.
     let keep_packed = raw_tag.get_boolean_or(KEEP_PACKED_TAG, false);
     let position = get_pos_from_tag(Some(chunk_pos), &raw_tag);
     if keep_packed {
-        return SerializedBlockEntityOutcome::Pending(PendingSerializedBlockEntity {
-            source_index,
-            position,
-            reason: PendingBlockEntityReason::KeepPacked,
-            raw_tag,
-        });
+        return Ok(SerializedBlockEntityOutcome::Pending(
+            PendingSerializedBlockEntity {
+                source_index,
+                position,
+                reason: PendingBlockEntityReason::KeepPacked,
+                raw_tag,
+            },
+        ));
     }
 
     let resolved = match raw_tag.tags.get(BLOCK_ENTITY_ID_TAG) {
-        None => Err(BlockEntityTypeError::MissingId),
+        None => Err(BlockEntityTypeError::InvalidIdType),
         Some(Tag::String(id)) => {
             let value = id.value.clone();
-            // `try_parse` includes Paper's default minecraft namespace. Its
-            // length guard is an unchecked Java exception, so contain it as an
-            // entry-local malformed codec result rather than losing the list.
-            let identifier = std::panic::catch_unwind(|| Identifier::try_parse(&value))
-                .ok()
-                .flatten()
-                .ok_or_else(|| BlockEntityTypeError::MalformedId {
+            // Position was corrected above. Invalid characters are nullable
+            // and entry-local, while Paper's constructor length exception
+            // stops the ordered reconstruction before any later source entry.
+            let identifier = match Identifier::try_parse_result(&value) {
+                Ok(identifier) => identifier.ok_or_else(|| BlockEntityTypeError::MalformedId {
                     value: value.clone(),
-                });
+                }),
+                Err(cause) => {
+                    return Err(FatalSerializedBlockEntity {
+                        source_index,
+                        position,
+                        cause,
+                        raw_tag,
+                    });
+                }
+            };
             identifier.and_then(|identifier| {
                 BlockEntityType::from_identifier(&identifier)
                     .ok_or(BlockEntityTypeError::UnknownId { identifier })
             })
         }
-        Some(tag) => Err(BlockEntityTypeError::WrongIdType { tag_type: tag.id() }),
+        Some(_) => Err(BlockEntityTypeError::InvalidIdType),
     };
 
     match resolved {
-        Ok(entity_type) => {
-            SerializedBlockEntityOutcome::ResolvedUnpacked(ResolvedSerializedBlockEntity {
+        Ok(entity_type) => Ok(SerializedBlockEntityOutcome::ResolvedUnpacked(
+            ResolvedSerializedBlockEntity {
                 source_index,
                 position,
                 entity_type,
                 raw_tag,
-            })
-        }
-        Err(error) => SerializedBlockEntityOutcome::InvalidUnpacked(FailedSerializedBlockEntity {
-            source_index,
-            position,
-            error,
-            raw_tag,
-        }),
+            },
+        )),
+        Err(error) => Ok(SerializedBlockEntityOutcome::InvalidUnpacked(
+            FailedSerializedBlockEntity {
+                source_index,
+                position,
+                error,
+                raw_tag,
+            },
+        )),
     }
 }
 
@@ -505,6 +548,7 @@ mod tests {
 
     fn one_level(tag: CompoundTag) -> SerializedBlockEntityOutcome {
         reconstruct_block_entities(&ChunkPos::new(2, -3), &[tag], BlockEntityChunkKind::Level)
+            .expect("non-fatal reconstruction")
             .pop()
             .expect("one outcome")
     }
@@ -523,7 +567,8 @@ mod tests {
         );
 
         let outcomes =
-            reconstruct_block_entities(&ChunkPos::new(0, 0), &raw, BlockEntityChunkKind::Level);
+            reconstruct_block_entities(&ChunkPos::new(0, 0), &raw, BlockEntityChunkKind::Level)
+                .expect("fixture identifiers are within bounds");
         assert_eq!(outcomes.len(), 2);
         for (index, (outcome, expected)) in outcomes
             .iter()
@@ -656,7 +701,8 @@ mod tests {
             &ChunkPos::new(2, -3),
             &[malformed.clone(), missing.clone()],
             BlockEntityChunkKind::Proto,
-        );
+        )
+        .expect("proto entries bypass identifier parsing");
         assert_eq!(outcomes.len(), 2);
         for (index, outcome) in outcomes.iter().enumerate() {
             assert_eq!(outcome.source_index(), index);
@@ -687,7 +733,8 @@ mod tests {
             block_entity(Some("minecraft:furnace"), 10, 75, -16),
         ];
         let outcomes =
-            reconstruct_block_entities(&ChunkPos::new(2, -3), &tags, BlockEntityChunkKind::Level);
+            reconstruct_block_entities(&ChunkPos::new(2, -3), &tags, BlockEntityChunkKind::Level)
+                .expect("ordinary invalid identifiers are entry-local");
 
         assert_eq!(outcomes.len(), tags.len());
         assert_eq!(
@@ -702,16 +749,26 @@ mod tests {
         assert!(matches!(
             &outcomes[0],
             SerializedBlockEntityOutcome::InvalidUnpacked(FailedSerializedBlockEntity {
-                error: BlockEntityTypeError::MissingId,
+                error: BlockEntityTypeError::InvalidIdType,
                 ..
             })
         ));
         assert!(matches!(
             &outcomes[1],
             SerializedBlockEntityOutcome::InvalidUnpacked(FailedSerializedBlockEntity {
-                error: BlockEntityTypeError::WrongIdType { tag_type: 3 },
+                error: BlockEntityTypeError::InvalidIdType,
                 ..
             })
+        ));
+        let invalid_type_errors = [&outcomes[0], &outcomes[1]].map(|outcome| match outcome {
+            SerializedBlockEntityOutcome::InvalidUnpacked(entry) => &entry.error,
+            other => panic!("expected invalid-type outcome, got {other:?}"),
+        });
+        assert_eq!(invalid_type_errors[0], invalid_type_errors[1]);
+        assert!(outcomes[0].raw_tag().tags.get("id").is_none());
+        assert!(matches!(
+            outcomes[1].raw_tag().tags.get("id"),
+            Some(Tag::Int(_))
         ));
         assert!(matches!(
             &outcomes[2],
@@ -750,6 +807,71 @@ mod tests {
     }
 
     #[test]
+    fn identifier_length_boundary_is_exact_for_default_namespace() {
+        // No explicit namespace adds `minecraft:` in Paper. A path of 21,835
+        // UTF-16 units therefore reaches the effective 21,845-unit limit.
+        let at_limit = "a".repeat(21_835);
+        let outcome = one_level(block_entity(Some(&at_limit), 5, 70, -21));
+        assert!(matches!(
+            outcome,
+            SerializedBlockEntityOutcome::InvalidUnpacked(FailedSerializedBlockEntity {
+                error: BlockEntityTypeError::UnknownId { identifier },
+                ..
+            }) if identifier.path() == at_limit
+        ));
+
+        let over_limit = "a".repeat(21_836);
+        let tag = block_entity(Some(&over_limit), 5, 70, -21);
+        let error = reconstruct_block_entities(
+            &ChunkPos::new(2, -3),
+            std::slice::from_ref(&tag),
+            BlockEntityChunkKind::Level,
+        )
+        .expect_err("21,846 UTF-16 units must trip Paper's length guard");
+        assert!(error.completed_outcomes.is_empty());
+        assert_eq!(error.failed.source_index, 0);
+        assert_eq!(error.failed.position, BlockPos::new(37, 70, -37));
+        assert_eq!(error.failed.cause.message(), "Identifier too long: 21846");
+        assert_eq!(error.failed.raw_tag, tag);
+    }
+
+    #[test]
+    fn overlong_middle_entry_stops_before_later_sources() {
+        let first = block_entity(Some("bad id"), 5, 70, -21);
+        let middle = block_entity(Some(&"a".repeat(21_836)), 6, 71, -20);
+        let later = block_entity(Some("minecraft:chest"), 7, 72, -19);
+        let error = reconstruct_block_entities(
+            &ChunkPos::new(2, -3),
+            &[first.clone(), middle.clone(), later],
+            BlockEntityChunkKind::Level,
+        )
+        .expect_err("the middle entry must stop ordered reconstruction");
+
+        assert_eq!(error.completed_outcomes.len(), 1);
+        assert!(matches!(
+            &error.completed_outcomes[0],
+            SerializedBlockEntityOutcome::InvalidUnpacked(FailedSerializedBlockEntity {
+                source_index: 0,
+                error: BlockEntityTypeError::MalformedId { value },
+                raw_tag,
+                ..
+            }) if value == "bad id" && raw_tag == &first
+        ));
+        assert_eq!(error.failed.source_index, 1);
+        assert_eq!(error.failed.position, BlockPos::new(38, 71, -36));
+        assert_eq!(error.failed.cause.message(), "Identifier too long: 21846");
+        assert_eq!(error.failed.raw_tag, middle);
+        // The result contains only the completed prefix and the fatal entry;
+        // source index 2 has no outcome because it was never reached.
+        assert!(
+            error
+                .completed_outcomes
+                .iter()
+                .all(|outcome| outcome.source_index() < error.failed.source_index)
+        );
+    }
+
+    #[test]
     fn position_fields_use_numeric_conversion_and_zero_defaults() {
         let mut tag = CompoundTag::new();
         tag.put_long("x", 37);
@@ -774,7 +896,8 @@ mod tests {
             &ChunkPos::new(2, -3),
             &[first.clone(), second.clone()],
             BlockEntityChunkKind::Level,
-        );
+        )
+        .expect("identifiers are within bounds");
 
         assert_eq!(outcomes.len(), 2);
         assert_eq!(outcomes[0].position(), BlockPos::new(37, 64, -37));
