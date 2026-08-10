@@ -133,19 +133,17 @@ pub fn map_codec<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<WorldDataConfi
 where
     WorldDataConfiguration: 'static,
 {
-    let dp = DataPackConfig::default_config();
-    let ef = default_flags();
     let lenient_data_packs: Arc<dyn MapCodec<DataPackConfig, Ops>> =
-        lenient_optional::<DataPackConfig, Ops>(
-            "DataPacks".to_string(),
+        rivet_serialization::codec::lenient_optional_field_of::<DataPackConfig, Ops>(
+            "DataPacks",
             super::data_pack_config::codec::<Ops>(),
-            dp,
+            DataPackConfig::default_config(),
         );
     let lenient_features: Arc<dyn MapCodec<FeatureFlagSet, Ops>> =
-        lenient_optional::<FeatureFlagSet, Ops>(
-            "enabled_features".to_string(),
+        rivet_serialization::codec::lenient_optional_field_of::<FeatureFlagSet, Ops>(
+            "enabled_features",
             feature_flags_codec::<Ops>(),
-            ef,
+            default_flags(),
         );
     record_builder::map_codec(|instance| {
         instance
@@ -170,45 +168,10 @@ where
     map_codec::codec_of(map_codec::<Ops>())
 }
 
-/// `Codec.lenientOptionalFieldOf(name, default)` — `optionalField(name, codec,
-/// true).xmap(o -> o.orElse(default), a -> Objects.equals(a, default) ?
-/// Optional.empty() : Optional.of(a))` in the pinned DFU 10.0.21. See the
-/// module doc for the exact encode/decode behavior this reproduces.
-fn lenient_optional<A, Ops: DynamicOps + 'static>(
-    name: String,
-    element_codec: Arc<dyn rivet_serialization::Codec<A, Ops>>,
-    default: A,
-) -> Arc<dyn MapCodec<A, Ops>>
-where
-    A: Clone + Send + Sync + PartialEq + 'static,
-{
-    let field: Arc<dyn MapCodec<Option<A>, Ops>> =
-        rivet_serialization::codec::optional_field(name, element_codec, true);
-    let default_dec = default.clone();
-    let default_enc = default.clone();
-    map_codec::xmap(
-        field,
-        // Decode half: `o -> o.orElse(default)`.
-        Arc::new(move |opt: &Option<A>| match opt {
-            Some(v) => v.clone(),
-            None => default_dec.clone(),
-        }),
-        // Encode half: `a -> Objects.equals(a, default) ? empty : of(a)`.
-        Arc::new(move |a: &A| {
-            if *a == default_enc {
-                None
-            } else {
-                Some(a.clone())
-            }
-        }),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::flag::feature_flags::{TRADE_REBALANCE, VANILLA};
-    use rivet_serialization::Decoder;
     use rivet_serialization::json_ops::JsonOps;
     use rivet_serialization::pair::Pair;
 

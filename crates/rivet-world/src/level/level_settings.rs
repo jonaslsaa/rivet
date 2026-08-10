@@ -326,7 +326,6 @@ impl DifficultySettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rivet_serialization::Decoder;
     use rivet_serialization::json_ops::JsonOps;
     use rivet_serialization::pair::Pair;
 
