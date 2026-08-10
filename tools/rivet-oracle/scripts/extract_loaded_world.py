@@ -403,17 +403,19 @@ def cmd_expect_fail(source: Path, scratch: Path) -> int:
     shutil.copytree(fixtures_dir, scratch)
 
     # Missing: delete one committed fixture file.
-    missing_path = scratch / chunk_path(*CORPUS[1][:2])
+    missing_rel = chunk_path(*CORPUS[1][:2])
+    missing_path = scratch / missing_rel
     missing_path.unlink()
     # Tampered: flip a byte in another committed fixture file.
-    tamper_path = scratch / chunk_path(*CORPUS[0][:2])
+    tamper_rel = chunk_path(*CORPUS[0][:2])
+    tamper_path = scratch / tamper_rel
     data = bytearray(tamper_path.read_bytes())
     data[0] ^= 0xFF
     tamper_path.write_bytes(bytes(data))
 
     errors = verify_fixtures_dir(scratch, manifest)
-    missing_named = any("missing captured file chunk/0.-4.nbt" in e for e in errors)
-    tamper_named = any("SHA-256 mismatch" in e and "chunk/-1.-3.nbt" in e for e in errors)
+    missing_named = any(f"missing captured file {missing_rel}" in e for e in errors)
+    tamper_named = any("SHA-256 mismatch" in e and tamper_rel in e for e in errors)
     if not errors:
         raise SystemExit("FAIL: negative control passed — tampered fixtures were not detected")
     if not (missing_named and tamper_named):
