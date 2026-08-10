@@ -743,6 +743,7 @@ dependencies = [
  "indexmap",
  "md5",
  "rivet-serialization",
+ "serde_json",
  "sha2",
 ]
 

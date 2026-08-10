@@ -55,6 +55,7 @@
 
 pub mod block;
 pub mod chunk;
+pub mod flag;
 pub mod level;
 pub mod levelgen;
 pub mod lighting;
