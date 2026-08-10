@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "seq-random",
+  "note": "golden samples of the PositionalRandomFactory default overloads taking BlockPos / Identifier (at(BlockPos) -> at(x,y,z), fromHashOf(Identifier) -> fromHashOf(id.toString())) over LegacyRandomSource / XoroshiroRandomSource, captured from the pinned Paper 26.2 runtime via SeqProbe. Values are the raw nextInt/nextLong outputs (integral). Deterministic across boots.",
+  "captured": [
+    {
+      "path": "seq-random.json",
+      "sha256": "34e745cb895d2f0262dbfcc18027400e279780d84b079bdd25060c2f86a39d14",
+      "bytes": 5884
+    }
+  ]
+}
