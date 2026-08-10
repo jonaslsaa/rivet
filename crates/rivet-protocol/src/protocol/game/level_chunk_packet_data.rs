@@ -290,8 +290,7 @@ impl LevelChunkPacketData {
 mod tests {
     use super::*;
     use bytes::BytesMut;
-    use rivet_registry::registry::RegistryKey;
-    use rivet_registry::{Identifier, RegistryAccess, ResourceKey};
+    use rivet_registry::RegistryAccess;
 
     fn registry_buf(bytes: Vec<u8>) -> RegistryFriendlyByteBuf {
         RegistryFriendlyByteBuf::new(BytesMut::from(bytes.as_slice()), RegistryAccess::empty())
@@ -300,13 +299,9 @@ mod tests {
     /// The generated Minecraft 26.2 `BLOCK_ENTITY_TYPE` registry, plus two
     /// representative stored allocations for packet round trips.
     fn block_entity_registry() -> (RegistryAccess, Arc<BlockEntityType>, Arc<BlockEntityType>) {
-        let key: RegistryKey<BlockEntityType> = ResourceKey::create_registry_key(
-            Identifier::with_default_namespace("block_entity_type"),
-        );
-        let registry = BlockEntityType::built_in_registry();
-        let access = RegistryAccess::from_single_registry(key.clone(), registry);
-        let furnace = access.lookup(&key).unwrap().by_id_arc(0).unwrap().clone();
-        let chest = access.lookup(&key).unwrap().by_id_arc(1).unwrap().clone();
+        let access = BlockEntityType::built_in_registry_access();
+        let furnace = BlockEntityType::from_name("minecraft:furnace").unwrap();
+        let chest = BlockEntityType::from_name("minecraft:chest").unwrap();
         (access, furnace, chest)
     }
 
