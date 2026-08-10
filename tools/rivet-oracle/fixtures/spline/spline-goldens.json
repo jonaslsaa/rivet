@@ -29,7 +29,7 @@
       "name": "constant_one_point",
       "min": "0x1.ap1",
       "max": "0x1.ap1",
-      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[0.000], derivatives\u003d[0.000], values\u003d[k\u003d3.250]}",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1, locations\u003d[0.000], derivatives\u003d[0.000], values\u003d[k\u003d3.250]}",
       "samples": [
         {
           "coordinate": "-0x1.8p1",
@@ -53,7 +53,7 @@
       "name": "two_point_no_deriv",
       "min": "0x1.0p1",
       "max": "0x1.0p2",
-      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[-1.000, 1.000], derivatives\u003d[0.000, 0.000], values\u003d[k\u003d2.000, k\u003d4.000]}",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1, locations\u003d[-1.000, 1.000], derivatives\u003d[0.000, 0.000], values\u003d[k\u003d2.000, k\u003d4.000]}",
       "samples": [
         {
           "coordinate": "-0x1.0p1",
@@ -107,7 +107,7 @@
       "name": "three_point_deriv",
       "min": "-Infinity",
       "max": "0x1.dp2",
-      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[-3.000, 0.000, 3.000], derivatives\u003d[1.000, 0.000, -2.000], values\u003d[k\u003d5.000, k\u003d-1.000, k\u003d2.000]}",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1, locations\u003d[-3.000, 0.000, 3.000], derivatives\u003d[1.000, 0.000, -2.000], values\u003d[k\u003d5.000, k\u003d-1.000, k\u003d2.000]}",
       "samples": [
         {
           "coordinate": "-0x1.0p2",
@@ -163,7 +163,7 @@
       "name": "neg_slope_extend",
       "min": "-0x1.3p2",
       "max": "Infinity",
-      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[0.000, 4.000, 8.000], derivatives\u003d[-1.000, 0.000, 0.500], values\u003d[k\u003d10.000, k\u003d2.000, k\u003d-3.000]}",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1, locations\u003d[0.000, 4.000, 8.000], derivatives\u003d[-1.000, 0.000, 0.500], values\u003d[k\u003d10.000, k\u003d2.000, k\u003d-3.000]}",
       "samples": [
         {
           "coordinate": "-0x1.0p1",
@@ -215,7 +215,7 @@
       "name": "nested_values",
       "min": "0x1.0p-1",
       "max": "0x1.8p1",
-      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[-2.000, 2.000], derivatives\u003d[0.000, 0.000], values\u003d[Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[0.000, 2.000], derivatives\u003d[0.000, 0.000], values\u003d[k\u003d1.000, k\u003d3.000]}, k\u003d0.500]}",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1, locations\u003d[-2.000, 2.000], derivatives\u003d[0.000, 0.000], values\u003d[Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1, locations\u003d[0.000, 2.000], derivatives\u003d[0.000, 0.000], values\u003d[k\u003d1.000, k\u003d3.000]}, k\u003d0.500]}",
       "samples": [
         {
           "coordinate": "-0x1.8p1",

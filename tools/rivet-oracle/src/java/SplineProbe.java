@@ -8,8 +8,6 @@ import java.util.List;
 import java.util.Locale;
 import net.minecraft.util.BoundedFloatFunction;
 import net.minecraft.util.CubicSpline;
-import net.minecraft.util.ExtraCodecs;
-import net.minecraft.util.Mth;
 
 /**
  * Samples the pinned Paper 26.2 value leaves that issue #372 ports
@@ -136,7 +134,7 @@ public final class SplineProbe {
         o.addProperty("name", name);
         o.addProperty("min", hexF(s.minValue()));
         o.addProperty("max", hexF(s.maxValue()));
-        o.addProperty("parity", s.parityString());
+        o.addProperty("parity", parityOf(s));
         o.add("samples", samples(s, List.of(-3.0F, 0.0F, 2.5F, 100.0F)));
         return o;
     }
@@ -148,7 +146,7 @@ public final class SplineProbe {
         o.addProperty("name", name);
         o.addProperty("min", hexF(s.minValue()));
         o.addProperty("max", hexF(s.maxValue()));
-        o.addProperty("parity", s.parityString());
+        o.addProperty("parity", parityOf(s));
         o.add("samples", samples(s, coordinates));
         if (s instanceof CubicSpline.Multipoint<BoundedFloatFunction<Float>> mp) {
             JsonObject raw = new JsonObject();
@@ -157,6 +155,13 @@ public final class SplineProbe {
             o.add("raw", raw);
         }
         return o;
+    }
+
+    private static String parityOf(CubicSpline<BoundedFloatFunction<Float>> s) {
+        // The identity coordinate is an anonymous BoundedFloatFunction instance,
+        // so its toString appends a per-JVM-run identity hash (`ClassName@hex`).
+        // Strip it so a regeneration is byte-reproducible across runs.
+        return s.parityString().replaceAll("@[0-9a-f]+", "");
     }
 
     private static JsonArray samples(CubicSpline<BoundedFloatFunction<Float>> s, List<Float> coords) {
