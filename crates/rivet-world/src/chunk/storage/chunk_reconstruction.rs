@@ -19,10 +19,12 @@
 //! worktrees/PRs); it composes them. It deliberately does not add generation,
 //! fallback, writes, repair, chunk scheduling, or server boot composition —
 //! the caller owns those. Structures stay an explicit #369 boundary; live block
-//! entities stay an explicit #341 boundary. Ticks stay behind #381: a FULL
-//! chunk carrying a decoded non-empty `block_ticks`/`fluid_ticks` list is a
-//! typed `UnsupportedTicks` error, and the API carries the raw `SavedTick`
-//! lists so the #381 adoption can consume them without rework.
+//! entities stay an explicit #341 boundary. Ticks are decoded through the
+//! merged `SavedTick` value layer (#370/#381), but stay deferred: a FULL chunk
+//! carrying a decoded non-empty `block_ticks`/`fluid_ticks` list is a typed
+//! `UnsupportedTicks` error, and the API carries the raw lists so the
+//! tick-execution slice (`LevelChunkTicks`/`ProtoChunkTicks`) can install
+//! them without rework.
 //!
 //! ## Block entities on the FULL path
 //!
@@ -118,9 +120,9 @@ pub struct ChunkReconstruction {
     /// diagnostic, mirroring `SerializableChunkData::construct_full` (Paper's
     /// `reportMisplacedChunk` — the chunk is relocated, never rejected).
     pub parse_diagnostics: Vec<ChunkParseDiagnostic>,
-    /// The raw `block_ticks` list, retained for #381 adoption.
+    /// The raw `block_ticks` list, retained for the tick-execution installer.
     pub raw_block_ticks: ListTag,
-    /// The raw `fluid_ticks` list, retained for #381 adoption.
+    /// The raw `fluid_ticks` list, retained for the tick-execution installer.
     pub raw_fluid_ticks: ListTag,
     /// The serialized block-entity compounds, retained in source order for the
     /// #341 materialization pass.
@@ -482,7 +484,8 @@ mod tests {
     fn nether_full_fixture_carries_lava_ticks_as_typed_boundary() {
         let data = parse_fixture("the_nether", 0, 256);
         // The nether 0.0 fixture carries real lava `fluid_ticks`, which stay
-        // behind #381 — a typed, honest error, not a silent drop.
+        // behind the tick-execution installer — a typed, honest error, not a
+        // silent drop.
         let error =
             reconstruct_runtime_chunk(ChunkPos::ZERO, data, height_accessor::create(0, 256), false)
                 .err()
