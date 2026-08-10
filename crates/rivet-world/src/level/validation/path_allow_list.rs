@@ -317,7 +317,12 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                             return Err(format!("Invalid range near index {}", i - 3));
                         }
                         // OpenJDK appends range endpoints without applying the
-                        // direct-class-member escaping or separator check.
+                        // direct-class-member escaping or separator check. Its
+                        // generated Java regex is therefore invalid for these
+                        // raw endpoints, even when PCRE2 would accept it.
+                        if matches!(range_end, '[' | '\\') {
+                            return Err(format!("Invalid range endpoint near index {}", i - 1));
+                        }
                         regex.push(range_end);
                         has_range_start = false;
                     } else {
@@ -750,10 +755,16 @@ mod tests {
             assert!(glob_to_regex("[Z-^]", windows).is_ok());
 
             // OpenJDK bypasses the direct-member separator check for a range
-            // endpoint, then emits this endpoint verbatim. The resulting
-            // regex is invalid rather than the glob conversion itself.
-            let range_end = glob_to_regex(r"[Z-\]", windows).unwrap();
-            assert!(Regex::new(&range_end).is_err());
+            // endpoint, then emits '[' or '\\' verbatim. Java Pattern rejects
+            // both generated expressions, so reject them before PCRE2 gets a
+            // chance to accept a different language.
+            assert!(glob_to_regex("[Z-[]", windows).is_err());
+            assert!(glob_to_regex(r"[Z-\]", windows).is_err());
+
+            // ']' closes the range/class in OpenJDK rather than becoming a
+            // raw endpoint, while '/' remains a valid raw endpoint.
+            assert!(glob_to_regex("[Z-]]", windows).is_ok());
+            assert!(glob_to_regex("[.-/]", windows).is_ok());
         }
 
         assert!(glob_to_regex(r"[a\b]", false).is_ok());
@@ -769,6 +780,32 @@ mod tests {
             ConfigEntry::glob(r"[Z-\]"),
         ]);
         assert!(!list.matches(Path::new("otherwise-matching")));
+    }
+
+    #[test]
+    fn java_pattern_invalid_range_endpoint_disables_the_whole_allow_list() {
+        let list =
+            PathAllowList::read_plain(Cursor::new("[prefix]otherwise-matching\n[glob][Z-[]\n"))
+                .unwrap();
+
+        assert!(!list.matches(Path::new("otherwise-matching")));
+        assert!(!list.matches(Path::new("Z")));
+        assert!(!list.matches(Path::new("[")));
+    }
+
+    #[test]
+    fn printable_ascii_range_endpoints_follow_openjdk_compile_results() {
+        for windows in [false, true] {
+            for endpoint in ' '..='~' {
+                let glob = format!("[ -{endpoint}]");
+                let result = glob_to_regex(&glob, windows);
+                if matches!(endpoint, '[' | '\\') {
+                    assert!(result.is_err(), "{glob:?} must fail for windows={windows}");
+                } else {
+                    assert!(result.is_ok(), "{glob:?} must pass for windows={windows}");
+                }
+            }
+        }
     }
 
     #[cfg(windows)]
