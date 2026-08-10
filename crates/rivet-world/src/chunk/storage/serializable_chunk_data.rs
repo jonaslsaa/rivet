@@ -8,11 +8,12 @@
 //! decoded through the faithful `SavedTick.codec(byNameCodec).listOf()` codecs
 //! into typed [`SavedTick<Block>`]/[`SavedTick<FluidId>`] values, filtered to
 //! the stored chunk position, and carried as typed stored values on the parse
-//! result. The old `UnsupportedTicks` boundary is therefore removed for these
-//! faithfully decoded/carryable values — but the parser still neither
-//! executes, schedules, generates, nor writes ticks (`construct_full` does not
-//! install them into the chunk; the `LevelChunkTicks`/`ProtoChunkTicks`
-//! containers are deferred with the tick-execution slice). `UpgradeData`'s
+//! result. That is the decode/carry half of the slice — the parser still
+//! neither executes, schedules, generates, installs, nor writes ticks, so a
+//! FULL chunk carrying non-empty stored ticks remains rejected by the typed
+//! `UnsupportedTicks` capability boundary until the tick-execution slice (the
+//! `LevelChunkTicks`/`ProtoChunkTicks` containers) lands an actual
+//! installer/carry contract that consumes the stored values. `UpgradeData`'s
 //! neighbor tick lists remain behind the `UnsupportedUpgradeData` boundary:
 //! they are decodable (with the Java `orElse(Blocks.AIR)`/`orElse(Fluids.EMPTY)`
 //! asymmetry) but are not yet carried by the `UpgradeData` port.
@@ -22,7 +23,7 @@
 //! `reconstruct_block_entities` resolves them per Paper's LEVELCHUNK/proto
 //! branch ordering. The top-level parser still defers live materialization.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::block::Block;
 use crate::chunk::chunk_access::{ChunkAccess, get_pos_from_tag};
@@ -46,7 +47,7 @@ use rivet_registry::Identifier;
 use rivet_registry::block_entity_type::BlockEntityType;
 use rivet_registry::core::{BlockPos, ChunkPos};
 use rivet_registry::fluid_id::FluidId;
-use rivet_serialization::codec;
+use rivet_serialization::codec::{self, Codec};
 
 pub const HEIGHTMAPS_TAG: &str = "Heightmaps";
 pub const IS_LIGHT_ON_TAG: &str = "isLightOn";
@@ -287,6 +288,8 @@ pub enum SerializableChunkDataError {
     UnsupportedChunkStatus { status: ChunkStatus },
     #[error("UpgradeData field {field} requires SavedTick support")]
     UnsupportedUpgradeData { field: &'static str },
+    #[error("non-empty {field} requires tick reconstruction")]
+    UnsupportedTicks { field: &'static str },
     #[error("blending_data requires blending reconstruction (#336)")]
     UnsupportedBlendingData,
     #[error("non-empty entities require post-load entity reconstruction")]
@@ -426,7 +429,8 @@ impl SerializableChunkData {
         let heightmaps = parse_heightmaps(chunk_data, status.heightmaps_after());
         let raw_block_ticks = chunk_data.get_list_or_empty(BLOCK_TICKS_TAG);
         let raw_fluid_ticks = chunk_data.get_list_or_empty(FLUID_TICKS_TAG);
-        let (stored_block_ticks, stored_fluid_ticks) = decode_stored_ticks(chunk_data, stored_pos);
+        let (stored_block_ticks, stored_fluid_ticks) =
+            decode_stored_ticks(chunk_data, stored_pos, status);
         let post_processing_sections = parse_post_processing(chunk_data);
         let entities = compound_entries(chunk_data.get_list("entities"));
         let block_entities = compound_entries(chunk_data.get_list("block_entities"));
@@ -522,12 +526,16 @@ impl SerializableChunkData {
     }
     /// The typed, per-chunk-filtered stored block ticks (`ChunkAccess.PackedTicks
     /// .blocks()`), faithfully decoded through `SavedTick.codec(...).listOf()`.
-    /// Carried as stored values only — `construct_full` does not install them.
+    /// Carried as stored values only — `construct_full` does not install them,
+    /// and a FULL chunk with a non-empty stored list is rejected by
+    /// [`Self::validate_full_capabilities`] with `UnsupportedTicks` until the
+    /// tick-execution slice lands an installer.
     pub fn stored_block_ticks(&self) -> &[SavedTick<Block>] {
         &self.stored_block_ticks
     }
     /// The typed, per-chunk-filtered stored fluid ticks (`ChunkAccess.PackedTicks
-    /// .fluids()`). Carried as stored values only.
+    /// .fluids()`). Carried as stored values only; same boundary as
+    /// [`Self::stored_block_ticks`].
     pub fn stored_fluid_ticks(&self) -> &[SavedTick<FluidId>] {
         &self.stored_fluid_ticks
     }
@@ -654,11 +662,22 @@ impl SerializableChunkData {
                 field: "neighbor_fluid_ticks",
             });
         }
-        // Stored `block_ticks`/`fluid_ticks` are no longer a construction
-        // boundary: they decode into typed stored values on parse and are
-        // carried (never executed/scheduled). `construct_full` deliberately does
-        // not install them into the chunk — the `LevelChunkTicks`/`ProtoChunkTicks`
-        // containers defer with the tick-execution slice.
+        // Stored `block_ticks`/`fluid_ticks` decode into typed stored values on
+        // parse and are carried, but `construct_full` deliberately does not
+        // install them into the chunk — the `LevelChunkTicks`/`ProtoChunkTicks`
+        // containers defer with the tick-execution slice. Until that installer
+        // lands, a FULL chunk carrying non-empty stored ticks is not fully
+        // capable and stays rejected here.
+        if !self.stored_block_ticks.is_empty() {
+            return Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "block_ticks",
+            });
+        }
+        if !self.stored_fluid_ticks.is_empty() {
+            return Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "fluid_ticks",
+            });
+        }
         // `below_zero_retrogen` is deliberately not checked here: Paper's
         // LEVELCHUNK branch of `SerializableChunkData.read` never consults it
         // (only the proto branch does), so a FULL chunk carrying one loads as-is.
@@ -769,6 +788,16 @@ fn decode_saved_tick_position(tick: &CompoundTag) -> Option<ChunkPos> {
     Some(ChunkPos::new(x >> 4, z >> 4))
 }
 
+/// Paper's cached top-level tick-list codecs (`BLOCK_TICKS_CODEC` /
+/// `FLUID_TICKS_CODEC` are `static final` in `SerializableChunkData`).
+///
+/// The graphs are immutable and ops-pinned to `NbtOps`, so they are built once
+/// and shared across every chunk parse.
+static BLOCK_TICK_LIST_CODEC: LazyLock<Arc<dyn Codec<Vec<SavedTick<Block>>, NbtOps>>> =
+    LazyLock::new(|| codec::list(saved_tick_codec::<Block, NbtOps>(block_by_name_codec())));
+static FLUID_TICK_LIST_CODEC: LazyLock<Arc<dyn Codec<Vec<SavedTick<FluidId>>, NbtOps>>> =
+    LazyLock::new(|| codec::list(saved_tick_codec::<FluidId, NbtOps>(fluid_by_name_codec())));
+
 /// Decode Paper's top-level stored-tick lists into typed, per-chunk-filtered
 /// values (#370).
 ///
@@ -778,19 +807,28 @@ fn decode_saved_tick_position(tick: &CompoundTag) -> Option<ChunkPos> {
 /// whole list through `SavedTick.codec(byNameCodec).listOf()` (a `ListCodec`
 /// that retains successful siblings and a partial on element errors), then
 /// the filter keeps only ticks packing to the stored chunk. The port uses the
-/// same faithful codec factory over `NbtOps` (via `read_quiet`, the no-log
-/// `read`), then `filter_tick_list_for_chunk`.
+/// same faithful codec factory over `NbtOps` through `CompoundTag::read`, so
+/// unknown/malformed element errors keep flowing through the codec-result
+/// partial path (Paper's `LOGGER.error("Failed to read field ...")`), then
+/// `filter_tick_list_for_chunk`.
+///
+/// The typed decode is only meaningful for a FULL chunk: every other status is
+/// rejected at the `UnsupportedChunkStatus` capability boundary before ticks
+/// are consulted, so decoding them would be wasted work and would not claim
+/// tick support on proto paths.
 fn decode_stored_ticks(
     chunk_data: &CompoundTag,
     stored_pos: ChunkPos,
+    status: ChunkStatus,
 ) -> (Vec<SavedTick<Block>>, Vec<SavedTick<FluidId>>) {
-    let block_codec = codec::list(saved_tick_codec::<Block, NbtOps>(block_by_name_codec()));
-    let fluid_codec = codec::list(saved_tick_codec::<FluidId, NbtOps>(fluid_by_name_codec()));
+    if status != ChunkStatus::Full {
+        return (Vec::new(), Vec::new());
+    }
     let blocks = chunk_data
-        .read_quiet(BLOCK_TICKS_TAG, &block_codec)
+        .read(BLOCK_TICKS_TAG, &BLOCK_TICK_LIST_CODEC)
         .unwrap_or_default();
     let fluids = chunk_data
-        .read_quiet(FLUID_TICKS_TAG, &fluid_codec)
+        .read(FLUID_TICKS_TAG, &FLUID_TICK_LIST_CODEC)
         .unwrap_or_default();
     (
         filter_tick_list_for_chunk(&blocks, &stored_pos),
@@ -2034,8 +2072,10 @@ mod tests {
             );
         }
 
-        // Stored block/fluid tick lists are no longer an unsupported surface —
-        // they decode into typed stored values and construct fine.
+        // Stored block/fluid tick lists decode into typed stored values and are
+        // carried, but a FULL chunk carrying a non-empty stored list is not yet
+        // fully capable: `construct_full` has no installer, so the typed
+        // `UnsupportedTicks` boundary stays until the tick-execution slice.
         let mut tick_chunk = top_level("minecraft:full");
         tick_chunk.put(
             "block_ticks".into(),
@@ -2044,7 +2084,12 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &tick_chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(
+            parsed.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "block_ticks"
+            })
+        );
         assert_eq!(parsed.stored_block_ticks().len(), 1);
         let parsed_ticks = parsed.stored_block_ticks()[0];
         assert_eq!(parsed_ticks.pos, BlockPos::new(0, 0, 0));
@@ -2062,7 +2107,12 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &tick_chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(
+            parsed.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "fluid_ticks"
+            })
+        );
         assert_eq!(parsed.stored_fluid_ticks().len(), 1);
         assert_eq!(
             parsed.stored_fluid_ticks()[0].r#type,
@@ -2133,7 +2183,7 @@ mod tests {
         );
         chunk.put(
             "fluid_ticks".into(),
-            Tag::List(ListTag::with_list(vec![Tag::Compound(fluid_tick(0, 0))])),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
         );
         let mut upgrade = CompoundTag::new();
         upgrade.put(
@@ -2147,6 +2197,10 @@ mod tests {
             .unwrap();
         assert_eq!(parsed.raw_block_ticks().list.len(), 1);
         assert_eq!(parsed.raw_fluid_ticks().list.len(), 1);
+        // Both tick lists are entirely malformed, so the ListCodec drops every
+        // element (Paper logs each) and the chunk carries no stored ticks.
+        assert!(parsed.stored_block_ticks().is_empty());
+        assert!(parsed.stored_fluid_ticks().is_empty());
         assert!(parsed.raw_blending_data().is_some());
         assert!(parsed.raw_below_zero_retrogen().is_some());
         assert!(parsed.raw_upgrade_data().is_some());
@@ -2160,7 +2214,8 @@ mod tests {
         // A `ListCodec` retains only successful siblings; an empty compound
         // (missing `i`) and an unknown/malformed id fail their element, and the
         // valid sibling survives. The typed stored list carries exactly that
-        // valid tick (filtered to the stored chunk (0,0)).
+        // valid tick (filtered to the stored chunk (0,0)) — and, being a
+        // non-empty stored list, keeps the FULL chunk behind `UnsupportedTicks`.
         let mut chunk = top_level("minecraft:full");
         chunk.put(
             "block_ticks".into(),
@@ -2173,7 +2228,12 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(
+            parsed.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "block_ticks"
+            })
+        );
         assert_eq!(parsed.stored_block_ticks().len(), 1);
         assert_eq!(parsed.stored_block_ticks()[0].pos, BlockPos::new(0, 0, 0));
         assert_eq!(parsed.stored_block_ticks()[0].delay, 1);
@@ -2195,7 +2255,12 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(
+            parsed.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "fluid_ticks"
+            })
+        );
         assert_eq!(parsed.stored_fluid_ticks().len(), 1);
         assert_eq!(
             parsed.stored_fluid_ticks()[0].r#type,
@@ -2272,7 +2337,12 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(
+            parsed.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "block_ticks"
+            })
+        );
         assert_eq!(parsed.stored_block_ticks().len(), 1);
         assert_eq!(
             parsed.stored_block_ticks()[0].r#type,
@@ -2290,7 +2360,12 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(
+            parsed.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "fluid_ticks"
+            })
+        );
         assert_eq!(parsed.stored_fluid_ticks().len(), 1);
         assert_eq!(
             parsed.stored_fluid_ticks()[0].r#type,
@@ -2344,9 +2419,11 @@ mod tests {
     /// through the real `SerializableChunkData::parse` path into exact typed
     /// values (positions, delay, priority) — the full stored-value surface, not
     /// the synthetic JsonOps round-trip the codec unit tests cover. This is the
-    /// value/carry layer only: the parse carries the typed ticks as stored
-    /// values and nothing schedules or executes them (#370 remains open for the
-    /// deferred `LevelChunkTicks`/`ProtoChunkTicks` containers).
+    /// decode/carry layer only: the parse carries the typed ticks as stored
+    /// values, nothing schedules or executes them, and the chunk therefore
+    /// stays rejected by the full-capability boundary with `UnsupportedTicks`
+    /// until tick installation lands (#370 remains open for the deferred
+    /// `LevelChunkTicks`/`ProtoChunkTicks` containers).
     #[test]
     fn real_26_2_nether_fixture_decodes_stored_fluid_ticks_exactly() {
         let fixture = named_fixture("the_nether", "0.0", "0.0.nbt");
@@ -2360,7 +2437,15 @@ mod tests {
             .unwrap()
             .expect("nether fixture has a Status");
         assert_eq!(parsed.stored_pos(), ChunkPos::new(0, 0));
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        // The chunk decodes its 13 stored lava ticks faithfully, but because no
+        // installer consumes them yet, it is not full-capable: the typed
+        // `UnsupportedTicks` boundary stays until tick installation lands.
+        assert_eq!(
+            parsed.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "fluid_ticks"
+            })
+        );
         // The nether chunk stores fluid ticks only; its `block_ticks` list is
         // empty.
         assert!(parsed.stored_block_ticks().is_empty());
@@ -2384,6 +2469,135 @@ mod tests {
             SavedTick::new(lava, BlockPos::new(5, 51, 6), 0, normal),
         ];
         assert_eq!(parsed.stored_fluid_ticks(), expected.as_slice());
+    }
+
+    /// The public full-capability surface: a FULL chunk carrying decoded stored
+    /// ticks is not falsely full-capable. The typed values decode and are
+    /// carried, but `validate_full_capabilities` rejects until a downstream
+    /// installer/carry contract consumes them (#370).
+    #[test]
+    fn stored_tick_chunks_decode_typed_but_fail_full_capability_validation() {
+        let height = height_accessor::create(-64, 384);
+
+        let mut chunk = top_level("minecraft:full");
+        chunk.put(
+            "block_ticks".into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(block_tick(0, 0))])),
+        );
+        chunk.put(
+            "fluid_ticks".into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(fluid_tick(0, 0))])),
+        );
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.stored_block_ticks().len(), 1);
+        assert_eq!(
+            parsed.stored_block_ticks()[0].r#type,
+            Block::from_name("minecraft:stone").unwrap()
+        );
+        assert_eq!(parsed.stored_fluid_ticks().len(), 1);
+        assert_eq!(
+            parsed.validate_full_capabilities(),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "block_ticks"
+            })
+        );
+
+        let mut chunk = top_level("minecraft:full");
+        chunk.put(
+            "fluid_ticks".into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(fluid_tick(0, 0))])),
+        );
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert!(parsed.stored_block_ticks().is_empty());
+        assert_eq!(parsed.stored_fluid_ticks().len(), 1);
+        assert_eq!(
+            parsed.validate_full_capabilities(),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "fluid_ticks"
+            })
+        );
+    }
+
+    /// Malformed tick entries are not swallowed into stored values: the
+    /// `ListCodec` drops each failing element (Paper's `read` observes the
+    /// error), keeps successful siblings, and the capability boundary follows
+    /// the survivors.
+    #[test]
+    fn malformed_tick_entries_are_dropped_and_boundary_follows_survivors() {
+        let height = height_accessor::create(-64, 384);
+
+        // A malformed element alongside a valid one: the valid tick survives,
+        // so the chunk carries a stored tick and is rejected.
+        let mut chunk = top_level("minecraft:full");
+        chunk.put(
+            "block_ticks".into(),
+            Tag::List(ListTag::with_list(vec![
+                Tag::Compound(CompoundTag::new()),
+                Tag::Compound(saved_tick_with_id("not valid", 0, 0)),
+                Tag::Compound(block_tick(0, 0)),
+            ])),
+        );
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.stored_block_ticks().len(), 1);
+        assert_eq!(
+            parsed.validate_full_capabilities(),
+            Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "block_ticks"
+            })
+        );
+
+        // An all-malformed list decodes to an empty partial (Paper drops the
+        // elements after logging), so the chunk carries no stored ticks and is
+        // full-capable.
+        let mut chunk = top_level("minecraft:full");
+        chunk.put(
+            "block_ticks".into(),
+            Tag::List(ListTag::with_list(vec![
+                Tag::Compound(CompoundTag::new()),
+                Tag::Compound(saved_tick_with_id("not valid", 0, 0)),
+            ])),
+        );
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert!(parsed.stored_block_ticks().is_empty());
+        assert_eq!(parsed.validate_full_capabilities(), Ok(()));
+    }
+
+    /// Proto paths never claim tick support: the typed decode is skipped for
+    /// statuses that cannot be FULL-capable, so the stored lists stay empty and
+    /// the capability boundary reports the status, never ticks.
+    #[test]
+    fn proto_paths_do_not_decode_or_claim_tick_support() {
+        let height = height_accessor::create(-64, 384);
+        for status in ["minecraft:empty", "minecraft:noise", "minecraft:light"] {
+            let mut chunk = top_level(status);
+            chunk.put(
+                "block_ticks".into(),
+                Tag::List(ListTag::with_list(vec![Tag::Compound(block_tick(0, 0))])),
+            );
+            chunk.put(
+                "fluid_ticks".into(),
+                Tag::List(ListTag::with_list(vec![Tag::Compound(fluid_tick(0, 0))])),
+            );
+            let parsed = SerializableChunkData::parse(height, &chunk)
+                .unwrap()
+                .unwrap();
+            assert!(parsed.stored_block_ticks().is_empty(), "{status}");
+            assert!(parsed.stored_fluid_ticks().is_empty(), "{status}");
+            assert_eq!(
+                parsed.validate_full_capabilities(),
+                Err(SerializableChunkDataError::UnsupportedChunkStatus {
+                    status: ChunkStatus::from_identifier(status).unwrap()
+                })
+            );
+        }
     }
 
     #[test]
