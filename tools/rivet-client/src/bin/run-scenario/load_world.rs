@@ -9,9 +9,9 @@
 //! - copying it beneath a fresh private disposable directory ([`TempWorld`]),
 //!   refusing symlinks and retaining a directory handle so pathname replacement
 //!   cannot redirect the server to the source;
-//! - asserting the copy is byte-faithful to the source and that the source is
-//!   not mutated between the pre-run snapshot and the post-run snapshot — the
-//!   explicit no-source-mutation guarantee;
+//! - asserting the copy is byte-faithful to the source and that two non-atomic
+//!   pre/post source snapshots match. This detects differences visible in
+//!   those snapshots; it cannot prove that no transient write occurred;
 //!
 //! It deliberately does NOT parse `level.dat`, check `DataVersion`, or read
 //! Anvil region files — those belong to #323 (level validation) and #231
@@ -20,6 +20,7 @@
 //! will one day drive. The server world-path launch probe lives in [`server`]
 //! (`crate::server`), which owns the launch interface contract.
 
+use std::ffi::{CStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
@@ -28,17 +29,16 @@ use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
-use std::os::fd::OwnedFd;
-#[cfg(target_vendor = "apple")]
-use std::os::unix::ffi::OsStringExt;
+use std::os::fd::{AsFd, OwnedFd};
 #[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt;
 
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
 
 #[cfg(unix)]
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use rustix::io::{FdFlags, fcntl_setfd};
 
@@ -140,21 +140,6 @@ fn hash_reader(reader: impl Read) -> io::Result<[u8; 32]> {
     Ok(hasher.finalize().into())
 }
 
-fn hash_file(path: &Path) -> Result<[u8; 32], Error> {
-    let file = fs::File::open(path).map_err(|error| {
-        Error::Io(io::Error::new(
-            error.kind(),
-            format!("open {} for fingerprinting: {error}", path.display()),
-        ))
-    })?;
-    hash_reader(file).map_err(|error| {
-        Error::Io(io::Error::new(
-            error.kind(),
-            format!("read {} for fingerprinting: {error}", path.display()),
-        ))
-    })
-}
-
 /// The type and, for a file, contents of one entry in a tree fingerprint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryFingerprint {
@@ -172,74 +157,183 @@ pub type TreeEntry = (PathBuf, EntryFingerprint);
 /// Symlinks are refused: a tree walk that follows a link could silently read
 /// content outside the tree (and, for the copy, could alias the source), so the
 /// harness fails loudly instead.
-pub fn hash_tree(root: &Path) -> Result<Vec<TreeEntry>, Error> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<TreeEntry>) -> Result<(), Error> {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let meta = fs::symlink_metadata(&path)?;
-            if meta.file_type().is_symlink() {
-                return Err(Error::Gate(format!(
-                    "refusing to follow symlink {} under {}",
-                    path.display(),
-                    root.display()
-                )));
+#[cfg(unix)]
+fn open_child(dir: &impl AsFd, name: &CStr, flags: OFlags) -> io::Result<OwnedFd> {
+    let flags = flags | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    return rustix::fs::openat2(
+        dir,
+        name,
+        flags,
+        Mode::empty(),
+        rustix::fs::ResolveFlags::BENEATH
+            | rustix::fs::ResolveFlags::NO_SYMLINKS
+            | rustix::fs::ResolveFlags::NO_MAGICLINKS
+            | rustix::fs::ResolveFlags::NO_XDEV,
+    )
+    .map_err(io::Error::from);
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    rustix::fs::openat(dir, name, flags, Mode::empty()).map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn entry_path(parent: &Path, name: &CStr) -> PathBuf {
+    parent.join(OsString::from_vec(name.to_bytes().to_vec()))
+}
+
+#[cfg(unix)]
+fn file_type(fd: &impl AsFd) -> io::Result<FileType> {
+    rustix::fs::fstat(fd)
+        .map(|stat| FileType::from_raw_mode(stat.st_mode))
+        .map_err(io::Error::from)
+}
+
+#[cfg(unix)]
+fn open_root(path: &Path) -> Result<OwnedFd, Error> {
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    if file_type(&fd)? != FileType::Directory {
+        return Err(Error::Gate(format!(
+            "{} must be a concrete directory",
+            path.display()
+        )));
+    }
+    Ok(fd)
+}
+
+#[cfg(unix)]
+fn hash_tree_fd(root: &OwnedFd) -> Result<Vec<TreeEntry>, Error> {
+    fn walk(dir: &OwnedFd, relative: &Path, out: &mut Vec<TreeEntry>) -> Result<(), Error> {
+        for entry in Dir::read_from(dir).map_err(io::Error::from)? {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = entry.file_name();
+            if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                continue;
             }
-            let rel = path
-                .strip_prefix(root)
-                .map(Path::to_path_buf)
-                .expect("walked paths stay under root");
-            if meta.is_dir() {
-                out.push((rel, EntryFingerprint::Directory));
-                walk(root, &path, out)?;
-            } else if meta.is_file() {
-                out.push((rel, EntryFingerprint::File(hash_file(&path)?)));
-            } else {
-                return Err(Error::Gate(format!(
-                    "refusing non-regular filesystem entry {} under {}",
-                    path.display(),
-                    root.display()
-                )));
+            let rel = entry_path(relative, name);
+            let fd = open_child(dir, name, OFlags::RDONLY).map_err(|error| {
+                Error::Gate(format!(
+                    "refusing entry {} that could not be opened without following links: {error}",
+                    rel.display()
+                ))
+            })?;
+            match file_type(&fd)? {
+                FileType::Directory => {
+                    out.push((rel.clone(), EntryFingerprint::Directory));
+                    walk(&fd, &rel, out)?;
+                }
+                FileType::RegularFile => {
+                    let hash = hash_reader(fs::File::from(fd)).map_err(|error| {
+                        Error::Io(io::Error::new(
+                            error.kind(),
+                            format!("read {} for fingerprinting: {error}", rel.display()),
+                        ))
+                    })?;
+                    out.push((rel, EntryFingerprint::File(hash)));
+                }
+                _ => {
+                    return Err(Error::Gate(format!(
+                        "refusing non-regular filesystem entry {}",
+                        rel.display()
+                    )));
+                }
             }
         }
         Ok(())
     }
+
     let mut out = Vec::new();
-    walk(root, root, &mut out)?;
+    walk(root, Path::new(""), &mut out)?;
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+pub fn hash_tree(root: &Path) -> Result<Vec<TreeEntry>, Error> {
+    #[cfg(not(unix))]
+    return Err(Error::Gate(
+        "the loaded-world safety boundary requires Unix directory descriptors".to_owned(),
+    ));
+    #[cfg(unix)]
+    hash_tree_fd(&open_root(root)?)
 }
 
 /// Recursively copy `src` into `dst`, refusing symlinks so the copy is a full
 /// materialized mirror and can never alias the source (a link farm would let a
 /// write through the "copy" reach the original save).
-fn copy_tree(src: &Path, dst: &Path) -> Result<(), Error> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let meta = fs::symlink_metadata(&from)?;
-        if meta.file_type().is_symlink() {
-            return Err(Error::Gate(format!(
-                "refusing to copy symlink {} — the read-only copy must be a full materialized \
-                 mirror, not a link into the source",
-                from.display()
-            )));
+#[cfg(unix)]
+fn copy_tree_fd(src: &OwnedFd, dst: &OwnedFd, relative: &Path) -> Result<(), Error> {
+    for entry in Dir::read_from(src).map_err(io::Error::from)? {
+        let entry = entry.map_err(io::Error::from)?;
+        let name = entry.file_name();
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
         }
-        let to = dst.join(entry.file_name());
-        if meta.is_dir() {
-            fs::create_dir_all(&to)?;
-            copy_tree(&from, &to)?;
-        } else if meta.is_file() {
-            fs::copy(&from, &to)?;
-        } else {
-            return Err(Error::Gate(format!(
-                "refusing non-regular filesystem entry {} while copying the source world",
-                from.display()
-            )));
+        let rel = entry_path(relative, name);
+        let source = open_child(src, name, OFlags::RDONLY).map_err(|error| {
+            Error::Gate(format!(
+                "refusing to copy entry {} without following links: {error}",
+                rel.display()
+            ))
+        })?;
+        match file_type(&source)? {
+            FileType::Directory => {
+                rustix::fs::mkdirat(dst, name, Mode::from_raw_mode(0o700))
+                    .map_err(io::Error::from)?;
+                let destination = open_child(dst, name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+                copy_tree_fd(&source, &destination, &rel)?;
+            }
+            FileType::RegularFile => {
+                let destination = rustix::fs::openat(
+                    dst,
+                    name,
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::from_raw_mode(0o600),
+                )
+                .map_err(io::Error::from)?;
+                io::copy(
+                    &mut fs::File::from(source),
+                    &mut fs::File::from(destination),
+                )
+                .map_err(|error| {
+                    Error::Io(io::Error::new(
+                        error.kind(),
+                        format!("copy {}: {error}", rel.display()),
+                    ))
+                })?;
+            }
+            _ => {
+                return Err(Error::Gate(format!(
+                    "refusing non-regular filesystem entry {} while copying the source world",
+                    rel.display()
+                )));
+            }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), Error> {
+    #[cfg(not(unix))]
+    return Err(Error::Gate(
+        "the loaded-world safety boundary requires Unix directory descriptors".to_owned(),
+    ));
+    #[cfg(unix)]
+    {
+        let source = open_root(src)?;
+        fs::create_dir(dst)?;
+        let destination = open_root(dst)?;
+        copy_tree_fd(&source, &destination, Path::new(""))
+    }
 }
 
 /// The copy must be byte-faithful to the source: the same relative files with
@@ -275,11 +369,9 @@ pub fn assert_copy_equals_source(source: &[TreeEntry], copy: &[TreeEntry]) -> Re
     Ok(())
 }
 
-/// The source world must be byte-identical before and after the run. This is
-/// the explicit no-source-mutation guarantee: the harness reads the source
-/// (to copy and to hash), and anything that writes the source — the harness
-/// itself, a server booted against it, or a concurrently-running client — fails
-/// the run loudly rather than silently proceeding on a mutated save.
+/// The source world must be byte-identical in the snapshots taken before and
+/// after the run. A difference visible in either non-atomic snapshot fails the
+/// run loudly; a transient modify-and-restore event may not be observable.
 pub fn assert_source_unchanged(before: &[TreeEntry], after: &[TreeEntry]) -> Result<(), Error> {
     if before == after {
         return Ok(());
@@ -311,16 +403,46 @@ pub fn assert_source_unchanged(before: &[TreeEntry], after: &[TreeEntry]) -> Res
 /// child shutdown. Linux fingerprints and launches through that descriptor;
 /// other Unix platforms retain it as ownership evidence but use the private
 /// path because their fd namespace is not portably directory-traversable.
-/// [`TempWorld::cleanup`] (or [`Drop`]) removes the unique parent — the
-/// file-system analog of the shared child-process kill-on-drop.
+/// [`TempWorld::cleanup`] (or [`Drop`]) removes the unique parent only while
+/// its retained storage entry still names the exact device/inode created by
+/// this instance. Path substitution therefore fails closed and leaks the
+/// owned tree instead of recursively deleting an attacker-selected substitute.
 #[derive(Debug)]
 pub struct TempWorld {
     path: PathBuf,
-    temp_dir: Option<TempDir>,
     #[cfg(unix)]
-    _storage_dir: OwnedFd,
+    storage_dir: OwnedFd,
     #[cfg(unix)]
-    _world_dir: OwnedFd,
+    parent_dir: OwnedFd,
+    #[cfg(unix)]
+    parent_name: OsString,
+    #[cfg(unix)]
+    parent_identity: Identity,
+    #[cfg(unix)]
+    world_dir: OwnedFd,
+    active: bool,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Identity {
+    device: rustix::fs::Dev,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn identity(stat: &rustix::fs::Stat) -> Identity {
+    Identity {
+        device: stat.st_dev,
+        inode: stat.st_ino,
+    }
+}
+
+#[cfg(unix)]
+fn fd_identity(fd: &impl AsFd) -> io::Result<Identity> {
+    rustix::fs::fstat(fd)
+        .map(|stat| identity(&stat))
+        .map_err(io::Error::from)
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -354,6 +476,156 @@ fn reject_aliasing(source: &Path, destination: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Resolve a not-yet-created storage path through its nearest existing
+/// ancestor, then reject equality and containment in either direction. This
+/// function is deliberately mutation-free so callers can run it before
+/// `create_dir_all`.
+pub fn validate_prospective_storage(source: &Path, storage: &Path) -> Result<(), Error> {
+    if fs::symlink_metadata(source)?.file_type().is_symlink() {
+        return Err(Error::Gate(format!(
+            "source world {} is a symlink; the harness requires a concrete directory",
+            source.display()
+        )));
+    }
+    let source_abs = source.canonicalize().map_err(|error| {
+        Error::Gate(format!(
+            "source world {} is not readable: {error}",
+            source.display()
+        ))
+    })?;
+
+    let mut existing = storage;
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let name = existing.file_name().ok_or_else(|| {
+            Error::Gate(format!(
+                "temp-world storage {} has no existing ancestor",
+                storage.display()
+            ))
+        })?;
+        missing.push(name.to_owned());
+        existing = existing.parent().ok_or_else(|| {
+            Error::Gate(format!(
+                "temp-world storage {} has no existing ancestor",
+                storage.display()
+            ))
+        })?;
+    }
+    let mut prospective = existing.canonicalize().map_err(|error| {
+        Error::Gate(format!(
+            "nearest existing ancestor {} of temp-world storage is not readable: {error}",
+            existing.display()
+        ))
+    })?;
+    for component in missing.iter().rev() {
+        prospective.push(component);
+    }
+    reject_aliasing(&source_abs, &prospective)
+}
+
+#[cfg(unix)]
+fn random_parent_name() -> Result<OsString, Error> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|error| Error::Gate(format!("secure random name generation failed: {error}")))?;
+    let mut name = String::with_capacity(5 + random.len() * 2);
+    name.push_str("copy-");
+    for byte in random {
+        use fmt::Write as _;
+        write!(&mut name, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(name.into())
+}
+
+#[cfg(unix)]
+fn create_private_parent(storage: &OwnedFd) -> Result<(OsString, OwnedFd), Error> {
+    for _ in 0..128 {
+        let name = random_parent_name()?;
+        match rustix::fs::mkdirat(storage, &name, Mode::from_raw_mode(0o700)) {
+            Ok(()) => {
+                // Open the newly-created single component relative to storage;
+                // never resolve it again through the storage pathname.
+                let c_name = std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| {
+                    Error::Gate("generated private-directory name contained NUL".to_owned())
+                })?;
+                let fd = open_child(storage, &c_name, OFlags::RDONLY | OFlags::DIRECTORY)?;
+                return Ok((name, fd));
+            }
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(error) => return Err(io::Error::from(error).into()),
+        }
+    }
+    Err(Error::Gate(
+        "could not allocate a unique private temp-world parent".to_owned(),
+    ))
+}
+
+#[cfg(unix)]
+fn entry_identity(dir: &OwnedFd, name: &CStr) -> io::Result<(Identity, FileType)> {
+    let stat = rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+    Ok((identity(&stat), FileType::from_raw_mode(stat.st_mode)))
+}
+
+#[cfg(unix)]
+fn remove_owned_tree(dir: &OwnedFd, relative: &Path) -> Result<(), Error> {
+    let names = Dir::read_from(dir)
+        .map_err(io::Error::from)?
+        .filter_map(|entry| match entry {
+            Ok(entry)
+                if entry.file_name().to_bytes() != b"."
+                    && entry.file_name().to_bytes() != b".." =>
+            {
+                Some(Ok(entry.file_name().to_owned()))
+            }
+            Ok(_) => None,
+            Err(error) => Some(Err(io::Error::from(error))),
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
+    for name in names {
+        let rel = entry_path(relative, &name);
+        let child = open_child(dir, &name, OFlags::RDONLY).map_err(|error| {
+            Error::Gate(format!(
+                "cleanup refused entry {} that changed or could not be opened safely: {error}",
+                rel.display()
+            ))
+        })?;
+        let expected = fd_identity(&child)?;
+        let kind = file_type(&child)?;
+        if kind == FileType::Directory {
+            remove_owned_tree(&child, &rel)?;
+        } else if kind != FileType::RegularFile {
+            return Err(Error::Gate(format!(
+                "cleanup refused non-regular entry {}; leaking the private tree",
+                rel.display()
+            )));
+        }
+        let (visible, visible_kind) = entry_identity(dir, &name).map_err(|error| {
+            Error::Gate(format!(
+                "cleanup could not revalidate {}: {error}; leaking the private tree",
+                rel.display()
+            ))
+        })?;
+        if visible != expected || visible_kind != kind {
+            return Err(Error::Gate(format!(
+                "cleanup identity changed for {}; leaking the private tree",
+                rel.display()
+            )));
+        }
+        rustix::fs::unlinkat(
+            dir,
+            &name,
+            if kind == FileType::Directory {
+                AtFlags::REMOVEDIR
+            } else {
+                AtFlags::empty()
+            },
+        )
+        .map_err(io::Error::from)?;
+    }
+    Ok(())
+}
+
 impl TempWorld {
     /// Create a fresh disposable copy of `source` beneath `storage`.
     ///
@@ -369,19 +641,7 @@ impl TempWorld {
 
         #[cfg(unix)]
         {
-            if fs::symlink_metadata(source)?.file_type().is_symlink() {
-                return Err(Error::Gate(format!(
-                    "source world {} is a symlink; the harness requires the concrete launcher save \
-                 directory so it can prove the server never receives an alias of the source",
-                    source.display()
-                )));
-            }
-            let source_abs = source.canonicalize().map_err(|e| {
-                Error::Gate(format!(
-                    "source world {} is not readable: {e}",
-                    source.display()
-                ))
-            })?;
+            validate_prospective_storage(source, storage)?;
             let storage_meta = fs::symlink_metadata(storage).map_err(|e| {
                 Error::Gate(format!(
                     "temp-world storage {} is not accessible: {e}",
@@ -406,41 +666,43 @@ impl TempWorld {
                     storage.display()
                 ))
             })?;
-            reject_aliasing(&source_abs, &storage_abs)?;
-
-            let temp_dir = tempfile::Builder::new()
-                .prefix("copy-")
-                .permissions(fs::Permissions::from_mode(0o700))
-                .tempdir_in(&storage_abs)?;
-            let world_path = temp_dir.path().join("world");
-            if let Err(error) = copy_tree(source, &world_path) {
-                if let Err(cleanup_error) = temp_dir.close() {
+            let source_dir = open_root(source)?;
+            let opened_source = opened_directory_path(&source_dir, source).map_err(|error| {
+                Error::Gate(format!(
+                    "opened source world {} cannot be resolved: {error}",
+                    source.display()
+                ))
+            })?;
+            reject_aliasing(&opened_source, &storage_abs)?;
+            let (parent_name, parent_dir) = create_private_parent(&storage_dir)?;
+            let parent_identity = fd_identity(&parent_dir)?;
+            rustix::fs::mkdirat(&parent_dir, "world", Mode::from_raw_mode(0o700))
+                .map_err(io::Error::from)?;
+            let world_dir = open_child(&parent_dir, c"world", OFlags::RDONLY | OFlags::DIRECTORY)?;
+            let world_path = storage_abs.join(&parent_name).join("world");
+            let mut temp = Self {
+                path: world_path,
+                storage_dir,
+                parent_dir,
+                parent_name,
+                parent_identity,
+                world_dir,
+                active: true,
+            };
+            if let Err(error) = copy_tree_fd(&source_dir, &temp.world_dir, Path::new("")) {
+                if let Err(cleanup_error) = temp.cleanup() {
                     return Err(Error::Gate(format!(
-                        "world copy failed ({error}) and partial-copy cleanup beneath {} also failed: \
-                     {cleanup_error}",
-                        storage.display()
+                        "world copy failed ({error}) and identity-safe partial-copy cleanup also failed: {cleanup_error}"
                     )));
                 }
                 return Err(error);
             }
-            let world_dir = rustix::fs::open(
-                &world_path,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(io::Error::from)?;
             // Linux resolves /proc/self/fd/<n> in the child. Clearing CLOEXEC
             // intentionally transfers this one capability across exec;
             // TempWorld retains ownership in the harness until the child exits.
             #[cfg(any(target_os = "linux", target_os = "android"))]
-            fcntl_setfd(&world_dir, FdFlags::empty()).map_err(io::Error::from)?;
-            let path = world_path.canonicalize()?;
-            Ok(Self {
-                path,
-                temp_dir: Some(temp_dir),
-                _storage_dir: storage_dir,
-                _world_dir: world_dir,
-            })
+            fcntl_setfd(&temp.world_dir, FdFlags::empty()).map_err(io::Error::from)?;
+            Ok(temp)
         }
     }
 
@@ -454,7 +716,7 @@ impl TempWorld {
     /// private pathname documented in the module threat model.
     pub fn server_path(&self) -> PathBuf {
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        return descriptor_path(&self._world_dir);
+        return descriptor_path(&self.world_dir);
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         self.path.clone()
     }
@@ -463,17 +725,55 @@ impl TempWorld {
     /// is asserted on identical fingerprints.
     pub fn hash_tree(&self) -> Result<Vec<TreeEntry>, Error> {
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        return hash_tree(&descriptor_path(&self._world_dir));
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        hash_tree(&self.path)
+        return hash_tree_fd(&self.world_dir);
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+        hash_tree_fd(&self.world_dir)
     }
 
     /// Deterministically remove the copy. Idempotent.
     pub fn cleanup(&mut self) -> Result<(), Error> {
-        if let Some(temp_dir) = self.temp_dir.take() {
-            temp_dir.close()?;
+        if !self.active {
+            return Ok(());
         }
+        #[cfg(unix)]
+        {
+            let c_name = std::ffi::CString::new(self.parent_name.as_encoded_bytes())
+                .map_err(|_| Error::Gate("private-directory name contained NUL".to_owned()))?;
+            let (visible, kind) = entry_identity(&self.storage_dir, &c_name).map_err(|error| {
+                Error::Gate(format!(
+                    "cleanup cannot revalidate {}: {error}; leaking the private tree",
+                    self.path.parent().unwrap().display()
+                ))
+            })?;
+            if visible != self.parent_identity || kind != FileType::Directory {
+                return Err(Error::Gate(format!(
+                    "cleanup identity changed for {}; leaking the private tree rather than deleting a substitute",
+                    self.path.parent().unwrap().display()
+                )));
+            }
+            remove_owned_tree(&self.parent_dir, Path::new(""))?;
+            let (visible, kind) = entry_identity(&self.storage_dir, &c_name).map_err(|error| {
+                Error::Gate(format!(
+                    "cleanup cannot revalidate private parent after emptying it: {error}; leaking it"
+                ))
+            })?;
+            if visible != self.parent_identity || kind != FileType::Directory {
+                return Err(Error::Gate(
+                    "cleanup private-parent identity changed; leaking it rather than deleting a substitute"
+                        .to_owned(),
+                ));
+            }
+            rustix::fs::unlinkat(&self.storage_dir, &c_name, AtFlags::REMOVEDIR)
+                .map_err(io::Error::from)?;
+        }
+        self.active = false;
         Ok(())
+    }
+}
+
+impl Drop for TempWorld {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
     }
 }
 
@@ -779,6 +1079,25 @@ mod tests {
     }
 
     #[test]
+    fn prospective_storage_beneath_source_is_rejected_before_creation() {
+        let src = fixture_world("prospective-containment");
+        let storage = src.join("missing/scenario-loaded-world");
+        assert!(!storage.exists());
+
+        let err = validate_prospective_storage(&src, &storage).unwrap_err();
+        assert!(
+            matches!(err, Error::Gate(_)) && err.to_string().contains("contained by source"),
+            "a missing destination beneath RIVET_WORLD_SRC must be rejected: {err}"
+        );
+        assert!(
+            !src.join("missing").exists(),
+            "prospective validation must not create any path beneath the configured source"
+        );
+
+        cleanup(&src);
+    }
+
+    #[test]
     fn temp_world_refuses_source_nested_under_stale_storage_without_mutation() {
         let storage = std::env::temp_dir().join(format!(
             "rivet-load-world-reverse-containment-{}",
@@ -881,9 +1200,109 @@ mod tests {
             "the source must remain unchanged"
         );
 
+        let err = temp.cleanup().unwrap_err();
+        assert!(
+            matches!(err, Error::Gate(_)) && err.to_string().contains("cleanup refused"),
+            "cleanup must leak rather than follow the substituted world entry: {err}"
+        );
+        fs::remove_file(&visible_world).unwrap();
+        fs::rename(&displaced_world, &visible_world).unwrap();
         temp.cleanup().unwrap();
         cleanup(&src);
         cleanup(&storage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_leaks_when_private_parent_path_is_substituted() {
+        let src = fixture_world("cleanup-parent-substitution");
+        let storage = sibling(&src, "cleanup-parent-storage");
+        cleanup(&storage);
+        fs::create_dir_all(&storage).unwrap();
+        let mut temp = TempWorld::create(&src, &storage).unwrap();
+        let visible_parent = temp.path().parent().unwrap().to_owned();
+        let displaced_parent = storage.join("displaced-owned-parent");
+
+        fs::rename(&visible_parent, &displaced_parent).unwrap();
+        fs::create_dir(&visible_parent).unwrap();
+        let substitute_sentinel = visible_parent.join("launcher-source-like-sentinel.dat");
+        fs::write(&substitute_sentinel, b"must never be deleted").unwrap();
+
+        let err = temp.cleanup().unwrap_err();
+        assert!(
+            matches!(err, Error::Gate(_)) && err.to_string().contains("identity changed"),
+            "private-parent substitution must fail closed: {err}"
+        );
+        assert_eq!(
+            fs::read(&substitute_sentinel).unwrap(),
+            b"must never be deleted",
+            "cleanup must not recurse into or delete a substituted directory"
+        );
+        assert!(
+            displaced_parent.join("world/level.dat").exists(),
+            "the original owned tree is intentionally leaked when its visible identity changes"
+        );
+
+        drop(temp);
+        assert_eq!(
+            fs::read(&substitute_sentinel).unwrap(),
+            b"must never be deleted",
+            "Drop must preserve the same fail-closed identity boundary"
+        );
+        cleanup(&visible_parent);
+        cleanup(&displaced_parent);
+        cleanup(&src);
+        cleanup(&storage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_symlink_replacement_is_never_followed_by_hashing() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let src = fixture_world("concurrent-source-entry");
+        let outside = sibling(&src, "outside-sentinel");
+        cleanup(&outside);
+        fs::create_dir(&outside).unwrap();
+        let outside_file = outside.join("secret");
+        fs::write(&outside_file, b"outside content must never be read").unwrap();
+        let target = src.join("racy-entry");
+        let spare = src.join("racy-entry.regular");
+        let link = src.join("racy-entry.link");
+        fs::write(&target, b"safe in-tree content").unwrap();
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker_target = target.clone();
+        let worker_spare = spare.clone();
+        let worker_link = link.clone();
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                let _ = fs::rename(&worker_target, &worker_spare);
+                let _ = fs::rename(&worker_link, &worker_target);
+                let _ = fs::rename(&worker_target, &worker_link);
+                let _ = fs::rename(&worker_spare, &worker_target);
+            }
+        });
+
+        let outside_hash = hash_reader(fs::File::open(&outside_file).unwrap()).unwrap();
+        for _ in 0..200 {
+            if let Ok(snapshot) = hash_tree(&src) {
+                assert!(
+                    snapshot.iter().all(|(_, entry)| {
+                        !matches!(entry, EntryFingerprint::File(hash) if *hash == outside_hash)
+                    }),
+                    "descriptor-relative hashing must never follow the raced symlink outside the source"
+                );
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        worker.join().unwrap();
+
+        cleanup(&src);
+        cleanup(&outside);
     }
 
     #[cfg(unix)]

@@ -51,19 +51,27 @@ tools/rivet-client/run-scenario.sh capture        # one boot; print the normaliz
 override the default launcher save at
 `~/Library/Application Support/minecraft/saves/New World`. The runner refuses
 symlinks, copies the source beneath a fresh unpredictable private (`0700`)
-directory, verifies the copy byte-for-byte, and retains a no-follow directory
-descriptor through server shutdown. On Linux, Rivet receives the inherited
-`/proc/self/fd/<n>` identity, so replacing the visible pathname cannot redirect
-the verified root. macOS does not provide a traversable directory-fd pathname;
+directory using descriptor-relative no-follow operations, verifies the copy
+byte-for-byte, and retains storage, private-parent, and world directory
+descriptors through server shutdown. Cleanup first proves the visible private
+parent still has the created device/inode; a missing, symlinked, or substituted
+entry is leaked rather than recursively deleted. On Linux, Rivet receives the
+inherited `/proc/self/fd/<n>` identity, so replacing the visible pathname cannot
+redirect the verified root. macOS does not provide a traversable directory-fd
+pathname;
 there the server receives the unpredictable private path, which closes the old
 deterministic-path window but does not defend against a malicious same-user
-process that discovers and races that path. A process with concurrent write
-access can likewise change source entries while they are being read. Source
-changes are detected by the post-run fingerprint, but neither race can be
-prevented portably without OS-specific descriptor-relative server loading or
-snapshotting/locking the external launcher save. The harness never claims
-detection can undo a source write. Until #339 provides the
-world-path/loading capability and official-client acceptance, this command
+process that discovers and races that path. Source traversal and copying open
+each entry relative to a retained directory with `O_NOFOLLOW` (and Linux
+`openat2` beneath/no-symlink/no-magic-link/no-cross-mount restrictions), so a
+symlink replacement is never followed. The before/after fingerprints are two
+non-atomic snapshots: they detect differences visible at those snapshot times,
+not every transient modify-and-restore event or every intermediate state of a
+concurrently changing tree. A same-uid process can still rename or mutate
+entries between descriptor-relative operations; the harness fails closed when
+an operation or identity check observes the race, but portable Unix APIs do not
+provide an atomic external-tree snapshot or unlink-by-fd. Until #339 provides
+the world-path/loading capability and official-client acceptance, this command
 exits `3` UNVERIFIED; it never turns an accepted argument into a fake PASS.
 Because the probe starts no client, explicit `--username` and
 `--timeout-seconds` options are rejected instead of being silently ignored.

@@ -2587,9 +2587,12 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
 fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-loaded-world");
+    let source = load_world::resolve_source_world()?;
+    // Resolve the prospective destination and reject both containment
+    // directions before create_dir_all or any other filesystem mutation.
+    load_world::validate_prospective_storage(&source, &work)?;
     fs::create_dir_all(&work)?;
 
-    let source = load_world::resolve_source_world()?;
     let source_before = load_world::hash_tree(&source)?;
     let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
     let base = base_address(args)?;
