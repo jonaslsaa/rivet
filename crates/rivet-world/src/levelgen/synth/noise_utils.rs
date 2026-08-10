@@ -1,10 +1,15 @@
 //! Port of `net.minecraft.world.level.levelgen.synth.NoiseUtils` (class, 26.2).
 //!
 //! `biasTowardsExtreme` and the two `parityNoiseOctaveConfigString` overloads.
-//! The parity strings use `String.format(Locale.ROOT, "%.3f", (float)xo)` —
-//! the `%.3f` float formatting Rust's `{:.3}` on an `f32` reproduces (shortest
-//! round-trip digits, half-up rounding), so `1.2345678f32 -> "1.235"`,
-//! `-9.8765432f32 -> "-9.877"`, `0.000123456f32 -> "0.000"`.
+//! The parity strings mirror `String.format(Locale.ROOT, "%.3f", (float)xo)`:
+//! `1.2345678f32 -> "1.235"`, `-9.8765432f32 -> "-9.877"`, `0.000123456f32 ->
+//! "0.000"`.
+//!
+//! Rounding-edge note: Rust `{:.3}` on an `f32` rounds half-to-even while
+//! Java's `%.3f` can round half-up on an exact `0.0005` midpoint (e.g.
+//! `1.0625f32` formats as `"1.062"`). This is diagnostic-only
+//! (`@VisibleForTesting` parity output, not gameplay), and none of the pinned
+//! fixture values land on such a midpoint, so the two agree bit-for-bit there.
 
 /// `NoiseUtils.biasTowardsExtreme(double noise, double factor)`.
 ///
