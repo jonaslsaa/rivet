@@ -7,8 +7,9 @@
 //! (the `LevelAccessor` seam) plus the `RespawnData` value record.
 //! `RespawnData.MAP_CODEC`/`CODEC` land here (wired on the
 //! `GlobalPos`/`BlockPos` map codecs); `RespawnData.STREAM_CODEC` defers with
-//! the protocol codec surface (issue #126, `rivet-protocol`), and the
-//! `fillCrashReportCategory` default defers with the crash-report surface.
+//! the protocol codec surface (issue #126, `rivet-protocol`). The
+//! `fillCrashReportCategory` default and its `format_location` helper land
+//! here too (#398), recording into the `rivet-core` CrashReportCategory stub.
 
 use rivet_registry::ResourceKey;
 use rivet_registry::core::{BlockPos, Difficulty, GlobalPos, SectionPos, global_pos_map_codec};
@@ -24,13 +25,14 @@ use super::super::height_accessor::LevelHeightAccessor;
 
 /// `LevelData` — the read side of the world's persistent data.
 ///
-/// RivetTodo(#232): `WritableLevelData` (`setSpawn`) and `ServerLevelData`
-/// (`setGameTime`, game type, allow-commands) are separate `storage` files
-/// outside this unit's list and defer with the concrete world data; `Level`
-/// holds a `WritableLevelData` in Java, which the concrete world port will
-/// type against. The `fillCrashReportCategory` default lands here (#398),
-/// grounded in `CrashReportCategory.formatLocation` (the crash-report surface
-/// stays a stub in `rivet-core`, which records entries).
+/// RivetTodo(#398): the `WritableLevelData`/`ServerLevelData`/`WorldData`/
+/// `DerivedLevelData` surfaces are ported (#398); the concrete
+/// `PrimaryLevelData` (which implements them and owns the world writes) still
+/// defers with the concrete world port. `Level` holds a `WritableLevelData` in
+/// Java, which the concrete world port will type against. The
+/// `fillCrashReportCategory` default lands here (#398), grounded in
+/// `CrashReportCategory.formatLocation` (the crash-report surface stays a stub
+/// in `rivet-core`, which records entries).
 pub trait LevelData {
     /// `getRespawnData()`.
     fn get_respawn_data(&self) -> &RespawnData;
