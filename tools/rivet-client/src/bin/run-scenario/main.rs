@@ -49,8 +49,9 @@
 //!   `rivet_dwell_verdict`, and a tamper negative on `connected_wall_seconds`.
 //!   `dwell` has no comparison concept, so any explicit `--runs` or `--pairs`
 //!   is rejected (exit 64) rather than silently ignored, and `--dwell-seconds`
-//!   is dwell-only (an explicit value on join/move/capture is a silent no-op
-//!   and is rejected the same way). The window must be at least
+//!   is dwell-only (an explicit value on join/move/kick/capture/load-world/
+//!   loaded-world is a silent no-op and is rejected the same way). The window
+//!   must be at least
 //!   `transcript::DWELL_MIN_DWELL_SECONDS` (a 31 s window would span only
 //!   ~29.8 s of challenges and fail the verdict), and `--timeout-seconds` must
 //!   exceed it by more than `DWELL_TIMEOUT_HEADROOM_SECONDS` so the client's
@@ -72,12 +73,16 @@
 //!   `rivet` is refused the same way.
 //! - `load-world` (#316 independent harness slice): resolve the known local
 //!   Minecraft 26.2 save, fingerprint it, create and verify a deterministic
-//!   disposable copy, and pass only that copy through Rivet's future
-//!   `--level <path>` seam. The retained source and copy are re-fingerprinted
-//!   and ordinary-operation cleanup removes the copy on every probe outcome.
-//!   Until #339 supplies the server
-//!   world-path/loading capability and real official-client acceptance, the
-//!   command returns UNVERIFIED (exit 3), never a placeholder PASS.
+//!   disposable copy, and pass only that copy through Rivet's `--level <path>`
+//!   seam. The retained source and copy are re-fingerprinted and
+//!   ordinary-operation cleanup removes the copy on every probe outcome. The
+//!   command returns UNVERIFIED (exit 3) when the server is not yet ready for a
+//!   genuine loaded-world PASS — never a placeholder PASS.
+//! - `loaded-world` (#374 official-client acceptance): boot Rivet against a
+//!   disposable copy of the safe world under `working/client-worlds/New World`
+//!   (`RIVET_WORLD_SRC` overrides; the launcher save is never touched), extract
+//!   the read-only ground-truth manifest, drive the real Azalea client in
+//!   `loaded` mode, and compare the observed per-coordinate content.
 //!
 //! ## Deterministic Paper config (issue #266 / #333)
 //!
@@ -376,15 +381,15 @@ impl Args {
         }
 
         // `--dwell-seconds` only has meaning for the dwell scenario; on
-        // join/move/kick/capture/load-world the client is never asked to dwell, so an
-        // explicit value would be a silent no-op. Reject it (exit 64) rather
-        // than ignore it — the same no-silent-noop policy as --runs/--pairs on
-        // dwell.
+        // join/move/kick/capture/load-world/loaded-world the client is never
+        // asked to dwell, so an explicit value would be a silent no-op. Reject
+        // it (exit 64) rather than ignore it — the same no-silent-noop policy
+        // as --runs/--pairs on dwell.
         if dwell_explicit && command != Subcommand::Dwell {
             return Err(
                 "--dwell-seconds only applies to the dwell scenario (the keepalive-survival \
-                 gate); join/move/kick/capture/load-world never dwell, so an explicit value would be a \
-                 silent no-op — drop it"
+                 gate); join/move/kick/capture/load-world/loaded-world never dwell, so an explicit \
+                 value would be a silent no-op — drop it"
                     .to_owned(),
             );
         }
@@ -632,7 +637,7 @@ impl Args {
 
         if command == Subcommand::LoadedWorld {
             // `loaded-world` (issue #374) boots exactly one Rivet server against
-            // a disposable copy of the launcher world (`--level <copy>`),
+            // a disposable copy of the safe copied world (`--level <copy>`),
             // drives the loaded client, and compares its observed per-coordinate
             // content against the read-only ground-truth manifest. Paper has no
             // place here; `--pairs`/`--runs` would be silent no-ops.
@@ -2686,11 +2691,11 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
 
 /// Independent loaded-world harness slice for #316.
 ///
-/// This deliberately stops at the #339 capability boundary: it makes and
-/// verifies a disposable copy, proves the source remains immutable, and probes
-/// the future `--level <copy>` launch seam. It does not parse or load the world
-/// and therefore cannot report PASS, even if a server unexpectedly accepts the
-/// argument and reaches READY.
+/// This is the copy-and-probe slice: it makes and verifies a disposable copy,
+/// proves the source remains immutable, and probes the `--level <copy>` launch
+/// seam. It deliberately does not parse or load the world (that belongs to
+/// #323/#339), so it reports the #339 launch outcome rather than a loaded-world
+/// content PASS.
 fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-loaded-world");
@@ -2742,9 +2747,10 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
         ) {
             Ok(mut srv) => match server::shutdown(&mut srv) {
                 Ok(()) => Err(RunnerError::Unverified(
-                    "rivet-server accepted the loaded-world path and reached READY, but the #339 \
-                     loaded-chunk official-client acceptance is not part of this independent slice; \
-                     refusing to claim PASS until that real acceptance exists"
+                    "rivet-server accepted the loaded-world path and reached READY, but this #316 \
+                     slice only proves the copy-and-launch seam; the #374 loaded-world acceptance \
+                     (per-coordinate content comparison) is the PASS contract, so this slice \
+                     refuses to claim PASS"
                         .to_owned(),
                 )),
                 Err(error) => Err(error.into()),
@@ -2772,12 +2778,12 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
 /// The official-client loaded-world acceptance probe (issue #374).
 ///
 /// This is the honest successor to `load-world`: it makes and verifies a
-/// disposable copy of the launcher world, extracts its read-only ground-truth
-/// manifest (`rivet-oracle extract-world`), boots Rivet against the copy with
-/// `--level <copy>`, drives the real Azalea client in `loaded` mode (join,
-/// wait for chunk quiescence, sample the genuine per-coordinate block content
-/// the server served, then take a short bounded walk), and compares the
-/// client's observed content against the manifest.
+/// disposable copy of the safe world under `working/client-worlds/New World`,
+/// extracts its read-only ground-truth manifest (`rivet-oracle extract-world`),
+/// boots Rivet against the copy with `--level <copy>`, drives the real Azalea
+/// client in `loaded` mode (join, wait for chunk quiescence, sample the genuine
+/// per-coordinate block content the server served, then take a short bounded
+/// walk), and compares the client's observed content against the manifest.
 ///
 /// The PASS contract is deliberately strict and honest:
 ///
@@ -2788,19 +2794,24 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
 /// - The sampled surface/bedrock/below_feet block names must match the
 ///   ground-truth manifest at the same coordinates. A server that merely
 ///   echoes repeated superflat bytes cannot match a genuine terrain chunk's
-///   distinct block set (verified: all 1369 FULL chunks in the launcher world
+///   distinct block set (verified: all 1369 FULL chunks in the copied world
 ///   have unique content signatures).
 /// - The disposable copy must be byte-for-byte unchanged after the run (the
 ///   server must not mutate the loaded world), and the source world must be
 ///   untouched.
 ///
-/// Until the #339 world-loading capability lands, rivet-server rejects
-/// `--level` and the launch probe classifies that as UNVERIFIED (exit 3) —
-/// never a fabricated PASS.
+/// The source is the safe copied world under `working/client-worlds/New World`
+/// (or `RIVET_WORLD_SRC`); the launcher save is never defaulted to or
+/// inspected. A chunk whose ground-truth status is not `minecraft:full`, or
+/// that carries an uncarried #369 capability flag, is honestly classified
+/// UNVERIFIED (exit 3) rather than misreported — never a fabricated PASS.
 fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-loaded-world");
-    let source_path = load_world::resolve_source_world()?;
+    // The loaded-world acceptance reads the safe copied world under
+    // `working/client-worlds` (or an explicit `RIVET_WORLD_SRC`); it never
+    // defaults to or inspects the launcher save.
+    let source_path = load_world::resolve_loaded_world_src()?;
     let source = load_world::SourceTree::open(&source_path)?;
     load_world::validate_prospective_storage(&source, &work)?;
     fs::create_dir_all(&work)?;
@@ -2839,8 +2850,10 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
         );
         println!();
 
-        // Boot Rivet against the disposable copy. Until #339 lands the server
-        // rejects `--level` and the probe classifies that as UNVERIFIED.
+        // Boot Rivet against the disposable copy. #363 merged `--level` into
+        // rivet-server; a boot failure is still classified via the probe so an
+        // unexpected rejection surfaces as UNVERIFIED rather than a fabricated
+        // PASS.
         let mut srv = match server::boot(
             server::ServerKind::Rivet,
             &run_dir,
@@ -3087,13 +3100,12 @@ fn classify_load_world_boot_failure(error: server::Error, log_path: &Path) -> Ru
     let log = fs::read_to_string(log_path).unwrap_or_default();
     match server::classify_probe(false, &log) {
         server::ProbeVerdict::Absent { evidence } => RunnerError::Unverified(format!(
-            "loaded-world acceptance is UNVERIFIED: rivet-server has no world-path/loading \
-             capability yet (#339); launch evidence: {evidence}"
+            "loaded-world acceptance is UNVERIFIED: rivet-server rejected the --level launch \
+             interface; launch evidence: {evidence}"
         )),
         server::ProbeVerdict::FailedToBoot { evidence } => RunnerError::Unverified(format!(
-            "loaded-world acceptance is UNVERIFIED: the launch probe did not reach READY and did \
-             not prove the expected missing #339 interface ({boot_error}); last log evidence: \
-             {evidence}"
+            "loaded-world acceptance is UNVERIFIED: the launch probe did not reach READY \
+             ({boot_error}); last log evidence: {evidence}"
         )),
         server::ProbeVerdict::Present => unreachable!("the failed boot did not reach READY"),
     }

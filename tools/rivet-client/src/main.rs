@@ -122,8 +122,9 @@ enum Mode {
     /// the client's own loaded `ChunkStorage`) and emit the `loaded` record.
     /// The runner compares this against the read-only ground-truth manifest
     /// (`rivet-oracle extract-world`); a server that merely echoes repeated
-    /// superflat bytes cannot match it. UNVERIFIED until the #339 capability
-    /// lands.
+    /// superflat bytes cannot match it. The runner classifies honestly
+    /// (UNVERIFIED for non-FULL chunks and uncarried #369 capability flags)
+    /// rather than reporting a fabricated PASS.
     Loaded,
 }
 
@@ -752,7 +753,7 @@ async fn observe_and_emit(bot: Client, state: State) {
 ///
 /// The sampled Y levels mirror the read-only ground-truth extractor
 /// (`rivet-oracle extract-world`): the surface (highest non-air block per
-/// column, `y=-60` the launcher world's bedrock slab) and `y=-61` (one block
+/// column), `y=-60` (the copied world's bedrock slab) and `y=-61` (one block
 /// below the bedrock — the dense stone body a superflat floor does not have).
 /// A server that merely echoes repeated superflat bytes for every chunk cannot
 /// match a genuine terrain chunk's distinct block set at these coordinates.
@@ -762,7 +763,8 @@ async fn observe_and_emit(bot: Client, state: State) {
 /// flag is present. After sampling, the client takes a short bounded forward
 /// walk and reports its `before`/`after` position as the walk evidence (the
 /// per-coordinate grid, not the walk delta, is the load-bearing content
-/// check). UNVERIFIED until the #339 world-loading capability lands.
+/// check). Non-FULL chunks and uncarried #369 capability flags are classified
+/// UNVERIFIED rather than a fabricated PASS.
 async fn loaded_and_emit(bot: Client, state: State) {
     let chunks = Arc::clone(&state.chunks);
     let started = Instant::now();
@@ -862,7 +864,7 @@ async fn loaded_walk(bot: &Client) -> Value {
     json!({ "before": before, "after": after })
 }
 
-/// The overworld world-ceiling Y (the launcher world is full-height 384).
+/// The overworld world-ceiling Y (the copied world is full-height 384).
 const WORLD_CEILING_Y: i32 = 320;
 /// The bedrock-slab sample Y (mirrors the extractor's `BEDROCK_Y`).
 const LOADED_BEDROCK_Y: i32 = -60;

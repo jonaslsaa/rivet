@@ -2,8 +2,9 @@
 //!
 //! The official-client loaded-world PASS contract needs genuine per-coordinate
 //! chunk content that cannot be faked by a server that merely echoes repeated
-//! superflat bytes. This module reads a disposable copy of the launcher-created
-//! Minecraft 26.2 world *read-only* and emits a deterministic manifest of the
+//! superflat bytes. This module reads a disposable copy of the safe copied
+//! Minecraft 26.2 world (`working/client-worlds/New World`) *read-only* and
+//! emits a deterministic manifest of the
 //! overworld chunk content: for every region file under
 //! `dimensions/minecraft/overworld/region`, for every allocated chunk, the
 //! parsed `SerializableChunkData` fingerprint (status, stored position,
@@ -53,7 +54,7 @@ const OVERWORLD_HEIGHT: i32 = 384;
 const CHUNK_SIZE: i32 = 16;
 /// Chunk-local vertical dimension (16 blocks per section).
 const SECTION_SIZE: i32 = 16;
-/// The launcher world's bedrock slab Y — the coordinate `#369`'s read-only
+/// The copied world's bedrock slab Y — the coordinate `#369`'s read-only
 /// probe observed genuine bedrock at, and what the deep-structure evidence
 /// samples at.
 const BEDROCK_Y: i32 = -60;
