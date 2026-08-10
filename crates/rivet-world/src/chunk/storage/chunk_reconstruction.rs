@@ -52,7 +52,8 @@ use crate::chunk::storage::section_reconstruction::{
     current_version_container_factory, reconstruct_sections,
 };
 use crate::chunk::storage::serializable_chunk_data::{
-    SerializableChunkData, SerializableChunkDataError, reconstruct_heightmaps, reconstruct_lights,
+    ChunkParseDiagnostic, SerializableChunkData, SerializableChunkDataError,
+    reconstruct_heightmaps, reconstruct_lights,
 };
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
 use crate::levelgen::heightmap::StateFlags;
@@ -113,6 +114,10 @@ pub struct ChunkReconstruction {
     /// section loop, for the caller's `logErrors` equivalent.
     pub section_diagnostics:
         Vec<crate::chunk::storage::section_reconstruction::SectionCodecDiagnostic>,
+    /// The recoverable parse-time diagnostics, plus the relocated-position
+    /// diagnostic, mirroring `SerializableChunkData::construct_full` (Paper's
+    /// `reportMisplacedChunk` — the chunk is relocated, never rejected).
+    pub parse_diagnostics: Vec<ChunkParseDiagnostic>,
     /// The raw `block_ticks` list, retained for #381 adoption.
     pub raw_block_ticks: ListTag,
     /// The raw `fluid_ticks` list, retained for #381 adoption.
@@ -136,10 +141,9 @@ pub enum ChunkReconstructionError {
 ///
 /// `requested_pos` is the position the runtime chunk takes; a mismatch with the
 /// stored position surfaces Paper's `reportMisplacedChunk` diagnostic on the
-/// returned value (the `SerializableChunkData::parse`/`construct_full` seam
-/// retains it), never an error. `has_sky_light` is the dimension's
-/// `dimensionType().hasSkyLight()` (the nether and end are false, overworld
-/// true).
+/// returned value (retained in `ChunkReconstruction::parse_diagnostics`), never
+/// an error. `has_sky_light` is the dimension's `dimensionType().hasSkyLight()`
+/// (the nether is false; the overworld and the end are true).
 ///
 /// Ordering follows Paper's `SerializableChunkData.read` LEVELCHUNK branch:
 /// sections and light are decoded from the raw section tags by
@@ -161,6 +165,27 @@ pub fn reconstruct_runtime_chunk(
     height_accessor: SimpleLevelHeightAccessor,
     has_sky_light: bool,
 ) -> Result<ChunkReconstruction, ChunkReconstructionError> {
+    // Mirror `SerializableChunkData::construct_full` exactly, including its
+    // guard order: the reconstruction accessor must agree with the parse-time
+    // accessor (or the section Y range / section count would silently
+    // misdecode) before the content capabilities are validated, so a mismatched
+    // accessor always surfaces as the accessor error regardless of content.
+    if height_accessor.get_min_section_y() != data.min_section_y() {
+        return Err(SerializableChunkDataError::HeightAccessorMismatch {
+            parsed: data.min_section_y(),
+            construction: height_accessor.get_min_section_y(),
+        }
+        .into());
+    }
+    if height_accessor.get_sections_count() as usize != data.section_count() {
+        return Err(
+            SerializableChunkDataError::HeightAccessorSectionCountMismatch {
+                parsed: data.section_count(),
+                construction: height_accessor.get_sections_count() as usize,
+            }
+            .into(),
+        );
+    }
     validate_full_capabilities(&data)?;
 
     let factory = current_version_container_factory();
@@ -214,9 +239,18 @@ pub fn reconstruct_runtime_chunk(
     );
     install_pending_block_entities(&mut chunk, &data);
 
+    let mut parse_diagnostics = data.diagnostics().to_vec();
+    if requested_pos != data.stored_pos() {
+        parse_diagnostics.push(ChunkParseDiagnostic::MisplacedChunk {
+            stored: data.stored_pos(),
+            requested: requested_pos,
+        });
+    }
+
     Ok(ChunkReconstruction {
         chunk,
         section_diagnostics: diagnostics,
+        parse_diagnostics,
         raw_block_ticks: data.raw_block_ticks().clone(),
         raw_fluid_ticks: data.raw_fluid_ticks().clone(),
         block_entities: data.block_entities().to_vec(),
@@ -357,21 +391,68 @@ mod tests {
     }
 
     #[test]
-    fn clean_end_full_fixture_reconstructs_without_sky_light() {
+    fn clean_end_full_fixture_reconstructs_with_sky_light_carried() {
+        // The End dimension type (`the_end.json`) has `has_skylight: true`, so
+        // the sky gate passes and the fixture's stored sky states install.
         let data = parse_fixture("the_end", 0, 256);
         let reconstructed =
-            reconstruct_runtime_chunk(ChunkPos::ZERO, data, height_accessor::create(0, 256), false)
+            reconstruct_runtime_chunk(ChunkPos::ZERO, data, height_accessor::create(0, 256), true)
                 .expect("clean end FULL fixture reconstructs");
         assert_eq!(reconstructed.chunk.get_sections().len(), 16);
         assert!(reconstructed.chunk.is_light_correct());
-        // The end has no sky light: only block nibbles are installed.
+        // The fixture carries a stored skylight state for its first section,
+        // so the sky nibble array is not empty (the overworld fixture does too).
         assert!(
             reconstructed
                 .chunk
                 .sky_nibbles()
                 .iter()
-                .all(|nibble| nibble.get_save_state().is_none())
+                .any(|nibble| nibble.get_save_state().is_some())
         );
+    }
+
+    #[test]
+    fn mismatched_reconstruction_accessor_is_a_typed_error() {
+        // Parsed for the overworld (-64/384) but reconstructed with an
+        // accessor that disagrees: mirror `construct_full`'s guard instead of
+        // silently misdecoding the section Y range.
+        let data = parse_fixture("overworld", -64, 384);
+        let wrong_min = reconstruct_runtime_chunk(
+            ChunkPos::ZERO,
+            data,
+            height_accessor::create(-80, 384),
+            true,
+        )
+        .err()
+        .expect("min section Y mismatch is typed");
+        assert!(matches!(
+            wrong_min,
+            ChunkReconstructionError::Serializable(
+                SerializableChunkDataError::HeightAccessorMismatch {
+                    parsed: -4,
+                    construction: -5
+                }
+            )
+        ));
+
+        let data = parse_fixture("overworld", -64, 384);
+        let wrong_count = reconstruct_runtime_chunk(
+            ChunkPos::ZERO,
+            data,
+            height_accessor::create(-64, 400),
+            true,
+        )
+        .err()
+        .expect("section count mismatch is typed");
+        assert!(matches!(
+            wrong_count,
+            ChunkReconstructionError::Serializable(
+                SerializableChunkDataError::HeightAccessorSectionCountMismatch {
+                    parsed: 24,
+                    construction: 25
+                }
+            )
+        ));
     }
 
     #[test]
@@ -388,6 +469,13 @@ mod tests {
         )
         .expect("misplaced chunk still reconstructs");
         assert_eq!(reconstructed.chunk.get_pos(), ChunkPos::new(3, -7));
+        assert_eq!(
+            reconstructed.parse_diagnostics,
+            vec![ChunkParseDiagnostic::MisplacedChunk {
+                stored: ChunkPos::ZERO,
+                requested: ChunkPos::new(3, -7),
+            }]
+        );
     }
 
     #[test]

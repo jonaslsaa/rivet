@@ -454,6 +454,11 @@ impl SerializableChunkData {
     pub fn min_section_y(&self) -> i32 {
         self.min_section_y
     }
+    /// The parse-time accessor's section count (the #383 reconstruction's
+    /// accessor-mismatch guard).
+    pub(crate) fn section_count(&self) -> usize {
+        self.section_count
+    }
     pub fn last_update_time(&self) -> i64 {
         self.last_update_time
     }
