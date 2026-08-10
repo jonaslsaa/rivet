@@ -24,6 +24,10 @@ xxhash-rust = { workspace = true }
 # IndexSet's, not Java's (which iterates in hash-probe slot order; see the
 # module `RivetTodo(#185)` in structure_access).
 indexmap = { workspace = true }
+# PCRE2 is the closest maintained engine to Java Pattern: it supports the
+# lookarounds/backreferences used by `regex:` allow-list rules and keeps Java's
+# default ASCII `\d`/`\w`/`\s` behavior when UTF mode is enabled without UCP.
+pcre2 = { workspace = true }
 # The `packets` feature unlocks the game packet bodies this crate produces
 # content for (#94): `LevelChunkPacketData`, `LightUpdatePacketData`,
 # `HeightmapType` (all feature-gated in rivet-protocol).
