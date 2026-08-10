@@ -36,6 +36,8 @@ pub struct RegionFileStorage {
     sync: bool,
     region_cache: Vec<(i64, RegionFile)>,
     non_existing_region_files: Vec<i64>,
+    #[cfg(test)]
+    closed_region_files: Vec<i64>,
 }
 
 impl RegionFileStorage {
@@ -46,6 +48,8 @@ impl RegionFileStorage {
             sync,
             region_cache: Vec::new(),
             non_existing_region_files: Vec::new(),
+            #[cfg(test)]
+            closed_region_files: Vec::new(),
         }
     }
 
@@ -143,6 +147,8 @@ impl RegionFileStorage {
             return Ok(None);
         }
 
+        self.evict_lru_if_full()?;
+
         let region_path = self
             .folder
             .join(Self::get_region_file_name(chunk_x, chunk_z));
@@ -153,12 +159,6 @@ impl RegionFileStorage {
         self.non_existing_region_files
             .retain(|cached| *cached != key);
 
-        if self.region_cache.len() >= MAX_CACHE_SIZE
-            && let Some((_, mut evicted)) = self.region_cache.pop()
-        {
-            evicted.close()?;
-        }
-
         let region = RegionFile::open(
             self.info.clone(),
             region_path,
@@ -168,6 +168,21 @@ impl RegionFileStorage {
         )?;
         self.region_cache.insert(0, (key, region));
         Ok(Some(0))
+    }
+
+    fn evict_lru_if_full(&mut self) -> io::Result<()> {
+        if self.region_cache.len() < MAX_CACHE_SIZE {
+            return Ok(());
+        }
+        let Some((key, mut evicted)) = self.region_cache.pop() else {
+            return Ok(());
+        };
+        evicted.close()?;
+        #[cfg(test)]
+        self.closed_region_files.push(key);
+        #[cfg(not(test))]
+        let _ = key;
+        Ok(())
     }
 
     fn mark_non_existing(&mut self, key: i64) {
@@ -272,6 +287,16 @@ mod tests {
         bytes[8196] = version;
         bytes[8197..8197 + payload.len()].copy_from_slice(payload);
         fs::write(path, bytes).unwrap();
+    }
+
+    fn write_empty_regions(folder: &Path, region_xs: impl IntoIterator<Item = i32>) {
+        for region_x in region_xs {
+            fs::write(folder.join(format!("r.{region_x}.0.mca")), []).unwrap();
+        }
+    }
+
+    fn region_key(region_x: i32, region_z: i32) -> i64 {
+        ChunkPos::pack_coords(region_x, region_z)
     }
 
     fn gzip(payload: &[u8]) -> Vec<u8> {
@@ -409,6 +434,81 @@ mod tests {
             storage.read(&ChunkPos::ZERO).unwrap().is_none(),
             "Paper's negative cache suppresses later filesystem discovery"
         );
+    }
+
+    #[test]
+    fn uncached_missing_read_at_capacity_closes_and_evicts_lru_before_existence_check() {
+        let dir = tempfile::tempdir().unwrap();
+        write_empty_regions(dir.path(), 0..MAX_CACHE_SIZE as i32);
+        let mut storage = RegionFileStorage::new(info(true), dir.path().to_path_buf(), false);
+
+        for region_x in 0..MAX_CACHE_SIZE as i32 {
+            assert!(
+                storage
+                    .read(&ChunkPos::new(region_x << REGION_SHIFT, 0))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(storage.region_cache.len(), MAX_CACHE_SIZE);
+
+        // Promote region 0, making region 1 the LRU before the uncached miss.
+        assert!(storage.read(&ChunkPos::ZERO).unwrap().is_none());
+        let missing_region_x = MAX_CACHE_SIZE as i32;
+        assert!(
+            storage
+                .read(&ChunkPos::new(missing_region_x << REGION_SHIFT, 0))
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(storage.region_cache.len(), MAX_CACHE_SIZE - 1);
+        assert_eq!(storage.closed_region_files, [region_key(1, 0)]);
+        assert!(
+            storage
+                .region_cache
+                .iter()
+                .all(|(key, _)| *key != region_key(1, 0)),
+            "the promoted entry must survive and the true LRU must be removed"
+        );
+        assert_eq!(
+            storage.non_existing_region_files[0],
+            region_key(missing_region_x, 0)
+        );
+    }
+
+    #[test]
+    fn negative_cache_hit_at_capacity_does_not_evict_or_close_lru() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_region_x = MAX_CACHE_SIZE as i32;
+        let missing_pos = ChunkPos::new(missing_region_x << REGION_SHIFT, 0);
+        let mut storage = RegionFileStorage::new(info(true), dir.path().to_path_buf(), false);
+
+        assert!(storage.read(&missing_pos).unwrap().is_none());
+        write_empty_regions(dir.path(), 0..MAX_CACHE_SIZE as i32);
+        for region_x in 0..MAX_CACHE_SIZE as i32 {
+            assert!(
+                storage
+                    .read(&ChunkPos::new(region_x << REGION_SHIFT, 0))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let cache_keys_before: Vec<_> = storage.region_cache.iter().map(|(key, _)| *key).collect();
+
+        assert!(storage.read(&missing_pos).unwrap().is_none());
+
+        assert_eq!(storage.region_cache.len(), MAX_CACHE_SIZE);
+        assert_eq!(
+            storage
+                .region_cache
+                .iter()
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>(),
+            cache_keys_before,
+            "a negative-cache hit must return before touching the positive LRU"
+        );
+        assert!(storage.closed_region_files.is_empty());
     }
 
     #[test]
