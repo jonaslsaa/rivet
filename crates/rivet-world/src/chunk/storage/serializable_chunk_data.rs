@@ -710,7 +710,10 @@ fn blending_data_decodes(tag: &CompoundTag) -> bool {
                 Tag::ByteArray(heights) => Some(heights.data.len()),
                 Tag::IntArray(heights) => Some(heights.data.len()),
                 Tag::LongArray(heights) => Some(heights.data.len()),
-                _ => None,
+                // `lenientOptionalFieldOf` turns any field-codec error,
+                // including a list's partial error, into an absent height
+                // array while preserving the surrounding packed value.
+                _ => return true,
             };
             decoded_length == Some(CELL_COLUMN_COUNT)
         })
@@ -2260,26 +2263,70 @@ mod tests {
     }
 
     #[test]
-    fn blending_heights_require_sixteen_decoded_numbers() {
+    fn blending_heights_match_lenient_optional_field_codec() {
         let height = height_accessor::create(-64, 384);
         for heights in [
-            Tag::List(ListTag::with_list(vec![Tag::Int(IntTag::value_of(1))])),
+            Tag::String(rivet_nbt::string_tag::StringTag::value_of(
+                "wrong type".into(),
+            )),
             Tag::List(ListTag::with_list(vec![Tag::String(
                 rivet_nbt::string_tag::StringTag::value_of("invalid".into()),
             )])),
+            Tag::List(ListTag::with_list(vec![
+                Tag::Int(IntTag::value_of(1)),
+                Tag::String(rivet_nbt::string_tag::StringTag::value_of("invalid".into())),
+            ])),
         ] {
             let mut blending = CompoundTag::new();
             blending.put_int("min_section", -4);
             blending.put_int("max_section", 19);
-            blending.put("heights".into(), heights);
+            blending.put("heights".into(), heights.clone());
             let mut chunk = top_level("minecraft:full");
             chunk.put("blending_data".into(), Tag::Compound(blending));
             let parsed = SerializableChunkData::parse(height, &chunk)
                 .unwrap()
                 .unwrap();
-            assert!(parsed.raw_blending_data().is_some());
-            assert_eq!(parsed.validate_full_construction(24), Ok(()));
+            assert_eq!(
+                parsed.raw_blending_data().unwrap().get("heights"),
+                Some(&heights)
+            );
+            assert!(parsed.effective_blending_data);
+            assert_eq!(
+                parsed.validate_full_construction(24),
+                Err(SerializableChunkDataError::UnsupportedBlendingData)
+            );
         }
+
+        let mut wrong_length = CompoundTag::new();
+        wrong_length.put_int("min_section", -4);
+        wrong_length.put_int("max_section", 19);
+        wrong_length.put(
+            "heights".into(),
+            Tag::List(ListTag::with_list(vec![Tag::Int(IntTag::value_of(1))])),
+        );
+        let mut chunk = top_level("minecraft:full");
+        chunk.put("blending_data".into(), Tag::Compound(wrong_length));
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert!(parsed.raw_blending_data().is_some());
+        assert!(!parsed.effective_blending_data);
+        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+
+        let mut absent = CompoundTag::new();
+        absent.put_int("min_section", -4);
+        absent.put_int("max_section", 19);
+        let mut chunk = top_level("minecraft:full");
+        chunk.put("blending_data".into(), Tag::Compound(absent));
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert!(parsed.raw_blending_data().is_some());
+        assert!(parsed.effective_blending_data);
+        assert_eq!(
+            parsed.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedBlendingData)
+        );
 
         let mut blending = CompoundTag::new();
         blending.put_int("min_section", -4);
@@ -2294,13 +2341,49 @@ mod tests {
         );
         let mut chunk = top_level("minecraft:full");
         chunk.put("blending_data".into(), Tag::Compound(blending));
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert!(parsed.effective_blending_data);
         assert_eq!(
-            SerializableChunkData::parse(height, &chunk)
-                .unwrap()
-                .unwrap()
-                .validate_full_construction(24),
+            parsed.validate_full_construction(24),
             Err(SerializableChunkDataError::UnsupportedBlendingData)
         );
+    }
+
+    #[test]
+    fn leading_colon_statuses_decode_across_full_and_partial_data() {
+        let height = height_accessor::create(-64, 384);
+
+        let full = SerializableChunkData::parse(height, &top_level(":full"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(full.status(), ChunkStatus::Full);
+        assert!(full.diagnostics().is_empty());
+        assert_eq!(full.validate_full_construction(24), Ok(()));
+
+        let partial = SerializableChunkData::parse(height, &top_level(":noise"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial.status(), ChunkStatus::Noise);
+        assert!(partial.diagnostics().is_empty());
+        assert_eq!(
+            partial.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedChunkStatus {
+                status: ChunkStatus::Noise,
+            })
+        );
+
+        let mut retrogen = CompoundTag::new();
+        retrogen.put_string("target_status", ":noise");
+        let mut chunk = top_level(":full");
+        chunk.put("below_zero_retrogen".into(), Tag::Compound(retrogen));
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.status(), ChunkStatus::Full);
+        assert!(parsed.effective_below_zero_retrogen());
+        assert!(parsed.raw_below_zero_retrogen().is_some());
     }
 
     #[test]

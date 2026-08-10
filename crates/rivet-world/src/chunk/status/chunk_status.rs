@@ -1,6 +1,7 @@
 //! Persisted chunk-status values from Paper 26.2.
 
 use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, Types, WORLDGEN_HEIGHTMAPS};
+use rivet_registry::identifier::Identifier;
 
 /// `ChunkStatus.ChunkType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,20 +64,16 @@ impl ChunkStatus {
         }
     }
 
-    /// Decode a built-in identifier. An omitted namespace defaults to
-    /// `minecraft`, as `Identifier.tryParse` does for registry codecs.
+    /// Decode a built-in identifier through the canonical registry-codec
+    /// parser, including its default-namespace behavior.
     pub fn from_identifier(identifier: &str) -> Option<Self> {
-        let (namespace, path) = identifier
-            .split_once(':')
-            .map_or(("minecraft", identifier), |(namespace, path)| {
-                (namespace, path)
-            });
-        if namespace != "minecraft" || path.is_empty() || path.contains(':') {
+        let identifier = Identifier::by_separator_result(identifier, ':').ok()?;
+        if identifier.namespace() != "minecraft" {
             return None;
         }
         Self::ALL
             .into_iter()
-            .find(|status| status.serialization_name()["minecraft:".len()..] == *path)
+            .find(|status| status.serialization_name()["minecraft:".len()..] == *identifier.path())
     }
 
     pub const fn chunk_type(self) -> ChunkType {
@@ -114,6 +111,13 @@ mod tests {
             );
             assert_eq!(
                 ChunkStatus::from_identifier(&status.serialization_name()["minecraft:".len()..]),
+                Some(status)
+            );
+            assert_eq!(
+                ChunkStatus::from_identifier(&format!(
+                    ":{}",
+                    &status.serialization_name()["minecraft:".len()..]
+                )),
                 Some(status)
             );
         }
