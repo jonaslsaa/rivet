@@ -437,9 +437,10 @@ impl<I> Multipoint<I> {
     }
 
     /// The canonical 6-arg constructor — validates sizes, then stores the
-    /// caller-supplied bounds. Mirrors the record's canonical constructor
-    /// (used by `new_with_bounds` in tests and future callers that already
-    /// know the bounds).
+    /// caller-supplied bounds. Mirrors the record's canonical constructor,
+    /// for callers that already know the bounds (e.g. a serialized form that
+    /// carries them). Callers that must compute bounds use `Multipoint::new`
+    /// instead.
     pub fn new_with_bounds(
         coordinate: I,
         locations: Vec<f32>,

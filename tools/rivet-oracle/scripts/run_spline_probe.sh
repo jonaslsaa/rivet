@@ -11,11 +11,13 @@
 # and `RIVET_PAPER_LIBRARIES` override it.
 #
 # Usage:
-#   scripts/run_spline_probe.sh [out-file] [paper-pin]
+#   scripts/run_spline_probe.sh [out-dir] [paper-pin]
 #   RIVET_PAPER_RUNTIME_JAR=/path/to/versions/26.2/paper-26.2.jar \
 #   RIVET_PAPER_LIBRARIES=/path/to/libraries scripts/run_spline_probe.sh
 #
-# The default output is `fixtures/spline/spline-goldens.json` (in place).
+# The default output directory is `fixtures/spline/` (in place). The probe
+# always writes the file `spline-goldens.json` inside the given directory, and
+# the manifest is regenerated there too.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -58,7 +60,7 @@ echo "wrote $GOLDENS_FILE"
 SHA="$(shasum -a 256 "$GOLDENS_FILE" | awk '{print $1}')"
 BYTES="$(wc -c < "$GOLDENS_FILE" | tr -d ' ')"
 MANIFEST="$OUT_DIR/manifest.json"
-NOTE="Paper-grounded CubicSpline/BoundedFloatFunction value-leaf goldens (issue #372): \`spline-goldens.json\` records Paper's exact min/max/sample outputs as hex-float, asserted bit-exactly by crates/rivet-util/tests/cubic_spline.rs; the parity strings are informational (the tests check the parity format via hardcoded strings). Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/SplineProbe.java; regenerate with \`scripts/run_spline_probe.sh\`."
+NOTE="Paper-grounded CubicSpline/BoundedFloatFunction value-leaf goldens (issue #372): \`spline-goldens.json\` records Paper's exact min/max/sample outputs as hex-float, asserted bit-exactly by crates/rivet-util/tests/cubic_spline.rs; the parity strings are Paper's \`parityString()\` output, asserted against Rust's parity output (coordinate token normalized) by the same tests. Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/SplineProbe.java; regenerate with \`scripts/run_spline_probe.sh\`."
 printf '%s\n' \
   '{' \
   '  "format": 1,' \
