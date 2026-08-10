@@ -21,7 +21,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_FILE="${1:-$ROOT/fixtures/spline/spline-goldens.json}"
+OUT_DIR="${1:-$ROOT/fixtures/spline}"
 PAPER_PIN="${2:-26.2-DEV-main@0a99345}"
 
 RUNTIME_JAR="${RIVET_PAPER_RUNTIME_JAR:-$ROOT/work/run/versions/26.2/paper-26.2.jar}"
@@ -44,13 +44,13 @@ mkdir -p "$CLASSES"
 CP="$RUNTIME_JAR:$LIBS$CLASSES"
 
 javac -cp "$CP" -d "$CLASSES" "$ROOT/src/java/SplineProbe.java"
-OUT_DIR="$(dirname "$OUT_FILE")"
 mkdir -p "$OUT_DIR"
 java -Xms256M -Xmx2G -cp "$CP" SplineProbe \
   --output "$OUT_DIR" --paper "$PAPER_PIN"
 # The probe hardcodes the output basename `spline-goldens.json` (SplineProbe
-# writes `output/spline-goldens.json`), so `$OUT_FILE` only selects the output
-# directory. Hash what the probe actually wrote, never `$OUT_FILE` itself.
+# writes `output/spline-goldens.json`), so the first argument selects the
+# output directory, not a file. Hash what the probe actually wrote, never an
+# assumed file path.
 GOLDENS_FILE="$OUT_DIR/spline-goldens.json"
 echo "wrote $GOLDENS_FILE"
 
