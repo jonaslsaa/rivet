@@ -1068,6 +1068,25 @@ mod tests {
     }
 
     #[test]
+    fn regex_empty_and_negated_empty_classes_fail_closed() {
+        // Java Pattern rejects '[]' and '[^]' ("Unclosed character class");
+        // PCRE2 rejects the same translated classes, so the allow list must
+        // be disabled rather than accept a rule Java could not compile.
+        for invalid in ["[]", "[^]"] {
+            let list = PathAllowList::new(vec![
+                ConfigEntry::prefix("otherwise/allowed"),
+                ConfigEntry::regex(invalid),
+            ]);
+            assert!(
+                !list.matches(Path::new("otherwise/allowed")),
+                "regex {invalid:?} left the prefix active"
+            );
+            assert!(!list.matches(Path::new("x")));
+            assert!(!list.matches(Path::new("")));
+        }
+    }
+
+    #[test]
     fn regex_rejects_java_syntax_with_different_pcre2_meaning() {
         assert!(
             ConfigEntry::regex(r"(?U)\w+")
