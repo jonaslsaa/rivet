@@ -277,7 +277,7 @@ the crate's `"blocks"` cargo feature:
 
 - `mod.rs` — declares the generated submodules: `biomes`, `block_behaviors`,
   `block_properties`, `block_states`, `blocks`, `registries`, `registry_data`,
-  `synchronized`, `tags`.
+  `synchronized`, `tags`, `worldgen`.
 - `blocks.rs` — `BlockId(pub u16)`, a `phf::Map<&'static str, u16>`
   (`BLOCK_BY_NAME`), an id-indexed `BLOCK_BY_ID` array, and lookup methods.
 - `block_properties.rs` — `BlockPropertyId`, an enum with one variant per
@@ -304,6 +304,14 @@ the crate's `"blocks"` cargo feature:
   registries the report cannot cover it also emits the element table; the other
   8 resolve through the existing `blocks.rs`/`registries.rs`/`biomes.rs`
   surfaces. See "Biome + tag tables" below.
+- `worldgen.rs` — the worldgen noise registry, per-biome climate
+  configuration, and multi-noise biome-source preset parameter points
+  (`NOISE_BY_NAME`/`NOISE_BY_ID`/`NOISE_AMPLITUDES`, `BIOME_CLIMATE`/
+  `BIOME_CLIMATE_BY_ID`, and `NETHER_BIOME_SOURCE_PARAMETER_POINTS`/
+  `OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS`, from `data/worldgen.json`, the
+  `WorldgenDataExtractor` fixture, issue #354). Parameter spans are the
+  quantized longs (`Climate.quantizeCoord`) exactly as stored in the runtime
+  `Climate.ParameterPoint`.
 
 The generator asserts block ids are contiguous `0..n` (true for vanilla 26.2).
 After regenerating, run `cargo fmt -p rivet-registry` (the phf macro output is
