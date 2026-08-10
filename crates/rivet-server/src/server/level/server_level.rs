@@ -82,9 +82,8 @@ pub struct ServerLevelConfig {
     /// tick-thread driver of `ClientboundSetSimulationDistancePacket` and the
     /// Moonrise `tickViewDistance` (issue #100).
     pub simulation_distance: i32,
-    /// Whether absent view chunks may repeat the deterministic spawn content.
-    /// This is only true for the legacy no-level superflat fixture; a
-    /// region-backed level must fail instead of synthesizing disk data.
+    /// Policy for absent view chunks. The legacy no-level fixture repeats
+    /// spawn content; region-backed composition requires loaded coordinates.
     pub missing_chunk_policy: MissingChunkPolicy,
 }
 
@@ -242,8 +241,7 @@ impl ServerLevel {
         -1
     }
 
-    /// Whether the legacy no-level fixture may repeat spawn content for an
-    /// unloaded position. Region-backed composition sets this to false.
+    /// The explicit absent-chunk policy consumed by the player send path.
     pub fn missing_chunk_policy(&self) -> MissingChunkPolicy {
         self.missing_chunk_policy
     }

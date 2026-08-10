@@ -357,15 +357,17 @@ impl PlayerChunkLoader {
 fn encode_chunk_with_light(pos: ChunkPos, world: &ServerLevel) -> Result<Vec<u8>, String> {
     let chunk = match world.chunk_map().get_chunk(pos) {
         Some(chunk) => chunk,
-        None if world.missing_chunk_policy() == MissingChunkPolicy::RequireLoaded => {
-            return Err(format!(
-                "UNVERIFIED region-backed chunk {pos} is not loaded; generation and superflat fallback are disabled"
-            ));
-        }
-        None => world
-            .chunk_map()
-            .get_chunk(world.view().center())
-            .expect("spawn chunk loaded"),
+        None => match world.missing_chunk_policy() {
+            MissingChunkPolicy::RequireLoaded => {
+                return Err(format!(
+                    "UNVERIFIED region-backed chunk {pos} is not loaded; generation and superflat fallback are disabled"
+                ));
+            }
+            MissingChunkPolicy::RepeatSpawnFixture => world
+                .chunk_map()
+                .get_chunk(world.view().center())
+                .expect("spawn chunk loaded"),
+        },
     };
     let packet = ClientboundLevelChunkWithLightPacket::new(
         pos.x(),
