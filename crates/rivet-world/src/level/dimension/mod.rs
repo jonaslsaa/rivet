@@ -9,6 +9,4 @@
 
 pub mod dimension_type;
 
-pub use dimension_type::{
-    BITS_FOR_Y, MAX_Y, MIN_HEIGHT, MIN_Y, WAY_ABOVE_MAX_Y, WAY_BELOW_MIN_Y, Y_SIZE,
-};
+pub use dimension_type::{BITS_FOR_Y, MAX_Y, MIN_Y, Y_SIZE};

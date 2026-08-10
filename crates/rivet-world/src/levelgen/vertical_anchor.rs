@@ -128,6 +128,11 @@ impl fmt::Display for VerticalAnchor {
 ///
 /// `Codec.xor(Absolute.CODEC, Codec.xor(AboveBottom.CODEC, BelowTop.CODEC))
 /// .xmap(VerticalAnchor::merge, VerticalAnchor::split)`.
+///
+/// The tree is rebuilt on every call (the same shape as the sibling
+/// `probability_feature_configuration_codec`/`decoration_codec` factories).
+/// Java builds its `static final` once; the port keeps the rebuild convention
+/// and defers per-Ops caching until a consumer makes the cost meaningful.
 pub fn vertical_anchor_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<VerticalAnchor, Ops>>
 where
     Ops::Output: Clone,
