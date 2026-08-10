@@ -98,12 +98,26 @@ impl DoubleBlockHalf {
     }
 }
 
-impl StringRepresentable for DoubleBlockHalf {
-    fn get_serialized_name(&self) -> &str {
+impl DoubleBlockHalf {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             DoubleBlockHalf::Upper => "upper",
             DoubleBlockHalf::Lower => "lower",
         }
+    }
+}
+
+impl StringRepresentable for DoubleBlockHalf {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<DoubleBlockHalf> for PropertyValue {
+    fn from(value: DoubleBlockHalf) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -117,12 +131,26 @@ pub enum Half {
     Bottom,
 }
 
-impl StringRepresentable for Half {
-    fn get_serialized_name(&self) -> &str {
+impl Half {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             Half::Top => "top",
             Half::Bottom => "bottom",
         }
+    }
+}
+
+impl StringRepresentable for Half {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<Half> for PropertyValue {
+    fn from(value: Half) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -137,13 +165,27 @@ pub enum SlabType {
     Double,
 }
 
-impl StringRepresentable for SlabType {
-    fn get_serialized_name(&self) -> &str {
+impl SlabType {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             SlabType::Top => "top",
             SlabType::Bottom => "bottom",
             SlabType::Double => "double",
         }
+    }
+}
+
+impl StringRepresentable for SlabType {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<SlabType> for PropertyValue {
+    fn from(value: SlabType) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -159,13 +201,27 @@ pub enum AttachFace {
     Ceiling,
 }
 
-impl StringRepresentable for AttachFace {
-    fn get_serialized_name(&self) -> &str {
+impl AttachFace {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             AttachFace::Floor => "floor",
             AttachFace::Wall => "wall",
             AttachFace::Ceiling => "ceiling",
         }
+    }
+}
+
+impl StringRepresentable for AttachFace {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<AttachFace> for PropertyValue {
+    fn from(value: AttachFace) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -207,8 +263,10 @@ impl RailShape {
     }
 }
 
-impl StringRepresentable for RailShape {
-    fn get_serialized_name(&self) -> &str {
+impl RailShape {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             RailShape::NorthSouth => "north_south",
             RailShape::EastWest => "east_west",
@@ -221,6 +279,18 @@ impl StringRepresentable for RailShape {
             RailShape::NorthWest => "north_west",
             RailShape::NorthEast => "north_east",
         }
+    }
+}
+
+impl StringRepresentable for RailShape {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<RailShape> for PropertyValue {
+    fn from(value: RailShape) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -243,13 +313,27 @@ impl RedstoneSide {
     }
 }
 
-impl StringRepresentable for RedstoneSide {
-    fn get_serialized_name(&self) -> &str {
+impl RedstoneSide {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             RedstoneSide::Up => "up",
             RedstoneSide::Side => "side",
             RedstoneSide::None => "none",
         }
+    }
+}
+
+impl StringRepresentable for RedstoneSide {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<RedstoneSide> for PropertyValue {
+    fn from(value: RedstoneSide) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -268,8 +352,10 @@ pub enum StairsShape {
     OuterRight,
 }
 
-impl StringRepresentable for StairsShape {
-    fn get_serialized_name(&self) -> &str {
+impl StairsShape {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             StairsShape::Straight => "straight",
             StairsShape::InnerLeft => "inner_left",
@@ -277,6 +363,18 @@ impl StringRepresentable for StairsShape {
             StairsShape::OuterLeft => "outer_left",
             StairsShape::OuterRight => "outer_right",
         }
+    }
+}
+
+impl StringRepresentable for StairsShape {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<StairsShape> for PropertyValue {
+    fn from(value: StairsShape) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -296,8 +394,10 @@ pub enum SpeleothemThickness {
     Base,
 }
 
-impl StringRepresentable for SpeleothemThickness {
-    fn get_serialized_name(&self) -> &str {
+impl SpeleothemThickness {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             SpeleothemThickness::TipMerge => "tip_merge",
             SpeleothemThickness::Tip => "tip",
@@ -305,6 +405,18 @@ impl StringRepresentable for SpeleothemThickness {
             SpeleothemThickness::Middle => "middle",
             SpeleothemThickness::Base => "base",
         }
+    }
+}
+
+impl StringRepresentable for SpeleothemThickness {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<SpeleothemThickness> for PropertyValue {
+    fn from(value: SpeleothemThickness) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -320,13 +432,27 @@ pub enum BambooLeaves {
     Large,
 }
 
-impl StringRepresentable for BambooLeaves {
-    fn get_serialized_name(&self) -> &str {
+impl BambooLeaves {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             BambooLeaves::None => "none",
             BambooLeaves::Small => "small",
             BambooLeaves::Large => "large",
         }
+    }
+}
+
+impl StringRepresentable for BambooLeaves {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<BambooLeaves> for PropertyValue {
+    fn from(value: BambooLeaves) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -342,13 +468,27 @@ pub enum CreakingHeartState {
     Awake,
 }
 
-impl StringRepresentable for CreakingHeartState {
-    fn get_serialized_name(&self) -> &str {
+impl CreakingHeartState {
+    /// The serialized name (`getSerializedName`), as a `'static` str so the
+    /// value can be used directly in a `PropertyValue::Enum`.
+    pub const fn serialized(&self) -> &'static str {
         match self {
             CreakingHeartState::Uprooted => "uprooted",
             CreakingHeartState::Dormant => "dormant",
             CreakingHeartState::Awake => "awake",
         }
+    }
+}
+
+impl StringRepresentable for CreakingHeartState {
+    fn get_serialized_name(&self) -> &str {
+        self.serialized()
+    }
+}
+
+impl From<CreakingHeartState> for PropertyValue {
+    fn from(value: CreakingHeartState) -> PropertyValue {
+        PropertyValue::Enum(value.serialized())
     }
 }
 
@@ -359,46 +499,9 @@ impl StringRepresentable for CreakingHeartState {
 // Each leaf enum is its property's typed value class (`state.setValue(
 // SlabBlock.TYPE, SlabType.DOUBLE)` in Java). The `From` impls let callers pass
 // the enum directly to the typed `BlockState::set_value`/`try_set_value`
-// helpers instead of hand-writing the `PropertyValue::Enum("...")` string.
-
-macro_rules! impl_from_leaf_enum {
-    ($($enum:ident => { $($variant:ident => $name:literal),+ $(,)? }),+ $(,)?) => {
-        $(
-            impl From<$enum> for PropertyValue {
-                fn from(value: $enum) -> PropertyValue {
-                    match value {
-                        $($enum::$variant => PropertyValue::Enum($name),)+
-                    }
-                }
-            }
-        )+
-    };
-}
-
-impl_from_leaf_enum! {
-    DoubleBlockHalf => { Upper => "upper", Lower => "lower" },
-    Half => { Top => "top", Bottom => "bottom" },
-    SlabType => { Top => "top", Bottom => "bottom", Double => "double" },
-    AttachFace => { Floor => "floor", Wall => "wall", Ceiling => "ceiling" },
-    RailShape => {
-        NorthSouth => "north_south", EastWest => "east_west",
-        AscendingEast => "ascending_east", AscendingWest => "ascending_west",
-        AscendingNorth => "ascending_north", AscendingSouth => "ascending_south",
-        SouthEast => "south_east", SouthWest => "south_west",
-        NorthWest => "north_west", NorthEast => "north_east"
-    },
-    RedstoneSide => { Up => "up", Side => "side", None => "none" },
-    StairsShape => {
-        Straight => "straight", InnerLeft => "inner_left",
-        InnerRight => "inner_right", OuterLeft => "outer_left", OuterRight => "outer_right"
-    },
-    SpeleothemThickness => {
-        TipMerge => "tip_merge", Tip => "tip",
-        Frustum => "frustum", Middle => "middle", Base => "base"
-    },
-    BambooLeaves => { None => "none", Small => "small", Large => "large" },
-    CreakingHeartState => { Uprooted => "uprooted", Dormant => "dormant", Awake => "awake" },
-}
+// helpers instead of hand-writing the `PropertyValue::Enum("...")` string. Each
+// impl routes through the enum's `serialized()` const fn — the single source of
+// truth for the serialized name shared with `StringRepresentable`.
 
 // ---------------------------------------------------------------------------
 // BlockStateProperties — the named constant facade
