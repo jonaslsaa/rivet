@@ -270,7 +270,10 @@ where
 /// bytes (one 16×16 y-level) are zero and everything above is fully lit (1920
 /// `0xFF` bytes). Index 2 (the next section, all air) is fully lit. All higher
 /// layers are absent (`None`), matching the captured fixture.
-fn superflat_sky_layers() -> Vec<Option<DataLayer>> {
+///
+/// `pub(crate)` so the #229 byte-identity spike can run this filler through the
+/// same `light_save_surface` seam as the fixture and falsify the difference.
+pub(crate) fn superflat_sky_layers() -> Vec<Option<DataLayer>> {
     let mut floor = vec![0u8; 128];
     floor.extend(vec![0xFFu8; 1920]);
     let mut layers = vec![None; LIGHT_SECTION_COUNT];
@@ -282,7 +285,10 @@ fn superflat_sky_layers() -> Vec<Option<DataLayer>> {
 
 /// The 26 block light layers: indices 0..2 exist and are empty (uniform 0),
 /// everything else absent — a fresh superflat chunk has no block light.
-fn superflat_block_layers() -> Vec<Option<DataLayer>> {
+///
+/// `pub(crate)` so the #229 byte-identity spike can run this filler through the
+/// same `light_save_surface` seam as the fixture and falsify the difference.
+pub(crate) fn superflat_block_layers() -> Vec<Option<DataLayer>> {
     let mut layers = vec![None; LIGHT_SECTION_COUNT];
     layers[0] = Some(DataLayer::new(0));
     layers[1] = Some(DataLayer::new(0));

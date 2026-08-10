@@ -16,5 +16,6 @@
 
 pub mod level_light_engine;
 pub mod light_update_data;
+pub mod save_util;
 pub mod star_light_provider;
 pub mod swmr_nibble_array;
