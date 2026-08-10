@@ -2811,29 +2811,41 @@ fn run_hash_diff_negative(
     // dim + coordinate are asserted by re-reading the rebuilt manifest, and the
     // run_hash_diff return value is examined structurally (FAIL + exactly the
     // tampered coordinate in the mismatch set), never just "exit nonzero".
-    let (mismatches, _, _, _) = compute_hash_diffs(&load_hash_manifest(paper_dir)?, &rebuilt);
+    let (mismatches, paper_only, rivet_only, _) =
+        compute_hash_diffs(&load_hash_manifest(paper_dir)?, &rebuilt);
     let tamper_label = format!(
         "{} tamper on {}/{}",
         kind.cli_name(),
         full.dim,
         fmt_hash_coord(full.cx, full.cz)
     );
-    // The tamper must be detected AND the reported mismatch set must name
-    // exactly the tampered chunk — every reported divergence is that chunk.
-    // A comparator that fails on an unrelated chunk (or vacuously passes) must
-    // not satisfy the negative control.
-    if !mismatch_set_names_exactly(&mismatches, &full.dim, full.cx, full.cz) {
+    // The tamper must be the ONLY divergence: the digest-mismatch set is
+    // non-empty and names exactly the tampered chunk, AND there is no one-sided
+    // FULL divergence in either direction (a one-sided divergence alongside the
+    // tamper means the comparator is also failing for a second, unrelated
+    // reason). A vacuous pass (empty) or a wrong-chunk failure must also be
+    // caught — "any diff failure" never satisfies the control.
+    if !tamper_divergence_is_exactly(
+        &mismatches,
+        &paper_only,
+        &rivet_only,
+        &full.dim,
+        full.cx,
+        full.cz,
+    ) {
         let _ = fs::remove_dir_all(&scratch);
         return Err(Error::Gate(format!(
-            "negative control FAILED: {tamper_label} was not reported as exactly that chunk \
-             (empty = vacuously green; non-empty = a DIFFERENT chunk named: {}) — the \
-             comparator must name exactly the tampered dimension/coordinate, not accept any \
+            "negative control FAILED: {tamper_label} was not reported as the ONLY divergence \
+             (digest mismatches: {}; paper-only: {}; rivet-only: {}) — the comparator must \
+             name exactly the tampered dimension/coordinate and nothing else, not accept any \
              diff failure",
             mismatches
                 .iter()
                 .map(|m| format!("{}/{}", m.dim, fmt_hash_coord(m.cx, m.cz)))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            paper_only.join(", "),
+            rivet_only.join(", ")
         )));
     }
     match run_hash_diff(paper_dir, &scratch) {
@@ -2874,6 +2886,25 @@ fn mismatch_set_names_exactly(
         && mismatches
             .iter()
             .all(|m| m.dim == dim && (m.cx, m.cz) == (cx, cz))
+}
+
+/// Whether the negative-control divergence proves the tamper was the **only**
+/// divergence: the digest-mismatch set names exactly the tampered chunk AND
+/// there is no one-sided FULL divergence in either direction. A one-sided FULL
+/// divergence alongside the tamper means the comparator is also failing for a
+/// second, unrelated reason, so the reported failure is not strictly "exactly
+/// the tampered chunk" — the control must not pass on it.
+fn tamper_divergence_is_exactly(
+    mismatches: &[ChunkHashMismatch],
+    paper_only: &[String],
+    rivet_only: &[String],
+    dim: &str,
+    cx: i32,
+    cz: i32,
+) -> bool {
+    mismatch_set_names_exactly(mismatches, dim, cx, cz)
+        && paper_only.is_empty()
+        && rivet_only.is_empty()
 }
 
 /// `<dim>/<cx>.<cz>` for a coordinate in hash-diff output.
@@ -4989,6 +5020,58 @@ mod tests {
         // The tampered chunk plus an unrelated one: FAIL (not *exactly*).
         assert!(!mismatch_set_names_exactly(
             &[t(7, 7), t(8, 8)],
+            "overworld",
+            7,
+            7
+        ));
+    }
+
+    /// The negative-control "tamper is the ONLY divergence" predicate: besides
+    /// naming exactly the tampered chunk, a one-sided FULL divergence in either
+    /// direction must also fail the control (the comparator is failing for a
+    /// second, unrelated reason).
+    #[test]
+    fn tamper_divergence_is_exactly_rejects_one_sided_divergence() {
+        let t = |cx: i32, cz: i32| ChunkHashMismatch {
+            dim: "overworld".to_string(),
+            cx,
+            cz,
+            expected: "a".to_string(),
+            actual: "b".to_string(),
+            order_only: false,
+        };
+        // Tamper only, no one-sided divergence: PASS.
+        assert!(tamper_divergence_is_exactly(
+            &[t(7, 7)],
+            &[],
+            &[],
+            "overworld",
+            7,
+            7
+        ));
+        // A paper-only FULL divergence alongside the tamper: FAIL.
+        assert!(!tamper_divergence_is_exactly(
+            &[t(7, 7)],
+            &["overworld/0.0.9.9".to_string()],
+            &[],
+            "overworld",
+            7,
+            7
+        ));
+        // A rivet-only FULL divergence alongside the tamper: FAIL.
+        assert!(!tamper_divergence_is_exactly(
+            &[t(7, 7)],
+            &[],
+            &["overworld/0.0.9.9".to_string()],
+            "overworld",
+            7,
+            7
+        ));
+        // Empty digest mismatches with no one-sided divergence: FAIL (vacuous).
+        assert!(!tamper_divergence_is_exactly(
+            &[],
+            &[],
+            &[],
             "overworld",
             7,
             7
