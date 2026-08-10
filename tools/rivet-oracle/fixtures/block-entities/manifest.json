@@ -1,0 +1,58 @@
+{
+  "format": 1,
+  "kind": "block-entities-337",
+  "paper": "26.2-DEV-main@0a99345",
+  "paper-commit": "0a993450f129c4942c2a9ed45ba047412b4667cf",
+  "paperclip-sha256": "6d37d7db3bbc055bc02ec3078fc6d80b6d51842c6b92446cb2f77d375a58bccd",
+  "minecraft": "26.2",
+  "data-version": 4903,
+  "world": {
+    "seed": "337",
+    "dimension": "minecraft:overworld",
+    "level-type": "minecraft:flat",
+    "region-file-compression": "none",
+    "chunk-concurrency": {
+      "worker-threads": 1,
+      "io-threads": 1
+    },
+    "launcher-world-mutated": false
+  },
+  "setup-commands": [
+    "forceload add 0 0",
+    "setblock 1 65 1 minecraft:chest",
+    "setblock 2 65 1 minecraft:furnace",
+    "data modify block 1 65 1 Items set value [{Slot:0b,id:\"minecraft:diamond\",count:3}]",
+    "data modify block 2 65 1 Items set value [{Slot:0b,id:\"minecraft:coal\",count:2},{Slot:1b,id:\"minecraft:iron_ore\",count:1}]",
+    "data modify block 1 65 1 PublicBukkitValues set value {\"rivet:fixture\":\"chest-payload\"}",
+    "data modify block 2 65 1 PublicBukkitValues set value {\"rivet:fixture\":\"furnace-payload\"}",
+    "data modify block 1 65 1 components.\"minecraft:custom_name\" set value '{\"text\":\"Fixture Chest\"}'",
+    "save-all flush",
+    "stop"
+  ],
+  "extraction-command": "python3 tools/rivet-oracle/scripts/extract_fixtures.py <fresh-world> <scratch-output>",
+  "captured": [
+    {
+      "path": "chunk-0-0.nbt",
+      "bytes": 19889,
+      "sha256": "27554ec58ee955a507e33174c70d28b4b46de82fcbd19e3e1e2c2e836ff5e573"
+    }
+  ],
+  "fixture": {
+    "path": "chunk-0-0.nbt",
+    "source": "chunk/overworld/0.0/0.0.nbt",
+    "bytes": 19889,
+    "sha256": "27554ec58ee955a507e33174c70d28b4b46de82fcbd19e3e1e2c2e836ff5e573",
+    "expected-order": [
+      {
+        "id": "minecraft:chest",
+        "position": [1, 65, 1],
+        "payload": ["Items", "components", "PublicBukkitValues"]
+      },
+      {
+        "id": "minecraft:furnace",
+        "position": [2, 65, 1],
+        "payload": ["Items", "Paper.CookSpeedMultiplier", "RecipesUsed", "PublicBukkitValues"]
+      }
+    ]
+  }
+}
