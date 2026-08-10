@@ -19,6 +19,10 @@
 //! slice only registers/accumulates library jar paths and carries the
 //! registration error surface; resolution and classpath consumption are
 //! future units (`paper.plugin.loader`, `paper.plugin.loader.library.impl`).
+//! RivetTodo(#400): `paper.plugin.loader` (the `PluginLoader` that consumes a
+//! `LibraryStore`) is a future unit.
+//! RivetTodo(#400): `paper.plugin.loader.library.impl` — `JarLibrary`,
+//! `MavenLibraryResolver`, `PaperClasspathBuilder` are future units.
 
 mod class_path_library;
 mod library_loading_exception;
