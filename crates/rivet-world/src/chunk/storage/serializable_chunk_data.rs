@@ -599,6 +599,13 @@ impl SerializableChunkData {
         })
     }
 
+    /// Validate every capability that precedes runtime chunk composition.
+    /// Region-backed boot uses this to retain precise proto/blending/tick/etc.
+    /// errors before a chunk can be handed to the composition slice.
+    pub fn validate_full_capabilities(&self) -> Result<(), SerializableChunkDataError> {
+        self.validate_full_construction(self.section_count)
+    }
+
     fn validate_full_construction(
         &self,
         section_count: usize,

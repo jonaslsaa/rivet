@@ -39,6 +39,15 @@ use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
 use super::chunk_map::ChunkMap;
 use super::chunk_tracking_view::ChunkTrackingView;
 
+/// How the player send path handles a position absent from `ChunkMap`.
+/// Repeating spawn content is confined to the legacy no-level fixture;
+/// region-backed worlds require an actually loaded coordinate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissingChunkPolicy {
+    RepeatSpawnFixture,
+    RequireLoaded,
+}
+
 /// `Level.OVERWORLD` — `ResourceKey.create(Registries.DIMENSION,
 /// Identifier.withDefaultNamespace("overworld"))`.
 pub fn overworld_dimension() -> ResourceKey<Level> {
@@ -73,6 +82,9 @@ pub struct ServerLevelConfig {
     /// tick-thread driver of `ClientboundSetSimulationDistancePacket` and the
     /// Moonrise `tickViewDistance` (issue #100).
     pub simulation_distance: i32,
+    /// Policy for absent view chunks. The legacy no-level fixture repeats
+    /// spawn content; region-backed composition requires loaded coordinates.
+    pub missing_chunk_policy: MissingChunkPolicy,
 }
 
 impl Default for ServerLevelConfig {
@@ -89,6 +101,7 @@ impl Default for ServerLevelConfig {
             respawn_data: RespawnData::of(dimension.clone(), spawn_pos, 0.0, 0.0),
             view_distance: 4,
             simulation_distance: 4,
+            missing_chunk_policy: MissingChunkPolicy::RepeatSpawnFixture,
         }
     }
 }
@@ -114,6 +127,7 @@ pub struct ServerLevel {
     /// The simulation distance (the Moonrise world `tickViewDistance` driver;
     /// the M1 world pins it to the `simulation-distance=4` fixture).
     simulation_distance: i32,
+    missing_chunk_policy: MissingChunkPolicy,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
     /// would cross threads.
@@ -141,6 +155,7 @@ impl ServerLevel {
             chunk_map,
             view,
             simulation_distance: config.simulation_distance,
+            missing_chunk_policy: config.missing_chunk_policy,
             _confinement: std::marker::PhantomData,
         }
     }
@@ -224,6 +239,11 @@ impl ServerLevel {
     /// unset default.
     pub fn send_view_distance(&self) -> i32 {
         -1
+    }
+
+    /// The explicit absent-chunk policy consumed by the player send path.
+    pub fn missing_chunk_policy(&self) -> MissingChunkPolicy {
+        self.missing_chunk_policy
     }
 }
 
