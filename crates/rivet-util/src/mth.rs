@@ -183,6 +183,42 @@ pub fn max_f64(a: f64, b: f64) -> f64 {
     }
 }
 
+/// `Math.min(float a, float b)` — returns the smaller of the two, and
+/// propagates NaN from *either* operand (Java `Math.min` returns NaN if either
+/// argument is NaN; Rust `f32::min` returns the non-NaN operand instead).
+/// Signed zero follows Java too: `Math.min(-0.0, 0.0)` is negative zero.
+pub fn min_f32(a: f32, b: f32) -> f32 {
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else {
+        a.min(b)
+    }
+}
+
+/// `Math.max(float a, float b)` — Java `Math.max` NaN propagation over `f32`.
+pub fn max_f32(a: f32, b: f32) -> f32 {
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else {
+        a.max(b)
+    }
+}
+
+/// `Math.min(double a, double b)` — Java `Math.min` NaN propagation over `f64`.
+pub fn min_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else {
+        a.min(b)
+    }
+}
+
 /// `Mth.clampedLerp(double factor, double min, double max)`.
 pub fn clamped_lerp(factor: f64, min: f64, max: f64) -> f64 {
     if factor < 0.0 {

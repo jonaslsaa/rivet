@@ -1,0 +1,278 @@
+{
+  "paper": "26.2-DEV-main@0a99345",
+  "cases": [
+    {
+      "name": "constant_raw",
+      "min": "0x1.8p0",
+      "max": "0x1.8p0",
+      "parity": "k\u003d1.500",
+      "samples": [
+        {
+          "coordinate": "-0x1.8p1",
+          "sample": "0x1.8p0"
+        },
+        {
+          "coordinate": "0x0.0p0",
+          "sample": "0x1.8p0"
+        },
+        {
+          "coordinate": "0x1.4p1",
+          "sample": "0x1.8p0"
+        },
+        {
+          "coordinate": "0x1.9p6",
+          "sample": "0x1.8p0"
+        }
+      ]
+    },
+    {
+      "name": "constant_one_point",
+      "min": "0x1.ap1",
+      "max": "0x1.ap1",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[0.000], derivatives\u003d[0.000], values\u003d[k\u003d3.250]}",
+      "samples": [
+        {
+          "coordinate": "-0x1.8p1",
+          "sample": "0x1.ap1"
+        },
+        {
+          "coordinate": "0x0.0p0",
+          "sample": "0x1.ap1"
+        },
+        {
+          "coordinate": "0x1.4p1",
+          "sample": "0x1.ap1"
+        },
+        {
+          "coordinate": "0x1.9p6",
+          "sample": "0x1.ap1"
+        }
+      ]
+    },
+    {
+      "name": "two_point_no_deriv",
+      "min": "0x1.0p1",
+      "max": "0x1.0p2",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[-1.000, 1.000], derivatives\u003d[0.000, 0.000], values\u003d[k\u003d2.000, k\u003d4.000]}",
+      "samples": [
+        {
+          "coordinate": "-0x1.0p1",
+          "sample": "0x1.0p1"
+        },
+        {
+          "coordinate": "-0x1.8p0",
+          "sample": "0x1.0p1"
+        },
+        {
+          "coordinate": "-0x1.0p0",
+          "sample": "0x1.0p1"
+        },
+        {
+          "coordinate": "-0x1.0p-1",
+          "sample": "0x1.28p1"
+        },
+        {
+          "coordinate": "0x0.0p0",
+          "sample": "0x1.8p1"
+        },
+        {
+          "coordinate": "0x1.0p-1",
+          "sample": "0x1.d8p1"
+        },
+        {
+          "coordinate": "0x1.0p0",
+          "sample": "0x1.0p2"
+        },
+        {
+          "coordinate": "0x1.8p0",
+          "sample": "0x1.0p2"
+        },
+        {
+          "coordinate": "0x1.0p1",
+          "sample": "0x1.0p2"
+        }
+      ],
+      "raw": {
+        "locations": [
+          "-0x1.0p0",
+          "0x1.0p0"
+        ],
+        "derivatives": [
+          "0x0.0p0",
+          "0x0.0p0"
+        ]
+      }
+    },
+    {
+      "name": "three_point_deriv",
+      "min": "-Infinity",
+      "max": "0x1.dp2",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[-3.000, 0.000, 3.000], derivatives\u003d[1.000, 0.000, -2.000], values\u003d[k\u003d5.000, k\u003d-1.000, k\u003d2.000]}",
+      "samples": [
+        {
+          "coordinate": "-0x1.0p2",
+          "sample": "0x1.0p2"
+        },
+        {
+          "coordinate": "-0x1.8p1",
+          "sample": "0x1.4p2"
+        },
+        {
+          "coordinate": "-0x1.0p1",
+          "sample": "0x1.f1c71cp1"
+        },
+        {
+          "coordinate": "-0x1.0p0",
+          "sample": "0x1.8e38e4p-1"
+        },
+        {
+          "coordinate": "0x0.0p0",
+          "sample": "-0x1.0p0"
+        },
+        {
+          "coordinate": "0x1.0p0",
+          "sample": "0x1.c71c7p-3"
+        },
+        {
+          "coordinate": "0x1.0p1",
+          "sample": "0x1.0e38e4p1"
+        },
+        {
+          "coordinate": "0x1.8p1",
+          "sample": "0x1.0p1"
+        },
+        {
+          "coordinate": "0x1.0p2",
+          "sample": "0x0.0p0"
+        }
+      ],
+      "raw": {
+        "locations": [
+          "-0x1.8p1",
+          "0x0.0p0",
+          "0x1.8p1"
+        ],
+        "derivatives": [
+          "0x1.0p0",
+          "0x0.0p0",
+          "-0x1.0p1"
+        ]
+      }
+    },
+    {
+      "name": "neg_slope_extend",
+      "min": "-0x1.3p2",
+      "max": "Infinity",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[0.000, 4.000, 8.000], derivatives\u003d[-1.000, 0.000, 0.500], values\u003d[k\u003d10.000, k\u003d2.000, k\u003d-3.000]}",
+      "samples": [
+        {
+          "coordinate": "-0x1.0p1",
+          "sample": "0x1.8p3"
+        },
+        {
+          "coordinate": "0x0.0p0",
+          "sample": "0x1.4p3"
+        },
+        {
+          "coordinate": "0x1.0p1",
+          "sample": "0x1.6p2"
+        },
+        {
+          "coordinate": "0x1.0p2",
+          "sample": "0x1.0p1"
+        },
+        {
+          "coordinate": "0x1.8p2",
+          "sample": "-0x1.8p-1"
+        },
+        {
+          "coordinate": "0x1.0p3",
+          "sample": "-0x1.8p1"
+        },
+        {
+          "coordinate": "0x1.4p3",
+          "sample": "-0x1.0p1"
+        },
+        {
+          "coordinate": "0x1.8p3",
+          "sample": "-0x1.0p0"
+        }
+      ],
+      "raw": {
+        "locations": [
+          "0x0.0p0",
+          "0x1.0p2",
+          "0x1.0p3"
+        ],
+        "derivatives": [
+          "-0x1.0p0",
+          "0x0.0p0",
+          "0x1.0p-1"
+        ]
+      }
+    },
+    {
+      "name": "nested_values",
+      "min": "0x1.0p-1",
+      "max": "0x1.8p1",
+      "parity": "Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[-2.000, 2.000], derivatives\u003d[0.000, 0.000], values\u003d[Spline{coordinate\u003dnet.minecraft.util.BoundedFloatFunction$1@e73f9ac, locations\u003d[0.000, 2.000], derivatives\u003d[0.000, 0.000], values\u003d[k\u003d1.000, k\u003d3.000]}, k\u003d0.500]}",
+      "samples": [
+        {
+          "coordinate": "-0x1.8p1",
+          "sample": "0x1.0p0"
+        },
+        {
+          "coordinate": "-0x1.0p1",
+          "sample": "0x1.0p0"
+        },
+        {
+          "coordinate": "-0x1.0p0",
+          "sample": "0x1.d8p-1"
+        },
+        {
+          "coordinate": "0x0.0p0",
+          "sample": "0x1.8p-1"
+        },
+        {
+          "coordinate": "0x1.0p0",
+          "sample": "0x1.78p-1"
+        },
+        {
+          "coordinate": "0x1.0p1",
+          "sample": "0x1.0p-1"
+        },
+        {
+          "coordinate": "0x1.8p1",
+          "sample": "0x1.0p-1"
+        }
+      ],
+      "raw": {
+        "locations": [
+          "-0x1.0p1",
+          "0x1.0p1"
+        ],
+        "derivatives": [
+          "0x0.0p0",
+          "0x0.0p0"
+        ]
+      }
+    }
+  ],
+  "hostile": {
+    "descending_order": {
+      "throws": true,
+      "exception": "IllegalArgumentException",
+      "message": "Please register points in ascending order"
+    },
+    "equal_order": {
+      "throws": true,
+      "exception": "IllegalArgumentException",
+      "message": "Please register points in ascending order"
+    },
+    "empty_builder": {
+      "throws": true,
+      "exception": "IllegalStateException",
+      "message": "No elements added"
+    }
+  }
+}
