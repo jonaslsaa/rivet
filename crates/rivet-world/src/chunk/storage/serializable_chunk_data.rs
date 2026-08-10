@@ -840,20 +840,19 @@ pub fn parse_heightmaps(chunk_data: &CompoundTag, heightmaps_after: &[Types]) ->
 /// The `write()` heightmaps half: build the `Heightmaps` compound from stored
 /// columns, keyed by `Types.getSerializationKey()`.
 ///
-/// Mirrors `SerializableChunkData.copyOf`/`write`: `copyOf` copies exactly the
-/// entries whose type the persisted status's `heightmapsAfter()` allows, then
-/// `write()` iterates that `EnumMap` in ordinal (declaration) order, cloning
-/// each raw `long[]` into a `LongArrayTag`. `heightmaps_after` is already the
-/// `EnumSet`'s ordinal iteration order (`FINAL_HEIGHTMAPS`/`WORLDGEN_HEIGHTMAPS`),
-/// so iterating it and keeping the present entries reproduces both the set
-/// filtering and the ordinal key order. The stored columns are borrowed, never
-/// consumed — each tag is written from `raw.clone()`.
+/// Mirrors `SerializableChunkData.write()`: it iterates the already-filtered
+/// `EnumMap` in ordinal (declaration) order and passes each raw `long[]` into a
+/// `LongArrayTag`. Java shares the array reference — `copyOf`'s single
+/// `data.clone()` has already happened at the stored-build boundary, so this
+/// move is the one copy after parse, matching Java's copy count. Stored columns
+/// are consumed, never cloned again: `put_long_array` takes the `Vec<i64>` by
+/// value, and Java's `write` passes the array into the tag without copying.
 ///
-/// Contract: `stored` must have been built from the same status's
-/// `heightmaps_after()` (i.e. `parse_heightmaps(chunk, status.heightmaps_after())`
-/// on the write side), matching how `copyOf` filters before `write` iterates.
-/// Passing a different slice than the one `stored` was built from silently drops
-/// columns Paper would persist — a caller error, not a writer fallback.
+/// The `copyOf` filter — keep only types the persisted status's
+/// `heightmapsAfter()` allows — lives at the stored-build boundary
+/// ([`parse_heightmaps`], which is passed the status slice), not here. `write`
+/// emits whatever the map holds, exactly as Java's `write` takes no status
+/// argument.
 ///
 /// The key order this produces is NOT the order Paper's own chunk files store
 /// heightmap keys in: Java's `CompoundTag` is a fastutil hash map, so the
@@ -862,11 +861,14 @@ pub fn parse_heightmaps(chunk_data: &CompoundTag, heightmaps_after: &[Types]) ->
 /// iteration order. Rivet's insertion-ordered `CompoundTag` therefore writes
 /// ordinal order — the `compound_key_order` divergence counted in PARITY.md —
 /// so the fixture's key order is never a byte-order oracle here.
-pub fn write_heightmaps(stored: &StoredHeightmaps, heightmaps_after: &[Types]) -> CompoundTag {
+pub fn write_heightmaps(mut stored: StoredHeightmaps) -> CompoundTag {
     let mut out = CompoundTag::new();
-    for ty in heightmaps_after {
-        if let Some(raw) = &stored[*ty as usize] {
-            out.put_long_array(ty.serialization_key(), raw.clone());
+    for ty in Types::all() {
+        // `.get_mut` (rather than `stored[ty as usize]`) keeps a future extra
+        // `Types` variant a silent skip instead of an index panic, and
+        // `.take()` moves the column out so `put_long_array` gets it by value.
+        if let Some(raw) = stored.get_mut(ty as usize).and_then(Option::take) {
+            out.put_long_array(ty.serialization_key(), raw);
         }
     }
     out
@@ -2670,10 +2672,10 @@ mod tests {
 
     #[test]
     fn write_heightmaps_emits_full_four_keys_in_ordinal_order() {
-        // `copyOf` keeps the four `FULL` types; `write()` emits the `EnumMap`
-        // in ordinal (declaration) order: WORLD_SURFACE, OCEAN_FLOOR,
-        // MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES. This is the storage key
-        // order, NOT the fixture's fastutil hash order.
+        // A FULL chunk's stored map (parse-filtered by FINAL_HEIGHTMAPS) emits
+        // the four types in ordinal (declaration) order: WORLD_SURFACE,
+        // OCEAN_FLOOR, MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES. This is the
+        // storage key order, NOT the fixture's fastutil hash order.
         let stored = {
             let mut maps = CompoundTag::new();
             maps.put_long_array("WORLD_SURFACE", vec![1; 37]);
@@ -2684,7 +2686,7 @@ mod tests {
             chunk.put(HEIGHTMAPS_TAG.to_string(), Tag::Compound(maps));
             parse_heightmaps(&chunk, &FINAL_HEIGHTMAPS)
         };
-        let written = write_heightmaps(&stored, &FINAL_HEIGHTMAPS);
+        let written = write_heightmaps(stored);
         let keys: Vec<&String> = written.key_set().collect();
         assert_eq!(
             keys,
@@ -2709,8 +2711,8 @@ mod tests {
 
     #[test]
     fn write_heightmaps_omits_missing_entries() {
-        // `copyOf` only copies types the chunk actually holds; `write()` then
-        // emits only those present.
+        // A chunk holding only WORLD_SURFACE writes only that key; the absent
+        // FINAL types stay absent.
         let stored = {
             let mut maps = CompoundTag::new();
             maps.put_long_array("WORLD_SURFACE", vec![1; 37]);
@@ -2718,15 +2720,17 @@ mod tests {
             chunk.put(HEIGHTMAPS_TAG.to_string(), Tag::Compound(maps));
             parse_heightmaps(&chunk, &FINAL_HEIGHTMAPS)
         };
-        let written = write_heightmaps(&stored, &FINAL_HEIGHTMAPS);
+        let written = write_heightmaps(stored);
         let keys: Vec<&String> = written.key_set().collect();
         assert_eq!(keys, vec![&"WORLD_SURFACE".to_string()]);
     }
 
     #[test]
-    fn write_heightmaps_clones_raw_data_exactly() {
-        // `copyOf` clones each `long[]` (`data.clone()`); the writer must not
-        // alias or truncate the stored column.
+    fn write_heightmaps_writes_raw_data_exactly() {
+        // The stored column lands in the tag byte-for-byte (Java's `write`
+        // passes the `copyOf`-cloned array reference into the `LongArrayTag` —
+        // this move is that same single copy, no second clone and no
+        // truncation).
         let stored = {
             let mut maps = CompoundTag::new();
             let raw: Vec<i64> = (0..37).map(|i| i64::from(i).wrapping_mul(7)).collect();
@@ -2735,24 +2739,21 @@ mod tests {
             chunk.put(HEIGHTMAPS_TAG.to_string(), Tag::Compound(maps));
             parse_heightmaps(&chunk, &FINAL_HEIGHTMAPS)
         };
-        let written = write_heightmaps(&stored, &FINAL_HEIGHTMAPS);
+        let written = write_heightmaps(stored);
         let expected: Vec<i64> = (0..37).map(|i| i64::from(i).wrapping_mul(7)).collect();
         assert_eq!(
             written.get_long_array("MOTION_BLOCKING_NO_LEAVES"),
             Some(&expected)
         );
-        // The stored column is untouched (borrowed, not consumed).
-        assert_eq!(
-            stored[Types::MotionBlockingNoLeaves as usize],
-            Some(expected)
-        );
     }
 
     #[test]
-    fn write_heightmaps_filters_by_worldgen_status() {
+    fn write_heightmaps_emits_only_worldgen_status_columns() {
         // A pre-CARVERS status's `heightmapsAfter()` is `WORLDGEN_HEIGHTMAPS`
-        // (WORLD_SURFACE_WG, OCEAN_FLOOR_WG). The writer emits only those two
-        // and only when present, never the `FINAL_HEIGHTMAPS`.
+        // (WORLD_SURFACE_WG, OCEAN_FLOOR_WG). `parse_heightmaps` filters by
+        // that slice (copyOf's job), so the stored map carries only the two WG
+        // columns even though the tag also holds WORLD_SURFACE; `write` emits
+        // exactly those.
         let mut maps = CompoundTag::new();
         maps.put_long_array("WORLD_SURFACE_WG", vec![9; 37]);
         maps.put_long_array("OCEAN_FLOOR_WG", vec![10; 37]);
@@ -2761,7 +2762,7 @@ mod tests {
         chunk.put(HEIGHTMAPS_TAG.to_string(), Tag::Compound(maps));
         let stored = parse_heightmaps(&chunk, &WORLDGEN_HEIGHTMAPS);
         assert!(stored[Types::WorldSurface as usize].is_none());
-        let written = write_heightmaps(&stored, &WORLDGEN_HEIGHTMAPS);
+        let written = write_heightmaps(stored);
         let keys: Vec<&String> = written.key_set().collect();
         assert_eq!(
             keys,
@@ -2788,7 +2789,7 @@ mod tests {
         // fastutil hash order), so this compares by value, never by key order.
         let chunk = fixture();
         let stored = parse_heightmaps(&chunk, &FINAL_HEIGHTMAPS);
-        let written = write_heightmaps(&stored, &FINAL_HEIGHTMAPS);
+        let written = write_heightmaps(stored.clone());
         // The writer's insertion order is the EnumMap ordinal order.
         assert_eq!(
             written.key_set().collect::<Vec<_>>(),
