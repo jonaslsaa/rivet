@@ -59,6 +59,9 @@ rivet-oracle/
       manifest.json     # hashes of corpus.json + golden.json (kind: text)
       corpus.json       # 62 exact component-JSON inputs (issue #98)
       golden.json       # Paper's verdict + canonical decode->re-encode per input
+    spline/             # CubicSpline/BoundedFloatFunction value-leaf goldens
+      manifest.json     # hash of spline-goldens.json (kind: spline, issue #372)
+      spline-goldens.json  # Paper's exact min/max/parity/sample outputs (hex-float)
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
@@ -192,8 +195,9 @@ cargo run -p rivet-oracle -- <dir>       # check a specific fixtures dir
 The no-arg form discovers every `manifest.json` under `fixtures/` — the M0
 superflat slice (`fixtures/`), the worldgen semantic samples
 (`fixtures/worldgen/`), the normal-overworld region payloads
-(`fixtures/regions/overworld-normal/`), and the text component-JSON corpus
-(`fixtures/text/`, issue #98) — and verifies each against its own
+(`fixtures/regions/overworld-normal/`), the text component-JSON corpus
+(`fixtures/text/`, issue #98), and the spline value-leaf goldens
+(`fixtures/spline/`, issue #372) — and verifies each against its own
 manifest. Prints `OK: all N captured files match manifest SHA-256s` and a
 summary per kind (seed, level-type, region-file-compression, per-dimension
 chunk counts). Exits nonzero on any hash or size mismatch, or if any kind
