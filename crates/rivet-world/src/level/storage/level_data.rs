@@ -174,9 +174,11 @@ pub fn default_respawn_data() -> RespawnData {
 ///
 /// Java wraps each section in a defensive try/catch that prints
 /// `(Error finding world loc)` / `(Error finding chunk loc)` on a throwable.
-/// Those branches are unreachable in practice (the format calls and integer
-/// arithmetic never throw in a release JVM), so the port omits the guards —
-/// identical behavior on every reachable input.
+/// The int arithmetic itself never throws in a release JVM — it silently
+/// wraps — so the port uses `wrapping_*` ops (PORTING.md §Types) that reproduce
+/// exactly that silent wrap even in a debug build, and the unreachable guards
+/// are omitted. This matters because a corrupted coordinate (e.g. a hostile
+/// `level.dat` spawn) must never defeat crash-report generation.
 ///
 /// The Java `%.2f` double overload is not ported — the level-data defaults
 /// only ever call the `BlockPos` overload (`LevelData.fillCrashReportCategory`
@@ -200,9 +202,9 @@ pub fn format_location(level_height_accessor: &dyn LevelHeightAccessor, pos: &Bl
     let min_block_x = SectionPos::section_to_block_coord(section_x);
     let min_block_y = level_height_accessor.get_min_y();
     let min_block_z = SectionPos::section_to_block_coord(section_z);
-    let max_block_x = SectionPos::section_to_block_coord(section_x + 1) - 1;
+    let max_block_x = SectionPos::section_to_block_coord(section_x.wrapping_add(1)).wrapping_sub(1);
     let max_block_y = level_height_accessor.get_max_y();
-    let max_block_z = SectionPos::section_to_block_coord(section_z + 1) - 1;
+    let max_block_z = SectionPos::section_to_block_coord(section_z.wrapping_add(1)).wrapping_sub(1);
     result.push_str(&format!(
         "Section: (at {relative_x},{relative_y},{relative_z} in {section_x},{section_y},{section_z}; chunk contains blocks {min_block_x},{min_block_y},{min_block_z} to {max_block_x},{max_block_y},{max_block_z})"
     ));
@@ -212,14 +214,14 @@ pub fn format_location(level_height_accessor: &dyn LevelHeightAccessor, pos: &Bl
     let region_z = z >> 9;
     let min_chunk_x = region_x << 5;
     let min_chunk_z = region_z << 5;
-    let max_chunk_x = ((region_x + 1) << 5) - 1;
-    let max_chunk_z = ((region_z + 1) << 5) - 1;
+    let max_chunk_x = region_x.wrapping_add(1).wrapping_shl(5).wrapping_sub(1);
+    let max_chunk_z = region_z.wrapping_add(1).wrapping_shl(5).wrapping_sub(1);
     let min_block_x = region_x << 9;
     let min_block_y = level_height_accessor.get_min_y();
     let min_block_z = region_z << 9;
-    let max_block_x = ((region_x + 1) << 9) - 1;
+    let max_block_x = region_x.wrapping_add(1).wrapping_shl(9).wrapping_sub(1);
     let max_block_y = level_height_accessor.get_max_y();
-    let max_block_z = ((region_z + 1) << 9) - 1;
+    let max_block_z = region_z.wrapping_add(1).wrapping_shl(9).wrapping_sub(1);
     result.push_str(&format!(
         "Region: ({region_x},{region_z}; contains chunks {min_chunk_x},{min_chunk_z} to {max_chunk_x},{max_chunk_z}, blocks {min_block_x},{min_block_y},{min_block_z} to {max_block_x},{max_block_y},{max_block_z})"
     ));
@@ -562,6 +564,22 @@ mod tests {
         assert_eq!(
             s,
             "World: (-1,-1,-1), Section: (at 15,15,15 in -1,-1,-1; chunk contains blocks -16,-64,-16 to -1,319,-1), Region: (-1,-1; contains chunks -32,-32 to -1,-1, blocks -512,-64,-512 to -1,319,-1)"
+        );
+    }
+
+    /// A hostile coordinate at the i32 extreme: `x = z = i32::MAX`. The max
+    /// bounds wrap (`sectionToBlockCoord(134217727 + 1) - 1` and
+    /// `(4194303 + 1 << 9) - 1` both overflow past `i32::MAX` and wrap to
+    /// `2147483647`), exactly as Java's silent int arithmetic does. A debug
+    /// build must not panic here — a corrupted `level.dat` spawn must never
+    /// defeat crash-report generation.
+    #[test]
+    fn format_location_i32_extreme_wraps() {
+        let h = crate::level::height_accessor::create(-64, 384);
+        let s = format_location(&h, &BlockPos::new(i32::MAX, 0, i32::MAX));
+        assert_eq!(
+            s,
+            "World: (2147483647,0,2147483647), Section: (at 15,0,15 in 134217727,0,134217727; chunk contains blocks 2147483632,-64,2147483632 to 2147483647,319,2147483647), Region: (4194303,4194303; contains chunks 134217696,134217696 to 134217727,134217727, blocks 2147483136,-64,2147483136 to 2147483647,319,2147483647)"
         );
     }
 
