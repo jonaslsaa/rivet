@@ -55,26 +55,25 @@ pub enum GameType {
     Spectator,
 }
 
-/// `BY_ID = ByIdMap.continuous(GameType::getId, values(), OutOfBoundsStrategy.ZERO)`
-/// — the dense `id → value` array in enum order.
+/// `GameType.values()` — the constants in declaration order (ordinal order).
 ///
-/// A `const` array, following the in-crate `Direction::BY_3D_DATA` precedent
-/// (same Java origin, same `ByIdMap.continuous` declaration): the ZERO
-/// strategy is exactly `BY_ID.get(id as usize).copied().unwrap_or(SURVIVAL)`
-/// — a negative id casts to a huge `usize`, misses, and falls back. No
-/// `ByIdMap` closure or `LazyLock` needed; Java's `BY_ID.apply(id)` behaves
-/// identically for every `int`.
-const BY_ID: [GameType; 4] = [
+/// This single array serves both Java roles: `values()` for the codec's
+/// name lookup / `fromInt`, and `ByIdMap.continuous(GameType::getId, values(),
+/// OutOfBoundsStrategy.ZERO)` for `by_id`. For this enum every value's wire id
+/// equals its declaration position (`getId` returns `0`..`3` in declaration
+/// order), so the dense id→value array Java builds is identical to `values()`;
+/// `by_id` indexes `VALUES` directly instead of declaring a second, drift-prone
+/// array. The ZERO strategy is exactly `VALUES.get(id as usize).copied()
+/// .unwrap_or(SURVIVAL)` — a negative id casts to a huge `usize`, misses, and
+/// falls back, matching Java's `BY_ID.apply(id)` for every `int`. `'static`
+/// because `StringRepresentable.fromEnum`/`from_enum_with_mapping` capture the
+/// array for their `fromInt`/name-lookup closures.
+const VALUES: [GameType; 4] = [
     GameType::Survival,
     GameType::Creative,
     GameType::Adventure,
     GameType::Spectator,
 ];
-
-/// `GameType.values()` — the constants in declaration order (ordinal order).
-/// `'static` because `StringRepresentable.fromEnum`/`from_enum_with_mapping`
-/// capture the array for their `fromInt`/name-lookup closures.
-const VALUES: [GameType; 4] = BY_ID;
 
 impl GameType {
     /// `GameType.DEFAULT_MODE` — `SURVIVAL`.
@@ -105,10 +104,10 @@ impl GameType {
         self.get_name()
     }
 
-    /// `GameType.byId(int)` — `BY_ID.apply(id)`: any id outside `[0, 4)`
-    /// (including negative) maps to the ZERO-fallback `SURVIVAL`.
+    /// `GameType.byId(int)` — `VALUES[id]` with the ZERO fallback: any id
+    /// outside `[0, 4)` (including negative) maps to `SURVIVAL`.
     pub fn by_id(id: i32) -> GameType {
-        BY_ID
+        VALUES
             .get(id as usize)
             .copied()
             .unwrap_or(GameType::DEFAULT_MODE)
@@ -136,7 +135,7 @@ impl GameType {
     /// `game_type_codec::<JsonOps>()`'s fresh lookup instead (see `by_name_or`
     /// for the shared helper).
     pub fn by_name(name: &str) -> GameType {
-        Self::by_name_or(name, Self::DEFAULT_MODE)
+        Self::by_name_or(name, Some(Self::DEFAULT_MODE)).unwrap_or(Self::DEFAULT_MODE)
     }
 
     /// `GameType.getNullableId(@Nullable GameType)` — `gameType != null ?
@@ -151,13 +150,19 @@ impl GameType {
     /// `GameType.byName(String, @Nullable GameType defaultMode)` —
     /// `CODEC.byName(name) != null ? result : defaultMode`.
     ///
-    /// `EnumCodec::by_name_or` is exactly `Objects.requireNonNullElse`
-    /// (`CODEC.byName(name, default)` in `EnumCodec`). The codec is built fresh
-    /// per call — the port has no ops-generic static to capture the name lookup
-    /// once — but the lookup is a linear scan of 4 names, matching Java's
-    /// `createNameLookup` for `values().length <= PRE_BUILT_MAP_THRESHOLD`.
-    pub fn by_name_or(name: &str, default: GameType) -> GameType {
-        game_type_codec::<rivet_serialization::json_ops::JsonOps>().by_name_or(name, default)
+    /// The `Option<GameType>` default/result is the faithful port of Java's
+    /// `@Nullable` parameter and return: `byName(name, null)` is how the
+    /// command/selector paths (`GameModeArgument`, `EntitySelectorOptions`) ask
+    /// for `null` on an unknown name. A non-null default is expressed by
+    /// passing `Some` — `by_name` above does exactly that with
+    /// `DEFAULT_MODE`. The codec is built fresh per call — the port has no
+    /// ops-generic static to capture the name lookup once — but the lookup is
+    /// a linear scan of 4 names, matching Java's `createNameLookup` for
+    /// `values().length <= PRE_BUILT_MAP_THRESHOLD`.
+    pub fn by_name_or(name: &str, default: Option<GameType>) -> Option<GameType> {
+        game_type_codec::<rivet_serialization::json_ops::JsonOps>()
+            .by_name(name)
+            .or(default)
     }
 
     /// `GameType.isValidId(int)` — some value's id equals `id`.
@@ -333,22 +338,37 @@ mod tests {
 
     #[test]
     fn by_name_with_explicit_default() {
-        // `byName(name, _default)` — `CODEC.byName(name, default)`
-        // (`Objects.requireNonNullElse`).
+        // `byName(name, _default)` — `CODEC.byName(name) != null ? result :
+        // default`, with the `@Nullable` default/result ported to `Option`.
         assert_eq!(
-            GameType::by_name_or("adventure", GameType::Creative),
-            GameType::Adventure
+            GameType::by_name_or("adventure", Some(GameType::Creative)),
+            Some(GameType::Adventure)
         );
         assert_eq!(
-            GameType::by_name_or("nope", GameType::Spectator),
-            GameType::Spectator
+            GameType::by_name_or("nope", Some(GameType::Spectator)),
+            Some(GameType::Spectator)
         );
         // The default is returned for an unknown name even when it differs from
         // `DEFAULT_MODE`.
         assert_eq!(
-            GameType::by_name_or("not_a_mode", GameType::Creative),
-            GameType::Creative
+            GameType::by_name_or("not_a_mode", Some(GameType::Creative)),
+            Some(GameType::Creative)
         );
+    }
+
+    #[test]
+    fn by_name_with_null_default_returns_none_for_unknown() {
+        // `byName(name, null)` — how `GameModeArgument`/`EntitySelectorOptions`
+        // ask for `null` on an unknown name. A known name is still `Some`.
+        assert_eq!(
+            GameType::by_name_or("adventure", None),
+            Some(GameType::Adventure)
+        );
+        assert_eq!(GameType::by_name_or("not_a_mode", None), None);
+        // `by_name(String)` is `byName(name, SURVIVAL)` — a `Some` default, so
+        // it never surfaces the nullability.
+        assert_eq!(GameType::by_name("not_a_mode"), GameType::Survival);
+        assert_eq!(GameType::by_name("creative"), GameType::Creative);
     }
 
     #[test]
