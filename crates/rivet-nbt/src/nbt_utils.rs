@@ -52,8 +52,8 @@ const NOT_FOUND: i32 = -1;
 
 /// `NbtUtils.CURRENT_DATA_VERSION` — `SharedConstants.WORLD_VERSION` (issue
 /// #202). Rewired to `rivet_core::shared_constants::WORLD_VERSION`; the
-/// `add_current_data_version_uses_world_version` test pins the shared value
-/// so a bump of the pinned MC version updates both together.
+/// literal 4903 pin lives in rivet-core `shared_constants.rs`, so a bump of
+/// the pinned MC version updates both together.
 pub const CURRENT_DATA_VERSION: i32 = rivet_core::shared_constants::WORLD_VERSION;
 
 /// `YXZ_LISTTAG_INT_COMPARATOR` — compare by y(1), then x(0), then z(2), each
@@ -1129,15 +1129,10 @@ mod tests {
     }
 
     #[test]
-    fn add_current_data_version_uses_world_version() {
+    fn add_current_data_version_writes_shared_version() {
         let mut tag = CompoundTag::new();
         add_current_data_version(&mut tag);
         assert_eq!(tag.get_int_or("DataVersion", -1), CURRENT_DATA_VERSION);
-        assert_eq!(
-            CURRENT_DATA_VERSION,
-            rivet_core::shared_constants::WORLD_VERSION,
-            "CURRENT_DATA_VERSION must track the pinned SharedConstants.WORLD_VERSION"
-        );
     }
 
     #[test]

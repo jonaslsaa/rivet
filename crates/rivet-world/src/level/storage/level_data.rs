@@ -4,9 +4,10 @@
 //! Java source:
 //! `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/level/
 //! storage/LevelData.java`. The #232 value slice ports the `getGameTime` read
-//! (the `LevelAccessor` seam) plus the `RespawnData` value record. The
-//! `MAP_CODEC`/`CODEC`/`STREAM_CODEC` wire surfaces defer with the
-//! registry-wired codecs (issue #126, `rivet-protocol`), and the
+//! (the `LevelAccessor` seam) plus the `RespawnData` value record.
+//! `RespawnData.MAP_CODEC`/`CODEC` land here (wired on the
+//! `GlobalPos`/`BlockPos` map codecs); `RespawnData.STREAM_CODEC` defers with
+//! the protocol codec surface (issue #126, `rivet-protocol`), and the
 //! `fillCrashReportCategory` default defers with the crash-report surface.
 
 use rivet_registry::ResourceKey;
@@ -55,7 +56,7 @@ pub trait LevelData {
 /// components with `Float.compare` (NaN equal, `+0.0 != -0.0`), which Rust's
 /// derived `f32` `PartialEq` does not match. The seam needs only
 /// [`RespawnData::position_equals`] (Paper's plain-`==` variant); whole-record
-/// equality defers with the codec surface (issue #126).
+/// equality is not ported — nothing consumes it yet.
 #[derive(Clone, Debug)]
 pub struct RespawnData {
     global_pos: GlobalPos,
