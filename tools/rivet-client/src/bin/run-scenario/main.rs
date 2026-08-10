@@ -2991,6 +2991,20 @@ fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), Ru
                      server served a chunk outside the ground-truth world"
             ))
         })?;
+        // A non-FULL chunk's content is not ground truth: the extractor records
+        // its (partial/empty) sections honestly, but the client would observe
+        // real terrain there. Comparing against an all-air fingerprint would be
+        // a misleading "content mismatch"; the honest classification is the
+        // #369 capability boundary — UNVERIFIED until full-chunk construction
+        // can carry it.
+        let status = fingerprint["status"].as_str().unwrap_or("minecraft:full");
+        if status != "minecraft:full" {
+            return Err(RunnerError::Unverified(format!(
+                "loaded-world sampled chunk {key} is {status} (not minecraft:full): the #369 \
+                 full-chunk construction capability is required to compare its per-coordinate \
+                 content, so this acceptance stays UNVERIFIED"
+            )));
+        }
         // The manifest stores surface/bedrock/below_feet as 16×16 arrays
         // indexed row-major `z*16+x`. The client samples the chunk center
         // offset (8,8), so the index is `8*16+8 = 136`.
@@ -3170,6 +3184,19 @@ mod tests {
         bedrock: &str,
         below: &str,
     ) -> Value {
+        manifest_with_status(chunk_x, chunk_z, surface, bedrock, below, "minecraft:full")
+    }
+
+    /// A minimal ground-truth manifest whose chunk carries an explicit status
+    /// (FULL or a pre-full status the #369 capability cannot yet carry).
+    fn manifest_with_status(
+        chunk_x: i32,
+        chunk_z: i32,
+        surface: &str,
+        bedrock: &str,
+        below: &str,
+        status: &str,
+    ) -> Value {
         let mut surface_arr = vec!["minecraft:air".to_owned(); 256];
         let mut bedrock_arr = vec!["minecraft:air".to_owned(); 256];
         let mut below_arr = vec!["minecraft:air".to_owned(); 256];
@@ -3180,7 +3207,7 @@ mod tests {
         json!({
             "chunks": {
                 format!("{chunk_x},{chunk_z}"): {
-                    "status": "minecraft:full",
+                    "status": status,
                     "stored_pos": [chunk_x, chunk_z],
                     "capability_flags": [],
                     "distinct": [surface, bedrock, below],
@@ -3282,6 +3309,32 @@ mod tests {
             compare_loaded_content(&manifest, &transcript).is_err(),
             "an empty sample set must fail (never a vacuous pass)"
         );
+    }
+
+    #[test]
+    fn compare_loaded_content_is_unverified_on_a_non_full_chunk() {
+        // A sampled chunk that is not minecraft:full has no ground-truth
+        // content (the #369 full-construction capability is absent) — the
+        // acceptance must report UNVERIFIED, never a misleading content
+        // mismatch.
+        let manifest = manifest_with_status(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+            "minecraft:structure_starts",
+        );
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        match compare_loaded_content(&manifest, &transcript) {
+            Err(RunnerError::Unverified(message)) => {
+                assert!(
+                    message.contains("structure_starts") && message.contains("UNVERIFIED"),
+                    "must name the non-FULL status and the UNVERIFIED boundary, got {message}"
+                );
+            }
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
     }
 
     #[test]
