@@ -864,9 +864,10 @@ pub fn parse_heightmaps(chunk_data: &CompoundTag, heightmaps_after: &[Types]) ->
 pub fn write_heightmaps(mut stored: StoredHeightmaps) -> CompoundTag {
     let mut out = CompoundTag::new();
     for ty in Types::all() {
-        // `.get_mut` (rather than `stored[ty as usize]`) keeps a future extra
-        // `Types` variant a silent skip instead of an index panic, and
-        // `.take()` moves the column out so `put_long_array` gets it by value.
+        // `.get_mut` + `.take()` moves each column out so `put_long_array` gets
+        // it by value (the one copy after parse, matching Java's `copyOf`/`write`
+        // share). The `StoredHeightmaps` lockstep assertion above already bounds
+        // the index; `get_mut` keeps this an Option-handled read regardless.
         if let Some(raw) = stored.get_mut(ty as usize).and_then(Option::take) {
             out.put_long_array(ty.serialization_key(), raw);
         }
