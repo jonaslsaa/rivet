@@ -244,6 +244,21 @@ fn parity_string_rounds_ties_like_java() {
     );
 }
 
+#[test]
+fn parity_string_subnormal_rounds_to_zero_like_java() {
+    // The tiny subnormal f32 1.4e-45 formats as `0.000` in Java (the
+    // `%.3f` "round to zero" branch); this exercises the formatter's overflow
+    // guard that avoids `10u128::pow` on a 58-digit shift.
+    assert_eq!(
+        CubicSpline::<Identity>::constant(f32::MIN_POSITIVE).parity_string(),
+        "k=0.000"
+    );
+    assert_eq!(
+        CubicSpline::<Identity>::constant(-f32::MIN_POSITIVE).parity_string(),
+        "k=-0.000"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Hostile builder validation (SplineProbe, Paper 26.2)
 // ---------------------------------------------------------------------------
