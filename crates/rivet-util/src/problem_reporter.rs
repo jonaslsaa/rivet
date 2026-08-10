@@ -24,9 +24,12 @@
 //! report time: walking `parent` up to the terminal root at report time and at
 //! report generation time are observationally identical (the chain is
 //! immutable), so the output is the same while avoiding object-identity
-//! comparisons. `getTreeReport` is root-anchored (`this` == the terminal root),
-//! which is the only in-scope usage (the value layer reports through the root);
-//! Java's non-root `this` boundary is not ported.
+//! comparisons. Java's `LinkedHashSet` store (and `getReport`'s `HashMultimap`)
+//! de-duplicate identical `(path, problem)` pairs; the port drops duplicate
+//! descriptions per path/node at report time (`push_unique`) because `Problem`
+//! has no value equality. `getTreeReport` is root-anchored (`this` == the
+//! terminal root) — the only in-scope usage (the value layer reports through
+//! the root); Java's non-root `this` boundary is not ported.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -143,20 +146,23 @@ impl Collector {
     /// path.
     ///
     /// Java groups through a Guava `HashMultimap` — a `HashMap`-backed set
-    /// multimap, so the group order is unspecified and identical entries are
-    /// de-duplicated. The port uses an ordered `indexmap::IndexMap<String,
-    /// Vec<Rc<dyn Problem>>>` so the report is deterministic: first-seen path
-    /// order (a superset of Java's unordered groups), descriptions joined
-    /// `"; "` per path (Java `Collectors.joining("; ")`).
+    /// multimap, so the group order is unspecified and identical `(path,
+    /// problem)` pairs appear once (the insert-side `LinkedHashSet<Entry>`
+    /// de-duplicates the same-source/same-problem case). The port uses an
+    /// ordered `indexmap::IndexMap<String, Vec<Rc<dyn Problem>>>` so the report
+    /// is deterministic: first-seen path order (a superset of Java's unordered
+    /// groups), descriptions joined `"; "` per path (Java
+    /// `Collectors.joining("; ")`). Duplicate descriptions within a path are
+    /// dropped (`push_unique`) to match Java's de-duplication.
     pub fn get_report(&self) -> String {
         let mut grouped: indexmap::IndexMap<String, Vec<Rc<dyn Problem>>> =
             indexmap::IndexMap::new();
         let borrowed = self.problems.borrow();
         for entry in borrowed.iter() {
-            grouped
-                .entry(entry.path_string())
-                .or_default()
-                .push(Rc::clone(&entry.problem));
+            push_unique(
+                grouped.entry(entry.path_string()).or_default(),
+                Rc::clone(&entry.problem),
+            );
         }
         grouped
             .into_iter()
@@ -178,7 +184,9 @@ impl Collector {
     ///
     /// Root-anchored: the tree is built from `self` as the root, matching Java
     /// when `getTreeReport` is called on the root collector (the only in-scope
-    /// usage).
+    /// usage). Problems are de-duplicated per node by description
+    /// (`push_unique`) so the tree shows each problem once per path, like
+    /// `get_report`.
     pub fn get_tree_report(&self) -> String {
         let root = Rc::new(ProblemTreeNode::new(Rc::clone(&self.element)));
         let borrowed = self.problems.borrow();
@@ -190,7 +198,8 @@ impl Collector {
             for element in entry.path.iter().rev().skip(1) {
                 node = node.child(Rc::clone(element));
             }
-            node.problems.borrow_mut().push(Rc::clone(&entry.problem));
+            let mut problems = node.problems.borrow_mut();
+            push_unique(&mut problems, Rc::clone(&entry.problem));
         }
         root.get_lines().join("\n")
     }
@@ -218,6 +227,21 @@ impl Entry {
             .rev()
             .map(|element| element.get())
             .collect::<String>()
+    }
+}
+
+/// Push `problem` unless a problem with the same description is already
+/// present, preserving first-seen order. Java de-duplicates identical `(path,
+/// problem)` pairs via `LinkedHashSet<Entry>` on insert and `HashMultimap` in
+/// `getReport`; the port keys on the rendered description because `Problem`
+/// has no value equality.
+fn push_unique(problems: &mut Vec<Rc<dyn Problem>>, problem: Rc<dyn Problem>) {
+    let description = problem.description();
+    if !problems
+        .iter()
+        .any(|existing| existing.description() == description)
+    {
+        problems.push(problem);
     }
 }
 
@@ -377,6 +401,51 @@ mod tests {
             report, " at .a.b: first; second\n at : root",
             "same-path entries join with '; ', root path is empty"
         );
+    }
+
+    /// Java's `LinkedHashSet<Entry>`/`HashMultimap` de-dup identical (path,
+    /// problem) pairs: reporting the same problem twice at the same path
+    /// yields one line in both report forms.
+    #[test]
+    fn identical_problem_at_same_path_reported_once() {
+        let root = Rc::new(Collector::new());
+        let a = root.for_child(Rc::new(FieldPathElement("a".to_string())));
+        a.report(Rc::new(TestProblem("dup".to_string())));
+        a.report(Rc::new(TestProblem("dup".to_string())));
+        assert_eq!(root.get_report(), " at .a: dup");
+        assert_eq!(root.get_tree_report(), ".a: dup");
+    }
+
+    /// The same problem at distinct paths is retained in both.
+    #[test]
+    fn same_problem_at_distinct_paths_retained() {
+        let root = Rc::new(Collector::with_root(Rc::new(FieldPathElement(
+            "root".to_string(),
+        ))));
+        root.for_child(Rc::new(FieldPathElement("a".to_string())))
+            .report(Rc::new(TestProblem("same".to_string())));
+        root.for_child(Rc::new(FieldPathElement("b".to_string())))
+            .report(Rc::new(TestProblem("same".to_string())));
+        assert_eq!(
+            root.get_report(),
+            " at .root.a: same\n at .root.b: same",
+            "distinct paths are separate groups"
+        );
+        assert_eq!(
+            root.get_tree_report(),
+            ".root:\n  .a: same\n  .b: same",
+            "distinct paths are separate tree nodes"
+        );
+    }
+
+    /// Distinct same-path problems keep first-seen order.
+    #[test]
+    fn distinct_same_path_problems_keep_first_seen_order() {
+        let root = Rc::new(Collector::new());
+        let a = root.for_child(Rc::new(FieldPathElement("a".to_string())));
+        a.report(Rc::new(TestProblem("first".to_string())));
+        a.report(Rc::new(TestProblem("second".to_string())));
+        assert_eq!(root.get_report(), " at .a: first; second");
     }
 
     /// `isEmpty` reflects reports on child frames too (shared store).
