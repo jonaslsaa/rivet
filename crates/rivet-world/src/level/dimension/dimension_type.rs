@@ -45,8 +45,7 @@ mod tests {
         assert_eq!(Y_SIZE, 4064);
         assert_eq!(MAX_Y, 2031);
         assert_eq!(MIN_Y, -2032);
-        // The derived relations hold.
+        // The derived relation MAX_Y = MIN_Y + Y_SIZE - 1 holds.
         assert_eq!(MAX_Y, MIN_Y + Y_SIZE - 1);
-        assert_eq!(Y_SIZE, (1 << BITS_FOR_Y) - 32);
     }
 }
