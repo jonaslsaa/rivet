@@ -29,9 +29,7 @@
 //!   (with `BelowZeroRetrogen`).
 //!
 //! RivetTodo(#185): `getNoiseBiome`'s `getHighestGeneratedStatus().isOrAfter(
-//! ChunkStatus.BIOMES)` guard is not ported — the slice-local `ChunkStatus`
-//! has no `BIOMES` ladder position. The port delegates to the base's read; the
-//! status unit re-adds the guard when the real `ChunkStatus` ladder lands.
+//! ChunkStatus.BIOMES)` guard remains outside this read-only slice.
 //! `markPosForPostProcessing`'s parent `postProcessGeneration` consumer and
 //! `addPackedPostProcess`'s `ShortList` read path remain with that owning unit.
 
@@ -41,9 +39,7 @@ use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
-use crate::levelgen::heightmap::{
-    FINAL_HEIGHTMAPS, Heightmap, StateFlags, Types, WORLDGEN_HEIGHTMAPS,
-};
+use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
@@ -119,9 +115,8 @@ where
     ///
     /// `ChunkStatus.EMPTY`'s `heightmapsAfter()` is `WORLDGEN_HEIGHTMAPS`
     /// (the two `Usage.WORLDGEN` types); `FULL` (the `LevelChunk` status) is
-    /// `FINAL_HEIGHTMAPS`. The slice-local status maps `Empty` →
-    /// `WORLDGEN_HEIGHTMAPS` (the persisted `EMPTY` status) so the worldgen
-    /// live update is faithful; a `Full` `ProtoChunk` uses `FINAL_HEIGHTMAPS`.
+    /// `FINAL_HEIGHTMAPS`; the complete persisted status ladder selects the
+    /// appropriate set at the `CARVERS` boundary.
     pub fn update_heightmaps_after(
         &mut self,
         local_x: i32,
@@ -129,10 +124,7 @@ where
         local_z: i32,
         placed: StateFlags,
     ) {
-        let after: &[Types] = match self.status {
-            ChunkStatus::Empty => &WORLDGEN_HEIGHTMAPS,
-            ChunkStatus::Full => &FINAL_HEIGHTMAPS,
-        };
+        let after = self.status.heightmaps_after();
         self.base
             .update_heightmaps_after(after, local_x, y, local_z, placed);
     }
@@ -351,6 +343,7 @@ mod tests {
     use crate::chunk::paletted_container::PalettedContainer;
     use crate::chunk::strategy::Strategy;
     use crate::level::height_accessor::create as create_accessor;
+    use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, WORLDGEN_HEIGHTMAPS};
     use rivet_registry::core::Vec3iLike;
 
     #[derive(Clone, Copy)]

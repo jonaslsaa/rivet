@@ -54,6 +54,7 @@ rivet-util = { workspace = true }
 # (`Files.move(tmp, target, REPLACE_EXISTING)`); the temp path must outlive
 # the `RegionFile.write` call, which only `tempfile::TempPath` guarantees.
 tempfile = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 # Tests build real containers (BytesMut-backed FriendlyByteBuf).

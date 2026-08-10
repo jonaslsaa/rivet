@@ -1,19 +1,29 @@
-//! Heightmap/light/block-entity read-and-carry slice of
-//! `net.minecraft.world.level.chunk.storage.SerializableChunkData` (MC 26.2).
+//! Current-version extraction half of Paper 26.2's `SerializableChunkData`.
 //!
-//! This intentionally stops below the top-level record/parser: section
-//! palettes, status decoding, chunk construction, live block-entity
-//! materialization, region I/O, recomputation, and writes belong to their
-//! owning units. Callers supply the already-decoded `heightmapsAfter` set,
-//! status predicates, and chunk kind.
+//! Section palette decoding remains at an explicit #336 seam. Region I/O is a
+//! caller, not a parser dependency; unsupported runtime surfaces are retained
+//! or rejected by name rather than silently discarded.
+//!
+//! This also carries the ordered serialized block-entity read-and-reconstruct
+//! surface (#337): `parse_block_entities` retains the raw compound tags and
+//! `reconstruct_block_entities` resolves them per Paper's LEVELCHUNK/proto
+//! branch ordering. The top-level parser still defers live materialization.
 
 use std::sync::Arc;
 
 use crate::chunk::chunk_access::{ChunkAccess, get_pos_from_tag};
+use crate::chunk::imposter_proto_chunk::ImposterProtoChunk;
+use crate::chunk::level_chunk::LevelChunk;
+use crate::chunk::level_chunk_section::LevelChunkSection;
+use crate::chunk::paletted_container_factory::PalettedContainerFactory;
+use crate::chunk::status::ChunkStatus;
+use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
-use crate::levelgen::heightmap::Types;
+use crate::levelgen::heightmap::{StateFlags, Types};
 use crate::lighting::swmr_nibble_array::{InitState, SwmrNibbleArray};
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_nbt::list_tag::ListTag;
+use rivet_nbt::nbt_utils::CURRENT_DATA_VERSION;
 use rivet_nbt::tag::Tag;
 use rivet_registry::Identifier;
 use rivet_registry::block_entity_type::BlockEntityType;
@@ -226,6 +236,365 @@ fn reconstruct_block_entity(
     }
 }
 
+const STATUS_TAG: &str = "Status";
+const DATA_VERSION_TAG: &str = "DataVersion";
+
+/// A recoverable codec diagnostic emitted during top-level extraction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChunkParseDiagnostic {
+    UnknownStatus(String),
+}
+
+/// Typed failures at the extraction/construction boundary.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SerializableChunkDataError {
+    #[error("chunk DataVersion {found} is newer than supported version {current}")]
+    NewerDataVersion { found: i32, current: i32 },
+    #[error("section {section_y} {field} has {length} bytes; expected 2048")]
+    MalformedDataLayer {
+        section_y: i32,
+        field: &'static str,
+        length: usize,
+    },
+    #[error("chunk status {status:?} is not constructible until proto-chunk loading lands")]
+    UnsupportedChunkStatus { status: ChunkStatus },
+    #[error("UpgradeData field {field} requires SavedTick support")]
+    UnsupportedUpgradeData { field: &'static str },
+    #[error("non-empty {field} requires tick reconstruction")]
+    UnsupportedTicks { field: &'static str },
+    #[error("blending_data requires blending reconstruction (#336)")]
+    UnsupportedBlendingData,
+    #[error("below_zero_retrogen requires retrogen reconstruction (#336)")]
+    UnsupportedBelowZeroRetrogen,
+    #[error("non-empty entities require post-load entity reconstruction")]
+    UnsupportedEntities,
+    #[error("non-empty block_entities require block-entity materialization (#341)")]
+    UnsupportedBlockEntities,
+    #[error("non-empty structures require structure reconstruction")]
+    UnsupportedStructures,
+    #[error("compound ChunkBukkitValues requires an owned PDC carrier")]
+    UnsupportedPersistentData,
+    #[error("PostProcessing section {index} is outside the {section_count}-section chunk")]
+    PostProcessingOutOfBounds { index: usize, section_count: usize },
+}
+
+/// The current-version, top-level extraction result from Paper's
+/// `SerializableChunkData.parse`. Section palette decoding remains at the
+/// explicit `section_tags` seam until #336 lands.
+pub struct SerializableChunkData {
+    stored_pos: ChunkPos,
+    min_section_y: i32,
+    last_update_time: i64,
+    inhabited_time: i64,
+    status: ChunkStatus,
+    diagnostics: Vec<ChunkParseDiagnostic>,
+    upgrade_data: UpgradeData,
+    upgrade_neighbor_block_ticks: bool,
+    upgrade_neighbor_fluid_ticks: bool,
+    light_correct: bool,
+    blending_data: Option<CompoundTag>,
+    below_zero_retrogen: Option<CompoundTag>,
+    carving_mask: Option<Vec<i64>>,
+    heightmaps: StoredHeightmaps,
+    block_ticks: ListTag,
+    fluid_ticks: ListTag,
+    post_processing_sections: Vec<Option<Vec<i16>>>,
+    entities: Vec<CompoundTag>,
+    block_entities: Vec<CompoundTag>,
+    structure_data: CompoundTag,
+    section_tags: ListTag,
+    section_lights: Vec<SectionLightData>,
+    persistent_data_container: Option<Tag>,
+}
+
+impl SerializableChunkData {
+    /// Extract in Paper's observable field order. `Ok(None)` is reserved for
+    /// a missing or non-string `Status`, which Paper drops before DataVersion.
+    pub fn parse(
+        level_height: SimpleLevelHeightAccessor,
+        chunk_data: &CompoundTag,
+    ) -> Result<Option<Self>, SerializableChunkDataError> {
+        let Some(status_name) = chunk_data.get_string(STATUS_TAG) else {
+            return Ok(None);
+        };
+
+        if let Some(found) = chunk_data.get_int(DATA_VERSION_TAG)
+            && found > CURRENT_DATA_VERSION
+        {
+            return Err(SerializableChunkDataError::NewerDataVersion {
+                found,
+                current: CURRENT_DATA_VERSION,
+            });
+        }
+
+        let stored_pos = ChunkPos::new(
+            chunk_data.get_int_or("xPos", 0),
+            chunk_data.get_int_or("zPos", 0),
+        );
+        let last_update_time = chunk_data.get_long_or("LastUpdate", 0);
+        let inhabited_time = chunk_data.get_long_or("InhabitedTime", 0);
+        let (status, diagnostics) = match ChunkStatus::from_identifier(status_name) {
+            Some(status) => (status, Vec::new()),
+            None => (
+                ChunkStatus::Empty,
+                vec![ChunkParseDiagnostic::UnknownStatus(status_name.clone())],
+            ),
+        };
+        let upgrade_tag = chunk_data.get_compound("UpgradeData");
+        let upgrade_data = upgrade_tag.map_or_else(
+            || UpgradeData::empty(level_height.get_sections_count() as usize),
+            |tag| UpgradeData::from_tag(tag, level_height.get_sections_count() as usize),
+        );
+        let upgrade_neighbor_block_ticks = upgrade_tag
+            .and_then(|tag| tag.get_list("neighbor_block_ticks"))
+            .is_some_and(|ticks| !ticks.list.is_empty());
+        let upgrade_neighbor_fluid_ticks = upgrade_tag
+            .and_then(|tag| tag.get_list("neighbor_fluid_ticks"))
+            .is_some_and(|ticks| !ticks.list.is_empty());
+        let light_correct = parse_light_correct(chunk_data, status.is_or_after(ChunkStatus::Light));
+        let blending_data = chunk_data.get_compound("blending_data").cloned();
+        let below_zero_retrogen = chunk_data.get_compound("below_zero_retrogen").cloned();
+        let carving_mask = chunk_data.get_long_array("carving_mask").cloned();
+        let heightmaps = parse_heightmaps(chunk_data, status.heightmaps_after());
+        let block_ticks = chunk_data.get_list_or_empty("block_ticks");
+        let fluid_ticks = chunk_data.get_list_or_empty("fluid_ticks");
+        let post_processing_sections = parse_post_processing(chunk_data);
+        let entities = compound_entries(chunk_data.get_list("entities"));
+        let block_entities = compound_entries(chunk_data.get_list("block_entities"));
+        let structure_data = chunk_data.get_compound_or_empty("structures");
+        let section_tags = chunk_data.get_list_or_empty(SECTIONS_TAG);
+        let section_lights = try_parse_section_lights_from_list(&section_tags)?;
+        let persistent_data_container = chunk_data.get("ChunkBukkitValues").cloned();
+
+        Ok(Some(Self {
+            stored_pos,
+            min_section_y: level_height.get_min_section_y(),
+            last_update_time,
+            inhabited_time,
+            status,
+            diagnostics,
+            upgrade_data,
+            upgrade_neighbor_block_ticks,
+            upgrade_neighbor_fluid_ticks,
+            light_correct,
+            blending_data,
+            below_zero_retrogen,
+            carving_mask,
+            heightmaps,
+            block_ticks,
+            fluid_ticks,
+            post_processing_sections,
+            entities,
+            block_entities,
+            structure_data,
+            section_tags,
+            section_lights,
+            persistent_data_container,
+        }))
+    }
+
+    pub fn stored_pos(&self) -> ChunkPos {
+        self.stored_pos
+    }
+    pub fn min_section_y(&self) -> i32 {
+        self.min_section_y
+    }
+    pub fn last_update_time(&self) -> i64 {
+        self.last_update_time
+    }
+    pub fn inhabited_time(&self) -> i64 {
+        self.inhabited_time
+    }
+    pub fn status(&self) -> ChunkStatus {
+        self.status
+    }
+    pub fn diagnostics(&self) -> &[ChunkParseDiagnostic] {
+        &self.diagnostics
+    }
+    pub fn upgrade_data(&self) -> &UpgradeData {
+        &self.upgrade_data
+    }
+    pub fn light_correct(&self) -> bool {
+        self.light_correct
+    }
+    pub fn carving_mask(&self) -> Option<&[i64]> {
+        self.carving_mask.as_deref()
+    }
+    pub fn heightmaps(&self) -> &StoredHeightmaps {
+        &self.heightmaps
+    }
+    pub fn post_processing_sections(&self) -> &[Option<Vec<i16>>] {
+        &self.post_processing_sections
+    }
+    pub fn entities(&self) -> &[CompoundTag] {
+        &self.entities
+    }
+    pub fn block_entities(&self) -> &[CompoundTag] {
+        &self.block_entities
+    }
+    pub fn structure_data(&self) -> &CompoundTag {
+        &self.structure_data
+    }
+    pub fn section_tags(&self) -> &ListTag {
+        &self.section_tags
+    }
+    pub fn section_lights(&self) -> &[SectionLightData] {
+        &self.section_lights
+    }
+    pub fn persistent_data_container(&self) -> Option<&Tag> {
+        self.persistent_data_container.as_ref()
+    }
+
+    /// Construct the faithful read-only FULL wrapper from sections decoded by
+    /// the future single per-section traversal. Stored/requested positions are
+    /// intentionally distinct; construction always uses `requested_pos`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_full<T, B, S>(
+        &self,
+        requested_pos: ChunkPos,
+        height_accessor: SimpleLevelHeightAccessor,
+        container_factory: &PalettedContainerFactory<T, B>,
+        sections: Vec<LevelChunkSection<T, B>>,
+        air: T,
+        resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
+        has_sky_light: bool,
+    ) -> Result<ImposterProtoChunk<T, B, S>, SerializableChunkDataError>
+    where
+        T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        self.validate_full_construction(height_accessor.get_sections_count() as usize)?;
+        let mut chunk = LevelChunk::new(
+            requested_pos,
+            self.upgrade_data.copy(),
+            height_accessor,
+            container_factory,
+            self.inhabited_time,
+            Some(sections),
+            air,
+            resolve,
+        );
+        let to_prime = reconstruct_heightmaps(
+            chunk.base_mut(),
+            &self.heightmaps,
+            self.status.heightmaps_after(),
+        );
+        chunk.prime_heightmaps(&to_prime);
+        for (index, offsets) in self.post_processing_sections.iter().enumerate() {
+            if let Some(offsets) = offsets {
+                chunk.add_packed_post_process(offsets, index);
+            }
+        }
+        let light = reconstruct_lights(
+            height_accessor,
+            &self.section_lights,
+            self.light_correct,
+            has_sky_light,
+        );
+        chunk.set_block_nibbles(light.block_nibbles);
+        chunk.set_sky_nibbles(light.sky_nibbles);
+        chunk.set_light_correct(light.light_correct);
+        Ok(ImposterProtoChunk::new(chunk, false))
+    }
+
+    fn validate_full_construction(
+        &self,
+        section_count: usize,
+    ) -> Result<(), SerializableChunkDataError> {
+        if self.status != ChunkStatus::Full {
+            return Err(SerializableChunkDataError::UnsupportedChunkStatus {
+                status: self.status,
+            });
+        }
+        if self.upgrade_neighbor_block_ticks {
+            return Err(SerializableChunkDataError::UnsupportedUpgradeData {
+                field: "neighbor_block_ticks",
+            });
+        }
+        if self.upgrade_neighbor_fluid_ticks {
+            return Err(SerializableChunkDataError::UnsupportedUpgradeData {
+                field: "neighbor_fluid_ticks",
+            });
+        }
+        if !self.block_ticks.list.is_empty() {
+            return Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "block_ticks",
+            });
+        }
+        if !self.fluid_ticks.list.is_empty() {
+            return Err(SerializableChunkDataError::UnsupportedTicks {
+                field: "fluid_ticks",
+            });
+        }
+        if self.blending_data.is_some() {
+            return Err(SerializableChunkDataError::UnsupportedBlendingData);
+        }
+        if self.below_zero_retrogen.is_some() {
+            return Err(SerializableChunkDataError::UnsupportedBelowZeroRetrogen);
+        }
+        if matches!(self.persistent_data_container, Some(Tag::Compound(_))) {
+            return Err(SerializableChunkDataError::UnsupportedPersistentData);
+        }
+        if !structures_are_empty(&self.structure_data) {
+            return Err(SerializableChunkDataError::UnsupportedStructures);
+        }
+        if let Some(index) =
+            self.post_processing_sections
+                .iter()
+                .enumerate()
+                .find_map(|(index, offsets)| {
+                    (index >= section_count && offsets.is_some()).then_some(index)
+                })
+        {
+            return Err(SerializableChunkDataError::PostProcessingOutOfBounds {
+                index,
+                section_count,
+            });
+        }
+        if !self.entities.is_empty() {
+            return Err(SerializableChunkDataError::UnsupportedEntities);
+        }
+        if !self.block_entities.is_empty() {
+            return Err(SerializableChunkDataError::UnsupportedBlockEntities);
+        }
+        Ok(())
+    }
+}
+
+fn parse_post_processing(chunk_data: &CompoundTag) -> Vec<Option<Vec<i16>>> {
+    chunk_data
+        .get_list_or_empty("PostProcessing")
+        .list
+        .iter()
+        .map(|entry| match entry {
+            Tag::List(offsets) if !offsets.list.is_empty() => Some(
+                (0..offsets.list.len())
+                    .map(|index| offsets.get_short_or(index, 0))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+fn compound_entries(list: Option<&ListTag>) -> Vec<CompoundTag> {
+    list.into_iter()
+        .flat_map(|list| &list.list)
+        .filter_map(|entry| match entry {
+            Tag::Compound(compound) => Some(compound.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn structures_are_empty(structures: &CompoundTag) -> bool {
+    structures.entry_set().all(|(key, value)| {
+        matches!(key.as_str(), "starts" | "References")
+            && matches!(value, Tag::Compound(compound) if compound.is_empty())
+    })
+}
+
 /// The stored `Map<Heightmap.Types, long[]>`, in enum ordinal order.
 pub type StoredHeightmaps = [Option<Vec<i64>>; 6];
 
@@ -238,12 +607,9 @@ pub fn parse_heightmaps(chunk_data: &CompoundTag, heightmaps_after: &[Types]) ->
         return out;
     };
 
-    for key in heightmaps.key_set() {
-        if let Some(ty) = Types::from_serialization_key(key)
-            && heightmaps_after.contains(&ty)
-            && let Some(raw) = heightmaps.get_long_array(key)
-        {
-            out[ty as usize] = Some(raw.clone());
+    for ty in heightmaps_after {
+        if let Some(raw) = heightmaps.get_long_array(ty.serialization_key()) {
+            out[*ty as usize] = Some(raw.clone());
         }
     }
     out
@@ -315,6 +681,12 @@ pub fn parse_section_lights(chunk_data: &CompoundTag) -> Vec<SectionLightData> {
     let Some(sections) = chunk_data.get_list(SECTIONS_TAG) else {
         return Vec::new();
     };
+    try_parse_section_lights_from_list(sections).unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn try_parse_section_lights_from_list(
+    sections: &ListTag,
+) -> Result<Vec<SectionLightData>, SerializableChunkDataError> {
     sections
         .list
         .iter()
@@ -323,25 +695,38 @@ pub fn parse_section_lights(chunk_data: &CompoundTag) -> Vec<SectionLightData> {
             _ => None,
         })
         .map(|section| {
+            let y = section.get_byte_or("Y", 0) as i32;
             let block_light = section
                 .get_byte_array(BLOCK_LIGHT_TAG)
                 .map(|bytes| signed_bytes(bytes));
             let sky_light = section
                 .get_byte_array(SKY_LIGHT_TAG)
                 .map(|bytes| signed_bytes(bytes));
-            if let Some(bytes) = &block_light {
-                crate::chunk::data_layer::DataLayer::with_data(bytes.clone());
+            if let Some(bytes) = &block_light
+                && bytes.len() != 2048
+            {
+                return Err(SerializableChunkDataError::MalformedDataLayer {
+                    section_y: y,
+                    field: BLOCK_LIGHT_TAG,
+                    length: bytes.len(),
+                });
             }
-            if let Some(bytes) = &sky_light {
-                crate::chunk::data_layer::DataLayer::with_data(bytes.clone());
+            if let Some(bytes) = &sky_light
+                && bytes.len() != 2048
+            {
+                return Err(SerializableChunkDataError::MalformedDataLayer {
+                    section_y: y,
+                    field: SKY_LIGHT_TAG,
+                    length: bytes.len(),
+                });
             }
-            SectionLightData {
-                y: section.get_byte_or("Y", 0) as i32,
+            Ok(SectionLightData {
+                y,
                 block_light,
                 sky_light,
                 block_state: state_or_absent(section, BLOCKLIGHT_STATE_TAG),
                 sky_state: state_or_absent(section, SKYLIGHT_STATE_TAG),
-            }
+            })
         })
         .collect()
 }
@@ -452,6 +837,8 @@ fn filled_empty_light(count: usize) -> Vec<SwmrNibbleArray> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::palette::GlobalIdMap;
+    use crate::chunk::strategy::Strategy;
     use crate::level::height_accessor;
     use crate::lighting::swmr_nibble_array::ARRAY_SIZE;
     use rivet_nbt::int_tag::IntTag;
@@ -479,6 +866,63 @@ mod tests {
         let bytes = std::fs::read(path).expect("Paper 26.2 block-entity fixture");
         let mut input = DataInputStream::new(Cursor::new(bytes));
         nbt_io::read(&mut input, &mut NbtAccounter::unlimited_heap()).expect("valid fixture")
+    }
+
+    fn named_fixture(dimension: &str, region: &str, chunk: &str) -> CompoundTag {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rivet-oracle/fixtures/chunk")
+            .join(dimension)
+            .join(region)
+            .join(chunk);
+        let bytes = std::fs::read(path).expect("Paper 26.2 chunk fixture");
+        let mut input = DataInputStream::new(Cursor::new(bytes));
+        nbt_io::read(&mut input, &mut NbtAccounter::unlimited_heap()).expect("valid fixture")
+    }
+
+    fn top_level(status: &str) -> CompoundTag {
+        let mut chunk = CompoundTag::new();
+        chunk.put_string(STATUS_TAG, status);
+        chunk.put_int(DATA_VERSION_TAG, CURRENT_DATA_VERSION);
+        chunk
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestGlobalMap;
+
+    impl GlobalIdMap<u8> for TestGlobalMap {
+        fn get_id(&self, value: &u8) -> i32 {
+            i32::from(*value)
+        }
+        fn by_id_or_throw(&self, id: i32) -> u8 {
+            id as u8
+        }
+        fn size(&self) -> i32 {
+            256
+        }
+        fn by_id(&self, id: i32) -> Option<u8> {
+            u8::try_from(id).ok()
+        }
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+            Box::new(*self)
+        }
+    }
+
+    fn test_factory() -> PalettedContainerFactory<u8, u8> {
+        PalettedContainerFactory::new(
+            Strategy::create_for_block_states(Box::new(TestGlobalMap)),
+            0,
+            Strategy::create_for_biomes(Box::new(TestGlobalMap)),
+            0,
+        )
+    }
+
+    fn test_state_flags(state: &u8) -> StateFlags {
+        StateFlags {
+            is_air: *state == 0,
+            blocks_motion: *state != 0,
+            has_fluid: false,
+            is_leaves: false,
+        }
     }
 
     fn section_tag(y: i8) -> CompoundTag {
@@ -900,6 +1344,399 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             original.key_set().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn status_type_precheck_precedes_newer_data_version() {
+        let height = height_accessor::create(-64, 384);
+        let mut missing = CompoundTag::new();
+        missing.put_long(DATA_VERSION_TAG, i64::from(CURRENT_DATA_VERSION + 1));
+        assert!(
+            SerializableChunkData::parse(height, &missing)
+                .unwrap()
+                .is_none()
+        );
+
+        missing.put_int(STATUS_TAG, 7);
+        assert!(
+            SerializableChunkData::parse(height, &missing)
+                .unwrap()
+                .is_none()
+        );
+
+        missing.put_string(STATUS_TAG, "minecraft:full");
+        assert!(matches!(
+            SerializableChunkData::parse(height, &missing),
+            Err(SerializableChunkDataError::NewerDataVersion {
+                found,
+                current,
+            }) if found == CURRENT_DATA_VERSION + 1 && current == CURRENT_DATA_VERSION
+        ));
+    }
+
+    #[test]
+    fn numeric_fields_coerce_and_default_and_y_pos_is_ignored() {
+        let height = height_accessor::create(-64, 384);
+        let mut chunk = top_level("full");
+        chunk.put_double("xPos", 3.75);
+        chunk.put_short("zPos", -7);
+        chunk.put_byte("LastUpdate", 12);
+        chunk.put_float("InhabitedTime", 41.9);
+        chunk.put_string("yPos", "deliberately wrong");
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.stored_pos(), ChunkPos::new(3, -7));
+        assert_eq!(parsed.last_update_time(), 12);
+        assert_eq!(parsed.inhabited_time(), 41);
+        assert_eq!(parsed.min_section_y(), -4);
+
+        let mut defaults = top_level("minecraft:full");
+        defaults.put_string("xPos", "wrong");
+        defaults.put_string("LastUpdate", "wrong");
+        let parsed = SerializableChunkData::parse(height, &defaults)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.stored_pos(), ChunkPos::new(0, 0));
+        assert_eq!(parsed.last_update_time(), 0);
+        assert_eq!(parsed.inhabited_time(), 0);
+    }
+
+    #[test]
+    fn empty_and_unknown_status_diagnose_then_fall_back_to_empty() {
+        let height = height_accessor::create(-64, 384);
+        for name in ["", "minecraft:not_a_status", "other:full"] {
+            let parsed = SerializableChunkData::parse(height, &top_level(name))
+                .unwrap()
+                .unwrap();
+            assert_eq!(parsed.status(), ChunkStatus::Empty);
+            assert_eq!(
+                parsed.diagnostics(),
+                &[ChunkParseDiagnostic::UnknownStatus(name.to_string())]
+            );
+        }
+
+        let mut malformed = top_level("");
+        let mut section = section_tag(4);
+        section.put_byte_array(BLOCK_LIGHT_TAG, vec![0; 3]);
+        malformed.put(
+            SECTIONS_TAG.into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(section)])),
+        );
+        assert!(matches!(
+            SerializableChunkData::parse(height, &malformed),
+            Err(SerializableChunkDataError::MalformedDataLayer { section_y: 4, .. })
+        ));
+    }
+
+    #[test]
+    fn heightmap_keys_are_status_filtered_typed_and_case_sensitive() {
+        let height = height_accessor::create(-64, 384);
+        let mut chunk = top_level("minecraft:full");
+        let mut heightmaps = CompoundTag::new();
+        heightmaps.put_long_array("WORLD_SURFACE", vec![1]);
+        heightmaps.put_long_array("OCEAN_FLOOR", vec![2]);
+        heightmaps.put_int_array("MOTION_BLOCKING", vec![3]);
+        heightmaps.put_long_array("motion_blocking_no_leaves", vec![4]);
+        heightmaps.put_long_array("WORLD_SURFACE_WG", vec![5]);
+        chunk.put("Heightmaps".into(), Tag::Compound(heightmaps));
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.heightmaps()[Types::WorldSurface as usize],
+            Some(vec![1])
+        );
+        assert_eq!(
+            parsed.heightmaps()[Types::OceanFloor as usize],
+            Some(vec![2])
+        );
+        assert!(parsed.heightmaps()[Types::MotionBlocking as usize].is_none());
+        assert!(parsed.heightmaps()[Types::MotionBlockingNoLeaves as usize].is_none());
+        assert!(parsed.heightmaps()[Types::WorldSurfaceWg as usize].is_none());
+    }
+
+    #[test]
+    fn light_correct_uses_is_light_on_presence_not_value_or_type() {
+        let height = height_accessor::create(-64, 384);
+        for tag in [
+            Tag::Byte(rivet_nbt::byte_tag::ByteTag::value_of(0)),
+            Tag::String(rivet_nbt::string_tag::StringTag::value_of("false".into())),
+        ] {
+            let mut chunk = top_level("minecraft:light");
+            chunk.put(IS_LIGHT_ON_TAG.into(), tag);
+            chunk.put_int(STARLIGHT_VERSION_TAG, STARLIGHT_LIGHT_VERSION);
+            assert!(
+                SerializableChunkData::parse(height, &chunk)
+                    .unwrap()
+                    .unwrap()
+                    .light_correct()
+            );
+        }
+        let mut absent = top_level("minecraft:light");
+        absent.put_int(STARLIGHT_VERSION_TAG, STARLIGHT_LIGHT_VERSION);
+        assert!(
+            !SerializableChunkData::parse(height, &absent)
+                .unwrap()
+                .unwrap()
+                .light_correct()
+        );
+        let mut early = top_level("minecraft:initialize_light");
+        early.put_int(IS_LIGHT_ON_TAG, 1);
+        early.put_int(STARLIGHT_VERSION_TAG, STARLIGHT_LIGHT_VERSION);
+        assert!(
+            !SerializableChunkData::parse(height, &early)
+                .unwrap()
+                .unwrap()
+                .light_correct()
+        );
+    }
+
+    #[test]
+    fn post_processing_preserves_outer_shape_and_numeric_coercion() {
+        let height = height_accessor::create(-64, 384);
+        let mut chunk = top_level("minecraft:full");
+        let offsets = ListTag::with_list(vec![
+            Tag::Int(IntTag::value_of(7)),
+            Tag::Long(LongTag::value_of(65_537)),
+            Tag::String(rivet_nbt::string_tag::StringTag::value_of("wrong".into())),
+        ]);
+        chunk.put(
+            "PostProcessing".into(),
+            Tag::List(ListTag::with_list(vec![
+                Tag::List(offsets),
+                Tag::List(ListTag::new()),
+                Tag::Int(IntTag::value_of(1)),
+            ])),
+        );
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.post_processing_sections(),
+            &[Some(vec![7, 1, 0]), None, None]
+        );
+    }
+
+    #[test]
+    fn entity_lists_filter_non_compounds_without_reordering() {
+        let height = height_accessor::create(-64, 384);
+        let mut first = CompoundTag::new();
+        first.put_int("order", 1);
+        let mut second = CompoundTag::new();
+        second.put_int("order", 2);
+        let mixed = ListTag::with_list(vec![
+            Tag::Compound(first),
+            Tag::Int(IntTag::value_of(99)),
+            Tag::Compound(second),
+        ]);
+        let mut chunk = top_level("minecraft:full");
+        chunk.put("entities".into(), Tag::List(mixed.clone()));
+        chunk.put("block_entities".into(), Tag::List(mixed));
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        for compounds in [parsed.entities(), parsed.block_entities()] {
+            assert_eq!(compounds.len(), 2);
+            assert_eq!(compounds[0].get_int_or("order", 0), 1);
+            assert_eq!(compounds[1].get_int_or("order", 0), 2);
+        }
+    }
+
+    #[test]
+    fn synthetic_full_seam_constructs_at_requested_position_read_only() {
+        let height = height_accessor::create(-64, 384);
+        let factory = test_factory();
+        let sections = (0..24)
+            .map(|_| {
+                LevelChunkSection::new(
+                    factory.create_for_block_states(),
+                    factory.create_for_biomes(),
+                    |state| *state == 0,
+                    |_| false,
+                    |_| true,
+                    |_| false,
+                    |_| false,
+                )
+            })
+            .collect();
+        let mut root = top_level("minecraft:full");
+        root.put_int("xPos", 8);
+        root.put_int("zPos", 9);
+        let parsed = SerializableChunkData::parse(height, &root)
+            .unwrap()
+            .unwrap();
+        let requested = ChunkPos::new(10, 11);
+        let imposter = parsed
+            .construct_full::<u8, u8, &'static str>(
+                requested,
+                height,
+                &factory,
+                sections,
+                0,
+                &test_state_flags,
+                true,
+            )
+            .unwrap();
+        assert_eq!(parsed.stored_pos(), ChunkPos::new(8, 9));
+        assert_eq!(imposter.get_pos(), requested);
+        assert_eq!(imposter.get_persisted_status(), ChunkStatus::Full);
+        assert!(!imposter.can_be_serialized());
+        assert_eq!(imposter.get_sections().len(), 24);
+        assert_eq!(imposter.get_wrapped().block_nibbles().len(), 26);
+        assert_eq!(imposter.get_wrapped().sky_nibbles().len(), 26);
+    }
+
+    #[test]
+    fn ancillary_surfaces_have_named_unsupported_markers() {
+        let height = height_accessor::create(-64, 384);
+        let cases: Vec<(&str, Tag, SerializableChunkDataError)> = vec![
+            (
+                "block_ticks",
+                Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
+                SerializableChunkDataError::UnsupportedTicks {
+                    field: "block_ticks",
+                },
+            ),
+            (
+                "fluid_ticks",
+                Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
+                SerializableChunkDataError::UnsupportedTicks {
+                    field: "fluid_ticks",
+                },
+            ),
+            (
+                "blending_data",
+                Tag::Compound(CompoundTag::new()),
+                SerializableChunkDataError::UnsupportedBlendingData,
+            ),
+            (
+                "below_zero_retrogen",
+                Tag::Compound(CompoundTag::new()),
+                SerializableChunkDataError::UnsupportedBelowZeroRetrogen,
+            ),
+            (
+                "entities",
+                Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
+                SerializableChunkDataError::UnsupportedEntities,
+            ),
+            (
+                "block_entities",
+                Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
+                SerializableChunkDataError::UnsupportedBlockEntities,
+            ),
+            (
+                "ChunkBukkitValues",
+                Tag::Compound(CompoundTag::new()),
+                SerializableChunkDataError::UnsupportedPersistentData,
+            ),
+        ];
+        for (field, value, expected) in cases {
+            let mut chunk = top_level("minecraft:full");
+            chunk.put(field.into(), value);
+            let parsed = SerializableChunkData::parse(height, &chunk)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                parsed.validate_full_construction(24),
+                Err(expected),
+                "{field}"
+            );
+        }
+
+        let mut structures = CompoundTag::new();
+        let mut starts = CompoundTag::new();
+        starts.put_int("minecraft:village", 1);
+        structures.put("starts".into(), Tag::Compound(starts));
+        let mut chunk = top_level("minecraft:full");
+        chunk.put("structures".into(), Tag::Compound(structures));
+        assert_eq!(
+            SerializableChunkData::parse(height, &chunk)
+                .unwrap()
+                .unwrap()
+                .validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedStructures)
+        );
+
+        for field in ["neighbor_block_ticks", "neighbor_fluid_ticks"] {
+            let mut upgrade = CompoundTag::new();
+            upgrade.put(
+                field.into(),
+                Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
+            );
+            let mut chunk = top_level("minecraft:full");
+            chunk.put("UpgradeData".into(), Tag::Compound(upgrade));
+            assert_eq!(
+                SerializableChunkData::parse(height, &chunk)
+                    .unwrap()
+                    .unwrap()
+                    .validate_full_construction(24),
+                Err(SerializableChunkDataError::UnsupportedUpgradeData { field })
+            );
+        }
+
+        let mut chunk = top_level("minecraft:full");
+        chunk.put_long_array("carving_mask", vec![1, 2, 3]);
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.carving_mask(), Some(&[1, 2, 3][..]));
+        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+    }
+
+    #[test]
+    fn real_full_and_partial_fixture_metadata_is_pinned() {
+        let full = [
+            (
+                "overworld",
+                height_accessor::create(-64, 384),
+                25usize,
+                24usize,
+            ),
+            ("the_nether", height_accessor::create(0, 256), 17, 16),
+            ("the_end", height_accessor::create(0, 256), 17, 16),
+        ];
+        for (dimension, height, light_sections, post_sections) in full {
+            let root = named_fixture(dimension, "0.0", "0.0.nbt");
+            assert_eq!(root.get_int_or(DATA_VERSION_TAG, -1), CURRENT_DATA_VERSION);
+            let parsed = SerializableChunkData::parse(height, &root)
+                .unwrap()
+                .unwrap();
+            assert_eq!(parsed.stored_pos(), ChunkPos::new(0, 0), "{dimension}");
+            assert_eq!(parsed.status(), ChunkStatus::Full, "{dimension}");
+            assert_eq!(parsed.section_lights().len(), light_sections, "{dimension}");
+            assert_eq!(
+                parsed.post_processing_sections().len(),
+                post_sections,
+                "{dimension}"
+            );
+            assert_eq!(
+                parsed
+                    .status()
+                    .heightmaps_after()
+                    .iter()
+                    .filter(|ty| parsed.heightmaps()[**ty as usize].is_some())
+                    .count(),
+                4,
+                "{dimension}"
+            );
+            assert!(parsed.entities().is_empty(), "{dimension}");
+            assert!(parsed.block_entities().is_empty(), "{dimension}");
+        }
+
+        let partial_root = named_fixture("overworld", "0.0", "0.1.nbt");
+        let partial =
+            SerializableChunkData::parse(height_accessor::create(-64, 384), &partial_root)
+                .unwrap()
+                .unwrap();
+        assert_eq!(partial.status(), ChunkStatus::InitializeLight);
+        assert_eq!(partial.section_tags().list.len(), 24);
+        assert_eq!(
+            partial.validate_full_construction(24),
+            Err(SerializableChunkDataError::UnsupportedChunkStatus {
+                status: ChunkStatus::InitializeLight,
+            })
         );
     }
 

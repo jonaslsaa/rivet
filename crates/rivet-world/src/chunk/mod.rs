@@ -35,6 +35,7 @@ pub mod palette;
 pub mod paletted_container;
 pub mod paletted_container_factory;
 pub mod proto_chunk;
+pub mod status;
 pub mod storage;
 pub mod strategy;
 pub mod structure_access;

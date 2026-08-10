@@ -62,8 +62,8 @@ pub enum Types {
 /// declaration order; `LevelChunk`'s constructor creates (unprimed) entries
 /// for exactly these.
 pub const FINAL_HEIGHTMAPS: [Types; 4] = [
-    Types::OceanFloor,
     Types::WorldSurface,
+    Types::OceanFloor,
     Types::MotionBlocking,
     Types::MotionBlockingNoLeaves,
 ];
@@ -504,8 +504,8 @@ mod tests {
         assert_eq!(
             FINAL_HEIGHTMAPS,
             [
-                Types::OceanFloor,
                 Types::WorldSurface,
+                Types::OceanFloor,
                 Types::MotionBlocking,
                 Types::MotionBlockingNoLeaves,
             ]
