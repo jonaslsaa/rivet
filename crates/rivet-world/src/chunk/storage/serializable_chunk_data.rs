@@ -844,9 +844,13 @@ pub fn parse_heightmaps(chunk_data: &CompoundTag, heightmaps_after: &[Types]) ->
 /// `EnumMap` in ordinal (declaration) order and passes each raw `long[]` into a
 /// `LongArrayTag`. Java shares the array reference — `copyOf`'s single
 /// `data.clone()` has already happened at the stored-build boundary, so this
-/// move is the one copy after parse, matching Java's copy count. Stored columns
-/// are consumed, never cloned again: `put_long_array` takes the `Vec<i64>` by
-/// value, and Java's `write` passes the array into the tag without copying.
+/// move is the one copy after parse, matching Java's copy count on the
+/// live-chunk → disk path. Stored columns are consumed, never cloned again:
+/// `put_long_array` takes the `Vec<i64>` by value, and Java's `write` passes
+/// the array into the tag without copying. (On the disk → tag read-back path
+/// Java makes zero copies — the tag's array flows straight into the map by
+/// reference — while Rust's ownership model still requires the single clone in
+/// `parse_heightmaps`; `write` adds no second copy on either path.)
 ///
 /// The `copyOf` filter — keep only types the persisted status's
 /// `heightmapsAfter()` allows — lives at the stored-build boundary
