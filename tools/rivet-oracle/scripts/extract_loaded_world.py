@@ -28,9 +28,13 @@ source is absent (e.g. CI), verification exits nonzero with UNVERIFIED — it
 never silently passes.
 
 Negative controls (`--expect-fail`): the committed fixtures are copied to a
-scratch dir, one file is deleted and one file's content is flipped, and both the
-static verification and the --verify re-extraction byte-compare must fail loudly
-naming the tamper. `--expect-fail` never touches the committed fixtures.
+dedicated scratch dir that THIS invocation alone creates and owns (a
+`tempfile.TemporaryDirectory` under the system temp namespace — never a
+user-supplied path, so no `rmtree` can ever reach anything but the exact
+directory this run created). One file is deleted and one file's content is
+flipped there, and both the static verification and the --verify re-extraction
+byte-compare must fail loudly naming the tamper. `--expect-fail` never touches
+the committed fixtures, and re-verifies them unchanged afterwards.
 
 Usage:
   python3 tools/rivet-oracle/scripts/extract_loaded_world.py            # extract fixtures from the disposable copy
@@ -393,116 +397,67 @@ def cmd_verify(source: Path) -> int:
     return 0
 
 
-def guard_scratch_path(scratch: Path) -> None:
-    """Refuse to rmtree a --scratch that overlaps the committed fixtures dir or
-    resolves to a broad/system path or an ancestor of one (filesystem root, the
-    home tree, the current working directory, or the temp dir), so a typo'd
-    flag can never destroy the corpus, the repo, or the machine."""
-    sc = scratch.resolve()
-    fs = FIXTURES_DIR.resolve()
-    cwd = Path.cwd().resolve()
-    home = Path.home().resolve()
-    temp_root = Path(tempfile.gettempdir()).resolve()
-    if sc == fs or sc.is_relative_to(fs) or fs.is_relative_to(sc):
-        raise SystemExit(
-            f"REFUSED: --scratch {scratch} overlaps the committed fixtures dir "
-            f"{FIXTURES_DIR} — pick a separate scratch path"
-        )
-    if (
-        len(sc.parts) == 1
-        or home.is_relative_to(sc)
-        or cwd.is_relative_to(sc)
-        or temp_root.is_relative_to(sc)
-    ):
-        raise SystemExit(
-            f"REFUSED: --scratch {scratch} is a broad/system path or an ancestor "
-            f"of one — pick a dedicated scratch path"
-        )
-
-
-def cmd_guard_check() -> int:
-    """Hostile guard test: guard_scratch_path must refuse every broad/system
-    path (filesystem root, home, cwd and all its ancestors, the temp root and
-    all its ancestors, and the fixtures dir) BEFORE any deletion, and must
-    accept a dedicated scratch under the temp root. Pure guard logic — never
-    touches the source world, the fixtures, or the filesystem."""
-    fs = FIXTURES_DIR.resolve()
-    cwd = Path.cwd().resolve()
-    home = Path.home().resolve()
-    temp_root = Path(tempfile.gettempdir()).resolve()
-
-    hostile: list[Path] = [fs, home, cwd, temp_root]
-    p = cwd.parent
-    while p != p.parent:
-        hostile.append(p)
-        p = p.parent
-    p = temp_root.parent
-    while p != p.parent:
-        hostile.append(p)
-        p = p.parent
-
-    for sc in hostile:
-        try:
-            guard_scratch_path(sc)
-        except SystemExit:
-            continue
-        raise SystemExit(f"FAIL: guard accepted hostile scratch path {sc}")
-
-    guard_scratch_path(temp_root / "rivet-lw-guard-ok")
-    print("guard: refuses root, home, cwd + ancestors, temp-root + ancestors, fixtures overlap: OK")
-    print("guard: accepts a dedicated scratch under the temp root: OK")
-    return 0
-
-
-def cmd_expect_fail(source: Path, scratch: Path) -> int:
+def cmd_expect_fail(source: Path) -> int:
     """Negative control: a missing and a tampered fixture must both be detected
     and named by static verification, the --verify re-extraction byte-compare
     must also flag the tamper set, and a tampered source fingerprint must be
-    flagged and named by the live comparison. Operates on a scratch copy / in
-    memory — never the committed fixtures and never the source tree."""
+    flagged and named by the live comparison. Operates on a dedicated scratch
+    copy that THIS invocation creates and owns via TemporaryDirectory (always
+    under the system temp namespace, cleaned up as the exact dir this run made)
+    and in memory — never the committed fixtures and never the source tree. The
+    committed fixtures are re-verified unchanged afterwards."""
     src = resolve_source(source)
     fixtures_dir = FIXTURES_DIR
     manifest = load_committed_manifest(fixtures_dir)
-    guard_scratch_path(scratch)
-    if scratch.exists():
-        shutil.rmtree(scratch)
-    shutil.copytree(fixtures_dir, scratch)
 
-    # Missing: delete one committed fixture file.
-    missing_rel = chunk_path(*CORPUS[1][:2])
-    missing_path = scratch / missing_rel
-    missing_path.unlink()
-    # Tampered: flip a byte in another committed fixture file.
-    tamper_rel = chunk_path(*CORPUS[0][:2])
-    tamper_path = scratch / tamper_rel
-    data = bytearray(tamper_path.read_bytes())
-    data[0] ^= 0xFF
-    tamper_path.write_bytes(bytes(data))
+    with tempfile.TemporaryDirectory(prefix="rivet-loaded-world-control-") as td:
+        scratch = Path(td)
+        # Copy the fixture tree INTO the scratch dir this invocation owns (the
+        # dir already exists, so copy contents, never rmtree anything).
+        for entry in fixtures_dir.iterdir():
+            if entry.is_dir():
+                shutil.copytree(entry, scratch / entry.name)
+            else:
+                shutil.copy2(entry, scratch / entry.name)
 
-    errors = verify_fixtures_dir(scratch, manifest)
-    missing_named = any(f"missing captured file {missing_rel}" in e for e in errors)
-    tamper_named = any("SHA-256 mismatch" in e and tamper_rel in e for e in errors)
-    if not errors:
-        raise SystemExit("FAIL: negative control passed — tampered fixtures were not detected")
-    if not (missing_named and tamper_named):
-        raise SystemExit(
-            "FAIL: negative control did not name both the missing and the tampered fixture: "
-            + "; ".join(errors)
-        )
-    print("negative control: missing fixture detected: OK")
-    print("negative control: tampered fixture detected: OK")
+        # Missing: delete one fixture file in the scratch copy.
+        missing_rel = chunk_path(*CORPUS[1][:2])
+        missing_path = scratch / missing_rel
+        missing_path.unlink()
+        # Tampered: flip a byte in another fixture file in the scratch copy.
+        tamper_rel = chunk_path(*CORPUS[0][:2])
+        tamper_path = scratch / tamper_rel
+        data = bytearray(tamper_path.read_bytes())
+        data[0] ^= 0xFF
+        tamper_path.write_bytes(bytes(data))
 
-    # Dynamic negative: the --verify re-extraction byte-compare (not just the
-    # static hash check) must flag the scratch tamper set, so a bug that makes
-    # the byte-compare always-equal is caught.
-    payloads = extract_corpus(src)
-    dyn_errors = verify_re_extracted(payloads, manifest, scratch)
-    if not dyn_errors:
-        raise SystemExit(
-            "FAIL: negative control passed — re-extraction byte-compare did not detect "
-            "the missing/tampered scratch fixtures"
-        )
-    print("negative control: re-extraction byte-compare detects tamper: OK")
+        errors = verify_fixtures_dir(scratch, manifest)
+        missing_named = any(f"missing captured file {missing_rel}" in e for e in errors)
+        tamper_named = any("SHA-256 mismatch" in e and tamper_rel in e for e in errors)
+        if not errors:
+            raise SystemExit("FAIL: negative control passed — tampered fixtures were not detected")
+        if not (missing_named and tamper_named):
+            raise SystemExit(
+                "FAIL: negative control did not name both the missing and the tampered fixture: "
+                + "; ".join(errors)
+            )
+        print("negative control: missing fixture detected: OK")
+        print("negative control: tampered fixture detected: OK")
+
+        # Dynamic negative: the --verify re-extraction byte-compare (not just the
+        # static hash check) must flag the scratch tamper set, so a bug that makes
+        # the byte-compare always-equal is caught.
+        payloads = extract_corpus(src)
+        dyn_errors = verify_re_extracted(payloads, manifest, scratch)
+        if not dyn_errors:
+            raise SystemExit(
+                "FAIL: negative control passed — re-extraction byte-compare did not detect "
+                "the missing/tampered scratch fixtures"
+            )
+        print("negative control: re-extraction byte-compare detects tamper: OK")
+
+    # The scratch dir this invocation created is already removed by
+    # TemporaryDirectory's exit (only that exact dir is ever deleted).
 
     # Source-fingerprint negative: a tampered committed baseline must be flagged
     # by the live source comparison and the tampered file must be named (in
@@ -526,6 +481,16 @@ def cmd_expect_fail(source: Path, scratch: Path) -> int:
             + "; ".join(fp_errors)
         )
     print("negative control: tampered source fingerprint detected: OK")
+
+    # Post-condition: the committed fixtures must be byte-identical to what the
+    # manifest records (self-verification that the negative control only ever
+    # ran against its own scratch copy and left the corpus untouched).
+    committed_errors = verify_fixtures_dir(fixtures_dir, manifest)
+    if committed_errors:
+        for e in committed_errors:
+            print(f"  FAIL: committed fixtures changed: {e}")
+        return 1
+    print("negative control: committed fixtures unchanged after the run: OK")
     return 0
 
 
@@ -545,25 +510,13 @@ def main() -> int:
     ap.add_argument(
         "--expect-fail",
         action="store_true",
-        help="negative control: prove missing/tampered fixtures are detected (on a scratch copy)",
-    )
-    ap.add_argument(
-        "--scratch",
-        type=Path,
-        default=Path("/tmp/rivet-loaded-world-control"),
-        help="scratch dir for the --expect-fail negative control",
-    )
-    ap.add_argument(
-        "--guard-check",
-        action="store_true",
-        help="hostile guard test: prove broad/system --scratch paths are refused before deletion",
+        help="negative control: prove missing/tampered fixtures are detected "
+        "(runs on its own TemporaryDirectory scratch copy)",
     )
     args = ap.parse_args()
 
-    if args.guard_check:
-        return cmd_guard_check()
     if args.expect_fail:
-        return cmd_expect_fail(args.source, args.scratch)
+        return cmd_expect_fail(args.source)
     if args.verify:
         return cmd_verify(args.source)
     return cmd_extract(args.source)
