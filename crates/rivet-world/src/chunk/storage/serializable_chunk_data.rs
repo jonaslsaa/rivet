@@ -606,7 +606,29 @@ impl SerializableChunkData {
         self.validate_full_construction(self.section_count)
     }
 
+    /// Validate every capability that precedes runtime chunk composition EXCEPT
+    /// the non-empty block-entity rejection — the #383 reconstruction carries
+    /// serialized block entities as pending NBT (materialization defers with
+    /// #341), so this is the boundary that slice consults. Field-for-field the
+    /// same as [`Self::validate_full_construction`] minus that one check.
+    pub(crate) fn validate_full_for_reconstruction(
+        &self,
+    ) -> Result<(), SerializableChunkDataError> {
+        self.validate_full_construction_except_block_entities(self.section_count)
+    }
+
     fn validate_full_construction(
+        &self,
+        section_count: usize,
+    ) -> Result<(), SerializableChunkDataError> {
+        self.validate_full_construction_except_block_entities(section_count)?;
+        if !self.block_entities.is_empty() {
+            return Err(SerializableChunkDataError::UnsupportedBlockEntities);
+        }
+        Ok(())
+    }
+
+    fn validate_full_construction_except_block_entities(
         &self,
         section_count: usize,
     ) -> Result<(), SerializableChunkDataError> {
@@ -665,9 +687,6 @@ impl SerializableChunkData {
         }
         if !self.entities.is_empty() {
             return Err(SerializableChunkDataError::UnsupportedEntities);
-        }
-        if !self.block_entities.is_empty() {
-            return Err(SerializableChunkDataError::UnsupportedBlockEntities);
         }
         Ok(())
     }

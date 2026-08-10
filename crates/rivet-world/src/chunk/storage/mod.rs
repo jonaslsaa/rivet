@@ -39,6 +39,7 @@
 // remain deferred. Codec coverage per DECISIONS.md D13: all four registered
 // read codecs are wired; deflate/lz4 writes stay deferred.
 
+pub mod chunk_reconstruction;
 pub mod region_bitmap;
 pub mod region_file;
 pub mod region_file_storage;
@@ -47,6 +48,10 @@ pub mod region_storage_info;
 pub mod section_reconstruction;
 pub mod serializable_chunk_data;
 
+pub use chunk_reconstruction::{
+    ChunkReconstruction, ChunkReconstructionError, ReconstructedLevelChunk,
+    reconstruct_runtime_chunk,
+};
 pub use region_bitmap::RegionBitmap;
 pub use region_file::{
     ChunkBuffer, RegionFile, RegionFileSizeException, get_chunk_coordinate,
