@@ -9,13 +9,14 @@ use std::fmt;
 
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::list_tag::ListTag;
-use rivet_nbt::nbt_utils::read_block_state;
+use rivet_nbt::nbt_ops::NbtOps;
 use rivet_nbt::tag::Tag;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::generated::biomes::{BIOME_BY_NAME, BIOME_COUNT};
 use rivet_registry::generated::block_states::{BLOCK_STATE_COUNT, StateId};
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::identifier::Identifier;
+use rivet_registry::state_definition::StateDefinition;
 
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::palette::GlobalIdMap;
@@ -205,13 +206,24 @@ fn read_palette<T: Clone>(
 ) -> Result<Decoded<Vec<T>>, ContainerCodecError> {
     // `palette` is `fieldOf`, so it is validated before lenient optional
     // `data`. `orElsePartial(default)` applies to each element independently.
-    let palette = container
-        .get_list("palette")
-        .ok_or_else(|| ContainerCodecError {
-            path: CodecPath::Palette,
-            message: "No palette list in paletted container".to_string(),
-            partials: Vec::new(),
-        })?;
+    let palette = match container.get("palette") {
+        Some(Tag::List(palette)) => palette,
+        Some(tag) => {
+            return Err(ContainerCodecError {
+                path: CodecPath::Palette,
+                message: format!("Not a list: {tag}"),
+                partials: Vec::new(),
+            });
+        }
+        None => {
+            let entries = NbtOps::instance().map_like(container).entries();
+            return Err(ContainerCodecError {
+                path: CodecPath::Palette,
+                message: format!("No key palette in MapLike[{entries:?}]"),
+                partials: Vec::new(),
+            });
+        }
+    };
     let mut values = Vec::with_capacity(palette.size());
     let mut diagnostics = Vec::new();
     for (index, entry) in palette.iter().enumerate() {
@@ -229,27 +241,67 @@ fn read_palette<T: Clone>(
     })
 }
 
+/// Decode one palette element with the constraints imposed by Paper's
+/// `BlockState.CODEC`. This is deliberately stricter than
+/// `NbtUtils.readBlockState`, whose separate contract ignores unknown or
+/// unparseable properties after logging a warning.
+fn decode_block_state(entry: &Tag) -> Result<BlockState, String> {
+    let Tag::Compound(state) = entry else {
+        return Err(format!("Not a map: {entry}"));
+    };
+    let name_tag = state
+        .get("Name")
+        .ok_or_else(|| format!("No key Name in MapLike[{state:?}]"))?;
+    let Tag::String(name) = name_tag else {
+        return Err(format!("Not a string: {name_tag}"));
+    };
+    let id = Identifier::by_separator_result(&name.value, ':')
+        .map_err(|error| format!("Invalid block identifier {}: {error}", name.value))?;
+    let block = BlockId::from_name(&id.to_string()).ok_or_else(|| {
+        format!("Unknown registry key in ResourceKey[minecraft:root / minecraft:block]: {id}")
+    })?;
+
+    let mut result = BlockState::of(block);
+    let Some(properties_tag) = state.get("Properties") else {
+        return Ok(result);
+    };
+    let Tag::Compound(properties) = properties_tag else {
+        return Err(format!("Not a map: {properties_tag}"));
+    };
+    let definition = StateDefinition::for_block(block);
+    for (name, value_tag) in properties.entry_set() {
+        let property = definition
+            .get_property(name)
+            .ok_or_else(|| format!("No property {name} in block state {id}"))?;
+        let Tag::String(value) = value_tag else {
+            return Err(format!("Not a string: {value_tag}"));
+        };
+        let parsed = property.get_value(&value.value).ok_or_else(|| {
+            format!(
+                "Unable to read property: {name} with value: {} for block state {id}",
+                value.value
+            )
+        })?;
+        let index = definition
+            .value_index(property, parsed)
+            .expect("parsed property belongs to the selected block definition");
+        result = result
+            .set_property(property.id(), index)
+            .expect("validated block-state property is settable");
+    }
+    Ok(result)
+}
+
 fn decode_block_states(
     container: &CompoundTag,
     factory: &PalettedContainerFactory<BlockState, BiomeId>,
     preset_values: Option<Vec<BlockState>>,
 ) -> Result<Decoded<PalettedContainer<BlockState>>, ContainerCodecError> {
-    let decoded_palette = read_palette(container, *factory.default_block_state(), |entry| {
-        let Tag::Compound(state) = entry else {
-            return Err(format!("Not a map: {entry}"));
-        };
-        let name = state
-            .get_string("Name")
-            .ok_or_else(|| "No key Name in block state".to_string())?;
-        let id = Identifier::by_separator_result(name, ':')
-            .map_err(|error| format!("Invalid block identifier {name}: {error}"))?;
-        if BlockId::from_name(&id.to_string()).is_none() {
-            return Err(format!(
-                "Unknown registry key in ResourceKey[minecraft:root / minecraft:block]: {id}"
-            ));
-        }
-        Ok(read_block_state(state))
-    })?;
+    let decoded_palette = read_palette(
+        container,
+        *factory.default_block_state(),
+        decode_block_state,
+    )?;
     // `lenientOptionalFieldOf`: a missing or wrong-typed `data` is `None`.
     let packed = PackedData::new(
         decoded_palette.value,

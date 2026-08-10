@@ -306,7 +306,7 @@ fn missing_containers_default_independently_and_blocks_fail_first() {
         .expect("block-state failure");
     assert_eq!(err.container, "block_states");
     assert_eq!(err.section_y, 0);
-    assert_eq!(err.message, "No palette list in paletted container");
+    assert!(err.message.starts_with("No key palette in MapLike["));
     assert_eq!(err.path, CodecPath::Palette);
 
     let tags = list(vec![section(0, None, Some(CompoundTag::new()))]);
@@ -314,10 +314,11 @@ fn missing_containers_default_independently_and_blocks_fail_first() {
         .err()
         .expect("biome failure");
     assert_eq!(err.container, "biomes");
+    assert!(err.message.starts_with("No key palette in MapLike["));
 }
 
 #[test]
-fn unknown_block_properties_and_biomes_use_codec_defaults() {
+fn invalid_block_state_elements_and_biomes_use_codec_defaults() {
     let factory = current_version_container_factory();
     let mut unknown = CompoundTag::new();
     unknown.put_string("Name", "minecraft:not_a_block");
@@ -353,9 +354,9 @@ fn unknown_block_properties_and_biomes_use_codec_defaults() {
     assert_eq!(defaults.get_block_state(0, 0, 0), block("minecraft:air"));
     assert_eq!(defaults.get_noise_biome(0, 0, 0), BiomeId::PLAINS);
     let log = sections[1].as_ref().unwrap();
-    assert_eq!(log.get_block_state(0, 0, 0), block("minecraft:oak_log"));
-    assert_eq!(log.non_empty_block_count(), 4096);
-    assert_eq!(sections.diagnostics.len(), 2);
+    assert_eq!(log.get_block_state(0, 0, 0), block("minecraft:air"));
+    assert_eq!(log.non_empty_block_count(), 0);
+    assert_eq!(sections.diagnostics.len(), 3);
     assert_eq!(sections.diagnostics[0].section_y, 0);
     assert_eq!(sections.diagnostics[0].container, "block_states");
     assert_eq!(sections.diagnostics[0].path, CodecPath::PaletteElement(0));
@@ -368,6 +369,181 @@ fn unknown_block_properties_and_biomes_use_codec_defaults() {
         sections.diagnostics[1].message,
         "(Unknown registry key in ResourceKey[minecraft:root / minecraft:worldgen/biome]: minecraft:not_a_biome -> using default)"
     );
+    assert_eq!(sections.diagnostics[2].section_y, 1);
+    assert_eq!(sections.diagnostics[2].container, "block_states");
+    assert_eq!(sections.diagnostics[2].path, CodecPath::PaletteElement(0));
+    assert_eq!(
+        sections.diagnostics[2].message,
+        "(No property bogus in block state minecraft:oak_log -> using default)"
+    );
+}
+
+#[test]
+fn every_block_state_codec_shape_error_replaces_the_whole_element() {
+    let factory = current_version_container_factory();
+
+    let block_state = |name_tag: Tag, properties: Option<Tag>| {
+        let mut state = CompoundTag::new();
+        state.put("Name".into(), name_tag);
+        if let Some(properties) = properties {
+            state.put("Properties".into(), properties);
+        }
+        Tag::Compound(state)
+    };
+    let properties = |name: &str, value: Tag| {
+        let mut properties = CompoundTag::new();
+        properties.put(name.into(), value);
+        Tag::Compound(properties)
+    };
+    let oak_log = Tag::String(StringTag::value_of("minecraft:oak_log".into()));
+    let hostile = [
+        block_state(
+            oak_log.clone(),
+            Some(properties(
+                "axis",
+                Tag::String(StringTag::value_of("sideways".into())),
+            )),
+        ),
+        block_state(
+            oak_log.clone(),
+            Some(properties(
+                "bogus",
+                Tag::String(StringTag::value_of("x".into())),
+            )),
+        ),
+        block_state(oak_log.clone(), Some(Tag::Int(IntTag::value_of(1)))),
+        block_state(
+            oak_log,
+            Some(properties("axis", Tag::Int(IntTag::value_of(1)))),
+        ),
+        block_state(Tag::Int(IntTag::value_of(1)), None),
+        Tag::Compound(CompoundTag::new()),
+        block_state(
+            Tag::String(StringTag::value_of("minecraft:bad id".into())),
+            None,
+        ),
+    ];
+
+    for (y, state) in hostile.into_iter().enumerate() {
+        let tags = list(vec![section(
+            y as i8,
+            Some(container(vec![state], None)),
+            Some(plains()),
+        )]);
+        let sections =
+            reconstruct_sections(&tags, y as i32, y as i32, &factory, predicates()).unwrap();
+        assert_eq!(
+            sections[0].as_ref().unwrap().get_block_state(0, 0, 0),
+            block("minecraft:air")
+        );
+        assert_eq!(sections.diagnostics.len(), 1);
+        assert_eq!(sections.diagnostics[0].path, CodecPath::PaletteElement(0));
+    }
+}
+
+#[test]
+fn hostile_property_diagnostic_precedes_biome_data_and_blocklight_failures() {
+    let factory = current_version_container_factory();
+    let mut properties = CompoundTag::new();
+    properties.put_string("axis", "sideways");
+    let mut oak_log = CompoundTag::new();
+    oak_log.put_string("Name", "minecraft:oak_log");
+    oak_log.put("Properties".into(), Tag::Compound(properties));
+
+    let bad_biomes = container(
+        vec![
+            Tag::String(StringTag::value_of("minecraft:plains".into())),
+            Tag::String(StringTag::value_of("minecraft:desert".into())),
+        ],
+        None,
+    );
+    let tags = list(vec![section(
+        0,
+        Some(container(vec![Tag::Compound(oak_log.clone())], None)),
+        Some(bad_biomes),
+    )]);
+    let err = reconstruct_sections(&tags, 0, 0, &factory, predicates())
+        .err()
+        .expect("biome packed data is fatal");
+    assert_eq!(err.container, "biomes");
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert_eq!(err.recoverable_diagnostics.len(), 1);
+    assert_eq!(
+        err.recoverable_diagnostics[0].path,
+        CodecPath::PaletteElement(0)
+    );
+
+    let mut bad_light = section(
+        0,
+        Some(container(vec![Tag::Compound(oak_log)], None)),
+        Some(plains()),
+    );
+    bad_light.put_byte_array("BlockLight", vec![0]);
+    let tags = list(vec![bad_light]);
+    let mut observed = Vec::new();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = reconstruct_sections_with_presets_and_diagnostics(
+                &tags,
+                0,
+                0,
+                &factory,
+                predicates(),
+                |_| None,
+                |diagnostic| observed.push(diagnostic.clone()),
+            );
+        }))
+        .is_err()
+    );
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].container, "block_states");
+    assert_eq!(observed[0].path, CodecPath::PaletteElement(0));
+}
+
+#[test]
+fn wrong_typed_required_palettes_keep_codec_messages_and_win_competition() {
+    let factory = current_version_container_factory();
+    let wrong_palette = || {
+        let mut container = CompoundTag::new();
+        container.put_int("palette", 7);
+        container.put_int("data", 12);
+        container
+    };
+
+    let mut bad_block = section(0, Some(wrong_palette()), Some(plains()));
+    bad_block.put_byte_array("BlockLight", vec![0]);
+    let later_bad = section(1, Some(CompoundTag::new()), Some(plains()));
+    let err = reconstruct_sections(
+        &list(vec![bad_block, later_bad]),
+        0,
+        1,
+        &factory,
+        predicates(),
+    )
+    .err()
+    .expect("wrong-typed block palette wins");
+    assert_eq!(err.container, "block_states");
+    assert_eq!(err.path, CodecPath::Palette);
+    assert_eq!(err.message, "Not a list: 7");
+
+    let mut bad_biome = section(
+        0,
+        Some(container(vec![state_tag("minecraft:air")], None)),
+        Some(wrong_palette()),
+    );
+    bad_biome.put_byte_array("BlockLight", vec![0]);
+    let err = reconstruct_sections(
+        &list(vec![bad_biome, section(1, None, Some(CompoundTag::new()))]),
+        0,
+        1,
+        &factory,
+        predicates(),
+    )
+    .err()
+    .expect("wrong-typed biome palette wins");
+    assert_eq!(err.container, "biomes");
+    assert_eq!(err.path, CodecPath::Palette);
+    assert_eq!(err.message, "Not a list: 7");
 }
 
 #[test]
