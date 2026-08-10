@@ -748,6 +748,7 @@ dependencies = [
 name = "rivet-world"
 version = "0.1.0-dev+mc26.2"
 dependencies = [
+ "base64",
  "bytes",
  "flate2",
  "indexmap",

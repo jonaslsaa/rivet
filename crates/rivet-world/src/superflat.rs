@@ -265,11 +265,16 @@ where
 }
 
 /// The 26 sky light layers, indexed by light-section index (`minLightSection`
-/// plus `index`). Index 0 (below the world floor) is empty (uniform 0). Index 1
-/// is the floor layer: the y=-64 stone floor blocks sky light, so the first 128
-/// bytes (one 16×16 y-level) are zero and everything above is fully lit (1920
-/// `0xFF` bytes). Index 2 (the next section, all air) is fully lit. All higher
-/// layers are absent (`None`), matching the captured fixture.
+/// plus `index`) for the single-stone superflat preset (#100): one stone layer
+/// at y=-64. Index 0 (below the world floor) is empty (uniform 0). Index 1 is
+/// the floor layer: the stone floor blocks sky light, so the first 128 bytes
+/// (one 16×16 y-level) are zero and everything above is fully lit (1920 `0xFF`
+/// bytes). Index 2 (the next section, all air) is fully lit. All higher layers
+/// are absent (`None`).
+///
+/// This models the #100 superflat filler's own floor (1 opaque y-level), NOT the
+/// M0 fixture terrain (bedrock/dirt/dirt/grass, 4 opaque y-levels, top opaque
+/// at y=-61) — that divergence is exactly what the #229 spike falsifies.
 ///
 /// `pub(crate)` so the #229 byte-identity spike can run this filler through the
 /// same `light_save_surface` seam as the fixture and falsify the difference.

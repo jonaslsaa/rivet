@@ -157,10 +157,12 @@ mod tests {
     };
     use crate::level::height_accessor::create;
     use crate::lighting::swmr_nibble_array::{ARRAY_SIZE, InitState};
+    use base64::Engine as _;
     use rivet_nbt::compound_tag::CompoundTag;
     use rivet_nbt::nbt_accounter::NbtAccounter;
     use rivet_nbt::nbt_io;
     use rivet_util::DataInputStream;
+    use serde_json::Value;
     use std::io::Cursor;
     use std::path::PathBuf;
 
@@ -227,8 +229,10 @@ mod tests {
     }
 
     /// Read a committed Paper 26.2 FULL-status chunk fixture for a dimension.
-    /// When the fixture is absent the spike cannot run — it fails loudly with an
-    /// UNVERIFIED message rather than silently passing (the oracle never skips).
+    /// When the fixture is absent the spike cannot run — the test binary fails
+    /// loudly (this panic), and the oracle verify gate independently fails with
+    /// exit 1 because the chunk payload is a manifest-captured fixture file.
+    /// Neither layer ever silently skips.
     fn load_fixture(dim: &str) -> CompoundTag {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tools/rivet-oracle/fixtures/chunk")
@@ -239,7 +243,10 @@ mod tests {
             panic!(
                 "UNVERIFIED: {dim} Starlight fixture {} missing ({e}) — the #229 byte-identity \
                  spike cannot run. Regenerate the fixtures (`cargo run -p rivet-oracle -- \
-                 regenerate --m0` for the M0 superflat slice) before relying on this proof.",
+                 regenerate --m0` for the M0 superflat slice) before relying on this proof. \
+                 This is a test-binary failure, not an oracle exit-3 UNVERIFIED: the oracle \
+                 gate fails with a hard manifest error whenever a captured fixture file is \
+                 absent.",
                 path.display()
             )
         });
@@ -263,6 +270,94 @@ mod tests {
                 sky_light: s.sky_light,
             })
             .collect()
+    }
+
+    /// Load the committed full-array light fixture (`light-full.json`) — the
+    /// independent Paper ground truth the spike compares against. It is captured
+    /// by `extract_light_full.py` from the same M0 FULL `.nbt` chunks but through
+    /// a *separate* decode path (Python NBT reader + base64), so a decode bug
+    /// shared by `parse_section_lights` cannot hide a divergence. When the fixture
+    /// is absent or malformed the spike fails loudly — never silently skips.
+    fn load_light_full_fixture() -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rivet-oracle/fixtures/worldgen/light-full.json");
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "UNVERIFIED: full-array light fixture {} missing ({e}) — the #229 \
+                 byte-identity spike cannot run its independent ground-truth check. \
+                 Regenerate the fixtures (`cargo run -p rivet-oracle -- sample`), which \
+                 re-extracts light-full.json from the M0 FULL chunks. The oracle verify \
+                 gate also fails loudly when this captured fixture file is absent.",
+                path.display()
+            )
+        });
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            panic!(
+                "UNVERIFIED: full-array light fixture {} malformed ({e}) — refusing to \
+                 compare against a corrupt ground truth",
+                path.display()
+            )
+        })
+    }
+
+    /// The light surface for a dimension from the committed `light-full.json`
+    /// (`extract_light_full.py` output), filtered to the sections
+    /// `saveLightHookReal` writes (a light state present) and normalized to the
+    /// `SavedLightSection` shape. Base64 arrays are decoded to the raw 2048 bytes;
+    /// absent states map to `-1` (`state_or_absent`).
+    fn json_surface(light_full: &Value, dim: &str) -> Vec<SavedLightSection> {
+        let chunks = light_full
+            .get("chunks")
+            .and_then(|c| c.as_array())
+            .unwrap_or_else(|| panic!("light-full.json: missing `chunks` array"));
+        let chunk = chunks
+            .iter()
+            .find(|c| c.get("dim").and_then(|d| d.as_str()) == Some(dim))
+            .unwrap_or_else(|| panic!("light-full.json: no chunk for dimension {dim}"));
+        let sections = chunk
+            .get("sections")
+            .and_then(|s| s.as_array())
+            .unwrap_or_else(|| panic!("light-full.json: missing `sections` for {dim}"));
+        sections
+            .iter()
+            .map(|s| {
+                let y = s.get("sectionY").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let block_state = s
+                    .get("blocklight_state")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32)
+                    .unwrap_or(-1);
+                let sky_state = s
+                    .get("skylight_state")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32)
+                    .unwrap_or(-1);
+                SavedLightSection {
+                    y,
+                    block_state,
+                    block_light: json_array(s, "blocklight"),
+                    sky_state,
+                    sky_light: json_array(s, "skylight"),
+                }
+            })
+            .filter(|s| s.block_state >= 0 || s.sky_state >= 0)
+            .collect()
+    }
+
+    /// Decode a base64 light array from a `light-full.json` section entry; `None`
+    /// when the key is absent.
+    fn json_array(section: &Value, key: &str) -> Option<Vec<u8>> {
+        let encoded = section.get(key)?.as_str()?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap_or_else(|e| panic!("light-full.json: invalid base64 for {key}: {e}"));
+        assert_eq!(
+            decoded.len(),
+            ARRAY_SIZE,
+            "light-full.json: {key} array has {} bytes, expected {ARRAY_SIZE}",
+            decoded.len()
+        );
+        Some(decoded)
     }
 
     /// `#229` round-trip proof: parse the fixture's light tags -> rebuild the
@@ -306,6 +401,45 @@ mod tests {
             assert!(
                 divergences.is_empty(),
                 "{dim}: fixture light surface does NOT round-trip through SWMR save state: {}",
+                divergences.join("; ")
+            );
+        }
+    }
+
+    /// `#229` cross-validation: the `saveLightHookReal` save seam, fed the SWMR
+    /// nibbles rebuilt from the `.nbt` chunks, must reproduce the committed
+    /// `light-full.json` full-array fixture byte-for-byte — the independent
+    /// Paper ground truth captured through a separate decode path — for every
+    /// dimension and every section. This makes `light-full.json` load-bearing:
+    /// a decode bug shared by the NBT path can no longer hide a divergence.
+    #[test]
+    fn spike_229_save_surface_matches_committed_light_full_fixture() {
+        let light_full = load_light_full_fixture();
+        // (min_y, height): overworld -64/384, nether 0/256, end 0/256.
+        for (dim, min_y, height) in [
+            ("overworld", -64, 384),
+            ("the_nether", 0, 256),
+            ("the_end", 0, 256),
+        ] {
+            let expected = json_surface(&light_full, dim);
+            // Derive has_sky from the fixture itself: a dimension with any sky
+            // light state/array in the committed fixture has skylight.
+            let has_sky = expected.iter().any(|s| s.sky_state >= 0);
+
+            let chunk = load_fixture(dim);
+            let sections = parse_section_lights(&chunk);
+            let light_correct = parse_light_correct(&chunk, true);
+            assert!(light_correct, "{dim} FULL fixture must be light-correct");
+            let accessor = create(min_y, height);
+            let rebuilt = reconstruct_lights(accessor, &sections, light_correct, has_sky);
+            let actual =
+                light_save_surface(&accessor, &rebuilt.block_nibbles, &rebuilt.sky_nibbles);
+
+            let divergences = surface_divergences(&expected, &actual);
+            assert!(
+                divergences.is_empty(),
+                "{dim}: SaveUtil save seam does NOT match the committed light-full.json \
+                 fixture: {}",
                 divergences.join("; ")
             );
         }

@@ -62,6 +62,9 @@ bytes = { workspace = true }
 # The `feature.configurations` codec tests decode/encode through
 # `JsonOps::INSTANCE` (serde_json::Value backed).
 serde_json = { workspace = true }
+# The #229 spike compares the save seam against the committed `light-full.json`
+# full-array fixture (base64 2048-byte light layers).
+base64 = { workspace = true }
 # The PalettedContainer<StateId> golden tests drive the real global
 # block-state table (rivet-registry `blocks` feature). Dev-only: normal
 # builds of rivet-world stay feature-free.

@@ -3270,6 +3270,30 @@ mod tests {
         }
     }
 
+    /// The oracle verify gate fails loudly when a captured worldgen fixture is
+    /// absent — the `light-full.json` full-array Starlight fixture (issue #229)
+    /// is load-bearing: deleting it turns `verify_fixtures` into a hard error
+    /// (`Error::Manifest` -> exit 1), never a silent skip.
+    #[test]
+    fn worldgen_missing_light_full_fails_verification() {
+        let dir = fixtures_dir().join("worldgen");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-wg-missing-{}", std::process::id()));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        copy_dir_recursive(&dir, &scratch).unwrap();
+        fs::remove_file(scratch.join("light-full.json")).unwrap();
+        assert!(
+            verify_fixtures(&scratch).is_err(),
+            "verify_fixtures must fail loudly when the captured light-full.json is absent"
+        );
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
     /// The committed `regions/overworld-normal` none-compression region fixtures
     /// must verify clean: 408 chunk payloads across all three dimensions.
     #[test]
