@@ -11,7 +11,7 @@
 //! `fillCrashReportCategory` default defers with the crash-report surface.
 
 use rivet_registry::ResourceKey;
-use rivet_registry::core::{BlockPos, Difficulty, GlobalPos, global_pos_map_codec};
+use rivet_registry::core::{BlockPos, Difficulty, GlobalPos, SectionPos, global_pos_map_codec};
 use rivet_registry::registries::Level as LevelKey;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
@@ -20,13 +20,17 @@ use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use rivet_util::mth;
 use std::sync::Arc;
 
+use super::super::height_accessor::LevelHeightAccessor;
+
 /// `LevelData` — the read side of the world's persistent data.
 ///
 /// RivetTodo(#232): `WritableLevelData` (`setSpawn`) and `ServerLevelData`
 /// (`setGameTime`, game type, allow-commands) are separate `storage` files
 /// outside this unit's list and defer with the concrete world data; `Level`
 /// holds a `WritableLevelData` in Java, which the concrete world port will
-/// type against. `fillCrashReportCategory` defers with the crash-report unit.
+/// type against. The `fillCrashReportCategory` default lands here (#398),
+/// grounded in `CrashReportCategory.formatLocation` (the crash-report surface
+/// stays a stub in `rivet-core`, which records entries).
 pub trait LevelData {
     /// `getRespawnData()`.
     fn get_respawn_data(&self) -> &RespawnData;
@@ -44,6 +48,32 @@ pub trait LevelData {
 
     /// `isDifficultyLocked()`.
     fn is_difficulty_locked(&self) -> bool;
+
+    /// `LevelData.fillCrashReportCategory(CrashReportCategory, LevelHeightAccessor)`
+    /// — the default that `ServerLevelData`/`PrimaryLevelData` build on.
+    ///
+    /// Java:
+    /// ```java
+    /// default void fillCrashReportCategory(final CrashReportCategory category,
+    ///     final LevelHeightAccessor levelHeightAccessor) {
+    ///     category.setDetail("Level spawn location",
+    ///         () -> CrashReportCategory.formatLocation(levelHeightAccessor, this.getRespawnData().pos()));
+    /// }
+    /// ```
+    ///
+    /// The `CrashReportCategory` stub records the detail key and the rendered
+    /// location string; the level-data defaults are otherwise stub-owned.
+    fn fill_crash_report_category(
+        &self,
+        category: &mut rivet_core::CrashReportCategory,
+        level_height_accessor: &dyn LevelHeightAccessor,
+    ) {
+        let pos = self.get_respawn_data().pos();
+        category.set_detail(
+            "Level spawn location",
+            format_location(level_height_accessor, &pos),
+        );
+    }
 }
 
 /// `LevelData.RespawnData` — the `(GlobalPos, yaw, pitch)` record.
@@ -129,6 +159,70 @@ pub fn default_respawn_data() -> RespawnData {
         0.0,
         0.0,
     )
+}
+
+/// `CrashReportCategory.formatLocation(LevelHeightAccessor, BlockPos)` — the
+/// crash-report location string.
+///
+/// Java formats three sections: `World: (x,y,z)`, `Section: (at rx,ry,rz in
+/// sx,sy,sz; chunk contains blocks ...)`, and `Region: (rx,rz; contains chunks
+/// ... , blocks ...)`. The arithmetic (`blockToSectionCoord` `>> 4`, `x & 15`,
+/// `sectionToBlockCoord` `<< 4`, `>> 9` / `<< 9` region math) mirrors the
+/// Java exactly with the `SectionPos`/`BlockPos` value surfaces.
+///
+/// Java wraps each section in a defensive try/catch that prints
+/// `(Error finding world loc)` / `(Error finding chunk loc)` on a throwable.
+/// Those branches are unreachable in practice (the format calls and integer
+/// arithmetic never throw in a release JVM), so the port omits the guards —
+/// identical behavior on every reachable input.
+///
+/// The Java `%.2f` double overload is not ported — the level-data defaults
+/// only ever call the `BlockPos` overload (`LevelData.fillCrashReportCategory`
+/// passes `this.getRespawnData().pos()`). The two int/BlockPos overloads are
+/// unified here (Java's `BlockPos` overload delegates to the int one).
+pub fn format_location(level_height_accessor: &dyn LevelHeightAccessor, pos: &BlockPos) -> String {
+    let x = pos.get_x();
+    let y = pos.get_y();
+    let z = pos.get_z();
+
+    let mut result = String::new();
+    result.push_str(&format!("World: ({x},{y},{z})"));
+    result.push_str(", ");
+
+    let section_x = SectionPos::block_to_section_coord(x);
+    let section_y = SectionPos::block_to_section_coord(y);
+    let section_z = SectionPos::block_to_section_coord(z);
+    let relative_x = x & 15;
+    let relative_y = y & 15;
+    let relative_z = z & 15;
+    let min_block_x = SectionPos::section_to_block_coord(section_x);
+    let min_block_y = level_height_accessor.get_min_y();
+    let min_block_z = SectionPos::section_to_block_coord(section_z);
+    let max_block_x = SectionPos::section_to_block_coord(section_x + 1) - 1;
+    let max_block_y = level_height_accessor.get_max_y();
+    let max_block_z = SectionPos::section_to_block_coord(section_z + 1) - 1;
+    result.push_str(&format!(
+        "Section: (at {relative_x},{relative_y},{relative_z} in {section_x},{section_y},{section_z}; chunk contains blocks {min_block_x},{min_block_y},{min_block_z} to {max_block_x},{max_block_y},{max_block_z})"
+    ));
+    result.push_str(", ");
+
+    let region_x = x >> 9;
+    let region_z = z >> 9;
+    let min_chunk_x = region_x << 5;
+    let min_chunk_z = region_z << 5;
+    let max_chunk_x = ((region_x + 1) << 5) - 1;
+    let max_chunk_z = ((region_z + 1) << 5) - 1;
+    let min_block_x = region_x << 9;
+    let min_block_y = level_height_accessor.get_min_y();
+    let min_block_z = region_z << 9;
+    let max_block_x = ((region_x + 1) << 9) - 1;
+    let max_block_y = level_height_accessor.get_max_y();
+    let max_block_z = ((region_z + 1) << 9) - 1;
+    result.push_str(&format!(
+        "Region: ({region_x},{region_z}; contains chunks {min_chunk_x},{min_chunk_z} to {max_chunk_x},{max_chunk_z}, blocks {min_block_x},{min_block_y},{min_block_z} to {max_block_x},{max_block_y},{max_block_z})"
+    ));
+
+    result
 }
 
 /// `LevelData.RespawnData.MAP_CODEC` — `RecordCodecBuilder.mapCodec(i ->
@@ -416,5 +510,83 @@ mod tests {
         };
         assert_eq!(level_data.get_game_time(), 123456789);
         assert_eq!(level_data.get_difficulty(), Difficulty::Normal);
+    }
+
+    /// `CrashReportCategory.formatLocation(LevelHeightAccessor, BlockPos)` for
+    /// the overworld height accessor (minY -64, height 384) at the origin.
+    ///
+    /// Hand-computed from the Java:
+    /// - `World: (0,0,0)`.
+    /// - Section: `blockToSectionCoord(0) = 0`, `0 & 15 = 0`;
+    ///   `sectionToBlockCoord(0) = 0`, `sectionToBlockCoord(1) - 1 = 15`;
+    ///   min/max y = -64/319.
+    /// - Region: `0 >> 9 = 0`; `0 << 5 = 0`, `(0+1) << 5 - 1 = 31`;
+    ///   blocks `0<<9=0` .. `(0+1)<<9-1=511`.
+    #[test]
+    fn format_location_origin_overworld() {
+        let h = crate::level::height_accessor::create(-64, 384);
+        let s = format_location(&h, &BlockPos::ZERO);
+        assert_eq!(
+            s,
+            "World: (0,0,0), Section: (at 0,0,0 in 0,0,0; chunk contains blocks 0,-64,0 to 15,319,15), Region: (0,0; contains chunks 0,0 to 31,31, blocks 0,-64,0 to 511,319,511)"
+        );
+    }
+
+    /// A position in a positive region/section: (x,y,z) = (321, 80, 300).
+    ///
+    /// `321 >> 4 = 20` (section x), `321 & 15 = 1` (relative x);
+    /// `80 >> 4 = 5` (section y), `80 & 15 = 0`; `300 >> 4 = 18`, `300 & 15 = 12`.
+    /// `sectionToBlockCoord(20) = 320`, `(20+1) << 4 - 1 = 335`; section y
+    /// bounds `5<<4=80` .. `6<<4-1=95`.
+    /// Region: `321 >> 9 = 0`? No — `321 / 512 = 0`. So region x = 0.
+    #[test]
+    fn format_location_mid_world() {
+        let h = crate::level::height_accessor::create(-64, 384);
+        let s = format_location(&h, &BlockPos::new(321, 80, 300));
+        assert_eq!(
+            s,
+            "World: (321,80,300), Section: (at 1,0,12 in 20,5,18; chunk contains blocks 320,-64,288 to 335,319,303), Region: (0,0; contains chunks 0,0 to 31,31, blocks 0,-64,0 to 511,319,511)"
+        );
+    }
+
+    /// Negative coordinates: `blockToSectionCoord(-1) = -1 >> 4 = -1` (Java
+    /// arithmetic shift), `-1 & 15 = 15` (Java `&` on a negative int is
+    /// two's-complement, `-1 & 15 = 15`). `sectionToBlockCoord(-1) = -16`,
+    /// `(-1+1) << 4 - 1 = -1`.
+    #[test]
+    fn format_location_negative() {
+        let h = crate::level::height_accessor::create(-64, 384);
+        let s = format_location(&h, &BlockPos::new(-1, -1, -1));
+        assert_eq!(
+            s,
+            "World: (-1,-1,-1), Section: (at 15,15,15 in -1,-1,-1; chunk contains blocks -16,-64,-16 to -1,319,-1), Region: (-1,-1; contains chunks -32,-32 to -1,-1, blocks -512,-64,-512 to -1,319,-1)"
+        );
+    }
+
+    /// The `LevelData.fillCrashReportCategory` default records the
+    /// `"Level spawn location"` detail with the formatted position.
+    #[test]
+    fn level_data_fill_crash_report_category_records_spawn_location() {
+        let h = crate::level::height_accessor::create(-64, 384);
+        let data = FakeLevelData {
+            game_time: 0,
+            respawn: RespawnData::new(
+                GlobalPos::of(overworld(), BlockPos::new(0, 64, 0)),
+                0.0,
+                0.0,
+            ),
+            hardcore: false,
+            difficulty: Difficulty::Normal,
+            locked: false,
+        };
+        let mut category = rivet_core::CrashReportCategory::new("test");
+        LevelData::fill_crash_report_category(&data, &mut category, &h);
+        assert_eq!(
+            category.entries(),
+            &[(
+                "Level spawn location".to_string(),
+                "World: (0,64,0), Section: (at 0,0,0 in 0,4,0; chunk contains blocks 0,-64,0 to 15,319,15), Region: (0,0; contains chunks 0,0 to 31,31, blocks 0,-64,0 to 511,319,511)".to_string()
+            )]
+        );
     }
 }
