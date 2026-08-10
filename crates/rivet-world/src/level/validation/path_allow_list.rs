@@ -278,6 +278,11 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                         regex.push('[');
                     }
                     if chars.get(i) == Some(&'-') {
+                        // In OpenJDK's generated intersection this remains the
+                        // first member of the inner class. Escape it here: a
+                        // negated PCRE2 class already contains the injected
+                        // separator, so a raw '-' would form a range with it.
+                        regex.push('\\');
                         regex.push('-');
                         i += 1;
                         has_member = true;
@@ -302,6 +307,13 @@ fn glob_to_regex(glob: &str, windows: bool) -> Result<String, String> {
                             "Explicit 'name separator' in class near index {}",
                             i - 1
                         ));
+                    }
+                    // PCRE2 reserves `[.x.]`, `[=x=]`, and `[:name:]`
+                    // shapes at the start of a class for POSIX features.
+                    // OpenJDK's glob converter treats the punctuation as
+                    // ordinary members of its inner intersection class.
+                    if !has_member && !negated && matches!(class_char, '.' | '=' | ':') {
+                        regex.push('\\');
                     }
                     // OpenJDK escapes a doubled '&' so Java's class
                     // intersection cannot reinterpret a literal ampersand.
@@ -831,6 +843,61 @@ mod tests {
         assert!(list.matches(Path::new("&")));
         assert!(list.matches(Path::new("b")));
         assert!(!list.matches(Path::new("c")));
+    }
+
+    #[test]
+    fn negated_glob_class_leading_hyphen_stays_literal_like_openjdk() {
+        for windows in [false, true] {
+            let expression = glob_to_regex("[!-?]", windows).unwrap();
+            let expression = format!(r"\A(?:{expression})\z");
+            let mut builder = RegexBuilder::new();
+            builder.utf(true).ucp(false);
+            let regex = builder.build(&expression).unwrap();
+
+            assert!(regex.is_match(b"!").unwrap());
+            assert!(!regex.is_match(b"-").unwrap());
+            assert!(!regex.is_match(b"?").unwrap());
+        }
+
+        let list = PathAllowList::new(vec![ConfigEntry::glob("[!-?]")]);
+        assert!(list.matches(Path::new("!")));
+        assert!(!list.matches(Path::new("-")));
+        assert!(!list.matches(Path::new("?")));
+    }
+
+    #[test]
+    fn valid_negated_leading_hyphen_glob_keeps_whole_list_enabled() {
+        let list = PathAllowList::new(vec![
+            ConfigEntry::prefix("otherwise-matching"),
+            ConfigEntry::glob("[!-!]"),
+        ]);
+        assert!(list.matches(Path::new("otherwise-matching")));
+        assert!(!list.matches(Path::new("-")));
+        assert!(!list.matches(Path::new("!")));
+    }
+
+    #[test]
+    fn positive_glob_class_does_not_enable_pcre2_posix_syntax() {
+        let cases: [(&str, &[u8], u8); 3] = [
+            ("[.!.]", b".!", b'a'),
+            ("[=!=]", b"=!", b'a'),
+            ("[:alpha:]", b":alph", b'z'),
+        ];
+        for (glob, matching, rejected) in cases {
+            let list = PathAllowList::new(vec![ConfigEntry::glob(glob)]);
+            for member in matching {
+                let subject = char::from(*member).to_string();
+                assert!(
+                    list.matches(Path::new(&subject)),
+                    "{glob:?} missed {subject:?}"
+                );
+            }
+            let subject = char::from(rejected).to_string();
+            assert!(
+                !list.matches(Path::new(&subject)),
+                "{glob:?} accepted PCRE2-only member {subject:?}"
+            );
+        }
     }
 
     #[test]
