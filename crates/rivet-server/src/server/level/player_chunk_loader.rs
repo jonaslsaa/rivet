@@ -58,8 +58,8 @@ use rivet_protocol::protocol::game::clientbound_set_simulation_distance::Clientb
 use rivet_protocol::registry_friendly_byte_buf::RegistryFriendlyByteBuf;
 use rivet_protocol::var_int;
 use rivet_protocol::varint21_length_field_prepender::encode_frame;
-use rivet_registry::RegistryAccess;
 use rivet_registry::core::ChunkPos;
+use rivet_registry::registries::BlockEntityType;
 
 use super::chunk_tracking_view::ChunkTrackingView;
 use super::server_level::ServerLevel;
@@ -384,11 +384,11 @@ fn encode_body<T>(
 }
 
 /// Encode a `ClientboundLevelChunkWithLightPacket` body over the
-/// registry-aware buffer (the block-entity list resolves through
-/// `BLOCK_ENTITY_TYPE`; the superflat chunk carries no block entities, so the
-/// empty `RegistryAccess` is never consulted).
+/// registry-aware buffer. The block-entity list and this codec context resolve
+/// through the same canonical built-in `BLOCK_ENTITY_TYPE` registry instance.
 fn encode_chunk_body(packet: &ClientboundLevelChunkWithLightPacket) -> Result<Vec<u8>, String> {
-    let mut out = RegistryFriendlyByteBuf::new(BytesMut::new(), RegistryAccess::empty());
+    let mut out =
+        RegistryFriendlyByteBuf::new(BytesMut::new(), BlockEntityType::built_in_registry_access());
     ClientboundLevelChunkWithLightPacket::stream_codec()
         .encode(&mut out, packet)
         .map_err(|e| format!("encoding level_chunk_with_light: {}", e.message))?;
@@ -424,8 +424,13 @@ pub fn encode_play_frame(packet: &PlayPacket, compression_threshold: i32) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivet_protocol::codec::StreamDecoder;
     use rivet_protocol::compression_decoder::CompressionDecoder;
+    use rivet_protocol::protocol::game::level_chunk_packet_data::{
+        BlockEntityInfo, LevelChunkPacketData,
+    };
     use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
+    use std::sync::Arc;
 
     /// The #194 capture fixture's first `level_chunk_with_light` body (coords
     /// -5/-4). All 117 bodies in the capture are byte-identical apart from the
@@ -460,6 +465,42 @@ mod tests {
             }
         }
         out
+    }
+
+    fn packet_with_block_entity(
+        entity_type: Arc<BlockEntityType>,
+    ) -> ClientboundLevelChunkWithLightPacket {
+        let world = overworld();
+        let chunk = world
+            .chunk_map()
+            .get_chunk(world.view().center())
+            .expect("spawn chunk loaded");
+        let chunk_data = LevelChunkPacketData::new(
+            chunk.client_heightmaps(),
+            chunk.sections_buffer(),
+            vec![BlockEntityInfo::new(0x57, -64, entity_type, None)],
+        );
+        ClientboundLevelChunkWithLightPacket::new(0, 0, chunk_data, chunk.light_data())
+    }
+
+    #[test]
+    fn production_chunk_encoder_handles_a_registered_block_entity_end_to_end() {
+        let furnace = BlockEntityType::from_name("minecraft:furnace").unwrap();
+        let packet = packet_with_block_entity(furnace.clone());
+
+        let bytes = encode_chunk_body(&packet).expect("production chunk body encodes");
+        let access = BlockEntityType::built_in_registry_access();
+        let mut input = RegistryFriendlyByteBuf::new(BytesMut::from(bytes.as_slice()), access);
+        let decoded = ClientboundLevelChunkWithLightPacket::stream_codec()
+            .decode(&mut input)
+            .expect("encoded production packet decodes");
+
+        assert_eq!(input.readable_bytes(), 0);
+        let infos = decoded.chunk_data().block_entities();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].packed_xz(), 0x57);
+        assert_eq!(infos[0].y(), -64);
+        assert!(Arc::ptr_eq(infos[0].entity_type(), &furnace));
     }
 
     #[test]

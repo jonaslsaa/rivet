@@ -293,12 +293,15 @@ repository source.
 Both `generate` and the standalone `registries` subcommand consume the pinned
 `data/reports/registries.json` (the vanilla `RegistryDumpReport`, issue #124
 phase F) and emit `crates/rivet-registry/src/generated/registries.rs`, committed
-and gated behind the crate's `"blocks"` cargo feature.
+and gated behind the crate's `"blocks"` cargo feature. The same validated
+surface also emits the dependency-free `generated/block_entity_types.rs`,
+which is available without that feature for loaded chunks and packet codecs.
 
 The report covers only `BuiltInRegistries.REGISTRY` — the 95 static registries,
 each element mapped to its `protocol_id` (the `MappedRegistry.byId` insertion
 index). The generator emits tables for the **minimal** subset whose element ids
-are on the M1 wire: `minecraft:item`, `minecraft:entity_type`,
+are on current wire or loaded-chunk paths: `minecraft:item`,
+`minecraft:entity_type`, `minecraft:block_entity_type`,
 `minecraft:data_component_type` (ItemStack / `ClientboundAddEntity` /
 `DataComponentPatch`), and `minecraft:fluid`, `minecraft:game_event`,
 `minecraft:potion`, `minecraft:point_of_interest_type` (static registries whose
@@ -313,7 +316,8 @@ Each surface is a dense `0..n` bijection — element id == holder id == network 
 - `{PREFIX}_BY_NAME` — a `phf::Map<&'static str, u16>` (name -> id), mirroring
   `BLOCK_BY_NAME`.
 - `{PREFIX}_BY_ID` — an id-indexed `&[&str]` (id == index), mirroring
-  `BLOCK_BY_ID`.
+  `BLOCK_BY_ID`. The block-entity surface additionally emits a dependency-free
+  id-indexed table and exact name lookup used by `BlockEntityType`.
 - `{PREFIX}_DEFAULT` — the `DefaultedRegistry` fold (`&str` name) for the four
   defaulted surfaces (item/entity_type/fluid/game_event); `Option<&str> = None`
   for the plain registries.

@@ -40,11 +40,11 @@
 //! (`ByteBufCodecs.GAME_PROFILE`/`GAME_PROFILE_PROPERTIES`) live in
 //! `rivet-protocol` per the same ownership rule.
 
-/// Compile-time block registry + block-state tables.
+/// Compile-time generated registry tables.
 ///
-/// Gated behind the `blocks` feature; empty when the feature is off.
-/// Submodule wiring lives in the generated `generated/mod.rs` (codegen-owned).
-#[cfg(feature = "blocks")]
+/// The block-entity identity table is unconditional because protocol codecs
+/// already need it. Larger block/state/static-builtin tables remain gated
+/// behind `blocks`. Wiring lives in generated `generated/mod.rs`.
 pub mod generated;
 
 /// Hand-written `BlockState` value type over the generated global-id + behavior
@@ -78,6 +78,9 @@ pub mod state_definition;
 // `net.minecraft.core.registries.Registries`, `net.minecraft.IdentifierException`)
 // ---------------------------------------------------------------------------
 
+/// The generated-identity surface of
+/// `net.minecraft.world.level.block.entity.BlockEntityType` (#341).
+pub mod block_entity_type;
 /// `net.minecraft.resources.Identifier` (MC 26.2 `ResourceLocation`).
 pub mod identifier;
 /// `net.minecraft.IdentifierException` — lives in `rivet-core` with the other

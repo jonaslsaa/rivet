@@ -3,12 +3,22 @@
 // data/biomes_tags.json + data/block_behaviors.json (MC 26.2).
 // Do not edit by hand — PORTING.md: registries/data are generated, not hand-ported.
 
+#[cfg(feature = "blocks")]
 pub mod biomes;
+#[cfg(feature = "blocks")]
 pub mod block_behaviors;
+pub mod block_entity_types;
+#[cfg(feature = "blocks")]
 pub mod block_properties;
+#[cfg(feature = "blocks")]
 pub mod block_states;
+#[cfg(feature = "blocks")]
 pub mod blocks;
+#[cfg(feature = "blocks")]
 pub mod registries;
+#[cfg(feature = "blocks")]
 pub mod registry_data;
+#[cfg(feature = "blocks")]
 pub mod synchronized;
+#[cfg(feature = "blocks")]
 pub mod tags;
