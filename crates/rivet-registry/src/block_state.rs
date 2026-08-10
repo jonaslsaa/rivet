@@ -29,6 +29,7 @@
 
 use std::fmt;
 
+use crate::block_state_property::{Property, PropertyValue};
 use crate::generated::block_behaviors::{
     BEHAVIOR_MASK_LIGHT_DAMPENING, BEHAVIOR_MASK_LIGHT_EMISSION, BEHAVIOR_MASK_MAP_COLOR,
     BEHAVIOR_SHIFT_LIGHT_DAMPENING, BEHAVIOR_SHIFT_LIGHT_EMISSION, BEHAVIOR_SHIFT_MAP_COLOR,
@@ -64,6 +65,10 @@ pub enum BlockStateError {
         /// The number of allowed values for `prop`.
         count: u16,
     },
+    /// A typed value is not one of the property's allowed values (Paper's
+    /// `setValue(property, value)` `IllegalArgumentException` for a typed value
+    /// outside the property's value set).
+    ValueNotAllowed(Property, PropertyValue),
 }
 
 impl fmt::Display for BlockStateError {
@@ -79,6 +84,11 @@ impl fmt::Display for BlockStateError {
             BlockStateError::ValueOutOfRange { prop, value, count } => write!(
                 f,
                 "cannot set property {} to value index {value}: the property has only {count} allowed values",
+                prop.name()
+            ),
+            BlockStateError::ValueNotAllowed(prop, value) => write!(
+                f,
+                "cannot set property {} to value {value:?}: it is not one of the property's allowed values",
                 prop.name()
             ),
         }
@@ -187,6 +197,54 @@ impl BlockState {
             .ok_or(BlockStateError::PropertyNotPresent(prop))?;
         let count = BLOCK_PROPERTY_VALUES[prop as usize].len() as u16;
         self.set_property(prop, (current + 1) % count)
+    }
+
+    // --- typed value helpers (block.state.properties, issue #228) -----------
+    //
+    // Worldgen/lighting sets properties through the *typed* value classes of
+    // `block.state.properties` (`state.setValue(SlabBlock.TYPE, SlabType.DOUBLE)`
+    // or `state.setValue(BlockStateProperties.FACING, Direction.NORTH)`). These
+    // helpers take the typed value and route it through the mixed-radix index
+    // surface, so callers never deal in raw value indices.
+
+    /// `state.hasProperty(property)` — whether the property is part of this
+    /// state's block definition.
+    #[inline]
+    pub fn has_property(self, prop: Property) -> bool {
+        shape_of(self.block()).contains(&(prop.id() as u16))
+    }
+
+    /// `state.getValue(property)` — the typed value, `None` when the property
+    /// is not on the owning block (the `getOptionalValue` view; Java's
+    /// `getValue` throws for that case).
+    pub fn get_value(self, prop: Property) -> Option<PropertyValue> {
+        let idx = self.get_property(prop.id())? as usize;
+        let name = *prop.values().get(idx)?;
+        prop.get_value(name)
+    }
+
+    /// `state.setValue(property, value)` — set a typed value, erroring when
+    /// the property is not on the block or the value is not one of its allowed
+    /// values (Paper's `IllegalArgumentException`).
+    pub fn set_value(self, prop: Property, value: PropertyValue) -> Result<Self, BlockStateError> {
+        let idx = prop
+            .value_index(value)
+            .ok_or(BlockStateError::ValueNotAllowed(prop, value))?;
+        self.set_property(prop.id(), idx)
+    }
+
+    /// `state.trySetValue(property, value)` — set a typed value, returning
+    /// `self` unchanged when the property is not on the owning block. The value
+    /// is still validated for a property that IS present (Paper `trySetValue`).
+    pub fn try_set_value(
+        self,
+        prop: Property,
+        value: PropertyValue,
+    ) -> Result<Self, BlockStateError> {
+        if !self.has_property(prop) {
+            return Ok(self);
+        }
+        self.set_value(prop, value)
     }
 
     // --- behavior queries (probe-driven, no world types) --------------------

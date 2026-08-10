@@ -237,3 +237,257 @@ fn shape_table_is_sorted_by_block_id() {
         assert!(pair[0].0 < pair[1].0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Typed `block.state.properties` surface (issue #228)
+// ---------------------------------------------------------------------------
+
+use crate::block_state::BlockState;
+use crate::block_state_properties::BlockStateProperties;
+use crate::block_state_property::PropertyValue;
+
+/// The default state of a block by name.
+fn default_state_of(name: &str) -> BlockState {
+    BlockState::of(BlockId::from_name(name).expect("block in generated table"))
+}
+
+/// Paper-grounded typed-property assertions over real 26.2 blocks.
+#[test]
+fn typed_set_get_round_trips_on_real_blocks() {
+    // oak_leaves: the TreeFeature/FoliagePlacer surface (DISTANCE, PERSISTENT,
+    // WATERLOGGED).
+    let leaves = default_state_of("minecraft:oak_leaves");
+    assert!(leaves.has_property(BlockStateProperties::DISTANCE));
+    assert!(leaves.has_property(BlockStateProperties::PERSISTENT));
+    assert!(leaves.has_property(BlockStateProperties::WATERLOGGED));
+    assert_eq!(
+        leaves.get_value(BlockStateProperties::DISTANCE),
+        Some(PropertyValue::Int(7))
+    );
+    assert_eq!(
+        leaves.get_value(BlockStateProperties::PERSISTENT),
+        Some(PropertyValue::Bool(false))
+    );
+    let near = leaves
+        .set_value(BlockStateProperties::DISTANCE, PropertyValue::Int(1))
+        .unwrap()
+        .set_value(BlockStateProperties::PERSISTENT, PropertyValue::Bool(true))
+        .unwrap();
+    assert_eq!(
+        near.get_value(BlockStateProperties::DISTANCE),
+        Some(PropertyValue::Int(1))
+    );
+    assert_eq!(
+        near.get_value(BlockStateProperties::PERSISTENT),
+        Some(PropertyValue::Bool(true))
+    );
+    assert_eq!(near.block().id(), leaves.block().id());
+
+    // oak_door: DoubleBlockHalf.HALF — set the top half (StrongholdPieces
+    // builds doors with DoubleBlockHalf.UPPER).
+    let door = default_state_of("minecraft:oak_door");
+    assert!(door.has_property(BlockStateProperties::DOUBLE_BLOCK_HALF));
+    assert_eq!(
+        door.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF),
+        Some(PropertyValue::Enum("lower"))
+    );
+    let top = door
+        .set_value(
+            BlockStateProperties::DOUBLE_BLOCK_HALF,
+            PropertyValue::Enum("upper"),
+        )
+        .unwrap();
+    assert_eq!(
+        top.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF),
+        Some(PropertyValue::Enum("upper"))
+    );
+
+    // oak_stairs: Half.HALF + StairsShape.SHAPE (SwampHutPiece sets
+    // StairsShape.OUTER_LEFT/RIGHT).
+    let stairs = default_state_of("minecraft:oak_stairs");
+    assert!(stairs.has_property(BlockStateProperties::HALF));
+    assert!(stairs.has_property(BlockStateProperties::STAIRS_SHAPE));
+    assert_eq!(
+        stairs.get_value(BlockStateProperties::HALF),
+        Some(PropertyValue::Enum("bottom"))
+    );
+    let outer = stairs
+        .set_value(
+            BlockStateProperties::STAIRS_SHAPE,
+            PropertyValue::Enum("outer_left"),
+        )
+        .unwrap();
+    assert_eq!(
+        outer.get_value(BlockStateProperties::STAIRS_SHAPE),
+        Some(PropertyValue::Enum("outer_left"))
+    );
+
+    // oak_slab: SlabType.TYPE (StrongholdPieces builds SlabType.DOUBLE).
+    let slab = default_state_of("minecraft:oak_slab");
+    assert!(slab.has_property(BlockStateProperties::SLAB_TYPE));
+    assert_eq!(
+        slab.get_value(BlockStateProperties::SLAB_TYPE),
+        Some(PropertyValue::Enum("bottom"))
+    );
+    let dbl = slab
+        .set_value(
+            BlockStateProperties::SLAB_TYPE,
+            PropertyValue::Enum("double"),
+        )
+        .unwrap();
+    assert_eq!(
+        dbl.get_value(BlockStateProperties::SLAB_TYPE),
+        Some(PropertyValue::Enum("double"))
+    );
+
+    // rail: RailShape.SHAPE (MineshaftPieces sets NORTH_SOUTH/EAST_WEST).
+    let rail = default_state_of("minecraft:rail");
+    assert!(rail.has_property(BlockStateProperties::RAIL_SHAPE));
+    assert_eq!(
+        rail.get_value(BlockStateProperties::RAIL_SHAPE),
+        Some(PropertyValue::Enum("north_south"))
+    );
+    let ew = rail
+        .set_value(
+            BlockStateProperties::RAIL_SHAPE,
+            PropertyValue::Enum("east_west"),
+        )
+        .unwrap();
+    assert_eq!(
+        ew.get_value(BlockStateProperties::RAIL_SHAPE),
+        Some(PropertyValue::Enum("east_west"))
+    );
+
+    // redstone_wire: RedstoneSide per-direction + POWER (JungleTemplePiece
+    // sets RedstoneSide.SIDE/UP).
+    let wire = default_state_of("minecraft:redstone_wire");
+    assert!(wire.has_property(BlockStateProperties::NORTH_REDSTONE));
+    assert!(wire.has_property(BlockStateProperties::EAST_REDSTONE));
+    assert!(wire.has_property(BlockStateProperties::POWER));
+    let connected = wire
+        .set_value(
+            BlockStateProperties::NORTH_REDSTONE,
+            PropertyValue::Enum("side"),
+        )
+        .unwrap()
+        .set_value(BlockStateProperties::POWER, PropertyValue::Int(3))
+        .unwrap();
+    assert_eq!(
+        connected.get_value(BlockStateProperties::NORTH_REDSTONE),
+        Some(PropertyValue::Enum("side"))
+    );
+    assert_eq!(
+        connected.get_value(BlockStateProperties::POWER),
+        Some(PropertyValue::Int(3))
+    );
+
+    // pointed_dripstone: SpeleothemThickness.THICKNESS (SpeleothemUtils).
+    let drip = default_state_of("minecraft:pointed_dripstone");
+    assert!(drip.has_property(BlockStateProperties::SPELEOTHEM_THICKNESS));
+    assert_eq!(
+        drip.get_value(BlockStateProperties::SPELEOTHEM_THICKNESS),
+        Some(PropertyValue::Enum("tip"))
+    );
+    let base = drip
+        .set_value(
+            BlockStateProperties::SPELEOTHEM_THICKNESS,
+            PropertyValue::Enum("base"),
+        )
+        .unwrap();
+    assert_eq!(
+        base.get_value(BlockStateProperties::SPELEOTHEM_THICKNESS),
+        Some(PropertyValue::Enum("base"))
+    );
+
+    // bamboo: BambooLeaves.LEAVES + STAGE (BambooFeature sets
+    // BambooLeaves.LARGE and stage 1).
+    let bamboo = default_state_of("minecraft:bamboo");
+    assert!(bamboo.has_property(BlockStateProperties::BAMBOO_LEAVES));
+    assert!(bamboo.has_property(BlockStateProperties::STAGE));
+    assert_eq!(
+        bamboo.get_value(BlockStateProperties::BAMBOO_LEAVES),
+        Some(PropertyValue::Enum("none"))
+    );
+    let grown = bamboo
+        .set_value(
+            BlockStateProperties::BAMBOO_LEAVES,
+            PropertyValue::Enum("large"),
+        )
+        .unwrap()
+        .set_value(BlockStateProperties::STAGE, PropertyValue::Int(1))
+        .unwrap();
+    assert_eq!(
+        grown.get_value(BlockStateProperties::BAMBOO_LEAVES),
+        Some(PropertyValue::Enum("large"))
+    );
+    assert_eq!(
+        grown.get_value(BlockStateProperties::STAGE),
+        Some(PropertyValue::Int(1))
+    );
+
+    // creaking_heart: CreakingHeartState (the default is UPROOTED per
+    // CreakingHeartBlock's default state; CreakingHeartDecorator sets DORMANT).
+    let heart = default_state_of("minecraft:creaking_heart");
+    assert!(heart.has_property(BlockStateProperties::CREAKING_HEART_STATE));
+    assert_eq!(
+        heart.get_value(BlockStateProperties::CREAKING_HEART_STATE),
+        Some(PropertyValue::Enum("uprooted"))
+    );
+    let awake = heart
+        .set_value(
+            BlockStateProperties::CREAKING_HEART_STATE,
+            PropertyValue::Enum("awake"),
+        )
+        .unwrap();
+    assert_eq!(
+        awake.get_value(BlockStateProperties::CREAKING_HEART_STATE),
+        Some(PropertyValue::Enum("awake"))
+    );
+}
+
+/// `hasProperty` false and `trySetValue` no-op for a property the block does
+/// not carry; `setValue` errors (Paper `IllegalArgumentException`).
+#[test]
+fn typed_helpers_absent_property_behavior() {
+    let stone = default_state_of("minecraft:stone");
+    assert!(!stone.has_property(BlockStateProperties::WATERLOGGED));
+    assert_eq!(stone.get_value(BlockStateProperties::WATERLOGGED), None);
+    // trySetValue returns the state unchanged.
+    let same = stone
+        .try_set_value(BlockStateProperties::WATERLOGGED, PropertyValue::Bool(true))
+        .unwrap();
+    assert_eq!(same.id(), stone.id());
+    // setValue errors for the absent property.
+    assert!(
+        stone
+            .set_value(BlockStateProperties::WATERLOGGED, PropertyValue::Bool(true))
+            .is_err()
+    );
+
+    // An invalid typed value for a *present* property errors (Java
+    // IllegalArgumentException): DISTANCE is 1..=7, so 8 is out of range.
+    let leaves = default_state_of("minecraft:oak_leaves");
+    assert!(
+        leaves
+            .set_value(BlockStateProperties::DISTANCE, PropertyValue::Int(8))
+            .is_err()
+    );
+    // An out-of-set enum name for a present enum property errors.
+    assert!(
+        leaves
+            .set_value(
+                BlockStateProperties::PERSISTENT,
+                PropertyValue::Enum("maybe")
+            )
+            .is_err()
+    );
+    // The bool value on an enum property errors (kind mismatch).
+    assert!(
+        leaves
+            .set_value(
+                BlockStateProperties::STAIRS_SHAPE,
+                PropertyValue::Bool(true)
+            )
+            .is_err()
+    );
+}
