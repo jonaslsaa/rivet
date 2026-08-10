@@ -33,7 +33,7 @@
 //!   `get_block_state` is always the final fast path, which Paper's `if (true)`
 //!   also routes through).
 //!
-//! RivetTodo(#185): `getPersistedStatus()` returns the slice-local `FULL`; the
+//! RivetTodo(#185): `getPersistedStatus()` returns `ChunkStatus.FULL`; the
 //! `FullChunkStatus`/`fullStatus` supplier and the chunkmap pipeline surface are
 //! not ported.
 
