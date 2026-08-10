@@ -22,7 +22,7 @@ use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::palette::GlobalIdMap;
 use crate::chunk::paletted_container::{PackedData, PalettedContainer};
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
-use crate::chunk::storage::serializable_chunk_data::{SectionLightData, parse_section_light};
+use crate::chunk::storage::serializable_chunk_data::{SectionLightData, decode_section_light};
 use crate::chunk::strategy::Strategy;
 
 /// Dense id into the current vanilla biome registry.
@@ -534,7 +534,8 @@ pub fn reconstruct_sections_with_presets_and_diagnostics(
             sections[y.wrapping_sub(min_section_y) as usize] = Some(section);
         }
 
-        light_data.push(parse_section_light(section_tag));
+        light_data
+            .push(decode_section_light(section_tag).unwrap_or_else(|error| panic!("{error}")));
     }
 
     Ok(SectionReconstruction {
