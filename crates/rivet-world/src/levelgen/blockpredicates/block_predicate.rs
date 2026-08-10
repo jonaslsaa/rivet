@@ -388,13 +388,17 @@ mod tests {
         assert!(at_min.test(&level, &BlockPos::new(0, 0, 0)));
         let below_min = wrap(inside_world(Vec3i::new(0, -65, 0)));
         assert!(!below_min.test(&level, &BlockPos::new(0, 0, 0)));
-        // Wrapping offset arithmetic: origin + i32::MAX offset wraps.
-        let wrapping = wrap(inside_world(Vec3i::new(0, i32::MAX, 0)));
-        // 0 + i32::MAX wraps to i32::MAX (no overflow here), far outside.
-        assert!(!wrapping.test(&level, &BlockPos::new(0, 0, 0)));
-        // Origin y=319 + offset 1 wraps to -2147483648 (Java `+`), outside.
-        let wrap_pos = wrap(inside_world(Vec3i::new(0, 1, 0)));
-        assert!(!wrap_pos.test(&level, &BlockPos::new(0, 319, 0)));
+        // Wrapping offset arithmetic (Java `+` on i32, no overflow checks).
+        // origin y = i32::MAX + offset 1 must wrap to i32::MIN (an i32 has no
+        // value above MAX), which is far below min_y — outside build height.
+        let wrap_overflow = wrap(inside_world(Vec3i::new(0, 1, 0)));
+        assert!(!wrap_overflow.test(&level, &BlockPos::new(0, i32::MAX, 0)));
+        // origin y = 1 + offset i32::MAX wraps to i32::MIN — outside.
+        let wrap_overflow2 = wrap(inside_world(Vec3i::new(0, i32::MAX, 0)));
+        assert!(!wrap_overflow2.test(&level, &BlockPos::new(0, 1, 0)));
+        // origin y = -1 + offset i32::MIN wraps to i32::MAX — above max_y.
+        let wrap_underflow = wrap(inside_world(Vec3i::new(0, i32::MIN, 0)));
+        assert!(!wrap_underflow.test(&level, &BlockPos::new(0, -1, 0)));
     }
 
     #[test]
@@ -550,6 +554,27 @@ mod tests {
         // Java: `fieldOf("type")` missing → "No key type in ...".
         let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
         assert!(msg.starts_with("No key type"), "got: {msg}");
+    }
+
+    #[test]
+    fn dispatch_missing_required_body_field_errors() {
+        // Java `fieldOf("predicates")`/`fieldOf("predicate")` are required
+        // (not optional) — a dispatch with the type key but no body field must
+        // fail with "No key <field> in ...", never default to an empty value.
+        let codec = block_predicate_codec::<JsonOps>();
+        for (input, field) in [
+            (json!({"type": "minecraft:all_of"}), "predicates"),
+            (json!({"type": "minecraft:any_of"}), "predicates"),
+            (json!({"type": "minecraft:not"}), "predicate"),
+        ] {
+            let result = codec.parse(&JsonOps::INSTANCE, &input);
+            assert!(result.is_error(), "field {field} missing must error");
+            let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
+            assert!(
+                msg.starts_with(&format!("No key {field}")),
+                "field {field}: got: {msg}"
+            );
+        }
     }
 
     #[test]

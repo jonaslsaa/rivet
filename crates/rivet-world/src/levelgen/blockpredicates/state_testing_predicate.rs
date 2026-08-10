@@ -86,9 +86,13 @@ pub fn vec3i_offset_codec<Ops: DynamicOps + 'static>(
     codec::validate(
         base,
         Arc::new(move |value: &Vec3i| {
-            if value.get_x().abs() < max_offset_per_axis
-                && value.get_y().abs() < max_offset_per_axis
-                && value.get_z().abs() < max_offset_per_axis
+            // `wrapping_abs` mirrors Java `Math.abs`: `Math.abs(Integer.MIN_VALUE)`
+            // wraps to `Integer.MIN_VALUE` (no exception), which is `< max`, so
+            // the offset is accepted. Rust `.abs()` would panic on `i32::MIN` in
+            // debug builds instead of reproducing that.
+            if value.get_x().wrapping_abs() < max_offset_per_axis
+                && value.get_y().wrapping_abs() < max_offset_per_axis
+                && value.get_z().wrapping_abs() < max_offset_per_axis
             {
                 rivet_serialization::DataResult::success(*value)
             } else {
@@ -218,6 +222,22 @@ mod tests {
         assert!(
             msg.starts_with("Position out of range, expected at most 16: "),
             "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn offset_codec_accepts_min_int_like_java_math_abs_wrap() {
+        // Java `Math.abs(Integer.MIN_VALUE)` wraps to `Integer.MIN_VALUE`
+        // (two's complement, no exception), which is `< 16` — so
+        // `Vec3i.offsetCodec(16)` ACCEPTS `[-2147483648, 0, 0]`. The port uses
+        // `wrapping_abs` to reproduce that exactly; `i32::abs` would panic in
+        // debug builds on this hostile input.
+        let codec = vec3i_offset_codec::<JsonOps>(16);
+        let ok = codec.parse(&JsonOps::INSTANCE, &json!([-2147483648, 0, 0]));
+        assert!(
+            ok.is_success(),
+            "got: {:?}",
+            ok.error_ref().map(|e| e.message().to_string())
         );
     }
 }
