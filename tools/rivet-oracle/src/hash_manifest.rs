@@ -349,6 +349,14 @@ pub fn build_from_payloads_with(
                         .get_string("Status")
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string());
+                    if status == "full" {
+                        return Err(format!(
+                            "chunk {dim}/{cx}.{cz} has bare root Status `full`: Paper's \
+                             `ChunkStatus.CODEC` always serializes the FULL status as \
+                             `minecraft:full`, so a bare `full` is an off-spec tree and must \
+                             be refused loudly, never silently recorded as non-FULL"
+                        ));
+                    }
                     if is_full_status(&status) {
                         full_count += 1;
                         validate_full_payload(&compound, &dim, cx, cz)?;
@@ -969,11 +977,16 @@ mod tests {
     /// A bare `full` root Status is never FULL: Paper serializes the FULL status
     /// as `minecraft:full` (`register("full", ...)` + `Identifier.toString` =
     /// `namespace:path`), so `is_full_status` accepts only the namespaced form.
-    /// A payload stamped bare `full` must be recorded as non-FULL — and a tree
-    /// whose ONLY FULL chunks carry bare `full` must end up with zero FULL entries,
-    /// never silently treated as a FULL sweep.
+    ///
+    /// Two guards, both load-bearing:
+    /// 1. `is_full` classifies a bare `full` as non-FULL, so it is never compared
+    ///    against Paper.
+    /// 2. `build_from_payloads` **refuses** a tree whose payload carries bare
+    ///    `full` — the off-spec serialization is a loud hard error, never a
+    ///    silently 0-FULL manifest (which would surface later only as an obscure
+    ///    UNVERIFIED/one-sided FAIL instead of naming the malformed tree).
     #[test]
-    fn bare_full_status_is_never_full() {
+    fn bare_full_status_is_refused_at_build() {
         let e = full_entry("the_nether", 0, 0);
         assert!(e.is_full(), "namespaced minecraft:full is FULL");
         let mut bare = e;
@@ -982,10 +995,32 @@ mod tests {
             !bare.is_full(),
             "bare `full` is not Paper's serialized FULL status"
         );
-        // A manifest of only bare-`full` chunks reports zero FULL entries.
-        let m = sample_manifest(vec![bare.clone()]);
-        assert_eq!(m.full_count, 0);
-        assert_eq!(m.full_entry("the_nether", 0, 0), None);
+
+        // A tree whose only payload carries bare `full` must be refused loudly.
+        use crate::mutate::{encode_payload, fixture_full_payload, parse_payload};
+        let mut compound = parse_payload(&fixture_full_payload(0, 0)).unwrap();
+        compound.put_string("Status", "full");
+        let bytes = encode_payload(&compound).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "rivet-oracle-hash-bare-full-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        let chunk = dir.join("chunk/the_nether/0.0/0.0.nbt");
+        std::fs::create_dir_all(chunk.parent().unwrap()).unwrap();
+        std::fs::write(&chunk, &bytes).unwrap();
+
+        let err = build_from_payloads(&dir, "42", "minecraft\\:normal")
+            .expect_err("bare `full` in a payload tree must be refused");
+        assert!(
+            err.contains("bare root Status `full`"),
+            "error names the bare `full`: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A duplicate FULL coordinate in a built manifest must be a hard error, not

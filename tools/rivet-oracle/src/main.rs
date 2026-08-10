@@ -2716,7 +2716,7 @@ fn compute_hash_diffs(
         }
         let Some(re) = rivet.full_entry(&pe.dim, pe.cx, pe.cz) else {
             paper_only.push(format!("{}/{}.{}.{}", pe.dim, pe.region, pe.cx, pe.cz));
-            continue; // Paper-only FULL chunk — reported in the one-sided pass below.
+            continue; // Paper-only FULL chunk — pushed here; the one-sided pass below only computes Rivet-only.
         };
         compared += 1;
         if pe.xxh3_64 != re.xxh3_64 {
