@@ -1126,6 +1126,7 @@ mod tests {
     use crate::level::height_accessor;
     use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, WORLDGEN_HEIGHTMAPS};
     use crate::lighting::swmr_nibble_array::ARRAY_SIZE;
+    use crate::ticks::TickPriority;
     use rivet_nbt::int_tag::IntTag;
     use rivet_nbt::list_tag::ListTag;
     use rivet_nbt::long_tag::LongTag;
@@ -2337,6 +2338,52 @@ mod tests {
                 assert_eq!(parsed.stored_fluid_ticks(), &[]);
             }
         }
+    }
+
+    /// A tracked 26.2 nether chunk with 13 stored lava `fluid_ticks` decodes
+    /// through the real `SerializableChunkData::parse` path into exact typed
+    /// values (positions, delay, priority) — the full stored-value surface, not
+    /// the synthetic JsonOps round-trip the codec unit tests cover. This is the
+    /// value/carry layer only: the parse carries the typed ticks as stored
+    /// values and nothing schedules or executes them (#370 remains open for the
+    /// deferred `LevelChunkTicks`/`ProtoChunkTicks` containers).
+    #[test]
+    fn real_26_2_nether_fixture_decodes_stored_fluid_ticks_exactly() {
+        let fixture = named_fixture("the_nether", "0.0", "0.0.nbt");
+        assert_eq!(fixture.get_int_or("DataVersion", -1), 4903);
+        assert_eq!(
+            fixture.get_string("Status").map(String::as_str),
+            Some("minecraft:full")
+        );
+
+        let parsed = SerializableChunkData::parse(height_accessor::create(-64, 384), &fixture)
+            .unwrap()
+            .expect("nether fixture has a Status");
+        assert_eq!(parsed.stored_pos(), ChunkPos::new(0, 0));
+        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        // The nether chunk stores fluid ticks only; its `block_ticks` list is
+        // empty.
+        assert!(parsed.stored_block_ticks().is_empty());
+        assert_eq!(parsed.stored_fluid_ticks().len(), 13);
+
+        let lava = FluidId::LAVA;
+        let normal = TickPriority::Normal;
+        let expected = vec![
+            SavedTick::new(lava, BlockPos::new(15, 101, 5), 0, normal),
+            SavedTick::new(lava, BlockPos::new(10, 39, 12), 0, normal),
+            SavedTick::new(lava, BlockPos::new(14, 90, 11), 0, normal),
+            SavedTick::new(lava, BlockPos::new(0, 10, 5), 0, normal),
+            SavedTick::new(lava, BlockPos::new(8, 64, 14), 0, normal),
+            SavedTick::new(lava, BlockPos::new(3, 16, 5), 0, normal),
+            SavedTick::new(lava, BlockPos::new(3, 88, 2), 0, normal),
+            SavedTick::new(lava, BlockPos::new(14, 87, 1), 0, normal),
+            SavedTick::new(lava, BlockPos::new(2, 100, 10), 0, normal),
+            SavedTick::new(lava, BlockPos::new(11, 90, 5), 0, normal),
+            SavedTick::new(lava, BlockPos::new(14, 89, 9), 0, normal),
+            SavedTick::new(lava, BlockPos::new(1, 104, 8), 0, normal),
+            SavedTick::new(lava, BlockPos::new(5, 51, 6), 0, normal),
+        ];
+        assert_eq!(parsed.stored_fluid_ticks(), expected.as_slice());
     }
 
     #[test]
