@@ -271,6 +271,17 @@ pub enum ChunkParseDiagnostic {
         stored: ChunkPos,
         requested: ChunkPos,
     },
+    /// A top-level stored-tick list (`block_ticks`/`fluid_ticks`) failed to
+    /// fully decode — one or more elements errored (unknown/malformed ids,
+    /// missing fields) and the `ListCodec` dropped them, retaining only the
+    /// surviving siblings. Paper logs the same failure per element via
+    /// `LOGGER.error("Failed to read field ({}={}): {}")`; the codec partial
+    /// path drops the per-element messages, so this diagnostic is the port's
+    /// explicit trace. The chunk still parses and may be FULL-capable.
+    StoredTicksDecodeFailed {
+        field: &'static str,
+        error: String,
+    },
 }
 
 /// Typed failures at the extraction/construction boundary.
@@ -397,7 +408,7 @@ impl SerializableChunkData {
         );
         let last_update_time = chunk_data.get_long_or("LastUpdate", 0);
         let inhabited_time = chunk_data.get_long_or("InhabitedTime", 0);
-        let (status, diagnostics) = match ChunkStatus::from_identifier(status_name) {
+        let (status, mut diagnostics) = match ChunkStatus::from_identifier(status_name) {
             Some(status) => (status, Vec::new()),
             None => (
                 ChunkStatus::Empty,
@@ -429,8 +440,9 @@ impl SerializableChunkData {
         let heightmaps = parse_heightmaps(chunk_data, status.heightmaps_after());
         let raw_block_ticks = chunk_data.get_list_or_empty(BLOCK_TICKS_TAG);
         let raw_fluid_ticks = chunk_data.get_list_or_empty(FLUID_TICKS_TAG);
-        let (stored_block_ticks, stored_fluid_ticks) =
+        let (stored_block_ticks, stored_fluid_ticks, tick_diagnostics) =
             decode_stored_ticks(chunk_data, stored_pos, status);
+        diagnostics.extend(tick_diagnostics);
         let post_processing_sections = parse_post_processing(chunk_data);
         let entities = compound_entries(chunk_data.get_list("entities"));
         let block_entities = compound_entries(chunk_data.get_list("block_entities"));
@@ -526,15 +538,18 @@ impl SerializableChunkData {
     }
     /// The typed, per-chunk-filtered stored block ticks (`ChunkAccess.PackedTicks
     /// .blocks()`), faithfully decoded through `SavedTick.codec(...).listOf()`.
-    /// Carried as stored values only — `construct_full` does not install them,
-    /// and a FULL chunk with a non-empty stored list is rejected by
-    /// [`Self::validate_full_capabilities`] with `UnsupportedTicks` until the
-    /// tick-execution slice lands an installer.
+    /// Only populated for a FULL chunk — every other status skips the typed
+    /// decode and carries an empty list (proto paths never claim tick support;
+    /// see [`Self::validate_full_capabilities`]). Carried as stored values only —
+    /// `construct_full` does not install them, and a FULL chunk with a non-empty
+    /// stored list is rejected by [`Self::validate_full_capabilities`] with
+    /// `UnsupportedTicks` until the tick-execution slice lands an installer.
     pub fn stored_block_ticks(&self) -> &[SavedTick<Block>] {
         &self.stored_block_ticks
     }
     /// The typed, per-chunk-filtered stored fluid ticks (`ChunkAccess.PackedTicks
-    /// .fluids()`). Carried as stored values only; same boundary as
+    /// .fluids()`). Only populated for a FULL chunk (proto paths skip the typed
+    /// decode); carried as stored values only. Same boundary as
     /// [`Self::stored_block_ticks`].
     pub fn stored_fluid_ticks(&self) -> &[SavedTick<FluidId>] {
         &self.stored_fluid_ticks
@@ -807,33 +822,77 @@ static FLUID_TICK_LIST_CODEC: LazyLock<Arc<dyn Codec<Vec<SavedTick<FluidId>>, Nb
 /// whole list through `SavedTick.codec(byNameCodec).listOf()` (a `ListCodec`
 /// that retains successful siblings and a partial on element errors), then
 /// the filter keeps only ticks packing to the stored chunk. The port uses the
-/// same faithful codec factory over `NbtOps` through `CompoundTag::read`, so
-/// unknown/malformed element errors keep flowing through the codec-result
-/// partial path (Paper's `LOGGER.error("Failed to read field ...")`), then
-/// `filter_tick_list_for_chunk`.
+/// same faithful codec factory over `NbtOps` directly on the borrowed list
+/// tag, so unknown/malformed element errors keep flowing through the
+/// codec-result partial path (Paper's `LOGGER.error("Failed to read field
+/// ...")`), then `filter_tick_list_for_chunk`.
 ///
 /// The typed decode is only meaningful for a FULL chunk: every other status is
 /// rejected at the `UnsupportedChunkStatus` capability boundary before ticks
 /// are consulted, so decoding them would be wasted work and would not claim
 /// tick support on proto paths.
+///
+/// The borrowed `raw_*` lists are decoded in place (no extra clone — the
+/// retained raw `ListTag` values are the caller's clones); a decode that drops
+/// elements (an error partial) surfaces a [`ChunkParseDiagnostic`] so a stored
+/// tick list that fails to decode any element is not silently empty.
 fn decode_stored_ticks(
     chunk_data: &CompoundTag,
     stored_pos: ChunkPos,
     status: ChunkStatus,
-) -> (Vec<SavedTick<Block>>, Vec<SavedTick<FluidId>>) {
+) -> (
+    Vec<SavedTick<Block>>,
+    Vec<SavedTick<FluidId>>,
+    Vec<ChunkParseDiagnostic>,
+) {
+    let mut diagnostics = Vec::new();
     if status != ChunkStatus::Full {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), diagnostics);
     }
-    let blocks = chunk_data
-        .read(BLOCK_TICKS_TAG, &BLOCK_TICK_LIST_CODEC)
-        .unwrap_or_default();
-    let fluids = chunk_data
-        .read(FLUID_TICKS_TAG, &FLUID_TICK_LIST_CODEC)
-        .unwrap_or_default();
+    let blocks = decode_tick_list(
+        chunk_data,
+        BLOCK_TICKS_TAG,
+        &BLOCK_TICK_LIST_CODEC,
+        &mut diagnostics,
+    );
+    let fluids = decode_tick_list(
+        chunk_data,
+        FLUID_TICKS_TAG,
+        &FLUID_TICK_LIST_CODEC,
+        &mut diagnostics,
+    );
     (
         filter_tick_list_for_chunk(&blocks, &stored_pos),
         filter_tick_list_for_chunk(&fluids, &stored_pos),
+        diagnostics,
     )
+}
+
+/// Decode one stored-tick list from its borrowed compound tag, appending a
+/// [`ChunkParseDiagnostic`] when the `ListCodec` drops any element (a failed
+/// sibling). A `ListCodec` returns a partial (surviving) value on element
+/// errors, so the survivors are carried while the failure is surfaced.
+fn decode_tick_list<T>(
+    chunk_data: &CompoundTag,
+    field: &'static str,
+    codec: &Arc<dyn Codec<Vec<SavedTick<T>>, NbtOps>>,
+    diagnostics: &mut Vec<ChunkParseDiagnostic>,
+) -> Vec<SavedTick<T>>
+where
+    T: 'static + Clone + Send + Sync,
+{
+    let Some(tag) = chunk_data.get(field) else {
+        return Vec::new();
+    };
+    let ops = NbtOps::instance();
+    let result = codec.parse(&ops, tag);
+    if let Some(error) = result.error_ref() {
+        diagnostics.push(ChunkParseDiagnostic::StoredTicksDecodeFailed {
+            field,
+            error: error.message().to_string(),
+        });
+    }
+    result.result_or_partial_silent().unwrap_or_default()
 }
 
 /// `UpgradeData` uses the block registry codec with `.orElse(Blocks.AIR)`.
@@ -2551,10 +2610,20 @@ mod tests {
                 field: "block_ticks"
             })
         );
+        // The two failing elements (empty compound + malformed id) are
+        // surfaced as a decode diagnostic even though a sibling survived.
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert!(matches!(
+            parsed.diagnostics()[0],
+            ChunkParseDiagnostic::StoredTicksDecodeFailed {
+                field: "block_ticks",
+                ref error,
+            } if !error.is_empty()
+        ));
 
         // An all-malformed list decodes to an empty partial (Paper drops the
         // elements after logging), so the chunk carries no stored ticks and is
-        // full-capable.
+        // full-capable — but the failure is not silent: a diagnostic records it.
         let mut chunk = top_level("minecraft:full");
         chunk.put(
             "block_ticks".into(),
@@ -2568,6 +2637,14 @@ mod tests {
             .unwrap();
         assert!(parsed.stored_block_ticks().is_empty());
         assert_eq!(parsed.validate_full_capabilities(), Ok(()));
+        assert_eq!(parsed.diagnostics().len(), 1);
+        assert!(matches!(
+            parsed.diagnostics()[0],
+            ChunkParseDiagnostic::StoredTicksDecodeFailed {
+                field: "block_ticks",
+                ref error,
+            } if !error.is_empty()
+        ));
     }
 
     /// Proto paths never claim tick support: the typed decode is skipped for
