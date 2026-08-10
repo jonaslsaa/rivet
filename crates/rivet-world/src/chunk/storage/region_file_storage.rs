@@ -55,11 +55,8 @@ impl RegionFileStorage {
         }
     }
 
-    /// Existing-only storage for the loaded-world extractor and world boot: no
-    /// create/write descriptor, repair, backup, padding, or sync-on-close
-    /// behavior. A corrupt allocated chunk is a hard `InvalidData` error, never
-    /// an absent chunk, so a disposable copy can never be mistaken for a
-    /// different world.
+    /// Existing-only storage for world boot: no create/write descriptor,
+    /// repair, backup, padding, or sync-on-close behavior.
     pub fn new_read_only(info: RegionStorageInfo, folder: PathBuf) -> Self {
         Self {
             info,
@@ -337,12 +334,6 @@ mod tests {
         ChunkPos::pack_coords(region_x, region_z)
     }
 
-    fn gzip(payload: &[u8]) -> Vec<u8> {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(payload).unwrap();
-        encoder.finish().unwrap()
-    }
-
     #[test]
     fn read_only_storage_does_not_pad_or_modify_existing_region() {
         let dir = tempfile::tempdir().unwrap();
@@ -440,6 +431,12 @@ mod tests {
 
         assert_eq!(fs::read(&path).unwrap(), before);
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    fn gzip(payload: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(payload).unwrap();
+        encoder.finish().unwrap()
     }
 
     fn deflate(payload: &[u8]) -> Vec<u8> {
