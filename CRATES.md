@@ -15,7 +15,7 @@
 | `rivet-world` | `world.level`, chunks, worldgen, lighting | Single chunk pipeline design (DAG + tickets), rayon workers. |
 | `rivet-entity` | `world.entity` hierarchy | `AnyEntity` enum + embedded base structs per OWNERSHIP.md. |
 | `rivet-server` | `server.*`, Paper `src/main`, patches | The binary; tick loop, connections, events, Paper config. |
-| `rivet-api` | `paper-api` shape; also Paper server-side API impls (`paper-server`) | Native Rust API surface (M4). |
+| `rivet-api` | `paper-api` shape | Native Rust API surface (M4). |
 | `rivet-ffi` | — | C ABI facade for the JVM adapter; the only crate where `unsafe` is normal. |
 | `tools/rivet-codegen` | — | Excluded from workspace; data extraction + code generation. In-repo, documented (unlike Pumpkin's out-of-tree extractor). |
 | `tools/rivet-harness-common` | — | Shared std-only E2E harness primitives (child-process boot lifecycle, held-port reservations, strict JSONL transcripts, exit contract, named negative controls); depended on by `rivet-capture` and `rivet-client`. Std-only so each harness tool can adopt it without adding external (non-std) packages — the only new lockfile entry is the crate itself. |
