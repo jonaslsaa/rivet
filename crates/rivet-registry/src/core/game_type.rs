@@ -16,11 +16,12 @@
 //! one-line move into `core`. The wire `StreamCodec` impls live in
 //! `rivet-protocol` per the ownership rule.
 //!
-//! Deliberately deferred (blocked by later work; no declarations emitted) to
-//! the `mc.world.level` unit in `rivet-world`: the display `Component`s
-//! (`selectWorld.gameMode.*` / `gameMode.*` translations), `getLongDisplayName`/
-//! `getShortDisplayName`, and `updatePlayerAbilities` (`Abilities`). The pure
-//! id↔name surface ports here only as far as the wire and the level.dat value
+//! Deliberately deferred (blocked by later work; no declarations emitted):
+//! RivetTodo(#101): the display `Component`s (`selectWorld.gameMode.*` /
+//! `gameMode.*` translations), `getLongDisplayName`/`getShortDisplayName`, and
+//! `updatePlayerAbilities` (`Abilities`) — the members the server join/game-mode
+//! fidelity work (#101) consumes. The pure id↔name surface ports here only as
+//! far as the wire and the level.dat value
 //! slice need: `SURVIVAL(0)/CREATIVE(1)/ADVENTURE(2)/SPECTATOR(3)`,
 //! `getId`/`getName`/`getSerializedName`, `byId` (ZERO fallback),
 //! `byNullableId`/`getNullableId` (`-1` ⇄ null), the
@@ -127,15 +128,14 @@ impl GameType {
 
     /// `GameType.byName(String)` — `byName(name, SURVIVAL)`.
     ///
-    /// `CODEC` is `StringRepresentable.fromEnum`, so the name lookup is the
-    /// serialized name — identical to `getName` for every value — and an
-    /// unknown name falls back to `DEFAULT_MODE` (never null). A lazily-built
-    /// static here would be a `'static` `EnumCodec<GameType, Ops>` — the codec
-    /// is ops-generic in the port, so it is a per-name call into
-    /// `game_type_codec::<JsonOps>()`'s fresh lookup instead (see `by_name_or`
-    /// for the shared helper).
+    /// The name lookup is the serialized name — identical to `getName` for
+    /// every value — and an unknown name falls back to `DEFAULT_MODE` (never
+    /// null). Java's `CODEC.byName` runs `createNameLookup`, which is a linear
+    /// scan for `values().length <= PRE_BUILT_MAP_THRESHOLD` (16); `GameType`
+    /// has 4 values, so `by_name_or` performs that same linear scan directly
+    /// over `VALUES` (see `by_name_or` for the shared helper).
     pub fn by_name(name: &str) -> GameType {
-        Self::by_name_or(name, Some(Self::DEFAULT_MODE)).unwrap_or(Self::DEFAULT_MODE)
+        Self::by_name_or(name, None).unwrap_or(Self::DEFAULT_MODE)
     }
 
     /// `GameType.getNullableId(@Nullable GameType)` — `gameType != null ?
@@ -154,14 +154,16 @@ impl GameType {
     /// `@Nullable` parameter and return: `byName(name, null)` is how the
     /// command/selector paths (`GameModeArgument`, `EntitySelectorOptions`) ask
     /// for `null` on an unknown name. A non-null default is expressed by
-    /// passing `Some` — `by_name` above does exactly that with
-    /// `DEFAULT_MODE`. The codec is built fresh per call — the port has no
-    /// ops-generic static to capture the name lookup once — but the lookup is
-    /// a linear scan of 4 names, matching Java's `createNameLookup` for
-    /// `values().length <= PRE_BUILT_MAP_THRESHOLD`.
+    /// passing `Some`. Java's `CODEC.byName` name lookup is a linear scan for
+    /// `values().length <= PRE_BUILT_MAP_THRESHOLD` (16); `GameType` has 4
+    /// values, so this performs that scan directly over `VALUES` rather than
+    /// building the ops-generic codec per call — identical results with no
+    /// allocation.
     pub fn by_name_or(name: &str, default: Option<GameType>) -> Option<GameType> {
-        game_type_codec::<rivet_serialization::json_ops::JsonOps>()
-            .by_name(name)
+        VALUES
+            .iter()
+            .find(|value| value.get_serialized_name() == name)
+            .copied()
             .or(default)
     }
 

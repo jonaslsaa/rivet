@@ -10,11 +10,12 @@
 //! `UUIDUtil.STREAM_CODEC` lives as `FriendlyByteBuf::read_uuid`/`write_uuid`
 //! (the same wire form — two big-endian longs).
 //!
-//! Deliberately deferred (blocked by later work; no declarations emitted): the
-//! string codecs (`STRING_CODEC`/`AUTHLIB_CODEC`/`LENIENT_CODEC`,
-//! `createOfflineProfile` — a `GameProfile` convenience for #99's offline login
-//! construction), and `uuidToByteArray` (`ByteBuffer.wrap(...).order(BIG_ENDIAN)`
-//! — a byte-order primitive with no consumer yet). The codec slice (#373) adds
+//! Deliberately deferred (blocked by later work; no declarations emitted):
+//! RivetTodo(#99): the string codecs (`STRING_CODEC`/`AUTHLIB_CODEC`/`LENIENT_CODEC`)
+//! and `createOfflineProfile` — a `GameProfile` convenience for #99's offline
+//! login construction. RivetTodo(#126): `uuidToByteArray`
+//! (`ByteBuffer.wrap(...).order(BIG_ENDIAN)`) — a byte-order primitive with no
+//! consumer yet — defers with the protocol StreamCodec surface. The codec slice (#373) adds
 //! `CODEC` — `Codec.INT_STREAM.comapFlatMap(Util.fixedSize(list, 4) …
 //! uuidFromIntArray, uuid -> IntStream.of(uuidToIntArray(uuid)))` — plus the
 //! exact `uuidFromIntArray`/`uuidToIntArray` int-array conversions it builds on.
