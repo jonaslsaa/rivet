@@ -249,8 +249,13 @@ pub struct RegionFile {
     /// repair/backups and makes close descriptor-only.
     read_only: bool,
     /// Legacy Aikar oversized flags loaded from `<region>.oversized.nbt`.
-    /// This slice only reads them; the legacy mutation surface stays absent.
+    /// `set_oversized` mutates them (mirroring Paper's `setOversized`); the
+    /// read-only slice only reads them.
     oversized: [u8; 1024],
+    /// `oversizedCount` — the number of set flags, maintained by
+    /// `set_oversized` and used to decide whether the meta file is rewritten or
+    /// deleted.
+    oversized_count: i32,
 }
 
 impl RegionFile {
@@ -325,6 +330,10 @@ impl RegionFile {
                 .open(&path)?
         };
         let can_recalc_header = info.is_chunk_data && !read_only;
+        // `initOversizedState` — Java sums every flag byte into
+        // `oversizedCount` after reading the meta file. `byte temp` is signed,
+        // so 0xFF contributes -1, not +255: `as i8` reproduces that.
+        let oversized_count = oversized.iter().map(|&b| i32::from(b as i8)).sum();
         let mut region = Self {
             path,
             external_file_dir,
@@ -337,6 +346,7 @@ impl RegionFile {
             sync,
             read_only,
             oversized,
+            oversized_count,
         };
         region.used_sectors.force(0, 2);
 
@@ -485,10 +495,48 @@ impl RegionFile {
     }
 
     /// Paper's package-private `isOversized(x, z)` legacy Aikar flag lookup.
-    /// Deliberately read-only: `setOversized` belongs to the excluded write
-    /// path and is not exposed by this porting slice.
     pub(super) fn is_oversized(&self, x: i32, z: i32) -> bool {
         self.oversized[get_chunk_index(x, z)] == 1
+    }
+
+    /// `setOversized(x, z, oversized)` — Paper's legacy Aikar meta mutation.
+    /// `write` calls `setOversized(x, z, false)` after a successful store so a
+    /// stale per-chunk supplement (`*_oversized_<x>_<z>.nbt`) and its flag can
+    /// never contaminate a freshly rewritten chunk on `read`. Mirrors Java's
+    /// `synchronized setOversized`: clear the flag byte, maintain the count,
+    /// delete the per-chunk data file when the flag was cleared, and rewrite or
+    /// delete the meta file based on the remaining count.
+    pub(super) fn set_oversized(&mut self, x: i32, z: i32, oversized: bool) -> io::Result<()> {
+        self.ensure_writable()?;
+        let offset = get_chunk_index(x, z);
+        let previous = self.oversized[offset] == 1;
+        self.oversized[offset] = if oversized { 1 } else { 0 };
+        if !previous && oversized {
+            self.oversized_count += 1;
+        } else if !oversized && previous {
+            self.oversized_count -= 1;
+        }
+        if previous && !oversized {
+            let oversized_file = self.get_oversized_file(x, z);
+            match fs::remove_file(&oversized_file) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if self.oversized_count > 0 {
+            if previous != oversized {
+                fs::write(self.get_oversized_meta_file(), self.oversized)?;
+            }
+        } else if previous {
+            let meta_file = self.get_oversized_meta_file();
+            match fs::remove_file(&meta_file) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     /// `getOversizedData(x, z)` — read the legacy per-chunk supplement through
@@ -739,6 +787,13 @@ impl RegionFile {
             .to_string_lossy();
         self.path
             .with_file_name(format!("{base}_oversized_{x}_{z}.nbt"))
+    }
+
+    /// `getOversizedMetaFile()` — `<region>.oversized.nbt`, the 1024-byte flag
+    /// array. `with_extension("oversized.nbt")` matches Java's
+    /// `replaceAll("\\.mca$", "") + ".oversized.nbt"`.
+    fn get_oversized_meta_file(&self) -> PathBuf {
+        self.path.with_extension("oversized.nbt")
     }
 
     /// `getChunkDataOutputStream(pos)` — `new DataOutputStream(version.wrap(new

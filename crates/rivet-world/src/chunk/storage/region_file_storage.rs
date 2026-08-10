@@ -9,9 +9,10 @@
 //! `CompoundTag` through `getChunkDataOutputStream` (or `clear`s on `None`),
 //! creates regions/directories on first write, and converts a
 //! `RegionFileSizeException` into a delete + log, exactly like Paper's
-//! `RegionFileStorage.write`. `flush`/`close` iterate every cached region and
-//! attempt all closes/flushes, returning the first error like Paper's
-//! `ExceptionCollector`.
+//! `RegionFileStorage.write`, and clears any legacy Aikar oversized flag via
+//! `RegionFile::set_oversized` after a successful store. `flush`/`close`
+//! iterate every cached region and attempt all closes/flushes, returning the
+//! first error like Paper's `ExceptionCollector`.
 //!
 //! The strict M2L read-only boundary is preserved: `new_read_only` rejects
 //! every mutation entry — `write` (create/update), delete (`None`), and
@@ -163,8 +164,11 @@ impl RegionFileStorage {
     /// the whole method on is not ported (it is false in production). And like
     /// `RegionFile.getChunkDataOutputStream`, this path is only functional under
     /// the D13 `region-file-compression=none` selection: deflate/lz4 writes are
-    /// deferred, so selecting them makes `wrap_output` fail loudly with
-    /// `Unsupported` before anything reaches disk.
+    /// deferred, so selecting them makes `wrap_output` fail with `Unsupported`.
+    /// The failure surfaces after `get_region_file` has already created the
+    /// storage folder and an empty region file (Paper opens the region with
+    /// CREATE before wrapping the output stream), but no chunk bytes reach
+    /// disk — the error propagates before anything is written to the file.
     pub fn write(&mut self, pos: &ChunkPos, value: Option<CompoundTag>) -> io::Result<()> {
         self.ensure_writable()?;
         let region_index = match self.get_region_file(pos, value.is_none())? {
@@ -182,10 +186,12 @@ impl RegionFileStorage {
                 let mut out = DataOutputStream::new(&mut writer);
                 nbt_io::write(&value, &mut out)?;
             }
-            // Paper clears the legacy Aikar flag here
-            // (`region.setOversized(x, z, false)`); that meta-mutation surface
-            // stays deferred with the rest of the Aikar subsystem (RivetTodo(#231)).
             let mut buffer = writer.finish()?;
+            // Paper calls `region.setOversized(x, z, false)` between the NBT
+            // write and `output.close()`: clearing any legacy Aikar oversized
+            // flag/supplement so a stale supplement never merges into a freshly
+            // rewritten chunk on a later `read`.
+            region.set_oversized(pos.x(), pos.z(), false)?;
             buffer.close(region)
         })();
 
@@ -1005,11 +1011,117 @@ mod tests {
         assert_eq!(fs::read(&meta_path).unwrap(), before_meta);
     }
 
+    /// Seed a legacy Aikar oversized flag + per-chunk supplement for (0,0),
+    /// the state Paper's `region.setOversized(x, z, false)` clears on write.
+    fn seed_aikar_oversized(dir: &Path, entities: &[Tag]) {
+        let mut extra = CompoundTag::new();
+        let mut extra_level = CompoundTag::new();
+        let mut list = ListTag::new();
+        for e in entities {
+            list.add(e.clone());
+        }
+        extra_level.put("Entities".to_string(), Tag::List(list));
+        extra.put("Level".to_string(), Tag::Compound(extra_level));
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&encode(&extra)).unwrap();
+        fs::write(
+            dir.join("r.0.0_oversized_0_0.nbt"),
+            encoder.finish().unwrap(),
+        )
+        .unwrap();
+        let mut meta = [0u8; 1024];
+        meta[0] = 1;
+        fs::write(dir.join("r.0.0.oversized.nbt"), meta).unwrap();
+    }
+
+    /// A chunk tag with a `Level` compound carrying an `Entities` list (the
+    /// shape `read_oversized_chunk` merges supplements into).
+    fn chunk_tag_with_level_entities() -> CompoundTag {
+        let mut tag = chunk_tag(0, 0);
+        let mut level = CompoundTag::new();
+        level.put("Entities".to_string(), Tag::List(ListTag::new()));
+        tag.put("Level".to_string(), Tag::Compound(level));
+        tag
+    }
+
+    #[test]
+    fn rewrite_clears_legacy_aikar_oversized_supplement() {
+        // Paper's write path calls `region.setOversized(x, z, false)` after a
+        // successful store. Without it, a stale `*_oversized_<x>_<z>.nbt`
+        // supplement would keep merging into a freshly rewritten chunk on
+        // `read`. This proves the rewrite clears the flag AND deletes the
+        // supplement, so read-after-rewrite serves only the new data.
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::ZERO;
+            {
+                let mut storage = writable_storage(dir.path());
+                storage
+                    .write(&pos, Some(chunk_tag_with_level_entities()))
+                    .unwrap();
+                storage.close().unwrap();
+            }
+
+            // Simulate a legacy Aikar oversized chunk: stale supplement that
+            // read() merges (Entities) plus its flag byte. Seeded after close
+            // so a fresh open loads the meta flag into the region.
+            seed_aikar_oversized(dir.path(), &[Tag::Compound(chunk_tag(9, 9))]);
+            let mut storage = writable_storage(dir.path());
+            let stale_merged = storage
+                .read(&pos)
+                .unwrap()
+                .expect("stale supplement merges into the base chunk");
+            assert_eq!(
+                stale_merged
+                    .get_compound("Level")
+                    .unwrap()
+                    .get_list("Entities")
+                    .unwrap()
+                    .size(),
+                1,
+                "precondition: the stale supplement is served before the rewrite"
+            );
+
+            // Rewrite with fresh data; the flag and supplement must be cleared.
+            storage
+                .write(&pos, Some(chunk_tag_with_level_entities()))
+                .unwrap();
+            let fresh = storage
+                .read(&pos)
+                .unwrap()
+                .expect("rewritten chunk reads back");
+            assert_eq!(
+                fresh
+                    .get_compound("Level")
+                    .unwrap()
+                    .get_list("Entities")
+                    .unwrap()
+                    .size(),
+                0,
+                "the stale supplement must not contaminate the rewritten chunk"
+            );
+            assert!(
+                !dir.path().join("r.0.0_oversized_0_0.nbt").exists(),
+                "the per-chunk supplement is deleted on successful write"
+            );
+            assert!(
+                !dir.path().join("r.0.0.oversized.nbt").exists(),
+                "the flag meta file is deleted when no chunk stays oversized"
+            );
+            assert!(
+                !storage.region_cache[0].1.is_oversized(0, 0),
+                "the in-memory flag is cleared too"
+            );
+            storage.close().unwrap();
+        });
+    }
+
     /// Pin the process-global region-file compression selection to `none` (the
     /// D13 byte-identity gate codec) for the write tests, and serialize against
-    /// `region_file_version`'s own `configure`-mutating tests.
+    /// `region_file_version`'s own `configure`-mutating tests. Recovers from a
+    /// poisoned mutex (a panicking lock-holder) so one failure does not cascade.
     fn with_selection_none<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = SELECTION_LOCK.lock().unwrap();
+        let _guard = SELECTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         RegionFileVersion::configure("none");
         f()
     }
@@ -1059,6 +1171,49 @@ mod tests {
             );
             storage.close().unwrap();
         });
+    }
+
+    #[test]
+    fn deferred_codec_write_creates_folder_and_empty_file_but_no_chunk_bytes() {
+        // The doc for `write` says deflate/lz4 writes are deferred: `wrap_output`
+        // rejects with `Unsupported` *after* `get_region_file` has created the
+        // storage folder and an empty region file (Paper opens the region with
+        // CREATE before wrapping the output stream). This pins that exact
+        // ordering — the failure is loud, and no chunk bytes reach disk.
+        let _guard = SELECTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        RegionFileVersion::configure("deflate");
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("region");
+        let pos = ChunkPos::new(0, 0);
+        let mut storage = RegionFileStorage::new(info(true), folder.clone(), false);
+        assert_eq!(
+            storage
+                .write(&pos, Some(chunk_tag(0, 0)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported,
+            "a deferred codec write fails loudly"
+        );
+        assert!(
+            folder.is_dir(),
+            "the storage folder is created before wrap_output is reached"
+        );
+        let region_file = folder.join("r.0.0.mca");
+        assert!(
+            region_file.is_file(),
+            "the region file is opened (CREATE) before wrap_output is reached"
+        );
+        assert_eq!(
+            fs::metadata(&region_file).unwrap().len(),
+            0,
+            "no chunk bytes reach disk for a deferred codec"
+        );
+        assert_eq!(
+            fs::read_dir(&folder).unwrap().count(),
+            1,
+            "only the empty region file exists — no .mcc or supplements"
+        );
+        storage.close().unwrap();
     }
 
     #[test]
