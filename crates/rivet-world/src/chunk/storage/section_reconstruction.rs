@@ -262,8 +262,16 @@ fn decode_block_state(entry: &Tag) -> Result<BlockState, String> {
     let Tag::String(name) = name_tag else {
         return Err(format!("Not a string: {name_tag}"));
     };
-    let id = Identifier::by_separator_result(&name.value, ':')
-        .map_err(|error| format!("Invalid block identifier {}: {error}", name.value))?;
+    let id = Identifier::by_separator_result(&name.value, ':').map_err(|error| {
+        // Paper `Identifier.read` errors with `Not a valid resource location:
+        // <input> <escaped message>`; that text flows through `orElsePartial`
+        // into the element diagnostic and any composed fatal message.
+        format!(
+            "Not a valid resource location: {} {}",
+            name.value,
+            error.message()
+        )
+    })?;
     let block = BlockId::from_name(&id.to_string()).ok_or_else(|| {
         format!("Unknown registry key in ResourceKey[minecraft:root / minecraft:block]: {id}")
     })?;
@@ -342,8 +350,13 @@ fn decode_biomes(
         let Tag::String(name) = entry else {
             return Err(format!("Not a string: {entry}"));
         };
-        let id = Identifier::by_separator_result(&name.value, ':')
-            .map_err(|error| format!("Invalid biome identifier {}: {error}", name.value))?;
+        let id = Identifier::by_separator_result(&name.value, ':').map_err(|error| {
+            format!(
+                "Not a valid resource location: {} {}",
+                name.value,
+                error.message()
+            )
+        })?;
         BIOME_BY_NAME
             .get(id.to_string().as_str())
             .copied()
@@ -448,6 +461,7 @@ pub fn reconstruct_sections_with_presets_and_diagnostics(
                     let decoded = match decode_block_states(container, factory, presets) {
                         Ok(decoded) => decoded,
                         Err(error) => {
+                            let message = compose_fatal_message(&error.partials, &error.message);
                             record_diagnostics(
                                 &mut diagnostics,
                                 &mut on_diagnostic,
@@ -458,7 +472,7 @@ pub fn reconstruct_sections_with_presets_and_diagnostics(
                             return Err(ChunkReadException {
                                 section_y: y,
                                 container: "block_states",
-                                message: error.message,
+                                message,
                                 path: error.path,
                                 recoverable_diagnostics: diagnostics,
                             });
@@ -480,6 +494,7 @@ pub fn reconstruct_sections_with_presets_and_diagnostics(
                     let decoded = match decode_biomes(container, factory) {
                         Ok(decoded) => decoded,
                         Err(error) => {
+                            let message = compose_fatal_message(&error.partials, &error.message);
                             record_diagnostics(
                                 &mut diagnostics,
                                 &mut on_diagnostic,
@@ -490,7 +505,7 @@ pub fn reconstruct_sections_with_presets_and_diagnostics(
                             return Err(ChunkReadException {
                                 section_y: y,
                                 container: "biomes",
-                                message: error.message,
+                                message,
                                 path: error.path,
                                 recoverable_diagnostics: diagnostics,
                             });
@@ -546,4 +561,32 @@ fn record_diagnostics(
         on_diagnostic(&diagnostic);
         diagnostics.push(diagnostic);
     }
+}
+
+/// Paper/DFU's fatal message after `promotePartial`/`getOrThrow`: palette-element
+/// partial errors compose with the fatal codec error via
+/// `DataResult.appendMessages(first, second)` = `first + "; " + second`, but the
+/// list decoder accumulates them by *prepending* each new element error
+/// (`Error.ap` on the accumulator). Empirically verified against the pinned
+/// Paper 26.2 + DFU 10.0.21 jars: with a palette `[a, b, c]` whose elements all
+/// fail and a fatal unpack, the message is `Err[c]; Err[b]; Err[a]; Fatal` —
+/// the failing elements appear in reverse decode order, then the fatal error.
+/// `ChunkReadException` is constructed from that combined `message()`, so the
+/// fatal packed-data error never drops the preceding element diagnostics. Empty
+/// partials (a palette-field failure, or a packed-data failure with a clean
+/// palette) leave the fatal message unchanged.
+fn compose_fatal_message(partials: &[(usize, String)], fatal: &str) -> String {
+    if partials.is_empty() {
+        return fatal.to_string();
+    }
+    let mut message = String::new();
+    for (_, partial) in partials.iter().rev() {
+        if !message.is_empty() {
+            message.push_str("; ");
+        }
+        message.push_str(partial);
+    }
+    message.push_str("; ");
+    message.push_str(fatal);
+    message
 }

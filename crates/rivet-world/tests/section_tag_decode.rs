@@ -580,7 +580,11 @@ fn malformed_palette_entries_degrade_before_storage_validation() {
     );
 
     // Two entries select non-zero storage only after both element fallbacks;
-    // absent data then fails at the unpack phase.
+    // absent data then fails at the unpack phase. Paper/DFU composes the
+    // element partials with the fatal unpack error via
+    // `DataResult.appendMessages` (`first + "; " + second`), prepending each
+    // new element error, so the fatal message carries them in reverse decode
+    // order (F1) — verified against pinned Paper 26.2 + DFU 10.0.21.
     let tags = list(vec![section(
         0,
         Some(container(vec![wrong_entry.clone(), wrong_entry], None)),
@@ -589,7 +593,10 @@ fn malformed_palette_entries_degrade_before_storage_validation() {
     let err = reconstruct_sections(&tags, 0, 0, &factory, predicates())
         .err()
         .expect("missing packed data");
-    assert_eq!(err.message, "Missing values for non-zero storage");
+    assert_eq!(
+        err.message,
+        "(Not a map: 123 -> using default); (Not a map: 123 -> using default); Missing values for non-zero storage"
+    );
     assert_eq!(err.path, CodecPath::PackedData);
     assert_eq!(err.recoverable_diagnostics.len(), 2);
     assert_eq!(
@@ -700,6 +707,112 @@ fn packed_storage_length_errors_are_container_scoped() {
     assert_eq!(
         err.message,
         "Failed to read PalettedContainer: Invalid length given for storage, got: 255 but expected: 256"
+    );
+}
+
+#[test]
+fn fatal_packed_data_retains_prior_element_partials_in_message() {
+    let factory = current_version_container_factory();
+    // A wrong-typed palette element becomes the default (air) with a partial;
+    // absent packed data then fails fatally. Paper/DFU composes the element
+    // partials with the unpack error via `appendMessages(first, second)` =
+    // `first + "; " + second`, *prepending* each new element error (verified
+    // against pinned Paper 26.2 + DFU 10.0.21), so `ChunkReadException.message`
+    // carries the failing elements in reverse decode order followed by the
+    // fatal unpack error (F1).
+    let block_tags = list(vec![section(
+        0,
+        Some(container(
+            vec![Tag::Int(IntTag::value_of(1)), Tag::Int(IntTag::value_of(2))],
+            None,
+        )),
+        Some(plains()),
+    )]);
+    let err = reconstruct_sections(&block_tags, 0, 0, &factory, predicates())
+        .err()
+        .expect("block packed data is fatal");
+    assert_eq!(
+        err.message,
+        "(Not a map: 2 -> using default); (Not a map: 1 -> using default); Missing values for non-zero storage"
+    );
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert_eq!(err.container, "block_states");
+    assert_eq!(err.recoverable_diagnostics.len(), 2);
+
+    // Biomes compose the same way.
+    let biome_tags = list(vec![section(
+        0,
+        Some(container(vec![state_tag("minecraft:air")], None)),
+        Some(container(
+            vec![Tag::Int(IntTag::value_of(1)), Tag::Int(IntTag::value_of(2))],
+            None,
+        )),
+    )]);
+    let err = reconstruct_sections(&biome_tags, 0, 0, &factory, predicates())
+        .err()
+        .expect("biome packed data is fatal");
+    assert_eq!(
+        err.message,
+        "(Not a string: 2 -> using default); (Not a string: 1 -> using default); Missing values for non-zero storage"
+    );
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert_eq!(err.container, "biomes");
+    assert_eq!(err.recoverable_diagnostics.len(), 2);
+
+    // A clean palette with a fatal unpack leaves the message unchanged.
+    let clean_tags = list(vec![section(
+        0,
+        Some(container(
+            vec![state_tag("minecraft:air"), state_tag("minecraft:stone")],
+            None,
+        )),
+        Some(plains()),
+    )]);
+    let err = reconstruct_sections(&clean_tags, 0, 0, &factory, predicates())
+        .err()
+        .expect("missing packed data is fatal");
+    assert_eq!(err.message, "Missing values for non-zero storage");
+    assert_eq!(err.path, CodecPath::PackedData);
+    assert!(err.recoverable_diagnostics.is_empty());
+}
+
+#[test]
+fn identifier_read_errors_use_paper_not_a_valid_resource_location_text() {
+    let factory = current_version_container_factory();
+    // F2: malformed `Name`/biome identifiers must surface Paper `Identifier.read`
+    // text (`Not a valid resource location: <input> <escaped message>`) through
+    // the element diagnostic, not a local `Invalid ... identifier` wrapper.
+    let mut bad_name = CompoundTag::new();
+    bad_name.put_string("Name", "minecraft:bad id");
+    let tags = list(vec![section(
+        0,
+        Some(container(vec![Tag::Compound(bad_name.clone())], None)),
+        Some(plains()),
+    )]);
+    let sections = reconstruct_sections(&tags, 0, 0, &factory, predicates()).unwrap();
+    assert_eq!(
+        sections.diagnostics[0].message,
+        "(Not a valid resource location: minecraft:bad id Non [a-z0-9/._-] character in path of location: minecraft:bad id -> using default)"
+    );
+    assert_eq!(sections.diagnostics[0].path, CodecPath::PaletteElement(0));
+
+    // Same text flows into a composed fatal message when packed data then fails.
+    // The second element (empty compound, no `Name`) is decoded after the bad
+    // name, so Paper/DFU's prepend accumulation lists it first (F1 order).
+    let bad_name_and_data = list(vec![section(
+        0,
+        Some(container(
+            vec![Tag::Compound(bad_name), Tag::Compound(CompoundTag::new())],
+            None,
+        )),
+        Some(plains()),
+    )]);
+    let err = reconstruct_sections(&bad_name_and_data, 0, 0, &factory, predicates())
+        .err()
+        .expect("missing packed data is fatal");
+    assert_eq!(
+        err.message,
+        "(No key Name in MapLike[CompoundTag { tags: {} }] -> using default); (Not a valid resource location: minecraft:bad id Non [a-z0-9/._-] character in path of location: minecraft:bad id -> using default); Missing values for non-zero storage"
     );
 }
 
