@@ -617,8 +617,8 @@ fn check_biome_surface_matches(climates: &[BiomeClimate], biome_ids: &HashMap<St
         match biome_ids.get(&c.name) {
             Some(&id) if id == c.id => {}
             Some(&id) => bail!(
-                "biome climate/table id mismatch for `{}`: worldgen.json {id} vs biomes_tags.json {id}",
-                c.name
+                "biome climate/table id mismatch for `{}`: worldgen.json {} vs biomes_tags.json {id}",
+                c.name, c.id
             ),
             None => bail!(
                 "biome climate `{}` is absent from the biomes_tags.json biome table",
