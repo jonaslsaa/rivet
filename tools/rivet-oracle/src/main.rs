@@ -3312,12 +3312,12 @@ mod tests {
     #[test]
     fn loaded_world_fixtures_verify() {
         let dir = fixtures_dir().join("loaded-world");
-        if !dir.join("chunk").is_dir() {
-            // The whole corpus isn't checked out (or was pruned) — nothing to verify.
-            return;
-        }
-        // A partial prune (manifest missing while payloads remain) must never
-        // pass silently — the corpus is the deliverable of #371.
+        // The corpus is the deliverable of #371, so its absence is a hard
+        // failure, never a silent skip — a normal checkout always has it.
+        assert!(
+            dir.join("chunk").is_dir(),
+            "loaded-world corpus is missing entirely (chunk/ absent)"
+        );
         assert!(
             dir.join("manifest.json").is_file(),
             "loaded-world manifest.json missing while chunk payloads are present"

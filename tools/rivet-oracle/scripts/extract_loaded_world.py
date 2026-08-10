@@ -256,7 +256,14 @@ def diff_fingerprint(actual: list[tuple[str, str]], committed_lines: list[tuple[
         return []
     actual_map = dict(actual)
     committed_map = dict(committed_lines)
-    changed = sorted(set(actual_map) | set(committed_map))
+    # Only the files whose hash actually changed (or that were added/removed)
+    # belong in the detail, not every file in the union — an unchanged tree
+    # would otherwise print all 39 entries with identical hashes.
+    changed = sorted(
+        rel
+        for rel in set(actual_map) | set(committed_map)
+        if committed_map.get(rel) != actual_map.get(rel)
+    )
     detail = [
         f"  {rel}: committed {committed_map.get(rel, '<absent>')} actual {actual_map.get(rel, '<absent>')}"
         for rel in changed
@@ -307,6 +314,10 @@ def cmd_extract(source: Path) -> int:
     )
     (fixtures_dir / FINGERPRINT_FILE).write_text(fingerprint_lines(before))
 
+    # The sha256 self-check below catches write corruption/truncation (on-disk
+    # bytes must hash to the in-memory payload the manifest was built from).
+    # Content/role validation of the payloads is the Rust
+    # loaded_world_fixtures_verify test's job, which parses them as NBT.
     errors = verify_fixtures_dir(fixtures_dir, manifest)
     if errors:
         for e in errors:
@@ -333,8 +344,10 @@ def verify_re_extracted(
             errors.append(f"chunk ({wx},{wz}) not re-extractable from source")
             continue
         committed = fixtures_dir / cap["path"]
-        committed_data = committed.read_bytes() if committed.is_file() else b"<missing>"
-        if payload != committed_data:
+        if not committed.is_file():
+            errors.append(f"chunk ({wx},{wz}) committed fixture missing: {cap['path']}")
+            continue
+        if payload != committed.read_bytes():
             errors.append(
                 f"chunk ({wx},{wz}) re-extracted bytes differ from committed fixture {cap['path']}"
             )
@@ -379,6 +392,19 @@ def cmd_verify(source: Path) -> int:
     return 0
 
 
+def guard_scratch_path(scratch: Path) -> None:
+    """Refuse to rmtree a --scratch that overlaps the committed fixtures dir or
+    one of its ancestors/descendants, so a typo'd flag can never destroy the
+    corpus (or the repo)."""
+    sc = scratch.resolve()
+    fs = FIXTURES_DIR.resolve()
+    if sc == fs or sc.is_relative_to(fs) or fs.is_relative_to(sc):
+        raise SystemExit(
+            f"REFUSED: --scratch {scratch} overlaps the committed fixtures dir "
+            f"{FIXTURES_DIR} — pick a separate scratch path"
+        )
+
+
 def cmd_expect_fail(source: Path, scratch: Path) -> int:
     """Negative control: a missing and a tampered fixture must both be detected
     and named by static verification, the --verify re-extraction byte-compare
@@ -388,6 +414,7 @@ def cmd_expect_fail(source: Path, scratch: Path) -> int:
     src = resolve_source(source)
     fixtures_dir = FIXTURES_DIR
     manifest = load_committed_manifest(fixtures_dir)
+    guard_scratch_path(scratch)
     if scratch.exists():
         shutil.rmtree(scratch)
     shutil.copytree(fixtures_dir, scratch)
@@ -435,6 +462,8 @@ def cmd_expect_fail(source: Path, scratch: Path) -> int:
     if not fp_path.is_file():
         raise SystemExit(f"FAIL: committed source fingerprint missing: {fp_path}")
     committed_lines = parse_fingerprint(fp_path.read_text())
+    if not committed_lines:
+        raise SystemExit("FAIL: committed source fingerprint is empty")
     actual = fingerprint_tree(src)
     tampered_baseline = committed_lines[:]
     rel, h = tampered_baseline[0]
