@@ -50,9 +50,19 @@ tools/rivet-client/run-scenario.sh capture        # one boot; print the normaliz
 `load-world` is the independent #316 harness slice. `RIVET_WORLD_SRC` may
 override the default launcher save at
 `~/Library/Application Support/minecraft/saves/New World`. The runner refuses
-symlinks, copies the source into deterministic disposable storage, verifies the
-copy byte-for-byte, launches Rivet only against that copy, then re-verifies the
-source and removes the copy on every probe outcome. Until #339 provides the
+symlinks, copies the source beneath a fresh unpredictable private (`0700`)
+directory, verifies the copy byte-for-byte, and retains a no-follow directory
+descriptor through server shutdown. On Linux, Rivet receives the inherited
+`/proc/self/fd/<n>` identity, so replacing the visible pathname cannot redirect
+the verified root. macOS does not provide a traversable directory-fd pathname;
+there the server receives the unpredictable private path, which closes the old
+deterministic-path window but does not defend against a malicious same-user
+process that discovers and races that path. A process with concurrent write
+access can likewise change source entries while they are being read. Source
+changes are detected by the post-run fingerprint, but neither race can be
+prevented portably without OS-specific descriptor-relative server loading or
+snapshotting/locking the external launcher save. The harness never claims
+detection can undo a source write. Until #339 provides the
 world-path/loading capability and official-client acceptance, this command
 exits `3` UNVERIFIED; it never turns an accepted argument into a fake PASS.
 Because the probe starts no client, explicit `--username` and

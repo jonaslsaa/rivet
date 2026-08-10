@@ -2593,12 +2593,12 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     let source_before = load_world::hash_tree(&source)?;
     let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
     let base = base_address(args)?;
-    let copy_path = work.join("copied-world");
     let run_dir = work.join("rivet");
     let log_path = work.join("rivet.log");
-    let mut temp = load_world::TempWorld::create(&source, &copy_path)?;
+    let mut temp = load_world::TempWorld::create(&source, &work)?;
     let probe_result = (|| -> Result<(), RunnerError> {
         load_world::assert_copy_equals_source(&source_before, &temp.hash_tree()?)?;
+        let server_world_path = temp.server_path();
 
         println!("rivet scenario runner: load-world (#316 independent harness slice)");
         println!(
@@ -2622,7 +2622,7 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
             base,
             None,
             &[],
-            Some(temp.path()),
+            Some(&server_world_path),
         ) {
             Ok(mut srv) => match server::shutdown(&mut srv) {
                 Ok(()) => Err(RunnerError::Unverified(

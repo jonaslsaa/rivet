@@ -6,8 +6,9 @@
 //!
 //! - resolving the known local Minecraft 26.2 world (the launcher-created
 //!   save, overridable via `RIVET_WORLD_SRC`);
-//! - copying it into a deterministic disposable temp world ([`TempWorld`]),
-//!   refusing to follow symlinks so the copy can never alias the source;
+//! - copying it beneath a fresh private disposable directory ([`TempWorld`]),
+//!   refusing symlinks and retaining a directory handle so pathname replacement
+//!   cannot redirect the server to the source;
 //! - asserting the copy is byte-faithful to the source and that the source is
 //!   not mutated between the pre-run snapshot and the post-run snapshot — the
 //!   explicit no-source-mutation guarantee;
@@ -24,7 +25,22 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(target_vendor = "apple")]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use sha2::{Digest, Sha256};
+use tempfile::TempDir;
+
+#[cfg(unix)]
+use rustix::fs::{Mode, OFlags};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use rustix::io::{FdFlags, fcntl_setfd};
 
 /// Default launcher-created Minecraft 26.2 world name (local-official-minecraft-client).
 const LAUNCHER_WORLD_NAME: &str = "New World";
@@ -286,91 +302,146 @@ pub fn assert_source_unchanged(before: &[TreeEntry], after: &[TreeEntry]) -> Res
     )))
 }
 
-/// A deterministic disposable copy of the source world.
+/// A disposable copy of the source world with deterministic contents and an
+/// unpredictable per-run identity.
 ///
-/// [`TempWorld::create`] sets up the copy at a fixed destination path: any
-/// stale leftover from a crashed previous run is removed first, then the source
-/// is copied fresh, so setup is deterministic and idempotent. [`TempWorld::cleanup`]
-/// (or [`Drop`]) removes the copy, so a temp world can never leak a stale tree a
-/// later run would mistake for fresh — the file-system analog of the shared
-/// child-process kill-on-drop.
+/// [`TempWorld::create`] creates a fresh private `0700` parent beneath the
+/// supplied storage directory and materializes the copy as its `world` child.
+/// On Unix, the copy is opened once with `O_NOFOLLOW` and retained through
+/// child shutdown. Linux fingerprints and launches through that descriptor;
+/// other Unix platforms retain it as ownership evidence but use the private
+/// path because their fd namespace is not portably directory-traversable.
+/// [`TempWorld::cleanup`] (or [`Drop`]) removes the unique parent — the
+/// file-system analog of the shared child-process kill-on-drop.
 #[derive(Debug)]
 pub struct TempWorld {
     path: PathBuf,
-    removed: bool,
+    temp_dir: Option<TempDir>,
+    #[cfg(unix)]
+    _storage_dir: OwnedFd,
+    #[cfg(unix)]
+    _world_dir: OwnedFd,
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn descriptor_path(fd: &impl AsRawFd) -> PathBuf {
+    Path::new("/proc/self/fd").join(fd.as_raw_fd().to_string())
+}
+
+#[cfg(unix)]
+fn opened_directory_path(fd: &OwnedFd, _original: &Path) -> Result<PathBuf, Error> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    return descriptor_path(fd).canonicalize().map_err(Error::from);
+
+    #[cfg(target_vendor = "apple")]
+    return rustix::fs::getpath(fd)
+        .map(|path| PathBuf::from(std::ffi::OsString::from_vec(path.into_bytes())))
+        .map_err(io::Error::from)
+        .map_err(Error::from);
+
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    _original.canonicalize().map_err(Error::from)
+}
+
+fn reject_aliasing(source: &Path, destination: &Path) -> Result<(), Error> {
+    if source == destination || destination.starts_with(source) || source.starts_with(destination) {
+        return Err(Error::Gate(format!(
+            "temp-world storage {} equals, contains, or is contained by source {}",
+            destination.display(),
+            source.display()
+        )));
+    }
+    Ok(())
 }
 
 impl TempWorld {
-    /// Create a fresh disposable copy of `source` at `dest`. Refuses to copy
-    /// into itself or into a path nested inside the source, which would alias
-    /// the very files being copied.
-    pub fn create(source: &Path, dest: &Path) -> Result<Self, Error> {
-        if fs::symlink_metadata(source)?.file_type().is_symlink() {
-            return Err(Error::Gate(format!(
-                "source world {} is a symlink; the harness requires the concrete launcher save \
+    /// Create a fresh disposable copy of `source` beneath `storage`.
+    ///
+    /// Canonical equality and containment are rejected in both directions
+    /// before the first filesystem mutation. This is essential when an
+    /// override accidentally points inside the harness storage directory: no
+    /// cleanup or setup may then touch the source.
+    pub fn create(source: &Path, storage: &Path) -> Result<Self, Error> {
+        #[cfg(not(unix))]
+        return Err(Error::Gate(
+            "the loaded-world safety boundary requires Unix directory descriptors".to_owned(),
+        ));
+
+        #[cfg(unix)]
+        {
+            if fs::symlink_metadata(source)?.file_type().is_symlink() {
+                return Err(Error::Gate(format!(
+                    "source world {} is a symlink; the harness requires the concrete launcher save \
                  directory so it can prove the server never receives an alias of the source",
-                source.display()
-            )));
-        }
-        let source_abs = source.canonicalize().map_err(|e| {
-            Error::Gate(format!(
-                "source world {} is not readable: {e}",
-                source.display()
-            ))
-        })?;
-        let dest_abs = match fs::canonicalize(dest) {
-            Ok(path) => path,
-            Err(_) => {
-                let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-                let parent = parent.canonicalize().map_err(|e| {
-                    Error::Gate(format!(
-                        "temp-world destination parent {} is not accessible: {e}",
-                        parent.display()
-                    ))
-                })?;
-                parent.join(dest.file_name().ok_or_else(|| {
-                    Error::Gate(format!(
-                        "temp-world destination {} has no final path component",
-                        dest.display()
-                    ))
-                })?)
-            }
-        };
-        if source_abs == dest_abs || dest_abs.starts_with(&source_abs) {
-            return Err(Error::Gate(format!(
-                "temp-world destination {} aliases the source {}",
-                dest.display(),
-                source.display()
-            )));
-        }
-        if let Ok(meta) = fs::symlink_metadata(dest) {
-            if meta.file_type().is_symlink() {
-                return Err(Error::Gate(format!(
-                    "refusing stale symlink at temp-world destination {}",
-                    dest.display()
+                    source.display()
                 )));
             }
-            if meta.is_dir() {
-                fs::remove_dir_all(dest)?;
-            } else {
-                fs::remove_file(dest)?;
-            }
-        }
-        fs::create_dir_all(dest)?;
-        if let Err(error) = copy_tree(source, dest) {
-            if let Err(cleanup_error) = fs::remove_dir_all(dest) {
+            let source_abs = source.canonicalize().map_err(|e| {
+                Error::Gate(format!(
+                    "source world {} is not readable: {e}",
+                    source.display()
+                ))
+            })?;
+            let storage_meta = fs::symlink_metadata(storage).map_err(|e| {
+                Error::Gate(format!(
+                    "temp-world storage {} is not accessible: {e}",
+                    storage.display()
+                ))
+            })?;
+            if storage_meta.file_type().is_symlink() || !storage_meta.is_dir() {
                 return Err(Error::Gate(format!(
-                    "world copy failed ({error}) and partial-copy cleanup at {} also failed: \
+                    "temp-world storage {} must be a concrete directory",
+                    storage.display()
+                )));
+            }
+            let storage_dir = rustix::fs::open(
+                storage,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(io::Error::from)?;
+            let storage_abs = opened_directory_path(&storage_dir, storage).map_err(|e| {
+                Error::Gate(format!(
+                    "opened temp-world storage {} cannot be resolved: {e}",
+                    storage.display()
+                ))
+            })?;
+            reject_aliasing(&source_abs, &storage_abs)?;
+
+            let temp_dir = tempfile::Builder::new()
+                .prefix("copy-")
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir_in(&storage_abs)?;
+            let world_path = temp_dir.path().join("world");
+            if let Err(error) = copy_tree(source, &world_path) {
+                if let Err(cleanup_error) = temp_dir.close() {
+                    return Err(Error::Gate(format!(
+                        "world copy failed ({error}) and partial-copy cleanup beneath {} also failed: \
                      {cleanup_error}",
-                    dest.display()
-                )));
+                        storage.display()
+                    )));
+                }
+                return Err(error);
             }
-            return Err(error);
+            let world_dir = rustix::fs::open(
+                &world_path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(io::Error::from)?;
+            // Linux resolves /proc/self/fd/<n> in the child. Clearing CLOEXEC
+            // intentionally transfers this one capability across exec;
+            // TempWorld retains ownership in the harness until the child exits.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            fcntl_setfd(&world_dir, FdFlags::empty()).map_err(io::Error::from)?;
+            let path = world_path.canonicalize()?;
+            Ok(Self {
+                path,
+                temp_dir: Some(temp_dir),
+                _storage_dir: storage_dir,
+                _world_dir: world_dir,
+            })
         }
-        Ok(Self {
-            path: dest.to_path_buf(),
-            removed: false,
-        })
     }
 
     /// The copy's root directory (absolute).
@@ -378,33 +449,31 @@ impl TempWorld {
         &self.path
     }
 
+    /// Path the child server consumes. Linux names the retained directory
+    /// descriptor; platforms without a traversable fd namespace use the fresh
+    /// private pathname documented in the module threat model.
+    pub fn server_path(&self) -> PathBuf {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        return descriptor_path(&self._world_dir);
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        self.path.clone()
+    }
+
     /// Hash the copy with the same walker used on the source, so copy fidelity
     /// is asserted on identical fingerprints.
     pub fn hash_tree(&self) -> Result<Vec<TreeEntry>, Error> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        return hash_tree(&descriptor_path(&self._world_dir));
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         hash_tree(&self.path)
     }
 
     /// Deterministically remove the copy. Idempotent.
     pub fn cleanup(&mut self) -> Result<(), Error> {
-        if self.removed {
-            return Ok(());
+        if let Some(temp_dir) = self.temp_dir.take() {
+            temp_dir.close()?;
         }
-        if self.path.exists() {
-            fs::remove_dir_all(&self.path)?;
-        }
-        self.removed = true;
         Ok(())
-    }
-}
-
-impl Drop for TempWorld {
-    fn drop(&mut self) {
-        if self.removed {
-            return;
-        }
-        // Best-effort: cleanup failure on the panic/error path must not mask the
-        // original error (mirrors ChildServer's kill-on-drop).
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -640,36 +709,60 @@ mod tests {
     }
 
     #[test]
-    fn temp_world_setup_removes_stale_and_cleanup_removes_the_copy() {
+    fn temp_world_uses_private_unique_parents_and_cleanup_removes_them() {
         let src = fixture_world("temp");
-        let dest = sibling(&src, "temp");
-        cleanup(&dest);
-        fs::create_dir_all(&dest).unwrap();
-        // A stale leftover from a "crashed previous run" must be replaced by a
-        // fresh copy, not kept.
-        fs::write(dest.join("stale.txt"), b"stale").unwrap();
+        let storage = sibling(&src, "storage");
+        cleanup(&storage);
+        fs::create_dir_all(&storage).unwrap();
 
-        let mut temp = TempWorld::create(&src, &dest).unwrap();
-        assert_eq!(temp.path(), dest);
-        assert!(
-            !dest.join("stale.txt").exists(),
-            "stale leftover must be cleared before the fresh copy"
+        let mut first = TempWorld::create(&src, &storage).unwrap();
+        let mut second = TempWorld::create(&src, &storage).unwrap();
+        assert_ne!(
+            first.path().parent(),
+            second.path().parent(),
+            "each disposable copy needs an unpredictable per-run parent"
         );
-        assert_copy_equals_source(&hash_tree(&src).unwrap(), &temp.hash_tree().unwrap())
+        assert!(
+            first
+                .path()
+                .parent()
+                .unwrap()
+                .starts_with(storage.canonicalize().unwrap()),
+            "the private parent must stay beneath the requested storage root"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(first.path().parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "the per-run parent must be owner-only"
+        );
+        assert_copy_equals_source(&hash_tree(&src).unwrap(), &first.hash_tree().unwrap())
             .expect("the fresh copy is faithful");
 
-        temp.cleanup().unwrap();
-        assert!(!dest.exists(), "cleanup must remove the copy");
+        let first_parent = first.path().parent().unwrap().to_owned();
+        let second_parent = second.path().parent().unwrap().to_owned();
+        first.cleanup().unwrap();
+        second.cleanup().unwrap();
+        assert!(!first_parent.exists(), "cleanup must remove the first copy");
+        assert!(
+            !second_parent.exists(),
+            "cleanup must remove the second copy"
+        );
         // Idempotent: a second cleanup is a no-op, and Drop is a no-op too.
-        temp.cleanup().unwrap();
+        first.cleanup().unwrap();
 
         cleanup(&src);
+        cleanup(&storage);
     }
 
     #[test]
     fn temp_world_refuses_aliasing_destinations() {
         let src = fixture_world("alias");
-        // The destination may not be the source itself, nor nested inside it.
+        // Storage may not be the source itself, nor nested inside it.
         let err = TempWorld::create(&src, &src).unwrap_err();
         assert!(
             matches!(err, Error::Gate(_)),
@@ -685,6 +778,114 @@ mod tests {
         cleanup(&src);
     }
 
+    #[test]
+    fn temp_world_refuses_source_nested_under_stale_storage_without_mutation() {
+        let storage = std::env::temp_dir().join(format!(
+            "rivet-load-world-reverse-containment-{}",
+            std::process::id()
+        ));
+        cleanup(&storage);
+        let source = storage.join("copied-world/launcher-save");
+        fs::create_dir_all(&source).unwrap();
+        let sentinel = source.join("source-sentinel.txt");
+        fs::write(&sentinel, b"launcher source must survive").unwrap();
+        fs::write(storage.join("stale.txt"), b"stale destination evidence").unwrap();
+
+        let err = TempWorld::create(&source, &storage).unwrap_err();
+        assert!(
+            matches!(err, Error::Gate(_)) && err.to_string().contains("contains"),
+            "reverse containment must fail as a safety gate: {err}"
+        );
+        assert_eq!(
+            fs::read(&sentinel).unwrap(),
+            b"launcher source must survive",
+            "the nested source sentinel must be byte-identical after rejection"
+        );
+        assert_eq!(
+            fs::read(storage.join("stale.txt")).unwrap(),
+            b"stale destination evidence",
+            "rejection must happen before any stale-storage cleanup"
+        );
+
+        cleanup(&storage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_private_copy_ignores_stale_predictable_path_alias() {
+        let src = fixture_world("stale-predictable-alias");
+        let storage = sibling(&src, "stale-predictable-storage");
+        cleanup(&storage);
+        fs::create_dir_all(&storage).unwrap();
+        let stale = storage.join("copied-world");
+        std::os::unix::fs::symlink(&src, &stale).unwrap();
+        let source_before = hash_tree(&src).unwrap();
+
+        let mut temp = TempWorld::create(&src, &storage).unwrap();
+        assert_ne!(
+            temp.path(),
+            stale,
+            "the copy must not reuse the formerly predictable destination"
+        );
+        assert!(
+            fs::symlink_metadata(&stale)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "creating the fresh copy must not remove or follow stale caller-owned storage"
+        );
+        assert_copy_equals_source(&source_before, &temp.hash_tree().unwrap()).unwrap();
+        assert_source_unchanged(&source_before, &hash_tree(&src).unwrap()).unwrap();
+
+        temp.cleanup().unwrap();
+        fs::remove_file(stale).unwrap();
+        cleanup(&src);
+        cleanup(&storage);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn retained_descriptor_defeats_visible_world_path_replacement() {
+        let src = fixture_world("descriptor-replacement");
+        let storage = sibling(&src, "descriptor-storage");
+        cleanup(&storage);
+        fs::create_dir_all(&storage).unwrap();
+        let mut temp = TempWorld::create(&src, &storage).unwrap();
+        let visible_world = temp.path().to_owned();
+        let displaced_world = visible_world.with_file_name("displaced-world");
+
+        fs::rename(&visible_world, &displaced_world).unwrap();
+        std::os::unix::fs::symlink(&src, &visible_world).unwrap();
+        fs::write(displaced_world.join("level.dat"), b"retained copy").unwrap();
+
+        assert_eq!(
+            fs::read(visible_world.join("level.dat")).unwrap(),
+            [0u8, 1, 2, 3],
+            "the adversarial visible replacement points at the source"
+        );
+        let child = std::process::Command::new("/bin/cat")
+            .arg(temp.server_path().join("level.dat"))
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "child must consume the inherited fd"
+        );
+        assert_eq!(
+            child.stdout, b"retained copy",
+            "the child must read the retained copy, not the replacement pathname"
+        );
+        assert_eq!(
+            fs::read(src.join("level.dat")).unwrap(),
+            [0u8, 1, 2, 3],
+            "the source must remain unchanged"
+        );
+
+        temp.cleanup().unwrap();
+        cleanup(&src);
+        cleanup(&storage);
+    }
+
     #[cfg(unix)]
     #[test]
     fn temp_world_refuses_a_symlinked_source_and_cleans_a_partial_copy() {
@@ -695,12 +896,17 @@ mod tests {
         cleanup(&dest);
         std::os::unix::fs::symlink(&src, &source_link).unwrap();
 
+        fs::create_dir_all(&dest).unwrap();
         let err = TempWorld::create(&source_link, &dest).unwrap_err();
         assert!(
             matches!(err, Error::Gate(_)) && err.to_string().contains("is a symlink"),
             "the root source alias must be refused: {err}"
         );
-        assert!(!dest.exists(), "a refused source must not leave a copy");
+        assert_eq!(
+            fs::read_dir(&dest).unwrap().count(),
+            0,
+            "a refused source must not create a private copy"
+        );
 
         fs::remove_file(&source_link).unwrap();
         cleanup(&src);
