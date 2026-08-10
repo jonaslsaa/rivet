@@ -196,8 +196,6 @@ pub enum RegionBackedBootError {
     SectionReconstructionUnavailable,
     #[error("UNVERIFIED biome registry id {0} is outside the generated registry")]
     UnknownBiomeId(u16),
-    #[error("UNVERIFIED region-backed chunk writes/generation are disabled")]
-    WritesAndGenerationDisabled,
 }
 
 #[cfg(test)]

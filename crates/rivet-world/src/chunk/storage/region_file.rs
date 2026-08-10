@@ -544,9 +544,12 @@ impl RegionFile {
     /// construction, exactly like Paper: recalc returns true for any CHUNK
     /// file whose name parses).
     ///
-    /// Returns `None` when the chunk is absent or the stream is corrupt; a
-    /// successful read hands back the codec-unwrapped payload, which the caller
-    /// wraps in a `DataInputStream` and parses as NBT.
+    /// Returns `None` when the chunk is absent. Writable/Paper-compatible mode
+    /// also degrades unrecoverable stream corruption to `None`; strict
+    /// read-only mode returns `InvalidData` so boot never mistakes an allocated
+    /// corrupt chunk for an absent one. A successful read hands back the
+    /// codec-unwrapped payload, which the caller wraps in a `DataInputStream`
+    /// and parses as NBT.
     pub fn get_chunk_data_input_stream(
         &mut self,
         pos: &ChunkPos,

@@ -5,7 +5,7 @@
 //! readiness gate, and deterministic SIGTERM shutdown.
 
 use std::fs;
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -124,15 +124,47 @@ fn disposable_level_fails_visible_before_ready_at_current_codec_boundary() {
     fs::create_dir_all(level.path().join("dimensions/minecraft/overworld/region"))
         .expect("overworld region");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_rivet-server"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rivet-server"))
         .arg("--level")
         .arg(level.path())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("spawn rivet-server");
 
-    assert!(!output.status.success());
-    assert!(!String::from_utf8_lossy(&output.stdout).contains(RIVET_READY));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let deadline = Instant::now() + READY_TIMEOUT;
+    let exited_before_timeout = loop {
+        if child.try_wait().expect("try_wait").is_some() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill hung rivet-server");
+            break false;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    };
+    let status = child.wait().expect("wait for rivet-server");
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+
+    assert!(
+        exited_before_timeout,
+        "server hung; stdout={stdout}; stderr={stderr}"
+    );
+    assert!(!status.success());
+    assert!(!stdout.contains(RIVET_READY));
     assert!(stderr.contains("RIVET_WORLD_UNVERIFIED"), "{stderr}");
     assert!(stderr.contains("level.dat codecs"), "{stderr}");
     assert!(stderr.contains("#323"), "{stderr}");
