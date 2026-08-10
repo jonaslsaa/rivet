@@ -46,16 +46,19 @@ OUT_DIR="$(dirname "$OUT_FILE")"
 mkdir -p "$OUT_DIR"
 java -Xms256M -Xmx2G -cp "$CP" SplineProbe \
   --output "$OUT_DIR" --paper "$PAPER_PIN"
-echo "wrote $OUT_FILE"
+# The probe hardcodes the output basename `spline-goldens.json` (SplineProbe
+# writes `output/spline-goldens.json`), so `$OUT_FILE` only selects the output
+# directory. Hash what the probe actually wrote, never `$OUT_FILE` itself.
+GOLDENS_FILE="$OUT_DIR/spline-goldens.json"
+echo "wrote $GOLDENS_FILE"
 
 # Refresh the fixture manifest so the regenerated goldens hash matches what the
 # gate's `rivet-oracle verify` expects (the text/worldgen kinds regenerate their
 # manifests in-process; the spline kind is script-driven, so the script owns it).
-SHA="$(shasum -a 256 "$OUT_FILE" | awk '{print $1}')"
-BYTES="$(wc -c < "$OUT_FILE" | tr -d ' ')"
+SHA="$(shasum -a 256 "$GOLDENS_FILE" | awk '{print $1}')"
+BYTES="$(wc -c < "$GOLDENS_FILE" | tr -d ' ')"
 MANIFEST="$OUT_DIR/manifest.json"
-GOLDEN_BASENAME="$(basename "$OUT_FILE")"
-NOTE="Paper-grounded CubicSpline/BoundedFloatFunction value-leaf goldens (issue #372): \`spline-goldens.json\` records Paper's exact min/max/parity/sample outputs as hex-float + Java-string forms, asserted bit-exactly by crates/rivet-util/tests/cubic_spline.rs. Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/SplineProbe.java; regenerate with \`scripts/run_spline_probe.sh\`."
+NOTE="Paper-grounded CubicSpline/BoundedFloatFunction value-leaf goldens (issue #372): \`spline-goldens.json\` records Paper's exact min/max/sample outputs as hex-float, asserted bit-exactly by crates/rivet-util/tests/cubic_spline.rs; the parity strings are informational (the tests check the parity format via hardcoded strings). Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/SplineProbe.java; regenerate with \`scripts/run_spline_probe.sh\`."
 printf '%s\n' \
   '{' \
   '  "format": 1,' \
@@ -64,7 +67,7 @@ printf '%s\n' \
   "  \"note\": \"$NOTE\"," \
   '  "captured": [' \
   '    {' \
-  "      \"path\": \"$GOLDEN_BASENAME\"," \
+  '      "path": "spline-goldens.json",' \
   "      \"sha256\": \"$SHA\"," \
   "      \"bytes\": $BYTES" \
   '    }' \
