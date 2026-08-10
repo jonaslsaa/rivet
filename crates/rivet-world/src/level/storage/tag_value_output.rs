@@ -14,16 +14,21 @@
 //! Rust's `CompoundTag` is a value, so the port models the write-back with a
 //! per-node `Rc<RefCell<…>>` plus a `sync` closure that copies the node's
 //! current content into its parent slot and propagates the parent's own sync.
-//! Every mutation ends in `sync()`, so the root (and `build_result()`) always
-//! reflects children. There is no reference cycle: a node holds its parent's
-//! `sync` closure (an `Rc<dyn Fn>`), while a parent only ever holds *snapshot
-//! clones* of its children's content — never the children's `Rc`.
+//! Every mutation ends in `sync()`, so the root (and `build_result()`) reflects
+//! children; a node's sync only writes back while its parent slot still holds
+//! the last snapshot it placed, so a child retained after the parent
+//! `discard()`s or replaces its field is detached and its writes stay invisible
+//! (Java's shared-object identity). There is no reference cycle: a node holds
+//! its parent's `sync` closure (an `Rc<dyn Fn>`), while a parent only ever
+//! holds *snapshot clones* of its children's content — never the children's
+//! `Rc`.
 //!
 //! ## Ops/context
 //!
-//! Every Paper 26.2 consumer of `TagValueOutput` uses the registry-context
-//! factory (`createWithContext`); `createWithoutContext`/`createWrappingGlobal`
-//! have no in-tree callers. This port therefore uses a single ops type
+//! Every Paper 26.2 consumer of `TagValueOutput` uses a registry-context
+//! factory (`createWithContext`/`createWrappingWithContext`);
+//! `createWithoutContext`/`createWrappingGlobal` have no in-tree callers. This
+//! port therefore uses a single ops type
 //! (`TagContextOps` = `RegistryOps<Tag, NbtOps>`), with the context-less
 //! factories building over an empty `RegistryAccess`. A registry codec decoded
 //! through the context-less ops reports the missing registry (Java's plain
@@ -65,7 +70,8 @@ impl fmt::Debug for TagValueOutput {
     }
 }
 
-/// The single-tick `ProblemReporter` handle (OWNERSHIP's single sync tick).
+/// The `ProblemReporter` handle — `Rc` (non-`Send`), confined to the tick
+/// thread per OWNERSHIP.
 type Reporter = Rc<dyn ProblemReporter>;
 
 impl TagValueOutput {
@@ -99,7 +105,11 @@ impl TagValueOutput {
 
     /// `TagValueOutput.createWithoutContext(ProblemReporter)`.
     ///
-    /// Built over an empty registry access (see the module doc).
+    /// RivetTodo(#382): Java builds this over plain `NbtOps`; the port pins
+    /// every factory to `TagContextOps`, so an empty `RegistryAccess` reports
+    /// the missing registry ("Unknown registry: …") where Java's plain `NbtOps`
+    /// reports "Not a registry ops" — message-only divergence on an unused
+    /// path (see the module doc).
     pub fn create_without_context(problem_reporter: Reporter) -> ValueOutput {
         TagValueOutput::create_with_context(problem_reporter, RegistryAccess::empty())
     }
@@ -120,6 +130,10 @@ impl TagValueOutput {
     }
 
     /// `TagValueOutput.createWrappingGlobal(ProblemReporter, CompoundTag)`.
+    ///
+    /// Same `TagContextOps` pinning as `createWithoutContext` (see the
+    /// `RivetTodo` there): empty `RegistryAccess` instead of Java's plain
+    /// `NbtOps`.
     pub fn create_wrapping_global(problem_reporter: Reporter, output: CompoundTag) -> ValueOutput {
         TagValueOutput::create_wrapping_with_context(
             problem_reporter,
@@ -293,6 +307,12 @@ impl TagValueOutput {
     pub fn child(&self, name: &str) -> ValueOutput {
         let name = name.to_string();
         let child_cell = Rc::new(RefCell::new(CompoundTag::new()));
+        // The snapshot this node last wrote into its parent slot. A write-back
+        // only happens while the parent slot still holds that exact snapshot —
+        // once the parent discards or replaces the field (or `discardLast`
+        // removes a list slot), the retained child is detached and its writes
+        // stay invisible, matching Java's shared-object identity semantics.
+        let last_placed = Rc::new(RefCell::new(Some(Tag::Compound(CompoundTag::new()))));
         {
             let mut output = self.output.borrow_mut();
             output.put(name.to_string(), Tag::Compound(child_cell.borrow().clone()));
@@ -301,13 +321,23 @@ impl TagValueOutput {
         let parent_sync = self.sync.clone();
         let sync_child_cell = Rc::clone(&child_cell);
         let sync_name = name.clone();
+        let sync_last_placed = Rc::clone(&last_placed);
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            parent_cell.borrow_mut().put(
-                sync_name.clone(),
-                Tag::Compound(sync_child_cell.borrow().clone()),
-            );
-            if let Some(parent_sync) = &parent_sync {
-                parent_sync();
+            let still_owned = {
+                let parent = parent_cell.borrow();
+                let last = sync_last_placed.borrow();
+                match (last.as_ref(), parent.get(&sync_name)) {
+                    (Some(prev), Some(cur)) => prev == cur,
+                    _ => false,
+                }
+            };
+            if still_owned {
+                let tag = Tag::Compound(sync_child_cell.borrow().clone());
+                parent_cell.borrow_mut().put(sync_name.clone(), tag.clone());
+                *sync_last_placed.borrow_mut() = Some(tag);
+                if let Some(parent_sync) = &parent_sync {
+                    parent_sync();
+                }
             }
         });
         ValueOutput::Tag(TagValueOutput::new(
@@ -322,6 +352,7 @@ impl TagValueOutput {
     pub fn children_list(&self, name: &str) -> ValueOutputList {
         let name = name.to_string();
         let list_cell = Rc::new(RefCell::new(ListTag::new()));
+        let last_placed = Rc::new(RefCell::new(Some(Tag::List(ListTag::new()))));
         {
             let mut output = self.output.borrow_mut();
             output.put(name.to_string(), Tag::List(list_cell.borrow().clone()));
@@ -330,13 +361,23 @@ impl TagValueOutput {
         let parent_sync = self.sync.clone();
         let sync_list_cell = Rc::clone(&list_cell);
         let sync_name = name.clone();
+        let sync_last_placed = Rc::clone(&last_placed);
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            parent_cell.borrow_mut().put(
-                sync_name.clone(),
-                Tag::List(sync_list_cell.borrow().clone()),
-            );
-            if let Some(parent_sync) = &parent_sync {
-                parent_sync();
+            let still_owned = {
+                let parent = parent_cell.borrow();
+                let last = sync_last_placed.borrow();
+                match (last.as_ref(), parent.get(&sync_name)) {
+                    (Some(prev), Some(cur)) => prev == cur,
+                    _ => false,
+                }
+            };
+            if still_owned {
+                let tag = Tag::List(sync_list_cell.borrow().clone());
+                parent_cell.borrow_mut().put(sync_name.clone(), tag.clone());
+                *sync_last_placed.borrow_mut() = Some(tag);
+                if let Some(parent_sync) = &parent_sync {
+                    parent_sync();
+                }
             }
         });
         ValueOutputList::Tag(ListWrapper {
@@ -355,6 +396,7 @@ impl TagValueOutput {
     {
         let name = name.to_string();
         let list_cell = Rc::new(RefCell::new(ListTag::new()));
+        let last_placed = Rc::new(RefCell::new(Some(Tag::List(ListTag::new()))));
         {
             let mut output = self.output.borrow_mut();
             output.put(name.to_string(), Tag::List(list_cell.borrow().clone()));
@@ -363,13 +405,23 @@ impl TagValueOutput {
         let parent_sync = self.sync.clone();
         let sync_list_cell = Rc::clone(&list_cell);
         let sync_name = name.clone();
+        let sync_last_placed = Rc::clone(&last_placed);
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            parent_cell.borrow_mut().put(
-                sync_name.clone(),
-                Tag::List(sync_list_cell.borrow().clone()),
-            );
-            if let Some(parent_sync) = &parent_sync {
-                parent_sync();
+            let still_owned = {
+                let parent = parent_cell.borrow();
+                let last = sync_last_placed.borrow();
+                match (last.as_ref(), parent.get(&sync_name)) {
+                    (Some(prev), Some(cur)) => prev == cur,
+                    _ => false,
+                }
+            };
+            if still_owned {
+                let tag = Tag::List(sync_list_cell.borrow().clone());
+                parent_cell.borrow_mut().put(sync_name.clone(), tag.clone());
+                *sync_last_placed.borrow_mut() = Some(tag);
+                if let Some(parent_sync) = &parent_sync {
+                    parent_sync();
+                }
             }
         });
         TypedOutputList::Tag(TypedListWrapper {
@@ -497,6 +549,9 @@ impl ListWrapper {
     /// `ValueOutputList.addChild()`.
     pub fn add_child(&self) -> ValueOutput {
         let child_cell = Rc::new(RefCell::new(CompoundTag::new()));
+        // The snapshot this node last wrote into its list slot (see the
+        // `last_placed` note in `TagValueOutput::child`).
+        let last_placed = Rc::new(RefCell::new(Some(Tag::Compound(CompoundTag::new()))));
         let index = {
             let mut list = self.output.borrow_mut();
             list.add(Tag::Compound(child_cell.borrow().clone()));
@@ -505,12 +560,23 @@ impl ListWrapper {
         let list_cell = Rc::clone(&self.output);
         let list_sync = self.sync.clone();
         let sync_child_cell = Rc::clone(&child_cell);
+        let sync_last_placed = Rc::clone(&last_placed);
         let sync: Rc<dyn Fn()> = Rc::new(move || {
-            list_cell
-                .borrow_mut()
-                .set(index, Tag::Compound(sync_child_cell.borrow().clone()));
-            if let Some(list_sync) = &list_sync {
-                list_sync();
+            let still_owned = {
+                let list = list_cell.borrow();
+                let last = sync_last_placed.borrow();
+                match (last.as_ref(), list.get_nullable(index)) {
+                    (Some(prev), Some(cur)) => prev == cur,
+                    _ => false,
+                }
+            };
+            if still_owned {
+                let tag = Tag::Compound(sync_child_cell.borrow().clone());
+                list_cell.borrow_mut().set(index, tag.clone());
+                *sync_last_placed.borrow_mut() = Some(tag);
+                if let Some(list_sync) = &list_sync {
+                    list_sync();
+                }
             }
         });
         let reporter = self
@@ -519,6 +585,9 @@ impl ListWrapper {
                 self.field_name.clone(),
                 index as i32,
             )));
+        // Java's `addChild` adds the empty child to the shared list object
+        // immediately, so propagate the new element to the parent right away.
+        self.sync();
         ValueOutput::Tag(TagValueOutput::new(
             reporter,
             Arc::clone(&self.ops),
@@ -740,6 +809,25 @@ mod tests {
         assert_eq!(b.get_int("x"), Some(5), "grandchild write visible at root");
     }
 
+    /// `addChild` adds the empty child to the shared list immediately — Java's
+    /// `ListWrapper.addChild` does `this.output.add(child)`, so `buildResult`
+    /// right after `addChild` (before any write) already shows one element.
+    #[test]
+    fn add_child_empty_element_is_immediately_visible() {
+        let out = output(reporter());
+        let list = out.children_list("items");
+        list.add_child();
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let list_tag = result.get_list("items").expect("list present");
+        assert_eq!(
+            list_tag.size(),
+            1,
+            "the empty child is visible before any write, got: {list_tag:?}"
+        );
+    }
+
     /// `childrenList` + `addChild` — a grandchild's writes propagate all the
     /// way to the root's `buildResult`.
     #[test]
@@ -836,6 +924,107 @@ mod tests {
         assert!(out.is_empty());
         out.child("sub").put_int("x", 1);
         assert!(!out.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Detachment after parent discard/overwrite (Java object-identity
+    // semantics: `discard`/`store`/`put*` replace the parent map entry, so a
+    // retained child's writes go into its detached object and are invisible to
+    // the parent).
+    // -----------------------------------------------------------------------
+
+    /// A retained child must not reinsert its field after the parent discards
+    /// it (Java: `discard` removes the map entry; the child's object is
+    /// detached, so later writes are invisible to the parent).
+    #[test]
+    fn child_write_after_parent_discard_is_invisible() {
+        let out = output(reporter());
+        let child = out.child("x");
+        child.put_int("a", 1);
+        out.discard("x");
+        child.put_int("b", 2);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        assert!(
+            !result.contains("x"),
+            "a retained child's write must not reinsert a discarded field, got: {result:?}"
+        );
+    }
+
+    /// A `childrenList` retained after the parent discards its field must not
+    /// reinsert the field on `addChild`.
+    #[test]
+    fn children_list_write_after_parent_discard_is_invisible() {
+        let out = output(reporter());
+        let list = out.children_list("items");
+        out.discard("items");
+        list.add_child().put_int("v", 1);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        assert!(
+            !result.contains("items"),
+            "a retained list's write must not reinsert a discarded field, got: {result:?}"
+        );
+    }
+
+    /// A typed `list` retained after the parent discards its field must not
+    /// reinsert the field on `add`.
+    #[test]
+    fn typed_list_add_after_parent_discard_is_invisible() {
+        let out = output(reporter());
+        let list = out.list("nums", codec::int_codec::<TagContextOps>());
+        out.discard("nums");
+        list.add(&5);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        assert!(
+            !result.contains("nums"),
+            "a retained typed list's add must not reinsert a discarded field, got: {result:?}"
+        );
+    }
+
+    /// A list child retained after `discardLast` removes its slot must not
+    /// corrupt the list on write (Java: the removed object is detached and
+    /// invisible; Rust must not panic on the stale index).
+    #[test]
+    fn retained_list_child_write_after_discard_last_is_invisible() {
+        let out = output(reporter());
+        let list = out.children_list("items");
+        let child = list.add_child();
+        child.put_int("v", 1);
+        list.discard_last();
+        child.put_int("w", 2);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        let list_tag = result.get_list("items").expect("list present");
+        assert_eq!(
+            list_tag.size(),
+            0,
+            "discardLast removes the child; a retained write stays invisible, got: {list_tag:?}"
+        );
+    }
+
+    /// A parent `store`/`put*` that replaces a field detaches a retained child
+    /// (Java: the map entry now references a different object).
+    #[test]
+    fn child_write_after_parent_overwrite_is_invisible() {
+        let out = output(reporter());
+        let child = out.child("x");
+        child.put_int("a", 1);
+        out.put_int("x", 5);
+        child.put_int("b", 2);
+        let result = match &out {
+            ValueOutput::Tag(tag) => tag.build_result(),
+        };
+        assert_eq!(
+            result.get_int("x"),
+            Some(5),
+            "parent overwrite detaches the child; the child's later write stays invisible, got: {result:?}"
+        );
     }
 
     /// Wrapping an existing tag (Paper's `createWrappingGlobal`) writes into it.

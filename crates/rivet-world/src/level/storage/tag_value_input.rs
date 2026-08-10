@@ -39,7 +39,8 @@ pub struct TagValueInput {
     input: CompoundTag,
 }
 
-/// The single-tick `ProblemReporter` handle (OWNERSHIP's single sync tick).
+/// The `ProblemReporter` handle — `Rc` (non-`Send`), confined to the tick
+/// thread per OWNERSHIP.
 type Reporter = Rc<dyn ProblemReporter>;
 
 impl TagValueInput {
