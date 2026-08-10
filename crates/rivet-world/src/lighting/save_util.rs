@@ -229,10 +229,9 @@ mod tests {
     }
 
     /// Read a committed Paper 26.2 FULL-status chunk fixture for a dimension.
-    /// When the fixture is absent the spike cannot run — the test binary fails
-    /// loudly (this panic), and the oracle verify gate independently fails with
-    /// exit 1 because the chunk payload is a manifest-captured fixture file.
-    /// Neither layer ever silently skips.
+    /// A missing fixture fails the test loudly (this panic); the oracle verify
+    /// gate independently fails with exit 1 because the chunk payload is a
+    /// manifest-captured fixture file. No layer silently skips.
     fn load_fixture(dim: &str) -> CompoundTag {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tools/rivet-oracle/fixtures/chunk")
