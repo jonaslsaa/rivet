@@ -10,9 +10,11 @@ use crate::plugin::loader::library::LibraryStore;
 ///
 /// Holds the registered library paths in an `ArrayList<Path>` (insertion
 /// order, duplicates retained) and exposes them by reference via
-/// `getPaths()`. The port keeps the same ordering and duplicate semantics and
-/// returns the live accumulated slice, which grows with later `add_library`
-/// calls — Java's `getPaths()` returns the live backing list.
+/// `getPaths()`. The port keeps the same ordering and duplicate semantics:
+/// `get_paths()` returns the current accumulated paths, and each subsequent
+/// `add_library` is reflected in the next `get_paths()` call. Java's
+/// `getPaths()` returns the live backing list; safe Rust has no live
+/// slice view, so callers re-borrow after each mutation.
 #[derive(Debug, Default)]
 pub struct PaperLibraryStore {
     paths: Vec<PathBuf>,
@@ -24,9 +26,10 @@ impl PaperLibraryStore {
         Self::default()
     }
 
-    /// Java `getPaths()` — the backing `List<Path>`, by reference. The caller
-    /// observes the store's own list, so it grows with subsequent
-    /// `addLibrary` calls.
+    /// Java `getPaths()` — the current accumulated `List<Path>`, by reference.
+    /// `add_library` takes `&mut self`, so a held borrow cannot overlap a push;
+    /// callers re-observe via a fresh `get_paths()` call after each addition
+    /// and always see the full accumulated list.
     pub fn get_paths(&self) -> &[PathBuf] {
         &self.paths
     }
