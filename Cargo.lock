@@ -754,6 +754,7 @@ dependencies = [
  "indexmap",
  "lz4_flex",
  "pcre2",
+ "rivet-core",
  "rivet-nbt",
  "rivet-protocol",
  "rivet-registry",

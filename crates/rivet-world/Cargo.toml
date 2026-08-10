@@ -49,6 +49,9 @@ rivet-serialization = { workspace = true }
 # read `CompoundTag`; rivet-nbt is now a production dependency.
 rivet-nbt = { workspace = true }
 rivet-util = { workspace = true }
+# `LevelVersion.parse` (level.dat header) falls back to the pinned 26.2
+# `SharedConstants` current-version constants (`rivet-core::shared_constants`).
+rivet-core = { workspace = true }
 # The `.mcc` oversized-chunk commit op writes to a `tmp...` file in the
 # external-file directory and atomically renames it over the target
 # (`Files.move(tmp, target, REPLACE_EXISTING)`); the temp path must outlive
