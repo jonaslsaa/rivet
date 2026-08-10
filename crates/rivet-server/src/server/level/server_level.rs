@@ -73,6 +73,10 @@ pub struct ServerLevelConfig {
     /// tick-thread driver of `ClientboundSetSimulationDistancePacket` and the
     /// Moonrise `tickViewDistance` (issue #100).
     pub simulation_distance: i32,
+    /// Whether absent view chunks may repeat the deterministic spawn content.
+    /// This is only true for the legacy no-level superflat fixture; a
+    /// region-backed level must fail instead of synthesizing disk data.
+    pub allow_missing_chunk_fallback: bool,
 }
 
 impl Default for ServerLevelConfig {
@@ -89,6 +93,7 @@ impl Default for ServerLevelConfig {
             respawn_data: RespawnData::of(dimension.clone(), spawn_pos, 0.0, 0.0),
             view_distance: 4,
             simulation_distance: 4,
+            allow_missing_chunk_fallback: true,
         }
     }
 }
@@ -114,6 +119,7 @@ pub struct ServerLevel {
     /// The simulation distance (the Moonrise world `tickViewDistance` driver;
     /// the M1 world pins it to the `simulation-distance=4` fixture).
     simulation_distance: i32,
+    allow_missing_chunk_fallback: bool,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
     /// would cross threads.
@@ -141,6 +147,7 @@ impl ServerLevel {
             chunk_map,
             view,
             simulation_distance: config.simulation_distance,
+            allow_missing_chunk_fallback: config.allow_missing_chunk_fallback,
             _confinement: std::marker::PhantomData,
         }
     }
@@ -224,6 +231,12 @@ impl ServerLevel {
     /// unset default.
     pub fn send_view_distance(&self) -> i32 {
         -1
+    }
+
+    /// Whether the legacy no-level fixture may repeat spawn content for an
+    /// unloaded position. Region-backed composition sets this to false.
+    pub fn allows_missing_chunk_fallback(&self) -> bool {
+        self.allow_missing_chunk_fallback
     }
 }
 

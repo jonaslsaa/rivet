@@ -97,6 +97,7 @@ fn config_with_threshold(compression_threshold: i32) -> ServerConfig {
         lifecycle_capacity: 64,
         enable_join: false,
         keepalive_timeout: Duration::from_secs(30),
+        level_path: None,
     }
 }
 
@@ -1178,6 +1179,7 @@ fn config_with_join() -> ServerConfig {
         lifecycle_capacity: 1024,
         enable_join: true,
         keepalive_timeout: Duration::from_secs(30),
+        level_path: None,
     }
 }
 

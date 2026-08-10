@@ -48,7 +48,13 @@ fn main() -> ExitCode {
         .init();
 
     let config = server_config_from_args();
-    let server = Server::new(config);
+    let server = match Server::try_new(config) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("RIVET_WORLD_UNVERIFIED: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -130,7 +136,14 @@ fn config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
                 let raw = args.get(i).expect("--port requires a value (e.g. 25565)");
                 config.port = raw.parse().expect("invalid --port (expected 0-65535)");
             }
-            other => panic!("unknown argument {other:?} (expected --host/--port)"),
+            "--level" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .expect("--level requires a disposable world directory path");
+                config.level_path = Some(raw.into());
+            }
+            other => panic!("unknown argument {other:?} (expected --host/--port/--level)"),
         }
         i += 1;
     }
@@ -158,6 +171,19 @@ mod tests {
         );
         assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 25599);
+    }
+
+    #[test]
+    fn parses_disposable_level_path() {
+        let config = config_from_args(
+            ["--level", "/tmp/rivet-disposable-world"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        assert_eq!(
+            config.level_path.as_deref(),
+            Some(std::path::Path::new("/tmp/rivet-disposable-world"))
+        );
     }
 
     #[test]

@@ -710,6 +710,7 @@ dependencies = [
  "rivet-util",
  "rivet-world",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

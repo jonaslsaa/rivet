@@ -245,6 +245,9 @@ pub struct RegionFile {
     /// `sync` — Java opens the FileChannel with `DSYNC` when set. Rivet
     /// emulates it with a `sync_data` after each `write_header`.
     sync: bool,
+    /// Existing-only mode used by region-backed boot. It forbids header
+    /// repair/backups and makes close descriptor-only.
+    read_only: bool,
     /// Legacy Aikar oversized flags loaded from `<region>.oversized.nbt`.
     /// This slice only reads them; the legacy mutation surface stays absent.
     oversized: [u8; 1024],
@@ -270,6 +273,28 @@ impl RegionFile {
         version: RegionFileVersion,
         sync: bool,
     ) -> io::Result<Self> {
+        Self::open_with_mode(info, path, external_file_dir, version, sync, false)
+    }
+
+    /// Open an already-existing region through a read-only descriptor. Header
+    /// corruption is reported instead of repaired, backed up, or rewritten.
+    pub fn open_read_only(
+        info: RegionStorageInfo,
+        path: PathBuf,
+        external_file_dir: PathBuf,
+        version: RegionFileVersion,
+    ) -> io::Result<Self> {
+        Self::open_with_mode(info, path, external_file_dir, version, false, true)
+    }
+
+    fn open_with_mode(
+        info: RegionStorageInfo,
+        path: PathBuf,
+        external_file_dir: PathBuf,
+        version: RegionFileVersion,
+        sync: bool,
+        read_only: bool,
+    ) -> io::Result<Self> {
         // Paper initializes Aikar metadata before validating the external
         // directory or opening the region channel; preserve that error order.
         let oversized = read_oversized_state(&path)?;
@@ -283,13 +308,17 @@ impl RegionFile {
         // TRUNCATE_EXISTING: a re-open must read the existing header (Paper
         // `RegionFile` constructor), and the header is only written by
         // `write_header`/`recalculate_header`.
-        #[allow(clippy::suspicious_open_options)]
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&path)?;
-        let can_recalc_header = info.is_chunk_data;
+        let file = if read_only {
+            OpenOptions::new().read(true).open(&path)?
+        } else {
+            #[allow(clippy::suspicious_open_options)]
+            OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&path)?
+        };
+        let can_recalc_header = info.is_chunk_data && !read_only;
         let mut region = Self {
             path,
             external_file_dir,
@@ -300,6 +329,7 @@ impl RegionFile {
             can_recalc_header,
             recalculate_count: 0,
             sync,
+            read_only,
             oversized,
         };
         region.used_sectors.force(0, 2);
@@ -340,6 +370,17 @@ impl RegionFile {
                     }
                     if sector_number < 2 || num_sectors <= 0 || (sector_number as u64) * 4096 > size
                     {
+                        if region.read_only {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "invalid header in read-only region {} at local chunk ({},{})",
+                                    region.path.display(),
+                                    i & 31,
+                                    i >> 5
+                                ),
+                            ));
+                        }
                         if region.can_recalc_header {
                             eprintln!(
                                 "Detected invalid header for regionfile {}! Recalculating header...",
@@ -372,6 +413,17 @@ impl RegionFile {
                             i >> 5,
                             region.path.display()
                         );
+                    }
+                    if failed_to_allocate && region.read_only {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "overlapping header allocation in read-only region {} at local chunk ({},{})",
+                                region.path.display(),
+                                i & 31,
+                                i >> 5
+                            ),
+                        ));
                     }
                     if failed_to_allocate && !region.can_recalc_header {
                         eprintln!(
@@ -411,6 +463,10 @@ impl RegionFile {
     /// the moonrise read path compares it to detect a recalc during a read.
     pub fn get_recalculate_count(&self) -> u64 {
         self.recalculate_count
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Paper's package-private `isOversized(x, z)` legacy Aikar flag lookup.
@@ -697,6 +753,10 @@ impl RegionFile {
     /// below mirrors that ordering; the close itself is a `drop` and cannot
     /// fail.
     pub fn close(&mut self) -> io::Result<()> {
+        if self.read_only {
+            self.file.take();
+            return Ok(());
+        }
         let pad_result = self.pad_to_full_sector();
         let force_result = self.file_mut().sync_all();
         self.file.take(); // FileChannel.close() — releases the descriptor

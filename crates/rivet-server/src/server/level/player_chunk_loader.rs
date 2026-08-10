@@ -356,6 +356,11 @@ impl PlayerChunkLoader {
 fn encode_chunk_with_light(pos: ChunkPos, world: &ServerLevel) -> Result<Vec<u8>, String> {
     let chunk = match world.chunk_map().get_chunk(pos) {
         Some(chunk) => chunk,
+        None if !world.allows_missing_chunk_fallback() => {
+            return Err(format!(
+                "UNVERIFIED region-backed chunk {pos} is not loaded; generation and superflat fallback are disabled"
+            ));
+        }
         None => world
             .chunk_map()
             .get_chunk(world.view().center())
@@ -448,6 +453,17 @@ mod tests {
 
     fn overworld() -> ServerLevel {
         ServerLevel::new(super::super::server_level::ServerLevelConfig::default())
+    }
+
+    #[test]
+    fn region_backed_policy_rejects_missing_chunk_without_spawn_fallback() {
+        let world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
+            allow_missing_chunk_fallback: false,
+            ..Default::default()
+        });
+        let error = encode_chunk_with_light(ChunkPos::new(1, 0), &world).unwrap_err();
+        assert!(error.contains("UNVERIFIED region-backed chunk"));
+        assert!(error.contains("fallback are disabled"));
     }
 
     /// The expected M1 send-set order: the `-5..5` × `-5..5` raster skipping
