@@ -29,8 +29,11 @@ pub trait LightEventListener {
     /// `hasLightWork()` — whether the engine has queued light updates.
     fn has_light_work(&self) -> bool;
 
-    /// `runLightUpdates()` — run queued light updates; returns the number of
-    /// updates run (Java returns the leftover budget from `runUpdates`).
+    /// `runLightUpdates()` — run queued light updates. Paper's
+    /// `LevelLightEngine.runLightUpdates()` returns `1` when there was light
+    /// work to run and `0` otherwise (its `hadUpdates ? 1 : 0`), not a count or
+    /// leftover budget; the port keeps the `i32` return so an implementor can
+    /// mirror that exact contract.
     fn run_light_updates(&mut self) -> i32;
 
     /// `updateSectionStatus(SectionPos, boolean)` — the section at `pos` became

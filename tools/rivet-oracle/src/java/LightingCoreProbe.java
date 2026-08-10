@@ -317,15 +317,15 @@ public final class LightingCoreProbe {
         }
         m.removeLayer(key);
         emit("storage.has.after.remove=" + m.hasLayer(key));
-        // NOTE on the copy() section: Java's `removeLayer`/`setLayer` do NOT
-        // clear the LRU cache, so `m.getLayer` below returns the STALE cached
-        // layer (the one `copyDataLayer` stored earlier, then removed), not the
-        // map's current layer. The three copy.* lines therefore record the
-        // cache-not-cleared behavior, NOT copy()'s reference semantics (fastutil
-        // `clone()` shares the DataLayer objects). The Rust port drops the cache
-        // and deep-copies each layer, which reproduces these exact three lines
-        // (same.reference=false, original.filled=false, copied.filled=true).
+        // copy() reference semantics: `removeLayer`/`setLayer` leave the LRU
+        // cache holding the stale pre-`copyDataLayer` layer, so clear the cache
+        // first (fastutil `clone()` copies the value array but shares the
+        // `DataLayer` objects — getLayer through the original and the copy must
+        // return the SAME object, and a fill through the copy is visible in the
+        // original). The Rust port drops the cache (pure read optimization) and
+        // shares the layers with `Rc<RefCell>`, reproducing these exact lines.
         m.setLayer(key, new DataLayer(0));
+        m.clearCache();
         TestStorageMap c = m.copy();
         emit("storage.copy.same.reference=" + (m.getLayer(key) == c.getLayer(key)));
         c.getLayer(key).fill(9);

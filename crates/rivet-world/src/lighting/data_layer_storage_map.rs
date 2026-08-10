@@ -19,51 +19,55 @@
 //! same reason. `clearCache()`/`disableCache()` become obsolete paths and are
 //! not ported.
 //!
-//! ## `copy()` semantics (value, not Java's reference sharing)
+//! ## Shared-layer semantics (`copy()` and the read/write views)
 //!
-//! Java's `copy()` is a shallow map clone: fastutil's `clone()` copies the
-//! value *array* but shares the `DataLayer` objects, so a layer mutated through
-//! the copy is visible in the original. The port instead deep-copies each
-//! layer (`DataLayer::copy`). The two are behaviorally identical for the real
-//! engine: every in-place mutation of a stored layer happens on a freshly
-//! copied layer (`getDataLayerToWrite` copies then `setLayer`; `copyDataLayer`
-//! copies then stores), never on a layer aliased across two maps, so the
-//! sharing Java's shallow clone provides is never observed. The oracle probe's
-//! `storage.copy.same.reference=false` / `original.filled=false` goldens are
-//! actually cache-staleness artifacts (the probe's `removeLayer`/`setLayer`
-//! leave the stale cached layer behind), and a deep-copy port reproduces those
-//! exact lines. Deep value semantics also keep the map within OWNERSHIP.md's
-//! no-shared-mutable-state model and mirror the `SWMRNibbleArray` sibling
-//! ("Java shares the reference; the port clones").
+//! Java's map stores *references* to `DataLayer` objects, and `copy()` is a
+//! shallow map clone sharing those references — mutating a layer through the
+//! copy is visible in the original (fastutil's `Long2ObjectOpenHashMap.clone`
+//! copies the value *array* but shares the `DataLayer` objects). This is
+//! load-bearing, not incidental: the engine storages (`LayerLightSectionStorage`)
+//! clone the map on every `swapSectionMap()` so the visible/updating maps keep
+//! pointing at the same layer objects, and `getLayer` hands out the stored
+//! object for in-place mutation. The port reproduces it with
+//! `Rc<RefCell<DataLayer>>` — the same single-threaded shared-mutable pattern
+//! `RegionFileVersion`'s scratch sink already uses, and within OWNERSHIP.md's
+//! tick-thread model (both maps belong to one layer storage on one thread;
+//! there is no `Sync` requirement). `get_layer` returns a cloned `Rc` handle,
+//! so a caller can hold a layer *while* mutating the map (Java callers hold the
+//! object across a `setLayer`, e.g. `getDataLayerToWrite`). `copy_data_layer`
+//! returns the stored copy's handle, matching Java's "the map now stores this
+//! exact layer".
 //!
 //! `copy()` is `abstract` in Java (each subclass returns its own type); the
-//! base-class port makes it concrete: a fresh storage map of independent
-//! `DataLayer` copies. `getLayer` returns the map's layer or Java `null`; the
-//! port splits the read/mutate views into `get_layer`/`get_layer_mut`.
-//!
-//! RivetTodo(#184): this is the `mc.world.level.lighting.core` storage-map
-//! unit. Its subclass consumers (`LayerLightSectionStorage`/`BlockLightSection
-//! Storage`/`SkyLightSectionStorage`) are vanilla dead jar-surface under
-//! Starlight and defer with the `mc.world.level.lighting.engine` unit; the
-//! engine's hold-a-layer-across-`setLayer` pattern (`getDataLayerToWrite`)
-//! will need interior mutability when that unit lands — noted, not built here.
+//! base-class port makes it concrete: a fresh storage map sharing the same
+//! layers. `getLayer` returns the map's layer or Java `null` (`None`).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::chunk::data_layer::DataLayer;
 
 /// `DataLayerStorageMap` — section-node → `DataLayer` storage.
 pub struct DataLayerStorageMap {
-    /// `map` — the `Long2ObjectOpenHashMap<DataLayer>` backing store.
-    map: HashMap<u64, DataLayer>,
+    /// `map` — the `Long2ObjectOpenHashMap<DataLayer>` backing store. The
+    /// layers are shared handles (Java references), so `copy()` and
+    /// `getLayer` preserve Java's aliasing.
+    map: HashMap<u64, Rc<RefCell<DataLayer>>>,
 }
 
 impl DataLayerStorageMap {
     /// `DataLayerStorageMap(Long2ObjectOpenHashMap<DataLayer> map)` — Java's
     /// constructor takes the pre-built map (its subclasses construct it) and
-    /// enables the (here omitted) cache.
+    /// enables the (here omitted) cache. The values are wrapped into shared
+    /// handles.
     pub fn new(map: HashMap<u64, DataLayer>) -> Self {
-        DataLayerStorageMap { map }
+        DataLayerStorageMap {
+            map: map
+                .into_iter()
+                .map(|(k, v)| (k, Rc::new(RefCell::new(v))))
+                .collect(),
+        }
     }
 
     /// An empty storage map — the natural value default for the base class.
@@ -73,14 +77,16 @@ impl DataLayerStorageMap {
         }
     }
 
-    /// `copy()` — a fresh storage map of independent `DataLayer` copies. Java's
-    /// concrete subclasses define the shape; `SkyDataLayerStorageMap.copy()` is
-    /// `new ...(this.map.clone(), ...)` and `BlockDataLayerStorageMap.copy()` is
-    /// `new ...(this.map.clone())`. See the module docs for why the port
-    /// deep-copies the layers instead of sharing them.
+    /// `copy()` — a fresh storage map. Java's concrete subclasses define the
+    /// shape; `SkyDataLayerStorageMap.copy()` is `new ...(this.map.clone(), ...)`
+    /// and `BlockDataLayerStorageMap.copy()` is `new ...(this.map.clone())` —
+    /// a *shallow* map clone sharing the stored `DataLayer` references. The
+    /// port's `Rc` clone does the same: a `DataLayer` mutated through one map
+    /// is visible in the other, exactly as Java's `swapSectionMap()` relies on
+    /// (it clones the map, not the layers).
     pub fn copy(&self) -> DataLayerStorageMap {
         DataLayerStorageMap {
-            map: self.map.iter().map(|(&k, v)| (k, v.copy())).collect(),
+            map: self.map.clone(),
         }
     }
 
@@ -88,17 +94,18 @@ impl DataLayerStorageMap {
     /// store the copy in place of the original, and return it. Java NPEs when
     /// the section has no layer (`map.get(...).copy()`); the port panics with
     /// the same contract (Java exceptions surface as panics, e.g.
-    /// `DataLayer::with_data`). The returned reference is the map's stored
-    /// copy, so mutating it is visible to later `get_layer` calls (Java's
-    /// shared-reference contract for the returned object).
-    pub fn copy_data_layer(&mut self, section_node: u64) -> &mut DataLayer {
+    /// `DataLayer::with_data`). The returned handle is the map's stored copy,
+    /// so mutating it through the handle is visible to later `get_layer` calls.
+    pub fn copy_data_layer(&mut self, section_node: u64) -> Rc<RefCell<DataLayer>> {
         let copied = self
             .map
             .get(&section_node)
             .expect("copyDataLayer called on a missing section")
+            .borrow()
             .copy();
-        self.map.insert(section_node, copied);
-        self.map.get_mut(&section_node).unwrap()
+        let handle = Rc::new(RefCell::new(copied));
+        self.map.insert(section_node, handle.clone());
+        handle
     }
 
     /// `hasLayer(long sectionNode)`.
@@ -106,25 +113,22 @@ impl DataLayerStorageMap {
         self.map.contains_key(&section_node)
     }
 
-    /// `getLayer(long sectionNode)` — the layer, or `None` (Java `null`).
-    pub fn get_layer(&self, section_node: u64) -> Option<&DataLayer> {
-        self.map.get(&section_node)
+    /// `getLayer(long sectionNode)` — a shared handle to the layer, or `None`
+    /// (Java `null`). The handle is a clone of the stored one, so the caller
+    /// can read (`borrow`) or write (`borrow_mut`) the stored layer even while
+    /// mutating the map itself.
+    pub fn get_layer(&self, section_node: u64) -> Option<Rc<RefCell<DataLayer>>> {
+        self.map.get(&section_node).cloned()
     }
 
-    /// The mutable view of `getLayer` — Java returns one shared object for
-    /// reading and writing; the port splits the borrows.
-    pub fn get_layer_mut(&mut self, section_node: u64) -> Option<&mut DataLayer> {
-        self.map.get_mut(&section_node)
-    }
-
-    /// `removeLayer(long sectionNode)` — the removed layer, or `None`.
-    pub fn remove_layer(&mut self, section_node: u64) -> Option<DataLayer> {
+    /// `removeLayer(long sectionNode)` — the removed layer's handle, or `None`.
+    pub fn remove_layer(&mut self, section_node: u64) -> Option<Rc<RefCell<DataLayer>>> {
         self.map.remove(&section_node)
     }
 
     /// `setLayer(long sectionNode, DataLayer layer)`.
     pub fn set_layer(&mut self, section_node: u64, layer: DataLayer) {
-        self.map.insert(section_node, layer);
+        self.map.insert(section_node, Rc::new(RefCell::new(layer)));
     }
 }
 
@@ -147,7 +151,7 @@ mod tests {
         assert!(storage.get_layer(key).is_none());
         storage.set_layer(key, filled_layer(0xAB));
         assert!(storage.has_layer(key));
-        assert_eq!(storage.get_layer(key).unwrap().get_data()[0], 0xAB);
+        assert_eq!(storage.get_layer(key).unwrap().borrow().get_data()[0], 0xAB);
         let removed = storage.remove_layer(key);
         assert!(removed.is_some());
         assert!(!storage.has_layer(key));
@@ -155,24 +159,32 @@ mod tests {
 
     #[test]
     fn copy_data_layer_replaces_and_returns_the_stored_copy() {
-        // The `storage.copyDataLayer.filled` / `storage.get.after.mutate.filled`
-        // goldens from the Paper oracle: the returned layer is the map's stored
-        // copy, so mutating it is visible to a later read.
         let mut storage = DataLayerStorageMap::empty();
         let key = 7u64;
         storage.set_layer(key, filled_layer(0x11));
-        {
-            let copied = storage.copy_data_layer(key);
-            assert_eq!(copied.get_data()[0], 0x11);
-            copied.fill(9);
-        }
-        assert!(storage.get_layer(key).unwrap().is_definitely_filled_with(9));
+        let copied = storage.copy_data_layer(key);
+        // The returned handle is the map's stored layer: mutate it and a later
+        // read sees the change (Java's shared-reference contract).
+        copied.borrow_mut().fill(9);
+        assert!(
+            storage
+                .get_layer(key)
+                .unwrap()
+                .borrow()
+                .is_definitely_filled_with(9)
+        );
+        // The copy is independent of any earlier handle: filling it did not
+        // disturb the original content of the pre-copy layer.
+        storage.set_layer(key, filled_layer(0x22));
+        let copied = storage.copy_data_layer(key);
+        assert_eq!(copied.borrow().get_data()[0], 0x22);
+        assert_eq!(storage.get_layer(key).unwrap().borrow().get_data()[0], 0x22);
     }
 
     #[test]
     fn copy_data_layer_absent_panics_like_java_npe() {
         // Java NPEs on `map.get(...).copy()` for a missing section; the port
-        // panics with the same contract (`storage.copyDataLayer.absent=throws:NPE`).
+        // panics with the same contract.
         let mut storage = DataLayerStorageMap::empty();
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -183,30 +195,48 @@ mod tests {
     }
 
     #[test]
-    fn copy_is_deep_like_the_oracle_golden() {
-        // `storage.copy.same.reference=false`, `storage.copy.original.filled=
-        // false`, `storage.copy.copied.filled=true` from the Paper oracle: a
-        // fresh `copy()` gives an independent layer, so mutating it through the
-        // copy leaves the original untouched.
+    fn copy_shares_layer_references_like_java() {
         let mut storage = DataLayerStorageMap::empty();
         let key = 3u64;
         storage.set_layer(key, filled_layer(0x77));
-        let mut copied = storage.copy();
-        assert!(!std::ptr::eq(
-            storage.get_layer(key).unwrap(),
-            copied.get_layer(key).unwrap()
+        let copied = storage.copy();
+        // Java's `copy()` clones the map, sharing the stored DataLayer
+        // references (`getLayer` through both maps returns the *same* object,
+        // and `swapSectionMap()` relies on it): mutating a layer through the
+        // copy is visible in the original.
+        assert!(Rc::ptr_eq(
+            &storage.get_layer(key).unwrap(),
+            &copied.get_layer(key).unwrap()
         ));
-        copied.get_layer_mut(key).unwrap().fill(0);
-        assert!(!storage.get_layer(key).unwrap().is_definitely_filled_with(0));
-        assert!(copied.get_layer(key).unwrap().is_definitely_filled_with(0));
+        copied.get_layer(key).unwrap().borrow_mut().fill(0);
+        assert!(
+            storage
+                .get_layer(key)
+                .unwrap()
+                .borrow()
+                .is_definitely_filled_with(0)
+        );
+        assert!(
+            copied
+                .get_layer(key)
+                .unwrap()
+                .borrow()
+                .is_definitely_filled_with(0)
+        );
     }
 
     #[test]
-    fn new_wraps_prebuilt_map_values() {
+    fn new_wraps_prebuilt_map_values_into_shared_handles() {
         let mut map = HashMap::new();
         map.insert(1u64, filled_layer(0x31));
         let storage = DataLayerStorageMap::new(map);
         assert!(storage.has_layer(1));
-        assert_eq!(storage.get_layer(1).unwrap().get_data()[0], 0x31);
+        assert_eq!(storage.get_layer(1).unwrap().borrow().get_data()[0], 0x31);
+        // The same layer is shared after copy, like every other path.
+        let copied = storage.copy();
+        assert!(Rc::ptr_eq(
+            &storage.get_layer(1).unwrap(),
+            &copied.get_layer(1).unwrap()
+        ));
     }
 }
