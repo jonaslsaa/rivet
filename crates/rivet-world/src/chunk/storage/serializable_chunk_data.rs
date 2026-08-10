@@ -799,18 +799,15 @@ fn decode_stored_ticks(
 }
 
 /// `UpgradeData` uses the block registry codec with `.orElse(Blocks.AIR)`.
-/// A present but malformed or unknown id therefore still yields a decoded
-/// tick; missing fields and malformed siblings remain partial-list failures.
+/// A present `i` therefore always decodes (unknown/malformed/wrong-type ids
+/// fall back to air); missing fields and malformed siblings remain
+/// partial-list failures.
 fn upgrade_neighbor_block_ticks_decode_non_empty(list: &ListTag) -> bool {
     list.list.iter().any(|entry| {
         let Tag::Compound(tick) = entry else {
             return false;
         };
-        let Some(raw_id) = tick.get("i") else {
-            return false;
-        };
-        let _decoded_id = raw_id.as_string().map_or("minecraft:air", String::as_str);
-        decode_saved_tick_position(tick).is_some()
+        tick.get("i").is_some() && decode_saved_tick_position(tick).is_some()
     })
 }
 
@@ -820,11 +817,7 @@ fn upgrade_neighbor_fluid_ticks_decode_non_empty(list: &ListTag) -> bool {
         let Tag::Compound(tick) = entry else {
             return false;
         };
-        let Some(raw_id) = tick.get("i") else {
-            return false;
-        };
-        let _decoded_id = raw_id.as_string().map_or("minecraft:empty", String::as_str);
-        decode_saved_tick_position(tick).is_some()
+        tick.get("i").is_some() && decode_saved_tick_position(tick).is_some()
     })
 }
 
