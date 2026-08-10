@@ -160,7 +160,11 @@ impl RegionFileStorage {
     /// "don't write garbage data to disk" handling.
     ///
     /// The `SharedConstants.DEBUG_DONT_SAVE_WORLD` dev flag that Paper gates
-    /// the whole method on is not ported (it is false in production).
+    /// the whole method on is not ported (it is false in production). And like
+    /// `RegionFile.getChunkDataOutputStream`, this path is only functional under
+    /// the D13 `region-file-compression=none` selection: deflate/lz4 writes are
+    /// deferred, so selecting them makes `wrap_output` fail loudly with
+    /// `Unsupported` before anything reaches disk.
     pub fn write(&mut self, pos: &ChunkPos, value: Option<CompoundTag>) -> io::Result<()> {
         self.ensure_writable()?;
         let region_index = match self.get_region_file(pos, value.is_none())? {
@@ -190,8 +194,9 @@ impl RegionFileStorage {
             Err(error) if is_region_file_size(&error) => {
                 self.region_cache[region_index].1.clear(pos)?;
                 eprintln!(
-                    "Chunk at ({}) in regionfile '{}' exceeds max size of {}MiB, it has been deleted from disk.",
-                    pos,
+                    "Chunk at ({},{}) in regionfile '{}' exceeds max size of {}MiB, it has been deleted from disk.",
+                    pos.x(),
+                    pos.z(),
                     self.region_cache[region_index].1.get_path().display(),
                     MAX_CHUNK_SIZE / (1024 * 1024)
                 );
@@ -1205,6 +1210,35 @@ mod tests {
         let size_error: io::Error = RegionFileSizeException { count: 42 }.into();
         assert!(is_region_file_size(&size_error));
         assert!(!is_region_file_size(&io::Error::other("not a size error")));
+    }
+
+    #[test]
+    fn write_exceeding_max_chunk_size_deletes_chunk_and_returns_ok() {
+        // Paper's "don't write garbage data to disk": a serialized chunk larger
+        // than MAX_CHUNK_SIZE throws RegionFileSizeException from the
+        // ChunkBuffer, and RegionFileStorage.write converts it into a delete
+        // (`region.clear`) plus a log, returning normally. The previous good
+        // chunk is gone; the oversized record never reaches disk.
+        with_selection_none(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let pos = ChunkPos::new(0, 0);
+            let mut storage = writable_storage(dir.path());
+            storage.write(&pos, Some(chunk_tag(0, 0))).unwrap();
+            assert!(storage.read(&pos).unwrap().is_some());
+
+            // A byte array at exactly MAX_CHUNK_SIZE trips the buffer guard
+            // (the buffer already holds the NBT prefix, so the sum exceeds the
+            // cap). At `none` the serialized form is the raw payload.
+            let mut huge = chunk_tag(0, 0);
+            huge.put_byte_array("big", vec![0i8; MAX_CHUNK_SIZE]);
+            storage.write(&pos, Some(huge)).unwrap();
+
+            assert!(
+                storage.read(&pos).unwrap().is_none(),
+                "the oversized chunk is deleted, not written"
+            );
+            storage.close().unwrap();
+        });
     }
 
     #[test]
