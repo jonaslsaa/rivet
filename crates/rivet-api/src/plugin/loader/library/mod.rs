@@ -46,7 +46,7 @@ mod tests {
     }
 
     impl ClassPathLibrary for SimpleJarLibrary {
-        fn register(&self, store: &mut dyn LibraryStore) -> Result<(), LibraryLoadingException> {
+        fn register(&mut self, store: &mut dyn LibraryStore) -> Result<(), LibraryLoadingException> {
             store.add_library(Path::new(&self.path));
             Ok(())
         }
@@ -60,7 +60,7 @@ mod tests {
     }
 
     impl ClassPathLibrary for MissingJarLibrary {
-        fn register(&self, _store: &mut dyn LibraryStore) -> Result<(), LibraryLoadingException> {
+        fn register(&mut self, _store: &mut dyn LibraryStore) -> Result<(), LibraryLoadingException> {
             // `Files.notExists(path)` is out of scope (no filesystem I/O in
             // this value slice), so the failure is injected directly. The
             // store is untouched, matching `JarLibrary`'s check-then-add
@@ -78,10 +78,10 @@ mod tests {
     #[test]
     fn libraries_register_paths_in_order_into_the_store() {
         let mut store = PaperLibraryStore::new();
-        let first = SimpleJarLibrary {
+        let mut first = SimpleJarLibrary {
             path: "libs/first.jar".to_string(),
         };
-        let second = SimpleJarLibrary {
+        let mut second = SimpleJarLibrary {
             path: "libs/second.jar".to_string(),
         };
         first.register(&mut store).expect("first library registers");
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn failing_library_returns_exact_message_and_mutates_nothing() {
         let mut store = PaperLibraryStore::new();
-        let missing = MissingJarLibrary {
+        let mut missing = MissingJarLibrary {
             path: "libs/never-here.jar".to_string(),
         };
         let error = missing
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn registering_same_library_twice_keeps_both() {
         let mut store = PaperLibraryStore::new();
-        let lib = SimpleJarLibrary {
+        let mut lib = SimpleJarLibrary {
             path: "libs/once.jar".to_string(),
         };
         lib.register(&mut store).unwrap();
@@ -141,13 +141,13 @@ mod tests {
     #[test]
     fn fail_fast_loop_aborts_at_first_error_keeping_earlier_paths() {
         let mut store = PaperLibraryStore::new();
-        let first = SimpleJarLibrary {
+        let mut first = SimpleJarLibrary {
             path: "libs/before.jar".to_string(),
         };
-        let broken = MissingJarLibrary {
+        let mut broken = MissingJarLibrary {
             path: "libs/broken.jar".to_string(),
         };
-        let last = SimpleJarLibrary {
+        let mut last = SimpleJarLibrary {
             path: "libs/after.jar".to_string(),
         };
 

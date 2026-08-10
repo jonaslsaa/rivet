@@ -16,7 +16,9 @@ use crate::plugin::loader::library::{LibraryLoadingException, LibraryStore};
 /// cause stay inspectable. The store is `&mut` — `register` mutates it
 /// (Java mutates the `ArrayList` through a shared reference; the owned
 /// `&mut` is the idiomatic Rust translation of that call pattern, and the
-/// caller owns the store it registers libraries into).
+/// caller owns the store it registers libraries into). The library itself is
+/// `&mut self`, matching Java's instance method whose implementations are
+/// free to mutate their own state ("complex logic") as well as the store.
 pub trait ClassPathLibrary {
     /// Java `register(LibraryStore store)` — registers this library into the
     /// passed store.
@@ -24,5 +26,5 @@ pub trait ClassPathLibrary {
     /// "This method may either be implemented by the plugins themselves if
     /// they need complex logic, or existing API exposed implementations of
     /// this interface may be used."
-    fn register(&self, store: &mut dyn LibraryStore) -> Result<(), LibraryLoadingException>;
+    fn register(&mut self, store: &mut dyn LibraryStore) -> Result<(), LibraryLoadingException>;
 }
