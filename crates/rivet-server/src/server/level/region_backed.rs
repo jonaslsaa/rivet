@@ -146,12 +146,15 @@ impl RegionChunkSource {
     }
 
     /// Read, extract, and validate one serialized chunk for runtime
-    /// composition. The validation is the same boundary `reconstruct_runtime_chunk`
-    /// applies internally, so the preflight agrees with what reconstruction will
-    /// accept: serialized block entities and stored ticks are carried (not
-    /// rejected), and the remaining unsupported surfaces (proto status,
-    /// blending, structure `starts`, etc.) surface their precise typed errors
-    /// here first.
+    /// composition. The preflight applies the same capability boundary
+    /// `reconstruct_runtime_chunk` uses — `validate_full_for_reconstruction` —
+    /// so serialized block entities and stored ticks are carried (not rejected)
+    /// and the unsupported surfaces (proto status, blending, structure `starts`,
+    /// persistent data, non-empty entities) surface their typed errors here.
+    /// Section/palette/light decode validation is not part of this boundary:
+    /// `reconstruct_runtime_chunk` decodes those inside its catch-unwound
+    /// `reconstruct_sections` step, so a chunk that passes the preflight can
+    /// still fail reconstruction on a malformed section or light payload.
     pub fn load_for_composition(
         &mut self,
         pos: ChunkPos,

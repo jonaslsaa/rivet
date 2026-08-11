@@ -745,9 +745,12 @@ fn structures_starts_are_non_empty(structures: &CompoundTag) -> bool {
 /// the pre-existing `decode_stored_ticks` boundary rather than Paper's exact
 /// call site.)
 ///
-/// The `References` tag is absent or a non-compound -> no entries (Paper's
-/// `getCompoundOrEmpty` returns an empty compound for a wrong-typed container,
-/// also silently). Each key is parsed with `Identifier::try_parse_result`
+/// An absent `References` tag -> no entries (normal). A wrong-typed `References`
+/// container drops every entry and surfaces a `StructureReferenceMalformed`
+/// diagnostic — Paper tolerates the wrong type silently (`getCompoundOrEmpty`
+/// returns an empty compound), the port surfaces the drop per the never-silent
+/// requirement, mirroring how per-key wrong-type values already surface. Each
+/// key is parsed with `Identifier::try_parse_result`
 /// (invalid characters -> dropped, like Paper's `Identifier.tryParse` returning
 /// null; an over-long identifier -> surfaced as a `StructureReferenceMalformed`
 /// diagnostic and dropped — Paper's `Identifier` constructor throws an
@@ -779,7 +782,21 @@ pub fn parse_structure_references(
     if status != ChunkStatus::Full {
         return (references, diagnostics);
     }
-    let Some(references_tag) = structures.get_compound("References") else {
+    let Some(references_tag) = structures.get("References") else {
+        // Absent `References` is normal (Paper's `getCompoundOrEmpty`).
+        return (references, diagnostics);
+    };
+    let Tag::Compound(references_tag) = references_tag else {
+        // A wrong-typed `References` container drops every entry; Paper
+        // tolerates it silently, the port surfaces the drop per the
+        // never-silent requirement.
+        diagnostics.push(ChunkParseDiagnostic::StructureReferenceMalformed {
+            key: "References".to_string(),
+            reason: format!(
+                "expected compound container, found tag type {:?}",
+                references_tag.get_type()
+            ),
+        });
         return (references, diagnostics);
     };
 
@@ -2997,6 +3014,41 @@ mod tests {
         )));
     }
 
+    /// A wrong-typed `structures.References` container drops every entry with a
+    /// typed diagnostic on a FULL chunk. Paper tolerates the wrong type
+    /// silently (`getCompoundOrEmpty` returns an empty compound); the port
+    /// surfaces the drop per the never-silent requirement, exactly like the
+    /// per-key wrong-type payload above. An absent `References` tag remains a
+    /// silent no-op (that is the normal, empty case).
+    #[test]
+    fn wrong_type_structure_references_container_is_dropped_with_diagnostic() {
+        let height = height_accessor::create(-64, 384);
+        let mut structures = CompoundTag::new();
+        structures.put_string("References", "not a compound");
+        let mut chunk = top_level("minecraft:full");
+        chunk.put("structures".into(), Tag::Compound(structures));
+
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert!(parsed.structures_references().is_empty());
+        assert!(parsed.diagnostics().iter().any(|diagnostic| matches!(
+            diagnostic,
+            ChunkParseDiagnostic::StructureReferenceMalformed { key, reason }
+                if key == "References" && !reason.is_empty()
+        )));
+
+        let no_references = top_level("minecraft:full");
+        let parsed = SerializableChunkData::parse(height, &no_references)
+            .unwrap()
+            .unwrap();
+        assert!(parsed.structures_references().is_empty());
+        assert!(!parsed.diagnostics().iter().any(|diagnostic| matches!(
+            diagnostic,
+            ChunkParseDiagnostic::StructureReferenceMalformed { .. }
+        )));
+    }
+
     /// A non-FULL (proto) chunk never decodes `structures.References` in the
     /// port: the runtime reconstruction this feeds accepts only FULL chunks, so
     /// decoding on a proto chunk would be dead work the FULL gate already
@@ -3119,26 +3171,36 @@ mod tests {
     /// A hostile `References` `long[]` of in-range duplicates deduplicates in
     /// O(n): a huge, nearly-all-duplicate array must collapse to the distinct
     /// entries while preserving first-insertion order. This is a regression
-    /// guard against a return to the quadratic `Vec::contains` dedup — a
-    /// hostile wire must not degrade to an O(n^2) scan (the array here would
-    /// make `Vec::contains` take ~10^10 comparisons). The dedup itself is
-    /// silent (Paper's `LongOpenHashSet`); the size of the surviving set is
-    /// asserted directly, so the test fails fast if the dedup is wrong without
-    /// relying on wall-clock timing.
+    /// guard against a return to the linear `Vec::contains` dedup — the wire
+    /// carries every in-range position Paper's chessboard filter can produce
+    /// (289) followed by millions of repeats of the last one, so a
+    /// `Vec::contains` revert rescans the entire surviving set for every
+    /// repeat (~6e8 comparisons) while the `HashSet` dedup stays O(n). The
+    /// dedup itself is silent (Paper's `LongOpenHashSet`); the size of the
+    /// surviving set is asserted directly, so the test fails fast if the dedup
+    /// is wrong without relying on wall-clock timing.
     #[test]
     fn hostile_duplicate_references_dedup_in_linear_time_and_preserve_order() {
         let height = height_accessor::create(-64, 384);
-        // A set of distinct in-range chunks (chessboard distance from (0,0) is
-        // <= 8), repeated thousands of times, so the dedup must collapse the
-        // wire to the distinct entries in first-insertion order (Paper's
-        // `LongOpenHashSet` keeps first-insertion order).
-        let distinct: Vec<i64> = (0..9)
-            .map(|offset| ChunkPos::new(offset, 0).pack())
-            .collect();
-        let mut wire = Vec::with_capacity(200_000);
-        for i in 0..200_000 {
-            wire.push(distinct[i % distinct.len()]);
+        // Every position within chessboard distance 8 of (0,0) — the full
+        // in-range set Paper's filter can produce — so the surviving-set scan a
+        // `Vec::contains` revert would do per repeat is genuinely large (289
+        // distinct, not a handful).
+        let mut distinct: Vec<i64> = Vec::new();
+        for z in -8..=8 {
+            for x in -8..=8 {
+                distinct.push(ChunkPos::new(x, z).pack());
+            }
         }
+        assert_eq!(distinct.len(), 289);
+        const REPEATS: usize = 2_000_000;
+        let mut wire = Vec::with_capacity(distinct.len() + REPEATS);
+        wire.extend_from_slice(&distinct);
+        // Repeat the LAST distinct position so every duplicate would scan the
+        // whole surviving set under `Vec::contains` (the worst case): the dedup
+        // must collapse the wire to the distinct entries in first-insertion
+        // order (Paper's `LongOpenHashSet` keeps first-insertion order).
+        wire.resize(wire.len() + REPEATS, *distinct.last().unwrap());
         let mut references = CompoundTag::new();
         references.put_long_array("minecraft:village", wire);
         let mut structures = CompoundTag::new();
@@ -3158,7 +3220,7 @@ mod tests {
         );
         assert!(
             diagnostics.is_empty(),
-            "all 200_000 references are in range; the silent dedup must not emit diagnostics"
+            "every wire reference is in range; the silent dedup must not emit diagnostics"
         );
     }
 

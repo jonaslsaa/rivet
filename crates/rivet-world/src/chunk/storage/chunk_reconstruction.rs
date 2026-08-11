@@ -410,6 +410,14 @@ fn install_lights(
 /// map is not ported — carrying all of them pending is the honest boundary.
 /// The tags are cloned into the chunk map; the caller keeps the owned list for
 /// the returned field.
+///
+/// Serialized entries whose corrected position collides in the pending map
+/// collapse with the later tag winning: `set_block_entity_nbt` omits Paper's
+/// `containsKey` first-tag-wins guard (#216), so the chunk's pending map keeps
+/// one entry per position. The returned `block_entities` vector retains every
+/// serialized entry (including collapsed duplicates), and the
+/// `block_entity_outcomes` per-entry materialization results stay in source
+/// order, so no entry is lost on this path.
 fn install_pending_block_entities(
     chunk: &mut ReconstructedLevelChunk,
     block_entities: &[CompoundTag],
