@@ -28,6 +28,10 @@ pub mod placement;
 // which `rivet-util` cannot depend on without a Cargo cycle. The registry-free
 // base `PositionalRandomFactory` trait stays in `rivet-util::random`.
 pub mod random;
+// The `mc.world.level.levelgen.noise` unit's `VerticalAnchor` is ported here
+// (issue #388 leaf: the value/codec layer unblocking height providers); the
+// noise wave must not re-port it.
+pub mod vertical_anchor;
 // The `mc.world.level.levelgen.noise` unit's `WorldGenerationContext` is
 // ported here (the minY/height window placement derives from the generator);
 // only the Paper `level()` accessor defers (RivetTodo #232, see the module).
