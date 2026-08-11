@@ -79,6 +79,13 @@ pub mod block_state_property;
 #[cfg(feature = "blocks")]
 pub mod state_definition;
 
+/// The typed `block.state.properties` leaf value classes and the
+/// `BlockStateProperties` constant facade (issue #228) — the worldgen/lighting
+/// surface that sets property values on states by their value-class enum
+/// (`state.set_value(SlabBlock.TYPE, SlabType.DOUBLE)`).
+#[cfg(feature = "blocks")]
+pub mod block_state_properties;
+
 // ---------------------------------------------------------------------------
 // Ownership A — resources / keys (`net.minecraft.resources`, `net.minecraft.tags`,
 // `net.minecraft.core.registries.Registries`, `net.minecraft.IdentifierException`)
