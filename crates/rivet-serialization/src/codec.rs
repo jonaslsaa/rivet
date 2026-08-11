@@ -21,7 +21,7 @@ use crate::dynamic_ops::{DynamicOps, Keyable};
 use crate::either::Either;
 use crate::functions::DecoderFn;
 use crate::lifecycle::Lifecycle;
-use crate::map_codec::MapCodec;
+use crate::map_codec::{self, MapCodec};
 use crate::pair::Pair;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -270,6 +270,39 @@ where
         element_codec,
         lenient,
     })
+}
+
+/// `Codec.lenientOptionalFieldOf(String, F default)` — the with-default form
+/// of a lenient optional field.
+///
+/// Java (DFU 10.0.21, verified from the pinned jar's bytecode):
+/// `optionalField(name, codec, true).xmap(o -> o.orElse(default), a ->
+/// Objects.equals(a, default) ? Optional.empty() : Optional.of(a))`. The field
+/// value defaults on decode (absent OR a present-but-malformed value falls back
+/// to `default` via the lenient error path), and is OMITTED on encode when
+/// value-equal to `default`.
+pub fn lenient_optional_field_of<F, Ops: DynamicOps + 'static>(
+    name: &str,
+    element_codec: Arc<dyn Codec<F, Ops>>,
+    default: F,
+) -> Arc<dyn MapCodec<F, Ops>>
+where
+    F: 'static + Clone + PartialEq + Send + Sync,
+{
+    let inner = optional_field(name.to_string(), element_codec, true);
+    let default_for_decode = default.clone();
+    let default_for_encode = default;
+    map_codec::xmap(
+        inner,
+        Arc::new(move |o: &Option<F>| o.clone().unwrap_or_else(|| default_for_decode.clone())),
+        Arc::new(move |a: &F| {
+            if *a == default_for_encode {
+                None
+            } else {
+                Some(a.clone())
+            }
+        }),
+    )
 }
 
 /// `Codec.recursive(String, Function<Codec<A>, Codec<A>>)`.
