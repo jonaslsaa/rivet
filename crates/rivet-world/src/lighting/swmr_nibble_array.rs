@@ -405,6 +405,15 @@ impl SwmrNibbleArray {
         self.state_visible == InitState::Initialised
     }
 
+    /// Whether the *visible* state is an unsupported persisted value (`Other`).
+    /// `to_vanilla_nibble` panics on that state (Java would carry it through
+    /// the same `toVanillaNibble` and keep the raw int), so a caller that
+    /// converts a reconstructed chunk into packet form must reject it first —
+    /// `toVanillaNibble`'s panic is not a typed error surface.
+    pub fn has_unknown_state_visible(&self) -> bool {
+        matches!(self.state_visible, InitState::Other(_))
+    }
+
     /// `SWMRNibbleArray.isHiddenUpdating()`.
     pub fn is_hidden_updating(&self) -> bool {
         self.state_updating == InitState::Hidden
