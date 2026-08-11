@@ -12,6 +12,10 @@
 //! bytes (`NBTMapType.setBoolean` -> `setByte`), and the `_or` overloads return
 //! the supplied default when the value is present but the wrong type
 //! (`NBTListType.getBytes(index, dfl)` returns `dfl` for a non-`ByteArrayTag`).
+//! List access is strict, matching `ListType.java`'s contract and the NBT
+//! throws: the no-default list `get*`/`get_generic`/`get_list`/`get_map`
+//! accessors panic on an out-of-range index, a wrong-typed element, or a nested
+//! container that is not this mock's backing.
 //!
 //! [`foundation_fixture`] embeds the same committed oracle golden that
 //! `rivet-oracle verify` hash-checks, so the container tests are differentially
@@ -228,11 +232,17 @@ impl MapType for MockMap {
     fn get_generic(&self, key: &str) -> Option<Generic> {
         match self.entries.borrow().get(key)? {
             Generic::Map(map) => {
-                let mock = map.as_any().downcast_ref::<MockMap>()?;
+                let mock = map
+                    .as_any()
+                    .downcast_ref::<MockMap>()
+                    .expect("MockMap.getGeneric: value is not a MockMap");
                 Some(Generic::Map(Box::new(mock.clone_view())))
             }
             Generic::List(list) => {
-                let mock = list.as_any().downcast_ref::<MockList>()?;
+                let mock = list
+                    .as_any()
+                    .downcast_ref::<MockList>()
+                    .expect("MockMap.getGeneric: value is not a MockList");
                 Some(Generic::List(Box::new(mock.clone_view())))
             }
             other => Some(deep_copy(other)),
@@ -464,7 +474,10 @@ impl MapType for MockMap {
         let Generic::List(list) = borrowed.get(key)? else {
             return None;
         };
-        let mock = list.as_any().downcast_ref::<MockList>()?;
+        let mock = list
+            .as_any()
+            .downcast_ref::<MockList>()
+            .expect("MockMap.getList: value is not a MockList");
         Some(Box::new(mock.clone_view()))
     }
 
@@ -483,7 +496,10 @@ impl MapType for MockMap {
         let Generic::Map(map) = borrowed.get(key)? else {
             return None;
         };
-        let mock = map.as_any().downcast_ref::<MockMap>()?;
+        let mock = map
+            .as_any()
+            .downcast_ref::<MockMap>()
+            .expect("MockMap.getMap: value is not a MockMap");
         Some(Box::new(mock.clone_view()))
     }
 
@@ -591,11 +607,17 @@ impl ListType for MockList {
     fn get_generic(&self, index: usize) -> Option<Generic> {
         match self.elems.borrow().get(index)? {
             Generic::Map(map) => {
-                let mock = map.as_any().downcast_ref::<MockMap>()?;
+                let mock = map
+                    .as_any()
+                    .downcast_ref::<MockMap>()
+                    .expect("MockList.getGeneric: element is not a MockMap");
                 Some(Generic::Map(Box::new(mock.clone_view())))
             }
             Generic::List(list) => {
-                let mock = list.as_any().downcast_ref::<MockList>()?;
+                let mock = list
+                    .as_any()
+                    .downcast_ref::<MockList>()
+                    .expect("MockList.getGeneric: element is not a MockList");
                 Some(Generic::List(Box::new(mock.clone_view())))
             }
             other => Some(deep_copy(other)),
@@ -611,11 +633,11 @@ impl ListType for MockList {
     }
 
     fn get_byte(&self, index: usize) -> i8 {
-        self.elems
-            .borrow()
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_i8)
-            .unwrap_or(0)
+            .expect("NBTListType.getByte: index out of bounds");
+        coerce_i8(element).expect("NBTListType.getByte: element is not a NumericTag")
     }
 
     fn get_byte_or(&self, index: usize, dfl: i8) -> i8 {
@@ -631,11 +653,11 @@ impl ListType for MockList {
     }
 
     fn get_short(&self, index: usize) -> i16 {
-        self.elems
-            .borrow()
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_i16)
-            .unwrap_or(0)
+            .expect("NBTListType.getShort: index out of bounds");
+        coerce_i16(element).expect("NBTListType.getShort: element is not a NumericTag")
     }
 
     fn get_short_or(&self, index: usize, dfl: i16) -> i16 {
@@ -651,11 +673,11 @@ impl ListType for MockList {
     }
 
     fn get_int(&self, index: usize) -> i32 {
-        self.elems
-            .borrow()
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_i32)
-            .unwrap_or(0)
+            .expect("NBTListType.getInt: index out of bounds");
+        coerce_i32(element).expect("NBTListType.getInt: element is not a NumericTag")
     }
 
     fn get_int_or(&self, index: usize, dfl: i32) -> i32 {
@@ -671,11 +693,11 @@ impl ListType for MockList {
     }
 
     fn get_long(&self, index: usize) -> i64 {
-        self.elems
-            .borrow()
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_i64)
-            .unwrap_or(0)
+            .expect("NBTListType.getLong: index out of bounds");
+        coerce_i64(element).expect("NBTListType.getLong: element is not a NumericTag")
     }
 
     fn get_long_or(&self, index: usize, dfl: i64) -> i64 {
@@ -691,11 +713,11 @@ impl ListType for MockList {
     }
 
     fn get_float(&self, index: usize) -> f32 {
-        self.elems
-            .borrow()
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_f32)
-            .unwrap_or(0.0)
+            .expect("NBTListType.getFloat: index out of bounds");
+        coerce_f32(element).expect("NBTListType.getFloat: element is not a NumericTag")
     }
 
     fn get_float_or(&self, index: usize, dfl: f32) -> f32 {
@@ -711,11 +733,11 @@ impl ListType for MockList {
     }
 
     fn get_double(&self, index: usize) -> f64 {
-        self.elems
-            .borrow()
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_f64)
-            .unwrap_or(0.0)
+            .expect("NBTListType.getDouble: index out of bounds");
+        coerce_f64(element).expect("NBTListType.getDouble: element is not a NumericTag")
     }
 
     fn get_double_or(&self, index: usize, dfl: f64) -> f64 {
@@ -731,9 +753,13 @@ impl ListType for MockList {
     }
 
     fn get_bytes(&self, index: usize) -> Vec<i8> {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Bytes(v)) => v.clone(),
-            _ => Vec::new(),
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getBytes: index out of bounds");
+        match element {
+            Generic::Bytes(v) => v.clone(),
+            _ => panic!("NBTListType.getBytes: element is not a ByteArrayTag"),
         }
     }
 
@@ -752,9 +778,13 @@ impl ListType for MockList {
     }
 
     fn get_shorts(&self, index: usize) -> Vec<i16> {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Shorts(v)) => v.clone(),
-            _ => Vec::new(),
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getShorts: index out of bounds");
+        match element {
+            Generic::Shorts(v) => v.clone(),
+            _ => panic!("NBTListType.getShorts: element is not a ShortArrayTag"),
         }
     }
 
@@ -770,9 +800,13 @@ impl ListType for MockList {
     }
 
     fn get_ints(&self, index: usize) -> Vec<i32> {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Ints(v)) => v.clone(),
-            _ => Vec::new(),
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getInts: index out of bounds");
+        match element {
+            Generic::Ints(v) => v.clone(),
+            _ => panic!("NBTListType.getInts: element is not an IntArrayTag"),
         }
     }
 
@@ -788,9 +822,13 @@ impl ListType for MockList {
     }
 
     fn get_longs(&self, index: usize) -> Vec<i64> {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Longs(v)) => v.clone(),
-            _ => Vec::new(),
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getLongs: index out of bounds");
+        match element {
+            Generic::Longs(v) => v.clone(),
+            _ => panic!("NBTListType.getLongs: element is not a LongArrayTag"),
         }
     }
 
@@ -810,7 +848,10 @@ impl ListType for MockList {
         let Generic::List(list) = borrowed.get(index)? else {
             return None;
         };
-        let mock = list.as_any().downcast_ref::<MockList>()?;
+        let mock = list
+            .as_any()
+            .downcast_ref::<MockList>()
+            .expect("MockList.getList: element is not a MockList");
         Some(Box::new(mock.clone_view()))
     }
 
@@ -827,7 +868,10 @@ impl ListType for MockList {
         let Generic::Map(map) = borrowed.get(index)? else {
             return None;
         };
-        let mock = map.as_any().downcast_ref::<MockMap>()?;
+        let mock = map
+            .as_any()
+            .downcast_ref::<MockMap>()
+            .expect("MockList.getMap: element is not a MockMap");
         Some(Box::new(mock.clone_view()))
     }
 

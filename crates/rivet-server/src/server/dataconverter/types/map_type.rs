@@ -142,7 +142,9 @@ pub trait MapType: Any {
     fn get_list_unchecked_or(&self, key: &str, dfl: Box<dyn ListType>) -> Box<dyn ListType>;
 
     /// `MapType.getList(String, ObjectType)` — the list only when its uniform
-    /// element type matches `ty` (or is `UNDEFINED`/`NONE`), else `None`.
+    /// element type matches `ty` (or is `UNDEFINED`/`NONE`), else `None` (Java
+    /// `getList(key, type)` delegating to the 3-arg with a null `dfl`; the null
+    /// maps to `None` here).
     fn get_list(&self, key: &str, ty: ObjectType) -> Option<Box<dyn ListType>> {
         let ret = self.get_list_unchecked(key);
         match ret {
@@ -157,6 +159,14 @@ pub trait MapType: Any {
             }
             None => None,
         }
+    }
+
+    /// `MapType.getList(String, ObjectType, ListType)` — the list when its
+    /// uniform element type matches `ty` (or is `UNDEFINED`/`NONE`), else `dfl`
+    /// (Java `getList(key, type, dfl)`, which returns `dfl` on a mismatched or
+    /// absent key).
+    fn get_list_or(&self, key: &str, ty: ObjectType, dfl: Box<dyn ListType>) -> Box<dyn ListType> {
+        self.get_list(key, ty).unwrap_or(dfl)
     }
 
     /// `MapType.getOrCreateList(String, ObjectType)` — the list, or a fresh
@@ -291,6 +301,43 @@ mod tests {
         map.set_list("s", Box::new(strings));
         assert!(map.get_list("s", ObjectType::String).is_some());
         assert!(map.get_list("s", ObjectType::Int).is_none());
+    }
+
+    /// `get_list_or` (Java `getList(key, type, dfl)`): returns the list when the
+    /// uniform type matches (or is `UNDEFINED`/`NONE`), else the supplied `dfl`
+    /// — including for an absent key, where the null-`dfl` overload yields
+    /// `None`. A `dfl` carrying known content proves the default itself (not a
+    /// fresh empty list) is returned on mismatch.
+    #[test]
+    fn get_list_or_returns_default_on_mismatch() {
+        let mut map = MockMap::new();
+        let mut ints = MockList::new();
+        ints.add_int(1);
+        map.set_list("i", Box::new(ints));
+
+        // Matching type -> the stored list.
+        assert_eq!(
+            map.get_list_or("i", ObjectType::Int, Box::new(MockList::new()))
+                .size(),
+            1
+        );
+
+        // Mismatched type / absent key -> the supplied `dfl`, content intact.
+        for key in ["i", "missing"] {
+            let mut dfl = MockList::new();
+            dfl.add_int(99);
+            let ret = map.get_list_or(key, ObjectType::String, Box::new(dfl));
+            assert_eq!(ret.size(), 1);
+            assert_eq!(ret.get_int(0), 99);
+        }
+
+        // Empty list matches any type (UNDEFINED/NONE) -> the stored empty list.
+        map.set_list("empty", Box::new(MockList::new()));
+        assert_eq!(
+            map.get_list_or("empty", ObjectType::Map, Box::new(MockList::new()))
+                .size(),
+            0
+        );
     }
 
     /// `get_or_create_list` reuses an existing typed list; `get_or_create_map`
