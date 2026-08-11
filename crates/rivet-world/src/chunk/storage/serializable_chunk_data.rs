@@ -11,8 +11,9 @@
 //! result. A FULL chunk carrying stored ticks now reconstructs, carrying the
 //! typed values for the caller's runtime composition — the parser neither
 //! executes, schedules, generates, installs, nor writes them (the
-//! `LevelChunkTicks`/`ProtoChunkTicks` execution containers stay deferred with
-//! the tick-execution slice). `UpgradeData`'s neighbor tick lists remain behind
+//! `LevelChunkTicks`/`ProtoChunkTicks` containers now live in `ticks` (#522),
+//! but wiring them in defers with the tick-execution slice). `UpgradeData`'s
+//! neighbor tick lists remain behind
 //! the `UnsupportedUpgradeData` boundary: they are decodable (with the Java
 //! `orElse(Blocks.AIR)`/`orElse(Fluids.EMPTY)` asymmetry) but are not yet
 //! carried by the `UpgradeData` port.
@@ -586,8 +587,8 @@ impl SerializableChunkData {
     /// see [`Self::validate_full_for_reconstruction`]). Carried as stored values
     /// only — the reconstruction consumes them off the parse result ([`Self`]
     /// installs them into no runtime container; the `LevelChunkTicks`/
-    /// `ProtoChunkTicks` execution containers defer with the tick-execution
-    /// slice (#370)).
+    /// `ProtoChunkTicks` containers live in `ticks` (#522), but wiring them in
+    /// defers with the tick-execution slice).
     pub fn stored_block_ticks(&self) -> &[SavedTick<Block>] {
         &self.stored_block_ticks
     }
@@ -620,8 +621,9 @@ impl SerializableChunkData {
     /// Serialized block entities are NOT rejected — the reconstruction carries
     /// them as pending NBT (materialization defers with #341). Stored ticks are
     /// carried as typed values, never rejected (the `LevelChunkTicks`/
-    /// `ProtoChunkTicks` execution containers defer with the tick-execution
-    /// slice, #370). The remaining unsupported surfaces (proto status,
+    /// `ProtoChunkTicks` containers live in `ticks` (#522), but wiring them in
+    /// defers with the tick-execution slice). The remaining unsupported
+    /// surfaces (proto status,
     /// `UpgradeData` neighbor ticks, blending data, persistent data, structure
     /// `starts`, non-empty entities, out-of-bounds post-processing) surface
     /// their typed errors here.
@@ -650,10 +652,10 @@ impl SerializableChunkData {
         }
         // Stored `block_ticks`/`fluid_ticks` decode into typed stored values on
         // parse and are carried. The runtime tick containers
-        // (`LevelChunkTicks`/`ProtoChunkTicks`) defer with the tick-execution
-        // slice, so a FULL chunk with stored ticks now reconstructs with the
-        // values carried — nothing is scheduled, generated, installed, or
-        // written (#370).
+        // (`LevelChunkTicks`/`ProtoChunkTicks`) exist in `ticks` (#522) but are
+        // not wired in, so a FULL chunk with stored ticks now reconstructs with
+        // the values carried — nothing is scheduled, generated, installed, or
+        // written.
         // `below_zero_retrogen` is deliberately not checked here: Paper's
         // LEVELCHUNK branch of `SerializableChunkData.read` never consults it
         // (only the proto branch does), so a FULL chunk carrying one loads as-is.
