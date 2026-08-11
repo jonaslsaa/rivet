@@ -19,6 +19,14 @@
 //! RivetTodo(#184): this is the `mc.world.level.lighting.core` queue unit.
 //! No `hasWork` is stored here — `DynamicGraphMinFixedPoint` derives it from
 //! `isEmpty()` after every mutator.
+//!
+//! Known non-blocking note: `enqueue`/`dequeue` are O(level size) per op
+//! (`VecDeque::contains`/`retain`), where Java's `LongLinkedOpenHashSet` is
+//! O(1). This is acceptable for now: the queue has no consumer yet (the
+//! `SectionTracker`/`ChunkTracker` engines that drive it defer with the
+//! `starlight.light` unit), and an O(1) order-preserving dedup would need an
+//! indexed structure beyond the current scope. Revisit alongside that engine
+//! port, not before.
 
 use std::collections::VecDeque;
 
@@ -52,11 +60,18 @@ impl LeveledPriorityQueue {
         }
     }
 
-    /// `removeFirstLong()` — pop from the lowest non-empty level.
+    /// `removeFirstLong()` — pop from the lowest non-empty level. Java throws
+    /// `NoSuchElementException` on an empty queue; the port panics with the
+    /// same message (indexing would otherwise hit a generic out-of-bounds
+    /// panic first).
     pub fn remove_first_long(&mut self) -> i64 {
+        assert!(
+            self.first_queued_level < self.level_count,
+            "removeFirstLong called on empty LeveledPriorityQueue"
+        );
         let result = self.queues[self.first_queued_level]
             .pop_front()
-            .expect("removeFirstLong called on empty LeveledPriorityQueue");
+            .expect("first_queued_level marks an occupied level after the guard");
         if self.queues[self.first_queued_level].is_empty() {
             self.check_first_queued_level(self.level_count);
         }

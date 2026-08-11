@@ -41,6 +41,13 @@
 //! unit. Its Java consumers (`SectionTracker`/`ChunkTracker` and the vanilla
 //! `LightEngine` storages) are dead jar-surface under Starlight; the set is
 //! ported as the standalone structure its own unit owns.
+//!
+//! Known non-blocking note: dropping an emptied group (`rem`/`remove_first_bit`)
+//! rebuilds the `outer_key -> entries` index over the remaining groups,
+//! O(groups) per drop, where Java's `fixPointers`+`shiftKeys` unlinks in
+//! O(1) amortized. The set has no live consumer yet (its engines defer with
+//! the `starlight.light` unit), and an O(1) indexed order-preserving removal
+//! is not worth the complexity until that engine port lands. Revisit then.
 
 /// `X_BITS` — `Mth.log2(60000000)`: `ceillog2(60000000) = 26`, minus 1 (not a
 /// power of two) = 25. `mth::log2` is not `const`, so the value is written out
