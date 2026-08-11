@@ -54,8 +54,14 @@ impl<Ops: DynamicOps + 'static> Debug for Nop<Ops> {
 }
 
 impl<Ops: DynamicOps + 'static> PointFreeRule<Ops> for Nop<Ops> {
-    fn rewrite(&self, expr: &dyn PointFreeCore<Ops>) -> Option<Arc<dyn PointFreeCore<Ops>>> {
-        Some(expr.clone_core())
+    // Java `Nop.rewrite` returns `Optional.of(expr)` — the same reference.
+    // `rewriteOrNop`'s `orElse(rewrite(expr), expr)` then recovers the
+    // original, which is what distinguishes "unchanged" from "rewritten" in
+    // `Comp.all`. Since `clone_core()` fabricates a distinct Arc, returning
+    // `None` here is the faithful translation (callers treat it as
+    // unchanged; `rewriteOrNop` falls back to the original node).
+    fn rewrite(&self, _expr: &dyn PointFreeCore<Ops>) -> Option<Arc<dyn PointFreeCore<Ops>>> {
+        None
     }
 
     fn clone_rule(&self) -> Arc<dyn PointFreeRule<Ops>> {
@@ -77,10 +83,18 @@ impl<Ops: DynamicOps + 'static> Debug for Seq<Ops> {
 impl<Ops: DynamicOps + 'static> PointFreeRule<Ops> for Seq<Ops> {
     fn rewrite(&self, expr: &dyn PointFreeCore<Ops>) -> Option<Arc<dyn PointFreeCore<Ops>>> {
         let mut result = expr.clone_core();
+        let mut changed = false;
         for rule in &self.rules {
-            result = rule.rewrite_or_nop(result.as_ref());
+            // `None` means the rule left the node unchanged (Java's `Seq`
+            // chains `rewriteOrNop`, which preserves the same reference when
+            // nothing changed). Track that so an all-nop sequence reports no
+            // rewrite.
+            if let Some(rewrite) = rule.rewrite(result.as_ref()) {
+                result = rewrite;
+                changed = true;
+            }
         }
-        Some(result)
+        if changed { Some(result) } else { None }
     }
 
     fn clone_rule(&self) -> Arc<dyn PointFreeRule<Ops>> {

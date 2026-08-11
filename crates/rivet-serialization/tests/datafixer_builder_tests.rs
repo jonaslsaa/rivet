@@ -19,23 +19,42 @@
 //! - `update`: no-op when `version >= newVersion`; the value is preserved when
 //!   the rewrite chain is empty (Java `resultOrPartial(...).orElse(input)`).
 //! - `DataFix.getInputSchema`: `changesType` picks the output schema's parent.
+//! - `update` end-to-end with a real non-nop rewrite: a `View.create` + compose
+//!   rule whose function transforms the value, exercising the full
+//!   `read -> rewrite -> eval_cached -> cap_write -> write` path.
+//! - `SumType.read` / `EmptyPartPassthrough.write`: the `EitherCodec.decode`
+//!   error-with-partial fallback and the wrong-typed-value error.
+//! - `add_schema_obj`: a repeated version key replaces the prior schema (Java's
+//!   sorted-map `put`), keeping the `Vec` sorted and duplicate-free.
 
+use rivet_serialization::data_result::DataResult;
 use rivet_serialization::datafixers::data_fix::DataFix;
 use rivet_serialization::datafixers::data_fix_utils::{
     get_sub_version, get_version, make_key, make_key_sub,
 };
 use rivet_serialization::datafixers::data_fixer_builder::DataFixerBuilder;
-use rivet_serialization::datafixers::data_fixer_upper::get_lowest_schema_same_version;
+use rivet_serialization::datafixers::data_fixer_upper::{
+    DataFixerUpper, get_lowest_schema_same_version,
+};
+use rivet_serialization::datafixers::rewrite_result::RewriteResult;
 use rivet_serialization::datafixers::schemas::Schema;
 use rivet_serialization::datafixers::type_rewrite_rule;
-use rivet_serialization::datafixers::types::TypeTemplate;
-use rivet_serialization::datafixers::types::templates::{Const, EmptyPartPassthrough};
+use rivet_serialization::datafixers::types::templates::{
+    Const, EmptyPart, EmptyPartPassthrough, PrimitiveType, SumType,
+};
+use rivet_serialization::datafixers::types::{AnyValue, Type, TypeTemplate, any};
+use rivet_serialization::datafixers::view::View;
 use rivet_serialization::dynamic::Dynamic;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::json_ops::JsonOps;
+use std::any::Any;
 use std::sync::Arc;
 
 type Json = JsonOps;
+
+/// The `JsonOps` value type, fully qualified (a bare `JsonOutput` through the
+/// alias is ambiguous to the compiler).
+type JsonOutput = <Json as DynamicOps>::Output;
 
 /// A schema at raw `version_key` with one registered remainder type `"x"`.
 fn schema_with_key_and_type(
@@ -57,6 +76,20 @@ fn schema_with_key_and_type(
 /// skip the fix via its `fixRule == TypeRewriteRule.nop()` check.
 fn non_nop_rule() -> Arc<dyn type_rewrite_rule::TypeRewriteRule<Json>> {
     type_rewrite_rule::seq(vec![type_rewrite_rule::nop(), type_rewrite_rule::nop()])
+}
+
+/// Constructs a `PrimitiveType<String, Json>` from `codec::string_codec`.
+fn string_primitive() -> Arc<dyn Type<Json>> {
+    Arc::new(PrimitiveType {
+        codec: rivet_serialization::codec::string_codec::<Json>(),
+    })
+}
+
+/// Constructs a `PrimitiveType<i32, Json>` from `codec::int_codec`.
+fn int_primitive() -> Arc<dyn Type<Json>> {
+    Arc::new(PrimitiveType {
+        codec: rivet_serialization::codec::int_codec::<Json>(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -316,4 +349,266 @@ fn data_fix_changes_type_parent_lookup() {
     // changesType = false => input schema is the output schema itself.
     let fix2 = DataFix::new(child, false);
     assert_eq!(fix2.get_input_schema().get_version_key(), 2000);
+}
+
+// ---------------------------------------------------------------------------
+// DataFixerUpper.update — end-to-end value-transforming rewrite
+// ---------------------------------------------------------------------------
+
+/// Builds the two schemas and a fix whose `makeRule` rewrites the `"name"`
+/// wrapper into an uppercasing function (a genuine non-nop value transform).
+fn fixer_with_uppercase_rule() -> DataFixerUpper<Json> {
+    // v100 schema has a `PrimitiveType<String>` named `"name"`; v200 same but
+    // parented, and the fix targets v200.
+    let s0 = {
+        let mut s = Schema::new(make_key(100), None);
+        let template: Arc<dyn TypeTemplate<Json>> = Arc::new(Const::new(string_primitive()));
+        s.type_templates.insert("name".to_string(), template);
+        s.types = s.build_types();
+        Arc::new(s)
+    };
+    let s1 = {
+        let mut s = Schema::new(make_key(200), Some(s0.clone()));
+        let template: Arc<dyn TypeTemplate<Json>> = Arc::new(Const::new(string_primitive()));
+        s.type_templates.insert("name".to_string(), template);
+        s.types = s.build_types();
+        Arc::new(s)
+    };
+    // The view's input/output must be the actual schema type instances:
+    // `PrimitiveType::equals_` is reference identity, and `cap_write` compares
+    // the view's output against the (same-instance) expected type.
+    let input_ty = s0.get_type_raw("name");
+    let output_ty = s1.get_type_raw("name");
+    let fix = DataFix::with_rule_factory(
+        s1.clone(),
+        false,
+        Arc::new(move || {
+            // makeRule: a `TypeRewriteRule` whose rewrite replaces the view's
+            // function with an uppercasing transform.
+            struct UpperRule {
+                input: Arc<dyn Type<Json>>,
+                output: Arc<dyn Type<Json>>,
+            }
+            impl std::fmt::Debug for UpperRule {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(f, "UpperRule")
+                }
+            }
+            impl type_rewrite_rule::TypeRewriteRule<Json> for UpperRule {
+                fn rewrite(&self, _ty: &dyn Type<Json>) -> Option<RewriteResult<Json>> {
+                    let view = View::create(
+                        "name".to_string(),
+                        self.input.clone(),
+                        self.output.clone(),
+                        Arc::new(|_ops: &Json, value: &AnyValue| {
+                            // The decoded element of a `PrimitiveType<String>` is a
+                            // `String` (Java's typed `A`), so the transform operates
+                            // on it directly.
+                            let s = value.downcast_ref::<String>().expect("string value");
+                            any(s.to_uppercase())
+                        }),
+                    );
+                    Some(RewriteResult::create(view, Vec::new()))
+                }
+                fn clone_rule(&self) -> Arc<dyn type_rewrite_rule::TypeRewriteRule<Json>> {
+                    Arc::new(UpperRule {
+                        input: self.input.clone(),
+                        output: self.output.clone(),
+                    })
+                }
+            }
+            Arc::new(UpperRule {
+                input: input_ty.clone(),
+                output: output_ty.clone(),
+            }) as Arc<dyn type_rewrite_rule::TypeRewriteRule<Json>>
+        }),
+    );
+    let mut builder = DataFixerBuilder::new(999);
+    builder.add_schema_obj(s0);
+    builder.add_schema_obj(s1);
+    builder.add_fixer(Arc::new(fix));
+    builder.build()
+}
+
+#[test]
+fn update_runs_a_real_value_transforming_rewrite() {
+    // A genuine non-nop fix: `makeRule` replaces the "name" view function with
+    // an uppercasing transform. If `cap_write`/`read_and_write` short-circuits
+    // or drops the transform, the output would keep the lowercased value.
+    let fixer = fixer_with_uppercase_rule();
+    let ops = JsonOps::INSTANCE;
+    let input = Dynamic::new(&ops, ops.create_string("hello".to_string()));
+    let out = fixer.update(&ops, "name", &input, 100, 200);
+    assert_eq!(out.value, ops.create_string("HELLO".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// SumType.read — EitherCodec.decode parity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sum_type_read_returns_second_success() {
+    let ops = JsonOps::INSTANCE;
+    let input = ops.create_string("42".to_string());
+    let int_ty: Arc<dyn Type<Json>> = int_primitive();
+    let str_ty: Arc<dyn Type<Json>> = string_primitive();
+    let sum = SumType::new(int_ty, str_ty);
+    // First branch (int) fails on a string; second (string) succeeds.
+    let result = sum.read(&ops, &input);
+    assert!(result.is_success());
+    let (value, _rest) = result.get_or_throw_unchecked();
+    let either = value
+        .downcast_ref::<rivet_serialization::either::Either<AnyValue, AnyValue>>()
+        .expect("either");
+    assert!(matches!(
+        either,
+        rivet_serialization::either::Either::Right(_)
+    ));
+}
+
+#[test]
+fn sum_type_read_prefers_first_error_with_partial_over_second_plain_error() {
+    // Java `EitherCodec.decode`: when first is an error-with-partial and second
+    // is a plain error, the FIRST partial is returned (not the second's error).
+    let ops = JsonOps::INSTANCE;
+    let input = ops.create_string("x".to_string());
+    // The first branch must error WITH a partial for the order to matter;
+    // `int_primitive` errors without one, so use a shim type as the first.
+    #[derive(Debug)]
+    struct PartialErrType;
+    impl Type<Json> for PartialErrType {
+        fn read(&self, ops: &Json, _input: &JsonOutput) -> DataResult<(AnyValue, JsonOutput)> {
+            DataResult::error_with_partial(
+                "first branch failed".to_string(),
+                (
+                    any(Dynamic::new(ops, ops.create_string("partial".to_string()))),
+                    ops.empty(),
+                ),
+            )
+        }
+        fn write(
+            &self,
+            _ops: &Json,
+            _value: &AnyValue,
+            prefix: &JsonOutput,
+        ) -> DataResult<JsonOutput> {
+            DataResult::success(prefix.clone())
+        }
+        fn equals_(&self, other: &dyn Type<Json>, _i: bool, _c: bool) -> bool {
+            other
+                .as_any_type()
+                .downcast_ref::<PartialErrType>()
+                .is_some()
+        }
+        fn template(&self) -> Arc<dyn TypeTemplate<Json>> {
+            Arc::new(Const::new(Arc::new(EmptyPart::new())))
+        }
+        fn type_to_string(&self) -> String {
+            "PartialErrType".to_string()
+        }
+        fn clone_ty(&self) -> Arc<dyn Type<Json>> {
+            Arc::new(PartialErrType)
+        }
+        fn as_any_type(&self) -> &dyn Any {
+            self
+        }
+    }
+    // Second: a plain error (no partial).
+    #[derive(Debug)]
+    struct PlainErrType;
+    impl Type<Json> for PlainErrType {
+        fn read(&self, _ops: &Json, _input: &JsonOutput) -> DataResult<(AnyValue, JsonOutput)> {
+            DataResult::error("second branch failed")
+        }
+        fn write(
+            &self,
+            _ops: &Json,
+            _value: &AnyValue,
+            prefix: &JsonOutput,
+        ) -> DataResult<JsonOutput> {
+            DataResult::success(prefix.clone())
+        }
+        fn equals_(&self, other: &dyn Type<Json>, _i: bool, _c: bool) -> bool {
+            other.as_any_type().downcast_ref::<PlainErrType>().is_some()
+        }
+        fn template(&self) -> Arc<dyn TypeTemplate<Json>> {
+            Arc::new(Const::new(Arc::new(EmptyPart::new())))
+        }
+        fn type_to_string(&self) -> String {
+            "PlainErrType".to_string()
+        }
+        fn clone_ty(&self) -> Arc<dyn Type<Json>> {
+            Arc::new(PlainErrType)
+        }
+        fn as_any_type(&self) -> &dyn Any {
+            self
+        }
+    }
+    let sum = SumType::new(
+        Arc::new(PartialErrType) as Arc<dyn Type<Json>>,
+        Arc::new(PlainErrType) as Arc<dyn Type<Json>>,
+    );
+    let result = sum.read(&ops, &input);
+    assert!(result.has_result_or_partial());
+    // The first (partial) value survives: the result is the LEFT branch partial.
+    let partial = result.result_or_partial_silent().expect("partial");
+    let (value, _rest) = partial;
+    let either = value
+        .downcast_ref::<rivet_serialization::either::Either<AnyValue, AnyValue>>()
+        .expect("either");
+    assert!(matches!(
+        either,
+        rivet_serialization::either::Either::Left(_)
+    ));
+}
+
+#[test]
+fn sum_type_read_combines_error_messages_when_both_plain_errors() {
+    let ops = JsonOps::INSTANCE;
+    let input = ops.create_string("x".to_string());
+    let int_ty: Arc<dyn Type<Json>> = int_primitive();
+    let also_int: Arc<dyn Type<Json>> = int_primitive();
+    let sum = SumType::new(int_ty, also_int);
+    let result = sum.read(&ops, &input);
+    assert!(result.is_error());
+    let msg = result.error_ref().expect("error").message().to_string();
+    assert!(
+        msg.contains("Failed to parse either. First:") && msg.contains("Second:"),
+        "unexpected combined message: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// EmptyPartPassthrough.write — wrong-typed value errors loudly
+// ---------------------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "EmptyPartPassthrough value is not a Dynamic")]
+fn empty_part_passthrough_write_panics_on_wrong_value_type() {
+    let ops = JsonOps::INSTANCE;
+    let ty = EmptyPartPassthrough::new();
+    let wrong = any(42i32);
+    let _ = ty.write(&ops, &wrong, &ops.empty());
+}
+
+// ---------------------------------------------------------------------------
+// DataFixerBuilder.addSchema — repeated key replaces (Java put)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_schema_obj_repeated_key_replaces_existing() {
+    let mut builder = DataFixerBuilder::new(999);
+    let s0 = schema_with_key_and_type(make_key(100), None);
+    let s0b = schema_with_key_and_type(make_key(100), None);
+    builder.add_schema_obj(s0.clone());
+    builder.add_schema_obj(s0b.clone());
+    let keys: Vec<i32> = builder
+        .build()
+        .schemas
+        .iter()
+        .map(|s| s.get_version_key())
+        .collect();
+    // No duplicate: the later schema replaces the earlier one at the same key.
+    assert_eq!(keys, vec![make_key(100)]);
+    assert!(Arc::ptr_eq(&builder.build().schemas[0], &s0b));
 }

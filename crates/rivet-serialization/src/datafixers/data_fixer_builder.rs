@@ -64,14 +64,17 @@ impl<Ops: DynamicOps + 'static> DataFixerBuilder<Ops> {
         schema
     }
 
-    /// `addSchema(Schema)` — insert keeping the map sorted.
+    /// `addSchema(Schema)` — insert keeping the map sorted, replacing an
+    /// existing entry on a repeated key (Java's `Int2ObjectSortedMap.put`).
     pub fn add_schema_obj(&mut self, schema: Arc<Schema<Ops>>) {
         let key = schema.get_version_key();
-        let pos = self
+        match self
             .schemas
             .binary_search_by_key(&key, |s| s.get_version_key())
-            .unwrap_or_else(|p| p);
-        self.schemas.insert(pos, schema);
+        {
+            Ok(pos) => self.schemas[pos] = schema,
+            Err(pos) => self.schemas.insert(pos, schema),
+        }
     }
 
     /// `addFixer(DataFix)`.

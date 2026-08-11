@@ -253,15 +253,22 @@ impl<Ops: DynamicOps + 'static> PointFreeCore<Ops> for Comp<Ops> {
         let mut new_functions: Vec<Arc<dyn PointFreeFunc<Ops>>> = Vec::new();
         let mut rewritten = false;
         for function in &self.functions {
-            let rewrite = rule.rewrite_or_nop(function.as_core());
-            if let Some(comp) = rewrite.as_any().downcast_ref::<Comp<Ops>>() {
-                new_functions.extend(comp.functions.clone());
-                rewritten = true;
-            } else if let Some(f) = clone_func_from_core(&rewrite) {
-                new_functions.push(f);
-                rewritten = true;
-            } else {
-                new_functions.push(function.clone());
+            // Java calls `rule.rewriteOrNop(function)` and compares reference
+            // identity; the port encodes "unchanged" as `None` (rules return
+            // `None` when they did not modify the node), so a present result
+            // here always means a real change.
+            match rule.rewrite(function.as_core()) {
+                Some(rewrite) => {
+                    if let Some(comp) = rewrite.as_any().downcast_ref::<Comp<Ops>>() {
+                        new_functions.extend(comp.functions.clone());
+                    } else if let Some(f) = clone_func_from_core(&rewrite) {
+                        new_functions.push(f);
+                    } else {
+                        new_functions.push(function.clone());
+                    }
+                    rewritten = true;
+                }
+                None => new_functions.push(function.clone()),
             }
         }
         if rewritten {
@@ -273,8 +280,9 @@ impl<Ops: DynamicOps + 'static> PointFreeCore<Ops> for Comp<Ops> {
 
     fn one(&self, rule: &dyn PointFreeRule<Ops>) -> Option<Arc<dyn PointFreeCore<Ops>>> {
         for (i, function) in self.functions.iter().enumerate() {
-            let rewrite = rule.rewrite(function.as_core());
-            if let Some(rewrite) = rewrite {
+            // Java `one` calls `rule.rewrite` directly and checks
+            // `.isPresent()`; `None` here is the "no rewrite" signal.
+            if let Some(rewrite) = rule.rewrite(function.as_core()) {
                 let mut new_functions: Vec<Arc<dyn PointFreeFunc<Ops>>> = Vec::new();
                 new_functions.extend_from_slice(&self.functions[..i]);
                 if let Some(comp) = rewrite.as_any().downcast_ref::<Comp<Ops>>() {

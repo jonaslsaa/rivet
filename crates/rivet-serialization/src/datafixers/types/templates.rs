@@ -227,11 +227,14 @@ impl<Ops: DynamicOps + 'static> Type<Ops> for EmptyPartPassthrough<Ops> {
 
     fn write(&self, ops: &Ops, value: &AnyValue, prefix: &Ops::Output) -> DataResult<Ops::Output> {
         // Java: `Codec.PASSTHROUGH.encode` merges the dynamic into the prefix.
+        // A wrong-typed value is a programming error (Java would
+        // ClassCastException); erroring here would be swallowed back to the
+        // input by `update`, so panic loudly like `PrimitiveType::write`.
         let codec = codec::passthrough::<Ops>();
-        match value.downcast_ref::<Dynamic<Ops::Output>>() {
-            Some(d) => codec.encode(d, ops, prefix),
-            None => DataResult::success(prefix.clone()),
-        }
+        let d = value
+            .downcast_ref::<Dynamic<Ops::Output>>()
+            .expect("EmptyPartPassthrough value is not a Dynamic");
+        codec.encode(d, ops, prefix)
     }
 
     fn equals_(
@@ -719,7 +722,10 @@ impl<Ops: DynamicOps + 'static> SumType<Ops> {
 
 impl<Ops: DynamicOps + 'static> Type<Ops> for SumType<Ops> {
     fn read(&self, ops: &Ops, input: &Ops::Output) -> DataResult<(AnyValue, Ops::Output)> {
-        // Java `SumType.buildCodec` (`Codec.either`) tries first, then second.
+        // Java `SumType.buildCodec` is `Codec.either` (`EitherCodec.decode`):
+        // decode both branches, prefer a success, then an error-with-partial
+        // from either branch (the partial value is preserved), and finally
+        // combine the two error messages.
         let first_read: DataResult<(AnyValue, Ops::Output)> =
             self.first.read(ops, input).map_owned(|(v, rest)| {
                 (
@@ -730,12 +736,29 @@ impl<Ops: DynamicOps + 'static> Type<Ops> for SumType<Ops> {
         if first_read.is_success() {
             return first_read;
         }
-        self.second.read(ops, input).map_owned(|(v, rest)| {
-            (
-                any(crate::either::Either::<AnyValue, AnyValue>::right(v)),
-                rest,
-            )
-        })
+        let second_read: DataResult<(AnyValue, Ops::Output)> =
+            self.second.read(ops, input).map_owned(|(v, rest)| {
+                (
+                    any(crate::either::Either::<AnyValue, AnyValue>::right(v)),
+                    rest,
+                )
+            });
+        if second_read.is_success() {
+            return second_read;
+        }
+        if first_read.has_result_or_partial() {
+            return first_read;
+        }
+        if second_read.has_result_or_partial() {
+            return second_read;
+        }
+        let first_err = first_read.error_ref().expect("first read error");
+        let second_err = second_read.error_ref().expect("second read error");
+        DataResult::error(format!(
+            "Failed to parse either. First: {}; Second: {}",
+            first_err.message(),
+            second_err.message()
+        ))
     }
 
     fn write(&self, ops: &Ops, value: &AnyValue, prefix: &Ops::Output) -> DataResult<Ops::Output> {
