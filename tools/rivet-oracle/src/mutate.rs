@@ -101,39 +101,48 @@ pub fn encode_payload(compound: &CompoundTag) -> Result<Vec<u8>, String> {
 ///
 /// Delegates to `fixture_full_payload_with_seed` with the working seed 42
 /// (mirroring `CAPTURE_SEED`) so a tree built by the plain builder is a
-/// different-seed tree from one built with a bogus seed — the seed-affecting
-/// fields (`LastUpdate`, `InhabitedTime`) hash differently, which is the
-/// bogus-seed negative's mechanism.
+/// different-seed tree from one built with a bogus seed — the seed flows into
+/// the block content (`Name` parity), which is the bogus-seed negative's
+/// mechanism.
 #[cfg(test)]
 pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
     fixture_full_payload_with_seed(cx, cz, 42)
 }
 
 /// Like `fixture_full_payload`, but carries the given world seed into the
-/// fields `SerializableChunkData.write()` writes from `Level` state
-/// (`LastUpdate` game time, `InhabitedTime`), so two payloads built for the
-/// same coordinate under different seeds hash differently — the deterministic
-/// analogue of the #175 7(e) bogus-seed negative without booting Paper.
+/// chunk's worldgen *content* (the block-palette `Name` alternation), so two
+/// payloads built for the same coordinate under different seeds hash
+/// differently — the deterministic analogue of the #175 7(e) bogus-seed
+/// negative without booting Paper.
+///
+/// The seed is deliberately **not** injected into the root `LastUpdate` /
+/// `InhabitedTime` tick counters: those are game/inhabited time, which in a
+/// fresh world are 0 for every seed and never a function of the world seed.
+/// The mechanism Paper actually has is that a different seed generates
+/// different worldgen content, so this builder folds the seed into the block
+/// palette instead — an honest stand-in for that content difference.
 #[cfg(test)]
 pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
     let mut root = CompoundTag::new();
     root.put_string("Status", "minecraft:full");
     root.put_int("xPos", cx);
     root.put_int("zPos", cz);
-    // Seed-affecting fields `SerializableChunkData.write()` emits from `Level`
-    // state: `LastUpdate` = `level.getGameTime()`, `InhabitedTime` = per-chunk
-    // `getInhabitedTime()`. A different seed flows different values here, so the
-    // seeded builder reproduces the #175 7(e) bogus-seed mechanism
-    // deterministically.
-    root.put_long("LastUpdate", seed);
-    root.put_long("InhabitedTime", seed + cx as i64);
+    // Root tick counters `SerializableChunkData.write()` emits from Level state
+    // (`LastUpdate` = game time, `InhabitedTime` = per-chunk inhabited time).
+    // These are time-based, not seed-based — a fresh world is 0 for every seed,
+    // so they are fixed constants here, never derived from `seed`.
+    root.put_long("LastUpdate", 0);
+    root.put_long("InhabitedTime", 0);
     let mut section = CompoundTag::new();
     section.put_byte("Y", 0);
     let mut bs = CompoundTag::new();
     let mut palette = CompoundTag::new();
+    // The seed folds into the block palette, standing in for real worldgen
+    // content differences: a different seed flips which blocks this synthetic
+    // chunk holds, so the serialized digest differs at every chunk.
     palette.put_string(
         "Name",
-        if (cx + cz) % 2 == 0 {
+        if (cx as i64 + cz as i64 + seed) % 2 == 0 {
             "minecraft:air"
         } else {
             "minecraft:stone"

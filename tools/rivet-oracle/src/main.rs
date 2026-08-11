@@ -4740,10 +4740,9 @@ mod tests {
     }
 
     /// Like `write_hash_fixture_tree`, but the payloads carry the given world
-    /// seed into the `LastUpdate`/`InhabitedTime` fields
-    /// (`fixture_full_payload_with_seed`), and the manifest records that seed —
-    /// so a tree under a different seed is a genuinely different world, which is
-    /// the #175 7(e) bogus-seed mechanism.
+    /// seed into their block content (`fixture_full_payload_with_seed`), and the
+    /// manifest records that seed — so a tree under a different seed is a
+    /// genuinely different world, which is the #175 7(e) bogus-seed mechanism.
     fn write_hash_fixture_tree_seeded(root: &Path, coords: &[(i32, i32)], seed: i64) -> PathBuf {
         let chunk_dir = root.join("chunk").join("the_nether").join("0.0");
         fs::create_dir_all(&chunk_dir).unwrap();
@@ -5480,6 +5479,58 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    /// The harder #175 7(e) case: a Rivet capture generated under a *bogus* seed
+    /// whose manifest **lies** and claims the baseline seed — so the provenance
+    /// guard passes (both sides claim seed 42) and only the digest comparison
+    /// can catch the different world. This is the real threat an honest
+    /// provenance check cannot stop (a capture mislabeling its own seed), and it
+    /// is the path the honest-seed test above cannot exercise: there the diff
+    /// bails on provenance before any digest is compared, here it must proceed
+    /// to the digest level and FAIL (exit 1) naming every diverged chunk.
+    #[test]
+    fn hash_diff_detects_bogus_seed_with_lying_manifest() {
+        let tmp = hash_tmp("hash-bogus-seed-lying");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let paper = write_hash_fixture_tree(&tmp.join("paper"), &all_corpus_coordinates());
+        // Rivet payloads genuinely generated under a bogus seed 999...
+        let rivet =
+            write_hash_fixture_tree_seeded(&tmp.join("rivet"), &all_corpus_coordinates(), 999);
+        // ...but the manifest lies and claims the baseline seed 42.
+        let mut m = load_hash_manifest(&rivet).unwrap();
+        m.seed = "42".to_string();
+        fs::write(
+            rivet.join("manifest.json"),
+            serde_json::to_string_pretty(&m).unwrap() + "\n",
+        )
+        .unwrap();
+
+        // Provenance now matches, so the diff must proceed to digest comparison
+        // and FAIL — never a vacuous green.
+        assert!(!run_hash_diff(&paper, &rivet).unwrap());
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            HASH_EXIT_FAIL
+        );
+        // Every corpus chunk diverged (the bogus-seed world differs at every
+        // chunk) and no chunk is one-sided: the FAIL names all of them.
+        let (mismatches, paper_only, rivet_only, compared) = compute_hash_diffs(
+            &load_hash_manifest(&paper).unwrap(),
+            &load_hash_manifest(&rivet).unwrap(),
+        );
+        assert_eq!(compared, all_corpus_coordinates().len());
+        assert_eq!(
+            mismatches.len(),
+            all_corpus_coordinates().len(),
+            "every FULL chunk of the lying-manifest bogus-seed world diverges"
+        );
+        assert!(
+            paper_only.is_empty() && rivet_only.is_empty(),
+            "no one-sided FULL divergence"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     /// The committed Paper manifest's digest table is grounded in the exact
     /// payload bytes under `fixtures/regions/overworld-normal`: rebuilding the
     /// manifest from those payloads reproduces the committed digest table
@@ -5535,7 +5586,15 @@ mod tests {
         let tmp = hash_tmp("hash-paper-dir");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
-        let dir = write_hash_fixture_tree(&tmp.join("tree"), &all_corpus_coordinates());
+        // Generate the payloads under the *same* seed the region manifest below
+        // claims (corpus seed 0), so the tree is internally consistent: a
+        // manifest recording a seed the payloads were not generated under would
+        // be exactly the lying-manifest scenario this gate exists to catch.
+        let dir = write_hash_fixture_tree_seeded(
+            &tmp.join("tree"),
+            &all_corpus_coordinates(),
+            corpus::corpus_seed(0) as i64,
+        );
         // A region manifest with provenance the source region capture would
         // carry: flat level type, uncompressed regions, corpus seed 0.
         let region = serde_json::json!({
