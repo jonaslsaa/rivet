@@ -171,6 +171,13 @@ mod tests {
         fn get_seed(&self) -> i64 {
             0
         }
+
+        fn get_block_state(&self, _pos: &BlockPos) -> rivet_registry::block_state::BlockState {
+            // RivetTodo(#399): no real world-access implementation is present —
+            // the state-testing predicates surface the unavailable capability
+            // explicitly (see `StateTestingPredicate::test`).
+            panic!("WorldGenLevel.getBlockState is not implemented (RivetTodo #399)")
+        }
     }
 
     struct NoopGenerator;

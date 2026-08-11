@@ -155,7 +155,7 @@ fn run_blocks(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<S
 /// (the noise/biome-climate/preset data) are added alongside the extract-driven
 /// block tables.
 fn render_mod() -> String {
-    "#[cfg(feature = \"blocks\")]\npub mod biomes;\n#[cfg(feature = \"blocks\")]\npub mod block_behaviors;\npub mod block_entity_types;\n#[cfg(feature = \"blocks\")]\npub mod block_properties;\n#[cfg(feature = \"blocks\")]\npub mod block_states;\n#[cfg(feature = \"blocks\")]\npub mod blocks;\n#[cfg(feature = \"blocks\")]\npub mod registries;\n#[cfg(feature = \"blocks\")]\npub mod registry_data;\n#[cfg(feature = \"blocks\")]\npub mod synchronized;\n#[cfg(feature = \"blocks\")]\npub mod tags;\n#[cfg(feature = \"blocks\")]\npub mod worldgen;\n"
+    "#[cfg(feature = \"blocks\")]\npub mod biomes;\n#[cfg(feature = \"blocks\")]\npub mod block_behaviors;\npub mod block_entity_types;\n#[cfg(feature = \"blocks\")]\npub mod block_properties;\n#[cfg(feature = \"blocks\")]\npub mod block_states;\n#[cfg(feature = \"blocks\")]\npub mod blocks;\npub mod feature_size_types;\n#[cfg(feature = \"blocks\")]\npub mod registries;\n#[cfg(feature = \"blocks\")]\npub mod registry_data;\n#[cfg(feature = \"blocks\")]\npub mod synchronized;\n#[cfg(feature = \"blocks\")]\npub mod tags;\n#[cfg(feature = \"blocks\")]\npub mod worldgen;\n"
         .to_string()
 }
 
@@ -343,6 +343,7 @@ mod drift_tests {
         "block_properties.rs",
         "block_states.rs",
         "blocks.rs",
+        "feature_size_types.rs",
         "mod.rs",
         "registries.rs",
         "registry_data.rs",
