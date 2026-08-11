@@ -79,6 +79,16 @@ impl ChunkMap {
         self.chunks.get(&pos)
     }
 
+    /// Install an owned reconstructed chunk at `pos`, replacing any previously
+    /// loaded chunk there. The #516 region-backed boot composes the read-only
+    /// world by installing the spawn chunk the caller already validated;
+    /// `ChunkMap::new` seeded a superflat placeholder at the same position, so
+    /// `install` overwrites it with the real loaded chunk (tick-thread-owned by
+    /// value, never `Arc<RwLock>`).
+    pub fn install(&mut self, pos: ChunkPos, chunk: LevelChunk) {
+        self.chunks.insert(pos, chunk);
+    }
+
     /// The number of loaded chunks. Deterministic: 1 for the M1 superflat
     /// world.
     pub fn len(&self) -> usize {

@@ -28,20 +28,25 @@
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_protocol::protocol::game::level_chunk_packet_data::LevelChunkPacketData;
 use rivet_protocol::protocol::game::light_update_packet_data::LightUpdatePacketData;
+use rivet_registry::block_state::BlockState;
 use rivet_registry::core::ChunkPos;
 use rivet_registry::generated::block_behaviors::{
     BEHAVIOR_FLAG_FLUID_EMPTY, BEHAVIOR_FLAG_RANDOM_TICKING, behavior_of,
 };
 /// Canonical dense global block-state id from the generated registry.
 pub use rivet_registry::generated::block_states::StateId;
+use rivet_world::chunk::data_layer::DataLayer;
 use rivet_world::chunk::level_chunk::LevelChunk as WorldLevelChunk;
 use rivet_world::chunk::level_chunk_section::LevelChunkSection;
 use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
+use rivet_world::chunk::storage::ChunkReconstruction;
 use rivet_world::chunk::strategy::Strategy;
 use rivet_world::chunk::upgrade_data::UpgradeData;
 use rivet_world::level::LevelHeightAccessor;
 use rivet_world::level::height_accessor::create as create_accessor;
-use rivet_world::levelgen::heightmap::Types;
+use rivet_world::levelgen::heightmap::{StateFlags, Types};
+use rivet_world::lighting::light_update_data::build_light_update_data;
+use rivet_world::lighting::swmr_nibble_array::SwmrNibbleArray;
 use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y, build_superflat};
 
 /// The chunk's structure-key type. Rivet has no `Structure` type yet, so the
@@ -128,8 +133,51 @@ impl LevelChunk {
         LevelChunk { chunk, light_data }
     }
 
-    /// The prebuilt superflat light payload — a clone of the value computed
-    /// once at construction (the packet body takes it by value).
+    /// `ChunkReconstruction` → server `LevelChunk` — the #516 boot bridge.
+    ///
+    /// `reconstruct_runtime_chunk` (#383) produces a generic
+    /// `LevelChunk<BlockState, BiomeId, ()>` whose sections carry the generated
+    /// `BlockState`/`BiomeId` values; the server chunk stores the same dense
+    /// global `StateId` (air = 0, stone = 1, ... — `BlockState::id()` IS the
+    /// `rivet_registry::generated::block_states::StateId`) and a `u16`-backed
+    /// `BiomeId`, so each section's containers are re-encoded against the
+    /// server strategies with `map_values` — the byte-identical-on-wire
+    /// conversion the packet path needs. The stored heightmaps/light nibbles/
+    /// pending block entities are preserved by the value transform; the packet
+    /// light payload is derived once through `to_vanilla_nibble` +
+    /// `build_light_update_data` (the #184 send seam).
+    pub fn from_reconstructed(reconstruction: ChunkReconstruction) -> Self {
+        let ChunkReconstruction {
+            chunk: world_chunk, ..
+        } = reconstruction;
+
+        let (block_strategy, biome_strategy) = strategies();
+        let world_chunk = world_chunk
+            .map_values(
+                block_strategy,
+                biome_strategy,
+                StateId(0),
+                BiomeId(40),
+                &|state: &BlockState| state.id(),
+                &|biome: &rivet_world::chunk::storage::section_reconstruction::BiomeId| {
+                    BiomeId(biome.0)
+                },
+                &|state: &StateId| state_flags(*state),
+            )
+            .expect("reconstructed sections map to the server StateId/BiomeId");
+        let light_data = light_data_from_nibbles(
+            world_chunk.block_nibbles(),
+            world_chunk.sky_nibbles(),
+            world_chunk.get_height(),
+        );
+        LevelChunk {
+            chunk: world_chunk,
+            light_data,
+        }
+    }
+
+    /// The prebuilt light payload — a clone of the value computed once at
+    /// construction (the packet body takes it by value).
     pub fn light_data(&self) -> LightUpdatePacketData {
         self.light_data.clone()
     }
@@ -267,6 +315,47 @@ fn strategies() -> (Strategy<StateId>, Strategy<BiomeId>) {
         Strategy::create_for_block_states(Box::new(maps::BlockStateGlobalMap)),
         Strategy::create_for_biomes(Box::new(maps::BiomeGlobalMap)),
     )
+}
+
+/// The `StateFlags` resolver for the server's `StateId` — the same behavior-table
+/// bit-tests the world reconstruction uses (`BlockState::is_air`/
+/// `blocks_motion`/`fluid_empty` and the `minecraft:leaves` tag), applied to the
+/// dense `StateId` via `BlockState::new`. This is the `resolve` closure stored
+/// on a chunk rebuilt by `from_reconstructed`, so on-demand heightmap primes
+/// classify real reconstructed states (not the all-air/all-motion superflat
+/// predicates).
+fn state_flags(state: StateId) -> StateFlags {
+    let s = BlockState::new(state);
+    StateFlags {
+        is_air: s.is_air(),
+        blocks_motion: s.blocks_motion(),
+        has_fluid: !s.fluid_empty(),
+        is_leaves: s.is_in_tag("minecraft:leaves"),
+    }
+}
+
+/// The `26 block_nibbles`/`sky_nibbles` Starlight arrays → the packet light
+/// payload, once per chunk (the #184 send seam). Each array is converted with
+/// `to_vanilla_nibble` (`Null`/`Hidden` → `None`, `Uninitialised` → an empty
+/// layer, `Initialised` → the bytes), then `build_light_update_data` folds them
+/// into the four masks + layer lists.
+fn light_data_from_nibbles(
+    block_nibbles: &[SwmrNibbleArray],
+    sky_nibbles: &[SwmrNibbleArray],
+    height: i32,
+) -> LightUpdatePacketData {
+    let light_section_count = (height / 16) as usize + 2;
+    let block_layers: Vec<Option<DataLayer>> = block_nibbles
+        .iter()
+        .take(light_section_count)
+        .map(|nibble| nibble.to_vanilla_nibble())
+        .collect();
+    let sky_layers: Vec<Option<DataLayer>> = sky_nibbles
+        .iter()
+        .take(light_section_count)
+        .map(|nibble| nibble.to_vanilla_nibble())
+        .collect();
+    build_light_update_data(&sky_layers, &block_layers)
 }
 
 /// Builds the deterministic single-stone superflat chunk content (air = state
