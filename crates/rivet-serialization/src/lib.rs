@@ -20,6 +20,7 @@
 pub mod codec;
 pub mod codecs;
 pub mod data_result;
+pub mod datafixers;
 pub mod decoder;
 pub mod dynamic;
 pub mod dynamic_ops;
