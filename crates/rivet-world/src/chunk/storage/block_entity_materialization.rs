@@ -56,9 +56,12 @@
 //!   table, components) are irrelevant to the client update tag.
 //! - **mob_spawner** — `SpawnerBlockEntity.getUpdateTag` is
 //!   `saveCustomOnly` minus `SpawnPotentials`. `saveCustomOnly` is
-//!   `saveAdditional`, which for the spawner is just `BaseSpawner.save` (the
-//!   base `BlockEntity.saveAdditional` is a no-op). The materialization models
-//!   the `BaseSpawner.load` → `BaseSpawner.save` round trip from the serialized
+//!   `saveAdditional`, which calls base `BlockEntity.saveAdditional` (writes
+//!   `PublicBukkitValues` when the persistent-data container is non-empty) and
+//!   then `BaseSpawner.save`; `sanitizeSentNbt` strips `PublicBukkitValues`
+//!   before the wire (BlockEntityInfo.create), so the net tag is exactly
+//!   `BaseSpawner.save` minus `SpawnPotentials`. The materialization models the
+//!   `BaseSpawner.load` → `BaseSpawner.save` round trip from the serialized
 //!   tag, including Paper's int variants and `Short.MAX_VALUE` clamps, then
 //!   drops `SpawnPotentials` exactly like `getUpdateTag`.
 //!
@@ -158,9 +161,12 @@ const UNSUPPORTED_UPDATE_TAG_TYPES: &[&str] = &[
 /// be non-empty (a state-carrying field is present in the serialized tag), the
 /// port refuses loudly because it cannot reproduce the tag.
 ///
-/// The emptiness is computable from the serialized raw tag because each
-/// type's `loadAdditional` rebuilds the live state from it and the override's
-/// conditional writes mirror the raw field's presence:
+/// The emptiness is computable from the serialized raw tag because on the
+/// chunk-load path each type's `loadAdditional` rebuilds the live state
+/// exclusively from the raw top-level fields — `applyImplicitComponents` is
+/// not invoked there, so a `components` compound only ever populates the
+/// entity's component map, never its live fields — and the override's
+/// conditional writes mirror exactly the raw fields' presence:
 ///
 /// - `minecraft:skull` (`SkullBlockEntity`) — `saveCustomOnly` writes only the
 ///   nullable `profile`, `note_block_sound`, `custom_name`; empty when none
