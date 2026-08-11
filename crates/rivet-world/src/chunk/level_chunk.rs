@@ -47,7 +47,7 @@ use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, Heightmap, StateFlags, Types};
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
@@ -348,6 +348,18 @@ where
         self.base.get_block_entity_nbt(pos)
     }
 
+    /// `pendingBlockEntities` — the read-only, insertion-ordered runtime
+    /// authority (source order for the surviving positions, #537).
+    pub fn pending_block_entities(&self) -> &IndexMap<BlockPos, CompoundTag> {
+        self.base.pending_block_entities()
+    }
+
+    /// `ProtoChunk.removeBlockEntity(BlockPos)`'s pending half — removes the
+    /// position from the runtime authority (#537).
+    pub fn remove_block_entity_nbt(&mut self, pos: &BlockPos) -> Option<CompoundTag> {
+        self.base.remove_block_entity_nbt(pos)
+    }
+
     /// `LevelChunk.getBlockEntityNbtForSaving(BlockPos, HolderLookup)` — Java
     /// saves the materialized block entity (with `keepPacked false`) or falls
     /// back to the pending tag (with `keepPacked true`). The block-entity map
@@ -405,12 +417,12 @@ where
     }
 
     /// `ChunkAccess.getAllReferences()`.
-    pub fn get_all_references(&self) -> &HashMap<S, IndexSet<u64>> {
+    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
         self.base.get_all_references()
     }
 
     /// `ChunkAccess.setAllReferences(Map)`.
-    pub fn set_all_references(&mut self, data: HashMap<S, Vec<u64>>) {
+    pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, data: I) {
         self.base.set_all_references(data);
     }
 
