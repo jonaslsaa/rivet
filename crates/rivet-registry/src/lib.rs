@@ -47,6 +47,12 @@
 /// behind `blocks`. Wiring lives in generated `generated/mod.rs`.
 pub mod generated;
 
+/// The pure fluid id-handle (`FluidId`) over the generated `minecraft:fluid`
+/// tables (issue #370), mirroring `BlockId`'s ownership. Gated behind
+/// `blocks` like the fluid tables it reads.
+#[cfg(feature = "blocks")]
+pub mod fluid_id;
+
 /// Hand-written `BlockState` value type over the generated global-id + behavior
 /// tables (issue #228). The "pure table ops, no world types" surface the
 /// worldgen/heightmap/lighting work consumes; gated behind `blocks` like the
