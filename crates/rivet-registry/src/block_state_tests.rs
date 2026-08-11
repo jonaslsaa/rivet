@@ -549,3 +549,53 @@ fn typed_leaf_enums_flow_through_set_value() {
         .unwrap();
     assert_eq!(same.id(), stone.id());
 }
+
+/// The non-enum value classes (`Direction`, `Direction.Axis`, `bool`, `i32`)
+/// flow through the same typed helpers via their `From<…> for PropertyValue`
+/// impls — the `state.setValue(BlockStateProperties.FACING, Direction.NORTH)`
+/// / `setValue(WATERLOGGED, true)` / `setValue(DISTANCE, 1)` ergonomics Java's
+/// worldgen code uses.
+#[test]
+fn typed_scalar_value_classes_flow_through_set_value() {
+    use crate::block_state_properties::BlockStateProperties;
+    use crate::core::{Axis, Direction};
+
+    // FACING → Direction (GeodeFeature / carvers set a Direction on FACING).
+    let dispenser = default_state_of("minecraft:dispenser");
+    let north = dispenser
+        .set_value(BlockStateProperties::FACING, Direction::North)
+        .unwrap();
+    assert_eq!(
+        north.get_value(BlockStateProperties::FACING),
+        Some(PropertyValue::Enum("north"))
+    );
+
+    // AXIS → Direction.Axis (RotatedPillarBlock.AXIS).
+    let log = default_state_of("minecraft:oak_log");
+    assert!(log.has_property(BlockStateProperties::AXIS));
+    let x = log.set_value(BlockStateProperties::AXIS, Axis::X).unwrap();
+    assert_eq!(
+        x.get_value(BlockStateProperties::AXIS),
+        Some(PropertyValue::Enum("x"))
+    );
+
+    // WATERLOGGED → bool.
+    let slab = default_state_of("minecraft:oak_slab");
+    let wet = slab
+        .set_value(BlockStateProperties::WATERLOGGED, true)
+        .unwrap();
+    assert_eq!(
+        wet.get_value(BlockStateProperties::WATERLOGGED),
+        Some(PropertyValue::Bool(true))
+    );
+
+    // DISTANCE → i32 (TreeFeature sets DISTANCE to the smallest distance).
+    let leaves = default_state_of("minecraft:oak_leaves");
+    let near = leaves.set_value(BlockStateProperties::DISTANCE, 1).unwrap();
+    assert_eq!(
+        near.get_value(BlockStateProperties::DISTANCE),
+        Some(PropertyValue::Int(1))
+    );
+    // Out-of-range integer errors (Paper IllegalArgumentException).
+    assert!(leaves.set_value(BlockStateProperties::DISTANCE, 8).is_err());
+}

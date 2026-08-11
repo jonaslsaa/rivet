@@ -65,7 +65,7 @@
 //! crate.
 
 use crate::block_state_property::{Property, PropertyValue};
-use crate::core::Direction;
+use crate::core::{Axis, Direction};
 use crate::generated::block_properties::BlockPropertyId;
 use rivet_util::string_representable::StringRepresentable;
 
@@ -506,6 +506,51 @@ impl From<CreakingHeartState> for PropertyValue {
 // helpers instead of hand-writing the `PropertyValue::Enum("...")` string. Each
 // impl routes through the enum's `serialized()` const fn — the single source of
 // truth for the serialized name shared with `StringRepresentable`.
+//
+// FIDELITY NOTE: distinct leaf enums can share a serialized name (`Half::Top`
+// and `SlabType::Top` are both `"top"`; `RedstoneSide::None` and
+// `BambooLeaves::None` are both `"none"`). Java catches passing the wrong enum
+// at compile time (generics); here every enum collapses to `PropertyValue::
+// Enum(&str)`, so `set_value(SLAB_TYPE, Half::Top)` compiles and silently sets
+// `type=top`. This matches Paper only when the caller pairs the value class with
+// its own property; worldgen callers must keep them matched. The leaf-enum
+// tests always use the correct pair, so no current path exercises a mismatch.
+
+// ---------------------------------------------------------------------------
+// From<Direction>/From<Axis>/From<bool>/From<i32> — the non-enum value classes
+// ---------------------------------------------------------------------------
+
+// The facade's Boolean / Integer / Direction / Direction.Axis value classes
+// (WATERLOGGED, DISTANCE, FACING, AXIS, …) are set through the same typed
+// helpers. Direction and Axis implement `StringRepresentable` in Java, so they
+// route through their serialized name exactly like the leaf enums; `bool` and
+// `i32` map directly onto `PropertyValue::Bool`/`PropertyValue::Int`. These
+// make the documented `state.set_value(BlockStateProperties.FACING,
+// Direction::North)` / `set_value(WATERLOGGED, true)` ergonomics compile.
+
+impl From<Direction> for PropertyValue {
+    fn from(dir: Direction) -> PropertyValue {
+        PropertyValue::Enum(dir.get_serialized_name())
+    }
+}
+
+impl From<Axis> for PropertyValue {
+    fn from(axis: Axis) -> PropertyValue {
+        PropertyValue::Enum(axis.get_name())
+    }
+}
+
+impl From<bool> for PropertyValue {
+    fn from(b: bool) -> PropertyValue {
+        PropertyValue::Bool(b)
+    }
+}
+
+impl From<i32> for PropertyValue {
+    fn from(v: i32) -> PropertyValue {
+        PropertyValue::Int(v)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // BlockStateProperties — the named constant facade
@@ -1175,6 +1220,135 @@ mod tests {
                 prop.name(),
                 *name,
                 "facade constant mapped to the wrong property id"
+            );
+        }
+    }
+
+    /// Duplicate-name constants must also resolve to the exact Java value set
+    /// (the id-encoded `values()` slice). The name check above cannot tell
+    /// `AGE_1` from `AGE_2` (both `age`) or `HORIZONTAL_FACING` from
+    /// `FACING_HOPPER` (both `facing`); asserting the value slice pins each
+    /// constant to its distinct `BlockPropertyId`.
+    #[test]
+    fn duplicate_name_facade_constants_have_distinct_value_sets() {
+        let cases: &[(&[&str], Property)] = &[
+            // age — 0..=n, one id per range.
+            (&["0", "1"], BlockStateProperties::AGE_1),
+            (&["0", "1", "2"], BlockStateProperties::AGE_2),
+            (&["0", "1", "2", "3"], BlockStateProperties::AGE_3),
+            (&["0", "1", "2", "3", "4"], BlockStateProperties::AGE_4),
+            (&["0", "1", "2", "3", "4", "5"], BlockStateProperties::AGE_5),
+            (
+                &["0", "1", "2", "3", "4", "5", "6", "7"],
+                BlockStateProperties::AGE_7,
+            ),
+            (
+                &[
+                    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14",
+                    "15",
+                ],
+                BlockStateProperties::AGE_15,
+            ),
+            (
+                &[
+                    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14",
+                    "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25",
+                ],
+                BlockStateProperties::AGE_25,
+            ),
+            // level — cauldron 1..=3, composter 0..=8, fluid 0..=15.
+            (&["1", "2", "3"], BlockStateProperties::LEVEL_CAULDRON),
+            (
+                &["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+                BlockStateProperties::LEVEL_COMPOSTER,
+            ),
+            (
+                &[
+                    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14",
+                    "15",
+                ],
+                BlockStateProperties::LEVEL,
+            ),
+            // distance — leaves 1..=7 vs stability 0..=7.
+            (
+                &["1", "2", "3", "4", "5", "6", "7"],
+                BlockStateProperties::DISTANCE,
+            ),
+            (
+                &["0", "1", "2", "3", "4", "5", "6", "7"],
+                BlockStateProperties::STABILITY_DISTANCE,
+            ),
+            // facing — full 6, horizontal 4 (EnumProperty Predicate filter),
+            // hopper 5 (direction != UP).
+            (
+                &["north", "east", "south", "west", "up", "down"],
+                BlockStateProperties::FACING,
+            ),
+            (
+                &["north", "south", "west", "east"],
+                BlockStateProperties::HORIZONTAL_FACING,
+            ),
+            (
+                &["down", "north", "south", "west", "east"],
+                BlockStateProperties::FACING_HOPPER,
+            ),
+            // axis — horizontal x/z vs full x/y/z.
+            (&["x", "z"], BlockStateProperties::HORIZONTAL_AXIS),
+            (&["x", "y", "z"], BlockStateProperties::AXIS),
+            // shape — rail 10 vs stairs 5.
+            (
+                &[
+                    "north_south",
+                    "east_west",
+                    "ascending_east",
+                    "ascending_west",
+                    "ascending_north",
+                    "ascending_south",
+                    "south_east",
+                    "south_west",
+                    "north_west",
+                    "north_east",
+                ],
+                BlockStateProperties::RAIL_SHAPE,
+            ),
+            (
+                &[
+                    "straight",
+                    "inner_left",
+                    "inner_right",
+                    "outer_left",
+                    "outer_right",
+                ],
+                BlockStateProperties::STAIRS_SHAPE,
+            ),
+            // half — door upper/lower vs stair/slab top/bottom.
+            (&["upper", "lower"], BlockStateProperties::DOUBLE_BLOCK_HALF),
+            (&["top", "bottom"], BlockStateProperties::HALF),
+            // Per-direction boolean (up/down/north/east/south/west) vs the
+            // redstone-wire tri-state (up/side/none).
+            (&["true", "false"], BlockStateProperties::UP),
+            (&["true", "false"], BlockStateProperties::DOWN),
+            (&["true", "false"], BlockStateProperties::NORTH),
+            (&["true", "false"], BlockStateProperties::EAST),
+            (&["true", "false"], BlockStateProperties::SOUTH),
+            (&["true", "false"], BlockStateProperties::WEST),
+            (&["up", "side", "none"], BlockStateProperties::EAST_REDSTONE),
+            (
+                &["up", "side", "none"],
+                BlockStateProperties::NORTH_REDSTONE,
+            ),
+            (
+                &["up", "side", "none"],
+                BlockStateProperties::SOUTH_REDSTONE,
+            ),
+            (&["up", "side", "none"], BlockStateProperties::WEST_REDSTONE),
+        ];
+        for (values, prop) in cases {
+            assert_eq!(
+                prop.values(),
+                *values,
+                "facade constant {} mapped to the wrong value set",
+                prop.name()
             );
         }
     }

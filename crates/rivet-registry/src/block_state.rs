@@ -230,8 +230,14 @@ impl BlockState {
     /// values (`setValueInternal`'s "not an allowed value").
     ///
     /// `value` accepts any `Into<PropertyValue>` — the raw `PropertyValue`
-    /// union or the typed leaf enums (`state.set_value(SlabBlock.TYPE,
-    /// SlabType::Double)`).
+    /// union, the typed leaf enums (`state.set_value(SlabBlock.TYPE,
+    /// SlabType::Double)`), or the `Direction`/`Axis`/`bool`/`i32` value
+    /// classes (`state.set_value(BlockStateProperties::FACING,
+    /// Direction::North)`, `set_value(WATERLOGGED, true)`,
+    /// `set_value(DISTANCE, 1)`). Leaf enums collapse to `PropertyValue::
+    /// Enum(&str)`, so a value class from a different property with the same
+    /// serialized name (`Half::Top` vs `SlabType::Top`) compiles — keep the
+    /// value class matched to its property, as Java's generics enforce.
     pub fn set_value(
         self,
         prop: Property,
