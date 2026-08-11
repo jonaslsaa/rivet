@@ -179,7 +179,7 @@ impl<T> SavedTick<T> {
 /// record `equals` (all five fields) is only consumed by the deferred
 /// `LevelTicks`; the per-position uniqueness this slice needs is the
 /// `UNIQUE_TICK_HASH` projection (see [`UniqueTickKey`]).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScheduledTick<T> {
     /// `type` — the block/fluid id-handle.
     pub r#type: T,
@@ -393,21 +393,48 @@ impl<T> TickQueue<T> {
 
     /// `PriorityQueue.removeAt(int)` — remove the element at `i`, restoring the
     /// heap with sift-down (and sift-up when the moved element stays put).
-    fn remove_at(&mut self, i: usize) {
+    ///
+    /// Returns the moved (former last) element when it was sifted strictly
+    /// above the removed slot — Java returns it exactly then so the iterator can
+    /// defer it to `forgetMeNot` for a later revisit (see [`LevelChunkTicks::
+    /// remove_if`]).
+    fn remove_at(&mut self, i: usize) -> Option<ScheduledTick<T>>
+    where
+        T: Clone,
+    {
         let s = self.queue.len() - 1;
         if s == i {
             self.queue.pop();
-            return;
+            return None;
         }
-        // Java: `E moved = queue[i] = queue[s]`; then `siftDown(i)` and
-        // `if (queue[i] == moved) siftUp(i, moved)`. The moved element is only
-        // compared by identity to see whether sift-down left it in place; the
-        // value itself is not consumed further.
+        // Java: `E moved = es[s]; es[s] = null; siftDown(i, moved); if (es[i]
+        // == moved) { siftUp(i, moved); if (es[i] != moved) return moved; }`.
+        // `swap_remove` puts the last element at `i` first; the sift-down then
+        // the conditional sift-up reproduce Java's array, and sifting the moved
+        // element strictly above `i` is exactly the case Java reports back.
         self.queue.swap_remove(i);
         let landed = self.sift_down(i);
         if landed == i {
-            self.sift_up(i);
+            let up = self.sift_up(i);
+            if up != i {
+                return Some(self.queue[up].clone());
+            }
         }
+        None
+    }
+
+    /// `PriorityQueue.removeEq(Object)` — remove the first element equal to
+    /// `tick`, restoring the heap (Java scans by identity; value equality is
+    /// equivalent here because a scheduled tick's five fields are its identity
+    /// for ordering, and duplicate values are interchangeable).
+    fn remove_eq(&mut self, tick: &ScheduledTick<T>)
+    where
+        T: Clone + PartialEq,
+    {
+        let Some(idx) = self.queue.iter().position(|e| e == tick) else {
+            return;
+        };
+        self.remove_at(idx);
     }
 
     /// `siftUpUsingComparator` — bubble `queue[k]` up to its heap position,
@@ -580,42 +607,53 @@ impl<T> LevelChunkTicks<T> {
     /// `removeIf(Predicate<ScheduledTick<T>>)` — remove every queued tick
     /// matching the predicate, updating the per-position set and marking dirty.
     ///
-    /// Mirrors the `java.util.PriorityQueue` iterator Java's `Collection
-    /// .removeIf` walks: removing the element at `i` shifts the former last
-    /// element into `i`, and the cursor is reset so that shifted element is
-    /// revisited (Java's `Itr.remove` `cursor--`). The only deviation is Java's
-    /// `forgetMeNot` deferred queue for the rare case where `removeAt` sifts the
-    /// replacement strictly above the removed slot — an ordering nuance that
-    /// cannot change the surviving set for the actual consumers (`clearArea`'s
-    /// stateless positional predicate), so it is not reproduced.
+    /// Reproduces the `java.util.PriorityQueue` iterator Java's `removeIf` loop
+    /// walks, including the `forgetMeNot` deferred-removal path: removing the
+    /// element at `i` shifts the former last element into the heap; when it
+    /// stays at or below `i`, the cursor is reset so that element is revisited
+    /// (`Itr.remove` `cursor--`); when `removeAt` instead sifts it strictly
+    /// above `i` (its `removeAt` return value), the slot now holds an
+    /// already-visited element so the cursor is not reset, and the moved
+    /// element is deferred — then re-tested and removed by `removeEq` after the
+    /// main pass. A deferred element can match the predicate (e.g. `clearArea`'s
+    /// positional test), so reproducing the deferral is required for the
+    /// surviving set to match Java.
     ///
-    /// The per-position set is rebuilt from the survivors rather than removed
-    /// element-by-element: with duplicate-position queued ticks (possible via
-    /// `unpack` of a duplicated pending list), Java's per-removal `set.remove`
-    /// leaves a stale missing entry even when a survivor holds the position,
-    /// and the rebuild avoids that stale entry while matching Java exactly in
-    /// the common single-tick-per-position case.
+    /// The per-position set is updated per removed element exactly like Java
+    /// (`ticksPerPosition.remove(tick)` for each removed tick, main pass and
+    /// drain alike), preserving its staleness when the queue holds duplicate
+    /// (type, pos) entries from the unchecked `unpack` path.
     pub fn remove_if(&mut self, mut test: impl FnMut(&ScheduledTick<T>) -> bool)
     where
         T: Clone + Eq + Hash,
     {
         let mut i = 0;
+        let mut forget_me_not: Vec<ScheduledTick<T>> = Vec::new();
         while i < self.tick_queue.queue.len() {
             if test(&self.tick_queue.queue[i]) {
-                self.tick_queue.remove_at(i);
                 self.dirty = true;
-                // Cursor reset (Java `Itr.remove` `cursor--`): revisit the
-                // element shifted into `i`.
+                self.ticks_per_position
+                    .remove(&UniqueTickKey::from(&self.tick_queue.queue[i]));
+                if let Some(moved) = self.tick_queue.remove_at(i) {
+                    // Java `Itr.remove` with a returned `moved`: the cursor is
+                    // NOT reset (the element now at `i` was already visited);
+                    // the moved element is re-tested after the main pass.
+                    forget_me_not.push(moved);
+                    i += 1;
+                }
+                // else Java `cursor--`: revisit the element shifted into `i`.
             } else {
                 i += 1;
             }
         }
-        // The per-position set is rebuilt from the survivors: Java removes
-        // `tick` (by unique key) from the set per removed element, and
-        // duplicates in the queue would otherwise leave stale entries.
-        self.ticks_per_position.clear();
-        for tick in &self.tick_queue.queue {
-            self.ticks_per_position.insert(UniqueTickKey::from(tick));
+        // Java's iterator drains `forgetMeNot` after the main pass, re-testing
+        // each deferred element and removing it by identity (`removeEq`).
+        for moved in forget_me_not {
+            if test(&moved) {
+                self.dirty = true;
+                self.tick_queue.remove_eq(&moved);
+                self.ticks_per_position.remove(&UniqueTickKey::from(&moved));
+            }
         }
     }
 
@@ -1230,6 +1268,66 @@ mod tests {
                 .map(|t| t.r#type.as_str())
                 .collect::<Vec<_>>(),
             vec!["c", "a"]
+        );
+    }
+
+    #[test]
+    fn level_chunk_ticks_remove_if_deferred_moved_element() {
+        // Exercises the `PriorityQueue` iterator's `forgetMeNot` path: removing
+        // a mid-heap element whose replacement sifts strictly above the removed
+        // slot. The moved (former-last) element is NOT revisited in place; it
+        // is deferred and re-tested after the main pass, then removed by
+        // `removeEq`. The heap array `[a,b,c,d,e,f,g]` (triggers 1,8,2,10,9,4,3)
+        // reproduces Java's layout; removing index 3 (d) returns g as the moved
+        // element (verified against the JDK algorithm).
+        let mut container = LevelChunkTicks::new();
+        for (name, trigger) in [
+            ("a", 1i64),
+            ("b", 8),
+            ("c", 2),
+            ("d", 10),
+            ("e", 9),
+            ("f", 4),
+            ("g", 3),
+        ] {
+            container.schedule(sched(
+                name,
+                trigger as i32,
+                0,
+                trigger,
+                TickPriority::Normal,
+                0,
+            ));
+        }
+        // Sanity: the queue holds the exact array Java produces for this
+        // insertion order.
+        assert_eq!(
+            container
+                .all()
+                .map(|t| t.r#type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d", "e", "f", "g"]
+        );
+        // The predicate matches d (index 3, the removed slot) and g (trigger 3,
+        // the element `removeAt` defers). Removing d returns g as the moved
+        // element, which is then re-tested and removed from `forgetMeNot`.
+        container.remove_if(|t| t.trigger_tick == 10 || t.trigger_tick == 3);
+        assert_eq!(container.count(), 5);
+        assert!(!container.has_scheduled_tick(&BlockPos::new(10, 0, 0), &"d".to_string()));
+        assert!(!container.has_scheduled_tick(&BlockPos::new(3, 0, 0), &"g".to_string()));
+        let mut drained = Vec::new();
+        while let Some(t) = container.poll() {
+            drained.push(t.r#type);
+        }
+        assert_eq!(
+            drained,
+            vec![
+                "a".to_string(),
+                "c".to_string(),
+                "f".to_string(),
+                "b".to_string(),
+                "e".to_string()
+            ]
         );
     }
 
