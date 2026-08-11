@@ -237,8 +237,7 @@ mod tests {
         }
 
         fn overworld_data(&self) -> &dyn ServerLevelData {
-            // Not exercised by the WorldData-only tests.
-            unimplemented!()
+            panic!("overworld data is not used by WorldData-only tests")
         }
 
         fn is_hardcore(&self) -> bool {

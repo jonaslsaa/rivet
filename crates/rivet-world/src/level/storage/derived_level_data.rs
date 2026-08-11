@@ -169,14 +169,14 @@ mod tests {
             false
         }
         fn get_known_server_brands(&self) -> &indexmap::IndexSet<String> {
-            unimplemented!()
+            panic!("known server brands are not used by derived delegation tests")
         }
         fn get_removed_feature_flags(&self) -> &indexmap::IndexSet<String> {
-            unimplemented!()
+            panic!("removed feature flags are not used by derived delegation tests")
         }
         fn set_modded_info(&mut self, _server_brand: &str, _is_modded: bool) {}
         fn overworld_data(&self) -> &dyn ServerLevelData {
-            unimplemented!()
+            panic!("overworld data is not used by derived delegation tests")
         }
         fn is_hardcore(&self) -> bool {
             self.hardcore
