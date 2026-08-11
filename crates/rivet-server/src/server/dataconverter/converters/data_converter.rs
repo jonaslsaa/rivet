@@ -85,10 +85,16 @@ impl DataConverter {
 }
 
 /// `DataConverter.convert` — the abstract behavior trait.
+///
+/// `data` is `&mut T`: Java's `convert(T data, ...)` receives a reference that
+/// the concrete converters mutate in place and then typically return null (e.g.
+/// `ConverterAbstractBlockRename` does `data.setString("Name", converted)` and
+/// returns null). The dispatcher rebinds the running value from the returned
+/// `Some` (`ret = data = replace`).
 pub trait ConverterBehavior<T, R> {
     /// `convert(T, long sourceVersion, long toVersion)` — `None` means "no
     /// replacement" (Java null return), which the dispatch layer skips.
-    fn convert(&self, data: &T, source_version: i64, to_version: i64) -> Option<R>;
+    fn convert(&self, data: &mut T, source_version: i64, to_version: i64) -> Option<R>;
 }
 
 #[cfg(test)]

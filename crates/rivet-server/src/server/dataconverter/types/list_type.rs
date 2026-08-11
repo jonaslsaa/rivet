@@ -2,11 +2,14 @@
 //! interface for ordered element lists, plus the generic-dispatch defaults.
 //!
 //! Strictness contract (Java `ListType.java` header): the no-default getters
-//! throw when the value at `index` is not the requested type; the default-value
-//! overloads return the default instead. The concrete NBT/JSON backings differ
-//! in *how* they implement that (NBT throws `IllegalStateException`, JSON
-//! returns `null`/`0`) — that divergence is a concrete-backing property and is
-//! not resolved here.
+//! throw when the value at `index` is not the requested type (and never return
+//! null); the default-value overloads return the default instead. The trait
+//! signatures model that strict, non-null shape: the no-default accessors
+//! return the plain value and panic on a wrong-typed element or out-of-range
+//! index, matching the `NBTListType` throws (`IllegalStateException` /
+//! `IndexOutOfBoundsException`). The JSON backing deviates by returning
+//! `null`/`0` for the strict accessors — a concrete-backing property of
+//! `types.json` that these signatures cannot express, and not resolved here.
 //!
 //! `setGeneric`/`addGeneric` are *set/add* operations, not inserts: Java's
 //! `ListTag.set` calls `ArrayList.set`, which throws `IndexOutOfBoundsException`
@@ -54,9 +57,12 @@ pub trait ListType: Any {
 
     // --- strict numeric getters/setters ---
 
-    /// `ListType.getNumber(int)`.
-    fn get_number(&self, index: usize) -> Option<Number>;
-    /// `ListType.getNumber(int, Number)`.
+    /// `ListType.getNumber(int)` — strict: panics on an out-of-range index or
+    /// a non-numeric element (Java `NBTListType.getNumber` throws
+    /// `IndexOutOfBoundsException`/`IllegalStateException`).
+    fn get_number(&self, index: usize) -> Number;
+    /// `ListType.getNumber(int, Number)` — the default for a non-numeric
+    /// element; an out-of-range index still throws.
     fn get_number_or(&self, index: usize, dfl: Number) -> Number;
     /// `ListType.getByte(int)`.
     fn get_byte(&self, index: usize) -> i8;
@@ -124,21 +130,30 @@ pub trait ListType: Any {
 
     // --- container getters/setters ---
 
-    /// `ListType.getList(int)`.
-    fn get_list(&self, index: usize) -> Option<Box<dyn ListType>>;
-    /// `ListType.getList(int, ListType)`.
+    /// `ListType.getList(int)` — strict: panics on an out-of-range index or a
+    /// non-list element (Java `NBTListType.getList` throws
+    /// `IndexOutOfBoundsException`/`IllegalStateException`).
+    fn get_list(&self, index: usize) -> Box<dyn ListType>;
+    /// `ListType.getList(int, ListType)` — the default for a non-list element;
+    /// an out-of-range index still throws.
     fn get_list_or(&self, index: usize, dfl: Box<dyn ListType>) -> Box<dyn ListType>;
     /// `ListType.setList(int, ListType)`.
     fn set_list(&mut self, index: usize, list: Box<dyn ListType>);
-    /// `ListType.getMap(int)`.
-    fn get_map(&self, index: usize) -> Option<Box<dyn MapType>>;
-    /// `ListType.getMap(int, MapType)`.
+    /// `ListType.getMap(int)` — strict: panics on an out-of-range index or a
+    /// non-map element (Java `NBTListType.getMap` throws
+    /// `IndexOutOfBoundsException`/`IllegalStateException`).
+    fn get_map(&self, index: usize) -> Box<dyn MapType>;
+    /// `ListType.getMap(int, MapType)` — the default for a non-map element; an
+    /// out-of-range index still throws.
     fn get_map_or(&self, index: usize, dfl: Box<dyn MapType>) -> Box<dyn MapType>;
     /// `ListType.setMap(int, MapType)`.
     fn set_map(&mut self, index: usize, to: Box<dyn MapType>);
-    /// `ListType.getString(int)`.
-    fn get_string(&self, index: usize) -> Option<String>;
-    /// `ListType.getString(int, String)`.
+    /// `ListType.getString(int)` — strict: panics on an out-of-range index or a
+    /// non-string element (Java `NBTListType.getString` throws
+    /// `IndexOutOfBoundsException`/`IllegalStateException`).
+    fn get_string(&self, index: usize) -> String;
+    /// `ListType.getString(int, String)` — the default for a non-string
+    /// element; an out-of-range index still throws.
     fn get_string_or(&self, index: usize, dfl: String) -> String;
     /// `ListType.setString(int, String)`.
     fn set_string(&mut self, index: usize, to: String);
@@ -292,8 +307,8 @@ mod tests {
 
         assert_eq!(list.get_int(0), 3);
         assert_eq!(list.get_short(1), 4);
-        assert_eq!(list.get_string(2).as_deref(), Some("five"));
-        assert_eq!(list.get_map(3).unwrap().get_int("k"), 6);
+        assert_eq!(list.get_string(2), "five");
+        assert_eq!(list.get_map(3).get_int("k"), 6);
         assert_eq!(list.get_ints(4), vec![6, 7]);
     }
 
@@ -321,9 +336,9 @@ mod tests {
         inner.set_int("k", 1);
         list.add_map(Box::new(inner));
 
-        let mut view = list.get_map(0).unwrap();
+        let mut view = list.get_map(0);
         view.set_int("k", 42);
-        assert_eq!(list.get_map(0).unwrap().get_int("k"), 42);
+        assert_eq!(list.get_map(0).get_int("k"), 42);
     }
 
     /// A `get_generic` container element view shares the parent's storage
@@ -340,13 +355,13 @@ mod tests {
             panic!("expected a map view");
         };
         map_view.set_int("k", 42);
-        assert_eq!(list.get_map(0).unwrap().get_int("k"), 42);
+        assert_eq!(list.get_map(0).get_int("k"), 42);
 
         let Generic::List(mut list_view) = list.get_generic(1).unwrap() else {
             panic!("expected a list view");
         };
         list_view.add_int(7);
-        assert_eq!(list.get_list(1).unwrap().get_int(0), 7);
+        assert_eq!(list.get_list(1).get_int(0), 7);
     }
 
     /// `ListType.copy` is a deep copy: mutating the copy must not affect the
@@ -380,6 +395,56 @@ mod tests {
         // The matching type still extracts the stored array.
         list.add_byte_array(vec![1, 2]);
         assert_eq!(list.get_bytes_or(1, vec![9]), vec![1, 2]);
+    }
+
+    /// The strict no-default `get_number`/`get_string`/`get_list`/`get_map`
+    /// accessors panic on a present-but-wrong-typed element, matching the
+    /// `NBTListType` throws (`getNumber`/`getString`/`getList`/`getMap` throw
+    /// `IllegalStateException` for a non-matching tag) — they never silently
+    /// yield `None`. Their `_or` overloads instead return the supplied default
+    /// for the wrong-typed element.
+    #[test]
+    fn strict_accessors_panic_on_wrong_typed_element() {
+        let mut list = MockList::new();
+        list.add_string("s".into());
+        list.add_int(7);
+
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = list.get_number(0);
+            }))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = list.get_string(1);
+            }))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = list.get_list(0);
+            }))
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = list.get_map(1);
+            }))
+            .is_err()
+        );
+
+        // The `_or` overloads return the default for the wrong-typed element.
+        assert_eq!(list.get_number_or(0, Number::from(9)), Number::from(9));
+        assert_eq!(list.get_string_or(1, "dfl".into()), "dfl");
+        assert_eq!(list.get_list_or(0, Box::new(MockList::new())).size(), 0);
+        let mut map_dfl = MockMap::new();
+        map_dfl.set_int("k", 42);
+        assert_eq!(list.get_map_or(1, Box::new(map_dfl)).get_int("k"), 42);
+
+        // The matching type still extracts the stored value.
+        assert_eq!(list.get_string(0), "s");
+        assert_eq!(list.get_number(1), Number::from(7));
     }
 
     /// Differential check of the default `setGeneric`/`addGeneric` dispatch

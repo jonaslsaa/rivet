@@ -2,12 +2,13 @@
 
 use std::marker::PhantomData;
 
-/// `DataWalker<T>` — a structure walker that may replace the value it walks
-/// (the `minecraft.walkers.*` units implement it). `None` means "no
-/// replacement" (Java null return).
+/// `DataWalker<T>` — a structure walker that may mutate and/or replace the
+/// value it walks (the `minecraft.walkers.*` units implement it; `WalkerUtils`
+/// calls `type.convert(...)` and writes replacements back with `data.setMap`/
+/// `list.setMap`). `None` means "no replacement" (Java null return).
 pub trait DataWalker<T> {
     /// `DataWalker.walk(T, long fromVersion, long toVersion)`.
-    fn walk(&self, data: &T, from_version: i64, to_version: i64) -> Option<T>;
+    fn walk(&self, data: &mut T, from_version: i64, to_version: i64) -> Option<T>;
 }
 
 /// `DataWalker.NO_OP` — the singleton walker that never replaces.
@@ -25,7 +26,7 @@ impl<T> NoOpWalker<T> {
 }
 
 impl<T> DataWalker<T> for NoOpWalker<T> {
-    fn walk(&self, _data: &T, _from_version: i64, _to_version: i64) -> Option<T> {
+    fn walk(&self, _data: &mut T, _from_version: i64, _to_version: i64) -> Option<T> {
         None
     }
 }
@@ -43,7 +44,7 @@ mod tests {
         .expect("dataconverter-foundation.json parses");
         let walker: NoOpWalker<&'static str> = NoOpWalker::no_op();
         assert_eq!(
-            walker.walk(&"d", 1, 2).is_none(),
+            walker.walk(&mut "d", 1, 2).is_none(),
             fixture["hookWalker"]["noOpWalkNull"].as_bool().unwrap()
         );
     }
@@ -51,7 +52,7 @@ mod tests {
     #[test]
     fn no_op_walk_returns_none() {
         let walker: NoOpWalker<&'static str> = NoOpWalker::no_op();
-        assert!(walker.walk(&"data", 1, 2).is_none());
+        assert!(walker.walk(&mut "data", 1, 2).is_none());
     }
 
     #[test]
@@ -60,13 +61,13 @@ mod tests {
         impl DataWalker<&'static str> for Replacer {
             fn walk(
                 &self,
-                _data: &&'static str,
+                _data: &mut &'static str,
                 _from_version: i64,
                 _to_version: i64,
             ) -> Option<&'static str> {
                 Some("replaced")
             }
         }
-        assert_eq!(Replacer.walk(&"orig", 1, 2), Some("replaced"));
+        assert_eq!(Replacer.walk(&mut "orig", 1, 2), Some("replaced"));
     }
 }

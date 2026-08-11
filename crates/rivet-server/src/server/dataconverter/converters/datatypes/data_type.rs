@@ -6,13 +6,17 @@
 
 /// `DataType<T, R>` — the abstract data type.
 ///
-/// `convert` borrows `data` (Java passes the reference; the concrete backings
-/// mutate through interior storage), so `convert_or_original` can return the
-/// owned `data` when conversion produced no replacement.
+/// `convert` takes `&mut T`: Java's `convert(T data, ...)` passes a reference
+/// that the concrete `MCDataType`/`MCValueType` conversions mutate in place and
+/// (for `MCDataType`) often return null after mutating. `MCValueType.convert`
+/// keeps its own `ret`/`data` binding that the dispatcher reassigns from a
+/// non-null result, so `convert_or_original` owns `data` and hands it to
+/// `convert` mutably, returning the original only when no replacement was
+/// produced.
 pub trait DataType<T, R> {
     /// `DataType.convert(T, long fromVersion, long toVersion)` — `None` means
     /// "no replacement" (Java null return).
-    fn convert(&self, data: &T, from_version: i64, to_version: i64) -> Option<R>;
+    fn convert(&self, data: &mut T, from_version: i64, to_version: i64) -> Option<R>;
 
     /// `DataType.convertOrOriginal(T, long, long)` — the conversion result, or
     /// the original `data` when conversion produced no replacement.
@@ -25,7 +29,8 @@ pub trait DataType<T, R> {
     where
         T: Into<R>,
     {
-        match self.convert(&data, from_version, to_version) {
+        let mut data = data;
+        match self.convert(&mut data, from_version, to_version) {
             Some(replaced) => replaced,
             None => data.into(),
         }
@@ -50,7 +55,7 @@ mod tests {
         impl DataType<String, String> for NullConverter {
             fn convert(
                 &self,
-                _data: &String,
+                _data: &mut String,
                 _from_version: i64,
                 _to_version: i64,
             ) -> Option<String> {
@@ -66,7 +71,7 @@ mod tests {
         impl DataType<String, String> for ReplacingConverter {
             fn convert(
                 &self,
-                _data: &String,
+                _data: &mut String,
                 _from_version: i64,
                 _to_version: i64,
             ) -> Option<String> {
@@ -85,7 +90,7 @@ mod tests {
         impl DataType<String, String> for NullConverter {
             fn convert(
                 &self,
-                _data: &String,
+                _data: &mut String,
                 _from_version: i64,
                 _to_version: i64,
             ) -> Option<String> {
@@ -104,7 +109,7 @@ mod tests {
         impl DataType<String, String> for ReplacingConverter {
             fn convert(
                 &self,
-                _data: &String,
+                _data: &mut String,
                 _from_version: i64,
                 _to_version: i64,
             ) -> Option<String> {
@@ -121,10 +126,34 @@ mod tests {
     fn convert_direct_contract() {
         struct Fallthrough;
         impl DataType<i32, i32> for Fallthrough {
-            fn convert(&self, data: &i32, _from_version: i64, _to_version: i64) -> Option<i32> {
+            fn convert(&self, data: &mut i32, _from_version: i64, _to_version: i64) -> Option<i32> {
                 Some(data.wrapping_add(1))
             }
         }
-        assert_eq!(Fallthrough.convert(&1, 0, 0), Some(2));
+        assert_eq!(Fallthrough.convert(&mut 1, 0, 0), Some(2));
+    }
+
+    /// The concrete conversion shape: `convert` mutates the data argument in
+    /// place and returns null (`None`) — exactly how `ConverterAbstractBlockRename`
+    /// does `data.setString("Name", converted); return null;`. The mutation must
+    /// be visible to the caller even when no replacement is produced, so the
+    /// signature must be `&mut T`, not `&T`.
+    #[test]
+    fn convert_mutates_data_in_place_and_returns_none() {
+        struct Rename;
+        impl DataType<String, String> for Rename {
+            fn convert(
+                &self,
+                data: &mut String,
+                _from_version: i64,
+                _to_version: i64,
+            ) -> Option<String> {
+                data.push_str("_v2");
+                None
+            }
+        }
+        let mut data = "name".to_string();
+        assert!(Rename.convert(&mut data, 1, 2).is_none());
+        assert_eq!(data, "name_v2");
     }
 }

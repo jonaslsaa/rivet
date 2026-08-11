@@ -9,13 +9,17 @@
 //! the parent — exactly how the NBT backings wrap the same `CompoundTag`/
 //! `ListTag`. Numeric getters coerce all six boxed numbers with `Number`'s
 //! `*_value` narrowing (Java `NumericTag.*Value()`), booleans are stored as
-//! bytes (`NBTMapType.setBoolean` -> `setByte`), and the `_or` overloads return
-//! the supplied default when the value is present but the wrong type
-//! (`NBTListType.getBytes(index, dfl)` returns `dfl` for a non-`ByteArrayTag`).
-//! List access is strict, matching `ListType.java`'s contract and the NBT
-//! throws: the no-default list `get*`/`get_generic`/`get_list`/`get_map`
-//! accessors panic on an out-of-range index, a wrong-typed element, or a nested
-//! container that is not this mock's backing.
+//! bytes (`NBTMapType.setBoolean` -> `setByte`). List access is strict,
+//! matching `ListType.java`'s contract and the NBT throws: the no-default
+//! `get_number`/`get_string`/`get_list`/`get_map` accessors panic on an
+//! out-of-range index or a wrong-typed element (Java `NBTListType` throws
+//! `IndexOutOfBoundsException`/`IllegalStateException`), and their `_or`
+//! overloads also throw on an out-of-range index (`list.get(index)` bound check)
+//! while returning the default only for a present-but-wrong-typed element.
+//! `get_generic` panics when a nested container is not this mock's backing.
+//! The array `get_bytes_or`/`get_shorts_or`/`get_ints_or`/`get_longs_or`
+//! overloads are the one exception: they return the default for an out-of-range
+//! index too (pre-existing behavior, exercised by the array tests).
 //!
 //! [`foundation_fixture`] embeds the same committed oracle golden that
 //! `rivet-oracle verify` hash-checks, so the container tests are differentially
@@ -624,12 +628,24 @@ impl ListType for MockList {
         }
     }
 
-    fn get_number(&self, index: usize) -> Option<Number> {
-        self.elems.borrow().get(index).and_then(Generic::as_number)
+    fn get_number(&self, index: usize) -> Number {
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getNumber: index out of bounds");
+        element
+            .as_number()
+            .expect("NBTListType.getNumber: element is not a NumericTag")
     }
 
     fn get_number_or(&self, index: usize, dfl: Number) -> Number {
-        self.get_number(index).unwrap_or(dfl)
+        // NBT `getNumber(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-numeric element returns `dfl`.
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getNumber: index out of bounds");
+        element.as_number().unwrap_or(dfl)
     }
 
     fn get_byte(&self, index: usize) -> i8 {
@@ -843,55 +859,100 @@ impl ListType for MockList {
         self.elems.borrow_mut()[index] = Generic::Longs(to);
     }
 
-    fn get_list(&self, index: usize) -> Option<Box<dyn ListType>> {
+    fn get_list(&self, index: usize) -> Box<dyn ListType> {
         let borrowed = self.elems.borrow();
-        let Generic::List(list) = borrowed.get(index)? else {
-            return None;
+        let element = borrowed
+            .get(index)
+            .expect("NBTListType.getList: index out of bounds");
+        let Generic::List(list) = element else {
+            panic!("NBTListType.getList: element is not a ListTag");
         };
         let mock = list
             .as_any()
             .downcast_ref::<MockList>()
             .expect("MockList.getList: element is not a MockList");
-        Some(Box::new(mock.clone_view()))
+        Box::new(mock.clone_view())
     }
 
     fn get_list_or(&self, index: usize, dfl: Box<dyn ListType>) -> Box<dyn ListType> {
-        self.get_list(index).unwrap_or(dfl)
+        // NBT `getList(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-list element returns `dfl`.
+        let borrowed = self.elems.borrow();
+        let element = borrowed
+            .get(index)
+            .expect("NBTListType.getList: index out of bounds");
+        let Generic::List(list) = element else {
+            return dfl;
+        };
+        let mock = list
+            .as_any()
+            .downcast_ref::<MockList>()
+            .expect("MockList.getList: element is not a MockList");
+        Box::new(mock.clone_view())
     }
 
     fn set_list(&mut self, index: usize, list: Box<dyn ListType>) {
         self.elems.borrow_mut()[index] = Generic::List(list);
     }
 
-    fn get_map(&self, index: usize) -> Option<Box<dyn MapType>> {
+    fn get_map(&self, index: usize) -> Box<dyn MapType> {
         let borrowed = self.elems.borrow();
-        let Generic::Map(map) = borrowed.get(index)? else {
-            return None;
+        let element = borrowed
+            .get(index)
+            .expect("NBTListType.getMap: index out of bounds");
+        let Generic::Map(map) = element else {
+            panic!("NBTListType.getMap: element is not a CompoundTag");
         };
         let mock = map
             .as_any()
             .downcast_ref::<MockMap>()
             .expect("MockList.getMap: element is not a MockMap");
-        Some(Box::new(mock.clone_view()))
+        Box::new(mock.clone_view())
     }
 
     fn get_map_or(&self, index: usize, dfl: Box<dyn MapType>) -> Box<dyn MapType> {
-        self.get_map(index).unwrap_or(dfl)
+        // NBT `getMap(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-map element returns `dfl`.
+        let borrowed = self.elems.borrow();
+        let element = borrowed
+            .get(index)
+            .expect("NBTListType.getMap: index out of bounds");
+        let Generic::Map(map) = element else {
+            return dfl;
+        };
+        let mock = map
+            .as_any()
+            .downcast_ref::<MockMap>()
+            .expect("MockList.getMap: element is not a MockMap");
+        Box::new(mock.clone_view())
     }
 
     fn set_map(&mut self, index: usize, to: Box<dyn MapType>) {
         self.elems.borrow_mut()[index] = Generic::Map(to);
     }
 
-    fn get_string(&self, index: usize) -> Option<String> {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Str(v)) => Some(v.clone()),
-            _ => None,
-        }
+    fn get_string(&self, index: usize) -> String {
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getString: index out of bounds");
+        let Generic::Str(v) = element else {
+            panic!("NBTListType.getString: element is not a StringTag");
+        };
+        v.clone()
     }
 
     fn get_string_or(&self, index: usize, dfl: String) -> String {
-        self.get_string(index).unwrap_or(dfl)
+        // NBT `getString(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-string element returns `dfl`.
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getString: index out of bounds");
+        let Generic::Str(v) = element else {
+            return dfl;
+        };
+        v.clone()
     }
 
     fn set_string(&mut self, index: usize, to: String) {
