@@ -919,13 +919,15 @@ pub fn parse_structure_references(
 /// preserving first-insertion order — Paper builds the `LongOpenHashSet` from
 /// the filtered array, so the carried and installed sets agree.
 ///
-/// The map shape mirrors Paper's `outmap`: a key whose wire `long[]` was
-/// non-empty is preserved even when every reference filters out — Paper's
+/// The map shape mirrors Paper's `outmap`: a key is preserved even when every
+/// reference filters out — Paper's
 /// `outmap.put(structureType, new LongOpenHashSet(filtered...))` keeps the key
-/// with an empty set, and `setAllReferences` installs that empty entry. A key
-/// whose `long[]` was already empty never enters the map (Paper's
-/// `entry.asLongArray()` empty-check skips it before the put), so such an entry
-/// is dropped here too.
+/// with an empty set, and `setAllReferences` installs that empty entry. That
+/// includes a key whose wire `long[]` was already empty: Paper's guard is
+/// `!longArray.isEmpty()` on the `Optional<long[]>` from
+/// `LongArrayTag.asLongArray()`, which is always present for a `LongArrayTag`
+/// regardless of array length, so the key still enters the map with an empty
+/// set.
 pub fn filter_structure_references(
     references: &[StructureReference],
     chunk_pos: &ChunkPos,
@@ -948,12 +950,13 @@ pub fn filter_structure_references(
                 filtered.push(reference);
             }
         }
-        if !entry.references.is_empty() {
-            kept.push(StructureReference {
-                identifier: entry.identifier.clone(),
-                references: filtered,
-            });
-        }
+        // Paper puts every key whose `References` value was a `LongArrayTag`
+        // (the `Optional` from `asLongArray` is always present), so an
+        // already-empty wire array still enters the map with an empty set.
+        kept.push(StructureReference {
+            identifier: entry.identifier.clone(),
+            references: filtered,
+        });
     }
     (kept, diagnostics)
 }
@@ -3312,9 +3315,11 @@ mod tests {
             ChunkParseDiagnostic::StructureReferenceOutOfRange { .. }
         )));
 
-        // An already-empty wire `long[]` never enters the map at all (Paper's
-        // `asLongArray()` empty-check skips the put), so the filtered result
-        // drops the key entirely with no diagnostic.
+        // An already-empty wire `long[]` still enters the map with an empty
+        // set: Paper's guard is `!longArray.isEmpty()` on the `Optional` from
+        // `LongArrayTag.asLongArray()`, which is always present regardless of
+        // array length, so the key is put and installed with no reference set
+        // and no diagnostic.
         let mut references = CompoundTag::new();
         references.put_long_array("minecraft:village", Vec::<i64>::new());
         let mut structures = CompoundTag::new();
@@ -3326,7 +3331,9 @@ mod tests {
             .unwrap();
         let (kept, diagnostics) =
             filter_structure_references(parsed.structures_references(), &ChunkPos::new(0, 0));
-        assert!(kept.is_empty());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].identifier.path(), "village");
+        assert!(kept[0].references.is_empty());
         assert!(diagnostics.is_empty());
     }
 
