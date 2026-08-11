@@ -22,6 +22,6 @@ rivet-serialization = { workspace = true }
 
 [dev-dependencies]
 # Codec round-trip tests drive `xoroshiro128plusplus_codec` through
-# `JsonOps::INSTANCE` (serde_json::Value backed), the same ops the codecs run
-# on in `rivet-registry`/`rivet-world`.
+# `JsonOps::INSTANCE` (serde_json::Value backed), the same ops the DFU
+# codecs in `rivet-registry`/`rivet-world` run on.
 serde_json = { workspace = true }
