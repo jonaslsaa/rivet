@@ -42,6 +42,9 @@ use crate::reports::SourceProvenance;
 /// asserts these against the running JVM; the codegen asserts them against the
 /// fixture, so a fixture from a different jar or a hand-edited one fails
 /// generation.
+///
+/// Keep the counts in sync with the `ANCHORS` in `probe_worldgen.rs` — an MC
+/// bump must update both copies together.
 const ANCHORS: &[(&str, usize)] = &[
     ("minecraft:worldgen/noise", 63), // noise registry size
     ("minecraft:worldgen/biome", 66), // biome registry size
@@ -1058,6 +1061,17 @@ mod tests {
             let parsed: f32 = s.parse().unwrap();
             assert_eq!(parsed.to_bits(), v.to_bits(), "round-trip failed for {v}");
         }
+    }
+
+    #[test]
+    fn parse_float_rejects_f32_overflow() {
+        // 3.5e38 is finite as f64 but overflows f32 (max ~3.4e38), so the
+        // `v as f32` fallback branch fires.
+        let err = parse_float("biome", "temperature", &serde_json::json!(3.5e38)).unwrap_err();
+        assert!(
+            err.to_string().contains("outside the f32 range"),
+            "got: {err}"
+        );
     }
 
     #[test]

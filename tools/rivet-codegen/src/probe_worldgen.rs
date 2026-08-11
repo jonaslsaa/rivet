@@ -27,6 +27,9 @@ use crate::extract;
 
 /// The anchor counts a live Paper 26.2 load must reproduce (also asserted by
 /// the codegen against the fixture, as `probe` object keys).
+///
+/// Keep the counts in sync with the `ANCHORS` in `worldgen.rs` — an MC bump
+/// must update both copies together.
 const ANCHORS: &[(&str, usize)] = &[
     ("noise_count", 63),
     ("biome_count", 66),
