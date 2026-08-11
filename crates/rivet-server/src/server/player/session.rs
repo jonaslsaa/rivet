@@ -65,6 +65,7 @@ use rivet_text::Component;
 
 use crate::server::keepalive::{KEEPALIVE_LIMIT_NS, KeepaliveResponseOutcome, KeepaliveState};
 use crate::server::level::entity_id_allocator::EntityIdAllocator;
+use crate::server::level::player_chunk_loader::PlayerChunkLoader;
 use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
 use crate::server::movement_math::{
     DEFAULT_MOVED_TOO_QUICKLY_MULTIPLIER, MoveState, build_move_targets, contains_invalid_values,
@@ -155,13 +156,25 @@ pub struct PlayerSessionManager {
 }
 
 /// The tick-owned session state for one connection (issue #158): the
-/// authoritative `ServerPlayer` (OWNERSHIP "one owner: the tick thread") and
-/// the `awaitingTeleport` ack machine plus the Paper `firstGood/lastGood` move
-/// anchors. The network task only forwards wire frames over the bounded
-/// channel; all mutation happens here on the tick thread.
+/// authoritative `ServerPlayer` (OWNERSHIP "one owner: the tick thread"), the
+/// `awaitingTeleport` ack machine plus the Paper `firstGood/lastGood` move
+/// anchors, and the per-player `PlayerChunkLoader` (issue #521) that tracks the
+/// player's last chunk/view state. The network task only forwards wire frames
+/// over the bounded channel; all mutation happens here on the tick thread.
 struct Session {
     player: ServerPlayer,
     movement: SessionMovement,
+    /// The per-player chunk loader (issue #521): the last chunk center +
+    /// send/tick distances committed by the join burst's `add()`, then advanced
+    /// by `update()` on each accepted chunk-boundary move. Dropped with the
+    /// session on disconnect. The world reference the `update` path needs is the
+    /// manager's level (the loader holds only the committed scalar state, never
+    /// a world reference).
+    loader: PlayerChunkLoader,
+    /// The client's requested view distance (the handoff `ClientInformation`),
+    /// re-fed into `update` so the send/tick distances re-derive identically to
+    /// the join burst.
+    requested_view_distance: Option<i32>,
     /// The number of accepted post-ack movements this session routed into the
     /// tick-owned player (each `RIVET_MOVE_ACCEPTED` record increments it). The
     /// per-session counter is tick-owned — no shared state — and is reported in
@@ -318,6 +331,14 @@ impl PlayerSessionManager {
         self.sessions.get(&id).map(|s| s.player.player_id())
     }
 
+    /// The chunk center the session's `PlayerChunkLoader` is currently
+    /// centered on (issue #521 test observability: proves a move recentered the
+    /// loader — the cache center the client's cache is anchored to). `None`
+    /// when the connection has no session.
+    pub fn chunk_center(&self, id: ConnectionId) -> Option<rivet_registry::core::ChunkPos> {
+        self.sessions.get(&id).map(|s| s.loader.last_chunk_pos())
+    }
+
     /// The first `firstGood` anchor of a live session (issue #158 test
     /// observability for the per-tick `resetPosition` mirror). `None` when the
     /// connection has no session.
@@ -407,6 +428,20 @@ impl PlayerSessionManager {
         // cache-radius packet this burst emits. The burst embeds `teleport_id`,
         // so it must succeed before the session (and its awaited spawn teleport)
         // is registered.
+        //
+        // The session-owned `PlayerChunkLoader` (issue #521) is built at the
+        // player's chunk position and handed into the burst as its `add()` —
+        // the burst commits the loader's last-chunk/distance state to the spawn
+        // view, so the movement-driven `update` later diffs against exactly the
+        // send-set the client received.
+        let requested_view_distance = Some(client_information.view_distance() as i32);
+        let mut loader = PlayerChunkLoader::new(rivet_registry::core::ChunkPos::containing(
+            &rivet_registry::core::BlockPos::containing(
+                player.position().x,
+                player.position().y,
+                player.position().z,
+            ),
+        ));
         if let Err(e) = place_new_player(
             &mut self.sender,
             ctx.connections,
@@ -414,7 +449,8 @@ impl PlayerSessionManager {
             &player,
             &self.level,
             &self.join,
-            Some(client_information.view_distance() as i32),
+            requested_view_distance,
+            &mut loader,
             teleport_id,
         ) {
             // A burst encode/send failure is a server-side fault or an outbound
@@ -435,12 +471,16 @@ impl PlayerSessionManager {
         self.entity_ids.mark_in_use(entity_id);
 
         // The session is live: the tick-owned player (the movement/teleport
-        // write target) plus the ack/anchors state, keyed by connection.
+        // write target), the ack/anchors state, and the per-player chunk loader
+        // (issue #521) whose committed state now matches the burst the client
+        // received, keyed by connection.
         self.sessions.insert(
             connection_id,
             Session {
                 player,
                 movement,
+                loader,
+                requested_view_distance,
                 accepted_frames: 0,
             },
         );
@@ -804,6 +844,55 @@ impl PlayerSessionManager {
             targets.x_rot,
             session.accepted_frames,
         );
+
+        // Issue #521: after an accepted chunk-boundary move, recenter the
+        // player's chunk view. `update` early-returns for an intra-chunk move
+        // (the nothing-to-do guard), so calling it on every accepted move is
+        // exactly the boundary-gated behavior — only a chunk crossing (or a
+        // send/tick distance change) produces output. It re-derives the
+        // send/tick distances from the same `requested_view_distance` the join
+        // burst used, so the `lastChunk`/`lastSendDistance` it diffs against
+        // are the ones the client's cache actually holds. `self.level` (read)
+        // and `session` (mutated) are disjoint fields, so the borrow splits.
+        let new_chunk = rivet_registry::core::ChunkPos::containing(
+            &rivet_registry::core::BlockPos::containing(targets.x, targets.y, targets.z),
+        );
+        let recenter =
+            session
+                .loader
+                .update(&self.level, new_chunk, session.requested_view_distance);
+        match recenter {
+            Ok(packets) => {
+                // Queue the ordered cache-center + newly entered chunks over the
+                // bounded outbound channel, exactly like the join burst's
+                // `PlaySender` path. A send failure (outbound overflow / gone
+                // connection) prunes the connection — the same backpressure
+                // policy as every other tick→network send.
+                for packet in packets {
+                    if let Err(e) =
+                        self.sender
+                            .send_packet(ctx.connections, id, packet.id, &packet.body)
+                    {
+                        tracing::warn!(%id, %e, "disconnecting play session on chunk send");
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                // A typed missing-chunk failure (the `RequireLoaded` UNVERIFIED
+                // error — no generation fallback, no silent substitution) or an
+                // encode failure is a server-side fault; Paper disconnects on a
+                // chunk send failure. The connection is being torn down, so the
+                // loader state `update` committed for the new center is moot.
+                tracing::warn!(%id, %e, "disconnecting play session on chunk-loader update failure");
+                let _ = ctx.connections.send(
+                    id,
+                    OutboundEvent::Disconnect {
+                        reason: DisconnectReason::Unsupported(format!("chunk update: {e}")),
+                    },
+                );
+            }
+        }
     }
 
     /// Remove sessions whose connection is gone (the tick pruned the registry
@@ -2474,4 +2563,5 @@ mod tests {
             }
         }
     }
+
 }
