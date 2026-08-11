@@ -13,13 +13,12 @@
 //! matching `ListType.java`'s contract and the NBT throws: the no-default
 //! `get_number`/`get_string`/`get_list`/`get_map` accessors panic on an
 //! out-of-range index or a wrong-typed element (Java `NBTListType` throws
-//! `IndexOutOfBoundsException`/`IllegalStateException`), and their `_or`
-//! overloads also throw on an out-of-range index (`list.get(index)` bound check)
+//! `IndexOutOfBoundsException`/`IllegalStateException`), and every `_or`
+//! overload also throws on an out-of-range index (`list.get(index)` bound check)
 //! while returning the default only for a present-but-wrong-typed element.
-//! `get_generic` panics when a nested container is not this mock's backing.
-//! The array `get_bytes_or`/`get_shorts_or`/`get_ints_or`/`get_longs_or`
-//! overloads are the one exception: they return the default for an out-of-range
-//! index too (pre-existing behavior, exercised by the array tests).
+//! `get_generic` reserves `None` for the `EndTag`/null case
+//! (`NBTTypeUtil.baseToGeneric(EndTag)` -> null) and panics on an out-of-range
+//! index; it also panics when a nested container is not this mock's backing.
 //!
 //! [`foundation_fixture`] embeds the same committed oracle golden that
 //! `rivet-oracle verify` hash-checks, so the container tests are differentially
@@ -609,7 +608,14 @@ impl ListType for MockList {
     }
 
     fn get_generic(&self, index: usize) -> Option<Generic> {
-        match self.elems.borrow().get(index)? {
+        // NBT `getGeneric(index)`: `list.get(index)` throws on an out-of-range
+        // index; `None` is reserved for the `EndTag`/null case
+        // (`NBTTypeUtil.baseToGeneric(EndTag)` -> null), never for OOB.
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getGeneric: index out of bounds");
+        match element {
             Generic::Map(map) => {
                 let mock = map
                     .as_any()
@@ -657,11 +663,13 @@ impl ListType for MockList {
     }
 
     fn get_byte_or(&self, index: usize, dfl: i8) -> i8 {
-        self.elems
-            .borrow()
+        // NBT `getByte(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-numeric element returns `dfl`.
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_i8)
-            .unwrap_or(dfl)
+            .expect("NBTListType.getByte: index out of bounds");
+        coerce_i8(element).unwrap_or(dfl)
     }
 
     fn set_byte(&mut self, index: usize, to: i8) {
@@ -677,11 +685,13 @@ impl ListType for MockList {
     }
 
     fn get_short_or(&self, index: usize, dfl: i16) -> i16 {
-        self.elems
-            .borrow()
+        // NBT `getShort(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-numeric element returns `dfl`.
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_i16)
-            .unwrap_or(dfl)
+            .expect("NBTListType.getShort: index out of bounds");
+        coerce_i16(element).unwrap_or(dfl)
     }
 
     fn set_short(&mut self, index: usize, to: i16) {
@@ -697,11 +707,13 @@ impl ListType for MockList {
     }
 
     fn get_int_or(&self, index: usize, dfl: i32) -> i32 {
-        self.elems
-            .borrow()
+        // NBT `getInt(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-numeric element returns `dfl`.
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_i32)
-            .unwrap_or(dfl)
+            .expect("NBTListType.getInt: index out of bounds");
+        coerce_i32(element).unwrap_or(dfl)
     }
 
     fn set_int(&mut self, index: usize, to: i32) {
@@ -717,11 +729,13 @@ impl ListType for MockList {
     }
 
     fn get_long_or(&self, index: usize, dfl: i64) -> i64 {
-        self.elems
-            .borrow()
+        // NBT `getLong(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-numeric element returns `dfl`.
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_i64)
-            .unwrap_or(dfl)
+            .expect("NBTListType.getLong: index out of bounds");
+        coerce_i64(element).unwrap_or(dfl)
     }
 
     fn set_long(&mut self, index: usize, to: i64) {
@@ -737,11 +751,13 @@ impl ListType for MockList {
     }
 
     fn get_float_or(&self, index: usize, dfl: f32) -> f32 {
-        self.elems
-            .borrow()
+        // NBT `getFloat(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-numeric element returns `dfl`.
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_f32)
-            .unwrap_or(dfl)
+            .expect("NBTListType.getFloat: index out of bounds");
+        coerce_f32(element).unwrap_or(dfl)
     }
 
     fn set_float(&mut self, index: usize, to: f32) {
@@ -757,11 +773,13 @@ impl ListType for MockList {
     }
 
     fn get_double_or(&self, index: usize, dfl: f64) -> f64 {
-        self.elems
-            .borrow()
+        // NBT `getDouble(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a non-numeric element returns `dfl`.
+        let elems = self.elems.borrow();
+        let element = elems
             .get(index)
-            .and_then(coerce_f64)
-            .unwrap_or(dfl)
+            .expect("NBTListType.getDouble: index out of bounds");
+        coerce_f64(element).unwrap_or(dfl)
     }
 
     fn set_double(&mut self, index: usize, to: f64) {
@@ -780,11 +798,15 @@ impl ListType for MockList {
     }
 
     fn get_bytes_or(&self, index: usize, dfl: Vec<i8>) -> Vec<i8> {
-        // Java `NBTListType.getBytes(index, dfl)` returns `dfl` for a
-        // present-but-not-`ByteArrayTag` element (and for an out-of-range
-        // index) — not an empty array.
-        match self.elems.borrow().get(index) {
-            Some(Generic::Bytes(v)) => v.clone(),
+        // NBT `getBytes(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a present-but-not-`ByteArrayTag` element
+        // returns `dfl` — not an empty array.
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getBytes: index out of bounds");
+        match element {
+            Generic::Bytes(v) => v.clone(),
             _ => dfl,
         }
     }
@@ -805,8 +827,16 @@ impl ListType for MockList {
     }
 
     fn get_shorts_or(&self, index: usize, dfl: Vec<i16>) -> Vec<i16> {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Shorts(v)) => v.clone(),
+        // NBT `getShorts(index, dfl)` throws `UnsupportedOperationException`
+        // (NBT has no short-array tag); the mock treats shorts like the other
+        // arrays: an out-of-range index throws, a present-but-not-`Shorts`
+        // element returns `dfl`.
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getShorts: index out of bounds");
+        match element {
+            Generic::Shorts(v) => v.clone(),
             _ => dfl,
         }
     }
@@ -827,8 +857,15 @@ impl ListType for MockList {
     }
 
     fn get_ints_or(&self, index: usize, dfl: Vec<i32>) -> Vec<i32> {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Ints(v)) => v.clone(),
+        // NBT `getInts(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a present-but-not-`IntArrayTag` element
+        // returns `dfl` — not an empty array.
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getInts: index out of bounds");
+        match element {
+            Generic::Ints(v) => v.clone(),
             _ => dfl,
         }
     }
@@ -849,8 +886,15 @@ impl ListType for MockList {
     }
 
     fn get_longs_or(&self, index: usize, dfl: Vec<i64>) -> Vec<i64> {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Longs(v)) => v.clone(),
+        // NBT `getLongs(index, dfl)`: `list.get(index)` throws on an
+        // out-of-range index; a present-but-not-`LongArrayTag` element
+        // returns `dfl` — not an empty array.
+        let elems = self.elems.borrow();
+        let element = elems
+            .get(index)
+            .expect("NBTListType.getLongs: index out of bounds");
+        match element {
+            Generic::Longs(v) => v.clone(),
             _ => dfl,
         }
     }

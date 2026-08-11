@@ -52,7 +52,9 @@ pub trait ListType: Any {
     /// `ListType.remove(int)`.
     fn remove(&mut self, index: usize);
 
-    /// `ListType.getGeneric(int)`.
+    /// `ListType.getGeneric(int)` — panics on an out-of-range index (Java
+    /// `list.get(index)` throws `IndexOutOfBoundsException`); `None` models the
+    /// `EndTag`/null case, never an out-of-range index.
     fn get_generic(&self, index: usize) -> Option<Generic>;
 
     // --- strict numeric getters/setters ---
@@ -66,37 +68,43 @@ pub trait ListType: Any {
     fn get_number_or(&self, index: usize, dfl: Number) -> Number;
     /// `ListType.getByte(int)`.
     fn get_byte(&self, index: usize) -> i8;
-    /// `ListType.getByte(int, byte)`.
+    /// `ListType.getByte(int, byte)` — the default for a non-numeric element;
+    /// an out-of-range index still throws.
     fn get_byte_or(&self, index: usize, dfl: i8) -> i8;
     /// `ListType.setByte(int, byte)`.
     fn set_byte(&mut self, index: usize, to: i8);
     /// `ListType.getShort(int)`.
     fn get_short(&self, index: usize) -> i16;
-    /// `ListType.getShort(int, short)`.
+    /// `ListType.getShort(int, short)` — the default for a non-numeric element;
+    /// an out-of-range index still throws.
     fn get_short_or(&self, index: usize, dfl: i16) -> i16;
     /// `ListType.setShort(int, short)`.
     fn set_short(&mut self, index: usize, to: i16);
     /// `ListType.getInt(int)`.
     fn get_int(&self, index: usize) -> i32;
-    /// `ListType.getInt(int, int)`.
+    /// `ListType.getInt(int, int)` — the default for a non-numeric element; an
+    /// out-of-range index still throws.
     fn get_int_or(&self, index: usize, dfl: i32) -> i32;
     /// `ListType.setInt(int, int)`.
     fn set_int(&mut self, index: usize, to: i32);
     /// `ListType.getLong(int)`.
     fn get_long(&self, index: usize) -> i64;
-    /// `ListType.getLong(int, long)`.
+    /// `ListType.getLong(int, long)` — the default for a non-numeric element;
+    /// an out-of-range index still throws.
     fn get_long_or(&self, index: usize, dfl: i64) -> i64;
     /// `ListType.setLong(int, long)`.
     fn set_long(&mut self, index: usize, to: i64);
     /// `ListType.getFloat(int)`.
     fn get_float(&self, index: usize) -> f32;
-    /// `ListType.getFloat(int, float)`.
+    /// `ListType.getFloat(int, float)` — the default for a non-numeric element;
+    /// an out-of-range index still throws.
     fn get_float_or(&self, index: usize, dfl: f32) -> f32;
     /// `ListType.setFloat(int, float)`.
     fn set_float(&mut self, index: usize, to: f32);
     /// `ListType.getDouble(int)`.
     fn get_double(&self, index: usize) -> f64;
-    /// `ListType.getDouble(int, double)`.
+    /// `ListType.getDouble(int, double)` — the default for a non-numeric
+    /// element; an out-of-range index still throws.
     fn get_double_or(&self, index: usize, dfl: f64) -> f64;
     /// `ListType.setDouble(int, double)`.
     fn set_double(&mut self, index: usize, to: f64);
@@ -105,25 +113,30 @@ pub trait ListType: Any {
 
     /// `ListType.getBytes(int)`.
     fn get_bytes(&self, index: usize) -> Vec<i8>;
-    /// `ListType.getBytes(int, byte[])`.
+    /// `ListType.getBytes(int, byte[])` — the default for a non-`ByteArrayTag`
+    /// element; an out-of-range index still throws.
     fn get_bytes_or(&self, index: usize, dfl: Vec<i8>) -> Vec<i8>;
     /// `ListType.setBytes(int, byte[])`.
     fn set_bytes(&mut self, index: usize, to: Vec<i8>);
     /// `ListType.getShorts(int)` — NBT has no short-array tag.
     fn get_shorts(&self, index: usize) -> Vec<i16>;
-    /// `ListType.getShorts(int, short[])`.
+    /// `ListType.getShorts(int, short[])` — the default for a non-array
+    /// element; an out-of-range index still throws (NBT itself throws
+    /// `UnsupportedOperationException`).
     fn get_shorts_or(&self, index: usize, dfl: Vec<i16>) -> Vec<i16>;
     /// `ListType.setShorts(int, short[])`.
     fn set_shorts(&mut self, index: usize, to: Vec<i16>);
     /// `ListType.getInts(int)`.
     fn get_ints(&self, index: usize) -> Vec<i32>;
-    /// `ListType.getInts(int, int[])`.
+    /// `ListType.getInts(int, int[])` — the default for a non-`IntArrayTag`
+    /// element; an out-of-range index still throws.
     fn get_ints_or(&self, index: usize, dfl: Vec<i32>) -> Vec<i32>;
     /// `ListType.setInts(int, int[])`.
     fn set_ints(&mut self, index: usize, to: Vec<i32>);
     /// `ListType.getLongs(int)`.
     fn get_longs(&self, index: usize) -> Vec<i64>;
-    /// `ListType.getLongs(int, long[])`.
+    /// `ListType.getLongs(int, long[])` — the default for a non-`LongArrayTag`
+    /// element; an out-of-range index still throws.
     fn get_longs_or(&self, index: usize, dfl: Vec<i64>) -> Vec<i64>;
     /// `ListType.setLongs(int, long[])`.
     fn set_longs(&mut self, index: usize, to: Vec<i64>);
@@ -379,18 +392,23 @@ mod tests {
     /// The array `_or` getters return the supplied default for a present-but-
     /// wrong-typed element, matching `NBTListType.getBytes(index, dfl)` etc.
     /// (which return `dfl` when the element is not the matching array tag) —
-    /// not an empty array.
+    /// not an empty array. An out-of-range index still throws (the `list.get`
+    /// bound check happens before the tag check).
     #[test]
     fn array_getters_return_default_for_wrong_typed_element() {
         let mut list = MockList::new();
         list.add_string("x".into());
 
         assert_eq!(list.get_bytes_or(0, vec![9]), vec![9]);
+        assert_eq!(list.get_shorts_or(0, vec![9]), vec![9]);
         assert_eq!(list.get_ints_or(0, vec![9]), vec![9]);
         assert_eq!(list.get_longs_or(0, vec![9]), vec![9]);
-        // Out-of-range index also returns the default (Java `list.get(index)`
-        // bound check -> `dfl`).
-        assert_eq!(list.get_bytes_or(9, vec![9]), vec![9]);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = list.get_bytes_or(9, vec![9]);
+            }))
+            .is_err()
+        );
 
         // The matching type still extracts the stored array.
         list.add_byte_array(vec![1, 2]);
@@ -445,6 +463,100 @@ mod tests {
         // The matching type still extracts the stored value.
         assert_eq!(list.get_string(0), "s");
         assert_eq!(list.get_number(1), Number::from(7));
+    }
+
+    /// The six numeric `_or` getters return the supplied default for a present-
+    /// but-wrong-typed element, while still coercing a present numeric element
+    /// (Java `NBTListType.getByte(index, dfl)` etc. return `dfl` only for a
+    /// non-`NumericTag`; a present `NumericTag` is always narrowed).
+    #[test]
+    fn numeric_or_getters_return_default_for_wrong_typed_element() {
+        let mut list = MockList::new();
+        list.add_string("x".into());
+        list.add_int(7);
+
+        assert_eq!(list.get_byte_or(0, 9), 9);
+        assert_eq!(list.get_short_or(0, 9), 9);
+        assert_eq!(list.get_int_or(0, 9), 9);
+        assert_eq!(list.get_long_or(0, 9), 9);
+        assert_eq!(list.get_float_or(0, 9.0), 9.0);
+        assert_eq!(list.get_double_or(0, 9.0), 9.0);
+
+        // A present numeric element is coerced, never the default.
+        assert_eq!(list.get_byte_or(1, 9), 7);
+        assert_eq!(list.get_short_or(1, 9), 7);
+        assert_eq!(list.get_int_or(1, 9), 7);
+        assert_eq!(list.get_long_or(1, 9), 7);
+        assert_eq!(list.get_float_or(1, 9.0), 7.0);
+        assert_eq!(list.get_double_or(1, 9.0), 7.0);
+    }
+
+    /// Every `_or` overload panics on an out-of-range index, matching
+    /// `NBTListType`: `list.get(index)` throws `IndexOutOfBoundsException`
+    /// before the tag/default decision. The default is only for a present-but-
+    /// wrong-typed element.
+    #[test]
+    fn or_getters_panic_on_out_of_range() {
+        let list = MockList::new();
+
+        let panics =
+            |f: &dyn Fn()| std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err();
+        assert!(panics(&|| {
+            let _ = list.get_number_or(0, Number::from(9));
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_byte_or(0, 9);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_short_or(0, 9);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_int_or(0, 9);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_long_or(0, 9);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_float_or(0, 9.0);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_double_or(0, 9.0);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_bytes_or(0, vec![9]);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_shorts_or(0, vec![9]);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_ints_or(0, vec![9]);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_longs_or(0, vec![9]);
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_list_or(0, Box::new(MockList::new()));
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_map_or(0, Box::new(MockMap::new()));
+        }));
+        assert!(panics(&|| {
+            let _ = list.get_string_or(0, "dfl".into());
+        }));
+    }
+
+    /// `get_generic` panics on an out-of-range index, matching
+    /// `NBTListType.getGeneric` (`list.get(index)` throws); `None` is reserved
+    /// for the `EndTag`/null element, never for an out-of-range index.
+    #[test]
+    fn get_generic_panics_on_out_of_range() {
+        let list = MockList::new();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = list.get_generic(0);
+            }))
+            .is_err()
+        );
     }
 
     /// Differential check of the default `setGeneric`/`addGeneric` dispatch
