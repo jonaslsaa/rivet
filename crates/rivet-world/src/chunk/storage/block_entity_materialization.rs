@@ -59,10 +59,15 @@
 //!   `id` surfaced by reconstruction.
 //! - [`BlockEntityMaterializeError::UnsupportedUpdateTag`] — a resolved type
 //!   whose update tag is not ported (everything outside chest + mob_spawner).
-//! - [`BlockEntityMaterializeError::MalformedUpdateData`] — a spawner whose
-//!   `SpawnData` cannot be decoded. Java's `SpawnData.CODEC` decode failure is
-//!   a silent drop (`load` leaves `nextSpawnData` null and `save` omits the
-//!   key); the port surfaces the drop per the never-silent requirement.
+//!
+//! A malformed spawner `SpawnData` is NOT an entry refusal: Java's
+//! `BaseSpawner.load` reads it through `TagValueInput.read`, which reports the
+//! `SpawnData.CODEC` decode problem and continues, leaving `nextSpawnData`
+//! null. `save` then still writes the seven numeric fields and omits only
+//! `SpawnData` — Paper sends that partial update tag to the client. The port
+//! mirrors that observable output (the spawner materializes partial) and
+//! surfaces the field drop as a [`BlockEntityMaterializeDiagnostic`] so it is
+//! never silent.
 //!
 //! ## Ordering
 //!
@@ -114,28 +119,58 @@ pub enum BlockEntityMaterializeError {
         position: BlockPos,
         entity_type: String,
     },
-    /// A spawner's `SpawnData` cannot be decoded into the codec's stored form
-    /// (absent `entity`, wrong-typed `entity`, or a non-compound `SpawnData`).
-    /// Paper logs and drops the field; the port surfaces the drop.
-    #[error("spawner block entity at {position} carries malformed {field}")]
-    MalformedUpdateData {
+}
+
+/// A recoverable, field-level drop during materialization. The enclosing entry
+/// still materializes — Paper logs the field decode problem and continues — so
+/// the diagnostic exists to keep the drop from being silent.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum BlockEntityMaterializeDiagnostic {
+    /// A spawner's `SpawnData` could not be decoded (absent `entity`,
+    /// wrong-typed `entity`, or a non-compound `SpawnData`). Paper's
+    /// `TagValueInput.read` reports the `SpawnData.CODEC` problem and leaves
+    /// `nextSpawnData` null; `BaseSpawner.save` then omits only the `SpawnData`
+    /// key. The spawner's numeric fields still materialize.
+    #[error("spawner block entity at {position} dropped malformed {field}")]
+    SpawnDataDropped {
         position: BlockPos,
         field: &'static str,
     },
 }
 
-/// Materialize every outcome in source order into a wire [`BlockEntityInfo`],
-/// preserving the input order exactly (see the module-level ordering note).
-/// Each element is `Ok` when the entry materializes and `Err` when it cannot —
-/// the caller logs and continues, never inventing a fallback tag.
+/// The result of materializing one outcome list: per-entry wire infos in exact
+/// source order, plus the recoverable field-level drops surfaced so they are
+/// never silent.
+#[derive(Clone, Debug)]
+pub struct BlockEntityMaterialization {
+    /// Per-outcome results in exact source order. `Err` entries are the
+    /// entry-level refusals (pending, invalid type, unsupported type); `Ok`
+    /// entries are the wire `BlockEntityInfo` values.
+    pub infos: Vec<Result<BlockEntityInfo, BlockEntityMaterializeError>>,
+    /// Recoverable field-level drops (Paper logs and continues) surfaced so
+    /// the drop is never silent.
+    pub diagnostics: Vec<BlockEntityMaterializeDiagnostic>,
+}
+
+/// Materialize every outcome in source order into wire [`BlockEntityInfo`]
+/// values, preserving the input order exactly (see the module-level ordering
+/// note). `Err` entries are the entry-level refusals; the enclosing
+/// [`BlockEntityMaterialization::diagnostics`] carry the recoverable field-level
+/// drops — the caller logs and continues, never inventing a fallback tag.
 pub fn materialize_block_entities(
     outcomes: &[SerializedBlockEntityOutcome],
-) -> Vec<Result<BlockEntityInfo, BlockEntityMaterializeError>> {
-    outcomes.iter().map(materialize_block_entity).collect()
+) -> BlockEntityMaterialization {
+    let mut diagnostics = Vec::new();
+    let infos = outcomes
+        .iter()
+        .map(|outcome| materialize_block_entity(outcome, &mut diagnostics))
+        .collect();
+    BlockEntityMaterialization { infos, diagnostics }
 }
 
 fn materialize_block_entity(
     outcome: &SerializedBlockEntityOutcome,
+    diagnostics: &mut Vec<BlockEntityMaterializeDiagnostic>,
 ) -> Result<BlockEntityInfo, BlockEntityMaterializeError> {
     match outcome {
         SerializedBlockEntityOutcome::Pending(entry) => Err(BlockEntityMaterializeError::Pending {
@@ -148,7 +183,9 @@ fn materialize_block_entity(
                 error: entry.error.clone(),
             })
         }
-        SerializedBlockEntityOutcome::ResolvedUnpacked(entry) => materialize_resolved(entry),
+        SerializedBlockEntityOutcome::ResolvedUnpacked(entry) => {
+            materialize_resolved(entry, diagnostics)
+        }
     }
 }
 
@@ -160,6 +197,7 @@ fn materialize_block_entity(
 /// registry id. Only chest and mob_spawner have a ported update tag.
 fn materialize_resolved(
     entry: &ResolvedSerializedBlockEntity,
+    diagnostics: &mut Vec<BlockEntityMaterializeDiagnostic>,
 ) -> Result<BlockEntityInfo, BlockEntityMaterializeError> {
     let packed_xz = ((SectionPos::section_relative(entry.position.get_x()) << 4)
         | SectionPos::section_relative(entry.position.get_z())) as i8;
@@ -172,7 +210,7 @@ fn materialize_resolved(
             None,
         )),
         SPAWNER_TYPE => {
-            let tag = materialize_spawner_update_tag(entry)?;
+            let tag = materialize_spawner_update_tag(entry, diagnostics);
             Ok(BlockEntityInfo::new(
                 packed_xz,
                 y,
@@ -196,14 +234,19 @@ fn materialize_resolved(
 /// `save` clamps: the `Paper.*` int variants appear only when a delay exceeds
 /// `Short.MAX_VALUE`, the legacy `Delay`/`MinSpawnDelay`/`MaxSpawnDelay` shorts
 /// clamp to `Short.MAX_VALUE`, and the count/range shorts wrap like Java's
-/// `(short)` cast. `SpawnPotentials` is deliberately dropped. `SpawnData` is
-/// carried through its codec's stored form (a compound) with the `SpawnData`
-/// constructor's `entity.id` normalization applied; a wrong-typed or
-/// entity-less `SpawnData` is a [`BlockEntityMaterializeError::MalformedUpdateData`]
-/// refusal (Paper logs and drops it).
+/// `(short)` cast. `SpawnPotentials` is deliberately dropped.
+///
+/// `SpawnData` is carried through its codec's stored form (a compound) with the
+/// `SpawnData` constructor's `entity.id` normalization applied. A wrong-typed or
+/// entity-less `SpawnData` is dropped exactly like Paper (`TagValueInput.read`
+/// reports the `SpawnData.CODEC` problem and leaves `nextSpawnData` null, so
+/// `BaseSpawner.save` omits only the key) — the drop is surfaced as a
+/// [`BlockEntityMaterializeDiagnostic::SpawnDataDropped`] and the spawner's
+/// numeric fields still materialize.
 fn materialize_spawner_update_tag(
     entry: &ResolvedSerializedBlockEntity,
-) -> Result<CompoundTag, BlockEntityMaterializeError> {
+    diagnostics: &mut Vec<BlockEntityMaterializeDiagnostic>,
+) -> CompoundTag {
     let raw = &entry.raw_tag;
     // BaseSpawner.load (Paper's int-first variants).
     let spawn_delay = raw.get_int_or("Paper.Delay", raw.get_short_or("Delay", 20) as i32);
@@ -218,12 +261,22 @@ fn materialize_spawner_update_tag(
 
     let spawn_data = match raw.get("SpawnData") {
         None => None,
-        Some(Tag::Compound(compound)) => Some(load_spawn_data(compound, entry.position)?),
+        Some(Tag::Compound(compound)) => match load_spawn_data(compound) {
+            Ok(spawn_data) => Some(spawn_data),
+            Err(field) => {
+                diagnostics.push(BlockEntityMaterializeDiagnostic::SpawnDataDropped {
+                    position: entry.position,
+                    field,
+                });
+                None
+            }
+        },
         Some(_) => {
-            return Err(BlockEntityMaterializeError::MalformedUpdateData {
+            diagnostics.push(BlockEntityMaterializeDiagnostic::SpawnDataDropped {
                 position: entry.position,
                 field: "SpawnData",
             });
+            None
         }
     };
 
@@ -247,40 +300,34 @@ fn materialize_spawner_update_tag(
         tag.put("SpawnData".to_string(), Tag::Compound(spawn_data));
     }
     // SpawnPotentials is not written: SpawnerBlockEntity.getUpdateTag removes it.
-    Ok(tag)
+    tag
 }
 
 /// Decode the stored `SpawnData` compound into the codec's re-encodable form.
 ///
 /// `SpawnData.CODEC` requires the `entity` compound field; a missing or
-/// wrong-typed `entity` fails the decode in Java (which logs and drops the
-/// field), so the port surfaces that as a [`BlockEntityMaterializeError::MalformedUpdateData`]
-/// refusal. Otherwise the compound is the codec's stored form and is carried
-/// through with the `SpawnData` record constructor's `entity.id` normalization
-/// applied (valid id rewritten canonically, invalid/absent/non-string id
-/// removed).
+/// wrong-typed `entity` fails the decode, and Paper's `TagValueInput.read`
+/// reports it and leaves the field dropped (the port returns the field name for
+/// the [`BlockEntityMaterializeDiagnostic::SpawnDataDropped`] surface).
+/// Otherwise the compound is the codec's stored form and is carried through
+/// with the `SpawnData` record constructor's `entity.id` normalization applied
+/// (valid id rewritten canonically, invalid/absent/non-string id removed).
 ///
-/// RivetTodo(#520): `SpawnData.CODEC` also fails on a present-but-malformed
-/// `equipment` optional field (a codec error that drops the whole `SpawnData`);
-/// `custom_spawn_rules` is lenient (per-field defaults) and never fails. The
-/// port validates only the `entity` hard field and carries the stored form,
-/// so a malformed `equipment` is carried rather than dropped until the
-/// `SpawnData`/`EquipmentTable` codec port lands.
-fn load_spawn_data(
-    spawn_data: &CompoundTag,
-    position: BlockPos,
-) -> Result<CompoundTag, BlockEntityMaterializeError> {
+/// RivetTodo(#520): `SpawnData.CODEC`'s `optionalFieldOf` fields are
+/// non-lenient — a present-but-wrong-typed `custom_spawn_rules` or a
+/// malformed `equipment` also fails the whole `SpawnData` decode (dropping it
+/// from the update tag), and a well-formed `custom_spawn_rules` re-encodes
+/// with its two light ranges always stored (defaults filled for a missing
+/// inner field). The port validates only the `entity` hard field and carries
+/// the stored compound verbatim (with the id normalization), so those deeper
+/// re-encode divergences defer with the `SpawnData`/`EquipmentTable` codec
+/// port.
+fn load_spawn_data(spawn_data: &CompoundTag) -> Result<CompoundTag, &'static str> {
     let Some(entity) = spawn_data.tags.get("entity") else {
-        return Err(BlockEntityMaterializeError::MalformedUpdateData {
-            position,
-            field: "SpawnData.entity",
-        });
+        return Err("SpawnData.entity");
     };
     if !matches!(entity, Tag::Compound(_)) {
-        return Err(BlockEntityMaterializeError::MalformedUpdateData {
-            position,
-            field: "SpawnData.entity",
-        });
+        return Err("SpawnData.entity");
     }
     let mut out = spawn_data.clone();
     normalize_spawn_data_entity_id(out.tags.get_mut("entity"));
@@ -355,10 +402,7 @@ mod tests {
         )
     }
 
-    fn materialize_fixture(
-        chunk: &CompoundTag,
-        chunk_pos: ChunkPos,
-    ) -> Vec<Result<BlockEntityInfo, BlockEntityMaterializeError>> {
+    fn materialize_fixture(chunk: &CompoundTag, chunk_pos: ChunkPos) -> BlockEntityMaterialization {
         let raw = crate::chunk::storage::serializable_chunk_data::parse_block_entities(chunk);
         let outcomes = reconstruct_block_entities(&chunk_pos, &raw, BlockEntityChunkKind::Level);
         materialize_block_entities(&outcomes)
@@ -387,6 +431,19 @@ mod tests {
         }
     }
 
+    /// Materialize one resolved entry, returning its per-entry result and the
+    /// recoverable field-level diagnostics it produced.
+    fn materialize_entry(
+        entry: &ResolvedSerializedBlockEntity,
+    ) -> (
+        Result<BlockEntityInfo, BlockEntityMaterializeError>,
+        Vec<BlockEntityMaterializeDiagnostic>,
+    ) {
+        let mut diagnostics = Vec::new();
+        let info = materialize_resolved(entry, &mut diagnostics);
+        (info, diagnostics)
+    }
+
     fn spawner_tag() -> CompoundTag {
         let mut tag = block_entity(SPAWNER_TYPE, 3, 64, -5);
         tag.put_short("Delay", 20);
@@ -412,7 +469,9 @@ mod tests {
     #[test]
     fn real_loaded_world_chest_materializes_to_null_tag() {
         let chunk = chest_fixture();
-        let results = materialize_fixture(&chunk, ChunkPos::new(-19, -21));
+        let materialized = materialize_fixture(&chunk, ChunkPos::new(-19, -21));
+        assert!(materialized.diagnostics.is_empty());
+        let results = materialized.infos;
         assert_eq!(results.len(), 1);
         let info = results[0].as_ref().expect("fixture chest materializes");
         // (x & 15, z & 15) = (5, 15) => 0x5F; absolute y = -51; tag None.
@@ -429,7 +488,9 @@ mod tests {
     #[test]
     fn real_fixture_chest_and_furnace_materialize_with_unsupported_refusal() {
         let chunk = block_entity_fixture();
-        let results = materialize_fixture(&chunk, ChunkPos::ZERO);
+        let materialized = materialize_fixture(&chunk, ChunkPos::ZERO);
+        assert!(materialized.diagnostics.is_empty());
+        let results = materialized.infos;
         assert_eq!(results.len(), 2);
 
         let chest = results[0].as_ref().expect("fixture chest materializes");
@@ -450,7 +511,9 @@ mod tests {
     #[test]
     fn synthetic_spawner_materializes_base_spawner_save_without_spawn_potentials() {
         let entry = resolved_outcome(spawner_tag());
-        let info = materialize_resolved(&entry).expect("spawner materializes");
+        let (info, diagnostics) = materialize_entry(&entry);
+        assert!(diagnostics.is_empty());
+        let info = info.expect("spawner materializes");
         assert_eq!(info.packed_xz(), ((3 & 15) << 4 | (-5 & 15)) as i8);
         assert_eq!(info.y(), 64);
         assert_eq!(info.entity_type().name(), SPAWNER_TYPE);
@@ -490,7 +553,9 @@ mod tests {
         tag.put_int("Paper.MinSpawnDelay", 40_000);
         tag.put_int("Paper.MaxSpawnDelay", 90_000);
         let entry = resolved_outcome(tag);
-        let info = materialize_resolved(&entry).expect("spawner materializes");
+        let (info, diagnostics) = materialize_entry(&entry);
+        assert!(diagnostics.is_empty());
+        let info = info.expect("spawner materializes");
         let update = info.tag().expect("non-empty update tag");
 
         // BaseSpawner.load prefers the Paper int variant...
@@ -504,32 +569,44 @@ mod tests {
     }
 
     #[test]
-    fn spawner_wrong_typed_spawn_data_is_a_malformed_refusal() {
+    fn spawner_wrong_typed_spawn_data_drops_only_the_field_with_a_diagnostic() {
         let mut tag = block_entity(SPAWNER_TYPE, 3, 64, -5);
+        tag.put_short("Delay", 20);
         tag.put("SpawnData".to_string(), Tag::Int(IntTag::value_of(5)));
         let entry = resolved_outcome(tag);
+        let (info, diagnostics) = materialize_entry(&entry);
+        // Paper sends the partial tag: numeric fields present, SpawnData omitted.
+        let info = info.expect("spawner still materializes partial");
+        assert_eq!(info.tag().unwrap().get_short_or("Delay", 0), 20);
+        assert!(info.tag().unwrap().get("SpawnData").is_none());
         assert_eq!(
-            materialize_resolved(&entry).unwrap_err(),
-            BlockEntityMaterializeError::MalformedUpdateData {
+            diagnostics,
+            vec![BlockEntityMaterializeDiagnostic::SpawnDataDropped {
                 position: BlockPos::new(3, 64, 11),
                 field: "SpawnData",
-            }
+            }]
         );
     }
 
     #[test]
-    fn spawner_entity_less_spawn_data_is_a_malformed_refusal() {
+    fn spawner_entity_less_spawn_data_drops_only_the_field_with_a_diagnostic() {
         let mut tag = block_entity(SPAWNER_TYPE, 3, 64, -5);
+        tag.put_short("Delay", 20);
         let mut spawn_data = CompoundTag::new();
         spawn_data.put_int("custom_spawn_rules", 1);
         tag.put("SpawnData".to_string(), Tag::Compound(spawn_data));
         let entry = resolved_outcome(tag);
+        let (info, diagnostics) = materialize_entry(&entry);
+        // Paper sends the partial tag; the entity-less SpawnData is omitted.
+        let info = info.expect("spawner still materializes partial");
+        assert_eq!(info.tag().unwrap().get_short_or("Delay", 0), 20);
+        assert!(info.tag().unwrap().get("SpawnData").is_none());
         assert_eq!(
-            materialize_resolved(&entry).unwrap_err(),
-            BlockEntityMaterializeError::MalformedUpdateData {
+            diagnostics,
+            vec![BlockEntityMaterializeDiagnostic::SpawnDataDropped {
                 position: BlockPos::new(3, 64, 11),
                 field: "SpawnData.entity",
-            }
+            }]
         );
     }
 
@@ -538,7 +615,9 @@ mod tests {
         // A default-namespace id is canonicalized to "minecraft:".
         let mut tag = spawner_tag();
         entity_owned_id(&mut tag, "pig");
-        let info = materialize_resolved(&resolved_outcome(tag)).expect("spawner materializes");
+        let (info, diagnostics) = materialize_entry(&resolved_outcome(tag));
+        assert!(diagnostics.is_empty());
+        let info = info.expect("spawner materializes");
         assert_eq!(
             info.tag()
                 .unwrap()
@@ -552,7 +631,9 @@ mod tests {
         // A malformed id is removed, matching the SpawnData constructor.
         let mut tag = spawner_tag();
         entity_owned_id(&mut tag, "not valid");
-        let info = materialize_resolved(&resolved_outcome(tag)).expect("spawner materializes");
+        let (info, diagnostics) = materialize_entry(&resolved_outcome(tag));
+        assert!(diagnostics.is_empty());
+        let info = info.expect("spawner materializes");
         assert!(
             info.tag()
                 .unwrap()
@@ -579,7 +660,9 @@ mod tests {
             .insert("entity".to_string(), Tag::Compound(entity));
         tag.tags
             .insert("SpawnData".to_string(), Tag::Compound(fixed));
-        let info = materialize_resolved(&resolved_outcome(tag)).expect("spawner materializes");
+        let (info, diagnostics) = materialize_entry(&resolved_outcome(tag));
+        assert!(diagnostics.is_empty());
+        let info = info.expect("spawner materializes");
         assert!(
             info.tag()
                 .unwrap()
@@ -622,7 +705,9 @@ mod tests {
             &[pending, invalid, furnace],
             BlockEntityChunkKind::Level,
         );
-        let results = materialize_block_entities(&outcomes);
+        let materialized = materialize_block_entities(&outcomes);
+        assert!(materialized.diagnostics.is_empty());
+        let results = materialized.infos;
         assert_eq!(results.len(), 3);
         assert_eq!(
             results[0].as_ref().unwrap_err(),
@@ -652,7 +737,9 @@ mod tests {
         let tag = block_entity("minecraft:chest", 1, 64, 1);
         let outcomes =
             reconstruct_block_entities(&ChunkPos::new(2, -3), &[tag], BlockEntityChunkKind::Proto);
-        let results = materialize_block_entities(&outcomes);
+        let materialized = materialize_block_entities(&outcomes);
+        assert!(materialized.diagnostics.is_empty());
+        let results = materialized.infos;
         assert_eq!(
             results[0].as_ref().unwrap_err(),
             &BlockEntityMaterializeError::Pending {
@@ -682,7 +769,9 @@ mod tests {
             ],
             BlockEntityChunkKind::Level,
         );
-        let results = materialize_block_entities(&outcomes);
+        let materialized = materialize_block_entities(&outcomes);
+        assert!(materialized.diagnostics.is_empty());
+        let results = materialized.infos;
         assert_eq!(results.len(), 4);
         // Chest ok, furnace unsupported, spawner ok, keepPacked pending.
         assert!(results[0].is_ok());
@@ -703,7 +792,9 @@ mod tests {
     #[test]
     fn registry_arc_identity_is_preserved_through_materialization() {
         let entry = resolved_outcome(spawner_tag());
-        let info = materialize_resolved(&entry).expect("spawner materializes");
+        let (info, diagnostics) = materialize_entry(&entry);
+        assert!(diagnostics.is_empty());
+        let info = info.expect("spawner materializes");
         let registered = BlockEntityType::from_name(SPAWNER_TYPE).unwrap();
         assert!(Arc::ptr_eq(info.entity_type(), &registered));
         // The codec registry resolves the same allocation identity.
