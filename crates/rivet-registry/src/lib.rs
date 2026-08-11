@@ -94,6 +94,10 @@ pub mod block_state_properties;
 /// The generated-identity surface of
 /// `net.minecraft.world.level.block.entity.BlockEntityType` (#341).
 pub mod block_entity_type;
+/// The generated-identity surface of
+/// `net.minecraft.world.level.levelgen.feature.featuresize.FeatureSizeType`
+/// (#394).
+pub mod feature_size_type;
 /// `net.minecraft.resources.Identifier` (MC 26.2 `ResourceLocation`).
 pub mod identifier;
 /// `net.minecraft.IdentifierException` — lives in `rivet-core` with the other

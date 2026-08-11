@@ -4080,3 +4080,19 @@ pub static POINT_OF_INTEREST_TYPE_BY_ID: &[&str] = &[
 /// `minecraft:point_of_interest_type` has no defaulted element (a plain `Registry`, not a
 /// `DefaultedRegistry`); lookups of missing names return `None`.
 pub static POINT_OF_INTEREST_TYPE_DEFAULT: Option<&str> = None;
+
+/// `minecraft:worldgen/feature_size_type` — element name -> registry id (dense `0..2`).
+pub static WORLDGEN_FEATURE_SIZE_TYPE_BY_NAME: phf::Map<&'static str, u16> = phf::phf_map! {
+    "minecraft:two_layers_feature_size" => 0u16,
+    "minecraft:three_layers_feature_size" => 1u16,
+};
+
+/// `minecraft:worldgen/feature_size_type` — element names indexed by registry id (id == index).
+pub static WORLDGEN_FEATURE_SIZE_TYPE_BY_ID: &[&str] = &[
+    "minecraft:two_layers_feature_size",   // 0
+    "minecraft:three_layers_feature_size", // 1
+];
+
+/// `minecraft:worldgen/feature_size_type` has no defaulted element (a plain `Registry`, not a
+/// `DefaultedRegistry`); lookups of missing names return `None`.
+pub static WORLDGEN_FEATURE_SIZE_TYPE_DEFAULT: Option<&str> = None;
