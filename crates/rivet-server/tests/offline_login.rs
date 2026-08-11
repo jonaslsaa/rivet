@@ -97,6 +97,7 @@ fn config_with_threshold(compression_threshold: i32) -> ServerConfig {
         lifecycle_capacity: 64,
         enable_join: false,
         keepalive_timeout: Duration::from_secs(30),
+        level_path: None,
     }
 }
 
@@ -1178,6 +1179,7 @@ fn config_with_join() -> ServerConfig {
         lifecycle_capacity: 1024,
         enable_join: true,
         keepalive_timeout: Duration::from_secs(30),
+        level_path: None,
     }
 }
 
@@ -1315,6 +1317,17 @@ async fn read_play_keepalive_challenge(stream: &mut TcpStream) -> [u8; 8] {
     payload[used..used + 8]
         .try_into()
         .expect("keep_alive body is an 8-byte long")
+}
+
+/// Read one clientbound play packet and return its id + body (the payload
+/// after the id varint). `read_play_keepalive_challenge` stays for the direct
+/// keepalive-only tests; the drain loop uses this so arbitrary play packets
+/// (the movement recenter's cache-center + chunk burst, future slices) are
+/// consumed without being misread as keepalives.
+async fn read_any_play_packet(stream: &mut TcpStream) -> (i32, Vec<u8>) {
+    let (_, payload) = read_compressed_packet(stream).await;
+    let (id, used) = decode_varint(&payload);
+    (id, payload[used..].to_vec())
 }
 
 /// Frame a serverbound play `keep_alive` reply (id 28) echoing the challenge
@@ -1559,16 +1572,24 @@ async fn wait_until(
         // frames) and observe the tick thread's channel events.
         tokio::time::sleep(Duration::from_millis(2)).await;
         if let Some(client) = client.as_deref_mut()
-            && let Ok(challenge) = tokio::time::timeout(
-                Duration::from_millis(1),
-                read_play_keepalive_challenge(client),
-            )
-            .await
+            && let Ok(packet) =
+                tokio::time::timeout(Duration::from_millis(1), read_any_play_packet(client)).await
         {
-            client
-                .write_all(&play_keepalive_reply_frame(challenge))
-                .await
-                .expect("write keepalive reply");
+            // Reply to keepalive challenges; drop everything else. A live play
+            // client sees arbitrary clientbound packets (the join burst was
+            // already consumed, but the movement recenter sends cache-center +
+            // chunks on a boundary crossing, and future slices send more), so
+            // the drain must not assume the only traffic is keepalives.
+            if packet.0 == PacketType::KeepAlive.id() as i32 {
+                let challenge: [u8; 8] = packet
+                    .1
+                    .try_into()
+                    .expect("keep_alive body is an 8-byte long");
+                client
+                    .write_all(&play_keepalive_reply_frame(challenge))
+                    .await
+                    .expect("write keepalive reply");
+            }
         }
     }
 }

@@ -17,6 +17,9 @@ rivet-protocol = { workspace = true, features = ["packets"] }
 # consumes (`generated::synchronized`, `generated::tags`, `generated::biomes`,
 # `generated::blocks`, `generated::registries` — OWNERSHIP.md §Registries).
 rivet-registry = { workspace = true, features = ["blocks"] }
+# `Dynamic`/`NbtOps` decode the region-backed level.dat `spawn` through the
+# finalized `RespawnData` codec (#515).
+rivet-serialization = { workspace = true }
 rivet-text = { workspace = true }
 rivet-util = { workspace = true }
 rivet-world = { workspace = true }
@@ -28,6 +31,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # Building compressed wire frames in the offline-login integration tests
 # (zlib-encoding the client's `login_acknowledged`).
 flate2 = { workspace = true }

@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "synth-noise",
+  "note": "bit-exact golden samples of net.minecraft.world.level.levelgen.synth (SimplexNoise/ImprovedNoise/PerlinSimplexNoise/PerlinNoise/NormalNoise/BlendedNoise/NoiseUtils) captured from the pinned Paper 26.2 runtime via SynthNoiseProbe. Values are Double.doubleToLongBits. Deterministic across boots.",
+  "captured": [
+    {
+      "path": "synth-noise.json",
+      "sha256": "2af451acd7dda0c072146ef73bee84350581abda87527d070706d827a5268c6a",
+      "bytes": 234782
+    }
+  ]
+}

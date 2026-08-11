@@ -27,25 +27,32 @@
 //! value. `RegionFile` is owned by the region's single IO worker behind a
 //! `Mutex<RegionFile>` (OWNERSHIP.md) — never `Arc<RwLock>` game state.
 
-// RivetTodo(#231): `RegionFileStorage` write/flush/create surfaces remain
-// deferred. This module now exposes only the existing-file direct-read slice,
-// including its LRU/negative caches, coordinate guard, and Aikar oversized
-// merge. `IOWorker`'s `PendingStore`
-// coalescing, the moonrise `RegionDataController` interfaces
+// RivetTodo(#231): the moonrise `RegionDataController` interfaces
 // (`moonrise$startWrite`/`moonrise$finishWrite`/`moonrise$readData`/
-// `moonrise$finishRead`), and `SimpleRegionStorage`'s coordinate guard also
-// land with that wave. The legacy Aikar oversized subsystem (§6.2) — per-chunk
-// Aikar `setOversized` write/meta mutations and the recalc-only Aikar branches
-// remain deferred. Codec coverage per DECISIONS.md D13: all four registered
-// read codecs are wired; deflate/lz4 writes stay deferred.
+// `moonrise$finishRead`), `IOWorker`'s `PendingStore` coalescing, and
+// `SimpleRegionStorage`'s coordinate guard land with the write worker wave.
+// `SerializableChunkData.write` is deferred. The Aikar `setOversized` clear
+// path is wired into the write lifecycle exactly like Paper: `write` clears the
+// legacy flag only on a successful store, while the delete and
+// `RegionFileSizeException` paths only `clear` (no `set_oversized`). The Aikar
+// recalc branches remain deferred. Codec coverage per DECISIONS.md D13: all
+// four registered read codecs are wired; deflate/lz4 writes stay deferred.
 
+pub mod block_entity_materialization;
+pub mod chunk_reconstruction;
 pub mod region_bitmap;
 pub mod region_file;
 pub mod region_file_storage;
 pub mod region_file_version;
 pub mod region_storage_info;
+pub mod section_reconstruction;
 pub mod serializable_chunk_data;
 
+pub use block_entity_materialization::{BlockEntityMaterializeError, materialize_block_entities};
+pub use chunk_reconstruction::{
+    ChunkReconstruction, ChunkReconstructionError, ReconstructedLevelChunk,
+    reconstruct_runtime_chunk,
+};
 pub use region_bitmap::RegionBitmap;
 pub use region_file::{
     ChunkBuffer, RegionFile, RegionFileSizeException, get_chunk_coordinate,
@@ -54,3 +61,8 @@ pub use region_file::{
 pub use region_file_storage::RegionFileStorage;
 pub use region_file_version::RegionFileVersion;
 pub use region_storage_info::RegionStorageInfo;
+pub use section_reconstruction::{
+    BiomeId, ChunkReadException, CodecPath, SectionBlockPredicates, SectionCodecDiagnostic,
+    SectionReconstruction, current_version_container_factory, reconstruct_sections,
+    reconstruct_sections_with_presets, reconstruct_sections_with_presets_and_diagnostics,
+};

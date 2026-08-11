@@ -12,8 +12,9 @@
 //!   1. **default** — verify every committed fixture *kind* under `fixtures/`
 //!      against its own `manifest.json` SHA-256s (M0 chunk slice,
 //!      `worldgen/` semantic samples, `regions/overworld-normal/` region
-//!      payloads). Each kind carries an independent manifest, so kinds can grow
-//!      without a format migration.
+//!      payloads, the text component-JSON corpus, and the `spline/`/`seq/`
+//!      value-leaf goldens). Each kind carries an independent manifest, so kinds
+//!      can grow without a format migration.
 //!   2. **`<dir>`** — verify a single fixtures dir against its manifest.
 //!   3. **`verify`** — the one-command M0 sanity gate: boot a *fresh* Paper
 //!      run in a clean scratch dir under `work/`, wait for `Done`, shut it
@@ -52,7 +53,10 @@
 //!      payloads (also twin-boot, issue #51), the worldgen semantic samples, and
 //!      the text component-JSON corpus (Paper reference-oracle capture, issue
 //!      #98). Sub-select with `--m0` / `--m2` / `--full` / `--samples` /
-//!      `--text`.
+//!      `--text`. The `spline/` and `seq/` value-leaf goldens are regenerated
+//!      by `scripts/run_spline_probe.sh` / `scripts/run_seq_probe.sh`
+//!      (script-driven, no boot; not `regenerate` modes), so bare `regenerate`
+//!      never refreshes them — re-run those scripts after a Paper re-pin.
 //!
 //! Note on determinism (see scripts/extract_fixtures.py): raw region files
 //! are NOT byte-stable across boots (framing/timestamps), but the decompressed
@@ -178,16 +182,16 @@ enum Error {
     PinUnavailable {
         reason: String,
     },
+    /// The #54 hash stage could not complete honestly (missing/empty payload
+    /// input, or a malformed capture tree) — maps to exit 3 UNVERIFIED, never a
+    /// fabricated green.
+    Unverified(String),
     /// The `verify --expect-fail` negative control failed: the boot -> extract
     /// -> pin-check -> diff pipeline did not detect (and name) the deliberately
     /// corrupted baseline chunk.
     NegativeControl {
         message: String,
     },
-    /// A #54 hash stage could not complete honestly — the input a stage needed
-    /// (a payload tree, a FULL chunk, a producer) is unavailable. Maps to exit 3
-    /// UNVERIFIED, never a fabricated green.
-    Unverified(String),
 }
 
 impl fmt::Display for Error {
@@ -227,8 +231,8 @@ impl fmt::Display for Error {
                  Paper (build working/Paper at 0a99345 into a paperclip, and materialize \
                  tools/rivet-oracle/work/jars/)."
             ),
-            Error::NegativeControl { message } => write!(f, "{message}"),
             Error::Unverified(m) => write!(f, "{m}"),
+            Error::NegativeControl { message } => write!(f, "{message}"),
         }
     }
 }
@@ -2467,19 +2471,19 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     // a later Paper-vs-Rivet diff compare "Paper (empty) vs Rivet" and possibly
     // go vacuously green. This is UNVERIFIED (exit 3), never a green. (A tree
     // with payloads but zero FULL chunks is a different, legitimate pre-worldgen
-    // state; hash-paper's source is the committed Paper capture, which must
-    // actually exist.)
+    // state that hash-rivet already reports as UNVERIFIED; hash-paper's source
+    // is the committed Paper capture, which must actually exist.)
     if !payload_dir.is_dir() {
         return Err(Error::Unverified(format!(
-            "hash-paper: payload source {} is not a directory — cannot build an honest Paper \
-             digest table; UNVERIFIED, never a zero-chunk manifest",
+            "hash-paper: payload source {} is not a directory — cannot build an honest \
+             Paper digest table; UNVERIFIED, never a zero-chunk manifest",
             payload_dir.display()
         )));
     }
     if !payload_dir.join("chunk").is_dir() {
         return Err(Error::Unverified(format!(
-            "hash-paper: {} has no chunk/ payload tree — nothing to hash; UNVERIFIED, never a \
-             zero-chunk manifest",
+            "hash-paper: {} has no chunk/ payload tree — nothing to hash; UNVERIFIED, \
+             never a zero-chunk manifest",
             payload_dir.display()
         )));
     }
@@ -2491,8 +2495,8 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
             .map_err(Error::Gate)?;
     if manifest.entries.is_empty() {
         return Err(Error::Unverified(format!(
-            "hash-paper: no .nbt chunk payloads under {} — writing a zero-chunk manifest would \
-             fabricate green; UNVERIFIED",
+            "hash-paper: no .nbt chunk payloads under {} — writing a zero-chunk manifest \
+             would fabricate green; UNVERIFIED",
             payload_dir.display()
         )));
     }
@@ -2659,9 +2663,9 @@ fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
         )));
     }
 
-    let (mismatches, extra, compared) = compute_hash_diffs(&paper, &rivet);
+    let (mismatches, paper_only, rivet_only, compared) = compute_hash_diffs(&paper, &rivet);
 
-    if mismatches.is_empty() && extra.is_empty() {
+    if mismatches.is_empty() && paper_only.is_empty() && rivet_only.is_empty() {
         println!(
             "hash-diff PASS: {compared} FULL chunks match Paper == Rivet ({} entries, {} FULL)",
             paper.chunk_count, paper.full_count
@@ -2679,13 +2683,17 @@ fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
             m.dim, m.cx, m.cz, m.expected, m.actual, triage
         );
     }
-    for e in &extra {
-        println!("EXTRA (Rivet-only FULL): {e}");
+    for e in &paper_only {
+        println!("PAPER-ONLY FULL (Paper has, Rivet is missing): {e}");
+    }
+    for e in &rivet_only {
+        println!("RIVET-ONLY FULL (Rivet over-generated): {e}");
     }
     println!(
-        "hash-diff FAIL: {} mismatched, {} extra, {} compared",
+        "hash-diff FAIL: {} mismatched, {} paper-only, {} rivet-only, {} compared",
         mismatches.len(),
-        extra.len(),
+        paper_only.len(),
+        rivet_only.len(),
         compared
     );
     Ok(false)
@@ -2693,25 +2701,30 @@ fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
 
 /// Per-chunk FULL-entry comparison between two manifests: `mismatches` are the
 /// shared (dim, cx, cz) FULL entries whose raw digest differs (with an
-/// order-only triage flag when the canonical digests agree), `extras` are the
-/// FULL entries present on exactly one side (Rivet-only over-generation, or a
-/// Paper FULL chunk missing from Rivet — a divergent omission that must not
-/// slide through as green), and `compared` is how many shared FULL pairs were
-/// checked. Pure — the caller prints and decides PASS/FAIL, and tests assert
-/// the exact set of named chunks.
+/// order-only triage flag when the canonical digests agree), `paper_only` are
+/// the FULL entries present in Paper but absent from Rivet (a chunk Rivet
+/// failed to produce — a divergent omission that must not slide through as
+/// green), `rivet_only` are the FULL entries present in Rivet but absent from
+/// Paper (Rivet over-generation), and `compared` is how many shared FULL pairs
+/// were checked. The two one-sided directions are kept separate because they
+/// diagnose opposite failures and must be reported with the correct direction
+/// (a Paper-only chunk is NOT Rivet over-generation). Pure — the caller prints
+/// and decides PASS/FAIL, and tests assert the exact set of named chunks.
 fn compute_hash_diffs(
     paper: &hash_manifest::HashManifest,
     rivet: &hash_manifest::HashManifest,
-) -> (Vec<ChunkHashMismatch>, Vec<String>, usize) {
+) -> (Vec<ChunkHashMismatch>, Vec<String>, Vec<String>, usize) {
     let mut mismatches: Vec<ChunkHashMismatch> = Vec::new();
-    let mut extra: Vec<String> = Vec::new();
+    let mut paper_only: Vec<String> = Vec::new();
+    let mut rivet_only: Vec<String> = Vec::new();
     let mut compared = 0usize;
     for pe in &paper.entries {
         if !pe.is_full() {
             continue;
         }
         let Some(re) = rivet.full_entry(&pe.dim, pe.cx, pe.cz) else {
-            continue; // Paper-only FULL chunk — reported in the one-sided pass below.
+            paper_only.push(format!("{}/{}.{}.{}", pe.dim, pe.region, pe.cx, pe.cz));
+            continue; // Paper-only FULL chunk — pushed here; the one-sided pass below only computes Rivet-only.
         };
         compared += 1;
         if pe.xxh3_64 != re.xxh3_64 {
@@ -2728,18 +2741,15 @@ fn compute_hash_diffs(
     }
     // One-sided FULL entries, either direction: Rivet-only (over-generation)
     // and Paper-only (a chunk Rivet failed to produce). Both are divergence and
-    // must fail the diff, never pass vacuously.
+    // must fail the diff, never pass vacuously. Directions are reported
+    // distinctly — a Paper-only chunk diagnoses "Rivet is missing a chunk Paper
+    // has", never the reverse.
     for re in &rivet.entries {
         if re.is_full() && paper.full_entry(&re.dim, re.cx, re.cz).is_none() {
-            extra.push(format!("{}/{}.{}.{}", re.dim, re.region, re.cx, re.cz));
+            rivet_only.push(format!("{}/{}.{}.{}", re.dim, re.region, re.cx, re.cz));
         }
     }
-    for pe in &paper.entries {
-        if pe.is_full() && rivet.full_entry(&pe.dim, pe.cx, pe.cz).is_none() {
-            extra.push(format!("{}/{}.{}.{}", pe.dim, pe.region, pe.cx, pe.cz));
-        }
-    }
-    (mismatches, extra, compared)
+    (mismatches, paper_only, rivet_only, compared)
 }
 
 /// `hash-diff --expect-fail`: negative control. Corrupt a copy of the baseline
@@ -2805,50 +2815,111 @@ fn run_hash_diff_negative(
         .map_err(|e| Error::Gate(format!("cannot write manifest: {e}")))?;
 
     // Now the Paper-vs-Rivet diff against the corrupted copy must FAIL and name
-    // exactly the tampered chunk — a FAIL for any other reason (a different
-    // chunk, a provenance mismatch, an unrelated divergence) is a wrong-reason
-    // pass and must be rejected.
-    let paper = load_hash_manifest(paper_dir)?;
-    let rivet = load_hash_manifest(&scratch)?;
-    if paper.provenance() != rivet.provenance() {
-        let _ = fs::remove_dir_all(&scratch);
-        return Err(Error::Gate(format!(
-            "negative control could not compare: provenance mismatch ({} vs {}) — the \
-             corrupted copy drifted from the baseline, not a tamper detection",
-            paper.provenance().describe(),
-            rivet.provenance().describe()
-        )));
-    }
-    let (mismatches, one_sided, compared) = compute_hash_diffs(&paper, &rivet);
-    let tampered_id = format!("{}/{}.{}.{}", full.dim, full.region, full.cx, full.cz);
-    let names_tampered = mismatches
-        .iter()
-        .any(|m| m.dim == full.dim && m.cx == full.cx && m.cz == full.cz);
-    if mismatches.is_empty() || !names_tampered || !one_sided.is_empty() {
-        let _ = fs::remove_dir_all(&scratch);
-        let mut detail = Vec::new();
-        for m in &mismatches {
-            detail.push(format!("{}/{}.{}", m.dim, m.cx, m.cz));
-        }
-        detail.extend(one_sided.iter().cloned());
-        return Err(Error::Gate(format!(
-            "negative control FAILED: {kind:?} tamper of {tampered_id} was not detected and \
-             named (compared {compared} chunks; divergences: {}). The comparator is either \
-             vacuously green or diverged for the wrong reason.",
-            if detail.is_empty() {
-                "none".to_string()
-            } else {
-                detail.join(", ")
-            }
-        )));
-    }
-    let _ = fs::remove_dir_all(&scratch);
-    println!(
-        "negative control PASS: {} tamper of {} detected and named (compared {compared} chunks)",
+    // exactly the tampered chunk. Accepting "any diff failure" is not enough: a
+    // comparator that broke in an unrelated way (e.g. refusing to compare at
+    // all, or failing on the wrong chunk) must not pass the control. The tampered
+    // dim + coordinate are asserted by re-reading the rebuilt manifest, and the
+    // run_hash_diff return value is examined structurally (FAIL + exactly the
+    // tampered coordinate in the mismatch set), never just "exit nonzero".
+    let (mismatches, paper_only, rivet_only, _) =
+        compute_hash_diffs(&load_hash_manifest(paper_dir)?, &rebuilt);
+    let tamper_label = format!(
+        "{} tamper on {}/{}",
         kind.cli_name(),
-        tampered_id
+        full.dim,
+        fmt_hash_coord(full.cx, full.cz)
     );
-    Ok(())
+    // The tamper must be the ONLY divergence: the digest-mismatch set is
+    // non-empty and names exactly the tampered chunk, AND there is no one-sided
+    // FULL divergence in either direction (a one-sided divergence alongside the
+    // tamper means the comparator is also failing for a second, unrelated
+    // reason). A vacuous pass (empty) or a wrong-chunk failure must also be
+    // caught — "any diff failure" never satisfies the control.
+    if !tamper_divergence_is_exactly(
+        &mismatches,
+        &paper_only,
+        &rivet_only,
+        &full.dim,
+        full.cx,
+        full.cz,
+    ) {
+        let _ = fs::remove_dir_all(&scratch);
+        return Err(Error::Gate(format!(
+            "negative control FAILED: {tamper_label} was not reported as the ONLY divergence \
+             (digest mismatches: {}; paper-only: {}; rivet-only: {}) — the comparator must \
+             name exactly the tampered dimension/coordinate and nothing else, not accept any \
+             diff failure",
+            mismatches
+                .iter()
+                .map(|m| format!("{}/{}", m.dim, fmt_hash_coord(m.cx, m.cz)))
+                .collect::<Vec<_>>()
+                .join(", "),
+            paper_only.join(", "),
+            rivet_only.join(", ")
+        )));
+    }
+    match run_hash_diff(paper_dir, &scratch) {
+        Ok(true) => {
+            let _ = fs::remove_dir_all(&scratch);
+            Err(Error::Gate(format!(
+                "negative control FAILED: {tamper_label} was NOT detected by the full diff — \
+                 the comparator is vacuously green"
+            )))
+        }
+        Ok(false) => {
+            let _ = fs::remove_dir_all(&scratch);
+            println!("negative control PASS: {tamper_label} detected and named exactly");
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_dir_all(&scratch);
+            Err(Error::Gate(format!(
+                "negative control could not run the diff (exit 3): {e}"
+            )))
+        }
+    }
+}
+
+/// Whether a negative-control mismatch set proves the tampered chunk was named
+/// **exactly**: the set is non-empty, and every reported divergence is the
+/// tampered (dim, cx, cz). An empty set means the comparator went vacuously
+/// green; a mismatch at a different coordinate means it failed for the wrong
+/// reason — neither satisfies the negative control, which must prove the
+/// reported mismatch names exactly the tampered dimension/coordinate.
+fn mismatch_set_names_exactly(
+    mismatches: &[ChunkHashMismatch],
+    dim: &str,
+    cx: i32,
+    cz: i32,
+) -> bool {
+    !mismatches.is_empty()
+        && mismatches
+            .iter()
+            .all(|m| m.dim == dim && (m.cx, m.cz) == (cx, cz))
+}
+
+/// Whether the negative-control divergence proves the tamper was the **only**
+/// divergence: the digest-mismatch set names exactly the tampered chunk AND
+/// there is no one-sided FULL divergence in either direction. A one-sided FULL
+/// divergence alongside the tamper means the comparator is also failing for a
+/// second, unrelated reason, so the reported failure is not strictly "exactly
+/// the tampered chunk" — the control must not pass on it.
+fn tamper_divergence_is_exactly(
+    mismatches: &[ChunkHashMismatch],
+    paper_only: &[String],
+    rivet_only: &[String],
+    dim: &str,
+    cx: i32,
+    cz: i32,
+) -> bool {
+    mismatch_set_names_exactly(mismatches, dim, cx, cz)
+        && paper_only.is_empty()
+        && rivet_only.is_empty()
+}
+
+/// `<dim>/<cx>.<cz>` for a coordinate in hash-diff output.
+fn fmt_hash_coord(cx: i32, cz: i32) -> String {
+    format!("{cx}.{cz}")
 }
 
 /// The #54 chunk-hash engine's exit-code contract (see the comment block above
@@ -2879,8 +2950,8 @@ fn hash_cli_exit(args: &[String]) -> Option<i32> {
             let dir = args.get(1).map(PathBuf::from);
             match run_hash_paper(dir.as_deref()) {
                 Ok(()) => 0,
-                Err(Error::Unverified(e)) => {
-                    eprintln!("rivet-oracle: {e}");
+                Err(Error::Unverified(m)) => {
+                    eprintln!("rivet-oracle: {m}");
                     HASH_EXIT_UNVERIFIED
                 }
                 Err(e) => {
@@ -3236,6 +3307,228 @@ mod tests {
         assert_eq!(dims.get("overworld"), Some(&120));
         assert_eq!(dims.get("the_nether"), Some(&144));
         assert_eq!(dims.get("the_end"), Some(&144));
+    }
+
+    /// The committed `fixtures/loaded-world/` corpus (issue #371) must verify
+    /// clean against its manifest, and each chunk payload must actually carry
+    /// the aux-data shape it is named for: a clean FULL spawn chunk, a chunk
+    /// with mineshaft `structures.References`, a chunk with saved `fluid_ticks`,
+    /// a chunk with saved `block_ticks`, and a chunk with a chest
+    /// `block_entities` entry. The payloads are read back through the proven
+    /// rivet-nbt codec, so the test is grounded in the real fixture bytes, not
+    /// in the extraction script's claims. The committed source fingerprint must
+    /// also be present and well-formed — it is the enforcement backing the
+    /// never-mutated provenance declaration.
+    #[test]
+    fn loaded_world_fixtures_verify() {
+        let dir = fixtures_dir().join("loaded-world");
+        // The corpus is the deliverable of #371, so its absence is a hard
+        // failure, never a silent skip — a normal checkout always has it.
+        assert!(
+            dir.join("chunk").is_dir(),
+            "loaded-world corpus is missing entirely (chunk/ absent)"
+        );
+        assert!(
+            dir.join("manifest.json").is_file(),
+            "loaded-world manifest.json missing while chunk payloads are present"
+        );
+        let manifest = verify_fixtures(&dir).expect("loaded-world fixtures should match manifest");
+        assert_eq!(manifest.format, 1);
+        assert_eq!(manifest.kind.as_deref(), Some("loaded-world"));
+        assert_eq!(manifest.chunk_count, Some(5));
+        assert_eq!(manifest.captured.len(), 5);
+        assert_eq!(
+            parse_paper_pin(manifest.paper.as_deref()),
+            Some("0a99345".into())
+        );
+        assert!(
+            !is_region_capture(&manifest),
+            "loaded-world is a curated per-chunk corpus, never a region capture"
+        );
+
+        // Metadata beyond the Manifest subset is read from the raw JSON.
+        let raw: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.join("manifest.json")).expect("committed manifest readable"),
+        )
+        .expect("committed manifest is valid JSON");
+        assert_eq!(raw["data-version"], 4903);
+        assert_eq!(raw["minecraft"], "26.2");
+        // Provenance declaration: the launcher save was never mutated. The
+        // committed source fingerprint is the enforcement backing this claim —
+        // --verify recomputes it and refuses any drift.
+        assert_eq!(
+            raw["source"]["launcher-world-mutated"], false,
+            "loaded-world provenance declares the launcher save was not mutated"
+        );
+        // The committed source fingerprint is the enforcement backing the
+        // never-mutated provenance claim — --verify recomputes it and refuses
+        // any drift. Its committed file must exist, be non-empty, well-formed,
+        // and be the file the manifest references, so a pruned/missing
+        // fingerprint can never pass silently.
+        let fp_name = raw["source"]["fingerprint-file"]
+            .as_str()
+            .expect("fingerprint-file present");
+        assert_eq!(fp_name, "source-fingerprint.txt");
+        let fp_text =
+            fs::read_to_string(dir.join(fp_name)).expect("committed source fingerprint readable");
+        assert!(
+            !fp_text.trim().is_empty(),
+            "source fingerprint is not empty"
+        );
+        let mut fp_entries = 0;
+        for line in fp_text.lines() {
+            let mut fields = line.split('\t');
+            let rel = fields.next().expect("fingerprint line has a path");
+            let hash = fields.next().expect("fingerprint line has a SHA-256");
+            assert!(!rel.is_empty(), "fingerprint path is non-empty");
+            assert_eq!(hash.len(), 64, "fingerprint SHA-256 is 64 hex chars");
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "fingerprint SHA-256 is hex"
+            );
+            fp_entries += 1;
+        }
+        assert!(fp_entries > 0, "source fingerprint lists at least one file");
+
+        let mut by_role: std::collections::BTreeMap<&str, &serde_json::Value> =
+            std::collections::BTreeMap::new();
+        for cap in raw["captured"].as_array().expect("captured is an array") {
+            let role = cap["role"].as_str().expect("role present");
+            assert!(
+                by_role.insert(role, cap).is_none(),
+                "role {role} appears once"
+            );
+            let chunk_path = dir.join(cap["path"].as_str().expect("path present"));
+            let bytes = fs::read(&chunk_path).expect("fixture file readable");
+            let mut input = DataInputStream::new(std::io::Cursor::new(bytes));
+            let root = nbt_io::read(
+                &mut input,
+                &mut rivet_nbt::nbt_accounter::NbtAccounter::unlimited_heap(),
+            )
+            .expect("fixture parses as NBT");
+
+            assert_eq!(root.get_int("DataVersion"), Some(4903));
+            assert_eq!(
+                root.get_string("Status").map(String::as_str),
+                Some("minecraft:full")
+            );
+            assert_eq!(
+                root.get_int("xPos"),
+                Some(
+                    cap["chunk"]
+                        .as_str()
+                        .expect("chunk present")
+                        .split('.')
+                        .next()
+                        .unwrap()
+                        .parse::<i32>()
+                        .expect("xPos parses")
+                )
+            );
+            assert_eq!(
+                root.get_int("zPos"),
+                Some(
+                    cap["chunk"]
+                        .as_str()
+                        .expect("chunk present")
+                        .split('.')
+                        .nth(1)
+                        .unwrap()
+                        .parse::<i32>()
+                        .expect("zPos parses")
+                )
+            );
+
+            let ticks_len = |key: &str| -> usize {
+                match root.get(key) {
+                    Some(Tag::List(l)) => l.size(),
+                    Some(_) => panic!("{key} is not a list in {}", cap["path"]),
+                    None => 0,
+                }
+            };
+            match role {
+                "clean-spawn" => {
+                    assert_eq!(
+                        ticks_len("fluid_ticks"),
+                        0,
+                        "clean spawn has no fluid_ticks"
+                    );
+                    assert_eq!(
+                        ticks_len("block_ticks"),
+                        0,
+                        "clean spawn has no block_ticks"
+                    );
+                    assert!(
+                        ticks_len("block_entities") == 0,
+                        "clean spawn has no block_entities"
+                    );
+                    // A FULL chunk always carries the structures compound; the
+                    // clean-spawn property is that both References and starts are
+                    // empty, so no structure reference blocks the FULL construction.
+                    let structures = root
+                        .get_compound("structures")
+                        .expect("clean spawn carries the structures compound");
+                    let refs = structures
+                        .get_compound("References")
+                        .expect("structures.References present");
+                    assert!(
+                        refs.tags.is_empty(),
+                        "clean spawn has no structure references"
+                    );
+                    let starts = structures
+                        .get_compound("starts")
+                        .expect("structures.starts present");
+                    assert!(
+                        starts.tags.is_empty(),
+                        "clean spawn has no structure starts"
+                    );
+                }
+                "mineshaft-structure-refs" => {
+                    let structures = root.get_compound("structures").expect("structures present");
+                    let refs = structures
+                        .get_compound("References")
+                        .expect("References present");
+                    assert!(
+                        refs.contains("minecraft:mineshaft"),
+                        "chunk 0.-4 carries a mineshaft structure reference"
+                    );
+                }
+                "fluid-ticks" => {
+                    assert_eq!(
+                        ticks_len("fluid_ticks"),
+                        1,
+                        "fluid-ticks chunk has one saved fluid tick"
+                    );
+                }
+                "block-ticks" => {
+                    assert_eq!(
+                        ticks_len("block_ticks"),
+                        1,
+                        "block-ticks chunk has one saved block tick"
+                    );
+                }
+                "chest-block-entity" => {
+                    let bes = root.get("block_entities").expect("block_entities present");
+                    let Tag::List(list) = bes else {
+                        panic!("block_entities is a list in {}", cap["path"])
+                    };
+                    let mut chest = false;
+                    for i in 0..list.size() {
+                        if let Tag::Compound(be) = list.get(i)
+                            && be.get_string("id").map(String::as_str) == Some("minecraft:chest")
+                        {
+                            chest = true;
+                        }
+                    }
+                    assert!(
+                        chest,
+                        "chest-block-entity chunk contains a chest block entity"
+                    );
+                }
+                other => panic!("unexpected role {other}"),
+            }
+        }
+        assert_eq!(by_role.len(), 5, "all five corpus roles present");
     }
 
     /// The committed `fixtures/paper-global.yml` (the pinned Paper global config
@@ -4534,7 +4827,7 @@ mod tests {
 
         let paper_m = load_hash_manifest(&paper).unwrap();
         let rivet_m = load_hash_manifest(&rivet).unwrap();
-        let (mismatches, extra, compared) = compute_hash_diffs(&paper_m, &rivet_m);
+        let (mismatches, paper_only, rivet_only, compared) = compute_hash_diffs(&paper_m, &rivet_m);
         assert_eq!(
             compared,
             all_corpus_coordinates().len(),
@@ -4547,7 +4840,10 @@ mod tests {
             !mismatches[0].order_only,
             "block tamper is a real worldgen difference"
         );
-        assert!(extra.is_empty(), "no one-sided chunks");
+        assert!(
+            paper_only.is_empty() && rivet_only.is_empty(),
+            "no one-sided chunks"
+        );
         assert!(!run_hash_diff(&paper, &rivet).unwrap());
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &rivet)),
@@ -4574,7 +4870,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         fs::write(rivet.join("manifest.json"), json + "\n").unwrap();
 
-        let (mismatches, _, compared) = compute_hash_diffs(
+        let (mismatches, _, _, compared) = compute_hash_diffs(
             &load_hash_manifest(&paper).unwrap(),
             &load_hash_manifest(&rivet).unwrap(),
         );
@@ -4599,13 +4895,21 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         let (paper, rivet) = paper_rivet_dirs(&tmp, &[(7, 7)], &[]);
-        let (mismatches, extra, compared) = compute_hash_diffs(
+        let (mismatches, paper_only, rivet_only, compared) = compute_hash_diffs(
             &load_hash_manifest(&paper).unwrap(),
             &load_hash_manifest(&rivet).unwrap(),
         );
         assert!(mismatches.is_empty(), "no digest mismatches");
         assert_eq!(compared, all_corpus_coordinates().len());
-        assert_eq!(extra, vec!["the_nether/0.0.7.7".to_string()]);
+        assert_eq!(
+            paper_only,
+            vec!["the_nether/0.0.7.7".to_string()],
+            "the Paper FULL chunk missing from Rivet is reported as PAPER-ONLY, not the reverse"
+        );
+        assert!(
+            rivet_only.is_empty(),
+            "Rivet produced no extra FULL chunk in this case"
+        );
         assert!(!run_hash_diff(&paper, &rivet).unwrap());
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &rivet)),
@@ -4622,13 +4926,21 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[(7, 7)]);
-        let (mismatches, extra, compared) = compute_hash_diffs(
+        let (mismatches, paper_only, rivet_only, compared) = compute_hash_diffs(
             &load_hash_manifest(&paper).unwrap(),
             &load_hash_manifest(&rivet).unwrap(),
         );
         assert!(mismatches.is_empty());
         assert_eq!(compared, all_corpus_coordinates().len());
-        assert_eq!(extra, vec!["the_nether/0.0.7.7".to_string()]);
+        assert!(
+            paper_only.is_empty(),
+            "Paper produced no extra FULL chunk in this case"
+        );
+        assert_eq!(
+            rivet_only,
+            vec!["the_nether/0.0.7.7".to_string()],
+            "the Rivet FULL chunk Paper lacks is reported as RIVET-ONLY over-generation"
+        );
         assert!(!run_hash_diff(&paper, &rivet).unwrap());
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -4921,16 +5233,150 @@ mod tests {
         assert_eq!(hash_cli_exit(&["hash-self-check".to_string()]), Some(0));
     }
 
+    /// The negative-control "names exactly the tampered chunk" predicate: the
+    /// mismatch set must be non-empty AND contain only the tampered coordinate.
+    /// A vacuous pass (empty) or a wrong-coordinate failure must both be caught,
+    /// so "any diff failure" never satisfies the control.
+    #[test]
+    fn mismatch_set_names_exactly_requires_exact_tampered_chunk() {
+        let t = |cx: i32, cz: i32| ChunkHashMismatch {
+            dim: "overworld".to_string(),
+            cx,
+            cz,
+            expected: "a".to_string(),
+            actual: "b".to_string(),
+            order_only: false,
+        };
+        // Exactly the tampered chunk: PASS.
+        assert!(mismatch_set_names_exactly(&[t(7, 7)], "overworld", 7, 7));
+        // Empty set (vacuously green): FAIL.
+        assert!(!mismatch_set_names_exactly(&[], "overworld", 7, 7));
+        // A different coordinate: FAIL.
+        assert!(!mismatch_set_names_exactly(&[t(8, 8)], "overworld", 7, 7));
+        // A different dimension: FAIL.
+        let other_dim = ChunkHashMismatch {
+            dim: "the_nether".to_string(),
+            ..t(7, 7)
+        };
+        assert!(!mismatch_set_names_exactly(&[other_dim], "overworld", 7, 7));
+        // The tampered chunk plus an unrelated one: FAIL (not *exactly*).
+        assert!(!mismatch_set_names_exactly(
+            &[t(7, 7), t(8, 8)],
+            "overworld",
+            7,
+            7
+        ));
+    }
+
+    /// The negative-control "tamper is the ONLY divergence" predicate: besides
+    /// naming exactly the tampered chunk, a one-sided FULL divergence in either
+    /// direction must also fail the control (the comparator is failing for a
+    /// second, unrelated reason).
+    #[test]
+    fn tamper_divergence_is_exactly_rejects_one_sided_divergence() {
+        let t = |cx: i32, cz: i32| ChunkHashMismatch {
+            dim: "overworld".to_string(),
+            cx,
+            cz,
+            expected: "a".to_string(),
+            actual: "b".to_string(),
+            order_only: false,
+        };
+        // Tamper only, no one-sided divergence: PASS.
+        assert!(tamper_divergence_is_exactly(
+            &[t(7, 7)],
+            &[],
+            &[],
+            "overworld",
+            7,
+            7
+        ));
+        // A paper-only FULL divergence alongside the tamper: FAIL.
+        assert!(!tamper_divergence_is_exactly(
+            &[t(7, 7)],
+            &["overworld/0.0.9.9".to_string()],
+            &[],
+            "overworld",
+            7,
+            7
+        ));
+        // A rivet-only FULL divergence alongside the tamper: FAIL.
+        assert!(!tamper_divergence_is_exactly(
+            &[t(7, 7)],
+            &[],
+            &["overworld/0.0.9.9".to_string()],
+            "overworld",
+            7,
+            7
+        ));
+        // Empty digest mismatches with no one-sided divergence: FAIL (vacuous).
+        assert!(!tamper_divergence_is_exactly(
+            &[],
+            &[],
+            &[],
+            "overworld",
+            7,
+            7
+        ));
+    }
+
+    /// `hash-paper` against a missing payload dir is UNVERIFIED (3) — it must
+    /// never write a zero-chunk manifest that a later diff could compare
+    /// vacuously green. Both the direct runner and the CLI contract agree.
+    #[test]
+    fn hash_paper_missing_payload_dir_is_unverified() {
+        let missing = hash_tmp("hash-paper-missing");
+        let _ = fs::remove_dir_all(&missing);
+        assert!(
+            matches!(run_hash_paper(Some(&missing)), Err(Error::Unverified(_))),
+            "a missing payload tree must be UNVERIFIED, never a zero-chunk manifest"
+        );
+        assert_eq!(
+            hash_cli_exit(&[
+                "hash-paper".to_string(),
+                missing.to_string_lossy().into_owned()
+            ]),
+            Some(HASH_EXIT_UNVERIFIED)
+        );
+    }
+
+    /// `hash-paper` against a dir with no `chunk/` payload tree is UNVERIFIED (3)
+    /// — the same zero-chunk-manifest guard as the missing-dir case.
+    #[test]
+    fn hash_paper_empty_payload_dir_is_unverified() {
+        let empty = hash_tmp("hash-paper-empty");
+        let _ = fs::remove_dir_all(&empty);
+        fs::create_dir_all(&empty).unwrap();
+        assert!(
+            matches!(run_hash_paper(Some(&empty)), Err(Error::Unverified(_))),
+            "a payload tree with no chunk/ dir must be UNVERIFIED, never a zero-chunk manifest"
+        );
+        assert_eq!(
+            hash_cli_exit(&[
+                "hash-paper".to_string(),
+                empty.to_string_lossy().into_owned()
+            ]),
+            Some(HASH_EXIT_UNVERIFIED)
+        );
+        let _ = fs::remove_dir_all(&empty);
+    }
+
     /// The committed Paper hash manifest records the capture's working seed (42,
     /// read from `fixtures/regions/overworld-normal/manifest.json`), NOT one of
     /// the pinned corpus seeds. Its honest coverage is therefore 0 sweep cells
     /// (0/N present, all FULL entries outside the corpus) — a capture not
-    /// generated under a corpus seed cannot claim any of the #175 sweep.
+    /// generated under a corpus seed cannot claim any of the #175 sweep. The
+    /// manifest is committed; if it is ever pruned this load-bearing honesty
+    /// claim must FAIL, never silently skip.
     #[test]
     fn committed_paper_manifest_coverage_is_honest() {
         let dir = crate_dir().join("fixtures/chunk-hash/paper");
         if !dir.join("manifest.json").is_file() {
-            return;
+            panic!(
+                "committed Paper hash manifest {} is ABSENT — the 0/N-coverage honesty \
+                 claim is unverified; this test must FAIL, never silently skip",
+                dir.join("manifest.json").display()
+            );
         }
         let m = load_hash_manifest(&dir).unwrap();
         let cov = hash_manifest::coverage(&m, &corpus::Corpus::from_committed());

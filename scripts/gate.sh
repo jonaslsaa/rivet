@@ -14,7 +14,8 @@
 #   - rivet-oracle (default)  verifies ALL committed fixture kinds: the M0 chunk
 #                          slice, the M2 worldgen semantic samples, the M2
 #                          normal-overworld none-compression region payloads,
-#                          and the text component-JSON corpus (issue #98)
+#                          the text component-JSON corpus (issue #98), and the
+#                          spline value-leaf goldens (issue #372)
 #                          (each against its own manifest.json SHA-256s).
 #   - rivet-oracle verify  M0 sanity gate: boot a fresh Paper server and diff its
 #                          chunk-NBT slice against the committed golden baseline.
@@ -358,7 +359,7 @@ oracle_prereq_check() {
 # gate like any other oracle stage; the tamper never touches the committed
 # fixtures.
 run_oracle_verify() {
-  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus)"
+  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline)"
   cargo run -q -p rivet-oracle
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
     echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
@@ -416,7 +417,16 @@ run_oracle_hash() {
       echo "    FAILED — committed Paper hash manifest drifted from a fresh rebuild; regenerate and commit it"
       exit 1
     fi
-    echo "    VERIFIED — Paper manifest rebuilds byte-identically (2 FULL: the_nether/0.0 + the_end/0.0)"
+    # Narrate the FULL facts from the live manifest, never a hardcoded count (a
+    # manifest whose FULL set changes must be caught here, not stale-narrated).
+    local full_narration
+    full_narration="$(python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+full = sorted((e["dim"], e["cx"], e["cz"]) for e in m["entries"] if e["status"] == "minecraft:full")
+print(f"{len(full)} FULL: " + ", ".join(f"{d}/{cx}.{cz}" for d, cx, cz in full))
+' "$REPO_DIR/tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json")"
+    echo "    VERIFIED — Paper manifest rebuilds byte-identically ($full_narration)"
   else
     echo "    NOTICE — skipped the Paper manifest git-clean check (not inside a git work tree)"
   fi
@@ -885,6 +895,9 @@ main() {
       echo "==> rivet-codegen probe-block-behaviors (live Paper per-StateId behavior table)"
       cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
         probe-block-behaviors --bundler "$PROBE_BUNDLER"
+      echo "==> rivet-codegen probe-worldgen (live Paper worldgen noise/biome/preset data)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+        probe-worldgen --bundler "$PROBE_BUNDLER"
     else
       echo "    SKIPPED (no Paper bundler jar: build working/Paper (paper-bundler-*.jar) or place it in tools/rivet-oracle/work/jars/)"
     fi

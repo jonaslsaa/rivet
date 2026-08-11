@@ -33,7 +33,7 @@
 //!   `get_block_state` is always the final fast path, which Paper's `if (true)`
 //!   also routes through).
 //!
-//! RivetTodo(#185): `getPersistedStatus()` returns the slice-local `FULL`; the
+//! RivetTodo(#185): `getPersistedStatus()` returns `ChunkStatus.FULL`; the
 //! `FullChunkStatus`/`fullStatus` supplier and the chunkmap pipeline surface are
 //! not ported.
 
@@ -42,6 +42,7 @@ use bytes::BytesMut;
 use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
+use crate::chunk::strategy::Strategy;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, Heightmap, StateFlags, Types};
@@ -106,6 +107,49 @@ where
             base.get_or_create_heightmap_unprimed(ty);
         }
         LevelChunk { base, air }
+    }
+
+    /// Value-transform every block state and biome, preserving all other chunk
+    /// state (sections, heightmaps, light nibbles, pending block entities,
+    /// post-processing, flags). The #516 server bridge uses this to convert the
+    /// reconstructed `LevelChunk<BlockState, BiomeId, ()>` into the server's
+    /// `LevelChunk<StateId, BiomeId, ()>` — both value pairs are dense
+    /// `u16`-backed ids in the same generated registry, so the
+    /// `pack`/`unpack` re-encode against the target strategies preserves the
+    /// wire-identical section buffers.
+    ///
+    /// The new base is rebuilt through the same path as [`new`](Self::new)
+    /// (the FULL heightmap priming and the all-air fallback), then the owned
+    /// state that `ChunkAccess::new` resets — unsaved, light-correct,
+    /// post-processing, pending block entities, light nibbles, heightmaps,
+    /// structure access — is reinstalled so the conversion is a pure re-type.
+    #[allow(clippy::too_many_arguments)] // the full re-type surface, mirroring
+    // `ChunkAccess::map_values` 1:1.
+    pub fn map_values<T2, B2>(
+        self,
+        block_strategy: Strategy<T2>,
+        biome_strategy: Strategy<B2>,
+        air: T2,
+        default_biome: B2,
+        map_block: &impl Fn(&T) -> T2,
+        map_biome: &impl Fn(&B) -> B2,
+        resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
+    ) -> Result<LevelChunk<T2, B2, S>, String>
+    where
+        T2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    {
+        let LevelChunk { base, air: _ } = self;
+        let base = base.map_values(
+            block_strategy,
+            biome_strategy,
+            air.clone(),
+            default_biome,
+            map_block,
+            map_biome,
+            resolve,
+        )?;
+        Ok(LevelChunk { base, air })
     }
 
     /// `LevelChunk.getBlockState(BlockPos)` — Paper routes it through
@@ -198,6 +242,21 @@ where
     /// The heightmaps storage (read-only; the concrete chunk's base).
     pub fn heightmaps(&self) -> &[Option<Heightmap>; 6] {
         self.base.heightmaps()
+    }
+
+    /// Narrow loader seam for `SerializableChunkData.read`.
+    pub(crate) fn base_mut(&mut self) -> &mut ChunkAccess<T, B, S> {
+        &mut self.base
+    }
+
+    /// `Heightmap.primeHeightmaps(this, types)` during chunk load.
+    pub(crate) fn prime_heightmaps(&mut self, types: &[Types]) {
+        self.base.prime_heightmaps(types);
+    }
+
+    /// `ChunkAccess.addPackedPostProcess` during chunk load.
+    pub(crate) fn add_packed_post_process(&mut self, offsets: &[i16], section_index: usize) {
+        self.base.add_packed_post_process(offsets, section_index);
     }
 
     /// `ChunkAccess.setHeightmap(Types, long[])` — adopted by the chunk-load /

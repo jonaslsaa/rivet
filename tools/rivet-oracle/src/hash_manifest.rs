@@ -76,12 +76,46 @@ impl ChunkHashEntry {
 }
 
 /// Normalized FULL predicate over the root `Status` string. `build_from_payloads`
-/// stamps the raw root `Status` (e.g. `minecraft:full`), so every consumer —
-/// build, coverage, the comparator — decides FULL through this one function,
-/// never a raw string compare that could silently drop chunks and turn the diff
-/// vacuously green.
+/// stamps the raw root `Status`, so every consumer — build, coverage, the
+/// comparator — decides FULL through this one function, never a raw string
+/// compare that could silently drop chunks and turn the diff vacuously green.
+///
+/// Paper's `ChunkStatus.CODEC` is `BuiltInRegistries.CHUNK_STATUS.byNameCodec()`,
+/// whose `toString` is `namespace + ":" + path`; the FULL status is registered
+/// as `register("full", ...)`, so Paper always serializes `minecraft:full` and
+/// never a bare `full`. A bare `full` therefore never comes from Paper — it is
+/// an off-spec serialization and must be refused (a malformed tree must fail
+/// loudly, never be silently treated as FULL and compared against Paper).
 fn is_full_status(status: &str) -> bool {
-    status == "minecraft:full" || status == "full"
+    status == "minecraft:full"
+}
+
+/// Reject a manifest whose FULL entries carry a duplicate (dim, cx, cz). A
+/// well-formed capture has exactly one chunk per coordinate, and the comparator
+/// resolves a FULL chunk by `full_entry` (first match) — so a duplicate would
+/// be **silently deduplicated**: whichever FULL entry sorts first wins and the
+/// other is never compared, turning a malformed tree into a possibly-green diff
+/// instead of a loud failure. The manifest is the digest table the whole gate
+/// trusts, so a duplicate FULL coordinate is a hard error at build, never a
+/// silent dedup.
+pub fn reject_duplicate_full(entries: &[ChunkHashEntry]) -> Result<(), String> {
+    let mut seen: std::collections::HashSet<(&str, i32, i32)> = std::collections::HashSet::new();
+    for e in entries.iter().filter(|e| e.is_full()) {
+        if !seen.insert((e.dim.as_str(), e.cx, e.cz)) {
+            return Err(format!(
+                "duplicate FULL chunk at {}/{}: a malformed capture tree must be rejected, \
+                 never silently deduplicated (the comparator's full_entry would drop one)",
+                e.dim,
+                fmt_coord(e.cx, e.cz)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `<cx>.<cz>` coordinate display used in manifest errors.
+fn fmt_coord(cx: i32, cz: i32) -> String {
+    format!("{cx}.{cz}")
 }
 
 /// A `HashManifest` (the #54 format). Serialized in committed field order so a
@@ -315,6 +349,14 @@ pub fn build_from_payloads_with(
                         .get_string("Status")
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string());
+                    if status == "full" {
+                        return Err(format!(
+                            "chunk {dim}/{cx}.{cz} has bare root Status `full`: Paper's \
+                             `ChunkStatus.CODEC` always serializes the FULL status as \
+                             `minecraft:full`, so a bare `full` is an off-spec tree and must \
+                             be refused loudly, never silently recorded as non-FULL"
+                        ));
+                    }
                     if is_full_status(&status) {
                         full_count += 1;
                         validate_full_payload(&compound, &dim, cx, cz)?;
@@ -345,6 +387,8 @@ pub fn build_from_payloads_with(
             b.cz,
         ))
     });
+
+    reject_duplicate_full(&entries)?;
 
     Ok(HashManifest {
         format: 1,
@@ -402,11 +446,10 @@ fn validate_full_payload(
 ) -> Result<(), String> {
     let at = format!("{dim}/{cx}.{cz}");
 
-    if compound.get_string("Status").map(String::as_str) != Some("minecraft:full")
-        && compound.get_string("Status").map(String::as_str) != Some("full")
-    {
+    if compound.get_string("Status").map(String::as_str) != Some("minecraft:full") {
         return Err(format!(
-            "chunk {at} stamped FULL but root Status is not minecraft:full — status/spec drift"
+            "chunk {at} stamped FULL but root Status is not minecraft:full (bare `full` is \
+             never written by Paper's `ChunkStatus.CODEC`; status/spec drift)"
         ));
     }
     let mut missing: Vec<&'static str> = Vec::new();
@@ -650,11 +693,21 @@ mod tests {
 
     /// The committed M2 region capture stamps exactly the true FULL counts
     /// (0 overworld, 1 each nether/end) — the load-bearing fixture-trap guard.
+    /// This test is *load-bearing*: if the committed region fixtures are ever
+    /// pruned or not checked out, it must FAIL (never silently return and leave
+    /// the fixture-trap guard unverified) — the `else` branch panics instead of
+    /// skipping, per the project fixture rule (D8: never weaken/delete fixtures
+    /// to go green; a missing load-bearing fixture is a hard failure).
     #[test]
     fn committed_region_payloads_stamp_true_full_counts() {
         let dir = crate_dir().join("fixtures/regions/overworld-normal");
         if !dir.join("manifest.json").is_file() {
-            return;
+            panic!(
+                "committed region fixtures {} are ABSENT — the load-bearing FULL \
+                 fixture-trap guard cannot verify; restore them (git checkout) or this \
+                 test is red, never silently skipped",
+                dir.display()
+            );
         }
         let m = build_from_payloads(&dir, "42", "minecraft\\:normal").unwrap();
         assert_eq!(m.chunk_count, 408);
@@ -795,7 +848,12 @@ mod tests {
     fn committed_superflat_full_capture_covers_corpus_seed_zero() {
         let dir = crate_dir().join("fixtures/regions/superflat-full");
         if !dir.join("manifest.json").is_file() {
-            return;
+            panic!(
+                "committed superflat FULL fixtures {} are ABSENT — the #51 corpus-forced \
+                 FULL capture is a load-bearing deliverable; this test must FAIL, never \
+                 silently skip (restore them or the SHA-256 superflat gate is unverified)",
+                dir.display()
+            );
         }
         let prov = CaptureProvenance::from_region_manifest(Some("minecraft\\:flat"), Some("none"));
         let m = build_from_payloads_with(&dir, "5207638315753790570", "minecraft\\:flat", &prov)
@@ -906,5 +964,84 @@ mod tests {
         let mut not_full = compound.clone();
         not_full.put_string("Status", "minecraft:structure_starts");
         assert!(validate_full_payload(&not_full, "overworld", 0, 0).is_err());
+
+        let mut bare_full = compound.clone();
+        bare_full.put_string("Status", "full");
+        assert!(
+            validate_full_payload(&bare_full, "overworld", 0, 0).is_err(),
+            "bare `full` is never written by Paper's ChunkStatus.CODEC (namespace:path) and \
+             must be refused as FULL, not compared against Paper"
+        );
+    }
+
+    /// A bare `full` root Status is never FULL: Paper serializes the FULL status
+    /// as `minecraft:full` (`register("full", ...)` + `Identifier.toString` =
+    /// `namespace:path`), so `is_full_status` accepts only the namespaced form.
+    ///
+    /// Two guards, both load-bearing:
+    /// 1. `is_full` classifies a bare `full` as non-FULL, so it is never compared
+    ///    against Paper.
+    /// 2. `build_from_payloads` **refuses** a tree whose payload carries bare
+    ///    `full` — the off-spec serialization is a loud hard error, never a
+    ///    silently 0-FULL manifest (which would surface later only as an obscure
+    ///    UNVERIFIED/one-sided FAIL instead of naming the malformed tree).
+    #[test]
+    fn bare_full_status_is_refused_at_build() {
+        let e = full_entry("the_nether", 0, 0);
+        assert!(e.is_full(), "namespaced minecraft:full is FULL");
+        let mut bare = e;
+        bare.status = "full".to_string();
+        assert!(
+            !bare.is_full(),
+            "bare `full` is not Paper's serialized FULL status"
+        );
+
+        // A tree whose only payload carries bare `full` must be refused loudly.
+        use crate::mutate::{encode_payload, fixture_full_payload, parse_payload};
+        let mut compound = parse_payload(&fixture_full_payload(0, 0)).unwrap();
+        compound.put_string("Status", "full");
+        let bytes = encode_payload(&compound).unwrap();
+
+        let dir = std::env::temp_dir().join(format!(
+            "rivet-oracle-hash-bare-full-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        let chunk = dir.join("chunk/the_nether/0.0/0.0.nbt");
+        std::fs::create_dir_all(chunk.parent().unwrap()).unwrap();
+        std::fs::write(&chunk, &bytes).unwrap();
+
+        let err = build_from_payloads(&dir, "42", "minecraft\\:normal")
+            .expect_err("bare `full` in a payload tree must be refused");
+        assert!(
+            err.contains("bare root Status `full`"),
+            "error names the bare `full`: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A duplicate FULL coordinate in a built manifest must be a hard error, not
+    /// a silent dedup: the comparator resolves a FULL chunk by first-match, so a
+    /// duplicate would drop one and possibly turn a malformed tree green.
+    #[test]
+    fn duplicate_full_coordinate_is_rejected() {
+        let a = full_entry("the_nether", 0, 0);
+        let mut b = full_entry("the_nether", 0, 0);
+        b.xxh3_64 = "1".repeat(16); // a genuinely different payload at the same coord
+        let err = reject_duplicate_full(&[a, b]).expect_err("duplicate FULL must be rejected");
+        assert!(
+            err.contains("duplicate FULL chunk"),
+            "error names the duplicate: {err}"
+        );
+        // Non-FULL duplicates at the same coordinate are fine (multiple
+        // intermediate statuses are not FULL and are never compared).
+        let mut c = full_entry("overworld", 5, 5);
+        c.status = "minecraft:biomes".to_string();
+        let mut d = full_entry("overworld", 5, 5);
+        d.status = "minecraft:carvers".to_string();
+        reject_duplicate_full(&[c, d]).expect("non-FULL duplicates are not FULL entries");
     }
 }

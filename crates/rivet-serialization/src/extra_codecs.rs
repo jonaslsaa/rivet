@@ -7,7 +7,8 @@
 //! that surface). They were added by the slices that needed them:
 //!
 //! - `overrideLifecycle(Codec, Function, Function)` and its 1-arg variant —
-//!   required by `Registry.referenceHolderWithLifecycle()`.
+//!   required by `Registry.referenceHolderWithLifecycle()` (#394, the by-name
+//!   codec surface in `rivet-registry`).
 //! - `retrieveContext(Function)` — required by `RegistryOps`.
 //! - `orCompressed(Codec, Codec)` and `orCompressed(MapCodec, MapCodec)` —
 //!   the Codec variant is a transitive dependency of
@@ -23,12 +24,19 @@
 //! - `LateBoundIdMapper<I, V>` + the `late_bound_values`/`late_bound_entries`
 //!   accessors — required by `ComponentSerialization`'s content-type bootstrap
 //!   and `KeyDispatchCodec` discriminator.
+//! - `nonNegativeIntCodec` (`NON_NEGATIVE_INT`, an `intRangeWithMessage(0,
+//!   MAX)` — a `Codec.INT` + `validate`) — required by `Weighted.codec`
+//!   (issue #353) for the exact `"Value must be non-negative: N"` decode
+//!   error. One range member is ported here (ahead of the rest of the ranges)
+//!   because it is a pure-DFU `validate` with no Minecraft dependency; the
+//!   remaining range surface stays `mc.util` scope.
 //!
 //! RECONCILIATION: when the full `mc.util` unit is ported, these free functions
 //! move into that unit's `extra_codecs.rs`; they keep the exact same signatures
 //! and semantics documented here. The remaining `ExtraCodecs.java` surface
-//! (ranges, `compactListCodec`, `ensureHomogenous`, `orElsePartial`, ...) is
-//! not ported — that is future `mc.util` scope, not this slice.
+//! (`intRange`/`longRange`/`floatRange` and friends, `compactListCodec`,
+//! `ensureHomogenous`, `orElsePartial`, ...) is not ported — that is future
+//! `mc.util` scope, not this slice.
 
 use crate::codec::{self, Codec, ResultFunction};
 use crate::data_result::DataResult;
@@ -287,6 +295,31 @@ where
         Arc::new(move |e: &E| match to_id(e) {
             Some(id) => DataResult::success(id),
             None => DataResult::error(format!("Element with unknown id: {}", e)),
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// NON_NEGATIVE_INT
+// ---------------------------------------------------------------------------
+
+/// `ExtraCodecs.NON_NEGATIVE_INT` — `Codec.INT.validate(v -> v >= 0 ?
+/// success : error("Value must be non-negative: " + v))`.
+///
+/// Java's `intRangeWithMessage(0, Integer.MAX_VALUE, n -> "Value must be
+/// non-negative: " + n)` — a plain `Codec.INT` + `validate` with that message.
+/// Note this is NOT `codec::int_range(0, i32::MAX)`: the message differs
+/// (`"Value must be non-negative: N"` vs the generic range message), and this
+/// is what `Weighted.codec` (issue #353) relies on for exact decode errors.
+pub fn non_negative_int_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i32, Ops>> {
+    codec::validate(
+        codec::int_codec::<Ops>(),
+        Arc::new(|value: &i32| {
+            if *value >= 0 {
+                DataResult::success(*value)
+            } else {
+                DataResult::error(format!("Value must be non-negative: {}", value))
+            }
         }),
     )
 }

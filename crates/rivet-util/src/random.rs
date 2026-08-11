@@ -14,7 +14,8 @@
 //!   (Xoroshiro128++) + `XoroshiroPositionalRandomFactory`
 //! - `net.minecraft.world.level.levelgen.RandomSupport` (Stafford-13 mixing,
 //!   md5 `seedFromHashOf`, `generateUniqueSeed`, `Seed128bit`)
-//! - `net.minecraft.world.level.levelgen.Xoroshiro128PlusPlus`
+//! - `net.minecraft.world.level.levelgen.Xoroshiro128PlusPlus` (incl. the
+//!   `CODEC`, a `Codec.LONG_STREAM` comapFlatMap)
 //! - `net.minecraft.world.level.levelgen.MarsagliaPolarGaussian` (the stored
 //!   nextGaussian quirk)
 //! - `net.minecraft.world.level.levelgen.SingleThreadedRandomSource` and
@@ -36,7 +37,11 @@
 //! plain field. `ThreadSafeLegacyRandomSource` is *for* cross-thread use and
 //! keeps an `AtomicI64`.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+
+use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::dynamic_ops::DynamicOps;
 
 use crate::java_hash::{get_seed, string_hash as java_string_hash};
 
@@ -201,10 +206,11 @@ pub trait BitRandomSource: RandomSource {
 /// `net.minecraft.world.level.levelgen.PositionalRandomFactory` — yields a
 /// source per position / seed / name.
 ///
-/// RivetTodo(#208): the Java default overloads taking `BlockPos` / `Identifier`
-/// are omitted — they need `rivet-registry` (which `rivet-util` cannot depend
-/// on without a Cargo cycle); the `at(x, y, z)` and `fromHashOf(String)` forms
-/// they delegate to are provided.
+/// The Java default overloads taking `BlockPos` / `Identifier` live in
+/// `rivet-world` (`levelgen::random::PositionalRandomFactoryOverloads`, issue
+/// #208): they need `rivet-registry`, which `rivet-util` cannot depend on
+/// without a Cargo cycle. The `at(x, y, z)` and `fromHashOf(String)` forms
+/// they delegate to are provided here.
 // `from_hash_of`/`from_seed` are faithful mirrors of the Java instance methods
 // `fromHashOf`/`fromSeed`, so the `from_*`-taking-`&self` convention lint is a
 // false positive here (renaming would break API fidelity).
@@ -342,10 +348,6 @@ pub mod random_support {
 
 /// `net.minecraft.world.level.levelgen.Xoroshiro128PlusPlus` — the underlying
 /// Xoroshiro128++ generator.
-///
-/// RivetTodo(#208): the `CODEC` (DFU `Codec.LONG_STREAM` xmap) is omitted —
-/// the DFU `Codec` surface now exists in rivet-serialization, so this is a
-/// plain omission with no consumer forcing it.
 #[derive(Clone, Debug)]
 pub struct Xoroshiro128PlusPlus {
     seed_lo: i64,
@@ -382,6 +384,26 @@ impl Xoroshiro128PlusPlus {
         self.seed_hi = s1.rotate_left(28);
         result
     }
+}
+
+/// `Xoroshiro128PlusPlus.CODEC` — `Codec.LONG_STREAM.comapFlatMap(seed ->
+/// Util.fixedSize(seed, 2).map(longs -> new Xoroshiro128PlusPlus(longs[0],
+/// longs[1])), r -> LongStream.of(r.seedLo, r.seedHi))`.
+///
+/// The `seedLo`/`seedHi` order is exactly Java's `LongStream.of(r.seedLo,
+/// r.seedHi)`; decode reads `longs[0]` as `seedLo` and `longs[1]` as `seedHi`
+/// (the `new_lo_hi` constructor also re-applies the all-zero golden-ratio
+/// fallback, exactly like the Java constructor).
+pub fn xoroshiro128plusplus_codec<Ops: DynamicOps + 'static>()
+-> Arc<dyn Codec<Xoroshiro128PlusPlus, Ops>> {
+    codec::comap_flat_map::<Vec<i64>, Xoroshiro128PlusPlus, Ops>(
+        codec::long_stream_codec::<Ops>(),
+        Arc::new(|seed: &Vec<i64>| {
+            crate::util::fixed_size_i64(seed, 2)
+                .map(|longs| Xoroshiro128PlusPlus::new_lo_hi(longs[0], longs[1]))
+        }),
+        Arc::new(|r: &Xoroshiro128PlusPlus| vec![r.seed_lo, r.seed_hi]),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -999,6 +1021,7 @@ mod tests {
         SingleThreadedRandomSource, ThreadSafeLegacyRandomSource, Xoroshiro128PlusPlus,
         XoroshiroPositionalRandomFactory, XoroshiroRandomSource, random_source_create,
         random_source_create_thread_local_instance, random_source_create_thread_safe,
+        xoroshiro128plusplus_codec,
     };
 
     // --- RandomSupport / Xoroshiro128PlusPlus goldens (OpenJDK 25) ---
@@ -1596,5 +1619,60 @@ mod tests {
         for _ in 0..100 {
             assert!((0.0..1.0).contains(&r.next_double()));
         }
+    }
+
+    // --- Xoroshiro128PlusPlus.CODEC (DFU LONG_STREAM comapFlatMap) ---
+
+    #[test]
+    fn xoroshiro128plusplus_codec_round_trip() {
+        use rivet_serialization::dynamic_ops::DynamicOps;
+        use rivet_serialization::json_ops::JsonOps;
+        let ops = JsonOps::INSTANCE;
+        let codec = xoroshiro128plusplus_codec::<JsonOps>();
+
+        for (lo, hi) in [
+            (1_i64, 2_i64),
+            (0_i64, 0_i64), // all-zero is normalized to the golden-ratio seed
+            (i64::MIN, i64::MAX),
+            (-987654321, 12345),
+        ] {
+            let g = Xoroshiro128PlusPlus::new_lo_hi(lo, hi);
+            // Encoding is `LongStream.of(seedLo, seedHi)` — the STORED seed
+            // (all-zero construction normalizes first), exactly like Java.
+            let expected = ops.create_long_list(vec![g.seed_lo, g.seed_hi]);
+            let encoded = codec.encode_start(&ops, &g).get_or_throw("encode").clone();
+            assert_eq!(encoded, expected, "encode({lo}, {hi})");
+            let decoded = codec.decode(&ops, &encoded).get_or_throw("decode").clone();
+            assert_eq!(decoded.0.seed_lo, g.seed_lo, "decode lo ({lo}, {hi})");
+            assert_eq!(decoded.0.seed_hi, g.seed_hi, "decode hi ({lo}, {hi})");
+        }
+    }
+
+    #[test]
+    fn xoroshiro128plusplus_codec_rejects_wrong_length() {
+        use rivet_serialization::dynamic_ops::DynamicOps;
+        use rivet_serialization::json_ops::JsonOps;
+        let ops = JsonOps::INSTANCE;
+        let codec = xoroshiro128plusplus_codec::<JsonOps>();
+
+        // Too short: `Util.fixedSize` errors without a partial.
+        let short = ops.create_long_list(vec![1]);
+        let result = codec.decode(&ops, &short);
+        assert!(result.result().is_none());
+        let binding = result.error_ref().unwrap();
+        assert_eq!(binding.message(), "Input is not a list of 2 longs");
+        assert!(binding.partial().is_none());
+
+        // Too long: `Util.fixedSize` errors WITH the first 2 as a partial,
+        // mapped through the `new Xoroshiro128PlusPlus(longs[0], longs[1])`
+        // constructor exactly like Java's `.map(...)`.
+        let long = ops.create_long_list(vec![1, 2, 3]);
+        let result = codec.decode(&ops, &long);
+        assert!(result.result().is_none());
+        let binding = result.error_ref().unwrap();
+        assert_eq!(binding.message(), "Input is not a list of 2 longs");
+        let partial = binding.partial().as_ref().unwrap();
+        assert_eq!(partial.0.seed_lo, 1);
+        assert_eq!(partial.0.seed_hi, 2);
     }
 }

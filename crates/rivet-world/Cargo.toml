@@ -24,6 +24,10 @@ xxhash-rust = { workspace = true }
 # IndexSet's, not Java's (which iterates in hash-probe slot order; see the
 # module `RivetTodo(#185)` in structure_access).
 indexmap = { workspace = true }
+# PCRE2 is the closest maintained engine to Java Pattern: it supports the
+# lookarounds/backreferences used by `regex:` allow-list rules and keeps Java's
+# default ASCII `\d`/`\w`/`\s` behavior when UTF mode is enabled without UCP.
+pcre2 = { workspace = true }
 # The `packets` feature unlocks the game packet bodies this crate produces
 # content for (#94): `LevelChunkPacketData`, `LightUpdatePacketData`,
 # `HeightmapType` (all feature-gated in rivet-protocol).
@@ -45,11 +49,15 @@ rivet-serialization = { workspace = true }
 # read `CompoundTag`; rivet-nbt is now a production dependency.
 rivet-nbt = { workspace = true }
 rivet-util = { workspace = true }
+# `LevelVersion.parse` (level.dat header) falls back to the pinned 26.2
+# `SharedConstants` current-version constants (`rivet-core::shared_constants`).
+rivet-core = { workspace = true }
 # The `.mcc` oversized-chunk commit op writes to a `tmp...` file in the
 # external-file directory and atomically renames it over the target
 # (`Files.move(tmp, target, REPLACE_EXISTING)`); the temp path must outlive
 # the `RegionFile.write` call, which only `tempfile::TempPath` guarantees.
 tempfile = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 # Tests build real containers (BytesMut-backed FriendlyByteBuf).

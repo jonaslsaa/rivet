@@ -8,6 +8,12 @@ version = "0.1.0-dev+mc26.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
+# Release tags are validated against this committed metadata. The workspace
+# package version remains a development version until a release is published.
+[workspace.metadata.rivet]
+release-version = "0.1.0"
+minecraft-version = "26.2"
+
 # Library choices are documented in CRATES.md — add dependencies there first.
 [workspace.dependencies]
 base64 = "0.22"
@@ -36,6 +42,7 @@ rivet-text = { path = "crates/rivet-text" }
 rivet-util = { path = "crates/rivet-util" }
 rivet-world = { path = "crates/rivet-world" }
 rayon = "1"
+pcre2 = "0.2"
 # Test-only tracing-subscriber machinery for asserting the RIVET_* trace
 # records (issue #53). Dev-dependency of rivet-server only; nothing production
 # links it (see crates/rivet-test-support).

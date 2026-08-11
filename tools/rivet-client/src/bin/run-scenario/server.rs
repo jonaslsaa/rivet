@@ -371,10 +371,22 @@ fn patch_server_port(properties: &Path, port: u16) -> Result<(), Error> {
 /// parity by construction plus port isolation. Rivet boots pass `None`: the
 /// rivet-server binary is driven purely by `--host`/`--port` and never reads
 /// `server.properties`.
+///
+/// `world_defaults_src` is the pinned `config/paper-world-defaults.yml` source
+/// (issue #266), required for every Paper boot and unused for Rivet. Paper reads
+/// the per-category spawn limits from `config/paper-world-defaults.yml` on every
+/// boot, and a fresh Paper world *generates* its defaults with the vanilla
+/// `spawn-limits` untouched — if the scenario run dir never installs the pinned
+/// file, natural spawning re-enables and the sampled walk (and `last_sent`)
+/// becomes nondeterministic. The pinned file is therefore installed into the
+/// (possibly stale) `config/` dir on every boot, overwriting whatever a prior
+/// boot generated or left behind, so the deterministic config is guaranteed by
+/// construction (same mechanism as `tools/rivet-capture`).
 fn prepare_run_dir(
     run_dir: &Path,
     kind: ServerKind,
     server_properties_src: Option<&Path>,
+    world_defaults_src: Option<&Path>,
     port: u16,
 ) -> Result<(), Error> {
     let libs = run_dir.join("libraries");
@@ -413,6 +425,32 @@ fn prepare_run_dir(
         patch_server_port(&properties, port)?;
     }
     if kind == ServerKind::Paper {
+        // The deterministic world-defaults are load-bearing for every Paper
+        // boot: without the pinned spawn-limits (all seven categories at 0), a
+        // fresh world re-enables natural spawning and the sampled walk (and
+        // `last_sent`) becomes nondeterministic — the issue #333 failure mode.
+        // Requiring the source here (not silently skipping on `None`) makes the
+        // invariant enforceable: a future Paper boot site that forgets to
+        // resolve the fixture fails UNVERIFIED instead of booting nondeterministic.
+        let world_defaults_src = world_defaults_src.ok_or_else(|| {
+            Error::Unverified(
+                "a Paper boot requires the pinned config/paper-world-defaults.yml source \
+                 (issue #266/#333): without it the spawn-limits stay at the vanilla defaults and \
+                 the sampled walk is nondeterministic"
+                    .to_owned(),
+            )
+        })?;
+        // Install into the server's `config/` dir so Paper merges them into
+        // `paper-world-defaults.yml` on boot. Overwrite unconditionally: the
+        // run dir may already hold a stale copy (from a prior boot, or
+        // Paper-generated defaults with the vanilla spawn limits intact), and
+        // only the pinned fixture is deterministic.
+        let config_dir = run_dir.join("config");
+        fs::create_dir_all(&config_dir)?;
+        fs::copy(
+            world_defaults_src,
+            config_dir.join("paper-world-defaults.yml"),
+        )?;
         // Paper refuses to boot without eula=true.
         fs::write(run_dir.join("eula.txt"), EULA)?;
     }
@@ -500,16 +538,19 @@ fn absolutize_artifact(artifact: &Path) -> PathBuf {
 /// Paper or the `rivet-server` binary for Rivet. `server_properties_src` is
 /// required for Paper and unused for Rivet (pass `None`): the rivet-server
 /// binary is driven purely by `--host`/`--port` and never reads
-/// `server.properties`. `envs` are extra environment variables for the child
-/// (currently only the Rivet-vs-Paper movement differential passes any: it
-/// boots the rivet-server with `RIVET_TRACE_MOVEMENT=1` so the tick thread
-/// emits its authoritative movement audit on stderr).
+/// `server.properties`. `world_defaults_src` is the pinned
+/// `config/paper-world-defaults.yml` source (issue #266), also required for
+/// Paper and unused for Rivet (pass `None`). `envs` are extra environment
+/// variables for the child (currently only the Rivet-vs-Paper movement
+/// differential passes any: it boots the rivet-server with
+/// `RIVET_TRACE_MOVEMENT=1` so the tick thread emits its authoritative movement
+/// audit on stderr).
 ///
-/// The nine arguments are the distinct inputs a boot needs (server kind, run
-/// dir, log tee, artifact, optional properties source, bind address, optional
-/// held port reservation, child envs, optional world-path launch option); the
-/// excess over clippy's default limit is inherent to the operation rather than
-/// a refactorable arity smell.
+/// The ten arguments are the distinct inputs a boot needs (server kind, run
+/// dir, log tee, artifact, optional properties source, optional world-defaults
+/// source, bind address, optional held port reservation, child envs, optional
+/// world-path launch option); the excess over clippy's default limit is
+/// inherent to the operation rather than a refactorable arity smell.
 #[allow(clippy::too_many_arguments)]
 pub fn boot(
     kind: ServerKind,
@@ -517,12 +558,19 @@ pub fn boot(
     log_path: &Path,
     artifact: &Path,
     server_properties_src: Option<&Path>,
+    world_defaults_src: Option<&Path>,
     address: SocketAddr,
     port_reservation: Option<rivet_harness_common::port::PortReservation>,
     envs: &[(&str, &str)],
     world_path: Option<&Path>,
 ) -> Result<Server, Error> {
-    prepare_run_dir(run_dir, kind, server_properties_src, address.port())?;
+    prepare_run_dir(
+        run_dir,
+        kind,
+        server_properties_src,
+        world_defaults_src,
+        address.port(),
+    )?;
     // The child runs with its cwd set to `run_dir`; a relative artifact (e.g.
     // `RIVET_ORACLE_JAR=work/jars/...`) must be resolved against the harness's
     // own cwd, not the run dir, or Java cannot find the jar.
@@ -680,6 +728,7 @@ mod tests {
             &log,
             &artifact,
             None,
+            None,
             test_socket(),
             None,
             &[],
@@ -713,6 +762,7 @@ mod tests {
             &run_dir,
             &log,
             &artifact,
+            None,
             None,
             test_socket(),
             None,
@@ -1023,8 +1073,10 @@ mod tests {
         // A stale materialized jar from a *prior* boot (e.g. the pinned commit).
         let stale = make_jar(&dir.join("versions/26.2"), Some("0a99345"));
         fs::rename(&stale, dir.join("versions/26.2/paper-26.2.jar")).unwrap();
+        let src = temp_world_defaults_src("wipe");
+        fs::write(&src, b"spawn-limits:\n").unwrap();
 
-        prepare_run_dir(&dir, ServerKind::Paper, None, 25599).unwrap();
+        prepare_run_dir(&dir, ServerKind::Paper, None, Some(&src), 25599).unwrap();
 
         assert!(
             !dir.join("versions").exists(),
@@ -1035,7 +1087,123 @@ mod tests {
             "libraries/ must be preserved"
         );
         assert!(dir.join("cache").is_dir(), "cache/ must be preserved");
+        assert!(
+            dir.join("config/paper-world-defaults.yml").is_file(),
+            "the pinned world-defaults must be installed on every Paper boot"
+        );
         fs::remove_dir_all(&dir).unwrap();
+        let _ = fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    /// A Paper boot with no world-defaults source must fail UNVERIFIED, never
+    /// silently boot with the vanilla spawn-limits: without the pinned fixture
+    /// the sampled walk is nondeterministic (issue #333), so skipping the
+    /// install is the same defect the guard exists to prevent. The message must
+    /// name the required fixture.
+    #[test]
+    fn prepare_run_dir_paper_requires_world_defaults_source() {
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-wdreq-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let err = prepare_run_dir(&dir, ServerKind::Paper, None, None, 25599).unwrap_err();
+        assert!(
+            matches!(err, Error::Unverified(_)),
+            "a Paper boot without the world-defaults source must be UNVERIFIED, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("paper-world-defaults.yml"),
+            "the Unverified error must name the required fixture, got {err}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The world-defaults source lives OUTSIDE the run dir (the wipe clears the
+    /// run dir's non-cache entries before anything is copied in), and its bytes
+    /// must land in the server's `config/paper-world-defaults.yml` byte-for-byte
+    /// — the deterministic spawn limits (all seven categories at 0, issue #266)
+    /// are the load-bearing config and must never be altered in transit.
+    fn temp_world_defaults_src(tag: &str) -> PathBuf {
+        let src = std::env::temp_dir().join(format!(
+            "rivet-scenario-wd-src-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&src);
+        fs::create_dir_all(&src).unwrap();
+        src.join("paper-world-defaults.yml")
+    }
+
+    #[test]
+    fn prepare_run_dir_installs_world_defaults_byte_identical() {
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-wd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let src = temp_world_defaults_src("install");
+        let pinned = b"entities:\n  spawning:\n    spawn-limits:\n      monster: 0\n";
+        fs::write(&src, pinned).unwrap();
+
+        prepare_run_dir(&dir, ServerKind::Paper, None, Some(&src), 25599).unwrap();
+
+        let installed = fs::read(dir.join("config/paper-world-defaults.yml")).unwrap();
+        assert_eq!(
+            installed, pinned,
+            "the installed paper-world-defaults.yml must be byte-identical to the pinned \
+             fixture — a modified spawn-limits would silently re-enable natural spawning"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+        let _ = fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    /// A stale `config/paper-world-defaults.yml` left by a prior boot (or
+    /// generated by Paper's first boot with the vanilla spawn-limits intact)
+    /// must be overwritten on every Paper boot — the deterministic spawn limits
+    /// are what keep the sampled walk and `last_sent` nondeterministic-free, so
+    /// a leftover permissive config must never survive into the next boot.
+    #[test]
+    fn prepare_run_dir_overwrites_stale_world_defaults() {
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-wd2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("config")).unwrap();
+        // A stale generated/defaults config with natural spawning re-enabled.
+        fs::write(
+            dir.join("config/paper-world-defaults.yml"),
+            "entities:\n  spawning:\n    spawn-limits:\n      monster: -1\n",
+        )
+        .unwrap();
+        let src = temp_world_defaults_src("stale");
+        let pinned = b"entities:\n  spawning:\n    spawn-limits:\n      monster: 0\n";
+        fs::write(&src, pinned).unwrap();
+
+        prepare_run_dir(&dir, ServerKind::Paper, None, Some(&src), 25599).unwrap();
+
+        let installed = fs::read(dir.join("config/paper-world-defaults.yml")).unwrap();
+        assert_eq!(
+            installed, pinned,
+            "a stale permissive paper-world-defaults.yml must be overwritten by the pinned \
+             fixture (spawn-limits all 0) on every boot"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+        let _ = fs::remove_dir_all(src.parent().unwrap());
+    }
+
+    /// Rivet boots pass `None` for the world-defaults source: the rivet-server
+    /// binary never reads `config/paper-world-defaults.yml`, so its run dir must
+    /// not be populated with Paper's config at all.
+    #[test]
+    fn prepare_run_dir_rivet_does_not_install_paper_config() {
+        let dir = std::env::temp_dir().join(format!("rivet-scenario-wd3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let src = temp_world_defaults_src("rivet");
+
+        prepare_run_dir(&dir, ServerKind::Rivet, None, Some(&src), 25599).unwrap();
+
+        assert!(
+            !dir.join("config/paper-world-defaults.yml").exists(),
+            "Rivet boots must not install Paper's config/paper-world-defaults.yml"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+        let _ = fs::remove_dir_all(src.parent().unwrap());
     }
 
     /// A `Server` wrapping a long-lived stand-in process (`sleep 60` — a booted

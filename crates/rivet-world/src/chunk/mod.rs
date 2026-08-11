@@ -35,6 +35,10 @@ pub mod palette;
 pub mod paletted_container;
 pub mod paletted_container_factory;
 pub mod proto_chunk;
+/// Block/fluid by-name codecs (`BuiltInRegistries.BLOCK/FLUID.byNameCodec()`,
+/// #370) the stored-tick codecs decode through.
+pub mod registry_codecs;
+pub mod status;
 pub mod storage;
 pub mod strategy;
 pub mod structure_access;

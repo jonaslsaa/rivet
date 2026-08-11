@@ -39,6 +39,15 @@ use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
 use super::chunk_map::ChunkMap;
 use super::chunk_tracking_view::ChunkTrackingView;
 
+/// How the player send path handles a position absent from `ChunkMap`.
+/// Repeating spawn content is confined to the legacy no-level fixture;
+/// region-backed worlds require an actually loaded coordinate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MissingChunkPolicy {
+    RepeatSpawnFixture,
+    RequireLoaded,
+}
+
 /// `Level.OVERWORLD` — `ResourceKey.create(Registries.DIMENSION,
 /// Identifier.withDefaultNamespace("overworld"))`.
 pub fn overworld_dimension() -> ResourceKey<Level> {
@@ -73,6 +82,15 @@ pub struct ServerLevelConfig {
     /// tick-thread driver of `ClientboundSetSimulationDistancePacket` and the
     /// Moonrise `tickViewDistance` (issue #100).
     pub simulation_distance: i32,
+    /// Policy for absent view chunks. The legacy no-level fixture repeats
+    /// spawn content; region-backed composition requires loaded coordinates.
+    pub missing_chunk_policy: MissingChunkPolicy,
+    /// `ServerLevel.isFlat()` — `generator instanceof FlatLevelSource`. True
+    /// for the deterministic superflat world; the region-backed boot derives it
+    /// from the real generator type in `world_gen_settings.dat`
+    /// (`minecraft:noise` → not flat), which the session wires into the login
+    /// packet's `is_flat` flag.
+    pub is_flat: bool,
 }
 
 impl Default for ServerLevelConfig {
@@ -89,6 +107,8 @@ impl Default for ServerLevelConfig {
             respawn_data: RespawnData::of(dimension.clone(), spawn_pos, 0.0, 0.0),
             view_distance: 4,
             simulation_distance: 4,
+            missing_chunk_policy: MissingChunkPolicy::RepeatSpawnFixture,
+            is_flat: true,
         }
     }
 }
@@ -114,6 +134,8 @@ pub struct ServerLevel {
     /// The simulation distance (the Moonrise world `tickViewDistance` driver;
     /// the M1 world pins it to the `simulation-distance=4` fixture).
     simulation_distance: i32,
+    missing_chunk_policy: MissingChunkPolicy,
+    is_flat: bool,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
     /// would cross threads.
@@ -126,10 +148,28 @@ impl ServerLevel {
     pub fn new(config: ServerLevelConfig) -> Self {
         let spawn_chunk = config.spawn_chunk;
         let chunk_map = ChunkMap::new(spawn_chunk, config.view_distance);
-        // The view radius comes from the *clamped* server view distance so the
-        // send square never exceeds it (Java invariant: the send radius is
-        // bounded by `serverViewDistance`; `setLoadDistance(serverViewDistance + 1)`
-        // derives from the same clamped value).
+        Self::with_chunk_map(config, chunk_map)
+    }
+
+    /// The region-backed world constructor: an empty `ChunkMap` the #516 boot
+    /// installs every reconstructed view chunk into. `ServerLevel::new` (the
+    /// M1 superflat world) seeds the spawn chunk; this constructor seeds
+    /// nothing, so `MissingChunkPolicy::RequireLoaded` fails on any position
+    /// the boot did not install instead of silently serving a superflat
+    /// placeholder.
+    pub fn new_region_backed(config: ServerLevelConfig) -> Self {
+        let chunk_map = ChunkMap::empty(config.view_distance);
+        Self::with_chunk_map(config, chunk_map)
+    }
+
+    /// The shared construction: a `ChunkMap` (seeded or empty) plus the world
+    /// fields from the immutable config. The view radius comes from the
+    /// *clamped* server view distance so the send square never exceeds it
+    /// (Java invariant: the send radius is bounded by `serverViewDistance`;
+    /// `setLoadDistance(serverViewDistance + 1)` derives from the same clamped
+    /// value).
+    fn with_chunk_map(config: ServerLevelConfig, chunk_map: ChunkMap) -> Self {
+        let spawn_chunk = config.spawn_chunk;
         let view = ChunkTrackingView::of(spawn_chunk, chunk_map.server_view_distance());
         ServerLevel {
             dimension: config.dimension,
@@ -141,6 +181,8 @@ impl ServerLevel {
             chunk_map,
             view,
             simulation_distance: config.simulation_distance,
+            missing_chunk_policy: config.missing_chunk_policy,
+            is_flat: config.is_flat,
             _confinement: std::marker::PhantomData,
         }
     }
@@ -224,6 +266,19 @@ impl ServerLevel {
     /// unset default.
     pub fn send_view_distance(&self) -> i32 {
         -1
+    }
+
+    /// The explicit absent-chunk policy consumed by the player send path.
+    pub fn missing_chunk_policy(&self) -> MissingChunkPolicy {
+        self.missing_chunk_policy
+    }
+
+    /// `ServerLevel.isFlat()` — `worldGenSettings.dimensions().get(typeKey)
+    /// .map(stem -> stem.generator() instanceof FlatLevelSource)`. The
+    /// region-backed boot reads the generator type from `world_gen_settings.dat`
+    /// (`minecraft:noise` → not flat); the superflat M1 world stays flat.
+    pub fn is_flat(&self) -> bool {
+        self.is_flat
     }
 }
 

@@ -42,10 +42,9 @@
 //! `resolve: &dyn Fn(&T) -> StateFlags` (the world sites use `rivet-registry`'s
 //! `BlockState` behavior table; the superflat/server sites supply their own
 //! flag predicates), so no predicate is stored on the base (OWNERSHIP.md).
-//! RivetTodo(#185): the
-//! `mc.world.level.chunk.status` unit replaces the slice-local `ChunkStatus`
-//! with the real status ladder and `isOrAfter`. The `setBlockState` mutators
-//! (section set-block/fluid) defer with the
+//! The persisted 26.2 `ChunkStatus` value ladder is mirrored in
+//! `chunk::status`; generation tasks and scheduler state remain with #185.
+//! The `setBlockState` mutators (section set-block/fluid) defer with the
 //! chunk-storage epic — the heightmap `update` half is ported here
 //! ([`update_heightmaps_after`]).
 
@@ -56,6 +55,8 @@ use indexmap::IndexSet;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::light_chunk::LightChunk;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
+pub use crate::chunk::status::ChunkStatus;
+use crate::chunk::strategy::Strategy;
 use crate::chunk::structure_access::StructureAccess;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
@@ -72,23 +73,6 @@ fn filled_empty_light(count: usize) -> Vec<SwmrNibbleArray> {
     (0..count)
         .map(|_| SwmrNibbleArray::new_with_bytes_and_null(None, true))
         .collect()
-}
-
-/// `net.minecraft.world.level.chunk.status.ChunkStatus` — the persisted chunk
-/// status, slice-local: the real status ladder (with `isOrAfter`/`heightmapsAfter`)
-/// lives in the `mc.world.level.chunk.status` unit (#185). This slice needs
-/// the two statuses its chunks reach — a fresh `ProtoChunk` is `EMPTY`, a
-/// loaded `LevelChunk`/`EmptyLevelChunk` is `FULL`.
-///
-/// RivetTodo(#185): the full `ChunkStatus` ladder (and `BelowZeroRetrogen`,
-/// which `getHighestGeneratedStatus` folds in) is not ported; this enum is a
-/// stand-in the status unit replaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChunkStatus {
-    /// `ChunkStatus.EMPTY` — the `ProtoChunk` default.
-    Empty,
-    /// `ChunkStatus.FULL` — `LevelChunk`/`EmptyLevelChunk`.
-    Full,
 }
 
 /// `net.minecraft.world.level.chunk.ChunkAccess` — the generic base value.
@@ -700,6 +684,86 @@ where
     pub fn set_all_references(&mut self, data: HashMap<S, Vec<u64>>) {
         self.structure_access.set_all_references(data);
         self.mark_unsaved();
+    }
+
+    /// Value-transform the block-state and biome value types while preserving
+    /// every other field (sections, heightmaps, light nibbles, pending block
+    /// entities, post-processing, flags, structure access). The #516 server
+    /// bridge converts a reconstructed `ChunkAccess<BlockState, BiomeId, ()>`
+    /// into the server's `ChunkAccess<StateId, BiomeId, ()>`.
+    ///
+    /// The base is rebuilt through [`Self::new`] (the section-Y layout and the
+    /// FULL heightmap priming), then every owned field `Self::new` reset —
+    /// unsaved, light-correct, post-processing, pending block entities, light
+    /// nibbles, heightmaps, structure access — is reinstalled from the source,
+    /// so the conversion is a pure re-type with no semantic change.
+    #[allow(clippy::too_many_arguments)] // the two strategies + the re-encoded
+    // air/default-biome defaults + the two mappers + the resolve closure — the
+    // full re-type surface `ChunkAccess::new` mirrors.
+    pub fn map_values<T2, B2>(
+        self,
+        block_strategy: Strategy<T2>,
+        biome_strategy: Strategy<B2>,
+        air: T2,
+        default_biome: B2,
+        map_block: &impl Fn(&T) -> T2,
+        map_biome: &impl Fn(&B) -> B2,
+        resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
+    ) -> Result<ChunkAccess<T2, B2, S>, String>
+    where
+        T2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    {
+        let ChunkAccess {
+            pos,
+            upgrade_data,
+            height_accessor,
+            sections,
+            post_processing,
+            unsaved,
+            light_correct,
+            inhabited_time,
+            structure_access,
+            pending_block_entities,
+            heightmaps,
+            block_nibbles,
+            sky_nibbles,
+            resolve: _,
+        } = self;
+        let factory = PalettedContainerFactory::new(
+            block_strategy.clone(),
+            air,
+            biome_strategy.clone(),
+            default_biome,
+        );
+        let sections: Vec<LevelChunkSection<T2, B2>> = sections
+            .into_iter()
+            .map(|section| {
+                section.map_values(&block_strategy, &biome_strategy, map_block, map_biome)
+            })
+            .collect::<Result<_, _>>()?;
+        let mut base = ChunkAccess::new(
+            pos,
+            upgrade_data,
+            height_accessor,
+            &factory,
+            inhabited_time,
+            Some(sections),
+            resolve,
+        );
+        base.unsaved = unsaved;
+        base.light_correct = light_correct;
+        base.post_processing = post_processing;
+        base.pending_block_entities = pending_block_entities;
+        base.block_nibbles = block_nibbles;
+        base.sky_nibbles = sky_nibbles;
+        for (index, heightmap) in heightmaps.into_iter().enumerate() {
+            if let Some(heightmap) = heightmap {
+                base.heightmaps[index] = Some(heightmap);
+            }
+        }
+        base.structure_access = structure_access;
+        Ok(base)
     }
 }
 

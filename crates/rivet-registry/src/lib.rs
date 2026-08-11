@@ -47,6 +47,12 @@
 /// behind `blocks`. Wiring lives in generated `generated/mod.rs`.
 pub mod generated;
 
+/// The pure fluid id-handle (`FluidId`) over the generated `minecraft:fluid`
+/// tables (issue #370), mirroring `BlockId`'s ownership. Gated behind
+/// `blocks` like the fluid tables it reads.
+#[cfg(feature = "blocks")]
+pub mod fluid_id;
+
 /// Hand-written `BlockState` value type over the generated global-id + behavior
 /// tables (issue #228). The "pure table ops, no world types" surface the
 /// worldgen/heightmap/lighting work consumes; gated behind `blocks` like the
@@ -73,6 +79,13 @@ pub mod block_state_property;
 #[cfg(feature = "blocks")]
 pub mod state_definition;
 
+/// The typed `block.state.properties` leaf value classes and the
+/// `BlockStateProperties` constant facade (issue #228) — the worldgen/lighting
+/// surface that sets property values on states by their value-class enum
+/// (`state.set_value(SlabBlock.TYPE, SlabType.DOUBLE)`).
+#[cfg(feature = "blocks")]
+pub mod block_state_properties;
+
 // ---------------------------------------------------------------------------
 // Ownership A — resources / keys (`net.minecraft.resources`, `net.minecraft.tags`,
 // `net.minecraft.core.registries.Registries`, `net.minecraft.IdentifierException`)
@@ -81,6 +94,10 @@ pub mod state_definition;
 /// The generated-identity surface of
 /// `net.minecraft.world.level.block.entity.BlockEntityType` (#341).
 pub mod block_entity_type;
+/// The generated-identity surface of
+/// `net.minecraft.world.level.levelgen.feature.featuresize.FeatureSizeType`
+/// (#394).
+pub mod feature_size_type;
 /// `net.minecraft.resources.Identifier` (MC 26.2 `ResourceLocation`).
 pub mod identifier;
 /// `net.minecraft.IdentifierException` — lives in `rivet-core` with the other
@@ -159,6 +176,11 @@ pub mod biomes_tags_tests;
 // Ownership D — serialization context (`net.minecraft.resources`)
 // ---------------------------------------------------------------------------
 
+/// `RegistryDataLoader` + the load-task units (`net.minecraft.resources`,
+/// `net.minecraft.server.packs.resources`, #126). The datapack JSON load path;
+/// the network/NBT task defers with the tags/network-sync units (RivetTodo
+/// #126, see the module doc) because rivet-registry cannot depend on rivet-nbt.
+pub mod registry_data_loader;
 /// `RegistryFileCodec`/`RegistryFixedCodec`/`HolderSetCodec` (#126 holder
 /// codecs, `net.minecraft.resources`).
 pub mod registry_file_codec;
