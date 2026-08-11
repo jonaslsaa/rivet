@@ -7,11 +7,13 @@
 //! play-side integration (#96) will use.
 //!
 //! No wall clock is touched: `SimTime` advances, the loop wakes, ticks run,
-//! frames flow. `wait_until` bounds each assertion so a stalled loop fails
-//! loudly instead of hanging.
+//! frames flow. `advance` moves the clock lockstep with the loop's processed
+//! tick count, so a preempted tick thread cannot let simulated time outrun the
+//! ticks actually run (issue #536). `wait_until` bounds each assertion so a
+//! stalled loop fails loudly instead of hanging.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -301,12 +303,39 @@ fn register(
     register_with_id(lifecycle_tx, ConnectionId(1), in_cap, out_cap)
 }
 
-/// Advance the sim clock by `ticks` ticks (each `NANOS_PER_TICK`), letting the
-/// loop process between advances.
-fn advance(sim: &Arc<SimTime>, ticks: u64) {
+/// Wait for the loop to finish every tick the current clock already warrants.
+/// The scheduler's deadline after `k` processed ticks is `k * NANOS_PER_TICK`
+/// (the first deadline is 0, so tick 1 is due at clock 0), so the loop is idle
+/// exactly when that deadline is past the current clock — it has caught up and
+/// is sleeping for the next deadline, reading a fresh clock when it wakes.
+fn wait_for_idle(sim: &Arc<SimTime>, stats: &Arc<TickStats>) {
+    wait_until(
+        Duration::from_secs(10),
+        "tick loop to catch up to the clock",
+        || stats.ticks.load(Ordering::Relaxed) as u128 * NANOS_PER_TICK > sim.now_nanos(),
+    );
+}
+
+/// Advance the sim clock by `ticks` ticks (each `NANOS_PER_TICK`), moving it
+/// lockstep with the loop's processed ticks.
+///
+/// Each advance is a single 50ms grid step, taken only once the loop has
+/// finished every tick the current clock warrants (is idle); each step is
+/// followed by another idle wait. The loop therefore wakes to read the clock at
+/// exactly the next grid position and runs exactly one tick there, so simulated
+/// time can never outrun the ticks actually processed — a tick thread preempted
+/// by CPU contention still stamps each tick at its exact 50ms grid position and
+/// the millis challenge ids hold. (Issue #536 reproduced lagged ids — 1100 ms
+/// instead of 1000 ms — when the clock raced ahead on a 1ms wall-clock pacing.)
+fn advance(sim: &Arc<SimTime>, stats: &Arc<TickStats>, ticks: u64) {
+    // Catch up first: if the loop has not yet processed the ticks the current
+    // clock already calls for (e.g. tick 1 due at clock 0), an advance would
+    // shift the whole grid — tick N reading `N*50ms` instead of `(N-1)*50ms`
+    // and the first challenge id landing at 1050 instead of 1000.
+    wait_for_idle(sim, stats);
     for _ in 0..ticks {
         sim.advance(NANOS_PER_TICK);
-        std::thread::sleep(Duration::from_millis(1));
+        wait_for_idle(sim, stats);
     }
 }
 
@@ -329,7 +358,7 @@ fn keepalive_sends_once_per_second_and_ids_are_millis() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (_in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 50); // 2500ms
+    advance(&sim, &loop_.stats, 50); // 2500ms
     wait_until(Duration::from_secs(2), "two keepalive sends", || {
         cells.lock().unwrap()[0].sends.len() >= 2
     });
@@ -350,19 +379,19 @@ fn no_send_before_first_second() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (_in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 19); // 950ms
-    std::thread::sleep(Duration::from_millis(50));
+    advance(&sim, &loop_.stats, 19); // 950ms
     assert_eq!(
         cells.lock().unwrap()[0].sends.len(),
         0,
         "no challenge before 1s elapses"
     );
 
-    advance(&sim, 1); // 1000ms
-    wait_until(Duration::from_secs(2), "first keepalive send", || {
-        !cells.lock().unwrap()[0].sends.is_empty()
-    });
-    assert_eq!(cells.lock().unwrap()[0].sends[0], 1000);
+    advance(&sim, &loop_.stats, 1); // 1000ms
+    assert_eq!(
+        cells.lock().unwrap()[0].sends[0],
+        1000,
+        "the first challenge fires at exactly 1s"
+    );
 
     let _ = loop_.handle;
 }
@@ -379,7 +408,7 @@ fn clientbound_frame_reaches_outbound_channel_with_wire_shape() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (_in_tx, mut out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 25); // 1250ms: one send at 1000ms
+    advance(&sim, &loop_.stats, 25); // 1250ms: one send at 1000ms
     wait_until(Duration::from_secs(2), "first send", || {
         !cells.lock().unwrap()[0].sends.is_empty()
     });
@@ -418,7 +447,7 @@ fn valid_response_via_inbound_clears_pending() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 25); // send at 1000ms
+    advance(&sim, &loop_.stats, 25); // send at 1000ms
     wait_until(Duration::from_secs(2), "first send", || {
         !cells.lock().unwrap()[0].sends.is_empty()
     });
@@ -430,7 +459,7 @@ fn valid_response_via_inbound_clears_pending() {
             bytes: keepalive_frame(1000),
         })
         .unwrap();
-    advance(&sim, 1);
+    advance(&sim, &loop_.stats, 1);
 
     wait_until(Duration::from_secs(2), "pending cleared", || {
         cells.lock().unwrap()[0].keepalive.pending_len() == 0
@@ -459,7 +488,7 @@ fn out_of_order_response_via_inbound_disconnects() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 45); // sends at 1000 and 2000
+    advance(&sim, &loop_.stats, 45); // sends at 1000 and 2000
     wait_until(Duration::from_secs(2), "two sends", || {
         cells.lock().unwrap()[0].sends.len() >= 2
     });
@@ -471,7 +500,7 @@ fn out_of_order_response_via_inbound_disconnects() {
         })
         .unwrap();
     // Wake the loop so it drains the inbound channel and processes the response.
-    advance(&sim, 1);
+    advance(&sim, &loop_.stats, 1);
 
     wait_until(Duration::from_secs(2), "out-of-order disconnect", || {
         cells.lock().unwrap()[0].disconnected.is_some()
@@ -494,7 +523,7 @@ fn unmatched_response_via_inbound_disconnects() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 25); // send at 1000ms
+    advance(&sim, &loop_.stats, 25); // send at 1000ms
     wait_until(Duration::from_secs(2), "first send", || {
         !cells.lock().unwrap()[0].sends.is_empty()
     });
@@ -505,7 +534,7 @@ fn unmatched_response_via_inbound_disconnects() {
         })
         .unwrap();
     // Wake the loop so it drains the inbound channel and processes the response.
-    advance(&sim, 1);
+    advance(&sim, &loop_.stats, 1);
 
     wait_until(Duration::from_secs(2), "unmatched disconnect", || {
         cells.lock().unwrap()[0].disconnected.is_some()
@@ -532,7 +561,7 @@ fn no_response_for_30s_disconnects_with_timeout() {
     // A wide-enough outbound for the 32 one-per-second challenges (no prune).
     let (_in_tx, _out_rx) = register(&lifecycle_tx, 8, 64);
 
-    advance(&sim, 640); // 32s
+    advance(&sim, &loop_.stats, 640); // 32s
     wait_until(Duration::from_secs(2), "keepalive timeout", || {
         cells.lock().unwrap()[0].disconnected.is_some()
     });
@@ -561,7 +590,7 @@ fn responding_client_survives_past_30s_window() {
 
     let mut last_answered = 0;
     for _ in 0..35 {
-        advance(&sim, 20); // 1s
+        advance(&sim, &loop_.stats, 20); // 1s
         // Drain the clientbound channel (a real client reads it), so the
         // outbound queue never backs up and prunes the connection.
         while let Ok(OutboundEvent::Packet { .. }) = out_rx.try_recv() {}
@@ -616,7 +645,7 @@ fn outbound_overflow_prunes_connection_and_loop_survives() {
     let (_in_tx1, mut out_rx1) = register_with_id(&lifecycle_tx, ConnectionId(1), 8, 1);
     let (_in_tx2, mut out_rx2) = register_with_id(&lifecycle_tx, ConnectionId(2), 8, 8);
 
-    advance(&sim, 50); // 2500ms: sends at 1000 and 2000 for both connections
+    advance(&sim, &loop_.stats, 50); // 2500ms: sends at 1000 and 2000 for both connections
     wait_until(Duration::from_secs(2), "id1 pruned by overflow", || {
         while let Ok(OutboundEvent::Packet { .. }) = out_rx1.try_recv() {}
         out_rx1.try_recv().is_err() // channel closed => registry pruned it
@@ -635,7 +664,7 @@ fn outbound_overflow_prunes_connection_and_loop_survives() {
     // id 2 (drained) keeps receiving keepalives; id 1's state is no longer
     // driven now that its connection left the registry.
     for _ in 0..5 {
-        advance(&sim, 20); // 1s
+        advance(&sim, &loop_.stats, 20); // 1s
         while let Ok(OutboundEvent::Packet { .. }) = out_rx2.try_recv() {}
     }
     wait_until(Duration::from_secs(2), "id2 keeps sending", || {
@@ -662,7 +691,7 @@ fn lifecycle_disconnect_stops_keepalive_drive() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (_in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 25); // 1250ms: one send at 1000ms
+    advance(&sim, &loop_.stats, 25); // 1250ms: one send at 1000ms
     wait_until(Duration::from_secs(2), "first send", || {
         !cells.lock().unwrap()[0].sends.is_empty()
     });
@@ -676,7 +705,7 @@ fn lifecycle_disconnect_stops_keepalive_drive() {
         .expect("lifecycle channel has room");
     // Wake the loop (its idle sleep blocks until the sim advances) so it
     // applies the disconnect and publishes `connected == 0`.
-    advance(&sim, 1);
+    advance(&sim, &loop_.stats, 1);
     wait_until(
         Duration::from_secs(2),
         "connection removed from registry",
@@ -684,7 +713,7 @@ fn lifecycle_disconnect_stops_keepalive_drive() {
     );
 
     let sends_before = cells.lock().unwrap()[0].sends.len();
-    advance(&sim, 60); // 3000ms — two keepalive intervals
+    advance(&sim, &loop_.stats, 60); // 3000ms — two keepalive intervals
     let sends_after = cells.lock().unwrap()[0].sends.len();
     assert_eq!(
         sends_after, sends_before,
@@ -714,7 +743,7 @@ fn two_connections_each_drive_independent_keepalive() {
     let (in_tx1, _out_rx1) = register_with_id(&lifecycle_tx, ConnectionId(1), 8, 8);
     let (_in_tx2, _out_rx2) = register_with_id(&lifecycle_tx, ConnectionId(2), 8, 8);
 
-    advance(&sim, 25); // 1250ms: both send at 1000ms
+    advance(&sim, &loop_.stats, 25); // 1250ms: both send at 1000ms
     wait_until(Duration::from_secs(2), "both first sends", || {
         let cells = cells.lock().unwrap();
         !cells[0].sends.is_empty() && !cells[1].sends.is_empty()
@@ -728,7 +757,7 @@ fn two_connections_each_drive_independent_keepalive() {
             bytes: keepalive_frame(1000),
         })
         .unwrap();
-    advance(&sim, 1);
+    advance(&sim, &loop_.stats, 1);
     wait_until(Duration::from_secs(2), "conn1 pending cleared", || {
         cells.lock().unwrap()[0].keepalive.pending_len() == 0
     });
@@ -753,7 +782,7 @@ fn replayed_keepalive_response_disconnects() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 25); // send at 1000ms
+    advance(&sim, &loop_.stats, 25); // send at 1000ms
     wait_until(Duration::from_secs(2), "first send", || {
         !cells.lock().unwrap()[0].sends.is_empty()
     });
@@ -764,7 +793,7 @@ fn replayed_keepalive_response_disconnects() {
             bytes: keepalive_frame(1000),
         })
         .unwrap();
-    advance(&sim, 1);
+    advance(&sim, &loop_.stats, 1);
     wait_until(Duration::from_secs(2), "accepted", || {
         cells.lock().unwrap()[0].keepalive.pending_len() == 0
     });
@@ -776,7 +805,7 @@ fn replayed_keepalive_response_disconnects() {
             bytes: keepalive_frame(1000),
         })
         .unwrap();
-    advance(&sim, 1);
+    advance(&sim, &loop_.stats, 1);
     wait_until(Duration::from_secs(2), "replay disconnect", || {
         cells.lock().unwrap()[0].disconnected.is_some()
     });
@@ -800,7 +829,7 @@ fn truncated_keepalive_frame_does_not_crash_loop() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 25); // send at 1000ms
+    advance(&sim, &loop_.stats, 25); // send at 1000ms
     wait_until(Duration::from_secs(2), "first send", || {
         !cells.lock().unwrap()[0].sends.is_empty()
     });
@@ -816,8 +845,9 @@ fn truncated_keepalive_frame_does_not_crash_loop() {
         .try_send(ServerboundFrame { bytes: truncated })
         .unwrap();
 
-    advance(&sim, 5);
-    std::thread::sleep(Duration::from_millis(50));
+    // The lockstep advance has already run the loop through the tick that
+    // drains the inbound channel, so the truncation was processed.
+    advance(&sim, &loop_.stats, 5);
     {
         let cell = cells.lock().unwrap();
         assert!(cell[0].disconnected.is_none(), "truncated frame is skipped");
@@ -834,7 +864,7 @@ fn truncated_keepalive_frame_does_not_crash_loop() {
             bytes: keepalive_frame(1000),
         })
         .unwrap();
-    advance(&sim, 1);
+    advance(&sim, &loop_.stats, 1);
     wait_until(
         Duration::from_secs(2),
         "valid response accepted after truncation",
@@ -855,7 +885,7 @@ fn non_keepalive_packet_frame_is_skipped() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 25); // send at 1000ms
+    advance(&sim, &loop_.stats, 25); // send at 1000ms
     wait_until(Duration::from_secs(2), "first send", || {
         !cells.lock().unwrap()[0].sends.is_empty()
     });
@@ -868,8 +898,7 @@ fn non_keepalive_packet_frame_is_skipped() {
     let other = Bytes::from(encode_frame(&payload).unwrap().to_vec());
     in_tx.try_send(ServerboundFrame { bytes: other }).unwrap();
 
-    advance(&sim, 5);
-    std::thread::sleep(Duration::from_millis(50));
+    advance(&sim, &loop_.stats, 5);
     let cell = cells.lock().unwrap();
     assert!(
         cell[0].disconnected.is_none(),
@@ -894,7 +923,7 @@ fn length_header_mismatch_is_skipped() {
     let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
     let (in_tx, _out_rx) = register(&lifecycle_tx, 8, 8);
 
-    advance(&sim, 25); // send at 1000ms
+    advance(&sim, &loop_.stats, 25); // send at 1000ms
     wait_until(Duration::from_secs(2), "first send", || {
         !cells.lock().unwrap()[0].sends.is_empty()
     });
@@ -912,8 +941,7 @@ fn length_header_mismatch_is_skipped() {
         })
         .unwrap();
 
-    advance(&sim, 5);
-    std::thread::sleep(Duration::from_millis(50));
+    advance(&sim, &loop_.stats, 5);
     let cell = cells.lock().unwrap();
     assert!(
         cell[0].disconnected.is_none(),
@@ -944,10 +972,9 @@ fn exact_30s_boundary_is_strict() {
 
     // The first challenge is sent at t=1s. Advance to t=31s exactly: it has
     // been pending exactly KEEPALIVE_LIMIT (30s) — strict `>` must not kick.
-    advance(&sim, 620); // 31000ms
-    wait_until(Duration::from_secs(2), "tick at 31s processed", || {
-        loop_.stats.ticks.load(Ordering::Relaxed) >= 621
-    });
+    // The lockstep advance runs the loop through the tick at 31s before it
+    // returns, so the cell reflects that tick's drive.
+    advance(&sim, &loop_.stats, 620); // 31000ms
     {
         let cell = cells.lock().unwrap();
         assert!(
@@ -962,14 +989,80 @@ fn exact_30s_boundary_is_strict() {
     }
 
     // One 50ms tick past the limit: 30.05s elapsed — the kick fires.
-    advance(&sim, 1); // 31050ms
-    wait_until(Duration::from_secs(2), "kick past the limit", || {
-        cells.lock().unwrap()[0].disconnected.is_some()
-    });
+    advance(&sim, &loop_.stats, 1); // 31050ms
     assert_eq!(
         cells.lock().unwrap()[0].disconnected,
         Some(DisconnectReason::Timeout)
     );
 
     let _ = loop_.handle;
+}
+
+// ---- CPU contention (issue #536) --------------------------------------------
+
+/// Stress/repetition evidence for the lockstep clock (issue #536): six busy-spin
+/// burners compete for the CPU while the clock advances through repeated
+/// one-second keepalive intervals. Every challenge id must still be exactly the
+/// simulated millis reading — the pre-fix pacing (a 1ms wall sleep per clock
+/// step) let the simulated clock outrun the ticks the loop actually processed,
+/// corrupting the first id to 1100+ under this same contention. The lockstep
+/// advance ties each clock step to a processed tick, so the exact ids hold no
+/// matter how the burners preempt the tick thread.
+///
+/// The burners are stopped and joined even when an assertion fails, so a
+/// regression cannot leave them spinning into the rest of the test run.
+#[test]
+fn challenge_ids_are_exact_millis_under_cpu_contention() {
+    const ROUNDS: usize = 3;
+    const INTERVALS_PER_ROUND: i64 = 7;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let burners: Vec<_> = (0..6)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut x: u64 = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    x = x
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                }
+                std::hint::black_box(x);
+            })
+        })
+        .collect();
+
+    let cells = one_cell();
+    let sim = Arc::new(SimTime::new());
+    let shutdown = Arc::new(Shutdown::new());
+    let (loop_, lifecycle_tx) = build_keepalive_loop(cells.clone(), sim.clone(), shutdown.clone());
+    // 21 one-per-second challenges (21s < the 30s kick window) fit a 64-slot
+    // outbound without pruning.
+    let (_in_tx, _out_rx) = register(&lifecycle_tx, 8, 64);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut sent: i64 = 0;
+        for round in 0..ROUNDS {
+            advance(&sim, &loop_.stats, (INTERVALS_PER_ROUND * 20) as u64); // 7s
+            let cell = cells.lock().unwrap();
+            let expected: Vec<i64> = ((sent + 1) * 1000..=(sent + INTERVALS_PER_ROUND) * 1000)
+                .step_by(1000)
+                .collect();
+            assert_eq!(
+                &cell[0].sends[sent as usize..],
+                expected.as_slice(),
+                "round {round}: challenge ids are exactly the simulated millis under CPU contention"
+            );
+            sent += INTERVALS_PER_ROUND;
+        }
+    }));
+    // Stop and join the burners before propagating any assertion failure.
+    stop.store(true, Ordering::Relaxed);
+    for b in burners {
+        let _ = b.join();
+    }
+    let _ = loop_.handle;
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
 }
