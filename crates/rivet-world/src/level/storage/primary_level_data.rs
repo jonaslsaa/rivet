@@ -271,12 +271,13 @@ impl PrimaryLevelData {
     ) {
         level_data_fill_default(self, category, level_height_accessor);
         category.set_detail("Level name", ServerLevelData::get_level_name(self));
+        let game_type = ServerLevelData::get_game_type(self);
         category.set_detail(
             "Level game mode",
             format!(
                 "Game mode: {} (ID {}). Hardcore: {}. Commands: {}",
-                ServerLevelData::get_game_type(self).get_name(),
-                ServerLevelData::get_game_type(self).get_id(),
+                game_type.get_name(),
+                game_type.get_id(),
                 LevelData::is_hardcore(self),
                 ServerLevelData::is_allow_commands(self),
             ),

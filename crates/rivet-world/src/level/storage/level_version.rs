@@ -124,6 +124,14 @@ impl LevelVersion {
 /// (`DataVersion.isCompatible` against the current `WorldVersion`). `Err`
 /// otherwise — including the absent-`Version`/`version`-`0` case, which Paper
 /// would have file-fixed or rejected before parsing.
+///
+/// Paper's own file-fixing gate (`LevelStorageSource.getLevelDataAndDimensions`
+/// / `LevelSummary`) keys off the *top-level* `DataVersion` tag via
+/// `NbtUtils.getDataVersion`, whereas this guard keys off the `Version` block's
+/// `Id`. The two agree on well-formed current-version worlds; this guard
+/// deliberately rejects any world whose `Version` block is absent or not the
+/// pinned main-series build, and the top-level `DataVersion` tag is not read
+/// (Rivet has no DFU to upgrade through it).
 pub fn ensure_compatible(level_version: &LevelVersion) -> Result<(), DataVersionMismatch> {
     let world_version = level_version.minecraft_version();
     if world_version.version == WORLD_VERSION && world_version.series == DataVersion::MAIN_SERIES {
