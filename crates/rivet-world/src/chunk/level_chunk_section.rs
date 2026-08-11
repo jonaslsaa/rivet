@@ -27,6 +27,7 @@
 
 use crate::chunk::moonrise_short_list::ShortList;
 use crate::chunk::paletted_container::PalettedContainer;
+use crate::chunk::strategy::Strategy;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use std::sync::LazyLock;
 
@@ -138,6 +139,49 @@ impl<
             special_colliding_blocks: 0,
             ticking_blocks: ShortList::new(),
         }
+    }
+
+    /// Value-transform the states and biomes containers into `T2`/`B2` with the
+    /// target strategies, mapping each palette entry through the caller's
+    /// `map_block`/`map_biome` closures — the wire-identical re-encode the #516
+    /// server bridge needs (`BlockState::id()` IS the server `StateId`, and
+    /// both biome newtypes are dense registry ids). All count fields, the
+    /// ticking list, and the special-colliding tally are preserved as-is: the
+    /// mapped values occupy the same dense id space, so the counts remain exact
+    /// without a `recalcBlockCounts` pass.
+    pub fn map_values<T2, B2>(
+        self,
+        block_strategy: &Strategy<T2>,
+        biome_strategy: &Strategy<B2>,
+        map_block: &impl Fn(&T) -> T2,
+        map_biome: &impl Fn(&B) -> B2,
+    ) -> Result<LevelChunkSection<T2, B2>, String>
+    where
+        T2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    {
+        let LevelChunkSection {
+            non_empty_block_count,
+            fluid_count,
+            ticking_block_count,
+            ticking_fluid_count,
+            states,
+            biomes,
+            special_colliding_blocks,
+            ticking_blocks,
+        } = self;
+        let states: PalettedContainer<T2> = states.map_values(block_strategy, map_block)?;
+        let biomes: PalettedContainer<B2> = biomes.map_values(biome_strategy, map_biome)?;
+        Ok(LevelChunkSection {
+            non_empty_block_count,
+            fluid_count,
+            ticking_block_count,
+            ticking_fluid_count,
+            states,
+            biomes,
+            special_colliding_blocks,
+            ticking_blocks,
+        })
     }
 
     /// `getBlockState(int, int, int)`.
