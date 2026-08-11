@@ -1340,6 +1340,66 @@ mod tests {
     }
 
     #[test]
+    fn level_chunk_ticks_remove_if_deferred_element_survives_when_non_matching() {
+        // Same heap layout as the deferred-moved-element test, but the
+        // predicate matches only the removed slot d (trigger 10), not the
+        // deferred element g (trigger 3). Java defers g to forgetMeNot and
+        // re-tests it after the main pass; since it does not match, it
+        // survives in the heap (JDK `Itr` behavior). Pins the "deferred
+        // element re-tested, kept when no match" path distinct from the
+        // deferred-element-also-removed case above.
+        let mut container = LevelChunkTicks::new();
+        for (name, trigger) in [
+            ("a", 1i64),
+            ("b", 8),
+            ("c", 2),
+            ("d", 10),
+            ("e", 9),
+            ("f", 4),
+            ("g", 3),
+        ] {
+            container.schedule(sched(
+                name,
+                trigger as i32,
+                0,
+                trigger,
+                TickPriority::Normal,
+                0,
+            ));
+        }
+        // Sanity: the queue holds the exact array Java produces for this
+        // insertion order (same as the sibling test).
+        assert_eq!(
+            container
+                .all()
+                .map(|t| t.r#type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d", "e", "f", "g"]
+        );
+        // Removing d (index 3) defers g; re-testing g with a predicate that
+        // matches only d keeps g in the heap.
+        container.remove_if(|t| t.trigger_tick == 10);
+        assert_eq!(container.count(), 6);
+        assert!(!container.has_scheduled_tick(&BlockPos::new(10, 0, 0), &"d".to_string()));
+        assert!(container.has_scheduled_tick(&BlockPos::new(3, 0, 0), &"g".to_string()));
+        let mut drained = Vec::new();
+        while let Some(t) = container.poll() {
+            drained.push(t.r#type);
+        }
+        assert_eq!(
+            drained,
+            vec![
+                "a".to_string(),
+                "c".to_string(),
+                "g".to_string(),
+                "f".to_string(),
+                "b".to_string(),
+                "e".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn level_chunk_ticks_dirty_surface() {
         // Moonrise dirty semantics: `dirty || (!queue.isEmpty() && tick !=
         // lastSaved)`.
