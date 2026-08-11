@@ -118,7 +118,7 @@ fn ready_marker_never_appears_when_the_binary_cannot_bind() {
 }
 
 #[test]
-fn disposable_level_fails_visible_before_ready_at_current_codec_boundary() {
+fn disposable_level_fails_visible_before_ready_at_the_level_dat_boundary() {
     let level = tempfile::tempdir().expect("temp level");
     fs::write(level.path().join("level.dat"), b"copied-level").expect("level.dat");
     fs::create_dir_all(level.path().join("dimensions/minecraft/overworld/region"))
@@ -166,6 +166,8 @@ fn disposable_level_fails_visible_before_ready_at_current_codec_boundary() {
     assert!(!status.success());
     assert!(!stdout.contains(RIVET_READY));
     assert!(stderr.contains("RIVET_WORLD_UNVERIFIED"), "{stderr}");
-    assert!(stderr.contains("level.dat codecs"), "{stderr}");
-    assert!(stderr.contains("#323"), "{stderr}");
+    assert!(
+        stderr.contains("UNVERIFIED level.dat could not be read"),
+        "{stderr}"
+    );
 }
