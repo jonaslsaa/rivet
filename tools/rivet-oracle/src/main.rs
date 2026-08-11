@@ -2443,14 +2443,6 @@ fn source_region_provenance(dir: &Path) -> Option<hash_manifest::CaptureProvenan
     ))
 }
 
-/// `hash-paper`: rebuild the committed Paper manifest from the decompressed
-/// `.nbt` fixtures. The seed, level-type, region-file-compression, and corpus
-/// version recorded are all read back out of the source region capture's
-/// manifest — the default source is the M2 capture (working seed 42, distinct
-/// from the pinned corpus seeds, which are the #175 sweep targets), whose only
-/// FULL chunks are the_nether/0.0 and the_end/0.0. The single `dir` argument
-/// overrides both the payload source and the manifest destination (one tree):
-/// run it against a scratch copy of a different tree to hash that tree without
 /// Extract the loaded-world ground-truth manifest from a disposable world copy
 /// (issue #374). The extraction is strictly read-only — every region opens
 /// through a read descriptor, and an allocated corrupt chunk is a hard
@@ -2474,6 +2466,14 @@ fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
     Ok(())
 }
 
+/// `hash-paper`: rebuild the committed Paper manifest from the decompressed
+/// `.nbt` fixtures. The seed, level-type, region-file-compression, and corpus
+/// version recorded are all read back out of the source region capture's
+/// manifest — the default source is the M2 capture (working seed 42, distinct
+/// from the pinned corpus seeds, which are the #175 sweep targets), whose only
+/// FULL chunks are the_nether/0.0 and the_end/0.0. The single `dir` argument
+/// overrides both the payload source and the manifest destination (one tree):
+/// run it against a scratch copy of a different tree to hash that tree without
 /// touching committed fixtures — e.g. a copy of the corpus-forced superflat-full
 /// capture reports its 8 FULL chunks per dimension (corpus seed 0,
 /// 5207638315753790570, `minecraft\:flat`, issue #51). Nothing is hardcoded;
