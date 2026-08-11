@@ -126,14 +126,11 @@ pub fn surface_divergences(
     actual: &[SavedLightSection],
 ) -> Vec<String> {
     let mut out = Vec::new();
-    let mut expected_by_y: std::collections::BTreeMap<i32, &SavedLightSection> =
-        expected.iter().map(|s| (s.y, s)).collect();
-    let mut actual_by_y: std::collections::BTreeMap<i32, &SavedLightSection> =
-        actual.iter().map(|s| (s.y, s)).collect();
+    // Surfaces are per-section, so a duplicate Y is malformed input: fail loudly
+    // rather than silently dropping a section's divergence (a false PASS).
+    let mut expected_by_y = collect_by_y(expected, "expected");
+    let mut actual_by_y = collect_by_y(actual, "actual");
 
-    // Draining both maps pairs every section by Y; when duplicate Ys exist the
-    // second one overwrites the first (surfaces are per-section, so duplicates
-    // are malformed input — the last wins, like a serialized section list).
     while let Some((y, exp)) = expected_by_y.pop_first() {
         match actual_by_y.remove(&y) {
             Some(act) if exp != act => {
@@ -151,6 +148,28 @@ pub fn surface_divergences(
         ));
     }
     out
+}
+
+/// Index a surface by section Y, panicking on a duplicate Y instead of silently
+/// dropping a section's divergence (which would turn a real mismatch into a
+/// false PASS).
+fn collect_by_y<'a>(
+    sections: &'a [SavedLightSection],
+    which: &str,
+) -> std::collections::BTreeMap<i32, &'a SavedLightSection> {
+    let mut by_y: std::collections::BTreeMap<i32, &'a SavedLightSection> =
+        std::collections::BTreeMap::new();
+    for s in sections {
+        if by_y.insert(s.y, s).is_some() {
+            panic!(
+                "surface_divergences: duplicate section y={} in the {which} surface \
+                 (each section Y must appear at most once; a duplicate would silently \
+                 drop a divergence)",
+                s.y
+            );
+        }
+    }
+    by_y
 }
 
 // The spike tests live in `spike_229` (issue #229); `light_save_surface` is the
@@ -326,7 +345,15 @@ mod tests {
         sections
             .iter()
             .map(|s| {
-                let y = s.get("sectionY").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let y = s
+                    .get("sectionY")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "light-full.json: {dim} section entry is missing a valid `sectionY` \
+                             (a lost key must fail loudly, not silently collapse onto y=0)"
+                        )
+                    }) as i32;
                 let block_state = s
                     .get("blocklight_state")
                     .and_then(|v| v.as_i64())
@@ -545,5 +572,38 @@ mod tests {
             divergences[0].contains("section y=-4") && divergences[0].contains("expected present"),
             "y=-4 absence must be reported, not a shifted pair: {divergences:?}"
         );
+    }
+
+    /// Controlled negative: a duplicate section Y fails loudly instead of the
+    /// last-wins overwrite silently dropping a divergence (a false PASS).
+    #[test]
+    #[should_panic(expected = "duplicate section y=-4")]
+    fn spike_229_duplicate_section_y_panics() {
+        let section = |y: i32| SavedLightSection {
+            y,
+            block_state: 1,
+            block_light: None,
+            sky_state: 1,
+            sky_light: None,
+        };
+        let dup = vec![section(-4), section(-4)];
+        let single = vec![section(-4)];
+        let _ = surface_divergences(&dup, &single);
+    }
+
+    /// Controlled negative: a `light-full.json` section missing `sectionY` fails
+    /// loudly instead of silently collapsing onto y=0.
+    #[test]
+    #[should_panic(expected = "missing a valid `sectionY`")]
+    fn spike_229_json_surface_missing_section_y_panics() {
+        let light_full = serde_json::json!({
+            "chunks": [{
+                "dim": "overworld",
+                "sections": [{
+                    "blocklight_state": 1
+                }]
+            }]
+        });
+        let _ = json_surface(&light_full, "overworld");
     }
 }
