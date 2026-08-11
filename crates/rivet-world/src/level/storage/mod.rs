@@ -16,6 +16,7 @@ pub mod data_version;
 pub mod derived_level_data;
 pub mod level_data;
 pub mod level_version;
+pub mod primary_level_data;
 pub mod server_level_data;
 pub mod tag_value_input;
 pub mod tag_value_output;
@@ -32,6 +33,7 @@ pub use level_data::{
     respawn_data_map_codec,
 };
 pub use level_version::LevelVersion;
+pub use primary_level_data::{PAPER_RESPAWN_DIMENSION, PrimaryLevelData, SpecialWorldProperty};
 pub use server_level_data::ServerLevelData;
 pub use tag_value_input::TagValueInput;
 pub use tag_value_output::{SharedCompoundTag, TagValueOutput};
