@@ -40,7 +40,7 @@
 //!   it is still empty, so `tag.isEmpty() ? null : tag` yields null. That covers
 //!   the vast majority of types: all containers (chest, furnace, hopper,
 //!   dispenser, dropper, barrel, shulker box, brewing stand, smoker, blast
-//!   furnace, lectern, crafter, …) and the plain non-tag types (jukebox, piston,
+//!   furnace, lectern, crafter, …) and the plain non-tag types (jukebox,
 //!   enchanting table, end portal, daylight detector, comparator, command block,
 //!   bell, beehive, sculk sensors/catalyst/shrieker, chiseled bookshelf,
 //!   copper golem statue, potent sulfur). The serialized contents (items, loot
@@ -53,13 +53,13 @@
 //!   tag, including Paper's int variants and `Short.MAX_VALUE` clamps, then
 //!   drops `SpawnPotentials` exactly like `getUpdateTag`.
 //!
-//! Every type that DOES override `getUpdateTag` with a non-empty tag (sign,
-//! hanging_sign, banner, skull, beacon, conduit, structure block, end gateway,
-//! jigsaw, campfire, decorated pot, brushable block, creaking heart, shelf,
-//! trial spawner, vault, test block, test instance block) is refused loudly as
-//! [`BlockEntityMaterializeError::UnsupportedUpdateTag`] — the port never
-//! fabricates a client tag from a serialized payload whose live subclass is
-//! not ported. The refusal set is the exact pinned-Paper override set
+//! Every type that DOES override `getUpdateTag` with a non-empty tag (piston,
+//! sign, hanging_sign, banner, skull, beacon, conduit, structure block, end
+//! gateway, jigsaw, campfire, decorated pot, brushable block, creaking heart,
+//! shelf, trial spawner, vault, test block, test instance block) is refused
+//! loudly as [`BlockEntityMaterializeError::UnsupportedUpdateTag`] — the port
+//! never fabricates a client tag from a serialized payload whose live subclass
+//! is not ported. The refusal set is the exact pinned-Paper override set
 //! (minus mob_spawner, which is ported), so every other resolved type
 //! materializes the null tag Paper sends.
 //!
@@ -109,19 +109,21 @@ const SPAWNER_TYPE: &str = "minecraft:mob_spawner";
 /// inherits the base empty `getUpdateTag` and materializes a null tag, exactly
 /// like Paper's `tag.isEmpty() ? null : tag`.
 ///
-/// Derived from the pinned Paper 26.2 `world/level/block/entity` sources:
-/// `SignBlockEntity` (also inherited by `HangingSignBlockEntity`),
-/// `BannerBlockEntity`, `SkullBlockEntity`, `BeaconBlockEntity`,
-/// `ConduitBlockEntity`, `StructureBlockEntity`, `TheEndGatewayBlockEntity`,
-/// `JigsawBlockEntity`, `CampfireBlockEntity`, `DecoratedPotBlockEntity`,
-/// `BrushableBlockEntity`, `CreakingHeartBlockEntity`, `ShelfBlockEntity`,
+/// Derived from the pinned Paper 26.2 sources: `SignBlockEntity` (also
+/// inherited by `HangingSignBlockEntity`), `BannerBlockEntity`,
+/// `SkullBlockEntity`, `BeaconBlockEntity`, `ConduitBlockEntity`,
+/// `StructureBlockEntity`, `TheEndGatewayBlockEntity`, `JigsawBlockEntity`,
+/// `CampfireBlockEntity`, `DecoratedPotBlockEntity`, `BrushableBlockEntity`,
+/// `CreakingHeartBlockEntity`, `ShelfBlockEntity`,
 /// `TrialSpawnerBlockEntity`, `vault.VaultBlockEntity`, `TestBlockEntity`,
-/// `TestInstanceBlockEntity`.
+/// `TestInstanceBlockEntity`, and `PistonMovingBlockEntity`
+/// (`world/level/block/piston`, registered as `minecraft:piston`).
 ///
 /// RivetTodo(#520): re-audit this set when the generated registry is
 /// regenerated — a newly added type whose subclass overrides `getUpdateTag`
 /// must join this set to stay loud instead of silently sending a null tag.
 const UNSUPPORTED_UPDATE_TAG_TYPES: &[&str] = &[
+    "minecraft:piston",
     "minecraft:sign",
     "minecraft:hanging_sign",
     "minecraft:banner",
@@ -890,13 +892,51 @@ mod tests {
         assert_eq!(registry.get_id(info.entity_type()), 9);
     }
 
+    /// The independently-pinned Paper 26.2 `getUpdateTag`-override set (direct
+    /// or inherited), minus `mob_spawner` which the port reproduces. This is
+    /// written out from the Java source audit, NOT derived from the production
+    /// constant, so a misclassification in `UNSUPPORTED_UPDATE_TAG_TYPES` fails
+    /// this test instead of mirroring the bug.
+    const EXPECTED_UNSUPPORTED: &[&str] = &[
+        "minecraft:piston",
+        "minecraft:sign",
+        "minecraft:hanging_sign",
+        "minecraft:banner",
+        "minecraft:skull",
+        "minecraft:beacon",
+        "minecraft:conduit",
+        "minecraft:structure_block",
+        "minecraft:end_gateway",
+        "minecraft:jigsaw",
+        "minecraft:campfire",
+        "minecraft:decorated_pot",
+        "minecraft:brushable_block",
+        "minecraft:creaking_heart",
+        "minecraft:shelf",
+        "minecraft:trial_spawner",
+        "minecraft:vault",
+        "minecraft:test_block",
+        "minecraft:test_instance_block",
+    ];
+
+    #[test]
+    fn unsupported_update_tag_set_matches_the_pinned_paper_override_audit() {
+        // The production constant must exactly match the independently-pinned
+        // Java audit set (the constant's order is canonical by registry id).
+        let mut constant = UNSUPPORTED_UPDATE_TAG_TYPES.to_vec();
+        constant.sort_unstable();
+        let mut expected = EXPECTED_UNSUPPORTED.to_vec();
+        expected.sort_unstable();
+        assert_eq!(constant, expected);
+    }
+
     #[test]
     fn every_generated_type_is_classified_faithfully() {
         // Pin the Paper-faithful classification across the whole generated
         // registry: mob_spawner is ported, the getUpdateTag-overriding set is
         // refused loudly, and every other type materializes the base null tag.
-        // This guards the UNSUPPORTED_UPDATE_TAG_TYPES set against a silent
-        // misclassification when the registry regenerates.
+        // The refusal set is checked against the independently-pinned
+        // EXPECTED_UNSUPPORTED audit, not the production constant.
         let access = BlockEntityType::built_in_registry_access();
         let registry = access.lookup(&BLOCK_ENTITY_TYPE).unwrap();
         let mut unsupported_seen = Vec::new();
@@ -909,7 +949,7 @@ mod tests {
                 let info = result.expect("mob_spawner materializes");
                 assert_eq!(registry.get_id(info.entity_type()), id as i32);
                 assert!(info.tag().is_some(), "mob_spawner sends its ported tag");
-            } else if UNSUPPORTED_UPDATE_TAG_TYPES.contains(name) {
+            } else if EXPECTED_UNSUPPORTED.contains(name) {
                 assert!(
                     matches!(
                         result,
@@ -924,7 +964,7 @@ mod tests {
                 null_seen.push(*name);
             }
         }
-        assert_eq!(unsupported_seen.len(), UNSUPPORTED_UPDATE_TAG_TYPES.len());
+        assert_eq!(unsupported_seen.len(), EXPECTED_UNSUPPORTED.len());
         assert!(!null_seen.is_empty());
         assert_eq!(
             null_seen.len() + unsupported_seen.len() + 1,
