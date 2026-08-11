@@ -18,16 +18,14 @@
 //! This module owns none of those files (they are active slices in other
 //! worktrees/PRs); it composes them. It deliberately does not add generation,
 //! fallback, writes, repair, chunk scheduling, or server boot composition —
-//! the caller owns those. Structures stay an explicit #369 boundary; live block
-//! entities stay an explicit #341 boundary. Ticks are decoded through the
-//! merged `SavedTick` value layer (#370/#381), but stay deferred: a FULL chunk
-//! carrying a decoded non-empty in-chunk `block_ticks`/`fluid_ticks` list is a
-//! typed `UnsupportedTicks` error — nothing is installed and nothing is
-//! silently dropped. The raw lists are still carried on the result, preserved
-//! for the tick-execution slice (`LevelChunkTicks`/`ProtoChunkTicks`) to
-//! consume once an installer lands; on the current success path they are empty
-//! unless the per-chunk filter dropped the stored ticks or an element failed
-//! to decode.
+//! the caller owns those. Live block entities stay an explicit #341 boundary.
+//!
+//! Ticks are decoded through the merged `SavedTick` value layer (#370/#381).
+//! A FULL chunk carrying a decoded in-chunk `block_ticks`/`fluid_ticks` list
+//! reconstructs and carries the typed stored ticks on the result (plus the raw
+//! lists); nothing is installed into a runtime container, scheduled, or
+//! executed — the `LevelChunkTicks`/`ProtoChunkTicks` execution containers
+//! stay deferred with the tick-execution slice.
 //!
 //! ## Block entities on the FULL path
 //!
@@ -38,18 +36,23 @@
 //! materializing. That is Paper-faithful for the `keepPacked` branch and an
 //! honest, typed boundary for the unpacked branch: the raw tags are retained
 //! exactly, in source order, so a future #341 materialization pass can consume
-//! them. This is deliberately NOT `UnsupportedBlockEntities` — the clean FULL
-//! fixture carries no block entities, and a chunk that does is still fully
-//! reconstructable up to that deferred surface.
+//! them. The registry-grounded type outcomes are computed on this path
+//! ([`SerializedBlockEntityOutcome`]), mirroring Paper's `postLoadChunk`
+//! keepPacked/unpacked split: `keepPacked` entries stay pending, unpacked
+//! entries resolve their `BlockEntityType` through the built-in registry.
 //!
-//! ## Structure key
+//! ## Structure references
 //!
-//! Rivet has no `Structure` type (#369), so the chunk is instantiated with the
-//! unit structure key `()`. A FULL chunk whose `structures` starts/References
-//! are non-empty surfaces the existing `UnsupportedStructures` typed boundary
-//! from `SerializableChunkDataError`; an empty `structures` compound carries
-//! nothing.
+//! Rivet has no `Structure`/`StructureStart` type yet (#369), so the chunk is
+//! keyed by the structure `Identifier` and only `structures.References` is
+//! installed: the references decode into [`StructureReference`]s at parse,
+//! are filtered by the >8-chunk chessboard rule against the requested position
+//! at reconstruction (Paper's `unpackStructureReferences`), and are installed
+//! into the chunk's `StructureAccess` map plus carried on the result. Non-empty
+//! `starts` still surfaces the `UnsupportedStructures` typed boundary (the
+//! `StructureStart` load path is not ported).
 
+use crate::block::Block;
 use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::storage::section_reconstruction::{
@@ -57,15 +60,19 @@ use crate::chunk::storage::section_reconstruction::{
     current_version_container_factory, reconstruct_sections,
 };
 use crate::chunk::storage::serializable_chunk_data::{
-    ChunkParseDiagnostic, SerializableChunkData, SerializableChunkDataError,
-    reconstruct_heightmaps, reconstruct_lights,
+    BlockEntityChunkKind, ChunkParseDiagnostic, SerializableChunkData, SerializableChunkDataError,
+    SerializedBlockEntityOutcome, StructureReference, filter_structure_references,
+    reconstruct_block_entities, reconstruct_heightmaps, reconstruct_lights,
 };
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
 use crate::levelgen::heightmap::StateFlags;
+use crate::ticks::SavedTick;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::list_tag::ListTag;
+use rivet_registry::Identifier;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::ChunkPos;
+use rivet_registry::fluid_id::FluidId;
 
 /// The canonical behavior predicates for the generated `BlockState` value.
 ///
@@ -115,11 +122,12 @@ pub fn resolve_state_flags(state: &BlockState) -> StateFlags {
 
 /// A FULL-status chunk reconstructed into an owned runtime `LevelChunk`.
 ///
-/// The structure key `S` is the caller's structure type; this slice instantiates
-/// the chunk with the unit key `()` (no `Structure` type yet, #369) so a
-/// structure-bearing chunk fails at the typed `UnsupportedStructures` boundary
-/// instead of fabricating starts.
-pub type ReconstructedLevelChunk = LevelChunk<BlockState, BiomeId, ()>;
+/// The structure key `S` is the structure `Identifier` (the registry key the
+/// `structures.References` map is keyed by, #369). Rivet has no `Structure`
+/// value type yet, so the chunk holds the reference map keyed by identifier and
+/// `starts` remain an `UnsupportedStructures` boundary rather than fabricating
+/// starts.
+pub type ReconstructedLevelChunk = LevelChunk<BlockState, BiomeId, Identifier>;
 
 /// The products of the reconstruction, mirroring `SerializableChunkData.read`'s
 /// LEVELCHUNK branch plus the retained deferred surfaces.
@@ -135,19 +143,34 @@ pub struct ChunkReconstruction {
     /// diagnostic, mirroring `SerializableChunkData::construct_full` (Paper's
     /// `reportMisplacedChunk` — the chunk is relocated, never rejected).
     pub parse_diagnostics: Vec<ChunkParseDiagnostic>,
-    /// The raw `block_ticks` list as it appeared on the wire. Non-empty stored
-    /// ticks are rejected by `validate_full_capabilities` (tick installation is
-    /// deferred to the `LevelChunkTicks`/`ProtoChunkTicks` execution slice), so
-    /// on the success path this is empty except when a hostile-garbage list
-    /// decodes to zero surviving ticks — the field exists so the future
-    /// installer can consume the raw wire form without rework.
+    /// The raw `block_ticks` list as it appeared on the wire, preserved for the
+    /// future tick installer to consume without rework.
     pub raw_block_ticks: ListTag,
     /// The raw `fluid_ticks` list as it appeared on the wire. See
-    /// [`Self::raw_block_ticks`] for the deferral semantics.
+    /// [`Self::raw_block_ticks`].
     pub raw_fluid_ticks: ListTag,
+    /// The typed, per-chunk-filtered stored block ticks (`ChunkAccess.PackedTicks
+    /// .blocks()`), faithfully decoded through `SavedTick.codec(...).listOf()`.
+    /// Carried on the result — nothing schedules, executes, installs, or writes
+    /// them (#370 defers the `LevelChunkTicks`/`ProtoChunkTicks` containers).
+    pub stored_block_ticks: Vec<SavedTick<Block>>,
+    /// The typed, per-chunk-filtered stored fluid ticks (`ChunkAccess.PackedTicks
+    /// .fluids()`). Same carry semantics as [`Self::stored_block_ticks`].
+    pub stored_fluid_ticks: Vec<SavedTick<FluidId>>,
     /// The serialized block-entity compounds, retained in source order for the
     /// #341 materialization pass.
     pub block_entities: Vec<CompoundTag>,
+    /// The registry-grounded outcomes for the serialized block entities, in
+    /// source order: unpacked entries resolve their `BlockEntityType` through
+    /// the built-in registry (Paper's `postLoadChunk` unpacked branch),
+    /// `keepPacked`/proto entries stay pending, and invalid ids surface as
+    /// typed entry-local failures — nothing is materialized (#341).
+    pub block_entity_outcomes: Vec<SerializedBlockEntityOutcome>,
+    /// The decoded `structures.References` entries after the >8-chunk
+    /// chessboard-distance filter, in key-insertion order. These are also
+    /// installed into the chunk's `StructureAccess` reference map (keyed by the
+    /// structure `Identifier`); the field is the caller's observable carry.
+    pub structures_references: Vec<StructureReference>,
 }
 
 /// Why a chunk is not reconstructable into an owned runtime `LevelChunk`.
@@ -283,11 +306,22 @@ pub fn reconstruct_runtime_chunk(
         has_sky_light,
         &light_data,
     );
+    // `structures.References` are filtered against the requested position
+    // (Paper's `unpackStructureReferences` distance rule) and installed into
+    // the chunk's reference map; the filtered entries are also carried.
+    let (structures_references, structure_diagnostics) =
+        filter_structure_references(data.structures_references(), &requested_pos);
+    install_structure_references(&mut chunk, &structures_references);
+
     // Move the serialized block entities out of the parse result once: the
     // chunk's pending map and the returned field both need them, so clone only
     // into the chunk map and move the owned list into the result.
     let block_entities = data.take_block_entities();
     install_pending_block_entities(&mut chunk, &block_entities);
+    // The registry-grounded type outcomes mirror Paper's `postLoadChunk`
+    // keepPacked/unpacked split (entry-local invalid-id failures included).
+    let block_entity_outcomes =
+        reconstruct_block_entities(&requested_pos, &block_entities, BlockEntityChunkKind::Level);
 
     let mut parse_diagnostics = data.diagnostics().to_vec();
     if requested_pos != data.stored_pos() {
@@ -296,6 +330,7 @@ pub fn reconstruct_runtime_chunk(
             requested: requested_pos,
         });
     }
+    parse_diagnostics.extend(structure_diagnostics);
 
     Ok(ChunkReconstruction {
         chunk,
@@ -303,7 +338,11 @@ pub fn reconstruct_runtime_chunk(
         parse_diagnostics,
         raw_block_ticks: data.raw_block_ticks().clone(),
         raw_fluid_ticks: data.raw_fluid_ticks().clone(),
+        stored_block_ticks: data.stored_block_ticks().to_vec(),
+        stored_fluid_ticks: data.stored_fluid_ticks().to_vec(),
         block_entities,
+        block_entity_outcomes,
+        structures_references,
     })
 }
 
@@ -375,6 +414,32 @@ fn install_pending_block_entities(
     }
 }
 
+/// Install the filtered `structures.References` into the chunk's
+/// `StructureAccess` reference map, keyed by the structure `Identifier`
+/// (Paper's `chunk.setAllReferences(unpackStructureReferences(...))`). The
+/// `markUnsaved` side effect is omitted with the chunk dirty-tracking unit.
+fn install_structure_references(
+    chunk: &mut ReconstructedLevelChunk,
+    references: &[StructureReference],
+) {
+    if references.is_empty() {
+        return;
+    }
+    let mut data = std::collections::HashMap::with_capacity(references.len());
+    for entry in references {
+        // The `StructureAccess` reference map models the packed longs as their
+        // raw `u64` bit patterns (`IndexSet<u64>`); the parsed NBT carries the
+        // signed `i64` wire form, so the cast is the install-boundary only.
+        let packed: Vec<u64> = entry
+            .references
+            .iter()
+            .map(|reference| *reference as u64)
+            .collect();
+        data.insert(entry.identifier.clone(), packed);
+    }
+    chunk.set_all_references(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +467,23 @@ mod tests {
     fn parse_fixture(dimension: &str, min_y: i32, height: i32) -> SerializableChunkData {
         let root = fixture(dimension);
         SerializableChunkData::parse(height_accessor::create(min_y, height), &root)
+            .expect("fixture parses")
+            .expect("fixture has a Status")
+    }
+
+    /// A radius-1 loaded-world auxiliary-data fixture (issue #371).
+    fn loaded_world_fixture(name: &str) -> CompoundTag {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rivet-oracle/fixtures/loaded-world/chunk")
+            .join(name);
+        let bytes = std::fs::read(path).expect("Paper 26.2 loaded-world chunk fixture");
+        let mut input = DataInputStream::new(Cursor::new(bytes));
+        nbt_io::read(&mut input, &mut NbtAccounter::unlimited_heap()).expect("valid fixture")
+    }
+
+    fn parse_loaded_world(name: &str) -> SerializableChunkData {
+        let root = loaded_world_fixture(name);
+        SerializableChunkData::parse(height_accessor::create(-64, 384), &root)
             .expect("fixture parses")
             .expect("fixture has a Status")
     }
@@ -531,21 +613,125 @@ mod tests {
     }
 
     #[test]
-    fn nether_full_fixture_carries_lava_ticks_as_typed_boundary() {
+    fn nether_full_fixture_reconstructs_carrying_lava_ticks() {
+        // The nether 0.0 fixture carries 13 real lava `fluid_ticks`; the FULL
+        // chunk reconstructs and carries the typed stored ticks on the result
+        // (plus the raw list). Nothing schedules or executes them — the
+        // `LevelChunkTicks`/`ProtoChunkTicks` containers stay deferred (#370).
         let data = parse_fixture("the_nether", 0, 256);
-        // The nether 0.0 fixture carries real lava `fluid_ticks`, which stay
-        // behind the tick-execution installer — a typed, honest error, not a
-        // silent drop.
-        let error =
+        let reconstructed =
             reconstruct_runtime_chunk(ChunkPos::ZERO, data, height_accessor::create(0, 256), false)
-                .err()
-                .expect("nether fixture carries ticks");
-        assert!(matches!(
-            error,
-            ChunkReconstructionError::Serializable(SerializableChunkDataError::UnsupportedTicks {
-                field: "fluid_ticks"
-            })
-        ));
+                .expect("nether FULL fixture reconstructs");
+        assert_eq!(reconstructed.stored_fluid_ticks.len(), 13);
+        assert!(reconstructed.stored_block_ticks.is_empty());
+        // The raw wire list is preserved for a future installer.
+        assert_eq!(reconstructed.raw_fluid_ticks.list.len(), 13);
+        assert!(reconstructed.raw_block_ticks.list.is_empty());
+    }
+
+    #[test]
+    fn mineshaft_fixture_reconstructs_installing_ordered_references() {
+        // The radius-1 loaded-world `0.-4.nbt` fixture carries a single
+        // `structures.References` entry (mineshaft -> chunk (5,-6), distance 5).
+        // The FULL chunk reconstructs, the reference is filtered in-range and
+        // installed into the chunk's `StructureAccess` map (keyed by the
+        // structure `Identifier`), and the filtered entry is carried on the
+        // result.
+        let data = parse_loaded_world("0.-4.nbt");
+        let reconstructed = reconstruct_runtime_chunk(
+            ChunkPos::new(0, -4),
+            data,
+            height_accessor::create(-64, 384),
+            true,
+        )
+        .expect("mineshaft FULL fixture reconstructs");
+
+        assert_eq!(reconstructed.structures_references.len(), 1);
+        let entry = &reconstructed.structures_references[0];
+        assert_eq!(entry.identifier.namespace(), "minecraft");
+        assert_eq!(entry.identifier.path(), "mineshaft");
+        assert_eq!(entry.references, vec![-25769803771]);
+        assert!(reconstructed.parse_diagnostics.is_empty());
+
+        let installed = reconstructed.chunk.get_all_references();
+        let mine = installed.get(&entry.identifier).expect("installed refs");
+        assert_eq!(
+            mine.iter().copied().collect::<Vec<_>>(),
+            vec![-25769803771i64 as u64]
+        );
+    }
+
+    #[test]
+    fn block_tick_fixture_reconstructs_carrying_stored_tick() {
+        // The radius-1 loaded-world `-17.-19.nbt` fixture carries one sand
+        // `block_ticks` entry. The FULL chunk reconstructs carrying the typed
+        // stored tick and the raw list; nothing schedules or executes it (#370).
+        let data = parse_loaded_world("-17.-19.nbt");
+        let reconstructed = reconstruct_runtime_chunk(
+            ChunkPos::new(-17, -19),
+            data,
+            height_accessor::create(-64, 384),
+            true,
+        )
+        .expect("block-tick FULL fixture reconstructs");
+        assert_eq!(reconstructed.stored_block_ticks.len(), 1);
+        assert_eq!(
+            reconstructed.stored_block_ticks[0].r#type.name(),
+            "minecraft:sand"
+        );
+        assert!(reconstructed.stored_fluid_ticks.is_empty());
+        assert_eq!(reconstructed.raw_block_ticks.list.len(), 1);
+        assert!(reconstructed.raw_fluid_ticks.list.is_empty());
+    }
+
+    #[test]
+    fn fluid_tick_fixture_reconstructs_carrying_stored_tick() {
+        // The radius-1 loaded-world `-2.-2.nbt` fixture carries one water
+        // `fluid_ticks` entry; the FULL chunk reconstructs carrying it.
+        let data = parse_loaded_world("-2.-2.nbt");
+        let reconstructed = reconstruct_runtime_chunk(
+            ChunkPos::new(-2, -2),
+            data,
+            height_accessor::create(-64, 384),
+            true,
+        )
+        .expect("fluid-tick FULL fixture reconstructs");
+        assert_eq!(reconstructed.stored_fluid_ticks.len(), 1);
+        assert_eq!(reconstructed.stored_fluid_ticks[0].r#type, FluidId::WATER);
+        assert!(reconstructed.stored_block_ticks.is_empty());
+        assert_eq!(reconstructed.raw_fluid_ticks.list.len(), 1);
+    }
+
+    #[test]
+    fn chest_fixture_reconstructs_carrying_pending_block_entity() {
+        // The radius-1 loaded-world `-19.-21.nbt` fixture carries one unpacked
+        // chest. The FULL chunk reconstructs, resolves the type registry-grounded
+        // (`minecraft:chest`), installs the tag as pending NBT (the #341 carry
+        // boundary), and carries both the raw tag and the outcome.
+        let data = parse_loaded_world("-19.-21.nbt");
+        let reconstructed = reconstruct_runtime_chunk(
+            ChunkPos::new(-19, -21),
+            data,
+            height_accessor::create(-64, 384),
+            true,
+        )
+        .expect("chest FULL fixture reconstructs");
+        assert_eq!(reconstructed.block_entities.len(), 1);
+        assert_eq!(
+            reconstructed.block_entities[0]
+                .get_string("id")
+                .map(String::as_str),
+            Some("minecraft:chest")
+        );
+        assert_eq!(reconstructed.block_entity_outcomes.len(), 1);
+        let SerializedBlockEntityOutcome::ResolvedUnpacked(entry) =
+            &reconstructed.block_entity_outcomes[0]
+        else {
+            panic!("fixture chest was not resolved");
+        };
+        assert_eq!(entry.source_index, 0);
+        assert_eq!(entry.position, BlockPos::new(-299, -51, -321));
+        assert_eq!(entry.entity_type.name(), "minecraft:chest");
     }
 
     #[test]
