@@ -563,6 +563,13 @@ impl SerializableChunkData {
     pub fn structure_data(&self) -> &CompoundTag {
         &self.structure_data
     }
+    /// Whether the chunk carries `structures.starts` entries — the one
+    /// structures surface the #369 full-chunk construction cannot yet carry.
+    /// References-only and empty structures containers decode into carried
+    /// [`StructureReference`]s and construct fine (#519).
+    pub fn has_unsupported_structure_starts(&self) -> bool {
+        structures_starts_are_non_empty(&self.structure_data)
+    }
     /// The decoded `structures.References` entries, in deterministic
     /// key-insertion order (a stable carry, not a Paper-observable order). The
     /// chunk position is not consulted until reconstruction (the >8-chunk
@@ -670,7 +677,7 @@ impl SerializableChunkData {
         // and no longer blocks construction. Non-empty `starts` remains an
         // unsupported surface (the `StructureStart` load path is not ported),
         // so a starts-bearing structures compound still fails here.
-        if structures_starts_are_non_empty(&self.structure_data) {
+        if self.has_unsupported_structure_starts() {
             return Err(SerializableChunkDataError::UnsupportedStructures);
         }
         if let Some(index) =
