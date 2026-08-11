@@ -8,11 +8,10 @@
 //! Java models the anchor as an interface with three record implementors
 //! (`Absolute(y)`, `AboveBottom(offset)`, `BelowTop(offset)`) plus the
 //! `BOTTOM`/`TOP` singletons (`aboveBottom(0)`/`belowTop(0)`). The port keeps
-//! the same discriminated-union shape: `VerticalAnchor` is a struct holding
-//! the variant enum, mirroring Java's sealed surface. `resolveY` dispatches on
-//! the variant, so the `VerticalAnchor` value is the single field of the struct
-//! — matching how the codebase ports sealed Java interfaces as a tagged
-//! struct (`GenerationStep`, etc.).
+//! the same discriminated-union shape: `VerticalAnchor` is a single enum over
+//! the three variants, mirroring Java's sealed surface (the same shape the
+//! codebase uses for sealed Java interfaces like `GenerationStep.Decoration`).
+//! `resolveY` dispatches on the variant.
 //!
 //! ## Codec shape (xor/dispatch)
 //!
