@@ -133,7 +133,7 @@ use std::fs;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, ExitStatus, Stdio};
 
 use serde_json::{Value, json};
 
@@ -2792,10 +2792,11 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
 ///   transcript boundary. The walk is recorded as `before`/`after` position
 ///   evidence; the per-coordinate grid is the load-bearing content check.
 /// - The sampled surface/bedrock/below_feet block names must match the
-///   ground-truth manifest at the same coordinates. A server that merely
-///   echoes repeated superflat bytes cannot match a genuine terrain chunk's
-///   distinct block set (verified: all 1369 FULL chunks in the copied world
-///   have unique content signatures).
+///   ground-truth manifest at the same coordinates. The manifest records the
+///   read-only world's per-coordinate content, so a server that serves a
+///   different world — e.g. echoing repeated superflat bytes for every chunk —
+///   fails the comparison at the first sampled coordinate whose content differs
+///   from ground truth.
 /// - The disposable copy must be byte-for-byte unchanged after the run (the
 ///   server must not mutate the loaded world), and the source world must be
 ///   untouched.
@@ -2803,7 +2804,7 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
 /// The source is the safe copied world under `working/client-worlds/New World`
 /// (or `RIVET_WORLD_SRC`); the launcher save is never defaulted to or
 /// inspected. A chunk whose ground-truth status is not `minecraft:full`, or
-/// that carries an uncarried #369 capability flag, is honestly classified
+/// that carries an uncarried #519 capability flag, is honestly classified
 /// UNVERIFIED (exit 3) rather than misreported — never a fabricated PASS.
 fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
@@ -2870,39 +2871,68 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
             Err(error) => return Err(classify_load_world_boot_failure(error, &log_path)),
         };
 
-        // Drive the real Azalea client in loaded mode against the booted server.
-        let client_run = run_client(
-            &client_bin,
-            &ClientSpec {
-                address: base.to_string(),
-                username: args.username.clone(),
-                timeout_seconds: args.timeout_seconds,
-                dwell_seconds: 0,
-                mode: "loaded".to_owned(),
-            },
-            &work,
-            "loaded-client",
-        )?;
+        // The post-boot acceptance body. It never shuts `srv` down; the wrapper
+        // below always does, so a failure here (client run, transcript, content
+        // mismatch) cannot drop the booted server (SIGKILL) and race the
+        // disposable-copy cleanup.
+        let body = (|| -> Result<(), RunnerError> {
+            // Drive the real Azalea client in loaded mode against the booted
+            // server.
+            let client_run = run_client(
+                &client_bin,
+                &ClientSpec {
+                    address: base.to_string(),
+                    username: args.username.clone(),
+                    timeout_seconds: args.timeout_seconds,
+                    dwell_seconds: 0,
+                    mode: "loaded".to_owned(),
+                },
+                &work,
+                "loaded-client",
+            )?;
 
-        server::shutdown(&mut srv)?;
+            // Prove the client genuinely reached the Rivet port (the server's
+            // `connection established` line). The client run above completed, so
+            // the connection line is already in the log.
+            verify_rivet_connection(&log_path)?;
 
-        // Prove the client genuinely reached the Rivet port.
-        verify_rivet_connection(&log_path)?;
+            // The client transcript must prove it joined, spawned, and sampled
+            // genuine per-coordinate content.
+            let transcript = transcript::normalize_loaded(&client_run.stdout_text)
+                .map_err(RunnerError::Transcript)?;
+            let boundary =
+                transcript::rivet_loaded_verdict(&transcript).map_err(RunnerError::Transcript)?;
 
-        // The client transcript must prove it joined, spawned, and sampled
-        // genuine per-coordinate content.
-        let transcript = transcript::normalize_loaded(&client_run.stdout_text)
-            .map_err(RunnerError::Transcript)?;
-        let boundary =
-            transcript::rivet_loaded_verdict(&transcript).map_err(RunnerError::Transcript)?;
+            // Compare the client's observed block content against the
+            // ground-truth manifest. This is the load-bearing comparison: a
+            // server that only echoes repeated superflat bytes fails here.
+            compare_loaded_content(&manifest, &transcript)?;
 
-        // Compare the client's observed block content against the ground-truth
-        // manifest. This is the load-bearing comparison: a server that only
-        // echoes repeated superflat bytes fails here.
-        compare_loaded_content(&manifest, &transcript)?;
+            println!("\nLoaded-world acceptance boundary reached: {boundary}");
+            Ok(())
+        })();
 
-        println!("\nLoaded-world acceptance boundary reached: {boundary}");
-        Ok(())
+        // A booted server must always be shut down cleanly before the
+        // disposable-copy cleanup below runs. On the error path the body above
+        // returned before any shutdown, and dropping `srv` would SIGKILL the
+        // child — a live server racing the copy cleanup and holding the port.
+        // `server::shutdown` is a no-op on a stopped child, so this is safe on
+        // both the success path (the body never shuts down) and every error
+        // path. A shutdown failure is surfaced only when the acceptance
+        // otherwise succeeded, so an original acceptance error is never masked.
+        let shutdown_result = server::shutdown(&mut srv);
+        match body {
+            Err(e) => {
+                if let Err(shutdown_err) = shutdown_result {
+                    eprintln!(
+                        "    warning: clean shutdown after a failed loaded-world run also \
+                         errored: {shutdown_err}"
+                    );
+                }
+                Err(e)
+            }
+            Ok(()) => shutdown_result.map_err(Into::into),
+        }
     })();
 
     // Run all safety checks even when the acceptance returns UNVERIFIED: an
@@ -2920,10 +2950,54 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
     result
 }
 
+/// Resolve the `rivet-oracle` binary: a sibling in the same target dir (the
+/// common `cargo build` layout), then an explicit `RIVET_ORACLE_BIN`, then the
+/// workspace `target/debug` default.
+fn oracle_binary() -> PathBuf {
+    let sibling = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("rivet-oracle")));
+    if let Some(p) = sibling
+        && p.is_file()
+    {
+        return p;
+    }
+    if let Ok(p) = std::env::var("RIVET_ORACLE_BIN") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return p;
+        }
+    }
+    crate_root().join("../../target/debug/rivet-oracle")
+}
+
+/// Map an `rivet-oracle extract-world` exit status onto the runner's error
+/// contract: a nonzero UNVERIFIED (3) from the oracle — a missing world
+/// layout — stays UNVERIFIED, while any other nonzero exit (a malformed CLI,
+/// an internal gate error, or a signal) is a hard Gate — never downgraded to
+/// UNVERIFIED.
+fn classify_extract_status(status: ExitStatus, out: &Path) -> Result<(), RunnerError> {
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(code) if code == EXIT_UNVERIFIED as i32 => Err(RunnerError::Unverified(format!(
+            "rivet-oracle extract-world is UNVERIFIED (exit {code}); see {}",
+            out.display()
+        ))),
+        Some(code) => Err(RunnerError::Gate(format!(
+            "rivet-oracle extract-world exited with {code}; see {}",
+            out.display()
+        ))),
+        None => Err(RunnerError::Gate(format!(
+            "rivet-oracle extract-world was terminated by a signal; see {}",
+            out.display()
+        ))),
+    }
+}
+
 /// Invoke `rivet-oracle extract-world <world> --to <json>` and parse the
 /// ground-truth manifest into a `serde_json::Value`.
 fn run_extract_world(world: &Path, work: &Path) -> Result<Value, RunnerError> {
-    let oracle_bin = crate_root().join("../../target/debug/rivet-oracle");
+    let oracle_bin = oracle_binary();
     let out = work.join("loaded-manifest.json");
     let status = Command::new(&oracle_bin)
         .args(["extract-world"])
@@ -2938,12 +3012,7 @@ fn run_extract_world(world: &Path, work: &Path) -> Result<Value, RunnerError> {
                 oracle_bin.display()
             ))
         })?;
-    if !status.success() {
-        return Err(RunnerError::Unverified(format!(
-            "rivet-oracle extract-world exited with {status}; see {}",
-            out.display()
-        )));
-    }
+    classify_extract_status(status, &out)?;
     let text = fs::read_to_string(&out)?;
     let manifest: Value = serde_json::from_str(&text).map_err(RunnerError::Json)?;
     let full_count = manifest["chunks"]
@@ -3018,13 +3087,23 @@ fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), Ru
                      server served a chunk outside the ground-truth world"
             ))
         })?;
+        // A fingerprint with no string `Status` is a malformed manifest: it
+        // must never default to minecraft:full (that would compare — and
+        // possibly PASS — a chunk whose ground-truth status is unknown). Refuse
+        // honestly as a gate error, the same classification as a missing chunks
+        // map.
+        let status = fingerprint["status"].as_str().ok_or_else(|| {
+            RunnerError::Gate(format!(
+                "loaded-world manifest chunk {key} has no string Status — refusing PASS on a \
+                 malformed manifest (never defaulting an unknown chunk to minecraft:full)"
+            ))
+        })?;
         // A non-FULL chunk's content is not ground truth: the extractor records
         // its (partial/empty) sections honestly, but the client would observe
         // real terrain there. Comparing against an all-air fingerprint would be
         // a misleading "content mismatch"; the honest classification is the
         // #369 capability boundary — UNVERIFIED until full-chunk construction
         // can carry it.
-        let status = fingerprint["status"].as_str().unwrap_or("minecraft:full");
         if status != "minecraft:full" {
             return Err(RunnerError::Unverified(format!(
                 "loaded-world sampled chunk {key} is {status} (not minecraft:full): the #369 \
@@ -3336,7 +3415,7 @@ mod tests {
     }
 
     /// A minimal ground-truth manifest whose FULL chunk carries the given
-    /// #369-uncarried capability flags.
+    /// #519-uncarried capability flags.
     fn manifest_with_flags(chunk_x: i32, chunk_z: i32, flags: &[&str]) -> Value {
         let mut m = manifest_with(
             chunk_x,
@@ -3352,17 +3431,17 @@ mod tests {
 
     #[test]
     fn compare_loaded_content_is_unverified_on_uncarried_capability_flags() {
-        // A FULL chunk that carries block entities/ticks/structures/entities is
-        // beyond the #369 full-construction capability boundary even though its
-        // status is minecraft:full. The runner must refuse PASS — comparing its
-        // content would trust a server that could not have served it
-        // faithfully.
-        let manifest = manifest_with_flags(0, 0, &["block_entities"]);
+        // A FULL chunk that carries an uncarried #519 surface (non-empty
+        // entities) is beyond the full-construction capability boundary even
+        // though its status is minecraft:full. The runner must refuse PASS —
+        // comparing its content would trust a server that could not have served
+        // it faithfully.
+        let manifest = manifest_with_flags(0, 0, &["entities"]);
         let transcript = loaded_transcript_with(matching_sample(0, 0));
         match compare_loaded_content(&manifest, &transcript) {
             Err(RunnerError::Unverified(message)) => {
                 assert!(
-                    message.contains("block_entities") && message.contains("refuses PASS"),
+                    message.contains("entities") && message.contains("refuses PASS"),
                     "must name the flag and the refusal, got {message}"
                 );
             }
@@ -3414,6 +3493,87 @@ mod tests {
                 );
             }
             other => panic!("expected an Unverified classification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_loaded_content_refuses_a_missing_status() {
+        // A fingerprint with no Status must never default to minecraft:full —
+        // that would compare (and possibly PASS) a chunk whose ground-truth
+        // status is unknown. The malformed-manifest contract refuses it as a
+        // Gate instead.
+        let mut manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        manifest["chunks"]["0,0"]
+            .as_object_mut()
+            .unwrap()
+            .remove("status");
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        match compare_loaded_content(&manifest, &transcript) {
+            Err(RunnerError::Gate(message)) => {
+                assert!(
+                    message.contains("Status") && message.contains("malformed"),
+                    "must name the missing Status and the malformed-manifest refusal, got {message}"
+                );
+            }
+            other => panic!("expected a Gate refusal for a missing Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_loaded_content_refuses_a_non_string_status() {
+        // A non-string Status is the same malformed manifest: refusing it
+        // honestly rather than defaulting to minecraft:full.
+        let mut manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        manifest["chunks"]["0,0"]["status"] = json!(42);
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        match compare_loaded_content(&manifest, &transcript) {
+            Err(RunnerError::Gate(message)) => {
+                assert!(
+                    message.contains("Status") && message.contains("malformed"),
+                    "must name the Status and the malformed-manifest refusal, got {message}"
+                );
+            }
+            other => panic!("expected a Gate refusal for a non-string Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_extract_status_maps_oracle_exit_codes() {
+        // A missing world layout surfaces as the oracle's UNVERIFIED (exit 3)
+        // and must stay UNVERIFIED; a FAIL/USAGE exit and a signal must be a
+        // hard Gate — never downgraded to a missing-prerequisite UNVERIFIED.
+        let ok = std::process::Command::new("true").status().unwrap();
+        assert!(classify_extract_status(ok, Path::new("/tmp/out.json")).is_ok());
+
+        let unverified = std::process::Command::new("sh")
+            .args(["-c", "exit 3"])
+            .status()
+            .unwrap();
+        match classify_extract_status(unverified, Path::new("/tmp/out.json")) {
+            Err(RunnerError::Unverified(message)) => {
+                assert!(message.contains("UNVERIFIED"), "got {message}");
+            }
+            other => panic!("expected Unverified for exit 3, got {other:?}"),
+        }
+
+        let fail = std::process::Command::new("false").status().unwrap();
+        match classify_extract_status(fail, Path::new("/tmp/out.json")) {
+            Err(RunnerError::Gate(message)) => {
+                assert!(message.contains("exited with 1"), "got {message}");
+            }
+            other => panic!("expected Gate for exit 1, got {other:?}"),
         }
     }
 

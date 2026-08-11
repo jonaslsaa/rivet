@@ -22,10 +22,13 @@
 //! `rivet-loaded-world` runner later compares against the official client's
 //! observed per-coordinate content, and what the negative controls tamper to
 //! prove the comparator is not vacuously green. The `distinct` set of block
-//! names across the sampled coordinates is what proves a world is not a
-//! superflat duplicate: a real terrain chunk has a different set of surface /
-//! bedrock / under-feet blocks than every other chunk, so a server serving
-//! identical bytes for every chunk cannot match it.
+//! names across the sampled coordinates is per-chunk evidence of block
+//! variety — a real chunk's columns carry more than one block type (surface,
+//! bedrock, under-feet), so a server serving a uniform floor or identical
+//! bytes for every chunk cannot reproduce the recorded per-coordinate content.
+//! It does not claim the set is unique per chunk; the per-coordinate
+//! `surface`/`bedrock`/`below_feet` arrays pin the content at the sampled
+//! points, and it is that comparison the runner actually enforces.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -69,9 +72,10 @@ pub struct ChunkFingerprint {
     pub status: String,
     /// The parsed `xPos`/`zPos`.
     pub stored_pos: [i32; 2],
-    /// Capability flags from `SerializableChunkData`: a chunk that #369 cannot
-    /// yet carry (structures/ticks/block entities) must be reported honestly,
-    /// so the runner refuses PASS rather than trusting an incomplete server.
+    /// Capability flags from `SerializableChunkData`: a chunk that the merged
+    /// #519 full-chunk construction boundary cannot yet carry (non-empty
+    /// `structures.starts`, non-empty entities) must be reported honestly, so
+    /// the runner refuses PASS rather than trusting an incomplete server.
     pub capability_flags: Vec<String>,
     /// The distinct block names across the sampled coordinates, sorted — the
     /// anti-superflat evidence.
@@ -192,16 +196,20 @@ pub fn extract_world(root: &Path) -> Result<WorldManifest, ExtractError> {
         Err(e) => return Err(ExtractError::Io(e)),
     };
 
-    let mut region_files: Vec<PathBuf> = entries
+    // Carry the parsed region coordinates alongside each path so the read loop
+    // never re-parses (and never has to unwrap a filtered parse).
+    let mut region_files: Vec<(PathBuf, ChunkPos)> = entries
         .into_iter()
         .filter_map(|entry| {
             let path = entry.path();
-            (path.extension().map(|e| e == "mca").unwrap_or(false)
-                && get_region_file_coordinates(&path).is_some())
-            .then_some(path)
+            if path.extension().map(|e| e == "mca").unwrap_or(false) {
+                get_region_file_coordinates(&path).map(|coords| (path, coords))
+            } else {
+                None
+            }
         })
         .collect();
-    region_files.sort();
+    region_files.sort_by(|a, b| a.0.cmp(&b.0));
     if region_files.is_empty() {
         return Err(ExtractError::Unverified(format!(
             "disposable world {} has no overworld region files under {}",
@@ -216,9 +224,7 @@ pub fn extract_world(root: &Path) -> Result<WorldManifest, ExtractError> {
     let factory = current_version_container_factory();
     let predicates = section_predicates();
 
-    for region_path in &region_files {
-        let region_coords = get_region_file_coordinates(region_path)
-            .expect("filtered region files have parseable coordinates");
+    for (region_path, region_coords) in &region_files {
         for local_x in 0..32i32 {
             for local_z in 0..32i32 {
                 let pos = ChunkPos::new(region_coords.x() + local_x, region_coords.z() + local_z);
@@ -324,21 +330,17 @@ fn fingerprint_chunk(
         }
     }
 
-    // Capability flags: report only what the merged slice can actually claim
-    // so a chunk that #369 cannot yet carry is recorded, never silently
-    // accepted. (`status` non-FULL is folded in by `capability_flags`.)
+    // Capability flags: report only what the merged #519 full-chunk
+    // construction boundary cannot yet carry, so a chunk beyond that boundary
+    // is recorded honestly, never silently accepted. (#519 constructs FULL
+    // chunks carrying block entities, stored block/fluid ticks, and
+    // `structures.References`; an empty or references-only structures compound
+    // is no longer a flag. The still-uncarried surfaces are non-empty
+    // `structures.starts` — the `StructureStart` load path is not ported —
+    // and non-empty entities.) `status` non-FULL is folded in separately.
     let mut flags = Vec::new();
-    if !data.block_entities().is_empty() {
-        flags.push("block_entities".to_owned());
-    }
-    if !data.structure_data().is_empty() {
+    if data.has_unsupported_structure_starts() {
         flags.push("structures".to_owned());
-    }
-    if !data.raw_block_ticks().is_empty() {
-        flags.push("block_ticks".to_owned());
-    }
-    if !data.raw_fluid_ticks().is_empty() {
-        flags.push("fluid_ticks".to_owned());
     }
     if !data.entities().is_empty() {
         flags.push("entities".to_owned());
@@ -367,6 +369,9 @@ fn fingerprint_chunk(
 #[cfg(test)]
 mod tests {
     use std::fs;
+
+    use rivet_nbt::compound_tag::CompoundTag;
+    use rivet_nbt::tag::Tag;
 
     use super::*;
 
@@ -537,5 +542,74 @@ mod tests {
         let mut out = Vec::new();
         nbt_io::write(&tag, &mut DataOutputStream::new(&mut out)).unwrap();
         out
+    }
+
+    /// Rewrite the fixture chunk's `structures` compound to `structures`
+    /// (preserving everything else) so a test can pin the #519 capability
+    /// boundary: an empty container and a References-only container must not be
+    /// flagged, while a non-empty `starts` compound must.
+    fn tamper_structures(original: &[u8], structures: CompoundTag) -> Vec<u8> {
+        use std::io::Cursor;
+
+        use rivet_nbt::nbt_io;
+        use rivet_util::data_io::{DataInputStream, DataOutputStream};
+
+        let mut input = DataInputStream::new(Cursor::new(original));
+        let mut tag = nbt_io::read_unlimited(&mut input).unwrap();
+        tag.put("structures".to_owned(), Tag::Compound(structures));
+        let mut out = Vec::new();
+        nbt_io::write(&tag, &mut DataOutputStream::new(&mut out)).unwrap();
+        out
+    }
+
+    fn fingerprint_flags(payload: &[u8]) -> Vec<String> {
+        let dir = world_with_chunk(ChunkPos::ZERO, payload);
+        let manifest = extract_world(dir.path()).unwrap();
+        manifest.chunks["0,0"].capability_flags.clone()
+    }
+
+    /// An empty `structures` compound is within the #519 boundary — nothing to
+    /// flag.
+    #[test]
+    fn fingerprint_does_not_flag_an_empty_structures_container() {
+        let flags = fingerprint_flags(&tamper_structures(PAPER_CHUNK_0_0, CompoundTag::new()));
+        assert!(
+            !flags.iter().any(|f| f == "structures"),
+            "an empty structures container must not be flagged, got {flags:?}"
+        );
+    }
+
+    /// A References-only structures compound (the normal FULL-chunk case:
+    /// `structures.References` decodes into carried `StructureReference`s) is
+    /// within the #519 boundary — not flagged merely because keys exist.
+    #[test]
+    fn fingerprint_does_not_flag_a_references_only_structures_container() {
+        let mut references = CompoundTag::new();
+        references.put_long_array("minecraft:mineshaft", vec![-25769803771]);
+        let mut structures = CompoundTag::new();
+        structures.put("References".into(), Tag::Compound(references));
+
+        let flags = fingerprint_flags(&tamper_structures(PAPER_CHUNK_0_0, structures));
+        assert!(
+            !flags.iter().any(|f| f == "structures"),
+            "references-only structures must not be flagged, got {flags:?}"
+        );
+    }
+
+    /// A non-empty `structures.starts` compound is the one structures surface
+    /// the #519 boundary cannot yet carry (the `StructureStart` load path is
+    /// not ported) — it must be flagged so the runner refuses PASS.
+    #[test]
+    fn fingerprint_flags_a_non_empty_structures_starts_container() {
+        let mut starts = CompoundTag::new();
+        starts.put_int("minecraft:village", 1);
+        let mut structures = CompoundTag::new();
+        structures.put("starts".into(), Tag::Compound(starts));
+
+        let flags = fingerprint_flags(&tamper_structures(PAPER_CHUNK_0_0, structures));
+        assert!(
+            flags.iter().any(|f| f == "structures"),
+            "non-empty structures.starts must be flagged, got {flags:?}"
+        );
     }
 }
