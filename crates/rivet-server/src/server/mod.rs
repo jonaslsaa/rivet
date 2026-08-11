@@ -18,6 +18,7 @@ pub mod teleport_ack;
 pub mod tick;
 
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,9 @@ pub struct ServerConfig {
     /// keepalive tests exercise the timeout window without a half-minute wait
     /// each (the 1s transmit cadence is never configurable, as in Java).
     pub keepalive_timeout: Duration,
+    /// Disposable world copy supplied by the load-world harness. `None` keeps
+    /// the deterministic no-level superflat boot path.
+    pub level_path: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -91,6 +95,7 @@ impl Default for ServerConfig {
             lifecycle_capacity: 256,
             enable_join: false,
             keepalive_timeout: Duration::from_secs(30),
+            level_path: None,
         }
     }
 }
@@ -110,6 +115,23 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
+        Self::try_new(config).expect(
+            "Server::new supports only the default no-level superflat boot; \
+             use Server::try_new when config.level_path is set",
+        )
+    }
+
+    /// Build the server, surfacing typed region-backed capability boundaries
+    /// before the binary announces readiness.
+    pub fn try_new(config: ServerConfig) -> Result<Self, level::RegionBackedBootError> {
+        // World selection is independent of whether the live join manager is
+        // installed. A requested disk level must never be silently ignored and
+        // replaced by superflat for a library caller with `enable_join=false`.
+        let region_level = config
+            .level_path
+            .as_deref()
+            .map(level::region_backed::boot_level)
+            .transpose()?;
         let config = Arc::new(config);
         let shutdown = Arc::new(Shutdown::new());
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(config.lifecycle_capacity);
@@ -122,17 +144,20 @@ impl Server {
         // the tick thread by `serve` (`std::mem::take`).
         if config.enable_join {
             let mut session = player::session::default_session_config(config.compression_threshold);
+            if let Some(level) = region_level {
+                session.level = level;
+            }
             session.keepalive_timeout_ns = config.keepalive_timeout.as_nanos() as i64;
             tickables.push(player::session::session_manager_tickable(session));
         }
-        Server {
+        Ok(Server {
             config,
             endpoint,
             shutdown,
             stats: Arc::new(TickStats::default()),
             tickables,
             lifecycle_rx: Some(lifecycle_rx),
-        }
+        })
     }
 
     /// Register a tickable that runs every tick on the tick thread. Tests use
