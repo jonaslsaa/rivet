@@ -710,6 +710,7 @@ dependencies = [
  "rivet-util",
  "rivet-world",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -739,8 +740,10 @@ name = "rivet-util"
 version = "0.1.0-dev+mc26.2"
 dependencies = [
  "crc32c",
+ "indexmap",
  "md5",
  "rivet-serialization",
+ "serde_json",
  "sha2",
 ]
 
@@ -754,6 +757,7 @@ dependencies = [
  "indexmap",
  "lz4_flex",
  "pcre2",
+ "rivet-core",
  "rivet-nbt",
  "rivet-protocol",
  "rivet-registry",
