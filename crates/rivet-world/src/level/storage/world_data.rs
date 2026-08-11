@@ -16,9 +16,8 @@
 //!     marker notes it.
 //!
 //! `getDataConfiguration`/`setDataConfiguration`/`getLevelSettings` and the
-//! `enabledFeatures` default land here with the #486 `WorldDataConfiguration`/
-//! `LevelSettings` values; `PrimaryLevelData` (the only implementor, #323)
-//! backs them from its `LevelSettings`.
+//! `enabledFeatures` default are present here (values from #486); the concrete
+//! `PrimaryLevelData` (#323) backs them from its `LevelSettings`.
 
 use rivet_registry::core::{Difficulty, GameType};
 use rivet_serialization::Lifecycle;
@@ -109,8 +108,6 @@ pub trait WorldData {
     /// `overworldData()`.
     fn overworld_data(&self) -> &dyn ServerLevelData;
 
-    // `getLevelSettings()` defers with the `LevelSettings` record
-    // (RivetTodo(#387), no declaration emitted).
     // `createTag(@Nullable UUID)` — the `PrimaryLevelData` write path — defers
     // with `CompoundTag` + worldgen settings (RivetTodo(#398), no declaration
     // emitted).

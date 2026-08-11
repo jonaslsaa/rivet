@@ -6,11 +6,15 @@
 //! codec wired on the `GlobalPos`/`BlockPos` map codecs.
 //!
 //! #398 trait surfaces: `WritableLevelData`, `ServerLevelData`, `WorldData`,
-//! and `DerivedLevelData` — the value/interface layer the concrete
-//! `PrimaryLevelData` (out of scope) implements. `LevelData` gains its
+//! and `DerivedLevelData` — the value/interface layer. `LevelData` gains its
 //! `fillCrashReportCategory` default and the `CrashReportCategory.formatLocation`
-//! helper (`#398`). `WorldDataConfiguration`/`LevelSettings`/`FeatureFlagSet`
-//! and `PrimaryLevelData.createTag` defer with sparse `RivetTodo` markers.
+//! helper (`#398`). `WorldData` carries the `WorldDataConfiguration`/
+//! `LevelSettings`/`FeatureFlagSet` surface (values from `#486`).
+//!
+//! #323 concrete data: `PrimaryLevelData` implements `ServerLevelData, WorldData`
+//! with the full `parse` orchestration, the `LevelVersion.ensure_compatible`
+//! no-migration version guard, and the crash-report composition. Its write path
+//! (`createTag`) defers with a sparse `RivetTodo` marker.
 
 pub mod data_version;
 pub mod derived_level_data;
