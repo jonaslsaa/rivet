@@ -284,13 +284,17 @@ fn tag_load_error(
     error: &dyn std::fmt::Display,
 ) -> io::Error {
     let report = CrashReport::for_throwable(error, "Loading NBT data");
-    let category = report.add_category("NBT Tag");
+    let mut category = report.add_category("NBT Tag");
     if let Some(name) = name {
         category.set_detail("Tag name", name);
     }
     match raw_id {
-        Some(id) => category.set_detail("Tag type", id),
-        None => category.set_detail("Tag type", tag_type.name()),
+        Some(id) => {
+            category.set_detail("Tag type", id);
+        }
+        None => {
+            category.set_detail("Tag type", tag_type.name());
+        }
     }
     io::Error::new(
         io::ErrorKind::InvalidData,
