@@ -38,6 +38,7 @@
 // recalc branches remain deferred. Codec coverage per DECISIONS.md D13: all
 // four registered read codecs are wired; deflate/lz4 writes stay deferred.
 
+pub mod block_entity_materialization;
 pub mod chunk_reconstruction;
 pub mod region_bitmap;
 pub mod region_file;
@@ -47,6 +48,7 @@ pub mod region_storage_info;
 pub mod section_reconstruction;
 pub mod serializable_chunk_data;
 
+pub use block_entity_materialization::{BlockEntityMaterializeError, materialize_block_entities};
 pub use chunk_reconstruction::{
     ChunkReconstruction, ChunkReconstructionError, ReconstructedLevelChunk,
     reconstruct_runtime_chunk,
