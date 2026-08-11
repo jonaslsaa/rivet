@@ -102,10 +102,14 @@ pub trait Type<Ops: DynamicOps + 'static>: Debug + Send + Sync {
         f_rule: &dyn PointFreeRule<Ops>,
     ) -> Option<RewriteResult<Ops>> {
         let ty = self.clone_ty();
-        rule.rewrite(ty.as_ref()).and_then(|r| {
-            r.view
-                .rewrite(f_rule)
-                .map(|view| RewriteResult::create(view, r.rec_data.clone()))
+        rule.rewrite(ty.as_ref()).map(|r| {
+            // Java's `fRule` (the optimization rule) returns `Optional.of`
+            // with the same reference when it changes nothing; the port encodes
+            // "unchanged" as `None`, so fall back to the original view
+            // (observably identical to Java, which never reaches an empty
+            // result here).
+            let view = r.view.rewrite(f_rule).unwrap_or_else(|| r.view.clone());
+            RewriteResult::create(view, r.rec_data.clone())
         })
     }
 

@@ -218,10 +218,18 @@ impl<Ops: DynamicOps + 'static> Debug for Many<Ops> {
 impl<Ops: DynamicOps + 'static> PointFreeRule<Ops> for Many<Ops> {
     fn rewrite(&self, expr: &dyn PointFreeCore<Ops>) -> Option<Arc<dyn PointFreeCore<Ops>>> {
         let mut result = expr.clone_core();
+        let mut changed = false;
         loop {
             match self.rule.rewrite(result.as_ref()) {
-                Some(new_result) => result = new_result,
-                None => return Some(result),
+                Some(new_result) => {
+                    result = new_result;
+                    changed = true;
+                }
+                // Java returns `Optional.of(result)` where `result` is the
+                // same reference when the rule never fired; the port encodes
+                // "unchanged" as `None` so callers like `Comp.all` do not
+                // report a spurious rewrite.
+                None => return if changed { Some(result) } else { None },
             }
         }
     }
@@ -247,10 +255,20 @@ impl<Ops: DynamicOps + 'static> Debug for Everywhere<Ops> {
 
 impl<Ops: DynamicOps + 'static> PointFreeRule<Ops> for Everywhere<Ops> {
     fn rewrite(&self, expr: &dyn PointFreeCore<Ops>) -> Option<Arc<dyn PointFreeCore<Ops>>> {
-        let top_down = self.top_down.rewrite_or_nop(expr);
-        let all = top_down.all(self).unwrap_or_else(|| top_down.clone());
-        let bottom_up = self.bottom_up.rewrite_or_nop(all.as_ref());
-        Some(bottom_up)
+        let top_down = self.top_down.rewrite(expr);
+        let top_down_arc = top_down.clone().unwrap_or_else(|| expr.clone_core());
+        let all = top_down_arc.all(self);
+        let all_arc = all.clone().unwrap_or_else(|| top_down_arc.clone());
+        let bottom_up = self.bottom_up.rewrite(all_arc.as_ref());
+        let bottom_up_arc = bottom_up.clone().unwrap_or_else(|| all_arc.clone());
+        // Java returns `Optional.of(bottomUp)` where each stage falls back to
+        // the same reference when unchanged; the port encodes "unchanged" as
+        // `None` (only a present result is a real change).
+        if top_down.is_some() || all.is_some() || bottom_up.is_some() {
+            Some(bottom_up_arc)
+        } else {
+            None
+        }
     }
 
     fn clone_rule(&self) -> Arc<dyn PointFreeRule<Ops>> {

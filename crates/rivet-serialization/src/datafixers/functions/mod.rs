@@ -424,3 +424,110 @@ impl<Ops: DynamicOps + 'static> Functions<Ops> {
         Arc::new(Comp::new(functions))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datafixers::functions::rule::{many as pf_many, nop as pf_nop, seq as pf_seq};
+    use crate::json_ops::JsonOps;
+
+    type Json = JsonOps;
+
+    fn typed_string() -> Arc<dyn Type<Json>> {
+        Arc::new(crate::datafixers::types::templates::PrimitiveType {
+            codec: crate::codec::string_codec::<Json>(),
+        })
+    }
+
+    fn string_primitive() -> Arc<dyn PointFreeFunc<Json>> {
+        Functions::id(typed_string())
+    }
+
+    fn comp_of_two() -> Arc<dyn PointFreeFunc<Json>> {
+        Functions::comp(string_primitive(), string_primitive())
+    }
+
+    #[test]
+    fn comp_all_reports_none_when_nop_rule_changes_nothing() {
+        // Java: `Comp.all(nop)` compares reference identity (`rewrite != expr`);
+        // nop returns the same reference, so no child changes and `all` returns
+        // the original — the port encodes "unchanged" as `None`.
+        let comp = comp_of_two();
+        let nop = pf_nop();
+        assert!(comp.as_core().all(nop.as_ref()).is_none());
+    }
+
+    #[test]
+    fn comp_one_reports_none_when_no_child_changed() {
+        let comp = comp_of_two();
+        let nop = pf_nop();
+        assert!(comp.as_core().one(nop.as_ref()).is_none());
+    }
+
+    #[test]
+    fn comp_all_sees_a_seq_of_nops_as_unchanged() {
+        // `Seq.rewrite` returns `None` when every rule left the node unchanged,
+        // so `Comp.all` must not report a rewrite either.
+        let comp = comp_of_two();
+        let seq = pf_seq(vec![pf_nop(), pf_nop()]);
+        assert!(comp.as_core().all(seq.as_ref()).is_none());
+    }
+
+    #[test]
+    fn many_reports_none_when_its_rule_never_changes() {
+        let expr = comp_of_two();
+        let many = pf_many(pf_nop());
+        assert!(many.rewrite(expr.as_core()).is_none());
+    }
+
+    #[test]
+    fn func_all_rewrites_children_and_detects_change() {
+        // A rule that (observably) replaces every child is a real change: `all`
+        // must report it as such. `ToId` returns a fresh `clone_core()` Arc for
+        // every child, which the port treats as a rewrite. Two `fun` children
+        // keep `Functions::comp` from collapsing the composition into one node.
+        let f1 = Functions::fun(
+            "f1".to_string(),
+            Arc::new(|_ops: &Json, value: &AnyValue| value.clone()),
+            typed_string(),
+            typed_string(),
+        );
+        let f2 = Functions::fun(
+            "f2".to_string(),
+            Arc::new(|_ops: &Json, value: &AnyValue| value.clone()),
+            typed_string(),
+            typed_string(),
+        );
+        let comp = Functions::comp(f1, f2);
+        let id_rule = {
+            struct ToId<Ops: DynamicOps + 'static>(std::marker::PhantomData<Ops>);
+            impl<Ops: DynamicOps + 'static> Debug for ToId<Ops> {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(f, "ToId")
+                }
+            }
+            impl<Ops: DynamicOps + 'static> PointFreeRule<Ops> for ToId<Ops> {
+                fn rewrite(
+                    &self,
+                    expr: &dyn PointFreeCore<Ops>,
+                ) -> Option<Arc<dyn PointFreeCore<Ops>>> {
+                    // Only rewrite FunctionWrapper nodes (not Ids or Comps).
+                    if expr
+                        .as_any()
+                        .downcast_ref::<FunctionWrapper<Ops>>()
+                        .is_some()
+                    {
+                        Some(expr.clone_core())
+                    } else {
+                        None
+                    }
+                }
+                fn clone_rule(&self) -> Arc<dyn PointFreeRule<Ops>> {
+                    Arc::new(ToId(std::marker::PhantomData))
+                }
+            }
+            Arc::new(ToId(std::marker::PhantomData)) as Arc<dyn PointFreeRule<Json>>
+        };
+        assert!(comp.as_core().all(id_rule.as_ref()).is_some());
+    }
+}
