@@ -310,7 +310,10 @@ impl<T: Clone> From<&SavedTick<T>> for UniqueTickKey<T> {
 
 impl<T: Hash> Hash for UniqueTickKey<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Java strategy form `31 * pos.hashCode() + type.hashCode()`.
+        // Java's strategy returns the literal int `31 * pos.hashCode() +
+        // type.hashCode()`; this Rust `Hasher` does not reproduce that
+        // integer. The set only needs equal keys to hash equal, so writing the
+        // `Vec3i.hashCode()` value then the type is sufficient (see the doc).
         self.pos.hash_code().hash(state);
         self.r#type.hash(state);
     }
@@ -426,23 +429,42 @@ impl<T> TickQueue<T> {
     /// `PriorityQueue.removeEq(Object)` — remove the first element equal to
     /// `tick`, restoring the heap. Java scans by identity (`==`); the port
     /// scans by five-field value equality, which is equivalent **only because
-    /// the heap can never hold two value-identical ticks** — the precondition
-    /// that makes the substitute sound:
+    /// no non-adversarial path leaves two value-identical ticks in the heap** —
+    /// the precondition that makes the substitute sound:
     ///
     /// - checked `schedule` deduplicates through the per-position set, so no
     ///   two scheduled ticks share a (type, pos);
     /// - `unpack` assigns strictly increasing `subTickOrder` per pending tick,
     ///   so two value-identical ticks cannot coexist on that path either.
     ///
-    /// Both hold today; if a future path could produce value-identical ticks,
-    /// this scan would need to match Java by identity instead.
+    /// The scan self-checks that precondition instead of trusting it: a value
+    /// match must be unique, because a second value-equal element would make
+    /// the scan diverge from Java's identity removal (Java picks whichever
+    /// object reference matches). The one adversarial exception: a pending list
+    /// holding the same (type, pos) twice survives `unpack` as two
+    /// subTickOrder-distinct ticks; `poll` then clears the per-position entry,
+    /// after which a `schedule` whose five fields match the surviving tick
+    /// re-admits a value-identical pair — the assert panics rather than
+    /// silently removing the wrong tick.
     fn remove_eq(&mut self, tick: &ScheduledTick<T>)
     where
         T: Clone + PartialEq,
     {
-        let Some(idx) = self.queue.iter().position(|e| e == tick) else {
-            return;
+        let mut matches = self
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| *e == tick)
+            .map(|(idx, _)| idx);
+        let Some(idx) = matches.next() else {
+            return; // Java no-ops when the identity is no longer in the heap.
         };
+        assert!(
+            matches.next().is_none(),
+            "remove_eq value match is ambiguous: the heap holds two \
+             value-identical ticks, so the value scan cannot reproduce Java's \
+             identity removal"
+        );
         self.remove_at(idx);
     }
 
@@ -1396,6 +1418,77 @@ mod tests {
                 "b".to_string(),
                 "e".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn level_chunk_ticks_remove_eq_rejects_ambiguous_value_match() {
+        // `remove_eq` scans by five-field value equality where Java's `removeEq`
+        // scans by identity; the substitute is sound only while the heap holds
+        // no two value-identical ticks. No public path can create one (checked
+        // `schedule` dedups by (type,pos); `unpack` assigns strictly increasing
+        // `subTickOrder`), so inject the violating state directly and pin the
+        // self-check that refuses to guess which element Java's identity scan
+        // would have removed.
+        let mut container = LevelChunkTicks::new();
+        let tick = sched("dup", 0, 0, 100, TickPriority::Normal, 0);
+        container.tick_queue.queue.push(tick.clone());
+        container.tick_queue.queue.push(tick.clone());
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            container.tick_queue.remove_eq(&tick);
+        }));
+        assert!(
+            panic.is_err(),
+            "ambiguous remove_eq must not silently pick one of two value-identical ticks"
+        );
+    }
+
+    #[test]
+    fn level_chunk_ticks_remove_eq_rejects_poll_then_schedule_value_identical_pair() {
+        // The adversarial window the `remove_eq` doc names: a pending list
+        // holding the same (type,pos) twice survives `unpack` as two
+        // subTickOrder-distinct ticks; `poll` then clears the per-position
+        // entry, after which a `schedule` whose five fields match the surviving
+        // tick re-admits a genuine value-identical pair. The self-check must
+        // refuse rather than silently pick which element Java's identity scan
+        // would have removed.
+        let mut container = LevelChunkTicks::new_with_pending(vec![
+            SavedTick::new(
+                "dup".to_string(),
+                BlockPos::new(0, 0, 0),
+                5,
+                TickPriority::Normal,
+            ),
+            SavedTick::new(
+                "dup".to_string(),
+                BlockPos::new(0, 0, 0),
+                5,
+                TickPriority::Normal,
+            ),
+        ]);
+        container.unpack(100); // schedules two subTickOrder-distinct ticks
+        container.poll(); // drains the min, clearing the per-position entry
+        // Re-admit a tick with every field matching the surviving one.
+        container.schedule(sched("dup", 0, 0, 105, TickPriority::Normal, -1));
+        // The heap now holds two value-identical ticks (the surviving unpacked
+        // one and the re-admitted one).
+        let surviving = container.tick_queue.queue[0].clone();
+        assert!(
+            container
+                .tick_queue
+                .queue
+                .iter()
+                .filter(|e| **e == surviving)
+                .count()
+                == 2,
+            "precondition: the heap holds two value-identical ticks"
+        );
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            container.tick_queue.remove_eq(&surviving);
+        }));
+        assert!(
+            panic.is_err(),
+            "ambiguous remove_eq must not silently pick one of two value-identical ticks"
         );
     }
 

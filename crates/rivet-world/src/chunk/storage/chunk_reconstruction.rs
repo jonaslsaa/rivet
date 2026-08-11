@@ -154,8 +154,8 @@ pub struct ChunkReconstruction {
     /// .blocks()`), faithfully decoded through `SavedTick.codec(...).listOf()`.
     /// Carried on the result — nothing schedules, executes, installs, or writes
     /// them. The `LevelChunkTicks`/`ProtoChunkTicks` containers live in `ticks`
-    /// (#522); wiring them into reconstruction defers with the tick-execution
-    /// slice.
+    /// (#522); the wiring that installs them into reconstruction defers with the
+    /// tick-execution slice.
     pub stored_block_ticks: Vec<SavedTick<Block>>,
     /// The typed, per-chunk-filtered stored fluid ticks (`ChunkAccess.PackedTicks
     /// .fluids()`). Same carry semantics as [`Self::stored_block_ticks`].

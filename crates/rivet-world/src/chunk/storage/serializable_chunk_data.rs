@@ -12,7 +12,8 @@
 //! typed values for the caller's runtime composition — the parser neither
 //! executes, schedules, generates, installs, nor writes them (the
 //! `LevelChunkTicks`/`ProtoChunkTicks` containers now live in `ticks` (#522),
-//! but wiring them in defers with the tick-execution slice). `UpgradeData`'s
+//! but the wiring that installs them defers with the tick-execution slice).
+//! `UpgradeData`'s
 //! neighbor tick lists remain behind
 //! the `UnsupportedUpgradeData` boundary: they are decodable (with the Java
 //! `orElse(Blocks.AIR)`/`orElse(Fluids.EMPTY)` asymmetry) but are not yet
@@ -587,8 +588,8 @@ impl SerializableChunkData {
     /// see [`Self::validate_full_for_reconstruction`]). Carried as stored values
     /// only — the reconstruction consumes them off the parse result ([`Self`]
     /// installs them into no runtime container; the `LevelChunkTicks`/
-    /// `ProtoChunkTicks` containers live in `ticks` (#522), but wiring them in
-    /// defers with the tick-execution slice).
+    /// `ProtoChunkTicks` containers live in `ticks` (#522), but the wiring that
+    /// installs them defers with the tick-execution slice).
     pub fn stored_block_ticks(&self) -> &[SavedTick<Block>] {
         &self.stored_block_ticks
     }
@@ -621,8 +622,8 @@ impl SerializableChunkData {
     /// Serialized block entities are NOT rejected — the reconstruction carries
     /// them as pending NBT (materialization defers with #341). Stored ticks are
     /// carried as typed values, never rejected (the `LevelChunkTicks`/
-    /// `ProtoChunkTicks` containers live in `ticks` (#522), but wiring them in
-    /// defers with the tick-execution slice). The remaining unsupported
+    /// `ProtoChunkTicks` containers live in `ticks` (#522), but the wiring that
+    /// installs them defers with the tick-execution slice). The remaining unsupported
     /// surfaces (proto status,
     /// `UpgradeData` neighbor ticks, blending data, persistent data, structure
     /// `starts`, non-empty entities, out-of-bounds post-processing) surface
@@ -2479,7 +2480,7 @@ mod tests {
     /// decode/carry layer only: the parse carries the typed ticks as stored
     /// values, nothing schedules or executes them, and the chunk is
     /// full-capable (the `LevelChunkTicks`/`ProtoChunkTicks` containers live in
-    /// `ticks` (#522); only wiring them in defers).
+    /// `ticks` (#522); only the wiring that installs them defers).
     #[test]
     fn real_26_2_nether_fixture_decodes_stored_fluid_ticks_exactly() {
         let fixture = named_fixture("the_nether", "0.0", "0.0.nbt");
@@ -2496,7 +2497,7 @@ mod tests {
         // The chunk decodes its 13 stored lava ticks faithfully and is
         // full-capable: the typed ticks are carried as stored values, not
         // scheduled (the `LevelChunkTicks`/`ProtoChunkTicks` containers live in
-        // `ticks` (#522); only wiring them in defers).
+        // `ticks` (#522); only the wiring that installs them defers).
         assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         // The nether chunk stores fluid ticks only; its `block_ticks` list is
         // empty.
