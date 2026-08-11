@@ -705,6 +705,7 @@ dependencies = [
  "rivet-nbt",
  "rivet-protocol",
  "rivet-registry",
+ "rivet-serialization",
  "rivet-test-support",
  "rivet-text",
  "rivet-util",
