@@ -31,14 +31,20 @@
 //! - the `tag` is `None` exactly when Java's `tag.isEmpty() ? null : tag`
 //!   yields null.
 //!
-//! Only two types have a materializable update tag today, mirroring what the
-//! port can reproduce without a live entity or the excluded subclasses:
+//! The update tag's shape is decided by whether the live subclass overrides
+//! `BlockEntity.getUpdateTag`:
 //!
-//! - **chest** — `ChestBlockEntity` does not override `getUpdateTag`, so the
-//!   base `BlockEntity.getUpdateTag` returns `new CompoundTag()`; after
-//!   `sanitizeSentNbt` it is still empty, so the wire tag is always `None`.
-//!   The serialized contents (items, loot table, components) are irrelevant to
-//!   the client update tag.
+//! - **Base behavior (null tag)** — every subclass that does NOT override
+//!   `getUpdateTag` inherits the base `new CompoundTag()`; after
+//!   `sanitizeSentNbt` (removes `PublicBukkitValues`, a no-op on the empty tag)
+//!   it is still empty, so `tag.isEmpty() ? null : tag` yields null. That covers
+//!   the vast majority of types: all containers (chest, furnace, hopper,
+//!   dispenser, dropper, barrel, shulker box, brewing stand, smoker, blast
+//!   furnace, lectern, crafter, …) and the plain non-tag types (jukebox, piston,
+//!   enchanting table, end portal, daylight detector, comparator, command block,
+//!   bell, beehive, sculk sensors/catalyst/shrieker, chiseled bookshelf,
+//!   copper golem statue, potent sulfur). The serialized contents (items, loot
+//!   table, components) are irrelevant to the client update tag.
 //! - **mob_spawner** — `SpawnerBlockEntity.getUpdateTag` is
 //!   `saveCustomOnly` minus `SpawnPotentials`. `saveCustomOnly` is
 //!   `saveAdditional`, which for the spawner is just `BaseSpawner.save` (the
@@ -47,9 +53,15 @@
 //!   tag, including Paper's int variants and `Short.MAX_VALUE` clamps, then
 //!   drops `SpawnPotentials` exactly like `getUpdateTag`.
 //!
-//! Every other type is refused loudly as [`BlockEntityMaterializeError`] — the
-//! port never fabricates a client tag from a serialized payload whose live
-//! subclass is not ported.
+//! Every type that DOES override `getUpdateTag` with a non-empty tag (sign,
+//! hanging_sign, banner, skull, beacon, conduit, structure block, end gateway,
+//! jigsaw, campfire, decorated pot, brushable block, creaking heart, shelf,
+//! trial spawner, vault, test block, test instance block) is refused loudly as
+//! [`BlockEntityMaterializeError::UnsupportedUpdateTag`] — the port never
+//! fabricates a client tag from a serialized payload whose live subclass is
+//! not ported. The refusal set is the exact pinned-Paper override set
+//! (minus mob_spawner, which is ported), so every other resolved type
+//! materializes the null tag Paper sends.
 //!
 //! ## Refusals (typed, never silent)
 //!
@@ -58,7 +70,7 @@
 //! - [`BlockEntityMaterializeError::InvalidType`] — an absent/malformed/unknown
 //!   `id` surfaced by reconstruction.
 //! - [`BlockEntityMaterializeError::UnsupportedUpdateTag`] — a resolved type
-//!   whose update tag is not ported (everything outside chest + mob_spawner).
+//!   whose `getUpdateTag` override is not ported (the override set above).
 //!
 //! A malformed spawner `SpawnData` is NOT an entry refusal: Java's
 //! `BaseSpawner.load` reads it through `TagValueInput.read`, which reports the
@@ -89,8 +101,46 @@ use rivet_protocol::protocol::game::level_chunk_packet_data::BlockEntityInfo;
 use rivet_registry::Identifier;
 use rivet_registry::core::{BlockPos, SectionPos};
 
-const CHEST_TYPE: &str = "minecraft:chest";
 const SPAWNER_TYPE: &str = "minecraft:mob_spawner";
+
+/// The pinned-Paper set of `BlockEntityType` values whose live subclass
+/// overrides `getUpdateTag` with a non-empty tag and which the port does not
+/// reproduce (`mob_spawner` is ported and excluded). Every other resolved type
+/// inherits the base empty `getUpdateTag` and materializes a null tag, exactly
+/// like Paper's `tag.isEmpty() ? null : tag`.
+///
+/// Derived from the pinned Paper 26.2 `world/level/block/entity` sources:
+/// `SignBlockEntity` (also inherited by `HangingSignBlockEntity`),
+/// `BannerBlockEntity`, `SkullBlockEntity`, `BeaconBlockEntity`,
+/// `ConduitBlockEntity`, `StructureBlockEntity`, `TheEndGatewayBlockEntity`,
+/// `JigsawBlockEntity`, `CampfireBlockEntity`, `DecoratedPotBlockEntity`,
+/// `BrushableBlockEntity`, `CreakingHeartBlockEntity`, `ShelfBlockEntity`,
+/// `TrialSpawnerBlockEntity`, `vault.VaultBlockEntity`, `TestBlockEntity`,
+/// `TestInstanceBlockEntity`.
+///
+/// RivetTodo(#520): re-audit this set when the generated registry is
+/// regenerated — a newly added type whose subclass overrides `getUpdateTag`
+/// must join this set to stay loud instead of silently sending a null tag.
+const UNSUPPORTED_UPDATE_TAG_TYPES: &[&str] = &[
+    "minecraft:sign",
+    "minecraft:hanging_sign",
+    "minecraft:banner",
+    "minecraft:skull",
+    "minecraft:beacon",
+    "minecraft:conduit",
+    "minecraft:structure_block",
+    "minecraft:end_gateway",
+    "minecraft:jigsaw",
+    "minecraft:campfire",
+    "minecraft:decorated_pot",
+    "minecraft:brushable_block",
+    "minecraft:creaking_heart",
+    "minecraft:shelf",
+    "minecraft:trial_spawner",
+    "minecraft:vault",
+    "minecraft:test_block",
+    "minecraft:test_instance_block",
+];
 
 /// Why a serialized block entity cannot be turned into a wire
 /// [`BlockEntityInfo`]. Each variant keeps the corrected absolute position and
@@ -194,7 +244,14 @@ fn materialize_block_entity(
 /// `packed_xz` truncates Java's `sectionRelative(x) << 4 | sectionRelative(z)`
 /// to the wire byte; `y` truncates the absolute Y to the wire short. The type
 /// is the entry's canonical registry `Arc`, so encode resolves the same
-/// registry id. Only chest and mob_spawner have a ported update tag.
+/// registry id.
+///
+/// The tag follows `BlockEntity.getUpdateTag` faithfully: a subclass that does
+/// not override it (the vast majority — all containers, chest included) yields
+/// the empty base tag, so the wire tag is `None`; `mob_spawner` has the ported
+/// `BaseSpawner.save`-minus-`SpawnPotentials` tag; the remaining
+/// [`UNSUPPORTED_UPDATE_TAG_TYPES`] override `getUpdateTag` with a non-empty
+/// tag the port cannot reproduce and are refused loudly.
 fn materialize_resolved(
     entry: &ResolvedSerializedBlockEntity,
     diagnostics: &mut Vec<BlockEntityMaterializeDiagnostic>,
@@ -202,27 +259,30 @@ fn materialize_resolved(
     let packed_xz = ((SectionPos::section_relative(entry.position.get_x()) << 4)
         | SectionPos::section_relative(entry.position.get_z())) as i8;
     let y = entry.position.get_y() as i16;
-    match entry.entity_type.name() {
-        CHEST_TYPE => Ok(BlockEntityInfo::new(
+    let name = entry.entity_type.name();
+    if name == SPAWNER_TYPE {
+        let tag = materialize_spawner_update_tag(entry, diagnostics);
+        return Ok(BlockEntityInfo::new(
             packed_xz,
             y,
             entry.entity_type.clone(),
-            None,
-        )),
-        SPAWNER_TYPE => {
-            let tag = materialize_spawner_update_tag(entry, diagnostics);
-            Ok(BlockEntityInfo::new(
-                packed_xz,
-                y,
-                entry.entity_type.clone(),
-                Some(tag),
-            ))
-        }
-        _ => Err(BlockEntityMaterializeError::UnsupportedUpdateTag {
-            position: entry.position,
-            entity_type: entry.entity_type.name().to_string(),
-        }),
+            Some(tag),
+        ));
     }
+    if UNSUPPORTED_UPDATE_TAG_TYPES.contains(&name) {
+        return Err(BlockEntityMaterializeError::UnsupportedUpdateTag {
+            position: entry.position,
+            entity_type: name.to_string(),
+        });
+    }
+    // Base `getUpdateTag` = new CompoundTag() -> empty -> null tag, for every
+    // type whose subclass does not override it.
+    Ok(BlockEntityInfo::new(
+        packed_xz,
+        y,
+        entry.entity_type.clone(),
+        None,
+    ))
 }
 
 /// `SpawnerBlockEntity.getUpdateTag` — `saveCustomOnly` minus `SpawnPotentials`
@@ -372,6 +432,7 @@ mod tests {
     use rivet_nbt::nbt_io;
     use rivet_registry::block_entity_type::BlockEntityType;
     use rivet_registry::core::ChunkPos;
+    use rivet_registry::generated::block_entity_types::BLOCK_ENTITY_TYPE_BY_ID;
     use rivet_registry::registries::BLOCK_ENTITY_TYPE;
     use rivet_util::DataInputStream;
     use std::io::Cursor;
@@ -486,7 +547,10 @@ mod tests {
     }
 
     #[test]
-    fn real_fixture_chest_and_furnace_materialize_with_unsupported_refusal() {
+    fn real_fixture_chest_and_furnace_materialize_with_null_tags() {
+        // The committed fixture carries a chest and a furnace; neither subclass
+        // overrides `getUpdateTag`, so Paper sends both with a null tag
+        // (`new CompoundTag()` -> empty -> `tag.isEmpty() ? null : tag`).
         let chunk = block_entity_fixture();
         let materialized = materialize_fixture(&chunk, ChunkPos::ZERO);
         assert!(materialized.diagnostics.is_empty());
@@ -499,13 +563,36 @@ mod tests {
         assert_eq!(chest.entity_type().name(), "minecraft:chest");
         assert!(chest.tag().is_none());
 
+        let furnace = results[1].as_ref().expect("fixture furnace materializes");
+        assert_eq!(furnace.packed_xz(), 0x21);
+        assert_eq!(furnace.y(), 65);
+        assert_eq!(furnace.entity_type().name(), "minecraft:furnace");
+        assert!(furnace.tag().is_none());
+    }
+
+    #[test]
+    fn get_update_tag_overriding_types_are_unsupported_refusals() {
+        // A resolved type that overrides `getUpdateTag` with a non-empty tag
+        // (e.g. banner) cannot be reproduced and is refused loudly. A resolved
+        // type that does not override it (e.g. hopper) materializes null.
+        let banner = resolved_outcome(block_entity("minecraft:banner", 3, 64, 5));
+        let (banner_result, banner_diags) = materialize_entry(&banner);
+        assert!(banner_diags.is_empty());
         assert_eq!(
-            results[1].as_ref().unwrap_err(),
-            &BlockEntityMaterializeError::UnsupportedUpdateTag {
-                position: BlockPos::new(2, 65, 1),
-                entity_type: "minecraft:furnace".to_string(),
+            banner_result.unwrap_err(),
+            BlockEntityMaterializeError::UnsupportedUpdateTag {
+                position: BlockPos::new(3, 64, 5),
+                entity_type: "minecraft:banner".to_string(),
             }
         );
+
+        let hopper = resolved_outcome(block_entity("minecraft:hopper", 4, 64, 6));
+        let (hopper_result, hopper_diags) = materialize_entry(&hopper);
+        assert!(hopper_diags.is_empty());
+        let hopper = hopper_result.expect("hopper inherits the base null tag");
+        assert_eq!(hopper.entity_type().name(), "minecraft:hopper");
+        assert!(hopper.tag().is_none());
+        assert_eq!(hopper.packed_xz(), 0x46);
     }
 
     #[test]
@@ -698,11 +785,11 @@ mod tests {
         pending.put_byte("keepPacked", 1);
         let mut invalid = block_entity("not valid", 2, 64, 2);
         invalid.put_short("Delay", 5);
-        let furnace = block_entity("minecraft:furnace", 3, 64, 3);
+        let banner = block_entity("minecraft:banner", 3, 64, 3);
 
         let outcomes = reconstruct_block_entities(
             &ChunkPos::new(2, -3),
-            &[pending, invalid, furnace],
+            &[pending, invalid, banner],
             BlockEntityChunkKind::Level,
         );
         let materialized = materialize_block_entities(&outcomes);
@@ -727,7 +814,7 @@ mod tests {
             results[2].as_ref().unwrap_err(),
             &BlockEntityMaterializeError::UnsupportedUpdateTag {
                 position: BlockPos::new(35, 64, -45),
-                entity_type: "minecraft:furnace".to_string(),
+                entity_type: "minecraft:banner".to_string(),
             }
         );
     }
@@ -755,7 +842,7 @@ mod tests {
             &ChunkPos::ZERO,
             &[
                 block_entity("minecraft:chest", 1, 64, 1),
-                block_entity("minecraft:furnace", 2, 64, 2),
+                block_entity("minecraft:banner", 2, 64, 2),
                 {
                     let mut tag = block_entity(SPAWNER_TYPE, 3, 64, 3);
                     tag.put_short("Delay", 20);
@@ -773,7 +860,7 @@ mod tests {
         assert!(materialized.diagnostics.is_empty());
         let results = materialized.infos;
         assert_eq!(results.len(), 4);
-        // Chest ok, furnace unsupported, spawner ok, keepPacked pending.
+        // Chest ok, banner unsupported, spawner ok, keepPacked pending.
         assert!(results[0].is_ok());
         assert!(matches!(
             results[1].as_ref().unwrap_err(),
@@ -801,5 +888,47 @@ mod tests {
         let access = BlockEntityType::built_in_registry_access();
         let registry = access.lookup(&BLOCK_ENTITY_TYPE).unwrap();
         assert_eq!(registry.get_id(info.entity_type()), 9);
+    }
+
+    #[test]
+    fn every_generated_type_is_classified_faithfully() {
+        // Pin the Paper-faithful classification across the whole generated
+        // registry: mob_spawner is ported, the getUpdateTag-overriding set is
+        // refused loudly, and every other type materializes the base null tag.
+        // This guards the UNSUPPORTED_UPDATE_TAG_TYPES set against a silent
+        // misclassification when the registry regenerates.
+        let access = BlockEntityType::built_in_registry_access();
+        let registry = access.lookup(&BLOCK_ENTITY_TYPE).unwrap();
+        let mut unsupported_seen = Vec::new();
+        let mut null_seen = Vec::new();
+        for (id, name) in BLOCK_ENTITY_TYPE_BY_ID.iter().enumerate() {
+            let entry = resolved_outcome(block_entity(name, id as i32, 64, id as i32));
+            let (result, diagnostics) = materialize_entry(&entry);
+            assert!(diagnostics.is_empty(), "{name}");
+            if name == &SPAWNER_TYPE {
+                let info = result.expect("mob_spawner materializes");
+                assert_eq!(registry.get_id(info.entity_type()), id as i32);
+                assert!(info.tag().is_some(), "mob_spawner sends its ported tag");
+            } else if UNSUPPORTED_UPDATE_TAG_TYPES.contains(name) {
+                assert!(
+                    matches!(
+                        result,
+                        Err(BlockEntityMaterializeError::UnsupportedUpdateTag { .. })
+                    ),
+                    "{name} overrides getUpdateTag and must be refused"
+                );
+                unsupported_seen.push(*name);
+            } else {
+                let info = result.unwrap_or_else(|e| panic!("{name} should materialize null: {e}"));
+                assert!(info.tag().is_none(), "{name} must send the base null tag");
+                null_seen.push(*name);
+            }
+        }
+        assert_eq!(unsupported_seen.len(), UNSUPPORTED_UPDATE_TAG_TYPES.len());
+        assert!(!null_seen.is_empty());
+        assert_eq!(
+            null_seen.len() + unsupported_seen.len() + 1,
+            BLOCK_ENTITY_TYPE_BY_ID.len()
+        );
     }
 }
