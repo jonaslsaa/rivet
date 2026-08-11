@@ -347,8 +347,6 @@ pub enum SerializableChunkDataError {
     UnsupportedChunkStatus { status: ChunkStatus },
     #[error("UpgradeData field {field} requires SavedTick support")]
     UnsupportedUpgradeData { field: &'static str },
-    #[error("non-empty {field} requires tick reconstruction")]
-    UnsupportedTicks { field: &'static str },
     #[error("blending_data requires blending reconstruction (#336)")]
     UnsupportedBlendingData,
     #[error("non-empty entities require post-load entity reconstruction")]
