@@ -31,11 +31,13 @@
 //! `custom_name`/`item_name` via `tagCodec`, `CustomData`
 //! `custom_data`/`bucket_entity_data` via `COMPOUND_TAG`, the `ItemLore` list,
 //! and the `TypedEntityData` `entity_data`/`block_entity_data` — are
-//! canonicalized structurally (NBT compound field order). Every other
-//! registered component value is copied byte-exact: the harness walks the
-//! component's exact wire shape ([`Shape`] / the `skip_*` primitives) to bound
-//! it, then preserves the raw bytes verbatim, so a display icon carrying, say,
-//! an `item_model` identifier or a `max_stack_size` VarInt still canonicalizes
+//! canonicalized structurally (NBT compound field order). A `tagCodec` value is
+//! refused when it is a root End tag, matching Java's
+//! `DecoderException("Expected non-null compound tag")`. Every other registered
+//! component value is copied byte-exact: the harness walks the component's
+//! exact wire shape ([`Shape`] / the `skip_*` primitives) to bound it, then
+//! preserves the raw bytes verbatim, so a display icon carrying, say, an
+//! `item_model` identifier or a `max_stack_size` VarInt still canonicalizes
 //! (patch entries sorted by id) instead of failing the whole advancement. Only
 //! an id outside the registered 26.2 range, a duplicate positive/negative id in
 //! a patch, or a value that does not fit its shape fails canonicalization.
@@ -84,6 +86,20 @@ fn component_type_name(id: u32) -> Option<&'static str> {
     }
 }
 
+/// Read a `tagCodec` value — any non-`End` NBT tag (a `Component`). Java's
+/// `ByteBufCodecs.tagCodec.decode` calls `FriendlyByteBuf.readNbt`, which
+/// returns null for a root End tag, and throws
+/// `DecoderException("Expected non-null compound tag")`; an End tag is refused
+/// the same way. A `Component` (`custom_name`, `item_name`, and the display
+/// `title`/`description`) serializes to an NBT tag through this codec.
+fn read_component_tag(body: &[u8], off: &mut usize) -> Option<Nbt> {
+    let value = read_nbt(body, off)?;
+    if matches!(value, Nbt::End) {
+        return None;
+    }
+    Some(value)
+}
+
 /// Read one component value and return its canonical bytes, for the pinned
 /// 26.2 components whose network value is a bare NBT payload.
 /// Supported shapes (canonicalized, never fabricated):
@@ -119,10 +135,7 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
         => {
             // tagCodec accepts any non-End tag (a Component serializes to an NBT
             // compound; null/End throws but any other tag type parses).
-            let value = read_nbt(body, off)?;
-            if matches!(value, Nbt::End) {
-                return None;
-            }
+            let value = read_component_tag(body, off)?;
             let mut out = Vec::with_capacity(body.len() / 8);
             write_nbt(&mut out, &value);
             Some(out)
@@ -1231,12 +1244,17 @@ fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u
 /// Canonicalize a `DisplayInfo` value and return its canonical bytes:
 /// `[title NBT][description NBT][icon][frame VarInt][flags int][bg?][x float][y float]`.
 /// `icon` is an `ItemStackTemplate` = `[item VarInt][count VarInt][patch]`.
+///
+/// The title and description are read with `ComponentSerialization.TRUSTED_STREAM_CODEC`
+/// (a `tagCodec`), which refuses a root End tag — Java throws
+/// `DecoderException("Expected non-null compound tag")`. They are refused the
+/// same way here (see `read_component_tag`).
 fn canon_display_info(body: &[u8], off: &mut usize) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(body.len() / 2);
 
-    let title = read_nbt(body, off)?;
+    let title = read_component_tag(body, off)?;
     write_nbt(&mut out, &title);
-    let description = read_nbt(body, off)?;
+    let description = read_component_tag(body, off)?;
     write_nbt(&mut out, &description);
 
     // icon: ItemStackTemplate = [item VarInt][count VarInt][DataComponentPatch].
@@ -2217,6 +2235,68 @@ mod tests {
 
         let mut off = 0;
         assert_eq!(canon_display_info(&bad_display, &mut off), None);
+    }
+
+    #[test]
+    fn end_tag_title_and_description_are_rejected() {
+        // DisplayInfo reads title and description through
+        // ComponentSerialization.TRUSTED_STREAM_CODEC (a tagCodec). A root End
+        // tag decodes to null and Java throws
+        // DecoderException("Expected non-null compound tag") — the payload must
+        // fail canonicalization (None), exactly like the existing component
+        // readers (`custom_name`/`item_name`/`lore`) refuse an End tag.
+        let end = vec![0u8]; // root End tag
+        let desc = raw_compound(&[("text", 8, raw_str("D"))]);
+        let icon = icon(926, 1, &patch(&[], &[]));
+
+        for (label, title, d) in [
+            ("title", end.clone(), desc.clone()),
+            ("description", desc, end),
+        ] {
+            let display = display_raw(&title, &d, &icon, 0, 0, (0.5, -1.25), None);
+            let mut off = 0;
+            assert_eq!(
+                canon_display_info(&display, &mut off),
+                None,
+                "an End {label} must fail canonicalization like Java's tagCodec"
+            );
+        }
+    }
+
+    #[test]
+    fn end_tag_component_values_are_rejected() {
+        // custom_name (6) / item_name (9) go through the same tagCodec as the
+        // display title/description; an End value must fail the whole
+        // advancement. This pins the shared `read_component_tag` behavior so the
+        // component readers and the display reader cannot drift.
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        for (label, comp) in [
+            ("custom_name", (6u32, nbt_bytes(&Nbt::End))),
+            ("item_name", (9u32, nbt_bytes(&Nbt::End))),
+            ("lore", (11u32, lore_end())),
+        ] {
+            let adv = advancement(
+                "story:root",
+                None,
+                Some(&display_for(&title, &title, &[comp], &[], &[0])),
+                &[vec!["c".into()]],
+                false,
+            );
+            let input = body(false, &[adv], &[], &[], true);
+            assert_eq!(
+                canon_update_advancements(&input),
+                None,
+                "an End {label} component value must fail canonicalization"
+            );
+        }
+    }
+
+    /// A lore component whose single line is a root End tag: `[VarInt 1][End]`.
+    fn lore_end() -> Vec<u8> {
+        let mut out = Vec::new();
+        frame::write_varint(&mut out, 1);
+        out.push(0);
+        out
     }
 
     #[test]
