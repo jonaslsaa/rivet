@@ -167,9 +167,10 @@ pub struct ChunkReconstruction {
     /// typed entry-local failures — nothing is materialized (#341).
     pub block_entity_outcomes: Vec<SerializedBlockEntityOutcome>,
     /// The decoded `structures.References` entries after the >8-chunk
-    /// chessboard-distance filter, in key-insertion order. These are also
-    /// installed into the chunk's `StructureAccess` reference map (keyed by the
-    /// structure `Identifier`); the field is the caller's observable carry.
+    /// chessboard-distance filter, in deterministic key-insertion order (a
+    /// stable carry, not a Paper-observable order). These are also installed
+    /// into the chunk's `StructureAccess` reference map (keyed by the structure
+    /// `Identifier`); the field is the caller's observable carry.
     pub structures_references: Vec<StructureReference>,
 }
 

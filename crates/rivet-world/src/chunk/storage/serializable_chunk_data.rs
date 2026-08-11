@@ -19,8 +19,8 @@
 //!
 //! Structures (#369): `structures.References` decodes into ordered typed
 //! [`StructureReference`] values (registry-key identifier + packed chunk-long
-//! set, in key-insertion order — Rivet's insertion-ordered `CompoundTag` is the
-//! observable order, standing in for Java's fastutil hash-map order). Malformed
+//! set, in deterministic key-insertion order — not a Paper-observable order,
+//! since Java's fastutil hash map iterates nondeterministically). Malformed
 //! keys, wrong-type payloads, and construction-time out-of-range references are
 //! surfaced as typed [`ChunkParseDiagnostic`]s and discarded, never silently
 //! ignored. Non-empty `starts` stays behind `UnsupportedStructures` (the
@@ -96,10 +96,12 @@ pub enum PendingBlockEntityReason {
 /// order the reference set was read.
 ///
 /// Ordering: Paper iterates the `References` `CompoundTag` (a fastutil hash
-/// map) and reads each entry's `long[]` into a `LongOpenHashSet`. Rivet's
-/// insertion-ordered `CompoundTag` makes the key iteration order the
-/// observable order here (mirroring the heightmap key-order note below), and
-/// the reference longs are retained in array order, which the `StructureAccess`
+/// map, so its key iteration order is nondeterministic) and reads each entry's
+/// `long[]` into a `LongOpenHashSet`. Rivet's insertion-ordered `CompoundTag`
+/// yields a deterministic key order, which is not a Paper-observable order —
+/// the same divergence the heightmap key-order note below records — so the
+/// entry order here is a stable carry, never a byte-order oracle. The reference
+/// longs within a key are retained in array order, which the `StructureAccess`
 /// port models as first-insertion order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructureReference {
@@ -590,9 +592,10 @@ impl SerializableChunkData {
     pub fn structure_data(&self) -> &CompoundTag {
         &self.structure_data
     }
-    /// The decoded `structures.References` entries, in key-insertion order.
-    /// Paper's `unpackStructureReferences` reads them the same way; the chunk
-    /// position is not consulted until reconstruction (the >8-chunk filter).
+    /// The decoded `structures.References` entries, in deterministic
+    /// key-insertion order (a stable carry, not a Paper-observable order). The
+    /// chunk position is not consulted until reconstruction (the >8-chunk
+    /// filter).
     pub fn structures_references(&self) -> &[StructureReference] {
         &self.structures_references
     }
@@ -856,11 +859,15 @@ fn structures_starts_are_non_empty(structures: &CompoundTag) -> bool {
 /// Paper's `unpackStructureReferences` read phase (the per-chunk distance filter
 /// is a reconstruction-time concern — Paper passes `pos` to the unpack, which
 /// this slice defers to construction so the stored position and the requested
-/// position can differ). Only a FULL chunk decodes: Paper reads `References`
-/// exclusively on the LEVELCHUNK construction branch (a proto chunk never
-/// consults `structures`), so a malformed `References` key on a non-FULL chunk
-/// must not surface a diagnostic Paper would never emit — mirroring the tick
-/// gate's FULL-only decode.
+/// position can differ). Only a FULL chunk decodes, mirroring the tick gate's
+/// FULL-only decode: the runtime reconstruction this feeds accepts only FULL
+/// chunks, and proto chunks are rejected before any of these surfaces are
+/// consulted, so decoding (and surfacing malformed-key diagnostics) on a
+/// non-FULL chunk would be dead work Paper's observable behavior never reaches.
+/// (Paper itself calls `setAllReferences(unpackStructureReferences(...))`
+/// unconditionally in `read` for every chunk type; the FULL gate here mirrors
+/// the pre-existing `decode_stored_ticks` boundary rather than Paper's exact
+/// call site.)
 ///
 /// The `References` tag is absent or a non-compound -> no entries (Paper's
 /// `getCompoundOrEmpty` returns an empty compound for a wrong-typed container,
@@ -890,10 +897,9 @@ pub fn parse_structure_references(
 ) -> (Vec<StructureReference>, Vec<ChunkParseDiagnostic>) {
     let mut references = Vec::new();
     let mut diagnostics = Vec::new();
-    // Paper only reads `structures.References` at construction time on the
-    // LEVELCHUNK branch (a proto chunk never consults it), so a malformed
-    // `References` key on a non-FULL chunk must not surface a diagnostic
-    // Paper would never emit. Mirror the tick gate: decode/carry only for FULL.
+    // Decode/carry only for FULL (mirroring the tick gate): the reconstruction
+    // this feeds accepts only FULL chunks, so a malformed `References` key on a
+    // non-FULL chunk would never reach a Paper-observable path.
     if status != ChunkStatus::Full {
         return (references, diagnostics);
     }
@@ -3190,6 +3196,16 @@ mod tests {
                 references.put_long_array("minecraft:village", vec![0]);
                 let mut structures = CompoundTag::new();
                 structures.put("References".into(), Tag::Compound(references));
+                structures
+            },
+            // A `starts` compound present but empty is not "non-empty": the
+            // guard is `!starts.is_empty()`, so an empty starts compound (like
+            // an absent one) must not reject the FULL chunk. Distinct from the
+            // wrong-typed `starts` int above, which `get_compound` treats as
+            // absent.
+            {
+                let mut structures = CompoundTag::new();
+                structures.put("starts".into(), Tag::Compound(CompoundTag::new()));
                 structures
             },
         ] {
