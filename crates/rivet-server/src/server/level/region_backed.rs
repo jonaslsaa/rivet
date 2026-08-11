@@ -326,11 +326,18 @@ fn read_level_metadata(layout: &RegionWorldLayout) -> Result<LevelMetadata, Regi
         .ok_or(RegionBackedBootError::MissingSpawn)?;
     let ops = NbtOps::instance();
     let dynamic = Dynamic::new(&ops, Tag::Compound(spawn_compound.clone()));
-    let spawn = dynamic
-        .decode(&ops, &*respawn_data_codec::<NbtOps>())
+    let decode = dynamic.decode(&ops, &*respawn_data_codec::<NbtOps>());
+    let spawn = decode
         .result()
-        .ok_or_else(|| RegionBackedBootError::SpawnDecode {
-            message: "RespawnData decode failed".to_string(),
+        .ok_or_else(|| {
+            // Preserve the codec's own diagnostic (which field the
+            // `RespawnData` decode rejected) instead of a static placeholder,
+            // so a hostile `level.dat` reports the real cause.
+            let message = decode
+                .error_ref()
+                .map(|error| error.message().to_string())
+                .unwrap_or_else(|| "unknown RespawnData codec error".to_string());
+            RegionBackedBootError::SpawnDecode { message }
         })?
         .0
         .clone();
@@ -855,6 +862,36 @@ mod tests {
         let _ = chunk.light_data();
     }
 
+    /// A hostile `level.dat` spawn compound that decodes to a typed
+    /// `RespawnData` failure surfaces the codec's own diagnostic in the
+    /// `SpawnDecode` error (which field the decode rejected), not a static
+    /// placeholder. Dropping `dimension` is the canonical field-absent case
+    /// (`"No key dimension in MapLike[...]"`).
+    #[test]
+    fn spawn_decode_error_preserves_the_codec_diagnostic() {
+        let temp = tempfile::tempdir().unwrap();
+        write_level_dat(temp.path(), REAL_SPAWN);
+        let mut level = read_level_dat_for_patch(temp.path());
+        level
+            .get_compound_or_empty_mut("Data")
+            .get_compound_or_empty_mut("spawn")
+            .remove("dimension");
+        let mut bytes = Vec::new();
+        nbt_io::write_compressed(&level, &mut bytes).unwrap();
+        fs::write(temp.path().join("level.dat"), bytes).unwrap();
+        fs::create_dir_all(temp.path().join("dimensions/minecraft/overworld/region")).unwrap();
+
+        match boot_level(temp.path()) {
+            Err(RegionBackedBootError::SpawnDecode { message }) => {
+                assert!(
+                    message.contains("dimension"),
+                    "the codec diagnostic must name the missing field, got: {message}"
+                );
+            }
+            _ => panic!("expected SpawnDecode, got a different boot outcome"),
+        }
+    }
+
     #[test]
     fn boot_rejects_a_mismatched_data_version() {
         let temp = tempfile::tempdir().unwrap();
@@ -1219,5 +1256,67 @@ mod tests {
                 SerializableChunkDataError::UnsupportedBlendingData
             ))
         ));
+    }
+
+    /// The `Server::try_new` login `is_flat` integration: a real region-backed
+    /// overworld (`minecraft:noise` generator) advertises not-flat through the
+    /// session's `JoinConfig.is_flat`, which drives the login packet's `is_flat`
+    /// flag. The world must be bootable end-to-end first (`enable_join` on a
+    /// noise generator), so this exercises the full composition, not just the
+    /// `boot_level` half.
+    #[test]
+    fn try_new_wires_region_backed_login_is_flat_false() {
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+
+        let server = crate::server::Server::try_new(crate::server::ServerConfig {
+            enable_join: true,
+            level_path: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .expect("a real region-backed world boots the server");
+        assert!(
+            !server.join_is_flat(),
+            "the noise overworld must advertise not-flat in the login"
+        );
+    }
+
+    /// The `Server::try_new` login `is_flat` integration for a flat generator:
+    /// a `minecraft:flat` overworld keeps the login flag true, the same
+    /// `ServerLevel.isFlat()` semantics as the superflat default.
+    #[test]
+    fn try_new_wires_flat_generator_login_is_flat_true() {
+        let temp = tempfile::tempdir().unwrap();
+        write_level_dat(temp.path(), REAL_SPAWN);
+        write_world_gen_settings_type(temp.path(), REAL_SEED, "minecraft:flat");
+        let region_dir = temp.path().join("dimensions/minecraft/overworld/region");
+        fs::create_dir_all(&region_dir).unwrap();
+        write_view_chunks(&region_dir, &[]);
+
+        let server = crate::server::Server::try_new(crate::server::ServerConfig {
+            enable_join: true,
+            level_path: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .expect("a flat-generator world boots the server");
+        assert!(
+            server.join_is_flat(),
+            "minecraft:flat must keep the login is_flat flag true"
+        );
+    }
+
+    /// The superflat default: `Server::try_new` with no `level_path` advertises
+    /// a flat login (the deterministic no-level superflat boot).
+    #[test]
+    fn try_new_defaults_to_flat_login_without_a_level() {
+        let server = crate::server::Server::try_new(crate::server::ServerConfig {
+            enable_join: true,
+            ..Default::default()
+        })
+        .expect("the no-level superflat boot succeeds");
+        assert!(
+            server.join_is_flat(),
+            "the no-level superflat boot must advertise flat"
+        );
     }
 }

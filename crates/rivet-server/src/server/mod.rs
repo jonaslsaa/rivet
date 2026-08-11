@@ -111,6 +111,13 @@ pub struct Server {
     stats: Arc<TickStats>,
     tickables: Vec<Tickable>,
     lifecycle_rx: Option<mpsc::Receiver<LifecycleEvent>>,
+    /// The login `is_flat` flag this server advertises: `ServerLevel.isFlat()`
+    /// of the booted region-backed world (the real generator type from
+    /// `world_gen_settings.dat`), or the superflat default `true` when no disk
+    /// level is configured. The session manager consumes the authoritative
+    /// `JoinConfig.is_flat`; this copy makes the `try_new` wiring observable
+    /// to integration tests.
+    join_is_flat: bool,
 }
 
 impl Server {
@@ -137,6 +144,14 @@ impl Server {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(config.lifecycle_capacity);
         let endpoint = Arc::new(NetworkEndpoint::new(lifecycle_tx, shutdown.clone()));
         let mut tickables: Vec<Tickable> = Vec::new();
+        // The login `is_flat` flag this server advertises: `ServerLevel.isFlat()`
+        // of the booted region-backed world (the real generator type from
+        // `world_gen_settings.dat`), or the superflat default `true` when no disk
+        // level is configured.
+        let join_is_flat = region_level
+            .as_ref()
+            .map(level::ServerLevel::is_flat)
+            .unwrap_or(true);
         // Live play sessions (issue #101 Slice B): the tick-owned session manager
         // that consumes configuration→play handoffs and fires the join burst. Off
         // by default so the offline-login tests exercise the handoff seam without
@@ -162,6 +177,7 @@ impl Server {
             stats: Arc::new(TickStats::default()),
             tickables,
             lifecycle_rx: Some(lifecycle_rx),
+            join_is_flat,
         })
     }
 
@@ -194,6 +210,16 @@ impl Server {
     /// The immutable config snapshot.
     pub fn config(&self) -> &ServerConfig {
         &self.config
+    }
+
+    /// The login `is_flat` flag this server advertises — the booted
+    /// region-backed world's `ServerLevel.isFlat()` (real generator type from
+    /// `world_gen_settings.dat`), or the superflat default `true` when no disk
+    /// level is configured. The session manager consumes the authoritative
+    /// `JoinConfig.is_flat` (wired from this value in `try_new`); this accessor
+    /// makes the wiring observable to integration tests.
+    pub fn join_is_flat(&self) -> bool {
+        self.join_is_flat
     }
 
     /// Bind the TCP listener without accepting yet (tests use this to learn the
