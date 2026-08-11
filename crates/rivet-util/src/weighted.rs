@@ -77,13 +77,14 @@ use std::sync::Arc;
 const FLAT_THRESHOLD: i32 = 64;
 
 /// `net.minecraft.util.random.Weighted<T>` — a `(value, weight)` record whose
-/// constructor rejects a negative weight.
+/// constructor rejects a negative weight. Like the Java record, the fields are
+/// private and only reachable through the validated constructor (a struct
+/// literal cannot produce a negative-weight entry, which the selector and
+/// total-weight code rely on).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Weighted<T> {
-    /// `Weighted.value()`.
-    pub value: T,
-    /// `Weighted.weight()`.
-    pub weight: i32,
+    value: T,
+    weight: i32,
 }
 
 impl<T> Weighted<T> {
@@ -97,6 +98,16 @@ impl<T> Weighted<T> {
             panic!("Weight should be >= 0");
         }
         Weighted { value, weight }
+    }
+
+    /// `Weighted.value()`.
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// `Weighted.weight()`.
+    pub fn weight(&self) -> i32 {
+        self.weight
     }
 
     /// `Weighted.map(Function<T, U>)` — maps the value, keeps the weight.
@@ -309,12 +320,9 @@ impl<E: Clone> WeightedList<E> {
         WeightedList::new(&weighted)
     }
 
-    /// `WeightedList.of(Weighted<E>... items)` — from pre-weighted entries.
-    pub fn of_weighted(items: &[Weighted<E>]) -> Self {
-        WeightedList::new(items)
-    }
-
-    /// `WeightedList.of(List<Weighted<E>> items)` — from pre-weighted entries.
+    /// `WeightedList.of(Weighted<E>... items)` / `of(List<Weighted<E>> items)`
+    /// — from pre-weighted entries. Java's varargs and `List` overloads both
+    /// take a `List<Weighted<E>>`; in Rust both collapse to a slice.
     pub fn of_weighted_list(items: &[Weighted<E>]) -> Self {
         WeightedList::new(items)
     }
