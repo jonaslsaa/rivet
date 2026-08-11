@@ -36,10 +36,13 @@
 //!    stores the record's dataConfiguration via `MAP_CODEC`, so re-encoding a
 //!    world whose configuration equals `DEFAULT` omits both fields.
 //!
-//! The real 26.2 `New World/level.dat` confirms #3 on the decode side: it
-//! stores `DataPacks: {Enabled: ["vanilla"], Disabled: [...]}` (present —
-//! non-default) and `enabled_features: []` (the empty list, which decodes to
-//! the *empty* set, NOT `DEFAULT_FLAGS` — see below).
+//! The real 26.2 `New World/level.dat` confirms the default-omit semantics on
+//! the decode side: it stores `DataPacks: {Enabled: ["vanilla"], Disabled:
+//! [...]}` (present — non-default) and *omits* `enabled_features` entirely.
+//! The absent field decodes to the default `DEFAULT_FLAGS` (#1) and, because
+//! the decoded set equals the default, re-encoding omits the field again (#3).
+//! (An explicit `enabled_features: []` is a distinct case — it decodes to the
+//! *empty* set, NOT `DEFAULT_FLAGS`; see below.)
 //!
 //! ## `Objects.equals` and `DataPackConfig`
 //!
@@ -55,17 +58,23 @@
 //! it is value-semantics-consistent with the Rust surface and marked
 //! RivetTodo(#486) so the excluded `PrimaryLevelData.write` port re-audits it.
 //!
-//! ## The `enabled_features: []` vs `DEFAULT_FLAGS` subtlety
+//! ## Absent `enabled_features` vs an explicit `[]`
 //!
 //! `FeatureFlags.CODEC` (`REGISTRY.codec()`) decodes a list of ids to the set
-//! of *known* ids. `[]` decodes to the **empty** set — which is NOT
-//! `DEFAULT_FLAGS` (`{vanilla}`) — so a `New World` with `enabled_features:
-//! []` decodes to an empty set, and re-encoding that empty set is NOT
-//! `Objects.equals(EMPTY, DEFAULT_FLAGS)` → the field is re-encoded as `[]`.
-//! The `WorldDataConfiguration.DEFAULT` config would instead encode an absent
-//! `enabled_features` (its `{vanilla}` equals the default). The real level.dat
-//! stores `[]` precisely because the launcher created it with an empty feature
-//! set, not `DEFAULT`.
+//! of *known* ids. The real 26.2 `New World/level.dat` *omits*
+//! `enabled_features` entirely (it does NOT store `[]`): the lenient-optional
+//! decode half promotes the absent field to the default `DEFAULT_FLAGS`
+//! (`{vanilla}`), and re-encoding that set — which equals the codec default —
+//! omits the field again. So an absent field decodes to the *default* feature
+//! set, not the empty set.
+//!
+//! An explicit `enabled_features: []` is different: `[]` decodes to the
+//! **empty** set, which is NOT `DEFAULT_FLAGS`; `Objects.equals(EMPTY,
+//! DEFAULT_FLAGS)` is false, so a config carrying the empty set re-encodes as
+//! `[]`. `WorldDataConfiguration.DEFAULT` (with `{vanilla}`) encodes an absent
+//! `enabled_features` instead. The two inputs are therefore not
+//! interchangeable: absent → `DEFAULT_FLAGS` (omitted on re-encode); `[]` →
+//! empty set (re-encoded as `[]`).
 //!
 //! Placement: `rivet-world::level` (`mc.world.level` unit), next to
 //! `DataPackConfig` (#387). `expandFeatures` is the only method beyond the
@@ -258,8 +267,10 @@ mod tests {
     fn encode_empty_features_is_present_because_not_default() {
         let ops = JsonOps::INSTANCE;
         let codec = codec::<JsonOps>();
-        // The real 26.2 New World stores enabled_features: [] (the EMPTY set).
-        // EMPTY != DEFAULT_FLAGS, so the field IS re-encoded as [].
+        // A config explicitly carrying the EMPTY set (not DEFAULT_FLAGS):
+        // EMPTY != DEFAULT_FLAGS, so the field IS re-encoded as [] (the real
+        // New World level.dat instead omits the field, which decodes to
+        // DEFAULT_FLAGS and is omitted on re-encode).
         let config = WorldDataConfiguration::new(
             DataPackConfig::default_config(),
             crate::flag::FeatureFlagSet::of(),
@@ -289,7 +300,11 @@ mod tests {
     fn decode_present_non_default_fields() {
         let ops = JsonOps::INSTANCE;
         let codec = codec::<JsonOps>();
-        // Match the real New World level.dat: DataPacks present + enabled_features [].
+        // A present enabled_features: [] decodes to the EMPTY set (NOT the
+        // default vanilla set) — the codec distinguishes absent (-> DEFAULT_FLAGS)
+        // from an explicit empty list (-> empty set). (The real 26.2 New World
+        // level.dat omits enabled_features entirely; this test pins the distinct
+        // explicit-[] path.)
         let input = ops.create_map(vec![
             Pair::of(
                 ops.create_string("DataPacks".to_string()),
