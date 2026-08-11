@@ -199,14 +199,19 @@ fn byte_divergence(name: &str, exp: Option<&[u8]>, act: Option<&[u8]>) -> String
                 .zip(act.iter())
                 .position(|(e, a)| e != a)
                 .expect("same bytes but Option<Vec> differed");
+            // A differing byte means at least one of its two nibbles differs
+            // (nibble 2i = low, nibble 2i+1 = high), but not which without
+            // computing both; the byte index is the unambiguous locator.
             format!(
-                "{name}: first difference at byte {i} (nibble {i}, 0x{:02x} != 0x{:02x})",
+                "{name}: first difference at byte {i} (0x{:02x} != 0x{:02x})",
                 exp[i], act[i]
             )
         }
         (Some(_), None) => format!("{name}: expected some, got absent"),
         (None, Some(_)) => format!("{name}: expected absent, got some"),
-        (None, None) => unreachable!("length-differing check ran on equal-length Some"),
+        (None, None) => unreachable!(
+            "section_divergence only calls byte_divergence when the arrays differ, and two absent arrays are equal"
+        ),
     }
 }
 

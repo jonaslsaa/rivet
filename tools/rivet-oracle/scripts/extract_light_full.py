@@ -173,7 +173,8 @@ def main() -> int:
         "format": 1,
         "paper": "26.2-DEV-main@0a99345",
         "source": "M0 FULL-status chunk NBT (fixtures/chunk) — complete Starlight arrays",
-        "starlight.light_version": sorted(str(v) for v in version_seen if v is not None),
+        # Numeric sort, not string sort: "10" must come after "9".
+        "starlight.light_version": sorted(str(v) for v in sorted(version_seen) if v is not None),
         "array-encoding": "base64 of the raw 2048-byte nibble-packed light layer; nibble i in byte i>>1 (low nibble even, high nibble odd)",
         "chunks": chunks,
         "section-count": section_count,
