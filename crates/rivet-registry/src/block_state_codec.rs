@@ -23,10 +23,13 @@
 //! });
 //! ```
 //!
-//! So a block state serializes to `{"Name": "minecraft:oak_log", "Properties":
-//! {"axis": "x"}}`: the `"Name"` discriminator names the block (unknown name →
-//! error), then the block's per-property codec applies to the whole map.
-//! Singleton states (no properties) encode only the name — `MapCodec.unit`.
+//! So a block state serializes to `{"Properties": {"axis": "x"}, "Name":
+//! "minecraft:oak_log"}`: the per-block property codec applies to the whole map
+//! first, then the `"Name"` discriminator names the block (unknown name →
+//! error). The element-before-key order matches `KeyDispatchCodec.encode`
+//! (value first, then the type key), which this port preserves byte-for-byte
+//! for the `rivet-parity` oracle. Singleton states (no properties) encode only
+//! the name — `MapCodec.unit`.
 //!
 //! The `"Properties"` field is a **lenient** optional field, so a wrong-typed
 //! `Properties` decodes to `None` → the block's default state (matching
@@ -183,9 +186,11 @@ mod tests {
             .result()
             .expect("encode should succeed")
             .clone();
+        // Element-first encode order: the property codec writes first, then the
+        // "Name" type key (Java `KeyDispatchCodec.encode`).
         assert_eq!(
             encoded,
-            json!({"Name": "minecraft:oak_log", "Properties": {"axis": "x"}})
+            json!({"Properties": {"axis": "x"}, "Name": "minecraft:oak_log"})
         );
         let decoded = *codec()
             .parse(&JsonOps::INSTANCE, &encoded)
@@ -206,7 +211,7 @@ mod tests {
             .clone();
         assert_eq!(
             encoded,
-            json!({"Name": "minecraft:oak_log", "Properties": {"axis": "y"}})
+            json!({"Properties": {"axis": "y"}, "Name": "minecraft:oak_log"})
         );
     }
 
@@ -288,12 +293,15 @@ mod tests {
             .result()
             .expect("encode should succeed")
             .clone();
-        // Name-sorted property order: distance < persistent < waterlogged.
+        // Properties encode in reverse name-sorted order (waterlogged,
+        // persistent, distance) — the `PairMapCodec` fold encodes the
+        // accumulated `second` first, so the alphabetically-last property
+        // (distance, folded last) lands first in the output.
         assert_eq!(
             encoded,
-            json!({"Name": "minecraft:oak_leaves", "Properties": {
-                "distance": "2", "persistent": "true", "waterlogged": "false"
-            }})
+            json!({"Properties": {
+                "waterlogged": "false", "persistent": "true", "distance": "2"
+            }, "Name": "minecraft:oak_leaves"})
         );
         let decoded = *codec()
             .parse(&JsonOps::INSTANCE, &encoded)

@@ -222,13 +222,15 @@ mod tests {
             .result()
             .expect("encode should succeed")
             .clone();
+        // Element-first encode order: the value fields write first, then the
+        // "type" key (Java `KeyDispatchCodec.encode`).
         assert_eq!(
             encoded,
             json!({
-                "type": "minecraft:two_layers_feature_size",
                 "limit": 4,
                 "lower_size": 1,
                 "upper_size": 2,
+                "type": "minecraft:two_layers_feature_size",
             })
         );
         let decoded = round_trip(size);
@@ -277,11 +279,11 @@ mod tests {
         assert_eq!(
             encoded,
             json!({
-                "type": "minecraft:two_layers_feature_size",
                 "limit": 4,
                 "lower_size": 1,
                 "upper_size": 2,
                 "min_clipped_height": 8,
+                "type": "minecraft:two_layers_feature_size",
             })
         );
         let decoded = round_trip(size);
@@ -301,12 +303,12 @@ mod tests {
         assert_eq!(
             encoded,
             json!({
-                "type": "minecraft:three_layers_feature_size",
                 "limit": 4,
                 "upper_limit": 2,
                 "lower_size": 1,
                 "middle_size": 2,
                 "upper_size": 3,
+                "type": "minecraft:three_layers_feature_size",
             })
         );
         let decoded = round_trip(size);
