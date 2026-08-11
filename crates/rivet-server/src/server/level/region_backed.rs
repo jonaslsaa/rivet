@@ -199,6 +199,14 @@ const EXPECTED_DATA_VERSION: i32 = 4903;
 /// no writes, no launcher-save discovery. Structures/ticks/block-entity
 /// materialization beyond the clean fixture stay behind the #369/#341 typed
 /// boundaries surfaced by `reconstruct_runtime_chunk`.
+///
+/// Serving a player from the composed world is the next slice: it must
+/// reconstruct and install the initial send view (the spawn chunk alone
+/// cannot satisfy `RequireLoaded` for the join burst) and carry the loaded
+/// world's generator shape into the session login flags (the M1 superflat
+/// path leaves `is_flat` set). Until then, `RequireLoaded` fails a
+/// region-backed join with a typed error instead of silently serving the
+/// superflat world.
 pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     let mut prepared = RegionLevelPreparation::prepare(root)?;
     let level = read_level_metadata(prepared.source().layout())?;
