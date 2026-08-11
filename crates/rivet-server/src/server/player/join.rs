@@ -99,7 +99,7 @@ use rivet_protocol::protocol::game::clock_network_state::ClockNetworkState;
 use rivet_protocol::protocol::game::common_player_spawn_info::CommonPlayerSpawnInfo;
 use rivet_protocol::protocol::game::position_move_rotation::PositionMoveRotation;
 use rivet_registry::ResourceKey;
-use rivet_registry::core::{ChunkPos, Difficulty, Vec3};
+use rivet_registry::core::{Difficulty, Vec3};
 use rivet_registry::holder::Holder;
 use rivet_registry::registries;
 use rivet_registry::registries::{DimensionType, Level};
@@ -198,6 +198,12 @@ pub struct JoinConfig {
 /// `placeNewPlayer`). Paper embeds it in the player_position packet and awaits
 /// the matching `accept_teleportation` ack before accepting the player's
 /// position movement.
+///
+/// `loader` is the session-owned per-player `PlayerChunkLoader` (issue #521):
+/// this burst is its `add()` — the send-set commits the loader's
+/// `lastChunk`/`lastSendDistance`/`lastTickDistance` to the spawn center and
+/// distances, so the movement-driven `update` later diffs against the same view
+/// the client received.
 #[allow(clippy::too_many_arguments)]
 pub fn place_new_player(
     sender: &mut PlaySender,
@@ -207,6 +213,7 @@ pub fn place_new_player(
     level: &ServerLevel,
     join: &JoinConfig,
     requested_view_distance: Option<i32>,
+    loader: &mut PlayerChunkLoader,
     teleport_id: i32,
 ) -> Result<Vec<u32>, PlaySendError> {
     let mut sent = Vec::with_capacity(3 + 117 + 10);
@@ -338,24 +345,18 @@ pub fn place_new_player(
     sent.push(PLAYER_INFO_UPDATE_ID);
 
     // Paper's `level.addNewPlayer(player)` → Moonrise `PlayerChunkLoaderData
-    // .add()` (issue #100): the per-player chunk loader, which this slice
-    // synthesizes per join at the player's chunk position and sends its
+    // .add()` (issue #100): the session-owned per-player chunk loader sends its
     // add-send-set immediately before the second `sendLevelInfo`. The three
     // cache packets (radius → simulation distance → center) then the 117 bare
     // `level_chunk_with_light` bodies in the deterministic X-major raster the
     // #194 fixture byte-matches. `set_entity_data` (the addEntity tracker) is
     // RivetTodo(#222).
     //
-    // The loader is owned by the tick thread (its `add_and_send_chunks` reads
-    // the world's chunk map); it is not stored on the player — the per-player
-    // movement-driven update (#185) that needs it is deferred, so the loader is
-    // built, sent, and dropped here.
-    let center = ChunkPos::containing(&rivet_registry::core::BlockPos::containing(
-        player.position().x,
-        player.position().y,
-        player.position().z,
-    ));
-    let mut loader = PlayerChunkLoader::new(center);
+    // The loader is owned by the live session (issue #521) and already built at
+    // the player's chunk center; the burst commits its state here so the
+    // movement-driven `update` (#521) diffs against the exact send-set the
+    // client received, instead of a fresh loader whose committed center would
+    // not match.
     let chunk_packets = loader
         .add_and_send_chunks(level, requested_view_distance)
         .map_err(PlaySendError::Encode)?;
