@@ -328,6 +328,12 @@ impl LevelChunk {
                 }
             })
             .collect();
+        // The entry-level refusals above are printed per entry; the recoverable
+        // field-level drops the materializer surfaced must not be silent either
+        // (Paper logs the field decode problem and continues).
+        for diagnostic in &materialization.diagnostics {
+            eprintln!("dropping field while materializing block entity: {diagnostic}");
+        }
         LevelChunkPacketData::new(self.client_heightmaps(), self.sections_buffer(), infos)
     }
 
