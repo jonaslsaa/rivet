@@ -204,14 +204,17 @@ pub enum ChunkReconstructionError {
 /// sections (missing entries replaced with all-air defaults, matching
 /// `replaceMissingSections`), then stored heightmaps are installed with the
 /// absent/malformed set primed, post-processing packed offsets are added, and
-/// Starlight nibbles + `lightCorrect` are installed. Block entities are carried
-/// as pending NBT, not materialized (#341).
+/// Starlight nibbles + `lightCorrect` are installed. `structures.References`
+/// are filtered against `requested_pos` and installed into the chunk's
+/// `StructureAccess` map; typed stored ticks are carried on the result (nothing
+/// is scheduled or executed, #370); block entities are carried as pending NBT,
+/// not materialized (#341).
 ///
 /// Boundary: the FULL path rejects (via `SerializableChunkDataError`) blending
-/// data, non-empty structures, non-empty ticks, persistent data, and non-empty
-/// entities with the same typed variants `construct_full` uses — so the caller
-/// can distinguish "chunk was never generated" (proto status) from
-/// "chunk carries a deferred surface".
+/// data, non-empty structure `starts`, `UpgradeData` neighbor tick lists,
+/// persistent data, and non-empty entities with the same typed variants
+/// `construct_full` uses — so the caller can distinguish "chunk was never
+/// generated" (proto status) from "chunk carries a deferred surface".
 pub fn reconstruct_runtime_chunk(
     requested_pos: ChunkPos,
     mut data: SerializableChunkData,
