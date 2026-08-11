@@ -94,7 +94,13 @@
 //! `SpawnData` — Paper sends that partial update tag to the client. The port
 //! mirrors that observable output (the spawner materializes partial) and
 //! surfaces the field drop as a [`BlockEntityMaterializeDiagnostic`] so it is
-//! never silent.
+//! never silent. The outer shape of each `SpawnData` codec field is validated
+//! like Paper's non-lenient fields — `entity` is a required compound and a
+//! present `custom_spawn_rules`/`equipment` must be a compound too. The inner
+//! field codec semantics (light-range validation and default-filling
+//! re-encode, the required `loot_table` key, `slot_drop_chances`
+//! normalization) defer with the `SpawnData`/`EquipmentTable` codec port
+//! (RivetTodo #520).
 //!
 //! ## Ordering
 //!
@@ -254,11 +260,11 @@ pub enum BlockEntityMaterializeError {
 /// the diagnostic exists to keep the drop from being silent.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BlockEntityMaterializeDiagnostic {
-    /// A spawner's `SpawnData` could not be decoded (absent `entity`,
-    /// wrong-typed `entity`, or a non-compound `SpawnData`). Paper's
-    /// `TagValueInput.read` reports the `SpawnData.CODEC` problem and leaves
-    /// `nextSpawnData` null; `BaseSpawner.save` then omits only the `SpawnData`
-    /// key. The spawner's numeric fields still materialize.
+    /// A spawner's `SpawnData` could not be decoded: `entity` is absent or not
+    /// a compound, or `custom_spawn_rules`/`equipment` is present but not a
+    /// compound. Paper's `TagValueInput.read` reports the `SpawnData.CODEC`
+    /// problem and leaves `nextSpawnData` null; `BaseSpawner.save` then omits
+    /// only the `SpawnData` key. The spawner's numeric fields still materialize.
     #[error("spawner block entity at {position} dropped malformed {field}")]
     SpawnDataDropped {
         position: BlockPos,
@@ -393,10 +399,12 @@ fn materialize_resolved(
 /// `(short)` cast. `SpawnPotentials` is deliberately dropped.
 ///
 /// `SpawnData` is carried through its codec's stored form (a compound) with the
-/// `SpawnData` constructor's `entity.id` normalization applied. A wrong-typed or
-/// entity-less `SpawnData` is dropped exactly like Paper (`TagValueInput.read`
-/// reports the `SpawnData.CODEC` problem and leaves `nextSpawnData` null, so
-/// `BaseSpawner.save` omits only the key) — the drop is surfaced as a
+/// `SpawnData` constructor's `entity.id` normalization applied. A `SpawnData`
+/// whose outer shape is malformed — `entity` absent or not a compound, or a
+/// present `custom_spawn_rules`/`equipment` that is not a compound — is dropped
+/// exactly like Paper (`TagValueInput.read` reports the `SpawnData.CODEC`
+/// problem and leaves `nextSpawnData` null, so `BaseSpawner.save` omits only
+/// the key) — the drop is surfaced as a
 /// [`BlockEntityMaterializeDiagnostic::SpawnDataDropped`] and the spawner's
 /// numeric fields still materialize.
 fn materialize_spawner_update_tag(
@@ -461,29 +469,42 @@ fn materialize_spawner_update_tag(
 
 /// Decode the stored `SpawnData` compound into the codec's re-encodable form.
 ///
-/// `SpawnData.CODEC` requires the `entity` compound field; a missing or
-/// wrong-typed `entity` fails the decode, and Paper's `TagValueInput.read`
-/// reports it and leaves the field dropped (the port returns the field name for
-/// the [`BlockEntityMaterializeDiagnostic::SpawnDataDropped`] surface).
+/// `SpawnData.CODEC` requires the `entity` compound field and, when present,
+/// compound `custom_spawn_rules`/`equipment` fields (all non-lenient at the
+/// outer shape). A missing or wrong-typed `entity`, or a present
+/// `custom_spawn_rules`/`equipment` that is not a compound, fails the decode —
+/// Paper's `TagValueInput.read` reports it and leaves the field dropped (the
+/// port returns the field name for the
+/// [`BlockEntityMaterializeDiagnostic::SpawnDataDropped`] surface).
 /// Otherwise the compound is the codec's stored form and is carried through
 /// with the `SpawnData` record constructor's `entity.id` normalization applied
 /// (valid id rewritten canonically, invalid/absent/non-string id removed).
 ///
-/// RivetTodo(#520): `SpawnData.CODEC`'s `optionalFieldOf` fields are
-/// non-lenient — a present-but-wrong-typed `custom_spawn_rules` or a
-/// malformed `equipment` also fails the whole `SpawnData` decode (dropping it
-/// from the update tag), and a well-formed `custom_spawn_rules` re-encodes
-/// with its two light ranges always stored (defaults filled for a missing
-/// inner field). The port validates only the `entity` hard field and carries
-/// the stored compound verbatim (with the id normalization), so those deeper
-/// re-encode divergences defer with the `SpawnData`/`EquipmentTable` codec
-/// port.
+/// RivetTodo(#520): the INNER `SpawnData`/`EquipmentTable` codec semantics
+/// defer: a compound `custom_spawn_rules` re-encodes with both light ranges
+/// always stored (defaults filled for a missing inner field, and a light range
+/// outside `[0, 15]` fails the whole `SpawnData` decode), and a compound
+/// `equipment` requires a `loot_table` resource key and re-encodes all-equal
+/// `slot_drop_chances` as a single float. The port validates the outer shape
+/// only and carries a present compound verbatim (with the id normalization), so
+/// those inner re-encode divergences defer with the `SpawnData`/`EquipmentTable`
+/// codec port.
 fn load_spawn_data(spawn_data: &CompoundTag) -> Result<CompoundTag, &'static str> {
     let Some(entity) = spawn_data.tags.get("entity") else {
         return Err("SpawnData.entity");
     };
     if !matches!(entity, Tag::Compound(_)) {
         return Err("SpawnData.entity");
+    }
+    if let Some(custom_spawn_rules) = spawn_data.tags.get("custom_spawn_rules")
+        && !matches!(custom_spawn_rules, Tag::Compound(_))
+    {
+        return Err("SpawnData.custom_spawn_rules");
+    }
+    if let Some(equipment) = spawn_data.tags.get("equipment")
+        && !matches!(equipment, Tag::Compound(_))
+    {
+        return Err("SpawnData.equipment");
     }
     let mut out = spawn_data.clone();
     normalize_spawn_data_entity_id(out.tags.get_mut("entity"));
@@ -791,6 +812,83 @@ mod tests {
                 field: "SpawnData.entity",
             }]
         );
+    }
+
+    #[test]
+    fn spawner_non_compound_custom_spawn_rules_drops_spawn_data_with_diagnostic() {
+        let mut tag = spawner_tag();
+        let mut spawn_data = tag
+            .get_compound("SpawnData")
+            .expect("spawn data present")
+            .clone();
+        spawn_data.put_int("custom_spawn_rules", 1);
+        tag.tags
+            .insert("SpawnData".to_string(), Tag::Compound(spawn_data));
+        let (info, diagnostics) = materialize_entry(&resolved_outcome(tag));
+        // Paper's SpawnData.CODEC optionalFieldOf("custom_spawn_rules") is
+        // non-lenient: a present-but-non-compound value fails the whole
+        // SpawnData decode, so the field is omitted.
+        let info = info.expect("spawner still materializes partial");
+        assert!(info.tag().unwrap().get("SpawnData").is_none());
+        assert_eq!(
+            diagnostics,
+            vec![BlockEntityMaterializeDiagnostic::SpawnDataDropped {
+                position: BlockPos::new(3, 64, 11),
+                field: "SpawnData.custom_spawn_rules",
+            }]
+        );
+    }
+
+    #[test]
+    fn spawner_non_compound_equipment_drops_spawn_data_with_diagnostic() {
+        let mut tag = spawner_tag();
+        let mut spawn_data = tag
+            .get_compound("SpawnData")
+            .expect("spawn data present")
+            .clone();
+        spawn_data.put_int("equipment", 1);
+        tag.tags
+            .insert("SpawnData".to_string(), Tag::Compound(spawn_data));
+        let (info, diagnostics) = materialize_entry(&resolved_outcome(tag));
+        // Same non-lenient optionalFieldOf("equipment") semantics: a
+        // present-but-non-compound value drops the whole SpawnData.
+        let info = info.expect("spawner still materializes partial");
+        assert!(info.tag().unwrap().get("SpawnData").is_none());
+        assert_eq!(
+            diagnostics,
+            vec![BlockEntityMaterializeDiagnostic::SpawnDataDropped {
+                position: BlockPos::new(3, 64, 11),
+                field: "SpawnData.equipment",
+            }]
+        );
+    }
+
+    #[test]
+    fn spawner_compound_custom_spawn_rules_and_equipment_are_carried_verbatim() {
+        // Well-formed compound values for the optional codec fields are the
+        // codec's stored form and are carried through. The inner-field
+        // re-encode normalization (light-range defaults, slot_drop_chances
+        // collapsing) defers with the SpawnData/EquipmentTable codec port.
+        let mut tag = spawner_tag();
+        let mut spawn_data = tag
+            .get_compound("SpawnData")
+            .expect("spawn data present")
+            .clone();
+        let mut rules = CompoundTag::new();
+        rules.put_int("block_light_limit", 0);
+        rules.put_int("sky_light_limit", 15);
+        spawn_data.put("custom_spawn_rules".to_string(), Tag::Compound(rules));
+        let mut equipment = CompoundTag::new();
+        equipment.put_string("loot_table", "minecraft:chest");
+        spawn_data.put("equipment".to_string(), Tag::Compound(equipment));
+        tag.tags
+            .insert("SpawnData".to_string(), Tag::Compound(spawn_data));
+        let (info, diagnostics) = materialize_entry(&resolved_outcome(tag));
+        assert!(diagnostics.is_empty());
+        let info = info.expect("spawner materializes");
+        let out = info.tag().unwrap().get_compound("SpawnData").unwrap();
+        assert!(out.get_compound("custom_spawn_rules").is_some());
+        assert!(out.get_compound("equipment").is_some());
     }
 
     #[test]
