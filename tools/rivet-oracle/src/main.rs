@@ -3212,7 +3212,7 @@ fn run() -> Result<(), Error> {
                 }
             }
             let world_dir = world_dir.ok_or_else(|| {
-                Error::Gate("extract-world requires a disposable world root directory".into())
+                Error::Unverified("extract-world requires a disposable world root directory".into())
             })?;
             run_extract_world(&world_dir, to.as_deref())
         }

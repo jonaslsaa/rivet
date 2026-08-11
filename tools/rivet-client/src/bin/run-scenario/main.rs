@@ -2932,7 +2932,7 @@ fn run_extract_world(world: &Path, work: &Path) -> Result<Value, RunnerError> {
         .arg(&out)
         .status()
         .map_err(|e| {
-            RunnerError::Gate(format!(
+            RunnerError::Unverified(format!(
                 "failed to run rivet-oracle extract-world ({}): {e} — build it first with \
                  cargo build -p rivet-oracle",
                 oracle_bin.display()
