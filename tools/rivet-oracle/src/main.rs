@@ -5603,7 +5603,7 @@ mod tests {
             "level-type": "minecraft\\:flat",
             "region-file-compression": "none",
             "kind": "full",
-            "chunk-count": 24,
+            "chunk-count": all_corpus_coordinates().len(),
         });
         fs::write(
             dir.join("manifest.json"),

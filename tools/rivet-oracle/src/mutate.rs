@@ -102,7 +102,7 @@ pub fn encode_payload(compound: &CompoundTag) -> Result<Vec<u8>, String> {
 /// Delegates to `fixture_full_payload_with_seed` with the working seed 42
 /// (mirroring `CAPTURE_SEED`) so a tree built by the plain builder is a
 /// different-seed tree from one built with a bogus seed — the seed flows into
-/// the block content (`Name` parity), which is the bogus-seed negative's
+/// the block content (`block_states.data`), which is the bogus-seed negative's
 /// mechanism.
 #[cfg(test)]
 pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
@@ -110,8 +110,8 @@ pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
 }
 
 /// Like `fixture_full_payload`, but carries the given world seed into the
-/// chunk's worldgen *content* (the block-palette `Name` alternation), so two
-/// payloads built for the same coordinate under different seeds hash
+/// chunk's worldgen *content* (the `block_states.data` per-block array), so
+/// two payloads built for the same coordinate under different seeds hash
 /// differently — the deterministic analogue of the #175 7(e) bogus-seed
 /// negative without booting Paper.
 ///
@@ -119,8 +119,10 @@ pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
 /// `InhabitedTime` tick counters: those are game/inhabited time, which in a
 /// fresh world are 0 for every seed and never a function of the world seed.
 /// The mechanism Paper actually has is that a different seed generates
-/// different worldgen content, so this builder folds the seed into the block
-/// palette instead — an honest stand-in for that content difference.
+/// different worldgen content, so this builder folds the seed into the
+/// per-block placement array — an honest, multi-bit stand-in for that content
+/// difference (a single palette-name parity bit would model only two worlds
+/// and collide for same-parity seeds).
 #[cfg(test)]
 pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
     let mut root = CompoundTag::new();
@@ -137,12 +139,12 @@ pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
     section.put_byte("Y", 0);
     let mut bs = CompoundTag::new();
     let mut palette = CompoundTag::new();
-    // The seed folds into the block palette, standing in for real worldgen
-    // content differences: a different seed flips which blocks this synthetic
-    // chunk holds, so the serialized digest differs at every chunk.
+    // The palette name alternates by coordinate only (air/stone) — the
+    // seed-dependent part of this chunk's content lives in the `data` array
+    // below, not here.
     palette.put_string(
         "Name",
-        if (cx as i64 + cz as i64 + seed) % 2 == 0 {
+        if (cx + cz) % 2 == 0 {
             "minecraft:air"
         } else {
             "minecraft:stone"
@@ -152,7 +154,12 @@ pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
         "palette".to_string(),
         Tag::List(ListTag::with_list(vec![Tag::Compound(palette)])),
     );
-    bs.put_long_array("data", vec![0; 256]);
+    // The seed folds into the `block_states.data` long array — the per-block
+    // packed placement real worldgen derives from the seed. Different seeds
+    // (or coordinates) produce different arrays, so the serialized digest
+    // differs at every chunk for any seed pair, never just an opposite-parity
+    // pair.
+    bs.put_long_array("data", seed_block_data(seed, cx, cz));
     section.put("block_states".to_string(), Tag::Compound(bs));
     section.put_byte_array("SkyLight", vec![0i8; 2048]);
     section.put_byte_array("BlockLight", vec![0i8; 2048]);
@@ -180,6 +187,28 @@ pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
     root.put_byte("isLightOn", 0);
     root.put_int("starlight.light_version", 10);
     encode_payload(&root).expect("fixture payload encodes")
+}
+
+/// Deterministic per-chunk block data derived from the world seed: a fixed
+/// 256-long array mixed with `(seed, cx, cz)` via a small xorshift-style
+/// mixer. Different seeds (or different coordinates) produce different arrays
+/// with overwhelming probability, so the bogus-seed negative never reduces to
+/// a single parity bit (which would collide for same-parity seeds).
+#[cfg(test)]
+fn seed_block_data(seed: i64, cx: i32, cz: i32) -> Vec<i64> {
+    let mut state = (seed as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(0xBF58_476D_1CE4_E5B9);
+    state ^= (cx as u32 as u64) << 32;
+    state ^= cz as u32 as u64;
+    (0..256)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as i64
+        })
+        .collect()
 }
 
 /// Apply one mutation of `kind` to a serialized payload, returning the
@@ -429,6 +458,15 @@ mod tests {
         let b = fixture_full_payload_with_seed(0, 0, 999);
         assert_ne!(a, b, "bogus seed must change the serialized payload");
         assert_ne!(xxh3_64_hex(&a), xxh3_64_hex(&b));
+        // Same parity, different seed (42 and 1000 are both even): the content
+        // difference must still be real — a single parity bit would make these
+        // byte-identical, so this pins the multi-bit seed mechanism.
+        let same_parity = fixture_full_payload_with_seed(0, 0, 1000);
+        assert_ne!(
+            a, same_parity,
+            "same-parity seeds must still produce different content"
+        );
+        assert_ne!(xxh3_64_hex(&a), xxh3_64_hex(&same_parity));
         // Same seed, same coordinate — deterministic by construction.
         assert_eq!(
             fixture_full_payload_with_seed(0, 0, 42),
