@@ -215,6 +215,19 @@ mod tests {
         fn world_gen_settings_lifecycle(&self) -> Lifecycle {
             Lifecycle::Stable
         }
+        fn get_data_configuration(
+            &self,
+        ) -> &crate::level::world_data_configuration::WorldDataConfiguration {
+            panic!("data configuration is not used by derived delegation tests")
+        }
+        fn set_data_configuration(
+            &mut self,
+            _data_configuration: crate::level::world_data_configuration::WorldDataConfiguration,
+        ) {
+        }
+        fn get_level_settings(&self) -> crate::level::level_settings::LevelSettings {
+            panic!("level settings are not used by derived delegation tests")
+        }
     }
 
     impl FakeWorld {

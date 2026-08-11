@@ -64,7 +64,11 @@ pub trait LevelData {
     /// ```
     ///
     /// The `CrashReportCategory` stub records the detail key and the rendered
-    /// location string; the level-data defaults are otherwise stub-owned.
+    /// location string; the level-data defaults are otherwise stub-owned. The
+    /// body is duplicated in [`level_data_fill_default`] so `PrimaryLevelData`
+    /// can compose it for its `ServerLevelData.super` chain (a fully-qualified
+    /// `LevelData::fill_crash_report_category(self, ...)` inside that override
+    /// would re-dispatch through the override — Rust has no `Interface.super`).
     fn fill_crash_report_category(
         &self,
         category: &mut rivet_core::CrashReportCategory,
@@ -76,6 +80,23 @@ pub trait LevelData {
             format_location(level_height_accessor, &pos),
         );
     }
+}
+
+/// `LevelData.fillCrashReportCategory` default body as a free function.
+///
+/// `PrimaryLevelData.fillCrashReportCategory` composes this (the
+/// `WritableLevelData.super`/`ServerLevelData.super` chain) with the
+/// `ServerLevelData` level details and the `WorldData` details.
+pub fn level_data_fill_default(
+    data: &dyn LevelData,
+    category: &mut rivet_core::CrashReportCategory,
+    level_height_accessor: &dyn LevelHeightAccessor,
+) {
+    let pos = data.get_respawn_data().pos();
+    category.set_detail(
+        "Level spawn location",
+        format_location(level_height_accessor, &pos),
+    );
 }
 
 /// `LevelData.RespawnData` — the `(GlobalPos, yaw, pitch)` record.
