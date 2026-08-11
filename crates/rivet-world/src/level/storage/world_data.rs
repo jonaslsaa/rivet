@@ -8,26 +8,23 @@
 //! bookkeeping, the crash-report default, and the value reads/writes the
 //! level-data slice needs.
 //!
-//! ## Deferred members (out of scope, #398)
+//! ## Deferred members (out of scope)
 //!
-//! - `getDataConfiguration` / `setDataConfiguration` — needs the
-//!   `WorldDataConfiguration` value (FeatureFlagSet + DataPackConfig),
-//!   tracked by the level-settings leaves (#387).
-//! - `getLevelSettings` — needs the `LevelSettings` record (#387).
-//! - `enabledFeatures` default — `getDataConfiguration().enabledFeatures()`,
-//!   needs `FeatureFlagSet` (#387).
 //! - `createTag(@Nullable UUID)` — the full `PrimaryLevelData` write path
-//!   (`PrimaryLevelData.parse`/save is out of scope, #398; needs
-//!   `CompoundTag` + worldgen settings).
+//!   (`PrimaryLevelData.save` is out of scope, #323; needs `CompoundTag` store
+//!   + worldgen settings). No declaration is emitted — a `RivetTodo(#398)`
+//!     marker notes it.
 //!
-//! No declarations are emitted for these — a `RivetTodo(#387)` marker notes
-//! each. The rest of the surface ports fully.
+//! `getDataConfiguration`/`setDataConfiguration`/`getLevelSettings` and the
+//! `enabledFeatures` default are present here (values from #486); the concrete
+//! `PrimaryLevelData` (#323) backs them from its `LevelSettings`.
 
 use rivet_registry::core::{Difficulty, GameType};
 use rivet_serialization::Lifecycle;
 use rivet_util::mth::Uuid;
 
 use super::server_level_data::ServerLevelData;
+use crate::level::world_data_configuration::WorldDataConfiguration;
 use indexmap::IndexSet;
 
 /// `WorldData.ANVIL_VERSION_ID` — `19133` (Java's interface constant
@@ -44,14 +41,6 @@ pub const MCREGION_VERSION_ID: i32 = 19132;
 
 /// `WorldData` — the world's persistent data facade.
 pub trait WorldData {
-    // RivetTodo(#387): `getDataConfiguration` / `setDataConfiguration`
-    // (deferred with the `WorldDataConfiguration` value — FeatureFlagSet +
-    // DataPackConfig), `getLevelSettings` (the `LevelSettings` record),
-    // `enabledFeatures` (`getDataConfiguration().enabledFeatures()`, needs
-    // `FeatureFlagSet`), and RivetTodo(#398): `createTag(@Nullable UUID)` (the
-    // `PrimaryLevelData` write path, out of scope). No declarations are
-    // emitted for these.
-
     /// `wasModded()`.
     fn was_modded(&self) -> bool;
 
@@ -119,8 +108,6 @@ pub trait WorldData {
     /// `overworldData()`.
     fn overworld_data(&self) -> &dyn ServerLevelData;
 
-    // `getLevelSettings()` defers with the `LevelSettings` record
-    // (RivetTodo(#387), no declaration emitted).
     // `createTag(@Nullable UUID)` — the `PrimaryLevelData` write path — defers
     // with `CompoundTag` + worldgen settings (RivetTodo(#398), no declaration
     // emitted).
@@ -169,6 +156,20 @@ pub trait WorldData {
 
     /// `worldGenSettingsLifecycle()`.
     fn world_gen_settings_lifecycle(&self) -> Lifecycle;
+
+    /// `getDataConfiguration()`.
+    fn get_data_configuration(&self) -> &WorldDataConfiguration;
+
+    /// `setDataConfiguration(WorldDataConfiguration)`.
+    fn set_data_configuration(&mut self, data_configuration: WorldDataConfiguration);
+
+    /// `getLevelSettings()`.
+    fn get_level_settings(&self) -> crate::level::level_settings::LevelSettings;
+
+    /// `enabledFeatures()` — `getDataConfiguration().enabledFeatures()`.
+    fn enabled_features(&self) -> &crate::flag::FeatureFlagSet {
+        self.get_data_configuration().enabled_features()
+    }
 }
 
 /// `String.join(", ", Collection)` over the set's iteration order.
@@ -305,6 +306,16 @@ mod tests {
 
         fn world_gen_settings_lifecycle(&self) -> Lifecycle {
             self.lifecycle
+        }
+
+        fn get_data_configuration(&self) -> &WorldDataConfiguration {
+            panic!("data configuration is not used by WorldData-only tests")
+        }
+
+        fn set_data_configuration(&mut self, _data_configuration: WorldDataConfiguration) {}
+
+        fn get_level_settings(&self) -> crate::level::level_settings::LevelSettings {
+            panic!("level settings are not used by WorldData-only tests")
         }
     }
 
