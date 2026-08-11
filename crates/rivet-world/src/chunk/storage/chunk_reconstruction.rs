@@ -419,18 +419,25 @@ fn install_structure_references(
     if references.is_empty() {
         return;
     }
-    let mut data = std::collections::HashMap::with_capacity(references.len());
-    for entry in references {
-        // The `StructureAccess` reference map models the packed longs as their
-        // raw `u64` bit patterns (`IndexSet<u64>`); the parsed NBT carries the
-        // signed `i64` wire form, so the cast is the install-boundary only.
-        let packed: Vec<u64> = entry
-            .references
-            .iter()
-            .map(|reference| *reference as u64)
-            .collect();
-        data.insert(entry.identifier.clone(), packed);
-    }
+    // Install in the decoded source order: `set_all_references` now feeds an
+    // insertion-ordered `IndexMap` authority (#537), so building a
+    // `std::collections::HashMap` here would discard that order for
+    // `RandomState` bucket order. The Vec carries each `StructureReference`'s
+    // key and its `u64` packed bit patterns.
+    let data: Vec<(Identifier, Vec<u64>)> = references
+        .iter()
+        .map(|entry| {
+            // The `StructureAccess` reference map models the packed longs as their
+            // raw `u64` bit patterns (`IndexSet<u64>`); the parsed NBT carries the
+            // signed `i64` wire form, so the cast is the install-boundary only.
+            let packed: Vec<u64> = entry
+                .references
+                .iter()
+                .map(|reference| *reference as u64)
+                .collect();
+            (entry.identifier.clone(), packed)
+        })
+        .collect();
     chunk.set_all_references(data);
 }
 
