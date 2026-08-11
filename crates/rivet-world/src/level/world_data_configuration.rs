@@ -56,7 +56,7 @@
 //! `DataPacks` IS omitted when the config equals `DEFAULT`. This is the only
 //! divergence from Java on the save path (which is excluded from this slice);
 //! it is value-semantics-consistent with the Rust surface and marked
-//! RivetTodo(#486) so the excluded `PrimaryLevelData.write` port re-audits it.
+//! RivetTodo(#486): so the excluded `PrimaryLevelData.write` port re-audits it.
 //!
 //! ## Absent `enabled_features` vs an explicit `[]`
 //!
@@ -81,7 +81,7 @@
 //! record accessors.
 //!
 //! Deliberately deferred (blocked by later units; no declarations emitted):
-//! RivetTodo(#486) — the `DataPackConfig` reference-identity encode divergence
+//! RivetTodo(#486): the `DataPackConfig` reference-identity encode divergence
 //! above (re-audit when `PrimaryLevelData.write` lands).
 
 use super::data_pack_config::DataPackConfig;
