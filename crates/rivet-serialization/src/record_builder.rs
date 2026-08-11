@@ -14,9 +14,9 @@
 //! composes the per-field `MapDecoder`s.
 
 use crate::codec::Codec;
-use crate::data_result::{DataResult, ap3, ap4, ap5};
+use crate::data_result::{DataResult, ap3, ap4, ap5, ap6};
 use crate::dynamic_ops::{DynamicOps, Keyable, MapLike, RecordBuilder};
-use crate::functions::{DecoderFn, Fn3, Fn4, Fn5};
+use crate::functions::{DecoderFn, Fn3, Fn4, Fn5, Fn6};
 use crate::lifecycle::Lifecycle;
 use crate::map_codec::MapCodec;
 use crate::map_decoder::MapDecoder;
@@ -327,6 +327,18 @@ pub struct Group5<O: 'static, Ops: DynamicOps + 'static, T, U, V, W, X> {
 }
 
 impl<O: 'static, Ops: DynamicOps + 'static, T, U, V, W, X> Group5<O, Ops, T, U, V, W, X> {
+    /// `Products.P5.and(App<F, T6>)`.
+    pub fn and<Y>(self, y: RecordCodecBuilder<O, Ops, Y>) -> Group6<O, Ops, T, U, V, W, X, Y> {
+        Group6 {
+            t: self.t,
+            u: self.u,
+            v: self.v,
+            w: self.w,
+            x: self.x,
+            y,
+        }
+    }
+
     /// `Products.P5.apply(Applicative, Function5<T1, T2, T3, T4, T5, R>)`.
     pub fn apply<R: 'static>(
         self,
@@ -341,6 +353,37 @@ impl<O: 'static, Ops: DynamicOps + 'static, T, U, V, W, X> Group5<O, Ops, T, U, 
         X: Clone + Send + Sync + 'static,
     {
         compose5(self.t, self.u, self.v, self.w, self.x, function)
+    }
+}
+
+/// `Products.P6`.
+#[derive(Debug, Clone)]
+pub struct Group6<O: 'static, Ops: DynamicOps + 'static, T, U, V, W, X, Y> {
+    pub(crate) t: RecordCodecBuilder<O, Ops, T>,
+    pub(crate) u: RecordCodecBuilder<O, Ops, U>,
+    pub(crate) v: RecordCodecBuilder<O, Ops, V>,
+    pub(crate) w: RecordCodecBuilder<O, Ops, W>,
+    pub(crate) x: RecordCodecBuilder<O, Ops, X>,
+    pub(crate) y: RecordCodecBuilder<O, Ops, Y>,
+}
+
+impl<O: 'static, Ops: DynamicOps + 'static, T, U, V, W, X, Y> Group6<O, Ops, T, U, V, W, X, Y> {
+    /// `Products.P6.apply(Applicative, Function6<T1, T2, T3, T4, T5, T6, R>)`.
+    #[allow(clippy::type_complexity)] // the 6-arity `Fn(T, U, V, W, X, Y)` mirrors Java `Function6`
+    pub fn apply<R: 'static>(
+        self,
+        _instance: &Instance<O, Ops>,
+        function: Arc<dyn Fn(T, U, V, W, X, Y) -> R + Send + Sync>,
+    ) -> RecordCodecBuilder<O, Ops, R>
+    where
+        T: Clone + Send + Sync + 'static,
+        U: Clone + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
+        W: Clone + Send + Sync + 'static,
+        X: Clone + Send + Sync + 'static,
+        Y: Clone + Send + Sync + 'static,
+    {
+        compose6(self.t, self.u, self.v, self.w, self.x, self.y, function)
     }
 }
 
@@ -620,6 +663,89 @@ fn compose5<
     }
 }
 
+/// `Applicative.ap6` composition — decode with error accumulation, encode all
+/// six fields via their getters.
+#[allow(clippy::type_complexity)] // the 6-arity `Fn(T, U, V, W, X, Y)` mirrors Java `Function6`
+fn compose6<
+    O: 'static,
+    Ops: DynamicOps + 'static,
+    T: Clone + Send + Sync + 'static,
+    U: Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    W: Clone + Send + Sync + 'static,
+    X: Clone + Send + Sync + 'static,
+    Y: Clone + Send + Sync + 'static,
+    R: 'static,
+>(
+    t: RecordCodecBuilder<O, Ops, T>,
+    u: RecordCodecBuilder<O, Ops, U>,
+    v: RecordCodecBuilder<O, Ops, V>,
+    w: RecordCodecBuilder<O, Ops, W>,
+    x: RecordCodecBuilder<O, Ops, X>,
+    y: RecordCodecBuilder<O, Ops, Y>,
+    function: Arc<dyn Fn(T, U, V, W, X, Y) -> R + Send + Sync>,
+) -> RecordCodecBuilder<O, Ops, R> {
+    let t_getter = t.getter.clone();
+    let u_getter = u.getter.clone();
+    let v_getter = v.getter.clone();
+    let w_getter = w.getter.clone();
+    let x_getter = x.getter.clone();
+    let y_getter = y.getter.clone();
+    let t_enc = t.encoder.clone();
+    let u_enc = u.encoder.clone();
+    let v_enc = v.encoder.clone();
+    let w_enc = w.encoder.clone();
+    let x_enc = x.encoder.clone();
+    let y_enc = y.encoder.clone();
+    let t_dec = t.decoder.clone();
+    let u_dec = u.decoder.clone();
+    let v_dec = v.decoder.clone();
+    let w_dec = w.decoder.clone();
+    let x_dec = x.decoder.clone();
+    let y_dec = y.decoder.clone();
+    let function_enc = function.clone();
+    let function_dec = function.clone();
+
+    let getter = Arc::new(move |o: &O| {
+        function_enc(
+            t_getter(o),
+            u_getter(o),
+            v_getter(o),
+            w_getter(o),
+            x_getter(o),
+            y_getter(o),
+        )
+    });
+
+    let encoder = Arc::new(
+        move |o: &O, ops: &Ops, prefix: &mut dyn RecordBuilder<Output = Ops::Output>| {
+            t_enc(o, ops, prefix);
+            u_enc(o, ops, prefix);
+            v_enc(o, ops, prefix);
+            w_enc(o, ops, prefix);
+            x_enc(o, ops, prefix);
+            y_enc(o, ops, prefix);
+        },
+    );
+
+    let decoder = Arc::new(MapDecoderComposed6 {
+        t: t_dec,
+        u: u_dec,
+        v: v_dec,
+        w: w_dec,
+        x: x_dec,
+        y: y_dec,
+        function: function_dec,
+        _marker: std::marker::PhantomData::<fn() -> O>,
+    });
+
+    RecordCodecBuilder {
+        getter,
+        encoder,
+        decoder,
+    }
+}
+
 /// Two-field composed `MapDecoder` (Java `Instance.ap2` decoder).
 pub struct MapDecoderComposed2<O: 'static, Ops: DynamicOps + 'static, T, U, R> {
     pub(crate) t: Arc<dyn MapDecoder<T, Ops>>,
@@ -846,6 +972,86 @@ where
             v.decode(ops, input),
             w.decode(ops, input),
             x.decode(ops, input),
+        )
+    }
+}
+
+/// Six-field composed `MapDecoder` (Java `Instance.ap6` decoder).
+#[allow(clippy::type_complexity)] // the 6-arity `Fn(T, U, V, W, X, Y)` mirrors Java `Function6`
+pub struct MapDecoderComposed6<O: 'static, Ops: DynamicOps + 'static, T, U, V, W, X, Y, R> {
+    pub(crate) t: Arc<dyn MapDecoder<T, Ops>>,
+    pub(crate) u: Arc<dyn MapDecoder<U, Ops>>,
+    pub(crate) v: Arc<dyn MapDecoder<V, Ops>>,
+    pub(crate) w: Arc<dyn MapDecoder<W, Ops>>,
+    pub(crate) x: Arc<dyn MapDecoder<X, Ops>>,
+    pub(crate) y: Arc<dyn MapDecoder<Y, Ops>>,
+    pub(crate) function: Arc<dyn Fn(T, U, V, W, X, Y) -> R + Send + Sync>,
+    pub(crate) _marker: std::marker::PhantomData<fn() -> O>,
+}
+impl<O, Ops: DynamicOps + 'static, T, U, V, W, X, Y, R> std::fmt::Debug
+    for MapDecoderComposed6<O, Ops, T, U, V, W, X, Y, R>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MapDecoderComposed6")
+    }
+}
+
+impl<O, Ops: DynamicOps + 'static, T, U, V, W, X, Y, R> Keyable<Ops>
+    for MapDecoderComposed6<O, Ops, T, U, V, W, X, Y, R>
+{
+    fn keys(&self, ops: &Ops) -> Vec<Ops::Output> {
+        let mut keys = self.t.keys(ops);
+        keys.extend(self.u.keys(ops));
+        keys.extend(self.v.keys(ops));
+        keys.extend(self.w.keys(ops));
+        keys.extend(self.x.keys(ops));
+        keys.extend(self.y.keys(ops));
+        keys
+    }
+}
+
+impl<O, Ops: DynamicOps + 'static, T, U, V, W, X, Y, R> MapDecoder<R, Ops>
+    for MapDecoderComposed6<O, Ops, T, U, V, W, X, Y, R>
+where
+    T: Clone + Send + Sync + 'static,
+    U: Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    W: Clone + Send + Sync + 'static,
+    X: Clone + Send + Sync + 'static,
+    Y: Clone + Send + Sync + 'static,
+    R: 'static,
+{
+    fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<R> {
+        // Java `Instance.ap6` (`Applicative.super.ap6`): every field is decoded
+        // and errors accumulate.
+        let t = self.t.clone();
+        let u = self.u.clone();
+        let v = self.v.clone();
+        let w = self.w.clone();
+        let x = self.x.clone();
+        let y = self.y.clone();
+        let function = self.function.clone();
+        let fr: DataResult<Fn6<T, U, V, W, X, Y, R>> = DataResult::success_with_lifecycle(
+            Arc::new(move |tv: &T, uv: &U, vv: &V, wv: &W, xv: &X, yv: &Y| {
+                function(
+                    tv.clone(),
+                    uv.clone(),
+                    vv.clone(),
+                    wv.clone(),
+                    xv.clone(),
+                    yv.clone(),
+                )
+            }),
+            Lifecycle::experimental(),
+        );
+        ap6(
+            fr,
+            t.decode(ops, input),
+            u.decode(ops, input),
+            v.decode(ops, input),
+            w.decode(ops, input),
+            x.decode(ops, input),
+            y.decode(ops, input),
         )
     }
 }
