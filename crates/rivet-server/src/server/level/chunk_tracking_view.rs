@@ -12,10 +12,11 @@
 //! `(5,5)` fall at distance² = 3² + 3² = 18 ≥ 16). This is the fixed chunk square
 //! `Event::ReceiveChunk` lands with (issue #150 DoD).
 //!
-//! RivetTodo(#185): the EMPTY view, the `Positioned.difference` enter/leave
-//! diff walker (Moonrise recenter), and the `isInViewDistance` overloads are
-//! deferred to the owning pipeline.view unit. This slice ports only the
-//! `Positioned` containment + `forEach` shape the M1 chunk square needs.
+//! RivetTodo(#185): the EMPTY view and the `isInViewDistance` static overloads
+//! are deferred to the owning pipeline.view unit. The `Positioned.difference`
+//! enter/leave diff walker (Moonrise recenter) was ported ahead of that unit
+//! for issue #521 — the movement-driven `PlayerChunkLoader` re-center needs the
+//! enter set of a center move.
 
 use rivet_registry::core::ChunkPos;
 
@@ -155,6 +156,75 @@ impl ChunkTrackingView {
     /// `isInViewDistance(int, int)` — `contains(x, z, false)`.
     pub fn is_in_view_distance(&self, chunk_x: i32, chunk_z: i32) -> bool {
         self.contains(chunk_x, chunk_z, false)
+    }
+
+    /// `Positioned.squareIntersects(Positioned other)` — the wrapped bounding
+    /// boxes overlap on both axes. The comparisons wrap like Java ints
+    /// (PORTING.md): at i32 extremes `min/max` of the wrapped bounds can give a
+    /// degenerate (false) result, exactly like Java's wrapped comparison.
+    fn square_intersects(&self, other: &Self) -> bool {
+        self.min_x() <= other.max_x()
+            && self.max_x() >= other.min_x()
+            && self.min_z() <= other.max_z()
+            && self.max_z() >= other.min_z()
+    }
+
+    /// `ChunkTrackingView.difference(from, to, onEnter, onLeave)` — the enter /
+    /// leave walker between two views.
+    ///
+    /// Java:
+    /// ```java
+    /// if (!from.equals(to)) {
+    ///     if (from instanceof Positioned last && to instanceof Positioned next
+    ///             && last.squareIntersects(next)) {
+    ///         // walk the union bounding box in X-major order, calling onEnter /
+    ///         // onLeave where the two views disagree
+    ///     } else {
+    ///         from.forEach(onLeave);
+    ///         to.forEach(onEnter);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// This slice has no `EMPTY` view yet (RivetTodo(#185)), so both views are
+    /// always `Positioned`; the `instanceof` check is trivially satisfied and
+    /// the walk reduces to the two branches below. The union walk iterates
+    /// X-major then Z-minor (the same deterministic order `for_each` uses), so
+    /// the enter/leave cells come out in the canonical raster order the M1
+    /// chunk square byte-matches. When the views do not intersect (a far
+    /// teleport), the fallback emits the full views — the old as leaves, the
+    /// new as enters.
+    pub fn difference(
+        from: &Self,
+        to: &Self,
+        mut on_enter: impl FnMut(ChunkPos),
+        mut on_leave: impl FnMut(ChunkPos),
+    ) {
+        if from == to {
+            return;
+        }
+        if from.square_intersects(to) {
+            let min_x = from.min_x().min(to.min_x());
+            let min_z = from.min_z().min(to.min_z());
+            let max_x = from.max_x().max(to.max_x());
+            let max_z = from.max_z().max(to.max_z());
+            for x in min_x..=max_x {
+                for z in min_z..=max_z {
+                    let saw = from.contains(x, z, true);
+                    let sees = to.contains(x, z, true);
+                    if saw != sees {
+                        if sees {
+                            on_enter(ChunkPos::new(x, z));
+                        } else {
+                            on_leave(ChunkPos::new(x, z));
+                        }
+                    }
+                }
+            }
+        } else {
+            from.for_each(on_leave);
+            to.for_each(on_enter);
+        }
     }
 
     /// `Positioned.forEach(Consumer<ChunkPos>)` — the X-major, Z-minor walk
@@ -388,5 +458,82 @@ mod tests {
         assert_eq!(min_center.chunk_count(), 0);
         let max_center = ChunkTrackingView::of(ChunkPos::new(i32::MAX, 0), 1);
         assert_eq!(max_center.chunk_count(), 0);
+    }
+
+    /// The enter/leave sets for moving the (0,0) view one chunk east (to (1,0)).
+    /// The new view gains the x=6 column (z=-4..4) plus the two cells the
+    /// corner-cut shifts at x=5 (z=±5, in the old view's corner cut but inside
+    /// the new square's bounds); the old view loses the mirror-image x=-5
+    /// column and the x=-4 z=±5 corner-shift cells. Both sets are 11 cells, in
+    /// the union-box X-major/Z-minor order the walker emits.
+    fn east_move_enter() -> Vec<ChunkPos> {
+        let mut out = Vec::new();
+        out.push(ChunkPos::new(5, -5));
+        out.push(ChunkPos::new(5, 5));
+        for z in -4i32..=4 {
+            out.push(ChunkPos::new(6, z));
+        }
+        out
+    }
+
+    fn east_move_leave() -> Vec<ChunkPos> {
+        let mut out = Vec::new();
+        for z in -4i32..=4 {
+            out.push(ChunkPos::new(-5, z));
+        }
+        out.push(ChunkPos::new(-4, -5));
+        out.push(ChunkPos::new(-4, 5));
+        out
+    }
+
+    #[test]
+    fn difference_emits_enter_and_leave_in_x_major_order() {
+        // Moving the spawn view one chunk east: every new-view cell that was
+        // absent from the old view enters; every old-view cell absent from the
+        // new view leaves. The walker yields both in the union box's
+        // X-major/Z-minor raster.
+        let from = spawn_view();
+        let to = ChunkTrackingView::of(ChunkPos::new(1, 0), 4);
+        let mut entered = Vec::new();
+        let mut left = Vec::new();
+        ChunkTrackingView::difference(&from, &to, |p| entered.push(p), |p| left.push(p));
+
+        assert_eq!(entered, east_move_enter());
+        assert_eq!(left, east_move_leave());
+        // The two sets are disjoint and cover every disagreement in the union
+        // box; the new view is old ∪ enter − leave.
+        assert_eq!(entered.len(), 11);
+        assert_eq!(left.len(), 11);
+    }
+
+    #[test]
+    fn difference_of_equal_views_emits_nothing() {
+        let from = spawn_view();
+        let mut entered = Vec::new();
+        let mut left = Vec::new();
+        ChunkTrackingView::difference(&from, &from, |p| entered.push(p), |p| left.push(p));
+        assert!(entered.is_empty());
+        assert!(left.is_empty());
+    }
+
+    #[test]
+    fn difference_of_disjoint_views_falls_back_to_full_views() {
+        // A far move: the bounding boxes do not intersect, so the walker falls
+        // back to `from.forEach(onLeave)` then `to.forEach(onEnter)` — the full
+        // 117-chunk views in the canonical raster order.
+        let from = spawn_view();
+        let to = ChunkTrackingView::of(ChunkPos::new(100, 0), 4);
+        let mut entered = Vec::new();
+        let mut left = Vec::new();
+        ChunkTrackingView::difference(&from, &to, |p| entered.push(p), |p| left.push(p));
+
+        assert_eq!(entered.len(), 117);
+        assert_eq!(left.len(), 117);
+        // The enter set is the full far view: center (100,0) → x 95..105.
+        assert_eq!(entered[0], ChunkPos::new(95, -4));
+        assert_eq!(*entered.last().unwrap(), ChunkPos::new(105, 4));
+        // The leave set is the full origin view.
+        assert_eq!(left[0], ChunkPos::new(-5, -4));
+        assert_eq!(*left.last().unwrap(), ChunkPos::new(5, 4));
     }
 }
