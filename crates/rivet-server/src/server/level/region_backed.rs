@@ -471,6 +471,7 @@ mod tests {
     use rivet_util::DataInputStream;
     use rivet_util::data_io::DataOutputStream;
     use rivet_world::chunk::status::ChunkStatus;
+    use rivet_world::chunk::storage::serializable_chunk_data::parse_section_lights;
 
     use super::*;
     use crate::server::level::chunk_tracking_view::ChunkTrackingView;
@@ -870,6 +871,23 @@ mod tests {
         assert_eq!(light.sky_updates().len(), 2);
         assert!(light.block_updates().is_empty());
         assert!(light.sky_updates().iter().all(|layer| layer.len() == 2048));
+
+        // The two sky layers travel byte-for-byte from the fixture's plain
+        // `SkyLight` arrays (no transposition or corruption at the
+        // `from_bridge`/`light_data` seam): re-parse the fixture and pin the
+        // exact arrays the send carries.
+        let fixture = load_fixture(&loaded_world_fixture());
+        let fixture_sections = parse_section_lights(&fixture);
+        let sky_at = |y: i32| {
+            fixture_sections
+                .iter()
+                .find(|s| s.y == y)
+                .unwrap_or_else(|| panic!("stored sky at Y={y}"))
+                .sky_light
+                .clone()
+                .expect("plain sky array")
+        };
+        assert_eq!(light.sky_updates(), &[sky_at(4), sky_at(5)]);
     }
 
     /// A hostile `level.dat` spawn compound that decodes to a typed

@@ -1274,13 +1274,29 @@ impl ReconstructedLightData {
 ///   present byte array is rebuilt with its raw state — the section stays
 ///   absent unless it has data (an absent state INT defaults to `Null`, so a
 ///   bytes-but-no-state section is skipped, matching Paper).
-/// - `false` (a vanilla-format save): the `starlight.*light_state` INTs are
-///   absent, but a present plain `BlockLight`/`SkyLight` array is what vanilla
+/// - `false` (any save that failed the Starlight predicate): if the save is
+///   genuinely vanilla-format — no `starlight.*light_state` INT on any section
+///   — a present plain `BlockLight`/`SkyLight` array is the light vanilla
 ///   `SerializableChunkData` read as a `DataLayer` and would queue for the send
 ///   (`new DataLayer(byte[])` is never empty, so it always becomes an update
-///   mask + bytes). Each such array is installed as an `Initialised` nibble.
-///   Paper itself would drop these and relight; Rivet has no lighting engine
-///   (#184), so the faithful packet is the persisted array (issue #531).
+///   mask + bytes); each such array is installed as an `Initialised` nibble
+///   (issue #531). A Starlight save that merely failed the predicate still
+///   carries those state INTs and installs nothing, matching Paper. Paper
+///   itself would drop these and relight; Rivet has no lighting engine (#184),
+///   so the faithful packet is the persisted array (issue #531).
+///
+/// The vanilla-format fallback is gated on both of Paper's conditions for it:
+/// the save must be genuinely vanilla-format — *no* section carries a
+/// `starlight.*light_state` INT — and `light_correct` must be false.
+/// `SaveUtil` writes a state INT for every section whose saved nibble state is
+/// non-null (`getSaveState()` -> UNINIT/INIT/HIDDEN), so a Starlight save
+/// always carries at least one on any light-bearing section. Paper's
+/// `loadStarlightLightData` returns all-null nibbles without touching the plain
+/// arrays when `lightCorrect` is false, and its `blockState >= 0` guard skips
+/// any section whose state INT is absent on a light-correct chunk, so a
+/// Starlight save that merely failed the predicate (version mismatch / missing
+/// `isLightOn` / status below Light) still carries those INTs and must not be
+/// reinterpreted as vanilla.
 ///
 /// Any invalid state, state/data mismatch, or out-of-range section reproduces
 /// Paper's caught load failure: all-null arrays are retained and
@@ -1293,6 +1309,12 @@ pub fn reconstruct_lights(
 ) -> ReconstructedLightData {
     let count = height.get_sections_count() as usize + 2;
     let empty = || filled_empty_light(count);
+    // Vanilla-format saves carry no per-section Starlight state INTs; a
+    // Starlight save always writes one for every light-bearing section
+    // (`SaveUtil` writes a state INT whenever `getSaveState()` is non-null).
+    let vanilla_format = sections
+        .iter()
+        .all(|section| section.block_state < 0 && section.sky_state < 0);
     let parsed = std::panic::catch_unwind(|| {
         let mut block = empty();
         let mut sky = empty();
@@ -1302,8 +1324,11 @@ pub fn reconstruct_lights(
                 usize::try_from(section.y - min_light_section).expect("light section below world");
             if light_correct && section.block_state >= 0 {
                 block[index] = rebuild_nibble(section.block_light.clone(), section.block_state);
-            } else if !light_correct && let Some(bytes) = &section.block_light {
-                // Vanilla-format save (no Starlight state INTs): a present plain
+            } else if !light_correct
+                && vanilla_format
+                && let Some(bytes) = &section.block_light
+            {
+                // Genuine vanilla-format save, not Starlight-lit: a present plain
                 // `BlockLight` array is the light, installed as an `Initialised`
                 // nibble exactly like the vanilla `new DataLayer(byte[])` the
                 // send would carry (issue #531).
@@ -1312,6 +1337,7 @@ pub fn reconstruct_lights(
             if light_correct && section.sky_state >= 0 && has_sky_light {
                 sky[index] = rebuild_nibble(section.sky_light.clone(), section.sky_state);
             } else if !light_correct
+                && vanilla_format
                 && has_sky_light
                 && let Some(bytes) = &section.sky_light
             {
@@ -3607,6 +3633,120 @@ mod tests {
                 .unwrap()
                 .get_data(),
             vec![0x33; ARRAY_SIZE]
+        );
+    }
+
+    /// A Starlight save that merely failed the light predicate (mismatched
+    /// `starlight.light_version` / missing `isLightOn` / status below Light)
+    /// still carries per-section `starlight.*light_state` INTs, so it is not
+    /// vanilla-format. Paper's `lit &&` load loop never runs for it and its
+    /// plain arrays stay Null — they must not be installed as authoritative
+    /// vanilla updates. Both persisted hostile states — `Null` (0) and
+    /// `Uninitialised` (1) — carry the INT, so neither counts as vanilla-format.
+    #[test]
+    fn failed_predicate_starlight_save_does_not_install_vanilla_bytes() {
+        for state in [InitState::Null, InitState::Uninitialised] {
+            let mut section = section_tag(-4);
+            section.put_byte_array(BLOCK_LIGHT_TAG, vec![0x22; ARRAY_SIZE]);
+            section.put_byte_array(SKY_LIGHT_TAG, vec![0x33; ARRAY_SIZE]);
+            section.put_int(BLOCKLIGHT_STATE_TAG, state.to_i32());
+            section.put_int(SKYLIGHT_STATE_TAG, state.to_i32());
+            let sections = parse_section_lights(&chunk_with_sections(vec![section]));
+            assert_eq!(sections[0].block_state, state.to_i32());
+
+            let rebuilt =
+                reconstruct_lights(height_accessor::create(-64, 384), &sections, false, true);
+            assert!(!rebuilt.light_correct);
+            assert!(
+                rebuilt
+                    .block_nibbles
+                    .iter()
+                    .all(|nibble| nibble.to_vanilla_nibble().is_none())
+            );
+            assert!(
+                rebuilt
+                    .sky_nibbles
+                    .iter()
+                    .all(|nibble| nibble.to_vanilla_nibble().is_none())
+            );
+        }
+    }
+
+    /// A mixed save — one section carrying a `starlight.*light_state` INT, one
+    /// vanilla-format section without one — is not vanilla-format, so `light_correct`
+    /// false installs nothing, matching Paper's all-null `lightCorrect=false`
+    /// branch. The gate requires *every* section to be INT-free, not just the
+    /// array-bearing one.
+    #[test]
+    fn mixed_section_save_is_not_vanilla_format() {
+        let mut starlight = section_tag(-4);
+        starlight.put_byte_array(BLOCK_LIGHT_TAG, vec![0x22; ARRAY_SIZE]);
+        starlight.put_int(BLOCKLIGHT_STATE_TAG, InitState::Uninitialised.to_i32());
+        let mut vanilla = section_tag(-3);
+        vanilla.put_byte_array(BLOCK_LIGHT_TAG, vec![0x44; ARRAY_SIZE]);
+        let sections = parse_section_lights(&chunk_with_sections(vec![starlight, vanilla]));
+        assert_eq!(sections[0].block_state, InitState::Uninitialised.to_i32());
+        assert_eq!(sections[1].block_state, -1);
+
+        let rebuilt = reconstruct_lights(height_accessor::create(-64, 384), &sections, false, true);
+        assert!(!rebuilt.light_correct);
+        assert!(
+            rebuilt
+                .block_nibbles
+                .iter()
+                .all(|nibble| nibble.to_vanilla_nibble().is_none())
+        );
+        assert!(
+            rebuilt
+                .sky_nibbles
+                .iter()
+                .all(|nibble| nibble.to_vanilla_nibble().is_none())
+        );
+    }
+
+    /// End-to-end hostile regression: a Starlight save whose
+    /// `starlight.light_version` no longer matches (so `parse_light_correct`
+    /// is false) still carries per-section `starlight.*light_state` INTs — here
+    /// with the `Null` state (0) — alongside plain light arrays. Paper's `lit
+    /// &&` load loop never runs, so those arrays must stay Null through the
+    /// parse → reconstruct path; the vanilla-format fallback must not install
+    /// them as authoritative updates just because `light_correct` failed.
+    #[test]
+    fn version_mismatched_starlight_save_with_null_states_installs_nothing() {
+        let height = height_accessor::create(-64, 384);
+        let mut chunk = top_level("minecraft:light");
+        chunk.put_boolean(IS_LIGHT_ON_TAG, true);
+        chunk.put_int(STARLIGHT_VERSION_TAG, STARLIGHT_LIGHT_VERSION + 1);
+        let mut section = section_tag(-4);
+        section.put_byte_array(BLOCK_LIGHT_TAG, vec![0x22; ARRAY_SIZE]);
+        section.put_byte_array(SKY_LIGHT_TAG, vec![0x33; ARRAY_SIZE]);
+        section.put_int(BLOCKLIGHT_STATE_TAG, InitState::Null.to_i32());
+        section.put_int(SKYLIGHT_STATE_TAG, InitState::Null.to_i32());
+        chunk.put(
+            SECTIONS_TAG.into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(section)])),
+        );
+
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert!(!parsed.light_correct());
+
+        let sections = parse_section_lights(&chunk);
+        assert_eq!(sections[0].block_state, InitState::Null.to_i32());
+        let rebuilt = reconstruct_lights(height, &sections, parsed.light_correct(), true);
+        assert!(!rebuilt.light_correct);
+        assert!(
+            rebuilt
+                .block_nibbles
+                .iter()
+                .all(|nibble| nibble.to_vanilla_nibble().is_none())
+        );
+        assert!(
+            rebuilt
+                .sky_nibbles
+                .iter()
+                .all(|nibble| nibble.to_vanilla_nibble().is_none())
         );
     }
 
