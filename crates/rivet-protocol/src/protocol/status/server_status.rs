@@ -27,7 +27,7 @@ use crate::protocol::status::name_and_id::NameAndId;
 use base64::Engine as _;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
-use rivet_serialization::map_codec::{self, MapCodec};
+use rivet_serialization::map_codec;
 use rivet_text::Component;
 use rivet_text::component_serialization;
 use std::sync::Arc;
@@ -98,7 +98,7 @@ impl ServerStatus {
     pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<ServerStatus, Ops>> {
         rivet_serialization::record_builder::create(move |instance| {
             let description = map_codec::for_getter(
-                lenient_optional_field_of::<Component, Ops>(
+                codec::lenient_optional_field_of::<Component, Ops>(
                     "description",
                     component_serialization::codec(),
                     Component::empty(),
@@ -118,7 +118,7 @@ impl ServerStatus {
                 Arc::new(|s: &ServerStatus| s.favicon.clone()),
             );
             let enforces_secure_chat = map_codec::for_getter(
-                lenient_optional_field_of::<bool, Ops>(
+                codec::lenient_optional_field_of::<bool, Ops>(
                     "enforcesSecureChat",
                     codec::bool_codec(),
                     false,
@@ -200,7 +200,7 @@ impl Players {
                 Arc::new(|p: &Players| p.online),
             );
             let sample = map_codec::for_getter(
-                lenient_optional_field_of::<Vec<NameAndId>, Ops>(
+                codec::lenient_optional_field_of::<Vec<NameAndId>, Ops>(
                     "sample",
                     codec::list(NameAndId::codec::<Ops>()),
                     Vec::new(),
@@ -314,36 +314,6 @@ impl Favicon {
             }),
         )
     }
-}
-
-/// `Codec.lenientOptionalFieldOf(String, F default)` — the with-default form
-/// of a lenient optional field (Java `optionalField(name, codec, lenient)
-/// .xmap(o -> o.orElse(default), a -> Objects.equals(a, default) ?
-/// Optional.empty() : Optional.of(a))`): the field value defaults on decode
-/// and is OMITTED on encode when equal to `default`.
-fn lenient_optional_field_of<F, Ops>(
-    name: &str,
-    element_codec: Arc<dyn Codec<F, Ops>>,
-    default: F,
-) -> Arc<dyn MapCodec<F, Ops>>
-where
-    F: Clone + PartialEq + Send + Sync + 'static,
-    Ops: DynamicOps + 'static,
-{
-    let inner = codec::optional_field(name.to_string(), element_codec, true);
-    let default_for_decode = default.clone();
-    let default_for_encode = default;
-    map_codec::xmap(
-        inner,
-        Arc::new(move |o: &Option<F>| o.clone().unwrap_or_else(|| default_for_decode.clone())),
-        Arc::new(move |a: &F| {
-            if *a == default_for_encode {
-                None
-            } else {
-                Some(a.clone())
-            }
-        }),
-    )
 }
 
 #[cfg(test)]
