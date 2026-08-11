@@ -422,9 +422,10 @@ mod tests {
         let chunk = &manifest.chunks["0,0"];
         assert_eq!(chunk.status, "minecraft:full");
         assert_eq!(chunk.stored_pos, [0, 0]);
-        // A real chunk carries a distinct content signature: the anti-superflat
-        // evidence. A server echoing repeated bytes for every chunk cannot
-        // reproduce a distinct set of three different blocks.
+        // A real chunk records a per-chunk block-variety signature: three
+        // different block names across the sampled coordinates. A server
+        // serving a uniform floor or identical bytes for every chunk cannot
+        // reproduce this recorded per-coordinate content.
         assert_eq!(
             chunk.distinct,
             vec![

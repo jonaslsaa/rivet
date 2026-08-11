@@ -3102,27 +3102,27 @@ fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), Ru
         // its (partial/empty) sections honestly, but the client would observe
         // real terrain there. Comparing against an all-air fingerprint would be
         // a misleading "content mismatch"; the honest classification is the
-        // #369 capability boundary — UNVERIFIED until full-chunk construction
+        // #519 capability boundary — UNVERIFIED until full-chunk construction
         // can carry it.
         if status != "minecraft:full" {
             return Err(RunnerError::Unverified(format!(
-                "loaded-world sampled chunk {key} is {status} (not minecraft:full): the #369 \
+                "loaded-world sampled chunk {key} is {status} (not minecraft:full): the #519 \
                  full-chunk construction capability is required to compare its per-coordinate \
                  content, so this acceptance stays UNVERIFIED"
             )));
         }
-        // A FULL chunk may still carry content the #369 capability boundary
-        // cannot yet construct (block entities, structures, ticks, entities).
-        // The extractor records these flags honestly; refusing PASS here keeps
-        // the capability boundary honest instead of comparing a chunk the
-        // server could not have served faithfully.
+        // A FULL chunk may still carry content the #519 capability boundary
+        // cannot yet construct (non-empty structures.starts, entities). The
+        // extractor records these flags honestly; refusing PASS here keeps the
+        // capability boundary honest instead of comparing a chunk the server
+        // could not have served faithfully.
         let flags: Vec<&str> = fingerprint["capability_flags"]
             .as_array()
             .map(|a| a.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
         if !flags.is_empty() {
             return Err(RunnerError::Unverified(format!(
-                "loaded-world sampled chunk {key} is minecraft:full but carries #369-uncarried \
+                "loaded-world sampled chunk {key} is minecraft:full but carries #519-uncarried \
                  capability flags {flags:?}; the runner refuses PASS rather than trusting an \
                  incomplete server"
             )));
@@ -3288,7 +3288,7 @@ mod tests {
     }
 
     /// A minimal ground-truth manifest whose chunk carries an explicit status
-    /// (FULL or a pre-full status the #369 capability cannot yet carry).
+    /// (FULL or a pre-full status the #519 capability cannot yet carry).
     fn manifest_with_status(
         chunk_x: i32,
         chunk_z: i32,
@@ -3473,7 +3473,7 @@ mod tests {
     #[test]
     fn compare_loaded_content_is_unverified_on_a_non_full_chunk() {
         // A sampled chunk that is not minecraft:full has no ground-truth
-        // content (the #369 full-construction capability is absent) — the
+        // content (the #519 full-construction capability is absent) — the
         // acceptance must report UNVERIFIED, never a misleading content
         // mismatch.
         let manifest = manifest_with_status(

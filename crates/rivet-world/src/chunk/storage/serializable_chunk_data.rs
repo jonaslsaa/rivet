@@ -564,7 +564,7 @@ impl SerializableChunkData {
         &self.structure_data
     }
     /// Whether the chunk carries `structures.starts` entries — the one
-    /// structures surface the #369 full-chunk construction cannot yet carry.
+    /// structures surface the #519 full-chunk construction cannot yet carry.
     /// References-only and empty structures containers decode into carried
     /// [`StructureReference`]s and construct fine (#519).
     pub fn has_unsupported_structure_starts(&self) -> bool {
