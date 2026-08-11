@@ -27,17 +27,16 @@
 //! value. `RegionFile` is owned by the region's single IO worker behind a
 //! `Mutex<RegionFile>` (OWNERSHIP.md) — never `Arc<RwLock>` game state.
 
-// RivetTodo(#231): `RegionFileStorage` write/flush/create surfaces remain
-// deferred. This module now exposes only the existing-file direct-read slice,
-// including its LRU/negative caches, coordinate guard, and Aikar oversized
-// merge. `IOWorker`'s `PendingStore`
-// coalescing, the moonrise `RegionDataController` interfaces
+// RivetTodo(#231): the moonrise `RegionDataController` interfaces
 // (`moonrise$startWrite`/`moonrise$finishWrite`/`moonrise$readData`/
-// `moonrise$finishRead`), and `SimpleRegionStorage`'s coordinate guard also
-// land with that wave. The legacy Aikar oversized subsystem (§6.2) — per-chunk
-// Aikar `setOversized` write/meta mutations and the recalc-only Aikar branches
-// remain deferred. Codec coverage per DECISIONS.md D13: all four registered
-// read codecs are wired; deflate/lz4 writes stay deferred.
+// `moonrise$finishRead`), `IOWorker`'s `PendingStore` coalescing, and
+// `SimpleRegionStorage`'s coordinate guard land with the write worker wave.
+// `SerializableChunkData.write` is deferred. The Aikar `setOversized` clear
+// path is wired into the write lifecycle exactly like Paper: `write` clears the
+// legacy flag only on a successful store, while the delete and
+// `RegionFileSizeException` paths only `clear` (no `set_oversized`). The Aikar
+// recalc branches remain deferred. Codec coverage per DECISIONS.md D13: all
+// four registered read codecs are wired; deflate/lz4 writes stay deferred.
 
 pub mod chunk_reconstruction;
 pub mod region_bitmap;
