@@ -496,31 +496,48 @@ impl<T> Registry<T> {
     ///
     /// Decode produces `Holder::Reference` holders for registered names (and
     /// errors on unknown ones with the same `"Unknown registry key in <key>:
-    /// <name>"`); encode accepts a registered `Reference` (emitting its
+    /// <name>"`); encode accepts a same-registry `Reference` (emitting its
     /// identifier) and errors on a `Direct` (`"Unregistered holder in <key>:
-    /// Direct{...}"`).
+    /// Direct{...}"`) or a `Reference` of another registry (which has no key
+    /// this registry can emit).
     pub fn holder_by_name_codec<Ops>(
         &self,
     ) -> Arc<dyn rivet_serialization::codec::Codec<Holder<T>, Ops>>
     where
-        T: Clone + std::fmt::Debug + Send + Sync + 'static,
+        T: std::fmt::Debug + Send + Sync + 'static,
         Ops: rivet_serialization::dynamic_ops::DynamicOps + 'static,
     {
         let reference_codec = self.reference_holder_with_lifecycle::<Ops>();
         let key = self.key.clone();
-        // `flatComapMap` decode mapper: `holder -> (Holder<T>)holder` (identity —
-        // the decode produces the reference holder unchanged; `T: Clone` is the
-        // derive's requirement).
-        let to: Fn1<Holder<T>, Holder<T>> = Arc::new(|h: &Holder<T>| h.clone());
-        // `flatComapMap` encode mapper: `safeCastToReference` — a registered
-        // Reference passes through; a Direct (a foreign holder) is the exact
-        // Java error.
+        let registry_id = self.registry_id;
+        // `flatComapMap` decode mapper: `holder -> (Holder<T>)holder` — a
+        // no-op on the decoded reference holder (Copy `(RegistryId, u32)` pair,
+        // reconstructed without touching `T`); a `Direct` is unreachable here
+        // (the decode only ever produces `Reference`s).
+        let to: Fn1<Holder<T>, Holder<T>> = Arc::new(|h: &Holder<T>| match h {
+            Holder::Reference { registry, id } => Holder::reference(*registry, *id),
+            Holder::Direct(_) => panic!("holderByNameCodec decode produced a Direct holder"),
+        });
+        // `flatComapMap` encode mapper: `safeCastToReference` — a same-registry
+        // Reference passes through and a Direct is the exact Java error. A
+        // Reference of ANOTHER registry is rejected here too: the port's
+        // `Reference` stores only `(RegistryId, id)` (no stored key), so this
+        // registry cannot emit the foreign key that Java's
+        // `Holder.Reference.key()` carries — the `can_serialize_in` owner rule
+        // applies instead of silently emitting this registry's key (or
+        // panicking on an out-of-range foreign id).
         let from: DecoderFn<Holder<T>, Holder<T>> =
             Arc::new(move |holder: &Holder<T>| match holder {
-                Holder::Reference { .. } => DataResult::success(holder.clone()),
+                Holder::Reference { registry, id } if *registry == registry_id => {
+                    DataResult::success(Holder::reference(*registry, *id))
+                }
                 Holder::Direct(value) => DataResult::error(format!(
                     "Unregistered holder in {}: Direct{{{:?}}}",
                     key, value
+                )),
+                Holder::Reference { registry, id } => DataResult::error(format!(
+                    "Unregistered holder in {}: foreign Reference from registry {} with id {}",
+                    key, registry.0, id
                 )),
             });
         rivet_serialization::codec::flat_comap_map(reference_codec, to, from)
@@ -544,7 +561,11 @@ impl<T> Registry<T> {
     /// so a malformed identifier error propagates verbatim (e.g.
     /// `"Not a valid resource location: ..."`), and an unknown name is the
     /// exact Java message.
-    pub fn reference_holder_with_lifecycle<Ops>(
+    ///
+    /// Private like Java's helper: both public codecs feed it only
+    /// same-registry references (identity lookup / owner-checked), so the
+    /// `Direct`/out-of-range panic paths in its encode mapper are unreachable.
+    fn reference_holder_with_lifecycle<Ops>(
         &self,
     ) -> Arc<dyn rivet_serialization::codec::Codec<Holder<T>, Ops>>
     where
@@ -1259,6 +1280,27 @@ mod by_name_codec_tests {
             result.error_ref().unwrap().message(),
             format!(
                 "Unregistered holder in {}: Direct{{TestElement(7)}}",
+                registry_key()
+            )
+        );
+    }
+
+    #[test]
+    fn holder_codec_encodes_a_foreign_reference_as_unregistered() {
+        // A `Reference` bound to ANOTHER registry has no key this registry can
+        // emit (the port's `Reference` stores only `(RegistryId, id)`), so it is
+        // rejected here — Java would throw `IllegalStateException` from
+        // `Holder.Reference.key()` on a foreign `can_serialize_in` owner. The
+        // message names the foreign registry rather than this one's key.
+        let registry = registry_of(&[("air", 0)]);
+        let codec = registry.holder_by_name_codec::<TestOps>();
+        let foreign = Holder::reference(RegistryId(999), 0);
+        let result = encode_value(codec.as_ref(), &foreign, &ops());
+        assert!(result.is_error());
+        assert_eq!(
+            result.error_ref().unwrap().message(),
+            format!(
+                "Unregistered holder in {}: foreign Reference from registry 999 with id 0",
                 registry_key()
             )
         );
