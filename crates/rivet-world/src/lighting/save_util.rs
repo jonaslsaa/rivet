@@ -133,21 +133,100 @@ pub fn surface_divergences(
 
     while let Some((y, exp)) = expected_by_y.pop_first() {
         match actual_by_y.remove(&y) {
-            Some(act) if exp != act => {
-                out.push(format!("section y={y}: expected {exp:?}, got {act:?}"))
-            }
+            Some(act) if exp != act => out.push(section_divergence(y, exp, act)),
             Some(_) => {}
             None => out.push(format!(
-                "section y={y}: expected present, got absent ({exp:?})"
+                "section y={y}: expected present, got absent ({})",
+                concise(exp)
             )),
         }
     }
     for (y, act) in actual_by_y {
         out.push(format!(
-            "section y={y}: expected absent, got present ({act:?})"
+            "section y={y}: expected absent, got present ({})",
+            concise(act)
         ));
     }
     out
+}
+
+/// A one-line, byte-exact description of one section's divergence, pointing at
+/// the first differing light byte rather than dumping two full 2048-byte arrays
+/// (which is what `Debug` on the `Vec<u8>` produces and is unreadable/unsearchable
+/// in a failing test). State differences and array-length differences are named
+/// directly; a same-length byte difference names the first byte where the
+/// nibble-packed layers diverge and both values at that byte.
+fn section_divergence(y: i32, exp: &SavedLightSection, act: &SavedLightSection) -> String {
+    let mut parts = Vec::new();
+    if exp.block_state != act.block_state {
+        parts.push(format!(
+            "block_state {} != {}",
+            exp.block_state, act.block_state
+        ));
+    }
+    if exp.sky_state != act.sky_state {
+        parts.push(format!("sky_state {} != {}", exp.sky_state, act.sky_state));
+    }
+    if exp.block_light != act.block_light {
+        parts.push(byte_divergence(
+            "block_light",
+            exp.block_light.as_deref(),
+            act.block_light.as_deref(),
+        ));
+    }
+    if exp.sky_light != act.sky_light {
+        parts.push(byte_divergence(
+            "sky_light",
+            exp.sky_light.as_deref(),
+            act.sky_light.as_deref(),
+        ));
+    }
+    format!("section y={y}: {}", parts.join("; "))
+}
+
+/// First differing byte (index + values) of two same-length light arrays, or a
+/// length mismatch when they differ in size.
+fn byte_divergence(name: &str, exp: Option<&[u8]>, act: Option<&[u8]>) -> String {
+    match (exp, act) {
+        (Some(exp), Some(act)) if exp.len() != act.len() => format!(
+            "{name}: length differs ({} != {} bytes)",
+            exp.len(),
+            act.len()
+        ),
+        (Some(exp), Some(act)) => {
+            let i = exp
+                .iter()
+                .zip(act.iter())
+                .position(|(e, a)| e != a)
+                .expect("same bytes but Option<Vec> differed");
+            format!(
+                "{name}: first difference at byte {i} (nibble {i}, 0x{:02x} != 0x{:02x})",
+                exp[i], act[i]
+            )
+        }
+        (Some(_), None) => format!("{name}: expected some, got absent"),
+        (None, Some(_)) => format!("{name}: expected absent, got some"),
+        (None, None) => unreachable!("length-differing check ran on equal-length Some"),
+    }
+}
+
+/// Compact one-line section render for absence/extra messages — states and byte
+/// lengths only, never the full arrays.
+fn concise(s: &SavedLightSection) -> String {
+    let bl = s
+        .block_light
+        .as_deref()
+        .map(|d| format!("{} bytes", d.len()))
+        .unwrap_or_else(|| "no bytes".into());
+    let sl = s
+        .sky_light
+        .as_deref()
+        .map(|d| format!("{} bytes", d.len()))
+        .unwrap_or_else(|| "no bytes".into());
+    format!(
+        "block_state {}, block_light {bl}, sky_state {}, sky_light {sl}",
+        s.block_state, s.sky_state
+    )
 }
 
 /// Index a surface by section Y, panicking on a duplicate Y instead of silently
