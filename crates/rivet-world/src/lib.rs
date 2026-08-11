@@ -60,8 +60,13 @@ pub mod level;
 pub mod levelgen;
 pub mod lighting;
 pub mod superflat;
-/// `net.minecraft.world.ticks` value layer (#370): [`ticks::TickPriority`],
-/// [`ticks::SavedTick`], the [`ticks::saved_tick_codec`] factory, and
-/// [`ticks::filter_tick_list_for_chunk`]. Execution/scheduling surfaces stay
-/// deferred (see the module doc).
+/// `net.minecraft.world.ticks` value and container layer (#370/#522):
+/// [`ticks::TickPriority`], [`ticks::SavedTick`] (+ the
+/// [`ticks::saved_tick_codec`] factory and [`ticks::filter_tick_list_for_chunk`]),
+/// [`ticks::ScheduledTick`] (+ the `DRAIN_ORDER` comparators and
+/// [`ticks::UniqueTickKey`] projection), and the runtime containers
+/// [`ticks::LevelChunkTicks`] / [`ticks::ProtoChunkTicks`] behind the
+/// [`ticks::TickAccess`] / [`ticks::SerializableTickContainer`] interfaces.
+/// Level-level execution/scheduling surfaces (`LevelTicks`) stay deferred (see
+/// the module doc).
 pub mod ticks;
