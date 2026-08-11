@@ -20,6 +20,11 @@
 //! default body, so behavior is identical; documented for the future
 //! `PrimaryLevelData` port.
 //!
+//! RivetTodo(#398): upcasting a `ServerLevelData` implementor to
+//! `&dyn LevelData` runs only the `LevelData` default (the server-level
+//! details are lost); the future `PrimaryLevelData` must override **both**
+//! trait methods.
+//!
 //! The `"Level game mode"` detail is `String.format(Locale.ROOT,
 //! "Game mode: %s (ID %d). Hardcore: %b. Commands: %b", getName(), getId(),
 //! isHardcore(), isAllowCommands())`. `%b` on a boolean is `"true"`/`"false"`

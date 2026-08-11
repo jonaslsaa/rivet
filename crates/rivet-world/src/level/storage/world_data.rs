@@ -59,6 +59,10 @@ pub trait WorldData {
     fn get_known_server_brands(&self) -> &IndexSet<String>;
 
     /// `getRemovedFeatureFlags()`.
+    ///
+    /// RivetTodo(#398): Java backs this with a `HashSet` (unspecified
+    /// hash-probe iteration) vs the `IndexSet` insertion order — a future
+    /// crash-report/serialized ordering divergence.
     fn get_removed_feature_flags(&self) -> &IndexSet<String>;
 
     /// `setModdedInfo(String serverBrand, boolean isModded)`.
@@ -80,7 +84,7 @@ pub trait WorldData {
     /// ```
     ///
     /// `String.join(", ", set)` joins with `", "` in iteration order
-    /// (`IndexSet` = the Java `LinkedHashSet`/`HashSet` stand-in); `%05X`
+    /// (`IndexSet` = the Java `LinkedHashSet` stand-in); `%05X`
     /// zero-pads the uppercase hex version to width 5.
     fn fill_crash_report_category(&self, category: &mut rivet_core::CrashReportCategory) {
         category.set_detail(
@@ -169,7 +173,10 @@ pub trait WorldData {
 
 /// `String.join(", ", Collection)` over the set's iteration order.
 fn join_strings(set: &IndexSet<String>) -> String {
-    set.iter().cloned().collect::<Vec<_>>().join(", ")
+    set.iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
