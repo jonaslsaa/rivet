@@ -424,9 +424,18 @@ impl<T> TickQueue<T> {
     }
 
     /// `PriorityQueue.removeEq(Object)` — remove the first element equal to
-    /// `tick`, restoring the heap (Java scans by identity; value equality is
-    /// equivalent here because a scheduled tick's five fields are its identity
-    /// for ordering, and duplicate values are interchangeable).
+    /// `tick`, restoring the heap. Java scans by identity (`==`); the port
+    /// scans by five-field value equality, which is equivalent **only because
+    /// the heap can never hold two value-identical ticks** — the precondition
+    /// that makes the substitute sound:
+    ///
+    /// - checked `schedule` deduplicates through the per-position set, so no
+    ///   two scheduled ticks share a (type, pos);
+    /// - `unpack` assigns strictly increasing `subTickOrder` per pending tick,
+    ///   so two value-identical ticks cannot coexist on that path either.
+    ///
+    /// Both hold today; if a future path could produce value-identical ticks,
+    /// this scan would need to match Java by identity instead.
     fn remove_eq(&mut self, tick: &ScheduledTick<T>)
     where
         T: Clone + PartialEq,
@@ -699,18 +708,17 @@ impl<T> LevelChunkTicks<T> {
     where
         T: Clone,
     {
-        if let Some(pending) = &self.pending_ticks {
+        // `take` moves the pending list out O(1) — `schedule_unchecked` needs
+        // `&mut self`, so iterating in place would conflict with the borrow.
+        // The list is always discarded after unpack, matching Java.
+        if let Some(pending) = std::mem::take(&mut self.pending_ticks) {
             self.last_saved.set(current_tick);
             let mut sub_tick_base = -(pending.len() as i64);
-            // Clone the pending list: scheduling mutates the queue through
-            // `schedule_unchecked`, which borrows `self` mutably.
-            let pending = pending.clone();
             for pending_tick in &pending {
                 self.schedule_unchecked(pending_tick.unpack(current_tick, sub_tick_base));
                 sub_tick_base = sub_tick_base.wrapping_add(1);
             }
         }
-        self.pending_ticks = None;
     }
 
     /// `moonrise$isDirty(long)` — the Moonrise dirty surface: the container was
