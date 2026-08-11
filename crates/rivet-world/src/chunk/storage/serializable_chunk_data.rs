@@ -850,19 +850,31 @@ fn structures_starts_are_non_empty(structures: &CompoundTag) -> bool {
 }
 
 /// Decode `structures.References` into ordered typed entries, mirroring
-/// Paper's `unpackStructureReferences` read phase (the registry lookup and
-/// per-chunk distance filter are reconstruction-time concerns — Paper passes
-/// `pos` to the unpack, which this slice defers to construction so the stored
-/// position and the requested position can differ).
+/// Paper's `unpackStructureReferences` read phase (the per-chunk distance filter
+/// is a reconstruction-time concern — Paper passes `pos` to the unpack, which
+/// this slice defers to construction so the stored position and the requested
+/// position can differ).
 ///
-/// The `References` tag is absent or a non-compound -> no entries. Each key is
-/// parsed with `Identifier::try_parse_result` (invalid characters -> dropped,
-/// like Paper's `Identifier.tryParse` returning null; an over-long identifier
-/// -> dropped, like the constructor's unchecked length exception — both
-/// surfaced as a `StructureReferenceMalformed` diagnostic rather than the raw
-/// Java log). A wrong-type value (anything but a `LongArray`) is skipped
-/// exactly like Java's `entry.asLongArray()` empty-check, and surfaced as a
-/// diagnostic. The packed chunk longs are retained in array order.
+/// The `References` tag is absent or a non-compound -> no entries (Paper's
+/// `getCompoundOrEmpty` returns an empty compound for a wrong-typed container,
+/// also silently). Each key is parsed with `Identifier::try_parse_result`
+/// (invalid characters -> dropped, like Paper's `Identifier.tryParse` returning
+/// null; an over-long identifier -> dropped, like the constructor's unchecked
+/// length exception — both surfaced as a `StructureReferenceMalformed`
+/// diagnostic rather than the raw Java log). A wrong-type value (anything but a
+/// `LongArray`) is skipped exactly like Java's `entry.asLongArray()`
+/// empty-check, and surfaced as a diagnostic. The packed chunk longs are
+/// retained in array order.
+///
+// RivetTodo(#369): Paper's STRUCTURE-registry membership discard is deferred.
+// `unpackStructureReferences` looks up each key through
+// `registryAccess.lookupOrThrow(Registries.STRUCTURE).getValue(identifier)` and
+// warns+discards the entry when it is absent (an unregistered structure id).
+// Rivet has no `Structure` type or STRUCTURE registry yet, so a syntactically
+// valid key is carried keyed by its `Identifier` and installed regardless of
+// membership; once the registry lands, this decode must drop unregistered keys
+// (typed diagnostic) to match Paper's observable map. The >8-chunk distance
+// filter still runs at reconstruction (see `filter_structure_references`).
 pub fn parse_structure_references(
     structures: &CompoundTag,
 ) -> (Vec<StructureReference>, Vec<ChunkParseDiagnostic>) {
@@ -904,9 +916,18 @@ pub fn parse_structure_references(
 /// Reconstruct-time `unpackStructureReferences` filter: keep only the packed
 /// chunk-longs whose chessboard distance from the chunk being reconstructed is
 /// <= 8 (Paper logs `"Found invalid structure reference ..."` and drops the
-/// rest). The filtered entries are returned in their decoded order; a dropped
-/// reference is recorded as a [`ChunkParseDiagnostic`] so the discard is never
-/// silent.
+/// rest). A dropped reference is recorded as a [`ChunkParseDiagnostic`] so the
+/// discard is never silent. Duplicate in-range references deduplicate silently,
+/// preserving first-insertion order — Paper builds the `LongOpenHashSet` from
+/// the filtered array, so the carried and installed sets agree.
+///
+/// The map shape mirrors Paper's `outmap`: a key whose wire `long[]` was
+/// non-empty is preserved even when every reference filters out — Paper's
+/// `outmap.put(structureType, new LongOpenHashSet(filtered...))` keeps the key
+/// with an empty set, and `setAllReferences` installs that empty entry. A key
+/// whose `long[]` was already empty never enters the map (Paper's
+/// `entry.asLongArray()` empty-check skips it before the put), so such an entry
+/// is dropped here too.
 pub fn filter_structure_references(
     references: &[StructureReference],
     chunk_pos: &ChunkPos,
@@ -914,25 +935,22 @@ pub fn filter_structure_references(
     let mut kept = Vec::new();
     let mut diagnostics = Vec::new();
     for entry in references {
-        let filtered: Vec<i64> = entry
-            .references
-            .iter()
-            .copied()
-            .filter(|reference| {
-                let ref_pos = ChunkPos::unpack(*reference);
-                if ref_pos.get_chessboard_distance(chunk_pos) > 8 {
-                    diagnostics.push(ChunkParseDiagnostic::StructureReferenceOutOfRange {
-                        identifier: entry.identifier.clone(),
-                        chunk: *chunk_pos,
-                        chunk_pos: ref_pos,
-                    });
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect();
-        if !filtered.is_empty() {
+        let mut filtered: Vec<i64> = Vec::with_capacity(entry.references.len());
+        for reference in entry.references.iter().copied() {
+            let ref_pos = ChunkPos::unpack(reference);
+            if ref_pos.get_chessboard_distance(chunk_pos) > 8 {
+                diagnostics.push(ChunkParseDiagnostic::StructureReferenceOutOfRange {
+                    identifier: entry.identifier.clone(),
+                    chunk: *chunk_pos,
+                    chunk_pos: ref_pos,
+                });
+            } else if !filtered.contains(&reference) {
+                // The `LongOpenHashSet` dedup is silent; only the out-of-range
+                // drop surfaces a diagnostic (Paper warns on that one).
+                filtered.push(reference);
+            }
+        }
+        if !entry.references.is_empty() {
             kept.push(StructureReference {
                 identifier: entry.identifier.clone(),
                 references: filtered,
@@ -3261,6 +3279,57 @@ mod tests {
                 && *chunk == ChunkPos::new(0, 0)
                 && *chunk_pos == ChunkPos::new(30, 0)
         ));
+    }
+
+    /// A structure key whose every reference is out of range is still preserved
+    /// in the filtered map with an empty reference set, mirroring Paper's
+    /// `outmap.put(structureType, new LongOpenHashSet(filtered...))` — the key
+    /// survives with an empty `LongSet`. Only a key whose wire `long[]` was
+    /// already empty is dropped (Paper's `asLongArray()` empty-check skips the
+    /// put). The out-of-range discard is still surfaced as a diagnostic.
+    #[test]
+    fn filtered_out_structure_key_is_preserved_with_empty_reference_set() {
+        let height = height_accessor::create(-64, 384);
+        // Two out-of-range refs, none in range: the key survives, empty.
+        let out = ChunkPos::new(30, 0).pack();
+        let mut references = CompoundTag::new();
+        references.put_long_array("minecraft:village", vec![out, out]);
+        let mut structures = CompoundTag::new();
+        structures.put("References".into(), Tag::Compound(references));
+        let mut chunk = top_level("minecraft:full");
+        chunk.put("structures".into(), Tag::Compound(structures));
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+
+        let (kept, diagnostics) =
+            filter_structure_references(parsed.structures_references(), &ChunkPos::new(0, 0));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].identifier.path(), "village");
+        assert!(kept[0].references.is_empty());
+        // Two refs dropped -> two diagnostics, never silent.
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics.iter().all(|diagnostic| matches!(
+            diagnostic,
+            ChunkParseDiagnostic::StructureReferenceOutOfRange { .. }
+        )));
+
+        // An already-empty wire `long[]` never enters the map at all (Paper's
+        // `asLongArray()` empty-check skips the put), so the filtered result
+        // drops the key entirely with no diagnostic.
+        let mut references = CompoundTag::new();
+        references.put_long_array("minecraft:village", Vec::<i64>::new());
+        let mut structures = CompoundTag::new();
+        structures.put("References".into(), Tag::Compound(references));
+        let mut chunk = top_level("minecraft:full");
+        chunk.put("structures".into(), Tag::Compound(structures));
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        let (kept, diagnostics) =
+            filter_structure_references(parsed.structures_references(), &ChunkPos::new(0, 0));
+        assert!(kept.is_empty());
+        assert!(diagnostics.is_empty());
     }
 
     /// A stored-tick entry whose id does not resolve through the block registry
