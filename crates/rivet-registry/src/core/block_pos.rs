@@ -83,6 +83,10 @@ impl BlockPos {
     /// `BlockPos.ZERO`.
     pub const ZERO: BlockPos = BlockPos { x: 0, y: 0, z: 0 };
 
+    /// `BlockPos.PACKED_Y_LENGTH` — the bit width of the packed Y field (12),
+    /// the source of `DimensionType.BITS_FOR_Y`.
+    pub const PACKED_Y_LENGTH: i32 = 12;
+
     /// `BlockPos.MAX_HORIZONTAL_COORDINATE`.
     pub const MAX_HORIZONTAL_COORDINATE: i32 = 33554431;
 
