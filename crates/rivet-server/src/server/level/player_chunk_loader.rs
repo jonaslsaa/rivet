@@ -496,6 +496,14 @@ impl PlayerChunkLoader {
         Ok(packets)
     }
 
+    /// `PlayerChunkLoaderData.lastChunkX/lastChunkZ` — the cache center the
+    /// last `add`/`update` emitted (the chunk the player's view is centered
+    /// on). Test/observability seam for the movement-driven recenter (issue
+    /// #521).
+    pub fn last_chunk_pos(&self) -> ChunkPos {
+        ChunkPos::new(self.last_chunk_x, self.last_chunk_z)
+    }
+
     /// `PlayerChunkLoaderData.lastSendDistance` — the cache radius emitted by
     /// the last `add`/`update`.
     pub fn last_send_distance(&self) -> i32 {
