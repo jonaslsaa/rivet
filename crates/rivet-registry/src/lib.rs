@@ -176,6 +176,11 @@ pub mod biomes_tags_tests;
 // Ownership D — serialization context (`net.minecraft.resources`)
 // ---------------------------------------------------------------------------
 
+/// `RegistryDataLoader` + the load-task units (`net.minecraft.resources`,
+/// `net.minecraft.server.packs.resources`, #126). The datapack JSON load path;
+/// the network/NBT task defers with the tags/network-sync units (RivetTodo
+/// #126, see the module doc) because rivet-registry cannot depend on rivet-nbt.
+pub mod registry_data_loader;
 /// `RegistryFileCodec`/`RegistryFixedCodec`/`HolderSetCodec` (#126 holder
 /// codecs, `net.minecraft.resources`).
 pub mod registry_file_codec;
