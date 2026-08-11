@@ -49,6 +49,12 @@ pub struct SavedLightSection {
 /// `SaveUtil.saveLightHookReal`'s per-section save-state mapping — the exact
 /// surface Paper writes for every light section of a lit chunk.
 ///
+/// This is the *value mapping only*: it emits sections from whatever nibble
+/// arrays it is given. Paper's caller (`saveLightHook`) only invokes the seam
+/// for a chunk that is light-correct (`isLightOn` + `status >= LIGHT`); the
+/// #184 integration must preserve that gate rather than calling this
+/// unconditionally.
+///
 /// Java walks light sections `minLightSection..=maxLightSection` (the range
 /// `minSectionY - 1 ..= maxSectionY + 1`), reads
 /// `blockNibbles[i - minSection].getSaveState()` and
