@@ -69,6 +69,15 @@
 //!   pre-resolved `(TagKey<T>, Vec<HolderId>)` bindings (the exact
 //!   `RegistryBuilder::bind_tags` shape) from the caller; a future `TagLoader`
 //!   port supplies them.
+//! - **JSON parsing is `serde_json`, not Gson `StrictJsonParser`.** Paper's
+//!   `StrictJsonParser` drives Gson's `JsonReader` with `Strictness.STRICT`,
+//!   which rejects duplicate object keys; `serde_json::from_str` accepts them
+//!   (last-wins). The shapes parsed here are datapack element JSON (single
+//!   object/array/primitive, no top-level duplicates in practice), so the
+//!   divergence only surfaces for hostile datapacks; documented rather than
+//!   wrapping a strictness check. `StrictJsonParser` also rejects a document
+//!   with trailing content; `serde_json::from_str` errors on trailing input the
+//!   same way.
 //! - **`KnownPack`/Paper reg-mod API are omitted.** The `RegistrationInfo`
 //!   known-pack slot is an opaque `()` placeholder (see `registration_info.rs`);
 //!   the Paper `PaperRegistryAccess`/`PaperRegistryListenerManager`/
