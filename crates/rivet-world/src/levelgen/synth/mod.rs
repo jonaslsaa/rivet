@@ -15,8 +15,8 @@
 //!   #177 waves the full `noise` unit): `BlendedNoise` exposes its value
 //!   surface (`compute`/`min_value`/`max_value`) directly instead of
 //!   implementing `DensityFunction.SimpleFunction`, and the DFU codecs
-//!   (`BlendedNoise.CODEC`, `NormalNoise.NoiseParameters.CODEC`) stay stubs —
-//!   RivetTodo(#177).
+//!   (`BlendedNoise.CODEC`, `NormalNoise.NoiseParameters.CODEC`) stay stubs.
+//!   RivetTodo(#177): the DFU codecs and `DensityFunction` surface are deferred.
 //!
 //! All probabilities/permutation sizes here mirror the Java 1:1; see each
 //! module doc for the Java class it ports.
