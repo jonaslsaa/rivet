@@ -854,12 +854,22 @@ mod tests {
         );
 
         // The packet light payload is derived once through the #184 send seam
-        // and stays a valid (here empty) `LightUpdatePacketData`. The
-        // reconstructed chunk carries no Starlight light: this fixture's
-        // `SkyLight`/`BlockLight` are plain 2048-byte arrays, not the modern
-        // Starlight per-section state INTs `reconstruct_lights` installs, so no
-        // section light is reconstructed from it.
-        let _ = chunk.light_data();
+        // and carries the loaded save's real light (issue #531): the spawn
+        // fixture is a vanilla-format save whose plain `SkyLight` arrays at
+        // Y=4 and Y=5 are installed at light-section indices 9 and 10
+        // (minLightSection -5), so the sky update mask has bits 9|10 set and
+        // the two 2048-byte layers travel in ascending section order. Block
+        // light, the empty masks, and the trust-edges byte (26.2 has none) stay
+        // empty — the same payload Paper's `prepareSectionData` emits for these
+        // sections.
+        let light = chunk.light_data();
+        assert_eq!(light.sky_y_mask(), &[0x600]);
+        assert!(light.block_y_mask().is_empty());
+        assert!(light.empty_sky_y_mask().is_empty());
+        assert!(light.empty_block_y_mask().is_empty());
+        assert_eq!(light.sky_updates().len(), 2);
+        assert!(light.block_updates().is_empty());
+        assert!(light.sky_updates().iter().all(|layer| layer.len() == 2048));
     }
 
     /// A hostile `level.dat` spawn compound that decodes to a typed
