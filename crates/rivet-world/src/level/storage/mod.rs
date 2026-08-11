@@ -27,7 +27,10 @@ pub mod writable_level_data;
 
 pub use data_version::DataVersion;
 pub use derived_level_data::DerivedLevelData;
-pub use level_data::{LevelData, RespawnData, default_respawn_data, format_location};
+pub use level_data::{
+    LevelData, RespawnData, default_respawn_data, format_location, respawn_data_codec,
+    respawn_data_map_codec,
+};
 pub use level_version::LevelVersion;
 pub use server_level_data::ServerLevelData;
 pub use tag_value_input::TagValueInput;
