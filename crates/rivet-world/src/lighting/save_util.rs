@@ -420,16 +420,16 @@ mod tests {
     #[test]
     fn spike_229_save_surface_matches_committed_light_full_fixture() {
         let light_full = load_light_full_fixture();
-        // (min_y, height): overworld -64/384, nether 0/256, end 0/256.
-        for (dim, min_y, height) in [
-            ("overworld", -64, 384),
-            ("the_nether", 0, 256),
-            ("the_end", 0, 256),
+        // (min_y, height, has_skylight): overworld -64/384, nether 0/256 (no sky,
+        // per `dimensionType.hasSkylight()`), end 0/256 (sky). Explicit rather than
+        // derived from the fixture so a fixture bug that dropped sky tags cannot
+        // silently pass.
+        for (dim, min_y, height, has_sky) in [
+            ("overworld", -64, 384, true),
+            ("the_nether", 0, 256, false),
+            ("the_end", 0, 256, true),
         ] {
             let expected = json_surface(&light_full, dim);
-            // Derive has_sky from the fixture itself: a dimension with any sky
-            // light state/array in the committed fixture has skylight.
-            let has_sky = expected.iter().any(|s| s.sky_state >= 0);
 
             let chunk = load_fixture(dim);
             let sections = parse_section_lights(&chunk);
