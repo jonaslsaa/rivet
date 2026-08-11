@@ -488,6 +488,11 @@ impl SerializableChunkData {
     pub fn min_section_y(&self) -> i32 {
         self.min_section_y
     }
+    /// The parse-time accessor's section count (the #383 reconstruction's
+    /// accessor-mismatch guard).
+    pub(crate) fn section_count(&self) -> usize {
+        self.section_count
+    }
     pub fn last_update_time(&self) -> i64 {
         self.last_update_time
     }
@@ -523,6 +528,13 @@ impl SerializableChunkData {
     }
     pub fn block_entities(&self) -> &[CompoundTag] {
         &self.block_entities
+    }
+    /// Consume the serialized block-entity compounds, source order, leaving an
+    /// empty list in place. The #383 reconstruction uses this to carry the
+    /// tags into the runtime chunk's pending map and the returned field without
+    /// cloning the list twice.
+    pub(crate) fn take_block_entities(&mut self) -> Vec<CompoundTag> {
+        std::mem::take(&mut self.block_entities)
     }
     pub fn structure_data(&self) -> &CompoundTag {
         &self.structure_data
@@ -658,7 +670,29 @@ impl SerializableChunkData {
         self.validate_full_construction(self.section_count)
     }
 
+    /// Validate every capability that precedes runtime chunk composition EXCEPT
+    /// the non-empty block-entity rejection — the #383 reconstruction carries
+    /// serialized block entities as pending NBT (materialization defers with
+    /// #341), so this is the boundary that slice consults. Field-for-field the
+    /// same as [`Self::validate_full_construction`] minus that one check.
+    pub(crate) fn validate_full_for_reconstruction(
+        &self,
+    ) -> Result<(), SerializableChunkDataError> {
+        self.validate_full_construction_except_block_entities(self.section_count)
+    }
+
     fn validate_full_construction(
+        &self,
+        section_count: usize,
+    ) -> Result<(), SerializableChunkDataError> {
+        self.validate_full_construction_except_block_entities(section_count)?;
+        if !self.block_entities.is_empty() {
+            return Err(SerializableChunkDataError::UnsupportedBlockEntities);
+        }
+        Ok(())
+    }
+
+    fn validate_full_construction_except_block_entities(
         &self,
         section_count: usize,
     ) -> Result<(), SerializableChunkDataError> {
@@ -723,9 +757,6 @@ impl SerializableChunkData {
         }
         if !self.entities.is_empty() {
             return Err(SerializableChunkDataError::UnsupportedEntities);
-        }
-        if !self.block_entities.is_empty() {
-            return Err(SerializableChunkDataError::UnsupportedBlockEntities);
         }
         Ok(())
     }
