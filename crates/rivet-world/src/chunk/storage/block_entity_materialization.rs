@@ -251,8 +251,9 @@ pub enum BlockEntityMaterializeError {
         position: BlockPos,
         error: BlockEntityTypeError,
     },
-    /// The resolved type's update tag is not ported; only chest and
-    /// mob_spawner have a materializable `getUpdateTag` today.
+    /// The resolved type's update tag is not ported; only mob_spawner has a
+    /// ported non-empty `getUpdateTag` today — every other materializable type
+    /// sends Paper's null tag.
     #[error("block entity type {entity_type} at {position} has no materialized update tag")]
     UnsupportedUpdateTag {
         position: BlockPos,
