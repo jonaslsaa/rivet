@@ -201,12 +201,14 @@ pub struct SessionManagerConfig {
 /// `join_burst.rs` tests use). This is what `Server` builds when
 /// `ServerConfig.enable_join` is set.
 pub fn default_session_config(compression_threshold: i32) -> SessionManagerConfig {
+    let level = ServerLevel::new(ServerLevelConfig::default());
+    let is_flat = level.is_flat();
     SessionManagerConfig {
         compression_threshold,
         dimension_type_access: dimension_type_access(),
         world_clock_access: world_clock_access(),
-        level: ServerLevel::new(ServerLevelConfig::default()),
-        join: join_config(),
+        level,
+        join: join_config(is_flat),
         keepalive_timeout_ns: KEEPALIVE_LIMIT_NS,
     }
 }
@@ -1040,9 +1042,11 @@ fn vanilla_level_keys() -> Vec<ResourceKey<rivet_registry::registries::Level>> {
     ]
 }
 
-/// The M1 `JoinConfig` (`max_players 20`, offline, flat superflat, death screen
-/// on; the reduced-debug / limited-crafting rules off).
-fn join_config() -> JoinConfig {
+/// The M1 `JoinConfig` (`max_players 20`, offline, death screen on; the
+/// reduced-debug / limited-crafting rules off). `is_flat` is `ServerLevel
+/// .isFlat()` — true for the superflat world, false for the region-backed
+/// overworld (the login packet's `is_flat` flag).
+fn join_config(is_flat: bool) -> JoinConfig {
     JoinConfig {
         max_players: 20,
         hardcore: false,
@@ -1052,7 +1056,7 @@ fn join_config() -> JoinConfig {
         show_death_screen: true,
         reduced_debug_info: false,
         do_limited_crafting: false,
-        is_flat: true,
+        is_flat,
     }
 }
 
