@@ -30,7 +30,7 @@ use rivet_world::chunk::storage::{
 use rivet_world::level::height_accessor;
 use rivet_world::level::storage::level_data::{RespawnData, respawn_data_codec};
 
-use super::level_chunk::LevelChunk;
+use super::level_chunk::{LevelChunk, UnsupportedLightState};
 use super::server_level::{
     MissingChunkPolicy, ServerLevel, ServerLevelConfig, overworld_dimension,
 };
@@ -255,7 +255,8 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
             parse: parse_diagnostics,
         });
     }
-    let chunk = LevelChunk::from_reconstructed(world_chunk);
+    let chunk = LevelChunk::from_reconstructed(world_chunk)
+        .map_err(RegionBackedBootError::UnsupportedLightState)?;
     let mut world = ServerLevel::new(config);
     world.chunk_map_mut().install(spawn_chunk, chunk);
     Ok(world)
@@ -368,6 +369,8 @@ pub enum RegionBackedBootError {
         section: Vec<SectionCodecDiagnostic>,
         parse: Vec<ChunkParseDiagnostic>,
     },
+    #[error("UNVERIFIED {0}")]
+    UnsupportedLightState(#[source] UnsupportedLightState),
 }
 
 #[cfg(test)]
@@ -838,6 +841,40 @@ mod tests {
             }
             other => panic!("expected UnsupportedSpawnDimension, got {other:?}"),
         }
+    }
+
+    /// A section carrying a persisted Starlight initialisation state outside
+    /// `0..=3` survives reconstruction as `InitState::Other`, which the #184
+    /// send seam (`to_vanilla_nibble`) cannot represent and would panic on. The
+    /// boot rejects the chunk with the typed `UnsupportedLightState` boundary
+    /// instead of aborting the process.
+    #[test]
+    fn boot_rejects_an_unsupported_persisted_starlight_state() {
+        let temp = tempfile::tempdir().unwrap();
+        write_level_dat(temp.path(), REAL_SPAWN);
+        write_world_gen_settings(temp.path(), REAL_SEED);
+        let region_dir = temp.path().join("dimensions/minecraft/overworld/region");
+        fs::create_dir_all(&region_dir).unwrap();
+        let mut chunk = load_fixture(&loaded_world_fixture());
+        // Mark the chunk light-correct so `reconstruct_lights` actually carries
+        // section light (the fixture itself is not light-correct), then give
+        // section 0 a hostile `starlight.skylight_state` outside `0..=3`.
+        chunk.put_int("isLightOn", 1);
+        chunk.put_int("starlight.light_version", 10);
+        chunk
+            .get_list_or_empty_mut("sections")
+            .get_compound_or_empty_mut(0)
+            .put_int("starlight.skylight_state", 4);
+        write_region_nbt(
+            &region_dir.join("r.-1.-1.mca"),
+            &mut chunk,
+            ChunkPos::new(-1, -3),
+        );
+
+        assert!(matches!(
+            boot_level(temp.path()),
+            Err(RegionBackedBootError::UnsupportedLightState(_))
+        ));
     }
 
     fn read_level_dat_for_patch(root: &Path) -> CompoundTag {

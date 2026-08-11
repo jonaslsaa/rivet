@@ -150,7 +150,21 @@ impl LevelChunk {
     /// The `ChunkReconstruction` diagnostics are consumed by the caller before
     /// this bridge: the boot rejects a non-empty set rather than silently
     /// installing a chunk whose content differs from what was stored.
-    pub fn from_reconstructed(world_chunk: ReconstructedLevelChunk) -> Self {
+    pub fn from_reconstructed(
+        world_chunk: ReconstructedLevelChunk,
+    ) -> Result<Self, UnsupportedLightState> {
+        // Reject an unsupported persisted Starlight state before the #184 send
+        // seam converts it: `to_vanilla_nibble` panics on `Other` (the packet
+        // seam has no typed error surface), which would abort the process
+        // instead of failing the boot with a `RegionBackedBootError`.
+        if world_chunk
+            .block_nibbles()
+            .iter()
+            .chain(world_chunk.sky_nibbles())
+            .any(|nibble| nibble.has_unknown_state_visible())
+        {
+            return Err(UnsupportedLightState);
+        }
         let (block_strategy, biome_strategy) = strategies();
         let world_chunk = world_chunk
             .map_values(
@@ -170,10 +184,10 @@ impl LevelChunk {
             world_chunk.sky_nibbles(),
             world_chunk.get_height(),
         );
-        LevelChunk {
+        Ok(LevelChunk {
             chunk: world_chunk,
             light_data,
-        }
+        })
     }
 
     /// The prebuilt light payload — a clone of the value computed once at
@@ -357,6 +371,25 @@ fn light_data_from_nibbles(
         .collect();
     build_light_update_data(&sky_layers, &block_layers)
 }
+
+/// A reconstructed chunk carries a persisted Starlight initialisation state
+/// this port does not understand (`InitState::Other`). Paper keeps the raw int
+/// through `toVanillaNibble` and re-emits it on save; the port's packet seam
+/// (`to_vanilla_nibble`) has no representation for it and panics, so the #516
+/// boot surfaces the mismatch as a typed error instead of aborting the process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnsupportedLightState;
+
+impl std::fmt::Display for UnsupportedLightState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "UNVERIFIED chunk carries an unsupported persisted Starlight state"
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedLightState {}
 
 /// Builds the deterministic single-stone superflat chunk content (air = state
 /// 0, stone = state 1, plains biome = id 40) — byte-identical to the
