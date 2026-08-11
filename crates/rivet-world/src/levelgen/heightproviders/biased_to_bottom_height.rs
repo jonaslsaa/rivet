@@ -291,6 +291,23 @@ mod tests {
     }
 
     #[test]
+    fn codec_malformed_inner_is_a_decode_error() {
+        // The `"inner"` optional field is NON-lenient
+        // (`Codec.optionalFieldOf(name, default)` — `optionalField(name, this,
+        // false)`). A present-but-malformed value is a decode error, never a
+        // silent default: `Codec.intRange(1, Integer.MAX_VALUE)` rejects `"abc"`.
+        let codec = rivet_serialization::map_codec::codec_of(biased_to_bottom_height_map_codec::<
+            JsonOps,
+        >());
+        let input = json!({
+            "min_inclusive": {"absolute": 0},
+            "max_inclusive": {"absolute": 9},
+            "inner": "abc"
+        });
+        assert!(codec.parse(&JsonOps::INSTANCE, &input).is_error());
+    }
+
+    #[test]
     fn codec_rejects_zero_inner() {
         // `Codec.intRange(1, Integer.MAX_VALUE)` rejects 0 on both decode and
         // encode.

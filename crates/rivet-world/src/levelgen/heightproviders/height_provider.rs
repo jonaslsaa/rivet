@@ -403,6 +403,29 @@ mod tests {
     }
 
     #[test]
+    fn codec_dispatch_round_trips_constant_record_form() {
+        // The `"constant"` dispatch branch (the record form
+        // `{"type": "minecraft:constant", "value": {...anchor...}}`) is
+        // exercised through the top-level `HeightProvider.CODEC`, distinct from
+        // the bare-anchor Left branch. `CODEC.xmap` special-cases CONSTANT on
+        // encode, so the round trip re-encodes as the bare anchor.
+        let codec = height_provider_codec::<JsonOps>();
+        let input = json!({
+            "type": "minecraft:constant",
+            "value": {"absolute": 5}
+        });
+        let decoded_result = codec.parse(&JsonOps::INSTANCE, &input);
+        let decoded = decoded_result.result().expect("decode should succeed");
+        assert_eq!(decoded.type_id(), HeightProviderTypes::CONSTANT);
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, decoded)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(encoded, json!({"absolute": 5}));
+    }
+
+    #[test]
     fn codec_dispatch_round_trips_each_type() {
         // One provider per `HeightProviderType` (all six dispatch branches of
         // `codec_for_type`), round-tripped through the top-level
