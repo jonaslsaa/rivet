@@ -7,6 +7,7 @@
 use crate::data_result::DataResult;
 use crate::dynamic::Dynamic;
 use crate::dynamic_ops::DynamicOps;
+use crate::number::Number;
 
 /// `com.mojang.serialization.OptionalDynamic<T>`.
 #[derive(Debug, Clone)]
@@ -64,6 +65,65 @@ impl<O> OptionalDynamic<O> {
             _ops: std::marker::PhantomData,
             delegate,
         }
+    }
+
+    /// `OptionalDynamic.asNumber()` — Java forwards `DynamicLike::asNumber`
+    /// via `flatMap`: `delegate.flatMap(DynamicLike::asNumber)`.
+    pub fn as_number(&self, ops: &impl DynamicOps<Output = O>) -> DataResult<Number>
+    where
+        O: Clone,
+    {
+        self.flat_map(|d| d.as_number(ops))
+    }
+
+    /// `DynamicLike.asNumber(Number default)` — `asNumber().result().orElse(default)`.
+    pub fn as_number_or(&self, ops: &impl DynamicOps<Output = O>, default: Number) -> Number
+    where
+        O: Clone,
+    {
+        self.as_number(ops).result().copied().unwrap_or(default)
+    }
+
+    /// `DynamicLike.asInt(int default)` — the default is a primitive `int`
+    /// (autoboxed to `Integer` for the `asNumber(Number)` fallback), not a
+    /// `Number` of arbitrary variant.
+    pub fn as_int_or(&self, ops: &impl DynamicOps<Output = O>, default: i32) -> i32
+    where
+        O: Clone,
+    {
+        self.as_number_or(ops, Number::Int(default)).int_value()
+    }
+
+    /// `DynamicLike.asLong(long default)` — the default is a primitive `long`
+    /// (autoboxed to `Long` for the `asNumber(Number)` fallback), not a
+    /// `Number` of arbitrary variant.
+    pub fn as_long_or(&self, ops: &impl DynamicOps<Output = O>, default: i64) -> i64
+    where
+        O: Clone,
+    {
+        self.as_number_or(ops, Number::Long(default)).long_value()
+    }
+
+    /// `DynamicLike.asBoolean(boolean default)` — `asBoolean().result().orElse(default)`.
+    pub fn as_boolean_or(&self, ops: &impl DynamicOps<Output = O>, default: bool) -> bool
+    where
+        O: Clone,
+    {
+        self.flat_map(|d| d.as_boolean(ops))
+            .result()
+            .copied()
+            .unwrap_or(default)
+    }
+
+    /// `DynamicLike.asString(String default)`.
+    pub fn as_string_or(&self, ops: &impl DynamicOps<Output = O>, default: &str) -> String
+    where
+        O: Clone,
+    {
+        self.flat_map(|d| d.as_string(ops))
+            .result()
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
     }
 
     /// `OptionalDynamic.orElseEmptyMap()` — `result().orElseGet(this::emptyMap)`

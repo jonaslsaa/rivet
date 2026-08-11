@@ -367,6 +367,7 @@ fn default_config() -> ServerConfig {
         lifecycle_capacity: 64,
         enable_join: false,
         keepalive_timeout: Duration::from_secs(30),
+        level_path: None,
     }
 }
 
