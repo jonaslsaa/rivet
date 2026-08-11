@@ -3285,9 +3285,12 @@ mod tests {
     /// A structure key whose every reference is out of range is still preserved
     /// in the filtered map with an empty reference set, mirroring Paper's
     /// `outmap.put(structureType, new LongOpenHashSet(filtered...))` — the key
-    /// survives with an empty `LongSet`. Only a key whose wire `long[]` was
-    /// already empty is dropped (Paper's `asLongArray()` empty-check skips the
-    /// put). The out-of-range discard is still surfaced as a diagnostic.
+    /// survives with an empty `LongSet`. That holds even for a key whose wire
+    /// `long[]` was already empty: Paper's guard is `!longArray.isEmpty()` on
+    /// the `Optional<long[]>` from `LongArrayTag.asLongArray()`, which is
+    /// always present for a `LongArrayTag` regardless of array length, so the
+    /// key still enters the map with an empty set. The out-of-range discard is
+    /// still surfaced as a diagnostic.
     #[test]
     fn filtered_out_structure_key_is_preserved_with_empty_reference_set() {
         let height = height_accessor::create(-64, 384);
