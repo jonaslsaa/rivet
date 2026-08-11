@@ -36,6 +36,7 @@ use rivet_registry::ResourceKey;
 use rivet_registry::core::{GameProfile, GameType, Vec3, create_offline_player_uuid};
 use rivet_registry::registries;
 use rivet_registry::{RegistrationInfo, RegistryAccess, RegistryBuilder};
+use rivet_server::server::level::player_chunk_loader::PlayerChunkLoader;
 use rivet_server::server::level::server_level::{ServerLevel, ServerLevelConfig};
 use rivet_server::server::network::connection_id::ConnectionId;
 use rivet_server::server::player::join::{JoinConfig, place_new_player, send_level_info};
@@ -394,6 +395,7 @@ fn run_burst_with_requested(
 ) -> Vec<(u32, Vec<u8>)> {
     let mut sender = play_sender();
     let (mut connections, mut out_rx) = registry_with_connection();
+    let mut loader = PlayerChunkLoader::new(world.view().center());
     let sent_ids = place_new_player(
         &mut sender,
         &mut connections,
@@ -402,6 +404,7 @@ fn run_burst_with_requested(
         world,
         config,
         requested_view_distance,
+        &mut loader,
         1, // the spawn teleport's `awaitingTeleport` id (issue #158)
     )
     .expect("burst encodes + queues");
@@ -688,6 +691,7 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
         lifecycle_rx,
         vec![Box::new(move |ctx: &mut TickContext| {
             let mut sender = sender.lock().unwrap();
+            let mut loader = PlayerChunkLoader::new(level.view().center());
             let _ = place_new_player(
                 &mut sender,
                 ctx.connections,
@@ -696,6 +700,7 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
                 &level,
                 &config,
                 None,
+                &mut loader,
                 1, // spawn teleport id (issue #158)
             );
         })],
