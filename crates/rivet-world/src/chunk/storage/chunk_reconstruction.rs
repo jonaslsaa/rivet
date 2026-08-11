@@ -446,6 +446,7 @@ mod tests {
     use crate::chunk::status::ChunkStatus;
     use crate::level::height_accessor;
     use crate::levelgen::heightmap::Types;
+    use crate::ticks::TickPriority;
     use rivet_nbt::nbt_accounter::NbtAccounter;
     use rivet_nbt::nbt_io;
     use rivet_registry::core::BlockPos;
@@ -662,10 +663,11 @@ mod tests {
     }
 
     #[test]
-    fn block_tick_fixture_reconstructs_carrying_stored_tick() {
+    fn block_tick_fixture_reconstructs_carrying_exact_stored_tick() {
         // The radius-1 loaded-world `-17.-19.nbt` fixture carries one sand
         // `block_ticks` entry. The FULL chunk reconstructs carrying the typed
-        // stored tick and the raw list; nothing schedules or executes it (#370).
+        // stored tick with exact position/delay/priority and the raw list;
+        // nothing schedules or executes it (#370).
         let data = parse_loaded_world("-17.-19.nbt");
         let reconstructed = reconstruct_runtime_chunk(
             ChunkPos::new(-17, -19),
@@ -674,10 +676,14 @@ mod tests {
             true,
         )
         .expect("block-tick FULL fixture reconstructs");
-        assert_eq!(reconstructed.stored_block_ticks.len(), 1);
         assert_eq!(
-            reconstructed.stored_block_ticks[0].r#type.name(),
-            "minecraft:sand"
+            reconstructed.stored_block_ticks,
+            vec![SavedTick::new(
+                Block::from_name("minecraft:sand").unwrap(),
+                BlockPos::new(-268, 61, -302),
+                -59,
+                TickPriority::Normal,
+            )]
         );
         assert!(reconstructed.stored_fluid_ticks.is_empty());
         assert_eq!(reconstructed.raw_block_ticks.list.len(), 1);
@@ -685,9 +691,10 @@ mod tests {
     }
 
     #[test]
-    fn fluid_tick_fixture_reconstructs_carrying_stored_tick() {
+    fn fluid_tick_fixture_reconstructs_carrying_exact_stored_tick() {
         // The radius-1 loaded-world `-2.-2.nbt` fixture carries one water
-        // `fluid_ticks` entry; the FULL chunk reconstructs carrying it.
+        // `fluid_ticks` entry; the FULL chunk reconstructs carrying it with
+        // exact position/delay/priority.
         let data = parse_loaded_world("-2.-2.nbt");
         let reconstructed = reconstruct_runtime_chunk(
             ChunkPos::new(-2, -2),
@@ -696,8 +703,15 @@ mod tests {
             true,
         )
         .expect("fluid-tick FULL fixture reconstructs");
-        assert_eq!(reconstructed.stored_fluid_ticks.len(), 1);
-        assert_eq!(reconstructed.stored_fluid_ticks[0].r#type, FluidId::WATER);
+        assert_eq!(
+            reconstructed.stored_fluid_ticks,
+            vec![SavedTick::new(
+                FluidId::WATER,
+                BlockPos::new(-27, 59, -17),
+                2,
+                TickPriority::Normal,
+            )]
+        );
         assert!(reconstructed.stored_block_ticks.is_empty());
         assert_eq!(reconstructed.raw_fluid_ticks.list.len(), 1);
     }
@@ -717,6 +731,12 @@ mod tests {
         )
         .expect("chest FULL fixture reconstructs");
         assert_eq!(reconstructed.block_entities.len(), 1);
+        // `keepPacked` is byte 0 on the fixture, so the level branch resolves
+        // the unpacked type (Paper's postLoadChunk keepPacked check).
+        assert_eq!(
+            reconstructed.block_entities[0].get_byte_or("keepPacked", -1),
+            0
+        );
         assert_eq!(
             reconstructed.block_entities[0]
                 .get_string("id")
