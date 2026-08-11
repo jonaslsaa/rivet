@@ -13,17 +13,17 @@
 # and `RIVET_PAPER_LIBRARIES` override it.
 #
 # Usage:
-#   scripts/run_seq_probe.sh [out-file] [paper-pin]
+#   scripts/run_seq_probe.sh [out-dir] [paper-pin]
 #   RIVET_PAPER_RUNTIME_JAR=/path/to/versions/26.2/paper-26.2.jar \
 #   RIVET_PAPER_LIBRARIES=/path/to/libraries scripts/run_seq_probe.sh
 #
-# The default output is `fixtures/seq/seq-random.json` (in place), so after a
-# run the committed fixture + its manifest SHA-256s are byte-identical iff the
-# runtime is unchanged. Re-run `rivet-oracle verify` after any output change.
+# The default output directory is `fixtures/seq/` (in place). The probe always
+# writes the file `seq-random.json` inside the given directory, and the
+# manifest is regenerated there too.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_FILE="${1:-$ROOT/fixtures/seq/seq-random.json}"
+OUT_DIR="${1:-$ROOT/fixtures/seq}"
 PAPER_PIN="${2:-26.2-DEV-main@0a99345}"
 
 RUNTIME_JAR="${RIVET_PAPER_RUNTIME_JAR:-$ROOT/work/run/versions/26.2/paper-26.2.jar}"
@@ -46,8 +46,36 @@ mkdir -p "$CLASSES"
 CP="$RUNTIME_JAR:$LIBS$CLASSES"
 
 javac -cp "$CP" -d "$CLASSES" "$ROOT/src/java/SeqProbe.java"
-OUT_DIR="$(dirname "$OUT_FILE")"
 mkdir -p "$OUT_DIR"
 java -Xms256M -Xmx2G -cp "$CP" SeqProbe \
   --output "$OUT_DIR" --paper "$PAPER_PIN"
-echo "wrote $OUT_FILE"
+# The probe hardcodes the output basename `seq-random.json` (SeqProbe writes
+# `output/seq-random.json`), so the first argument selects the output
+# directory, not a file. Hash what the probe actually wrote, never an assumed
+# file path.
+FIXTURE_FILE="$OUT_DIR/seq-random.json"
+echo "wrote $FIXTURE_FILE"
+
+# Refresh the fixture manifest so the regenerated goldens hash matches what the
+# gate's `rivet-oracle verify` expects (the text/worldgen kinds regenerate their
+# manifests in-process; the seq-random kind is script-driven, so the script
+# owns it).
+SHA="$(shasum -a 256 "$FIXTURE_FILE" | awk '{print $1}')"
+BYTES="$(wc -c < "$FIXTURE_FILE" | tr -d ' ')"
+MANIFEST="$OUT_DIR/manifest.json"
+NOTE="golden samples of the PositionalRandomFactory default overloads taking BlockPos / Identifier (at(BlockPos) -> at(x,y,z), fromHashOf(Identifier) -> fromHashOf(id.toString())) over LegacyRandomSource / XoroshiroRandomSource, captured from the pinned Paper 26.2 runtime via SeqProbe. Values are the raw nextInt/nextLong outputs (integral). Deterministic across boots."
+printf '%s\n' \
+  '{' \
+  '  "format": 1,' \
+  "  \"paper\": \"$PAPER_PIN\"," \
+  '  "kind": "seq-random",' \
+  "  \"note\": \"$NOTE\"," \
+  '  "captured": [' \
+  '    {' \
+  '      "path": "seq-random.json",' \
+  "      \"sha256\": \"$SHA\"," \
+  "      \"bytes\": $BYTES" \
+  '    }' \
+  '  ]' \
+  '}' > "$MANIFEST"
+echo "wrote $MANIFEST"
