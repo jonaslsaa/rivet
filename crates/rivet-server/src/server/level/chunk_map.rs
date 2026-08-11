@@ -61,6 +61,19 @@ impl ChunkMap {
         }
     }
 
+    /// A chunk map with no seeded placeholder chunk and the given (clamped)
+    /// server view distance. The #516 region-backed boot reconstructs every
+    /// chunk of the view square from the read-only region and installs it
+    /// explicitly — an empty map guarantees `RequireLoaded` fails on any
+    /// position the boot did not install, instead of silently serving a
+    /// superflat placeholder.
+    pub fn empty(server_view_distance: i32) -> Self {
+        ChunkMap {
+            chunks: HashMap::new(),
+            server_view_distance: Self::set_server_view_distance(server_view_distance),
+        }
+    }
+
     /// `ChunkMap.setServerViewDistance(int)` — `Mth.clamp(newViewDistance, 2,
     /// MoonriseConstants.MAX_VIEW_DISTANCE)` (default 32).
     pub fn set_server_view_distance(view_distance: i32) -> i32 {
@@ -77,6 +90,15 @@ impl ChunkMap {
     /// "not loaded" (no generation yet — issue #185).
     pub fn get_chunk(&self, pos: ChunkPos) -> Option<&LevelChunk> {
         self.chunks.get(&pos)
+    }
+
+    /// Install an owned reconstructed chunk at `pos`, replacing any previously
+    /// loaded chunk there. The #516 region-backed boot composes the read-only
+    /// world into an empty map by installing every chunk of the view square
+    /// the caller already validated (tick-thread-owned by value, never
+    /// `Arc<RwLock>`).
+    pub fn install(&mut self, pos: ChunkPos, chunk: LevelChunk) {
+        self.chunks.insert(pos, chunk);
     }
 
     /// The number of loaded chunks. Deterministic: 1 for the M1 superflat

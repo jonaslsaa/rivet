@@ -599,6 +599,35 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
         ))
     }
 
+    /// Re-encode this container's values into a container of type `T2` with the
+    /// target strategy, mapping each palette entry through `f`. Used when the
+    /// two value types share the same dense global id space (the #516 server
+    /// bridge: `BlockState` and the server `StateId` are both the generated
+    /// `0..BLOCK_STATE_COUNT` ids; the world/server biome newtypes are both
+    /// dense `0..BIOME_COUNT` ids): `pack` re-encodes against a fresh palette,
+    /// each entry is mapped, and `unpack` reconstructs with the target
+    /// strategy — the raw storage longs and bit width are untouched, so the
+    /// wire section bytes are identical.
+    ///
+    /// The target strategy must declare the same global-palette configuration
+    /// ladder (same `entry_count`/`size`), so the packed on-disc bits match the
+    /// target's `configuration_for_palette_size`.
+    pub fn map_values<T2>(
+        &self,
+        target: &Strategy<T2>,
+        f: &impl Fn(&T) -> T2,
+    ) -> Result<PalettedContainer<T2>, String>
+    where
+        T2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    {
+        let packed = self.pack();
+        let palette_entries = packed.palette_entries.iter().map(f).collect::<Vec<_>>();
+        PalettedContainer::<T2>::unpack(
+            target,
+            PackedData::with_bits(palette_entries, packed.storage, packed.bits_per_entry),
+        )
+    }
+
     /// The global map (exposed for tests / callers needing the wire global ids).
     pub fn global_map(&self) -> &dyn GlobalIdMap<T> {
         self.strategy.global_map()
