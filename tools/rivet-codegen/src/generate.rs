@@ -336,7 +336,7 @@ mod drift_tests {
 
     use super::run;
 
-    const GENERATED_FILES: [&str; 12] = [
+    const GENERATED_FILES: [&str; 13] = [
         "biomes.rs",
         "block_behaviors.rs",
         "block_entity_types.rs",
