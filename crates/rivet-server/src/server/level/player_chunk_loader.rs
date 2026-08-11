@@ -395,11 +395,8 @@ impl PlayerChunkLoader {
             self.last_send_distance,
         );
 
-        if self.last_chunk_x == current_x
-            && self.last_chunk_z == current_z
-            && self.last_send_distance == send
-            && self.last_tick_distance == tick
-        {
+        let center_changed = self.last_chunk_x != current_x || self.last_chunk_z != current_z;
+        if !center_changed && self.last_send_distance == send && self.last_tick_distance == tick {
             // Java `update()`: "nothing we care about changed, so we're not
             // re-calculating."
             return Ok(Vec::new());
@@ -410,17 +407,21 @@ impl PlayerChunkLoader {
         // M1 world's distances are constant, so neither the radius nor the
         // simulation packet changes here — Java's `!=` guards). Java sends the
         // center packet last in `update()` "so that the client does not ignore
-        // any of our unload chunk packets above"; the actual chunk sends happen
-        // in the later `updateQueues` phase. This slice has no unloads, so the
+        // any of our unload chunk packets above", gated on the center actually
+        // changing (`lastSentChunkCenter`); the actual chunk sends happen in the
+        // later `updateQueues` phase. This slice has no unloads, so the
         // observable order is center-then-chunks — the same prepare-the-cache
         // order the join burst's radius → simulation → center uses.
-        let mut packets = vec![PlayPacket::new(
-            PlayClientbound::SetChunkCacheCenter.id(),
-            encode_body(
-                ClientboundSetChunkCacheCenterPacket::stream_codec(),
-                &ClientboundSetChunkCacheCenterPacket::new(current_x, current_z),
-            )?,
-        )];
+        let mut packets = Vec::new();
+        if center_changed {
+            packets.push(PlayPacket::new(
+                PlayClientbound::SetChunkCacheCenter.id(),
+                encode_body(
+                    ClientboundSetChunkCacheCenterPacket::stream_codec(),
+                    &ClientboundSetChunkCacheCenterPacket::new(current_x, current_z),
+                )?,
+            ));
+        }
 
         // Java `update()` commits the new center + distances before processing
         // the iteration (`this.lastChunkX = currentChunkX` etc. precede the
