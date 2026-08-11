@@ -5433,10 +5433,13 @@ mod tests {
     }
 
     /// The #175 7(e) bogus-seed negative: a capture generated under a *different*
-    /// seed hashes differently at every chunk, and the diff must FAIL (exit 1)
-    /// naming the diverged chunks — never a vacuous green. Unlike the tamper
-    /// negatives (which flip one field in a copy of the baseline), a bogus seed
-    /// changes the *whole* tree, so this is a genuine different-world comparison.
+    /// seed hashes differently at every chunk. Because the two trees carry
+    /// different seeds, the diff refuses to compare at all — provenance drift
+    /// is UNVERIFIED (3), never a vacuous green or a misleading exit-1 digest
+    /// comparison of two different worlds. Unlike the tamper negatives (which
+    /// flip one field in a copy of the baseline), a bogus seed changes the
+    /// *whole* tree, so this is a genuine different-world comparison; the
+    /// every-chunk-differs claim is asserted on the payload level below.
     #[test]
     fn hash_diff_detects_bogus_seed() {
         let tmp = hash_tmp("hash-bogus-seed");
@@ -5484,17 +5487,31 @@ mod tests {
     /// `Level` compound written by `SerializableChunkData.write()`, region
     /// framing excluded) to the actual committed bytes, and guards against a
     /// future hashing change silently retargeting every digest.
+    ///
+    /// This test is *load-bearing*: the committed Paper digest table and the
+    /// region payloads it is grounded in are committed deliverables, so their
+    /// absence is a hard failure (panic), never a silent skip — matching the
+    /// merged `committed_region_payloads_stamp_true_full_counts` convention
+    /// (D8: a missing load-bearing fixture is a red test, never a skip).
     #[test]
     fn committed_paper_manifest_digests_ground_in_payload_bytes() {
         let dir = crate_dir().join("fixtures/chunk-hash/paper");
-        if !dir.join("manifest.json").is_file() {
-            return;
-        }
+        assert!(
+            dir.join("manifest.json").is_file(),
+            "committed Paper digest table {} is ABSENT — the #54 digest-scope grounding \
+             guard cannot verify; restore it (git checkout) or this test is red, never \
+             silently skipped",
+            dir.display()
+        );
         let committed = load_hash_manifest(&dir).unwrap();
         let payload_dir = crate_dir().join("fixtures/regions/overworld-normal");
-        if !payload_dir.join("chunk").is_dir() {
-            return;
-        }
+        assert!(
+            payload_dir.join("chunk").is_dir(),
+            "committed region payloads {} are ABSENT — the #54 digest-scope grounding guard \
+             cannot verify; restore them (git checkout) or this test is red, never silently \
+             skipped",
+            payload_dir.display()
+        );
         let seed = source_region_seed(&payload_dir)
             .unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
         let rebuilt = hash_manifest::build_from_payloads(&payload_dir, &seed, "minecraft\\:normal")
