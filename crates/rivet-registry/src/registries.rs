@@ -62,8 +62,9 @@ pub static DIMENSION: LazyLock<ResourceKey<Registry<Level>>> = LazyLock::new(|| 
 /// `Registries.BLOCK_ENTITY_TYPE` — `createRegistryKey("block_entity_type")`,
 /// the block-entity registry key. Needed by `ClientboundLevelChunkPacketData`'s
 /// `BlockEntityInfo` codec (`ByteBufCodecs.registry(Registries.BLOCK_ENTITY_TYPE)`,
-/// issue #94). `BlockEntityType` is the element placeholder until the block-entity
-/// unit lands (owned by the world/block unit).
+/// issue #94). `BlockEntityType` carries the generated built-in registry
+/// identity required by loaded-chunk reconstruction; block-entity subclasses
+/// and behavior remain owned by the world/block unit.
 pub static BLOCK_ENTITY_TYPE: LazyLock<ResourceKey<Registry<BlockEntityType>>> =
     LazyLock::new(|| {
         ResourceKey::create_registry_key(Identifier::with_default_namespace("block_entity_type"))
@@ -92,6 +93,22 @@ pub static LEVEL_STEM: LazyLock<ResourceKey<Registry<LevelStem>>> = LazyLock::ne
 pub static DIMENSION_TYPE: LazyLock<ResourceKey<Registry<DimensionType>>> = LazyLock::new(|| {
     ResourceKey::create_registry_key(Identifier::with_default_namespace("dimension_type"))
 });
+
+/// `Registries.FEATURE_SIZE_TYPE` — `createRegistryKey("worldgen/feature_size_type")`,
+/// the `net.minecraft.world.level.levelgen.feature.featuresize.FeatureSizeType`
+/// registry key. Added for #394: `FeatureSize.CODEC` is
+/// `BuiltInRegistries.FEATURE_SIZE_TYPE.byNameCodec().dispatch(FeatureSize::type,
+/// FeatureSizeType::codec)`, and this key is the target of the #394 by-name
+/// codec. `FeatureSizeTypeId` carries the generated built-in registry identity
+/// (the two vanilla feature-size types, in declaration order); the concrete
+/// `FeatureSize` variants and their codecs remain owned by the worldgen/feature
+/// unit in `rivet-world`.
+pub static FEATURE_SIZE_TYPE: LazyLock<ResourceKey<Registry<FeatureSizeTypeId>>> =
+    LazyLock::new(|| {
+        ResourceKey::create_registry_key(Identifier::with_default_namespace(
+            "worldgen/feature_size_type",
+        ))
+    });
 
 /// `Registries.ATTRIBUTE` — `createRegistryKey("attribute")`, the
 /// `net.minecraft.world.entity.ai.attributes.Attribute` registry key (entity
@@ -164,11 +181,8 @@ pub struct LevelStem;
 /// tests compare `Holder::Reference` values).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DimensionType;
-/// `net.minecraft.world.level.block.entity.BlockEntityType` (world unit
-/// placeholder, issue #94). `Clone`/`PartialEq`/`Eq` because it is the element
-/// type of a registry codec element (`Arc<T>` derives compare through `T`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BlockEntityType;
+pub use crate::block_entity_type::BlockEntityType;
+pub use crate::feature_size_type::FeatureSizeTypeId;
 /// `net.minecraft.world.entity.ai.attributes.Attribute` — the entity unit's
 /// registry element placeholder (see the `ATTRIBUTE` key above, #90).
 /// `Clone`/`PartialEq`/`Eq` are required by `Holder<Attribute>` (the wire codec

@@ -1,0 +1,318 @@
+{
+  "format": 1,
+  "kind": "text",
+  "paper": "26.2-DEV-main@0a99345",
+  "note": "Paper-grounded component JSON corpus for epic #12 issue #98: representative components used by chat / title / player-info / scoreboard paths. Each `input` is the exact component JSON a packet carries (stored as a JSON string so the bytes fed to the Paper oracle equal the bytes the Rust side parses). `accept` records Paper's actual verdict in this oracle context (Bootstrap-only, no Holder resolution) and matches golden.json. `malformed-*` entries are strict malformed fixtures Paper rejects. The `hover_*`/`click_*` entries are the corrected Paper-accepted fixtures (issue #98): their field names are exactly Paper 26.2's codec schemas - ShowText `value`, OpenUrl `url`, RunCommand `command`, CopyToClipboard `value` - and none needs registry/Holder context (show_text is a plain component, open_url a URI, run_command/copy_to_clipboard plain strings), so Paper accepts all four and the Rust port's `ClickEvent`/`HoverEvent` codecs (issue #85) match them byte-for-byte. The four `malformed-*-wrong-key` fixtures are the same content with the wrong field name (show_text `contents`, open_url `href`, run_command `value`, copy_to_clipboard `text`): Paper rejects them, pinning the field names as load-bearing. The `translatable-with-*` entries exercise the translatable numeric/boolean args the chat JSON codec supports (#92); StyledFormat/FixedFormat remain NBT-persistence scoreboard shapes outside ComponentSerialization.CODEC.",
+  "entries": [
+    {
+      "id": "literal-plain",
+      "input": "\"hello\"",
+      "accept": true
+    },
+    {
+      "id": "literal-unicode",
+      "input": "\"héllo wörld\"",
+      "accept": true
+    },
+    {
+      "id": "literal-emoji",
+      "input": "\"🎉\"",
+      "accept": true
+    },
+    {
+      "id": "literal-empty",
+      "input": "\"\"",
+      "accept": true
+    },
+    {
+      "id": "literal-markup",
+      "input": "\"<b>hi & bye</b>\"",
+      "accept": true
+    },
+    {
+      "id": "literal-escapes",
+      "input": "\"line1\\nline2\\t\\\"quoted\\\" \\\\backslash\"",
+      "accept": true
+    },
+    {
+      "id": "literal-json-tokens",
+      "input": "\"{}[],: true false null\"",
+      "accept": true
+    },
+    {
+      "id": "literal-dashes",
+      "input": "\"stat.player.one\"",
+      "accept": true
+    },
+    {
+      "id": "styled-bold",
+      "input": "{\"text\":\"bold\",\"bold\":true}",
+      "accept": true
+    },
+    {
+      "id": "styled-italic",
+      "input": "{\"text\":\"it\",\"italic\":true}",
+      "accept": true
+    },
+    {
+      "id": "styled-named-color",
+      "input": "{\"text\":\"red\",\"color\":\"red\"}",
+      "accept": true
+    },
+    {
+      "id": "styled-hex-color",
+      "input": "{\"text\":\"hex\",\"color\":\"#ff5555\"}",
+      "accept": true
+    },
+    {
+      "id": "styled-multi-format",
+      "input": "{\"text\":\"x\",\"bold\":true,\"italic\":true,\"underlined\":true,\"strikethrough\":true,\"obfuscated\":true}",
+      "accept": true
+    },
+    {
+      "id": "styled-shadow-color",
+      "input": "{\"text\":\"s\",\"shadow_color\":-16777216}",
+      "accept": true
+    },
+    {
+      "id": "styled-insertion",
+      "input": "{\"text\":\"i\",\"insertion\":\"insert me\"}",
+      "accept": true
+    },
+    {
+      "id": "styled-font",
+      "input": "{\"text\":\"f\",\"font\":\"minecraft:default\"}",
+      "accept": true
+    },
+    {
+      "id": "styled-negated-format",
+      "input": "{\"text\":\"n\",\"bold\":false}",
+      "accept": true
+    },
+    {
+      "id": "translatable-plain",
+      "input": "{\"translate\":\"multiplayer.player.joined\"}",
+      "accept": true
+    },
+    {
+      "id": "translatable-fallback",
+      "input": "{\"translate\":\"key\",\"fallback\":\"Fallback\"}",
+      "accept": true
+    },
+    {
+      "id": "translatable-with-string",
+      "input": "{\"translate\":\"chat.type.text\",\"with\":[\"<Steve>\"]}",
+      "accept": true
+    },
+    {
+      "id": "translatable-with-int",
+      "input": "{\"translate\":\"commands.give.success\",\"with\":[42,\"diamond\"]}",
+      "accept": true
+    },
+    {
+      "id": "translatable-with-float",
+      "input": "{\"translate\":\"custom.f\",\"with\":[3.5]}",
+      "accept": true
+    },
+    {
+      "id": "translatable-with-neg-int",
+      "input": "{\"translate\":\"custom.n\",\"with\":[-7]}",
+      "accept": true
+    },
+    {
+      "id": "translatable-with-bool",
+      "input": "{\"translate\":\"custom.b\",\"with\":[true]}",
+      "accept": true
+    },
+    {
+      "id": "translatable-with-long",
+      "input": "{\"translate\":\"custom.big\",\"with\":[2147483648]}",
+      "accept": true
+    },
+    {
+      "id": "translatable-with-styled-component",
+      "input": "{\"translate\":\"custom.c\",\"with\":[{\"text\":\"nested\",\"bold\":true}]}",
+      "accept": true
+    },
+    {
+      "id": "translatable-with-mixed",
+      "input": "{\"translate\":\"custom.m\",\"with\":[1,2.5,false,\"four\"]}",
+      "accept": true
+    },
+    {
+      "id": "keybind-forward",
+      "input": "{\"keybind\":\"key.forward\"}",
+      "accept": true
+    },
+    {
+      "id": "keybind-jump",
+      "input": "{\"keybind\":\"key.jump\"}",
+      "accept": true
+    },
+    {
+      "id": "score-plain",
+      "input": "{\"score\":{\"name\":\"Player\",\"objective\":\"obj\"}}",
+      "accept": true
+    },
+    {
+      "id": "score-dashed",
+      "input": "{\"score\":{\"name\":\"Team A\",\"objective\":\"scoreboard\"}}",
+      "accept": true
+    },
+    {
+      "id": "selector-plain",
+      "input": "{\"selector\":\"@p\"}",
+      "accept": true
+    },
+    {
+      "id": "selector-styled",
+      "input": "{\"selector\":\"@a[team=red]\",\"color\":\"gold\"}",
+      "accept": true
+    },
+    {
+      "id": "selector-with-separator",
+      "input": "{\"selector\":\"@e\",\"separator\":\",\"}",
+      "accept": true
+    },
+    {
+      "id": "selector-with-object-separator",
+      "input": "{\"selector\":\"@e\",\"separator\":{\"text\":\" | \"}}",
+      "accept": true
+    },
+    {
+      "id": "nested-extra",
+      "input": "{\"text\":\"a\",\"extra\":[\"b\",\"c\"]}",
+      "accept": true
+    },
+    {
+      "id": "nested-extra-styled",
+      "input": "{\"text\":\"a\",\"extra\":[{\"text\":\"b\",\"bold\":true},{\"translate\":\"x\"}]}",
+      "accept": true
+    },
+    {
+      "id": "nested-deep",
+      "input": "{\"text\":\"a\",\"extra\":[{\"text\":\"b\",\"extra\":[\"c\"]}]}",
+      "accept": true
+    },
+    {
+      "id": "nested-extra-with-style",
+      "input": "{\"text\":\"a\",\"extra\":[\"b\",\"c\"],\"color\":\"yellow\"}",
+      "accept": true
+    },
+    {
+      "id": "nested-list-form",
+      "input": "[\"a\",\"b\"]",
+      "accept": true
+    },
+    {
+      "id": "typed-text",
+      "input": "{\"type\":\"text\",\"text\":\"legacy\"}",
+      "accept": true
+    },
+    {
+      "id": "typed-translatable",
+      "input": "{\"type\":\"translatable\",\"translate\":\"a\",\"fallback\":\"b\"}",
+      "accept": true
+    },
+    {
+      "id": "hover-show-text",
+      "input": "{\"text\":\"h\",\"hover_event\":{\"action\":\"show_text\",\"value\":\"hover!\"}}",
+      "accept": true
+    },
+    {
+      "id": "click-open-url",
+      "input": "{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"url\":\"https://example.com/path?q=1&r=2\"}}",
+      "accept": true
+    },
+    {
+      "id": "click-run-command",
+      "input": "{\"text\":\"r\",\"click_event\":{\"action\":\"run_command\",\"command\":\"/say hi\"}}",
+      "accept": true
+    },
+    {
+      "id": "click-copy-to-clipboard",
+      "input": "{\"text\":\"cp\",\"click_event\":{\"action\":\"copy_to_clipboard\",\"value\":\"copied\"}}",
+      "accept": true
+    },
+    {
+      "id": "malformed-hover-show-text-wrong-key",
+      "input": "{\"text\":\"h\",\"hover_event\":{\"action\":\"show_text\",\"contents\":\"hover!\"}}",
+      "accept": false
+    },
+    {
+      "id": "malformed-click-open-url-wrong-key",
+      "input": "{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"href\":\"https://example.com\"}}",
+      "accept": false
+    },
+    {
+      "id": "malformed-click-run-command-wrong-key",
+      "input": "{\"text\":\"r\",\"click_event\":{\"action\":\"run_command\",\"value\":\"/say hi\"}}",
+      "accept": false
+    },
+    {
+      "id": "malformed-click-copy-clipboard-wrong-key",
+      "input": "{\"text\":\"cp\",\"click_event\":{\"action\":\"copy_to_clipboard\",\"text\":\"copied\"}}",
+      "accept": false
+    },
+    {
+      "id": "malformed-not-json",
+      "input": "not json",
+      "accept": false
+    },
+    {
+      "id": "malformed-unclosed-object",
+      "input": "{\"text\":\"a\"",
+      "accept": false
+    },
+    {
+      "id": "malformed-text-missing-key",
+      "input": "{\"type\":\"text\"}",
+      "accept": false
+    },
+    {
+      "id": "malformed-translate-not-string",
+      "input": "{\"translate\":42}",
+      "accept": false
+    },
+    {
+      "id": "malformed-bold-not-bool",
+      "input": "{\"text\":\"a\",\"bold\":\"yes\"}",
+      "accept": false
+    },
+    {
+      "id": "malformed-extra-empty",
+      "input": "{\"text\":\"a\",\"extra\":[]}",
+      "accept": false
+    },
+    {
+      "id": "malformed-extra-not-list",
+      "input": "{\"text\":\"a\",\"extra\":5}",
+      "accept": false
+    },
+    {
+      "id": "malformed-score-missing-objective",
+      "input": "{\"score\":{\"name\":\"p\"}}",
+      "accept": false
+    },
+    {
+      "id": "malformed-score-not-object",
+      "input": "{\"score\":\"p\"}",
+      "accept": false
+    },
+    {
+      "id": "malformed-unknown-type",
+      "input": "{\"type\":\"bogus\",\"text\":\"x\"}",
+      "accept": false
+    },
+    {
+      "id": "malformed-bad-color",
+      "input": "{\"text\":\"a\",\"color\":\"notacolor\"}",
+      "accept": false
+    },
+    {
+      "id": "malformed-with-bad-component",
+      "input": "{\"translate\":\"x\",\"with\":[{\"foo\":42}]}",
+      "accept": false
+    }
+  ]
+}

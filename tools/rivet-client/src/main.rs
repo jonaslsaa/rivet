@@ -16,7 +16,7 @@ use azalea::ecs::message::MessageReader;
 use azalea::ecs::observer::On;
 use azalea::ecs::prelude::{Query, Res, Resource};
 use azalea::ecs::schedule::IntoScheduleConfigs;
-use azalea::entity::{EntityGeometryUpdateSystems, Physics};
+use azalea::entity::{EntityGeometryUpdateSystems, LastSentPosition, Physics};
 use azalea::join::{ConnectionFailedEvent, poll_create_connection_task};
 use azalea::movement::{
     send_player_input_packet, send_position, send_sprinting_if_needed, update_pose,
@@ -25,6 +25,7 @@ use azalea::packet::game::SendGamePacketEvent;
 use azalea::physics::PhysicsSystems;
 use azalea::physics::client_movement::ClientMovementState;
 use azalea::prelude::*;
+use azalea::protocol::common::movements::MoveFlags;
 use azalea::protocol::packets::game::{ClientboundGamePacket, ServerboundGamePacket};
 use serde_json::{Value, json};
 
@@ -32,6 +33,10 @@ const DEFAULT_MODE: &str = "join";
 const DEFAULT_ADDRESS: &str = "127.0.0.1:25599";
 const DEFAULT_USERNAME: &str = "RivetProbe";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+/// Default dwell window for `--mode dwell`: the wall-clock seconds the client
+/// stays connected after spawn while answering every live keepalive. Zero means
+/// the mode is inactive (dwell mode with zero is rejected at parse time).
+const DEFAULT_DWELL_SECONDS: u64 = 0;
 const AZALEA_REVISION: &str = "6249c295d353b9b3ef68f665b311cba39211fd19";
 const TRANSCRIPT_PROTOCOL: u64 = 1;
 
@@ -51,6 +56,34 @@ const SAMPLE_TICKS: u32 = 100;
 /// Wait this long after the walk stops before ending the client, so the final
 /// sent positions and any trailing correction are recorded before exit.
 const MOVE_DRAIN: Duration = Duration::from_millis(200);
+/// How long the dwell settle loop waits between coherence checks after the dwell
+/// window elapses. The keepalive cadence is 1 s, so a 50 ms check interval is
+/// ample: it lets an in-flight challenge/echo pair land and be observed well
+/// before the next challenge.
+const DWELL_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
+/// How long the dwell settle loop waits for the echo stream to catch up to the
+/// challenge stream before giving up and snapshotting anyway. Bounded so a
+/// genuinely missing echo (a client that stopped echoing, which the server would
+/// kick) cannot hold the record open forever — the emitted mismatch still fails
+/// the verdict. 1 s is far shorter than the survival-window proof and keeps the
+/// wall-clock record honest.
+const DWELL_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
+/// The minimum wall-clock dwell window (s) `--mode dwell` accepts. The
+/// transcript verdict requires the challenge span to reach 30 s, and the first
+/// challenge lands ~1.2 s after spawn, so a 31 s window (the server's 30 s kick
+/// limit plus 1) would span only ~29.8 s and fail on a healthy run. 35 s leaves
+/// a comfortable margin. Mirrors `run-scenario`'s
+/// `transcript::DWELL_MIN_DWELL_SECONDS`; kept in sync so a direct client
+/// invocation cannot be told to run a window that cannot prove survival.
+const DWELL_MIN_DWELL_SECONDS: u64 = 35;
+/// Reserved client-side headroom (s) beyond the dwell window + settle timeout
+/// that `--timeout-seconds` must accommodate. The timeout starts at process
+/// launch while the dwell window only starts at `Event::Spawn` (after offline
+/// login and configuration), so the timeout must reserve that pre-spawn time
+/// too, or the timeout branch cuts the client off before it emits the `dwell`
+/// record. Mirrors `run-scenario`'s `DWELL_TIMEOUT_HEADROOM_SECONDS` (5 s here
+/// + the 1 s settle above = the 6 s the runner reserves).
+const DWELL_LOGIN_HEADROOM_SECONDS: u64 = 5;
 
 /// After `Event::Spawn` we keep the client alive for a short observation window
 /// so the observable outcome is stable (chunks arrived, health/inventory
@@ -69,6 +102,18 @@ enum Mode {
     /// teleport/keepalive/correction packets observed along the way (the `move`
     /// scenario).
     Move,
+    /// Join and stay connected for `--dwell-seconds` wall-clock seconds after
+    /// spawn while azalea auto-echoes every live keepalive, then emit the
+    /// `dwell` record (challenge ids, echo ids, wall-clock span). Proves a real
+    /// client survives in PLAY past the server's keepalive kick limit (30s).
+    Dwell,
+    /// Join, then send a movement frame whose position is NaN so the server's
+    /// `contains_invalid_values` anti-cheat gate answers with a
+    /// `ClientboundDisconnectPacket` carrying
+    /// `multiplayer.disconnect.invalid_player_movement`. The decoded reason
+    /// (the translatable key) is emitted by the `disconnect` handler, proving
+    /// the real client decodes Rivet's reason (the `kick` scenario, issue #86).
+    Kick,
 }
 
 impl Mode {
@@ -76,6 +121,8 @@ impl Mode {
         match self {
             Mode::Join => "join",
             Mode::Move => "move",
+            Mode::Dwell => "dwell",
+            Mode::Kick => "kick",
         }
     }
 
@@ -83,6 +130,8 @@ impl Mode {
         match s {
             "join" => Some(Mode::Join),
             "move" => Some(Mode::Move),
+            "dwell" => Some(Mode::Dwell),
+            "kick" => Some(Mode::Kick),
             _ => None,
         }
     }
@@ -94,15 +143,21 @@ struct Args {
     username: String,
     timeout: Duration,
     mode: Mode,
+    dwell: Duration,
 }
 
 impl Args {
     fn parse() -> Result<Self, String> {
+        Self::parse_from(env::args().skip(1))
+    }
+
+    fn parse_from(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut address = DEFAULT_ADDRESS.to_owned();
         let mut username = DEFAULT_USERNAME.to_owned();
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
+        let mut dwell_seconds = DEFAULT_DWELL_SECONDS;
+        let mut dwell_explicit = false;
         let mut mode = Mode::Join;
-        let mut args = env::args().skip(1);
 
         while let Some(argument) = args.next() {
             match argument.as_str() {
@@ -117,19 +172,64 @@ impl Args {
                 "--mode" => {
                     let value = next_value(&mut args, "--mode")?;
                     mode = Mode::parse(&value).ok_or_else(|| {
-                        format!("invalid --mode value: {value} (expected join|move)")
+                        format!("invalid --mode value: {value} (expected join|move|dwell|kick)")
                     })?;
+                }
+                "--dwell-seconds" => {
+                    let value = next_value(&mut args, "--dwell-seconds")?;
+                    dwell_seconds = value
+                        .parse()
+                        .map_err(|_| format!("invalid --dwell-seconds value: {value}"))?;
+                    dwell_explicit = true;
                 }
                 "--help" | "-h" => return Err(usage()),
                 _ => return Err(format!("unknown argument: {argument}\n\n{}", usage())),
             }
         }
 
+        // --dwell-seconds only has meaning in dwell mode; on join/move/kick an
+        // explicit value would be a silent no-op, so it is rejected (exit 64)
+        // rather than ignored.
+        if dwell_explicit && mode != Mode::Dwell {
+            return Err(
+                "--dwell-seconds only applies to --mode dwell; join/move/kick never dwell, so an \
+                 explicit value would be a silent no-op — drop it"
+                    .to_owned(),
+            );
+        }
         if username.is_empty() {
             return Err("--username must not be empty".to_owned());
         }
         if timeout_seconds == 0 {
             return Err("--timeout-seconds must be greater than zero".to_owned());
+        }
+        if mode == Mode::Dwell && dwell_seconds < DWELL_MIN_DWELL_SECONDS {
+            return Err(format!(
+                "--mode dwell requires --dwell-seconds of at least {DWELL_MIN_DWELL_SECONDS} (the \
+                 server's 30 s keepalive kick limit plus the first-challenge offset and margin; a \
+                 shorter window cannot prove survival or span the required 30 s of challenges)"
+            ));
+        }
+        // The timeout starts at process launch while the dwell window only
+        // starts at spawn; after the window the client spends up to
+        // DWELL_SETTLE_TIMEOUT settling the keepalive stream before emitting
+        // the `dwell` record. `dwell < timeout` is therefore not enough — the
+        // timeout must reserve the settle loop AND the pre-spawn
+        // login/configuration time, or the timeout branch cuts the client off
+        // before it emits.
+        if mode == Mode::Dwell
+            && timeout_seconds
+                <= dwell_seconds + DWELL_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS
+        {
+            return Err(format!(
+                "--timeout-seconds must exceed --dwell-seconds by more than {}s (the client \
+                 spends up to {}s settling the keepalive stream after the dwell window, plus {}s \
+                 of login/configuration time before spawn, and must emit the dwell record before \
+                 the timeout fires)",
+                DWELL_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS,
+                DWELL_SETTLE_TIMEOUT.as_secs(),
+                DWELL_LOGIN_HEADROOM_SECONDS
+            ));
         }
 
         Ok(Self {
@@ -137,6 +237,7 @@ impl Args {
             username,
             timeout: Duration::from_secs(timeout_seconds),
             mode,
+            dwell: Duration::from_secs(dwell_seconds),
         })
     }
 }
@@ -148,10 +249,10 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: rivet-client [--mode join|move] [--address HOST:PORT] [--username NAME] \
-         [--timeout-seconds N]\n\
+        "Usage: rivet-client [--mode join|move|dwell|kick] [--address HOST:PORT] [--username NAME] \
+         [--timeout-seconds N] [--dwell-seconds N]\n\
          Defaults: --mode {DEFAULT_MODE} --address {DEFAULT_ADDRESS} --username {DEFAULT_USERNAME} \
-         --timeout-seconds {DEFAULT_TIMEOUT_SECONDS}"
+         --timeout-seconds {DEFAULT_TIMEOUT_SECONDS} --dwell-seconds {DEFAULT_DWELL_SECONDS}"
     )
 }
 
@@ -199,6 +300,10 @@ struct MoveSampler {
     notify: Arc<tokio::sync::Notify>,
     /// The samples captured so far, shared with the driver for the final record.
     samples: Arc<Mutex<Vec<MoveSample>>>,
+    /// The last movement frame actually sent across the whole walk (the
+    /// `LastSentPosition` at the tick the walk stopped), shared with the driver
+    /// for the final record's `walk.last_sent`.
+    last_sent: Arc<Mutex<Option<azalea::Vec3>>>,
 }
 
 /// A [`GameTick`] system that drives the move-walk sampler synchronously.
@@ -217,10 +322,11 @@ fn move_sampler_system(
         &azalea::entity::Position,
         &Physics,
         &mut ClientMovementState,
+        &LastSentPosition,
         &mut MoveSampler,
     )>,
 ) {
-    for (position, physics, mut movement, mut sampler) in &mut players {
+    for (position, physics, mut movement, last_sent, mut sampler) in &mut players {
         // Once the walk window has fully elapsed the sampler is inert: it no
         // longer samples, re-stops the walk, or re-notifies the driver.
         if sampler.tick_count >= MOVE_TICKS {
@@ -248,6 +354,13 @@ fn move_sampler_system(
         sampler.tick_count += 1;
         if sampler.tick_count >= MOVE_TICKS {
             movement.move_direction = WalkDirection::None;
+            // This run happens after `send_position`, so `LastSentPosition` is
+            // the position the walk's final movement frame was actually sent
+            // with (the frame sent this tick — the walk still moved, direction
+            // is only cleared here). The sampled prefix stops at SAMPLE_TICKS,
+            // so the remaining `MOVE_TICKS - 1 - SAMPLE_TICKS` moving ticks are
+            // unsampled; this snapshot is the last of them.
+            *sampler.last_sent.lock().expect("last sent lock poisoned") = Some(**last_sent);
             sampler.notify.notify_one();
         }
     }
@@ -285,6 +398,12 @@ impl Plugin for MoveSamplerPlugin {
 #[derive(Clone, Component)]
 struct State {
     mode: Mode,
+    /// Dwell-mode wall-clock window (real time, monotonic). Zero for non-dwell
+    /// modes; validated at parse time to be non-zero and strictly less than the
+    /// outer `--timeout-seconds` bound for dwell.
+    dwell: Duration,
+    /// Monotonic `Instant` at `Event::Spawn`, the start of the dwell window.
+    spawn_instant: Arc<Mutex<Option<Instant>>>,
     spawned: Arc<AtomicBool>,
     terminal_emitted: Arc<AtomicBool>,
     /// Chunk coordinates received so far (sorted at read time). Shared between
@@ -293,6 +412,9 @@ struct State {
     /// Per-tick movement samples, appended by the move task and read once when
     /// it emits the canonical `moved` record.
     move_samples: Arc<Mutex<Vec<MoveSample>>>,
+    /// The last movement frame actually sent across the walk (the sampler's
+    /// `walk.last_sent` snapshot), read once when the `moved` record is emitted.
+    last_sent: Arc<Mutex<Option<azalea::Vec3>>>,
     /// Clientbound teleport ids (`player_position`), observed by the event
     /// handler. On a fresh boot the spawn teleport is the first (id 1 — Paper's
     /// `awaitingTeleport` is per-connection and starts at 0), so the ids are
@@ -302,11 +424,10 @@ struct State {
     /// Serverbound `accept_teleportation` ids, observed by the outbound packet
     /// observer (azalea auto-acks every teleport).
     teleport_acks: Arc<Mutex<Vec<u32>>>,
-    /// Clientbound keepalive ids, observed by the event handler.
-    keepalives: Arc<Mutex<Vec<u64>>>,
-    /// Serverbound `keep_alive` ids (the echo), observed by the outbound packet
-    /// observer (azalea auto-echoes every keepalive).
-    keepalive_echoes: Arc<Mutex<Vec<u64>>>,
+    /// Keepalive challenges, their receipt instants, and their echoes, shared
+    /// by move and dwell modes under a single lock so a snapshot never splits a
+    /// challenge from its echo (see [`KeepaliveLog`]).
+    keepalive_log: Arc<Mutex<KeepaliveLog>>,
     /// Server-issued position corrections (`entity_position_sync`) observed
     /// during the walk: Paper re-syncs the player entity periodically, so both
     /// the count and the coordinates vary per boot (46-118 across test boots).
@@ -326,14 +447,16 @@ impl Default for State {
     fn default() -> Self {
         Self {
             mode: Mode::Join,
+            dwell: Duration::ZERO,
+            spawn_instant: Arc::new(Mutex::new(None)),
             spawned: Arc::new(AtomicBool::new(false)),
             terminal_emitted: Arc::new(AtomicBool::new(false)),
             chunks: Arc::new(Mutex::new(BTreeSet::new())),
             move_samples: Arc::new(Mutex::new(Vec::new())),
+            last_sent: Arc::new(Mutex::new(None)),
             teleports: Arc::new(Mutex::new(Vec::new())),
             teleport_acks: Arc::new(Mutex::new(Vec::new())),
-            keepalives: Arc::new(Mutex::new(Vec::new())),
-            keepalive_echoes: Arc::new(Mutex::new(Vec::new())),
+            keepalive_log: Arc::new(Mutex::new(KeepaliveLog::default())),
             corrections: Arc::new(Mutex::new(Vec::new())),
             spawn_origin: Arc::new(Mutex::new(None)),
             runtime: tokio::runtime::Handle::current(),
@@ -378,6 +501,22 @@ fn round_position(p: azalea::core::position::Vec3) -> Value {
     })
 }
 
+/// The translation key of a disconnect reason that azalea decoded as a
+/// translatable component, or `None` for a literal/plain-text reason. The
+/// `kick` scenario needs the raw key (e.g.
+/// `multiplayer.disconnect.invalid_player_movement`) — not its Debug rendering
+/// or a resolved-language string — so it can assert Rivet's exact reason was
+/// decoded and reported. `Event::Disconnect(Some(reason))` carries azalea's
+/// `FormattedText`; a plain-text reason is `FormattedText::Text`, and the
+/// translatable reason from `ClientboundDisconnectPacket` is
+/// `FormattedText::Translatable` whose `key` field is the wire key.
+fn translatable_key(reason: &azalea::FormattedText) -> Option<String> {
+    match reason {
+        azalea::FormattedText::Translatable(c) => Some(c.key.clone()),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Resource)]
 struct ConnectionFailure(Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>);
 
@@ -392,13 +531,39 @@ impl Plugin for ConnectionFailurePlugin {
     }
 }
 
+/// The keepalive observables a run records: every clientbound challenge id, its
+/// receipt instant (dwell mode only), and every serverbound echo id. All three
+/// live under one lock so a snapshot is coherent — a challenge and its echo can
+/// never be split across two reads, and the challenge/instant pair is written
+/// atomically (the same handler records both).
+#[derive(Clone, Default)]
+struct KeepaliveLog {
+    challenges: Vec<u64>,
+    instants: Vec<Instant>,
+    echoes: Vec<u64>,
+}
+
+impl KeepaliveLog {
+    /// Whether the echo stream has caught up to the challenge stream: every
+    /// challenge received so far has a recorded echo. The server challenges at
+    /// a 1 s cadence and azalea echoes within a tick, so a settled log is in a
+    /// coherent state — snapshotting it now cannot observe a challenge whose
+    /// echo is still in flight. A challenge whose echo genuinely never lands
+    /// (a client that stopped echoing would be kicked) keeps this false, so the
+    /// dwell settle window expires and the emitted mismatch still fails the
+    /// verdict.
+    fn settled(&self) -> bool {
+        self.echoes.len() >= self.challenges.len()
+    }
+}
+
 /// Handles shared by the outbound-packet observer: it records the serverbound
 /// echoes (teleport acks, keepalive echoes) that azalea sends automatically, so
 /// the move transcript can prove the request->echo relationship on the raw ids.
 #[derive(Clone)]
 struct MoveObservation {
     teleport_acks: Arc<Mutex<Vec<u32>>>,
-    keepalive_echoes: Arc<Mutex<Vec<u64>>>,
+    keepalive_log: Arc<Mutex<KeepaliveLog>>,
 }
 
 /// Registers an observer on every `SendGamePacketEvent` (any serverbound packet
@@ -410,7 +575,7 @@ struct MoveObservationPlugin(MoveObservation);
 impl Plugin for MoveObservationPlugin {
     fn build(&self, app: &mut App) {
         let teleport_acks = Arc::clone(&self.0.teleport_acks);
-        let keepalive_echoes = Arc::clone(&self.0.keepalive_echoes);
+        let keepalive_log = Arc::clone(&self.0.keepalive_log);
         app.add_observer(move |event: On<SendGamePacketEvent>| match &event.packet {
             ServerboundGamePacket::AcceptTeleportation(p) => {
                 teleport_acks
@@ -419,9 +584,10 @@ impl Plugin for MoveObservationPlugin {
                     .push(p.id);
             }
             ServerboundGamePacket::KeepAlive(p) => {
-                keepalive_echoes
+                keepalive_log
                     .lock()
-                    .expect("keepalive echoes lock poisoned")
+                    .expect("keepalive log lock poisoned")
+                    .echoes
                     .push(p.id);
             }
             _ => {}
@@ -496,7 +662,7 @@ async fn observe_and_emit(bot: Client, state: State) {
         // stream must surface as `chunk_count: 0`, not be accepted as stable.
         if size > 0
             && now >= started + MIN_OBSERVATION
-            && now.duration_since(last_change) >= QUIET_PERIOD
+            && now.saturating_duration_since(last_change) >= QUIET_PERIOD
         {
             break;
         }
@@ -586,6 +752,7 @@ async fn move_and_emit(bot: Client, state: State) {
     let _ = bot.set_direction(-90.0, 0.0);
 
     let samples = Arc::clone(&state.move_samples);
+    let last_sent = Arc::clone(&state.last_sent);
     let notify = Arc::new(tokio::sync::Notify::new());
     {
         let mut ecs = bot.ecs.write();
@@ -593,6 +760,7 @@ async fn move_and_emit(bot: Client, state: State) {
             tick_count: 0,
             notify: Arc::clone(&notify),
             samples,
+            last_sent,
         });
     }
     // Wait for the sampler to finish the walk window.
@@ -601,15 +769,22 @@ async fn move_and_emit(bot: Client, state: State) {
     // Let the last sent positions and any trailing server correction flush.
     tokio::time::sleep(MOVE_DRAIN).await;
 
-    // Snapshot the observables. Each lock is taken and released per value (never
-    // all at once). The walk finished earlier and MOVE_DRAIN let the write side
-    // quiesce: no further teleports/corrections arrive once the player stops
-    // moving, and the keepalive cadence (1s) is far longer than the drain
-    // (200ms), so in practice these reads observe the final sets. If a keepalive
-    // somehow landed between two reads, the echo relationship below would report
-    // false and the run would FAIL — a spurious failure, never a false pass,
-    // which is the honest direction for a differential harness.
-    let (samples, teleports, teleport_acks, keepalives, keepalive_echoes, corrections, origin) = {
+    // Snapshot the observables. The keepalive challenges and echoes are read
+    // together under one lock (coherent by construction), while the remaining
+    // values each take their own lock. The walk finished earlier and MOVE_DRAIN
+    // let the write side quiesce: no further teleports/corrections arrive once
+    // the player stops moving, so in practice these reads observe the final
+    // sets.
+    let (
+        samples,
+        teleports,
+        teleport_acks,
+        keepalives,
+        keepalive_echoes,
+        corrections,
+        origin,
+        last_sent,
+    ) = {
         let samples = state
             .move_samples
             .lock()
@@ -625,16 +800,12 @@ async fn move_and_emit(bot: Client, state: State) {
             .lock()
             .expect("teleport acks lock poisoned")
             .clone();
-        let keepalives = state
-            .keepalives
+        let keepalive_log = state
+            .keepalive_log
             .lock()
-            .expect("keepalives lock poisoned")
-            .clone();
-        let keepalive_echoes = state
-            .keepalive_echoes
-            .lock()
-            .expect("keepalive echoes lock poisoned")
-            .clone();
+            .expect("keepalive log lock poisoned");
+        let keepalives = keepalive_log.challenges.clone();
+        let keepalive_echoes = keepalive_log.echoes.clone();
         let corrections = state
             .corrections
             .lock()
@@ -644,6 +815,7 @@ async fn move_and_emit(bot: Client, state: State) {
             .spawn_origin
             .lock()
             .expect("spawn origin lock poisoned");
+        let last_sent = *state.last_sent.lock().expect("last sent lock poisoned");
         (
             samples,
             teleports,
@@ -652,9 +824,11 @@ async fn move_and_emit(bot: Client, state: State) {
             keepalive_echoes,
             corrections,
             origin,
+            last_sent,
         )
     };
     let origin = origin.expect("move mode requires a recorded spawn position");
+    let last_sent = last_sent.expect("move mode requires the walk's last sent position");
 
     // Samples are normalized to spawn-relative X/Z deltas at full precision
     // (subtract the origin, then round), so the walk is identical across boots
@@ -679,11 +853,52 @@ async fn move_and_emit(bot: Client, state: State) {
             // The walk spans MOVE_TICKS observed game ticks; the first is the
             // setup tick (direction set, no movement), so the player actually
             // moves for MOVE_TICKS - 1 of them. The first SAMPLE_TICKS moving
-            // ticks are sampled into `samples`.
+            // ticks are sampled into `samples`; the remaining
+            // MOVE_TICKS - 1 - SAMPLE_TICKS moving ticks are unsampled.
+            //
+            // `last_sent` is the last movement frame actually sent across all
+            // MOVE_TICKS - 1 moving ticks (the `LastSentPosition` at the tick
+            // the walk stopped). It is NOT the final sampled position: the
+            // samples stop at SAMPLE_TICKS, so the last frame was sent 19
+            // moving ticks after the last sample — comparing `last_sent` to the
+            // final sample would always disagree and is not done here. Like the
+            // samples, X/Z are spawn-relative (the server randomizes the spawn
+            // offset each boot) and `y` is absolute (the superflat spawn height
+            // is fixed), so the record is normalized the same way. `last_sent`
+            // is a *compared* field in the #53 differentials: the evidence
+            // across fresh boots and Paper-vs-Rivet runs (the
+            // `differing_last_sent_is_compared` parity test) shows it is
+            // deterministic per server and Paper-vs-Rivet equal on X/Z, so a
+            // differing `last_sent` is a real movement divergence, not per-boot
+            // noise — it is no longer excluded (there is no `walk.last_sent`
+            // entry in `excluded_move_fields`). The one honest caveat is that
+            // `last_sent` snapshots the unsampled tail, the region a mid-walk
+            // server re-sync (`player_position`) perturbation would land in; if
+            // one ever does land there, the differential now FAILS on the
+            // divergence rather than waving it through — the intended strict
+            // behavior.
+            //
+            // `spawn_origin` is the full-precision spawn position the X/Z
+            // normalization subtracted. It is carried (not rounded) so the
+            // harness can invert the normalization losslessly: the runner adds
+            // it back to `last_sent` to reconstruct the absolute position for
+            // the Rivet-trace cross-check (run-scenario's
+            // `check_rivet_authoritative`). It is per-boot nondeterministic
+            // (Paper randomizes the spawn X/Z offset) and excluded from parity.
             "walk_ticks": MOVE_TICKS,
             "movement_ticks": MOVE_TICKS - 1,
             "sampled_ticks": samples.len(),
             "heading_degrees": -90.0,
+            "spawn_origin": json!({
+                "x": origin.x,
+                "y": origin.y,
+                "z": origin.z,
+            }),
+            "last_sent": json!({
+                "x": round_to(last_sent.x - origin.x, 3),
+                "y": round_to(last_sent.y, 3),
+                "z": round_to(last_sent.z - origin.z, 3),
+            }),
             "samples": samples.iter().map(sample_json).collect::<Vec<_>>(),
             "teleports": teleports,
             "teleport_acks": teleport_acks,
@@ -694,6 +909,172 @@ async fn move_and_emit(bot: Client, state: State) {
     }));
 
     hard_exit(0);
+}
+
+/// Wait until the keepalive echo stream has caught up to the challenge stream
+/// (bounded by `timeout`), then return a coherent snapshot of the log.
+///
+/// The 1 s cadence means a challenge can arrive exactly as the dwell window
+/// elapses, with azalea's echo still in flight; snapshotting immediately would
+/// record that challenge without its echo and spuriously fail the
+/// challenge->echo relationship. This waits (polling every `interval`) for the
+/// in-flight pair to land and be observed coherently. A challenge whose echo
+/// truly never arrives (a client that stopped echoing, which the server would
+/// kick) keeps the log unsettled until `timeout`; the snapshot then preserves
+/// the mismatch, so a genuinely missing echo still fails the verdict — the
+/// settle window never masks it.
+///
+/// `timeout` and `interval` are parameters so the straddle/missing-echo
+/// counterfactuals can be driven deterministically in tests.
+async fn settle_and_snapshot(
+    log: &Arc<Mutex<KeepaliveLog>>,
+    timeout: Duration,
+    interval: Duration,
+) -> KeepaliveLog {
+    let settle_deadline = Instant::now() + timeout;
+    loop {
+        // Hold the log's single lock across the settled decision AND the clone:
+        // no writer can interleave, so a returned snapshot is guaranteed to be a
+        // settled, coherent state (every challenge it contains has its echo). A
+        // challenge that lands only after the clone is simply outside the
+        // snapshot — a coherent prefix, never a split pair. The guard is scoped
+        // to this block so it is dropped before the sleep below (it is not Send).
+        let snapshot = {
+            let guard = log.lock().expect("keepalive log lock poisoned");
+            if guard.settled() || Instant::now() >= settle_deadline {
+                Some(guard.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(snapshot) = snapshot {
+            return snapshot;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Elapsed wall-clock seconds from `start` to `now`, saturating at zero. A
+/// receipt instant recorded before the dwell window start (a keepalive that
+/// landed before `Event::Spawn` set the origin) must produce 0, never a panic
+/// from [`Instant::duration_since`]'s "later instant" precondition.
+fn elapsed_secs_f64(start: Instant, now: Instant) -> f64 {
+    now.saturating_duration_since(start).as_secs_f64()
+}
+
+/// Wall-clock offset (ms) of a keepalive receipt from the dwell window start,
+/// saturating at zero for a receipt before spawn (same invariant as
+/// [`elapsed_secs_f64`]).
+fn receipt_offset_ms(receipt: Instant, start: Instant) -> u64 {
+    receipt.saturating_duration_since(start).as_millis() as u64
+}
+
+/// The challenge span across the dwell window: the last receipt offset minus
+/// the first. `None` when there is no offset pair, or the offsets are inverted
+/// (a corrupt/out-of-order stream) — the transcript then carries `null` and the
+/// verdict refuses PASS rather than trusting a declared span.
+fn challenge_span_ms(offsets: &[u64]) -> Option<u64> {
+    match (offsets.first(), offsets.last()) {
+        (Some(first), Some(last)) if last >= first => Some(last - first),
+        _ => None,
+    }
+}
+
+/// Emit the `dwell` record — the keepalive-survival observable — after staying
+/// connected for `state.dwell` wall-clock seconds past spawn, then end the
+/// client.
+///
+/// The dwell window is measured on the client's monotonic wall clock (`Instant`)
+/// from `Event::Spawn` — real time, independent of the server's tick clock. While
+/// connected the client stays passive (no movement) and azalea auto-echoes every
+/// serverbound keepalive; the record reports each clientbound challenge id and
+/// its receipt offset from spawn, plus the serverbound echo ids, so the 1:1
+/// challenge->echo pairing and the ~1/s cadence are directly provable from the
+/// transcript. The wall span proves the client survived in PLAY past the server's
+/// 30s keepalive kick limit.
+async fn dwell_and_emit(bot: Client, state: State) {
+    let dwell = state.dwell;
+    // Connected wall-clock elapsed since spawn. If spawn_instant is somehow
+    // unset (should not happen: dwell only starts from the spawn handler), fall
+    // back to an elapsed of zero and the following sleep still bounds the run.
+    let start = state
+        .spawn_instant
+        .lock()
+        .expect("spawn instant lock poisoned")
+        .unwrap_or_else(Instant::now);
+
+    tokio::time::sleep(dwell).await;
+
+    // Settle the keepalive stream, then snapshot it coherently (see
+    // `settle_and_snapshot`): a challenge that arrives exactly as the dwell
+    // window elapses, with azalea's echo still in flight, is observed together
+    // with its echo instead of spuriously failing the relationship.
+    let log = settle_and_snapshot(
+        &state.keepalive_log,
+        DWELL_SETTLE_TIMEOUT,
+        DWELL_SETTLE_INTERVAL,
+    )
+    .await;
+    let keepalives = log.challenges;
+    let keepalive_instants = log.instants;
+    let keepalive_echoes = log.echoes;
+
+    let now = Instant::now();
+    let connected_wall_seconds = elapsed_secs_f64(start, now);
+    // Wall-clock offset of each challenge receipt from spawn (ms). Challenges
+    // arrive on the play socket after the join burst settles; the first is at
+    // roughly the keepalive cadence after spawn.
+    let offsets_ms: Vec<u64> = keepalive_instants
+        .iter()
+        .map(|t| receipt_offset_ms(*t, start))
+        .collect();
+    let first_offset_ms = offsets_ms.first().copied();
+    let last_offset_ms = offsets_ms.last().copied();
+    let challenge_span_ms = challenge_span_ms(&offsets_ms);
+
+    emit(json!({
+        "event": "dwell",
+        "requested_dwell_seconds": dwell.as_secs(),
+        "connected_wall_seconds": round_to(connected_wall_seconds, 3),
+        "challenge_count": keepalives.len(),
+        "echo_count": keepalive_echoes.len(),
+        "challenge_ids": keepalives,
+        "echo_ids": keepalive_echoes,
+        "first_challenge_offset_ms": first_offset_ms,
+        "last_challenge_offset_ms": last_offset_ms,
+        "challenge_span_ms": challenge_span_ms,
+    }));
+
+    // The bot handle keeps the connection alive for the duration of the dwell;
+    // it is intentionally never read beyond that.
+    let _ = bot;
+    hard_exit(0);
+}
+
+/// Send one movement frame whose position is NaN so Rivet's
+/// `contains_invalid_values` anti-cheat gate (session.rs `dispatch_move_player`)
+/// answers with a `ClientboundDisconnectPacket` carrying the
+/// `multiplayer.disconnect.invalid_player_movement` translatable. The
+/// `Event::Disconnect` handler decodes that reason and emits the transcript
+/// terminal; the `kick` scenario asserts the decoded key. After sending, this
+/// parks forever: the disconnect handler's `hard_exit` ends the process, and if
+/// the server never kicks (a regression in the gate or the disconnect path), the
+/// outer `--timeout-seconds` branch exits with `timeout` and the scenario FAILs.
+async fn kick_and_wait(bot: Client, _state: State) {
+    bot.write_packet(
+        azalea::protocol::packets::game::ServerboundMovePlayerPosRot {
+            pos: azalea::Vec3 {
+                x: f64::NAN,
+                y: 0.0,
+                z: 0.0,
+            },
+            look_direction: azalea::entity::LookDirection::new(0.0, 0.0),
+            flags: MoveFlags::default(),
+        },
+    );
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 async fn handle(bot: Client, event: Event, state: State) {
@@ -715,6 +1096,10 @@ async fn handle(bot: Client, event: Event, state: State) {
                 .spawn_origin
                 .lock()
                 .expect("spawn origin lock poisoned") = raw_position;
+            *state
+                .spawn_instant
+                .lock()
+                .expect("spawn instant lock poisoned") = Some(Instant::now());
             emit(json!({
                 "event": "spawn",
                 "position": position,
@@ -723,6 +1108,8 @@ async fn handle(bot: Client, event: Event, state: State) {
             match state.mode {
                 Mode::Move => runtime.spawn(move_and_emit(bot, state)),
                 Mode::Join => runtime.spawn(observe_and_emit(bot, state)),
+                Mode::Dwell => runtime.spawn(dwell_and_emit(bot, state)),
+                Mode::Kick => runtime.spawn(kick_and_wait(bot, state)),
             };
         }
         // Move-mode packet observables. Recorded alongside the per-tick samples
@@ -752,19 +1139,32 @@ async fn handle(bot: Client, event: Event, state: State) {
             }
         }
         Event::KeepAlive(id) => {
-            if state.mode == Mode::Move {
-                state
-                    .keepalives
+            // Record every clientbound keepalive challenge id and (in dwell
+            // mode) its receipt instant. Both move and dwell modes report the
+            // challenge/echo relationship; dwell needs a full ~1/s sequence to
+            // prove the server kept issuing live challenges while the client
+            // stayed connected, plus each receipt's wall-clock instant to report
+            // the first/last offset and span. The challenge and instant are
+            // written under the log's single lock, so a snapshot always pairs a
+            // challenge with the instant recorded for it.
+            if state.mode != Mode::Join {
+                let now = Instant::now();
+                let mut log = state
+                    .keepalive_log
                     .lock()
-                    .expect("keepalives lock poisoned")
-                    .push(id);
+                    .expect("keepalive log lock poisoned");
+                log.challenges.push(id);
+                if state.mode == Mode::Dwell {
+                    log.instants.push(now);
+                }
             }
         }
         Event::Disconnect(reason) => {
             state.terminal_emitted.store(true, Ordering::Release);
             emit(json!({
                 "event": "disconnect",
-                "reason": reason.map(|reason| format!("{reason:?}")),
+                "reason": reason.as_ref().map(|reason| format!("{reason:?}")),
+                "reason_key": reason.as_ref().and_then(translatable_key),
                 "after_spawn": state.spawned.load(Ordering::Acquire),
             }));
             // Preserve the original exit-code contract: 0 if we got to spawn,
@@ -793,17 +1193,19 @@ async fn main() -> ExitCode {
         "username": args.username,
         "timeout_seconds": args.timeout.as_secs(),
         "mode": mode.as_str(),
+        "dwell_seconds": args.dwell.as_secs(),
         "azalea_revision": AZALEA_REVISION,
     }));
 
     let state = State {
         mode,
+        dwell: args.dwell,
         ..State::default()
     };
     let spawned = Arc::clone(&state.spawned);
     let terminal_emitted = Arc::clone(&state.terminal_emitted);
     let teleport_acks = Arc::clone(&state.teleport_acks);
-    let keepalive_echoes = Arc::clone(&state.keepalive_echoes);
+    let keepalive_log = Arc::clone(&state.keepalive_log);
     let (failure_tx, failure_rx) = tokio::sync::oneshot::channel();
     let connection_failure = ConnectionFailure(Arc::new(Mutex::new(Some(failure_tx))));
     let account = Account::offline(&args.username);
@@ -813,7 +1215,7 @@ async fn main() -> ExitCode {
         .add_plugins(MoveSamplerPlugin)
         .add_plugins(MoveObservationPlugin(MoveObservation {
             teleport_acks,
-            keepalive_echoes,
+            keepalive_log,
         }))
         .set_handler(handle)
         .set_state(state)
@@ -848,5 +1250,206 @@ async fn main() -> ExitCode {
             }));
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A keepalive log with `n` challenges (and matching receipt instants) and
+    /// `echoed` echoes, the first `echoed` challenge ids echoed.
+    fn log_with(n: usize, echoed: usize) -> KeepaliveLog {
+        let ids: Vec<u64> = (1001..1001 + n as u64).collect();
+        KeepaliveLog {
+            challenges: ids.clone(),
+            instants: vec![Instant::now(); n],
+            echoes: ids.into_iter().take(echoed).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dwell_settle_snapshots_an_in_flight_pair_coherently() {
+        // Counterfactual for the spurious-FAIL fix: the dwell window elapses
+        // exactly as the server issues a new challenge, with azalea's echo
+        // still in flight. A snapshot taken at that moment would record the
+        // challenge without its echo and spuriously fail the 1:1
+        // challenge->echo relationship. The settle loop must wait for the
+        // in-flight echo, then snapshot challenge+echo together so the
+        // relationship holds and the verdict does not false-FAIL.
+        let log = Arc::new(Mutex::new(log_with(4, 3)));
+        // The straddling echo lands 50 ms later — well inside the settle timeout
+        // but definitely after the loop's first coherence check.
+        let log_for_echo = Arc::clone(&log);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            log_for_echo
+                .lock()
+                .expect("test lock poisoned")
+                .echoes
+                .push(1004);
+        });
+
+        let started = Instant::now();
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_secs(2), Duration::from_millis(5)).await;
+
+        // The snapshot observed the straddling challenge together with its echo:
+        // the 1:1 relationship holds (challenge_count == echo_count) and the log
+        // is settled. If the settle loop had snapshot immediately, this would be
+        // 4 challenges vs 3 echoes and the verdict would FAIL.
+        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1003, 1004]);
+        assert!(snapshot.settled());
+        // The echo physically cannot land before 50 ms, so the settle loop must
+        // have waited for it — the pass above is not a race where the echo beat
+        // the first coherence check.
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "settle returned before the in-flight echo could land"
+        );
+    }
+
+    #[tokio::test]
+    async fn dwell_settle_never_masks_a_missing_echo() {
+        // Counterfactual for the "no masking" half of the fix: a challenge is
+        // recorded whose echo never arrives (a client that stopped echoing,
+        // which the server would kick). The settle loop must NOT wait forever —
+        // it times out and the snapshot preserves the mismatch, so the verdict
+        // still fails on the genuinely missing echo.
+        let log = Arc::new(Mutex::new(log_with(4, 3)));
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_millis(20), Duration::from_millis(5)).await;
+
+        assert_eq!(snapshot.challenges.len(), 4);
+        assert_eq!(snapshot.echoes.len(), 3);
+        assert!(!snapshot.settled());
+    }
+
+    #[tokio::test]
+    async fn dwell_settle_returns_immediately_when_already_settled() {
+        // A log whose echoes already caught up must not sleep at all: the settle
+        // window only delays the record when there is an in-flight pair to
+        // drain, never on a healthy stream.
+        let log = Arc::new(Mutex::new(log_with(4, 4)));
+        let started = Instant::now();
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_secs(1), Duration::from_millis(5)).await;
+        assert!(snapshot.settled());
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "a settled log must not be delayed by the settle loop"
+        );
+    }
+
+    #[test]
+    fn duration_helpers_saturate_instead_of_panicking() {
+        // Counterfactual for the latent panic paths: a receipt instant recorded
+        // before the dwell window start (a keepalive that landed before
+        // `Event::Spawn` set the origin) must yield 0, not panic via
+        // `Instant::duration_since`'s "later instant" precondition.
+        let start = Instant::now();
+        let later = start + Duration::from_secs(2);
+        assert_eq!(receipt_offset_ms(start, later), 0);
+        assert_eq!(elapsed_secs_f64(later, start), 0.0);
+        // Normal ordering yields the expected offsets.
+        assert_eq!(receipt_offset_ms(later, start), 2000);
+        assert_eq!(elapsed_secs_f64(start, later), 2.0);
+    }
+
+    #[test]
+    fn challenge_span_derives_from_offsets_without_panicking() {
+        assert_eq!(challenge_span_ms(&[1200, 41_100]), Some(39_900));
+        assert_eq!(challenge_span_ms(&[]), None);
+        // A single challenge spans 0 ms (first == last) — the verdict rejects it
+        // as below the 30 s minimum — and an inverted pair (corrupt/out-of-order
+        // stream) yields None rather than a subtraction panic.
+        assert_eq!(challenge_span_ms(&[41_100]), Some(0));
+        assert_eq!(challenge_span_ms(&[5000, 1000]), None);
+    }
+
+    fn parse(v: &[&str]) -> Result<Args, String> {
+        Args::parse_from(v.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn non_dwell_modes_reject_explicit_dwell_seconds() {
+        // --dwell-seconds is dwell-mode-only; an explicit value on join/move is
+        // a silent no-op and must be rejected (the caller's error exits 64).
+        for mode in ["join", "move"] {
+            let err = parse(&["--mode", mode, "--dwell-seconds", "41"]).unwrap_err();
+            assert!(
+                err.contains("--dwell-seconds") && err.contains("silent no-op"),
+                "{mode} must reject --dwell-seconds as a silent no-op, got {err}"
+            );
+        }
+        // dwell accepts an explicit value (with a timeout that reserves the
+        // settle/login headroom; the 30 s default timeout cannot fit any valid
+        // dwell window).
+        assert!(
+            parse(&[
+                "--mode",
+                "dwell",
+                "--dwell-seconds",
+                "41",
+                "--timeout-seconds",
+                "48"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn dwell_rejects_a_window_below_the_span_floor() {
+        // A 31 s window would span only ~29.8 s of challenges and fail the
+        // verdict; the client enforces the same floor as the runner.
+        let err = parse(&["--mode", "dwell", "--dwell-seconds", "34"]).unwrap_err();
+        assert!(
+            err.contains("at least 35"),
+            "error must state the minimum window, got {err}"
+        );
+        assert!(
+            parse(&[
+                "--mode",
+                "dwell",
+                "--dwell-seconds",
+                "35",
+                "--timeout-seconds",
+                "42"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn dwell_timeout_must_reserve_settle_and_login_headroom() {
+        // dwell < timeout is not enough: the timeout starts at process launch
+        // while the dwell window starts at spawn, and after the window the
+        // client spends up to 1 s settling before emitting. 47 = 41 + 1 (settle)
+        // + 5 (login) must be rejected; 48 leaves a strict margin.
+        let err = parse(&[
+            "--mode",
+            "dwell",
+            "--dwell-seconds",
+            "41",
+            "--timeout-seconds",
+            "47",
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("--timeout-seconds") && err.contains("settling"),
+            "error must explain the reserved settle headroom, got {err}"
+        );
+        assert!(
+            parse(&[
+                "--mode",
+                "dwell",
+                "--dwell-seconds",
+                "41",
+                "--timeout-seconds",
+                "48",
+            ])
+            .is_ok()
+        );
     }
 }

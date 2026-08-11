@@ -11,9 +11,10 @@
 //! - `get_serialized_size` — exact varint byte counts, used to size the
 //!   chunk payload before it is written.
 //!
-//! Paper's Moonrise `FastPalette`/`FastPaletteData` hooks are optimizations on
-//! the read path (materialized `T[]` snapshots) that do not change the wire
-//! format or palette semantics; they are not ported.
+//! Paper's Moonrise `FastPalette`/`FastPaletteData` hooks materialize a `T[]`
+//! snapshot of the palette for the container's read path (issue #216). They do
+//! not change the wire format or palette semantics; each palette exposes its
+//! snapshot via [`Palette::raw_palette`].
 
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_registry::id_map::DEFAULT_ID;
@@ -95,6 +96,16 @@ pub trait Palette<T: Clone + PartialEq + Send + 'static>: Send {
 
     /// `copy()` — a fresh palette with identical contents.
     fn copy_palette(&self) -> Box<dyn Palette<T>>;
+
+    /// `moonrise$getRawPalette(FastPaletteData)` — the Moonrise
+    /// `FastPaletteData` read-path snapshot: a `Vec<T>` whose index `i` holds
+    /// `valueFor(i)`, used by the container to resolve stored indices without
+    /// consulting the palette on every read.
+    ///
+    /// `None` means the palette materializes no snapshot (Java's default
+    /// `FastPalette.moonrise$getRawPalette` returns `null` for
+    /// [`GlobalPalette`]); the container falls back to `value_for`.
+    fn raw_palette(&self) -> Option<Vec<T>>;
 }
 
 /// `Mth.ceillog2` — the palette-width function (`minimumBitsRequiredForDistinctValues`).
@@ -203,6 +214,21 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for SingleValuePalette<T>
         }
         Box::new(SingleValuePalette {
             value: self.value.clone(),
+        })
+    }
+
+    fn raw_palette(&self) -> Option<Vec<T>> {
+        // Java `SingleValuePalette.moonrise$getRawPalette` returns
+        // `new Object[] { this.value }` (a null entry when uninitialized).
+        // The Rust snapshot represents the null entry as absence: `[]` makes
+        // the container's `read_palette` panic "Palette index out of bounds",
+        // which is the Java read of the null entry's behaviour (an
+        // `IllegalArgumentException`). Reads of an uninitialized single-value
+        // palette are unreachable in practice — every construction path
+        // inserts at least one value.
+        Some(match &self.value {
+            Some(v) => vec![v.clone()],
+            None => vec![],
         })
     }
 }
@@ -323,6 +349,20 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for LinearPalette<T> {
             size: self.size,
         })
     }
+
+    fn raw_palette(&self) -> Option<Vec<T>> {
+        // Java `LinearPalette.moonrise$getRawPalette` returns the full
+        // `values` array (the `1 << bits` slots, null beyond `size`). The Rust
+        // port returns only the occupied prefix, mirroring the observable
+        // `value_for` domain.
+        Some(
+            self.values
+                .iter()
+                .take(self.size as usize)
+                .map(|v| v.clone().expect("LinearPalette slot below size is set"))
+                .collect(),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +477,14 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for HashMapPalette<T> {
             bits: self.bits,
         })
     }
+
+    fn raw_palette(&self) -> Option<Vec<T>> {
+        // Java `HashMapPalette.moonrise$getRawPalette` forwards to the
+        // identity map's `byId` array (a dense id -> value array). The Rust
+        // port's insertion-order `Vec` is exactly `byId` order, so it is the
+        // snapshot.
+        Some(self.values.clone())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -494,5 +542,12 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for GlobalPalette<T> {
         Box::new(GlobalPalette {
             registry: self.registry.clone_box(),
         })
+    }
+
+    fn raw_palette(&self) -> Option<Vec<T>> {
+        // Java `GlobalPalette` does not implement the materialized
+        // `FastPalette` snapshot (its `moonrise$getRawPalette` is the
+        // interface default `null`); the container falls back to `value_for`.
+        None
     }
 }

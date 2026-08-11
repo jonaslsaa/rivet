@@ -17,6 +17,9 @@ rivet-protocol = { workspace = true, features = ["packets"] }
 # consumes (`generated::synchronized`, `generated::tags`, `generated::biomes`,
 # `generated::blocks`, `generated::registries` — OWNERSHIP.md §Registries).
 rivet-registry = { workspace = true, features = ["blocks"] }
+# `Dynamic`/`NbtOps` decode the region-backed level.dat `spawn` through the
+# finalized `RespawnData` codec (#515).
+rivet-serialization = { workspace = true }
 rivet-text = { workspace = true }
 rivet-util = { workspace = true }
 rivet-world = { workspace = true }
@@ -28,11 +31,17 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # Building compressed wire frames in the offline-login integration tests
 # (zlib-encoding the client's `login_acknowledged`).
 flate2 = { workspace = true }
 # Parsing the committed `registry_data_capture.json` byte-identity fixture.
 serde_json = { workspace = true }
+# Test-only tracing-subscriber machinery for asserting the RIVET_* trace
+# records (issue #53): the recorder + installers that used to ship in the lib's
+# `movement_trace::test_support` now live here so no production binary carries
+# them.
+rivet-test-support = { workspace = true }
 
 [lints]
 workspace = true

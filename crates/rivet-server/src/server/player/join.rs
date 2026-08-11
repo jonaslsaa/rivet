@@ -1,5 +1,5 @@
 //! `PlayerList.placeNewPlayer` / `PlayerList.sendLevelInfo` — the deterministic
-//! play join burst (Slice A of #101), in Paper's send order.
+//! play join burst (issues #101 Slice A + B), in Paper's send order.
 //!
 //! Java source: `working/Paper/paper-server/src/minecraft/java/net/minecraft/
 //! server/players/PlayerList.java` (`placeNewPlayer` lines 158–338,
@@ -14,32 +14,45 @@
 //! id-18/20 from the two `initInventoryMenu` calls): the duplicates come from
 //! the one join re-sending them, not from proxy merging or a second connection.
 //! `set_time` (113) is sampled once only because `canonicalize` keeps racy ids'
-//! first occurrence. The burst below is the FIRST occurrence, emitted before the
-//! `player_info_update` broadcast; Slice A ports only this first-occurrence
-//! foundation. The second block re-sends the same four members
-//! (`initialize_border` → `set_time` → `set_default_spawn_position` →
-//! `game_event`) after `player_info_update` (and after the addEntity entity
-//! pairing); it is deferred to Slice B. It is the final level-snapshot block in
-//! `placeNewPlayer`: the later `initInventoryMenu` re-sends
-//! `container_set_content`/`container_set_slot` (18/20), so nothing in the
-//! snapshot itself follows it.
+//! first occurrence. The burst below emits BOTH `sendLevelInfo` occurrences
+//! (the first before `player_info_update`, the second after the player_info
+//! broadcast), matching Paper's source order.
 //!
-//! This burst is `PLAY_BURST_ORDER` restricted to the Slice A members — the
-//! ten members Paper sends in between are deferred, keeping the relative order
-//! of the members that are sent:
+//! This burst is `PLAY_BURST_ORDER` restricted to the members that are ported —
+//! the deferred members are dropped, keeping the relative order of the members
+//! that are sent. The complete member set `placeNewPlayer` sends is
+//! [`PLAY_BURST_ORDER`](crate::server::player::join) (all ids listed in
+//! `tools/rivet-capture/src/ordering.rs`); this function emits:
 //!
-//! - `update_recipes` (133) — RivetTodo(#87), body not ported.
-//! - `entity_event` (34) — `sendPlayerPermissionLevel`'s op-level event (body
-//!   ported per #90); the server-side send is Slice B.
+//! - login (49), change_difficulty (10), player_abilities (64),
+//!   set_held_slot (105);
+//! - `update_recipes` (133) — RivetTodo(#87), body not ported;
+//! - entity_event (34) — `sendPlayerPermissionLevel`'s op-level event (body
+//!   ported per #90);
 //! - `recipe_book_settings` (76) / `recipe_book_add` (74) — inventory/recipe
-//!   book (epic #22).
-//! - `server_data` (86) — `ServerStatus`, follows the teleport in
-//!   `placeNewPlayer`.
+//!   book (epic #22);
+//! - player_position (72);
+//! - `server_data` (86) — `ServerStatus`, follows the teleport;
+//! - first `sendLevelInfo` (43/113/97/38);
 //! - `ticking_state` (127) / `ticking_step` (128) — the tick-rate manager's
-//!   join burst.
+//!   join burst;
 //! - `container_set_content` (18) / `container_set_slot` (20) — inventory
-//!   init (epic #22).
-//! - `system_chat` (121) — the join message (epic #12).
+//!   init (epic #22);
+//! - `system_chat` (121) — the join message (epic #12);
+//! - player_info_update (70);
+//! - second `sendLevelInfo` (43/113/97/38) — after the player_info broadcast;
+//! - the Moonrise chunk-loader send-set (issue #100): cache radius (95),
+//!   simulation distance (111), cache center (94), then the deterministic 117
+//!   `level_chunk_with_light` (45) bodies. Moonrise's `addPlayer` runs at
+//!   `level.addNewPlayer(player)` (before the second `sendLevelInfo` in Paper);
+//!   this slice emits the cache + chunk set immediately before the second
+//!   `sendLevelInfo` so the level-snapshot block stays contiguous and the
+//!   chunk stream is the last burst member (the chunk order is the deterministic
+//!   canonical raster `rivet-capture` byte-matches, not Paper's timing-dependent
+//!   wire order). `addNewPlayer`'s `set_entity_data` (99) entity pairing is
+//!   deferred.
+//!   RivetTodo(#222): `addNewPlayer`'s `set_entity_data` (99) entity-pairing
+//!   packet — the syncher serializers / entity-data integration are not ported.
 //!
 //! Every body is encoded with the merged #246 protocol bodies (the join packet
 //! bodies in `rivet-protocol`) and framed + queued by
@@ -49,11 +62,22 @@
 //! below — three vanilla levels, `max_players 20`, the world-border defaults,
 //! the two clocks, the `RivetProbe` profile — are pinned by that fixture's
 //! `join_clientbound_*.hex` golden bodies. The `capture.jsonl` is the
-//! NORMALIZED capture (`normalize::canonicalize`): it supplies Slice A's
-//! BODIES, but canonicalize groups by `(state, direction, id)` and so erases
-//! ORDER — the burst order comes from `PLAY_BURST_ORDER` / the Paper source,
-//! not from the normalized capture's (or the raw capture's) positional order.
+//! NORMALIZED capture (`normalize::canonicalize`): it supplies the BODIES, but
+//! canonicalize groups by `(state, direction, id)` and so erases ORDER — the
+//! burst order comes from `PLAY_BURST_ORDER` / the Paper source, not from the
+//! normalized capture's (or the raw capture's) positional order. It also
+//! normalizes racy ids to fixed values (the teleport id, entity_event's
+//! `entityId -> 1`, `eventId -> 0`); the deterministic real values this slice
+//! emits (event id 24, and the server-allocated entity id — 1 for the M1
+//! single player, GitHub #222) are the Paper source facts, asserted inline in
+//! `join_burst.rs`. The teleport id is *not* a fixed 0: `place_new_player`
+//! runs the live `awaitingTeleport` machine (issue #158) and embeds the
+//! session's real id (1 for the spawn teleport), which `join_burst.rs` pins by
+//! rewriting the fixture's leading id varint.
 
+use rivet_protocol::game::clientbound_entity_event_packet::{
+    ClientboundEntityEventPacket, entity_event_codec,
+};
 use rivet_protocol::generated::packets::play::clientbound::PacketType;
 use rivet_protocol::protocol::game::clientbound_change_difficulty::ClientboundChangeDifficultyPacket;
 use rivet_protocol::protocol::game::clientbound_game_event::{
@@ -80,6 +104,7 @@ use rivet_registry::holder::Holder;
 use rivet_registry::registries;
 use rivet_registry::registries::{DimensionType, Level};
 
+use crate::server::level::player_chunk_loader::PlayerChunkLoader;
 use crate::server::level::server_level::ServerLevel;
 use crate::server::network::connection_id::ConnectionId;
 use crate::server::tick::registry::ConnectionRegistry;
@@ -93,6 +118,7 @@ const LOGIN_ID: u32 = PacketType::Login.id();
 const CHANGE_DIFFICULTY_ID: u32 = PacketType::ChangeDifficulty.id();
 const PLAYER_ABILITIES_ID: u32 = PacketType::PlayerAbilities.id();
 const SET_HELD_SLOT_ID: u32 = PacketType::SetHeldSlot.id();
+const ENTITY_EVENT_ID: u32 = PacketType::EntityEvent.id();
 const PLAYER_POSITION_ID: u32 = PacketType::PlayerPosition.id();
 const INITIALIZE_BORDER_ID: u32 = PacketType::InitializeBorder.id();
 const SET_TIME_ID: u32 = PacketType::SetTime.id();
@@ -115,6 +141,12 @@ const WORLD_BORDER_SIZE: f64 = 59_999_968.0;
 const WORLD_BORDER_ABSOLUTE_MAX_SIZE: i32 = 29_999_984;
 const WORLD_BORDER_WARNING_BLOCKS: i32 = 5;
 const WORLD_BORDER_WARNING_TIME: i32 = 300;
+
+/// `EntityEvent.PLAYER_OP_PERMISSION_LEVEL_ALL` — the op-level event
+/// `PlayerList.sendPlayerPermissionLevel` sends for a level-4 operator. The M1
+/// player is `GameType.Survival` with the default op level (4), matching the
+/// capture's id-34 `entity_event` line.
+const PERMISSION_LEVEL_ALL: i8 = 24;
 
 /// The values `PlayerList.placeNewPlayer` reads off the server and the level to
 /// build the login packet — a mix of server-derived (`max_players`, `level_keys`,
@@ -144,17 +176,35 @@ pub struct JoinConfig {
 }
 
 /// `PlayerList.placeNewPlayer(connection, player, cookie)` — the deterministic
-/// play join burst, through Paper's FIRST `sendLevelInfo` occurrence (the
-/// pre-`player_info_update` foundation; the second block is Slice B). Encode +
-/// queue each packet in Paper's send order (the Slice A subset of
-/// `PLAY_BURST_ORDER`) and return the ordered packet ids that were sent, for
-/// the ordering tests.
+/// play join burst, in Paper's send order. Encode + queue each packet in the
+/// `PLAY_BURST_ORDER` order (restricted to the ported members) and return the
+/// ordered packet ids that were sent, for the ordering tests.
 ///
 /// `update_recipes` is intentionally omitted: its body is not ported
 /// (RivetTodo(#87)); the burst keeps Paper's order otherwise. The
-/// `set_entity_data` pairing member (the addEntity tracker) is RivetTodo(#222);
-/// the `entity_event` member is `sendPlayerPermissionLevel`'s op-level event
-/// (body ported per #90; the server-side send is Slice B).
+/// `set_entity_data` pairing member (the addEntity tracker) is RivetTodo(#222).
+/// The cache + chunk send-set (Moonrise's `level.addNewPlayer` `addPlayer`,
+/// issue #100) is emitted immediately before the second `sendLevelInfo` so the
+/// level-snapshot block stays contiguous and the chunk stream is the last burst
+/// member. `requested_view_distance` is the client's `ClientInformation`
+/// view distance (Slice B): the Moonrise ladder feeds it through `client + 1`,
+/// so the send-set DOES depend on the client — the capture client's 8 caps at
+/// `load - 1` (4) → 117 chunks; a `create_default` client's 2 resolves send 3
+/// → 81 chunks. `None` (the auto-config path) resolves the world's own send
+/// distance, 4 on the M1 world.
+///
+/// `teleport_id` is the live `awaitingTeleport` id (issue #158) the caller's
+/// session began for the spawn teleport (`playerConnection.teleport` in
+/// `placeNewPlayer`). Paper embeds it in the player_position packet and awaits
+/// the matching `accept_teleportation` ack before accepting the player's
+/// position movement.
+///
+/// `loader` is the session-owned per-player `PlayerChunkLoader` (issue #521):
+/// this burst is its `add()` — the send-set commits the loader's
+/// `lastChunk`/`lastSendDistance`/`lastTickDistance` to the spawn center and
+/// distances, so the movement-driven `update` later diffs against the same view
+/// the client received.
+#[allow(clippy::too_many_arguments)]
 pub fn place_new_player(
     sender: &mut PlaySender,
     connections: &mut ConnectionRegistry,
@@ -162,8 +212,11 @@ pub fn place_new_player(
     player: &ServerPlayer,
     level: &ServerLevel,
     join: &JoinConfig,
+    requested_view_distance: Option<i32>,
+    loader: &mut PlayerChunkLoader,
+    teleport_id: i32,
 ) -> Result<Vec<u32>, PlaySendError> {
-    let mut sent = Vec::with_capacity(10);
+    let mut sent = Vec::with_capacity(3 + 117 + 10);
 
     // `playerConnection.send(new ClientboundLoginPacket(player.getId(), ...))`.
     // `createCommonSpawnInfo` resolves the level's dimension-type holder; the M1
@@ -235,11 +288,27 @@ pub fn place_new_player(
     // recipeManager.getSynchronizedStonecutterRecipes())` — the recipe-book
     // body is not ported; the burst omits it, keeping Paper's order otherwise.
 
+    // `this.sendPlayerPermissionLevel(player)` — `ClientboundEntityEventPacket`
+    // with `EntityEvent.PLAYER_OP_PERMISSION_LEVEL_ALL` (24): the op-level
+    // event. The entity id is the player's `Entity.getId()` (the server-allocated
+    // entity id), encoded as a 4-byte BE int (NOT a VarInt — the packet's wire
+    // quirk). The capture's id-34 body normalizes `entityId -> 1, eventId -> 0`,
+    // so the fixture does not pin the real event id; Paper's source sends 24,
+    // asserted inline in `join_burst.rs`.
+    let body = sender.encode_body(
+        entity_event_codec(),
+        &ClientboundEntityEventPacket::new(player.player_id(), PERMISSION_LEVEL_ALL),
+    )?;
+    sender.send_packet(connections, connection_id, ENTITY_EVENT_ID, &body)?;
+    sent.push(ENTITY_EVENT_ID);
+
     // `playerConnection.teleport(player.getX(), ...)` — the position teleport.
-    // The teleport `id 0` is the capture's canonical normalized value
-    // (normalize.rs rewrites the server's randomized per-login counter to 0);
-    // it is NOT a Paper constant. Live per-teleport counter wiring (the
-    // `awaitingTeleport` ack matching) is #158 / M3.
+    // The embedded `awaitingTeleport` id is the live session's (issue #158):
+    // Paper's `placeNewPlayer` teleport increments the per-connection counter
+    // to 1 and awaits the matching `accept_teleportation` ack (the capture's
+    // `id 0` was normalize.rs's canonical rewrite of the counter, not a Paper
+    // value). The ack matches on this id; the server records the spawn as the
+    // awaited position.
     let change = PositionMoveRotation::new(
         player.position(),
         Vec3::new(0.0, 0.0, 0.0),
@@ -248,7 +317,7 @@ pub fn place_new_player(
     );
     let body = sender.encode_body(
         ClientboundPlayerPositionPacket::stream_codec(),
-        &ClientboundPlayerPositionPacket::new(0, change, Vec::new()),
+        &ClientboundPlayerPositionPacket::new(teleport_id, change, Vec::new()),
     )?;
     sender.send_packet(connections, connection_id, PLAYER_POSITION_ID, &body)?;
     sent.push(PLAYER_POSITION_ID);
@@ -274,6 +343,32 @@ pub fn place_new_player(
     )?;
     sender.send_packet(connections, connection_id, PLAYER_INFO_UPDATE_ID, &body)?;
     sent.push(PLAYER_INFO_UPDATE_ID);
+
+    // Paper's `level.addNewPlayer(player)` → Moonrise `PlayerChunkLoaderData
+    // .add()` (issue #100): the session-owned per-player chunk loader sends its
+    // add-send-set immediately before the second `sendLevelInfo`. The three
+    // cache packets (radius → simulation distance → center) then the 117 bare
+    // `level_chunk_with_light` bodies in the deterministic X-major raster the
+    // #194 fixture byte-matches. `set_entity_data` (the addEntity tracker) is
+    // RivetTodo(#222).
+    //
+    // The loader is owned by the live session (issue #521) and already built at
+    // the player's chunk center; the burst commits its state here so the
+    // movement-driven `update` (#521) diffs against the exact send-set the
+    // client received, instead of a fresh loader whose committed center would
+    // not match.
+    let chunk_packets = loader
+        .add_and_send_chunks(level, requested_view_distance)
+        .map_err(PlaySendError::Encode)?;
+    for packet in chunk_packets {
+        sender.send_packet(connections, connection_id, packet.id, &packet.body)?;
+        sent.push(packet.id);
+    }
+
+    // `this.sendLevelInfo(player, level)` — Paper's SECOND `sendLevelInfo`
+    // occurrence, after the player_info broadcast and the addEntity tracker. It
+    // re-sends the same four level-snapshot members the first call did.
+    sent.extend(send_level_info(sender, connections, connection_id, level)?);
 
     Ok(sent)
 }

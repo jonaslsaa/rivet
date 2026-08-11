@@ -44,8 +44,13 @@ from pathlib import Path
 
 REGION_RE = re.compile(r"^r\.(-?\d+)\.(-?\d+)\.mca$")
 
-# The deterministic slice: only this region is captured for M0.
+# The deterministic slice: only this region is captured for M0/M2.
 SPAWN_REGION = (0, 0)
+
+# The superflat status-FULL capture (issue #51) spans the four regions around
+# the origin so every corpus coordinate (positive, negative, and the x/z=31
+# seams) lands in a captured region file. `--all-regions` selects these.
+FULL_REGIONS = [(0, 0), (-1, -1), (-1, 0), (0, -1)]
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -123,6 +128,13 @@ def main() -> int:
              "server.properties, which carry wall-clock timestamps). Used for the "
              "M2 normal-overworld region fixture so regeneration is git-clean.",
     )
+    ap.add_argument(
+        "--all-regions", action="store_true",
+        help="capture the four regions around the origin (r.0.0, r.-1.-1, r.-1.0, "
+             "r.0.-1) instead of just r.0.0. Used for the superflat status-FULL "
+             "capture (issue #51) so every corpus coordinate — positive, negative, "
+             "and the x/z=31 region seams — lands in a captured region file.",
+    )
     args = ap.parse_args()
 
     world: Path = args.world_dir
@@ -172,32 +184,39 @@ def main() -> int:
                     {"path": fn, "sha256": sha256_file(dst), "bytes": dst.stat().st_size}
                 )
 
-    # --- chunk NBT payloads from the spawn region of each dimension ---
+    # --- chunk NBT payloads from the region(s) of each dimension ---
+    # Chunks are named by GLOBAL coordinate (`gcx.gcz`), not region-local
+    # coordinate: a region-local (0,0) in r.-1.-1 is global (-32,-32), and the
+    # fixture consumers (`hash_manifest::build_from_payloads`) read the chunk
+    # position straight off the filename. For region 0.0 local == global, so
+    # the M0/M2 captures are unchanged.
+    regions = FULL_REGIONS if args.all_regions else [SPAWN_REGION]
     for dim_name, dim_dir in dims.items():
         region_dir = dim_dir / "region"
         if not region_dir.is_dir():
             continue
-        rx, rz = SPAWN_REGION
-        mca = region_dir / f"r.{rx}.{rz}.mca"
-        if not mca.is_file():
-            continue
-        chunks = read_region_chunks(mca)
-        rel_dir = out / "chunk" / dim_name / f"{rx}.{rz}"
-        rel_dir.mkdir(parents=True, exist_ok=True)
-        for (cx, cz), payload in sorted(chunks.items()):
-            dst = rel_dir / f"{cx}.{cz}.nbt"
-            dst.write_bytes(payload)
-            captured.append(
-                {
-                    "path": str(dst.relative_to(out)),
-                    "sha256": sha256_bytes(payload),
-                    "bytes": len(payload),
-                    "dim": dim_name,
-                    "region": f"{rx}.{rz}",
-                    "chunk": f"{cx}.{cz}",
-                }
-            )
-            chunk_count += 1
+        for rx, rz in regions:
+            mca = region_dir / f"r.{rx}.{rz}.mca"
+            if not mca.is_file():
+                continue
+            chunks = read_region_chunks(mca)
+            rel_dir = out / "chunk" / dim_name / f"{rx}.{rz}"
+            rel_dir.mkdir(parents=True, exist_ok=True)
+            for (lcx, lcz), payload in sorted(chunks.items()):
+                gcx, gcz = rx * 32 + lcx, rz * 32 + lcz
+                dst = rel_dir / f"{gcx}.{gcz}.nbt"
+                dst.write_bytes(payload)
+                captured.append(
+                    {
+                        "path": str(dst.relative_to(out)),
+                        "sha256": sha256_bytes(payload),
+                        "bytes": len(payload),
+                        "dim": dim_name,
+                        "region": f"{rx}.{rz}",
+                        "chunk": f"{gcx}.{gcz}",
+                    }
+                )
+                chunk_count += 1
 
     manifest = {
         "format": 1,

@@ -1,0 +1,4 @@
+# Rust build output — never committed
+/target
+# Compiled Java classes — regenerable from java/ sources
+/out

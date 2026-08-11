@@ -8,19 +8,26 @@ pub mod component;
 pub mod component_contents;
 pub mod component_serialization;
 pub mod contents;
+pub mod corpus;
+pub mod extra_codecs;
 pub mod font_description;
 pub mod hover_event;
 pub mod style;
 pub mod text_color;
+pub mod uri;
 
 pub use click_event::ClickEvent;
+pub use click_event::ClickEventAction;
 pub use component::Component;
 pub use component_contents::ComponentContents;
 pub use font_description::FontDescription;
 pub use hover_event::HoverEvent;
+pub use hover_event::HoverEventAction;
 pub use rivet_core::ChatFormatting;
 pub use style::Style;
 pub use text_color::TextColor;
 
+#[cfg(test)]
+mod corpus_tests;
 #[cfg(test)]
 mod tests;

@@ -7,9 +7,10 @@
 //! `index / valuesPerLong` / `index % valuesPerLong` used here — the resulting
 //! packed layout and wire bytes are identical (verified against the Java
 //! constructor packing below, which is the ground truth for the layout).
-//! RivetTodo(#216): Paper's `moonrise$countEntries` (block counting) is
-//! deferred to the block-counting unit (M2 chunk storage, epic #15).
+//! The Paper `moonrise$countEntries` block-counting fast path is ported as
+//! [`BitStorage::count_entries`] (issue #216).
 
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::bit_storage::BitStorage;
@@ -236,6 +237,81 @@ impl BitStorage for SimpleBitStorage {
             values_per_long: self.values_per_long,
         })
     }
+
+    /// `moonrise$countEntries()` — Paper's block-counting fast path. Walks the
+    /// packed cells and extracts each palette id in index order.
+    ///
+    /// Java's two paths are mirrored for their allocation characteristics: for
+    /// `bits <= 6` it indexes a `ShortArrayList[1 << bits]` array (bounded at
+    /// 64 slots); for wider storages the same `ShortArrayList[1 << bits]`
+    /// array would be too large, so it falls back to a `computeIfAbsent` map.
+    /// The Rust port uses `Vec<Vec<i16>>` slots in the first case and a
+    /// `HashMap` in the second. Each palette id's index list is appended in
+    /// ascending storage order (`index` only moves forward), matching Java's
+    /// `(short)index` truncation exactly. The id → list pairs are returned in
+    /// first-appearance order — a deterministic canonical order; Java's map
+    /// iteration is hash-bucket order, so the outer order is not portable. It
+    /// is observable only as the element order `LevelChunkSection`'s recalc
+    /// appends to its `tickingBlocks` ShortList, which no current ported
+    /// consumer reads (the count fields and the set of ticking positions are
+    /// order-independent, and the wire never carries the list).
+    fn count_entries(&self) -> Vec<(i32, Vec<i16>)> {
+        let values_per_long = self.values_per_long;
+        let bits = self.bits;
+        let mask = self.mask;
+        let size = self.size;
+
+        let mut order: Vec<i32> = Vec::new();
+        let mut index = 0usize;
+
+        // The two Java paths differ only in how a palette id's list is looked
+        // up; both extract `min(valuesPerLong, size - index)` entries per cell
+        // (Java's `li < valuesPerLong && index < size` do/while) and append to
+        // the id's list in ascending index order.
+        if bits <= 6 {
+            let mut slots: Vec<Vec<i16>> = vec![Vec::new(); 1usize << bits];
+            for mut value in self.data.iter().copied() {
+                for _ in 0..values_per_long {
+                    if index >= size {
+                        break;
+                    }
+                    let palette_idx = (value & mask) as i32;
+                    value >>= bits as u32;
+                    let slot = &mut slots[palette_idx as usize];
+                    if slot.is_empty() {
+                        order.push(palette_idx);
+                    }
+                    slot.push(index as i16);
+                    index += 1;
+                }
+            }
+            order
+                .into_iter()
+                .map(|id| (id, std::mem::take(&mut slots[id as usize])))
+                .collect()
+        } else {
+            let mut slots: HashMap<i32, Vec<i16>> = HashMap::new();
+            for mut value in self.data.iter().copied() {
+                for _ in 0..values_per_long {
+                    if index >= size {
+                        break;
+                    }
+                    let palette_idx = (value & mask) as i32;
+                    value >>= bits as u32;
+                    let slot = slots.entry(palette_idx).or_insert_with(|| {
+                        order.push(palette_idx);
+                        Vec::new()
+                    });
+                    slot.push(index as i16);
+                    index += 1;
+                }
+            }
+            order
+                .into_iter()
+                .map(|id| (id, slots.remove(&id).unwrap()))
+                .collect()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -424,5 +500,158 @@ mod tests {
         let raw = expected_raw(4, 16, &values);
         let s = SimpleBitStorage::from_values(4, 16, &values);
         assert_eq!(s.get_raw(), raw.as_slice());
+    }
+
+    // -----------------------------------------------------------------------
+    // moonrise$countEntries (#216)
+    // -----------------------------------------------------------------------
+
+    /// A `get(index)`-based reference for `count_entries`, mirroring Java's
+    /// default `BitStorage.moonrise$countEntries` (`computeIfAbsent` over
+    /// `get`), with the port's deterministic first-appearance id order and
+    /// ascending index lists.
+    fn count_entries_reference(size: usize, s: &SimpleBitStorage) -> Vec<(i32, Vec<i16>)> {
+        let mut order: Vec<i32> = Vec::new();
+        let mut lists: std::collections::HashMap<i32, Vec<i16>> = std::collections::HashMap::new();
+        for index in 0..size {
+            let id = s.get(index);
+            lists
+                .entry(id)
+                .or_insert_with(|| {
+                    order.push(id);
+                    Vec::new()
+                })
+                .push(index as i16);
+        }
+        order
+            .into_iter()
+            .map(|id| (id, lists.remove(&id).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn count_entries_single_value_lists_all_indices() {
+        // Every entry is palette id 0: one group holding 0..size.
+        let s = SimpleBitStorage::new(4, 16);
+        assert_eq!(
+            s.count_entries(),
+            vec![(0, (0..16).map(|i| i as i16).collect())]
+        );
+    }
+
+    #[test]
+    fn count_entries_groups_in_first_appearance_order() {
+        // bits=4, size=40: cell 0 holds indices 0..16, cell 1 holds 16..32,
+        // remainder cell holds 32..40. Ids reappear across cells: 3 at
+        // 0..5 and 10..20, 1 at 5..10 and 30..40, 5 at 20..30.
+        let mut s = SimpleBitStorage::new(4, 40);
+        for i in 0..5 {
+            s.set(i, 3);
+        }
+        for i in 5..10 {
+            s.set(i, 1);
+        }
+        for i in 10..20 {
+            s.set(i, 3);
+        }
+        for i in 20..30 {
+            s.set(i, 5);
+        }
+        for i in 30..40 {
+            s.set(i, 1);
+        }
+        // Ids are returned in first-appearance order (3, 1, 5), each with its
+        // ascending index list.
+        assert_eq!(
+            s.count_entries(),
+            vec![
+                (3, (0..5).chain(10..20).map(|i| i as i16).collect()),
+                (1, (5..10).chain(30..40).map(|i| i as i16).collect()),
+                (5, (20..30).map(|i| i as i16).collect()),
+            ]
+        );
+    }
+
+    #[test]
+    fn count_entries_bits_gt_6_uses_map_path() {
+        // bits=7 crosses Java's `bits <= 6` array fast-path boundary into the
+        // `computeIfAbsent` map fallback; the observable grouping is identical.
+        // valuesPerLong = 64/7 = 9, so cells hold 0..9, 9..18, remainder 18..20.
+        let mut s = SimpleBitStorage::new(7, 20);
+        for i in 0..3 {
+            s.set(i, 5);
+        }
+        for i in 3..9 {
+            s.set(i, 2);
+        }
+        for i in 9..12 {
+            s.set(i, 5);
+        }
+        for i in 12..20 {
+            s.set(i, 7);
+        }
+        assert_eq!(
+            s.count_entries(),
+            vec![
+                (5, (0..3).chain(9..12).map(|i| i as i16).collect()),
+                (2, (3..9).map(|i| i as i16).collect()),
+                (7, (12..20).map(|i| i as i16).collect()),
+            ]
+        );
+    }
+
+    #[test]
+    fn count_entries_matches_get_based_reference() {
+        // Property test across both paths and several cell/remainder shapes:
+        // count_entries must equal a `get(index)`-based grouping.
+        for (bits, size) in [
+            (1usize, 4096usize),
+            (4, 40),
+            (6, 4096),
+            (6, 33),
+            (7, 20),
+            (15, 4096),
+        ] {
+            let mut s = SimpleBitStorage::new(bits as i32, size);
+            let max = (1u64 << bits) - 1;
+            for i in 0..size {
+                s.set(i, ((i as u64 * 17 + 5) & max) as i32);
+            }
+            assert_eq!(
+                s.count_entries(),
+                count_entries_reference(size, &s),
+                "bits={bits} size={size}"
+            );
+        }
+    }
+
+    #[test]
+    fn count_entries_covers_every_index_exactly_once() {
+        // bits=1, size=4096 — the full index range. `(short)index` never wraps
+        // here (max 4095 < i16::MAX), so each list element is exactly the
+        // index. Each group's list is ascending; the groups together cover
+        // 0..4096 exactly once.
+        let mut s = SimpleBitStorage::new(1, 4096);
+        for i in 0..4096 {
+            s.set(i, (i % 2) as i32);
+        }
+        let groups = s.count_entries();
+        assert_eq!(groups.len(), 2); // ids 0 and 1
+        let mut all: Vec<i16> = Vec::new();
+        for (_id, indices) in &groups {
+            assert!(indices.windows(2).all(|w| w[0] < w[1]), "ascending");
+            all.extend(indices.iter().copied());
+        }
+        let mut sorted = all.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..4096).map(|i| i as i16).collect::<Vec<_>>());
+        // First-appearance order is by the entry at index 0.
+        assert_eq!(groups[0].0, 0);
+    }
+
+    #[test]
+    fn count_entries_empty_storage() {
+        let s = SimpleBitStorage::new(4, 0);
+        assert!(s.count_entries().is_empty());
     }
 }

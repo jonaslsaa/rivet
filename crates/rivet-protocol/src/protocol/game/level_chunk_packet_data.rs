@@ -42,13 +42,24 @@ pub const TWO_MEGABYTES: i32 = 2097152;
 /// (both `& 15`), `y` the absolute block Y, `type` the registry id, `tag` the
 /// update NBT (null -> EndTag, not length-prefixed).
 ///
-/// `PartialEq` only (not `Eq`): the NBT `CompoundTag` value type has no `Eq`.
-#[derive(Clone, Debug, PartialEq)]
+/// Equality is provided for packet comparisons and treats the registry value
+/// like Java does: the `Arc` allocations must be identical. `PartialEq` only
+/// (not `Eq`), because the NBT `CompoundTag` value type has no `Eq`.
+#[derive(Clone, Debug)]
 pub struct BlockEntityInfo {
     packed_xz: i8,
     y: i16,
     entity_type: Arc<BlockEntityType>,
     tag: Option<CompoundTag>,
+}
+
+impl PartialEq for BlockEntityInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.packed_xz == other.packed_xz
+            && self.y == other.y
+            && Arc::ptr_eq(&self.entity_type, &other.entity_type)
+            && self.tag == other.tag
+    }
 }
 
 impl BlockEntityInfo {
@@ -290,36 +301,18 @@ impl LevelChunkPacketData {
 mod tests {
     use super::*;
     use bytes::BytesMut;
-    use rivet_registry::registry::RegistryKey;
-    use rivet_registry::{
-        Identifier, RegistrationInfo, RegistryAccess, RegistryBuilder, ResourceKey,
-    };
+    use rivet_registry::RegistryAccess;
 
     fn registry_buf(bytes: Vec<u8>) -> RegistryFriendlyByteBuf {
         RegistryFriendlyByteBuf::new(BytesMut::from(bytes.as_slice()), RegistryAccess::empty())
     }
 
-    /// A `BLOCK_ENTITY_TYPE` registry with two placeholder types, `furnace` (id
-    /// 0) and `chest` (id 1), plus the stored allocations for the round trips.
+    /// The generated Minecraft 26.2 `BLOCK_ENTITY_TYPE` registry, plus two
+    /// representative stored allocations for packet round trips.
     fn block_entity_registry() -> (RegistryAccess, Arc<BlockEntityType>, Arc<BlockEntityType>) {
-        let key: RegistryKey<BlockEntityType> = ResourceKey::create_registry_key(
-            Identifier::with_default_namespace("block_entity_type"),
-        );
-        let mut builder = RegistryBuilder::new(&key);
-        builder.register(
-            &ResourceKey::create(&key, Identifier::with_default_namespace("furnace")),
-            Arc::new(BlockEntityType),
-            RegistrationInfo::BUILT_IN,
-        );
-        builder.register(
-            &ResourceKey::create(&key, Identifier::with_default_namespace("chest")),
-            Arc::new(BlockEntityType),
-            RegistrationInfo::BUILT_IN,
-        );
-        let registry = builder.freeze();
-        let access = RegistryAccess::from_single_registry(key.clone(), registry);
-        let furnace = access.lookup(&key).unwrap().by_id_arc(0).unwrap().clone();
-        let chest = access.lookup(&key).unwrap().by_id_arc(1).unwrap().clone();
+        let access = BlockEntityType::built_in_registry_access();
+        let furnace = BlockEntityType::from_name("minecraft:furnace").unwrap();
+        let chest = BlockEntityType::from_name("minecraft:chest").unwrap();
         (access, furnace, chest)
     }
 
@@ -515,8 +508,14 @@ mod tests {
             .unwrap();
         assert_eq!(input.readable_bytes(), 0);
         assert_eq!(decoded.block_entities().len(), 2);
-        assert_eq!(decoded.block_entities()[0].entity_type(), &furnace);
-        assert_eq!(decoded.block_entities()[1].entity_type(), &chest);
+        assert!(Arc::ptr_eq(
+            decoded.block_entities()[0].entity_type(),
+            &furnace
+        ));
+        assert!(Arc::ptr_eq(
+            decoded.block_entities()[1].entity_type(),
+            &chest
+        ));
         assert!(decoded.block_entities()[0].tag().is_none());
         assert_eq!(
             decoded.block_entities()[1]

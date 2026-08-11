@@ -8,6 +8,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
+use rivet_protocol::protocol::common::client_information::ClientInformation;
+use rivet_registry::core::GameProfile;
+
 use super::channels::{InboundDrained, LifecycleEvent, OutboundEvent, ServerboundFrame};
 use super::shutdown::Shutdown;
 use crate::server::network::connection_id::ConnectionId;
@@ -79,6 +82,41 @@ impl NetworkEndpoint {
         let _ = self
             .lifecycle_tx
             .try_send(LifecycleEvent::Disconnect { id, reason });
+    }
+
+    /// Report the configuration→play handoff (issue #101 Slice B): a connection
+    /// carrying an authenticated profile + `ClientInformation` entered the play
+    /// state. Unlike [`Self::connection_closed`] this is NOT best-effort — a
+    /// dropped EnterPlay would leave the connection forwarding play frames to a
+    /// tick that never learns of the handoff, so the session would never spawn.
+    /// A full lifecycle channel is therefore overload backpressure, awaited like
+    /// [`Self::register_connection`]; only a closed channel — the tick thread
+    /// exiting while we wait — is a server stop.
+    ///
+    /// The tick drains the lifecycle channel (which carries EnterPlay) before it
+    /// drains any inbound channel, and the per-connection task awaits this
+    /// before it forwards the first play frame, so the tick applies the handoff
+    /// before it delivers any of the connection's play frames — the ordering
+    /// that lets the join burst and the first coalesced play frames share a tick.
+    pub async fn enter_play(
+        &self,
+        id: ConnectionId,
+        profile: GameProfile,
+        client_information: ClientInformation,
+    ) -> Result<(), ()> {
+        let event = LifecycleEvent::EnterPlay {
+            id,
+            profile,
+            client_information,
+        };
+        match self.lifecycle_tx.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Closed(_)) => Err(()),
+            Err(TrySendError::Full(event)) => match self.lifecycle_tx.send(event).await {
+                Ok(()) => Ok(()),
+                Err(_) => Err(()),
+            },
+        }
     }
 
     pub fn shutdown(&self) {

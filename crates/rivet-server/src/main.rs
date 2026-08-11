@@ -4,7 +4,12 @@
 //!
 //! The full boot sequence (world/level load, registry/data load, tick-phase
 //! systems) is M1 sub-issues #100/#101; this binary brings up the TCP listener,
-//! pre-play connection state machines, and the empty tick spine.
+//! the login/configuration/play state machines, the tick spine, and — with
+//! `enable_join` set — the live play path: an offline client that completes
+//! login + configuration joins the superflat world and receives the join burst
+//! (issue #101 Slice B) sized by its `ClientInformation` view distance — the
+//! capture client's 8 caps at `load - 1` and resolves the 117-chunk send-set, a
+//! `create_default` client's 2 the 81-chunk set.
 //!
 //! ## Machine-readable protocol (stdout)
 //!
@@ -43,7 +48,13 @@ fn main() -> ExitCode {
         .init();
 
     let config = server_config_from_args();
-    let server = Server::new(config);
+    let server = match Server::try_new(config) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("RIVET_WORLD_UNVERIFIED: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -87,8 +98,24 @@ async fn run_server(server: Server) -> ExitCode {
 
 /// Parse the bind config. `--host` and `--port` override the defaults so the
 /// binary is runnable without a `server.properties` parser (a later M1 slice).
+///
+/// The production binary always enables the live play path: `Server::new`
+/// wires the tick-owned session manager that consumes the configuration→play
+/// handoff and fires the join burst (issue #101 Slice B). `ServerConfig::default()`
+/// leaves `enable_join` off so the offline-login tests exercise the handoff
+/// seam without the burst; this entry point turns it on.
 fn server_config_from_args() -> ServerConfig {
-    config_from_args(std::env::args().skip(1))
+    production_config_from_args(std::env::args().skip(1))
+}
+
+/// The M1 production config: the parsed bind config with `enable_join` forced
+/// on (see [`server_config_from_args`]). Pure so tests can assert the binary's
+/// join behavior without touching real process args.
+fn production_config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
+    ServerConfig {
+        enable_join: true,
+        ..config_from_args(args)
+    }
 }
 
 fn config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
@@ -109,7 +136,14 @@ fn config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
                 let raw = args.get(i).expect("--port requires a value (e.g. 25565)");
                 config.port = raw.parse().expect("invalid --port (expected 0-65535)");
             }
-            other => panic!("unknown argument {other:?} (expected --host/--port)"),
+            "--level" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .expect("--level requires a disposable world directory path");
+                config.level_path = Some(raw.into());
+            }
+            other => panic!("unknown argument {other:?} (expected --host/--port/--level)"),
         }
         i += 1;
     }
@@ -126,6 +160,7 @@ mod tests {
         let config = config_from_args(Vec::<String>::new().into_iter());
         assert_eq!(config.bind_host, IpAddr::from([0, 0, 0, 0]));
         assert_eq!(config.port, 25565);
+        assert!(config.level_path.is_none());
     }
 
     #[test]
@@ -137,5 +172,55 @@ mod tests {
         );
         assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 25599);
+    }
+
+    #[test]
+    fn parses_disposable_level_path() {
+        let config = config_from_args(
+            ["--level", "/tmp/rivet-disposable-world"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        assert_eq!(
+            config.level_path.as_deref(),
+            Some(std::path::Path::new("/tmp/rivet-disposable-world"))
+        );
+    }
+
+    #[test]
+    fn parses_level_with_bind_overrides() {
+        let config = config_from_args(
+            [
+                "--host",
+                "127.0.0.1",
+                "--level",
+                "/tmp/rivet-disposable-world",
+                "--port",
+                "25599",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
+        assert_eq!(config.port, 25599);
+        assert_eq!(
+            config.level_path.as_deref(),
+            Some(std::path::Path::new("/tmp/rivet-disposable-world"))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "--level requires a disposable world directory path")]
+    fn level_requires_a_path() {
+        let _ = config_from_args(["--level"].into_iter().map(str::to_owned));
+    }
+
+    #[test]
+    fn production_config_enables_live_join() {
+        let config = production_config_from_args(Vec::<String>::new().into_iter());
+        assert!(
+            config.enable_join,
+            "the M1 binary must run the live play path (issue #101 Slice B)"
+        );
     }
 }

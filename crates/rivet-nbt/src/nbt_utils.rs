@@ -15,9 +15,8 @@
 //! `NbtFormatException` carrying the full message (see `tag_parser`). Valid
 //! input behaves identically.
 //!
-//! Stubbed (world/registry parts, see markers): `readBlockState`,
-//! `writeBlockState`, `writeFluidState`, and the `ValueOutput` overloads of
-//! `addDataVersion` / `addCurrentDataVersion`.
+//! Stubbed (world/registry parts, see markers): `writeFluidState`, and the
+//! `ValueOutput` overloads of `addDataVersion` / `addCurrentDataVersion`.
 
 use crate::compound_tag::CompoundTag;
 use crate::list_tag::ListTag;
@@ -25,6 +24,11 @@ use crate::nbt_ops::NbtOps;
 use crate::string_tag::StringTag;
 use crate::tag::Tag;
 use crate::text_component_tag_visitor::TextComponentTagVisitor;
+use rivet_registry::block_state::BlockState;
+use rivet_registry::block_state_property::Property;
+use rivet_registry::generated::blocks::BlockId;
+use rivet_registry::identifier::Identifier;
+use rivet_registry::state_definition::StateDefinition;
 use rivet_serialization::Dynamic;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -46,14 +50,11 @@ const INDENT: i32 = 2;
 #[allow(dead_code)]
 const NOT_FOUND: i32 = -1;
 
-/// RivetTodo(#202): `CURRENT_DATA_VERSION` is a stopgap local constant
-/// duplicating `SharedConstants.WORLD_VERSION` (rivet-core) — 4903 in the
-/// pinned MC 26.2 build (`DetectedVersion`: `new DataVersion(4903, "main")`,
-/// `SharedConstants.WORLD_VERSION = 4903`); it is rewired when that lands.
-/// It silently drifts if the pinned MC version changes: both this constant
-/// and the `add_current_data_version_uses_world_version` test hardcode 4903,
-/// and the oracle harness is not wired to this unit yet.
-pub const CURRENT_DATA_VERSION: i32 = 4903;
+/// `NbtUtils.CURRENT_DATA_VERSION` — `SharedConstants.WORLD_VERSION` (issue
+/// #202). Rewired to `rivet_core::shared_constants::WORLD_VERSION`; the
+/// literal 4903 pin lives in rivet-core `shared_constants.rs`, so a bump of
+/// the pinned MC version updates both together.
+pub const CURRENT_DATA_VERSION: i32 = rivet_core::shared_constants::WORLD_VERSION;
 
 /// `YXZ_LISTTAG_INT_COMPARATOR` — compare by y(1), then x(0), then z(2), each
 /// via `getIntOr(index, 0)`.
@@ -220,17 +221,103 @@ pub fn compare_nbt(
     }
 }
 
-// RivetTodo(#202): `NbtUtils.readBlockState(HolderGetter<Block>,
-// CompoundTag) -> BlockState` and its private `setValueHelper` depend on
-// `net.minecraft.world.level.block.state.BlockState`/`StateDefinition`/
-// `Property` and `net.minecraft.core.HolderGetter` (rivet-world /
-// rivet-registry), not yet ported.
+// `NbtUtils.readBlockState(HolderGetter<Block>, CompoundTag) -> BlockState`
+// (issue #228). The `HolderGetter<Block>` parameter resolves the "Name" key
+// through the holder lookup; this slice resolves through the generated id
+// table (`BlockId::from_name`, OWNERSHIP: arenas + ids), which is the
+// `BuiltInRegistries.BLOCK` lookup for vanilla names.
+pub fn read_block_state(tag: &CompoundTag) -> BlockState {
+    // `tag.read("Name", BLOCK_NAME_CODEC)` — the ResourceKey<Block> codec
+    // parses the string as an Identifier (defaulting the `minecraft`
+    // namespace) and `blocks.get` looks it up. A missing/invalid name resolves
+    // to empty, and Java falls back to `Blocks.AIR.defaultBlockState()`.
+    let block = tag
+        .get_string("Name")
+        .and_then(|name| Identifier::by_separator_result(name, ':').ok())
+        .and_then(|id| BlockId::from_name(&id.to_string()));
+    let Some(block) = block else {
+        return BlockState::of(
+            BlockId::from_name("minecraft:air").expect("air is in the generated block table"),
+        );
+    };
 
-// RivetTodo(#202): `NbtUtils.writeBlockState(BlockState) -> CompoundTag`
-// and `writeFluidState(FluidState) -> CompoundTag` (with the private
-// `writeStateProperties`) depend on `BlockState`/`FluidState` and
-// `BuiltInRegistries.BLOCK`/`FLUID` (rivet-world / rivet-registry), not yet
-// ported.
+    let mut result = BlockState::of(block);
+    if let Some(properties) = tag.get_compound("Properties") {
+        let definition = StateDefinition::for_block(block);
+        for key in properties.key_set() {
+            if let Some(property) = definition.get_property(key) {
+                result = set_value_helper(result, property, key, properties, tag);
+            }
+        }
+    }
+    result
+}
+
+/// `NbtUtils.setValueHelper` — apply one property's serialized value, or
+/// (Java) log a warn and leave the state unchanged when the value string is
+/// not one of the property's allowed values.
+fn set_value_helper(
+    result: BlockState,
+    property: Property,
+    key: &str,
+    properties: &CompoundTag,
+    _tag: &CompoundTag,
+) -> BlockState {
+    let Some(value) = properties
+        .get_string(key)
+        .and_then(|v| property.get_value(v))
+    else {
+        // Java: `LOGGER.warn("Unable to read property: {} with value: {} for
+        // blockstate: {}", key, properties.get(key), tag)`. The logger is not
+        // ported yet (see text_component_tag_visitor.rs), so the warn is
+        // dropped and the state is returned unchanged.
+        return result;
+    };
+    let index = property
+        .value_index(value)
+        .expect("get_value only yields allowed values");
+    // The property comes from the block's own `StateDefinition` and the value
+    // is validated above, so `setValue`'s `IllegalArgumentException` is
+    // unreachable — mirror it with an expect.
+    result
+        .set_property(property.id(), index)
+        .expect("property from StateDefinition is settable")
+}
+
+/// `NbtUtils.writeStateProperties(StateHolder, CompoundTag)` — write the
+/// `Properties` compound (name-sorted, matching `getValues()`), skipping the
+/// singleton case.
+fn write_state_properties(state: BlockState, tag: &mut CompoundTag) {
+    let definition = StateDefinition::for_block(state.block());
+    if definition.is_singleton_state() {
+        return;
+    }
+    let mut properties = CompoundTag::new();
+    for property in definition.properties() {
+        // `StateHolder.getValue(property)` — the value index is the position
+        // into the property's name-ordered value slice, so `values()[index]`
+        // is the serialized value name (`value.valueName()`).
+        if let Some(index) = state.get_property(property.id()) {
+            properties.put_string(property.name(), property.values()[index as usize]);
+        }
+    }
+    tag.put("Properties".to_string(), Tag::Compound(properties));
+}
+
+/// `NbtUtils.writeBlockState(BlockState) -> CompoundTag` — the `Name` key is
+/// the block's registry key (`BuiltInRegistries.BLOCK.getKey(...).toString()`),
+/// then the optional `Properties` compound.
+pub fn write_block_state(state: BlockState) -> CompoundTag {
+    let mut tag = CompoundTag::new();
+    tag.put_string("Name", state.block().name());
+    write_state_properties(state, &mut tag);
+    tag
+}
+
+// RivetTodo(#202): `NbtUtils.writeFluidState(FluidState) -> CompoundTag`
+// (with `writeStateProperties`) depends on `net.minecraft.world.level.material
+// .FluidState` + `BuiltInRegistries.FLUID` (rivet-world / rivet-registry),
+// not yet ported — the block-state twin above is the issue #228 slice.
 
 /// `NbtUtils.prettyPrint(Tag, boolean)` — pretty-printed NBT, 2-space indent.
 pub fn pretty_print(tag: &Tag, with_binary_blobs: bool) -> String {
@@ -769,6 +856,7 @@ mod tests {
     use crate::int_tag::IntTag;
     use crate::long_array_tag::LongArrayTag;
     use crate::long_tag::LongTag;
+    use rivet_registry::generated::block_properties::BlockPropertyId;
 
     fn int_tag(v: i32) -> Tag {
         Tag::Int(IntTag::value_of(v))
@@ -1041,11 +1129,10 @@ mod tests {
     }
 
     #[test]
-    fn add_current_data_version_uses_world_version() {
+    fn add_current_data_version_writes_shared_version() {
         let mut tag = CompoundTag::new();
         add_current_data_version(&mut tag);
         assert_eq!(tag.get_int_or("DataVersion", -1), CURRENT_DATA_VERSION);
-        assert_eq!(CURRENT_DATA_VERSION, 4903);
     }
 
     #[test]
@@ -1126,6 +1213,155 @@ mod tests {
         let packed = "minecraft:stone{facing:up,lit:true}";
         let unpacked = unpack_block_state(packed);
         assert_eq!(pack_block_state(&unpacked), packed);
+    }
+
+    // ---- readBlockState / writeBlockState NBT codecs ----
+
+    #[test]
+    fn read_block_state_empty_or_unknown_name_is_air() {
+        // Missing "Name" (Java `tag.read` resolves empty) -> AIR default.
+        assert_eq!(
+            read_block_state(&CompoundTag::new()),
+            BlockState::of(BlockId::from_name("minecraft:air").unwrap())
+        );
+        // An unresolvable name -> AIR default (`blockHolder.isEmpty()`).
+        let mut tag = CompoundTag::new();
+        tag.put_string("Name", "minecraft:no_such_block");
+        assert_eq!(
+            read_block_state(&tag),
+            BlockState::of(BlockId::from_name("minecraft:air").unwrap())
+        );
+    }
+
+    #[test]
+    fn read_block_state_bare_name_defaults_to_minecraft_namespace() {
+        // `BLOCK_NAME_CODEC` parses the string as an Identifier, defaulting
+        // the `minecraft` namespace, so "stone" == "minecraft:stone".
+        let mut tag = CompoundTag::new();
+        tag.put_string("Name", "stone");
+        assert_eq!(
+            read_block_state(&tag),
+            BlockState::of(BlockId::from_name("minecraft:stone").unwrap())
+        );
+    }
+
+    #[test]
+    fn read_block_state_applies_axis_property() {
+        let mut props = CompoundTag::new();
+        props.put_string("axis", "x");
+        let mut tag = CompoundTag::new();
+        tag.put_string("Name", "minecraft:oak_log");
+        tag.put("Properties".to_string(), Tag::Compound(props));
+
+        // `axis` values are name-ordered [x, y, z], so "x" is index 0.
+        let expected = BlockState::of(BlockId::from_name("minecraft:oak_log").unwrap())
+            .set_property(BlockPropertyId::Axis, 0)
+            .unwrap();
+        assert_eq!(read_block_state(&tag), expected);
+    }
+
+    #[test]
+    fn read_block_state_ignores_unknown_property_and_bad_value() {
+        // `definition.getProperty(key)` returns null for a name not on the
+        // block -> key skipped.
+        let mut props = CompoundTag::new();
+        props.put_string("bogus", "x");
+        let mut tag = CompoundTag::new();
+        tag.put_string("Name", "minecraft:oak_log");
+        tag.put("Properties".to_string(), Tag::Compound(props));
+        assert_eq!(
+            read_block_state(&tag),
+            BlockState::of(BlockId::from_name("minecraft:oak_log").unwrap())
+        );
+
+        // `property.getValue(value)` is empty for a value outside the allowed
+        // set -> `setValueHelper` leaves the state unchanged (warn dropped).
+        let mut props = CompoundTag::new();
+        props.put_string("axis", "sideways");
+        let mut tag = CompoundTag::new();
+        tag.put_string("Name", "minecraft:oak_log");
+        tag.put("Properties".to_string(), Tag::Compound(props));
+        assert_eq!(
+            read_block_state(&tag),
+            BlockState::of(BlockId::from_name("minecraft:oak_log").unwrap())
+        );
+    }
+
+    #[test]
+    fn write_block_state_singleton_omits_properties() {
+        let tag = write_block_state(BlockState::of(
+            BlockId::from_name("minecraft:stone").unwrap(),
+        ));
+        assert_eq!(
+            tag.get_string("Name").map(String::as_str),
+            Some("minecraft:stone")
+        );
+        assert_eq!(tag.get_compound("Properties"), None);
+    }
+
+    #[test]
+    fn write_block_state_writes_name_sorted_properties() {
+        let oak_log = BlockId::from_name("minecraft:oak_log").unwrap();
+        let state = BlockState::of(oak_log)
+            .set_property(BlockPropertyId::Axis, 0)
+            .unwrap();
+        let tag = write_block_state(state);
+        assert_eq!(
+            tag.get_string("Name").map(String::as_str),
+            Some("minecraft:oak_log")
+        );
+        let props = tag.get_compound("Properties").expect("Properties");
+        // Single property, so ordering is trivially the name order.
+        assert_eq!(props.get_string("axis").map(String::as_str), Some("x"));
+    }
+
+    #[test]
+    fn write_block_state_writes_all_state_properties() {
+        // Java iterates `getValues()` (every property of the state), so an
+        // oak_leaves state with only `distance` set still writes `persistent`
+        // and `waterlogged`. Keys are name-sorted.
+        let oak_leaves = BlockId::from_name("minecraft:oak_leaves").unwrap();
+        let state = BlockState::of(oak_leaves)
+            .set_property(BlockPropertyId::Distance, 1)
+            .unwrap();
+        let tag = write_block_state(state);
+        let props = tag.get_compound("Properties").expect("Properties");
+        let keys: Vec<&str> = props.key_set().map(|k| k.as_str()).collect();
+        assert_eq!(keys, ["distance", "persistent", "waterlogged"]);
+        assert_eq!(props.get_string("distance").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn block_state_nbt_codec_round_trip() {
+        // read then write then read — the full `readBlockState` /
+        // `writeBlockState` pair on a multi-property block.
+        let mut props = CompoundTag::new();
+        props.put_string("distance", "4");
+        props.put_string("persistent", "true");
+        let mut tag = CompoundTag::new();
+        tag.put_string("Name", "minecraft:oak_leaves");
+        tag.put("Properties".to_string(), Tag::Compound(props));
+
+        let state = read_block_state(&tag);
+        let rewritten = write_block_state(state);
+        assert_eq!(
+            rewritten.get_string("Name").map(String::as_str),
+            Some("minecraft:oak_leaves")
+        );
+        let props = rewritten.get_compound("Properties").expect("Properties");
+        assert_eq!(props.get_string("distance").map(String::as_str), Some("4"));
+        assert_eq!(
+            props.get_string("persistent").map(String::as_str),
+            Some("true")
+        );
+        // waterlogged was not present on input, so it falls back to the
+        // default (oak_leaves are not waterlogged) and is then written back.
+        assert_eq!(
+            props.get_string("waterlogged").map(String::as_str),
+            Some("false")
+        );
+        // The round-trip is stable: re-reading the rewritten tag is a fixpoint.
+        assert_eq!(read_block_state(&rewritten), state);
     }
 
     // ---- structure pack/unpack ----

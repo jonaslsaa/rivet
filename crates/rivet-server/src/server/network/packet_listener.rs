@@ -59,13 +59,22 @@ pub trait PacketListener: Send {
         config: &ServerConfig,
     ) -> Result<ListenerOutcome, DisconnectReason>;
 
-    /// `TickablePacketListener.tick()` — the per-tick driver hook, reserved for
-    /// #157 (Paper's configuration keepalive + task ticking). Not yet driven by
-    /// the connection loop, so the default is a no-op; the configuration
-    /// listener's keepalive/task tick mechanics land with #157.
-    // RivetTodo(#157): drive listener ticks from `conn_loop` (Paper ticks every
-    // listener each server tick; the per-connection task has no tick source yet).
-    fn tick(&mut self) {}
+    /// `TickablePacketListener.tick()` — the per-tick driver hook
+    /// (`ServerConnectionListener.tick()` → `Connection.tick()` →
+    /// `TickablePacketListener.tick()` in Paper). `conn_loop` drives it for the
+    /// configuration listener every `config.tick_interval` (issue #283); the
+    /// other listeners have nothing per-tick, so the default is a no-op. The
+    /// clock axes come from the same `Connection::monotonic_nanos` epoch the
+    /// keepalive runs on (`now_ns`, `now_ms = now_ns / 1_000_000`). A
+    /// `Err(reason)` closes the connection.
+    fn tick(
+        &mut self,
+        _conn: &mut Connection,
+        _now_ns: i64,
+        _now_ms: i64,
+    ) -> Result<(), DisconnectReason> {
+        Ok(())
+    }
 
     /// `onDisconnect(DisconnectionDetails)` — called when the connection drops.
     /// No-ops for all listeners in this slice.
@@ -103,6 +112,16 @@ pub enum DisconnectReason {
     /// does not handle).
     #[error("multiplayer.status.request_handled")]
     RequestHandled,
+    /// The Paper anti-cheat kick for a play movement/teleport-ack frame that
+    /// fails validation (issue #158): a NaN position / non-finite rotation in
+    /// `handleMovePlayer` or a teleport ack whose id matches with no pending
+    /// position in `handleAcceptTeleportPacket`. The reason records Paper's
+    /// `multiplayer.disconnect.invalid_player_movement` translation key. The
+    /// session manager encodes the same key into a `ClientboundDisconnectPacket`
+    /// and queues it *before* this disconnect so the frame flushes ahead of the
+    /// close (issue #86) — the client decodes and reports the key.
+    #[error("multiplayer.disconnect.invalid_player_movement")]
+    InvalidPlayerMovement,
     /// Slice-local outbound-overload disconnect: the tick side dropped this
     /// connection's tick→network channel when it overflowed (the bounded-channel
     /// backpressure policy of sub-issue #93). Paper's netty outbound buffer is

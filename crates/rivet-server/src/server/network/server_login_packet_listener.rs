@@ -66,6 +66,10 @@ enum LoginState {
 #[derive(Debug, Default)]
 pub struct ServerLoginPacketListener {
     state: LoginState,
+    /// The authenticated `GameProfile` built by `handle_hello` (issue #101 Slice
+    /// B). Carried to the configuration listener so the finish→play handoff can
+    /// transfer it to the tick thread for the join burst.
+    profile: Option<GameProfile>,
 }
 
 impl ServerLoginPacketListener {
@@ -87,7 +91,7 @@ impl PacketListener for ServerLoginPacketListener {
     ) -> Result<ListenerOutcome, DisconnectReason> {
         match packet_id(&frame)? {
             HELLO_PACKET_ID => self.handle_hello(frame, conn, config),
-            LOGIN_ACKNOWLEDGED_PACKET_ID => self.handle_login_acknowledgement(frame, conn),
+            LOGIN_ACKNOWLEDGED_PACKET_ID => self.handle_login_acknowledgement(frame, conn, config),
             KEY_PACKET_ID => Err(DisconnectReason::Unsupported(
                 // `handleKey` is the RSA online-auth path (`ClientboundHello`/
                 // `ServerboundKey`). M1 runs offline (`usesAuthentication()`
@@ -138,6 +142,8 @@ impl ServerLoginPacketListener {
         // spoofed UUID/profile in this slice).
         let name = hello.name().to_string();
         let profile = GameProfile::new_without_properties(create_offline_player_uuid(&name), name);
+        // Stored so the configuration listener can carry it into the play state.
+        self.profile = Some(profile.clone());
 
         // Paper's `startClientVerification` sets state VERIFYING, then `tick()`
         // calls `verifyLoginAndFinishConnectionSetup`. No tick driver exists yet,
@@ -195,6 +201,7 @@ impl ServerLoginPacketListener {
         &mut self,
         frame: Bytes,
         conn: &mut Connection,
+        config: &ServerConfig,
     ) -> Result<ListenerOutcome, DisconnectReason> {
         // `Validate.validState(this.state == PROTOCOL_SWITCHING, "Unexpected
         // login acknowledgement packet")`.
@@ -216,7 +223,22 @@ impl ServerLoginPacketListener {
         // a configuration packet. (Java's final `state = ACCEPTED` is moot here:
         // the listener is replaced by the configuration one.)
         conn.set_outbound_protocol(ConnectionProtocol::Configuration);
-        let mut config_listener = ServerConfigurationPacketListener::new();
+        let profile = self
+            .profile
+            .clone()
+            .expect("handle_hello built the profile before the ack");
+        // The configuration keepalive (issue #283) is seeded with the
+        // connection's monotonic reading at construction — Paper's
+        // `lastKeepAliveTx = System.nanoTime()` — and the configured kick limit
+        // (`paper.playerconnection.keepalive`, `ServerConfig.keepalive_timeout`).
+        // `conn.monotonic_nanos()` and the tick drive (`PacketListener::tick`)
+        // share the same per-connection epoch, so the 1s transmit throttle and
+        // the 30s timeout count from construction exactly like Java.
+        let mut config_listener = ServerConfigurationPacketListener::new(
+            profile,
+            conn.monotonic_nanos(),
+            config.keepalive_timeout.as_nanos() as i64,
+        );
         config_listener
             .start_configuration(conn)
             .map_err(DisconnectReason::Unsupported)?;

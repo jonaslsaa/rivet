@@ -6,15 +6,17 @@
 //! Java source of truth: `working/Paper/.../server/players/PlayerList.java` and
 //! `.../server/level/ServerPlayer.java`. This slice ports only the join-burst
 //! surface: the spawn geometry the `placeNewPlayer` burst carries (position,
-//! yaw/pitch, game type, offline profile), the login `playerId`, the owning
+//! yaw/pitch, game type, offline profile), the entity id (`ServerLevel.
+//! getNextEntityId` — the static `ENTITY_COUNTER`, GitHub #222), the owning
 //! [`ConnectionId`], and the UUID↔ConnectionId lookup indices. The entity
 //! surface (`ServerPlayer extends Player extends LivingEntity`, syncer, data
 //! slots) is deferred with the entity unit — RivetTodo(#222) tracks entity
-//! pairing; the `EntityId` type does not exist yet, so `player_id` is the
-//! capture's raw login `playerId` int.
+//! pairing; the `EntityId` value type does not exist yet, so `player_id` is the
+//! raw `int` the server's entity-id allocator handed out.
 
 pub mod join;
 pub mod play_sender;
+pub mod session;
 
 use std::collections::HashMap;
 
@@ -35,8 +37,9 @@ pub struct ServerPlayer {
     /// The offline `GameProfile` (name + uuid + properties) the login and
     /// `player_info_update` entries carry.
     profile: GameProfile,
-    /// `Entity.getId()` — the login `playerId`. No `EntityId` value type exists
-    /// yet (RivetTodo(#222)); the capture's raw int.
+    /// `Entity.getId()` — the entity id the server's entity-id allocator handed
+    /// out (`ServerLevel.getNextEntityId` — the static `ENTITY_COUNTER`, GitHub
+    /// #222). No `EntityId` value type exists yet (RivetTodo(#222)); the raw int.
     player_id: i32,
     /// `position` — the spawn position (`PositionMoveRotation.position`).
     position: Vec3,
@@ -90,7 +93,7 @@ impl ServerPlayer {
         self.profile.name()
     }
 
-    /// `Entity.getId()` — the login `playerId`.
+    /// `Entity.getId()` — the server-allocated entity id.
     pub fn player_id(&self) -> i32 {
         self.player_id
     }
@@ -108,6 +111,24 @@ impl ServerPlayer {
     /// `getXRot()`.
     pub fn pitch(&self) -> f32 {
         self.pitch
+    }
+
+    /// `Entity.absSnapTo(x, y, z, yRot, xRot)` — the authoritative
+    /// position+rotation write the movement/teleport paths route accepted
+    /// values into (issue #158). The tick thread owns the player, so only
+    /// these methods mutate the position.
+    pub fn abs_snap_to(&mut self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) {
+        self.position = Vec3::new(x, y, z);
+        self.yaw = yaw;
+        self.pitch = pitch;
+    }
+
+    /// `Entity.absSnapRotationTo(yRot, xRot)` — rotation-only snap, used while a
+    /// teleport is pending (`updateAwaitingTeleport` accepts the client's
+    /// rotation but ignores its position movement).
+    pub fn abs_snap_rotation_to(&mut self, yaw: f32, pitch: f32) {
+        self.yaw = yaw;
+        self.pitch = pitch;
     }
 
     /// `gameMode()`.
@@ -157,6 +178,11 @@ impl PlayerIndices {
     /// Resolve a connection to its player UUID.
     pub fn uuid_for(&self, connection_id: ConnectionId) -> Option<Uuid> {
         self.by_connection.get(&connection_id).copied()
+    }
+
+    /// Iterate the connection ids with a registered session (the live sessions).
+    pub fn connection_ids(&self) -> impl Iterator<Item = ConnectionId> + '_ {
+        self.by_connection.keys().copied()
     }
 
     /// The number of registered sessions.

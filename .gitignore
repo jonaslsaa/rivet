@@ -30,3 +30,10 @@ tools/rivet-codegen/target/
 # never scanned by cargo-machete and never tracked.
 .claude/worktrees/
 .claude/settings.local.json
+
+# Worktree provenance logs (serialized gate runs recorded by run_gate_closure.sh) —
+# never committed, like the oracle workdirs above.
+/logs/
+
+# worktree-task workflow resume scaffolding (see .claude/workflows/worktree-task.js)
+/PROGRESS.md

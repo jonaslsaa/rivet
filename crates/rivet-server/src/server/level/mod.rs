@@ -15,15 +15,21 @@
 
 pub mod chunk_map;
 pub mod chunk_tracking_view;
+pub mod entity_id_allocator;
 pub mod level_chunk;
 pub mod player_chunk_loader;
+pub mod region_backed;
 pub mod server_level;
 
 pub use chunk_map::{ChunkMap, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE};
 pub use chunk_tracking_view::ChunkTrackingView;
+pub use entity_id_allocator::EntityIdAllocator;
 pub use level_chunk::{BiomeId, LevelChunk, StateId};
 pub use player_chunk_loader::{
     PlayPacket, PlayerChunkLoader, encode_play_frame, get_client_view_distance,
     get_load_view_distance, get_send_view_distance, get_tick_distance,
 };
-pub use server_level::{RespawnData, ServerLevel, ServerLevelConfig, overworld_dimension};
+pub use region_backed::{
+    RegionBackedBootError, RegionChunkSource, RegionLevelPreparation, RegionWorldLayout,
+};
+pub use server_level::{MissingChunkPolicy, ServerLevel, ServerLevelConfig, overworld_dimension};

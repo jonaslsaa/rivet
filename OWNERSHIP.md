@@ -37,9 +37,21 @@ Server
 Rust can't hold `&mut entity` (inside the arena) and `&mut level` (owning the arena) at once. Pattern: **take-tick-putback** — the tick loop removes the entity value from the slotmap slot, ticks it with `(&mut entity, ctx: &mut LevelCtx)`, reinserts. `LevelCtx` exposes the rest of the level (chunks, other entities, RNG, events) without the ticked entity. Access to *self through the level* during own tick (rare in vanilla) resolves by ID lookup returning `None` — matches Java semantics closely enough; deviations get documented per call site. *(refine: exact LevelCtx API before the entity wave)*
 
 ## Chunks & blocks
-Chunks owned by `ChunkMap` by value. Block state = palette index into generated global state table (`rivet-registry`), copy `u32`-ish IDs, no references. BlockEntities live in their chunk; ticking uses the same take-tick-putback pattern with a `BlockEntityCtx`. Chunk gen/lighting runs on `rayon` on detached `ProtoChunk` values, results merged into `ChunkMap` on the tick thread via channel. *(refine: light engine threading before world wave)*
+Chunks owned by `ChunkMap` by value. Block state = palette index into generated global state table (`rivet-registry`), copy `u32`-ish IDs, no references. BlockEntities live in their chunk; ticking uses the same take-tick-putback pattern with a `BlockEntityCtx`. Chunk gen/lighting runs on `rayon` on detached `ProtoChunk` values, results merged into `ChunkMap` on the tick thread via channel.
+
+The chunk *pipeline* — ticket levels and holder lifecycle, the `ChunkStatus` generation DAG and radii, chunk send ordering, storage-worker/write ordering, cancellation/backpressure, and the determinism-under-parallelism invariants — is specified in `docs/chunk-pipeline-spec.md` (issue #185). Tick-thread ownership (§5 there) is the realization of this section's rule; the Moonrise scheduler internals (executors, propagation engine) are deliberately deferred to that issue.
 
 `ChunkPos`/`SectionPos` live in `rivet-registry::core` as pure value types, resolved by ID — `ChunkPyramid.MAX_CHUNK_COORDINATE_VALUE` moves to a `const` there so `ChunkPos` stays value-only. (Java puts `ChunkPos` in `world.level`; the module mirror is a convenience and cycle-breaking justifies the one-line move.)
+
+## Chunk storage workers (region files) — storage-worker amendment
+
+Issue #231 amendment (the `world.level.chunk.storage` slice). Region-file IO is **not game state**: `RegionFile`/`RegionFileStorage`/`IOWorker` are owned handles on the chunk-IO side (rayon/tokio worker pools), never stored inside `ChunkMap`. The tick thread hands **owned `CompoundTag` values** across the channel boundary — no `Arc<RwLock>` on chunk data anywhere on this path.
+
+- Per-`RegionFile` mutual exclusion (Java `synchronized` on `write`/`getChunkDataInputStream`) maps to a `Mutex<RegionFile>` held by the region's single IO task, or a region-keyed single-writer queue (`chunkX >> 5, chunkZ >> 5`). This cross-thread IO lock is explicitly inside the "cross-thread queues only" exception below — a worker/queue mutex, never a lock on game state.
+- Chunk ownership is unchanged: the chunk is owned by `ChunkMap` by value; `SerializableChunkData` builds/reads a plain value `CompoundTag` on the worker side. Starlight light arrays survive load→save as opaque bytes in the compound — no engine, no shared state.
+- Value types: `ChunkPos` (region math `& ~31`, `getRegionLocalX/Z`, `pack`) is a `Copy` value type; `RegionStorageInfo` is a `Clone` value type (it owns `String`/`ResourceKey` fields, so it cannot be `Copy`). Java's `info.dfuType()[0] = dataFixType` mutable-array hack becomes a plain `is_chunk_data: bool` field — do not reproduce a shared-mutable array.
+- Codec selection is a frozen value: the `RegionFileVersion` chosen by `configure` is shared freely like `GameData`; the gzip/deflate/lz4 stream wrappers are pure functions over `Read`/`Write`.
+- `RegionBitmap` is an owned `BitSet`-equivalent inside each `RegionFile` — sector allocation is per-file derived state, never global.
 
 ## Network
 Per-connection tokio task owns the socket, encryption, and framing; decoded packets flow to the tick thread over bounded channels keyed by `ConnectionId`; outbound is the reverse. Handshake/status/login handled entirely on the tokio side; play-state packets are game state and cross to the tick thread. Packets are plain owned structs — no lifetimes in packet types (accept the copies; optimize later with `bytes::Bytes` for blobs).

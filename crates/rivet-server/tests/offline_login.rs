@@ -12,6 +12,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use flate2::read::ZlibDecoder;
+use rivet_protocol::generated::packets::play::clientbound::PacketType;
 use rivet_server::server::{Server, ServerConfig};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -40,10 +41,26 @@ const CONFIG_CLIENT_INFORMATION_ID: i32 = 0;
 const CONFIG_CLIENTBOUND_CUSTOM_PAYLOAD_ID: i32 = 1;
 /// Configuration clientbound id for `finish_configuration` (0-byte body).
 const CONFIG_CLIENTBOUND_FINISH_CONFIGURATION_ID: i32 = 3;
+/// Configuration serverbound id for `custom_payload` (the serverbound response
+/// direction, distinguished from the clientbound brand by flow).
+const CONFIG_CUSTOM_PAYLOAD_ID: i32 = 2;
+/// Configuration serverbound id for `resource_pack` (the response).
+const CONFIG_RESOURCE_PACK_ID: i32 = 6;
+/// Configuration serverbound id for `custom_click_action`.
+const CONFIG_CUSTOM_CLICK_ACTION_ID: i32 = 8;
+/// Configuration serverbound id for `accept_code_of_conduct` (0-byte body).
+const CONFIG_ACCEPT_CODE_OF_CONDUCT_ID: i32 = 9;
 
 /// Play serverbound id for `keep_alive` (a long body) — the play packet this
 /// slice forwards to the tick thread after the configuration→play handoff.
 const PLAY_KEEP_ALIVE_PACKET_ID: i32 = 28;
+
+/// Configuration serverbound id for `keep_alive` (a long body) — the config
+/// listener's keepalive reply direction.
+const CONFIG_KEEP_ALIVE_PACKET_ID: i32 = 4;
+/// Configuration clientbound id for `keep_alive` — the config keepalive
+/// challenge direction.
+const CONFIG_CLIENTBOUND_KEEP_ALIVE_ID: i32 = 4;
 
 /// The pinned capture fixture's offline profile for the test player
 /// (`UUID.nameUUIDFromBytes("OfflinePlayer:RivetProbe")`, issue #198): most
@@ -78,6 +95,9 @@ fn config_with_threshold(compression_threshold: i32) -> ServerConfig {
         inbound_channel_capacity: 64,
         outbound_channel_capacity: 64,
         lifecycle_capacity: 64,
+        enable_join: false,
+        keepalive_timeout: Duration::from_secs(30),
+        level_path: None,
     }
 }
 
@@ -203,16 +223,23 @@ async fn read_frame_payload(stream: &mut TcpStream) -> Vec<u8> {
     read_bytes(stream, len as usize).await
 }
 
-/// Assert nothing arrives and the connection stays open (a short timeout with
-/// no data and no EOF).
-async fn expect_silent_open(stream: &mut TcpStream) {
+/// Assert nothing arrives and the connection stays open for `duration` (a
+/// longer silent-open window than [`expect_silent_open`], for asserting a
+/// stopped keepalive driver stays stopped across a kick window).
+async fn expect_silent_open_for(stream: &mut TcpStream, duration: Duration) {
     let mut buf = [0u8; 16];
-    match tokio::time::timeout(Duration::from_millis(200), stream.read(&mut buf)).await {
+    match tokio::time::timeout(duration, stream.read(&mut buf)).await {
         Ok(Ok(0)) => panic!("connection closed; expected it to stay open"),
         Ok(Ok(n)) => panic!("unexpected data: {n} bytes"),
         Ok(Err(_)) => panic!("read error"),
         Err(_) => {} // timeout: still open, nothing sent
     }
+}
+
+/// Assert nothing arrives and the connection stays open (a short timeout with
+/// no data and no EOF).
+async fn expect_silent_open(stream: &mut TcpStream) {
+    expect_silent_open_for(stream, Duration::from_millis(200)).await;
 }
 
 /// Read until EOF; panics if the server writes data instead of closing (the
@@ -229,6 +256,23 @@ async fn expect_eof(stream: &mut TcpStream) {
         Ok(Ok(n)) => panic!("server sent {n} bytes before closing; expected EOF"),
         Ok(Err(_)) => {}
         Err(_) => panic!("timed out waiting for EOF"),
+    }
+}
+
+/// Read until EOF, tolerating trailing data: the keepalive timeout close flushes
+/// whatever the timeout tick already queued (possibly a fresh challenge when the
+/// 1s throttle and the timeout check land on the same tick — Paper checks the
+/// throttle first) before the socket closes. Panics only if the close does not
+/// arrive within the deadline.
+async fn expect_eof_allowing_trailing(stream: &mut TcpStream) {
+    let mut buf = [0u8; 128];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buf)).await {
+            Ok(Ok(0)) | Ok(Err(_)) => break,
+            Ok(Ok(_)) => continue, // trailing frame; keep reading to the close
+            Err(_) => panic!("timed out waiting for the disconnect close"),
+        }
     }
 }
 
@@ -919,8 +963,10 @@ async fn finish_configuration_after_sync_reaches_play() {
         .await
         .expect("write finish_configuration");
 
-    // The handoff is silent: `spawnPlayer` (#101) is deferred, so nothing is
-    // sent in play yet — but the connection stays open (no deterministic close).
+    // The handoff is silent here because this test config leaves `enable_join`
+    // off (issue #101 Slice B: the join burst runs only when the play listener
+    // is wired). Nothing is sent in play yet, but the connection stays open (no
+    // deterministic close). The burst itself is covered by `join_burst.rs`.
     expect_silent_open(&mut client).await;
     server_task.abort();
 }
@@ -1109,6 +1155,919 @@ async fn play_flood_over_inbound_budget_closes_with_eof() {
         .write_all(&flood)
         .await
         .expect("write compressed flood");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+/// The live-join config: `enable_join` on (issue #101 Slice B) with channel
+/// capacities large enough for the whole 135-frame join burst — the tick fires
+/// the burst into the connection's outbound channel in one synchronous pass, so
+/// the channel must hold it before the per-connection task drains it to the
+/// socket (the 64 default would overflow and disconnect the client mid-join).
+fn config_with_join() -> ServerConfig {
+    ServerConfig {
+        bind_host: std::net::IpAddr::from([127, 0, 0, 1]),
+        port: 0,
+        max_connections: 16,
+        read_timeout: Duration::from_secs(30),
+        compression_threshold: 256,
+        tick_interval: Duration::from_millis(50),
+        catchup_ticks: 5,
+        inbound_channel_capacity: 1024,
+        outbound_channel_capacity: 1024,
+        lifecycle_capacity: 1024,
+        enable_join: true,
+        keepalive_timeout: Duration::from_secs(30),
+        level_path: None,
+    }
+}
+
+/// `config_with_join()` with a short keepalive kick limit, so the live TCP
+/// keepalive tests exercise the timeout window in seconds instead of the pinned
+/// 30s default (`paper.playerconnection.keepalive`, issue #236). The 1s transmit
+/// cadence is never configurable, exactly as in Java.
+fn config_with_join_keepalive(timeout: Duration) -> ServerConfig {
+    ServerConfig {
+        keepalive_timeout: timeout,
+        ..config_with_join()
+    }
+}
+
+/// The `place_new_player` join burst in Paper's send order — the same sequence
+/// `join_burst.rs::burst_order` asserts at the unit level, mirrored here so the
+/// live wire path is covered end to end: the 11 join members, the 3 #100 cache
+/// packets, the 117 superflat chunks, then the second `sendLevelInfo` block.
+fn join_burst_ids() -> Vec<u32> {
+    let mut ids = vec![
+        PacketType::Login.id(),
+        PacketType::ChangeDifficulty.id(),
+        PacketType::PlayerAbilities.id(),
+        PacketType::SetHeldSlot.id(),
+        PacketType::EntityEvent.id(),
+        PacketType::PlayerPosition.id(),
+        PacketType::InitializeBorder.id(),
+        PacketType::SetTime.id(),
+        PacketType::SetDefaultSpawnPosition.id(),
+        PacketType::GameEvent.id(),
+        PacketType::PlayerInfoUpdate.id(),
+        PacketType::SetChunkCacheRadius.id(),
+        PacketType::SetSimulationDistance.id(),
+        PacketType::SetChunkCacheCenter.id(),
+    ];
+    ids.extend(std::iter::repeat_n(
+        PacketType::LevelChunkWithLight.id(),
+        117,
+    ));
+    ids.extend([
+        PacketType::InitializeBorder.id(),
+        PacketType::SetTime.id(),
+        PacketType::SetDefaultSpawnPosition.id(),
+        PacketType::GameEvent.id(),
+    ]);
+    ids
+}
+
+/// The end-to-end live join (issue #101 Slice B): boot the server with
+/// `enable_join` on, drive the full handshake → login → registry sync →
+/// `client_information` → `finish_configuration` over a real socket, then
+/// assert the tick-owned play listener fires the entire 135-frame
+/// `place_new_player` burst on the wire in Paper's order.
+///
+/// The client reports view distance 8 (the #153 capture client's value); the
+/// Moonrise ladder caps the send distance at `load - 1` (4), so the send-set is
+/// the capture's 117-chunk square. A `createDefault` client (view distance 2)
+/// would resolve send 3 and the full 9×9 = 81-chunk square instead — the
+/// `create_default_handoff_resolves_the_81_chunk_send_set` unit test pins that
+/// shape. `join_burst.rs` covers the byte-exact bodies; this test proves the
+/// burst is live end to end (login → configuration → play over TCP, framed +
+/// compressed as the connection task emits it).
+#[tokio::test]
+async fn live_join_burst_over_tcp_after_finish_configuration() {
+    let (addr, server_task) = start_server(config_with_join()).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    client
+        .write_all(&client_information_frame(8))
+        .await
+        .expect("write client_information");
+    client
+        .write_all(&finish_configuration_reply_frame())
+        .await
+        .expect("write finish_configuration");
+
+    // The join burst: read every frame the tick fired, decompressing as needed
+    // (below-threshold frames pass through with declaredLength 0; the ~7 KB
+    // chunks exceed the 256 threshold and are zlib-compressed).
+    let mut seen = Vec::with_capacity(135);
+    for _ in 0..135 {
+        let (_, payload) = read_compressed_packet(&mut client).await;
+        let (id, _) = decode_varint(&payload);
+        seen.push(id as u32);
+    }
+
+    assert_eq!(seen, join_burst_ids(), "the 135-frame live join burst");
+
+    // The connection stays open in play (a live session, not a silent close).
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// The client's view of one live keepalive exchange: drive the full handshake →
+/// login → registry sync → `client_information` → `finish_configuration` with
+/// `enable_join` on, consume the 135-frame join burst, and return the live play
+/// connection. The tick-owned session is in play and its keepalive state is
+/// live (first challenge fires ~1s later).
+async fn join_to_play(
+    config: ServerConfig,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>, TcpStream) {
+    let (addr, server_task) = start_server(config).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    client
+        .write_all(&client_information_frame(8))
+        .await
+        .expect("write client_information");
+    client
+        .write_all(&finish_configuration_reply_frame())
+        .await
+        .expect("write finish_configuration");
+    for _ in 0..135 {
+        let _ = read_compressed_packet(&mut client).await;
+    }
+    (addr, server_task, client)
+}
+
+/// Read one clientbound play `keep_alive` (id 44) and return its 8-byte
+/// challenge id (the raw big-endian `long` the server expects echoed back). The
+/// frame is under the 256 threshold, so it arrives with `declaredLength 0`.
+async fn read_play_keepalive_challenge(stream: &mut TcpStream) -> [u8; 8] {
+    let (_, payload) = read_compressed_packet(stream).await;
+    let (id, used) = decode_varint(&payload);
+    assert_eq!(
+        id,
+        PacketType::KeepAlive.id() as i32,
+        "clientbound play keep_alive"
+    );
+    payload[used..used + 8]
+        .try_into()
+        .expect("keep_alive body is an 8-byte long")
+}
+
+/// Read one clientbound play packet and return its id + body (the payload
+/// after the id varint). `read_play_keepalive_challenge` stays for the direct
+/// keepalive-only tests; the drain loop uses this so arbitrary play packets
+/// (the movement recenter's cache-center + chunk burst, future slices) are
+/// consumed without being misread as keepalives.
+async fn read_any_play_packet(stream: &mut TcpStream) -> (i32, Vec<u8>) {
+    let (_, payload) = read_compressed_packet(stream).await;
+    let (id, used) = decode_varint(&payload);
+    (id, payload[used..].to_vec())
+}
+
+/// Frame a serverbound play `keep_alive` reply (id 28) echoing the challenge
+/// id bytes, compressed under the threshold (`varint(0)` declaredLength).
+fn play_keepalive_reply_frame(challenge_id: [u8; 8]) -> Vec<u8> {
+    let mut body = varint(PLAY_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&challenge_id);
+    let mut wire = varint(0); // declaredLength 0 → raw payload
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// A live client that echoes every play `keep_alive` challenge survives well
+/// past the (shortened) kick window: the tick-owned keepalive loop transmits
+/// the clientbound challenge (id 44) over the real socket, and the echoed
+/// serverbound reply (id 28) is routed back into the same state machine, so no
+/// pending challenge ever exceeds the 2s limit.
+#[tokio::test]
+async fn live_keepalive_responding_client_survives_beyond_the_timeout_window() {
+    let (_addr, server_task, mut client) =
+        join_to_play(config_with_join_keepalive(Duration::from_secs(2))).await;
+
+    // Echo every challenge. 4 challenges span ~4s — 2× the 2s kick limit — so a
+    // client that failed to respond would already have been disconnected.
+    for _ in 0..4 {
+        let challenge = read_play_keepalive_challenge(&mut client).await;
+        client
+            .write_all(&play_keepalive_reply_frame(challenge))
+            .await
+            .expect("write keepalive reply");
+    }
+
+    // Still connected past the timeout window.
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// A live client that receives a play `keep_alive` challenge and never answers
+/// it is disconnected — the socket closes once the challenge exceeds the 2s
+/// kick limit (the TIMEOUT disconnect from `keepConnectionAlive` reaches the
+/// wire as a close).
+///
+/// The close is Paper's send-then-disconnect ordering: when the 1s throttle and
+/// the timeout check land on the same tick the throttled challenge is queued
+/// before the timeout fires, and the disconnect flushes it before closing — so
+/// the client may observe one more clientbound play `keep_alive` before EOF.
+/// [`expect_eof_allowing_trailing`] tolerates either shape.
+#[tokio::test]
+async fn live_keepalive_unanswered_challenge_is_disconnected() {
+    let (_addr, server_task, mut client) =
+        join_to_play(config_with_join_keepalive(Duration::from_secs(2))).await;
+
+    // Receive the first challenge, then go silent. The kick fires ~2s after
+    // that challenge's transmit (the strict `>` limit); the 5s deadline inside
+    // the EOF helper covers the 1s transmit + the 2s limit, far short of the
+    // 30s read timeout — so an EOF here is the keepalive kick, not a read
+    // timeout.
+    let _challenge = read_play_keepalive_challenge(&mut client).await;
+    expect_eof_allowing_trailing(&mut client).await;
+    server_task.abort();
+}
+
+// ---- issue #158: live movement + teleport-ack wiring over TCP ----
+//
+// The unit tests in `server::player::session` prove the tick-owned state
+// transitions (accepted position/rotation via the `player_position`/`player_yaw`
+// accessors). These live tests prove the wire path: a serverbound move/ack
+// frame written over a real socket reaches the tick thread, and the semantic
+// outcome is observable — a non-finite move closes the connection (the
+// `invalid_player_movement` kick), a correct/wrong ack and an ignored
+// pre-ack move keep it open. The spawn teleport (`placeNewPlayer` →
+// `teleport`) embeds `awaitingTeleport = 1`.
+
+/// Frame a serverbound play `accept_teleportation` (id 0) echoing the given
+/// teleport id, under the compression threshold (declaredLength 0).
+fn play_accept_teleport_frame(teleport_id: i32) -> Vec<u8> {
+    let mut body = varint(0);
+    body.extend_from_slice(&varint(teleport_id));
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// Frame a serverbound play `move_player_pos` (id 30) carrying a position (3
+/// doubles + the 1-byte flags, not on ground).
+fn play_move_pos_frame(x: f64, y: f64, z: f64) -> Vec<u8> {
+    let mut body = varint(30);
+    body.extend_from_slice(&x.to_be_bytes());
+    body.extend_from_slice(&y.to_be_bytes());
+    body.extend_from_slice(&z.to_be_bytes());
+    body.push(0x00);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// Frame a serverbound play `move_player_rot` (id 32) carrying a rotation (2
+/// floats + the 1-byte flags).
+fn play_move_rot_frame(y_rot: f32, x_rot: f32) -> Vec<u8> {
+    let mut body = varint(32);
+    body.extend_from_slice(&y_rot.to_be_bytes());
+    body.extend_from_slice(&x_rot.to_be_bytes());
+    body.push(0x00);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// A stale/wrong ack id is a silent no-op over the live wire: no kick (the
+/// connection stays open), and the spawn teleport survives — the subsequent
+/// correct ack (id 1) still accepts, so a movement frame after it is not
+/// rejected. A matching id with no pending position would have kicked.
+#[tokio::test]
+async fn live_wrong_ack_then_correct_ack_keeps_connection_open() {
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    client
+        .write_all(&play_accept_teleport_frame(999))
+        .await
+        .expect("write stale ack");
+    expect_silent_open(&mut client).await;
+
+    // The correct ack for the spawn teleport (id 1) is accepted, and a move
+    // after it routes through the tick-owned player without a kick.
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write correct ack");
+    client
+        .write_all(&play_move_pos_frame(5.0, -63.0, 5.0))
+        .await
+        .expect("write move after ack");
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// A move before the spawn teleport is acked is ignored (position movement is
+/// withheld while `awaitingTeleport` is pending, `updateAwaitingTeleport`): no
+/// kick, and the pending teleport survives the ignored move — the correct ack
+/// still accepts.
+#[tokio::test]
+async fn live_move_before_ack_is_ignored_and_teleport_survives() {
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    client
+        .write_all(&play_move_pos_frame(100.0, -63.0, 100.0))
+        .await
+        .expect("write move before ack");
+    expect_silent_open(&mut client).await;
+
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write ack");
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// A non-finite rotation in a live move frame fires the Paper-faithful
+/// `invalid_player_movement` kick: the tick-owned movement gate closes the
+/// connection over the real wire (EOF, tolerating any trailing keepalive
+/// frame the close flushed).
+#[tokio::test]
+async fn live_nan_rotation_move_disconnects() {
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    client
+        .write_all(&play_move_rot_frame(f32::NAN, 30.0))
+        .await
+        .expect("write NaN rotation move");
+    expect_eof_allowing_trailing(&mut client).await;
+    server_task.abort();
+}
+
+/// An `accept_teleportation` whose id matches the current `awaitingTeleport`
+/// but for which no teleport is pending is the Paper-faithful
+/// `invalid_player_movement` kick (`handleAcceptTeleportPacket`): after the
+/// spawn teleport (id 1) is acked and the pending marker cleared, a second ack
+/// with the same id matches the counter but finds no awaited position, so the
+/// connection closes. This exercises the `InvalidMovementKick` path over a real
+/// socket, not just as a state-machine unit test.
+#[tokio::test]
+async fn live_matching_ack_with_no_pending_teleport_disconnects() {
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    // Ack the spawn teleport (id 1): accepted, pending cleared.
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write first ack");
+    expect_silent_open(&mut client).await;
+
+    // A matching id with no pending position is the kick: the connection EOFs.
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write second ack");
+    expect_eof_allowing_trailing(&mut client).await;
+    server_task.abort();
+}
+
+// ---- issue #53: movement trace over a live socket ----
+//
+// The unit tests in `server::player::session` prove the `RIVET_*` records'
+// contents against the tick-owned state directly. This test proves the same
+// records flow out of a real server: the process-global tracing subscriber is
+// installed once per test binary (`rivet_test_support::install_global_for_tests`),
+// so the tick OS thread's events land in the shared recorder while a raw
+// `TcpStream` drives a join → ack → move → disconnect. The subscriber composes
+// the recording layer with `tracing_subscriber::fmt::layer().with_test_writer()`,
+// so the rendered records are also captured by cargo. The machinery lives in the
+// dev-dependency crate `rivet-test-support` (not in the production library); the
+// env gate is pinned via `movement_trace::set_trace_gate_for_tests`.
+
+/// Poll `pred` until it returns true or `timeout` elapses (a stalled tick or
+/// conn_loop fails loudly instead of hanging the test).
+///
+/// The poll yields to the tokio runtime (`tokio::time::sleep`, never
+/// `std::thread::sleep`): the default single-threaded test runtime drives the
+/// server's per-connection task, so blocking the test thread would starve the
+/// conn_loop and it would never read the frames this test writes. When `client`
+/// is `Some`, a pending clientbound `keep_alive` challenge is read and echoed
+/// before each poll — a live client always replies, and without the echo the
+/// server's outbound flush would eventually backpressure (the client's receive
+/// buffer never drains), wedging the conn_loop in `flush_out` instead of
+/// reading inbound frames. The 1 ms service window never splits a frame: the
+/// server writes each keepalive as one atomic write, so the whole frame is in
+/// the receive buffer the moment the first byte is available.
+async fn wait_until(
+    mut client: Option<&mut TcpStream>,
+    timeout: Duration,
+    what: &str,
+    mut pred: impl FnMut() -> bool,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while !pred() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        // Yield so the runtime can drive the conn_loop (read + forward our
+        // frames) and observe the tick thread's channel events.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        if let Some(client) = client.as_deref_mut()
+            && let Ok(packet) =
+                tokio::time::timeout(Duration::from_millis(1), read_any_play_packet(client)).await
+        {
+            // Reply to keepalive challenges; drop everything else. A live play
+            // client sees arbitrary clientbound packets (the join burst was
+            // already consumed, but the movement recenter sends cache-center +
+            // chunks on a boundary crossing, and future slices send more), so
+            // the drain must not assume the only traffic is keepalives.
+            if packet.0 == PacketType::KeepAlive.id() as i32 {
+                let challenge: [u8; 8] = packet
+                    .1
+                    .try_into()
+                    .expect("keep_alive body is an 8-byte long");
+                client
+                    .write_all(&play_keepalive_reply_frame(challenge))
+                    .await
+                    .expect("write keepalive reply");
+            }
+        }
+    }
+}
+
+/// The tick thread emits `RIVET_TELEPORT_ACK` + `RIVET_MOVE_ACCEPTED` for an
+/// acked move over the real socket, and `RIVET_SESSION_END` when the client
+/// drops (the peer EOF prune). The recorder is process-global and shared with
+/// the other live tests in this binary, so every content assertion filters on
+/// the distinctive `42.5` x-coordinate only this test sends.
+#[tokio::test]
+async fn live_trace_records_teleport_ack_move_and_session_end() {
+    let recorder = rivet_test_support::install_global_for_tests(
+        rivet_server::server::movement_trace::set_trace_gate_for_tests,
+        true,
+    );
+    let (_addr, server_task, mut client) = join_to_play(config_with_join()).await;
+
+    client
+        .write_all(&play_accept_teleport_frame(1))
+        .await
+        .expect("write spawn ack");
+    client
+        .write_all(&play_move_pos_frame(42.5, -63.0, -17.25))
+        .await
+        .expect("write move after ack");
+
+    // Both records are emitted from the tick thread as the ack + move are
+    // accepted; poll until the accepted ack and this test's move both land. The
+    // ack and move are written back-to-back and forwarded to the tick in order,
+    // so the ack is always processed before the move — no intermediate silence
+    // assert (a keepalive challenge could land in a silence read and be
+    // misread as data). The ack's acceptance is proven by the record's
+    // `outcome=accepted`, stronger than socket silence.
+    wait_until(
+        Some(&mut client),
+        Duration::from_secs(5),
+        "teleport-ack + move-accepted records",
+        || {
+            let snap = recorder.snapshot();
+            snap.iter()
+                .any(|r| r.tag == "RIVET_TELEPORT_ACK" && r.field("outcome") == Some("accepted"))
+                && snap
+                    .iter()
+                    .any(|r| r.tag == "RIVET_MOVE_ACCEPTED" && r.field("x") == Some("42.5"))
+        },
+    )
+    .await;
+
+    let snap = recorder.snapshot();
+    let ack = snap
+        .iter()
+        .find(|r| r.tag == "RIVET_TELEPORT_ACK" && r.field("outcome") == Some("accepted"))
+        .expect("an accepted teleport-ack record");
+    // `ConnectionId`s are assigned from 0 per server boot, and this test's
+    // connection is the first (and only) one on its server.
+    assert_eq!(ack.field("id"), Some("conn#0"));
+    assert_eq!(ack.field("ack_id"), Some("1"));
+    assert_eq!(ack.field("x"), Some("0"));
+    assert_eq!(ack.field("y"), Some("-63"));
+    assert_eq!(ack.field("z"), Some("0"));
+
+    let mv = snap
+        .iter()
+        .find(|r| r.tag == "RIVET_MOVE_ACCEPTED" && r.field("x") == Some("42.5"))
+        .expect("this test's move-accepted record");
+    assert_eq!(mv.field("id"), Some("conn#0"));
+    assert_eq!(mv.field("x"), Some("42.5"));
+    assert_eq!(mv.field("y"), Some("-63"));
+    assert_eq!(mv.field("z"), Some("-17.25"));
+    assert_eq!(mv.field("accepted_frames"), Some("1"));
+
+    // Disconnect the client: the network task sees the peer EOF, the registry
+    // records the `EndOfStream` reason, and `prune_lost` emits the final
+    // authoritative record on the next tick. The client is gone, so the wait
+    // only yields — there is no keepalive to service.
+    drop(client);
+    wait_until(None, Duration::from_secs(5), "session-end record", || {
+        recorder
+            .snapshot()
+            .iter()
+            .any(|r| r.tag == "RIVET_SESSION_END" && r.field("x") == Some("42.5"))
+    })
+    .await;
+    let end = recorder
+        .snapshot()
+        .into_iter()
+        .find(|r| r.tag == "RIVET_SESSION_END" && r.field("x") == Some("42.5"))
+        .expect("this test's session-end record");
+    assert_eq!(end.field("id"), Some("conn#0"));
+    assert_eq!(end.field("reason"), Some("disconnect.endOfStream"));
+    assert_eq!(end.field("accepted_frames"), Some("1"));
+    // The final authoritative position is the accepted move's snapped values.
+    assert_eq!(end.field("x"), Some("42.5"));
+    assert_eq!(end.field("y"), Some("-63"));
+    assert_eq!(end.field("z"), Some("-17.25"));
+    server_task.abort();
+}
+
+// ---- issue #283: configuration-phase keepalive lifecycle ----
+
+/// `config_with_threshold` with a short keepalive kick limit, so the live
+/// configuration-phase keepalive tests exercise the timeout window in seconds
+/// instead of the pinned 30s default (`paper.playerconnection.keepalive`,
+/// issue #236). `enable_join` stays off — these tests drive the configuration
+/// listener's keepalive (tokio side), not the play session's.
+fn config_with_threshold_keepalive(compression_threshold: i32, timeout: Duration) -> ServerConfig {
+    ServerConfig {
+        keepalive_timeout: timeout,
+        ..config_with_threshold(compression_threshold)
+    }
+}
+
+/// Drive the login → registry-sync → `JoinWorldTask` sequence and return the
+/// client socket still in the configuration phase (the client has NOT replied
+/// `finish_configuration`, so the config listener stays current and its
+/// keepalive is live).
+async fn login_to_configuration(
+    config: ServerConfig,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>, TcpStream) {
+    let (addr, server_task) = start_server(config).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+    complete_sync_and_consume_finish(&mut client).await;
+    (addr, server_task, client)
+}
+
+/// Read one clientbound configuration `keep_alive` (id 4) and return its 8-byte
+/// challenge id (the raw big-endian `long` the server expects echoed back). The
+/// frame is under the 256 threshold, so it arrives with `declaredLength 0`.
+async fn read_config_keepalive_challenge(stream: &mut TcpStream) -> [u8; 8] {
+    let (_, payload) = read_compressed_packet(stream).await;
+    let (id, used) = decode_varint(&payload);
+    assert_eq!(
+        id, CONFIG_CLIENTBOUND_KEEP_ALIVE_ID,
+        "clientbound configuration keep_alive"
+    );
+    payload[used..used + 8]
+        .try_into()
+        .expect("keep_alive body is an 8-byte long")
+}
+
+/// Frame a serverbound configuration `keep_alive` reply (id 4) echoing the
+/// challenge id bytes, compressed under the threshold (`varint(0)` declaredLength).
+fn config_keepalive_reply_frame(challenge_id: [u8; 8]) -> Vec<u8> {
+    let mut body = varint(CONFIG_KEEP_ALIVE_PACKET_ID);
+    body.extend_from_slice(&challenge_id);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+/// A configuration-phase client that echoes every config `keep_alive` challenge
+/// survives well past the (shortened) kick window: `conn_loop`'s interval arm
+/// drives the config listener's keepalive over the real socket, and the echoed
+/// serverbound reply is routed back into the same state machine, so no pending
+/// challenge ever exceeds the 2s limit.
+#[tokio::test]
+async fn config_keepalive_responding_client_survives_beyond_the_timeout_window() {
+    let (_addr, server_task, mut client) =
+        login_to_configuration(config_with_threshold_keepalive(256, Duration::from_secs(2))).await;
+
+    // 3 challenges span ~3s — past the 2s kick limit — so a client that failed
+    // to respond would already have been disconnected.
+    for _ in 0..3 {
+        let challenge = read_config_keepalive_challenge(&mut client).await;
+        client
+            .write_all(&config_keepalive_reply_frame(challenge))
+            .await
+            .expect("write config keepalive reply");
+    }
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+/// A configuration-phase client that receives a config `keep_alive` challenge
+/// and never answers is disconnected — the socket closes once the challenge
+/// exceeds the 2s kick limit (the TIMEOUT disconnect from `keepConnectionAlive`
+/// reaches the wire as a close). The close is far short of the 30s read
+/// timeout, so an EOF here is the keepalive kick, not a read timeout.
+#[tokio::test]
+async fn config_keepalive_unanswered_challenge_is_disconnected() {
+    let (_addr, server_task, mut client) =
+        login_to_configuration(config_with_threshold_keepalive(256, Duration::from_secs(2))).await;
+
+    let _challenge = read_config_keepalive_challenge(&mut client).await;
+    // `expect_eof_allowing_trailing` tolerates the throttled challenge the
+    // timeout tick may queue before the close (Paper's send-then-disconnect).
+    expect_eof_allowing_trailing(&mut client).await;
+    server_task.abort();
+}
+
+/// A configuration-phase client that replies with a wrong id (one matching no
+/// pending challenge) is disconnected immediately with TIMEOUT — Java's
+/// "without matching challenge" branch — not left open to the kick window.
+#[tokio::test]
+async fn config_keepalive_wrong_reply_disconnects() {
+    let (_addr, server_task, mut client) =
+        login_to_configuration(config_with_threshold_keepalive(256, Duration::from_secs(2))).await;
+
+    // Read the challenge (proving the transmit), then reply with a wrong id.
+    let _challenge = read_config_keepalive_challenge(&mut client).await;
+    client
+        .write_all(&config_keepalive_reply_frame([0xFF; 8]))
+        .await
+        .expect("write wrong config keepalive reply");
+
+    // The wrong reply closes immediately, before the 2s kick window.
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+/// The config keepalive stops at the configuration→play handoff: after
+/// `finish_configuration` the `conn_loop` tick arm skips (`in_play`), so no
+/// config keep_alive is transmitted and the connection is not closed by the
+/// config kick limit — even past the challenge's 2s window. There is no play
+/// session (`enable_join` off), so nothing replaces the stopped driver; the
+/// connection simply stays open and silent.
+#[tokio::test]
+async fn config_keepalive_stops_at_play_handoff() {
+    let (_addr, server_task, mut client) =
+        login_to_configuration(config_with_threshold_keepalive(256, Duration::from_secs(2))).await;
+
+    // Observe the config keepalive is live, answer it, then hand off to play.
+    let challenge = read_config_keepalive_challenge(&mut client).await;
+    client
+        .write_all(&config_keepalive_reply_frame(challenge))
+        .await
+        .expect("write config keepalive reply");
+    client
+        .write_all(&finish_configuration_reply_frame())
+        .await
+        .expect("write finish_configuration");
+
+    // 4s spans the 2s kick window measured from the challenge's transmit: a
+    // config keepalive that kept driving past play would have closed here. It
+    // stays open and silent instead.
+    expect_silent_open_for(&mut client, Duration::from_secs(4)).await;
+
+    server_task.abort();
+}
+
+/// Frame a serverbound configuration `custom_payload` (id 2) with the given
+/// payload id + raw data, compressed (`varint(0)` declaredLength — sub-threshold).
+fn config_custom_payload_frame(payload_id: &str, data: &[u8]) -> Vec<u8> {
+    let mut body = varint(CONFIG_CUSTOM_PAYLOAD_ID);
+    body.extend_from_slice(&varint(payload_id.len() as i32));
+    body.extend_from_slice(payload_id.as_bytes());
+    body.extend_from_slice(data);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+#[tokio::test]
+async fn config_custom_payload_register_keeps_open() {
+    // A `minecraft:register` channel-list payload decodes and the connection
+    // stays open. Channel tracking lives in the plugin bridge, deferred with
+    // #26. The 0/1/3 harness semantics are preserved: the serverbound
+    // `custom_payload` id (2) is distinct from the clientbound brand id (1).
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:register",
+            b"bungeecord:main\x00my:plugin",
+        ))
+        .await
+        .expect("write register");
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_brand_keeps_open() {
+    // A valid `minecraft:brand` payload (utf `\x05Paper`) decodes and the
+    // connection stays open.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:brand",
+            b"\x05Paper",
+        ))
+        .await
+        .expect("write brand");
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_brand_truncated_closes() {
+    // A brand utf that declares 5 bytes but carries 2 throws Java's
+    // `DecoderException` from `Utf8String.read`'s not-enough-bytes check —
+    // caught by `handleCustomPayload`'s try/catch → the `"Invalid custom
+    // payload payload!"` disconnect, surfaced here as a deterministic Malformed
+    // close (EOF).
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_custom_payload_frame("minecraft:brand", b"\x05Pa"))
+        .await
+        .expect("write truncated brand");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_register_malformed_channel_closes() {
+    // A `minecraft:register` channel that `validateAndCorrectChannel` rejects
+    // (here: not entirely lowercase) throws inside `readChannelIdentifier` —
+    // caught by `handleCustomPayload`'s try/catch → the invalid-payload
+    // disconnect (EOF). The channel is never tracked (the bridge is deferred,
+    // #26); validation alone closes.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:register",
+            b"Foo:Bar",
+        ))
+        .await
+        .expect("write malformed register");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_register_oversize_channel_closes() {
+    // A 32770-byte channel-list payload exceeds the `DiscardedPayload`
+    // 32767-byte decode cap, so it is rejected at DECODE — before the channel
+    // validation runs — like Java's `DiscardedPayload.streamCodec(identifier,
+    // 32767)`. Either way the connection closes with the invalid-payload
+    // disconnect.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut oversize = vec![b'a'; 32768];
+    oversize.extend_from_slice(b":y");
+    client
+        .write_all(&config_custom_payload_frame(
+            "minecraft:register",
+            &oversize,
+        ))
+        .await
+        .expect("write oversize register");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_payload_brand_oversize_closes() {
+    // A brand whose decoded length exceeds the `readUtf(256)` max throws Java's
+    // `DecoderException` (the decoded-length check — distinct from the truncated
+    // not-enough-bytes check) → the same invalid-payload disconnect. 257 units
+    // (`varint 0x81 0x02`) is one past the 256 max; 256 would be exactly at the
+    // limit and pass.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut data = vec![0x81u8, 0x02]; // varint 257
+    data.extend(vec![b'a'; 257]);
+    client
+        .write_all(&config_custom_payload_frame("minecraft:brand", &data))
+        .await
+        .expect("write oversize brand");
+
+    expect_eof(&mut client).await;
+    server_task.abort();
+}
+
+/// Frame a serverbound configuration `resource_pack` (id 6): `[uuid 16] ++
+/// [action ordinal varint]`, compressed.
+fn config_resource_pack_frame(action_ordinal: u8) -> Vec<u8> {
+    let mut body = varint(CONFIG_RESOURCE_PACK_ID);
+    body.extend_from_slice(&[0u8; 16]);
+    body.push(action_ordinal);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    frame(&wire)
+}
+
+#[tokio::test]
+async fn config_resource_pack_declined_keeps_open() {
+    // No pack is ever required (`getServerResourcePack()` is empty), so a
+    // DECLINED terminal response does NOT disconnect — Java's required-kick
+    // branch is dead with an empty pack, and the task-finish branch can never
+    // match. The connection stays open.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    client
+        .write_all(&config_resource_pack_frame(1)) // Action.DECLINED
+        .await
+        .expect("write resource_pack DECLINED");
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_custom_click_action_keeps_open() {
+    // A custom click action (`[id] ++ optional tag`) decodes and the connection
+    // stays open (the server only debug-logs; the callbacks are plugin-layer).
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    // `id` "minecraft:button", then `optionalTag` = present empty compound,
+    // matching `optionalTagCodec(...).apply(lengthPrefixed(65536))`: the whole
+    // optional-tag encoding (NBT type 10 + empty-compound end marker) is
+    // wrapped in a length varint — `varint(2) ++ [0x0A, 0x00]`.
+    let mut body = varint(CONFIG_CUSTOM_CLICK_ACTION_ID);
+    body.extend_from_slice(&varint(16));
+    body.extend_from_slice(b"minecraft:button");
+    body.extend_from_slice(&varint(2));
+    body.extend_from_slice(&[0x0A, 0x00]);
+    let mut wire = varint(0);
+    wire.extend_from_slice(&body);
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write custom_click_action");
+
+    expect_silent_open(&mut client).await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn config_accept_code_of_conduct_closes() {
+    // `handleAcceptCodeOfConduct` -> `finishCurrentTask("server_code_of_conduct")`
+    // with no CoC task ever current — Java's `IllegalStateException`, a
+    // deterministic Malformed close (EOF). The fieldless body is `[id 9]`.
+    let (addr, server_task) = start_server(config_with_threshold(256)).await;
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+
+    login_and_assert_response(&mut client, 256).await;
+    consume_config_sync_opening(&mut client).await;
+
+    let mut wire = varint(0);
+    wire.extend_from_slice(&varint(CONFIG_ACCEPT_CODE_OF_CONDUCT_ID));
+    client
+        .write_all(&frame(&wire))
+        .await
+        .expect("write accept_code_of_conduct");
 
     expect_eof(&mut client).await;
     server_task.abort();

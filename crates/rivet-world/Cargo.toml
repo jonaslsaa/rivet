@@ -12,16 +12,59 @@ workspace = true
 # `FriendlyByteBuf` (and the section/data-layer buffers it fills) is BytesMut-
 # backed; the #100 superflat content builder writes sections through it.
 bytes = { workspace = true }
+# Region-file codecs (#231, `world.level.chunk.storage`): gzip/deflate read and
+# gzip write ride on flate2 (gzip proven via rivet-nbt). Paper's lz4-java
+# block stream is decoded with lz4_flex + xxHash32; lz4 and deflate writes stay
+# deferred (see CRATES.md).
+flate2 = { workspace = true }
+lz4_flex = { workspace = true }
+xxhash-rust = { workspace = true }
+# `StructureAccess`'s reference sets are an `IndexSet<u64>` — the Rust stand-in
+# for Java's `LongOpenHashSet`. Dedup and first-insertion order are the
+# IndexSet's, not Java's (which iterates in hash-probe slot order; see the
+# module `RivetTodo(#185)` in structure_access).
+indexmap = { workspace = true }
+# PCRE2 is the closest maintained engine to Java Pattern: it supports the
+# lookarounds/backreferences used by `regex:` allow-list rules and keeps Java's
+# default ASCII `\d`/`\w`/`\s` behavior when UTF mode is enabled without UCP.
+pcre2 = { workspace = true }
 # The `packets` feature unlocks the game packet bodies this crate produces
 # content for (#94): `LevelChunkPacketData`, `LightUpdatePacketData`,
 # `HeightmapType` (all feature-gated in rivet-protocol).
 rivet-protocol = { workspace = true, features = ["packets"] }
-rivet-registry = { workspace = true }
+# The `blocks` feature exposes the generated block/state/property tables +
+# the `BlockState` value type (issue #228) this slice's `block` module and the
+# chunk/palette golden tests read.
+rivet-registry = { workspace = true, features = ["blocks"] }
+# Rivet-serialization's `DynamicOps`/codec surface is used two ways in this
+# crate: the `feature.configurations` codec factories (`unit_codec` /
+# `record_builder` / `codec::float_range`) in none_feature_configuration.rs and
+# probability_feature_configuration.rs, and the `GenerationStep.Decoration`
+# codec's factory (`decoration_codec::<Ops>()`). Both are ops-generic — the
+# same shape `rivet-registry::core::rotations` takes for its `CODEC`; `JsonOps`
+# is used only in tests.
+rivet-serialization = { workspace = true }
+# The chunk-access carrier types hold `CompoundTag`s (`ChunkAccess` pending
+# block entities, `ProtoChunk` entities) and the `UpgradeData`/`ProtoChunk`
+# read `CompoundTag`; rivet-nbt is now a production dependency.
+rivet-nbt = { workspace = true }
 rivet-util = { workspace = true }
+# `LevelVersion.parse` (level.dat header) falls back to the pinned 26.2
+# `SharedConstants` current-version constants (`rivet-core::shared_constants`).
+rivet-core = { workspace = true }
+# The `.mcc` oversized-chunk commit op writes to a `tmp...` file in the
+# external-file directory and atomically renames it over the target
+# (`Files.move(tmp, target, REPLACE_EXISTING)`); the temp path must outlive
+# the `RegionFile.write` call, which only `tempfile::TempPath` guarantees.
+tempfile = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 # Tests build real containers (BytesMut-backed FriendlyByteBuf).
 bytes = { workspace = true }
+# The `feature.configurations` codec tests decode/encode through
+# `JsonOps::INSTANCE` (serde_json::Value backed).
+serde_json = { workspace = true }
 # The PalettedContainer<StateId> golden tests drive the real global
 # block-state table (rivet-registry `blocks` feature). Dev-only: normal
 # builds of rivet-world stay feature-free.

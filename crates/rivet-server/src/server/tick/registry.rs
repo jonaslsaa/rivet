@@ -7,11 +7,15 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
+use rivet_protocol::protocol::common::client_information::ClientInformation;
+use rivet_registry::core::GameProfile;
+
 use super::channels::{
     ConnChannels, LifecycleEvent, MAX_INBOUND_DECOMPRESSED_BYTES_PER_DRAIN,
     MAX_INBOUND_FRAMES_PER_DRAIN, OutboundEvent, ServerboundFrame,
 };
 use crate::server::network::connection_id::ConnectionId;
+use crate::server::network::packet_listener::DisconnectReason;
 
 /// Outcome of draining one connection's inbound channel.
 #[derive(Debug, Clone)]
@@ -36,14 +40,72 @@ pub enum OutboundError {
 
 /// The tick thread's connections, keyed by `ConnectionId` (OWNERSHIP §Network:
 /// the tick thread owns the inbound receivers / outbound senders).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ConnectionRegistry {
     connections: HashMap<ConnectionId, ConnChannels>,
+    /// The rotating round-robin drain cursor: the connection at which the next
+    /// tick's aggregate drain starts (ascending `ConnectionId` order, wrapping).
+    /// The tick loop advances it past the connections it gave budget to, so the
+    /// aggregate inbound budget ([`MAX_INBOUND_FRAMES_PER_TICK`] /
+    /// [`MAX_INBOUND_BYTES_PER_TICK`]) cannot indefinitely favor the same fixed
+    /// subset of connections. A stable connection that sorts last is still
+    /// served on its turn. See [`Self::rotated_ids`].
+    next_drain: ConnectionId,
+    /// The last disconnect reason observed per connection, recorded when the
+    /// tick removes the entry (a `Disconnect` lifecycle event, a closed inbound
+    /// channel, or an outbound-overload prune). The session manager's prune
+    /// consumes it via [`Self::take_disconnect_reason`] when a session ends, to
+    /// report why on the `RIVET_SESSION_END` trace path; the tick loop drops
+    /// whatever it did not consume at the tick boundary ([`Self::drain_unconsumed_disconnect_reasons`]),
+    /// so the map is empty between ticks even on a server with no session
+    /// manager. Tick-owned — the same OWNERSHIP exception as the registry itself
+    /// — so no cross-thread state exists.
+    last_disconnect_reason: HashMap<ConnectionId, DisconnectReason>,
+}
+
+impl Default for ConnectionRegistry {
+    fn default() -> Self {
+        ConnectionRegistry {
+            connections: HashMap::new(),
+            next_drain: ConnectionId(0),
+            last_disconnect_reason: HashMap::new(),
+        }
+    }
 }
 
 impl ConnectionRegistry {
     pub fn new() -> Self {
         ConnectionRegistry::default()
+    }
+
+    /// Consume the recorded disconnect reason for a connection the tick removed
+    /// (the session manager's prune uses this to report why a session ended).
+    pub fn take_disconnect_reason(&mut self, id: ConnectionId) -> Option<DisconnectReason> {
+        self.last_disconnect_reason.remove(&id)
+    }
+
+    /// Drop every recorded disconnect reason the session manager did not
+    /// consume. The tick loop calls this at the end of every tick, whether or
+    /// not a session manager is registered: a reason is recorded only when a
+    /// connection entry is removed, so by the time the session manager's prune
+    /// has run, any reason left in the map belongs to a connection that never
+    /// reached play (a status/handshake/login close, or a session-less overflow
+    /// prune) and will never be consumed — without this, a server with no
+    /// session manager (or one whose connections close before play) would grow
+    /// the map without bound. Draining at the tick boundary keeps the map empty
+    /// between ticks: bounded to the reasons recorded and consumed within one
+    /// tick.
+    pub fn drain_unconsumed_disconnect_reasons(&mut self) {
+        self.last_disconnect_reason.clear();
+    }
+
+    /// Test-only: the count of recorded-but-unconsumed disconnect reasons. The
+    /// tick-loop counterfactual proves this is zero between ticks; production
+    /// code never needs to observe it (reasons are consumed by the session
+    /// manager's prune or drained at the tick boundary).
+    #[cfg(test)]
+    pub(crate) fn disconnect_reason_count(&self) -> usize {
+        self.last_disconnect_reason.len()
     }
 
     pub fn len(&self) -> usize {
@@ -70,6 +132,33 @@ impl ConnectionRegistry {
         self.connections.iter()
     }
 
+    /// Connection ids in deterministic ascending `ConnectionId` order, rotated
+    /// to start at or after [`Self::next_drain`] (wrapping). The tick loop drains
+    /// in this order, so the rotating start gives every connection its turn at
+    /// the head of the aggregate budget instead of permanently favoring the
+    /// connections that happen to sort first (a fixed order lets the connections
+    /// at the tail starve indefinitely once the aggregate budget is exhausted
+    /// before reaching them).
+    ///
+    /// The rotation is deterministic (sorted, not hash order): the fairness
+    /// tests depend on it, and a `HashMap` iteration order is unspecified.
+    pub fn rotated_ids(&self) -> Vec<ConnectionId> {
+        let mut ids: Vec<ConnectionId> = self.connections.keys().copied().collect();
+        ids.sort_unstable();
+        // `ConnectionId`s are unique per boot, so a cursor pointing at a removed
+        // connection simply starts the rotation at the next higher id (wrapping
+        // when the cursor is past every id — `rotate_left(len)` is a no-op).
+        let pos = ids.partition_point(|id| *id < self.next_drain);
+        ids.rotate_left(pos);
+        ids
+    }
+
+    /// Set the rotating drain cursor for the next drain pass (called by the tick
+    /// loop after each aggregate drain).
+    pub fn advance_drain_cursor(&mut self, next: ConnectionId) {
+        self.next_drain = next;
+    }
+
     /// Apply one lifecycle event (the tick thread's registration source).
     pub fn apply(&mut self, event: LifecycleEvent) {
         match event {
@@ -86,10 +175,33 @@ impl ConnectionRegistry {
                 self.connections
                     .insert(id, ConnChannels::new(id, remote, in_rx, out_tx, drained));
             }
-            LifecycleEvent::Disconnect { id, .. } => {
+            LifecycleEvent::Disconnect { id, reason } => {
                 self.connections.remove(&id);
+                self.last_disconnect_reason.insert(id, reason);
+            }
+            LifecycleEvent::EnterPlay {
+                id,
+                profile,
+                client_information,
+            } => {
+                if let Some(conn) = self.connections.get_mut(&id) {
+                    conn.set_play_handoff(profile, client_information);
+                }
+                // An EnterPlay for an unknown connection is a race where the
+                // connection already closed; the handoff is dropped.
             }
         }
+    }
+
+    /// Consume a connection's configuration→play handoff ([`LifecycleEvent::EnterPlay`])
+    /// so the session manager can spawn its join burst exactly once.
+    pub fn take_play_handoff(
+        &mut self,
+        id: ConnectionId,
+    ) -> Option<(GameProfile, ClientInformation)> {
+        self.connections
+            .get_mut(&id)
+            .and_then(ConnChannels::take_play_handoff)
     }
 
     /// Drain one connection's inbound frames in FIFO order, bounded by the
@@ -174,6 +286,8 @@ impl ConnectionRegistry {
         }
         if closed {
             self.connections.remove(&id);
+            self.last_disconnect_reason
+                .insert(id, DisconnectReason::EndOfStream);
             return DrainOutcome::Closed;
         }
         DrainOutcome::Drained(frames)
@@ -195,10 +309,14 @@ impl ConnectionRegistry {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 self.connections.remove(&id);
+                self.last_disconnect_reason
+                    .insert(id, DisconnectReason::Overflow);
                 Err(OutboundError::Overflow(id))
             }
             Err(TrySendError::Closed(_)) => {
                 self.connections.remove(&id);
+                self.last_disconnect_reason
+                    .insert(id, DisconnectReason::EndOfStream);
                 Err(OutboundError::Gone(id))
             }
         }
@@ -248,6 +366,66 @@ mod tests {
             drained: InboundDrained::new(),
         });
         (in_tx, out_rx)
+    }
+
+    /// The rotating drain order is deterministic by ascending `ConnectionId`,
+    /// never the unspecified `HashMap` iteration order, and starts at the
+    /// cursor (wrapping).
+    #[test]
+    fn rotated_ids_are_sorted_and_rotated_deterministically() {
+        let mut reg = ConnectionRegistry::new();
+        // Connected out of id order: the rotation is by id, not insertion.
+        for id in [
+            ConnectionId(5),
+            ConnectionId(1),
+            ConnectionId(9),
+            ConnectionId(3),
+        ] {
+            connect(&mut reg, id, 4, 4);
+        }
+        // Cursor 0 (default): ascending id order.
+        assert_eq!(
+            reg.rotated_ids(),
+            vec![
+                ConnectionId(1),
+                ConnectionId(3),
+                ConnectionId(5),
+                ConnectionId(9)
+            ]
+        );
+        // A cursor at 3 starts the rotation there, wrapping 9 before 1.
+        reg.advance_drain_cursor(ConnectionId(3));
+        assert_eq!(
+            reg.rotated_ids(),
+            vec![
+                ConnectionId(3),
+                ConnectionId(5),
+                ConnectionId(9),
+                ConnectionId(1)
+            ]
+        );
+        // A cursor past every id wraps fully back to the head (no-op rotation).
+        reg.advance_drain_cursor(ConnectionId(10));
+        assert_eq!(
+            reg.rotated_ids(),
+            vec![
+                ConnectionId(1),
+                ConnectionId(3),
+                ConnectionId(5),
+                ConnectionId(9)
+            ]
+        );
+        // A cursor pointing at a removed id falls through to the next higher.
+        reg.advance_drain_cursor(ConnectionId(6));
+        assert_eq!(
+            reg.rotated_ids(),
+            vec![
+                ConnectionId(9),
+                ConnectionId(1),
+                ConnectionId(3),
+                ConnectionId(5)
+            ]
+        );
     }
 
     #[test]
@@ -556,5 +734,114 @@ mod tests {
         assert_eq!(reg.len(), 1);
         // The old sender sees its receiver dropped.
         assert!(in_tx.try_send(frame(0)).is_err());
+    }
+
+    /// Load-bearing counterfactual for the disconnect-reason leak: every
+    /// recorded disconnect reason is drained by the end of the tick. The registry
+    /// records a reason on each of the three removal paths — a lifecycle
+    /// `Disconnect`, a closed inbound channel, and an outbound-overflow prune —
+    /// and the tick loop drains whatever the session manager did not consume at
+    /// the tick boundary. So even a server with **no session manager**
+    /// (`enable_join=false` — the status/offline-login boot) must show an empty
+    /// reason map after every tick: a single connect/disconnect cycle must not
+    /// retain one entry per disconnected `ConnectionId` over a long run.
+    ///
+    /// This test drives the three removal paths against the same registry
+    /// without any session-manager tickable registered, asserting that each
+    /// path's reason is gone after the very next `drain_unconsumed_disconnect_reasons()`
+    /// — the same call `run_tick` performs every tick. A regression that stopped
+    /// draining (or recorded a reason the drain missed) fails here on a
+    /// long-lived, many-cycle loop, never silently growing memory.
+    #[test]
+    fn disconnect_reasons_are_drained_each_tick_without_a_session_manager() {
+        let mut reg = ConnectionRegistry::new();
+        // Path 1: a lifecycle Disconnect event (a status/handshake/login close
+        // with no session — exactly what an `enable_join=false` boot sees).
+        for round in 0..512 {
+            let id = ConnectionId(round * 3 + 1);
+            connect(&mut reg, id, 4, 4);
+            reg.apply(LifecycleEvent::Disconnect {
+                id,
+                reason: DisconnectReason::Timeout,
+            });
+            assert!(!reg.contains(id), "disconnect removed the entry");
+            assert_eq!(
+                reg.take_disconnect_reason(id),
+                Some(DisconnectReason::Timeout),
+                "the lifecycle reason is recorded"
+            );
+            reg.drain_unconsumed_disconnect_reasons();
+            assert_eq!(
+                reg.disconnect_reason_count(),
+                0,
+                "tick boundary leaves no unconsumed reason"
+            );
+        }
+
+        // Path 2: a closed inbound channel (the network task dropped its
+        // sender; the tick's drain prunes the entry and records EndOfStream).
+        for round in 0..512 {
+            let id = ConnectionId(round * 3 + 2);
+            let (in_tx, _out_rx) = connect(&mut reg, id, 4, 4);
+            drop(in_tx); // the connection task is gone
+            match reg.drain_one(id) {
+                DrainOutcome::Closed => {}
+                other => panic!("closed channel drains as Closed, got {other:?}"),
+            }
+            assert!(!reg.contains(id), "the closed channel pruned the entry");
+            assert_eq!(
+                reg.take_disconnect_reason(id),
+                Some(DisconnectReason::EndOfStream),
+                "the EOF prune recorded its reason"
+            );
+            reg.drain_unconsumed_disconnect_reasons();
+            assert_eq!(
+                reg.disconnect_reason_count(),
+                0,
+                "tick boundary leaves no unconsumed reason"
+            );
+        }
+
+        // Path 3: an outbound-overflow prune (the tick dropped the connection
+        // when its outbound channel was full — the backpressure policy). The
+        // channel has capacity 1 and is never drained, so the first send fills
+        // it and the second overflows, pruning the entry and recording
+        // `Overflow`.
+        for round in 0..512 {
+            let id = ConnectionId(round * 3 + 3);
+            let (_in_tx, out_rx) = connect(&mut reg, id, 4, 1);
+            let _out_rx = out_rx; // never drained: the channel stays full
+            assert_eq!(
+                reg.send(
+                    id,
+                    OutboundEvent::Disconnect {
+                        reason: DisconnectReason::Overflow,
+                    },
+                ),
+                Ok(()),
+                "the first send fills the outbound channel"
+            );
+            let err = reg
+                .send(
+                    id,
+                    OutboundEvent::Disconnect {
+                        reason: DisconnectReason::Overflow,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(err, OutboundError::Overflow(id));
+            assert!(!reg.contains(id), "overflow pruned the entry");
+            assert_eq!(
+                reg.take_disconnect_reason(id),
+                Some(DisconnectReason::Overflow),
+                "the overflow prune recorded its reason"
+            );
+            reg.drain_unconsumed_disconnect_reasons();
+            assert_eq!(
+                reg.disconnect_reason_count(),
+                0,
+                "tick boundary leaves no unconsumed reason"
+            );
+        }
     }
 }

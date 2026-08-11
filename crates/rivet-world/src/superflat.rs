@@ -34,7 +34,7 @@ use crate::chunk::data_layer::DataLayer;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container::PalettedContainer;
 use crate::chunk::strategy::Strategy;
-use crate::levelgen::heightmap::{Heightmap, prime_heightmaps};
+use crate::levelgen::heightmap::{Heightmap, StateFlags, Types, prime_heightmaps};
 use crate::lighting::light_update_data::build_light_update_data;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
@@ -101,7 +101,13 @@ impl<
 /// The `BlockBehaviour` flag predicates the superflat build resolves per state
 /// (the content is air + stone, so they are exact for it; the owning world
 /// units replace them with real behavior). Grouped so `build_superflat` takes
-/// one parameter instead of four predicates.
+/// one parameter instead of eight predicates.
+///
+/// The heightmap predicates (`is_air`/`blocks_motion`/`has_fluid`/`is_leaves`)
+/// and the block-counting recalc predicates are threaded from the caller's
+/// `BlockBehaviour` equivalents — there is no placeholder default. The caller
+/// supplies exact-for-content predicates for the two flags the generated table
+/// does not carry (`fluid_is_randomly_ticking` and `is_special_colliding`).
 pub struct BlockFlags<T: 'static> {
     /// `state.isAir()`.
     pub is_air: &'static dyn Fn(&T) -> bool,
@@ -112,6 +118,16 @@ pub struct BlockFlags<T: 'static> {
     pub has_fluid: &'static dyn Fn(&T) -> bool,
     /// `state.is(BlockTags.LEAVES)`.
     pub is_leaves: &'static dyn Fn(&T) -> bool,
+    /// `state.isRandomlyTicking()` — the block random-tick predicate.
+    pub is_randomly_ticking: &'static dyn Fn(&T) -> bool,
+    /// `state.getFluidState().isEmpty()`.
+    pub fluid_is_empty: &'static dyn Fn(&T) -> bool,
+    /// `state.getFluidState().isRandomlyTicking()` — the fluid random-tick
+    /// predicate, distinct from the block one.
+    pub fluid_is_randomly_ticking: &'static dyn Fn(&T) -> bool,
+    /// `CollisionUtil.isSpecialCollidingBlock(state)` — `hasLargeCollisionShape`
+    /// or `MOVING_PISTON`.
+    pub is_special_colliding: &'static dyn Fn(&T) -> bool,
 }
 
 /// Builds the deterministic single-stone superflat chunk content.
@@ -141,23 +157,50 @@ where
         }
     }
     let biomes = PalettedContainer::new(plains.clone(), biome_strategy.clone());
-    sections.push(LevelChunkSection::new(states, biomes, flags.is_air));
+    sections.push(LevelChunkSection::new(
+        states,
+        biomes,
+        flags.is_air,
+        flags.is_randomly_ticking,
+        flags.fluid_is_empty,
+        flags.fluid_is_randomly_ticking,
+        flags.is_special_colliding,
+    ));
     // Sections 1..23: all air, plains biome.
     for _ in 1..SECTION_COUNT {
         let states = PalettedContainer::new(air.clone(), block_strategy.clone());
         let biomes = PalettedContainer::new(plains.clone(), biome_strategy.clone());
-        sections.push(LevelChunkSection::new(states, biomes, flags.is_air));
+        sections.push(LevelChunkSection::new(
+            states,
+            biomes,
+            flags.is_air,
+            flags.is_randomly_ticking,
+            flags.fluid_is_empty,
+            flags.fluid_is_randomly_ticking,
+            flags.is_special_colliding,
+        ));
     }
 
     let heightmaps = heightmaps_for_sections(&sections, SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT, &flags);
 
-    let light_data = build_light_update_data(&superflat_sky_layers(), &superflat_block_layers());
+    let light_data = superflat_light_data();
 
     SuperflatChunkContent {
         sections,
         heightmaps,
         light_data,
     }
+}
+
+/// The deterministic full-sky light payload for a superflat chunk — the light
+/// the `ClientboundLevelChunkWithLightPacket` body carries (Java queries the
+/// `LevelLightEngine`; the engine is not ported, so the M1 send path uses the
+/// fixed superflat light).
+///
+/// RivetTodo(#184): the real `LevelLightEngine` replaces this filler when the
+/// lighting engine unit lands.
+pub fn superflat_light_data() -> LightUpdatePacketData {
+    build_light_update_data(&superflat_sky_layers(), &superflat_block_layers())
 }
 
 /// `primeHeightmaps` for a superflat chunk: the topmost opaque block per column
@@ -188,13 +231,13 @@ where
     prime_heightmaps(height, min_y, |ty, x, z| {
         for y in (min_y..=scan_top).rev() {
             let state = block_state_at(sections, min_y, x, y, z);
-            if Heightmap::is_opaque(
-                ty,
-                (flags.is_air)(&state),
-                (flags.blocks_motion)(&state),
-                (flags.has_fluid)(&state),
-                (flags.is_leaves)(&state),
-            ) {
+            let state_flags = StateFlags {
+                is_air: (flags.is_air)(&state),
+                blocks_motion: (flags.blocks_motion)(&state),
+                has_fluid: (flags.has_fluid)(&state),
+                is_leaves: (flags.is_leaves)(&state),
+            };
+            if Heightmap::is_opaque(Types::from_protocol(ty), state_flags) {
                 return Some(y);
             }
         }

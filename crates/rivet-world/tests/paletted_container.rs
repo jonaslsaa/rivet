@@ -13,7 +13,7 @@ use rivet_registry::generated::block_states::{
     BLOCK_STATE_COUNT, GLOBAL_PALETTE_BITS, StateId, is_valid,
 };
 use rivet_world::chunk::palette::GlobalIdMap;
-use rivet_world::chunk::paletted_container::PalettedContainer;
+use rivet_world::chunk::paletted_container::{PackedData, PalettedContainer};
 use rivet_world::chunk::strategy::Strategy;
 
 /// The dense generated block-state global id map: `StateId(n)` <-> global id
@@ -489,4 +489,193 @@ fn all_generated_state_ids_are_valid_global_ids() {
     assert_eq!(map.get_id(&StateId(12345)), 12345);
     assert!(is_valid(StateId(BLOCK_STATE_COUNT - 1)));
     assert!(!is_valid(StateId(BLOCK_STATE_COUNT)));
+}
+
+// ---------------------------------------------------------------------------
+// Anti-Xray presetValues + Moonrise FastPalette snapshot (#216)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn preset_values_force_palette_growth_on_unpack() {
+    // Java: unpackWithPresetValues on a full single-value palette triggers
+    // onResize which widens for the presets, then inserts them. Palette [85]
+    // (wire values) + presets [1, 10] -> union {85,1,10} -> 3 distinct ->
+    // ceillog2(3) = 2, but the configuration ladder maps that to the 4-bit
+    // Linear config (bits 1..=4 all map to FOUR_BITS_LINEAR, in-memory 4).
+    let data = PackedData::new(vec![StateId(85)], None);
+    let c = PalettedContainer::unpack_with_preset_values(
+        &block_state_strategy(),
+        data,
+        StateId(0),
+        Some(vec![StateId(1), StateId(10)]),
+    )
+    .expect("unpack");
+    // SingleValue + presets: the single value is not the default, so the
+    // Anti-Xray block runs and the palette grows to hold the presets.
+    assert_eq!(c.bits_per_entry(), 4);
+    let mut palette = Vec::new();
+    c.for_each_in_palette(|s| palette.push(s));
+    assert_eq!(palette.len(), 3);
+    assert!(palette.contains(&StateId(85)));
+    assert!(palette.contains(&StateId(1)));
+    assert!(palette.contains(&StateId(10)));
+    // The storage is zero-width: every stored index resolves to value 85
+    // (the single wire entry), and the presets are palette members only.
+    assert_eq!(c.get_index(0), StateId(85));
+    assert_eq!(c.get_index(4095), StateId(85));
+}
+
+#[test]
+fn preset_values_skip_when_single_value_matches_default() {
+    // Java: a SingleValue config only runs the Anti-Xray block when
+    // `valueFor(0) != defaultValue`. With the wire value equal to the default,
+    // the presets are NOT inserted.
+    let data = PackedData::new(vec![StateId(0)], None);
+    let c = PalettedContainer::unpack_with_preset_values(
+        &block_state_strategy(),
+        data,
+        StateId(0),
+        Some(vec![StateId(1)]),
+    )
+    .expect("unpack");
+    assert_eq!(c.bits_per_entry(), 0);
+    let mut palette = Vec::new();
+    c.for_each_in_palette(|s| palette.push(s));
+    assert_eq!(palette, vec![StateId(0)]); // presets absent
+}
+
+#[test]
+fn preset_values_reinserted_after_read() {
+    // Java `read()` calls `addPresetValues()` ("inefficient, but this isn't
+    // used by the server"): after adopting a fresh palette from the wire, the
+    // preset values are re-added to it.
+    // The unpacked container (4-bit, palette [85, 1], storage all-85) carries
+    // preset 10, so its palette grows to [85, 1, 10].
+    let data = PackedData::with_bits(
+        vec![StateId(85), StateId(1)],
+        Some(vec![0i64; 256]), // 4-bit, 4096 entries, all palette id 0 = 85
+        4,
+    );
+    let mut c = PalettedContainer::unpack_with_preset_values(
+        &block_state_strategy(),
+        data,
+        StateId(0),
+        Some(vec![StateId(10)]),
+    )
+    .expect("unpack");
+    let mut palette = Vec::new();
+    c.for_each_in_palette(|s| palette.push(s));
+    assert_eq!(palette, vec![StateId(85), StateId(1), StateId(10)]);
+
+    // A wire read replaces the palette with the wire's [air, 85, 1] and then
+    // re-adds preset 10, restoring [air, 85, 1, 10].
+    let mut src = PalettedContainer::new(StateId(0), block_state_strategy());
+    src.set_index(0, StateId(85));
+    src.set_index(1, StateId(1));
+    let bytes = write_to_bytes(&src);
+    let mut buf = FriendlyByteBuf::new(BytesMut::from(bytes.as_slice()));
+    c.read(&mut buf);
+    assert_eq!(c.get_index(0), StateId(85));
+    assert_eq!(c.get_index(1), StateId(1));
+    let mut palette = Vec::new();
+    c.for_each_in_palette(|s| palette.push(s));
+    assert_eq!(
+        palette,
+        vec![StateId(0), StateId(85), StateId(1), StateId(10)]
+    );
+}
+
+#[test]
+fn read_refreshes_snapshot_after_palette_replace() {
+    // Java `read()` sets `this.data = newData` then `updateData(this.data)`
+    // and `addPresetValues()`. The Moonrise snapshot is a live reference, so
+    // the Rust owned snapshot must be refreshed: reading a palette that grew
+    // must make the read path see the new entries.
+    let mut c = PalettedContainer::new(StateId(0), block_state_strategy());
+    let mut src = PalettedContainer::new(StateId(0), block_state_strategy());
+    src.set(0, 0, 0, StateId(85));
+    src.set(0, 0, 1, StateId(10));
+    let bytes = write_to_bytes(&src);
+    let mut buf = FriendlyByteBuf::new(BytesMut::from(bytes.as_slice()));
+    c.read(&mut buf);
+    assert_eq!(c.get(0, 0, 0), StateId(85));
+    assert_eq!(c.get(0, 0, 1), StateId(10));
+    assert_eq!(c.bits_per_entry(), 4);
+}
+
+#[test]
+fn snapshot_refreshes_after_set_grows_palette() {
+    // Java `onResize` (reached via `idFor` during `set`) calls `updateData`
+    // after the preset inserts and the final insert, so the snapshot reflects
+    // the grown palette. The Rust port must re-materialize it likewise: after
+    // growing, a previously-stored index reads the new value.
+    let mut c = PalettedContainer::new(StateId(0), block_state_strategy());
+    assert_eq!(c.get(0, 0, 0), StateId(0));
+    c.set(0, 0, 0, StateId(85));
+    assert_eq!(c.get(0, 0, 0), StateId(85));
+    // Set a *new* value on a fresh index: grows to 4-bit, snapshot rebuilt.
+    c.set(0, 0, 1, StateId(10));
+    assert_eq!(c.get(0, 0, 0), StateId(85));
+    assert_eq!(c.get(0, 0, 1), StateId(10));
+}
+
+#[test]
+fn copy_and_recreate_carry_preset_values() {
+    // Java's `copy()` and `recreate()` pass `this.presetValues` through, so
+    // resizes on the copy still keep the presets in the palette.
+    let data = PackedData::new(vec![StateId(85)], None);
+    let c = PalettedContainer::unpack_with_preset_values(
+        &block_state_strategy(),
+        data,
+        StateId(0),
+        Some(vec![StateId(1), StateId(10)]),
+    )
+    .expect("unpack");
+    assert_eq!(c.bits_per_entry(), 4);
+
+    // copy preserves preset_values: growing the copy re-adds the presets.
+    let mut copy = c.copy();
+    copy.set_index(0, StateId(2)); // a third distinct value
+    let mut palette = Vec::new();
+    copy.for_each_in_palette(|s| palette.push(s));
+    assert!(palette.contains(&StateId(1))); // preset survived the resize
+    assert!(palette.contains(&StateId(10)));
+
+    // recreate (Java `new PalettedContainer(valueFor(0), strategy, presets)`)
+    // starts single-value at valueFor(0) and re-applies the presets on resize.
+    let recreate = c.recreate();
+    let mut palette = Vec::new();
+    recreate.for_each_in_palette(|s| palette.push(s));
+    assert_eq!(palette, vec![StateId(85)]);
+    let mut recreate = recreate;
+    recreate.set_index(0, StateId(2)); // force a resize, presets reappear
+    let mut palette = Vec::new();
+    recreate.for_each_in_palette(|s| palette.push(s));
+    assert!(palette.contains(&StateId(1)));
+    assert!(palette.contains(&StateId(10)));
+}
+
+#[test]
+fn read_palette_snapshot_oob_panics_on_malformed_storage() {
+    // Java's `readPalette` throws "Palette index out of bounds" when the
+    // snapshot's entry is null. The port reproduces this on a hostile wire
+    // buffer whose storage longs contain an index the (small) palette cannot
+    // hold: the LinearPalette snapshot covers [air, stone], so a stored index
+    // >= 2 reads out of bounds.
+    //
+    // Build a 4-bit container with palette [air(0), stone(1)] and storage
+    // whose entry 0 holds palette index 2 (malformed: no such entry).
+    let mut c = PalettedContainer::new(StateId(0), block_state_strategy());
+    c.set_index(0, StateId(1)); // palette [0, 1], 4-bit
+    let mut bytes = write_to_bytes(&c);
+    // Cell 0's long is written big-endian at bytes[4..12]; entry 0 is the low
+    // nibble, i.e. the low nibble of bytes[11]. Force it to a palette index
+    // the 2-entry palette does not hold.
+    bytes[11] = 0x02;
+    let mut buf = FriendlyByteBuf::new(BytesMut::from(bytes.as_slice()));
+    c.read(&mut buf);
+    // `catch_unwind` needs `AssertUnwindSafe`: `c` owns trait objects that
+    // cannot prove `UnwindSafe`.
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.get_index(0)));
+    assert!(err.is_err());
 }

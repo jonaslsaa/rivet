@@ -17,7 +17,9 @@ JVM and to use `anyhow`/`serde`.
   property enum structure), consumes `data/reports/registries.json` to emit the
   static-builtin registry tables into the same `src/generated/` (see
   `registries` below), consumes `data/reports/blocks.json` to emit the
-  block-state global-id table (see `block_states.rs`, issue #154), and consumes
+  block-state global-id table (see `block_states.rs`, issue #154), consumes
+  `data/block_behaviors.json` to emit the per-`StateId` behavior table (see
+  `block_behaviors.rs`, issue #228), and consumes
   `data/reports/packets.json` to emit the packet-ID tables into
   `crates/rivet-protocol/src/generated/`.
 - **`registries`** — reads the pinned vanilla `data/reports/registries.json`
@@ -51,6 +53,40 @@ JVM and to use `anyhow`/`serde`.
   id space, defaults in range, and the representative anchor ids. This is the
   live half of the fixture-pinned conformance test in `generate`'s
   `block_states.rs` tests.
+- **`extract-block-behaviors`** — compiles and runs `java/BlockBehaviourProbe.java`
+  against the real Paper jar, boots `Bootstrap` + the `Blocks` static init
+  (which `initCache`s every state against `EmptyBlockGetter`), evaluates all
+  32,366 states' worldgen/heightmap/lighting accessors, and writes the
+  run-length-encoded per-`StateId` behavior table to `data/block_behaviors.json`
+  (+ provenance manifest), issue #228.
+- **`probe-block-behaviors`** — re-runs `BlockBehaviourProbe` against the real
+  Paper jar and requires byte-identity with the committed `data/block_behaviors.json`,
+  that every probe anchor key (state_count, run_count, and the representative
+  air/stone/water/lava/oak_leaves/glass/torch words) is present, and that
+  state_count is pinned to 32366. The anchor *values* are pinned independently
+  by the `rivet-registry` `BlockState` behavior-decode tests
+  (`behavior_queries_match_probe_anchors` /
+  `behavior_word_fields_match_paper_semantics`). This is the live half of the
+  fixture-pinned conformance tests in `generate`'s `block_behaviors.rs` tests.
+- **`extract-worldgen`** — compiles and runs `java/WorldgenDataExtractor.java`
+  against the real Paper jar, reproducing `WorldLoader.load` (vanilla pack ->
+  STATIC layer -> `TagLoader.loadTagsForExistingRegistries` ->
+  `RegistryDataLoader.load(WORLDGEN_REGISTRIES)`), and writes the deterministic
+  worldgen noise registry, per-biome climate configuration, and multi-noise
+  biome-source preset parameter points to `data/worldgen.json` (issue #354).
+  The three surfaces are datapack-loaded or hardcoded in Paper:
+  `minecraft:worldgen/noise` (`NormalNoise.NoiseParameters`, dense `0..n`),
+  `minecraft:worldgen/biome` (`Biome.ClimateSettings` per biome), and
+  `MultiNoiseBiomeSourceParameterList.knownPresets()` (overworld +
+  `OverworldBiomeBuilder` / nether inline list). Parameter spans are the
+  quantized longs (`Climate.quantizeCoord`, `(long)(coord * 10000.0F)`) exactly
+  as stored in the runtime `Climate.ParameterPoint`, so the generated Rust table
+  reconstructs the exact values with no float round-trip.
+- **`probe-worldgen`** — re-runs `WorldgenDataExtractor` against the real Paper
+  jar and requires byte-identity with the committed `data/worldgen.json` plus
+  the anchor counts (63 noises / 66 biome climates / 2 presets, nether 5 points,
+  overworld 7594 points). This is the live half of the fixture-pinned
+  conformance test in `generate`'s `worldgen.rs` tests.
 - **`reports`** — runs the vanilla `net.minecraft.data.Main --reports` datagen
   against the materialized Paper 26.2 server jar and pins the canonical
   `packets.json` / `registries.json` / `blocks.json` reports (with provenance)
@@ -65,6 +101,10 @@ rivet-codegen mth-gen    [--bundler <path>] [--output <dir>]
 rivet-codegen extract-biomes-tags [--bundler <path>] [--output <path>]
 rivet-codegen probe-biomes-tags  [--bundler <path>]
 rivet-codegen probe-block-states [--bundler <path>]
+rivet-codegen extract-block-behaviors [--bundler <path>] [--output <path>]
+rivet-codegen probe-block-behaviors  [--bundler <path>]
+rivet-codegen extract-worldgen [--bundler <path>] [--output <path>]
+rivet-codegen probe-worldgen  [--bundler <path>]
 rivet-codegen reports    [--jar <path>] [--output <dir>] [--verify]
 ```
 
@@ -80,12 +120,16 @@ checkout; the tool needs a jar produced elsewhere.
 ```
 cargo build --release
 target/release/rivet-codegen extract          # -> data/block_states.json
-target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_states.rs, registries.rs, biomes.rs, tags.rs, synchronized.rs, registry_data.rs} + crates/rivet-protocol/src/generated/
+target/release/rivet-codegen generate         # -> crates/rivet-registry/src/generated/{mod.rs, blocks.rs, block_properties.rs, block_behaviors.rs, block_states.rs, registries.rs, biomes.rs, tags.rs, synchronized.rs, registry_data.rs, worldgen.rs} + crates/rivet-protocol/src/generated/
 target/release/rivet-codegen registries       # -> crates/rivet-registry/src/generated/registries.rs (report-driven half only)
 target/release/rivet-codegen mth-gen          # -> crates/rivet-util/src/mth_{sin_table,atan_tables,golden_tests}.rs
 target/release/rivet-codegen extract-biomes-tags  # -> data/biomes_tags.json + manifest
 target/release/rivet-codegen probe-biomes-tags    # verify biome ids + tag network content against live Paper
 target/release/rivet-codegen probe-block-states   # verify the emitted block-state global ids against live Paper
+target/release/rivet-codegen extract-block-behaviors  # -> data/block_behaviors.json + manifest
+target/release/rivet-codegen probe-block-behaviors    # verify the per-StateId behavior table against live Paper
+target/release/rivet-codegen extract-worldgen         # -> data/worldgen.json + manifest
+target/release/rivet-codegen probe-worldgen           # verify the worldgen noise/biome/preset data against live Paper
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
@@ -93,14 +137,17 @@ target/release/rivet-codegen reports          # -> data/reports/{packets,registr
 static-builtin registry tables (from `data/reports/registries.json`, the
 `RegistryDumpReport` fixture), the block-state global-id table (from
 `data/reports/blocks.json`, the `BlockListReport` fixture), the biome id +
-tag network tables (from `data/biomes_tags.json`), the synchronized
-configuration-registry element tables (from `data/synchronized_registries.json`),
-the pre-baked registry NBT payloads (from `data/registry_data.json`, the
-canonical join capture), and the packet-ID tables (from
-`data/reports/packets.json`, the `PacketReport` fixture). Regenerate all of them
-with a single `generate` run; `--input`/`--output` control the block half,
-`--packets`/`--packets-output` control the packet half. (The `registries`
-subcommand emits just the report-driven registry tables.)
+tag network tables (from `data/biomes_tags.json`), the per-`StateId` behavior
+table (from `data/block_behaviors.json`, the `BlockBehaviourProbe` fixture),
+the synchronized configuration-registry element tables (from
+`data/synchronized_registries.json`), the pre-baked registry NBT payloads
+(from `data/registry_data.json`, the canonical join capture), the worldgen
+noise/biome-climate/preset tables (from `data/worldgen.json`, the
+`WorldgenDataExtractor` fixture), and the packet-ID tables (from
+`data/reports/packets.json`, the `PacketReport` fixture).
+Regenerate all of them with a single `generate` run; `--input`/`--output`
+control the block half, `--packets`/`--packets-output` control the packet half.
+(The `registries` subcommand emits just the report-driven registry tables.)
 
 `extract` and `mth-gen` cache the unpacked classpath in `.cache/` (gitignored)
 so reruns are fast. Pass `--bundler` to point at a different jar.
@@ -228,14 +275,26 @@ the block-state index layout and must not be sorted during codegen.
 Wired into `crates/rivet-registry/src/generated/`, committed, and gated behind
 the crate's `"blocks"` cargo feature:
 
-- `mod.rs` — declares the generated submodules (`block_properties`, `blocks`,
-  `registries`).
+- `mod.rs` — declares the generated submodules: `biomes`, `block_behaviors`,
+  `block_properties`, `block_states`, `blocks`, `registries`, `registry_data`,
+  `synchronized`, `tags`, `worldgen`.
 - `blocks.rs` — `BlockId(pub u16)`, a `phf::Map<&'static str, u16>`
   (`BLOCK_BY_NAME`), an id-indexed `BLOCK_BY_ID` array, and lookup methods.
 - `block_properties.rs` — `BlockPropertyId`, an enum with one variant per
   distinct `(name, values)` property type, plus the value tables and a per-block
   `BLOCK_STATE_SHAPES` table (ordered property ids by block id).
+- `block_states.rs` — the dense global block-state ids in Paper's
+  `Block.BLOCK_STATE_REGISTRY` order (`StateId(pub u16)`, `BLOCK_STATE_COUNT` =
+  32366, `GLOBAL_PALETTE_BITS`, `BLOCK_STATE_BASES`, and
+  `shape_of`/`state_id`/`block_of`), the wire global-palette index (issue #154).
+- `block_behaviors.rs` — the run-length-encoded per-`StateId` behavior table
+  (`BLOCK_BEHAVIOR_RUNS`, the flag/shift/mask constants, and `behavior_of`),
+  issue #228.
 - `registries.rs` — the report-driven static-builtin tables (see below).
+- `registry_data.rs` — the pre-baked registry NBT payloads (`SYNCHRONIZED_NBT`,
+  from `data/registry_data.json`, the canonical join capture).
+- `synchronized.rs` — the synchronized configuration-registry element tables
+  (`SYNCHRONIZED_REGISTRIES`, from `data/synchronized_registries.json`).
 - `biomes.rs` — the biome id/name table (`BIOME_BY_NAME`/`BIOME_BY_ID`, dense
   `0..n`, `BIOME_COUNT`), the element table a `PalettedContainer<Holder<Biome>>`
   global palette indexes into (issue #49).
@@ -245,6 +304,14 @@ the crate's `"blocks"` cargo feature:
   registries the report cannot cover it also emits the element table; the other
   8 resolve through the existing `blocks.rs`/`registries.rs`/`biomes.rs`
   surfaces. See "Biome + tag tables" below.
+- `worldgen.rs` — the worldgen noise registry, per-biome climate
+  configuration, and multi-noise biome-source preset parameter points
+  (`NOISE_BY_NAME`/`NOISE_BY_ID`/`NOISE_AMPLITUDES`, `BIOME_CLIMATE`/
+  `BIOME_CLIMATE_BY_ID`, and `NETHER_BIOME_SOURCE_PARAMETER_POINTS`/
+  `OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS`, from `data/worldgen.json`, the
+  `WorldgenDataExtractor` fixture, issue #354). Parameter spans are the
+  quantized longs (`Climate.quantizeCoord`) exactly as stored in the runtime
+  `Climate.ParameterPoint`.
 
 The generator asserts block ids are contiguous `0..n` (true for vanilla 26.2).
 After regenerating, run `cargo fmt -p rivet-registry` (the phf macro output is
@@ -259,12 +326,15 @@ repository source.
 Both `generate` and the standalone `registries` subcommand consume the pinned
 `data/reports/registries.json` (the vanilla `RegistryDumpReport`, issue #124
 phase F) and emit `crates/rivet-registry/src/generated/registries.rs`, committed
-and gated behind the crate's `"blocks"` cargo feature.
+and gated behind the crate's `"blocks"` cargo feature. The same validated
+surface also emits the dependency-free `generated/block_entity_types.rs`,
+which is available without that feature for loaded chunks and packet codecs.
 
 The report covers only `BuiltInRegistries.REGISTRY` — the 95 static registries,
 each element mapped to its `protocol_id` (the `MappedRegistry.byId` insertion
 index). The generator emits tables for the **minimal** subset whose element ids
-are on the M1 wire: `minecraft:item`, `minecraft:entity_type`,
+are on current wire or loaded-chunk paths: `minecraft:item`,
+`minecraft:entity_type`, `minecraft:block_entity_type`,
 `minecraft:data_component_type` (ItemStack / `ClientboundAddEntity` /
 `DataComponentPatch`), and `minecraft:fluid`, `minecraft:game_event`,
 `minecraft:potion`, `minecraft:point_of_interest_type` (static registries whose
@@ -279,7 +349,8 @@ Each surface is a dense `0..n` bijection — element id == holder id == network 
 - `{PREFIX}_BY_NAME` — a `phf::Map<&'static str, u16>` (name -> id), mirroring
   `BLOCK_BY_NAME`.
 - `{PREFIX}_BY_ID` — an id-indexed `&[&str]` (id == index), mirroring
-  `BLOCK_BY_ID`.
+  `BLOCK_BY_ID`. The block-entity surface additionally emits a dependency-free
+  id-indexed table and exact name lookup used by `BlockEntityType`.
 - `{PREFIX}_DEFAULT` — the `DefaultedRegistry` fold (`&str` name) for the four
   defaulted surfaces (item/entity_type/fluid/game_event); `Option<&str> = None`
   for the plain registries.

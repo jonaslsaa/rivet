@@ -34,7 +34,9 @@ pub enum TranslatableArg {
     Float(f64),
     Bool(bool),
     String(String),
-    Component(crate::Component),
+    // Boxed so the enum stays small once `Component` carries the full
+    // ClickEvent/HoverEvent codec tree (clippy `large_enum_variant`).
+    Component(Box<crate::Component>),
 }
 
 impl std::fmt::Display for TranslatableArg {
@@ -291,11 +293,11 @@ pub fn arg_codec<Ops: DynamicOps + 'static>(
             Either::Left(a) => a.clone(),
             Either::Right(c) => match c.try_collapse_to_string() {
                 Some(text) => TranslatableArg::String(text),
-                None => TranslatableArg::Component(c.clone()),
+                None => TranslatableArg::Component(Box::new(c.clone())),
             },
         }),
         Arc::new(|a: &TranslatableArg| match a {
-            TranslatableArg::Component(c) => Either::Right(c.clone()),
+            TranslatableArg::Component(c) => Either::Right((**c).clone()),
             other => Either::Left(other.clone()),
         }),
     )

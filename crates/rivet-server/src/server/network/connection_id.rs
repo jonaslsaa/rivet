@@ -5,7 +5,7 @@ use std::fmt;
 /// keyed by `ConnectionId`. The accept loop assigns ids; the tick thread's
 /// [`ConnectionRegistry`](crate::server::tick::registry::ConnectionRegistry)
 /// keys its per-connection channel ends by them (sub-issue #93).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConnectionId(pub u64);
 
 impl fmt::Display for ConnectionId {

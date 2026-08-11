@@ -40,10 +40,11 @@
 //! every connection, exactly as `Connection::send_packet` does on the tokio
 //! side (the #96 per-connection refinement is a `RivetTodo`).
 //!
-//! RivetTodo(#101): the `ServerPlayer`/`placeNewPlayer` join burst that calls
-//! `addPlayer` + `update` each tick — this slice is invoked directly by tests
-//! and exposes the M1 send-set. RivetTodo(#185): the per-stage send/load queues
-//! and rate limiters the full `updateQueues` drains.
+//! The `placeNewPlayer` join burst calls this per-player chunk send-set once at
+//! spawn (see `join.rs`), then `update` on each chunk-boundary crossing or
+//! view-distance change (issue #521: the re-center / re-distance path).
+//! RivetTodo(#185): the per-stage send/load queues, the rate limiters, and the
+//! unload packets the full `updateQueues` drains.
 
 use bytes::{Bytes, BytesMut};
 
@@ -58,10 +59,11 @@ use rivet_protocol::protocol::game::clientbound_set_simulation_distance::Clientb
 use rivet_protocol::registry_friendly_byte_buf::RegistryFriendlyByteBuf;
 use rivet_protocol::var_int;
 use rivet_protocol::varint21_length_field_prepender::encode_frame;
-use rivet_registry::RegistryAccess;
 use rivet_registry::core::ChunkPos;
+use rivet_registry::registries::BlockEntityType;
 
 use super::chunk_tracking_view::ChunkTrackingView;
+use super::server_level::MissingChunkPolicy;
 use super::server_level::ServerLevel;
 
 // `ServerChunkCache.setSendViewDistance` + `ChunkMap.setServerViewDistance` map
@@ -85,9 +87,11 @@ const AUTO_CONFIG_SEND_DISTANCE: bool = true;
 
 /// `RegionizedPlayerChunkLoader.getClientViewDistance(player)` —
 /// `player.requestedViewDistance()`, `null` → -1 (the "no request" sentinel the
-/// ladder resolves via auto-config). The M1 callers pass `None` (issue #101 is
-/// not wired), but the capture client itself requests 8 — see
-/// `add_and_send_chunks`.
+/// ladder resolves via auto-config). The live Slice B caller
+/// (`PlayerSessionManager::spawn_session` →
+/// [`place_new_player`](crate::server::player::join::place_new_player)) passes
+/// `Some(client_information.view_distance())`; the `None` auto-config path
+/// remains for the unit/`join_burst` callers that hand no client information.
 pub fn get_client_view_distance(requested_view_distance: Option<i32>) -> i32 {
     requested_view_distance.map(|vd| vd.max(0)).unwrap_or(-1)
 }
@@ -153,6 +157,33 @@ pub fn get_send_view_distance(
     load_view_distance.wrapping_sub(1).min(inner)
 }
 
+/// The `PlayerChunkLoaderData` distance ladder, derived from the world's
+/// Moonrise distances with the per-player overrides absent (`-1`, resolved to
+/// the world defaults): `getTickDistance` → `getLoadViewDistance` →
+/// `getSendViewDistance`. Returns `(tick, load, send)`.
+///
+/// Both `add` (the initial send-set) and `update` (the re-center) derive the
+/// same ladder. The world-pinned part is constant on the M1 world
+/// (`tick = 4`, `load = 5`); `send = min(load - 1, client + 1)` also depends
+/// on the per-player `requested_view_distance`, so it resolves `4` when the
+/// request is `None` or `≥ 3` and lower (`1..3`) for smaller requests.
+fn derive_distances(world: &ServerLevel, requested_view_distance: Option<i32>) -> (i32, i32, i32) {
+    let tick = get_tick_distance(
+        -1,
+        world.get_simulation_distance(),
+        -1,
+        world.load_view_distance(),
+    );
+    let load = get_load_view_distance(tick, -1, world.load_view_distance());
+    let client = get_client_view_distance(requested_view_distance);
+    let send = get_send_view_distance(load, client, -1, world.send_view_distance());
+    debug_assert!(
+        send <= load && tick <= load,
+        "send/tick view cannot exceed load view"
+    );
+    (tick, load, send)
+}
+
 /// One tick-thread-produced play-state packet: the play clientbound packet id
 /// plus the encoded body (packet id NOT included — the caller frames it). Plain
 /// owned values so the tick thread can queue them without holding game state
@@ -175,10 +206,11 @@ impl PlayPacket {
 /// `RegionizedPlayerChunkLoader.PlayerChunkLoaderData` — the per-player chunk
 /// send state, reduced to the M1 direct-send path.
 ///
-/// The M1 player stands still at the spawn chunk, so only `add()` (the initial
-/// send-set) is reachable; the movement-driven `update()` re-center, the
-/// `sentChunks` delta tracking, and the per-stage queues are deferred with
-/// #185/#101.
+/// `add_and_send_chunks` (the initial send-set at spawn) and `update` (the
+/// movement-driven re-center, issue #521) are ported; the `sentChunks` delta
+/// tracking (the M1 synchronous send path makes the previously-sent set equal
+/// the previous view — see `update`) and the per-stage queues are deferred with
+/// #185.
 pub struct PlayerChunkLoader {
     /// `this.lastChunkX` / `lastChunkZ` — the player's chunk position (the
     /// `ClientboundSetChunkCacheCenterPacket` center).
@@ -218,10 +250,11 @@ impl PlayerChunkLoader {
     /// record the distances sent in those packets, not the chunk set's delivery.
     ///
     /// `requested_view_distance` is `ServerPlayer.requestedViewDistance()`
-    /// (issue #101); the M1 callers pass `None`. Note the capture client itself
-    /// requests 8 (`client_information` view distance in `capture.jsonl`), but
-    /// the ladder still resolves send = 4 (`min(load - 1, client + 1)`), so the
-    /// M1 send-set is unchanged.
+    /// (issue #101). The live Slice B caller passes
+    /// `Some(ClientInformation.view_distance)` (the capture client requests 8,
+    /// which the ladder caps at `load - 1` → send 4, the 117-chunk M1 send-set).
+    /// The unit/`join_burst` callers pass `None`, which the auto-config ladder
+    /// resolves to the world's own send distance (also 4 on the M1 world).
     pub fn add_and_send_chunks(
         &mut self,
         world: &ServerLevel,
@@ -230,19 +263,7 @@ impl PlayerChunkLoader {
         // `add()`: derive the per-player distances from the world's Moonrise
         // distances (no per-player overrides — the M1 player holds the world
         // defaults).
-        let tick = get_tick_distance(
-            -1,
-            world.get_simulation_distance(),
-            -1,
-            world.load_view_distance(),
-        );
-        let load = get_load_view_distance(tick, -1, world.load_view_distance());
-        let client = get_client_view_distance(requested_view_distance);
-        let send = get_send_view_distance(load, client, -1, world.send_view_distance());
-        debug_assert!(
-            send <= load && tick <= load,
-            "send/tick view cannot exceed load view"
-        );
+        let (tick, _load, send) = derive_distances(world, requested_view_distance);
 
         // `add()` packet order — `this.player.connection.send(...)` in Moonrise
         // source order: cache radius, then simulation distance, then cache
@@ -316,14 +337,181 @@ impl PlayerChunkLoader {
         Ok(packets)
     }
 
+    /// `PlayerChunkLoaderData.update()` — the movement/re-distance-driven
+    /// path, reduced to the M1 direct-send world (issue #521).
+    ///
+    /// Whenever any tracked input changed (the center, the send/tick
+    /// distances, or both), this emits in Java's `update()` wire order:
+    /// the `ClientboundSetChunkCacheRadiusPacket` if the send distance changed
+    /// (the `lastSentChunkRadius != sendViewDistance` guard), the
+    /// `ClientboundSetSimulationDistancePacket` if the tick distance changed,
+    /// then the `ClientboundSetChunkCacheCenterPacket` if the center changed,
+    /// then the bare `ClientboundLevelChunkWithLightPacket`s for **only the
+    /// newly entered view cells**, in the deterministic union-box raster order
+    /// `ChunkTrackingView::difference` walks.
+    ///
+    /// **Full-view fidelity.** The Moonrise direct send is synchronous and
+    /// per-tick, and this slice's world has no chunk unloads (the pipeline is
+    /// deferred with #185), so the previously-sent set is exactly the previous
+    /// view. Java's `sentChunks` delta therefore collapses to the
+    /// `difference(prevView, nextView)` enter set — no `LongOpenHashSet` is
+    /// needed. The `wantChunkSent` acceptance
+    /// (`max(|dx|, |dz|) <= send + 1` and `wantChunkLoaded` with
+    /// `includeNeighbors`), the corner-shave, and the coordinates all match the
+    /// `add` send-set, so the enter cells are exactly the cells of the new view
+    /// the old view did not contain.
+    ///
+    /// **Nothing-to-do guard.** Java's `update` early-returns only when all six
+    /// of its conditions still hold — the three view distances (`send`, `load`,
+    /// `tick`), the chunk x/z, and `canGenerateChunks`. This slice tracks only
+    /// `send`, `tick`, and the center: the `load` distance derives from the
+    /// world's constant view distance (fixed per world instance), and
+    /// `canGenerateChunks` (spectator/creative generation permission) has no
+    /// ported counterpart. A `load`-only change emits nothing in this slice
+    /// anyway — `update` produces only the radius/simulation/center packets
+    /// and the newly entered chunks, and the load queues are deferred with
+    /// #185 — so the guard recomputes exactly when an output could change, and
+    /// an intra-chunk move with unchanged distances emits nothing (the same
+    /// "nothing we care about changed" early return).
+    ///
+    /// **No silent substitution.** Each entered position resolves through
+    /// `encode_chunk_with_light`, which honors `MissingChunkPolicy`:
+    /// `RequireLoaded` fails typed `UNVERIFIED` on a missing chunk (no
+    /// generation fallback); `RepeatSpawnFixture` repeats spawn content. The
+    /// entered set is emitted as a bare level-chunk packet per cell — no
+    /// `ChunkBatchStart`/`Finished`, exactly like the join burst.
+    ///
+    /// RivetTodo(#185): the distance-map `broadcastMap`/`loadTicketCleanup`/
+    /// `tickMap` updates, the unload packets, and the per-stage queues this
+    /// re-center eventually feeds.
+    pub fn update(
+        &mut self,
+        world: &ServerLevel,
+        player_chunk: ChunkPos,
+        requested_view_distance: Option<i32>,
+    ) -> Result<Vec<PlayPacket>, String> {
+        // Java: no per-player distance overrides on the M1 world, so the ladder
+        // resolves the world defaults — tick 4 / load 5, send `min(4, client + 1)`
+        // (4 unless the client requests < 3).
+        let (tick, _load, send) = derive_distances(world, requested_view_distance);
+        let (current_x, current_z) = (player_chunk.x(), player_chunk.z());
+
+        // The previous view, captured before any state commit: the center the
+        // last send-set actually used, with the send radius that last cache
+        // radius/center packet carried (`lastSendDistance`, still the old value
+        // here). Java's `sentChunks` delta equals this view minus the next (the
+        // M1 direct send is synchronous — every sent chunk is still the
+        // client's cache, and there are no unloads until #185). When the send
+        // distance changes the radii differ and the diff is against the
+        // previously-sent (old-radius) cache; the cells that leave are exactly
+        // the ones Java unloads in the deferred #185 updateQueues phase.
+        let prev_view = ChunkTrackingView::of(
+            ChunkPos::new(self.last_chunk_x, self.last_chunk_z),
+            self.last_send_distance,
+        );
+
+        let center_changed = self.last_chunk_x != current_x || self.last_chunk_z != current_z;
+        if !center_changed && self.last_send_distance == send && self.last_tick_distance == tick {
+            // Java `update()`: "nothing we care about changed, so we're not
+            // re-calculating."
+            return Ok(Vec::new());
+        }
+
+        // Java `update()`: the client radius/simulation updates come first,
+        // after the distance-map updates (which send unload packets
+        // synchronously — deferred with #185). Java compares against the
+        // *sent* values (`lastSentChunkRadius`/`lastSentSimulationDistance`),
+        // which are committed wherever the corresponding packet is emitted —
+        // in `add` and here — so they fold into `lastSendDistance`/
+        // `lastTickDistance`. The radius/simulation packets precede the center
+        // packet, so the client's cache is sized and located before any chunk
+        // arrives.
+        let mut packets = Vec::new();
+        if self.last_send_distance != send {
+            packets.push(PlayPacket::new(
+                PlayClientbound::SetChunkCacheRadius.id(),
+                encode_body(
+                    ClientboundSetChunkCacheRadiusPacket::stream_codec(),
+                    &ClientboundSetChunkCacheRadiusPacket::new(send),
+                )?,
+            ));
+        }
+        if self.last_tick_distance != tick {
+            packets.push(PlayPacket::new(
+                PlayClientbound::SetSimulationDistance.id(),
+                encode_body(
+                    ClientboundSetSimulationDistancePacket::stream_codec(),
+                    &ClientboundSetSimulationDistancePacket::new(tick),
+                )?,
+            ));
+        }
+
+        // Java `update()` commits the new center + distances before the center
+        // packet (`this.lastChunkX = currentChunkX` etc. precede the send) and
+        // before the chunk walk, so the enter-set diff is against the committed
+        // center.
+        self.last_chunk_x = current_x;
+        self.last_chunk_z = current_z;
+        self.last_send_distance = send;
+        self.last_tick_distance = tick;
+
+        // Java sends the center packet last in `update()` "so that the client
+        // does not ignore any of our unload chunk packets above", gated on the
+        // center actually changing (`lastSentChunkCenter`); the actual chunk
+        // sends happen in the later `updateQueues` phase. This slice has no
+        // unloads, so the observable order is radius → simulation → center →
+        // chunks — the same prepare-the-cache order the join burst uses.
+        if center_changed {
+            packets.push(PlayPacket::new(
+                PlayClientbound::SetChunkCacheCenter.id(),
+                encode_body(
+                    ClientboundSetChunkCacheCenterPacket::stream_codec(),
+                    &ClientboundSetChunkCacheCenterPacket::new(current_x, current_z),
+                )?,
+            ));
+        }
+
+        // Java: `sendChunk = (squareDistance <= send + 1) && wantChunkLoaded(...)`
+        // over the radius iteration — the same containment the join burst
+        // emits, so the difference against the previous view yields exactly the
+        // newly entered cells (and nothing to unload). `difference` walks the
+        // union bounding box in the deterministic X-major/Z-minor raster.
+        let next_view = ChunkTrackingView::of(ChunkPos::new(current_x, current_z), send);
+        let mut bodies = Vec::new();
+        ChunkTrackingView::difference(
+            &prev_view,
+            &next_view,
+            |pos| {
+                bodies.push(encode_chunk_with_light(pos, world));
+            },
+            |_| {},
+        );
+        let bodies: Vec<Vec<u8>> = bodies.into_iter().collect::<Result<_, _>>()?;
+        for body in bodies {
+            packets.push(PlayPacket::new(
+                PlayClientbound::LevelChunkWithLight.id(),
+                body,
+            ));
+        }
+        Ok(packets)
+    }
+
+    /// `PlayerChunkLoaderData.lastChunkX/lastChunkZ` — the cache center the
+    /// last `add`/`update` emitted (the chunk the player's view is centered
+    /// on). Test/observability seam for the movement-driven recenter (issue
+    /// #521).
+    pub fn last_chunk_pos(&self) -> ChunkPos {
+        ChunkPos::new(self.last_chunk_x, self.last_chunk_z)
+    }
+
     /// `PlayerChunkLoaderData.lastSendDistance` — the cache radius emitted by
-    /// the last `add`.
+    /// the last `add`/`update`.
     pub fn last_send_distance(&self) -> i32 {
         self.last_send_distance
     }
 
     /// `PlayerChunkLoaderData.lastTickDistance` — the simulation distance
-    /// emitted by the last `add`.
+    /// emitted by the last `add`/`update`.
     pub fn last_tick_distance(&self) -> i32 {
         self.last_tick_distance
     }
@@ -342,22 +530,34 @@ impl PlayerChunkLoader {
 /// all 117 bodies differ only in the 8-byte coordinate header), so any other
 /// view position resolves the spawn chunk's content.
 ///
+/// The light is the deterministic superflat light (`#184`): Java queries the
+/// `LevelLightEngine`; the engine is not ported, so every chunk carries the
+/// fixed superflat sky/block layers the golden fixture pins. The payload is
+/// computed once at `LevelChunk` construction and cloned here, so a per-chunk
+/// per-player encode never rebuilds the 26 layer arrays.
+///
 /// RivetTodo(#185): the chunk pipeline loads every view chunk; until then the
 /// content is the deterministic superflat build for every position.
 fn encode_chunk_with_light(pos: ChunkPos, world: &ServerLevel) -> Result<Vec<u8>, String> {
-    let content = match world.chunk_map().get_chunk(pos) {
-        Some(chunk) => chunk.content(),
-        None => world
-            .chunk_map()
-            .get_chunk(world.view().center())
-            .expect("spawn chunk loaded")
-            .content(),
+    let chunk = match world.chunk_map().get_chunk(pos) {
+        Some(chunk) => chunk,
+        None => match world.missing_chunk_policy() {
+            MissingChunkPolicy::RequireLoaded => {
+                return Err(format!(
+                    "UNVERIFIED region-backed chunk {pos} is not loaded; generation and superflat fallback are disabled"
+                ));
+            }
+            MissingChunkPolicy::RepeatSpawnFixture => world
+                .chunk_map()
+                .get_chunk(world.view().center())
+                .expect("spawn chunk loaded"),
+        },
     };
     let packet = ClientboundLevelChunkWithLightPacket::new(
         pos.x(),
         pos.z(),
-        content.chunk_packet_data(),
-        content.light_data.clone(),
+        chunk.chunk_packet_data(),
+        chunk.light_data(),
     );
     encode_chunk_body(&packet)
 }
@@ -376,11 +576,11 @@ fn encode_body<T>(
 }
 
 /// Encode a `ClientboundLevelChunkWithLightPacket` body over the
-/// registry-aware buffer (the block-entity list resolves through
-/// `BLOCK_ENTITY_TYPE`; the superflat chunk carries no block entities, so the
-/// empty `RegistryAccess` is never consulted).
+/// registry-aware buffer. The block-entity list and this codec context resolve
+/// through the same canonical built-in `BLOCK_ENTITY_TYPE` registry instance.
 fn encode_chunk_body(packet: &ClientboundLevelChunkWithLightPacket) -> Result<Vec<u8>, String> {
-    let mut out = RegistryFriendlyByteBuf::new(BytesMut::new(), RegistryAccess::empty());
+    let mut out =
+        RegistryFriendlyByteBuf::new(BytesMut::new(), BlockEntityType::built_in_registry_access());
     ClientboundLevelChunkWithLightPacket::stream_codec()
         .encode(&mut out, packet)
         .map_err(|e| format!("encoding level_chunk_with_light: {}", e.message))?;
@@ -416,8 +616,13 @@ pub fn encode_play_frame(packet: &PlayPacket, compression_threshold: i32) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivet_protocol::codec::StreamDecoder;
     use rivet_protocol::compression_decoder::CompressionDecoder;
+    use rivet_protocol::protocol::game::level_chunk_packet_data::{
+        BlockEntityInfo, LevelChunkPacketData,
+    };
     use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
+    use std::sync::Arc;
 
     /// The #194 capture fixture's first `level_chunk_with_light` body (coords
     /// -5/-4). All 117 bodies in the capture are byte-identical apart from the
@@ -437,6 +642,17 @@ mod tests {
         ServerLevel::new(super::super::server_level::ServerLevelConfig::default())
     }
 
+    #[test]
+    fn region_backed_policy_rejects_missing_chunk_without_spawn_fallback() {
+        let world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
+            missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
+            ..Default::default()
+        });
+        let error = encode_chunk_with_light(ChunkPos::new(1, 0), &world).unwrap_err();
+        assert!(error.contains("UNVERIFIED region-backed chunk"));
+        assert!(error.contains("fallback are disabled"));
+    }
+
     /// The expected M1 send-set order: the `-5..5` × `-5..5` raster skipping
     /// the four corners (X-major, Z-minor) — the deterministic coordinate sort
     /// `rivet-capture` canonicalizes the fixture to (`normalize.rs`), not
@@ -452,6 +668,42 @@ mod tests {
             }
         }
         out
+    }
+
+    fn packet_with_block_entity(
+        entity_type: Arc<BlockEntityType>,
+    ) -> ClientboundLevelChunkWithLightPacket {
+        let world = overworld();
+        let chunk = world
+            .chunk_map()
+            .get_chunk(world.view().center())
+            .expect("spawn chunk loaded");
+        let chunk_data = LevelChunkPacketData::new(
+            chunk.client_heightmaps(),
+            chunk.sections_buffer(),
+            vec![BlockEntityInfo::new(0x57, -64, entity_type, None)],
+        );
+        ClientboundLevelChunkWithLightPacket::new(0, 0, chunk_data, chunk.light_data())
+    }
+
+    #[test]
+    fn production_chunk_encoder_handles_a_registered_block_entity_end_to_end() {
+        let furnace = BlockEntityType::from_name("minecraft:furnace").unwrap();
+        let packet = packet_with_block_entity(furnace.clone());
+
+        let bytes = encode_chunk_body(&packet).expect("production chunk body encodes");
+        let access = BlockEntityType::built_in_registry_access();
+        let mut input = RegistryFriendlyByteBuf::new(BytesMut::from(bytes.as_slice()), access);
+        let decoded = ClientboundLevelChunkWithLightPacket::stream_codec()
+            .decode(&mut input)
+            .expect("encoded production packet decodes");
+
+        assert_eq!(input.readable_bytes(), 0);
+        let infos = decoded.chunk_data().block_entities();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].packed_xz(), 0x57);
+        assert_eq!(infos[0].y(), -64);
+        assert!(Arc::ptr_eq(infos[0].entity_type(), &furnace));
     }
 
     #[test]
@@ -621,5 +873,195 @@ mod tests {
         assert_eq!(packets.len(), 3 + 117);
         assert_eq!(loader.last_send_distance(), 4);
         assert_eq!(loader.last_tick_distance(), 4);
+    }
+
+    /// The chunk-body coordinate header is the BE i32 x/z at the head of the
+    /// body (the same layout `m1_send_set_is_117_chunks...` decodes).
+    fn chunk_body_coords(body: &[u8]) -> ChunkPos {
+        let x = i32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+        let z = i32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+        ChunkPos::new(x, z)
+    }
+
+    /// The M1 `update` path on the default (RepeatSpawnFixture) world: the
+    /// spawn send-set at (0,0), then a one-chunk-east move. Returns the
+    /// `update` packet list and the loader for further assertions.
+    fn loader_after_east_move() -> (PlayerChunkLoader, Vec<PlayPacket>) {
+        let world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader.update(&world, ChunkPos::new(1, 0), None).unwrap();
+        (loader, packets)
+    }
+
+    /// The cells the (0,0)→(1,0) move enters, in the union-box walker's
+    /// X-major/Z-minor order: the new view's x=6 column (z=-4..4) plus the two
+    /// cells the corner-shave shifts at x=5 (z=±5). 11 cells.
+    fn east_move_enter() -> Vec<ChunkPos> {
+        let mut out = Vec::new();
+        out.push(ChunkPos::new(5, -5));
+        out.push(ChunkPos::new(5, 5));
+        for z in -4i32..=4 {
+            out.push(ChunkPos::new(6, z));
+        }
+        out
+    }
+
+    /// The mirror image: the cells the (0,0)→(1,0) move leaves (re-entered by
+    /// the symmetric (1,0)→(0,0) move).
+    fn east_move_leave() -> Vec<ChunkPos> {
+        let mut out = Vec::new();
+        for z in -4i32..=4 {
+            out.push(ChunkPos::new(-5, z));
+        }
+        out.push(ChunkPos::new(-4, -5));
+        out.push(ChunkPos::new(-4, 5));
+        out
+    }
+
+    #[test]
+    fn update_emits_cache_center_then_only_newly_entered_chunks_in_raster_order() {
+        let (_loader, packets) = loader_after_east_move();
+        // Cache center first — the (1,0) varint body [0x01, 0x00].
+        assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheCenter.id());
+        assert_eq!(packets[0].body, vec![0x01, 0x00]);
+        // Then exactly the newly entered cells, in the deterministic
+        // X-major/Z-minor raster the union-box walker emits.
+        let coords: Vec<ChunkPos> = packets[1..]
+            .iter()
+            .map(|p| chunk_body_coords(&p.body))
+            .collect();
+        assert_eq!(coords, east_move_enter());
+        assert_eq!(coords.len(), 11, "one-chunk move enters exactly 11 cells");
+        for p in &packets[1..] {
+            assert_eq!(p.id, PlayClientbound::LevelChunkWithLight.id());
+        }
+    }
+
+    #[test]
+    fn update_inside_the_same_chunk_emits_nothing() {
+        // The nothing-to-do guard: same chunk, same distances → Java "nothing
+        // we care about changed, so we're not re-calculating."
+        let world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader.update(&world, world.view().center(), None).unwrap();
+        assert!(packets.is_empty());
+        // State is untouched by the no-op.
+        assert_eq!(loader.last_send_distance(), 4);
+        assert_eq!(loader.last_tick_distance(), 4);
+    }
+
+    #[test]
+    fn update_reemits_radius_when_requested_view_distance_changes_send() {
+        // A view-distance change with the center fixed: Java `update()` emits
+        // `updateClientChunkRadius` when `lastSentChunkRadius != sendViewDistance`
+        // (folded into `lastSendDistance`), so a client request that re-derives
+        // a different send distance emits the radius packet. On the M1 world
+        // `send = min(load - 1, client + 1) = min(4, client + 1)`, so a request
+        // of 2 yields send 3 (the world default 4 → client requests 0..3 lower
+        // it). The tick distance (`min(sim, load - 1)`) is world-pinned, so no
+        // simulation packet follows; the shrink sends no new chunks, and the
+        // center is unchanged, so the radius packet is the whole output.
+        let world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader
+            .update(&world, world.view().center(), Some(2))
+            .unwrap();
+        assert_eq!(packets.len(), 1, "radius only: no sim/center/chunks");
+        assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheRadius.id());
+        assert_eq!(packets[0].body, vec![0x03]); // send 3
+        assert_eq!(loader.last_send_distance(), 3);
+        // The next update with the same request is a no-op (radius already 3).
+        let again = loader
+            .update(&world, world.view().center(), Some(2))
+            .unwrap();
+        assert!(again.is_empty());
+        // Raising the request back to the world default re-emits radius 4 and
+        // the newly-entered ring: the radius-4 view (117 cells) minus the
+        // radius-3 view (the full 9×9 square = 81 cells) = 36 cells. Java's
+        // `wantChunkSent` against the new send distance enqueues exactly these.
+        let packets = loader
+            .update(&world, world.view().center(), Some(8))
+            .unwrap();
+        assert_eq!(packets.len(), 1 + 36, "radius + the grown ring");
+        assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheRadius.id());
+        assert_eq!(packets[0].body, vec![0x04]);
+        for p in &packets[1..] {
+            assert_eq!(p.id, PlayClientbound::LevelChunkWithLight.id());
+        }
+        assert_eq!(loader.last_send_distance(), 4);
+    }
+
+    #[test]
+    fn repeated_updates_compound_deterministically() {
+        // (0,0) -> (1,0) -> (2,0): the second move diffs against the first
+        // move's view, entering the x=7 column and the (6,±5) corner-shift
+        // cells — never re-sending the 117 original cells.
+        let world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&world, None).unwrap();
+        let first = loader.update(&world, ChunkPos::new(1, 0), None).unwrap();
+        assert_eq!(first.len(), 1 + 11);
+        let second = loader.update(&world, ChunkPos::new(2, 0), None).unwrap();
+        assert_eq!(second[0].id, PlayClientbound::SetChunkCacheCenter.id());
+        assert_eq!(second[0].body, vec![0x02, 0x00]);
+        let coords: Vec<ChunkPos> = second[1..]
+            .iter()
+            .map(|p| chunk_body_coords(&p.body))
+            .collect();
+        // From (1,0) to (2,0): the (6,-5)/(6,5) corner-shift cells plus the
+        // x=7 column z=-4..4 — the same shape as the first move, shifted east.
+        let mut expected = Vec::new();
+        expected.push(ChunkPos::new(6, -5));
+        expected.push(ChunkPos::new(6, 5));
+        for z in -4i32..=4 {
+            expected.push(ChunkPos::new(7, z));
+        }
+        assert_eq!(coords, expected);
+    }
+
+    #[test]
+    fn update_back_and_forth_is_symmetric() {
+        // Moving east then west returns to the origin view and re-enters the
+        // mirror-image west column — no dropped or duplicated cells.
+        let world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&world, None).unwrap();
+        loader.update(&world, ChunkPos::new(1, 0), None).unwrap();
+        let back = loader.update(&world, ChunkPos::new(0, 0), None).unwrap();
+        assert_eq!(back[0].id, PlayClientbound::SetChunkCacheCenter.id());
+        assert_eq!(back[0].body, vec![0x00, 0x00]);
+        let coords: Vec<ChunkPos> = back[1..]
+            .iter()
+            .map(|p| chunk_body_coords(&p.body))
+            .collect();
+        assert_eq!(coords, east_move_leave());
+    }
+
+    #[test]
+    fn update_on_require_loaded_errors_typed_without_silent_substitution() {
+        // A region-backed world (RequireLoaded) with only the spawn chunk
+        // loaded: any enter cell outside it is missing, and the update path
+        // fails typed `UNVERIFIED` — no generation fallback, no silent spawn
+        // substitution. The loader is pre-add, so its initial state matches
+        // Java's `lastSendDistance = Integer.MIN_VALUE`; the degenerate
+        // previous view makes the diff fall back to the full next view (Java's
+        // `difference` else-branch), so the error fires on the first missing
+        // cell of the 117-cell view.
+        let world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
+            missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
+            ..Default::default()
+        });
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        let err = loader
+            .update(&world, ChunkPos::new(1, 0), None)
+            .unwrap_err();
+        assert!(
+            err.contains("UNVERIFIED region-backed chunk"),
+            "typed UNVERIFIED missing-chunk failure: {err}"
+        );
+        assert!(err.contains("fallback are disabled"));
     }
 }

@@ -12,15 +12,20 @@
 //! `Iterable`s can be pulled again; Rivet returns one pass). `Rotation`,
 //! `TraversalNodeStatus`, and `RandomSource` are in `core`/`rivet-util`.
 //!
-//! RivetTodo(#126): `CODEC`/`STREAM_CODEC` (codec surface →
-//! rivet-protocol). `betweenCornersInDirection`/`clampLocationWithin` (JOML
+//! `CODEC` landed here (`Codec.INT_STREAM.comapFlatMap(Util::fixedSize(…, 3))
+//! .stable()`).
+//! RivetTodo(#126): `STREAM_CODEC` (codec surface → rivet-protocol).
+//! `betweenCornersInDirection`/`clampLocationWithin` (JOML
 //! `Vec3`) defer with the JOML unit.
 
 use super::axis_cycle::AxisCycle;
 use super::direction::{Axis, Direction};
 use super::rotation::Rotation;
 use super::vec3i::{Vec3i, Vec3iLike, compare_coords};
+use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_util::mth;
+use std::sync::Arc;
 
 /// Block-position packing constants (`BlockPos` Paper-inlined bit operations).
 const PACKED_X_MASK: i64 = 67108863; // 26 bits
@@ -77,6 +82,10 @@ impl std::hash::Hash for BlockPos {
 impl BlockPos {
     /// `BlockPos.ZERO`.
     pub const ZERO: BlockPos = BlockPos { x: 0, y: 0, z: 0 };
+
+    /// `BlockPos.PACKED_Y_LENGTH` — the bit width of the packed Y field (12),
+    /// the source of `DimensionType.BITS_FOR_Y`.
+    pub const PACKED_Y_LENGTH: i32 = 12;
 
     /// `BlockPos.MAX_HORIZONTAL_COORDINATE`.
     pub const MAX_HORIZONTAL_COORDINATE: i32 = 33554431;
@@ -776,6 +785,29 @@ impl std::fmt::Display for BlockPos {
     }
 }
 
+/// `BlockPos.CODEC` — `Codec.INT_STREAM.comapFlatMap(Util::fixedSize, ...)
+/// .stable()` as the ops-generic `block_pos_codec::<Ops>()` factory.
+///
+/// Java: `Codec.INT_STREAM.<BlockPos>comapFlatMap(input ->
+/// Util.fixedSize(input, 3).map(ints -> new BlockPos(ints[0], ints[1],
+/// ints[2])), pos -> IntStream.of(pos.getX(), pos.getY(), pos.getZ()))` then
+/// `.stable()`. The int stream is a `Vec<i32>` here (`get_int_stream`);
+/// `Util.fixedSize(input, 3)` (rivet-util `fixed_size_i32`) returns a
+/// `DataResult<Vec<i32>>` with the same "Input is not a list of 3 ints"
+/// error/partial semantics, mapped to a `BlockPos`; `codec::stable` applies
+/// the stable lifecycle like Java's `.stable()`. The `RivetTodo(#126)` on this
+/// module's header tracks the remaining `STREAM_CODEC`.
+pub fn block_pos_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<BlockPos, Ops>> {
+    codec::stable(codec::comap_flat_map::<Vec<i32>, BlockPos, Ops>(
+        codec::int_stream_codec::<Ops>(),
+        Arc::new(|input: &Vec<i32>| {
+            rivet_util::fixed_size_i32(input, 3)
+                .map(|ints| BlockPos::new(ints[0], ints[1], ints[2]))
+        }),
+        Arc::new(|pos: &BlockPos| vec![pos.get_x(), pos.get_y(), pos.get_z()]),
+    ))
+}
+
 /// `BlockPos.MutableBlockPos` — a mutable block position.
 #[derive(Clone, Copy, Debug)]
 pub struct MutableBlockPos {
@@ -994,4 +1026,27 @@ pub enum TraversalNodeStatus {
     Accept,
     Skip,
     Stop,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivet_serialization::json_ops::JsonOps;
+    use rivet_serialization::lifecycle::Lifecycle;
+    use serde_json::json;
+
+    #[test]
+    fn block_pos_codec_round_trips_as_stable() {
+        // Paper `BlockPos.CODEC = Codec.INT_STREAM.comapFlatMap(...).stable()`:
+        // the wire shape is a 3-int array and the lifecycle is Stable on both
+        // encode and decode.
+        let ops = JsonOps::INSTANCE;
+        let codec = block_pos_codec::<JsonOps>();
+        let decoded = codec.decode(&ops, &json!([1, -60, 3]));
+        assert_eq!(decoded.lifecycle(), Lifecycle::Stable);
+        assert_eq!(decoded.get_or_throw("decode").0, BlockPos::new(1, -60, 3));
+        let encoded = codec.encode_start(&ops, &BlockPos::new(1, -60, 3));
+        assert_eq!(encoded.lifecycle(), Lifecycle::Stable);
+        assert_eq!(encoded.get_or_throw("encode"), &json!([1, -60, 3]));
+    }
 }

@@ -3,7 +3,7 @@
 //! Port of `io.papermc.paper.util.KeepAlive` + the keepalive halves of
 //! `ServerCommonPacketListenerImpl.keepConnectionAlive`/`handleKeepAlive`, split
 //! out of the play/configuration listeners so the *state* is testable
-//! exhaustively with a simulated clock before the #96 play handoff exists.
+//! exhaustively with a simulated clock, independent of either listener.
 //!
 //! Two independent clock axes, mirroring Paper:
 //!   - **monotonic nanos** (`tx_time_ns` on every pending challenge, the
@@ -12,12 +12,16 @@
 //!   - **millis** (`now_ms` on the timeout check, the `closed_listener_time`
 //!     guard) — in Java `Util.getMillis()`.
 //!
-//! Both are `i64`/`u128` monotonic values injected at the call site, never a
-//! wall clock, so every branch is deterministic under the Rivet `TickTime`
-//! clock. All Java arithmetic wraps silently; the code uses `i64` (never `u64`
-//! for these axes) so `wrapping_sub`/`wrapping_add` keep the exact Paper
-//! behavior when the monotonic counters reach `i64::MAX` and roll over
-//! (PORTING.md: wrapping arithmetic is sacred).
+//! Both axes are `i64` monotonic readings injected at the call site, never a
+//! wall clock, so the machine is deterministic under whichever monotonic
+//! source the caller injects. The two owners inject from their own clocks:
+//! PLAY session state drives on the `TickTime` axes (`TickContext::now_ns` /
+//! `now_ms`), and the configuration listener drives on the connection's
+//! per-connection `Instant` epoch (`Connection::monotonic_nanos` plus derived
+//! millis) — see [`KeepaliveState`]. All Java arithmetic wraps silently; the
+//! code uses `i64` (never `u64` for these axes) so `wrapping_sub`/`wrapping_add`
+//! keep the exact Paper behavior when the monotonic counters reach `i64::MAX`
+//! and roll over (PORTING.md: wrapping arithmetic is sacred).
 
 use std::collections::VecDeque;
 
@@ -164,10 +168,18 @@ pub struct KeepaliveTickOutcome {
     pub timeout: bool,
 }
 
-/// `KeepAlive` + the keepalive fields of `ServerCommonPacketListenerImpl`,
-/// owned by the tick thread. Every time is injected (`tx_time_ns` from the
-/// `TickTime` monotonic clock, `now_ms` from a millis source), so the machine
-/// is fully deterministic under simulated time — no wall clock anywhere.
+/// `KeepAlive` + the keepalive fields of `ServerCommonPacketListenerImpl` — a
+/// shared machine with two owners (issue #283). PLAY session state is
+/// tick-thread-owned and drives it on the `TickTime` axes (`TickContext`
+/// `now_ns`/`now_ms`); CONFIGURATION state is tokio listener-owned and drives
+/// it on `Connection::monotonic_nanos` plus derived millis. Every time is
+/// injected at the call site, so the machine is deterministic under whichever
+/// monotonic source the owner injects — no wall clock anywhere.
+///
+/// Construction always takes an explicit seed (`first_now_ns`, Paper's
+/// `System.nanoTime()` at `new KeepAlive()`): there is deliberately no
+/// `Default`, because a time-zero machine would transmit its first challenge
+/// on the very first tick.
 #[derive(Debug, Clone)]
 pub struct KeepaliveState {
     /// `KeepAlive.lastKeepAliveTx` — `System.nanoTime()` at construction
@@ -182,39 +194,51 @@ pub struct KeepaliveState {
     /// `ServerCommonPacketListenerImpl.latency` — the last computed average
     /// latency in ms (`this.keepAlive.pingCalculator5s.getAvgLatencyMS()`).
     latency_ms: i32,
+    /// The kick limit (`paper.playerconnection.keepalive`, issue #236) in ns.
+    /// Defaults to [`KEEPALIVE_LIMIT_NS`]; a shorter limit lets the live server
+    /// tests exercise the timeout window without a half-minute wait each. Paper
+    /// reads the same knob from a system property; the 1s transmit cadence is
+    /// not configurable, exactly as in Java.
+    timeout_ns: i64,
 }
 
-impl Default for KeepaliveState {
-    fn default() -> Self {
+impl KeepaliveState {
+    /// `new KeepAlive()` with the initial `lastKeepAliveTx` reading and the
+    /// pinned `KEEPALIVE_LIMIT_NS` kick limit. `first_now_ns` is Paper's
+    /// `System.nanoTime()` at construction — the tick that is `>= 1s` past it
+    /// transmits the first challenge.
+    pub fn new(first_now_ns: i64) -> Self {
         KeepaliveState {
-            // `KeepAlive.lastKeepAliveTx = System.nanoTime()` runs once at
-            // construction. Simulated callers pass the epoch's first reading
-            // via `new(first_now_ns)`; this default is the pure fallback.
-            last_keep_alive_tx_ns: 0,
+            last_keep_alive_tx_ns: first_now_ns,
             pending: VecDeque::new(),
             ping_calculator_1m: PingCalculator::one_minute(),
             ping_calculator_5s: PingCalculator::five_seconds(),
             latency_ms: 0,
+            timeout_ns: KEEPALIVE_LIMIT_NS,
         }
     }
-}
 
-impl KeepaliveState {
-    /// `new KeepAlive()` with the initial `lastKeepAliveTx` reading.
-    pub fn new(first_now_ns: i64) -> Self {
+    /// `new KeepAlive()` with an explicit kick limit (`paper.playerconnection.
+    /// keepalive`, issue #236). Same as [`KeepaliveState::new`] except the
+    /// timeout the tick fires at; the 1s transmit cadence is unchanged.
+    pub fn new_with_timeout(first_now_ns: i64, timeout_ns: i64) -> Self {
         KeepaliveState {
-            last_keep_alive_tx_ns: first_now_ns,
-            ..KeepaliveState::default()
+            timeout_ns,
+            ..KeepaliveState::new(first_now_ns)
         }
     }
 
     /// `KeepAlive.copyForListenerHandoff()` — a fresh machine that preserves
     /// the transmit throttle state and ping history but starts with an empty
     /// pending queue ("listener handoff should reset pending keepalive
-    /// expectations", `createCookie`). The play listener after configuration
-    /// calls this on handoff.
+    /// expectations", `createCookie`). Not currently wired into any production
+    /// handoff: the configuration listener owns its own `KeepaliveState`
+    /// (issue #283), and the play path seeds a fresh machine in `spawn_session`
+    /// — so no `KeepaliveState` carries across the finish→play seam and the
+    /// only caller is the unit test below.
     pub fn copy_for_listener_handoff(&self) -> Self {
-        let mut copy = KeepaliveState::new(self.last_keep_alive_tx_ns);
+        let mut copy =
+            KeepaliveState::new_with_timeout(self.last_keep_alive_tx_ns, self.timeout_ns);
         copy.ping_calculator_1m.copy_from(&self.ping_calculator_1m);
         copy.ping_calculator_5s.copy_from(&self.ping_calculator_5s);
         copy.latency_ms = self.latency_ms;
@@ -287,9 +311,10 @@ impl KeepaliveState {
             outcome.send = Some(pka.challenge_id);
         }
 
-        // 30 s timeout: `(currTime - oldest.txTimeNS()) > KEEPALIVE_LIMIT_NS`.
+        // Timeout: `(currTime - oldest.txTimeNS()) > timeout` (the strict `>` on
+        // `KEEPALIVE_LIMIT_NS` by default, or the config's shorter limit).
         if let Some(oldest) = self.pending.front().copied()
-            && tx_time_ns.wrapping_sub(oldest.tx_time_ns) > KEEPALIVE_LIMIT_NS
+            && tx_time_ns.wrapping_sub(oldest.tx_time_ns) > self.timeout_ns
         {
             outcome.timeout = true;
         }
@@ -510,6 +535,20 @@ mod tests {
     }
 
     #[test]
+    fn configurable_timeout_shortens_the_kick() {
+        // `paper.playerconnection.keepalive` (issue #236): a machine built with
+        // a 2s limit kicks at 2s, with the same strict `>` boundary. The 1s
+        // transmit cadence is unaffected.
+        let mut s = KeepaliveState::new_with_timeout(0, ms_to_ns(2_000));
+        assert_eq!(tick_at(&mut s, 1_000).send, Some(1_000), "challenge at 1s");
+        // At exactly 2s elapsed (3s), the strict `>` does not fire.
+        let o = tick_at(&mut s, 3_000);
+        assert!(!o.timeout);
+        // One ms past 2s elapsed it fires.
+        assert!(tick_at(&mut s, 3_001).timeout);
+    }
+
+    #[test]
     fn timeout_only_checks_oldest_pending() {
         // The oldest challenge is answered, so a younger one past its own limit
         // does not fire (Paper checks only `peek()`).
@@ -656,6 +695,30 @@ mod tests {
         // At 3000ms it does.
         let o = copy.tick(ms_to_ns(3000), 3000);
         assert_eq!(o.send, Some(3000));
+    }
+
+    #[test]
+    fn fresh_seed_resets_the_throttle_not_copy() {
+        // The finish→play seam diverges from Paper's `copyForListenerHandoff`
+        // (which preserves the transmit throttle): `spawn_session` builds a
+        // fresh `new_with_timeout(now_ns, ...)`, so a handoff after a config
+        // phase whose last transmit was t=2000 still waits a full second from
+        // the fresh seed — the first play challenge fires at seed+1s, never on
+        // the old cadence.
+        let mut prior = state(0);
+        tick_at(&mut prior, 1000);
+        tick_at(&mut prior, 2000); // last transmit at t=2000
+        // Paper's copy would carry that throttle (a copy at t=3000 sends at
+        // once); the fresh seed at t=3000 does not.
+        let mut fresh = KeepaliveState::new(ms_to_ns(3000));
+        let o = fresh.tick(ms_to_ns(3500), 3500);
+        assert_eq!(o.send, None, "no send 500ms after the fresh seed");
+        let o = fresh.tick(ms_to_ns(4000), 4000);
+        assert_eq!(
+            o.send,
+            Some(4000),
+            "first play challenge 1s after the fresh seed"
+        );
     }
 
     #[test]

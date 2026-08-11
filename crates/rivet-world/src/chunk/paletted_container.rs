@@ -8,16 +8,13 @@
 //! `read`/`write`/`get_serialized_size`, and the NBT `pack`/`unpack` paths
 //! (which share the exact bits-per-entry transition logic).
 //!
-//! Deferred (not part of M1): the Anti-Xray `presetValues` surface, the
-//! Moonrise `FastPalette` read-path snapshot, and `acquire`/`release`
-//! threading guards (the container is tick-thread-confined game state —
-//! OWNERSHIP.md — and Java's `synchronized` is dropped with a note, as
-//! PORTING.md prescribes for tick-confined state).
+//! Deferred (not part of M1): `acquire`/`release` threading guards (the
+//! container is tick-thread-confined game state — OWNERSHIP.md — and Java's
+//! `synchronized` is dropped with a note, as PORTING.md prescribes for
+//! tick-confined state) and the Anti-Xray `write`/`ChunkPacketInfo` params.
 //!
-//! RivetTodo(#216): the Anti-Xray `presetValues` surface and Moonrise
-//! `FastPalette` read-path snapshot are not ported (deferred to the M2 chunk
-//! storage epic #15); the threading guards are intentionally dropped
-//! (tick-thread-confined state).
+//! The Anti-Xray `presetValues` constructor surface and the Moonrise
+//! `FastPalette` read-path snapshot are ported (issue #216).
 //!
 //! The `onResize` reentrancy is ported by deferring the resize: `Palette::id_for`
 //! returns `IdForResult` and the container grows, then inserts the value. The
@@ -31,8 +28,8 @@ use rivet_util::bit_storage::BitStorage;
 use rivet_util::simple_bit_storage::{InitializationException, SimpleBitStorage};
 use rivet_util::zero_bit_storage::ZeroBitStorage;
 
-use crate::chunk::configuration::Configuration;
-use crate::chunk::palette::{GlobalIdMap, HashMapPalette, IdForResult, Palette};
+use crate::chunk::configuration::{Configuration, PaletteFactoryKind};
+use crate::chunk::palette::{GlobalIdMap, HashMapPalette, IdForResult, Palette, ceillog2};
 use crate::chunk::strategy::Strategy;
 
 /// `PalettedContainerRO.PackedData<T>` — the NBT codec's packed form.
@@ -76,6 +73,10 @@ impl<T> PackedData<T> {
 pub struct PalettedContainer<T: Clone + PartialEq + Send + 'static> {
     strategy: Strategy<T>,
     data: Data<T>,
+    /// Paper Anti-Xray `presetValues` — a fixed set of values kept in the
+    /// palette (re-inserted on every resize/read) so the wire palette always
+    /// contains them. `None` when no preset values are configured.
+    preset_values: Option<Vec<T>>,
 }
 
 impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<T> {
@@ -84,26 +85,99 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
     /// Starts at the zero-bit configuration (single-value palette,
     /// `ZeroBitStorage`), then inserts `initial_value`.
     pub fn new(initial_value: T, strategy: Strategy<T>) -> Self {
-        let mut data = Self::create_or_reuse_data(&strategy, None, 0);
-        let _ = data.palette.id_for(&initial_value);
-        PalettedContainer { strategy, data }
+        Self::new_with_preset_values(initial_value, strategy, None)
     }
 
-    /// The private constructor used by `unpack`.
+    /// `PalettedContainer(T initialValue, Strategy<T>, T[] presetValues)`.
+    ///
+    /// As [`new`](Self::new), but records the Anti-Xray `preset_values`. Like
+    /// Java, the preset values are not inserted here — they take effect on the
+    /// next resize (`on_resize` widens for them) or `read`.
+    pub fn new_with_preset_values(
+        initial_value: T,
+        strategy: Strategy<T>,
+        preset_values: Option<Vec<T>>,
+    ) -> Self {
+        let mut data = Self::create_or_reuse_data(&strategy, None, 0);
+        let _ = data.palette.id_for(&initial_value);
+        let mut container = PalettedContainer {
+            strategy,
+            data,
+            preset_values,
+        };
+        container.update_data();
+        container
+    }
+
+    /// Java's private constructor
+    /// `PalettedContainer(Strategy, Configuration, BitStorage, Palette, List<T>
+    /// values, T defaultValue, T[] presetValues)` — used by `unpack`. Adopts
+    /// `storage`/`palette` (built from the wire), then runs the Anti-Xray
+    /// preset insertion block (Paper re-adds the resize handling Mojang
+    /// removed for reads in 1.18).
     pub(crate) fn from_data(
         strategy: Strategy<T>,
         configuration: Configuration,
         storage: Box<dyn BitStorage>,
         palette: Box<dyn Palette<T>>,
+        values: Vec<T>,
+        default_value: Option<T>,
+        preset_values: Option<Vec<T>>,
     ) -> Self {
-        PalettedContainer {
+        let mut container = PalettedContainer {
             strategy,
             data: Data {
                 configuration,
                 storage,
                 palette,
+                snapshot: None,
             },
+            preset_values,
+        };
+
+        // Paper Anti-Xray: if preset values are configured and the stored
+        // configuration can hold them, insert them so the wire palette always
+        // contains them, growing the palette when it fills up.
+        if let Some(presets) = container.preset_values.clone() {
+            let should_insert = match &container.data.configuration {
+                // A single-value palette only gets the presets when its single
+                // entry differs from the codec default (Java `defaultValue`).
+                Configuration::Simple {
+                    factory: PaletteFactoryKind::SingleValue,
+                    ..
+                } => {
+                    container.data.palette.value_for(0)
+                        != default_value.expect("preset values require a codec default value")
+                }
+                Configuration::Global { .. } => false,
+                Configuration::Simple { .. } => true,
+            };
+            if should_insert {
+                let max_size = 1i32 << container.data.configuration.bits_in_memory();
+                for preset in &presets {
+                    if container.data.palette.get_size() >= max_size {
+                        // The palette is full: widen once to fit every distinct
+                        // value (wire palette entries + all presets), then stop.
+                        let mut all_values: Vec<T> = values.clone();
+                        for p in &presets {
+                            if !all_values.contains(p) {
+                                all_values.push(p.clone());
+                            }
+                        }
+                        let new_bits = ceillog2(all_values.len() as i32);
+                        if new_bits > container.data.configuration.bits_in_memory() {
+                            container.on_resize(new_bits, None);
+                        }
+                        break;
+                    }
+                    container.insert_index(preset.clone());
+                }
+            }
         }
+        // The snapshot must reflect the preset inserts (Java's is live).
+        container.update_data();
+
+        container
     }
 
     /// `createOrReuseData(Data oldData, int targetBits)` — Java returns
@@ -125,25 +199,93 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
 
     /// `onResize(int bits, T lastAddedValue)` — the container's resize handler
     /// (Java `PaletteResize`). Rebuilds `data` at `bits`, copies the old
-    /// contents across, then inserts `last_added_value`, returning its index.
-    fn on_resize(&mut self, bits: i32, last_added_value: T) -> i32 {
+    /// contents across, then re-adds the preset values and inserts
+    /// `last_added_value`, returning its index (`-1` when `last_added_value`
+    /// is absent — Java's `null` from the unpack resize path).
+    fn on_resize(&mut self, bits: i32, last_added_value: Option<T>) -> i32 {
+        // Paper Anti-Xray: when growing from a single-value palette with
+        // preset values configured, widen up front so every preset fits
+        // without a cascade of further resizes.
+        let mut bits = bits;
+        if let Some(added) = last_added_value.as_ref()
+            && let Some(presets) = self.preset_values.as_ref()
+            && matches!(
+                &self.data.configuration,
+                Configuration::Simple {
+                    factory: PaletteFactoryKind::SingleValue,
+                    ..
+                }
+            )
+        {
+            let mut duplicates = 0;
+            if presets.contains(added) {
+                duplicates += 1;
+            }
+            if presets.contains(&self.data.palette.value_for(0)) {
+                duplicates += 1;
+            }
+            let size = 1i32
+                << self
+                    .strategy
+                    .configuration_for_bit_count(bits)
+                    .bits_in_memory();
+            bits = ceillog2(size + presets.len() as i32 - duplicates);
+        }
         let configuration = self.strategy.configuration_for_bit_count(bits);
         if self.data.configuration == configuration {
             // Java's createOrReuseData reuses the same Data; copyFrom(old, old)
-            // is a self-copy no-op. Only the final insert is observable.
-            return self
-                .data
-                .palette
-                .id_for(&last_added_value)
-                .expect_no_resize();
+            // is a self-copy no-op. Only the final insert (or `-1` for the
+            // unpack `onResize(newBits, null)` widening) is observable.
+            return match last_added_value {
+                None => -1,
+                Some(value) => self.data.palette.id_for(&value).expect_no_resize(),
+            };
         }
         let mut new_data = Data::new(configuration, &self.strategy);
         new_data.copy_from(&*self.data.palette, &*self.data.storage);
         self.data = new_data;
-        self.data
-            .palette
-            .id_for(&last_added_value)
-            .expect_no_resize()
+        self.add_preset_values();
+        match last_added_value {
+            None => -1,
+            Some(value) => self.data.palette.id_for(&value).expect_no_resize(),
+        }
+        // Every caller re-materializes the snapshot after this helper returns:
+        // `insert_index` unconditionally, `from_data` after the preset block.
+    }
+
+    /// `updateData(Data)` — recomputes the Moonrise `FastPaletteData`
+    /// read-path snapshot from the current palette.
+    fn update_data(&mut self) {
+        self.data.snapshot = self.data.palette.raw_palette();
+    }
+
+    /// `addPresetValues()` — re-inserts the preset values into the current
+    /// palette (Java's Anti-Xray hook on resize and read). Java's snapshot is
+    /// a live reference, so it must be re-materialized after the inserts.
+    fn add_preset_values(&mut self) {
+        if self.preset_values.is_some()
+            && !matches!(&self.data.configuration, Configuration::Global { .. })
+        {
+            let presets = self.preset_values.clone().unwrap();
+            for preset in presets {
+                let _ = self.insert_index(preset);
+            }
+        }
+        self.update_data();
+    }
+
+    /// `readPalette(Data, int)` — the Moonrise read path: consult the
+    /// `FastPaletteData` snapshot when present (Java `palette[paletteIdx]`,
+    /// panicking when the entry is null), else the palette's `value_for`.
+    fn read_palette(&self, data: &Data<T>, palette_idx: i32) -> T {
+        if let Some(snapshot) = &data.snapshot {
+            match snapshot.get(palette_idx as usize) {
+                Some(value) => value.clone(),
+                None => panic!("Palette index out of bounds"),
+            }
+        } else {
+            data.palette.value_for(palette_idx)
+        }
     }
 
     /// `getAndSet(int x, int y, int z, T)` — returns the previous value.
@@ -158,7 +300,7 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
         // Java re-reads `this.data` after idFor because the resize may have
         // replaced it; the port reads the (possibly replaced) data here.
         let prev = self.data.storage.get_and_set(index, palette_idx);
-        self.data.palette.value_for(prev)
+        self.read_palette(&self.data, prev)
     }
 
     /// `set(int x, int y, int z, T)`.
@@ -176,23 +318,30 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
 
     /// The shared `idFor` + deferred resize path.
     fn insert_index(&mut self, value: T) -> i32 {
-        match self.data.palette.id_for(&value) {
+        let result = match self.data.palette.id_for(&value) {
             IdForResult::Id(id) => id,
-            IdForResult::Resize { bits, value } => self.on_resize(bits, value),
-        }
+            IdForResult::Resize { bits, value } => self.on_resize(bits, Some(value)),
+        };
+        // Java's snapshot is a live reference into the palette backing array,
+        // so it stays current through every palette mutation — including
+        // non-resize inserts that never reach `on_resize`. The owned `Vec`
+        // snapshot must be re-materialized after each `id_for` (the only
+        // palette-mutating call) to match.
+        self.update_data();
+        result
     }
 
     /// `get(int x, int y, int z)`.
     pub fn get(&self, x: i32, y: i32, z: i32) -> T {
         let index = self.strategy.get_index(x, y, z);
         let state = self.data.storage.get(index);
-        self.data.palette.value_for(state)
+        self.read_palette(&self.data, state)
     }
 
     /// `get(int index)`.
     pub fn get_index(&self, index: usize) -> T {
         let state = self.data.storage.get(index);
-        self.data.palette.value_for(state)
+        self.read_palette(&self.data, state)
     }
 
     /// `getAll(Consumer<T>)` — every distinct value present, each once.
@@ -220,6 +369,11 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
         new_data.palette.read(buffer, self.strategy.global_map());
         buffer.read_fixed_size_long_array(new_data.storage.get_raw_mut());
         self.data = new_data;
+        // Paper Anti-Xray: the server re-inserts the preset values after a
+        // read so the wire palette keeps containing them (Java notes this is
+        // "inefficient, but this isn't used by the server"). Refreshes the
+        // read-path snapshot whether or not presets are configured.
+        self.add_preset_values();
     }
 
     /// `write(FriendlyByteBuf)`.
@@ -242,6 +396,28 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
         self.data.palette.maybe_has(&mut predicate)
     }
 
+    /// `data.palette().getSize()` — the number of distinct entries in the
+    /// palette. The section-level Moonrise `recalcBlockCounts` (issue #216)
+    /// uses it to pick the `FULL_LIST` single-value shortcut over the
+    /// per-palette-id `count_entries` walk.
+    pub fn palette_size(&self) -> i32 {
+        self.data.palette.get_size()
+    }
+
+    /// `palette.valueFor(paletteIdx)` — the value a palette-local id maps to
+    /// (the section recalc's `state` per count-entry group).
+    pub fn value_for_palette(&self, palette_idx: i32) -> T {
+        self.data.palette.value_for(palette_idx)
+    }
+
+    /// `data.storage().moonrise$countEntries()` — per-palette-id coordinate
+    /// groups in first-appearance order (issue #216). Consumed by the section
+    /// recalc; the returned indices are the flat storage positions, which for a
+    /// block section equal the Moonrise packed position `x | z<<4 | y<<8`.
+    pub fn count_entries(&self) -> Vec<(i32, Vec<i16>)> {
+        self.data.storage.count_entries()
+    }
+
     /// `forEachInPalette(Consumer<T>)`.
     pub fn for_each_in_palette(&self, mut consumer: impl FnMut(T)) {
         for i in 0..self.data.palette.get_size() {
@@ -257,6 +433,12 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
                 self.data.storage.get_size() as i32,
             );
         } else {
+            // Java `PalettedContainer.count` tallies with an
+            // `Int2IntOpenHashMap` over `getAll`; the `HashMap` mirrors it,
+            // including the nondeterministic iteration order (unobservable:
+            // the consumer sums). Moonrise's `moonrise$countEntries` fast path
+            // is a separate surface ported on the storages (issue #216); it
+            // feeds the section-level `recalcBlockCounts`, not this method.
             let mut counts = HashMap::new();
             self.data.storage.get_all(&mut |state| {
                 *counts.entry(state).or_insert(0) += 1;
@@ -272,31 +454,36 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
         PalettedContainer {
             strategy: self.strategy.clone(),
             data: self.data.copy(),
+            preset_values: self.preset_values.clone(),
         }
     }
 
     /// `recreate()` — a fresh single-value container holding the palette's
-    /// first entry.
+    /// first entry (and, on the Anti-Xray path, the preset values).
     pub fn recreate(&self) -> Self {
-        PalettedContainer::new(self.data.palette.value_for(0), self.strategy.clone())
+        PalettedContainer::new_with_preset_values(
+            self.data.palette.value_for(0),
+            self.strategy.clone(),
+            self.preset_values.clone(),
+        )
     }
 
     /// `pack(Strategy<T>)` — the NBT codec path. Re-encodes the storage against
     /// a fresh `HashMapPalette`, then picks the on-disc configuration by the
-    /// palette size.
-    pub fn pack(&self) -> PackedData<T> {
+    /// palette size. Takes the strategy explicitly (Java's signature — the
+    /// `PalettedContainerRO` read-view takes it as an argument); the container's
+    /// own strategy is the value every caller passes.
+    pub fn pack_with_strategy(&self, strategy: &Strategy<T>) -> PackedData<T> {
         let current_storage = &*self.data.storage;
         let current_palette = &*self.data.palette;
         let mut new_palette = HashMapPalette::new(current_storage.get_bits(), Vec::new());
         let new_contents = reencode_contents(current_storage, current_palette, &mut new_palette);
-        let stored_configuration = self
-            .strategy
-            .configuration_for_palette_size(new_palette.get_size());
+        let stored_configuration = strategy.configuration_for_palette_size(new_palette.get_size());
         let bits_on_disc = stored_configuration.bits_in_storage();
         let values = if bits_on_disc != 0 {
             let storage = SimpleBitStorage::from_values(
                 bits_on_disc,
-                self.strategy.entry_count() as usize,
+                strategy.entry_count() as usize,
                 &new_contents,
             );
             Some(storage.get_raw().to_vec())
@@ -306,14 +493,43 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
         PackedData::with_bits(new_palette.get_entries(), values, bits_on_disc)
     }
 
+    /// `pack()` — [`pack_with_strategy`](Self::pack_with_strategy) with the
+    /// container's own strategy (the common call; Java always passes the same
+    /// strategy the container was built with).
+    pub fn pack(&self) -> PackedData<T> {
+        self.pack_with_strategy(&self.strategy)
+    }
+
+    /// `unpack(Strategy<T>, PackedData<T>)` — Anti-Xray disabled
+    /// (`presetValues == null` in Java).
+    pub fn unpack(strategy: &Strategy<T>, disc_data: PackedData<T>) -> Result<Self, String> {
+        Self::unpack_impl(strategy, disc_data, None, None)
+    }
+
     /// `unpack(Strategy<T>, PackedData<T>, T defaultValue, T[] presetValues)`.
     ///
     /// Reconstructs a container from the NBT packed form, re-encoding the
     /// storage whenever the on-disc bits differ from the in-memory width (the
-    /// `alwaysRepack` / width-mismatch path). `defaultValue`/`presetValues`
-    /// feed only the Anti-Xray constructor block (null in the server), so they
-    /// are dropped. Errors mirror Java's `DataResult.error` messages.
-    pub fn unpack(strategy: &Strategy<T>, disc_data: PackedData<T>) -> Result<Self, String> {
+    /// `alwaysRepack` / width-mismatch path). `default_value`/`preset_values`
+    /// feed the Anti-Xray constructor block (null in the server). Errors mirror
+    /// Java's `DataResult.error` messages.
+    pub fn unpack_with_preset_values(
+        strategy: &Strategy<T>,
+        disc_data: PackedData<T>,
+        default_value: T,
+        preset_values: Option<Vec<T>>,
+    ) -> Result<Self, String> {
+        Self::unpack_impl(strategy, disc_data, Some(default_value), preset_values)
+    }
+
+    /// The shared decode; `default_value` is only consulted by the Anti-Xray
+    /// block (absent when no preset values are configured).
+    fn unpack_impl(
+        strategy: &Strategy<T>,
+        disc_data: PackedData<T>,
+        default_value: Option<T>,
+        preset_values: Option<Vec<T>>,
+    ) -> Result<Self, String> {
         let palette_entries = disc_data.palette_entries;
         let entry_count = strategy.entry_count();
         let stored_configuration =
@@ -332,7 +548,7 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
             .bits_in_memory()
             == 0
         {
-            let palette = stored_configuration.create_palette(strategy, palette_entries);
+            let palette = stored_configuration.create_palette(strategy, palette_entries.clone());
             let storage: Box<dyn BitStorage> = Box::new(ZeroBitStorage::new(entry_count as usize));
             (storage, palette)
         } else {
@@ -342,7 +558,8 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
             if !stored_configuration.always_repack()
                 && stored_configuration.bits_in_memory() == bits_on_disc
             {
-                let palette = stored_configuration.create_palette(strategy, palette_entries);
+                let palette =
+                    stored_configuration.create_palette(strategy, palette_entries.clone());
                 let storage = SimpleBitStorage::from_raw(bits_on_disc, entry_count as usize, &data)
                     .map_err(|e: InitializationException| {
                         format!("Failed to read PalettedContainer: {}", e)
@@ -360,7 +577,7 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
                 // (for a Global config the factory ignores them; kept for exact
                 // fidelity).
                 let mut new_palette =
-                    stored_configuration.create_palette(strategy, palette_entries);
+                    stored_configuration.create_palette(strategy, palette_entries.clone());
                 let new_contents = reencode_contents(&old_storage, &old_palette, &mut *new_palette);
                 let storage = SimpleBitStorage::from_values(
                     stored_configuration.bits_in_memory(),
@@ -376,7 +593,39 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
             stored_configuration,
             storage,
             palette,
+            palette_entries,
+            default_value,
+            preset_values,
         ))
+    }
+
+    /// Re-encode this container's values into a container of type `T2` with the
+    /// target strategy, mapping each palette entry through `f`. Used when the
+    /// two value types share the same dense global id space (the #516 server
+    /// bridge: `BlockState` and the server `StateId` are both the generated
+    /// `0..BLOCK_STATE_COUNT` ids; the world/server biome newtypes are both
+    /// dense `0..BIOME_COUNT` ids): `pack` re-encodes against a fresh palette,
+    /// each entry is mapped, and `unpack` reconstructs with the target
+    /// strategy — the raw storage longs and bit width are untouched, so the
+    /// wire section bytes are identical.
+    ///
+    /// The target strategy must declare the same global-palette configuration
+    /// ladder (same `entry_count`/`size`), so the packed on-disc bits match the
+    /// target's `configuration_for_palette_size`.
+    pub fn map_values<T2>(
+        &self,
+        target: &Strategy<T2>,
+        f: &impl Fn(&T) -> T2,
+    ) -> Result<PalettedContainer<T2>, String>
+    where
+        T2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    {
+        let packed = self.pack();
+        let palette_entries = packed.palette_entries.iter().map(f).collect::<Vec<_>>();
+        PalettedContainer::<T2>::unpack(
+            target,
+            PackedData::with_bits(palette_entries, packed.storage, packed.bits_per_entry),
+        )
     }
 
     /// The global map (exposed for tests / callers needing the wire global ids).
@@ -390,11 +639,104 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
     }
 }
 
-/// `PalettedContainer.Data<T>` — the configuration/storage/palette triple.
+/// `PalettedContainerRO<T>` — the read-view surface of a paletted container
+/// (Java's interface of the same name; `PalettedContainer` implements it).
+///
+/// `copy`/`recreate`/`pack` return the concrete `PalettedContainer` (Java's
+/// covariant returns). The mutating surface (`set`, `getAndSet`, `read`) is
+/// deliberately absent — it is not part of the read view.
+///
+/// The methods delegate to the inherent [`PalettedContainer`] surface; this
+/// trait exists so a value that only needs reads can be typed by capability
+/// (e.g. the factory's `biomeContainerCodec` in Java is `Codec<
+/// PalettedContainerRO<Holder<Biome>>>`).
+pub trait PalettedContainerRO<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> {
+    /// `get(int, int, int)`.
+    fn get(&self, x: i32, y: i32, z: i32) -> T;
+    /// `getAll(Consumer<T>)`.
+    fn get_all(&self, consumer: &mut dyn FnMut(T));
+    /// `write(FriendlyByteBuf)` — the deprecated no-Anti-Xray-info variant.
+    ///
+    /// The Anti-Xray overload `write(FriendlyByteBuf,
+    /// @Nullable ChunkPacketInfo<T>, int chunkSectionIndex)` is omitted —
+    /// `ChunkPacketInfo` is deferred with the `paper.antixray` chunk-storage
+    /// unit; re-add it when that type lands.
+    fn write(&self, buffer: &mut FriendlyByteBuf);
+    /// `getSerializedSize()`.
+    fn get_serialized_size(&self) -> i32;
+    /// `bitsPerEntry()` — the in-memory storage width.
+    fn bits_per_entry(&self) -> i32;
+    /// `maybeHas(Predicate<T>)`.
+    fn maybe_has(&self, predicate: &mut dyn FnMut(&T) -> bool) -> bool;
+    /// `forEachInPalette(Consumer<T>)`.
+    fn for_each_in_palette(&self, consumer: &mut dyn FnMut(T));
+    /// `count(PalettedContainer.CountConsumer<T>)`.
+    fn count(&self, output: &mut dyn FnMut(T, i32));
+    /// `copy()`.
+    fn copy(&self) -> PalettedContainer<T>;
+    /// `recreate()`.
+    fn recreate(&self) -> PalettedContainer<T>;
+    /// `pack(Strategy<T>)`.
+    fn pack(&self, strategy: &Strategy<T>) -> PackedData<T>;
+}
+
+impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainerRO<T>
+    for PalettedContainer<T>
+{
+    fn get(&self, x: i32, y: i32, z: i32) -> T {
+        PalettedContainer::get(self, x, y, z)
+    }
+
+    fn get_all(&self, consumer: &mut dyn FnMut(T)) {
+        PalettedContainer::get_all(self, consumer)
+    }
+
+    fn write(&self, buffer: &mut FriendlyByteBuf) {
+        PalettedContainer::write(self, buffer)
+    }
+
+    fn get_serialized_size(&self) -> i32 {
+        PalettedContainer::get_serialized_size(self)
+    }
+
+    fn bits_per_entry(&self) -> i32 {
+        PalettedContainer::bits_per_entry(self)
+    }
+
+    fn maybe_has(&self, predicate: &mut dyn FnMut(&T) -> bool) -> bool {
+        PalettedContainer::maybe_has(self, predicate)
+    }
+
+    fn for_each_in_palette(&self, consumer: &mut dyn FnMut(T)) {
+        PalettedContainer::for_each_in_palette(self, consumer)
+    }
+
+    fn count(&self, output: &mut dyn FnMut(T, i32)) {
+        PalettedContainer::count(self, output)
+    }
+
+    fn copy(&self) -> PalettedContainer<T> {
+        PalettedContainer::copy(self)
+    }
+
+    fn recreate(&self) -> PalettedContainer<T> {
+        PalettedContainer::recreate(self)
+    }
+
+    fn pack(&self, strategy: &Strategy<T>) -> PackedData<T> {
+        PalettedContainer::pack_with_strategy(self, strategy)
+    }
+}
+
+/// `PalettedContainer.Data<T>` — the configuration/storage/palette triple
+/// plus the Moonrise `FastPaletteData` read-path snapshot (issue #216).
 pub struct Data<T: Clone + PartialEq + Send + 'static> {
     configuration: Configuration,
     storage: Box<dyn BitStorage>,
     palette: Box<dyn Palette<T>>,
+    /// `moonrise$palette` — the materialized palette snapshot used by the
+    /// `read_palette` fast path (`None` when no palette materializes one).
+    snapshot: Option<Vec<T>>,
 }
 
 impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> Data<T> {
@@ -416,6 +758,7 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> Data<T> {
             configuration,
             storage,
             palette,
+            snapshot: None,
         }
     }
 
@@ -434,6 +777,7 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> Data<T> {
             configuration: self.configuration.clone(),
             storage: self.storage.copy_box(),
             palette: self.palette.copy_palette(),
+            snapshot: self.snapshot.clone(),
         }
     }
 

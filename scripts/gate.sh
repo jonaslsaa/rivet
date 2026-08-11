@@ -12,8 +12,10 @@
 # The full gate also runs the oracle steps against the Paper Java oracle, plus the
 # scenario runner:
 #   - rivet-oracle (default)  verifies ALL committed fixture kinds: the M0 chunk
-#                          slice, the M2 worldgen semantic samples, and the M2
-#                          normal-overworld none-compression region payloads
+#                          slice, the M2 worldgen semantic samples, the M2
+#                          normal-overworld none-compression region payloads,
+#                          the text component-JSON corpus (issue #98), and the
+#                          spline value-leaf goldens (issue #372)
 #                          (each against its own manifest.json SHA-256s).
 #   - rivet-oracle verify  M0 sanity gate: boot a fresh Paper server and diff its
 #                          chunk-NBT slice against the committed golden baseline.
@@ -32,12 +34,42 @@
 #                          exactly "1 worker threads, 1 I/O threads", and the M2
 #                          region baseline must carry matching chunk-concurrency
 #                          provenance — drift fails the gate loudly.
+#   - reference self-test  boot the reference oracle in --self-test mode and assert
+#                          stdout is exactly one bare JSON line (no log4j [STDOUT]
+#                          prefix, not swallowed) — the load-bearing proof that
+#                          selfTest() rides the raw stream. Shares the parity prereqs.
+#                          A booted oracle with broken raw stdout is FAILED; any
+#                          nonzero run.sh exit is conservatively UNVERIFIED (exit 3) —
+#                          the wrapper's single exit channel cannot distinguish a
+#                          boot/prereq failure (present-but-stale runtime jar, missing
+#                          prereq) from a JVM self-test assertion failure (run.sh
+#                          exec's the JVM, whose exit status passes straight through) —
+#                          and --require-oracle makes any nonzero exit a hard failure
+#                          (exit 1), mirroring rivet-parity's rc=3 handling.
+#   - rivet-oracle verify --full  M2 FULL region gate (issue #51): boot a fresh
+#                          superflat server (region-file-compression=none, D13) and
+#                          diff its chunk-NBT slice against the committed status-FULL
+#                          region baseline — the corpus-forced, twin-boot-captured
+#                          superflat full-status chunks. The capture injects
+#                          level-33 forced tickets for every corpus coordinate into
+#                          each dimension, so all 8 corpus coordinates per dimension
+#                          reach `minecraft:full`; LastUpdate is normalized to 0
+#                          (save-clock artifact). Also runs the --full --expect-fail
+#                          negative control.
 #   - rivet-parity         byte-for-byte NBT/SNBT diff of rivet-nbt against the Paper
 #                          reference oracle — the only gate step that exercises real
 #                          Rivet code against Paper.
 #   - scenario runner      join: boots Paper twice via the Azalea client and requires
 #                          identical normalized transcripts, plus a negative case.
-#                          Guarded by the paperclip jar, like oracle verify.
+#                          join --server both / move --server both run the Rivet-vs-Paper
+#                          differentials (issues #192/#53): the same client boots each server
+#                          and must produce equal normalized transcripts, proving Rivet's
+#                          join and authoritative-walk behavior matches Paper's. dwell boots
+#                          Rivet headlessly and proves the client survives past the 30 s
+#                          keepalive kick limit (wall-clock, echoing every live keepalive).
+#                          The Paper rows are guarded by the paperclip jar, like oracle
+#                          verify; dwell needs only the rivet-server binary. Each row exits
+#                          0 PASS / 1 FAIL / 3 UNVERIFIED (never silently green).
 #   - join capture         rivet-capture: boots Paper, joins via the Azalea client
 #                          through a byte-transparent proxy, and diffs the normalized
 #                          join packets byte-for-byte against the committed fixture,
@@ -74,6 +106,7 @@ ORACLE_UNVERIFIED=0
 VERIFY_RUNNABLE=0
 PARITY_RUNNABLE=0
 CAPTURE_RUNNABLE=0
+SCENARIO_RUNNABLE=0
 
 # Directory of this script via bash builtins only (no external tools at load
 # time — sourcing must stay side-effect-free so tests can shim PATH).
@@ -93,9 +126,9 @@ oracle_prereq_check() {
   local missing=0
   JAVA_BARE_OK=0; PYTHON3_OK=0; DISK_OK=0; JAVAC25_OK=0
   PAPERCLIP_JAR=""; COMPILE_JAR=""; LIBRARIES_DIR=""; RUNTIME_JAR=""
-  # VERIFY_RUNNABLE / PARITY_RUNNABLE / CAPTURE_RUNNABLE are globals (the step
-  # runners read them).
-  VERIFY_RUNNABLE=0; PARITY_RUNNABLE=0; CAPTURE_RUNNABLE=0
+  # VERIFY_RUNNABLE / PARITY_RUNNABLE / CAPTURE_RUNNABLE / SCENARIO_RUNNABLE are
+  # globals (the step runners read them).
+  VERIFY_RUNNABLE=0; PARITY_RUNNABLE=0; CAPTURE_RUNNABLE=0; SCENARIO_RUNNABLE=0
 
   # rivet-oracle verify boots `java` directly, so bare java 25+ must be on PATH.
   if command -v java >/dev/null 2>&1; then
@@ -181,6 +214,31 @@ oracle_prereq_check() {
     missing=$((missing + 1))
   fi
 
+  # paperclip jar for the scenario runner's Paper rows (join/move Paper-vs-Rivet
+  # differentials). The scenario harness resolves it through its own ensure_jar
+  # discovery — RIVET_ORACLE_JAR, tools/rivet-client/work/jars/, then a
+  # paper-paperclip-*.jar under working/Paper — so the gate mirrors exactly those
+  # locations (RIVET_ORACLE_JAR is already handled by the PAPERCLIP_JAR check
+  # above). The Paper rows must never run against a missing jar, and equally must
+  # never silently skip: SCENARIO_RUNNABLE is consumed by run_scenario_paper_rows
+  # to report UNVERIFIED (or hard-fail under --require-oracle) instead of the bare
+  # SKIPPED the pre-#160 gate printed.
+  SCENARIO_PAPERCLIP_JAR=""
+  if [ -n "$PAPERCLIP_JAR" ]; then
+    # A verified paperclip (oracle jars/working) is exactly the bundler the
+    # scenario harness boots, so reuse it rather than re-discovering.
+    SCENARIO_PAPERCLIP_JAR="$PAPERCLIP_JAR"
+  elif [ -f "$REPO_DIR/tools/rivet-client/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar" ]; then
+    SCENARIO_PAPERCLIP_JAR="$REPO_DIR/tools/rivet-client/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar"
+  else
+    for c in "$REPO_DIR"/working/Paper/paper-server/build/libs/paper-paperclip-*.jar; do
+      if [ -f "$c" ]; then
+        SCENARIO_PAPERCLIP_JAR="$c"
+        break
+      fi
+    done
+  fi
+
   # Java 25 JDK for the reference oracle (rivet-parity compiles against Paper via
   # run.sh) — mirror run.sh's discovery order.
   local javac25="" h mac_home
@@ -258,6 +316,14 @@ oracle_prereq_check() {
   if [ "$JAVA_BARE_OK" = 1 ] && [ "$DISK_OK" = 1 ] && [ -n "$PAPERCLIP_JAR" ] && [ -n "$CLIENT_BIN" ]; then
     CAPTURE_RUNNABLE=1
   fi
+  # The scenario runner's Paper rows (join --server both / move --server both)
+  # boot Paper (java + paperclip) AND drive the client binary (the harness's
+  # run-scenario.sh builds the rivet-server on demand, so no server binary is a
+  # prereq here). The Paper rows therefore run exactly when the paperclip jar is
+  # present and the client binary exists.
+  if [ "$JAVA_BARE_OK" = 1 ] && [ "$DISK_OK" = 1 ] && [ -n "$SCENARIO_PAPERCLIP_JAR" ] && [ -n "$CLIENT_BIN" ]; then
+    SCENARIO_RUNNABLE=1
+  fi
   if [ "$JAVAC25_OK" = 1 ] && [ -n "$COMPILE_JAR" ] && [ -n "$LIBRARIES_DIR" ] && [ -n "$RUNTIME_JAR" ]; then
     PARITY_RUNNABLE=1
   fi
@@ -293,7 +359,7 @@ oracle_prereq_check() {
 # gate like any other oracle stage; the tamper never touches the committed
 # fixtures.
 run_oracle_verify() {
-  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions)"
+  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline)"
   cargo run -q -p rivet-oracle
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
     echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
@@ -306,8 +372,188 @@ run_oracle_verify() {
     echo "    VERIFIED — fresh normal-overworld boot is byte-identical to the committed region baseline"
     echo "==> oracle negative control (verify --m2 --expect-fail: detects tamper)"
     cargo run -q -p rivet-oracle -- verify --m2 --expect-fail
+    echo "==> oracle verify (M2 FULL region gate: superflat status-FULL region capture, issue #51)"
+    cargo run -q -p rivet-oracle -- verify --full
+    echo "    VERIFIED — fresh corpus-forced superflat boot is byte-identical to the committed status-FULL region baseline"
+    echo "==> oracle negative control (verify --full --expect-fail: detects tamper)"
+    cargo run -q -p rivet-oracle -- verify --full --expect-fail
   else
     echo "    UNVERIFIED — oracle verify did not run (see the prereq report above)"
+    ORACLE_UNVERIFIED=1
+  fi
+}
+
+# The #54 chunk-hash engine (xxh3_64 seed-hash gate). Unlike the other oracle
+# stages it does not boot Paper: `hash-self-check` pins the xxh3_64 known-answer
+# vectors (a wrong variant/endianness fails loudly, never silently corrupting
+# digests), and `hash-paper` rebuilds the committed Paper manifest from the
+# committed M2 region payloads — which must be git-clean, proving the FULL-status
+# stamping and digest table are deterministic.
+#
+# The Paper-vs-Rivet `hash-diff` needs FULL chunks at every corpus coordinate on
+# both sides. Pre-worldgen there is no Rivet FULL serialization (#231/#15; #51
+# must capture status-FULL regions), so with RIVET_HASH_DIR unset (the default)
+# the gate records an explicit NOTICE and stays mergeable — it never runs Paper
+# against Paper (a self-diff proves nothing about Rivet, and `hash-diff` refuses
+# one), and it never claims parity it does not have. This is a milestone-gated
+# comparison, not an oracle prereq: an absent comparison is not ORACLE_UNVERIFIED
+# and does not fail the gate. Setting RIVET_HASH_DIR opts into the strict check —
+# the comparison is then required, and any UNVERIFIED (incomplete corpus coverage
+# or a Paper-vs-Paper self-diff) or FAILED divergence is gate-fatal, never a
+# silent or vacuous green.
+run_oracle_hash() {
+  echo "==> chunk-hash engine (issue #54: xxh3_64 seed-hash gate)"
+  echo "==> oracle hash self-check (xxh3_64 known-answer vectors)"
+  cargo run -q -p rivet-oracle -- hash-self-check
+  echo "    VERIFIED — xxh3_64 matches the pinned known-answer vectors"
+  echo "==> oracle hash-paper (rebuild committed Paper manifest; must be git-clean)"
+  cargo run -q -p rivet-oracle -- hash-paper
+  # The byte-identity check needs a git work tree to compare the rebuild against
+  # the committed manifest. The gate shell tests drive gate.sh from a non-git
+  # sandbox (cargo stubbed), where the manifest cannot be tracked; there the
+  # check is recorded as a NOTICE — never a silent skip or a false abort.
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! git diff --exit-code -- tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json; then
+      echo "    FAILED — committed Paper hash manifest drifted from a fresh rebuild; regenerate and commit it"
+      exit 1
+    fi
+    # Narrate the FULL facts from the live manifest, never a hardcoded count (a
+    # manifest whose FULL set changes must be caught here, not stale-narrated).
+    local full_narration
+    full_narration="$(python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+full = sorted((e["dim"], e["cx"], e["cz"]) for e in m["entries"] if e["status"] == "minecraft:full")
+print(f"{len(full)} FULL: " + ", ".join(f"{d}/{cx}.{cz}" for d, cx, cz in full))
+' "$REPO_DIR/tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json")"
+    echo "    VERIFIED — Paper manifest rebuilds byte-identically ($full_narration)"
+  else
+    echo "    NOTICE — skipped the Paper manifest git-clean check (not inside a git work tree)"
+  fi
+  local paper_dir="$REPO_DIR/tools/rivet-oracle/fixtures/chunk-hash/paper"
+  local rivet_dir="${RIVET_HASH_DIR:-}"
+  if [ -z "$rivet_dir" ]; then
+    # No Rivet chunk manifest exists yet. Record the milestone gap honestly and
+    # move on — this is the documented pre-worldgen state, not an oracle failure.
+    echo "    NOTICE — Paper-vs-Rivet hash-diff did not run: no Rivet chunk manifest yet"
+    echo "      (pre-worldgen, #231/#15 serialization + #51 status-FULL capture pending;"
+    echo "      set RIVET_HASH_DIR to a Rivet region tree to enable the comparison)"
+    return 0
+  fi
+  # `hash-diff` itself refuses a Paper-vs-Paper self-diff (a self-comparison can
+  # never imply Paper == Rivet parity); if RIVET_HASH_DIR aliases the paper tree,
+  # surface that as a hard failure rather than a silent UNVERIFIED.
+  local rc=0
+  cargo run -q -p rivet-oracle -- hash-diff "$paper_dir" "$rivet_dir" 2>&1 || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    # RIVET_HASH_DIR was set, so the comparison was requested and could not
+    # complete (incomplete corpus coverage, or a self-diff if it aliases the
+    # paper tree). A green gate must not claim M2 parity it does not have.
+    echo "    UNVERIFIED — Paper-vs-Rivet hash-diff could not complete"
+    echo "      (needs FULL chunks at every corpus coordinate on both sides; #51 + #231/#15 pending)"
+    exit 1
+  elif [ "$rc" -eq 0 ]; then
+    echo "    VERIFIED — Paper-vs-Rivet FULL digests match across the corpus matrix"
+    echo "==> oracle hash-diff --expect-fail (tamper negatives: every mutation class must be detected)"
+    cargo run -q -p rivet-oracle -- hash-diff --expect-fail "$paper_dir" "$rivet_dir" all
+    echo "    VERIFIED — block/light/heightmap/NBT-order tampering all detected and named"
+  else
+    echo "    FAILED — hash-diff exited $rc (see the output above)"
+    exit 1
+  fi
+}
+
+# Returns 0 iff stdin is exactly the bare JSON-Lines summary the oracle
+# self-test must emit: a single JSON object whose top-level "ok" is the boolean
+# true, with no trailing blank line. Reads RAW bytes from stdin (NOT a $()
+# capture, which strips trailing newlines) so the line-count contract is
+# checkable. Parsed structurally with python3 (NOT a substring scan — a
+# substring glob would accept a nested `{"ok":true}` with no top-level ok, and
+# a top-level "ok":false / "ok":"true" / "ok":1 must all be rejected).
+#
+# The raw-stdout shape is the load-bearing contract: the summary must NOT be a
+# log4j `[HH:mm:ss LEVEL]: [STDOUT]: ...` prefix — Bootstrap.bootStrap()
+# re-wires System.out through SysOutOverSLF4J, so a regression of selfTest()
+# back to System.out.println either prefixes the summary or swallows it
+# entirely. Empty stdout, a `[`-prefixed log line, extra lines, a trailing
+# blank line, or leading/trailing whitespace around the JSON object means the
+# protocol broke — the line must be *exactly* the bare JSON object.
+oracle_self_test_stdout_is_raw_json() {
+  python3 -c '
+import json, sys
+raw = sys.stdin.buffer.read()
+line = raw.rstrip(b"\n")
+if len(raw) - len(line) > 1:
+    sys.exit(1)          # trailing blank line (more than the single terminator)
+if b"\n" in line:
+    sys.exit(1)          # more than one line of content
+if line != line.strip():
+    sys.exit(1)          # leading/trailing whitespace around the JSON object
+if not line:
+    sys.exit(1)          # empty stdout
+try:
+    data = json.loads(line.decode("utf-8"))
+except ValueError:
+    sys.exit(1)
+if not isinstance(data, dict) or data.get("ok") is not True:
+    sys.exit(1)
+'
+}
+
+# The reference oracle's `--self-test` mode (RivetReferenceOracle.selfTest())
+# must emit exactly one bare JSON line on stdout. selfTest() writes through
+# RAW_STDOUT — the System.out captured before Bootstrap.bootStrap() re-wires it
+# through log4j — precisely so the summary is not a `[HH:mm:ss LEVEL]: [STDOUT]:
+# {...}` log line (or swallowed). Asserting the real stdout shape is the
+# load-bearing proof that a regression back to System.out.println fails the
+# gate; it shares the parity step's prerequisites (the compiled oracle boots
+# against the same Paper runtime), so it is guarded by PARITY_RUNNABLE, and the
+# JSON verdict is parsed with python3 (already a gate prereq for `verify`).
+#
+# Classification, mirroring run_rivet_parity's 0/1/3 contract:
+#   run.sh exits 0 AND stdout is the bare JSON line  -> VERIFIED
+#   run.sh exits 0 but stdout is not the bare JSON   -> FAILED (exit 1): the
+#     oracle booted, so a broken raw-stdout protocol is a real self-test
+#     failure.
+#   run.sh exits nonzero                             -> UNVERIFIED: run.sh's single
+#     exit channel cannot tell a boot/prereq failure (a present-but-stale runtime
+#     jar fails its SHA/commit pin, a prereq is missing) from a JVM self-test
+#     assertion failure — selfTest() throws on a failed assertion and run.sh exec's
+#     the JVM, so its nonzero exit passes straight through. Either way the
+#     RAW_STDOUT verdict was never observed, so this is a conservative
+#     classification, never a proven self-test failure. Sets ORACLE_UNVERIFIED
+#     (gate exits 3); with --require-oracle any nonzero exit is a hard failure
+#     (exit 1), exactly like rivet-parity's rc=3 handling.
+run_oracle_self_test() {
+  echo "==> reference oracle self-test (raw JSON Lines on stdout, no log prefix)"
+  if [ "$PARITY_RUNNABLE" = 1 ] && command -v python3 >/dev/null 2>&1; then
+    local out="" rc=0 tmp
+    # Capture stdout to a file (not $() — command substitution strips trailing
+    # newlines, so a trailing blank line would be invisible to the checker).
+    # run.sh exec's the JVM, so its exit status passes straight through; stderr
+    # stays on the terminal so a boot/prereq failure's message is visible.
+    tmp="$(mktemp)"
+    bash "$REPO_DIR/tools/rivet-reference-oracle/run.sh" --self-test >"$tmp" || rc=$?
+    out="$(cat "$tmp")"
+    if [ "$rc" -ne 0 ]; then
+      rm -f "$tmp"
+      echo "    UNVERIFIED — reference oracle --self-test did not yield the raw JSON verdict (exit $rc; see output above)"
+      ORACLE_UNVERIFIED=1
+      if [ "$REQUIRE_ORACLE" = 1 ]; then
+        echo "    --require-oracle is set: a nonzero self-test exit is a hard failure"
+        exit 1
+      fi
+      return 0
+    fi
+    if ! oracle_self_test_stdout_is_raw_json <"$tmp"; then
+      rm -f "$tmp"
+      echo "    FAILED — reference oracle --self-test did not emit a bare JSON line (got: ${out:-<empty>})"
+      exit 1
+    fi
+    rm -f "$tmp"
+    echo "    VERIFIED — reference oracle --self-test emitted raw JSON Lines ($out)"
+  else
+    echo "    UNVERIFIED — reference oracle self-test did not run (see the prereq report above)"
     ORACLE_UNVERIFIED=1
   fi
 }
@@ -385,6 +631,30 @@ run_join_capture() {
     done
   else
     echo "    UNVERIFIED — join capture did not run (see the prereq report above)"
+    ORACLE_UNVERIFIED=1
+  fi
+}
+
+# The scenario runner's Paper-vs-Rivet rows: `join --server both` (#192/#159)
+# and `move --server both` (#53). They boot a real Paper server and drive the
+# client against both servers, so they need the paperclip jar AND the
+# rivet-client binary — SCENARIO_RUNNABLE is set by oracle_prereq_check. Like
+# every other oracle step they must never silently skip: with the prereqs
+# present they run the differentials (0 PASS / 1 FAIL); with a prereq missing
+# they report UNVERIFIED and set ORACLE_UNVERIFIED so the gate exits 3 (and
+# --require-oracle hard-fails at the prereq pre-check, exit 1). This replaces
+# the pre-#160 bare "SKIPPED" which concealed the missing comparison behind a
+# green-looking outcome.
+run_scenario_paper_rows() {
+  if [ "$SCENARIO_RUNNABLE" = 1 ]; then
+    echo "==> scenario runner (join: Paper-vs-Paper + negative case)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" join
+    echo "==> scenario runner (join: Rivet-vs-Paper differential)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" join --server both
+    echo "==> scenario runner (move: Rivet-vs-Paper authoritative-walk differential)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" move --server both
+  else
+    echo "    UNVERIFIED — scenario Paper rows (join/move Paper-vs-Rivet) did not run (paperclip jar or rivet-client binary missing; see the prereq report above)"
     ORACLE_UNVERIFIED=1
   fi
 }
@@ -622,6 +892,12 @@ main() {
       echo "==> rivet-codegen probe-biomes-tags (live Paper biome id + tag network content)"
       cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
         probe-biomes-tags --bundler "$PROBE_BUNDLER"
+      echo "==> rivet-codegen probe-block-behaviors (live Paper per-StateId behavior table)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+        probe-block-behaviors --bundler "$PROBE_BUNDLER"
+      echo "==> rivet-codegen probe-worldgen (live Paper worldgen noise/biome/preset data)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+        probe-worldgen --bundler "$PROBE_BUNDLER"
     else
       echo "    SKIPPED (no Paper bundler jar: build working/Paper (paper-bundler-*.jar) or place it in tools/rivet-oracle/work/jars/)"
     fi
@@ -630,26 +906,55 @@ main() {
   # --- oracle steps (full gate only; the oracle verifies the whole server) -----
   if [ "$FULL_GATE" = true ]; then
     run_oracle_verify
+    run_oracle_hash
+    run_oracle_self_test
     run_rivet_parity
     run_join_capture
   fi
 
-  # --- scenario runner (full gate only; M0 join harness: Paper-vs-Paper + negative case) --
-  # The Paper-vs-Paper join harness boots local Paper twice, joins each with the
-  # Azalea headless client, and requires identical normalized transcripts, plus a
-  # negative case proving the comparator detects a tampered position. The runner
-  # also runs its own unit tests first (port isolation, ServerKind, process-
-  # lifecycle cleanup, exit-code classification — issue #155). Runs only
-  # when a paperclip jar is materialized (same guard style as oracle verify);
-  # skipped when gating a crate subset (the scenario drives a whole server).
+  # --- scenario runner (full gate only; terminal M1 acceptance harness) ------
+  # Boots local servers (Paper and/or Rivet), joins each with the Azalea
+  # headless client, and requires identical normalized transcripts (plus a
+  # negative case proving the comparator detects a tampered transcript). The
+  # runner also runs its own unit tests first (port isolation, ServerKind,
+  # process-lifecycle cleanup, exit-code classification — issue #155).
+  #
+  # Rows:
+  #   join                  Paper-vs-Paper self-check + tamper negative.
+  #   join --server both    Rivet-vs-Paper join differential (issue #192, inverted by #159):
+  #                         the same client joins each server and the normalized
+  #                         transcripts must match — proving Rivet's offline
+  #                         login/configuration/PLAY/chunk-receipt matches Paper.
+  #   move --server both    Rivet-vs-Paper authoritative-walk differential:
+  #                         the same client walks in each server and the sampled
+  #                         walk, teleport acks, and keepalive echoes must match.
+  #   dwell                 Rivet-only wall-clock keepalive survival: the client
+  #                         stays in PLAY past the 30 s kick limit echoing every
+  #                         live keepalive, and the rivet log must show the
+  #                         connection and never a `read timeout` kick.
+  #   kick                  Rivet-only decoded-disconnect-reason check (issue #86):
+  #                         the client sends a NaN movement frame after spawn so
+  #                         the anti-cheat gate answers with a
+  #                         ClientboundDisconnectPacket, and the client must decode
+  #                         exactly `multiplayer.disconnect.invalid_player_movement`
+  #                         (plus a tamper negative on the decoded reason key).
+  #
+  # The Paper rows run when the paperclip jar and the rivet-client binary are
+  # present (SCENARIO_RUNNABLE, set by the prereq pre-check); when either is
+  # missing they report UNVERIFIED and set ORACLE_UNVERIFIED so the gate exits 3
+  # (--require-oracle hard-fails at the pre-check) — never the bare "SKIPPED"
+  # that could conceal the missing comparison behind a green-looking run (issue
+  # #160). The dwell/kick rows are Rivet-only — they need no jar, only the
+  # rivet-server binary (which run-scenario.sh builds on demand). Every row
+  # exits 0 PASS / 1 FAIL / 3 UNVERIFIED, so a missing prereq or a failed
+  # scenario can never look green. Skipped when gating a crate subset (the
+  # scenario drives a whole server).
   if [ "$FULL_GATE" = true ]; then
-    echo "==> scenario runner (join: Paper-vs-Paper + negative case)"
-    if [ -n "${RIVET_ORACLE_JAR:-}" ] || [ -f "$REPO_DIR/tools/rivet-client/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar" ] || \
-       ls "$REPO_DIR"/working/Paper/paper-server/build/libs/paper-paperclip*.jar >/dev/null 2>&1; then
-      "$REPO_DIR/tools/rivet-client/run-scenario.sh" join
-    else
-      echo "    SKIPPED (no paperclip jar: set RIVET_ORACLE_JAR or materialize working/Paper first)"
-    fi
+    run_scenario_paper_rows
+    echo "==> scenario runner (dwell: wall-clock keepalive survival past the 30s kick limit)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" dwell --server rivet
+    echo "==> scenario runner (kick: decoded disconnect reason from the anti-cheat gate)"
+    "$REPO_DIR/tools/rivet-client/run-scenario.sh" kick --server rivet
   fi
 
   # --- unused dependencies (cargo-machete) -------------------------------------

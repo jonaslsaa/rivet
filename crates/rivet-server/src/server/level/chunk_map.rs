@@ -61,6 +61,19 @@ impl ChunkMap {
         }
     }
 
+    /// A chunk map with no seeded placeholder chunk and the given (clamped)
+    /// server view distance. The #516 region-backed boot reconstructs every
+    /// chunk of the view square from the read-only region and installs it
+    /// explicitly — an empty map guarantees `RequireLoaded` fails on any
+    /// position the boot did not install, instead of silently serving a
+    /// superflat placeholder.
+    pub fn empty(server_view_distance: i32) -> Self {
+        ChunkMap {
+            chunks: HashMap::new(),
+            server_view_distance: Self::set_server_view_distance(server_view_distance),
+        }
+    }
+
     /// `ChunkMap.setServerViewDistance(int)` — `Mth.clamp(newViewDistance, 2,
     /// MoonriseConstants.MAX_VIEW_DISTANCE)` (default 32).
     pub fn set_server_view_distance(view_distance: i32) -> i32 {
@@ -77,6 +90,15 @@ impl ChunkMap {
     /// "not loaded" (no generation yet — issue #185).
     pub fn get_chunk(&self, pos: ChunkPos) -> Option<&LevelChunk> {
         self.chunks.get(&pos)
+    }
+
+    /// Install an owned reconstructed chunk at `pos`, replacing any previously
+    /// loaded chunk there. The #516 region-backed boot composes the read-only
+    /// world into an empty map by installing every chunk of the view square
+    /// the caller already validated (tick-thread-owned by value, never
+    /// `Arc<RwLock>`).
+    pub fn install(&mut self, pos: ChunkPos, chunk: LevelChunk) {
+        self.chunks.insert(pos, chunk);
     }
 
     /// The number of loaded chunks. Deterministic: 1 for the M1 superflat
@@ -126,15 +148,15 @@ mod tests {
     fn spawn_chunk_content_is_the_deterministic_superflat() {
         let map = ChunkMap::new(ChunkPos::ZERO, 4);
         let chunk = map.get_chunk(ChunkPos::ZERO).unwrap();
-        // The 24-section single-stone content: section 0 holds the stone layer.
-        assert_eq!(chunk.content().sections.len(), 24);
+        // The 24-section single-stone content: section 0 (Y=-4) holds the stone
+        // layer (superflat minY -64, height 384).
+        assert_eq!(chunk.get_sections().len(), 24);
         // The three `Usage.CLIENT` heightmaps (WORLD_SURFACE, MOTION_BLOCKING,
         // MOTION_BLOCKING_NO_LEAVES) in enum id order — issue #156's DoD
         // heightmap set. All stored offsets 1 (stone at y=-64).
         use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
         let types: Vec<HeightmapType> = chunk
-            .content()
-            .heightmaps
+            .client_heightmaps()
             .iter()
             .map(|(ty, _)| *ty)
             .collect();
@@ -146,7 +168,7 @@ mod tests {
                 HeightmapType::MotionBlockingNoLeaves,
             ]
         );
-        for (_, raw) in &chunk.content().heightmaps {
+        for (_, raw) in chunk.client_heightmaps() {
             assert_eq!(raw.len(), 37, "9-bit heightmap storage longs");
         }
     }
@@ -158,13 +180,10 @@ mod tests {
         let b = ChunkMap::new(ChunkPos::ZERO, 4);
         let ca = a.get_chunk(ChunkPos::ZERO).unwrap();
         let cb = b.get_chunk(ChunkPos::ZERO).unwrap();
+        assert_eq!(ca.sections_buffer(), cb.sections_buffer());
         assert_eq!(
-            ca.content().sections_buffer(),
-            cb.content().sections_buffer()
-        );
-        assert_eq!(
-            ca.content().chunk_packet_data().buffer(),
-            cb.content().chunk_packet_data().buffer()
+            ca.chunk_packet_data().buffer(),
+            cb.chunk_packet_data().buffer()
         );
     }
 }

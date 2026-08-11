@@ -44,6 +44,7 @@ mkdir -p "$SANDBOX/scripts" \
          "$SANDBOX/tools/rivet-oracle/work/jars" \
          "$SANDBOX/tools/rivet-oracle/work/run/libraries" \
          "$SANDBOX/tools/rivet-oracle/work/run/versions/26.2" \
+         "$SANDBOX/tools/rivet-reference-oracle" \
          "$SANDBOX/working/Paper/paper-server/build/libs"
 
 # Minimal workspace + codegen manifest so gate.sh's --manifest-path / path
@@ -66,6 +67,18 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/t
 # prerequisites present.
 mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
 : > "$SANDBOX/tools/rivet-client/target/debug/rivet-client"
+
+# gate.sh now also runs the scenario runner's Paper rows (join/move
+# Paper-vs-Rivet differentials) whenever the paperclip jar and the client binary
+# are present (SCENARIO_RUNNABLE). Stub run-scenario.sh to succeed so a green
+# full gate reaches GATE GREEN; the scenario's own behaviour is covered by
+# test_gate_prereqs.sh and the runner's unit tests.
+mkdir -p "$SANDBOX/tools/rivet-client"
+cat > "$SANDBOX/tools/rivet-client/run-scenario.sh" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$SANDBOX/tools/rivet-client/run-scenario.sh"
 
 # The real gate script under test.
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
@@ -92,6 +105,13 @@ EOF
 # materialized runtime: the libraries dir (created above) + the runtime jar
 # beside it at versions/26.2/paper-26.2.jar.
 : > "$SANDBOX/tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
+# The reference-oracle self-test step (run_oracle_self_test) invokes run.sh;
+# stub it to emit the bare JSON summary so a green full gate reaches GATE GREEN.
+cat > "$SANDBOX/tools/rivet-reference-oracle/run.sh" <<'EOF'
+#!/bin/bash
+printf '%s\n' '{"ok":true,"protocol":1,"tests":9}'
+EOF
+chmod +x "$SANDBOX/tools/rivet-reference-oracle/run.sh"
 
 TEST_LOG="$SANDBOX/invocations.log"
 : > "$TEST_LOG"
