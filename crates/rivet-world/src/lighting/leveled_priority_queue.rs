@@ -60,10 +60,11 @@ impl LeveledPriorityQueue {
         }
     }
 
-    /// `removeFirstLong()` — pop from the lowest non-empty level. Java throws
-    /// `NoSuchElementException` on an empty queue; the port panics with the
-    /// same message (indexing would otherwise hit a generic out-of-bounds
-    /// panic first).
+    /// `removeFirstLong()` — pop from the lowest non-empty level. On an empty
+    /// queue Java indexes `queues[firstQueuedLevel]` with
+    /// `firstQueuedLevel == levelCount` — an `ArrayIndexOutOfBoundsException`
+    /// — before any set method is reached; the port guards explicitly and
+    /// panics with a clear message instead of the generic out-of-bounds panic.
     pub fn remove_first_long(&mut self) -> i64 {
         assert!(
             self.first_queued_level < self.level_count,
