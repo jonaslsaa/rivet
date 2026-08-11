@@ -146,6 +146,11 @@ impl Server {
             let mut session = player::session::default_session_config(config.compression_threshold);
             if let Some(level) = region_level {
                 session.level = level;
+                // `ServerLevel.isFlat()` drives the login packet's `is_flat`
+                // flag: the region-backed overworld (real generator type from
+                // `world_gen_settings.dat`) advertises not-flat, while the
+                // superflat default stays flat.
+                session.join.is_flat = session.level.is_flat();
             }
             session.keepalive_timeout_ns = config.keepalive_timeout.as_nanos() as i64;
             tickables.push(player::session::session_manager_tickable(session));
