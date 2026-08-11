@@ -2,11 +2,14 @@
 //!
 //! This module deliberately has no launcher-save discovery, generation, or
 //! write API. The caller supplies the already-copied root created by the #316
-//! harness. Section/palette reconstruction (#336) and heightmap/light/
-//! block-entity reconstruction (#337) are available on main; construction
-//! still stops at the runtime `ChunkMap`/`LevelChunk` composition slice, the
-//! #323 `level.dat` metadata boundary, and real structures/ticks/block
-//! entities (#369).
+//! harness. Section/palette reconstruction (#336), heightmap/light/
+//! block-entity reconstruction (#337), and the #369 auxiliary-payload carry
+//! (structure references, stored ticks, serialized block entities) are
+//! available on main; construction still stops at the runtime
+//! `ChunkMap`/`LevelChunk` composition slice, the #323 `level.dat` metadata
+//! boundary, and the deferred execution/installation of those payloads (tick
+//! containers #370, block-entity materialization #341, `StructureStart`
+//! loading and STRUCTURE-registry membership #369).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -142,17 +145,22 @@ impl RegionChunkSource {
             .ok_or(RegionBackedBootError::MissingChunkStatus(pos))
     }
 
-    /// Read, extract, and fully validate one serialized chunk for runtime
-    /// composition. Returns the validated data; the runtime
-    /// `ChunkMap`/`LevelChunk` composition slice is the next loaded-world
-    /// step, so no production path composes the result today. Proto/generation
-    /// and blending boundaries surface their precise typed errors first.
+    /// Read, extract, and validate one serialized chunk for runtime
+    /// composition. The preflight applies the same capability boundary
+    /// `reconstruct_runtime_chunk` uses — `validate_full_for_reconstruction` —
+    /// so serialized block entities and stored ticks are carried (not rejected)
+    /// and the unsupported surfaces (proto status, blending, structure `starts`,
+    /// persistent data, non-empty entities) surface their typed errors here.
+    /// Section/palette/light decode validation is not part of this boundary:
+    /// `reconstruct_runtime_chunk` decodes those inside its catch-unwound
+    /// `reconstruct_sections` step, so a chunk that passes the preflight can
+    /// still fail reconstruction on a malformed section or light payload.
     pub fn load_for_composition(
         &mut self,
         pos: ChunkPos,
     ) -> Result<SerializableChunkData, RegionBackedBootError> {
         let data = self.read_serializable(pos)?;
-        data.validate_full_capabilities()
+        data.validate_full_for_reconstruction()
             .map_err(RegionBackedBootError::SerializableChunk)?;
         Ok(data)
     }
