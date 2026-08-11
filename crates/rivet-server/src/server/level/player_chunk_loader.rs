@@ -355,11 +355,18 @@ impl PlayerChunkLoader {
     /// `add` send-set, so the enter cells are exactly the cells of the new view
     /// the old view did not contain.
     ///
-    /// **Nothing-to-do guard.** Java's `update` recomputes only when the view
-    /// distances *or* the chunk moved (the first of four conditions in the
-    /// "has anything changed" check); with the M1 world's constant distances,
-    /// an intra-chunk move emits nothing — the same "nothing we care about
-    /// changed" early return.
+    /// **Nothing-to-do guard.** Java's `update` early-returns only when all six
+    /// of its conditions still hold — the three view distances (`send`, `load`,
+    /// `tick`), the chunk x/z, and `canGenerateChunks`. This slice tracks only
+    /// `send`, `tick`, and the center: the `load` distance derives from the
+    /// world's constant view distance (fixed per world instance), and
+    /// `canGenerateChunks` (spectator/creative generation permission) has no
+    /// ported counterpart. A `load`-only change emits nothing in this slice
+    /// anyway — `update` produces only the cache-center packet and the newly
+    /// entered chunks, and the load queues are deferred with #185 — so the
+    /// guard recomputes exactly when an output could change, and an
+    /// intra-chunk move on the constant-distance M1 world emits nothing (the
+    /// same "nothing we care about changed" early return).
     ///
     /// **No silent substitution.** Each entered position resolves through
     /// `encode_chunk_with_light`, which honors `MissingChunkPolicy`:
