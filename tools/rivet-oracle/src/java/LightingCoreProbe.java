@@ -239,8 +239,8 @@ public final class LightingCoreProbe {
         emit("spatial.outerMask=" + OUTER_MASK);
 
         long a = (1L << 39) | (2L << 14) | 3L;
-        long b = (1L << 39) | (5L << 14) | 6L; // same outer group as a
-        long c = (9L << 39) | (2L << 14) | 3L; // different outer group
+        long b = (1L << 39) | (5L << 14) | 6L; // different outer group from a
+        long c = (9L << 39) | (2L << 14) | 3L; // different outer group from a
         emit("spatial.key.a=" + a);
         emit("spatial.key.b=" + b);
         emit("spatial.key.c=" + c);
