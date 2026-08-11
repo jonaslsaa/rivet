@@ -529,6 +529,13 @@ impl SerializableChunkData {
     pub fn block_entities(&self) -> &[CompoundTag] {
         &self.block_entities
     }
+    /// Consume the serialized block-entity compounds, source order, leaving an
+    /// empty list in place. The #383 reconstruction uses this to carry the
+    /// tags into the runtime chunk's pending map and the returned field without
+    /// cloning the list twice.
+    pub(crate) fn take_block_entities(&mut self) -> Vec<CompoundTag> {
+        std::mem::take(&mut self.block_entities)
+    }
     pub fn structure_data(&self) -> &CompoundTag {
         &self.structure_data
     }

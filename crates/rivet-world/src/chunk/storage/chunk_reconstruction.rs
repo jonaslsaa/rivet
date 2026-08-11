@@ -21,10 +21,13 @@
 //! the caller owns those. Structures stay an explicit #369 boundary; live block
 //! entities stay an explicit #341 boundary. Ticks are decoded through the
 //! merged `SavedTick` value layer (#370/#381), but stay deferred: a FULL chunk
-//! carrying a decoded non-empty `block_ticks`/`fluid_ticks` list is a typed
-//! `UnsupportedTicks` error, and the API carries the raw lists so the
-//! tick-execution slice (`LevelChunkTicks`/`ProtoChunkTicks`) can install
-//! them without rework.
+//! carrying a decoded non-empty in-chunk `block_ticks`/`fluid_ticks` list is a
+//! typed `UnsupportedTicks` error — nothing is installed and nothing is
+//! silently dropped. The raw lists are still carried on the result, preserved
+//! for the tick-execution slice (`LevelChunkTicks`/`ProtoChunkTicks`) to
+//! consume once an installer lands; on the current success path they are empty
+//! unless the per-chunk filter dropped the stored ticks or an element failed
+//! to decode.
 //!
 //! ## Block entities on the FULL path
 //!
@@ -83,6 +86,18 @@ pub fn block_state_predicates() -> SectionBlockPredicates {
     }
 }
 
+/// Extract the human-readable message from a panic payload, for surfacing a
+/// caught section-decode panic as a typed [`ChunkReconstructionError`].
+fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown section-decode panic".to_string()
+    }
+}
+
 /// The `StateFlags` resolver the `LevelChunk`/`ChunkAccess` constructors store
 /// for the heightmap walks (`isOpaque` predicates).
 ///
@@ -120,9 +135,15 @@ pub struct ChunkReconstruction {
     /// diagnostic, mirroring `SerializableChunkData::construct_full` (Paper's
     /// `reportMisplacedChunk` — the chunk is relocated, never rejected).
     pub parse_diagnostics: Vec<ChunkParseDiagnostic>,
-    /// The raw `block_ticks` list, retained for the tick-execution installer.
+    /// The raw `block_ticks` list as it appeared on the wire. Non-empty stored
+    /// ticks are rejected by `validate_full_capabilities` (tick installation is
+    /// deferred to the `LevelChunkTicks`/`ProtoChunkTicks` execution slice), so
+    /// on the success path this is empty except when a hostile-garbage list
+    /// decodes to zero surviving ticks — the field exists so the future
+    /// installer can consume the raw wire form without rework.
     pub raw_block_ticks: ListTag,
-    /// The raw `fluid_ticks` list, retained for the tick-execution installer.
+    /// The raw `fluid_ticks` list as it appeared on the wire. See
+    /// [`Self::raw_block_ticks`] for the deferral semantics.
     pub raw_fluid_ticks: ListTag,
     /// The serialized block-entity compounds, retained in source order for the
     /// #341 materialization pass.
@@ -137,6 +158,13 @@ pub enum ChunkReconstructionError {
     /// The per-section paletted-container codec failure (#336).
     #[error("section {0}")]
     Section(#[from] ChunkReadException),
+    /// A section-decode panic, caught at this boundary and surfaced as a typed
+    /// error. The one known source is `decode_section_light` panicking on a
+    /// malformed light array (length != 2048), which faithfully mirrors Paper's
+    /// unchecked `IllegalArgumentException` from `new DataLayer(byte[])` — but
+    /// the public reconstruction API surfaces it as an error, not a crash.
+    #[error("section decode panic: {0}")]
+    SectionPanic(String),
 }
 
 /// Reconstruct one validated FULL chunk into an owned runtime `LevelChunk`.
@@ -163,7 +191,7 @@ pub enum ChunkReconstructionError {
 /// "chunk carries a deferred surface".
 pub fn reconstruct_runtime_chunk(
     requested_pos: ChunkPos,
-    data: SerializableChunkData,
+    mut data: SerializableChunkData,
     height_accessor: SimpleLevelHeightAccessor,
     has_sky_light: bool,
 ) -> Result<ChunkReconstruction, ChunkReconstructionError> {
@@ -193,17 +221,33 @@ pub fn reconstruct_runtime_chunk(
     let factory = current_version_container_factory();
     let min_section_y = height_accessor.get_min_section_y();
     let max_section_y = height_accessor.get_max_section_y();
+    // `reconstruct_sections` surfaces paletted-container failures as a typed
+    // `ChunkReadException`, but the section loop's `decode_section_light`
+    // panics on a malformed light array (length != 2048) — faithfully mirroring
+    // Paper's unchecked `IllegalArgumentException` from `new DataLayer(byte[])`.
+    // Catch that panic here so the public reconstruction API surfaces it as a
+    // typed error instead of crashing the caller.
+    let section_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reconstruct_sections(
+            data.section_tags(),
+            min_section_y,
+            max_section_y,
+            &factory,
+            block_state_predicates(),
+        )
+    }));
     let SectionReconstruction {
         sections,
         light_data,
         diagnostics,
-    } = reconstruct_sections(
-        data.section_tags(),
-        min_section_y,
-        max_section_y,
-        &factory,
-        block_state_predicates(),
-    )?;
+    } = match section_result {
+        Ok(Ok(reconstruction)) => reconstruction,
+        Ok(Err(error)) => return Err(error.into()),
+        Err(payload) => {
+            let message = panic_payload_message(&payload);
+            return Err(ChunkReconstructionError::SectionPanic(message));
+        }
+    };
     let sections: Vec<LevelChunkSection<BlockState, BiomeId>> = sections
         .into_iter()
         .map(|section| {
@@ -239,7 +283,11 @@ pub fn reconstruct_runtime_chunk(
         has_sky_light,
         &light_data,
     );
-    install_pending_block_entities(&mut chunk, &data);
+    // Move the serialized block entities out of the parse result once: the
+    // chunk's pending map and the returned field both need them, so clone only
+    // into the chunk map and move the owned list into the result.
+    let block_entities = data.take_block_entities();
+    install_pending_block_entities(&mut chunk, &block_entities);
 
     let mut parse_diagnostics = data.diagnostics().to_vec();
     if requested_pos != data.stored_pos() {
@@ -255,7 +303,7 @@ pub fn reconstruct_runtime_chunk(
         parse_diagnostics,
         raw_block_ticks: data.raw_block_ticks().clone(),
         raw_fluid_ticks: data.raw_fluid_ticks().clone(),
-        block_entities: data.block_entities().to_vec(),
+        block_entities,
     })
 }
 
@@ -316,11 +364,13 @@ fn install_lights(
 /// the raw tags stay available for that pass. Java's `postLoadChunk` only keeps
 /// `keepPacked` entries pending and materializes the rest, but the block-entity
 /// map is not ported — carrying all of them pending is the honest boundary.
+/// The tags are cloned into the chunk map; the caller keeps the owned list for
+/// the returned field.
 fn install_pending_block_entities(
     chunk: &mut ReconstructedLevelChunk,
-    data: &SerializableChunkData,
+    block_entities: &[CompoundTag],
 ) {
-    for entity_tag in data.block_entities() {
+    for entity_tag in block_entities {
         chunk.set_block_entity_nbt(entity_tag.clone());
     }
 }
@@ -569,6 +619,59 @@ mod tests {
         .err()
         .expect("corrupt section is a typed read error");
         assert!(matches!(error, ChunkReconstructionError::Section(_)));
+    }
+
+    #[test]
+    fn malformed_light_array_is_a_caught_section_panic() {
+        // `decode_section_light` panics on a BlockLight byte array whose length
+        // is not 2048 (faithfully mirroring Paper's unchecked
+        // `IllegalArgumentException` from `new DataLayer(byte[])`). The
+        // reconstruction catches that panic and surfaces it as a typed
+        // `SectionPanic` instead of crashing the caller.
+        // A valid single-entry `block_states` palette so the section decodes
+        // past the container and reaches the light validation.
+        let stone = rivet_nbt::nbt_utils::write_block_state(BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:stone")
+                .expect("stone is in the generated block registry"),
+        ));
+        let mut block_states = CompoundTag::new();
+        block_states.put(
+            "palette".to_string(),
+            rivet_nbt::tag::Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![
+                rivet_nbt::tag::Tag::Compound(stone),
+            ])),
+        );
+        let mut section = CompoundTag::new();
+        section.put_byte("Y", 0);
+        section.put(
+            "block_states".to_string(),
+            rivet_nbt::tag::Tag::Compound(block_states),
+        );
+        section.put_byte_array("BlockLight", vec![0i8; 17]);
+        let mut chunk = CompoundTag::new();
+        chunk.put_string("Status", "minecraft:full");
+        chunk.put(
+            "sections".to_string(),
+            rivet_nbt::tag::Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![
+                rivet_nbt::tag::Tag::Compound(section),
+            ])),
+        );
+        let data = SerializableChunkData::parse(height_accessor::create(-64, 384), &chunk)
+            .unwrap()
+            .unwrap();
+        let error = reconstruct_runtime_chunk(
+            ChunkPos::ZERO,
+            data,
+            height_accessor::create(-64, 384),
+            true,
+        )
+        .err()
+        .expect("malformed light array is a caught panic, not a crash");
+        assert!(matches!(
+            error,
+            ChunkReconstructionError::SectionPanic(message)
+                if message.contains("BlockLight") && message.contains("2048")
+        ));
     }
 
     #[test]
