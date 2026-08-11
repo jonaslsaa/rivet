@@ -73,9 +73,13 @@
 //!   known-pack slot is an opaque `()` placeholder (see `registration_info.rs`);
 //!   the Paper `PaperRegistryAccess`/`PaperRegistryListenerManager`/
 //!   `Conversions` hooks are Paper plugin-API machinery out of scope for this
-//!   foundation slice. Registration info is `RegistrationInfo::BUILT_IN`
-//!   (stable), matching the `ResourceManagerRegistryLoadTask` memoized
-//!   `KNOWN_PACK_INFO.empty()` → `Lifecycle.stable()` path.
+//!   foundation slice. Because the placeholder carrier can only ever be absent,
+//!   every datapack element registers with
+//!   `RegistrationInfo(None, Lifecycle.experimental())` — Java's
+//!   `REGISTRATION_INFO_CACHE` maps an absent `KnownPack` to
+//!   `orElse(Lifecycle.experimental())`. The task's initial `Lifecycle.stable()`
+//!   accumulates the element lifecycles (`Lifecycle.add`: experimental wins),
+//!   so a datapack-loaded registry freezes experimental, matching Paper.
 //! - **Same-batch cross-references resolve as empty.** Java's
 //!   `ConcurrentHolderGetter` creates placeholder holders for not-yet-registered
 //!   keys (holder identity: repeated `get(key)` returns the same holder, bound
@@ -213,16 +217,21 @@ impl FileToIdConverter {
 
     /// `FileToIdConverter.listMatchingResources(ResourceManager)` — the seam a
     /// future `ResourceManager` port calls. `resources` is the already-listed
-    /// `(Identifier, contents)` map (see module docs); only files whose path
-    /// ends with the extension are returned, preserving Java's
-    /// `manager.listResources(prefix, this::extensionMatches)` filter.
+    /// `(Identifier, contents)` map (see module docs). Java's
+    /// `manager.listResources(prefix, this::extensionMatches)` lists only
+    /// resources under the prefix directory, so a file must both start with
+    /// `prefix + "/"` AND end with the extension to match. The prefix filter is
+    /// what keeps `file_to_id`'s substring from ever seeing an out-of-prefix
+    /// path during a load (Java's `substring` throws on such input; the load
+    /// path simply never hands it one).
     pub fn list_matching_resources<'a>(
         &self,
         resources: &'a HashMap<Identifier, String>,
     ) -> HashMap<Identifier, &'a String> {
+        let prefix_path = format!("{}/", self.prefix);
         resources
             .iter()
-            .filter(|(id, _)| self.extension_matches(id))
+            .filter(|(id, _)| id.path().starts_with(&prefix_path) && self.extension_matches(id))
             .map(|(id, contents)| (id.clone(), contents))
             .collect()
     }
@@ -477,11 +486,13 @@ pub trait DynLoadTask {
     /// the getter's owning access).
     fn create_registry_info(&self, context_access: &RegistryAccess) -> RegistryInfo<()>;
 
-    /// `RegistryLoadTask.load(RegistryInfoLookup, Executor)` — the concrete
-    /// element/tag load (synchronous here; the caller owns threading).
+    /// `RegistryLoadTask.load(RegistryOps, Executor)` — the concrete element/tag
+    /// load (synchronous here; the caller owns threading). The driver passes the
+    /// shared `RegistryOps` (over the load context) so the per-element decode
+    /// runs under the same ops across all tasks, like Java's shared context.
     fn load(
         &mut self,
-        context: &dyn RegistryInfoLookup,
+        ops: &JsonRegistryOps,
         loading_errors: &mut HashMap<ResourceKey<()>, String>,
     );
 
@@ -617,13 +628,15 @@ impl<'a, T: Send + Sync + 'static> ResourceManagerRegistryLoadTask<'a, T> {
         }
     }
 
-    /// `RegistryLoadTask.registerTags(Map)` — `bindTags` on the builder.
+    /// `RegistryLoadTask.registerTags(Map)` — `bindTags` on the builder. The
+    /// bindings are moved out (the task is linearly consumed; they are never
+    /// needed after the load phase).
     fn register_tags(&mut self) {
         let builder = self
             .builder
             .as_mut()
             .expect("register_tags runs before freeze");
-        builder.bind_tags(self.tag_bindings.clone());
+        builder.bind_tags(std::mem::take(&mut self.tag_bindings));
     }
 }
 
@@ -651,15 +664,14 @@ impl<T: Send + Sync + 'static> DynLoadTask for ResourceManagerRegistryLoadTask<'
 
     fn load(
         &mut self,
-        context: &dyn RegistryInfoLookup,
+        ops: &JsonRegistryOps,
         loading_errors: &mut HashMap<ResourceKey<()>, String>,
     ) {
-        let ops = RegistryOps::create(&JsonOps::INSTANCE, context.clone_box());
         let converter = FileToIdConverter::registry(&self.registry_key());
         // `lister.listMatchingResources` then `sorted(Entry.comparingByKey())`:
-        // only extension-matching resources, registered in resource-id order
-        // (which fixes the holder ids). Identifier `Ord` is path-then-namespace,
-        // matching Java's `Identifier.compareTo`.
+        // only prefix + extension-matching resources, registered in resource-id
+        // order (which fixes the holder ids). Identifier `Ord` is
+        // path-then-namespace, matching Java's `Identifier.compareTo`.
         let mut resource_ids: Vec<Identifier> = converter
             .list_matching_resources(self.resources)
             .keys()
@@ -673,14 +685,17 @@ impl<T: Send + Sync + 'static> DynLoadTask for ResourceManagerRegistryLoadTask<'
                 ResourceKey::create(&self.data.key, converter.file_to_id(&resource_id));
             let value = PendingRegistration::<T>::load_from_resource(
                 self.data.element_codec.as_ref(),
-                &ops,
+                ops,
                 &element_key,
                 &self.resources[&resource_id],
             );
             registrations.push(PendingRegistration {
                 key: element_key,
                 value,
-                registration_info: crate::RegistrationInfo::BUILT_IN,
+                // `REGISTRATION_INFO_CACHE.apply(thunk.knownPackInfo())` with an
+                // absent known-pack: `RegistrationInfo(None, experimental())`
+                // (the `()` placeholder carrier cannot be present).
+                registration_info: crate::RegistrationInfo::new(None, Lifecycle::Experimental),
             });
         }
 
@@ -821,15 +836,18 @@ pub fn load<'a>(
 ) -> Result<RegistryAccess, RegistryLoadErrors> {
     let mut loading_errors: HashMap<ResourceKey<()>, String> = HashMap::new();
     let context = create_context(context_registries, &registries_to_load);
+    // One ops over the load context shared across all tasks (Java passes the
+    // same `RegistryOps.RegistryInfoLookup context` to every task's load).
+    let ops = RegistryOps::create(&JsonOps::INSTANCE, context);
 
     for task in &mut registries_to_load {
-        task.load(context.as_ref(), &mut loading_errors);
-    }
-    if !loading_errors.is_empty() {
-        return Err(loading_errors);
+        task.load(&ops, &mut loading_errors);
     }
 
-    // `frozenRegistries = loadTasks.stream().filter(t -> t.freezeRegistry(errors))`
+    // `frozenRegistries = loadTasks.stream().filter(t -> t.freezeRegistry(errors))`.
+    // Paper runs the freeze phase before checking the shared error map, so a
+    // decode failure in one registry still surfaces a freeze failure in another
+    // alongside it (no early return here).
     let mut to_validate: Vec<&mut Box<dyn DynLoadTask + 'a>> = Vec::new();
     for task in &mut registries_to_load {
         if task.freeze_registry(&mut loading_errors) {
@@ -983,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn file_to_id_converter_list_filters_by_extension() {
+    fn file_to_id_converter_list_filters_by_extension_and_prefix() {
         let converter = FileToIdConverter::json("worldgen/feature".to_string());
         let mut resources = HashMap::new();
         resources.insert(
@@ -998,11 +1016,21 @@ mod tests {
             Identifier::with_default_namespace("worldgen/feature/ignored.txt"),
             "\"z\"".to_string(),
         );
+        // Java's `listResources(prefix, ...)` never lists an out-of-prefix file
+        // even when it ends with the extension — without this filter the
+        // resource would reach `fileToId`'s substring and panic.
+        resources.insert(
+            Identifier::with_default_namespace("other/prefix/oak.json"),
+            "\"w\"".to_string(),
+        );
         let matching = converter.list_matching_resources(&resources);
         assert_eq!(matching.len(), 2);
         assert!(!matching.contains_key(&Identifier::with_default_namespace(
             "worldgen/feature/ignored.txt"
         )));
+        assert!(
+            !matching.contains_key(&Identifier::with_default_namespace("other/prefix/oak.json"))
+        );
     }
 
     #[test]
@@ -1200,6 +1228,23 @@ mod tests {
                 .get(&erase_key(&feature_registry_key()))
                 .map(String::as_str),
             Some("Registry must be non-empty: minecraft:test_feature")
+        );
+    }
+
+    #[test]
+    fn load_freezes_a_datapack_registry_as_experimental() {
+        // `REGISTRATION_INFO_CACHE` maps an absent KnownPack to
+        // `Lifecycle.experimental()`; the element lifecycles accumulate into
+        // the frozen registry (experimental wins over the task's stable).
+        let (context, _) = context_access();
+        let data = RegistryData::new(&feature_registry_key(), biome_holder_codec());
+        let resources = resource_map("test_feature", &[("oak", "\"minecraft:plains\"")]);
+        let task = ResourceManagerRegistryLoadTask::with_stable_lifecycle(data, &resources);
+        let access = load(&context, vec![Box::new(task)]).expect("load succeeds");
+        let feature_registry = access.lookup(&feature_registry_key()).unwrap();
+        assert_eq!(
+            feature_registry.registry_lifecycle(),
+            Lifecycle::Experimental
         );
     }
 
