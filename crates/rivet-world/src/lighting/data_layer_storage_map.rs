@@ -10,14 +10,16 @@
 //!
 //! Java's `lastSectionKeys[2]`/`lastSections[2]` cache is a pure read
 //! optimization: a hit returns the same `DataLayer` object a map lookup would
-//! (the cache stores *references* into the map, never copies). Nothing about
-//! the cache is observable to a caller that goes through the map: the engine
-//! storages call `clearCache()` after every mutator (`setLayer`/`removeLayer`/
-//! `copyDataLayer`), so a cache hit always returns the map's current layer.
-//! The port drops it — the `HashMap` is the single source of truth, exactly as
-//! the `SWMRNibbleArray` port drops Java's thread-local buffer pooling for the
-//! same reason. `clearCache()`/`disableCache()` become obsolete paths and are
-//! not ported.
+//! (the cache stores *references* into the map, never copies). The cache is
+//! only kept consistent by the consumer's `clearCache()` calls — Java's
+//! `setLayer`/`removeLayer` do not clear it, and the engine storages clear
+//! after most, not every, mutator (e.g. `LayerLightSectionStorage.initializeSection`
+//! calls `setLayer` with no following `clearCache`). The port drops the cache
+//! entirely, so every `get_layer` reads the `HashMap` directly and can never
+//! return a stale layer — behaviorally safe by construction rather than by the
+//! consumer's clearing discipline, exactly as the `SWMRNibbleArray` port drops
+//! Java's thread-local buffer pooling for the same reason. `clearCache()`/
+//! `disableCache()` become obsolete paths and are not ported.
 //!
 //! ## Shared-layer semantics (`copy()` and the read/write views)
 //!
