@@ -7,7 +7,8 @@
 //! that surface). They were added by the slices that needed them:
 //!
 //! - `overrideLifecycle(Codec, Function, Function)` and its 1-arg variant —
-//!   required by `Registry.referenceHolderWithLifecycle()`.
+//!   required by `Registry.referenceHolderWithLifecycle()` (#394, the by-name
+//!   codec surface in `rivet-registry`).
 //! - `retrieveContext(Function)` — required by `RegistryOps`.
 //! - `orCompressed(Codec, Codec)` and `orCompressed(MapCodec, MapCodec)` —
 //!   the Codec variant is a transitive dependency of
