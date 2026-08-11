@@ -1265,10 +1265,26 @@ impl ReconstructedLightData {
     }
 }
 
-/// Rebuild Starlight nibbles without running lighting. Any invalid state,
-/// state/data mismatch, or out-of-range section reproduces Paper's caught
-/// load failure: all-null arrays are retained and `light_correct` becomes
-/// false, with no partially installed data.
+/// Rebuild the Starlight nibbles from the decoded per-section light, without
+/// running lighting. `light_correct` distinguishes the two ingest paths Paper
+/// has for a serialized chunk's light:
+///
+/// - `true` (Starlight save): every `SectionLightData` carries the persisted
+///   `starlight.*light_state` INTs (`SaveUtil.loadLightHookReal`), so each
+///   present byte array is rebuilt with its raw state — the section stays
+///   absent unless it has data (an absent state INT defaults to `Null`, so a
+///   bytes-but-no-state section is skipped, matching Paper).
+/// - `false` (a vanilla-format save): the `starlight.*light_state` INTs are
+///   absent, but a present plain `BlockLight`/`SkyLight` array is what vanilla
+///   `SerializableChunkData` read as a `DataLayer` and would queue for the send
+///   (`new DataLayer(byte[])` is never empty, so it always becomes an update
+///   mask + bytes). Each such array is installed as an `Initialised` nibble.
+///   Paper itself would drop these and relight; Rivet has no lighting engine
+///   (#184), so the faithful packet is the persisted array (issue #531).
+///
+/// Any invalid state, state/data mismatch, or out-of-range section reproduces
+/// Paper's caught load failure: all-null arrays are retained and
+/// `light_correct` becomes false, with no partially installed data.
 pub fn reconstruct_lights(
     height: SimpleLevelHeightAccessor,
     sections: &[SectionLightData],
@@ -1277,14 +1293,6 @@ pub fn reconstruct_lights(
 ) -> ReconstructedLightData {
     let count = height.get_sections_count() as usize + 2;
     let empty = || filled_empty_light(count);
-    if !light_correct {
-        return ReconstructedLightData {
-            block_nibbles: empty(),
-            sky_nibbles: empty(),
-            light_correct: false,
-        };
-    }
-
     let parsed = std::panic::catch_unwind(|| {
         let mut block = empty();
         let mut sky = empty();
@@ -1292,11 +1300,22 @@ pub fn reconstruct_lights(
         for section in sections {
             let index =
                 usize::try_from(section.y - min_light_section).expect("light section below world");
-            if section.block_state >= 0 {
+            if light_correct && section.block_state >= 0 {
                 block[index] = rebuild_nibble(section.block_light.clone(), section.block_state);
+            } else if !light_correct && let Some(bytes) = &section.block_light {
+                // Vanilla-format save (no Starlight state INTs): a present plain
+                // `BlockLight` array is the light, installed as an `Initialised`
+                // nibble exactly like the vanilla `new DataLayer(byte[])` the
+                // send would carry (issue #531).
+                block[index] = SwmrNibbleArray::new_with_bytes(bytes.clone());
             }
-            if section.sky_state >= 0 && has_sky_light {
+            if light_correct && section.sky_state >= 0 && has_sky_light {
                 sky[index] = rebuild_nibble(section.sky_light.clone(), section.sky_state);
+            } else if !light_correct
+                && has_sky_light
+                && let Some(bytes) = &section.sky_light
+            {
+                sky[index] = SwmrNibbleArray::new_with_bytes(bytes.clone());
             }
         }
         (block, sky)
@@ -1306,7 +1325,7 @@ pub fn reconstruct_lights(
         Ok((block_nibbles, sky_nibbles)) => ReconstructedLightData {
             block_nibbles,
             sky_nibbles,
-            light_correct: true,
+            light_correct,
         },
         Err(_) => ReconstructedLightData {
             block_nibbles: empty(),
@@ -1341,8 +1360,10 @@ fn filled_empty_light(count: usize) -> Vec<SwmrNibbleArray> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::data_layer::DataLayer;
     use crate::level::height_accessor;
     use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, WORLDGEN_HEIGHTMAPS};
+    use crate::lighting::light_update_data::build_light_update_data;
     use crate::lighting::swmr_nibble_array::ARRAY_SIZE;
     use crate::ticks::TickPriority;
     use rivet_nbt::int_tag::IntTag;
@@ -3394,6 +3415,225 @@ mod tests {
                 .expect("stored sky")
                 .data,
             sections[1].sky_light
+        );
+    }
+
+    /// The #371 loaded-world spawn fixture `-1.-3.nbt` is a vanilla-format
+    /// save: `isLightOn` present but no `starlight.light_version`, plain
+    /// `SkyLight`/`BlockLight` arrays, no per-section state INTs. Paper would
+    /// drop these and relight; Rivet has no lighting engine (#184), so
+    /// `reconstruct_lights` installs each present array as an `Initialised`
+    /// nibble at its exact light-section index (issue #531) — the payload the
+    /// vanilla `new DataLayer(byte[])` send would carry.
+    #[test]
+    fn loaded_world_vanilla_sky_arrays_install_at_exact_section_indices() {
+        let chunk = loaded_world_fixture("-1.-3.nbt");
+        assert!(
+            !parse_light_correct(&chunk, true),
+            "a vanilla-format save is not Starlight-lit"
+        );
+        let sections = parse_section_lights(&chunk);
+        let rebuilt = reconstruct_lights(height_accessor::create(-64, 384), &sections, false, true);
+        // Paper marks a vanilla-format save unlit; the plain arrays are still
+        // carried (Rivet cannot relight them).
+        assert!(!rebuilt.light_correct);
+
+        // minLightSection = -64/16 - 1 = -5; sky Y=4 -> index 9, Y=5 -> index 10.
+        let sky4 = sections
+            .iter()
+            .find(|s| s.y == 4)
+            .expect("stored sky at Y=4")
+            .sky_light
+            .clone()
+            .expect("plain sky array");
+        let sky5 = sections
+            .iter()
+            .find(|s| s.y == 5)
+            .expect("stored sky at Y=5")
+            .sky_light
+            .clone()
+            .expect("plain sky array");
+        assert_eq!(
+            rebuilt.sky_nibbles[9]
+                .to_vanilla_nibble()
+                .unwrap()
+                .get_data(),
+            sky4
+        );
+        assert_eq!(
+            rebuilt.sky_nibbles[10]
+                .to_vanilla_nibble()
+                .unwrap()
+                .get_data(),
+            sky5
+        );
+        // No light above/below the stored sections, and no block light at all.
+        assert!(rebuilt.sky_nibbles[8].to_vanilla_nibble().is_none());
+        assert!(rebuilt.sky_nibbles[11].to_vanilla_nibble().is_none());
+        assert!(
+            rebuilt
+                .block_nibbles
+                .iter()
+                .all(|nibble| nibble.to_vanilla_nibble().is_none())
+        );
+
+        // The #184 send seam folds the nibbles into the packet payload: the two
+        // sky updates set the update mask at bits 9 and 10 (0x600), in ascending
+        // section order; nothing sets the empty masks or block masks.
+        let sky_layers: Vec<Option<DataLayer>> = rebuilt
+            .sky_nibbles
+            .iter()
+            .map(|nibble| nibble.to_vanilla_nibble())
+            .collect();
+        let block_layers: Vec<Option<DataLayer>> = rebuilt
+            .block_nibbles
+            .iter()
+            .map(|nibble| nibble.to_vanilla_nibble())
+            .collect();
+        let payload = build_light_update_data(&sky_layers, &block_layers);
+        assert_eq!(payload.sky_y_mask(), &[0x600]);
+        assert!(payload.block_y_mask().is_empty());
+        assert!(payload.empty_sky_y_mask().is_empty());
+        assert!(payload.empty_block_y_mask().is_empty());
+        assert_eq!(payload.sky_updates(), &[sky4, sky5]);
+        assert!(payload.block_updates().is_empty());
+    }
+
+    /// The #371 loaded-world fixture `-2.-2.nbt` carries both plain `BlockLight`
+    /// (Y=-4..=-1) and plain `SkyLight` (Y=3..=5). Both install at the exact
+    /// light-section indices, producing a block update mask at bits 1..=4 and a
+    /// sky update mask at bits 8..=10 — wrong masks, array order, or section
+    /// offsets would fail these assertions.
+    #[test]
+    fn loaded_world_vanilla_block_and_sky_arrays_mask_offsets() {
+        let chunk = loaded_world_fixture("-2.-2.nbt");
+        assert!(!parse_light_correct(&chunk, true));
+        let sections = parse_section_lights(&chunk);
+        let rebuilt = reconstruct_lights(height_accessor::create(-64, 384), &sections, false, true);
+        assert!(!rebuilt.light_correct);
+
+        // minLightSection = -5: block Y=-4..=-1 -> indices 1..=4.
+        let block = |y: i32| {
+            sections
+                .iter()
+                .find(|s| s.y == y)
+                .unwrap_or_else(|| panic!("stored block at Y={y}"))
+                .block_light
+                .clone()
+                .expect("plain block array")
+        };
+        let expected_block = (1..=4)
+            .map(|index| {
+                rebuilt.block_nibbles[index]
+                    .to_vanilla_nibble()
+                    .unwrap()
+                    .get_data()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected_block,
+            vec![block(-4), block(-3), block(-2), block(-1)]
+        );
+        assert!(rebuilt.block_nibbles[0].to_vanilla_nibble().is_none());
+        assert!(rebuilt.block_nibbles[5].to_vanilla_nibble().is_none());
+
+        // sky Y=3..=5 -> indices 8..=10.
+        let sky = |y: i32| {
+            sections
+                .iter()
+                .find(|s| s.y == y)
+                .unwrap_or_else(|| panic!("stored sky at Y={y}"))
+                .sky_light
+                .clone()
+                .expect("plain sky array")
+        };
+        let expected_sky = (8..=10)
+            .map(|index| {
+                rebuilt.sky_nibbles[index]
+                    .to_vanilla_nibble()
+                    .unwrap()
+                    .get_data()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expected_sky, vec![sky(3), sky(4), sky(5)]);
+
+        let sky_layers: Vec<Option<DataLayer>> = rebuilt
+            .sky_nibbles
+            .iter()
+            .map(|nibble| nibble.to_vanilla_nibble())
+            .collect();
+        let block_layers: Vec<Option<DataLayer>> = rebuilt
+            .block_nibbles
+            .iter()
+            .map(|nibble| nibble.to_vanilla_nibble())
+            .collect();
+        let payload = build_light_update_data(&sky_layers, &block_layers);
+        assert_eq!(payload.block_y_mask(), &[0b11110]);
+        assert_eq!(payload.sky_y_mask(), &[0b111 << 8]);
+        assert_eq!(
+            payload.block_updates(),
+            &[block(-4), block(-3), block(-2), block(-1)]
+        );
+        assert_eq!(payload.sky_updates(), &[sky(3), sky(4), sky(5)]);
+    }
+
+    /// Paper's vanilla `canReadSky` gate (`dimensionType().hasSkyLight()`)
+    /// applies to the vanilla-format path too: a plain `SkyLight` array in a
+    /// sky-less dimension is dropped, while a plain `BlockLight` array is
+    /// retained.
+    #[test]
+    fn vanilla_format_plain_sky_arrays_respect_the_dimension_sky_gate() {
+        let mut section = section_tag(-4);
+        section.put_byte_array(BLOCK_LIGHT_TAG, vec![0x22; ARRAY_SIZE]);
+        section.put_byte_array(SKY_LIGHT_TAG, vec![0x33; ARRAY_SIZE]);
+        let sections = parse_section_lights(&chunk_with_sections(vec![section]));
+
+        let no_sky = reconstruct_lights(height_accessor::create(-64, 384), &sections, false, false);
+        assert!(!no_sky.light_correct);
+        assert_eq!(
+            no_sky.block_nibbles[1]
+                .to_vanilla_nibble()
+                .unwrap()
+                .get_data(),
+            vec![0x22; ARRAY_SIZE]
+        );
+        assert!(no_sky.sky_nibbles[1].to_vanilla_nibble().is_none());
+
+        let with_sky =
+            reconstruct_lights(height_accessor::create(-64, 384), &sections, false, true);
+        assert_eq!(
+            with_sky.sky_nibbles[1]
+                .to_vanilla_nibble()
+                .unwrap()
+                .get_data(),
+            vec![0x33; ARRAY_SIZE]
+        );
+    }
+
+    /// A vanilla-format section outside the world's light-section range fails
+    /// the whole payload exactly like the Starlight path: Paper's caught load
+    /// failure keeps all-null arrays and `light_correct` false.
+    #[test]
+    fn vanilla_format_out_of_range_section_invalidates_the_whole_payload() {
+        let out_of_range = SectionLightData {
+            y: 100,
+            block_light: Some(vec![0x11; ARRAY_SIZE]),
+            sky_light: None,
+            block_state: -1,
+            sky_state: -1,
+        };
+        let rebuilt = reconstruct_lights(
+            height_accessor::create(-64, 384),
+            &[out_of_range],
+            false,
+            true,
+        );
+        assert!(!rebuilt.light_correct);
+        assert!(
+            rebuilt
+                .block_nibbles
+                .iter()
+                .all(|nibble| nibble.to_vanilla_nibble().is_none())
         );
     }
 
