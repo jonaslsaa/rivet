@@ -343,6 +343,61 @@ mod tests {
         assert_eq!(map.get_map("m").unwrap().get_int("k"), 42);
     }
 
+    /// A `get_generic` map/list view shares the parent's storage, mirroring
+    /// `NBTMapType.getGeneric` wrapping the same `CompoundTag`/`ListTag`: a
+    /// mutation through the returned container is visible in the parent.
+    #[test]
+    fn get_generic_container_view_aliases_parent_storage() {
+        let mut map = MockMap::new();
+        let mut inner = MockMap::new();
+        inner.set_int("k", 1);
+        map.set_map("m", Box::new(inner));
+        map.set_list("l", Box::new(MockList::new()));
+
+        let Generic::Map(mut map_view) = map.get_generic("m").unwrap() else {
+            panic!("expected a map view");
+        };
+        map_view.set_int("k", 42);
+        assert_eq!(map.get_map("m").unwrap().get_int("k"), 42);
+
+        let Generic::List(mut list_view) = map.get_generic("l").unwrap() else {
+            panic!("expected a list view");
+        };
+        list_view.add_int(7);
+        assert_eq!(map.get_list_unchecked("l").unwrap().get_int(0), 7);
+    }
+
+    /// Non-strict numeric/boolean coercion mirrors the NBT backing: `getBoolean`
+    /// is `getByte != 0` over any number, and the `_or` overloads return the
+    /// default when the value is present but not a number (Java
+    /// `NBTMapType.getBoolean`/`getInt(key, dfl)`).
+    #[test]
+    fn numeric_coercion_matches_nbt_backing() {
+        let mut map = MockMap::new();
+        map.set_int("i", 5);
+        map.set_string("s", "x".into());
+        map.set_long("l", 300);
+        map.set_double("d", 300.0);
+
+        assert!(map.get_boolean("i"));
+        // Java `Double.byteValue()` = `(byte)(int)`: 300 wraps to 44, not 0.
+        assert_eq!(map.get_byte("l"), 44);
+        assert_eq!(map.get_byte("d"), 44);
+        assert_eq!(map.get_int("d"), 300);
+        assert_eq!(map.get_int_or("s", 42), 42);
+    }
+
+    /// `setBoolean` stores a byte, so `getGeneric("bool")` reads back the byte
+    /// `1`, matching the probe golden `mapTypeDefaults.bool = "1"` (NBT stores
+    /// booleans as `ByteTag`).
+    #[test]
+    fn set_boolean_round_trips_as_byte() {
+        let mut map = MockMap::new();
+        map.set_boolean("bool", true);
+        assert!(matches!(map.get_generic("bool"), Some(Generic::Byte(1))));
+        assert!(map.get_boolean("bool"));
+    }
+
     /// `has_key(key, type)` checks the value's ObjectType (probe
     /// `mapTypeDefaults.hasKey_*`): `INT` matches only an int, `NUMBER` matches
     /// any number, `STRING` matches a string.

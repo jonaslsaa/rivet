@@ -324,6 +324,29 @@ mod tests {
         assert_eq!(list.get_map(0).unwrap().get_int("k"), 42);
     }
 
+    /// A `get_generic` container element view shares the parent's storage
+    /// (`NBTListType.getGeneric` wraps the same `ListTag` element).
+    #[test]
+    fn get_generic_container_element_aliases_parent_storage() {
+        let mut list = MockList::new();
+        let mut inner = MockMap::new();
+        inner.set_int("k", 1);
+        list.add_map(Box::new(inner));
+        list.add_list(Box::new(MockList::new()));
+
+        let Generic::Map(mut map_view) = list.get_generic(0).unwrap() else {
+            panic!("expected a map view");
+        };
+        map_view.set_int("k", 42);
+        assert_eq!(list.get_map(0).unwrap().get_int("k"), 42);
+
+        let Generic::List(mut list_view) = list.get_generic(1).unwrap() else {
+            panic!("expected a list view");
+        };
+        list_view.add_int(7);
+        assert_eq!(list.get_list(1).unwrap().get_int(0), 7);
+    }
+
     /// `ListType.copy` is a deep copy: mutating the copy must not affect the
     /// source.
     #[test]

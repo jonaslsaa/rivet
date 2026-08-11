@@ -5,8 +5,11 @@
 //! captured against the real NBT backing.
 //!
 //! Both backings store their elements in `Rc<RefCell<...>>` so a `get_map`/
-//! `get_list`/`get_or_create_*` view shares the same storage as the parent —
-//! exactly how the NBT backings wrap the same `CompoundTag`/`ListTag`.
+//! `get_list`/`get_generic`/`get_or_create_*` view shares the same storage as
+//! the parent — exactly how the NBT backings wrap the same `CompoundTag`/
+//! `ListTag`. Numeric getters coerce all six boxed numbers with `Number`'s
+//! `*_value` narrowing (Java `NumericTag.*Value()`), and booleans are stored
+//! as bytes (`NBTMapType.setBoolean` -> `setByte`).
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -53,16 +56,32 @@ fn deep_copy(value: &Generic) -> Generic {
     }
 }
 
-fn numeric_cast_i8(value: &Generic) -> Option<i8> {
-    match value {
-        Generic::Byte(v) => Some(*v),
-        Generic::Short(v) => Some(*v as i8),
-        Generic::Int(v) => Some(*v as i8),
-        Generic::Long(v) => Some(*v as i8),
-        Generic::Float(v) => Some(*v as i8),
-        Generic::Double(v) => Some(*v as i8),
-        _ => None,
-    }
+/// `NumericTag.*Value()` narrowing for each primitive — `None` when the value
+/// is not one of the six boxed numbers (Java `tag instanceof NumericTag`).
+/// `Number` reproduces the JLS 5.1.3 casts exactly, including the float/double
+/// `(byte)(int)` wrap on `byte_value`/`short_value`.
+fn coerce_i8(value: &Generic) -> Option<i8> {
+    value.as_number().map(|n| n.byte_value())
+}
+
+fn coerce_i16(value: &Generic) -> Option<i16> {
+    value.as_number().map(|n| n.short_value())
+}
+
+fn coerce_i32(value: &Generic) -> Option<i32> {
+    value.as_number().map(|n| n.int_value())
+}
+
+fn coerce_i64(value: &Generic) -> Option<i64> {
+    value.as_number().map(|n| n.long_value())
+}
+
+fn coerce_f32(value: &Generic) -> Option<f32> {
+    value.as_number().map(|n| n.float_value())
+}
+
+fn coerce_f64(value: &Generic) -> Option<f64> {
+    value.as_number().map(|n| n.double_value())
 }
 
 /// The reference `MapType` backing.
@@ -151,7 +170,17 @@ impl MapType for MockMap {
     }
 
     fn get_generic(&self, key: &str) -> Option<Generic> {
-        self.entries.borrow().get(key).map(deep_copy)
+        match self.entries.borrow().get(key)? {
+            Generic::Map(map) => {
+                let mock = map.as_any().downcast_ref::<MockMap>()?;
+                Some(Generic::Map(Box::new(mock.clone_view())))
+            }
+            Generic::List(list) => {
+                let mock = list.as_any().downcast_ref::<MockList>()?;
+                Some(Generic::List(Box::new(mock.clone_view())))
+            }
+            other => Some(deep_copy(other)),
+        }
     }
 
     fn get_number(&self, key: &str) -> Option<Number> {
@@ -163,41 +192,31 @@ impl MapType for MockMap {
     }
 
     fn get_boolean(&self, key: &str) -> bool {
-        match self.entries.borrow().get(key) {
-            Some(Generic::Bool(b)) => *b,
-            Some(Generic::Byte(b)) => *b != 0,
-            _ => false,
-        }
+        self.get_byte(key) != 0
     }
 
     fn get_boolean_or(&self, key: &str, dfl: bool) -> bool {
-        if self.has_key(key) {
-            self.get_boolean(key)
-        } else {
-            dfl
-        }
+        self.get_byte_or(key, if dfl { 1 } else { 0 }) != 0
     }
 
     fn set_boolean(&mut self, key: &str, val: bool) {
-        self.entries
-            .borrow_mut()
-            .insert(key.to_owned(), Generic::Bool(val));
+        self.set_byte(key, if val { 1 } else { 0 });
     }
 
     fn get_byte(&self, key: &str) -> i8 {
         self.entries
             .borrow()
             .get(key)
-            .and_then(numeric_cast_i8)
+            .and_then(coerce_i8)
             .unwrap_or(0)
     }
 
     fn get_byte_or(&self, key: &str, dfl: i8) -> i8 {
-        if self.has_key(key) {
-            self.get_byte(key)
-        } else {
-            dfl
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_i8)
+            .unwrap_or(dfl)
     }
 
     fn set_byte(&mut self, key: &str, val: i8) {
@@ -207,20 +226,19 @@ impl MapType for MockMap {
     }
 
     fn get_short(&self, key: &str) -> i16 {
-        match self.entries.borrow().get(key) {
-            Some(Generic::Short(v)) => *v,
-            Some(Generic::Byte(v)) => *v as i16,
-            Some(Generic::Int(v)) => *v as i16,
-            _ => 0,
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_i16)
+            .unwrap_or(0)
     }
 
     fn get_short_or(&self, key: &str, dfl: i16) -> i16 {
-        if self.has_key(key) {
-            self.get_short(key)
-        } else {
-            dfl
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_i16)
+            .unwrap_or(dfl)
     }
 
     fn set_short(&mut self, key: &str, val: i16) {
@@ -230,21 +248,19 @@ impl MapType for MockMap {
     }
 
     fn get_int(&self, key: &str) -> i32 {
-        match self.entries.borrow().get(key) {
-            Some(Generic::Int(v)) => *v,
-            Some(Generic::Byte(v)) => *v as i32,
-            Some(Generic::Short(v)) => *v as i32,
-            Some(Generic::Long(v)) => *v as i32,
-            _ => 0,
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_i32)
+            .unwrap_or(0)
     }
 
     fn get_int_or(&self, key: &str, dfl: i32) -> i32 {
-        if self.has_key(key) {
-            self.get_int(key)
-        } else {
-            dfl
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_i32)
+            .unwrap_or(dfl)
     }
 
     fn set_int(&mut self, key: &str, val: i32) {
@@ -254,21 +270,19 @@ impl MapType for MockMap {
     }
 
     fn get_long(&self, key: &str) -> i64 {
-        match self.entries.borrow().get(key) {
-            Some(Generic::Long(v)) => *v,
-            Some(Generic::Byte(v)) => *v as i64,
-            Some(Generic::Short(v)) => *v as i64,
-            Some(Generic::Int(v)) => *v as i64,
-            _ => 0,
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_i64)
+            .unwrap_or(0)
     }
 
     fn get_long_or(&self, key: &str, dfl: i64) -> i64 {
-        if self.has_key(key) {
-            self.get_long(key)
-        } else {
-            dfl
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_i64)
+            .unwrap_or(dfl)
     }
 
     fn set_long(&mut self, key: &str, val: i64) {
@@ -278,20 +292,19 @@ impl MapType for MockMap {
     }
 
     fn get_float(&self, key: &str) -> f32 {
-        match self.entries.borrow().get(key) {
-            Some(Generic::Float(v)) => *v,
-            Some(Generic::Int(v)) => *v as f32,
-            Some(Generic::Double(v)) => *v as f32,
-            _ => 0.0,
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_f32)
+            .unwrap_or(0.0)
     }
 
     fn get_float_or(&self, key: &str, dfl: f32) -> f32 {
-        if self.has_key(key) {
-            self.get_float(key)
-        } else {
-            dfl
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_f32)
+            .unwrap_or(dfl)
     }
 
     fn set_float(&mut self, key: &str, val: f32) {
@@ -301,20 +314,19 @@ impl MapType for MockMap {
     }
 
     fn get_double(&self, key: &str) -> f64 {
-        match self.entries.borrow().get(key) {
-            Some(Generic::Double(v)) => *v,
-            Some(Generic::Float(v)) => *v as f64,
-            Some(Generic::Int(v)) => *v as f64,
-            _ => 0.0,
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_f64)
+            .unwrap_or(0.0)
     }
 
     fn get_double_or(&self, key: &str, dfl: f64) -> f64 {
-        if self.has_key(key) {
-            self.get_double(key)
-        } else {
-            dfl
-        }
+        self.entries
+            .borrow()
+            .get(key)
+            .and_then(coerce_f64)
+            .unwrap_or(dfl)
     }
 
     fn set_double(&mut self, key: &str, val: f64) {
@@ -521,7 +533,17 @@ impl ListType for MockList {
     }
 
     fn get_generic(&self, index: usize) -> Option<Generic> {
-        self.elems.borrow().get(index).map(deep_copy)
+        match self.elems.borrow().get(index)? {
+            Generic::Map(map) => {
+                let mock = map.as_any().downcast_ref::<MockMap>()?;
+                Some(Generic::Map(Box::new(mock.clone_view())))
+            }
+            Generic::List(list) => {
+                let mock = list.as_any().downcast_ref::<MockList>()?;
+                Some(Generic::List(Box::new(mock.clone_view())))
+            }
+            other => Some(deep_copy(other)),
+        }
     }
 
     fn get_number(&self, index: usize) -> Option<Number> {
@@ -536,16 +558,16 @@ impl ListType for MockList {
         self.elems
             .borrow()
             .get(index)
-            .and_then(numeric_cast_i8)
+            .and_then(coerce_i8)
             .unwrap_or(0)
     }
 
     fn get_byte_or(&self, index: usize, dfl: i8) -> i8 {
-        if self.size() > index {
-            self.get_byte(index)
-        } else {
-            dfl
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_i8)
+            .unwrap_or(dfl)
     }
 
     fn set_byte(&mut self, index: usize, to: i8) {
@@ -553,21 +575,19 @@ impl ListType for MockList {
     }
 
     fn get_short(&self, index: usize) -> i16 {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Short(v)) => *v,
-            Some(Generic::Byte(v)) => *v as i16,
-            Some(Generic::Int(v)) => *v as i16,
-            _ => 0,
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_i16)
+            .unwrap_or(0)
     }
 
     fn get_short_or(&self, index: usize, dfl: i16) -> i16 {
-        match self.get_generic(index) {
-            Some(Generic::Short(v)) => v,
-            Some(Generic::Byte(v)) => v as i16,
-            Some(Generic::Int(v)) => v as i16,
-            _ => dfl,
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_i16)
+            .unwrap_or(dfl)
     }
 
     fn set_short(&mut self, index: usize, to: i16) {
@@ -575,21 +595,19 @@ impl ListType for MockList {
     }
 
     fn get_int(&self, index: usize) -> i32 {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Int(v)) => *v,
-            Some(Generic::Byte(v)) => *v as i32,
-            Some(Generic::Short(v)) => *v as i32,
-            Some(Generic::Long(v)) => *v as i32,
-            _ => 0,
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_i32)
+            .unwrap_or(0)
     }
 
     fn get_int_or(&self, index: usize, dfl: i32) -> i32 {
-        if self.size() > index {
-            self.get_int(index)
-        } else {
-            dfl
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_i32)
+            .unwrap_or(dfl)
     }
 
     fn set_int(&mut self, index: usize, to: i32) {
@@ -597,21 +615,19 @@ impl ListType for MockList {
     }
 
     fn get_long(&self, index: usize) -> i64 {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Long(v)) => *v,
-            Some(Generic::Byte(v)) => *v as i64,
-            Some(Generic::Short(v)) => *v as i64,
-            Some(Generic::Int(v)) => *v as i64,
-            _ => 0,
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_i64)
+            .unwrap_or(0)
     }
 
     fn get_long_or(&self, index: usize, dfl: i64) -> i64 {
-        if self.size() > index {
-            self.get_long(index)
-        } else {
-            dfl
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_i64)
+            .unwrap_or(dfl)
     }
 
     fn set_long(&mut self, index: usize, to: i64) {
@@ -619,20 +635,19 @@ impl ListType for MockList {
     }
 
     fn get_float(&self, index: usize) -> f32 {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Float(v)) => *v,
-            Some(Generic::Int(v)) => *v as f32,
-            Some(Generic::Double(v)) => *v as f32,
-            _ => 0.0,
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_f32)
+            .unwrap_or(0.0)
     }
 
     fn get_float_or(&self, index: usize, dfl: f32) -> f32 {
-        if self.size() > index {
-            self.get_float(index)
-        } else {
-            dfl
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_f32)
+            .unwrap_or(dfl)
     }
 
     fn set_float(&mut self, index: usize, to: f32) {
@@ -640,20 +655,19 @@ impl ListType for MockList {
     }
 
     fn get_double(&self, index: usize) -> f64 {
-        match self.elems.borrow().get(index) {
-            Some(Generic::Double(v)) => *v,
-            Some(Generic::Float(v)) => *v as f64,
-            Some(Generic::Int(v)) => *v as f64,
-            _ => 0.0,
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_f64)
+            .unwrap_or(0.0)
     }
 
     fn get_double_or(&self, index: usize, dfl: f64) -> f64 {
-        if self.size() > index {
-            self.get_double(index)
-        } else {
-            dfl
-        }
+        self.elems
+            .borrow()
+            .get(index)
+            .and_then(coerce_f64)
+            .unwrap_or(dfl)
     }
 
     fn set_double(&mut self, index: usize, to: f64) {
