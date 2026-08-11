@@ -232,6 +232,7 @@ mod tests {
     use crate::chunk::chunk_generator::ChunkGenerator;
     use crate::level::WorldGenLevel;
     use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor, create};
+    use rivet_registry::core::BlockPos;
     use rivet_serialization::json_ops::JsonOps;
     use serde_json::json;
 
@@ -262,6 +263,13 @@ mod tests {
     impl WorldGenLevel for TestLevel {
         fn get_seed(&self) -> i64 {
             0
+        }
+
+        fn get_block_state(&self, _pos: &BlockPos) -> rivet_registry::block_state::BlockState {
+            // RivetTodo(#399): the world-access implementation is not ported;
+            // this test double never reads block state — resolve_y and the
+            // codec tests only touch the height window.
+            panic!("WorldGenLevel.getBlockState is not implemented (RivetTodo #399)")
         }
     }
 
