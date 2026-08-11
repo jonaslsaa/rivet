@@ -59,12 +59,16 @@ pub mod weighted_list_int;
 #[cfg(test)]
 mod tests;
 
-/// `Identifier` default-namespace normalization — a bare `path` becomes
-/// `minecraft:path` (the `minecraft:` default namespace), exactly like Java's
-/// `Identifier` single-string constructor. Names already containing `:` pass
-/// through unchanged.
+/// `Identifier` default-namespace normalization — the `minecraft:` default
+/// namespace, exactly like Java's `Identifier.withDefaultNamespace` (the
+/// `bySeparator` no-namespace / empty-namespace path). A bare `path` becomes
+/// `minecraft:path`; a leading colon (`:path`) is stripped and also becomes
+/// `minecraft:path` (Java treats a separator at index 0 as an empty namespace);
+/// names already carrying a namespace pass through unchanged.
 pub(crate) fn default_namespace(name: &str) -> String {
-    if name.contains(':') {
+    if let Some(path) = name.strip_prefix(':') {
+        format!("minecraft:{path}")
+    } else if name.contains(':') {
         name.to_string()
     } else {
         format!("minecraft:{name}")
