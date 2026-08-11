@@ -16,6 +16,10 @@ pub mod block_getter;
 // `world.level.DataPackConfig` — the `WorldDataConfiguration` prerequisite
 // (#387).
 pub mod data_pack_config;
+// The `mc.world.level.dimension` unit's `DimensionType` height constants are
+// ported here (the minimal slice issue #388 needs); the full record/codec
+// defers with the owning unit. Never re-ported.
+pub mod dimension;
 pub mod height_accessor;
 // `world.level.LevelSettings` — the level.dat settings record (+ nested
 // `DifficultySettings`) and the `Dynamic` parse (#486).
