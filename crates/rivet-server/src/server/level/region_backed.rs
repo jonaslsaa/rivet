@@ -142,17 +142,19 @@ impl RegionChunkSource {
             .ok_or(RegionBackedBootError::MissingChunkStatus(pos))
     }
 
-    /// Read, extract, and fully validate one serialized chunk for runtime
-    /// composition. Returns the validated data; the runtime
-    /// `ChunkMap`/`LevelChunk` composition slice is the next loaded-world
-    /// step, so no production path composes the result today. Proto/generation
-    /// and blending boundaries surface their precise typed errors first.
+    /// Read, extract, and validate one serialized chunk for runtime
+    /// composition. The validation is the same boundary `reconstruct_runtime_chunk`
+    /// applies internally, so the preflight agrees with what reconstruction will
+    /// accept: serialized block entities and stored ticks are carried (not
+    /// rejected), and the remaining unsupported surfaces (proto status,
+    /// blending, structure `starts`, etc.) surface their precise typed errors
+    /// here first.
     pub fn load_for_composition(
         &mut self,
         pos: ChunkPos,
     ) -> Result<SerializableChunkData, RegionBackedBootError> {
         let data = self.read_serializable(pos)?;
-        data.validate_full_capabilities()
+        data.validate_full_for_reconstruction()
             .map_err(RegionBackedBootError::SerializableChunk)?;
         Ok(data)
     }

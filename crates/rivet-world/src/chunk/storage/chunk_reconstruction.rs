@@ -140,8 +140,8 @@ pub struct ChunkReconstruction {
     pub section_diagnostics:
         Vec<crate::chunk::storage::section_reconstruction::SectionCodecDiagnostic>,
     /// The recoverable parse-time diagnostics, plus the relocated-position
-    /// diagnostic, mirroring `SerializableChunkData::construct_full` (Paper's
-    /// `reportMisplacedChunk` — the chunk is relocated, never rejected).
+    /// diagnostic, mirroring Paper's `SerializableChunkData.read` (the
+    /// `reportMisplacedChunk` report — the chunk is relocated, never rejected).
     pub parse_diagnostics: Vec<ChunkParseDiagnostic>,
     /// The raw `block_ticks` list as it appeared on the wire, preserved for the
     /// future tick installer to consume without rework.
@@ -214,16 +214,16 @@ pub enum ChunkReconstructionError {
 /// Boundary: the FULL path rejects (via `SerializableChunkDataError`) blending
 /// data, non-empty structure `starts`, `UpgradeData` neighbor tick lists,
 /// persistent data, and non-empty entities with the same typed variants
-/// `construct_full` uses — so the caller can distinguish "chunk was never
-/// generated" (proto status) from "chunk carries a deferred surface".
+/// `validate_full_for_reconstruction` uses — so the caller can distinguish "chunk was
+/// never generated" (proto status) from "chunk carries a deferred surface".
 pub fn reconstruct_runtime_chunk(
     requested_pos: ChunkPos,
     mut data: SerializableChunkData,
     height_accessor: SimpleLevelHeightAccessor,
     has_sky_light: bool,
 ) -> Result<ChunkReconstruction, ChunkReconstructionError> {
-    // Mirror `SerializableChunkData::construct_full` exactly, including its
-    // guard order: the reconstruction accessor must agree with the parse-time
+    // Mirror the accessor-guard ordering Paper's `SerializableChunkData.read`
+    // applies: the reconstruction accessor must agree with the parse-time
     // accessor (or the section Y range / section count would silently
     // misdecode) before the content capabilities are validated, so a mismatched
     // accessor always surfaces as the accessor error regardless of content.
@@ -243,7 +243,7 @@ pub fn reconstruct_runtime_chunk(
             .into(),
         );
     }
-    validate_full_capabilities(&data)?;
+    validate_full_for_reconstruction(&data)?;
 
     let factory = current_version_container_factory();
     let min_section_y = height_accessor.get_min_section_y();
@@ -350,10 +350,11 @@ pub fn reconstruct_runtime_chunk(
     })
 }
 
-/// The capabilities the FULL runtime reconstruction requires, delegating to
-/// the `SerializableChunkData` seam that skips only the block-entity rejection
-/// (block entities are carried pending on this path, see the module docs).
-fn validate_full_capabilities(
+/// The capabilities the FULL runtime reconstruction requires. Serialized block
+/// entities are carried pending on this path (see the module docs), so the
+/// validation does not reject them; the remaining unsupported surfaces surface
+/// their typed errors.
+fn validate_full_for_reconstruction(
     data: &SerializableChunkData,
 ) -> Result<(), ChunkReconstructionError> {
     Ok(data.validate_full_for_reconstruction()?)
@@ -553,8 +554,8 @@ mod tests {
     #[test]
     fn mismatched_reconstruction_accessor_is_a_typed_error() {
         // Parsed for the overworld (-64/384) but reconstructed with an
-        // accessor that disagrees: mirror `construct_full`'s guard instead of
-        // silently misdecoding the section Y range.
+        // accessor that disagrees: mirror `SerializableChunkData.read`'s guard
+        // instead of silently misdecoding the section Y range.
         let data = parse_fixture("overworld", -64, 384);
         let wrong_min = reconstruct_runtime_chunk(
             ChunkPos::ZERO,

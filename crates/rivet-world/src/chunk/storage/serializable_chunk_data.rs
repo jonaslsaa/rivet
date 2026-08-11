@@ -36,15 +36,11 @@ use std::sync::{Arc, LazyLock};
 
 use crate::block::Block;
 use crate::chunk::chunk_access::{ChunkAccess, get_pos_from_tag};
-use crate::chunk::imposter_proto_chunk::ImposterProtoChunk;
-use crate::chunk::level_chunk::LevelChunk;
-use crate::chunk::level_chunk_section::LevelChunkSection;
-use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::registry_codecs::{block_by_name_codec, fluid_by_name_codec};
 use crate::chunk::status::ChunkStatus;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
-use crate::levelgen::heightmap::{StateFlags, Types};
+use crate::levelgen::heightmap::Types;
 use crate::lighting::swmr_nibble_array::{InitState, SwmrNibbleArray};
 use crate::ticks::{SavedTick, filter_tick_list_for_chunk, saved_tick_codec};
 use rivet_nbt::compound_tag::CompoundTag;
@@ -353,8 +349,6 @@ pub enum SerializableChunkDataError {
     UnsupportedBlendingData,
     #[error("non-empty entities require post-load entity reconstruction")]
     UnsupportedEntities,
-    #[error("non-empty block_entities require block-entity materialization (#341)")]
-    UnsupportedBlockEntities,
     #[error("non-empty structures require structure reconstruction")]
     UnsupportedStructures,
     #[error("compound ChunkBukkitValues requires an owned PDC carrier")]
@@ -406,29 +400,6 @@ pub struct SerializableChunkData {
     structures_references: Vec<StructureReference>,
     section_tags: ListTag,
     persistent_data_container: Option<Tag>,
-}
-
-/// Output of the single ordered section traversal owned by #336. That
-/// traversal decodes block states, biomes, block light, then sky light for
-/// each raw section tag before composing this construction input.
-pub struct FullChunkReconstruction<T, B>
-where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-{
-    pub sections: Vec<LevelChunkSection<T, B>>,
-    pub lights: Vec<SectionLightData>,
-}
-
-/// A constructed FULL chunk together with ordered, non-fatal read reports.
-pub struct FullChunkConstruction<T, B, S>
-where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    S: Eq + std::hash::Hash,
-{
-    pub chunk: ImposterProtoChunk<T, B, S>,
-    pub diagnostics: Vec<ChunkParseDiagnostic>,
 }
 
 impl SerializableChunkData {
@@ -612,11 +583,11 @@ impl SerializableChunkData {
     /// .blocks()`), faithfully decoded through `SavedTick.codec(...).listOf()`.
     /// Only populated for a FULL chunk — every other status skips the typed
     /// decode and carries an empty list (proto paths never claim tick support;
-    /// see [`Self::validate_full_capabilities`]). Carried as stored values only —
-    /// `construct_full` does not install them into a runtime container: the
-    /// `LevelChunkTicks`/`ProtoChunkTicks` execution containers defer with the
-    /// tick-execution slice (#370), and the values ride on the parse result for
-    /// the caller to compose.
+    /// see [`Self::validate_full_for_reconstruction`]). Carried as stored values
+    /// only — the reconstruction consumes them off the parse result ([`Self`]
+    /// installs them into no runtime container; the `LevelChunkTicks`/
+    /// `ProtoChunkTicks` execution containers defer with the tick-execution
+    /// slice (#370)).
     pub fn stored_block_ticks(&self) -> &[SavedTick<Block>] {
         &self.stored_block_ticks
     }
@@ -640,120 +611,25 @@ impl SerializableChunkData {
         self.persistent_data_container.as_ref()
     }
 
-    /// Construct the faithful read-only FULL wrapper from sections decoded by
-    /// the future single per-section traversal. Stored/requested positions are
-    /// intentionally distinct; construction always uses `requested_pos`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn construct_full<T, B, S>(
-        &self,
-        requested_pos: ChunkPos,
-        height_accessor: SimpleLevelHeightAccessor,
-        container_factory: &PalettedContainerFactory<T, B>,
-        reconstruction: FullChunkReconstruction<T, B>,
-        air: T,
-        resolve: &'static (dyn Fn(&T) -> StateFlags + Sync),
-        has_sky_light: bool,
-    ) -> Result<FullChunkConstruction<T, B, S>, SerializableChunkDataError>
-    where
-        T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-        S: Eq + std::hash::Hash,
-    {
-        let section_count = height_accessor.get_sections_count() as usize;
-        if height_accessor.get_min_section_y() != self.min_section_y {
-            return Err(SerializableChunkDataError::HeightAccessorMismatch {
-                parsed: self.min_section_y,
-                construction: height_accessor.get_min_section_y(),
-            });
-        }
-        if section_count != self.section_count {
-            return Err(
-                SerializableChunkDataError::HeightAccessorSectionCountMismatch {
-                    parsed: self.section_count,
-                    construction: section_count,
-                },
-            );
-        }
-        if reconstruction.sections.len() != section_count {
-            return Err(SerializableChunkDataError::SectionCountMismatch {
-                expected: section_count,
-                actual: reconstruction.sections.len(),
-            });
-        }
-        self.validate_full_construction(section_count)?;
-        let mut chunk = LevelChunk::new(
-            requested_pos,
-            self.upgrade_data.copy(),
-            height_accessor,
-            container_factory,
-            self.inhabited_time,
-            Some(reconstruction.sections),
-            air,
-            resolve,
-        );
-        let to_prime = reconstruct_heightmaps(
-            chunk.base_mut(),
-            &self.heightmaps,
-            self.status.heightmaps_after(),
-        );
-        chunk.prime_heightmaps(&to_prime);
-        for (index, offsets) in self.post_processing_sections.iter().enumerate() {
-            if let Some(offsets) = offsets {
-                chunk.add_packed_post_process(offsets, index);
-            }
-        }
-        let light = reconstruct_lights(
-            height_accessor,
-            &reconstruction.lights,
-            self.light_correct,
-            has_sky_light,
-        );
-        chunk.set_block_nibbles(light.block_nibbles);
-        chunk.set_sky_nibbles(light.sky_nibbles);
-        chunk.set_light_correct(light.light_correct);
-        let mut diagnostics = self.diagnostics.clone();
-        if requested_pos != self.stored_pos {
-            diagnostics.push(ChunkParseDiagnostic::MisplacedChunk {
-                stored: self.stored_pos,
-                requested: requested_pos,
-            });
-        }
-        Ok(FullChunkConstruction {
-            chunk: ImposterProtoChunk::new(chunk, false),
-            diagnostics,
-        })
-    }
-
-    /// Validate every capability that precedes runtime chunk composition.
-    /// Region-backed boot uses this to retain precise proto/blending/tick/etc.
-    /// errors before a chunk can be handed to the composition slice.
-    pub fn validate_full_capabilities(&self) -> Result<(), SerializableChunkDataError> {
+    /// Validate every capability the FULL reconstruction requires. This is the
+    /// single reconstruction capability boundary: `reconstruct_runtime_chunk`
+    /// consults it before composing, and region-backed boot uses it as the
+    /// pre-composition gate so the preflight agrees with what reconstruction
+    /// will accept.
+    ///
+    /// Serialized block entities are NOT rejected — the reconstruction carries
+    /// them as pending NBT (materialization defers with #341). Stored ticks are
+    /// carried as typed values, never rejected (the `LevelChunkTicks`/
+    /// `ProtoChunkTicks` execution containers defer with the tick-execution
+    /// slice, #370). The remaining unsupported surfaces (proto status,
+    /// `UpgradeData` neighbor ticks, blending data, persistent data, structure
+    /// `starts`, non-empty entities, out-of-bounds post-processing) surface
+    /// their typed errors here.
+    pub fn validate_full_for_reconstruction(&self) -> Result<(), SerializableChunkDataError> {
         self.validate_full_construction(self.section_count)
     }
 
-    /// Validate every capability that precedes runtime chunk composition EXCEPT
-    /// the non-empty block-entity rejection — the #383 reconstruction carries
-    /// serialized block entities as pending NBT (materialization defers with
-    /// #341), so this is the boundary that slice consults. Field-for-field the
-    /// same as [`Self::validate_full_construction`] minus that one check.
-    pub(crate) fn validate_full_for_reconstruction(
-        &self,
-    ) -> Result<(), SerializableChunkDataError> {
-        self.validate_full_construction_except_block_entities(self.section_count)
-    }
-
     fn validate_full_construction(
-        &self,
-        section_count: usize,
-    ) -> Result<(), SerializableChunkDataError> {
-        self.validate_full_construction_except_block_entities(section_count)?;
-        if !self.block_entities.is_empty() {
-            return Err(SerializableChunkDataError::UnsupportedBlockEntities);
-        }
-        Ok(())
-    }
-
-    fn validate_full_construction_except_block_entities(
         &self,
         section_count: usize,
     ) -> Result<(), SerializableChunkDataError> {
@@ -1448,8 +1324,6 @@ fn filled_empty_light(count: usize) -> Vec<SwmrNibbleArray> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::palette::GlobalIdMap;
-    use crate::chunk::strategy::Strategy;
     use crate::level::height_accessor;
     use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, WORLDGEN_HEIGHTMAPS};
     use crate::lighting::swmr_nibble_array::ARRAY_SIZE;
@@ -1510,62 +1384,6 @@ mod tests {
         chunk.put_string(STATUS_TAG, status);
         chunk.put_int(DATA_VERSION_TAG, CURRENT_DATA_VERSION);
         chunk
-    }
-
-    #[derive(Clone, Copy)]
-    struct TestGlobalMap;
-
-    impl GlobalIdMap<u8> for TestGlobalMap {
-        fn get_id(&self, value: &u8) -> i32 {
-            i32::from(*value)
-        }
-        fn by_id_or_throw(&self, id: i32) -> u8 {
-            id as u8
-        }
-        fn size(&self) -> i32 {
-            256
-        }
-        fn by_id(&self, id: i32) -> Option<u8> {
-            u8::try_from(id).ok()
-        }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
-            Box::new(*self)
-        }
-    }
-
-    fn test_factory() -> PalettedContainerFactory<u8, u8> {
-        PalettedContainerFactory::new(
-            Strategy::create_for_block_states(Box::new(TestGlobalMap)),
-            0,
-            Strategy::create_for_biomes(Box::new(TestGlobalMap)),
-            0,
-        )
-    }
-
-    fn test_state_flags(state: &u8) -> StateFlags {
-        StateFlags {
-            is_air: *state == 0,
-            blocks_motion: *state != 0,
-            has_fluid: false,
-            is_leaves: false,
-        }
-    }
-
-    fn test_sections(count: usize) -> Vec<LevelChunkSection<u8, u8>> {
-        let factory = test_factory();
-        (0..count)
-            .map(|_| {
-                LevelChunkSection::new(
-                    factory.create_for_block_states(),
-                    factory.create_for_biomes(),
-                    |state| *state == 0,
-                    |_| false,
-                    |_| true,
-                    |_| false,
-                    |_| false,
-                )
-            })
-            .collect()
     }
 
     fn saved_tick_with_id(id: &str, x: i32, z: i32) -> CompoundTag {
@@ -2212,122 +2030,6 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_full_seam_constructs_at_requested_position_read_only() {
-        let height = height_accessor::create(-64, 384);
-        let factory = test_factory();
-        let sections = test_sections(24);
-        let mut root = top_level("minecraft:full");
-        root.put_int("xPos", 8);
-        root.put_int("zPos", 9);
-        let parsed = SerializableChunkData::parse(height, &root)
-            .unwrap()
-            .unwrap();
-        let requested = ChunkPos::new(10, 11);
-        let constructed = parsed
-            .construct_full::<u8, u8, &'static str>(
-                requested,
-                height,
-                &factory,
-                FullChunkReconstruction {
-                    sections,
-                    lights: Vec::new(),
-                },
-                0,
-                &test_state_flags,
-                true,
-            )
-            .unwrap();
-        assert_eq!(parsed.stored_pos(), ChunkPos::new(8, 9));
-        assert_eq!(
-            constructed.diagnostics,
-            vec![ChunkParseDiagnostic::MisplacedChunk {
-                stored: ChunkPos::new(8, 9),
-                requested,
-            }]
-        );
-        let imposter = constructed.chunk;
-        assert_eq!(imposter.get_pos(), requested);
-        assert_eq!(imposter.get_persisted_status(), ChunkStatus::Full);
-        assert!(!imposter.can_be_serialized());
-        assert_eq!(imposter.get_sections().len(), 24);
-        assert_eq!(imposter.get_wrapped().block_nibbles().len(), 26);
-        assert_eq!(imposter.get_wrapped().sky_nibbles().len(), 26);
-    }
-
-    #[test]
-    fn full_construction_rejects_off_by_one_sections_and_accessor_mismatch() {
-        let parsed_height = height_accessor::create(-64, 384);
-        let factory = test_factory();
-        let parsed = SerializableChunkData::parse(parsed_height, &top_level("minecraft:full"))
-            .unwrap()
-            .unwrap();
-
-        for count in [23, 25] {
-            let result = parsed.construct_full::<u8, u8, &'static str>(
-                ChunkPos::ZERO,
-                parsed_height,
-                &factory,
-                FullChunkReconstruction {
-                    sections: test_sections(count),
-                    lights: Vec::new(),
-                },
-                0,
-                &test_state_flags,
-                true,
-            );
-            assert!(matches!(
-                result,
-                Err(SerializableChunkDataError::SectionCountMismatch {
-                    expected: 24,
-                    actual
-                }) if actual == count
-            ));
-        }
-
-        let result = parsed.construct_full::<u8, u8, &'static str>(
-            ChunkPos::ZERO,
-            height_accessor::create(-80, 384),
-            &factory,
-            FullChunkReconstruction {
-                sections: test_sections(24),
-                lights: Vec::new(),
-            },
-            0,
-            &test_state_flags,
-            true,
-        );
-        assert!(matches!(
-            result,
-            Err(SerializableChunkDataError::HeightAccessorMismatch {
-                parsed: -4,
-                construction: -5
-            })
-        ));
-
-        let result = parsed.construct_full::<u8, u8, &'static str>(
-            ChunkPos::ZERO,
-            height_accessor::create(-64, 400),
-            &factory,
-            FullChunkReconstruction {
-                sections: test_sections(25),
-                lights: Vec::new(),
-            },
-            0,
-            &test_state_flags,
-            true,
-        );
-        assert!(matches!(
-            result,
-            Err(
-                SerializableChunkDataError::HeightAccessorSectionCountMismatch {
-                    parsed: 24,
-                    construction: 25
-                }
-            )
-        ));
-    }
-
-    #[test]
     fn ancillary_surfaces_have_named_unsupported_markers() {
         let height = height_accessor::create(-64, 384);
         let cases: Vec<(&str, Tag, SerializableChunkDataError)> = vec![
@@ -2347,11 +2049,6 @@ mod tests {
                 SerializableChunkDataError::UnsupportedEntities,
             ),
             (
-                "block_entities",
-                Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
-                SerializableChunkDataError::UnsupportedBlockEntities,
-            ),
-            (
                 "ChunkBukkitValues",
                 Tag::Compound({
                     let mut tag = CompoundTag::new();
@@ -2368,11 +2065,25 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                parsed.validate_full_construction(24),
+                parsed.validate_full_for_reconstruction(),
                 Err(expected),
                 "{field}"
             );
         }
+
+        // A non-empty `block_entities` list is carried (not rejected): the
+        // reconstruction installs the serialized tags as pending NBT and
+        // materialization defers with #341.
+        let mut block_entity_chunk = top_level("minecraft:full");
+        block_entity_chunk.put(
+            "block_entities".into(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(CompoundTag::new())])),
+        );
+        let parsed = SerializableChunkData::parse(height, &block_entity_chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
+        assert_eq!(parsed.block_entities().len(), 1);
 
         // Stored block/fluid tick lists decode into typed stored values and are
         // carried; a FULL chunk carrying a non-empty stored list is now fully
@@ -2386,7 +2097,7 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &tick_chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         assert_eq!(parsed.stored_block_ticks().len(), 1);
         let parsed_ticks = parsed.stored_block_ticks()[0];
         assert_eq!(parsed_ticks.pos, BlockPos::new(0, 0, 0));
@@ -2404,7 +2115,7 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &tick_chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         assert_eq!(parsed.stored_fluid_ticks().len(), 1);
         assert_eq!(
             parsed.stored_fluid_ticks()[0].r#type,
@@ -2421,7 +2132,7 @@ mod tests {
             SerializableChunkData::parse(height, &chunk)
                 .unwrap()
                 .unwrap()
-                .validate_full_construction(24),
+                .validate_full_for_reconstruction(),
             Err(SerializableChunkDataError::UnsupportedStructures)
         );
 
@@ -2440,7 +2151,7 @@ mod tests {
                 SerializableChunkData::parse(height, &chunk)
                     .unwrap()
                     .unwrap()
-                    .validate_full_construction(24),
+                    .validate_full_for_reconstruction(),
                 Err(SerializableChunkDataError::UnsupportedUpgradeData { field })
             );
         }
@@ -2451,7 +2162,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(parsed.carving_mask(), Some(&[1, 2, 3][..]));
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
     }
 
     #[test]
@@ -2496,7 +2207,7 @@ mod tests {
         assert!(parsed.raw_blending_data().is_some());
         assert!(parsed.raw_below_zero_retrogen().is_some());
         assert!(parsed.raw_upgrade_data().is_some());
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
     }
 
     #[test]
@@ -2521,7 +2232,7 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         assert_eq!(parsed.stored_block_ticks().len(), 1);
         assert_eq!(parsed.stored_block_ticks()[0].pos, BlockPos::new(0, 0, 0));
         assert_eq!(parsed.stored_block_ticks()[0].delay, 1);
@@ -2543,7 +2254,7 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         assert_eq!(parsed.stored_fluid_ticks().len(), 1);
         assert_eq!(
             parsed.stored_fluid_ticks()[0].r#type,
@@ -2565,7 +2276,7 @@ mod tests {
             let parsed = SerializableChunkData::parse(height, &chunk)
                 .unwrap()
                 .unwrap();
-            assert_eq!(parsed.validate_full_construction(24), Ok(()), "{field}");
+            assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()), "{field}");
             if field == "block_ticks" {
                 assert_eq!(parsed.stored_block_ticks(), &[]);
             } else {
@@ -2593,7 +2304,7 @@ mod tests {
             let parsed = SerializableChunkData::parse(height, &chunk)
                 .unwrap()
                 .unwrap();
-            assert_eq!(parsed.validate_full_construction(24), Ok(()), "{field}");
+            assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()), "{field}");
             if field == "block_ticks" {
                 assert_eq!(parsed.stored_block_ticks(), &[]);
             } else {
@@ -2620,7 +2331,7 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         assert_eq!(parsed.stored_block_ticks().len(), 1);
         assert_eq!(
             parsed.stored_block_ticks()[0].r#type,
@@ -2638,7 +2349,7 @@ mod tests {
         let parsed = SerializableChunkData::parse(height, &chunk)
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         assert_eq!(parsed.stored_fluid_ticks().len(), 1);
         assert_eq!(
             parsed.stored_fluid_ticks()[0].r#type,
@@ -2658,7 +2369,7 @@ mod tests {
             let parsed = SerializableChunkData::parse(height, &chunk)
                 .unwrap()
                 .unwrap();
-            assert_eq!(parsed.validate_full_construction(24), Ok(()), "{field}");
+            assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()), "{field}");
             if field == "block_ticks" {
                 assert_eq!(parsed.stored_block_ticks(), &[]);
             } else {
@@ -2679,7 +2390,7 @@ mod tests {
             let parsed = SerializableChunkData::parse(height, &chunk)
                 .unwrap()
                 .unwrap();
-            assert_eq!(parsed.validate_full_construction(24), Ok(()), "{field}");
+            assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()), "{field}");
             if field == "block_ticks" {
                 assert_eq!(parsed.stored_block_ticks(), &[]);
             } else {
@@ -2713,7 +2424,7 @@ mod tests {
         // full-capable: the typed ticks are carried as stored values, not
         // scheduled (the `LevelChunkTicks`/`ProtoChunkTicks` containers stay
         // deferred to #370).
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         // The nether chunk stores fluid ticks only; its `block_ticks` list is
         // empty.
         assert!(parsed.stored_block_ticks().is_empty());
@@ -2759,7 +2470,7 @@ mod tests {
             .expect("loaded-world fixture has a Status");
         assert_eq!(parsed.stored_pos(), ChunkPos::new(0, -4));
         // References-only structures never block FULL construction (#369).
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         assert_eq!(parsed.structures_references().len(), 1);
         let entry = &parsed.structures_references()[0];
         assert_eq!(entry.identifier.namespace(), "minecraft");
@@ -2800,7 +2511,7 @@ mod tests {
             )]
         );
         assert!(parsed.stored_fluid_ticks().is_empty());
-        assert_eq!(parsed.validate_full_capabilities(), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
     }
 
     /// Radius-1 loaded-world fixture `-2.-2.nbt` (role `fluid-ticks`): a single
@@ -2826,7 +2537,7 @@ mod tests {
             )]
         );
         assert!(parsed.stored_block_ticks().is_empty());
-        assert_eq!(parsed.validate_full_capabilities(), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
     }
 
     /// Radius-1 loaded-world fixture `-19.-21.nbt` (role `chest-block-entity`):
@@ -2892,7 +2603,7 @@ mod tests {
             Block::from_name("minecraft:stone").unwrap()
         );
         assert_eq!(parsed.stored_fluid_ticks().len(), 1);
-        assert_eq!(parsed.validate_full_capabilities(), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
 
         let mut chunk = top_level("minecraft:full");
         chunk.put(
@@ -2904,7 +2615,7 @@ mod tests {
             .unwrap();
         assert!(parsed.stored_block_ticks().is_empty());
         assert_eq!(parsed.stored_fluid_ticks().len(), 1);
-        assert_eq!(parsed.validate_full_capabilities(), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
     }
 
     /// Malformed tick entries are not swallowed into stored values: the
@@ -2930,7 +2641,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(parsed.stored_block_ticks().len(), 1);
-        assert_eq!(parsed.validate_full_capabilities(), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         // The two failing elements (empty compound + malformed id) are
         // surfaced as a decode diagnostic even though a sibling survived.
         assert_eq!(parsed.diagnostics().len(), 1);
@@ -2957,7 +2668,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(parsed.stored_block_ticks().is_empty());
-        assert_eq!(parsed.validate_full_capabilities(), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         assert_eq!(parsed.diagnostics().len(), 1);
         assert!(matches!(
             parsed.diagnostics()[0],
@@ -2990,7 +2701,7 @@ mod tests {
             assert!(parsed.stored_block_ticks().is_empty(), "{status}");
             assert!(parsed.stored_fluid_ticks().is_empty(), "{status}");
             assert_eq!(
-                parsed.validate_full_capabilities(),
+                parsed.validate_full_for_reconstruction(),
                 Err(SerializableChunkDataError::UnsupportedChunkStatus {
                     status: ChunkStatus::from_identifier(status).unwrap()
                 })
@@ -3022,7 +2733,7 @@ mod tests {
                 SerializableChunkData::parse(height, &chunk)
                     .unwrap()
                     .unwrap()
-                    .validate_full_construction(24),
+                    .validate_full_for_reconstruction(),
                 Err(SerializableChunkDataError::UnsupportedUpgradeData { field })
             );
         }
@@ -3044,7 +2755,7 @@ mod tests {
             SerializableChunkData::parse(height, &chunk)
                 .unwrap()
                 .unwrap()
-                .validate_full_construction(24),
+                .validate_full_for_reconstruction(),
             Ok(())
         );
     }
@@ -3079,7 +2790,7 @@ mod tests {
             );
             assert!(parsed.effective_blending_data);
             assert_eq!(
-                parsed.validate_full_construction(24),
+                parsed.validate_full_for_reconstruction(),
                 Err(SerializableChunkDataError::UnsupportedBlendingData)
             );
         }
@@ -3098,7 +2809,7 @@ mod tests {
             .unwrap();
         assert!(parsed.raw_blending_data().is_some());
         assert!(!parsed.effective_blending_data);
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
 
         let mut absent = CompoundTag::new();
         absent.put_int("min_section", -4);
@@ -3111,7 +2822,7 @@ mod tests {
         assert!(parsed.raw_blending_data().is_some());
         assert!(parsed.effective_blending_data);
         assert_eq!(
-            parsed.validate_full_construction(24),
+            parsed.validate_full_for_reconstruction(),
             Err(SerializableChunkDataError::UnsupportedBlendingData)
         );
 
@@ -3133,7 +2844,7 @@ mod tests {
             .unwrap();
         assert!(parsed.effective_blending_data);
         assert_eq!(
-            parsed.validate_full_construction(24),
+            parsed.validate_full_for_reconstruction(),
             Err(SerializableChunkDataError::UnsupportedBlendingData)
         );
     }
@@ -3147,7 +2858,7 @@ mod tests {
             .unwrap();
         assert_eq!(full.status(), ChunkStatus::Full);
         assert!(full.diagnostics().is_empty());
-        assert_eq!(full.validate_full_construction(24), Ok(()));
+        assert_eq!(full.validate_full_for_reconstruction(), Ok(()));
 
         let partial = SerializableChunkData::parse(height, &top_level(":noise"))
             .unwrap()
@@ -3155,7 +2866,7 @@ mod tests {
         assert_eq!(partial.status(), ChunkStatus::Noise);
         assert!(partial.diagnostics().is_empty());
         assert_eq!(
-            partial.validate_full_construction(24),
+            partial.validate_full_for_reconstruction(),
             Err(SerializableChunkDataError::UnsupportedChunkStatus {
                 status: ChunkStatus::Noise,
             })
@@ -3214,7 +2925,7 @@ mod tests {
             let parsed = SerializableChunkData::parse(height, &chunk)
                 .unwrap()
                 .unwrap();
-            assert_eq!(parsed.validate_full_construction(24), Ok(()));
+            assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         }
 
         // A non-empty `starts` compound is the one structures surface still
@@ -3230,7 +2941,7 @@ mod tests {
             SerializableChunkData::parse(height, &chunk)
                 .unwrap()
                 .unwrap()
-                .validate_full_construction(24),
+                .validate_full_for_reconstruction(),
             Err(SerializableChunkDataError::UnsupportedStructures)
         );
     }
@@ -3286,11 +2997,13 @@ mod tests {
         )));
     }
 
-    /// A non-FULL (proto) chunk never decodes `structures.References`: Paper
-    /// reads `References` exclusively on the LEVELCHUNK construction branch,
-    /// so a malformed key on a proto chunk surfaces no `StructureReferenceMalformed`
-    /// diagnostic (and no carried entries), mirroring the tick gate's FULL-only
-    /// decode.
+    /// A non-FULL (proto) chunk never decodes `structures.References` in the
+    /// port: the runtime reconstruction this feeds accepts only FULL chunks, so
+    /// decoding on a proto chunk would be dead work the FULL gate already
+    /// rejects. This is the same boundary the tick decode uses — not Paper's
+    /// exact call site, since Paper's `read` invokes
+    /// `setAllReferences(unpackStructureReferences(...))` unconditionally for
+    /// every chunk type (see [`parse_structure_references`]).
     #[test]
     fn proto_chunk_ignores_malformed_structure_references() {
         let height = height_accessor::create(-64, 384);
@@ -3403,6 +3116,52 @@ mod tests {
         assert!(diagnostics.is_empty());
     }
 
+    /// A hostile `References` `long[]` of in-range duplicates deduplicates in
+    /// O(n): a huge, nearly-all-duplicate array must collapse to the distinct
+    /// entries while preserving first-insertion order. This is a regression
+    /// guard against a return to the quadratic `Vec::contains` dedup — a
+    /// hostile wire must not degrade to an O(n^2) scan (the array here would
+    /// make `Vec::contains` take ~10^10 comparisons). The dedup itself is
+    /// silent (Paper's `LongOpenHashSet`); the size of the surviving set is
+    /// asserted directly, so the test fails fast if the dedup is wrong without
+    /// relying on wall-clock timing.
+    #[test]
+    fn hostile_duplicate_references_dedup_in_linear_time_and_preserve_order() {
+        let height = height_accessor::create(-64, 384);
+        // A set of distinct in-range chunks (chessboard distance from (0,0) is
+        // <= 8), repeated thousands of times, so the dedup must collapse the
+        // wire to the distinct entries in first-insertion order (Paper's
+        // `LongOpenHashSet` keeps first-insertion order).
+        let distinct: Vec<i64> = (0..9)
+            .map(|offset| ChunkPos::new(offset, 0).pack())
+            .collect();
+        let mut wire = Vec::with_capacity(200_000);
+        for i in 0..200_000 {
+            wire.push(distinct[i % distinct.len()]);
+        }
+        let mut references = CompoundTag::new();
+        references.put_long_array("minecraft:village", wire);
+        let mut structures = CompoundTag::new();
+        structures.put("References".into(), Tag::Compound(references));
+        let mut chunk = top_level("minecraft:full");
+        chunk.put("structures".into(), Tag::Compound(structures));
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+
+        let (kept, diagnostics) =
+            filter_structure_references(parsed.structures_references(), &ChunkPos::new(0, 0));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept[0].references, distinct,
+            "the dedup must collapse to the distinct in-range references in first-insertion order"
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "all 200_000 references are in range; the silent dedup must not emit diagnostics"
+        );
+    }
+
     /// A stored-tick entry whose id does not resolve through the block registry
     /// is dropped by the codec's partial path and surfaced as a
     /// [`StoredTicksDecodeFailed`](ChunkParseDiagnostic::StoredTicksDecodeFailed)
@@ -3423,7 +3182,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(parsed.stored_block_ticks().is_empty());
-        assert_eq!(parsed.validate_full_capabilities(), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         assert_eq!(parsed.diagnostics().len(), 1);
         assert!(matches!(
             parsed.diagnostics()[0],
@@ -3446,7 +3205,7 @@ mod tests {
             .unwrap();
         assert!(parsed.raw_below_zero_retrogen().is_some());
         assert!(parsed.effective_below_zero_retrogen());
-        assert_eq!(parsed.validate_full_construction(24), Ok(()));
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
     }
 
     #[test]
@@ -3521,7 +3280,7 @@ mod tests {
         assert_eq!(partial.status(), ChunkStatus::InitializeLight);
         assert_eq!(partial.section_tags().list.len(), 24);
         assert_eq!(
-            partial.validate_full_construction(24),
+            partial.validate_full_for_reconstruction(),
             Err(SerializableChunkDataError::UnsupportedChunkStatus {
                 status: ChunkStatus::InitializeLight,
             })
