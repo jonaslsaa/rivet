@@ -495,7 +495,7 @@ impl SerializableChunkData {
         let block_entities = compound_entries(chunk_data.get_list("block_entities"));
         let structure_data = chunk_data.get_compound_or_empty("structures");
         let (structures_references, structure_diagnostics) =
-            parse_structure_references(&structure_data);
+            parse_structure_references(&structure_data, status);
         diagnostics.extend(structure_diagnostics);
         let section_tags = chunk_data.get_list_or_empty(SECTIONS_TAG);
         let persistent_data_container = chunk_data.get("ChunkBukkitValues").cloned();
@@ -844,25 +844,36 @@ fn compound_entries(list: Option<&ListTag>) -> Vec<CompoundTag> {
 /// alone no longer blocks FULL construction (#369); starts remain unsupported
 /// until the `StructureStart` load path is ported.
 fn structures_starts_are_non_empty(structures: &CompoundTag) -> bool {
-    !structures.get_compound_or_empty("starts").is_empty()
+    // `get_compound` borrows (Paper's `getCompoundOrEmpty` returns a live
+    // reference); the absent case is just an empty compound, so there is no
+    // need to clone the starts compound just to test emptiness.
+    structures
+        .get_compound("starts")
+        .is_some_and(|starts| !starts.is_empty())
 }
 
 /// Decode `structures.References` into ordered typed entries, mirroring
 /// Paper's `unpackStructureReferences` read phase (the per-chunk distance filter
 /// is a reconstruction-time concern — Paper passes `pos` to the unpack, which
 /// this slice defers to construction so the stored position and the requested
-/// position can differ).
+/// position can differ). Only a FULL chunk decodes: Paper reads `References`
+/// exclusively on the LEVELCHUNK construction branch (a proto chunk never
+/// consults `structures`), so a malformed `References` key on a non-FULL chunk
+/// must not surface a diagnostic Paper would never emit — mirroring the tick
+/// gate's FULL-only decode.
 ///
 /// The `References` tag is absent or a non-compound -> no entries (Paper's
 /// `getCompoundOrEmpty` returns an empty compound for a wrong-typed container,
 /// also silently). Each key is parsed with `Identifier::try_parse_result`
 /// (invalid characters -> dropped, like Paper's `Identifier.tryParse` returning
-/// null; an over-long identifier -> dropped, like the constructor's unchecked
-/// length exception — both surfaced as a `StructureReferenceMalformed`
-/// diagnostic rather than the raw Java log). A wrong-type value (anything but a
-/// `LongArray`) is skipped exactly like Java's `entry.asLongArray()`
-/// empty-check, and surfaced as a diagnostic. The packed chunk longs are
-/// retained in array order.
+/// null; an over-long identifier -> surfaced as a `StructureReferenceMalformed`
+/// diagnostic and dropped — Paper's `Identifier` constructor throws an
+/// unchecked `IdentifierException` for an over-long id that propagates up and
+/// aborts the whole chunk read, so the port deliberately degrades that crash
+/// into an entry-local diagnostic instead of dropping the entire chunk). A
+/// wrong-type value (anything but a `LongArray`) is skipped exactly like Java's
+/// `entry.asLongArray()` empty-check, and surfaced as a diagnostic. The packed
+/// chunk longs are retained in array order.
 ///
 // RivetTodo(#369): Paper's STRUCTURE-registry membership discard is deferred.
 // `unpackStructureReferences` looks up each key through
@@ -875,9 +886,17 @@ fn structures_starts_are_non_empty(structures: &CompoundTag) -> bool {
 // filter still runs at reconstruction (see `filter_structure_references`).
 pub fn parse_structure_references(
     structures: &CompoundTag,
+    status: ChunkStatus,
 ) -> (Vec<StructureReference>, Vec<ChunkParseDiagnostic>) {
     let mut references = Vec::new();
     let mut diagnostics = Vec::new();
+    // Paper only reads `structures.References` at construction time on the
+    // LEVELCHUNK branch (a proto chunk never consults it), so a malformed
+    // `References` key on a non-FULL chunk must not surface a diagnostic
+    // Paper would never emit. Mirror the tick gate: decode/carry only for FULL.
+    if status != ChunkStatus::Full {
+        return (references, diagnostics);
+    }
     let Some(references_tag) = structures.get_compound("References") else {
         return (references, diagnostics);
     };
@@ -936,6 +955,12 @@ pub fn filter_structure_references(
     let mut diagnostics = Vec::new();
     for entry in references {
         let mut filtered: Vec<i64> = Vec::with_capacity(entry.references.len());
+        // O(n) dedup mirroring Paper's `LongOpenHashSet`: the membership set
+        // is transient and only guards first-insertion order (the `Vec` is the
+        // carried value). A hostile `long[]` must not degrade to an O(n^2)
+        // linear scan.
+        let mut seen: std::collections::HashSet<i64> =
+            std::collections::HashSet::with_capacity(entry.references.len());
         for reference in entry.references.iter().copied() {
             let ref_pos = ChunkPos::unpack(reference);
             if ref_pos.get_chessboard_distance(chunk_pos) > 8 {
@@ -944,7 +969,7 @@ pub fn filter_structure_references(
                     chunk: *chunk_pos,
                     chunk_pos: ref_pos,
                 });
-            } else if !filtered.contains(&reference) {
+            } else if seen.insert(reference) {
                 // The `LongOpenHashSet` dedup is silent; only the out-of-range
                 // drop surfaces a diagnostic (Paper warns on that one).
                 filtered.push(reference);
@@ -3243,6 +3268,28 @@ mod tests {
             ChunkParseDiagnostic::StructureReferenceMalformed { key, reason }
                 if key == "minecraft:village" && !reason.is_empty()
         )));
+    }
+
+    /// A non-FULL (proto) chunk never decodes `structures.References`: Paper
+    /// reads `References` exclusively on the LEVELCHUNK construction branch,
+    /// so a malformed key on a proto chunk surfaces no `StructureReferenceMalformed`
+    /// diagnostic (and no carried entries), mirroring the tick gate's FULL-only
+    /// decode.
+    #[test]
+    fn proto_chunk_ignores_malformed_structure_references() {
+        let height = height_accessor::create(-64, 384);
+        let mut references = CompoundTag::new();
+        references.put_string("minecraft:village", "not an array");
+        let mut structures = CompoundTag::new();
+        structures.put("References".into(), Tag::Compound(references));
+        let mut chunk = top_level("minecraft:noise");
+        chunk.put("structures".into(), Tag::Compound(structures));
+
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert!(parsed.structures_references().is_empty());
+        assert!(parsed.diagnostics().is_empty());
     }
 
     /// An out-of-range `structures.References` chunk-long (>8 chessboard
