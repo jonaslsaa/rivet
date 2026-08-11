@@ -1116,4 +1116,66 @@ mod tests {
             BLOCK_ENTITY_TYPE_BY_ID.len()
         );
     }
+
+    #[test]
+    fn materialized_infos_round_trip_through_the_wire_codec() {
+        // The #520 boundary produces the exact `BlockEntityInfo` values the
+        // active #516 send path encodes. Prove the materialized values survive
+        // the real `BlockEntityInfo.STREAM_CODEC` encode -> decode round trip:
+        // a tagged spawner and a null-tag chest both decode back with the same
+        // packed position, absolute Y, canonical registry Arc, and tag.
+        use bytes::BytesMut;
+        use rivet_protocol::codec::{StreamDecoder, StreamEncoder};
+        use rivet_protocol::protocol::game::level_chunk_packet_data::BlockEntityInfo;
+        use rivet_protocol::registry_friendly_byte_buf::RegistryFriendlyByteBuf;
+
+        let access = BlockEntityType::built_in_registry_access();
+
+        let spawner = resolved_outcome(spawner_tag());
+        let (spawner_info, spawner_diags) = materialize_entry(&spawner);
+        assert!(spawner_diags.is_empty());
+        let spawner_info = spawner_info.expect("spawner materializes");
+        let spawner_tag_value = spawner_info.tag().expect("spawner tag is non-null").clone();
+
+        let chest = resolved_outcome(block_entity("minecraft:chest", 1, 65, 1));
+        let (chest_info, chest_diags) = materialize_entry(&chest);
+        assert!(chest_diags.is_empty());
+        let chest_info = chest_info.expect("chest materializes");
+
+        // Encode both infos back-to-back in a single buffer (the packet writes
+        // the whole block-entity list), then decode them in order.
+        let mut out = RegistryFriendlyByteBuf::new(BytesMut::new(), access.clone());
+        BlockEntityInfo::stream_codec()
+            .encode(&mut out, &spawner_info)
+            .unwrap();
+        BlockEntityInfo::stream_codec()
+            .encode(&mut out, &chest_info)
+            .unwrap();
+        let bytes = out.into_inner().to_vec();
+
+        let mut input =
+            RegistryFriendlyByteBuf::new(BytesMut::from(bytes.as_slice()), access.clone());
+        let decoded_spawner = BlockEntityInfo::stream_codec().decode(&mut input).unwrap();
+        let decoded_chest = BlockEntityInfo::stream_codec().decode(&mut input).unwrap();
+        assert_eq!(input.readable_bytes(), 0);
+
+        // The spawner decodes with identical packed position, absolute Y,
+        // registry Arc identity (the canonical allocation), and tag.
+        assert_eq!(decoded_spawner.packed_xz(), spawner_info.packed_xz());
+        assert_eq!(decoded_spawner.y(), spawner_info.y());
+        assert!(Arc::ptr_eq(
+            decoded_spawner.entity_type(),
+            spawner_info.entity_type()
+        ));
+        assert_eq!(decoded_spawner.tag(), Some(&spawner_tag_value));
+
+        // The chest's null tag stays null through the wire.
+        assert_eq!(decoded_chest.packed_xz(), 0x11);
+        assert_eq!(decoded_chest.y(), 65);
+        assert!(Arc::ptr_eq(
+            decoded_chest.entity_type(),
+            chest_info.entity_type()
+        ));
+        assert!(decoded_chest.tag().is_none());
+    }
 }
