@@ -13,7 +13,11 @@
 //!   ReportedNbtException extends ReportedException
 //! The `CrashReportCategory` records its `setDetail` entries so the
 //! level-data `fillCrashReportCategory` defaults (#398) are observable and
-//! testable.
+//! testable. Java's `setDetail` takes a lazy `Supplier<String>` (the detail is
+//! formatted only when the report is rendered); the stub formats its
+//! `impl Display` value eagerly. Accepted: this is a test-observability stub
+//! replaced by the real `rivet-server` `CrashReport` port, and the level-data
+//! defaults format their detail strings at call time regardless.
 
 use std::fmt;
 
