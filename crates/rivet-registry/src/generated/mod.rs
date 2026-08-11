@@ -14,6 +14,7 @@ pub mod block_properties;
 pub mod block_states;
 #[cfg(feature = "blocks")]
 pub mod blocks;
+pub mod feature_size_types;
 #[cfg(feature = "blocks")]
 pub mod registries;
 #[cfg(feature = "blocks")]

@@ -2,9 +2,10 @@
 //! `net.minecraft.network.chat` `ClickEvent`/`HoverEvent` codecs (epic #12).
 //!
 //! PROVENANCE: `net.minecraft.util.ExtraCodecs` maps to `rivet-util`; the
-//! helpers live here because their only consumers are `rivet-text` and the
-//! `mc.util` unit has not yet been split into `rivet-util`. RECONCILIATION:
-//! move them to `rivet-util` when a fuller `mc.util` port lands.
+//! `POSITIVE_INT` codec (shared with the worldgen configuration leaves)
+//! lives in `rivet-util::extra_codecs`, and this module delegates to it. The
+//! chat-specific helpers (`chat_string`, `untrusted_uri`, …) stay here because
+//! their only consumers are `rivet-text`.
 
 use crate::uri::parse_uri;
 use rivet_serialization::codec::{self, Codec};
@@ -13,19 +14,11 @@ use rivet_serialization::dynamic_ops::DynamicOps;
 use std::sync::Arc;
 
 /// `ExtraCodecs.POSITIVE_INT` — `Codec.INT` validated to `[1, MAX]` with the
-/// Java-exact message `"Value must be positive: {n}"` (Java's
-/// `intRangeWithMessage(1, Integer.MAX_VALUE, ...)`).
+/// Java-exact message `"Value must be positive: {n}"`. Lives in
+/// `rivet-util::extra_codecs` (shared with worldgen configs); re-exported for
+/// the chat codecs.
 pub fn positive_int<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i32, Ops>> {
-    codec::validate(
-        codec::int_codec(),
-        Arc::new(|value: &i32| {
-            if *value >= 1 {
-                DataResult::success(*value)
-            } else {
-                DataResult::error(format!("Value must be positive: {}", value))
-            }
-        }),
-    )
+    rivet_util::positive_int()
 }
 
 /// `StringUtil.isAllowedChatCharacter(char)` — `ch != 167 && ch >= 32 &&
