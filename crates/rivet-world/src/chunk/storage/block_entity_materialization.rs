@@ -11,6 +11,15 @@
 //! reconstruction carries the outcomes for; the active #516 server send path
 //! consumes it but is deliberately not wired here.
 //!
+//! Authority boundary (#537): the server `LevelChunk` currently carries the
+//! serialized block entities both in `ChunkAccess`'s pending-NBT map and as the
+//! `block_entities`/`block_entity_outcomes` Vec snapshots the reconstruction
+//! returns, and runtime mutators update only the map. Choosing one authority is
+//! tracked separately; this materializer deliberately takes an immutable
+//! outcome slice and produces owned wire values, so it neither creates nor
+//! cements any duplicate mutable ownership — the caller decides which snapshot
+//! feeds it once #537 lands.
+//!
 //! ## Paper-faithful mapping
 //!
 //! Java's `BlockEntityInfo.create` (Paper 26.2, `ClientboundLevelChunkPacketData`):
@@ -54,14 +63,16 @@
 //!   drops `SpawnPotentials` exactly like `getUpdateTag`.
 //!
 //! Every type that DOES override `getUpdateTag` with a non-empty tag (piston,
-//! sign, hanging_sign, banner, skull, beacon, conduit, structure block, end
-//! gateway, jigsaw, campfire, decorated pot, brushable block, creaking heart,
-//! shelf, trial spawner, vault, test block, test instance block) is refused
-//! loudly as [`BlockEntityMaterializeError::UnsupportedUpdateTag`] — the port
-//! never fabricates a client tag from a serialized payload whose live subclass
-//! is not ported. The refusal set is the exact pinned-Paper override set
-//! (minus mob_spawner, which is ported), so every other resolved type
-//! materializes the null tag Paper sends.
+//! sign, hanging_sign, banner, beacon, structure block, end gateway, jigsaw,
+//! campfire, shelf, trial spawner, vault, test block, test instance block) is
+//! refused loudly as [`BlockEntityMaterializeError::UnsupportedUpdateTag`] —
+//! the port never fabricates a client tag from a serialized payload whose live
+//! subclass is not ported. Five overriders whose tag can be EMPTY depending on
+//! the loaded state (skull, conduit, decorated pot, brushable block, creaking
+//! heart) materialize a null-tag entry when empty — exactly Paper's
+//! `tag.isEmpty() ? null : tag` — and are refused when non-empty. The refusal
+//! sets are the exact pinned-Paper override set (minus mob_spawner, which is
+//! ported), so every other resolved type materializes the null tag Paper sends.
 //!
 //! ## Refusals (typed, never silent)
 //!
@@ -70,7 +81,8 @@
 //! - [`BlockEntityMaterializeError::InvalidType`] — an absent/malformed/unknown
 //!   `id` surfaced by reconstruction.
 //! - [`BlockEntityMaterializeError::UnsupportedUpdateTag`] — a resolved type
-//!   whose `getUpdateTag` override is not ported (the override set above).
+//!   whose `getUpdateTag` override is not ported (the unconditional override
+//!   set, or a conditional overrider whose tag is non-empty).
 //!
 //! A malformed spawner `SpawnData` is NOT an entry refusal: Java's
 //! `BaseSpawner.load` reads it through `TagValueInput.read`, which reports the
@@ -104,45 +116,103 @@ use rivet_registry::core::{BlockPos, SectionPos};
 const SPAWNER_TYPE: &str = "minecraft:mob_spawner";
 
 /// The pinned-Paper set of `BlockEntityType` values whose live subclass
-/// overrides `getUpdateTag` with a non-empty tag and which the port does not
-/// reproduce (`mob_spawner` is ported and excluded). Every other resolved type
-/// inherits the base empty `getUpdateTag` and materializes a null tag, exactly
-/// like Paper's `tag.isEmpty() ? null : tag`.
+/// overrides `getUpdateTag` with a tag the port does not reproduce
+/// (`mob_spawner` is ported and excluded). Every other resolved type inherits
+/// the base empty `getUpdateTag` and materializes a null tag, exactly like
+/// Paper's `tag.isEmpty() ? null : tag`.
 ///
 /// Derived from the pinned Paper 26.2 sources: `SignBlockEntity` (also
 /// inherited by `HangingSignBlockEntity`), `BannerBlockEntity`,
-/// `SkullBlockEntity`, `BeaconBlockEntity`, `ConduitBlockEntity`,
-/// `StructureBlockEntity`, `TheEndGatewayBlockEntity`, `JigsawBlockEntity`,
-/// `CampfireBlockEntity`, `DecoratedPotBlockEntity`, `BrushableBlockEntity`,
-/// `CreakingHeartBlockEntity`, `ShelfBlockEntity`,
+/// `BeaconBlockEntity`, `StructureBlockEntity`, `TheEndGatewayBlockEntity`,
+/// `JigsawBlockEntity`, `CampfireBlockEntity`, `ShelfBlockEntity`,
 /// `TrialSpawnerBlockEntity`, `vault.VaultBlockEntity`, `TestBlockEntity`,
 /// `TestInstanceBlockEntity`, and `PistonMovingBlockEntity`
 /// (`world/level/block/piston`, registered as `minecraft:piston`).
+/// [`CONDITIONAL_UPDATE_TAG_TYPES`] holds the overriders whose tag can be empty
+/// (materialized null) or non-empty (refused) depending on the loaded state.
 ///
-/// RivetTodo(#520): re-audit this set when the generated registry is
+/// RivetTodo(#520): re-audit these sets when the generated registry is
 /// regenerated — a newly added type whose subclass overrides `getUpdateTag`
-/// must join this set to stay loud instead of silently sending a null tag.
+/// must join one of the sets to stay loud instead of silently sending a null
+/// tag.
 const UNSUPPORTED_UPDATE_TAG_TYPES: &[&str] = &[
     "minecraft:piston",
     "minecraft:sign",
     "minecraft:hanging_sign",
     "minecraft:banner",
-    "minecraft:skull",
     "minecraft:beacon",
-    "minecraft:conduit",
     "minecraft:structure_block",
     "minecraft:end_gateway",
     "minecraft:jigsaw",
     "minecraft:campfire",
-    "minecraft:decorated_pot",
-    "minecraft:brushable_block",
-    "minecraft:creaking_heart",
     "minecraft:shelf",
     "minecraft:trial_spawner",
     "minecraft:vault",
     "minecraft:test_block",
     "minecraft:test_instance_block",
 ];
+
+/// The `getUpdateTag` overriders whose tag can be EMPTY depending on their
+/// loaded state. Paper's `tag.isEmpty() ? null : tag` then sends a null-tag
+/// entry (present) — the port materializes that. When the override tag would
+/// be non-empty (a state-carrying field is present in the serialized tag), the
+/// port refuses loudly because it cannot reproduce the tag.
+///
+/// The emptiness is computable from the serialized raw tag because each
+/// type's `loadAdditional` rebuilds the live state from it and the override's
+/// conditional writes mirror the raw field's presence:
+///
+/// - `minecraft:skull` (`SkullBlockEntity`) — `saveCustomOnly` writes only the
+///   nullable `profile`, `note_block_sound`, `custom_name`; empty when none
+///   are present.
+/// - `minecraft:conduit` (`ConduitBlockEntity`) — `saveCustomOnly` writes
+///   `Target` only when a destroy target is present; empty when absent.
+/// - `minecraft:decorated_pot` (`DecoratedPotBlockEntity`) — `getUpdateTag`
+///   writes `sherds` only when not `PotDecorations.EMPTY` (Paper hides the
+///   item); empty when `sherds` is absent.
+/// - `minecraft:brushable_block` (`BrushableBlockEntity`) — `getUpdateTag`
+///   writes the nullable `hit_direction` and `item` only when non-empty; empty
+///   when both are absent.
+/// - `minecraft:creaking_heart` (`CreakingHeartBlockEntity`) — `saveCustomOnly`
+///   writes `creaking` only when a creaking is active; empty when absent.
+///
+/// `minecraft:trial_spawner` is NOT here: its override can also be empty (a
+/// non-ACTIVE state with no `SpawnData`), but that emptiness depends on the
+/// block-state `TrialSpawnerBlock.STATE`, which the serialized tag does not
+/// carry — so it cannot be computed here and stays in
+/// [`UNSUPPORTED_UPDATE_TAG_TYPES`] (refused loudly rather than risking a
+/// silent wrong tag).
+const CONDITIONAL_UPDATE_TAG_TYPES: &[&str] = &[
+    "minecraft:skull",
+    "minecraft:conduit",
+    "minecraft:decorated_pot",
+    "minecraft:brushable_block",
+    "minecraft:creaking_heart",
+];
+
+/// Whether a [`CONDITIONAL_UPDATE_TAG_TYPES`] type's `getUpdateTag` override is
+/// empty given the serialized tag (see the set's doc for the per-type
+/// derivation). A present-but-malformed field loads to null in Paper (the
+/// codec reports and drops it), which would make the override tag empty and
+/// Paper send null; the port treats a present field as non-empty and refuses —
+/// the conservative, never-fabricate direction, matching the module's other
+/// malformed-field boundaries.
+fn conditional_override_tag_is_empty(name: &str, raw: &CompoundTag) -> bool {
+    match name {
+        "minecraft:skull" => {
+            raw.get("profile").is_none()
+                && raw.get("note_block_sound").is_none()
+                && raw.get("custom_name").is_none()
+        }
+        "minecraft:conduit" => raw.get("Target").is_none(),
+        "minecraft:decorated_pot" => raw.get("sherds").is_none(),
+        "minecraft:brushable_block" => {
+            raw.get("hit_direction").is_none() && raw.get("item").is_none()
+        }
+        "minecraft:creaking_heart" => raw.get("creaking").is_none(),
+        _ => false,
+    }
+}
 
 /// Why a serialized block entity cannot be turned into a wire
 /// [`BlockEntityInfo`]. Each variant keeps the corrected absolute position and
@@ -251,9 +321,11 @@ fn materialize_block_entity(
 /// The tag follows `BlockEntity.getUpdateTag` faithfully: a subclass that does
 /// not override it (the vast majority — all containers, chest included) yields
 /// the empty base tag, so the wire tag is `None`; `mob_spawner` has the ported
-/// `BaseSpawner.save`-minus-`SpawnPotentials` tag; the remaining
-/// [`UNSUPPORTED_UPDATE_TAG_TYPES`] override `getUpdateTag` with a non-empty
-/// tag the port cannot reproduce and are refused loudly.
+/// `BaseSpawner.save`-minus-`SpawnPotentials` tag; a [`CONDITIONAL_UPDATE_TAG_TYPES`]
+/// override materializes null when its tag is empty (Paper sends the entry with
+/// a null tag) and is refused when non-empty; the remaining
+/// [`UNSUPPORTED_UPDATE_TAG_TYPES`] override `getUpdateTag` with a tag the port
+/// cannot reproduce and are refused loudly.
 fn materialize_resolved(
     entry: &ResolvedSerializedBlockEntity,
     diagnostics: &mut Vec<BlockEntityMaterializeDiagnostic>,
@@ -270,6 +342,22 @@ fn materialize_resolved(
             entry.entity_type.clone(),
             Some(tag),
         ));
+    }
+    if CONDITIONAL_UPDATE_TAG_TYPES.contains(&name) {
+        if conditional_override_tag_is_empty(name, &entry.raw_tag) {
+            // The override tag is empty, so Paper's `tag.isEmpty() ? null : tag`
+            // sends a null-tag entry — the entry is present with no tag.
+            return Ok(BlockEntityInfo::new(
+                packed_xz,
+                y,
+                entry.entity_type.clone(),
+                None,
+            ));
+        }
+        return Err(BlockEntityMaterializeError::UnsupportedUpdateTag {
+            position: entry.position,
+            entity_type: name.to_string(),
+        });
     }
     if UNSUPPORTED_UPDATE_TAG_TYPES.contains(&name) {
         return Err(BlockEntityMaterializeError::UnsupportedUpdateTag {
@@ -893,53 +981,103 @@ mod tests {
     }
 
     /// The independently-pinned Paper 26.2 `getUpdateTag`-override set (direct
-    /// or inherited), minus `mob_spawner` which the port reproduces. This is
-    /// written out from the Java source audit, NOT derived from the production
-    /// constant, so a misclassification in `UNSUPPORTED_UPDATE_TAG_TYPES` fails
-    /// this test instead of mirroring the bug.
+    /// or inherited) minus `mob_spawner`, split into the unconditional
+    /// non-empty-override types and the conditional empty-capable overriders.
+    /// Written out from the Java source audit, NOT derived from the production
+    /// constants, so a misclassification in `UNSUPPORTED_UPDATE_TAG_TYPES` or
+    /// `CONDITIONAL_UPDATE_TAG_TYPES` fails the tests instead of mirroring the
+    /// bug.
     const EXPECTED_UNSUPPORTED: &[&str] = &[
         "minecraft:piston",
         "minecraft:sign",
         "minecraft:hanging_sign",
         "minecraft:banner",
-        "minecraft:skull",
         "minecraft:beacon",
-        "minecraft:conduit",
         "minecraft:structure_block",
         "minecraft:end_gateway",
         "minecraft:jigsaw",
         "minecraft:campfire",
-        "minecraft:decorated_pot",
-        "minecraft:brushable_block",
-        "minecraft:creaking_heart",
         "minecraft:shelf",
         "minecraft:trial_spawner",
         "minecraft:vault",
         "minecraft:test_block",
         "minecraft:test_instance_block",
     ];
+    const EXPECTED_CONDITIONAL: &[&str] = &[
+        "minecraft:skull",
+        "minecraft:conduit",
+        "minecraft:decorated_pot",
+        "minecraft:brushable_block",
+        "minecraft:creaking_heart",
+    ];
 
     #[test]
-    fn unsupported_update_tag_set_matches_the_pinned_paper_override_audit() {
-        // The production constant must exactly match the independently-pinned
-        // Java audit set (the constant's order is canonical by registry id).
+    fn update_tag_sets_match_the_pinned_paper_override_audit() {
+        // The production constants must exactly match the independently-pinned
+        // Java audit sets.
         let mut constant = UNSUPPORTED_UPDATE_TAG_TYPES.to_vec();
         constant.sort_unstable();
         let mut expected = EXPECTED_UNSUPPORTED.to_vec();
         expected.sort_unstable();
         assert_eq!(constant, expected);
+
+        let mut conditional = CONDITIONAL_UPDATE_TAG_TYPES.to_vec();
+        conditional.sort_unstable();
+        let mut expected_conditional = EXPECTED_CONDITIONAL.to_vec();
+        expected_conditional.sort_unstable();
+        assert_eq!(conditional, expected_conditional);
+    }
+
+    #[test]
+    fn conditional_overriders_materialize_null_when_empty_and_refuse_when_not() {
+        // A conditional overrider with no state-carrying field loads to an
+        // empty getUpdateTag, so Paper sends a null-tag entry (present).
+        for name in EXPECTED_CONDITIONAL {
+            let entry = resolved_outcome(block_entity(name, 1, 64, 1));
+            let (result, diagnostics) = materialize_entry(&entry);
+            assert!(diagnostics.is_empty(), "{name}");
+            let info = result.unwrap_or_else(|e| panic!("{name} empty override -> null: {e}"));
+            assert!(info.tag().is_none(), "{name} empty override sends null");
+        }
+
+        // Each conditional overrider's state-carrying field makes the tag
+        // non-empty, so the entry is refused loudly (the tag is not ported).
+        let non_empty = [
+            ("minecraft:skull", "profile"),
+            ("minecraft:conduit", "Target"),
+            ("minecraft:decorated_pot", "sherds"),
+            ("minecraft:brushable_block", "item"),
+            ("minecraft:creaking_heart", "creaking"),
+        ];
+        for (name, field) in non_empty {
+            let mut tag = block_entity(name, 1, 64, 1);
+            tag.put_string(field, "state");
+            let entry = resolved_outcome(tag);
+            let (result, diagnostics) = materialize_entry(&entry);
+            assert!(diagnostics.is_empty(), "{name}");
+            assert_eq!(
+                result.unwrap_err(),
+                BlockEntityMaterializeError::UnsupportedUpdateTag {
+                    position: BlockPos::new(1, 64, 1),
+                    entity_type: name.to_string(),
+                },
+                "{name} with {field} must be refused"
+            );
+        }
     }
 
     #[test]
     fn every_generated_type_is_classified_faithfully() {
         // Pin the Paper-faithful classification across the whole generated
-        // registry: mob_spawner is ported, the getUpdateTag-overriding set is
-        // refused loudly, and every other type materializes the base null tag.
-        // The refusal set is checked against the independently-pinned
-        // EXPECTED_UNSUPPORTED audit, not the production constant.
+        // registry: mob_spawner is ported, the unconditional overriders are
+        // refused loudly, the conditional overriders materialize null (their
+        // loop tag carries no state field), and every other type materializes
+        // the base null tag. The refusal sets are checked against the
+        // independently-pinned audit, not the production constants.
         let access = BlockEntityType::built_in_registry_access();
         let registry = access.lookup(&BLOCK_ENTITY_TYPE).unwrap();
         let mut unsupported_seen = Vec::new();
+        let mut conditional_seen = Vec::new();
         let mut null_seen = Vec::new();
         for (id, name) in BLOCK_ENTITY_TYPE_BY_ID.iter().enumerate() {
             let entry = resolved_outcome(block_entity(name, id as i32, 64, id as i32));
@@ -958,6 +1096,12 @@ mod tests {
                     "{name} overrides getUpdateTag and must be refused"
                 );
                 unsupported_seen.push(*name);
+            } else if EXPECTED_CONDITIONAL.contains(name) {
+                // The loop's bare tag carries no state field, so the override
+                // tag is empty and Paper sends a null-tag entry (present).
+                let info = result.unwrap_or_else(|e| panic!("{name} should materialize null: {e}"));
+                assert!(info.tag().is_none(), "{name} empty override sends null");
+                conditional_seen.push(*name);
             } else {
                 let info = result.unwrap_or_else(|e| panic!("{name} should materialize null: {e}"));
                 assert!(info.tag().is_none(), "{name} must send the base null tag");
@@ -965,9 +1109,10 @@ mod tests {
             }
         }
         assert_eq!(unsupported_seen.len(), EXPECTED_UNSUPPORTED.len());
+        assert_eq!(conditional_seen.len(), EXPECTED_CONDITIONAL.len());
         assert!(!null_seen.is_empty());
         assert_eq!(
-            null_seen.len() + unsupported_seen.len() + 1,
+            null_seen.len() + unsupported_seen.len() + conditional_seen.len() + 1,
             BLOCK_ENTITY_TYPE_BY_ID.len()
         );
     }
