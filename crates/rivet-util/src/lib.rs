@@ -52,7 +52,7 @@ pub use bounded_float_function::{
 pub use by_id_map::{OutOfBoundsStrategy, continuous, sparse};
 pub use cubic_spline::{
     Builder as CubicSplineBuilder, CubicSpline, Multipoint as CubicSplineMultipoint,
-    Point as CubicSplinePoint, Sampler as CubicSplineSampler,
+    Point as CubicSplinePoint, Sampler as CubicSplineSampler, fmt_f32_3 as fmt_java_3,
 };
 pub use data_io::{DataInput, DataInputStream, DataOutput, DataOutputStream};
 pub use delegate_data_output::DelegateDataOutput;
