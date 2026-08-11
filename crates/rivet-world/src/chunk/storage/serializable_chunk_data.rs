@@ -2478,8 +2478,8 @@ mod tests {
     /// the synthetic JsonOps round-trip the codec unit tests cover. This is the
     /// decode/carry layer only: the parse carries the typed ticks as stored
     /// values, nothing schedules or executes them, and the chunk is
-    /// full-capable (#370 remains open for the deferred
-    /// `LevelChunkTicks`/`ProtoChunkTicks` containers).
+    /// full-capable (the `LevelChunkTicks`/`ProtoChunkTicks` containers live in
+    /// `ticks` (#522); only wiring them in defers).
     #[test]
     fn real_26_2_nether_fixture_decodes_stored_fluid_ticks_exactly() {
         let fixture = named_fixture("the_nether", "0.0", "0.0.nbt");
@@ -2495,8 +2495,8 @@ mod tests {
         assert_eq!(parsed.stored_pos(), ChunkPos::new(0, 0));
         // The chunk decodes its 13 stored lava ticks faithfully and is
         // full-capable: the typed ticks are carried as stored values, not
-        // scheduled (the `LevelChunkTicks`/`ProtoChunkTicks` containers stay
-        // deferred to #370).
+        // scheduled (the `LevelChunkTicks`/`ProtoChunkTicks` containers live in
+        // `ticks` (#522); only wiring them in defers).
         assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         // The nether chunk stores fluid ticks only; its `block_ticks` list is
         // empty.
