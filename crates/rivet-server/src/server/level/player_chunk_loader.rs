@@ -41,10 +41,10 @@
 //! side (the #96 per-connection refinement is a `RivetTodo`).
 //!
 //! The `placeNewPlayer` join burst calls this per-player chunk send-set once at
-//! spawn (see `join.rs`), then `update` on each chunk-boundary crossing
-//! (issue #521: the pure re-center path). RivetTodo(#185): the per-stage
-//! send/load queues, the rate limiters, and the unload packets the full
-//! `updateQueues` drains.
+//! spawn (see `join.rs`), then `update` on each chunk-boundary crossing or
+//! view-distance change (issue #521: the re-center / re-distance path).
+//! RivetTodo(#185): the per-stage send/load queues, the rate limiters, and the
+//! unload packets the full `updateQueues` drains.
 
 use bytes::{Bytes, BytesMut};
 
@@ -163,8 +163,10 @@ pub fn get_send_view_distance(
 /// `getSendViewDistance`. Returns `(tick, load, send)`.
 ///
 /// Both `add` (the initial send-set) and `update` (the re-center) derive the
-/// same world-pinned distances; the M1 world distances are constant, so the
-/// ladder always resolves `(4, 5, 4)` on the fixture world.
+/// same ladder. The world-pinned part is constant on the M1 world
+/// (`tick = 4`, `load = 5`); `send = min(load - 1, client + 1)` also depends
+/// on the per-player `requested_view_distance`, so it resolves `4` when the
+/// request is `None` or `≥ 3` and lower (`1..3`) for smaller requests.
 fn derive_distances(world: &ServerLevel, requested_view_distance: Option<i32>) -> (i32, i32, i32) {
     let tick = get_tick_distance(
         -1,
@@ -335,14 +337,18 @@ impl PlayerChunkLoader {
         Ok(packets)
     }
 
-    /// `PlayerChunkLoaderData.update()` — the movement-driven re-center path,
-    /// reduced to the M1 direct-send world (issue #521).
+    /// `PlayerChunkLoaderData.update()` — the movement/re-distance-driven
+    /// path, reduced to the M1 direct-send world (issue #521).
     ///
-    /// On a chunk-boundary crossing (the player's chunk differs from
-    /// `lastChunkX/Z`) this emits the `ClientboundSetChunkCacheCenterPacket`
-    /// for the new center, then the bare `ClientboundLevelChunkWithLightPacket`s
-    /// for **only the newly entered view cells**, in the deterministic union-box
-    /// raster order `ChunkTrackingView::difference` walks.
+    /// Whenever any tracked input changed (the center, the send/tick
+    /// distances, or both), this emits in Java's `update()` wire order:
+    /// the `ClientboundSetChunkCacheRadiusPacket` if the send distance changed
+    /// (the `lastSentChunkRadius != sendViewDistance` guard), the
+    /// `ClientboundSetSimulationDistancePacket` if the tick distance changed,
+    /// then the `ClientboundSetChunkCacheCenterPacket` if the center changed,
+    /// then the bare `ClientboundLevelChunkWithLightPacket`s for **only the
+    /// newly entered view cells**, in the deterministic union-box raster order
+    /// `ChunkTrackingView::difference` walks.
     ///
     /// **Full-view fidelity.** The Moonrise direct send is synchronous and
     /// per-tick, and this slice's world has no chunk unloads (the pipeline is
@@ -362,11 +368,11 @@ impl PlayerChunkLoader {
     /// world's constant view distance (fixed per world instance), and
     /// `canGenerateChunks` (spectator/creative generation permission) has no
     /// ported counterpart. A `load`-only change emits nothing in this slice
-    /// anyway — `update` produces only the cache-center packet and the newly
-    /// entered chunks, and the load queues are deferred with #185 — so the
-    /// guard recomputes exactly when an output could change, and an
-    /// intra-chunk move on the constant-distance M1 world emits nothing (the
-    /// same "nothing we care about changed" early return).
+    /// anyway — `update` produces only the radius/simulation/center packets
+    /// and the newly entered chunks, and the load queues are deferred with
+    /// #185 — so the guard recomputes exactly when an output could change, and
+    /// an intra-chunk move with unchanged distances emits nothing (the same
+    /// "nothing we care about changed" early return).
     ///
     /// **No silent substitution.** Each entered position resolves through
     /// `encode_chunk_with_light`, which honors `MissingChunkPolicy`:
@@ -385,18 +391,20 @@ impl PlayerChunkLoader {
         requested_view_distance: Option<i32>,
     ) -> Result<Vec<PlayPacket>, String> {
         // Java: no per-player distance overrides on the M1 world, so the ladder
-        // resolves the world defaults — the same (4, 5, 4) the join burst sent.
+        // resolves the world defaults — tick 4 / load 5, send `min(4, client + 1)`
+        // (4 unless the client requests < 3).
         let (tick, _load, send) = derive_distances(world, requested_view_distance);
         let (current_x, current_z) = (player_chunk.x(), player_chunk.z());
 
         // The previous view, captured before any state commit: the center the
         // last send-set actually used, with the send radius that last cache
-        // center packet carried (`lastSendDistance`, still the old value here).
-        // Java's `sentChunks` delta equals this view minus the next (the M1
-        // direct send is synchronous — every sent chunk is still the client's
-        // cache, and there are no unloads until #185). On the M1 world the old
-        // and new send radii coincide (4), so the diff is purely the center
-        // move.
+        // radius/center packet carried (`lastSendDistance`, still the old value
+        // here). Java's `sentChunks` delta equals this view minus the next (the
+        // M1 direct send is synchronous — every sent chunk is still the
+        // client's cache, and there are no unloads until #185). When the send
+        // distance changes the radii differ and the diff is against the
+        // previously-sent (old-radius) cache; the cells that leave are exactly
+        // the ones Java unloads in the deferred #185 updateQueues phase.
         let prev_view = ChunkTrackingView::of(
             ChunkPos::new(self.last_chunk_x, self.last_chunk_z),
             self.last_send_distance,
@@ -409,17 +417,50 @@ impl PlayerChunkLoader {
             return Ok(Vec::new());
         }
 
-        // Java: the distance maps + client radius/simulation updates come first
-        // (the `broadcastMap.update` can send unload packets synchronously; the
-        // M1 world's distances are constant, so neither the radius nor the
-        // simulation packet changes here — Java's `!=` guards). Java sends the
-        // center packet last in `update()` "so that the client does not ignore
-        // any of our unload chunk packets above", gated on the center actually
-        // changing (`lastSentChunkCenter`); the actual chunk sends happen in the
-        // later `updateQueues` phase. This slice has no unloads, so the
-        // observable order is center-then-chunks — the same prepare-the-cache
-        // order the join burst's radius → simulation → center uses.
+        // Java `update()`: the client radius/simulation updates come first,
+        // after the distance-map updates (which send unload packets
+        // synchronously — deferred with #185). Java compares against the
+        // *sent* values (`lastSentChunkRadius`/`lastSentSimulationDistance`),
+        // which are committed wherever the corresponding packet is emitted —
+        // in `add` and here — so they fold into `lastSendDistance`/
+        // `lastTickDistance`. The radius/simulation packets precede the center
+        // packet, so the client's cache is sized and located before any chunk
+        // arrives.
         let mut packets = Vec::new();
+        if self.last_send_distance != send {
+            packets.push(PlayPacket::new(
+                PlayClientbound::SetChunkCacheRadius.id(),
+                encode_body(
+                    ClientboundSetChunkCacheRadiusPacket::stream_codec(),
+                    &ClientboundSetChunkCacheRadiusPacket::new(send),
+                )?,
+            ));
+        }
+        if self.last_tick_distance != tick {
+            packets.push(PlayPacket::new(
+                PlayClientbound::SetSimulationDistance.id(),
+                encode_body(
+                    ClientboundSetSimulationDistancePacket::stream_codec(),
+                    &ClientboundSetSimulationDistancePacket::new(tick),
+                )?,
+            ));
+        }
+
+        // Java `update()` commits the new center + distances before the center
+        // packet (`this.lastChunkX = currentChunkX` etc. precede the send) and
+        // before the chunk walk, so the enter-set diff is against the committed
+        // center.
+        self.last_chunk_x = current_x;
+        self.last_chunk_z = current_z;
+        self.last_send_distance = send;
+        self.last_tick_distance = tick;
+
+        // Java sends the center packet last in `update()` "so that the client
+        // does not ignore any of our unload chunk packets above", gated on the
+        // center actually changing (`lastSentChunkCenter`); the actual chunk
+        // sends happen in the later `updateQueues` phase. This slice has no
+        // unloads, so the observable order is radius → simulation → center →
+        // chunks — the same prepare-the-cache order the join burst uses.
         if center_changed {
             packets.push(PlayPacket::new(
                 PlayClientbound::SetChunkCacheCenter.id(),
@@ -429,14 +470,6 @@ impl PlayerChunkLoader {
                 )?,
             ));
         }
-
-        // Java `update()` commits the new center + distances before processing
-        // the iteration (`this.lastChunkX = currentChunkX` etc. precede the
-        // chunk walk), so the enter-set diff is against the committed center.
-        self.last_chunk_x = current_x;
-        self.last_chunk_z = current_z;
-        self.last_send_distance = send;
-        self.last_tick_distance = tick;
 
         // Java: `sendChunk = (squareDistance <= send + 1) && wantChunkLoaded(...)`
         // over the radius iteration — the same containment the join burst
@@ -464,13 +497,13 @@ impl PlayerChunkLoader {
     }
 
     /// `PlayerChunkLoaderData.lastSendDistance` — the cache radius emitted by
-    /// the last `add`.
+    /// the last `add`/`update`.
     pub fn last_send_distance(&self) -> i32 {
         self.last_send_distance
     }
 
     /// `PlayerChunkLoaderData.lastTickDistance` — the simulation distance
-    /// emitted by the last `add`.
+    /// emitted by the last `add`/`update`.
     pub fn last_tick_distance(&self) -> i32 {
         self.last_tick_distance
     }
@@ -909,6 +942,48 @@ mod tests {
         // State is untouched by the no-op.
         assert_eq!(loader.last_send_distance(), 4);
         assert_eq!(loader.last_tick_distance(), 4);
+    }
+
+    #[test]
+    fn update_reemits_radius_when_requested_view_distance_changes_send() {
+        // A view-distance change with the center fixed: Java `update()` emits
+        // `updateClientChunkRadius` when `lastSentChunkRadius != sendViewDistance`
+        // (folded into `lastSendDistance`), so a client request that re-derives
+        // a different send distance emits the radius packet. On the M1 world
+        // `send = min(load - 1, client + 1) = min(4, client + 1)`, so a request
+        // of 2 yields send 3 (the world default 4 → client requests 0..3 lower
+        // it). The tick distance (`min(sim, load - 1)`) is world-pinned, so no
+        // simulation packet follows; the shrink sends no new chunks, and the
+        // center is unchanged, so the radius packet is the whole output.
+        let world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader
+            .update(&world, world.view().center(), Some(2))
+            .unwrap();
+        assert_eq!(packets.len(), 1, "radius only: no sim/center/chunks");
+        assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheRadius.id());
+        assert_eq!(packets[0].body, vec![0x03]); // send 3
+        assert_eq!(loader.last_send_distance(), 3);
+        // The next update with the same request is a no-op (radius already 3).
+        let again = loader
+            .update(&world, world.view().center(), Some(2))
+            .unwrap();
+        assert!(again.is_empty());
+        // Raising the request back to the world default re-emits radius 4 and
+        // the newly-entered ring: the radius-4 view (117 cells) minus the
+        // radius-3 view (the full 9×9 square = 81 cells) = 36 cells. Java's
+        // `wantChunkSent` against the new send distance enqueues exactly these.
+        let packets = loader
+            .update(&world, world.view().center(), Some(8))
+            .unwrap();
+        assert_eq!(packets.len(), 1 + 36, "radius + the grown ring");
+        assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheRadius.id());
+        assert_eq!(packets[0].body, vec![0x04]);
+        for p in &packets[1..] {
+            assert_eq!(p.id, PlayClientbound::LevelChunkWithLight.id());
+        }
+        assert_eq!(loader.last_send_distance(), 4);
     }
 
     #[test]
