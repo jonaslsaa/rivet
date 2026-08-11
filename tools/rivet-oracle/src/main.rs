@@ -2474,6 +2474,29 @@ fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
 /// FULL chunks are the_nether/0.0 and the_end/0.0. The single `dir` argument
 /// overrides both the payload source and the manifest destination (one tree):
 /// run it against a scratch copy of a different tree to hash that tree without
+/// Extract the loaded-world ground-truth manifest from a disposable world copy
+/// (issue #374). The extraction is strictly read-only — every region opens
+/// through a read descriptor, and an allocated corrupt chunk is a hard
+/// `InvalidData` error rather than an absent chunk. The manifest is printed as
+/// compact JSON (or written to `to` when given) for the `rivet-loaded-world`
+/// runner's PASS comparison and for the tamper negative controls.
+fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
+    let manifest = loaded_world::extract_world(world_dir).map_err(|e| match e {
+        loaded_world::ExtractError::Unverified(m) => Error::Unverified(m),
+        loaded_world::ExtractError::Gate(m) => Error::Gate(m),
+        loaded_world::ExtractError::Io(io) => Error::Io(io),
+    })?;
+    let json = serde_json::to_string(&manifest)
+        .map_err(|e| Error::Gate(format!("serializing loaded-world manifest: {e}")))?;
+    match to {
+        Some(path) => fs::write(path, json.as_bytes())
+            .map_err(Error::Io)
+            .map(|_| ())?,
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
 /// touching committed fixtures — e.g. a copy of the corpus-forced superflat-full
 /// capture reports its 8 FULL chunks per dimension (corpus seed 0,
 /// 5207638315753790570, `minecraft\:flat`, issue #51). Nothing is hardcoded;
