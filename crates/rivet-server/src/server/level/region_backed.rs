@@ -5,10 +5,20 @@
 //! harness. `boot_level` composes the smallest read-only end-to-end boot: it
 //! validates `level.dat` (DataVersion 4903), decodes the real spawn through
 //! the finalized `RespawnData` codec (#515), reads the real world seed, builds
-//! the `ServerLevelConfig`, reconstructs the spawn chunk through the #336/
-//! #337 surfaces, and installs the owned `LevelChunk` into the tick-thread
-//! owned `ChunkMap` under `RequireLoaded` (#516). Real structures/ticks/block
-//! entities stay behind the #369/#341 typed boundaries.
+//! the `ServerLevelConfig`, reconstructs every chunk of the view-distance-4
+//! `ChunkTrackingView` (the exact 117-position square centered on the spawn
+//! chunk, #100) through the #336/#337/#519 surfaces, and installs the owned
+//! `LevelChunk`s into the tick-thread-owned `ChunkMap` under
+//! `MissingChunkPolicy::RequireLoaded` (#516). All #519 auxiliary payloads —
+//! stored block/fluid ticks, block-entity outcomes + pending block entities,
+//! structure references — are carried onto the installed server chunks as
+//! owned tick-thread state; nothing is scheduled, spawned, generated, written,
+//! or fallen back, and no `Arc<RwLock>` appears.
+//!
+//! The overworld is advertised through its real login metadata: the generator
+//! type read from `world_gen_settings.dat` (`minecraft:noise` → not flat)
+//! drives `ServerLevel::is_flat`, which the session wires into the login
+//! packet's `is_flat` flag.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -30,7 +40,9 @@ use rivet_world::chunk::storage::{
 use rivet_world::level::height_accessor;
 use rivet_world::level::storage::level_data::{RespawnData, respawn_data_codec};
 
-use super::level_chunk::{LevelChunk, UnsupportedLightState};
+use super::chunk_map::ChunkMap;
+use super::chunk_tracking_view::ChunkTrackingView;
+use super::level_chunk::{LevelChunk, LevelChunkBridgeError};
 use super::server_level::{
     MissingChunkPolicy, ServerLevel, ServerLevelConfig, overworld_dimension,
 };
@@ -157,17 +169,22 @@ impl RegionChunkSource {
             .ok_or(RegionBackedBootError::MissingChunkStatus(pos))
     }
 
-    /// Read, extract, and fully validate one serialized chunk for runtime
-    /// composition. Returns the validated data; the runtime
-    /// `ChunkMap`/`LevelChunk` composition slice is the next loaded-world
-    /// step, so no production path composes the result today. Proto/generation
-    /// and blending boundaries surface their precise typed errors first.
+    /// Read, extract, and validate one serialized chunk for runtime
+    /// composition. The preflight applies the same capability boundary
+    /// `reconstruct_runtime_chunk` uses — `validate_full_for_reconstruction` —
+    /// so serialized block entities and stored ticks are carried (not rejected)
+    /// and the unsupported surfaces (proto status, blending, structure `starts`,
+    /// persistent data, non-empty entities) surface their typed errors here.
+    /// Section/palette/light decode validation is not part of this boundary:
+    /// `reconstruct_runtime_chunk` decodes those inside its catch-unwound
+    /// `reconstruct_sections` step, so a chunk that passes the preflight can
+    /// still fail reconstruction on a malformed section or light payload.
     pub fn load_for_composition(
         &mut self,
         pos: ChunkPos,
     ) -> Result<SerializableChunkData, RegionBackedBootError> {
         let data = self.read_serializable(pos)?;
-        data.validate_full_capabilities()
+        data.validate_full_for_reconstruction()
             .map_err(RegionBackedBootError::SerializableChunk)?;
         Ok(data)
     }
