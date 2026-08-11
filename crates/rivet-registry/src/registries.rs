@@ -94,6 +94,22 @@ pub static DIMENSION_TYPE: LazyLock<ResourceKey<Registry<DimensionType>>> = Lazy
     ResourceKey::create_registry_key(Identifier::with_default_namespace("dimension_type"))
 });
 
+/// `Registries.FEATURE_SIZE_TYPE` — `createRegistryKey("worldgen/feature_size_type")`,
+/// the `net.minecraft.world.level.levelgen.feature.featuresize.FeatureSizeType`
+/// registry key. Added for #394: `FeatureSize.CODEC` is
+/// `BuiltInRegistries.FEATURE_SIZE_TYPE.byNameCodec().dispatch(FeatureSize::type,
+/// FeatureSizeType::codec)`, and this key is the target of the #394 by-name
+/// codec. `FeatureSizeTypeId` carries the generated built-in registry identity
+/// (the two vanilla feature-size types, in declaration order); the concrete
+/// `FeatureSize` variants and their codecs remain owned by the worldgen/feature
+/// unit in `rivet-world`.
+pub static FEATURE_SIZE_TYPE: LazyLock<ResourceKey<Registry<FeatureSizeTypeId>>> =
+    LazyLock::new(|| {
+        ResourceKey::create_registry_key(Identifier::with_default_namespace(
+            "worldgen/feature_size_type",
+        ))
+    });
+
 /// `Registries.ATTRIBUTE` — `createRegistryKey("attribute")`, the
 /// `net.minecraft.world.entity.ai.attributes.Attribute` registry key (entity
 /// unit placeholder). Added for #90: `ClientboundUpdateAttributesPacket`'s
@@ -166,6 +182,7 @@ pub struct LevelStem;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DimensionType;
 pub use crate::block_entity_type::BlockEntityType;
+pub use crate::feature_size_type::FeatureSizeTypeId;
 /// `net.minecraft.world.entity.ai.attributes.Attribute` — the entity unit's
 /// registry element placeholder (see the `ATTRIBUTE` key above, #90).
 /// `Clone`/`PartialEq`/`Eq` are required by `Holder<Attribute>` (the wire codec

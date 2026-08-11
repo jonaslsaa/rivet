@@ -79,6 +79,13 @@ pub mod block_state_property;
 #[cfg(feature = "blocks")]
 pub mod state_definition;
 
+/// The typed `block.state.properties` leaf value classes and the
+/// `BlockStateProperties` constant facade (issue #228) — the worldgen/lighting
+/// surface that sets property values on states by their value-class enum
+/// (`state.set_value(SlabBlock.TYPE, SlabType.DOUBLE)`).
+#[cfg(feature = "blocks")]
+pub mod block_state_properties;
+
 // ---------------------------------------------------------------------------
 // Ownership A — resources / keys (`net.minecraft.resources`, `net.minecraft.tags`,
 // `net.minecraft.core.registries.Registries`, `net.minecraft.IdentifierException`)
@@ -87,6 +94,10 @@ pub mod state_definition;
 /// The generated-identity surface of
 /// `net.minecraft.world.level.block.entity.BlockEntityType` (#341).
 pub mod block_entity_type;
+/// The generated-identity surface of
+/// `net.minecraft.world.level.levelgen.feature.featuresize.FeatureSizeType`
+/// (#394).
+pub mod feature_size_type;
 /// `net.minecraft.resources.Identifier` (MC 26.2 `ResourceLocation`).
 pub mod identifier;
 /// `net.minecraft.IdentifierException` — lives in `rivet-core` with the other
