@@ -18,11 +18,15 @@ use rivet_nbt::nbt_io;
 use rivet_nbt::nbt_ops::NbtOps;
 use rivet_nbt::tag::Tag;
 use rivet_registry::core::ChunkPos;
+use rivet_registry::{ResourceKey, registries::Level as LevelKey};
 use rivet_serialization::Dynamic;
+use rivet_world::chunk::storage::section_reconstruction::SectionCodecDiagnostic;
 use rivet_world::chunk::storage::serializable_chunk_data::{
-    SerializableChunkData, SerializableChunkDataError,
+    ChunkParseDiagnostic, SerializableChunkData, SerializableChunkDataError,
 };
-use rivet_world::chunk::storage::{ChunkReconstructionError, RegionFileStorage, RegionStorageInfo};
+use rivet_world::chunk::storage::{
+    ChunkReconstruction, ChunkReconstructionError, RegionFileStorage, RegionStorageInfo,
+};
 use rivet_world::level::height_accessor;
 use rivet_world::level::storage::level_data::{RespawnData, respawn_data_codec};
 
@@ -199,6 +203,18 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     let mut prepared = RegionLevelPreparation::prepare(root)?;
     let level = read_level_metadata(prepared.source().layout())?;
     let respawn = level.spawn;
+    // This boot composes the overworld dimension exclusively: the region
+    // layout, the geometry constants, and `ServerLevel::dimension()` are all
+    // overworld. A same-version `level.dat` whose spawn anchors another
+    // dimension would otherwise boot "successfully" while the login and
+    // default-spawn packets advertise different worlds — reject the mismatch
+    // before reading the region.
+    if respawn.dimension() != &overworld_dimension() {
+        return Err(RegionBackedBootError::UnsupportedSpawnDimension {
+            actual: Box::new(respawn.dimension().clone()),
+            expected: Box::new(overworld_dimension()),
+        });
+    }
     let spawn_chunk = ChunkPos::containing(&respawn.pos());
     let seed = read_world_seed(prepared.source().layout())?;
     let config = ServerLevelConfig {
@@ -222,7 +238,24 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
         true, // the overworld dimension has skylight.
     )
     .map_err(RegionBackedBootError::ChunkReconstruction)?;
-    let chunk = LevelChunk::from_reconstructed(reconstruction);
+    // Recoverable reconstruction diagnostics (substituted palette entries,
+    // dropped malformed tick elements) are real content changes Paper surfaces
+    // through its top-level logger. This read-only boot has no logger, so a
+    // non-empty set fails loudly instead of silently installing a chunk whose
+    // content differs from what was stored.
+    let ChunkReconstruction {
+        chunk: world_chunk,
+        section_diagnostics,
+        parse_diagnostics,
+        ..
+    } = reconstruction;
+    if !section_diagnostics.is_empty() || !parse_diagnostics.is_empty() {
+        return Err(RegionBackedBootError::ReconstructionDiagnostics {
+            section: section_diagnostics,
+            parse: parse_diagnostics,
+        });
+    }
+    let chunk = LevelChunk::from_reconstructed(world_chunk);
     let mut world = ServerLevel::new(config);
     world.chunk_map_mut().install(spawn_chunk, chunk);
     Ok(world)
@@ -321,6 +354,20 @@ pub enum RegionBackedBootError {
     SerializableChunk(#[source] SerializableChunkDataError),
     #[error("UNVERIFIED chunk reconstruction failed: {0}")]
     ChunkReconstruction(#[source] ChunkReconstructionError),
+    #[error(
+        "UNVERIFIED level.dat spawn dimension {actual} is not the composed overworld {expected}"
+    )]
+    UnsupportedSpawnDimension {
+        actual: Box<ResourceKey<LevelKey>>,
+        expected: Box<ResourceKey<LevelKey>>,
+    },
+    #[error(
+        "UNVERIFIED chunk reconstruction surfaced recoverable diagnostics (section: {section:?}, parse: {parse:?})"
+    )]
+    ReconstructionDiagnostics {
+        section: Vec<SectionCodecDiagnostic>,
+        parse: Vec<ChunkParseDiagnostic>,
+    },
 }
 
 #[cfg(test)]
@@ -758,6 +805,39 @@ mod tests {
                 SerializableChunkDataError::UnsupportedBlockEntities
             ))
         ));
+    }
+
+    /// The boot rejects a same-version `level.dat` whose spawn anchors another
+    /// dimension before it reads the region: the overworld-only composition
+    /// would otherwise boot "successfully" while login and default-spawn
+    /// advertise different worlds.
+    #[test]
+    fn boot_rejects_a_spawn_dimension_other_than_overworld() {
+        let temp = tempfile::tempdir().unwrap();
+        write_level_dat(temp.path(), REAL_SPAWN);
+        let mut level = read_level_dat_for_patch(temp.path());
+        level
+            .get_compound_or_empty_mut("Data")
+            .get_compound_or_empty_mut("spawn")
+            .put(
+                "dimension".to_string(),
+                Tag::String(StringTag::value_of("minecraft:the_nether".to_string())),
+            );
+        let mut bytes = Vec::new();
+        nbt_io::write_compressed(&level, &mut bytes).unwrap();
+        fs::write(temp.path().join("level.dat"), bytes).unwrap();
+        fs::create_dir_all(temp.path().join("dimensions/minecraft/overworld/region")).unwrap();
+
+        let error = boot_level(temp.path())
+            .err()
+            .expect("a nether spawn must not boot the overworld composition");
+        match error {
+            RegionBackedBootError::UnsupportedSpawnDimension { actual, expected } => {
+                assert_eq!(actual.identifier().to_string(), "minecraft:the_nether");
+                assert_eq!(expected.identifier().to_string(), "minecraft:overworld");
+            }
+            other => panic!("expected UnsupportedSpawnDimension, got {other:?}"),
+        }
     }
 
     fn read_level_dat_for_patch(root: &Path) -> CompoundTag {

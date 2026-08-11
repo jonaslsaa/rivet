@@ -39,7 +39,7 @@ use rivet_world::chunk::data_layer::DataLayer;
 use rivet_world::chunk::level_chunk::LevelChunk as WorldLevelChunk;
 use rivet_world::chunk::level_chunk_section::LevelChunkSection;
 use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
-use rivet_world::chunk::storage::ChunkReconstruction;
+use rivet_world::chunk::storage::ReconstructedLevelChunk;
 use rivet_world::chunk::strategy::Strategy;
 use rivet_world::chunk::upgrade_data::UpgradeData;
 use rivet_world::level::LevelHeightAccessor;
@@ -133,7 +133,7 @@ impl LevelChunk {
         LevelChunk { chunk, light_data }
     }
 
-    /// `ChunkReconstruction` → server `LevelChunk` — the #516 boot bridge.
+    /// Reconstructed chunk → server `LevelChunk` — the #516 boot bridge.
     ///
     /// `reconstruct_runtime_chunk` (#383) produces a generic
     /// `LevelChunk<BlockState, BiomeId, ()>` whose sections carry the generated
@@ -146,11 +146,11 @@ impl LevelChunk {
     /// pending block entities are preserved by the value transform; the packet
     /// light payload is derived once through `to_vanilla_nibble` +
     /// `build_light_update_data` (the #184 send seam).
-    pub fn from_reconstructed(reconstruction: ChunkReconstruction) -> Self {
-        let ChunkReconstruction {
-            chunk: world_chunk, ..
-        } = reconstruction;
-
+    ///
+    /// The `ChunkReconstruction` diagnostics are consumed by the caller before
+    /// this bridge: the boot rejects a non-empty set rather than silently
+    /// installing a chunk whose content differs from what was stored.
+    pub fn from_reconstructed(world_chunk: ReconstructedLevelChunk) -> Self {
         let (block_strategy, biome_strategy) = strategies();
         let world_chunk = world_chunk
             .map_values(
