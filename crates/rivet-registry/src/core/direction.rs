@@ -10,11 +10,19 @@
 //! `rotate(Matrix4fc, …)`), `Entity`-based methods (`orderedByNearest`,
 //! `getFacingAxis`), `RandomSource` methods (`getRandom`, `allShuffled`),
 //! `axisStepOrder` (JOML `Vec3`), and `moonrise$uniqueId`. RivetTodo(#126): the
-//! string/codec surface (`CODEC`, `VERTICAL_CODEC`, `byName`, `STREAM_CODEC`,
-//! `LEGACY_ID_CODEC_*`) defers with the protocol codec surface.
+//! remaining codec surface (`CODEC`'s sibling constants `VERTICAL_CODEC`,
+//! `byName`, `STREAM_CODEC`, `LEGACY_ID_CODEC_*`) defers with the protocol
+//! codec surface; `CODEC` itself is ported here as [`direction_codec`] (the
+//! `StringRepresentable.fromEnum` ops form) because
+//! `HasSturdyFacePredicate.CODEC` (issue #180) reads `Direction.CODEC.fieldOf
+//! ("direction")`.
 
 use super::vec3i::Vec3i;
+use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::dynamic_ops::DynamicOps;
+use rivet_serialization::extra_codecs;
 use rivet_util::mth;
+use std::sync::Arc;
 
 /// A direction. Variant order (and therefore `Ord`/`Hash`/iteration order)
 /// matches Java's `Direction.values()`.
@@ -444,6 +452,43 @@ impl std::fmt::Display for Direction {
     }
 }
 
+/// `Direction.CODEC` — `StringRepresentable.fromEnum(Direction::values)`, the
+/// `orCompressed(Codec.stringResolver, ExtraCodecs.idResolverCodec)` form, as
+/// the ops-generic `direction_codec::<Ops>()` factory.
+///
+/// The string resolver maps the enum's `getSerializedName()` (lowercase name)
+/// to the variant; the compressed branch routes through the ordinal id codec
+/// when `ops.compress_maps()` (the network/NBT compressed form).
+pub fn direction_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Direction, Ops>> {
+    let by_name = codec::string_resolver(
+        Arc::new(|d: &Direction| Some(d.get_serialized_name().to_string())),
+        Arc::new(|name: &String| direction_by_serialized_name(name)),
+    );
+    extra_codecs::or_compressed(
+        by_name,
+        extra_codecs::id_resolver_codec(
+            Arc::new(|d: &Direction| *d as i32),
+            Arc::new(|id: i32| {
+                if id >= 0 && (id as usize) < Direction::VALUES.len() {
+                    Some(Direction::VALUES[id as usize])
+                } else {
+                    None
+                }
+            }),
+            -1,
+        ),
+    )
+}
+
+/// `StringRepresentable.byName(String)` — resolve the enum's serialized name
+/// to its variant (Java `EnumCodec.byName`).
+pub fn direction_by_serialized_name(name: &str) -> Option<Direction> {
+    Direction::VALUES
+        .iter()
+        .find(|d| d.get_serialized_name() == name)
+        .copied()
+}
+
 /// `Direction.Axis` — an axis-aligned axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Axis {
@@ -632,5 +677,50 @@ impl std::fmt::Display for Plane {
             Plane::Horizontal => "HORIZONTAL",
             Plane::Vertical => "VERTICAL",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivet_serialization::json_ops::JsonOps;
+    use serde_json::json;
+
+    #[test]
+    fn codec_round_trips_and_resolves_by_serialized_name() {
+        let codec = direction_codec::<JsonOps>();
+        for d in Direction::VALUES {
+            let encoded = codec
+                .encode_start(&JsonOps::INSTANCE, &d)
+                .result()
+                .expect("encode should succeed")
+                .clone();
+            assert_eq!(encoded, json!(d.get_serialized_name()));
+            let decoded = codec
+                .parse(&JsonOps::INSTANCE, &encoded)
+                .result()
+                .expect("decode should succeed")
+                .clone();
+            assert_eq!(decoded, d);
+        }
+    }
+
+    #[test]
+    fn codec_rejects_unknown_name() {
+        let codec = direction_codec::<JsonOps>();
+        let result = codec.parse(&JsonOps::INSTANCE, &json!("upward"));
+        assert!(result.is_error());
+        assert_eq!(direction_by_serialized_name("upward"), None);
+    }
+
+    #[test]
+    fn by_serialized_name_matches_get_name() {
+        for d in Direction::VALUES {
+            assert_eq!(
+                direction_by_serialized_name(d.get_serialized_name()),
+                Some(d)
+            );
+            assert_eq!(d.get_serialized_name(), d.get_name());
+        }
     }
 }

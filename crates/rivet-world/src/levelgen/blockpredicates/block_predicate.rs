@@ -26,15 +26,18 @@
 //!
 //! ## Scope boundary (RivetTodo #399)
 //!
-//! The dispatch resolves codecs for the five in-scope types
-//! (`inside_world_bounds`, `any_of`, `all_of`, `not`, `true`); the other nine
-//! Paper types (`matching_*`, `has_sturdy_face`, `solid`, `replaceable`,
-//! `would_survive`, `unobstructed`) are deferred with their owning units and
-//! fail explicitly on the codec lookup (no fabricated behavior). The
-//! `ONLY_IN_AIR_PREDICATE`/`ONLY_IN_AIR_OR_WATER_PREDICATE` constants and the
-//! `matchesBlocks`/`matchesTag`/`matchesFluids`/`matchesBiomes`/
-//! `replaceable`/`wouldSurvive`/`hasSturdyFace`/`solid`/`noFluid`/
-//! `unobstructed` static factories defer with those concrete predicates.
+//! The dispatch resolves codecs for all fourteen Paper types: the five core
+//! types (`inside_world_bounds`, `any_of`, `all_of`, `not`, `true`) plus the
+//! `.states` unit and the remaining `.simple` leaves (`matching_blocks`,
+//! `matching_block_tag`, `matching_fluids`, `matching_biomes`,
+//! `has_sturdy_face`, `solid`, `replaceable`, `would_survive`, `unobstructed`).
+//! Only the world-access *behavior* (state/biome/collision reads) is deferred
+//! with the world unit, failing explicitly through the `#399` seams. The
+//! `ONLY_IN_AIR_PREDICATE`/`ONLY_IN_AIR_OR_WATER_PREDICATE` constants defer
+//! with the fluid-value surface; the `matchesBlocks`/`matchesTag`/
+//! `matchesFluids`/`matchesBiomes`/`replaceable`/`wouldSurvive`/
+//! `hasSturdyFace`/`solid`/`noFluid`/`unobstructed` static factories defer
+//! with the concrete `Block`/`Fluid` value types they build holder sets from.
 
 use crate::level::WorldGenLevel;
 use crate::levelgen::blockpredicates::all_of_predicate::AllOfPredicate;
@@ -42,11 +45,21 @@ use crate::levelgen::blockpredicates::any_of_predicate::AnyOfPredicate;
 use crate::levelgen::blockpredicates::block_predicate_type::{
     BlockPredicateTypeId, BlockPredicateTypes,
 };
+use crate::levelgen::blockpredicates::has_sturdy_face_predicate::HasSturdyFacePredicate;
 use crate::levelgen::blockpredicates::inside_world_bounds_predicate::InsideWorldBoundsPredicate;
+use crate::levelgen::blockpredicates::matching_biomes_predicate::MatchingBiomesPredicate;
+use crate::levelgen::blockpredicates::matching_block_tag_predicate::MatchingBlockTagPredicate;
+use crate::levelgen::blockpredicates::matching_blocks_predicate::MatchingBlocksPredicate;
+use crate::levelgen::blockpredicates::matching_fluids_predicate::MatchingFluidsPredicate;
 use crate::levelgen::blockpredicates::not_predicate::NotPredicate;
+use crate::levelgen::blockpredicates::replaceable_predicate::ReplaceablePredicate;
+use crate::levelgen::blockpredicates::solid_predicate::SolidPredicate;
 use crate::levelgen::blockpredicates::true_block_predicate::TrueBlockPredicate;
+use crate::levelgen::blockpredicates::unobstructed_predicate::UnobstructedPredicate;
+use crate::levelgen::blockpredicates::would_survive_predicate::WouldSurvivePredicate;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::Vec3i;
+use rivet_registry::registry_ops::RegistryOpsLookup;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
@@ -110,7 +123,12 @@ pub fn inside_world(offset: Vec3i) -> InsideWorldBoundsPredicate {
 /// `BlockPredicate.CODEC` — the recursive dispatch codec, as the ops-generic
 /// `block_predicate_codec::<Ops>()` factory (the same shape every static
 /// `CODEC` constant takes in this codebase).
-pub fn block_predicate_codec<Ops: DynamicOps + 'static>()
+///
+/// `Ops` must also implement [`RegistryOpsLookup`]: the `matching_blocks`/
+/// `matching_fluids`/`matching_biomes` `"blocks"`/`"fluids"`/`"biomes"` fields
+/// are `RegistryCodecs.homogeneousList(...)`, whose `HolderSetCodec`/element
+/// codec resolve the registry through the ops.
+pub fn block_predicate_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
 -> Arc<dyn Codec<Arc<dyn BlockPredicate>, Ops>> {
     codec::recursive("BlockPredicate".to_string(), Arc::new(create_dispatch))
 }
@@ -119,7 +137,7 @@ pub fn block_predicate_codec<Ops: DynamicOps + 'static>()
 /// `"type"` by-name dispatch. Every combinator that recurses into
 /// `BlockPredicate.CODEC` receives `top` as the child-element codec so the
 /// whole nested graph shares this single recursive codec.
-fn create_dispatch<Ops: DynamicOps + 'static>(
+fn create_dispatch<Ops: DynamicOps + 'static + RegistryOpsLookup>(
     top: Arc<dyn Codec<Arc<dyn BlockPredicate>, Ops>>,
 ) -> Arc<dyn Codec<Arc<dyn BlockPredicate>, Ops>> {
     let dispatch =
@@ -137,10 +155,10 @@ fn create_dispatch<Ops: DynamicOps + 'static>(
 /// `BlockPredicateType::codec` — resolve a `BlockPredicateTypeId` to its
 /// `MapCodec<Arc<dyn BlockPredicate>>` (the dispatch's `codec` function).
 ///
-/// The five in-scope types resolve to their codecs; the other nine Paper types
-/// are not ported (RivetTodo #399) and fail explicitly — never fabricating a
-/// behavior.
-fn codec_for_type<Ops: DynamicOps + 'static>(
+/// All fourteen Paper types resolve to their codecs. Only the world-access
+/// *behavior* (state/biome/collision reads) is deferred with the world unit,
+/// failing explicitly through the `#399` seams.
+fn codec_for_type<Ops: DynamicOps + 'static + RegistryOpsLookup>(
     top: Arc<dyn Codec<Arc<dyn BlockPredicate>, Ops>>,
 ) -> key_dispatch_codec::CodecFn<BlockPredicateTypeId, Arc<dyn BlockPredicate>, Ops> {
     Arc::new(move |k: &BlockPredicateTypeId| {
@@ -154,11 +172,45 @@ fn codec_for_type<Ops: DynamicOps + 'static>(
             DataResult::success(true_map_codec())
         } else if *k == BlockPredicateTypes::INSIDE_WORLD_BOUNDS {
             DataResult::success(inside_world_bounds_map_codec())
-        } else {
-            DataResult::error(format!(
-                "Block predicate type '{}' is not ported (RivetTodo #399)",
-                k.location
+        } else if *k == BlockPredicateTypes::MATCHING_BLOCKS {
+            DataResult::success(erase_map_codec::<MatchingBlocksPredicate, Ops>(
+                crate::levelgen::blockpredicates::matching_blocks_predicate::matching_blocks_predicate_map_codec::<Ops>(),
             ))
+        } else if *k == BlockPredicateTypes::MATCHING_BLOCK_TAG {
+            DataResult::success(erase_map_codec::<MatchingBlockTagPredicate, Ops>(
+                crate::levelgen::blockpredicates::matching_block_tag_predicate::matching_block_tag_predicate_map_codec::<Ops>(),
+            ))
+        } else if *k == BlockPredicateTypes::MATCHING_FLUIDS {
+            DataResult::success(erase_map_codec::<MatchingFluidsPredicate, Ops>(
+                crate::levelgen::blockpredicates::matching_fluids_predicate::matching_fluids_predicate_map_codec::<Ops>(),
+            ))
+        } else if *k == BlockPredicateTypes::MATCHING_BIOMES {
+            DataResult::success(erase_map_codec::<MatchingBiomesPredicate, Ops>(
+                crate::levelgen::blockpredicates::matching_biomes_predicate::matching_biomes_predicate_map_codec::<Ops>(),
+            ))
+        } else if *k == BlockPredicateTypes::HAS_STURDY_FACE {
+            DataResult::success(erase_map_codec::<HasSturdyFacePredicate, Ops>(
+                crate::levelgen::blockpredicates::has_sturdy_face_predicate::has_sturdy_face_predicate_map_codec::<Ops>(),
+            ))
+        } else if *k == BlockPredicateTypes::SOLID {
+            DataResult::success(erase_map_codec::<SolidPredicate, Ops>(
+                crate::levelgen::blockpredicates::solid_predicate::solid_predicate_map_codec::<Ops>(
+                ),
+            ))
+        } else if *k == BlockPredicateTypes::REPLACEABLE {
+            DataResult::success(erase_map_codec::<ReplaceablePredicate, Ops>(
+                crate::levelgen::blockpredicates::replaceable_predicate::replaceable_predicate_map_codec::<Ops>(),
+            ))
+        } else if *k == BlockPredicateTypes::WOULD_SURVIVE {
+            DataResult::success(erase_map_codec::<WouldSurvivePredicate, Ops>(
+                crate::levelgen::blockpredicates::would_survive_predicate::would_survive_predicate_map_codec::<Ops>(),
+            ))
+        } else if *k == BlockPredicateTypes::UNOBSTRUCTED {
+            DataResult::success(erase_map_codec::<UnobstructedPredicate, Ops>(
+                crate::levelgen::blockpredicates::unobstructed_predicate::unobstructed_predicate_map_codec::<Ops>(),
+            ))
+        } else {
+            DataResult::error(format!("Unknown block predicate type '{}'", k.location))
         }
     })
 }
@@ -269,8 +321,22 @@ mod tests {
     use super::*;
     use crate::level::height_accessor::LevelHeightAccessor;
     use crate::levelgen::blockpredicates::block_predicate_type::block_predicate_type_by_name;
+    use rivet_registry::access::RegistryAccess;
+    use rivet_registry::registry_ops::RegistryOps;
     use rivet_serialization::json_ops::JsonOps;
     use serde_json::json;
+
+    /// The test ops: a `RegistryOps` over JSON — the only ops that implement
+    /// `RegistryOpsLookup` (the `matching_blocks`/`matching_fluids`/
+    /// `matching_biomes` holder-set fields require it).
+    type TestOps = RegistryOps<serde_json::Value, JsonOps>;
+
+    /// A `RegistryOps` over an empty `RegistryAccess` — enough for every test
+    /// here (the combinator/bounds/true/not predicates never resolve a registry;
+    /// the registry-backed leaf tests live in the predicate modules).
+    fn empty_ops() -> TestOps {
+        RegistryOps::create_from_access(&JsonOps::INSTANCE, RegistryAccess::empty())
+    }
 
     /// A minimal `WorldGenLevel` double over the overworld window (height
     /// access only — the block-state predicates need `get_block_state`, which
@@ -410,23 +476,25 @@ mod tests {
     }
 
     fn round_trip(predicate: Arc<dyn BlockPredicate>) -> Arc<dyn BlockPredicate> {
-        let codec = block_predicate_codec::<JsonOps>();
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         let encoded = codec
-            .encode_start(&JsonOps::INSTANCE, &predicate)
+            .encode_start(&ops, &predicate)
             .result()
             .expect("encode should succeed")
             .clone();
-        let result = codec.parse(&JsonOps::INSTANCE, &encoded);
+        let result = codec.parse(&ops, &encoded);
         result.result().expect("decode should succeed").clone()
     }
 
     #[test]
     fn true_codec_round_trips_and_encodes_empty_map() {
         // `TrueBlockPredicate.CODEC = MapCodec.unit(INSTANCE)` — encodes to `{}`.
-        let codec = block_predicate_codec::<JsonOps>();
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         let p = always_true();
         let encoded = codec
-            .encode_start(&JsonOps::INSTANCE, &p)
+            .encode_start(&ops, &p)
             .result()
             .expect("encode should succeed")
             .clone();
@@ -441,10 +509,11 @@ mod tests {
         // `InsideWorldBoundsPredicate.CODEC` — the `"offset"` optional field
         // (`Vec3i.offsetCodec(16)`), default `Vec3i.ZERO`. `BlockPos.ZERO` and
         // `Vec3i.ZERO` are the same value (offset codec defaults to ZERO).
-        let codec = block_predicate_codec::<JsonOps>();
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         let p = wrap(inside_world(Vec3i::ZERO));
         let encoded = codec
-            .encode_start(&JsonOps::INSTANCE, &p)
+            .encode_start(&ops, &p)
             .result()
             .expect("encode should succeed")
             .clone();
@@ -452,7 +521,7 @@ mod tests {
         // With a non-zero offset.
         let p2 = wrap(inside_world(Vec3i::new(1, 2, 3)));
         let encoded2 = codec
-            .encode_start(&JsonOps::INSTANCE, &p2)
+            .encode_start(&ops, &p2)
             .result()
             .expect("encode should succeed")
             .clone();
@@ -475,9 +544,10 @@ mod tests {
     fn inside_world_bounds_offset_codec_rejects_out_of_range() {
         // `Vec3i.offsetCodec(16)` rejects any axis with `Math.abs(v) >= 16`:
         // `"Position out of range, expected at most 16: {value}"`.
-        let codec = block_predicate_codec::<JsonOps>();
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         let result = codec.parse(
-            &JsonOps::INSTANCE,
+            &ops,
             &json!({"type": "minecraft:inside_world_bounds", "offset": [16, 0, 0]}),
         );
         assert!(result.is_error());
@@ -488,7 +558,7 @@ mod tests {
         );
         // The boundary is inclusive: exactly 15 per axis is accepted.
         let ok = codec.parse(
-            &JsonOps::INSTANCE,
+            &ops,
             &json!({"type": "minecraft:inside_world_bounds", "offset": [15, -15, 15]}),
         );
         assert!(
@@ -538,18 +608,20 @@ mod tests {
 
     #[test]
     fn dispatch_decodes_by_type_name() {
-        let codec = block_predicate_codec::<JsonOps>();
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         let input = json!({"type": "minecraft:not", "predicate": {"type": "minecraft:true"}});
-        let result = codec.parse(&JsonOps::INSTANCE, &input);
+        let result = codec.parse(&ops, &input);
         let decoded = result.result().expect("decode should succeed");
         assert_eq!(bp_type_id(decoded), BlockPredicateTypes::NOT);
     }
 
     #[test]
     fn dispatch_missing_type_key_errors() {
-        let codec = block_predicate_codec::<JsonOps>();
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         let input = json!({"predicates": []});
-        let result = codec.parse(&JsonOps::INSTANCE, &input);
+        let result = codec.parse(&ops, &input);
         assert!(result.is_error());
         // Java: `fieldOf("type")` missing → "No key type in ...".
         let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
@@ -561,13 +633,14 @@ mod tests {
         // Java `fieldOf("predicates")`/`fieldOf("predicate")` are required
         // (not optional) — a dispatch with the type key but no body field must
         // fail with "No key <field> in ...", never default to an empty value.
-        let codec = block_predicate_codec::<JsonOps>();
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         for (input, field) in [
             (json!({"type": "minecraft:all_of"}), "predicates"),
             (json!({"type": "minecraft:any_of"}), "predicates"),
             (json!({"type": "minecraft:not"}), "predicate"),
         ] {
-            let result = codec.parse(&JsonOps::INSTANCE, &input);
+            let result = codec.parse(&ops, &input);
             assert!(result.is_error(), "field {field} missing must error");
             let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
             assert!(
@@ -579,9 +652,10 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_type_errors_like_by_name_codec() {
-        let codec = block_predicate_codec::<JsonOps>();
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         let input = json!({"type": "minecraft:not_a_type"});
-        let result = codec.parse(&JsonOps::INSTANCE, &input);
+        let result = codec.parse(&ops, &input);
         assert!(result.is_error());
         let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
         assert!(
@@ -591,15 +665,19 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_unported_type_fails_explicitly() {
-        // `matching_blocks` (id 0) is a real Paper type but not in this
-        // slice's scope — the codec lookup fails explicitly, never fabricating.
-        let codec = block_predicate_codec::<JsonOps>();
+    fn matching_blocks_dispatches_and_needs_registry() {
+        // `matching_blocks` (id 0) is now ported: the dispatch resolves its
+        // codec (never a "not ported" error). Its `"blocks"` holder-set field
+        // is a `RegistryCodecs.homogeneousList` — over the empty test access it
+        // fails on the missing registry, which proves the dispatch reached the
+        // real codec rather than a stub.
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         let input = json!({"type": "minecraft:matching_blocks", "blocks": "minecraft:stone"});
-        let result = codec.parse(&JsonOps::INSTANCE, &input);
+        let result = codec.parse(&ops, &input);
         assert!(result.is_error());
         let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
-        assert!(msg.contains("not ported"), "got: {msg}");
+        assert!(!msg.contains("not ported"), "got: {msg}");
         // The registry itself still resolves the type (the table has all 14).
         assert_eq!(
             block_predicate_type_by_name("minecraft:matching_blocks"),
@@ -612,10 +690,11 @@ mod tests {
         // Encode writes the element fields then the `"type"` key (Java
         // `KeyDispatchCodec` encodes key AFTER value), so the JSON has the
         // `not`-body fields first and `"type"` last.
-        let codec = block_predicate_codec::<JsonOps>();
+        let ops = empty_ops();
+        let codec = block_predicate_codec::<TestOps>();
         let p = wrap(not(always_true()));
         let encoded = codec
-            .encode_start(&JsonOps::INSTANCE, &p)
+            .encode_start(&ops, &p)
             .result()
             .expect("encode should succeed")
             .clone();

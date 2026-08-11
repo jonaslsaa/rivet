@@ -66,6 +66,37 @@ pub fn state_testing_test<C: StateTestingPredicate>(
     predicate.test_state(&state)
 }
 
+/// `Vec3i.CODEC` — `Codec.INT_STREAM.comapFlatMap(Util.fixedSize(input, 3) ->
+/// Vec3i, pos -> IntStream)`, as the ops-generic `vec3i_codec::<Ops>()` factory.
+///
+/// Unlike `BlockPos.CODEC` (which is `.stable()`), `Vec3i.CODEC` is NOT stable
+/// — `UnobstructedPredicate.CODEC`'s `"offset"` field uses it directly.
+pub fn vec3i_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Vec3i, Ops>> {
+    codec::comap_flat_map::<Vec<i32>, Vec3i, Ops>(
+        codec::int_stream_codec::<Ops>(),
+        Arc::new(|input: &Vec<i32>| {
+            rivet_util::fixed_size_i32(input, 3).map(|ints| Vec3i::new(ints[0], ints[1], ints[2]))
+        }),
+        Arc::new(|v: &Vec3i| vec![v.get_x(), v.get_y(), v.get_z()]),
+    )
+}
+
+/// `Vec3i.CODEC.optionalFieldOf("offset", Vec3i.ZERO)` — the NON-lenient
+/// optional offset field (`UnobstructedPredicate.CODEC` uses this form;
+/// `lenientOptionalFieldOf` is the strict-with-default variant Java's
+/// `optionalFieldOf(name, default)` is NOT — it propagates a present-but-
+/// malformed field's error). Absent decodes to ZERO, and the default ZERO is
+/// omitted on encode.
+pub fn vec3i_optional_field_codec<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<Vec3i, Ops>> {
+    let optional: Arc<dyn MapCodec<Option<Vec3i>, Ops>> =
+        codec::optional_field("offset".to_string(), vec3i_codec::<Ops>(), false);
+    map_codec::xmap(
+        optional,
+        Arc::new(|o: &Option<Vec3i>| o.unwrap_or(Vec3i::ZERO)),
+        Arc::new(|v: &Vec3i| if *v == Vec3i::ZERO { None } else { Some(*v) }),
+    )
+}
+
 /// `Vec3i.offsetCodec(int maxOffsetPerAxis)` — `Vec3i.CODEC.validate(...)` with
 /// `Math.abs(x) < maxOffsetPerAxis && Math.abs(y) < ... && Math.abs(z) < ...`,
 /// erroring `"Position out of range, expected at most {max}: {value}"`.

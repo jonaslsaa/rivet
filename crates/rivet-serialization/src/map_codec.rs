@@ -292,6 +292,73 @@ where
     flat_xmap(inner, checker.clone(), checker)
 }
 
+/// `Codec.mapPair(MapCodec<F>, MapCodec<S>)` — `PairMapCodec`, the pair
+/// combinator the `StateDefinition` property-codec fold uses (Java
+/// `StateDefinition.appendPropertyCodec`: `Codec.mapPair(codec,
+/// property.valueCodec().fieldOf(name))`).
+///
+/// Java decodes the first half, then flat-maps the second; encodes the first
+/// half into the builder that the second half produced. The Rust port's
+/// `encode` mutates a single `RecordBuilder` directly (Java's chained builders
+/// merge into the same map), so the halves encode in sequence into the same
+/// prefix — the map key order is not semantically significant.
+pub fn map_pair<F, S, Ops: DynamicOps + 'static>(
+    first: Arc<dyn MapCodec<F, Ops>>,
+    second: Arc<dyn MapCodec<S, Ops>>,
+) -> Arc<dyn MapCodec<crate::pair::Pair<F, S>, Ops>>
+where
+    F: 'static,
+    S: 'static,
+{
+    Arc::new(PairMapCodec { first, second })
+}
+
+/// `com.mojang.serialization.codecs.PairMapCodec`.
+pub struct PairMapCodec<F, S, Ops: DynamicOps + 'static> {
+    first: Arc<dyn MapCodec<F, Ops>>,
+    second: Arc<dyn MapCodec<S, Ops>>,
+}
+
+impl<F, S, Ops: DynamicOps + 'static> std::fmt::Debug for PairMapCodec<F, S, Ops> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PairMapCodec")
+    }
+}
+
+impl<F, S, Ops: DynamicOps + 'static> Keyable<Ops> for PairMapCodec<F, S, Ops> {
+    fn keys(&self, ops: &Ops) -> Vec<Ops::Output> {
+        let mut keys = self.first.keys(ops);
+        keys.extend(self.second.keys(ops));
+        keys
+    }
+}
+
+impl<F, S, Ops: DynamicOps + 'static> MapCodec<crate::pair::Pair<F, S>, Ops>
+    for PairMapCodec<F, S, Ops>
+{
+    fn decode(
+        &self,
+        ops: &Ops,
+        input: &dyn MapLike<Ops::Output>,
+    ) -> DataResult<crate::pair::Pair<F, S>> {
+        self.first.decode(ops, input).flat_map(|f| {
+            self.second
+                .decode(ops, input)
+                .flat_map(|s| DataResult::success(crate::pair::Pair::of(f, s)))
+        })
+    }
+
+    fn encode(
+        &self,
+        input: &crate::pair::Pair<F, S>,
+        ops: &Ops,
+        prefix: &mut dyn RecordBuilder<Output = Ops::Output>,
+    ) {
+        self.second.encode(&input.second, ops, prefix);
+        self.first.encode(&input.first, ops, prefix);
+    }
+}
+
 /// `MapCodec.mapResult(ResultFunction)`.
 pub fn map_result<A, Ops: DynamicOps + 'static>(
     inner: Arc<dyn MapCodec<A, Ops>>,

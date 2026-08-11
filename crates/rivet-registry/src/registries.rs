@@ -59,6 +59,29 @@ pub static DIMENSION: LazyLock<ResourceKey<Registry<Level>>> = LazyLock::new(|| 
     ResourceKey::create_registry_key(Identifier::with_default_namespace("dimension"))
 });
 
+/// `Registries.FLUID` — `createRegistryKey("fluid")`, the
+/// `net.minecraft.world.level.material.Fluid` registry key. Added for #180:
+/// `MatchingFluidsPredicate.CODEC`'s `"fluids"` field is
+/// `RegistryCodecs.homogeneousList(Registries.FLUID)` (a `HolderSet<Fluid>`
+/// over the fluid registry). `FluidId` is the id-handle element (the pure
+/// numeric fluid id over the generated `FLUID_BY_*` tables, mirroring
+/// `BlockId`); fluid behaviour and `FluidState` defer with the
+/// `mc.world.level.material` unit.
+pub static FLUID: LazyLock<ResourceKey<Registry<FluidId>>> =
+    LazyLock::new(|| ResourceKey::create_registry_key(Identifier::with_default_namespace("fluid")));
+
+/// `Registries.BIOME` — `createRegistryKey("worldgen/biome")`, the
+/// `net.minecraft.world.level.biome.Biome` registry key. Added for #180:
+/// `MatchingBiomesPredicate.CODEC`'s `"biomes"` field is
+/// `RegistryCodecs.homogeneousList(Registries.BIOME)` (a `HolderSet<Biome>`
+/// over the biome registry). `BiomeId` is the id-handle element (the pure
+/// numeric biome id over the generated `BIOME_BY_*` tables, mirroring
+/// `BlockId`); the `Biome` value type defers with the
+/// `mc.world.level.biome` unit.
+pub static BIOME: LazyLock<ResourceKey<Registry<BiomeId>>> = LazyLock::new(|| {
+    ResourceKey::create_registry_key(Identifier::with_default_namespace("worldgen/biome"))
+});
+
 /// `Registries.BLOCK_ENTITY_TYPE` — `createRegistryKey("block_entity_type")`,
 /// the block-entity registry key. Needed by `ClientboundLevelChunkPacketData`'s
 /// `BlockEntityInfo` codec (`ByteBufCodecs.registry(Registries.BLOCK_ENTITY_TYPE)`,
@@ -138,7 +161,14 @@ pub static WORLD_CLOCK: LazyLock<ResourceKey<Registry<WorldClock>>> = LazyLock::
 
 /// The `Block` registry element — a placeholder for
 /// `net.minecraft.world.level.block.Block` (owned by the world/block unit).
-#[derive(Debug)]
+///
+/// `Clone`/`PartialEq`/`Eq` are required by `Holder<BlockType>` /
+/// `HolderSet<BlockType>` (the `MatchingBlocksPredicate` `"blocks"` holder set
+/// carries `Holder::Reference` — equality compares the Copy `(RegistryId, u32)`
+/// pair, so the ZST element value is never compared). Distinct `Arc::new(
+/// BlockType)` allocations have distinct pointers, so a multi-element
+/// `Registry<BlockType>` registers fine under the identity-keyed value map.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockType;
 
 /// `Registries.levelStemToLevel(ResourceKey<LevelStem>)`.
@@ -181,8 +211,10 @@ pub struct LevelStem;
 /// tests compare `Holder::Reference` values).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DimensionType;
+pub use crate::biome_id::BiomeId;
 pub use crate::block_entity_type::BlockEntityType;
 pub use crate::feature_size_type::FeatureSizeTypeId;
+pub use crate::fluid_id::FluidId;
 /// `net.minecraft.world.entity.ai.attributes.Attribute` — the entity unit's
 /// registry element placeholder (see the `ATTRIBUTE` key above, #90).
 /// `Clone`/`PartialEq`/`Eq` are required by `Holder<Attribute>` (the wire codec

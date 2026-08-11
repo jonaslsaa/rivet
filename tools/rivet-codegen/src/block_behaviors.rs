@@ -16,7 +16,7 @@
 //! at 0, starts strictly increasing, lengths positive, no overlap, sum ==
 //! count), every run's start/length must fit the emitted `(u16, u16, u32)`
 //! tuple and lie within `state_count`, the accumulation is overflow-checked,
-//! the word's reserved bits (22..32) must be zero, and the fixture must match
+//! the word's reserved bits (27..32) must be zero, and the fixture must match
 //! its provenance manifest sha256. `state_count` is pinned to 32366 (the
 //! emitted `BLOCK_STATE_COUNT`) by the live probe.
 
@@ -191,14 +191,15 @@ fn validate(root: Value) -> Result<Vec<Run>> {
             .get("word")
             .and_then(Value::as_u64)
             .with_context(|| format!("run {i} `word` must be a non-negative integer"))?;
-        // Reserved bits 22..32 must be zero — a probe emitting a field outside
+        // Reserved bits 27..32 must be zero — a probe emitting a field outside
         // its documented width would otherwise be silently dropped.
-        if word >> 22 != 0 {
+        if word >> 27 != 0 {
             bail!("run {i} word {word} has reserved bits set");
         }
         // Field bounds by bit width (light_dampening, light_emission <= 15,
-        // map_color <= 63) are implied by the width, so the reserved check
-        // above is the only field-level bound worth asserting here.
+        // map_color <= 63, fluid_id <= 4) are implied by the width, so the
+        // reserved check above is the only field-level bound worth asserting
+        // here (the probe additionally pins fluid_id to 0..4).
 
         if start != expected_start {
             bail!(
@@ -302,7 +303,10 @@ fn render(runs: &[Run], source: &SourceProvenance) -> String {
          //   bits  8-11   light_dampening (0..15)\n\
          //   bits  12-15  light_emission (0..15)\n\
          //   bits  16-21  map_color_id (0..63)\n\
-         //   bits  22-31  reserved (always 0)\n\
+         //   bit  22 is_solid (isSolid() — BlockBehaviour.Properties.hasCollision)\n\
+         //   bit  23 can_be_replaced (canBeReplaced() — Properties.replaceable)\n\
+         //   bits  24-26  fluid_id (BuiltInRegistries.FLUID.getId(getFluidState().getType()), 0..4)\n\
+         //   bits  27-31  reserved (always 0)\n\
          // Words are run-length encoded: each (start, length, word) covers states\n\
          // [start, start + length). Runs partition 0..BLOCK_STATE_COUNT and are sorted\n\
          // by start.\n\n",
@@ -348,6 +352,16 @@ fn render(runs: &[Run], source: &SourceProvenance) -> String {
             "1 << 7",
             "the state carries no fluid",
         ),
+        (
+            "BEHAVIOR_FLAG_IS_SOLID",
+            "1 << 22",
+            "state is solid (BlockBehaviour.Properties.hasCollision — SolidPredicate)",
+        ),
+        (
+            "BEHAVIOR_FLAG_CAN_BE_REPLACED",
+            "1 << 23",
+            "state can be replaced (Properties.replaceable — ReplaceablePredicate)",
+        ),
     ] {
         out.push_str(&format!(
             "/// {doc}.\n\
@@ -362,9 +376,12 @@ fn render(runs: &[Run], source: &SourceProvenance) -> String {
          pub const BEHAVIOR_SHIFT_LIGHT_EMISSION: u32 = 12;\n\
          /// Shift/width of the `map_color_id` field (0..63).\n\
          pub const BEHAVIOR_SHIFT_MAP_COLOR: u32 = 16;\n\
+         /// Shift/width of the `fluid_id` field (0..4, the 5 built-in fluids).\n\
+         pub const BEHAVIOR_SHIFT_FLUID_ID: u32 = 24;\n\
          pub const BEHAVIOR_MASK_LIGHT_DAMPENING: u32 = 0xF;\n\
          pub const BEHAVIOR_MASK_LIGHT_EMISSION: u32 = 0xF;\n\
-         pub const BEHAVIOR_MASK_MAP_COLOR: u32 = 0x3F;\n\n",
+         pub const BEHAVIOR_MASK_MAP_COLOR: u32 = 0x3F;\n\
+         pub const BEHAVIOR_MASK_FLUID_ID: u32 = 0x7;\n\n",
     );
 
     out.push_str(

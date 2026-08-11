@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import java.io.PrintWriter;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
@@ -49,7 +50,10 @@ import net.minecraft.world.level.material.MapColor;
  *   bits  8-11   light_dampening (0..15)
  *   bits  12-15  light_emission (0..15)
  *   bits  16-21  map_color_id (0..63)
- *   bits  22-31  reserved (must be 0)
+ *   bit  22 is_solid (isSolid() — BlockBehaviour.Properties.hasCollision)
+ *   bit  23 can_be_replaced (canBeReplaced() — Properties.replaceable)
+ *   bits  24-26  fluid_id (BuiltInRegistries.FLUID.getId(getFluidState().getType()), 0..4)
+ *   bits  27-31  reserved (must be 0)
  */
 public final class BlockBehaviourProbe {
     private BlockBehaviourProbe() {}
@@ -155,7 +159,13 @@ public final class BlockBehaviourProbe {
         word |= (long) dampening << 8;
         word |= (long) emission << 12;
         word |= (long) mapColor << 16;
-        // bits 22-31 stay 0 by construction.
+        word |= state.isSolid() ? 1L << 22 : 0;
+        word |= state.canBeReplaced() ? 1L << 23 : 0;
+        int fluidId = BuiltInRegistries.FLUID.getId(state.getFluidState().getType());
+        require(fluidId >= 0 && fluidId <= 4,
+            "fluid id " + fluidId + " out of 0..4");
+        word |= (long) fluidId << 24;
+        // bits 27-31 stay 0 by construction.
         return word;
     }
 
