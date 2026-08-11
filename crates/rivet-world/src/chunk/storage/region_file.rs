@@ -33,10 +33,11 @@
 //!   (Paper's "don't write garbage data to disk"); the caller converts it to a
 //!   `clear`.
 //!
-//! The read-only Aikar surface (`.oversized.nbt` flags plus deflate-compressed
-//! `*_oversized_<x>_<z>.nbt` data) is present for `RegionFileStorage`; its
-//! legacy `setOversized` mutation path and recalc-only Aikar detection/meta
-//! rewrites remain deferred. Modern `.mcc` re-linking is fully ported.
+//! The Aikar surface (`.oversized.nbt` flags plus deflate-compressed
+//! `*_oversized_<x>_<z>.nbt` data) is present for `RegionFileStorage`; the
+//! `set_oversized` clear path is wired into the write lifecycle, while the
+//! recalc-only Aikar detection/meta rewrites remain deferred. Modern `.mcc`
+//! re-linking is fully ported.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -193,11 +194,7 @@ impl CommitOp {
                 // the move (the old path no longer exists).
                 fs::rename(&tmp, &target)
             }
-            CommitOp::DeleteExternal(p) => match fs::remove_file(&p) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e),
-            },
+            CommitOp::DeleteExternal(p) => remove_file_if_exists(&p),
         }
     }
 }
@@ -249,8 +246,13 @@ pub struct RegionFile {
     /// repair/backups and makes close descriptor-only.
     read_only: bool,
     /// Legacy Aikar oversized flags loaded from `<region>.oversized.nbt`.
-    /// This slice only reads them; the legacy mutation surface stays absent.
+    /// `set_oversized` mutates them (mirroring Paper's `setOversized`); the
+    /// read-only slice only reads them.
     oversized: [u8; 1024],
+    /// `oversizedCount` — the number of set flags, maintained by
+    /// `set_oversized` and used to decide whether the meta file is rewritten or
+    /// deleted.
+    oversized_count: i32,
 }
 
 impl RegionFile {
@@ -325,6 +327,10 @@ impl RegionFile {
                 .open(&path)?
         };
         let can_recalc_header = info.is_chunk_data && !read_only;
+        // `initOversizedState` — Java sums every flag byte into
+        // `oversizedCount` after reading the meta file. `byte temp` is signed,
+        // so 0xFF contributes -1, not +255: `as i8` reproduces that.
+        let oversized_count = oversized.iter().map(|&b| i32::from(b as i8)).sum();
         let mut region = Self {
             path,
             external_file_dir,
@@ -337,6 +343,7 @@ impl RegionFile {
             sync,
             read_only,
             oversized,
+            oversized_count,
         };
         region.used_sectors.force(0, 2);
 
@@ -485,10 +492,37 @@ impl RegionFile {
     }
 
     /// Paper's package-private `isOversized(x, z)` legacy Aikar flag lookup.
-    /// Deliberately read-only: `setOversized` belongs to the excluded write
-    /// path and is not exposed by this porting slice.
     pub(super) fn is_oversized(&self, x: i32, z: i32) -> bool {
         self.oversized[get_chunk_index(x, z)] == 1
+    }
+
+    /// `setOversized(x, z, oversized)` — Paper's legacy Aikar meta mutation.
+    /// `write` calls `setOversized(x, z, false)` after a successful store so a
+    /// stale per-chunk supplement (`*_oversized_<x>_<z>.nbt`) and its flag can
+    /// never contaminate a freshly rewritten chunk on `read`. Mirrors Java's
+    /// `synchronized setOversized`: clear the flag byte, maintain the count,
+    /// delete the per-chunk data file when the flag was cleared, and rewrite or
+    /// delete the meta file based on the remaining count.
+    pub(super) fn set_oversized(&mut self, x: i32, z: i32, oversized: bool) -> io::Result<()> {
+        self.ensure_writable()?;
+        let offset = get_chunk_index(x, z);
+        let previous = self.oversized[offset] == 1;
+        self.oversized[offset] = if oversized { 1 } else { 0 };
+        // `oversizedCount` — recomputed from the flag array with Java's
+        // signed-byte sum (0xFF contributes -1), so it can never drift from the
+        // flags. This is the same sum `open_with_mode` computes on load.
+        self.oversized_count = self.oversized.iter().map(|&b| i32::from(b as i8)).sum();
+        if previous && !oversized {
+            remove_file_if_exists(&self.get_oversized_file(x, z))?;
+        }
+        if self.oversized_count > 0 {
+            if previous != oversized {
+                fs::write(self.get_oversized_meta_file(), self.oversized)?;
+            }
+        } else if previous {
+            remove_file_if_exists(&self.get_oversized_meta_file())?;
+        }
+        Ok(())
     }
 
     /// `getOversizedData(x, z)` — read the legacy per-chunk supplement through
@@ -741,6 +775,13 @@ impl RegionFile {
             .with_file_name(format!("{base}_oversized_{x}_{z}.nbt"))
     }
 
+    /// `getOversizedMetaFile()` — `<region>.oversized.nbt`, the 1024-byte flag
+    /// array. `with_extension("oversized.nbt")` matches Java's
+    /// `replaceAll("\\.mca$", "") + ".oversized.nbt"`.
+    fn get_oversized_meta_file(&self) -> PathBuf {
+        self.path.with_extension("oversized.nbt")
+    }
+
     /// `getChunkDataOutputStream(pos)` — `new DataOutputStream(version.wrap(new
     /// ChunkBuffer(pos)))`. The caller writes NBT through the returned writer,
     /// finalizes it with `RegionFileWriter::finish` (writing the codec trailer),
@@ -772,11 +813,7 @@ impl RegionFile {
             self.write_offset(offset_index, 0);
             self.write_timestamp(offset_index, get_timestamp());
             self.write_header()?;
-            match fs::remove_file(self.get_external_chunk_path(pos)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
+            remove_file_if_exists(&self.get_external_chunk_path(pos))?;
             self.used_sectors
                 .free(get_sector_number(offset), get_num_sectors(offset));
         }
@@ -1423,6 +1460,16 @@ fn get_timestamp() -> i32 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     (millis / 1000) as i32
+}
+
+/// `Files.deleteIfExists(path)` — remove a file, treating a missing file as a
+/// no-op. Shared by `set_oversized`, `clear`, and `CommitOp::DeleteExternal`.
+fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn read_oversized_state(path: &Path) -> io::Result<[u8; 1024]> {

@@ -39,14 +39,14 @@ pub mod world_data_configuration;
 pub use block_getter::BlockGetter;
 pub use data_pack_config::DataPackConfig;
 pub use height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor, create};
-pub use level::{Level, end, nether, overworld};
+pub use level::{Level, end, nether, overworld, resource_key_codec};
 pub use level_accessor::LevelAccessor;
 pub use level_reader::LevelReader;
 pub use level_settings::{DifficultySettings, LevelSettings};
 pub use rivet_registry::core::ChunkPos;
 pub use storage::{
     DerivedLevelData, LevelData, RespawnData, ServerLevelData, WorldData, WritableLevelData,
-    default_respawn_data, format_location,
+    default_respawn_data, format_location, respawn_data_codec, respawn_data_map_codec,
 };
 pub use world_data_configuration::WorldDataConfiguration;
 pub use world_gen_level::WorldGenLevel;

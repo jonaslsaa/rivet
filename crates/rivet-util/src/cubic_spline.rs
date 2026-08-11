@@ -645,7 +645,10 @@ fn find_interval_start(locations: &[f32], input: f32) -> i32 {
 /// and re-emit with exactly 3 fraction digits. `NaN`/`±Infinity` are spelled as
 /// Java prints them. Validated bit-exact against `javac`/`java` 25 on a 4.6M
 /// sweep (random bit patterns, dense ties, subnormals, ±0.0, huge magnitudes).
-fn fmt_f32_3(f: f32) -> String {
+///
+/// `pub` because `NoiseUtils` (the `levelgen::synth` port) formats its parity
+/// strings with the same Java `%.3f` semantics.
+pub fn fmt_f32_3(f: f32) -> String {
     if f.is_nan() {
         return "NaN".to_string();
     }
