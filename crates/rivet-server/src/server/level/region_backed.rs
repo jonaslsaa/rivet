@@ -2,11 +2,14 @@
 //!
 //! This module deliberately has no launcher-save discovery, generation, or
 //! write API. The caller supplies the already-copied root created by the #316
-//! harness. Section/palette reconstruction (#336) and heightmap/light/
-//! block-entity reconstruction (#337) are available on main; construction
-//! still stops at the runtime `ChunkMap`/`LevelChunk` composition slice, the
-//! #323 `level.dat` metadata boundary, and real structures/ticks/block
-//! entities (#369).
+//! harness. Section/palette reconstruction (#336), heightmap/light/
+//! block-entity reconstruction (#337), and the #369 auxiliary-payload carry
+//! (structure references, stored ticks, serialized block entities) are
+//! available on main; construction still stops at the runtime
+//! `ChunkMap`/`LevelChunk` composition slice, the #323 `level.dat` metadata
+//! boundary, and the deferred execution/installation of those payloads (tick
+//! containers #370, block-entity materialization #341, `StructureStart`
+//! loading and STRUCTURE-registry membership #369).
 
 use std::io;
 use std::path::{Path, PathBuf};
