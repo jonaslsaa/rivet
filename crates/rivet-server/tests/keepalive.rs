@@ -1023,7 +1023,9 @@ fn challenge_ids_are_exact_millis_under_cpu_contention() {
             std::thread::spawn(move || {
                 let mut x: u64 = 0;
                 while !stop.load(Ordering::Relaxed) {
-                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    x = x
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                 }
                 std::hint::black_box(x);
             })
@@ -1043,10 +1045,9 @@ fn challenge_ids_are_exact_millis_under_cpu_contention() {
         for round in 0..ROUNDS {
             advance(&sim, &loop_.stats, (INTERVALS_PER_ROUND * 20) as u64); // 7s
             let cell = cells.lock().unwrap();
-            let expected: Vec<i64> =
-                ((sent + 1) * 1000..=(sent + INTERVALS_PER_ROUND) * 1000)
-                    .step_by(1000)
-                    .collect();
+            let expected: Vec<i64> = ((sent + 1) * 1000..=(sent + INTERVALS_PER_ROUND) * 1000)
+                .step_by(1000)
+                .collect();
             assert_eq!(
                 &cell[0].sends[sent as usize..],
                 expected.as_slice(),
