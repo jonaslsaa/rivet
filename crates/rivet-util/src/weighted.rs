@@ -24,8 +24,9 @@
 //! - `WeightedRandom.getWeightedItem(items, index, weightGetter)` walks with
 //!   a wrapping-i32 subtraction (the port keeps `i32` exactly; `index` is
 //!   `i32` in Java, and the loop is `index -= weight; if (index < 0)`). A
-//!   negative initial `index` (or one that never goes below zero, e.g.
-//!   `index == total`) yields `None` — faithfully.
+//!   negative initial `index` returns the first item (the first subtraction
+//!   pushes it further below zero); an `index` that never goes below zero
+//!   (e.g. `index == total`) yields `None` — faithfully.
 //! - `WeightedList` picks its selector by `totalWeight`: `0` -> no selector
 //!   (`isEmpty()` true, `getRandom` -> `None`, `getRandomOrThrow` throws
 //!   `IllegalStateException("Weighted list has no elements")`); `1..63` ->
@@ -172,15 +173,12 @@ impl WeightedRandom {
     /// `IllegalArgumentException("Sum of weights must be <= 2147483647")` when
     /// it exceeds `i32::MAX`. The port takes the generic `weight_fn`
     /// (`Fn(&T) -> i32`) in place of Java's `ToIntFunction<T>`.
-    pub fn get_total_weight<T>(
-        items: &[T],
-        weight_fn: impl Fn(&T) -> i32,
-    ) -> Result<i32, WeightTotalOverflow> {
+    pub fn get_total_weight<T>(items: &[T], weight_fn: impl Fn(&T) -> i32) -> i32 {
         let total_weight: i64 = items.iter().map(|item| weight_fn(item) as i64).sum();
         if total_weight > 2147483647 {
-            Err(WeightTotalOverflow)
+            panic!("Sum of weights must be <= 2147483647");
         } else {
-            Ok(total_weight as i32)
+            total_weight as i32
         }
     }
 
@@ -212,8 +210,9 @@ impl WeightedRandom {
     /// ToIntFunction<T>)` — walks the items subtracting weights (i32
     /// wrapping, exactly Java's `index -= weight; if (index < 0)`) and returns
     /// the first item whose prefix strictly exceeds the selection. An index
-    /// that never satisfies that (e.g. `>= total`) or a negative start returns
-    /// `None`.
+    /// that never goes below zero (e.g. `>= total`) returns `None`; a negative
+    /// start returns the first item (the first subtraction pushes it further
+    /// below zero).
     pub fn get_weighted_item<T>(
         items: &[T],
         mut index: i32,
@@ -241,28 +240,10 @@ impl WeightedRandom {
     where
         T: Clone,
     {
-        match Self::get_total_weight(items, &weight_fn) {
-            Ok(total_weight) => Self::get_random_item(random, items, total_weight, weight_fn),
-            Err(_) => {
-                log_and_pause_if_in_ide("Sum of weights must be <= 2147483647");
-                panic!("Sum of weights must be <= 2147483647");
-            }
-        }
+        let total_weight = Self::get_total_weight(items, &weight_fn);
+        Self::get_random_item(random, items, total_weight, weight_fn)
     }
 }
-
-/// The `getTotalWeight` overflow failure — Java throws
-/// `IllegalArgumentException("Sum of weights must be <= 2147483647")`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WeightTotalOverflow;
-
-impl fmt::Display for WeightTotalOverflow {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Sum of weights must be <= 2147483647")
-    }
-}
-
-impl std::error::Error for WeightTotalOverflow {}
 
 /// `net.minecraft.util.random.WeightedList<E>` — a fixed weighted distribution
 /// with an internal selector (flat array under 64 total weight, compact walk
@@ -280,13 +261,7 @@ impl<E: Clone> WeightedList<E> {
     /// (`"Sum of weights must be <= 2147483647"`) exactly like Java.
     pub fn new(items: &[Weighted<E>]) -> Self {
         let items_vec: Vec<Weighted<E>> = items.to_vec();
-        let total_weight = match WeightedRandom::get_total_weight(items, |w| w.weight) {
-            Ok(t) => t,
-            Err(_) => {
-                log_and_pause_if_in_ide("Sum of weights must be <= 2147483647");
-                panic!("Sum of weights must be <= 2147483647");
-            }
-        };
+        let total_weight = WeightedRandom::get_total_weight(items, |w| w.weight);
         let selector = if total_weight == 0 {
             None
         } else if total_weight < FLAT_THRESHOLD {
@@ -675,22 +650,20 @@ mod tests {
         // Negative via a custom getter (Weighted ctor forbids negatives).
         let items = vec![Weighted::new("a", 5), Weighted::new("b", 7)];
         assert_eq!(
-            WeightedRandom::get_total_weight(&items, |w: &Weighted<&str>| w.weight - 5).unwrap(),
+            WeightedRandom::get_total_weight(&items, |w: &Weighted<&str>| w.weight - 5),
             2
         );
         assert_eq!(
-            WeightedRandom::get_total_weight::<Weighted<&str>>(&[], |_| 1).unwrap(),
+            WeightedRandom::get_total_weight::<Weighted<&str>>(&[], |_| 1),
             0
         );
     }
 
     #[test]
+    #[should_panic(expected = "Sum of weights must be <= 2147483647")]
     fn weighted_random_get_total_weight_overflows() {
         let items = vec![Weighted::new("a", 1), Weighted::new("b", 1)];
-        assert_eq!(
-            WeightedRandom::get_total_weight(&items, |_| i32::MAX),
-            Err(WeightTotalOverflow)
-        );
+        let _ = WeightedRandom::get_total_weight(&items, |_| i32::MAX);
     }
 
     #[test]
@@ -831,7 +804,7 @@ mod tests {
     fn varargs_of_values_seeded_sequence() {
         let wl = WeightedList::of_values(&["a", "b", "c"]);
         assert_eq!(
-            WeightedRandom::get_total_weight(&wl.unwrap(), |w: &Weighted<&str>| w.weight).unwrap(),
+            WeightedRandom::get_total_weight(&wl.unwrap(), |w: &Weighted<&str>| w.weight),
             3
         );
         let mut r = LegacyRandomSource::new(5);
