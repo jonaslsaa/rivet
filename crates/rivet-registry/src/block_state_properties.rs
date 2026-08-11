@@ -13,7 +13,7 @@
 //!
 //! ## Boundary (chosen from actual Java imports)
 //!
-//! `working/Paper/.../world/level/block/state/properties/*.java` has 33
+//! `working/Paper/.../world/level/block/state/properties/*.java` has 32
 //! classes. The ten enums here are the `levelgen`/`lighting`/structure pieces'
 //! leaf value classes for **setting block states** (grep over `levelgen/` +
 //! `lighting/` for `BlockStateProperties.*` usage): `DoubleBlockHalf`, `Half`,
