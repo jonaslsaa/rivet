@@ -94,75 +94,49 @@ pub trait ConverterBehavior<T, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
+    /// The committed `dataconverter-foundation` oracle golden — the same file
+    /// `rivet-oracle verify` hash-validates — so a re-pin that changes the
+    /// version-encoding arithmetic fails this test instead of going stale.
+    fn fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../../../../tools/rivet-oracle/fixtures/dataconverter/dataconverter-foundation.json"
+        ))
+        .expect("dataconverter-foundation.json parses")
+    }
 
     #[test]
-    fn encode_versions_round_trip_matches_probe() {
-        // Directly from the probe `encodeVersions` golden rows.
-        for (version, step, expected_encoded) in [
-            (0i32, 0i32, 0i64),
-            (1, 0, 4_294_967_296),
-            (1, 1, 4_294_967_297),
-            (2, 0, 8_589_934_592),
-            (-1, 0, -4_294_967_296),
-            (-1, -1, -1),
-            (99, 0, 425_201_762_304),
-            (1344, 0, 5_772_436_045_824),
-            (1344, 1, 5_772_436_045_825),
-            (1344, 2_147_483_647, 5_774_583_529_471),
-            (1344, -2_147_483_648, 5_774_583_529_472),
-            (268_435_456, 1234, 1_152_921_504_606_848_210),
-            (-2_147_483_648, 0, i64::MIN),
-            (-2_147_483_648, -2_147_483_648, -9_223_372_034_707_292_160),
-        ] {
+    fn encode_versions_matches_paper_golden() {
+        // `encodeVersions` rows: version/step/encoded + the round-trip decode.
+        for row in fixture()["encodeVersions"].as_array().unwrap() {
+            let version = row["version"].as_i64().unwrap() as i32;
+            let step = row["step"].as_i64().unwrap() as i32;
+            let expected_encoded = row["encoded"].as_str().unwrap().parse::<i64>().unwrap();
+            let encoded = encode_versions(version, step);
             assert_eq!(
-                encode_versions(version, step),
-                expected_encoded,
+                encoded, expected_encoded,
                 "encodeVersions({version}, {step})"
             );
-        }
-    }
-
-    #[test]
-    fn get_version_step_round_trip() {
-        for (version, step) in [
-            (0i32, 0i32),
-            (1, 1),
-            (1344, 2_147_483_647),
-            (1344, -2_147_483_648),
-            (-1, -1),
-            (268_435_456, 1234),
-        ] {
-            let encoded = encode_versions(version, step);
             assert_eq!(get_version(encoded), version);
             assert_eq!(get_step(encoded), step);
+            assert_eq!(
+                encoded_to_string(encoded),
+                row["encodedToString"].as_str().unwrap()
+            );
         }
-    }
 
-    #[test]
-    fn step_monotonic() {
-        // encodeVersions(version, step) < encodeVersions(version, step + 1).
+        let monotonic = &fixture()["stepMonotonic"];
         let a = encode_versions(5, 100);
         let b = encode_versions(5, 101);
-        assert!(a < b);
-        // The probe's exact monotonic row.
-        assert_eq!(encode_versions(5, 100), 21_474_836_580);
-        assert_eq!(encode_versions(5, 101), 21_474_836_581);
+        assert_eq!(a.to_string(), monotonic["a"].as_str().unwrap());
+        assert_eq!(b.to_string(), monotonic["b"].as_str().unwrap());
+        assert_eq!(a < b, monotonic["aLessThanB"].as_bool().unwrap());
     }
 
     #[test]
-    fn encoded_to_string_matches_probe() {
-        assert_eq!(encoded_to_string(encode_versions(0, 0)), "0.0");
-        assert_eq!(encoded_to_string(encode_versions(1, 0)), "1.0");
-        assert_eq!(encoded_to_string(encode_versions(1, 1)), "1.1");
-        assert_eq!(encoded_to_string(encode_versions(-1, -1)), "-1.-1");
-        assert_eq!(
-            encoded_to_string(encode_versions(1344, 2_147_483_647)),
-            "1344.2147483647"
-        );
-    }
-
-    #[test]
-    fn lowest_version_comparator_orders_by_encoded() {
+    fn lowest_version_comparator_matches_paper_golden() {
+        // The probe's `convs` list, in its original insertion order.
         let convs = [
             DataConverter::with_step(5, 0),
             DataConverter::with_step(5, 2),
@@ -174,19 +148,16 @@ mod tests {
         ];
         let mut convs = convs.to_vec();
         convs.sort_by(lowest_version_cmp);
-        // Expected ascending encoded order: 3.0 < 3.2147483647 < 5.0 < 5.1 <
-        // 5.2 < 5.-1 < 100.0 — note 5.-1 has the largest low bits of the 5.x
-        // group because `step & 0xFFFFFFFFL` is unsigned.
-        let expected_encoded = [
-            encode_versions(3, 0),
-            encode_versions(3, 2_147_483_647),
-            encode_versions(5, 0),
-            encode_versions(5, 1),
-            encode_versions(5, 2),
-            encode_versions(5, -1),
-            encode_versions(100, 0),
-        ];
+
+        // The golden records the probe's sorted `comparatorOrder` rows; compare
+        // the sorted encoded versions against the recorded `encoded` values.
+        let golden: Vec<i64> = fixture()["comparatorOrder"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["encoded"].as_str().unwrap().parse::<i64>().unwrap())
+            .collect();
         let actual: Vec<i64> = convs.iter().map(|c| c.get_encoded_version()).collect();
-        assert_eq!(actual, expected_encoded);
+        assert_eq!(actual, golden);
     }
 }

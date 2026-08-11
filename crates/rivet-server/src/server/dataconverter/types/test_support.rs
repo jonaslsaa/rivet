@@ -8,8 +8,15 @@
 //! `get_list`/`get_generic`/`get_or_create_*` view shares the same storage as
 //! the parent — exactly how the NBT backings wrap the same `CompoundTag`/
 //! `ListTag`. Numeric getters coerce all six boxed numbers with `Number`'s
-//! `*_value` narrowing (Java `NumericTag.*Value()`), and booleans are stored
-//! as bytes (`NBTMapType.setBoolean` -> `setByte`).
+//! `*_value` narrowing (Java `NumericTag.*Value()`), booleans are stored as
+//! bytes (`NBTMapType.setBoolean` -> `setByte`), and the `_or` overloads return
+//! the supplied default when the value is present but the wrong type
+//! (`NBTListType.getBytes(index, dfl)` returns `dfl` for a non-`ByteArrayTag`).
+//!
+//! [`foundation_fixture`] embeds the same committed oracle golden that
+//! `rivet-oracle verify` hash-checks, so the container tests are differentially
+//! checked against Paper — a re-pin that changes a default-method semantic fails
+//! the tests, not just the fixture hash.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -22,6 +29,55 @@ use crate::server::dataconverter::types::map_type::MapType;
 use crate::server::dataconverter::types::object_type::ObjectType;
 use crate::server::dataconverter::types::type_util::TypeUtilBase;
 use rivet_serialization::number::Number;
+use serde_json::Value;
+
+/// The committed `dataconverter-foundation` oracle golden
+/// (`tools/rivet-oracle/fixtures/dataconverter/dataconverter-foundation.json`),
+/// embedded so the container default-method tests are differentially checked
+/// against the same fixture `rivet-oracle verify` hash-validates.
+pub(crate) fn foundation_fixture() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../../../../tools/rivet-oracle/fixtures/dataconverter/dataconverter-foundation.json"
+    ))
+    .expect("dataconverter-foundation.json parses")
+}
+
+/// Renders a boxed [`Generic`] the way the probe recorded the value fields of
+/// `mapTypeDefaults`/`listTypeDefaults` — the NBT `Tag.toString` /
+/// `Arrays.toString` forms (numbers and strings as their plain value, arrays as
+/// `[a, b]`). Containers are asserted structurally by the callers, never here.
+pub(crate) fn render_generic(value: &Generic) -> String {
+    match value {
+        Generic::Byte(v) => format!("{v}"),
+        Generic::Short(v) => format!("{v}"),
+        Generic::Int(v) => format!("{v}"),
+        Generic::Long(v) => format!("{v}"),
+        Generic::Float(v) => format!("{v}"),
+        Generic::Double(v) => format!("{v}"),
+        Generic::Str(s) => s.clone(),
+        Generic::Bytes(v) => format!("{v:?}"),
+        Generic::Shorts(v) => format!("{v:?}"),
+        Generic::Ints(v) => format!("{v:?}"),
+        Generic::Longs(v) => format!("{v:?}"),
+        Generic::Bool(b) => format!("{b}"),
+        Generic::Map(_) | Generic::List(_) => {
+            unreachable!("containers are asserted structurally, not rendered")
+        }
+    }
+}
+
+/// Renders a [`Number`] as `String.valueOf` would for the probe's `getNumber`
+/// sample (e.g. `getNumberFromByte`).
+pub(crate) fn render_number(value: &Number) -> String {
+    match value {
+        Number::Byte(v) => format!("{v}"),
+        Number::Short(v) => format!("{v}"),
+        Number::Int(v) => format!("{v}"),
+        Number::Long(v) => format!("{v}"),
+        Number::Float(v) => format!("{v}"),
+        Number::Double(v) => format!("{v}"),
+    }
+}
 
 /// The factory for both reference backings (`TypeUtil.createEmptyList/Map`).
 pub(crate) struct MockTypeUtil;
@@ -682,10 +738,12 @@ impl ListType for MockList {
     }
 
     fn get_bytes_or(&self, index: usize, dfl: Vec<i8>) -> Vec<i8> {
-        if self.size() > index {
-            self.get_bytes(index)
-        } else {
-            dfl
+        // Java `NBTListType.getBytes(index, dfl)` returns `dfl` for a
+        // present-but-not-`ByteArrayTag` element (and for an out-of-range
+        // index) — not an empty array.
+        match self.elems.borrow().get(index) {
+            Some(Generic::Bytes(v)) => v.clone(),
+            _ => dfl,
         }
     }
 
@@ -701,10 +759,9 @@ impl ListType for MockList {
     }
 
     fn get_shorts_or(&self, index: usize, dfl: Vec<i16>) -> Vec<i16> {
-        if self.size() > index {
-            self.get_shorts(index)
-        } else {
-            dfl
+        match self.elems.borrow().get(index) {
+            Some(Generic::Shorts(v)) => v.clone(),
+            _ => dfl,
         }
     }
 
@@ -720,10 +777,9 @@ impl ListType for MockList {
     }
 
     fn get_ints_or(&self, index: usize, dfl: Vec<i32>) -> Vec<i32> {
-        if self.size() > index {
-            self.get_ints(index)
-        } else {
-            dfl
+        match self.elems.borrow().get(index) {
+            Some(Generic::Ints(v)) => v.clone(),
+            _ => dfl,
         }
     }
 
@@ -739,10 +795,9 @@ impl ListType for MockList {
     }
 
     fn get_longs_or(&self, index: usize, dfl: Vec<i64>) -> Vec<i64> {
-        if self.size() > index {
-            self.get_longs(index)
-        } else {
-            dfl
+        match self.elems.borrow().get(index) {
+            Some(Generic::Longs(v)) => v.clone(),
+            _ => dfl,
         }
     }
 

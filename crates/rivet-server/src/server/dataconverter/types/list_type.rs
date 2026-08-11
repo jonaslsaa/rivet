@@ -20,7 +20,9 @@ use rivet_serialization::number::Number;
 use std::any::Any;
 
 #[cfg(test)]
-use crate::server::dataconverter::types::test_support::{MockList, MockMap};
+use crate::server::dataconverter::types::test_support::{
+    MockList, MockMap, foundation_fixture, render_generic,
+};
 
 /// `ListType` — a list of elements, backed by NBT or JSON.
 pub trait ListType: Any {
@@ -357,5 +359,74 @@ mod tests {
         copy.set_int(0, 99);
         assert_eq!(list.get_int(0), 3);
         assert_eq!(copy.get_int(0), 99);
+    }
+
+    /// The array `_or` getters return the supplied default for a present-but-
+    /// wrong-typed element, matching `NBTListType.getBytes(index, dfl)` etc.
+    /// (which return `dfl` when the element is not the matching array tag) —
+    /// not an empty array.
+    #[test]
+    fn array_getters_return_default_for_wrong_typed_element() {
+        let mut list = MockList::new();
+        list.add_string("x".into());
+
+        assert_eq!(list.get_bytes_or(0, vec![9]), vec![9]);
+        assert_eq!(list.get_ints_or(0, vec![9]), vec![9]);
+        assert_eq!(list.get_longs_or(0, vec![9]), vec![9]);
+        // Out-of-range index also returns the default (Java `list.get(index)`
+        // bound check -> `dfl`).
+        assert_eq!(list.get_bytes_or(9, vec![9]), vec![9]);
+
+        // The matching type still extracts the stored array.
+        list.add_byte_array(vec![1, 2]);
+        assert_eq!(list.get_bytes_or(1, vec![9]), vec![1, 2]);
+    }
+
+    /// Differential check of the default `setGeneric`/`addGeneric` dispatch
+    /// against the committed `dataconverter-foundation` oracle golden
+    /// (`listTypeDefaults`): rebuilding the probe's scenario over [`MockList`]
+    /// must reproduce every recorded value.
+    #[test]
+    fn list_type_defaults_match_paper_golden() {
+        let golden = &foundation_fixture()["listTypeDefaults"];
+
+        // `setGeneric` is a set on a populated index; the rest are appends
+        // (probe `listTypeDefaults.setGeneric_int`/`addGeneric_*`).
+        let mut list = MockList::new();
+        list.add_int(0);
+        list.set_generic(0, Generic::Int(3));
+        list.add_generic(Generic::Short(4));
+        list.add_generic(Generic::Str("five".into()));
+        list.add_generic(Generic::Map(Box::new(MockMap::new())));
+        list.add_generic(Generic::Ints(vec![6, 7]));
+
+        assert_eq!(
+            list.get_int(0),
+            golden["setGeneric_int"].as_i64().unwrap() as i32
+        );
+        assert_eq!(
+            list.get_short(1),
+            golden["addGeneric_short"].as_i64().unwrap() as i16
+        );
+        assert_eq!(
+            render_generic(&list.get_generic(2).unwrap()),
+            golden["addGeneric_string"].as_str().unwrap()
+        );
+        assert!(matches!(list.get_generic(3), Some(Generic::Map(_))));
+        assert_eq!(
+            render_generic(&list.get_generic(4).unwrap()),
+            golden["addGeneric_ints"].as_str().unwrap()
+        );
+
+        // `setGeneric` on an unpopulated index throws in Java
+        // (`IndexOutOfBoundsException`); the Rust mock panics.
+        let result = std::panic::catch_unwind(|| {
+            let mut empty = MockList::new();
+            empty.set_generic(0, Generic::Int(1));
+        });
+        assert_eq!(
+            result.is_err(),
+            golden["setGeneric_empty_oob"].as_bool().unwrap()
+        );
     }
 }

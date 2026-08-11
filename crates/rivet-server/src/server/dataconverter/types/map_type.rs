@@ -225,6 +225,9 @@ pub trait MapType: Any {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::dataconverter::types::test_support::{
+        foundation_fixture, render_generic, render_number,
+    };
 
     /// `MapType.setGeneric` dispatch: each boxed `Generic` lands on the matching
     /// typed setter and round-trips through the typed getter (probe
@@ -411,5 +414,133 @@ mod tests {
         assert!(map.has_key_of_type("i", ObjectType::Number));
         assert!(map.has_key_of_type("s", ObjectType::String));
         assert!(!map.has_key_of_type("unknown", ObjectType::Int));
+    }
+
+    /// Differential check of the default-method surface against the committed
+    /// `dataconverter-foundation` oracle golden (`mapTypeDefaults`): rebuilding
+    /// the probe's scenario over [`MockMap`] must reproduce every recorded
+    /// value, so a re-capture against a different Paper pin that changes a
+    /// default-method semantic fails this test.
+    #[test]
+    fn map_type_defaults_match_paper_golden() {
+        let golden = &foundation_fixture()["mapTypeDefaults"];
+
+        // The probe's `map.setGeneric(...)` dispatch scenario.
+        let mut map = MockMap::new();
+        map.set_generic("b", Generic::Byte(1));
+        map.set_generic("s", Generic::Short(2));
+        map.set_generic("i", Generic::Int(3));
+        map.set_generic("l", Generic::Long(4));
+        map.set_generic("f", Generic::Float(5.5));
+        map.set_generic("d", Generic::Double(6.5));
+        map.set_generic("bool", Generic::Bool(true));
+        map.set_generic("str", Generic::Str("seven".into()));
+        map.set_generic("map", Generic::Map(Box::new(MockMap::new())));
+        map.set_generic("list", Generic::List(Box::new(MockList::new())));
+        map.set_generic("bytes", Generic::Bytes(vec![8, 9]));
+        map.set_generic("ints", Generic::Ints(vec![10, 11]));
+        map.set_generic("longs", Generic::Longs(vec![12, 13]));
+
+        for key in [
+            "b", "s", "i", "l", "f", "d", "bool", "str", "bytes", "ints", "longs",
+        ] {
+            let rendered = render_generic(map.get_generic(key).as_ref().unwrap());
+            assert_eq!(
+                rendered,
+                golden[key].as_str().unwrap(),
+                "mapTypeDefaults.{key}"
+            );
+        }
+        // The probe records the container class name for the map/list values.
+        assert!(matches!(map.get_generic("map"), Some(Generic::Map(_))));
+        assert!(matches!(map.get_generic("list"), Some(Generic::List(_))));
+
+        // Numeric coercion over a byte.
+        assert_eq!(
+            map.get_boolean("b"),
+            golden["getBooleanFromByte"].as_bool().unwrap()
+        );
+        assert_eq!(
+            render_number(&map.get_number("b").unwrap()),
+            golden["getNumberFromByte"].as_str().unwrap()
+        );
+        assert_eq!(
+            map.get_int("b"),
+            golden["getIntCoerced"].as_i64().unwrap() as i32
+        );
+
+        // `hasKey(key, type)` type filtering.
+        assert_eq!(
+            map.has_key_of_type("i", ObjectType::Int),
+            golden["hasKey_int_AS_INT"].as_bool().unwrap()
+        );
+        assert_eq!(
+            map.has_key_of_type("i", ObjectType::Byte),
+            golden["hasKey_int_AS_BYTE"].as_bool().unwrap()
+        );
+        assert_eq!(
+            map.has_key_of_type("i", ObjectType::Number),
+            golden["hasKey_int_AS_NUMBER"].as_bool().unwrap()
+        );
+        assert_eq!(
+            map.has_key_of_type("str", ObjectType::String),
+            golden["hasKey_str_AS_STRING"].as_bool().unwrap()
+        );
+        assert_eq!(
+            map.has_key_of_type("nope", ObjectType::Int),
+            golden["hasKey_unknown"].as_bool().unwrap()
+        );
+
+        // `getList(key, type)` filter (probe's `lists` map) + `getOrCreate*`
+        // (probe's `create` map).
+        let mut lists = MockMap::new();
+        let mut ints = MockList::new();
+        ints.add_int(1);
+        ints.add_int(2);
+        lists.set_list("ints", Box::new(ints));
+        let empty = MockList::new();
+        lists.set_list("empty", Box::new(empty));
+        assert_eq!(
+            lists.get_list("ints", ObjectType::Int).is_some(),
+            golden["getList_int_as_INT_notNull"].as_bool().unwrap()
+        );
+        assert_eq!(
+            lists.get_list("ints", ObjectType::String).is_none(),
+            golden["getList_int_as_STRING_null"].as_bool().unwrap()
+        );
+        assert_eq!(
+            lists.get_list("empty", ObjectType::Map).is_some(),
+            golden["getList_empty_as_any_notNull"].as_bool().unwrap()
+        );
+        assert_eq!(
+            lists.get_list("nope", ObjectType::Int).is_none(),
+            golden["getList_missing_null"].as_bool().unwrap()
+        );
+        assert_eq!(
+            lists.get_list_unchecked("ints").is_some(),
+            golden["getListUnchecked_int_notNull"].as_bool().unwrap()
+        );
+
+        let mut create = MockMap::new();
+        let mut created = create.get_or_create_list("k", ObjectType::Int);
+        created.add_int(42);
+        assert_eq!(
+            create.has_key("k"),
+            golden["getOrCreateList_created"].as_bool().unwrap()
+        );
+        assert_eq!(
+            create.get_list_unchecked("k").unwrap().size() as i64,
+            golden["getOrCreateList_size"].as_i64().unwrap()
+        );
+        let mut created_map = create.get_or_create_map("m");
+        created_map.set_int("inner", 7);
+        assert_eq!(
+            create.has_key("m"),
+            golden["getOrCreateMap_created"].as_bool().unwrap()
+        );
+        assert_eq!(
+            create.get_map("m").unwrap().get_int("inner"),
+            golden["getOrCreateMap_inner"].as_i64().unwrap() as i32
+        );
     }
 }

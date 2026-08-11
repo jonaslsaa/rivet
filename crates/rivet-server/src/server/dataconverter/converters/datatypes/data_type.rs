@@ -37,6 +37,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn convert_or_original_matches_paper_golden() {
+        // `dataTypeConvertOrOriginal` from the `dataconverter-foundation`
+        // golden: null-conversion keeps the original; a replacement is kept.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../../../tools/rivet-oracle/fixtures/dataconverter/dataconverter-foundation.json"
+        ))
+        .expect("dataconverter-foundation.json parses");
+        let golden = &fixture["dataTypeConvertOrOriginal"];
+
+        struct NullConverter;
+        impl DataType<String, String> for NullConverter {
+            fn convert(
+                &self,
+                _data: &String,
+                _from_version: i64,
+                _to_version: i64,
+            ) -> Option<String> {
+                None
+            }
+        }
+        assert_eq!(
+            NullConverter.convert_or_original("orig".into(), 1, 2),
+            golden["nullConverterKeepsOriginal"].as_str().unwrap()
+        );
+
+        struct ReplacingConverter;
+        impl DataType<String, String> for ReplacingConverter {
+            fn convert(
+                &self,
+                _data: &String,
+                _from_version: i64,
+                _to_version: i64,
+            ) -> Option<String> {
+                Some("replaced".into())
+            }
+        }
+        assert_eq!(
+            ReplacingConverter.convert_or_original("orig".into(), 1, 2),
+            golden["replacingConverterReplaces"].as_str().unwrap()
+        );
+    }
+
+    #[test]
     fn convert_or_original_keeps_original_when_null() {
         struct NullConverter;
         impl DataType<String, String> for NullConverter {

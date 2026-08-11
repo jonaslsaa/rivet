@@ -35,6 +35,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn no_op_walk_matches_paper_golden() {
+        // `hookWalker.noOpWalkNull` from the `dataconverter-foundation` golden.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../../../tools/rivet-oracle/fixtures/dataconverter/dataconverter-foundation.json"
+        ))
+        .expect("dataconverter-foundation.json parses");
+        let walker: NoOpWalker<&'static str> = NoOpWalker::no_op();
+        assert_eq!(
+            walker.walk(&"d", 1, 2).is_none(),
+            fixture["hookWalker"]["noOpWalkNull"].as_bool().unwrap()
+        );
+    }
+
+    #[test]
     fn no_op_walk_returns_none() {
         let walker: NoOpWalker<&'static str> = NoOpWalker::no_op();
         assert!(walker.walk(&"data", 1, 2).is_none());

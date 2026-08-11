@@ -82,6 +82,10 @@ impl ObjectType {
 mod tests {
     use super::*;
     use crate::server::dataconverter::types::generic::Generic;
+    use crate::server::dataconverter::types::test_support::{
+        MockList, MockMap, foundation_fixture,
+    };
+    use serde_json::Value;
 
     #[test]
     fn number_variants_report_is_number() {
@@ -147,6 +151,75 @@ mod tests {
         );
         // Boolean and BigDecimal are not one of the Java Number subtypes the
         // dispatch recognizes — the Java code falls through to null (None).
+        assert_eq!(ObjectType::get_type(&Generic::Bool(true)), None);
+    }
+
+    /// Differential check of the `getType(Object)` dispatch against the
+    /// committed `dataconverter-foundation` oracle golden (`objectType`
+    /// section). Each fixture key maps to the boxed value the probe passed and
+    /// the recorded variant name; `Boolean`/`BigDecimal` fall through to
+    /// `null` (`None`) and are intentionally absent from the golden.
+    #[test]
+    fn get_type_matches_paper_golden() {
+        /// Java `ObjectType` enum constant name (the golden records
+        /// `type.name()`).
+        fn java_name(ty: ObjectType) -> &'static str {
+            match ty {
+                ObjectType::None => "NONE",
+                ObjectType::Byte => "BYTE",
+                ObjectType::Short => "SHORT",
+                ObjectType::Int => "INT",
+                ObjectType::Long => "LONG",
+                ObjectType::Float => "FLOAT",
+                ObjectType::Double => "DOUBLE",
+                ObjectType::Number => "NUMBER",
+                ObjectType::ByteArray => "BYTE_ARRAY",
+                ObjectType::ShortArray => "SHORT_ARRAY",
+                ObjectType::IntArray => "INT_ARRAY",
+                ObjectType::LongArray => "LONG_ARRAY",
+                ObjectType::List => "LIST",
+                ObjectType::Map => "MAP",
+                ObjectType::String => "STRING",
+                ObjectType::Undefined => "UNDEFINED",
+                ObjectType::Mixed => "MIXED",
+            }
+        }
+        fn build(key: &str) -> Generic {
+            match key {
+                "byte" => Generic::Byte(3),
+                "short" => Generic::Short(3),
+                "int" => Generic::Int(3),
+                "long" => Generic::Long(3),
+                "float" => Generic::Float(3.0),
+                "double" => Generic::Double(3.0),
+                "string" => Generic::Str("abc".into()),
+                "byteArray" => Generic::Bytes(vec![1, 2]),
+                "shortArray" => Generic::Shorts(vec![1, 2]),
+                "intArray" => Generic::Ints(vec![1, 2]),
+                "longArray" => Generic::Longs(vec![1, 2]),
+                "map" => Generic::Map(Box::new(MockMap::new())),
+                "list" => Generic::List(Box::new(MockList::new())),
+                other => panic!("unknown fixture key {other}"),
+            }
+        }
+
+        let golden: &Value = &foundation_fixture()["objectType"];
+        for (key, value) in golden.as_object().unwrap() {
+            if key == "null_npe" {
+                // `ObjectType.getType(null)` throws NPE in Java; ported as a
+                // panic in Rust (no null `Generic`). Recorded, not exercised.
+                assert!(value.as_bool().unwrap());
+                continue;
+            }
+            let expected = ObjectType::get_type(&build(key)).expect("golden key has a variant");
+            assert_eq!(
+                java_name(expected),
+                value.as_str().unwrap(),
+                "objectType.{key}"
+            );
+        }
+        // Boolean has no ObjectType (absent from the golden): it falls through
+        // to `None`, matching Java's null.
         assert_eq!(ObjectType::get_type(&Generic::Bool(true)), None);
     }
 }
