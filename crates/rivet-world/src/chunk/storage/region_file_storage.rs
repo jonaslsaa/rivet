@@ -186,12 +186,12 @@ impl RegionFileStorage {
                 let mut out = DataOutputStream::new(&mut writer);
                 nbt_io::write(&value, &mut out)?;
             }
-            let mut buffer = writer.finish()?;
             // Paper calls `region.setOversized(x, z, false)` between the NBT
-            // write and `output.close()`: clearing any legacy Aikar oversized
-            // flag/supplement so a stale supplement never merges into a freshly
-            // rewritten chunk on a later `read`.
+            // write and `output.close()`: clear any legacy Aikar oversized
+            // flag/supplement before finalizing so a stale supplement never
+            // merges into a freshly rewritten chunk on a later `read`.
             region.set_oversized(pos.x(), pos.z(), false)?;
+            let mut buffer = writer.finish()?;
             buffer.close(region)
         })();
 
