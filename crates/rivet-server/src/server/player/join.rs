@@ -210,7 +210,7 @@ pub fn place_new_player(
     connections: &mut ConnectionRegistry,
     connection_id: ConnectionId,
     player: &ServerPlayer,
-    level: &ServerLevel,
+    level: &mut ServerLevel,
     join: &JoinConfig,
     requested_view_distance: Option<i32>,
     loader: &mut PlayerChunkLoader,

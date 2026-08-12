@@ -51,10 +51,10 @@ fn test_config() -> ServerConfig {
 
 /// Build the ordered M1 send-set frames at the fixture's compression threshold.
 fn send_set_frames() -> Vec<Bytes> {
-    let world = ServerLevel::new(ServerLevelConfig::default());
+    let mut world = ServerLevel::new(ServerLevelConfig::default());
     let mut loader = PlayerChunkLoader::new(world.view().center());
     let packets = loader
-        .add_and_send_chunks(&world, None)
+        .add_and_send_chunks(&mut world, None)
         .expect("build the M1 send set");
     packets
         .iter()
@@ -179,9 +179,9 @@ async fn chunk_send_set_reaches_a_real_tcp_client_in_order() {
 /// a client with no compression stage decodes them.
 #[tokio::test]
 async fn chunk_send_set_tcp_without_compression_uses_plain_frames() {
-    let world = ServerLevel::new(ServerLevelConfig::default());
+    let mut world = ServerLevel::new(ServerLevelConfig::default());
     let mut loader = PlayerChunkLoader::new(world.view().center());
-    let packets = loader.add_and_send_chunks(&world, None).unwrap();
+    let packets = loader.add_and_send_chunks(&mut world, None).unwrap();
     let frames: Vec<Bytes> = packets
         .iter()
         .map(|p| encode_play_frame(p, -1).unwrap())
