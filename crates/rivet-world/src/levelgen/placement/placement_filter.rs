@@ -41,16 +41,16 @@ pub trait PlacementFilter: Debug + Send + Sync + 'static {
 /// `type_id` delegates to the `PlacementFilter` method to avoid recursing
 /// through the blanket `PlacementModifier` impl.
 impl<F: PlacementFilter + ?Sized> PlacementModifier for F {
-    fn get_positions<R: RandomSource>(
-        &self,
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         context: &PlacementContext,
         random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
         if self.should_place(context, random, origin) {
-            vec![*origin]
+            Box::new(std::iter::once(*origin))
         } else {
-            Vec::new()
+            Box::new(std::iter::empty())
         }
     }
 
@@ -130,7 +130,7 @@ mod tests {
         let generator = NoopGenerator;
         let context = PlacementContext::new(&mut level, &generator, None);
         let origin = BlockPos::new(1, 2, 3);
-        PlacementModifier::get_positions(filter, &context, random, &origin)
+        PlacementModifier::get_positions(filter, &context, random, &origin).collect()
     }
 
     #[test]
