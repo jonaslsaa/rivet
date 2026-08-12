@@ -3327,17 +3327,11 @@ fn compare_generated_content(manifest: &Value, transcript: &Value) -> Result<(),
         }
         // The manifest stores surface/bedrock/below_feet as 16×16 arrays
         // indexed row-major `z*16+x`. The client samples the chunk center
-        // offset (8,8), so the index is `8*16+8 = 136`.
-        const CENTER: usize = 8 * 16 + 8;
-        let manifest_surface = fingerprint["surface"][CENTER]
-            .as_str()
-            .unwrap_or("minecraft:air");
-        let manifest_bedrock = fingerprint["bedrock"][CENTER]
-            .as_str()
-            .unwrap_or("minecraft:air");
-        let manifest_below = fingerprint["below_feet"][CENTER]
-            .as_str()
-            .unwrap_or("minecraft:air");
+        // offset (8,8), so the index is `8*16+8 = 136`. The helper requires
+        // every array to contain that center entry — a short/missing array is a
+        // malformed manifest refused as a Gate, never a vacuous air-vs-air pass.
+        let (manifest_surface, manifest_bedrock, manifest_below) =
+            manifest_center_blocks(fingerprint, &key, "generated-expected")?;
         let observed_surface = canonicalize_block_name(sample["surface"].as_str());
         let observed_bedrock = canonicalize_block_name(sample["bedrock"].as_str());
         let observed_below = canonicalize_block_name(sample["below_feet"].as_str());
@@ -3470,6 +3464,46 @@ fn canonicalize_block_name(name: Option<&str>) -> String {
     }
 }
 
+/// The index of the chunk-center sample point in the manifest's 16×16
+/// row-major `surface`/`bedrock`/`below_feet` arrays (`z*16+x` at the client's
+/// (8,8) center offset). Shared by the loaded and generated comparators so the
+/// two ground-truth contracts agree on where the per-coordinate content is
+/// sampled.
+const MANIFEST_CENTER: usize = 8 * 16 + 8;
+
+/// Read the three ground-truth block names at the chunk-center sample point
+/// from a fingerprint, requiring every array to actually contain the CENTER
+/// entry. A missing or short array would otherwise default to air and could
+/// pass vacuously air-vs-air against an unloaded client column — a malformed
+/// manifest is refused honestly as a Gate (like a missing Status), never
+/// compared against nothing.
+fn manifest_center_blocks(
+    fingerprint: &Value,
+    key: &str,
+    label: &str,
+) -> Result<(String, String, String), RunnerError> {
+    let read = |column: &str| -> Result<String, RunnerError> {
+        let array = fingerprint[column].as_array().ok_or_else(|| {
+            RunnerError::Gate(format!(
+                "{label} manifest chunk {key} has no {column} array — refusing PASS on a \
+                 malformed manifest (the sampled chunk must carry ground-truth content at the \
+                 center point)"
+            ))
+        })?;
+        let entry = array
+            .get(MANIFEST_CENTER)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                RunnerError::Gate(format!(
+                    "{label} manifest chunk {key} {column} array has no center entry (index \
+                 {MANIFEST_CENTER}) — refusing PASS on a malformed manifest"
+                ))
+            })?;
+        Ok(entry.to_owned())
+    };
+    Ok((read("surface")?, read("bedrock")?, read("below_feet")?))
+}
+
 /// Compare the client's observed per-coordinate block content against the
 /// ground-truth manifest. The `loaded` record's `samples` carry
 /// `surface`/`bedrock`/`below_feet` block names at world coordinates; the
@@ -3551,17 +3585,11 @@ fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), Ru
         }
         // The manifest stores surface/bedrock/below_feet as 16×16 arrays
         // indexed row-major `z*16+x`. The client samples the chunk center
-        // offset (8,8), so the index is `8*16+8 = 136`.
-        const CENTER: usize = 8 * 16 + 8;
-        let manifest_surface = fingerprint["surface"][CENTER]
-            .as_str()
-            .unwrap_or("minecraft:air");
-        let manifest_bedrock = fingerprint["bedrock"][CENTER]
-            .as_str()
-            .unwrap_or("minecraft:air");
-        let manifest_below = fingerprint["below_feet"][CENTER]
-            .as_str()
-            .unwrap_or("minecraft:air");
+        // offset (8,8), so the index is `8*16+8 = 136`. The helper requires
+        // every array to contain that center entry — a short/missing array is a
+        // malformed manifest refused as a Gate, never a vacuous air-vs-air pass.
+        let (manifest_surface, manifest_bedrock, manifest_below) =
+            manifest_center_blocks(fingerprint, &key, "loaded-world")?;
         // Canonicalize the observed names into the manifest's namespace: the
         // client emits azalea bare ids (`grass_block`) which must compare equal
         // to the manifest's namespaced names (`minecraft:grass_block`).
@@ -4220,6 +4248,35 @@ mod tests {
                 );
             }
             other => panic!("expected an Unverified classification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_generated_content_refuses_a_short_surface_array() {
+        // A malformed manifest whose surface array is too short to contain the
+        // chunk-center entry must be refused as a Gate — never defaulted to
+        // air, which would let an unloaded client column pass vacuously
+        // air-vs-air (the finding: no explicit 'array must contain CENTER'
+        // validation on the manifest).
+        let mut manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        // Truncate the surface array below the center index (137).
+        manifest["chunks"]["0,0"]["surface"] = json!(vec!["minecraft:air".to_owned(); 136]);
+        let transcript = generated_transcript_with(matching_sample(0, 0));
+        match compare_generated_content(&manifest, &transcript) {
+            Err(RunnerError::Gate(message)) => {
+                assert!(
+                    message.contains("surface") && message.contains("malformed"),
+                    "must name the truncated column and the malformed-manifest refusal, got \
+                     {message}"
+                );
+            }
+            other => panic!("expected a Gate refusal for a short array, got {other:?}"),
         }
     }
 
