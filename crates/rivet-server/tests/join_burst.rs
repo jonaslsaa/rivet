@@ -380,7 +380,7 @@ fn burst_order() -> Vec<u32> {
 /// the ordered `(packet_id, raw_packet_body)` pairs from the outbound channel.
 /// Each frame is decompressed/deframed by stripping the VarInt21 length prefix
 /// and the compression prefix (below-threshold frames are uncompressed).
-fn run_burst_with(world: &ServerLevel, config: &JoinConfig) -> Vec<(u32, Vec<u8>)> {
+fn run_burst_with(world: &mut ServerLevel, config: &JoinConfig) -> Vec<(u32, Vec<u8>)> {
     run_burst_with_requested(world, config, None)
 }
 
@@ -389,7 +389,7 @@ fn run_burst_with(world: &ServerLevel, config: &JoinConfig) -> Vec<(u32, Vec<u8>
 /// `PlayerChunkLoader` auto-config path (no client request); `Some(n)` caps at
 /// `load - 1`.
 fn run_burst_with_requested(
-    world: &ServerLevel,
+    world: &mut ServerLevel,
     config: &JoinConfig,
     requested_view_distance: Option<i32>,
 ) -> Vec<(u32, Vec<u8>)> {
@@ -429,7 +429,7 @@ fn run_burst_with_requested(
 
 /// Run the burst against the default M1 world/config.
 fn run_burst() -> Vec<(u32, Vec<u8>)> {
-    run_burst_with(&world(), &join_config())
+    run_burst_with(&mut world(), &join_config())
 }
 
 #[test]
@@ -576,11 +576,11 @@ fn login_uses_simulation_distance_not_view_distance() {
         simulation_distance: 3,
         ..ServerLevelConfig::default()
     };
-    let world = ServerLevel::new(config);
+    let mut world = ServerLevel::new(config);
     assert_eq!(world.view().view_distance(), 4);
     assert_eq!(world.get_simulation_distance(), 3);
 
-    let packets = run_burst_with(&world, &join_config());
+    let packets = run_burst_with(&mut world, &join_config());
     let login_body = packets
         .iter()
         .find(|(id, _)| *id == ids::LOGIN)
@@ -600,7 +600,7 @@ fn login_encodes_non_default_config_booleans_distinctly() {
     config.reduced_debug_info = true;
     config.do_limited_crafting = true;
 
-    let packets = run_burst_with(&world(), &config);
+    let packets = run_burst_with(&mut world(), &config);
     let login_body = packets
         .iter()
         .find(|(id, _)| *id == ids::LOGIN)
@@ -676,7 +676,7 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
     // Build the loop with the join burst as the sole tickable.
     let sender = std::sync::Mutex::new(play_sender());
     let player = probe_player();
-    let level = world();
+    let mut level = world();
     let config = join_config();
     let (lifecycle_tx, lifecycle_rx) = tokio::sync::mpsc::channel(16);
     let shutdown = Arc::new(Shutdown::new());
@@ -697,7 +697,7 @@ fn join_burst_integration_tick_loop_sends_ordered_frames() {
                 ctx.connections,
                 PROBE_ID,
                 &player,
-                &level,
+                &mut level,
                 &config,
                 None,
                 &mut loader,

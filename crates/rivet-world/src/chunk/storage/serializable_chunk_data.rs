@@ -25,9 +25,11 @@
 //! since Java's fastutil hash map iterates nondeterministically). Malformed
 //! keys, wrong-type payloads, and construction-time out-of-range references are
 //! surfaced as typed [`ChunkParseDiagnostic`]s and discarded, never silently
-//! ignored. Non-empty `starts` stays behind `UnsupportedStructures` (the
-//! `StructureStart` load path is not ported); a References-only structures
-//! compound is now fully carryable.
+//! ignored. Non-empty `starts` is not fabricated or parsed (the `StructureStart`
+//! load path is not ported, #369): the raw `structures.starts` compound is
+//! carried verbatim off the parse result ([`SerializableChunkData::structure_starts_compound`])
+//! for the future installer — the same owned-carry semantics as the stored
+//! ticks — so a starts-bearing FULL chunk reconstructs and the data is not lost.
 //!
 //! This also carries the ordered serialized block-entity read-and-reconstruct
 //! surface (#337): `parse_block_entities` retains the raw compound tags and
@@ -351,8 +353,6 @@ pub enum SerializableChunkDataError {
     UnsupportedBlendingData,
     #[error("non-empty entities require post-load entity reconstruction")]
     UnsupportedEntities,
-    #[error("non-empty structures require structure reconstruction")]
-    UnsupportedStructures,
     #[error("compound ChunkBukkitValues requires an owned PDC carrier")]
     UnsupportedPersistentData,
     #[error("PostProcessing section {index} is outside the {section_count}-section chunk")]
@@ -565,12 +565,14 @@ impl SerializableChunkData {
     pub fn structure_data(&self) -> &CompoundTag {
         &self.structure_data
     }
-    /// Whether the chunk carries `structures.starts` entries — the one
-    /// structures surface the #519 full-chunk construction cannot yet carry.
-    /// References-only and empty structures containers decode into carried
-    /// [`StructureReference`]s and construct fine (#519).
-    pub fn has_unsupported_structure_starts(&self) -> bool {
-        structures_starts_are_non_empty(&self.structure_data)
+    /// The raw `structures.starts` compound, cloned, when the chunk carries
+    /// non-empty structure starts (the `StructureStart` load path is not ported,
+    /// #369). References-only and empty structures containers return `None`. The
+    /// compound is preserved verbatim as owned carry state — never fabricated,
+    /// never parsed into a `StructureStart` — for the future #369 installer to
+    /// consume, mirroring the stored-ticks carry semantics.
+    pub fn structure_starts_compound(&self) -> Option<CompoundTag> {
+        structures_starts_compound(&self.structure_data)
     }
     /// The decoded `structures.References` entries, in deterministic
     /// key-insertion order (a stable carry, not a Paper-observable order). The
@@ -677,12 +679,10 @@ impl SerializableChunkData {
             return Err(SerializableChunkDataError::UnsupportedPersistentData);
         }
         // `structures.References` decodes into carried [`StructureReference`]s
-        // and no longer blocks construction. Non-empty `starts` remains an
-        // unsupported surface (the `StructureStart` load path is not ported),
-        // so a starts-bearing structures compound still fails here.
-        if self.has_unsupported_structure_starts() {
-            return Err(SerializableChunkDataError::UnsupportedStructures);
-        }
+        // and no longer blocks construction. Non-empty `starts` is carried
+        // verbatim via `structure_starts_compound()` (the `StructureStart` load
+        // path is not ported, #369), so a starts-bearing structures compound
+        // reconstructs with the data preserved rather than blocking.
         if let Some(index) =
             self.post_processing_sections
                 .iter()
@@ -732,13 +732,14 @@ fn compound_entries(list: Option<&ListTag>) -> Vec<CompoundTag> {
 /// Whether the `structures.starts` compound carries any entries. References
 /// alone no longer blocks FULL construction (#369); starts remain unsupported
 /// until the `StructureStart` load path is ported.
-fn structures_starts_are_non_empty(structures: &CompoundTag) -> bool {
+fn structures_starts_compound(structures: &CompoundTag) -> Option<CompoundTag> {
     // `get_compound` borrows (Paper's `getCompoundOrEmpty` returns a live
-    // reference); the absent case is just an empty compound, so there is no
-    // need to clone the starts compound just to test emptiness.
+    // reference); only a non-empty starts compound is carried (an absent or
+    // empty one is indistinguishable from "no starts" and carries nothing).
     structures
         .get_compound("starts")
-        .is_some_and(|starts| !starts.is_empty())
+        .filter(|starts| !starts.is_empty())
+        .cloned()
 }
 
 /// Decode `structures.References` into ordered typed entries, mirroring
@@ -2209,13 +2210,16 @@ mod tests {
         structures.put("starts".into(), Tag::Compound(starts));
         let mut chunk = top_level("minecraft:full");
         chunk.put("structures".into(), Tag::Compound(structures));
-        assert_eq!(
-            SerializableChunkData::parse(height, &chunk)
-                .unwrap()
-                .unwrap()
-                .validate_full_for_reconstruction(),
-            Err(SerializableChunkDataError::UnsupportedStructures)
-        );
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        // A starts-bearing chunk reconstructs with the starts carried verbatim
+        // (the `StructureStart` load path is not ported, #369) — it no longer
+        // blocks the FULL boundary.
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
+        let mut expected_starts = CompoundTag::new();
+        expected_starts.put_int("minecraft:village", 1);
+        assert_eq!(parsed.structure_starts_compound(), Some(expected_starts));
 
         for (field, tick) in [
             ("neighbor_block_ticks", block_tick(0, 0)),
@@ -3009,22 +3013,23 @@ mod tests {
             assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         }
 
-        // A non-empty `starts` compound is the one structures surface still
-        // unsupported: structure starts (StructureStart) are not ported, so the
-        // FULL boundary stays.
+        // A non-empty `starts` compound is carried verbatim off the parse
+        // (structure starts / `StructureStart` are not ported, #369): the FULL
+        // boundary no longer rejects it, and the compound survives for the
+        // future installer.
         let mut starts = CompoundTag::new();
         starts.put_string("minecraft:village", "pending");
         let mut structures = CompoundTag::new();
         structures.put("starts".into(), Tag::Compound(starts));
         let mut chunk = top_level("minecraft:full");
         chunk.put("structures".into(), Tag::Compound(structures));
-        assert_eq!(
-            SerializableChunkData::parse(height, &chunk)
-                .unwrap()
-                .unwrap()
-                .validate_full_for_reconstruction(),
-            Err(SerializableChunkDataError::UnsupportedStructures)
-        );
+        let parsed = SerializableChunkData::parse(height, &chunk)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
+        let mut expected_starts = CompoundTag::new();
+        expected_starts.put_string("minecraft:village", "pending");
+        assert_eq!(parsed.structure_starts_compound(), Some(expected_starts));
     }
 
     /// A malformed `structures.References` key is dropped with a typed
