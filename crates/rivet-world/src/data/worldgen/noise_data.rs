@@ -218,8 +218,11 @@ mod tests {
     /// Drive the full bootstrap into a recording context and return the
     /// recorded registrations.
     fn run_bootstrap() -> Vec<RecordedRegistration<NoiseParameters>> {
-        let mut context =
-            RecordingContext::<NoiseParameters>::new(RegistryId(7), RegistryAccess::empty());
+        let mut context = RecordingContext::<NoiseParameters>::new(
+            RegistryId(7),
+            (*crate::levelgen::noise::registry_keys::NOISE).clone(),
+            RegistryAccess::empty(),
+        );
         bootstrap(&mut context);
         context.registrations().iter().cloned().collect()
     }
