@@ -11,6 +11,7 @@ use azalea::WalkDirection;
 use azalea::app::{App, Plugin, Update};
 use azalea::attack::handle_attack_queued;
 use azalea::core::game_type::GameMode;
+use azalea::core::position::BlockPos;
 use azalea::core::tick::GameTick;
 use azalea::ecs::message::MessageReader;
 use azalea::ecs::observer::On;
@@ -18,6 +19,7 @@ use azalea::ecs::prelude::{Query, Res, Resource};
 use azalea::ecs::schedule::IntoScheduleConfigs;
 use azalea::entity::{EntityGeometryUpdateSystems, LastSentPosition, Physics};
 use azalea::join::{ConnectionFailedEvent, poll_create_connection_task};
+use azalea::local_player::WorldHolder;
 use azalea::movement::{
     send_player_input_packet, send_position, send_sprinting_if_needed, update_pose,
 };
@@ -114,6 +116,16 @@ enum Mode {
     /// (the translatable key) is emitted by the `disconnect` handler, proving
     /// the real client decodes Rivet's reason (the `kick` scenario, issue #86).
     Kick,
+    /// Join a server that boots a real loaded world (`--level <copy>`, issue
+    /// #374), wait for chunk quiescence, then sample the genuine per-coordinate
+    /// block content the server served (surface/bedrock/under-feet names from
+    /// the client's own loaded `ChunkStorage`) and emit the `loaded` record.
+    /// The runner compares this against the read-only ground-truth manifest
+    /// (`rivet-oracle extract-world`); a server that merely echoes repeated
+    /// superflat bytes cannot match it. The runner classifies honestly
+    /// (UNVERIFIED for non-FULL chunks and uncarried #369 capability flags)
+    /// rather than reporting a fabricated PASS.
+    Loaded,
 }
 
 impl Mode {
@@ -123,6 +135,7 @@ impl Mode {
             Mode::Move => "move",
             Mode::Dwell => "dwell",
             Mode::Kick => "kick",
+            Mode::Loaded => "loaded",
         }
     }
 
@@ -132,6 +145,7 @@ impl Mode {
             "move" => Some(Mode::Move),
             "dwell" => Some(Mode::Dwell),
             "kick" => Some(Mode::Kick),
+            "loaded" => Some(Mode::Loaded),
             _ => None,
         }
     }
@@ -172,7 +186,9 @@ impl Args {
                 "--mode" => {
                     let value = next_value(&mut args, "--mode")?;
                     mode = Mode::parse(&value).ok_or_else(|| {
-                        format!("invalid --mode value: {value} (expected join|move|dwell|kick)")
+                        format!(
+                            "invalid --mode value: {value} (expected join|move|dwell|kick|loaded)"
+                        )
                     })?;
                 }
                 "--dwell-seconds" => {
@@ -192,8 +208,8 @@ impl Args {
         // rather than ignored.
         if dwell_explicit && mode != Mode::Dwell {
             return Err(
-                "--dwell-seconds only applies to --mode dwell; join/move/kick never dwell, so an \
-                 explicit value would be a silent no-op — drop it"
+                "--dwell-seconds only applies to --mode dwell; join/move/kick/loaded never dwell, \
+                 so an explicit value would be a silent no-op — drop it"
                     .to_owned(),
             );
         }
@@ -249,7 +265,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: rivet-client [--mode join|move|dwell|kick] [--address HOST:PORT] [--username NAME] \
+        "Usage: rivet-client [--mode join|move|dwell|kick|loaded] [--address HOST:PORT] [--username NAME] \
          [--timeout-seconds N] [--dwell-seconds N]\n\
          Defaults: --mode {DEFAULT_MODE} --address {DEFAULT_ADDRESS} --username {DEFAULT_USERNAME} \
          --timeout-seconds {DEFAULT_TIMEOUT_SECONDS} --dwell-seconds {DEFAULT_DWELL_SECONDS}"
@@ -637,17 +653,18 @@ fn describe_inventory(bot: &Client) -> Value {
 
 /// Emit the canonical `joined` record — the normalized observable outcome —
 /// once the world state has settled, then end the client.
-async fn observe_and_emit(bot: Client, state: State) {
-    let chunks = Arc::clone(&state.chunks);
+/// Wait for the client's received-chunk stream to quiesce: no new chunk for
+/// `QUIET_PERIOD`, at least `MIN_OBSERVATION` after spawn, and never longer
+/// than `OBSERVATION_TIMEOUT`. The captured chunk set is then the full view
+/// square the server sent (its count is deterministic; its coordinates track
+/// the player's spawn chunk), not a racy prefix. An empty set never quiesces —
+/// a stalled or regressed chunk stream surfaces as `chunk_count: 0`, not as
+/// stability. Shared by the join (`observe_and_emit`) and loaded
+/// (`loaded_and_emit`) modes.
+async fn wait_chunk_quiescence(chunks: &Arc<Mutex<BTreeSet<(i32, i32)>>>) {
     let started = Instant::now();
     let mut last_size = 0usize;
     let mut last_change = started;
-
-    // Wait for the chunk stream to quiesce: no new chunk for QUIET_PERIOD, at
-    // least MIN_OBSERVATION after spawn, and never longer than
-    // OBSERVATION_TIMEOUT. The captured chunk set is the full view square the
-    // server sent (its count is deterministic; its coordinates track the
-    // player's spawn chunk), not a racy prefix.
     loop {
         let size = chunks.lock().expect("chunks lock poisoned").len();
         if size != last_size {
@@ -668,6 +685,12 @@ async fn observe_and_emit(bot: Client, state: State) {
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+async fn observe_and_emit(bot: Client, state: State) {
+    let chunks = Arc::clone(&state.chunks);
+    let started = Instant::now();
+    wait_chunk_quiescence(&chunks).await;
 
     let position = bot.position().ok().map(round_position);
     let world = bot
@@ -721,6 +744,174 @@ async fn observe_and_emit(bot: Client, state: State) {
     }));
 
     hard_exit(0);
+}
+
+/// The loaded-world sampling contract (issue #374): the client waits for chunk
+/// quiescence, then reads the *genuine per-coordinate block content* the
+/// server served, from its own loaded `ChunkStorage`, at fixed world
+/// coordinates near the spawn chunk.
+///
+/// The sampled Y levels mirror the read-only ground-truth extractor
+/// (`rivet-oracle extract-world`): the surface (highest non-air block per
+/// column), `y=-60` (the copied world's bedrock slab) and `y=-61` (one block
+/// below the bedrock — the dense stone body a superflat floor does not have).
+/// A server that merely echoes repeated superflat bytes for every chunk cannot
+/// match a genuine terrain chunk's distinct block set at these coordinates.
+///
+/// The record is deliberately small and canonical: the runner compares
+/// `samples` against the manifest and refuses PASS when any #369 capability
+/// flag is present. After sampling, the client takes a short bounded forward
+/// walk and reports its `before`/`after` position as the walk evidence (the
+/// per-coordinate grid, not the walk delta, is the load-bearing content
+/// check). Non-FULL chunks and uncarried #369 capability flags are classified
+/// UNVERIFIED rather than a fabricated PASS.
+async fn loaded_and_emit(bot: Client, state: State) {
+    let chunks = Arc::clone(&state.chunks);
+    let started = Instant::now();
+    wait_chunk_quiescence(&chunks).await;
+
+    let position = bot.position().ok().map(round_position);
+    // The spawn chunk — the deterministic center of the view square the
+    // server sent. Everything below samples near it, where the loaded world
+    // is guaranteed.
+    let spawn_pos = state
+        .spawn_origin
+        .lock()
+        .expect("spawn origin lock poisoned")
+        .map(|p| azalea::core::position::BlockPos {
+            x: p.x.floor() as i32,
+            y: p.y.floor() as i32,
+            z: p.z.floor() as i32,
+        });
+    let spawn_chunk = spawn_pos.map(|p| (p.x.div_euclid(16), p.z.div_euclid(16)));
+
+    // Sample the block content the server served. `sample_cell` walks the
+    // loaded world downward from the world ceiling, so the runner compares
+    // genuine per-coordinate content. The `WorldHolder` read guard is scoped
+    // and dropped before the walk below, so the future stays `Send`.
+    let samples: Vec<Value> = {
+        let holder = bot
+            .component::<WorldHolder>()
+            .map_err(|_| "client has no loaded WorldHolder".to_owned())
+            .expect("loaded mode requires a joined client");
+        match (spawn_chunk, position.as_ref()) {
+            (Some((cx, cz)), Some(_)) => {
+                let shared = holder.shared.read();
+                let mut out = Vec::new();
+                for dx in -2..=2i32 {
+                    for dz in -2..=2i32 {
+                        let chunk_x = cx + dx;
+                        let chunk_z = cz + dz;
+                        // World-anchored sample point: chunk origin + center
+                        // offset, so the manifest's per-coordinate surface
+                        // matches.
+                        let origin_x = chunk_x * 16 + 8;
+                        let origin_z = chunk_z * 16 + 8;
+                        let (surface, bedrock, below_feet) =
+                            sample_cell(&shared, origin_x, origin_z);
+                        out.push(json!({
+                            "chunk_x": chunk_x,
+                            "chunk_z": chunk_z,
+                            "sample_x": origin_x,
+                            "sample_z": origin_z,
+                            "surface": surface,
+                            "bedrock": bedrock,
+                            "below_feet": below_feet,
+                        }));
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    };
+
+    // A bounded forward walk proves the loaded client can move in the served
+    // world (the task's join/dwell/walk evidence). The position delta is
+    // recorded, not asserted — the per-coordinate sample grid is the
+    // load-bearing content check.
+    let walk = loaded_walk(&bot).await;
+
+    emit(json!({
+        "event": "loaded",
+        "position": position,
+        "spawn_chunk": spawn_chunk.map(|(x, z)| [x, z]),
+        "chunk_count": chunks.lock().expect("chunks lock poisoned").len(),
+        "samples": samples,
+        "walk": walk,
+        "observation_ms": started.elapsed().as_millis() as u64,
+    }));
+
+    hard_exit(0);
+}
+
+/// How long the loaded-mode walk runs (wall-clock): long enough to move at
+/// least one block in the served world, short enough to stay well inside the
+/// client timeout.
+const LOADED_WALK: Duration = Duration::from_millis(1500);
+
+/// Drive a short bounded forward walk (yaw -90 faces +x) and report the
+/// position before and after as the walk evidence. A server that accepted the
+/// client but served a frozen world yields `before == after`; the runner
+/// records it honestly rather than fabricating movement.
+async fn loaded_walk(bot: &Client) -> Value {
+    let before = bot.position().ok().map(round_position);
+    let _ = bot.set_direction(-90.0, 0.0);
+    bot.walk(WalkDirection::Forward);
+    tokio::time::sleep(LOADED_WALK).await;
+    bot.walk(WalkDirection::None);
+    let after = bot.position().ok().map(round_position);
+    json!({ "before": before, "after": after })
+}
+
+/// The overworld world-ceiling Y (the copied world is full-height 384).
+const WORLD_CEILING_Y: i32 = 320;
+/// The bedrock-slab sample Y (mirrors the extractor's `BEDROCK_Y`).
+const LOADED_BEDROCK_Y: i32 = -60;
+/// One block below the bedrock slab (mirrors the extractor's
+/// `BELOW_BEDROCK_Y`).
+const LOADED_BELOW_BEDROCK_Y: i32 = -61;
+
+/// Canonicalize an azalea block id for the transcript: azalea's
+/// `BlockTrait::id()` returns the bare registry name (`grass_block`), while the
+/// ground-truth manifest stores namespaced names (`minecraft:grass_block`).
+/// The loaded transcript must match the manifest's namespace so the runner's
+/// per-coordinate comparison is not defeated by a representation mismatch.
+fn namespaced_block_name(id: &str) -> String {
+    if id.contains(':') {
+        id.to_owned()
+    } else {
+        format!("minecraft:{id}")
+    }
+}
+
+/// Sample one world column at `(x, z)`: the surface block (highest non-air),
+/// the block at the bedrock slab, and the block below it. `world` is the
+/// client's loaded `World` (its `ChunkStorage`). Returns `minecraft:air` for
+/// any coordinate the client has not loaded — the runner treats a missing
+/// chunk as a FAIL (the server did not serve the loaded world), never as a
+/// vacuous pass. Every emitted name is namespaced (see
+/// [`namespaced_block_name`]).
+fn sample_cell(world: &azalea::world::World, x: i32, z: i32) -> (String, String, String) {
+    let block_at = |y: i32| {
+        world
+            .get_block_state(BlockPos { x, y, z })
+            .map(|s| namespaced_block_name(s.to_trait().id()))
+            .unwrap_or_else(|| "minecraft:air".to_owned())
+    };
+    let mut surface = "minecraft:air".to_owned();
+    for y in (LOADED_BELOW_BEDROCK_Y..=WORLD_CEILING_Y).rev() {
+        let state = world.get_block_state(BlockPos { x, y, z });
+        if let Some(s) = state
+            && !s.is_air()
+        {
+            surface = namespaced_block_name(s.to_trait().id());
+            break;
+        }
+    }
+    let bedrock = block_at(LOADED_BEDROCK_Y);
+    let below_feet = block_at(LOADED_BELOW_BEDROCK_Y);
+    (surface, bedrock, below_feet)
 }
 
 /// Emit the canonical `moved` record — the move scenario's observable outcome —
@@ -1110,6 +1301,7 @@ async fn handle(bot: Client, event: Event, state: State) {
                 Mode::Join => runtime.spawn(observe_and_emit(bot, state)),
                 Mode::Dwell => runtime.spawn(dwell_and_emit(bot, state)),
                 Mode::Kick => runtime.spawn(kick_and_wait(bot, state)),
+                Mode::Loaded => runtime.spawn(loaded_and_emit(bot, state)),
             };
         }
         // Move-mode packet observables. Recorded alongside the per-tick samples
@@ -1370,6 +1562,24 @@ mod tests {
 
     fn parse(v: &[&str]) -> Result<Args, String> {
         Args::parse_from(v.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn loaded_mode_parses_and_rejects_silent_dwell() {
+        // `loaded` is a first-class client mode: it joins, waits for chunk
+        // quiescence, samples the genuine block content the server served, and
+        // emits the `loaded` record for the #374 runner.
+        let a = parse(&["--mode", "loaded"]).unwrap();
+        assert_eq!(a.mode, Mode::Loaded);
+        assert_eq!(a.mode.as_str(), "loaded");
+
+        // --dwell-seconds is dwell-mode-only; an explicit value on loaded is a
+        // silent no-op and must be rejected (same policy as join/move).
+        let err = parse(&["--mode", "loaded", "--dwell-seconds", "41"]).unwrap_err();
+        assert!(
+            err.contains("--dwell-seconds") && err.contains("silent no-op"),
+            "loaded must reject --dwell-seconds as a silent no-op, got {err}"
+        );
     }
 
     #[test]

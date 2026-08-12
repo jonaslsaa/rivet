@@ -497,8 +497,9 @@ pub fn classify_probe(reached_ready: bool, log: &str) -> ProbeVerdict {
         return ProbeVerdict::Present;
     }
     // The server rejected the world-path interface: it exited before READY and
-    // its log names the argument as unknown (`config_from_args` panics with
-    // `unknown argument "--level" (expected --host/--port)`).
+    // its log names `--level` as unknown. Since #363 rivet-server accepts the
+    // argument, so this is a defensive classification for a server build that
+    // still rejects it.
     let evidence = log
         .lines()
         .find(|l| l.contains("unknown argument") && l.contains(WORLD_PATH_ARG))
@@ -602,10 +603,10 @@ pub fn boot(
             ])
             .current_dir(run_dir);
             // The world-path launch interface (`--level <path>`, issue #316):
-            // the narrow seam the loaded-world acceptance probe drives. Today
-            // rivet-server rejects the arg (no world-loading capability yet) and
-            // the probe classifies that rejection; when the capability lands,
-            // the same arg boots the server against the copied world.
+            // the narrow seam the loaded-world acceptance probe drives. Since
+            // #363, rivet-server accepts the arg and boots against the copied
+            // world; a rejection is still surfaced honestly as UNVERIFIED by
+            // the probe classifier.
             if let Some(world) = world_path {
                 c.arg(WORLD_PATH_ARG).arg(world);
             }
@@ -719,7 +720,8 @@ mod tests {
         fs::write(&artifact, b"#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&artifact, fs::Permissions::from_mode(0o644)).unwrap();
         // If pre-spawn failures were incorrectly classified from old evidence,
-        // this would look like the expected absent --level capability.
+        // this would look like a --level rejection (Absent) instead of a hard
+        // spawn failure.
         fs::write(&log, "unknown argument \"--level\"\n").unwrap();
 
         let error = boot(
