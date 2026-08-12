@@ -327,6 +327,138 @@ where
     )
 }
 
+/// `Codec.optionalFieldOf(String, F default)` — the with-default form of a
+/// NON-lenient optional field.
+///
+/// Java (DFU 10.0.21, verified from the pinned jar's bytecode):
+/// `optionalField(name, codec, false).xmap(o -> o.orElse(default), a ->
+/// Objects.equals(a, default) ? Optional.empty() : Optional.of(a))`. Unlike
+/// [`lenient_optional_field_of`], a present-but-malformed value is a decode
+/// error (the optional field is NOT lenient). The field value defaults on
+/// decode when absent, and is OMITTED on encode when value-equal to `default`.
+pub fn optional_field_of<F, Ops: DynamicOps + 'static>(
+    name: &str,
+    element_codec: Arc<dyn Codec<F, Ops>>,
+    default: F,
+) -> Arc<dyn MapCodec<F, Ops>>
+where
+    F: 'static + Clone + PartialEq + Send + Sync,
+{
+    let inner = optional_field(name.to_string(), element_codec, false);
+    let default_for_decode = default.clone();
+    let default_for_encode = default;
+    map_codec::xmap(
+        inner,
+        Arc::new(move |o: &Option<F>| o.clone().unwrap_or_else(|| default_for_decode.clone())),
+        Arc::new(move |a: &F| {
+            if *a == default_for_encode {
+                None
+            } else {
+                Some(a.clone())
+            }
+        }),
+    )
+}
+
+/// `Double.doubleToLongBits(double)` — the raw bits with every `NaN` bit
+/// pattern canonicalized to `0x7ff8_0000_0000_0000` (the JDK's `Double.equals`
+/// /`hashCode` use `doubleToLongBits`, not the raw bits; `-0.0` keeps its sign
+/// bit).
+fn double_to_long_bits(v: f64) -> u64 {
+    if v.is_nan() {
+        0x7ff8_0000_0000_0000u64
+    } else {
+        v.to_bits()
+    }
+}
+
+/// `Float.floatToIntBits(float)` — the raw bits with every `NaN` bit pattern
+/// canonicalized to `0x7fc0_0000` (the JDK's `Float.equals`/`hashCode` use
+/// `floatToIntBits`, not the raw bits; `-0.0` keeps its sign bit).
+fn float_to_int_bits(v: f32) -> u32 {
+    if v.is_nan() {
+        0x7fc0_0000u32
+    } else {
+        v.to_bits()
+    }
+}
+
+/// Java `Objects.equals(Object, Object)` value equality — Rust's `==` for the
+/// primitive boxed `Boolean`/`Integer`/`Long`/`String`/... `equals`, and the
+/// JDK's bit equality for `double`/`float` (see [`double_to_long_bits`] /
+/// [`float_to_int_bits`]): `-0.0` is distinct from `0.0`, and every `NaN`
+/// payload equals every other.
+///
+/// Implemented for the scalar types the strict optional-field codecs use (the
+/// JDK wrappers' `equals` all reduce to `==` except `Double`/`Float`). There is
+/// deliberately NO `impl<T: Eq>` blanket: it would overlap the `f32`/`f64`
+/// impls if `Eq` were ever added to the floats. New scalar types opt in with a
+/// one-line impl.
+pub trait JavaEquals {
+    fn java_equals(&self, other: &Self) -> bool;
+}
+
+macro_rules! impl_java_equals_eq {
+    ($($t:ty),* $(,)?) => {
+        $(impl JavaEquals for $t {
+            fn java_equals(&self, other: &Self) -> bool {
+                self == other
+            }
+        })*
+    };
+}
+
+impl_java_equals_eq!(
+    bool, char, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, String,
+);
+
+impl JavaEquals for f64 {
+    fn java_equals(&self, other: &Self) -> bool {
+        double_to_long_bits(*self) == double_to_long_bits(*other)
+    }
+}
+
+impl JavaEquals for f32 {
+    fn java_equals(&self, other: &Self) -> bool {
+        float_to_int_bits(*self) == float_to_int_bits(*other)
+    }
+}
+
+/// `Codec.strictOptionalFieldOf(String, F default)` — the with-default form of
+/// a strict optional field.
+///
+/// Java (DFU 10.0.21, verified from the pinned jar's bytecode):
+/// `optionalField(name, codec, false).xmap(o -> o.orElse(default), a ->
+/// Objects.equals(a, default) ? Optional.empty() : Optional.of(a))`. The field
+/// defaults on decode when absent, but a present-but-malformed value PROPAGATES
+/// the element parse error (the lenient form swallows it to `default`). It is
+/// OMITTED on encode when Java-equal to `default` (for `double`/`float` that is
+/// `doubleToLongBits`/`floatToIntBits` equality, so `-0.0` is distinct from
+/// `0.0`).
+pub fn strict_optional_field_of<F, Ops: DynamicOps + 'static>(
+    name: &str,
+    element_codec: Arc<dyn Codec<F, Ops>>,
+    default: F,
+) -> Arc<dyn MapCodec<F, Ops>>
+where
+    F: 'static + Clone + JavaEquals + Send + Sync,
+{
+    let inner = optional_field(name.to_string(), element_codec, false);
+    let default_for_decode = default.clone();
+    let default_for_encode = default;
+    map_codec::xmap(
+        inner,
+        Arc::new(move |o: &Option<F>| o.clone().unwrap_or_else(|| default_for_decode.clone())),
+        Arc::new(move |a: &F| {
+            if a.java_equals(&default_for_encode) {
+                None
+            } else {
+                Some(a.clone())
+            }
+        }),
+    )
+}
+
 /// `Codec.recursive(String, Function<Codec<A>, Codec<A>>)`.
 pub fn recursive<A, Ops: DynamicOps + 'static>(
     name: String,
