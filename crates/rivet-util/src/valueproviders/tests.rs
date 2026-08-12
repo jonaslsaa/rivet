@@ -9,7 +9,12 @@
 //!
 //! Codec JSON shapes and validation messages are captured from the live codecs
 //! and cross-checked against the Paper Java sources (the exact strings are
-//! quoted in the per-file module docs).
+//! quoted in the per-file module docs). A float field encodes through
+//! `JsonOps.createFloat` — `rivet-serialization` stores the `f64` nearest
+//! Java's `Float.toString` literal, so `0.05f` writes `0.05`, exactly as Gson
+//! renders a `JsonPrimitive(Float)` (see `create_float_uses_float_to_string_literal`
+//! in `rivet-serialization`'s `json_ops_tests`; `float_provider_round_trips`
+//! pins the shape end-to-end).
 
 use crate::random::LegacyRandomSource;
 use crate::valueproviders::biased_to_bottom_int::BiasedToBottomInt;
@@ -486,8 +491,11 @@ fn float_provider_round_trips() {
             json!({"min": 0.0, "max": 10.0, "plateau": 2.0, "type": "minecraft:trapezoid"}),
         ),
         (
+            // `deviation` 0.05 encodes as `0.05` — `rivet-serialization` renders
+            // the `Float.toString` literal (Gson's form), not the widened f64
+            // decimal.
             FloatProvider::ClampedNormal(ClampedNormalFloat::of(0.5, 0.05, 0.0, 1.0)),
-            json!({"mean": 0.5, "deviation": 0.05000000074505806, "min": 0.0, "max": 1.0,
+            json!({"mean": 0.5, "deviation": 0.05, "min": 0.0, "max": 1.0,
                    "type": "minecraft:clamped_normal"}),
         ),
     ];
@@ -505,6 +513,26 @@ fn float_provider_round_trips() {
             .unwrap();
         assert_eq!(dec, p, "round-trip for {p:?}");
     }
+}
+
+#[test]
+fn float_provider_clamped_normal_deviation_paper_form_parses() {
+    // Paper's serialization of a `ClampedNormalFloat` deviation uses the SHORT
+    // `Float.toString` form (`0.05`), which `rivet-serialization`'s `JsonOps`
+    // now emits on encode too. This pins that Paper's own JSON form parses to
+    // the identical provider.
+    let codec = float_provider_codec::<J>();
+    let p = FloatProvider::ClampedNormal(ClampedNormalFloat::of(0.5, 0.05, 0.0, 1.0));
+    let dec = codec
+        .parse(
+            &JsonOps::INSTANCE,
+            &json!({"mean": 0.5, "deviation": 0.05, "min": 0.0, "max": 1.0,
+                   "type": "minecraft:clamped_normal"}),
+        )
+        .result()
+        .cloned()
+        .unwrap();
+    assert_eq!(dec, p);
 }
 
 #[test]
@@ -707,7 +735,7 @@ fn clamped_normal_float_rejects_max_below_min() {
 }
 
 #[test]
-fn uniform_float_max_exceeds_min_round_trips() {
+fn uniform_float_max_exceeds_min_decode_error() {
     // UniformFloat's codec uses the record canonical `new` (no panic) and
     // validates via DataResult; a max<=min input is a decode error, never a
     // panic.
