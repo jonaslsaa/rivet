@@ -900,9 +900,10 @@ where
     let mut min_dimension = 0usize;
     let mut min_buckets: Vec<Vec<Node<T>>> = Vec::new();
     for d in 0..dimensions {
-        let mut sorted = children.clone();
-        sort(&mut sorted, dimensions, d, false);
-        let buckets = bucketize(&sorted);
+        // Java `sort(children, ...)` mutates `children` in place, so each
+        // dimension buckets the *previously sorted* list (cumulative ordering).
+        sort(&mut children, dimensions, d, false);
+        let buckets = bucketize(&children);
         let mut total_cost = 0i64;
         for bucket in &buckets {
             let space = bucket_parameter_space(bucket);
