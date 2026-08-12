@@ -26,13 +26,12 @@ pub const TICKS_PER_SECOND: u32 = 20;
 /// Move-mode walk wall-clock seconds, ceiled to a whole second (like
 /// `MOVE_DRAIN_SECONDS_CEIL`) so a tick count that is not divisible by the tick
 /// rate cannot silently truncate the reserved budget below the true walk time.
-pub const MOVE_WALK_SECONDS: u64 =
-    ((MOVE_WALK_TICKS + TICKS_PER_SECOND - 1) / TICKS_PER_SECOND) as u64;
+pub const MOVE_WALK_SECONDS: u64 = MOVE_WALK_TICKS.div_ceil(TICKS_PER_SECOND) as u64;
 /// Move-mode post-walk drain in milliseconds (the client's `MOVE_DRAIN`).
 pub const MOVE_DRAIN_MS: u64 = 200;
 /// Move-mode post-walk drain (s) before the record emits: `MOVE_DRAIN_MS`
 /// ceiled to a whole second so the headroom budget is a whole-second floor.
-pub const MOVE_DRAIN_SECONDS_CEIL: u64 = (MOVE_DRAIN_MS + 999) / 1000;
+pub const MOVE_DRAIN_SECONDS_CEIL: u64 = MOVE_DRAIN_MS.div_ceil(1000);
 
 /// The headroom (s) a `move` `--timeout-seconds` must exceed: the pre-spawn
 /// login/configuration, the fixed walk, the post-walk drain, and the keepalive

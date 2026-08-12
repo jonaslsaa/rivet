@@ -1112,18 +1112,19 @@ async fn move_and_emit(bot: Client, state: State) {
     hard_exit(0);
 }
 
-/// Freeze the challenge set at settle entry and wait (bounded by `timeout`) for
-/// every frozen challenge to be echoed, then return a coherent snapshot.
+/// Wait (bounded by `timeout`) for the challenge and echo streams to reach 1:1
+/// correspondence, then return a coherent snapshot.
 ///
 /// A challenge/echo pair can straddle the emit boundary in either order — a
 /// challenge with its echo still in flight, or a stray echo whose challenge
-/// record has not landed (the move-mode flake). Freezing the challenges we
-/// already have and filtering echoes to that set closes both orderings: an
-/// in-flight echo keeps the loop going until it lands, while a stray echo is
-/// excluded. Because the snapshot's echoes are always a subset of the frozen
-/// challenges' echoes, even the deadline path (a genuinely missing echo) can
-/// never emit an echo without its challenge — only a missing echo, which still
-/// fails the verdict.
+/// record has not landed (the move-mode flake). The success path waits until
+/// the *live* streams are 1:1 (every challenge echoed, every echo has its
+/// challenge) and snapshots the full live log, so dwell's verdict-checked
+/// challenge count and span are never truncated. Only the deadline path — a
+/// genuinely missing echo keeping the streams apart until `timeout` — falls
+/// back to a coherent prefix: the challenges frozen at settle entry with their
+/// echoes, so an echo-without-challenge is never emitted, and a missing echo
+/// still fails the verdict.
 ///
 /// `timeout` and `interval` are parameters so the straddle/missing-echo
 /// counterfactuals can be driven deterministically in tests.
@@ -1133,34 +1134,53 @@ async fn settle_and_snapshot(
     interval: Duration,
 ) -> KeepaliveLog {
     let settle_deadline = Instant::now() + timeout;
-    // Freeze the challenges observed so far. The challenge/instant pair is
-    // written atomically (same handler), so the first `frozen_challenges.len()`
-    // instants are exactly the frozen challenges' instants.
+    // The challenge set at settle entry, for the deadline path's coherent
+    // prefix. In dwell mode the challenge/instant pair is written atomically
+    // (same handler), so the first `frozen_challenges.len()` instants are the
+    // frozen challenges' instants; move mode records no instants.
     let frozen_challenges = log
         .lock()
         .expect("keepalive log lock poisoned")
         .challenges
         .clone();
     loop {
-        // Hold the log's single lock across the settled decision AND the clone:
-        // no writer can interleave, so a returned snapshot is guaranteed to be a
-        // coherent state. The guard is scoped to this block so it is dropped
-        // before the sleep below (it is not Send).
+        // Hold the log's single lock across the decision and the clone: no
+        // writer can interleave, so a returned snapshot is coherent. The guard
+        // is scoped to this block so it is dropped before the sleep below (it
+        // is not Send).
         let snapshot = {
             let guard = log.lock().expect("keepalive log lock poisoned");
-            // Only echoes of the frozen challenges count: a stray echo recorded
-            // before its challenge record landed is excluded, so the snapshot
-            // can never contain an echo without its challenge.
-            let echoes = guard
-                .echoes
+            let settled = guard
+                .challenges
                 .iter()
-                .filter(|e| frozen_challenges.contains(e))
-                .copied()
-                .collect::<Vec<_>>();
-            let settled = frozen_challenges.iter().all(|c| echoes.contains(c));
-            if settled || Instant::now() >= settle_deadline {
+                .all(|c| guard.echoes.contains(c))
+                && guard
+                    .echoes
+                    .iter()
+                    .all(|e| guard.challenges.contains(e));
+            if settled {
+                // Full live log: the streams are 1:1, so every challenge has
+                // its echo and every echo has its challenge.
+                Some(guard.clone())
+            } else if Instant::now() >= settle_deadline {
+                // Deadline: emit the frozen challenges with only their echoes,
+                // so an echo-without-challenge is never emitted. An empty
+                // frozen set with stray echoes is a broken observation, not a
+                // vacuous pass — keep the raw echoes so the mismatch still
+                // fails the verdict.
+                let challenges = frozen_challenges.clone();
+                let echoes = if challenges.is_empty() {
+                    guard.echoes.clone()
+                } else {
+                    guard
+                        .echoes
+                        .iter()
+                        .filter(|e| challenges.contains(e))
+                        .copied()
+                        .collect()
+                };
                 Some(KeepaliveLog {
-                    challenges: frozen_challenges.clone(),
+                    challenges,
                     instants: guard
                         .instants
                         .iter()
@@ -1547,17 +1567,15 @@ mod tests {
         // (Paper transcript: 6 challenges / 7 echoes). A snapshot taken at that
         // moment records an echo with no matching challenge, which fails the 1:1
         // `keepalive_echo` relationship and false-FAILs parity. The settle loop
-        // freezes the challenges it already has and filters echoes to that set,
-        // so the stray echo (whose challenge record has not landed) is excluded:
-        // the snapshot is 1:1 without waiting for the straggler.
+        // must wait for the stray echo's challenge record to land, then snapshot
+        // the full 1:1 set together.
         let log = Arc::new(Mutex::new(KeepaliveLog {
             challenges: vec![1001, 1002, 1003],
             instants: vec![],
             echoes: vec![1001, 1002, 1003, 1004],
         }));
-        // The straddling challenge's record would land 50 ms later — but the
-        // settle must NOT wait for it: every frozen challenge already has its
-        // echo, so the coherent snapshot is available immediately.
+        // The straddling challenge's record lands 50 ms later — well inside the
+        // settle timeout but after the first coherence check.
         let log_for_challenge = Arc::clone(&log);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1572,18 +1590,19 @@ mod tests {
         let snapshot =
             settle_and_snapshot(&log, Duration::from_secs(2), Duration::from_millis(5)).await;
 
-        // The stray echo (1004) is excluded because its challenge record has not
-        // landed, so the snapshot is 1:1 (3 challenges / 3 echoes) and settled.
-        // If the settle had snapshot the raw log, this would be 3 challenges vs
-        // 4 echoes and the verdict would FAIL.
-        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003]);
-        assert_eq!(snapshot.echoes, vec![1001, 1002, 1003]);
+        // Once the straggler challenge lands, the full live log is 1:1 and is
+        // snapshotted whole (4 challenges / 4 echoes). If the settle had
+        // snapshotted the raw log immediately, this would be 3 challenges vs 4
+        // echoes and the verdict would FAIL.
+        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1003, 1004]);
         assert!(snapshot.settled());
-        // The straggler challenge cannot land before 50 ms, and the settle must
-        // not have waited for it — a coherent snapshot was available immediately.
+        // The straggler challenge physically cannot land before 50 ms, so the
+        // settle must have waited for it — the pass above is not a race where
+        // the challenge beat the first coherence check.
         assert!(
-            started.elapsed() < Duration::from_millis(50),
-            "settle waited for a challenge record outside the frozen set"
+            started.elapsed() >= Duration::from_millis(50),
+            "settle returned before the straggler challenge could land"
         );
     }
 
@@ -1614,6 +1633,59 @@ mod tests {
         // No echo in the snapshot lacks its challenge — the 1:1 relationship
         // cannot false-FAIL on a split pair, only on the genuinely missing echo.
         assert!(snapshot.echoes.iter().all(|e| snapshot.challenges.contains(e)));
+    }
+
+    #[tokio::test]
+    async fn settle_deadline_does_not_vacuously_pass_an_empty_challenge_stream() {
+        // Counterfactual for the empty-frozen-set deadline case: the challenge
+        // recorder saw nothing while the echo recorder observed strays (a broken
+        // observation). The settle times out; filtering echoes to the empty
+        // frozen set would make keepalive_echo vacuously true and mask the
+        // broken stream, so the raw echoes are kept and the mismatch survives.
+        let log = Arc::new(Mutex::new(KeepaliveLog {
+            challenges: vec![],
+            instants: vec![],
+            echoes: vec![1005, 1006],
+        }));
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_millis(20), Duration::from_millis(5)).await;
+
+        assert_eq!(snapshot.challenges, Vec::<u64>::new());
+        assert_eq!(snapshot.echoes, vec![1005, 1006]);
+        assert!(!snapshot.settled());
+    }
+
+    #[tokio::test]
+    async fn dwell_settle_success_path_preserves_the_full_live_log() {
+        // Counterfactual for the dwell count/span truncation: the settle starts
+        // with an in-flight echo (4 challenges / 3 echoes, echo 1004 still on
+        // the way), and while it waits, a new challenge/echo pair (1005) lands.
+        // The success path must snapshot the full live log once 1:1 — including
+        // the post-entry pair — so dwell's verdict-checked challenge_count and
+        // challenge_span_ms are never truncated to the settle-entry set.
+        let log = Arc::new(Mutex::new(log_with(4, 3)));
+        let log_for_pair = Arc::clone(&log);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut guard = log_for_pair.lock().expect("test lock poisoned");
+            guard.echoes.push(1004);
+            guard.challenges.push(1005);
+            guard.echoes.push(1005);
+        });
+
+        let started = Instant::now();
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_secs(2), Duration::from_millis(5)).await;
+
+        // The in-flight echo and the post-entry pair are all in the snapshot:
+        // the full live log (5 challenges / 5 echoes), not the settle-entry 4.
+        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004, 1005]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1003, 1004, 1005]);
+        assert!(snapshot.settled());
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "settle returned before the in-flight echo and post-entry pair could land"
+        );
     }
 
     #[tokio::test]
