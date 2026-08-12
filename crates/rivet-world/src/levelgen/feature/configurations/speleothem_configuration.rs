@@ -31,21 +31,15 @@
 //! encode via `Float.equals` semantics.
 //!
 //! The fields use the serialization crate's shared
-//! `rivet_serialization::codec::optional_field_of`, which omits on `PartialEq
-//! ==` — for `f32` that treats `-0.0 == 0.0` as true and `NaN != NaN`, the
-//! opposite of `Float.equals`. On encode the omission test runs first on the
-//! raw config value (`xmap`'s `from` half drives `comap`, so `*a == default`
-//! executes before the element codec); only a non-omitted value then reaches
-//! `floatRange(0.0, 1.0)`'s range check, where `check_range_f32` rejects
-//! `-0.0`, NaN, and out-of-range values under the `Float.compare` total order.
-//! That ordering never diverges from Java: the defaults are positive and
-//! nonzero, and no `f32` value is `PartialEq ==`-equal to `0.2`/`0.7`/`0.5`
-//! while `Float.equals`-distinct (IEEE `==` differs from `Float.equals` only
-//! for `-0.0`/`+0.0` and NaN, which a positive nonzero default is not), so the
-//! omission decision agrees in both implementations; `-0.0` and NaN are then
-//! range-rejected on both sides. (The struct's own [`PartialEq`] still
-//! compares the float fields via `java_float_equals`, exactly `Float.equals`,
-//! to match the record's `equals`.)
+//! `rivet_serialization::codec::optional_field_of`, which omits on encode via
+//! Java `Objects.equals` (`JavaEquals`): for `f32` that is `Float.equals` bit
+//! equality, so `-0.0` is distinct from `0.0` and every `NaN` equals every
+//! other — exactly the DFU omission test. A value that is not omitted then
+//! reaches `floatRange(0.0, 1.0)`'s range check, where `check_range_f32`
+//! rejects `-0.0`, NaN, and out-of-range values under the `Float.compare` total
+//! order. (The struct's own [`PartialEq`] compares the float fields via
+//! `java_float_equals`, exactly `Float.equals`, to match the record's
+//! `equals`.)
 //!
 //! ## Holder-set field
 //!
