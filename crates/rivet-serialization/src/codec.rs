@@ -20,8 +20,8 @@ use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, Keyable};
 use crate::either::Either;
 use crate::float_format::{
-    java_double_compare, java_double_to_string, java_float_compare, java_float_equals,
-    java_float_to_string,
+    java_double_compare, java_double_equals, java_double_to_string, java_float_compare,
+    java_float_equals, java_float_to_string,
 };
 use crate::functions::DecoderFn;
 use crate::lifecycle::Lifecycle;
@@ -332,25 +332,13 @@ where
     )
 }
 
-/// `Double.doubleToLongBits(double)` — the raw bits with every `NaN` bit
-/// pattern canonicalized to `0x7ff8_0000_0000_0000` (the JDK's `Double.equals`
-/// /`hashCode` use `doubleToLongBits`, not the raw bits; `-0.0` keeps its sign
-/// bit).
-fn double_to_long_bits(v: f64) -> u64 {
-    if v.is_nan() {
-        0x7ff8_0000_0000_0000u64
-    } else {
-        v.to_bits()
-    }
-}
-
 /// Java `Objects.equals(Object, Object)` value equality — Rust's `==` for the
 /// primitive boxed `Boolean`/`Integer`/`Long`/`String`/... `equals`, and the
-/// JDK's bit equality for `double`/`float` (see [`double_to_long_bits`] /
+/// JDK's bit equality for `double`/`float` (see [`java_double_equals`] /
 /// [`java_float_equals`]): `-0.0` is distinct from `0.0`, and every `NaN`
 /// payload equals every other.
 ///
-/// Implemented for the scalar types the strict optional-field codecs use (the
+/// Implemented for the scalar types the optional-field codecs use (the
 /// JDK wrappers' `equals` all reduce to `==` except `Double`/`Float`). There is
 /// deliberately NO `impl<T: Eq>` blanket: it would overlap the `f32`/`f64`
 /// impls if `Eq` were ever added to the floats. New scalar types opt in with a
@@ -375,7 +363,7 @@ impl_java_equals_eq!(
 
 impl JavaEquals for f64 {
     fn java_equals(&self, other: &Self) -> bool {
-        double_to_long_bits(*self) == double_to_long_bits(*other)
+        java_double_equals(*self, *other)
     }
 }
 

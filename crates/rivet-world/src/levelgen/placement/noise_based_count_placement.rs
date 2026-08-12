@@ -24,7 +24,7 @@
 //! (`rivet_serialization::codec::optional_field_of`), not a
 //! placement-modifier concern.
 
-use crate::biome::BIOME_INFO_NOISE;
+use crate::levelgen::placement::BIOME_INFO_NOISE;
 use crate::levelgen::placement::placement_modifier_type::{
     PlacementModifierTypeId, PlacementModifierTypes,
 };
@@ -297,19 +297,17 @@ mod tests {
             .result()
             .expect("encode should succeed")
             .clone();
-        assert_eq!(
-            encoded,
-            json!({"noise_to_count_ratio": 10, "noise_factor": 0.05,
-                   "noise_offset": -0.0})
-        );
-        // `serde_json::Value` equality treats `-0.0 == 0.0`, so the assert
-        // above cannot detect sign loss; the serialized string preserves the
-        // sign bit (`-0.0` vs `0.0`).
-        let encoded_str = encoded.to_string();
+        // `serde_json::Value` equality treats `-0.0 == 0.0`, so comparing the
+        // whole map cannot detect sign loss — the field value itself must keep
+        // the `-0.0` sign bit.
+        let encoded_offset = &encoded["noise_offset"];
         assert!(
-            encoded_str.contains("-0.0"),
-            "encode must preserve -0.0 noise_offset, got {encoded_str}"
+            encoded_offset.as_f64().is_some_and(f64::is_sign_negative),
+            "encode must preserve the -0.0 noise_offset sign bit, got {encoded_offset:?}"
         );
+        // The other two required fields are unaffected by the sign check.
+        assert_eq!(encoded["noise_to_count_ratio"], json!(10));
+        assert_eq!(encoded["noise_factor"], json!(0.05));
         let decoded = codec
             .parse(&JsonOps::INSTANCE, &encoded)
             .result()
