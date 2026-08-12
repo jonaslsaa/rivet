@@ -8,6 +8,11 @@
 //! positive count, a truncated payload). One copy of the parser lives here so
 //! the two canonicalizers cannot drift; `rivet-capture` depends on `rivet-decode`.
 //!
+//! Hostile input cannot abort the process: compound/list nesting is bounded by
+//! Java's `NbtAccounter.MAX_STACK_DEPTH` (512), and collection pre-allocation is
+//! capped at `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE` (65536) so a huge wire
+//! count fails the parse instead of forcing a huge allocation.
+//!
 //! Wire format (`NbtIo.writeAnyTag`): `[byte type][payload]` with the root
 //! un-named and compound fields named `[byte type][u16 len][name][payload]`.
 //! Strings are modified UTF-8 (`DataInput.readUTF`/`writeUTF`), decoded by the
@@ -16,6 +21,18 @@
 //! [`crate::advancement`]: crate::advancement
 
 use crate::frame;
+
+/// `NbtAccounter.MAX_STACK_DEPTH` — the compound/list nesting depth `NbtIo`
+/// permits before throwing. The parser recurses through list items and compound
+/// fields, so the depth cap doubles as the recursion bound that keeps hostile
+/// input from overflowing the stack.
+const MAX_NBT_DEPTH: u32 = 512;
+
+/// `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE` — the initial capacity Java
+/// gives a decoded collection. The parser pre-allocates at most this many
+/// slots so a hostile count cannot force a huge allocation before any element
+/// has been read.
+const MAX_INITIAL_COLLECTION_SIZE: usize = 65536;
 
 /// A parsed network NBT value. Compound fields are kept in parse order;
 /// re-serialization sorts them by name so the wire form is canonical.
@@ -56,8 +73,22 @@ pub fn encode_modified_utf8(s: &str) -> Vec<u8> {
         .expect("decoded u16-prefixed string re-encodes within the u16 limit")
 }
 
-/// Read a bare NBT payload of `type_byte` (no name prefix).
+/// Read a bare NBT payload of `type_byte` (no name prefix). Entry point for a
+/// single top-level tag; nesting depth starts at 0 (Java gives each tag codec
+/// invocation a fresh `NbtAccounter`).
 pub fn read_payload(body: &[u8], off: &mut usize, type_byte: u8) -> Option<Nbt> {
+    read_payload_depth(body, off, type_byte, 0)
+}
+
+/// Depth-aware core of [`read_payload`]. Every recursive descent (a list item
+/// or a compound field value) is one nesting level, bounded by
+/// `MAX_NBT_DEPTH` so hostile input cannot overflow the stack; collection
+/// pre-allocation is capped at `MAX_INITIAL_COLLECTION_SIZE` so a hostile
+/// count cannot force a huge allocation before any element is read.
+fn read_payload_depth(body: &[u8], off: &mut usize, type_byte: u8, depth: u32) -> Option<Nbt> {
+    if depth >= MAX_NBT_DEPTH {
+        return None;
+    }
     match type_byte {
         0 => Some(Nbt::End),
         1 => {
@@ -115,9 +146,9 @@ pub fn read_payload(body: &[u8], off: &mut usize, type_byte: u8) -> Option<Nbt> 
             if elem == 0 && n > 0 {
                 return None;
             }
-            let mut items = Vec::with_capacity(n as usize);
+            let mut items = Vec::with_capacity((n as usize).min(MAX_INITIAL_COLLECTION_SIZE));
             for _ in 0..n {
-                items.push(read_payload(body, off, elem)?);
+                items.push(read_payload_depth(body, off, elem, depth + 1)?);
             }
             Some(Nbt::List { elem, items })
         }
@@ -140,7 +171,7 @@ pub fn read_payload(body: &[u8], off: &mut usize, type_byte: u8) -> Option<Nbt> 
                 let name_bytes = frame::read_bytes(body, off, name_len)?;
                 // Field names are read with DataInput.readUTF (modified UTF-8).
                 let name = decode_modified_utf8(name_bytes)?;
-                let value = read_payload(body, off, type_byte)?;
+                let value = read_payload_depth(body, off, type_byte, depth + 1)?;
                 fields.push((name, value));
             }
             Some(Nbt::Compound(fields))
@@ -150,7 +181,7 @@ pub fn read_payload(body: &[u8], off: &mut usize, type_byte: u8) -> Option<Nbt> 
             if n < 0 {
                 return None; // Java: DecoderException on a negative array size
             }
-            let mut items = Vec::with_capacity(n as usize);
+            let mut items = Vec::with_capacity((n as usize).min(MAX_INITIAL_COLLECTION_SIZE));
             for _ in 0..n {
                 let b = frame::read_bytes(body, off, 4)?;
                 items.push(i32::from_be_bytes([b[0], b[1], b[2], b[3]]));
@@ -162,7 +193,7 @@ pub fn read_payload(body: &[u8], off: &mut usize, type_byte: u8) -> Option<Nbt> 
             if n < 0 {
                 return None; // Java: DecoderException on a negative array size
             }
-            let mut items = Vec::with_capacity(n as usize);
+            let mut items = Vec::with_capacity((n as usize).min(MAX_INITIAL_COLLECTION_SIZE));
             for _ in 0..n {
                 let b = frame::read_bytes(body, off, 8)?;
                 items.push(i64::from_be_bytes([

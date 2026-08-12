@@ -33,14 +33,27 @@
 //! and the `TypedEntityData` `entity_data`/`block_entity_data` — are
 //! canonicalized structurally (NBT compound field order). A `tagCodec` value is
 //! refused when it is a root End tag, matching Java's
-//! `DecoderException("Expected non-null compound tag")`. Every other registered
-//! component value is copied byte-exact: the harness walks the component's
-//! exact wire shape ([`Shape`] / the `skip_*` primitives) to bound it, then
-//! preserves the raw bytes verbatim, so a display icon carrying, say, an
-//! `item_model` identifier or a `max_stack_size` VarInt still canonicalizes
-//! (patch entries sorted by id) instead of failing the whole advancement. Only
-//! an id outside the registered 26.2 range, a duplicate positive/negative id in
-//! a patch, or a value that does not fit its shape fails canonicalization.
+//! `DecoderException("Expected non-null compound tag")`; a `COMPOUND_TAG` value
+//! is refused when it is not a compound (`DecoderException("Not a compound tag")`).
+//! Every other registered component value is copied byte-exact: the harness walks
+//! the component's exact wire shape ([`Shape`] / the `skip_*` primitives) to
+//! bound it, then preserves the raw bytes verbatim, so a display icon carrying,
+//! say, an `item_model` identifier or a `max_stack_size` VarInt still
+//! canonicalizes (patch entries sorted by id) instead of failing the whole
+//! advancement. Only an id outside the registered 26.2 range, a duplicate
+//! positive/negative id in a patch, or a value that does not fit its shape fails
+//! canonicalization.
+//!
+//! Hostile input cannot abort the process: the shared NBT parser caps its
+//! recursion at Java's `NbtAccounter` depth (512) and pre-allocates at most
+//! `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE` (65536) slots per collection;
+//! patch and advancement collections use the same allocation cap. Java-grounded
+//! maxima are enforced where the codec has them — `list(256)` lore/container/
+//! bundle, `list(1024)` charged projectiles, `list(100)` writable book,
+//! `list(64)` data-component predicates, `readCount(16)` profile properties,
+//! `STRING_UTF8` (32767*4 encoded bytes) strings, and the three-value
+//! `AdvancementType` display frame — and negative holder-registry / holder-set
+//! ids are refused like `Registry.byIdOrThrow`.
 //!
 //! The display path is proven by synthetic display-bearing bodies in
 //! `tools/rivet-capture/src/normalize.rs`; issue #269 tracks exercising it via
@@ -49,9 +62,45 @@
 use crate::frame;
 use crate::nbt::{Nbt, read_nbt, write_nbt};
 
+/// `STRING_UTF8`'s encoded-byte cap: `Utf8String.read(input, 32767)` rejects a
+/// `VarInt` buffer length over `32767 * 4` bytes (Java's `utf8MaxBytes`).
+const MAX_STRING_ENCODED_BYTES: usize = 32767 * 4;
+/// `DataComponentPatch.decode` caps its map's initial capacity at
+/// `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE`; the canonicalizer pre-allocates
+/// at most this many slots so a hostile count cannot force a huge allocation.
+const MAX_INITIAL_COLLECTION_SIZE: usize = 65536;
+/// `ItemLore.MAX_LINES` — `list(256)`.
+const MAX_LORE_LINES: usize = 256;
+/// `ItemContainerContents.MAX_SIZE` — `list(256)`.
+const MAX_CONTAINER_SLOTS: usize = 256;
+/// `BundleContents` — `list(256)`.
+const MAX_BUNDLE_ITEMS: usize = 256;
+/// `ChargedProjectiles.MAX_SIZE` — `list(1024)`.
+const MAX_CHARGED_PROJECTILES: usize = 1024;
+/// `WritableBookContent` — `list(100)` of `Filterable(stringUtf8(1024))`.
+const MAX_WRITABLE_BOOK_PAGES: usize = 100;
+const MAX_WRITABLE_PAGE_ENCODED_BYTES: usize = 1024 * 4;
+/// `WrittenBookContent` title — `Filterable(stringUtf8(32))`.
+const MAX_WRITTEN_TITLE_ENCODED_BYTES: usize = 32 * 4;
+/// `DataComponentPredicate.STREAM_CODEC` — `list(64)`.
+const MAX_DATA_COMPONENT_PREDICATES: usize = 64;
+/// `PotDecorations.STREAM_CODEC` — `list(4)(registry ITEM)`.
+const MAX_POT_DECORATIONS: usize = 4;
+/// `ByteBufCodecs.GAME_PROFILE_PROPERTIES` — `readCount(16)`.
+const MAX_PROFILE_PROPERTIES: usize = 16;
+/// `ByteBufCodecs.PLAYER_NAME` — `stringUtf8(16)`.
+const MAX_PROFILE_NAME_ENCODED_BYTES: usize = 16 * 4;
+/// Game-profile property name — `Utf8String.read(input, 64)`.
+const MAX_PROFILE_PROPERTY_NAME_ENCODED_BYTES: usize = 64 * 4;
+/// Game-profile property signature — `Utf8String.read(in, 1024)`.
+const MAX_PROFILE_SIGNATURE_ENCODED_BYTES: usize = 1024 * 4;
+/// `AdvancementType` has three values (TASK=0, CHALLENGE=1, GOAL=2); the
+/// display's `writeEnum`/`readEnum` frame field is bounded by that count.
+const MAX_ADVANCEMENT_TYPE_ID: i32 = 2;
+
 fn read_string(body: &[u8], off: &mut usize) -> Option<String> {
     let len = frame::read_varint(body, off)?;
-    if len < 0 {
+    if len < 0 || len as usize > MAX_STRING_ENCODED_BYTES {
         return None;
     }
     let s = std::str::from_utf8(body.get(*off..*off + len as usize)?)
@@ -91,7 +140,10 @@ fn component_type_name(id: u32) -> Option<&'static str> {
 /// returns null for a root End tag, and throws
 /// `DecoderException("Expected non-null compound tag")`; an End tag is refused
 /// the same way. A `Component` (`custom_name`, `item_name`, and the display
-/// `title`/`description`) serializes to an NBT tag through this codec.
+/// `title`/`description`) serializes to an NBT tag through this codec. This is
+/// the tag-level bound only: the subsequent `Component` codec parse is not
+/// re-implemented, so a non-`Component` tag (e.g. an `IntTag`) is re-emitted
+/// rather than refused.
 fn read_component_tag(body: &[u8], off: &mut usize) -> Option<Nbt> {
     let value = read_nbt(body, off)?;
     if matches!(value, Nbt::End) {
@@ -103,9 +155,9 @@ fn read_component_tag(body: &[u8], off: &mut usize) -> Option<Nbt> {
 /// Read one component value and return its canonical bytes, for the pinned
 /// 26.2 components whose network value is a bare NBT payload.
 /// Supported shapes (canonicalized, never fabricated):
-///   - a single NBT tag: `custom_data`, `custom_name`, `item_name`,
-///     `bucket_entity_data` — a `CustomData`/`Component` value
-///     (`tagCodec`/`COMPOUND_TAG`), re-emitted as NBT;
+///   - a single NBT tag: `custom_name`/`item_name` — a `Component` through
+///     `tagCodec` (any non-End tag); `custom_data`/`bucket_entity_data` — a
+///     `CustomData` through `COMPOUND_TAG` (compound only), re-emitted as NBT;
 ///   - a list of NBT tags: `lore` — an `ItemLore` (`list(256)` of `tagCodec`);
 ///   - a typed NBT tag: `entity_data`, `block_entity_data` — a
 ///     `TypedEntityData` (`[type registry id VarInt][compound tag]`), with the
@@ -133,8 +185,9 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
         "minecraft:custom_name" // ComponentSerialization.STREAM_CODEC = tagCodec
         | "minecraft:item_name" // ComponentSerialization.STREAM_CODEC = tagCodec
         => {
-            // tagCodec accepts any non-End tag (a Component serializes to an NBT
-            // compound; null/End throws but any other tag type parses).
+            // tagCodec accepts any non-End tag at the tag level; the Component
+            // codec parse that would reject a non-Component tag is out of scope
+            // for the structural canonicalizer.
             let value = read_component_tag(body, off)?;
             let mut out = Vec::with_capacity(body.len() / 8);
             write_nbt(&mut out, &value);
@@ -143,7 +196,7 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
         "minecraft:lore" => {
             // ItemLore.STREAM_CODEC = list(256) of tagCodec.
             let count = frame::read_varint(body, off)?;
-            if count < 0 {
+            if count < 0 || count as usize > MAX_LORE_LINES {
                 return None;
             }
             let mut out = Vec::with_capacity(body.len() / 4);
@@ -192,12 +245,17 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
 /// The wire shape of a registered 26.2 component value that is copied verbatim.
 #[derive(Clone, Copy)]
 enum Shape {
-    /// A scalar or id-mapper VarInt that accepts any signed value
-    /// (`ByteBufCodecs.VAR_INT` / `idMapper`). `idMapper` maps an out-of-range id
-    /// through its `ByIdMap` strategy rather than rejecting it.
+    /// A scalar or id-mapper VarInt that accepts any signed value. The idMapper
+    /// enums in the 26.2 component set (`Rarity`, `DyeColor`, `EquipmentSlot`,
+    /// `FireworkExplosion.Shape`, ...) all map out-of-range and negative ids
+    /// through `ByIdMap.continuous(..., OutOfBoundsStrategy.ZERO)` to the first
+    /// enum value, so a bare VarInt is the faithful bound for them.
     VarInt,
     /// A `ByteBufCodecs.holderRegistry` VarInt — `byIdOrThrow(id)`, which rejects
-    /// a negative id (the only registry-independent case this harness can detect).
+    /// a negative id. The registry's size is not pinned at build time, so the
+    /// upper bound is not checked (a non-negative out-of-range id is accepted
+    /// where Java would throw; only the registry-independent negative case is
+    /// enforced).
     HolderRegistry,
     /// No bytes (`Unit`).
     Unit,
@@ -209,8 +267,9 @@ enum Shape {
     Int,
     /// `[VarInt byte length][UTF-8 bytes]` (`Identifier` / `Utf8String`).
     Utf8String,
-    /// A bare NBT tag (`fromCodecWithRegistries` fallback for components without
-    /// a `networkSynchronized` stream codec, e.g. `intangible_projectile`).
+    /// A bare NBT tag read through `tagCodec` (the `fromCodecWithRegistries`
+    /// fallback for components without a `networkSynchronized` stream codec,
+    /// e.g. `intangible_projectile`); a root End tag is refused.
     NbtTag,
     /// `ByteBufCodecs.holderSet(registry)` — `[VarInt count-1][named|holders]`.
     HolderSet,
@@ -404,10 +463,18 @@ fn skip_uuid(body: &[u8], off: &mut usize) -> Option<()> {
     skip_bytes(body, off, 16)
 }
 
-/// Skip `[VarInt byte length][UTF-8 bytes]` (`Utf8String` / `Identifier`).
+/// Skip `[VarInt byte length][UTF-8 bytes]` (`Utf8String` / `Identifier`,
+/// default `STRING_UTF8` max of 32767 chars / 32767*4 encoded bytes).
 fn skip_utf8(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_utf8_limited(body, off, MAX_STRING_ENCODED_BYTES)
+}
+
+/// Skip a `[VarInt byte length][UTF-8 bytes]` string bounded by a
+/// Java-grounded encoded-byte cap (`Utf8String.read` rejects
+/// `bufferLength > maxLength * 4`).
+fn skip_utf8_limited(body: &[u8], off: &mut usize, max_encoded: usize) -> Option<()> {
     let len = frame::read_varint(body, off)?;
-    if len < 0 {
+    if len < 0 || len as usize > max_encoded {
         return None;
     }
     skip_bytes(body, off, len as usize)
@@ -415,8 +482,23 @@ fn skip_utf8(body: &[u8], off: &mut usize) -> Option<()> {
 
 /// Skip one NBT tag (`[type byte][payload]`), reusing the strict parser so a
 /// malformed tag (negative array length, truncated payload) fails the patch.
+/// The codecs the walker covers (`tagCodec` / `fromCodecWithRegistries`) all
+/// reject a root End tag, so it is refused here too.
 fn skip_nbt(body: &[u8], off: &mut usize) -> Option<()> {
-    let _ = read_nbt(body, off)?;
+    let value = read_nbt(body, off)?;
+    if matches!(value, Nbt::End) {
+        return None;
+    }
+    Some(())
+}
+
+/// Skip a `COMPOUND_TAG` value — the tag must be a CompoundTag, else Java
+/// throws `DecoderException("Not a compound tag: ...")`.
+fn skip_compound_tag(body: &[u8], off: &mut usize) -> Option<()> {
+    let value = read_nbt(body, off)?;
+    if !matches!(value, Nbt::Compound(_)) {
+        return None;
+    }
     Some(())
 }
 
@@ -442,8 +524,14 @@ fn skip_optional(body: &[u8], off: &mut usize, value: SkipFn) -> Option<()> {
 /// `[VarInt count][count × value]`. A negative count fails (Java's encoder never
 /// writes one; the harness's other canonicalizers reject them the same way).
 fn skip_list(body: &[u8], off: &mut usize, elem: SkipFn) -> Option<()> {
+    skip_list_limited(body, off, elem, usize::MAX)
+}
+
+/// `[VarInt count][count × value]` with a Java list max: `ByteBufCodecs.list(n)`
+/// throws `DecoderException` when `count > n`. A negative count fails as well.
+fn skip_list_limited(body: &[u8], off: &mut usize, elem: SkipFn, max: usize) -> Option<()> {
     let count = frame::read_varint(body, off)?;
-    if count < 0 {
+    if count < 0 || count as usize > max {
         return None;
     }
     for _ in 0..count {
@@ -506,7 +594,9 @@ fn skip_holder(body: &[u8], off: &mut usize, direct: SkipFn) -> Option<()> {
 /// `count = VarInt.read - 1`: `count == -1` (raw 0) is a named set
 /// (`[TagKey Identifier]`); any other `count` is that many direct holder-registry
 /// ids (`raw 1` = empty direct set). A raw value below 0 makes `count < -1`,
-/// which Java rejects with `NegativeArraySizeException`.
+/// which Java rejects with `NegativeArraySizeException`. Each direct holder is a
+/// `holderRegistry` id decoded through `byIdOrThrow`, so a negative id is
+/// rejected the same way.
 fn skip_holder_set(body: &[u8], off: &mut usize) -> Option<()> {
     let raw = frame::read_varint(body, off)?;
     if raw < 0 {
@@ -516,7 +606,7 @@ fn skip_holder_set(body: &[u8], off: &mut usize) -> Option<()> {
         return skip_utf8(body, off); // named set: TagKey identifier
     }
     for _ in 0..raw.saturating_sub(1) {
-        skip_varint(body, off)?;
+        skip_holder_registry(body, off)?;
     }
     Some(())
 }
@@ -675,7 +765,10 @@ fn skip_patch_value(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
         skip_any_component_value(body, off, id as u32, depth + 1)?;
     }
     for _ in 0..negative {
-        skip_varint(body, off)?;
+        let id = frame::read_varint(body, off)?;
+        if id < 0 {
+            return None; // DataComponentType registry byIdOrThrow rejects negative ids
+        }
     }
     Some(())
 }
@@ -799,29 +892,39 @@ fn skip_fireworks(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 fn skip_game_profile_properties(body: &[u8], off: &mut usize) -> Option<()> {
-    // [VarInt count][count × ([String name][String value][?String signature])].
+    // [readCount(16)][count × ([String name(64)][String value][?String signature(1024)])].
     let count = frame::read_varint(body, off)?;
-    if count < 0 {
+    if count < 0 || count as usize > MAX_PROFILE_PROPERTIES {
         return None;
     }
     for _ in 0..count {
+        skip_utf8_limited(body, off, MAX_PROFILE_PROPERTY_NAME_ENCODED_BYTES)?;
         skip_utf8(body, off)?;
-        skip_utf8(body, off)?;
-        skip_optional(body, off, skip_utf8)?;
+        skip_optional(body, off, skip_utf8_limited_1024)?;
     }
     Some(())
 }
 
+/// A game-profile property signature — `Utf8String.read(in, 1024)`.
+fn skip_utf8_limited_1024(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_utf8_limited(body, off, MAX_PROFILE_SIGNATURE_ENCODED_BYTES)
+}
+
 fn skip_game_profile(body: &[u8], off: &mut usize) -> Option<()> {
     skip_bytes(body, off, 16)?; // UUID
-    skip_utf8(body, off)?; // PLAYER_NAME
+    skip_utf8_limited(body, off, MAX_PROFILE_NAME_ENCODED_BYTES)?; // PLAYER_NAME
     skip_game_profile_properties(body, off)
 }
 
 fn skip_resolvable_partial(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_optional(body, off, skip_utf8)?; // name
+    skip_optional(body, off, skip_utf8_limited_16)?; // name PLAYER_NAME (16)
     skip_optional(body, off, skip_uuid)?; // id
     skip_game_profile_properties(body, off)
+}
+
+/// `Utf8String.read(input, 16)` (`PLAYER_NAME`).
+fn skip_utf8_limited_16(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_utf8_limited(body, off, MAX_PROFILE_NAME_ENCODED_BYTES)
 }
 
 fn skip_player_skin_patch(body: &[u8], off: &mut usize) -> Option<()> {
@@ -874,17 +977,21 @@ fn skip_banner_patterns(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 fn skip_pot_decorations(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_list(body, off, skip_varint)
+    // list(4)(registry ITEM) — PotDecorations max 4; each element is a registry
+    // id decoded through byIdOrThrow, so a negative id is refused.
+    skip_list_limited(body, off, skip_holder_registry, MAX_POT_DECORATIONS)
 }
 
 fn skip_block_state(body: &[u8], off: &mut usize) -> Option<()> {
     skip_map(body, off, skip_utf8, skip_utf8)
 }
 
-/// `TypedEntityData` — `[type registry id VarInt][COMPOUND_TAG]`.
+/// `TypedEntityData` — `[type registry id][COMPOUND_TAG]`. The type id is a
+/// registry decode (`EntityType.STREAM_CODEC` etc.), so a negative id is
+/// refused like `byIdOrThrow`.
 fn skip_typed_entity_data(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_varint(body, off)?;
-    skip_nbt(body, off)
+    skip_holder_registry(body, off)?;
+    skip_compound_tag(body, off)
 }
 
 fn skip_beehive_occupant(body: &[u8], off: &mut usize) -> Option<()> {
@@ -898,8 +1005,8 @@ fn skip_bees(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 fn skip_container(body: &[u8], off: &mut usize) -> Option<()> {
-    // list(256)(?ItemStackTemplate).
-    skip_list(body, off, skip_optional_item_stack)
+    // list(256)(?ItemStackTemplate) — ItemContainerContents.MAX_SIZE.
+    skip_list_limited(body, off, skip_optional_item_stack, MAX_CONTAINER_SLOTS)
 }
 
 fn skip_potion_contents(body: &[u8], off: &mut usize) -> Option<()> {
@@ -922,9 +1029,27 @@ fn skip_filterable(body: &[u8], off: &mut usize, value: SkipFn) -> Option<()> {
     skip_optional(body, off, value)
 }
 
-/// `Filterable(STRING_UTF8)` — a plain string plus an optional filtered copy.
-fn skip_filterable_utf8(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_filterable(body, off, skip_utf8)
+/// `Filterable(stringUtf8(1024))` — a plain string capped at the writable-book
+/// page bound plus an optional filtered copy of the same bound.
+fn skip_filterable_utf8_limited_1024(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_utf8_limited(body, off, MAX_WRITABLE_PAGE_ENCODED_BYTES)?;
+    let present = *body.get(*off)?;
+    *off += 1;
+    if present != 0 {
+        skip_utf8_limited(body, off, MAX_WRITABLE_PAGE_ENCODED_BYTES)?;
+    }
+    Some(())
+}
+
+/// `Filterable(stringUtf8(32))` — the written-book title bound.
+fn skip_filterable_utf8_limited_32(body: &[u8], off: &mut usize) -> Option<()> {
+    skip_utf8_limited(body, off, MAX_WRITTEN_TITLE_ENCODED_BYTES)?;
+    let present = *body.get(*off)?;
+    *off += 1;
+    if present != 0 {
+        skip_utf8_limited(body, off, MAX_WRITTEN_TITLE_ENCODED_BYTES)?;
+    }
+    Some(())
 }
 
 /// `Filterable(ComponentSerialization.STREAM_CODEC)`.
@@ -949,15 +1074,20 @@ fn skip_ranged_matcher(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 fn skip_writable_book_content(body: &[u8], off: &mut usize) -> Option<()> {
-    // list(100)(Filterable(STRING_UTF8(1024))).
-    skip_list(body, off, skip_filterable_utf8)
+    // list(100)(Filterable(stringUtf8(1024))) — WritableBookContent max 100.
+    skip_list_limited(
+        body,
+        off,
+        skip_filterable_utf8_limited_1024,
+        MAX_WRITABLE_BOOK_PAGES,
+    )
 }
 
 fn skip_written_book_content(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_filterable(body, off, skip_utf8)?; // title Filterable(string(32))
-    skip_utf8(body, off)?; // author
+    skip_filterable_utf8_limited_32(body, off)?; // title Filterable(string(32))
+    skip_utf8(body, off)?; // author STRING_UTF8
     skip_varint(body, off)?; // generation
-    skip_list(body, off, skip_filterable_component)?; // pages
+    skip_list(body, off, skip_filterable_component)?; // pages (list(), no max)
     skip_bool(body, off) // resolved
 }
 
@@ -971,7 +1101,7 @@ fn skip_state_properties_predicate(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 fn skip_nbt_predicate(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_nbt(body, off) // COMPOUND_TAG
+    skip_compound_tag(body, off) // NbtPredicate.STREAM_CODEC = COMPOUND_TAG
 }
 
 /// `TypedDataComponent` — `[DataComponentType registry VarInt][value]`, where the
@@ -1001,18 +1131,19 @@ fn skip_data_component_predicate(body: &[u8], off: &mut usize, _depth: usize) ->
     // list(64)(Single). Single = [Type either][value]. The Type either reads
     // [readBoolean][registry varint]: a nonzero byte selects a concrete
     // DATA_COMPONENT_PREDICATE_TYPE, a zero byte a DATA_COMPONENT_TYPE (AnyValue).
+    // Both registries decode through `byIdOrThrow`, so a negative id is refused.
     // The value for BOTH branches is a fromCodecWithRegistries NBT tag — a
     // concrete predicate's `singleStreamCodec` serializes the whole predicate to
     // one tag, and an AnyValueType's `unitCodec` encodes to an empty compound —
     // so every element is [bool][varint][NBT tag], fully bounded by the NBT
     // parser (no depth recursion). An End tag is refused like Java's tagCodec.
     let count = frame::read_varint(body, off)?;
-    if count < 0 {
+    if count < 0 || count as usize > MAX_DATA_COMPONENT_PREDICATES {
         return None;
     }
     for _ in 0..count {
         skip_bool(body, off)?; // either flag (nonzero = concrete predicate type)
-        skip_varint(body, off)?; // predicate-type or component-type registry id
+        skip_holder_registry(body, off)?; // predicate-type or component-type registry id
         let value = read_nbt(body, off)?;
         if matches!(value, Nbt::End) {
             return None;
@@ -1049,12 +1180,13 @@ fn skip_block_predicate_list(body: &[u8], off: &mut usize, depth: usize) -> Opti
 fn skip_attribute_modifiers_entry(body: &[u8], off: &mut usize) -> Option<()> {
     skip_holder_registry(body, off)?; // Attribute holderRegistry
     skip_attribute_modifier(body, off)?; // modifier
-    skip_varint(body, off)?; // EquipmentSlotGroup idMapper
-    // Display = Type idMapper (0=Default, 1=Hidden, 2=OverrideText) then dispatch.
+    skip_varint(body, off)?; // EquipmentSlotGroup idMapper (ZERO strategy)
+    // Display = Type idMapper (0=Default, 1=Hidden, 2=OverrideText) built with
+    // ByIdMap.OutOfBoundsStrategy.ZERO: an out-of-range (or negative) id maps to
+    // Default, a unit codec. Only id 2 (OverrideText) reads a Component tag.
     match frame::read_varint(body, off)? {
-        0 | 1 => Some(()),
         2 => skip_component_tag(body, off), // OverrideText = [Component tag]
-        _ => None,
+        _ => Some(()),
     }
 }
 
@@ -1065,12 +1197,12 @@ fn skip_attribute_modifiers(body: &[u8], off: &mut usize) -> Option<()> {
 fn skip_charged_projectiles(body: &[u8], off: &mut usize) -> Option<()> {
     // list(1024)(ItemStackTemplate) — the elements are NOT Optional (only
     // ItemContainerContents wraps its ItemStackTemplates in an Optional).
-    skip_list(body, off, skip_item_stack_leaf)
+    skip_list_limited(body, off, skip_item_stack_leaf, MAX_CHARGED_PROJECTILES)
 }
 
 fn skip_bundle_contents(body: &[u8], off: &mut usize) -> Option<()> {
     // list(256)(ItemStackTemplate) — the elements are NOT Optional.
-    skip_list(body, off, skip_item_stack_leaf)
+    skip_list_limited(body, off, skip_item_stack_leaf, MAX_BUNDLE_ITEMS)
 }
 
 fn skip_painting_variant_holder(body: &[u8], off: &mut usize) -> Option<()> {
@@ -1086,7 +1218,8 @@ fn skip_painting_variant_holder(body: &[u8], off: &mut usize) -> Option<()> {
 
 /// Bound `shape`'s wire value, advancing `*off` past it. The depth cap guards
 /// against pathological nesting through `ItemStackTemplate`/`DataComponentMatchers`
-/// recursion on hostile input (Java tracks codec depth the same way).
+/// recursion on hostile input (the advancement packet is not `trackDepth`-wrapped,
+/// so this cap is the walker's own recursion bound, deliberately conservative).
 fn skip_shape(body: &[u8], off: &mut usize, shape: Shape, depth: usize) -> Option<()> {
     use Shape::*;
     if depth > 8 {
@@ -1198,7 +1331,7 @@ fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u
         return None;
     }
     let mut seen = std::collections::HashSet::new();
-    let mut entries = Vec::with_capacity(positive as usize);
+    let mut entries = Vec::with_capacity((positive as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..positive {
         let type_id = frame::read_varint(body, off)?;
         if type_id < 0 || !seen.insert(type_id) {
@@ -1217,7 +1350,7 @@ fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u
             value,
         });
     }
-    let mut negatives = Vec::with_capacity(negative as usize);
+    let mut negatives = Vec::with_capacity((negative as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..negative {
         let type_id = frame::read_varint(body, off)?;
         if type_id < 0 || !seen.insert(type_id) {
@@ -1268,8 +1401,11 @@ fn canon_display_info(body: &[u8], off: &mut usize) -> Option<Vec<u8>> {
     let patch = canon_data_component_patch_body(body, off)?;
     out.extend_from_slice(&patch);
 
+    // frame: AdvancementType via writeEnum/readEnum, bounded by its three
+    // values (TASK=0, CHALLENGE=1, GOAL=2); readEnum indexes the constants
+    // array, so an out-of-range id throws ArrayIndexOutOfBoundsException.
     let frame_v = frame::read_varint(body, off)?;
-    if frame_v < 0 {
+    if !(0..=MAX_ADVANCEMENT_TYPE_ID).contains(&frame_v) {
         return None;
     }
     frame::write_varint(&mut out, frame_v);
@@ -1320,13 +1456,14 @@ fn canon_advancement_value(body: &[u8], off: &mut usize) -> Option<(String, Vec<
     if group_count < 0 {
         return None;
     }
-    let mut groups: Vec<Vec<String>> = Vec::with_capacity(group_count as usize);
+    let mut groups: Vec<Vec<String>> =
+        Vec::with_capacity((group_count as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..group_count {
         let name_count = frame::read_varint(body, off)?;
         if name_count < 0 {
             return None;
         }
-        let mut names = Vec::with_capacity(name_count as usize);
+        let mut names = Vec::with_capacity((name_count as usize).min(MAX_INITIAL_COLLECTION_SIZE));
         for _ in 0..name_count {
             names.push(read_string(body, off)?);
         }
@@ -1365,7 +1502,7 @@ pub fn canon_update_advancements(body: &[u8]) -> Option<Vec<u8>> {
     if added_count < 0 {
         return None;
     }
-    let mut added = Vec::with_capacity(added_count as usize);
+    let mut added = Vec::with_capacity((added_count as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..added_count {
         let (id, raw) = canon_advancement_value(body, &mut off)?;
         added.push((id, raw));
@@ -1376,7 +1513,7 @@ pub fn canon_update_advancements(body: &[u8]) -> Option<Vec<u8>> {
     if removed_count < 0 {
         return None;
     }
-    let mut removed = Vec::with_capacity(removed_count as usize);
+    let mut removed = Vec::with_capacity((removed_count as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..removed_count {
         let start = off;
         let id = read_string(body, &mut off)?;
@@ -1388,7 +1525,8 @@ pub fn canon_update_advancements(body: &[u8]) -> Option<Vec<u8>> {
     if progress_count < 0 {
         return None;
     }
-    let mut progress = Vec::with_capacity(progress_count as usize);
+    let mut progress =
+        Vec::with_capacity((progress_count as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..progress_count {
         let id = read_string(body, &mut off)?;
         // AdvancementProgress: [VarInt criteria][criteria × ([String][bool][?Instant])].
@@ -2680,6 +2818,412 @@ mod tests {
 
         let title = nbt_compound(vec![("text", nbt_str("T"))]);
         let entry = (13u32, value);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    // -- hostile-input process-abort guards -----------------------------------
+
+    #[test]
+    fn nbt_depth_beyond_java_limit_is_rejected() {
+        // NbtAccounter.MAX_STACK_DEPTH = 512. A compound nesting deeper than
+        // that must fail the parse (None) instead of overflowing the stack.
+        let mut tag = vec![10u8, 0]; // empty compound
+        for _ in 0..600 {
+            let mut outer = vec![10u8]; // compound
+            outer.push(10); // field type: compound
+            outer.extend_from_slice(&1u16.to_be_bytes()); // name len
+            outer.push(b'a'); // name
+            outer.extend_from_slice(&tag); // nested value
+            outer.push(0); // end tag
+            tag = outer;
+        }
+        let mut off = 0;
+        assert_eq!(
+            read_nbt(&tag, &mut off),
+            None,
+            "compound nesting past 512 must fail the parse"
+        );
+    }
+
+    #[test]
+    fn nbt_huge_list_count_does_not_preallocate_bomb() {
+        // A ListTag with a count near i32::MAX must not pre-allocate a huge
+        // vector: the capacity is capped at MAX_INITIAL_COLLECTION_SIZE and the
+        // first element read fails against the exhausted body (None).
+        let mut tag = Vec::new();
+        tag.push(9); // list
+        tag.push(1); // elem: byte
+        tag.extend_from_slice(&i32::MAX.to_be_bytes()); // count
+        // no elements present
+        let mut off = 0;
+        assert_eq!(read_nbt(&tag, &mut off), None);
+    }
+
+    #[test]
+    fn patch_huge_count_is_bounded_not_allocated() {
+        // DataComponentPatch decode caps its map capacity at 65536; the
+        // canonicalizer must fail fast (None) on a near-i32::MAX positive count
+        // rather than pre-allocating a huge vector.
+        let mut patch_val = Vec::new();
+        frame::write_varint(&mut patch_val, i32::MAX); // positive count
+        frame::write_varint(&mut patch_val, 0); // negative count
+        let mut off = 0;
+        assert_eq!(
+            canon_data_component_patch_body(&patch_val, &mut off),
+            None,
+            "huge patch count must fail the patch, not abort the process"
+        );
+    }
+
+    #[test]
+    fn holder_set_direct_holder_negative_id_is_rejected() {
+        // holderSet(DAMAGE_TYPE) with raw count-1 = 2 (one direct holder) whose
+        // id is negative: Java's holderRegistry decode -> byIdOrThrow(-1)
+        // throws. A regression that skipped the direct holder as a bare VarInt
+        // would accept this.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 2); // raw count-1 = 2 -> 1 direct holder
+        frame::write_varint(&mut value, -1); // holder id -1
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (27u32, value); // damage_resistant = holderSet(DAMAGE_TYPE)
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn holder_set_with_valid_direct_holder_passes_byte_exact() {
+        // holderSet(DAMAGE_TYPE) with a raw count-1 = 2 (one direct holder, id
+        // 0) must round-trip byte-exact — the direct-holder walk rejects only
+        // negative ids, not valid registry ids.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 2); // 1 direct holder
+        frame::write_varint(&mut value, 0); // holder id 0
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (27u32, value.clone());
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input).expect("valid holder set canonicalizes");
+        assert_eq!(canon, input);
+    }
+
+    #[test]
+    fn lore_over_java_max_is_rejected() {
+        // ItemLore.STREAM_CODEC = list(256) of tagCodec; Java throws
+        // DecoderException on count > 256.
+        let mut lore_value = Vec::new();
+        frame::write_varint(&mut lore_value, 257);
+        for _ in 0..257 {
+            write_nbt(&mut lore_value, &nbt_compound(vec![("text", nbt_str("x"))]));
+        }
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(
+                &title,
+                &title,
+                &[(11u32, lore_value)],
+                &[],
+                &[0],
+            )),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn charged_projectiles_over_java_max_is_rejected() {
+        // ChargedProjectiles.STREAM_CODEC = list(1024); the count check fires
+        // before any element is read.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 1025);
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[(49u32, value)], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn container_and_bundle_over_java_max_are_rejected() {
+        // ItemContainerContents (75) and BundleContents (50) are both list(256).
+        for id in [50u32, 75] {
+            let mut value = Vec::new();
+            frame::write_varint(&mut value, 257);
+            let title = nbt_compound(vec![("text", nbt_str("T"))]);
+            let adv = advancement(
+                "story:root",
+                None,
+                Some(&display_for(&title, &title, &[(id, value)], &[], &[0])),
+                &[vec!["c".into()]],
+                false,
+            );
+            let input = body(false, &[adv], &[], &[], true);
+            assert_eq!(
+                canon_update_advancements(&input),
+                None,
+                "{id} list over its 256 max must fail canonicalization"
+            );
+        }
+    }
+
+    #[test]
+    fn attribute_modifiers_display_out_of_range_maps_to_default() {
+        // ItemAttributeModifiers.Entry Display = Type idMapper built with
+        // OutOfBoundsStrategy.ZERO: an out-of-range id (3) maps to Default (a
+        // unit codec, no bytes). A walker that rejected out-of-range ids would
+        // fail the whole display; the faithful walk accepts the value and
+        // round-trips it byte-exact.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 1); // list(Entry) count
+        frame::write_varint(&mut value, 0); // Attribute holderRegistry id
+        // AttributeModifier: [Identifier][Double][Operation idMapper].
+        frame::write_varint(&mut value, 0); // Identifier: empty
+        value.extend_from_slice(&0.5f64.to_be_bytes()); // amount
+        frame::write_varint(&mut value, 0); // Operation idMapper
+        frame::write_varint(&mut value, 0); // EquipmentSlotGroup idMapper
+        frame::write_varint(&mut value, 3); // Display type id 3 -> ZERO -> Default
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (16u32, value.clone()); // attribute_modifiers
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input)
+            .expect("out-of-range display type maps to Default and canonicalizes");
+        assert_eq!(canon, input);
+
+        // A negative display id also maps to Default via ZERO.
+        let mut value_neg = Vec::new();
+        frame::write_varint(&mut value_neg, 1);
+        frame::write_varint(&mut value_neg, 0);
+        frame::write_varint(&mut value_neg, 0);
+        value_neg.extend_from_slice(&0.5f64.to_be_bytes());
+        frame::write_varint(&mut value_neg, 0);
+        frame::write_varint(&mut value_neg, 0);
+        frame::write_varint(&mut value_neg, -1); // negative display id -> Default
+        let entry = (16u32, value_neg);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input)
+            .expect("negative display id maps to Default and canonicalizes");
+        assert_eq!(canon, input);
+    }
+
+    #[test]
+    fn pot_decorations_over_java_max_is_rejected() {
+        // PotDecorations.STREAM_CODEC = list(4)(registry ITEM); the count check
+        // fires before any element is read.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 5);
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[(74u32, value)], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+
+        // A single decoration whose item registry id is negative: byIdOrThrow.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 1);
+        frame::write_varint(&mut value, -1);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[(74u32, value)], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn writable_book_content_over_java_max_is_rejected() {
+        // WritableBookContent.STREAM_CODEC = list(100)(Filterable(stringUtf8(1024))).
+        // Both the page count and the page-string bound are Java maxima.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 101); // pages over list(100) max
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[(54u32, value)], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+
+        // A single page whose string exceeds stringUtf8(1024)'s encoded bytes.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 1); // one page
+        frame::write_varint(&mut value, 4097); // page string len > 1024*4
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[(54u32, value)], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn data_component_predicate_over_java_max_is_rejected() {
+        // DataComponentPredicate.STREAM_CODEC = list(64); a can_place_on (14)
+        // BlockPredicate's partial matcher with 65 Singles fails.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 1); // list(BlockPredicate) count
+        value.push(0); // blocks optional: absent
+        value.push(0); // properties optional: absent
+        value.push(0); // nbt optional: absent
+        frame::write_varint(&mut value, 0); // exact: empty list
+        frame::write_varint(&mut value, 65); // partial: over list(64) max
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (14u32, value);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn profile_properties_over_java_max_are_rejected() {
+        // GAME_PROFILE_PROPERTIES reads readCount(16); 17 properties fail.
+        let mut value = Vec::new();
+        value.push(1u8); // either flag: nonzero -> GameProfile (left)
+        value.extend_from_slice(&[0u8; 16]); // UUID
+        value.push(0); // PLAYER_NAME: empty
+        frame::write_varint(&mut value, 17); // property count over 16
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (70u32, value); // profile
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn display_frame_out_of_advancement_type_range_is_rejected() {
+        // DisplayInfo writes the frame as AdvancementType via writeEnum/readEnum
+        // (3 values: TASK=0, CHALLENGE=1, GOAL=2); readEnum indexes the constants
+        // array, so id 3 throws ArrayIndexOutOfBoundsException.
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let desc = nbt_compound(vec![("text", nbt_str("D"))]);
+        let mut display = Vec::new();
+        write_nbt(&mut display, &title);
+        write_nbt(&mut display, &desc);
+        frame::write_varint(&mut display, 0); // icon item
+        frame::write_varint(&mut display, 1); // icon count
+        frame::write_varint(&mut display, 0); // patch positive
+        frame::write_varint(&mut display, 0); // patch negative
+        frame::write_varint(&mut display, 3); // frame id 3 — out of range
+        display.extend_from_slice(&0i32.to_be_bytes()); // flags
+        display.extend_from_slice(&0.5f32.to_be_bytes());
+        display.extend_from_slice(&(-1.25f32).to_be_bytes());
+        let mut off = 0;
+        assert_eq!(canon_display_info(&display, &mut off), None);
+    }
+
+    #[test]
+    fn advancement_id_over_string_max_is_rejected() {
+        // Identifier.STREAM_CODEC = stringUtf8(32767); the encoded-byte max is
+        // 32767*4. A VarInt length beyond that fails the parse.
+        let mut adv = Vec::new();
+        frame::write_varint(&mut adv, 32767 * 4 + 1);
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn nbt_tag_component_end_value_is_rejected() {
+        // id 22 intangible_projectile is an NbtTag via fromCodecWithRegistries
+        // (tagCodec); a root End value is refused like Java's tagCodec.
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (22u32, nbt_bytes(&Nbt::End));
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn typed_entity_data_in_bees_requires_compound() {
+        // Bees (77) occupant = TypedEntityData([type id][COMPOUND_TAG]). A
+        // non-compound tag there must fail the walk (Java: "Not a compound tag").
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 1); // list count
+        frame::write_varint(&mut value, 7); // entity type id
+        write_nbt(&mut value, &Nbt::String("nope".into())); // NOT a compound
+        frame::write_varint(&mut value, 1); // ticksInHive
+        frame::write_varint(&mut value, 1); // minTicksInHive
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (77u32, value);
         let adv = advancement(
             "story:root",
             None,
