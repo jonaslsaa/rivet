@@ -31,7 +31,7 @@ use crate::frame;
 // update_advancements canonicalizer): one strict parser + writer so the two
 // join-path canonicalizers cannot drift on the wire bytes they accept/reject
 // (negative array/list lengths, ListTag elem End, modified-UTF-8 strings).
-use rivet_decode::nbt::{read_nbt, write_nbt};
+use rivet_decode::nbt::{MAX_INITIAL_COLLECTION_SIZE, read_nbt, write_nbt};
 // The `Nbt` variant constructors are used by the test module (`super::*`).
 #[cfg(test)]
 use rivet_decode::nbt::Nbt;
@@ -59,7 +59,8 @@ pub fn canon_registry_data(body: &[u8]) -> Option<Vec<u8>> {
     let mut off = 0;
     let registry = read_string(body, &mut off)?;
     let entry_count = frame::read_varint(body, &mut off)?;
-    let mut entries = Vec::with_capacity(entry_count.max(0) as usize);
+    let mut entries =
+        Vec::with_capacity((entry_count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..entry_count.max(0) {
         let id = read_string(body, &mut off)?;
         let present = *body.get(off)?;
@@ -101,13 +102,15 @@ pub fn canon_update_attributes(body: &[u8]) -> Option<Vec<u8>> {
     let mut off = 0;
     let entity_id = frame::read_varint(body, &mut off)?;
     let count = frame::read_varint(body, &mut off)?;
-    let mut snapshots = Vec::with_capacity(count.max(0) as usize);
+    let mut snapshots =
+        Vec::with_capacity((count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..count.max(0) {
         let attr_id = frame::read_varint(body, &mut off)?;
         let base_off = off;
         frame::read_bytes(body, &mut off, 8)?; // base value (double)
         let mod_count = frame::read_varint(body, &mut off)?;
-        let mut modifiers = Vec::with_capacity(mod_count.max(0) as usize);
+        let mut modifiers =
+            Vec::with_capacity((mod_count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
         for _ in 0..mod_count.max(0) {
             let start = off;
             let id = read_string(body, &mut off)?;
@@ -151,11 +154,12 @@ pub fn canon_update_attributes(body: &[u8]) -> Option<Vec<u8>> {
 pub fn canon_update_recipes(body: &[u8]) -> Option<Vec<u8>> {
     let mut off = 0;
     let count = frame::read_varint(body, &mut off)?;
-    let mut sets = Vec::with_capacity(count.max(0) as usize);
+    let mut sets = Vec::with_capacity((count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..count.max(0) {
         let id = read_string(body, &mut off)?;
         let item_count = frame::read_varint(body, &mut off)?;
-        let mut items = Vec::with_capacity(item_count.max(0) as usize);
+        let mut items =
+            Vec::with_capacity((item_count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
         for _ in 0..item_count.max(0) {
             items.push(frame::read_varint(body, &mut off)?);
         }
@@ -183,15 +187,18 @@ pub fn canon_update_recipes(body: &[u8]) -> Option<Vec<u8>> {
 pub fn canon_update_tags(body: &[u8]) -> Option<Vec<u8>> {
     let mut off = 0;
     let registry_count = frame::read_varint(body, &mut off)?;
-    let mut registries = Vec::with_capacity(registry_count.max(0) as usize);
+    let mut registries =
+        Vec::with_capacity((registry_count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..registry_count.max(0) {
         let name = read_string(body, &mut off)?;
         let tag_count = frame::read_varint(body, &mut off)?;
-        let mut tags = Vec::with_capacity(tag_count.max(0) as usize);
+        let mut tags =
+            Vec::with_capacity((tag_count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
         for _ in 0..tag_count.max(0) {
             let tag_name = read_string(body, &mut off)?;
             let id_count = frame::read_varint(body, &mut off)?;
-            let mut ids = Vec::with_capacity(id_count.max(0) as usize);
+            let mut ids =
+                Vec::with_capacity((id_count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
             for _ in 0..id_count.max(0) {
                 ids.push(frame::read_varint(body, &mut off)?);
             }
@@ -339,7 +346,7 @@ pub fn canon_chunk(body: &[u8]) -> Option<Vec<u8>> {
     }
     let mut off = 8;
     let count = frame::read_varint(body, &mut off)?;
-    let mut entries = Vec::with_capacity(count.max(0) as usize);
+    let mut entries = Vec::with_capacity((count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..count.max(0) {
         let type_id = frame::read_varint(body, &mut off)?;
         let len = frame::read_varint(body, &mut off)?;

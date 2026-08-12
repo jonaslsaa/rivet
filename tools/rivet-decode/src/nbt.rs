@@ -39,8 +39,9 @@ const MAX_NBT_DEPTH: u32 = 512;
 /// `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE` — the initial capacity Java
 /// gives a decoded collection. The parser pre-allocates at most this many
 /// slots so a hostile count cannot force a huge allocation before any element
-/// has been read.
-const MAX_INITIAL_COLLECTION_SIZE: usize = 65536;
+/// has been read. Shared with the `rivet-capture` structured canonicalizers,
+/// which cap their count-derived pre-allocations the same way.
+pub const MAX_INITIAL_COLLECTION_SIZE: usize = 65536;
 
 /// Spigot's `checkArgument(length < 1 << 24)` cap on `ByteArrayTag` and
 /// `IntArrayTag` reads (a 16 MiB array). `LongArrayTag` has no such cap.
