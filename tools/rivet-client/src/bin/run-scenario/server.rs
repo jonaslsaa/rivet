@@ -73,12 +73,12 @@ pub const GENERATED_SEED_ARG: &str = "--seed";
 /// fresh disposable seed-42 world. The Paper ground-truth reference
 /// (`rivet-oracle generated-expected`) is captured for exactly this seed.
 ///
-/// This runner is the source of truth: it always passes this seed explicitly
-/// to `rivet-oracle generated-expected <seed>`, so the oracle's own default
-/// (tools/rivet-oracle/src/main.rs `GENERATED_SEED`) only applies to bare CLI
-/// use of that subcommand. A divergence between the two constants would make
-/// the runner compare the wrong seed's world against the reference — a content
-/// mismatch (FAIL), never a fabricated PASS — but keep them in sync.
+/// This runner is the single source of truth: it always passes this seed
+/// explicitly to both the server boot and `rivet-oracle generated-expected
+/// <seed>`. The oracle has no seed default of its own, so there is no second
+/// copy of the constant for the runner and oracle to drift apart on — a bare
+/// oracle CLI call without a seed is a usage error, never a silent comparison
+/// of the wrong world.
 pub const GENERATED_SEED: u64 = 42;
 
 /// How long to wait for Paper to reach `Done (...)!` (covers the paperclip
