@@ -39,6 +39,9 @@
 //! - `levelgen::world_generation_context` — the `WorldGenerationContext`
 //!   minY/height window (the `mc.world.level.levelgen.noise` unit's class; only
 //!   the Paper `level()` accessor defers — RivetTodo #232)
+//! - `levelgen::blending` — the `Blender` empty-singleton value prerequisite
+//!   (the `mc.world.level.levelgen.blending` unit — issue #177; the
+//!   `BlendingData`/`of` surface defers as `RivetTodo(#177)`)
 //! - `lighting::light_update_data` — the light payload producer
 //! - `superflat` — the deterministic single-stone superflat content builder
 //!   (issue #100) that feeds the #94 `ClientboundLevelChunkWithLightPacket`.
