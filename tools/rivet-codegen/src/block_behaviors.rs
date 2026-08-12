@@ -16,7 +16,7 @@
 //! at 0, starts strictly increasing, lengths positive, no overlap, sum ==
 //! count), every run's start/length must fit the emitted `(u16, u16, u32)`
 //! tuple and lie within `state_count`, the accumulation is overflow-checked,
-//! the word's reserved bits (22..32) must be zero, and the fixture must match
+//! the word's reserved bits (27..32) must be zero, and the fixture must match
 //! its provenance manifest sha256. `state_count` is pinned to 32366 (the
 //! emitted `BLOCK_STATE_COUNT`) by the live probe.
 
@@ -191,14 +191,21 @@ fn validate(root: Value) -> Result<Vec<Run>> {
             .get("word")
             .and_then(Value::as_u64)
             .with_context(|| format!("run {i} `word` must be a non-negative integer"))?;
-        // Reserved bits 22..32 must be zero — a probe emitting a field outside
+        // Reserved bits 27..32 must be zero — a probe emitting a field outside
         // its documented width would otherwise be silently dropped.
-        if word >> 22 != 0 {
+        if word >> 27 != 0 {
             bail!("run {i} word {word} has reserved bits set");
         }
-        // Field bounds by bit width (light_dampening, light_emission <= 15,
-        // map_color <= 63) are implied by the width, so the reserved check
-        // above is the only field-level bound worth asserting here.
+        // The 3-bit `fluid_id` field admits 0..=7, but the registry only
+        // defines the five built-in fluids (0..=4) — assert the narrower
+        // contract here (the probe pins it too) so a fixture with `fluid_id`
+        // 5..=7 is rejected rather than silently accepted.
+        if (word >> 24) & 0x7 > 4 {
+            bail!("run {i} word {word} has fluid_id out of 0..4");
+        }
+        // The remaining fields (light_dampening, light_emission <= 15,
+        // map_color <= 63, is_solid, can_be_replaced) are implied by their
+        // widths, so no further field-level bound is worth asserting here.
 
         if start != expected_start {
             bail!(
@@ -302,7 +309,12 @@ fn render(runs: &[Run], source: &SourceProvenance) -> String {
          //   bits  8-11   light_dampening (0..15)\n\
          //   bits  12-15  light_emission (0..15)\n\
          //   bits  16-21  map_color_id (0..63)\n\
-         //   bits  22-31  reserved (always 0)\n\
+         //   bit  22 is_solid (isSolid() — the cached legacySolid from calculateSolid():\n\
+         //            non-empty collision-shape bounds volume >= 35/48 or ysize >= 1.0,\n\
+         //            after the forceSolidOn/Off and dynamic-shape guards; NOT hasCollision)\n\
+         //   bit  23 can_be_replaced (canBeReplaced() — Properties.replaceable)\n\
+         //   bits  24-26  fluid_id (BuiltInRegistries.FLUID.getId(getFluidState().getType()), 0..4)\n\
+         //   bits  27-31  reserved (always 0)\n\
          // Words are run-length encoded: each (start, length, word) covers states\n\
          // [start, start + length). Runs partition 0..BLOCK_STATE_COUNT and are sorted\n\
          // by start.\n\n",
@@ -348,6 +360,17 @@ fn render(runs: &[Run], source: &SourceProvenance) -> String {
             "1 << 7",
             "the state carries no fluid",
         ),
+        (
+            "BEHAVIOR_FLAG_IS_SOLID",
+            "1 << 22",
+            "state is solid (BlockStateBase.isSolid() — cached legacySolid: collision-shape \
+             bounds volume >= 35/48 or ysize >= 1.0; SolidPredicate)",
+        ),
+        (
+            "BEHAVIOR_FLAG_CAN_BE_REPLACED",
+            "1 << 23",
+            "state can be replaced (Properties.replaceable — ReplaceablePredicate)",
+        ),
     ] {
         out.push_str(&format!(
             "/// {doc}.\n\
@@ -362,9 +385,12 @@ fn render(runs: &[Run], source: &SourceProvenance) -> String {
          pub const BEHAVIOR_SHIFT_LIGHT_EMISSION: u32 = 12;\n\
          /// Shift/width of the `map_color_id` field (0..63).\n\
          pub const BEHAVIOR_SHIFT_MAP_COLOR: u32 = 16;\n\
+         /// Shift/width of the `fluid_id` field (0..4, the 5 built-in fluids).\n\
+         pub const BEHAVIOR_SHIFT_FLUID_ID: u32 = 24;\n\
          pub const BEHAVIOR_MASK_LIGHT_DAMPENING: u32 = 0xF;\n\
          pub const BEHAVIOR_MASK_LIGHT_EMISSION: u32 = 0xF;\n\
-         pub const BEHAVIOR_MASK_MAP_COLOR: u32 = 0x3F;\n\n",
+         pub const BEHAVIOR_MASK_MAP_COLOR: u32 = 0x3F;\n\
+         pub const BEHAVIOR_MASK_FLUID_ID: u32 = 0x7;\n\n",
     );
 
     out.push_str(
@@ -459,10 +485,27 @@ mod tests {
 
     #[test]
     fn reserved_bits_fail() {
+        // Bit 22 is `is_solid` (assigned for #180); the first truly reserved
+        // bit is 27 (`word >> 27 != 0` is the validator's reserved-bits check).
         let mut v = valid_root();
-        v["runs"][0]["word"] = serde_json::json!(1u64 << 22);
+        v["runs"][0]["word"] = serde_json::json!(1u64 << 27);
         let err = validate(v).unwrap_err();
         assert!(err.to_string().contains("reserved bits"), "got: {err}");
+    }
+
+    #[test]
+    fn fluid_id_out_of_range_fails() {
+        // The 3-bit `fluid_id` field admits 0..=7, but the registry only
+        // defines 0..=4 — a fixture with fluid_id 5 must be rejected by the
+        // explicit bound (the reserved-bits check alone can no longer catch
+        // it, since bits 24..26 are a legitimate field).
+        let mut v = valid_root();
+        v["runs"][0]["word"] = serde_json::json!(5u64 << 24);
+        let err = validate(v).unwrap_err();
+        assert!(
+            err.to_string().contains("fluid_id out of 0..4"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -613,7 +656,7 @@ mod tests {
     /// The emitted `behavior_of` binary search must reproduce the fixture words
     /// for every state in the real table (the RLE decode is the load-bearing
     /// consumer path). Walking all 32366 states — including both boundaries of
-    /// every one of the 16753 runs and the out-of-range fallback — proves the
+    /// every one of the 16757 runs and the out-of-range fallback — proves the
     /// `partition_point` decode has no off-by-one anywhere.
     #[test]
     fn behavior_of_matches_fixture_words() {

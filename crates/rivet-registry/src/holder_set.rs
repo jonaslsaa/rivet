@@ -165,6 +165,19 @@ impl<T> HolderSet<T> {
         }
     }
 
+    /// Whether a `Reference` member carries the given element id — the
+    /// `BlockState.is(HolderSet)`-style membership check the `matching_blocks`/
+    /// `matching_fluids` predicates use (`state.is(set)` compares the state's
+    /// block/fluid holder, a `Reference` in the matching registry, against the
+    /// set). The set is over the matching registry by construction, so the id
+    /// compare is the faithful equivalent of `Reference.equals` on a
+    /// same-registry holder.
+    pub fn contains_id(&self, id: u32) -> bool {
+        self.contents()
+            .iter()
+            .any(|h| matches!(h, Holder::Reference { id: member, .. } if *member == id))
+    }
+
     /// `HolderSet.canSerializeIn(HolderOwner<T>)` — `Direct` serializes
     /// anywhere; `Named` must belong to the owner (Java `Named.canSerializeIn`
     /// = `owner.canSerializeIn(context)` = the RegistryId O(1) owner check).
