@@ -200,6 +200,34 @@ pub const OVERWORLD_SEA_LEVEL: i32 = 63;
 /// The pinned data version the #371 disposable New World was captured at.
 const EXPECTED_DATA_VERSION: i32 = 4903;
 
+/// Read, preflight, reconstruct, and bridge one existing chunk from the
+/// read-only region source into an owned server `LevelChunk` — the shared
+/// boot/on-demand reconstruction step. Recoverable reconstruction diagnostics
+/// fail loudly (the boot and the on-demand recenter both reject a chunk whose
+/// content differs from what was stored), and absent/corrupt chunks surface
+/// their typed [`RegionBackedBootError`] — never generation, never a superflat
+/// fallback.
+pub fn load_and_reconstruct_chunk(
+    source: &mut RegionChunkSource,
+    pos: ChunkPos,
+) -> Result<LevelChunk, RegionBackedBootError> {
+    let data = source.load_for_composition(pos)?;
+    let accessor = height_accessor::create(OVERWORLD_MIN_Y, OVERWORLD_HEIGHT);
+    let reconstruction = rivet_world::chunk::storage::reconstruct_runtime_chunk(
+        pos, data, accessor, true, // the overworld dimension has skylight.
+    )
+    .map_err(RegionBackedBootError::ChunkReconstruction)?;
+    if !reconstruction.section_diagnostics.is_empty()
+        || !reconstruction.parse_diagnostics.is_empty()
+    {
+        return Err(RegionBackedBootError::ReconstructionDiagnostics {
+            section: reconstruction.section_diagnostics,
+            parse: reconstruction.parse_diagnostics,
+        });
+    }
+    LevelChunk::from_bridge(reconstruction).map_err(RegionBackedBootError::LevelChunkBridge)
+}
+
 /// Compose the read-only region-backed overworld boot: validate `level.dat`
 /// (`Data.DataVersion` 4903), decode the real spawn `RespawnData` through the
 /// finalized `respawn_data_codec` (#515), read the real world seed and the
@@ -259,7 +287,6 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     // The empty `ChunkMap` guarantees `RequireLoaded` fails on any position the
     // boot did not install — never a superflat placeholder.
     let mut world = ServerLevel::new_region_backed(config);
-    let accessor = height_accessor::create(OVERWORLD_MIN_Y, OVERWORLD_HEIGHT);
     // Reconstruct and install every chunk of the exact 117-chunk view square:
     // the join send-set (issue #100) must resolve every position from the
     // read-only region. A missing or corrupt chunk anywhere in the view fails
@@ -269,30 +296,16 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     let mut positions = Vec::with_capacity(world.view().chunk_count());
     world.view().for_each(|pos| positions.push(pos));
     for pos in positions {
-        let data = prepared.source_mut().load_for_composition(pos)?;
-        let reconstruction = rivet_world::chunk::storage::reconstruct_runtime_chunk(
-            pos, data, accessor, true, // the overworld dimension has skylight.
-        )
-        .map_err(RegionBackedBootError::ChunkReconstruction)?;
-        // Recoverable reconstruction diagnostics (substituted palette entries,
-        // dropped malformed tick elements) are real content changes Paper
-        // surfaces through its top-level logger. This read-only boot has no
-        // logger, so a non-empty set fails loudly instead of silently
-        // installing a chunk whose content differs from what was stored.
-        if !reconstruction.section_diagnostics.is_empty()
-            || !reconstruction.parse_diagnostics.is_empty()
-        {
-            return Err(RegionBackedBootError::ReconstructionDiagnostics {
-                section: reconstruction.section_diagnostics,
-                parse: reconstruction.parse_diagnostics,
-            });
-        }
-        // The #519 aux payloads are carried onto the server chunk as owned
-        // tick-thread state (`from_bridge`); nothing is scheduled or written.
-        let chunk = LevelChunk::from_bridge(reconstruction)
-            .map_err(RegionBackedBootError::LevelChunkBridge)?;
+        let chunk = load_and_reconstruct_chunk(prepared.source_mut(), pos)?;
         world.chunk_map_mut().install(pos, chunk);
     }
+    // The read-only region source moves into the world as its on-demand
+    // authority (issue #185): a movement-driven recenter requesting a chunk
+    // outside this boot-time view loads it from the same source, validates it
+    // through the identical `load_and_reconstruct_chunk` boundary, and installs
+    // it into the same `ChunkMap` — one authority, no duplicate cache, no
+    // `Arc<RwLock>`, no writes, no generation, no superflat fallback.
+    world.set_region_source(prepared.into_source());
     Ok(world)
 }
 
@@ -475,6 +488,7 @@ mod tests {
 
     use super::*;
     use crate::server::level::chunk_tracking_view::ChunkTrackingView;
+    use crate::server::level::player_chunk_loader::PlayerChunkLoader;
 
     // Fixtures here hand-craft minimal region buffers (a single version-3
     // chunk). Exercising real launcher-created overworld regions — Spigot
@@ -555,6 +569,12 @@ mod tests {
     /// are serialized with `nbt_io::write` (matching the single-chunk
     /// `write_region_nbt`); `Raw` entries are placed byte-for-byte. The region
     /// header layout mirrors `write_region_nbt`.
+    ///
+    /// A call MERGES into an existing region file instead of rebuilding it: the
+    /// header of a file already on disk is carried over and new entries append
+    /// to the body, so a later write (e.g. the beyond-view enter cells the
+    /// movement tests place after `loaded_world_root`) augments chunks the
+    /// earlier boot-view write already placed rather than clobbering them.
     fn write_region_chunks(region_dir: &Path, chunks: &[(ChunkPos, ChunkPayload)]) {
         use std::collections::BTreeMap;
         let mut regions: BTreeMap<(i32, i32), Vec<(ChunkPos, ChunkPayload)>> = BTreeMap::new();
@@ -565,9 +585,16 @@ mod tests {
                 .push((*pos, payload.clone()));
         }
         for ((rx, rz), entries) in regions {
-            let mut header = vec![0u8; 8192];
-            let mut body = Vec::new();
-            let mut sector = 2usize; // the header occupies sectors 0..2.
+            let path = region_dir.join(format!("r.{rx}.{rz}.mca"));
+            let (mut header, mut body) = if path.exists() {
+                let existing = fs::read(&path).unwrap();
+                (existing[..8192].to_vec(), existing[8192..].to_vec())
+            } else {
+                (vec![0u8; 8192], Vec::new())
+            };
+            // The next free sector follows whatever body the file already
+            // carries (the header occupies sectors 0..2).
+            let mut sector = (body.len() / 4096) + 2;
             for (pos, payload) in entries {
                 let nbt = match payload {
                     ChunkPayload::Valid(tag) => {
@@ -593,7 +620,7 @@ mod tests {
             let mut region = Vec::with_capacity(header.len() + body.len());
             region.extend_from_slice(&header);
             region.extend_from_slice(&body);
-            fs::write(region_dir.join(format!("r.{rx}.{rz}.mca")), region).unwrap();
+            fs::write(path, region).unwrap();
         }
     }
 
@@ -1347,6 +1374,185 @@ mod tests {
         assert!(
             server.join_is_flat(),
             "the no-level superflat boot must advertise flat"
+        );
+    }
+
+    /// The cells the spawn view ((−1,−3), send 4) enters on a one-chunk-east
+    /// recenter to (0,−3) — the deterministic `ChunkTrackingView::difference`
+    /// enter set (11 cells): the new view's x=5 column (z=−7..1) plus the two
+    /// corner-shift cells (4,−8)/(4,2). Every entered cell lies OUTSIDE the
+    /// boot-time 117-chunk square (the square's max x is 4, and both corner
+    /// cells are boot-time corners), so the movement-driven recenter (issue
+    /// #185) must load each on demand from the region source instead of
+    /// disconnecting.
+    fn spawn_east_move_enter() -> Vec<ChunkPos> {
+        let boot = ChunkTrackingView::of(ChunkPos::new(-1, -3), 4);
+        let next = ChunkTrackingView::of(ChunkPos::new(0, -3), 4);
+        let mut enter = Vec::new();
+        ChunkTrackingView::difference(&boot, &next, |pos| enter.push(pos), |_| {});
+        assert_eq!(
+            enter.len(),
+            11,
+            "one-chunk east move enters exactly 11 cells"
+        );
+        for pos in &enter {
+            assert!(
+                !boot.contains_pos(pos),
+                "every entered cell is outside the boot view: {pos}"
+            );
+        }
+        enter
+    }
+
+    /// Write the entered beyond-view cells into the region (in addition to the
+    /// 117-chunk boot view `loaded_world_root` already wrote), each carrying
+    /// the committed clean spawn fixture with its coordinates rewritten.
+    fn write_entered_cells(region_dir: &Path, enter: &[ChunkPos]) {
+        let mut extras = Vec::with_capacity(enter.len());
+        for pos in enter {
+            let mut chunk = load_fixture(&loaded_world_fixture());
+            chunk.put_int("xPos", pos.x());
+            chunk.put_int("zPos", pos.z());
+            extras.push((*pos, ChunkPayload::Valid(chunk)));
+        }
+        write_region_chunks(region_dir, &extras);
+    }
+
+    /// A movement-driven recenter (issue #521) east from the spawn chunk
+    /// resolves every entered cell from the read-only region on demand (issue
+    /// #185) and installs it into the `ChunkMap` — no disconnect, no generation,
+    /// no superflat fallback. The entered set is entirely beyond the boot-time
+    /// view, so each packet is the freshly-loaded real chunk, and the map grows
+    /// by exactly the 11 entered cells (the single authority).
+    #[test]
+    fn movement_recenter_loads_on_demand_chunk_from_region_outside_boot_view() {
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+        let region_dir = temp.path().join("dimensions/minecraft/overworld/region");
+        let enter = spawn_east_move_enter();
+        write_entered_cells(&region_dir, &enter);
+
+        let mut world = boot_level(temp.path()).expect("the loaded world boots");
+        assert_eq!(world.chunk_map().len(), 117);
+        assert!(
+            world.is_region_backed(),
+            "the boot installs the read-only source"
+        );
+
+        let mut loader = PlayerChunkLoader::new(ChunkPos::new(-1, -3));
+        loader
+            .add_and_send_chunks(&mut world, None)
+            .expect("the spawn send-set encodes (all boot cells loaded)");
+        let packets = loader
+            .update(&mut world, ChunkPos::new(0, -3), None)
+            .expect("the recenter loads the entered cells on demand");
+
+        // The cache-center packet then exactly the 11 entered chunks.
+        let chunk_packets: Vec<&crate::server::level::PlayPacket> = packets
+            .iter()
+            .filter(|p| {
+                p.id
+                    == rivet_protocol::generated::packets::play::clientbound::PacketType::LevelChunkWithLight
+                        .id()
+            })
+            .collect();
+        assert_eq!(
+            chunk_packets.len(),
+            enter.len(),
+            "the east move sends exactly the entered cells"
+        );
+
+        // Every entered cell is installed into the world's ChunkMap (one
+        // authority) and its packet carries the real coordinate header — the
+        // freshly loaded chunk, not a substituted placeholder.
+        for pos in &enter {
+            let chunk = world
+                .chunk_map()
+                .get_chunk(*pos)
+                .unwrap_or_else(|| panic!("entered cell {pos} installed on demand"));
+            assert_eq!(chunk.pos(), *pos);
+        }
+        assert_eq!(world.chunk_map().len(), 117 + enter.len());
+        assert!(world.is_region_backed());
+    }
+
+    /// A recenter whose entered cells are absent from the region fails typed
+    /// `UNVERIFIED` (the source's `MissingChunkNoGeneration` boundary) instead
+    /// of disconnecting silently or substituting superflat content, and the
+    /// failed recenter installs nothing.
+    #[test]
+    fn movement_recenter_fails_typed_when_on_demand_chunk_is_missing_from_region() {
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+        let mut world = boot_level(temp.path()).expect("the loaded world boots");
+        assert_eq!(world.chunk_map().len(), 117);
+
+        let mut loader = PlayerChunkLoader::new(ChunkPos::new(-1, -3));
+        loader
+            .add_and_send_chunks(&mut world, None)
+            .expect("the spawn send-set encodes");
+        let err = loader
+            .update(&mut world, ChunkPos::new(0, -3), None)
+            .unwrap_err();
+        assert!(
+            err.contains("UNVERIFIED"),
+            "a missing beyond-view chunk fails typed UNVERIFIED: {err}"
+        );
+        // The failed recenter installed nothing: the map is still the boot view.
+        assert_eq!(world.chunk_map().len(), 117);
+    }
+
+    /// A recenter whose entered cell carries corrupt NBT fails typed with the
+    /// source's region-read error — the storage's decode fails, never a
+    /// superflat fallback. The corrupt entry is the first entered cell the
+    /// walker resolves.
+    #[test]
+    fn movement_recenter_fails_typed_on_a_corrupt_on_demand_chunk() {
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+        let region_dir = temp.path().join("dimensions/minecraft/overworld/region");
+        let enter = spawn_east_move_enter();
+        // Write every entered cell except the first as valid; the first carries
+        // garbage NBT so the on-demand read fails at the storage boundary.
+        let mut extras = Vec::with_capacity(enter.len());
+        for (index, pos) in enter.iter().enumerate() {
+            let payload = if index == 0 {
+                ChunkPayload::Raw(vec![0x7f, 0x45, 0x4c, 0x46, 0xff, 0x00])
+            } else {
+                let mut chunk = load_fixture(&loaded_world_fixture());
+                chunk.put_int("xPos", pos.x());
+                chunk.put_int("zPos", pos.z());
+                ChunkPayload::Valid(chunk)
+            };
+            extras.push((*pos, payload));
+        }
+        write_region_chunks(&region_dir, &extras);
+
+        let mut world = boot_level(temp.path()).expect("the loaded world boots");
+        let mut loader = PlayerChunkLoader::new(ChunkPos::new(-1, -3));
+        loader
+            .add_and_send_chunks(&mut world, None)
+            .expect("the spawn send-set encodes");
+        let err = loader
+            .update(&mut world, ChunkPos::new(0, -3), None)
+            .unwrap_err();
+        assert!(
+            err.contains("UNVERIFIED"),
+            "a corrupt beyond-view chunk fails typed UNVERIFIED: {err}"
+        );
+        // The corrupt cell itself is never installed: the on-demand load fails
+        // at the storage boundary before any install. The walk continues (each
+        // entered cell is an independent `sendChunk`, like Java), so the other
+        // entered cells load and install into the single `ChunkMap` authority;
+        // the whole send-set still returns `Err`, so no partial set is emitted.
+        assert!(
+            world.chunk_map().get_chunk(enter[0]).is_none(),
+            "the corrupt cell was never installed"
+        );
+        assert_eq!(
+            world.chunk_map().len(),
+            117 + enter.len() - 1,
+            "the other entered cells loaded before the failed cell are installed"
         );
     }
 }
