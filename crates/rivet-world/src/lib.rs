@@ -64,6 +64,14 @@
 pub mod biome;
 pub mod block;
 pub mod chunk;
+/// `net.minecraft.data.worldgen` — the `mc.data.worldgen.prereq` unit's
+/// `data::worldgen` slice: the `BootstrapContext` registry-bootstrap contract
+/// (+ test-only `RecordingContext` until `RegistrySetBuilder` lands), the
+/// `TerrainProvider` overworld terrain splines (`#178`/`#177` consumers), and
+/// the `NoiseData` noise registration table. The rest of the
+/// `net.minecraft.data.worldgen` package (the 26-file residual of the
+/// `mc.data.worldgen` row) stays pending.
+pub mod data;
 pub mod flag;
 pub mod level;
 pub mod levelgen;
