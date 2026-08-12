@@ -1258,15 +1258,18 @@ fn walk_work(body: &[u8], off: &mut usize, root: Work) -> Option<()> {
                 let negative = frame::read_varint(body, off)?;
                 // DataComponentPatch.decode throws only when the *sum* (map
                 // capacity) is negative; an individual negative count is
-                // tolerated (its loop runs zero times).
+                // tolerated (its `for (int i = 0; i < count; i++)` loop runs
+                // zero times). Clamp to 0 for the loop counters so a negative
+                // count cannot desynchronize the walker (a `-1 as usize` would
+                // read the negative entries as if they were positive ones).
                 if positive as i64 + (negative as i64) < 0 {
                     return None;
                 }
                 stack.push(Work::PatchNegative {
-                    remaining: negative as usize,
+                    remaining: negative.max(0) as usize,
                 });
                 stack.push(Work::PatchPositive {
-                    remaining: positive as usize,
+                    remaining: positive.max(0) as usize,
                 });
             }
             Work::PatchPositive { remaining } => {
@@ -3694,6 +3697,48 @@ mod tests {
             canon_display_info(&display, &mut off),
             None,
             "a negative total patch count throws in Java"
+        );
+    }
+
+    #[test]
+    fn nested_patch_negative_individual_count_with_positive_sum_is_accepted() {
+        // The walker's nested-patch path (Work::Patch, for Container/
+        // ChargedProjectiles/BundleContents/UseRemainder ItemStackTemplates)
+        // must honor the same leniency as the top-level icon patch: Java's
+        // DataComponentPatch.decode only throws when positive + negative (the
+        // map capacity) is negative; an individual negative count runs its loop
+        // zero times. A regression that cast `-1 as usize` would read the
+        // negative entries as positive ones and desynchronize. id 75 = Container
+        // = list(256)(?ItemStackTemplate).
+        let mut patch_val = Vec::new();
+        frame::write_varint(&mut patch_val, -1); // positive count (loop runs 0×)
+        frame::write_varint(&mut patch_val, 5); // negative count (sum 4 >= 0)
+        for i in 1..=5 {
+            frame::write_varint(&mut patch_val, i); // distinct negative-entry type ids
+        }
+
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 1); // list count
+        value.push(1); // Optional present
+        frame::write_varint(&mut value, 926); // item (non-air)
+        frame::write_varint(&mut value, 1); // count
+        value.extend_from_slice(&patch_val); // nested patch
+
+        let title = nbt_bytes(&nbt_compound(vec![("text", nbt_str("T"))]));
+        let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+        let display = display_raw(
+            &title,
+            &desc,
+            &icon(926, 1, &patch(&[(75u32, value)], &[])),
+            0,
+            0,
+            (0.5, -1.25),
+            None,
+        );
+        let mut off = 0;
+        assert!(
+            canon_display_info(&display, &mut off).is_some(),
+            "Java accepts a nested patch with a negative individual count when the total is non-negative"
         );
     }
 
