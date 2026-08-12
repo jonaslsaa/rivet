@@ -782,11 +782,13 @@ fn byte_codec_narrows_through_json() {
 
 /// Every f32 in the committed Gson golden (`gson-float-to-string.txt`) must
 /// serialize through `createFloat` to the exact `Float.toString` bytes Gson
-/// emits for a `JsonPrimitive(Float)`. The golden was captured from JDK 25 +
-/// Gson 2.13.1 across every exponent class, several mantissas, both signs,
-/// thresholds (1e-3 / 1e7), subnormals, extremes, and shortest tie-breaks —
-/// so `JsonOps.createFloat` is byte-for-byte Paper/Gson-faithful, including
-/// signed zero, exponent casing/sign, and the ~1.1% subnormal tie-breaks.
+/// emits for a `JsonPrimitive(Float)` — Gson delegates float rendering to the
+/// JDK's `Float.toString`, so the bytes are version-independent (Paper pins
+/// Gson 2.14.0). The golden was captured from JDK 25 across every exponent
+/// class, several mantissas, both signs, thresholds (1e-3 / 1e7), subnormals,
+/// extremes, and shortest tie-breaks — so `JsonOps.createFloat` is
+/// byte-for-byte Paper/Gson-faithful, including signed zero, exponent
+/// casing/sign, and the ~1.1% subnormal tie-breaks.
 #[test]
 fn create_float_matches_gson_byte_for_byte() {
     let ops = JsonOps::INSTANCE;
