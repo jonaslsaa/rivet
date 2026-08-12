@@ -86,7 +86,7 @@ pub fn canon_registry_data(body: &[u8]) -> Option<Vec<u8>> {
         match value {
             Some(v) => {
                 out.push(1);
-                write_nbt(&mut out, v);
+                write_nbt(&mut out, v)?;
             }
             None => out.push(0),
         }
@@ -381,6 +381,13 @@ pub fn canon_chunk(body: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test fixtures are built from `Nbt` values that always re-encode within
+    /// the u16 length limit, so the fallible `write_nbt` is unwrapped here.
+    /// (The canonicalizer itself propagates `None` for a hostile string.)
+    fn write_nbt(out: &mut Vec<u8>, value: &Nbt) {
+        super::write_nbt(out, value).expect("test fixture re-encodes within the u16 limit");
+    }
 
     fn round_trip_nbt(v: &Nbt) -> Nbt {
         let mut out = Vec::new();

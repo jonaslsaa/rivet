@@ -105,12 +105,19 @@ pub fn decode_modified_utf8(bytes: &[u8]) -> Option<String> {
 /// (modified-UTF-8) bytes, not the UTF-8 bytes, so an astral or NUL string is
 /// re-encoded byte-for-byte the way Java wrote it. Shares the OpenJDK-faithful
 /// encoder in `rivet-util::data_io`, so write/read round-trip through the same
-/// codec. `write_utf_body` only fails on a body over 65535 encoded bytes; the
-/// canonicalizer only re-encodes strings it decoded from u16-prefixed wire
-/// fields, which are at most 65535 bytes and re-encode to at most that.
-pub fn encode_modified_utf8(s: &str) -> Vec<u8> {
-    rivet_util::data_io::write_utf_body(s)
-        .expect("decoded u16-prefixed string re-encodes within the u16 limit")
+/// codec.
+///
+/// Returns `None` when the encoded body would exceed the 65535-byte u16 prefix
+/// (Java's `UTFDataFormatException`). This is reachable from hostile wire
+/// input: `DataInput.readUTF` accepts a raw `0x00` byte as U+0000, and the
+/// re-encode expands each NUL to the 2-byte `C0 80`, so a u16-prefixed field of
+/// ≥32768 raw `0x00` bytes decodes to ≥32768 NULs and re-encodes past the
+/// limit. Java's network write path (`FriendlyByteBuf.writeNbt` →
+/// `DataOutputStream.writeUTF`) throws here and the whole packet encode fails;
+/// the canonicalizers propagate `None` the same way (the caller keeps the raw
+/// body) rather than aborting.
+pub fn encode_modified_utf8(s: &str) -> Option<Vec<u8>> {
+    rivet_util::data_io::write_utf_body(s).ok()
 }
 
 /// Read a bare NBT payload of `type_byte` (no name prefix). Entry point for a
@@ -350,40 +357,63 @@ pub fn nbt_type_id(v: &Nbt) -> u8 {
 /// Write a named compound field (`[byte type][u16 name len][name][payload]`).
 /// The name length counts *encoded* (modified-UTF-8) bytes, matching
 /// `DataOutput.writeUTF`; a plain `name.len()` would misreport astral names.
-pub fn write_named_field(out: &mut Vec<u8>, name: &str, value: &Nbt) {
-    let name_bytes = encode_modified_utf8(name);
+/// Fails (`None`) when the name or a nested string re-encodes past the u16
+/// length limit (see [`encode_modified_utf8`]).
+fn write_named_field(out: &mut Vec<u8>, name: &str, value: &Nbt) -> Option<()> {
+    let name_bytes = encode_modified_utf8(name)?;
     out.push(nbt_type_id(value));
     out.extend_from_slice(&(name_bytes.len() as u16).to_be_bytes());
     out.extend_from_slice(&name_bytes);
-    write_payload(out, value);
+    write_payload(out, value)
 }
 
-pub fn write_payload(out: &mut Vec<u8>, value: &Nbt) {
+pub fn write_payload(out: &mut Vec<u8>, value: &Nbt) -> Option<()> {
     match value {
-        Nbt::End => {}
-        Nbt::Byte(v) => out.push(*v as u8),
-        Nbt::Short(v) => out.extend_from_slice(&v.to_be_bytes()),
-        Nbt::Int(v) => out.extend_from_slice(&v.to_be_bytes()),
-        Nbt::Long(v) => out.extend_from_slice(&v.to_be_bytes()),
-        Nbt::Float(v) => out.extend_from_slice(&v.to_be_bytes()),
-        Nbt::Double(v) => out.extend_from_slice(&v.to_be_bytes()),
+        Nbt::End => Some(()),
+        Nbt::Byte(v) => {
+            out.push(*v as u8);
+            Some(())
+        }
+        Nbt::Short(v) => {
+            out.extend_from_slice(&v.to_be_bytes());
+            Some(())
+        }
+        Nbt::Int(v) => {
+            out.extend_from_slice(&v.to_be_bytes());
+            Some(())
+        }
+        Nbt::Long(v) => {
+            out.extend_from_slice(&v.to_be_bytes());
+            Some(())
+        }
+        Nbt::Float(v) => {
+            out.extend_from_slice(&v.to_be_bytes());
+            Some(())
+        }
+        Nbt::Double(v) => {
+            out.extend_from_slice(&v.to_be_bytes());
+            Some(())
+        }
         Nbt::ByteArray(v) => {
             out.extend_from_slice(&(v.len() as i32).to_be_bytes());
             out.extend_from_slice(v);
+            Some(())
         }
         Nbt::String(v) => {
             // Length counts encoded (modified-UTF-8) bytes, matching
             // DataOutput.writeUTF.
-            let bytes = encode_modified_utf8(v);
+            let bytes = encode_modified_utf8(v)?;
             out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
             out.extend_from_slice(&bytes);
+            Some(())
         }
         Nbt::List { elem, items } => {
             out.push(*elem);
             out.extend_from_slice(&(items.len() as i32).to_be_bytes());
             for item in items {
-                write_payload(out, item);
+                write_payload(out, item)?;
             }
+            Some(())
         }
         Nbt::Compound(fields) => {
             // Always emit fields in sorted order so the serialized form is
@@ -391,27 +421,31 @@ pub fn write_payload(out: &mut Vec<u8>, value: &Nbt) {
             let mut sorted = fields.clone();
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, value) in &sorted {
-                write_named_field(out, name, value);
+                write_named_field(out, name, value)?;
             }
             out.push(0);
+            Some(())
         }
         Nbt::IntArray(v) => {
             out.extend_from_slice(&(v.len() as i32).to_be_bytes());
             for x in v {
                 out.extend_from_slice(&x.to_be_bytes());
             }
+            Some(())
         }
         Nbt::LongArray(v) => {
             out.extend_from_slice(&(v.len() as i32).to_be_bytes());
             for x in v {
                 out.extend_from_slice(&x.to_be_bytes());
             }
+            Some(())
         }
     }
 }
 
-/// Write a root NBT value (root un-named).
-pub fn write_nbt(out: &mut Vec<u8>, value: &Nbt) {
+/// Write a root NBT value (root un-named). Fails (`None`) when a string
+/// re-encodes past the u16 length limit (see [`encode_modified_utf8`]).
+pub fn write_nbt(out: &mut Vec<u8>, value: &Nbt) -> Option<()> {
     out.push(nbt_type_id(value));
-    write_payload(out, value);
+    write_payload(out, value)
 }

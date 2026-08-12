@@ -212,7 +212,7 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
                 return None;
             }
             let mut out = Vec::with_capacity(body.len() / 8);
-            write_nbt(&mut out, &value);
+            write_nbt(&mut out, &value)?;
             Some(out)
         }
         "minecraft:custom_name" // ComponentSerialization.STREAM_CODEC = tagCodec
@@ -223,7 +223,7 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
             // for the structural canonicalizer.
             let value = read_component_tag(body, off)?;
             let mut out = Vec::with_capacity(body.len() / 8);
-            write_nbt(&mut out, &value);
+            write_nbt(&mut out, &value)?;
             Some(out)
         }
         "minecraft:lore" => {
@@ -239,7 +239,7 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
                 if matches!(line, Nbt::End) {
                     return None;
                 }
-                write_nbt(&mut out, &line);
+                write_nbt(&mut out, &line)?;
             }
             Some(out)
         }
@@ -255,7 +255,7 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
             }
             let mut out = Vec::with_capacity(body.len() / 4);
             frame::write_varint(&mut out, type_id);
-            write_nbt(&mut out, &value);
+            write_nbt(&mut out, &value)?;
             Some(out)
         }
         "minecraft:block_entity_data" => {
@@ -273,7 +273,7 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
             }
             let mut out = Vec::with_capacity(body.len() / 4);
             frame::write_varint(&mut out, type_id);
-            write_nbt(&mut out, &value);
+            write_nbt(&mut out, &value)?;
             Some(out)
         }
         _ => None,
@@ -890,11 +890,13 @@ fn skip_fireworks(body: &[u8], off: &mut usize) -> Option<()> {
 
 fn skip_game_profile_properties(body: &[u8], off: &mut usize) -> Option<()> {
     // [readCount(16)][count × ([String name(64)][String value][?String signature(1024)])].
+    // ByteBufCodecs.readCount only rejects count > maxSize, never count < 0; a
+    // negative count runs its loop zero times (Java returns an empty PropertyMap).
     let count = frame::read_varint(body, off)?;
-    if count < 0 || count as usize > MAX_PROFILE_PROPERTIES {
+    if count > MAX_PROFILE_PROPERTIES as i32 {
         return None;
     }
-    for _ in 0..count {
+    for _ in 0..count.max(0) {
         skip_utf8_limited(body, off, MAX_PROFILE_PROPERTY_NAME_ENCODED_BYTES)?;
         skip_utf8(body, off)?;
         skip_optional(body, off, skip_utf8_limited_1024)?;
@@ -1538,7 +1540,8 @@ fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u
         return None;
     }
     let mut seen = std::collections::HashSet::new();
-    let mut entries = Vec::with_capacity((positive as usize).min(MAX_INITIAL_COLLECTION_SIZE));
+    let mut entries =
+        Vec::with_capacity((positive.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..positive {
         let type_id = frame::read_varint(body, off)?;
         if type_id < 0 || !seen.insert(type_id) {
@@ -1557,7 +1560,8 @@ fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u
             value,
         });
     }
-    let mut negatives = Vec::with_capacity((negative as usize).min(MAX_INITIAL_COLLECTION_SIZE));
+    let mut negatives =
+        Vec::with_capacity((negative.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..negative {
         let type_id = frame::read_varint(body, off)?;
         if type_id < 0 || !seen.insert(type_id) {
@@ -1596,9 +1600,9 @@ fn canon_display_info(body: &[u8], off: &mut usize) -> Option<Vec<u8>> {
     // ComponentSerialization.TRUSTED_STREAM_CODEC (NbtAccounter.unlimitedHeap),
     // so no byte budget is charged.
     let title = read_component_tag_unbounded(body, off)?;
-    write_nbt(&mut out, &title);
+    write_nbt(&mut out, &title)?;
     let description = read_component_tag_unbounded(body, off)?;
-    write_nbt(&mut out, &description);
+    write_nbt(&mut out, &description)?;
 
     // icon: ItemStackTemplate = [item VarInt][count VarInt][DataComponentPatch].
     // item is Item.STREAM_CODEC = holderRegistry(ITEM): a negative id throws
@@ -1803,6 +1807,13 @@ pub fn canon_update_advancements(body: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test fixtures are built from `Nbt` values that always re-encode within
+    /// the u16 length limit, so the fallible `write_nbt` is unwrapped here.
+    /// (The canonicalizer itself propagates `None` for a hostile string.)
+    fn write_nbt(out: &mut Vec<u8>, value: &Nbt) {
+        super::write_nbt(out, value).expect("test fixture re-encodes within the u16 limit");
+    }
 
     /// The id of the first added advancement whose canonical form does not match
     /// the baseline's, or `None` when every advancement canonicalizes identically.
@@ -3448,6 +3459,37 @@ mod tests {
     }
 
     #[test]
+    fn profile_properties_negative_count_is_accepted() {
+        // ByteBufCodecs.readCount only rejects count > maxSize, never count < 0;
+        // a negative property count runs its loop zero times (Java returns an
+        // empty PropertyMap). The walker must accept it rather than failing the
+        // profile value.
+        let mut value = Vec::new();
+        value.push(1u8); // either flag: nonzero -> GameProfile (left)
+        value.extend_from_slice(&[0u8; 16]); // UUID
+        value.push(0); // PLAYER_NAME: empty
+        frame::write_varint(&mut value, -1); // property count (loop runs 0×)
+        value.extend_from_slice(&[0u8; 4]); // PlayerSkin.Patch: four absent optionals
+
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let entry = (70u32, value); // profile
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[entry], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        let canon = canon_update_advancements(&input)
+            .expect("a profile with a negative property count canonicalizes");
+        assert_eq!(
+            canon, input,
+            "the profile value must be copied byte-exact (empty property loop)"
+        );
+    }
+
+    #[test]
     fn display_frame_out_of_advancement_type_range_is_rejected() {
         // DisplayInfo writes the frame as AdvancementType via writeEnum/readEnum
         // (3 values: TASK=0, CHALLENGE=1, GOAL=2); readEnum indexes the constants
@@ -3982,5 +4024,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn nul_heavy_string_reencode_overflow_is_rejected_not_aborted() {
+        // DataInput.readUTF accepts a raw 0x00 byte as U+0000, but the modified
+        // UTF-8 re-encode expands each NUL to the 2-byte C0 80. A u16-prefixed
+        // string field of >=32768 raw 0x00 bytes decodes to >=32768 NULs and
+        // re-encodes past the 65535-byte prefix — Java's network write path
+        // throws UTFDataFormatException (the packet encode fails). The
+        // canonicalizer must return None (keep the raw body), not abort the
+        // process.
+        let mut title = vec![8u8]; // String tag
+        title.extend_from_slice(&40000u16.to_be_bytes()); // u16 byte length
+        title.extend(vec![0u8; 40000]); // raw NUL bytes
+        let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+        let display = display_raw(
+            &title,
+            &desc,
+            &icon(926, 1, &patch(&[], &[])),
+            0,
+            0,
+            (0.5, -1.25),
+            None,
+        );
+        let mut off = 0;
+        assert_eq!(
+            canon_display_info(&display, &mut off),
+            None,
+            "a NUL-heavy title that cannot re-encode must fail, not abort"
+        );
+
+        // Pin the lower-level contract too: write_nbt returns None for a string
+        // whose re-encode exceeds the u16 limit.
+        let mut out = Vec::new();
+        assert_eq!(
+            super::write_nbt(&mut out, &Nbt::String("\0".repeat(40000))),
+            None,
+            "write_nbt must be fallible on a re-encode overflow"
+        );
     }
 }
