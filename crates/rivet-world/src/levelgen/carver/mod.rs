@@ -50,5 +50,5 @@ pub mod configured_world_carver;
 pub mod world_carver;
 
 pub use carver_configuration::CarverConfiguration;
-pub use configured_world_carver::ConfiguredWorldCarver;
+pub use configured_world_carver::{ConfiguredWorldCarver, ConfiguredWorldCarverErased};
 pub use world_carver::{WorldCarverBehavior, WorldCarverId, carver_is_start_chunk};
