@@ -32,8 +32,8 @@ use rivet_serialization::codec;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec::MapCodec;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
-use rivet_util::RandomSource;
 use rivet_util::mth;
+use rivet_util::RandomSource;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -259,6 +259,34 @@ mod tests {
             json!({"min_chance": 0.2, "max_chance": 0.8, "min_dist": 1, "max_dist": 5})
         );
         assert_eq!(codec_test_util::decode(&codec, &encoded), t);
+    }
+
+    #[test]
+    fn codec_negative_zero_chance_is_not_omitted() {
+        // `Codec.FLOAT.optionalFieldOf("min_chance", 0.0F)` omits a field on
+        // encode only when `Float.equals(a, default)` — and `Float.equals` is
+        // bitwise (`floatToIntBits`), so `-0.0f` (0x80000000) is DISTINCT from
+        // the `+0.0f` default. The shared `optional_field_of` omission test
+        // therefore routes through `java_float_equals`, keeping a `-0.0`
+        // chance field in the output (and round-tripping its sign), where a
+        // Rust `==` omission test would have silently dropped it to `+0.0`.
+        // JsonOps renders the `Number::Float` via `Float.toString`, so the
+        // negative zero survives as the exact `-0.0` literal.
+        let codec = codec_test_util::codec(linear_pos_test_map_codec::<
+            rivet_serialization::json_ops::JsonOps,
+        >());
+        let t = LinearPosTest::new(-0.0, 1.0, 1, 2);
+        let encoded = codec_test_util::encode(&codec, &t);
+        assert_eq!(
+            encoded.to_string(),
+            r#"{"min_chance":-0.0,"max_chance":1.0,"min_dist":1,"max_dist":2}"#
+        );
+        let decoded = codec_test_util::decode(&codec, &encoded);
+        assert!(decoded.min_chance.is_sign_negative());
+        assert_eq!(decoded.min_chance.to_bits(), 0x8000_0000);
+        assert_eq!(decoded.max_chance, 1.0);
+        assert_eq!(decoded.min_dist, 1);
+        assert_eq!(decoded.max_dist, 2);
     }
 
     #[test]
