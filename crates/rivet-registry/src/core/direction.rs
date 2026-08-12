@@ -497,6 +497,15 @@ pub enum Axis {
     Z,
 }
 
+impl rivet_serialization::codec::JavaEquals for Axis {
+    fn java_equals(&self, other: &Self) -> bool {
+        // Java `Direction.Axis` is an enum: `equals` is plain value equality
+        // (the JDK wrappers' `==` case in `Objects.equals`), so Rust `==` is
+        // exactly faithful.
+        self == other
+    }
+}
+
 impl Axis {
     pub const VALUES: [Axis; 3] = [Axis::X, Axis::Y, Axis::Z];
 
