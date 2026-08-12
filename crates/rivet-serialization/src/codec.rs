@@ -20,7 +20,8 @@ use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, Keyable};
 use crate::either::Either;
 use crate::float_format::{
-    java_double_compare, java_double_to_string, java_float_compare, java_float_to_string,
+    java_double_compare, java_double_equals, java_double_to_string, java_float_compare,
+    java_float_equals, java_float_to_string,
 };
 use crate::functions::DecoderFn;
 use crate::lifecycle::Lifecycle;
@@ -302,7 +303,11 @@ where
 /// Objects.equals(a, default) ? Optional.empty() : Optional.of(a))`. The field
 /// value defaults on decode (absent OR a present-but-malformed value falls back
 /// to `default` via the lenient error path), and is OMITTED on encode when
-/// value-equal to `default`.
+/// value-equal to `default`. Unlike [`optional_field_of`], the omission test is
+/// Rust `PartialEq ==`, not `JavaEquals` — the divergence (only for
+/// `f32`/`f64`: `-0.0 == 0.0`, `NaN != NaN`) is irrelevant to the current
+/// callers, which are `i32` and `Vec` (whose deep `==` matches Java's
+/// collection `equals`).
 pub fn lenient_optional_field_of<F, Ops: DynamicOps + 'static>(
     name: &str,
     element_codec: Arc<dyn Codec<F, Ops>>,
@@ -327,6 +332,56 @@ where
     )
 }
 
+/// Java `Objects.equals(Object, Object)` value equality — Rust's `==` for the
+/// primitive boxed `Boolean`/`Integer`/`Long`/`String`/... `equals`, and the
+/// JDK's bit equality for `double`/`float` (see [`java_double_equals`] /
+/// [`java_float_equals`]): `-0.0` is distinct from `0.0`, and every `NaN`
+/// payload equals every other.
+///
+/// Implemented for the scalar types the optional-field codecs use (the
+/// JDK wrappers' `equals` all reduce to `==` except `Double`/`Float`). There is
+/// deliberately NO `impl<T: Eq>` blanket: it would overlap the `f32`/`f64`
+/// impls if `Eq` were ever added to the floats. New scalar types opt in with a
+/// one-line impl.
+pub trait JavaEquals {
+    fn java_equals(&self, other: &Self) -> bool;
+}
+
+macro_rules! impl_java_equals_eq {
+    ($($t:ty),* $(,)?) => {
+        $(impl JavaEquals for $t {
+            fn java_equals(&self, other: &Self) -> bool {
+                self == other
+            }
+        })*
+    };
+}
+
+impl_java_equals_eq!(
+    bool, char, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, String,
+);
+
+impl JavaEquals for f64 {
+    fn java_equals(&self, other: &Self) -> bool {
+        java_double_equals(*self, *other)
+    }
+}
+
+impl JavaEquals for f32 {
+    fn java_equals(&self, other: &Self) -> bool {
+        java_float_equals(*self, *other)
+    }
+}
+
+impl<T: JavaEquals> JavaEquals for Vec<T> {
+    fn java_equals(&self, other: &Self) -> bool {
+        // Java `List.equals` — element-wise `equals`, short-circuiting on the
+        // first unequal element (Rust `==` on `Vec` is the same deep equality).
+        self.len() == other.len()
+            && self.iter().zip(other.iter()).all(|(a, b)| a.java_equals(b))
+    }
+}
+
 /// `Codec.optionalFieldOf(String, F default)` — the with-default form of a
 /// NON-lenient optional field.
 ///
@@ -335,14 +390,16 @@ where
 /// Objects.equals(a, default) ? Optional.empty() : Optional.of(a))`. Unlike
 /// [`lenient_optional_field_of`], a present-but-malformed value is a decode
 /// error (the optional field is NOT lenient). The field value defaults on
-/// decode when absent, and is OMITTED on encode when value-equal to `default`.
+/// decode when absent, and is OMITTED on encode when Java-equal to `default`
+/// (for `double`/`float` that is `doubleToLongBits`/`floatToIntBits` equality,
+/// so `-0.0` is distinct from `0.0`).
 pub fn optional_field_of<F, Ops: DynamicOps + 'static>(
     name: &str,
     element_codec: Arc<dyn Codec<F, Ops>>,
     default: F,
 ) -> Arc<dyn MapCodec<F, Ops>>
 where
-    F: 'static + Clone + PartialEq + Send + Sync,
+    F: 'static + Clone + JavaEquals + Send + Sync,
 {
     let inner = optional_field(name.to_string(), element_codec, false);
     let default_for_decode = default.clone();
@@ -351,7 +408,7 @@ where
         inner,
         Arc::new(move |o: &Option<F>| o.clone().unwrap_or_else(|| default_for_decode.clone())),
         Arc::new(move |a: &F| {
-            if *a == default_for_encode {
+            if a.java_equals(&default_for_encode) {
                 None
             } else {
                 Some(a.clone())
