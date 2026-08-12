@@ -852,8 +852,7 @@ impl PlayerSessionManager {
         // send/tick distance change) produces output. It re-derives the
         // send/tick distances from the same `requested_view_distance` the join
         // burst used, so the `lastChunk`/`lastSendDistance` it diffs against
-        // are the ones the client's cache actually holds. `self.level` (read)
-        // and `session` (mutated) are disjoint fields, so the borrow splits.
+        // are the ones the client's cache actually holds.
         let new_chunk = rivet_registry::core::ChunkPos::containing(
             &rivet_registry::core::BlockPos::containing(targets.x, targets.y, targets.z),
         );
@@ -1194,7 +1193,8 @@ fn world_clock_access() -> RegistryAccess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::level::{ChunkTrackingView, MissingChunkPolicy};
+    use crate::server::level::ChunkTrackingView;
+    use crate::server::level::test_support::{loaded_world_root, write_entered_cells};
     use crate::server::movement_trace::{TAG_MOVE_ACCEPTED, TAG_SESSION_END, TAG_TELEPORT_ACK};
     use crate::server::tick::channels::{InboundDrained, LifecycleEvent, OutboundEvent};
     use crate::server::tick::registry::ConnectionRegistry;
@@ -2858,61 +2858,47 @@ mod tests {
         );
     }
 
-    /// The real loaded-world recenter failure (issue #561), server-level: a
-    /// `RequireLoaded` world booted with the actual region-backed geometry
-    /// (spawn block (-16,68,-48) → spawn chunk (-1,-3), view distance 4) has
-    /// EXACTLY the 117-chunk view square installed. A view-distance-2 client
-    /// (send radius 3) joins with the 81-chunk send-3 view — a strict subset of
-    /// the booted square — so the FIRST +x boundary crossing (into chunk (0,-3))
-    /// enters the x=4 column, every cell of which the booted square still
-    /// contains, and the recenter SUCCEEDS (proving a genuine repeated
-    /// boundary crossing). The SECOND +x crossing (into chunk (1,-3)) enters the
-    /// x=5 column; its first enter cell (5,-7) is outside the booted square's
-    /// raster, so `update` fails typed UNVERIFIED and the session disconnects —
-    /// exactly the current Azalea-client regression #561 reproduces.
+    /// The real loaded-world recenter, server-level, stays CONNECTED (issues
+    /// #185/#561): a `RequireLoaded` world booted with the actual region-backed
+    /// geometry (spawn block (-16,68,-48) → spawn chunk (-1,-3), view distance
+    /// 4) installs the read-only region source and exactly the 117-chunk view
+    /// square. A view-distance-2 client (send radius 3) joins with the 81-chunk
+    /// send-3 view — a strict subset of the booted square — so the FIRST +x
+    /// boundary crossing (into chunk (0,-3)) enters the x=4 column, every cell
+    /// of which the booted square still contains, and the recenter SUCCEEDS
+    /// without an on-demand load. The SECOND +x crossing (into chunk (1,-3))
+    /// enters the x=5 column — entirely outside the booted square — and the
+    /// session resolves each entered cell on demand from the read-only region,
+    /// installs it into the single `ChunkMap` authority, and keeps the client
+    /// connected: no disconnect, no generation, no superflat fallback.
     #[test]
-    fn loaded_world_recenter_fails_typed_on_second_boundary_move() {
-        let spawn_pos = rivet_registry::core::BlockPos::new(-16, 68, -48);
-        let spawn_chunk = ChunkPos::containing(&spawn_pos);
-        assert_eq!((spawn_chunk.x(), spawn_chunk.z()), (-1, -3));
-
-        let config = ServerLevelConfig {
-            dimension: crate::server::level::overworld_dimension(),
-            seed: 9_110_734_097_863_663_269,
-            min_y: -64,
-            height: 384,
-            sea_level: -63,
-            spawn_chunk,
-            respawn_data: rivet_world::level::storage::level_data::RespawnData::of(
-                crate::server::level::overworld_dimension(),
-                spawn_pos,
-                0.0,
-                0.0,
-            ),
-            view_distance: 4,
-            simulation_distance: 4,
-            missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
-            is_flat: false,
-        };
-        // The empty `ChunkMap` + `RequireLoaded` guarantee a position the boot
-        // did not install fails typed (never a superflat substitution).
-        let mut level = ServerLevel::new_region_backed(config);
-        let booted = ChunkTrackingView::of(spawn_chunk, 4);
-        let booted_cells: Vec<ChunkPos> = {
-            let mut v = Vec::new();
-            booted.for_each(|p| v.push(p));
-            v
-        };
-        assert_eq!(
-            booted_cells.len(),
-            117,
-            "the region-backed boot installs exactly the 117-chunk view square"
+    fn loaded_world_recenter_stays_connected_and_loads_entered_cells_on_demand() {
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+        // The session sends at radius 3 (client view 2 → send 3), so the second
+        // crossing to (1,-3) enters the x=5 column (z=-7..1, 9 cells) — the
+        // exact enter set `update` diffs. Write those cells into the region so
+        // the on-demand load resolves them.
+        let region_dir = temp.path().join("dimensions/minecraft/overworld/region");
+        let mut session_enter = Vec::new();
+        ChunkTrackingView::difference(
+            &ChunkTrackingView::of(ChunkPos::new(0, -3), 3),
+            &ChunkTrackingView::of(ChunkPos::new(1, -3), 3),
+            |pos| session_enter.push(pos),
+            |_| {},
         );
-        for pos in booted_cells {
-            level
-                .chunk_map_mut()
-                .install(pos, crate::server::level::LevelChunk::new(pos));
-        }
+        assert_eq!(
+            session_enter.len(),
+            9,
+            "the radius-3 east move enters the 9-cell x=5 column"
+        );
+        write_entered_cells(&region_dir, &session_enter);
+
+        let level = crate::server::level::region_backed::boot_level(temp.path())
+            .expect("the loaded world boots with its read-only region source");
+        assert!(level.is_region_backed());
+        assert_eq!(level.chunk_map().len(), 117);
+        let booted = *level.view();
 
         let mut config = default_session_config(256);
         config.level = level;
@@ -2948,16 +2934,98 @@ mod tests {
             );
         }
 
-        // SECOND boundary crossing: block x=16 → chunk (1,-3). The first enter
-        // cell (5,-7) is outside the booted square — the recenter fails typed
-        // UNVERIFIED and the session disconnects.
+        // SECOND boundary crossing: block x=16 → chunk (1,-3). The x=5 column
+        // is outside the booted square — the recenter loads each entered cell
+        // on demand from the region and STAYS CONNECTED.
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(16.0, 68.0, -48.0))],
+        );
+        let recenter2 = drain_outbound_frames(&mut out_rx);
+        assert!(
+            drained_disconnect_reason(&mut out_rx).is_none(),
+            "the second crossing's on-demand loads must not disconnect"
+        );
+        assert_eq!(
+            manager.chunk_center(ID),
+            Some(ChunkPos::new(1, -3)),
+            "the loader recentered onto the second chunk"
+        );
+        // Every entered cell is installed into the single ChunkMap authority —
+        // the freshly-loaded real chunk, not a placeholder.
+        for pos in &session_enter {
+            assert!(
+                manager.level.chunk_map().get_chunk(*pos).is_some(),
+                "entered cell {pos} installed on demand"
+            );
+        }
+        assert_eq!(
+            manager.level.chunk_map().len(),
+            117 + session_enter.len(),
+            "the map grows by exactly the entered cells"
+        );
+        // The center packet, then exactly the 9 entered chunks.
+        let chunk_bodies = &recenter2[1..];
+        assert_eq!(
+            chunk_bodies.len(),
+            session_enter.len(),
+            "the second crossing sends exactly the entered cells"
+        );
+        for (_, body) in chunk_bodies {
+            let pos = chunk_body_coords(body);
+            assert!(
+                session_enter.contains(&pos),
+                "second-crossing packet carries the entered cell {pos}"
+            );
+        }
+    }
+
+    /// The non-vacuous negative control for the positive recenter above: the
+    /// same region-backed world booted WITHOUT the x=5 column cells written into
+    /// the region. The SECOND +x crossing's first entered cell (5,-7) is
+    /// genuinely absent from the read-only source, so the on-demand load fails
+    /// typed `UNVERIFIED` (the source's `MissingChunkNoGeneration` boundary —
+    /// never generation, never a superflat substitution) and the session
+    /// disconnects typed.
+    #[test]
+    fn loaded_world_recenter_disconnects_typed_when_entered_chunk_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+        // Deliberately do NOT write the x=5 column: the entered cells are
+        // absent from the region.
+        let level = crate::server::level::region_backed::boot_level(temp.path())
+            .expect("the loaded world boots with its read-only region source");
+        assert!(level.is_region_backed());
+
+        let mut config = default_session_config(256);
+        config.level = level;
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(config);
+        apply_enter_play(&mut registry); // view distance 2 → send 3
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        drain_outbound_frames(&mut out_rx);
+
+        // FIRST crossing succeeds (x=4 column is inside the booted square).
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(0.0, 68.0, -48.0))],
+        );
+        drain_outbound_frames(&mut out_rx);
+        assert!(
+            drained_disconnect_reason(&mut out_rx).is_none(),
+            "the first crossing must still succeed"
+        );
+
+        // SECOND crossing hits the genuinely-absent (5,-7) cell.
         run_tick(
             manager,
             &mut registry,
             vec![(ID, move_pos_frame(16.0, 68.0, -48.0))],
         );
         let reason = drained_disconnect_reason(&mut out_rx)
-            .expect("the second crossing's update failure disconnects");
+            .expect("the missing entered chunk's update failure disconnects");
         match reason {
             DisconnectReason::Unsupported(message) => {
                 assert!(
