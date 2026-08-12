@@ -1149,18 +1149,24 @@ pub fn normalize_generated(raw: &str) -> Result<Value, String> {
 }
 
 /// The minimum received-chunk count a generated-world run must prove: the
-/// server must have served the client a genuine generated view (chunks from
-/// the fresh seed world, not an empty/zero set). A floor, not an exact count —
-/// the generated-world server's send-set is not yet pinned to the 117-chunk
-/// Rivet join contract (a fresh world of a real seed has no superflat
-/// send-set guarantee).
+/// server must have served the client at least one chunk — a non-empty
+/// send-set. This is a sanity floor, not proof of a genuine generated world:
+/// the load-bearing check is the runner's per-coordinate content comparison
+/// against the seed-42 ground truth (`compare_generated_content`). The floor
+/// is deliberately not an exact count because the generated-world server's
+/// send-set is not yet pinned to the 117-chunk Rivet join contract (a fresh
+/// world of a real seed has no superflat send-set guarantee).
 pub const GENERATED_MIN_CHUNKS: usize = 1;
 
 /// The minimum wall-clock dwell window (s) the generated-world client must
 /// prove: long enough for at least one keepalive challenge to land and be
 /// echoed while the client is connected, so the dwell evidence is genuine and
-/// not a vacuous zero. The generated record is emitted only after this window
-/// elapses from spawn.
+/// not a vacuous zero. This is a brief "reached PLAY and dwelled" check, NOT
+/// the 30 s keepalive-survival proof the `dwell` scenario owns — the
+/// generated-world acceptance's purpose is content comparison, and its dwell
+/// only proves the client actually reached PLAY rather than being rejected
+/// before it could sample. The generated record is emitted only after this
+/// window elapses from spawn.
 pub const GENERATED_MIN_DWELL_SECONDS: f64 = 1.0;
 
 /// Verify a normalized `generated` transcript proves the real Azalea client
@@ -1176,19 +1182,22 @@ pub const GENERATED_MIN_DWELL_SECONDS: f64 = 1.0;
 /// - `azalea_revision != PINNED_AZALEA_REVISION`.
 /// - the `generated` record is absent or its `samples` is empty — the client
 ///   did not sample any generated content.
-/// - `chunk_count < GENERATED_MIN_CHUNKS` — the server served no genuine view.
+/// - `chunk_count < GENERATED_MIN_CHUNKS` — the server served an empty
+///   send-set (a sanity floor; the per-coordinate content comparison is the
+///   load-bearing check).
 /// - the walk evidence is missing or the walk did not move (before == after) —
 ///   a frozen world cannot pass.
 /// - the dwell evidence is missing, below [`GENERATED_MIN_DWELL_SECONDS`], or
-///   shows no keepalive challenge — a client that did not survive in PLAY
-///   cannot pass.
+///   shows no keepalive challenge — the client did not stay connected long
+///   enough to observe a challenge (a brief reached-PLAY check, not the 30 s
+///   survival dwell gate).
 ///
 /// This verdict deliberately does NOT compare the sampled block content
 /// against the seed-42 ground truth: that comparison lives in the runner
 /// (`compare_generated_content` feeds the oracle `generated-expected`
 /// manifest, external to the client transcript). The verdict here only proves
-/// the client observed and reported genuine per-coordinate content while
-/// surviving in PLAY.
+/// the client observed and reported per-coordinate content while connected
+/// long enough to dwell and move.
 pub fn rivet_generated_verdict(t: &Value) -> Result<&'static str, String> {
     let outcome = t
         .get("outcome")
@@ -1270,9 +1279,10 @@ pub fn rivet_generated_verdict(t: &Value) -> Result<&'static str, String> {
                 .to_owned(),
         );
     }
-    // The dwell evidence is the keepalive-survival proof: the client must have
-    // stayed connected in PLAY long enough to observe and echo at least one
-    // keepalive challenge. A zero-dwell client that never survived cannot pass.
+    // The dwell evidence is the reached-PLAY proof: the client must have
+    // stayed connected long enough to observe and echo at least one keepalive
+    // challenge. A zero-dwell client that never reached a live PLAY cannot
+    // pass. (This is a brief check, not the 30 s survival dwell gate.)
     let dwell = generated
         .get("dwell")
         .ok_or_else(|| "generated record has no dwell evidence".to_owned())?;
@@ -1288,7 +1298,9 @@ pub fn rivet_generated_verdict(t: &Value) -> Result<&'static str, String> {
         return Err(format!(
             "generated dwell evidence is connected_wall_seconds={connected_wall_seconds} \
              challenge_count={challenge_count} (expected >= {GENERATED_MIN_DWELL_SECONDS}s and \
-             at least one keepalive challenge): the client did not survive in PLAY"
+             at least one keepalive challenge): the client did not stay connected long enough \
+             to observe a keepalive challenge (a brief reached-PLAY check, not the 30 s \
+             survival dwell gate)"
         ));
     }
     Ok(

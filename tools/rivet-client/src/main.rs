@@ -1009,12 +1009,18 @@ async fn generated_and_emit(bot: Client, state: State) {
     hard_exit(0);
 }
 
-/// The overworld world-ceiling Y (the copied world is full-height 384).
+/// The overworld world-ceiling Y (a full-height 384 overworld spans
+/// y=-64..320). Shared by the loaded and generated sampling: both slices
+/// sample a full-height overworld, and the oracle ground-truth extractor must
+/// sample the same columns for the per-coordinate comparison to mean anything.
 const WORLD_CEILING_Y: i32 = 320;
-/// The bedrock-slab sample Y (mirrors the extractor's `BEDROCK_Y`).
+/// The bedrock-slab sample Y (mirrors the extractor's `BEDROCK_Y`). Shared by
+/// the loaded and generated slices — a cross-tool contract: the oracle
+/// `extract-world` / `generated-expected` extractor must record ground truth
+/// at this exact Y or every bedrock column comparison mis-passes.
 const LOADED_BEDROCK_Y: i32 = -60;
 /// One block below the bedrock slab (mirrors the extractor's
-/// `BELOW_BEDROCK_Y`).
+/// `BELOW_BEDROCK_Y`), same shared cross-tool contract as [`LOADED_BEDROCK_Y`].
 const LOADED_BELOW_BEDROCK_Y: i32 = -61;
 
 /// Canonicalize an azalea block id for the transcript: azalea's
@@ -1032,9 +1038,12 @@ fn namespaced_block_name(id: &str) -> String {
 
 /// Sample one world column at `(x, z)`: the surface block (highest non-air),
 /// the block at the bedrock slab, and the block below it. `world` is the
-/// client's loaded `World` (its `ChunkStorage`). Returns `minecraft:air` for
-/// any coordinate the client has not loaded — the runner treats a missing
-/// chunk as a FAIL (the server did not serve the loaded world), never as a
+/// client's loaded `World` (its `ChunkStorage`). Serves both the loaded and
+/// generated slices, reusing the same sample Ys ([`WORLD_CEILING_Y`],
+/// [`LOADED_BEDROCK_Y`], [`LOADED_BELOW_BEDROCK_Y`]) so the two acceptances
+/// share one vertical sampling contract. Returns `minecraft:air` for any
+/// coordinate the client has not loaded — the runner treats a missing chunk as
+/// a FAIL (the server did not serve the loaded/generated world), never as a
 /// vacuous pass. Every emitted name is namespaced (see
 /// [`namespaced_block_name`]).
 fn sample_cell(world: &azalea::world::World, x: i32, z: i32) -> (String, String, String) {
