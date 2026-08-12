@@ -2201,9 +2201,11 @@ impl Clone for EndIslandDensityFunction {
 
 impl EndIslandDensityFunction {
     /// The `ISLAND_THRESHOLD` constant — `-0.9F`. Java compares
-    /// `islandNoise.getValue(...) < ISLAND_THRESHOLD` (a `double < float`
-    /// promotion, exact in f64); the port compares in f64.
-    const ISLAND_THRESHOLD_D: f64 = -0.9;
+    /// `islandNoise.getValue(...) < ISLAND_THRESHOLD`, which widens the float
+    /// to double before comparing; the port pins the exact widened value
+    /// (`(double)(-0.9F)` — `-0.9f32 as f64`), not the f64 literal `-0.9`
+    /// (the two differ by ~2.4e-8).
+    const ISLAND_THRESHOLD_D: f64 = -0.9f32 as f64;
 
     /// `new EndIslandDensityFunction(long seed)` — `LegacyRandomSource(seed)`,
     /// `consumeCount(17292)`, `new SimplexNoise(islandRandom)`.
@@ -2241,7 +2243,10 @@ impl EndIslandDensityFunction {
                 let total_chunk_z = chunk_z as i64 + zo as i64;
                 let chunk_key = ChunkPos::pack_coords(total_chunk_x as i32, total_chunk_z as i32);
                 let cache_index = (mix_i64(chunk_key) & 8191) as usize;
-                let mut island_size = f32::MIN;
+                // Java `float islandSize = Float.MIN_VALUE` — the smallest
+                // positive float (the `islandSize != Float.MIN_VALUE` sentinel),
+                // not `f32::MIN` (the most negative float).
+                let mut island_size = f32::from_bits(1);
                 if cache.keys[cache_index] == chunk_key {
                     island_size = cache.values[cache_index];
                 } else {
@@ -2260,7 +2265,7 @@ impl EndIslandDensityFunction {
                     cache.keys[cache_index] = chunk_key;
                     cache.values[cache_index] = island_size;
                 }
-                if island_size != f32::MIN {
+                if island_size != f32::from_bits(1) {
                     let xd = sub_section_x as f32 - (xo * 2) as f32;
                     let zd = sub_section_z as f32 - (zo * 2) as f32;
                     let new_doffs = 100.0 - mth::sqrt(xd * xd + zd * zd) * island_size;
@@ -2286,13 +2291,12 @@ fn mix_i64(mut z: i64) -> i64 {
 impl DensityFunction for EndIslandDensityFunction {
     fn compute(&self, context: &dyn FunctionContext) -> f64 {
         // Java `compute`:
-        //   double blockX = context.blockX() / 8.0; double blockZ = ...;
-        //   int sectionX = Mth.floor(blockX); int sectionZ = Mth.floor(blockZ);
-        //   return ((double)this.getHeightValue(sectionX, sectionZ) - 8.0) / 128.0;
-        //
-        // `blockX / 8.0` floored is the same as `floorDiv(blockX, 8)` for the
-        // coordinates this slice sees (integer block coords). The cache is
-        // `Mutex` (the value layer's per-function cache; the
+        //   return ((double)this.getHeightValue(this.islandNoise,
+        //       context.blockX() / 8, context.blockZ() / 8) - 8.0) / 128.0;
+        // where `context.blockX() / 8` is integer division (truncating toward
+        // zero), which the `section_x = context.block_x() / 8` port matches
+        // exactly (NOT `blockX / 8.0` floored — those differ on negative coords).
+        // The cache is `Mutex` (the value layer's per-function cache; the
         // value-layer `EndIslandDensityFunction` runs single-threaded in the
         // chunk-gen path) — Paper's `ThreadLocal` cache is serialized here
         // behind a `Mutex` (correct: the cached island size per chunk is
@@ -3829,6 +3833,17 @@ mod tests {
         // Far from the End center the field stays within its declared bounds.
         let v = f.compute(&at(30000, 64, 30000));
         assert!((-0.84375 - 1e-9..=0.5625 + 1e-9).contains(&v));
+    }
+
+    #[test]
+    fn end_islands_threshold_matches_widened_float() {
+        // Java compares `getValue(...) < ISLAND_THRESHOLD` where
+        // `ISLAND_THRESHOLD = -0.9F`; binary numeric promotion widens the float
+        // to double, so the compared constant is `(double)(-0.9F)`, NOT the f64
+        // literal `-0.9` (the two differ by ~2.4e-8). Pin the exact widened
+        // value so a `-0.9` regression is caught.
+        assert_eq!(EndIslandDensityFunction::ISLAND_THRESHOLD_D, -0.9f32 as f64);
+        assert_ne!(EndIslandDensityFunction::ISLAND_THRESHOLD_D, -0.9f64);
     }
 
     #[test]
