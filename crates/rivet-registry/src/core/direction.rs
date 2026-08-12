@@ -696,11 +696,10 @@ mod tests {
                 .expect("encode should succeed")
                 .clone();
             assert_eq!(encoded, json!(d.get_serialized_name()));
-            let decoded = codec
+            let decoded = *codec
                 .parse(&JsonOps::INSTANCE, &encoded)
                 .result()
-                .expect("decode should succeed")
-                .clone();
+                .expect("decode should succeed");
             assert_eq!(decoded, d);
         }
     }
