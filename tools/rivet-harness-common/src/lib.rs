@@ -20,6 +20,8 @@
 //! - [`transcript`] — strict JSONL parsing (malformed / duplicate-terminal /
 //!   missing-terminal failures).
 //! - [`negative`] — named-path negative-control helpers.
+//! - [`timing`] — wall-clock budgets the client and scenario runner must agree
+//!   on (keepalive settle, login headroom, dwell/move timeout reservations).
 //!
 //! Only the *strict E2E primitives* live here. Consumer-specific orchestration
 //! (which command to spawn, Paper's clean-save marker, the rivet-server
@@ -29,4 +31,5 @@ pub mod exit;
 pub mod negative;
 pub mod port;
 pub mod server;
+pub mod timing;
 pub mod transcript;
