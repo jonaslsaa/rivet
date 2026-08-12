@@ -947,11 +947,13 @@ async fn loaded_recenter_and_emit(bot: Client, state: State) {
 
     let mut sent = 0usize;
     for &(x, y, z) in &frames {
-        bot.write_packet(azalea::protocol::packets::game::ServerboundMovePlayerPosRot {
-            pos: azalea::Vec3 { x, y, z },
-            look_direction: azalea::entity::LookDirection::new(0.0, 0.0),
-            flags: MoveFlags::default(),
-        });
+        bot.write_packet(
+            azalea::protocol::packets::game::ServerboundMovePlayerPosRot {
+                pos: azalea::Vec3 { x, y, z },
+                look_direction: azalea::entity::LookDirection::new(0.0, 0.0),
+                flags: MoveFlags::default(),
+            },
+        );
         sent += 1;
         emit(json!({
             "event": "move_frame",

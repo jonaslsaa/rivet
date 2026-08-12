@@ -1267,7 +1267,12 @@ pub fn rivet_recenter_verdict(t: &Value) -> Result<&'static str, String> {
         .first()
         .and_then(|f| f.get("chunk").and_then(Value::as_array))
         .map(|c| c.iter().filter_map(Value::as_i64).collect::<Vec<_>>());
-    if first_chunk.as_deref() != Some(&[i64::from(RECENTER_FIRST_CHUNK[0]), i64::from(RECENTER_FIRST_CHUNK[1])]) {
+    if first_chunk.as_deref()
+        != Some(&[
+            i64::from(RECENTER_FIRST_CHUNK[0]),
+            i64::from(RECENTER_FIRST_CHUNK[1]),
+        ])
+    {
         return Err(format!(
             "loaded-recenter first move frame chunk is {first_chunk:?} (expected \
              {RECENTER_FIRST_CHUNK:?}): the first boundary crossing did not land inside the \
@@ -1278,7 +1283,12 @@ pub fn rivet_recenter_verdict(t: &Value) -> Result<&'static str, String> {
         .last()
         .and_then(|f| f.get("chunk").and_then(Value::as_array))
         .map(|c| c.iter().filter_map(Value::as_i64).collect::<Vec<_>>());
-    if last_chunk.as_deref() != Some(&[i64::from(RECENTER_EDGE_CHUNK[0]), i64::from(RECENTER_EDGE_CHUNK[1])]) {
+    if last_chunk.as_deref()
+        != Some(&[
+            i64::from(RECENTER_EDGE_CHUNK[0]),
+            i64::from(RECENTER_EDGE_CHUNK[1]),
+        ])
+    {
         return Err(format!(
             "loaded-recenter last move frame chunk is {last_chunk:?} (expected \
              {RECENTER_EDGE_CHUNK:?}): the route did not reach the fixed boot authority edge"
@@ -1307,8 +1317,10 @@ pub fn rivet_recenter_verdict(t: &Value) -> Result<&'static str, String> {
             disconnect.get("reason_key")
         ));
     }
-    Ok("movement-driven recenter disconnect after spawn (route crossed repeated boundaries and \
-        reached the boot authority edge)")
+    Ok(
+        "movement-driven recenter disconnect after spawn (route crossed repeated boundaries and \
+        reached the boot authority edge)",
+    )
 }
 
 #[cfg(test)]
@@ -2226,7 +2238,10 @@ mod tests {
         assert_eq!(t["outcome"], "disconnected");
         assert_eq!(t["scenario"], "loaded-recenter");
         assert_eq!(t["lifecycle"], json!(["init", "login", "spawn"]));
-        assert_eq!(t["route"]["origin"], json!({"x": -16.0, "y": 68.0, "z": -48.0}));
+        assert_eq!(
+            t["route"]["origin"],
+            json!({"x": -16.0, "y": 68.0, "z": -48.0})
+        );
         assert_eq!(t["move_frames"].as_array().unwrap().len(), 2);
         assert_eq!(t["move_frames"][0]["chunk"], json!([0, -3]));
         assert_eq!(t["move_frames"][1]["chunk"], json!([1, -3]));
@@ -2288,7 +2303,8 @@ mod tests {
             r#"{"event":"move_frame","index":2,"x":0.0,"y":68.0,"z":-48.0,"chunk":[0,-3],"protocol":1}"#,
         );
         let t = normalize_recenter(&raw).expect("normalize");
-        let err = rivet_recenter_verdict(&t).expect_err("edge miss is not the intended reproduction");
+        let err =
+            rivet_recenter_verdict(&t).expect_err("edge miss is not the intended reproduction");
         assert!(
             err.contains("edge"),
             "error must name the boot authority edge, got {err}"
@@ -2311,7 +2327,8 @@ mod tests {
         ]
         .join("\n");
         let t = normalize_recenter(&one_frame).expect("normalize");
-        let err = rivet_recenter_verdict(&t).expect_err("a single crossing is not the repeated route");
+        let err =
+            rivet_recenter_verdict(&t).expect_err("a single crossing is not the repeated route");
         assert!(
             err.contains("at least 2"),
             "error must demand at least two move frames, got {err}"
