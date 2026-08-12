@@ -53,7 +53,7 @@ use std::sync::Arc;
 /// behavior contract of every template rule test.
 ///
 /// `test` is generic over the random source (`RandomSource` is `Sized`), so
-/// concrete rule tests are dispatched monomorphically by `rule_test_test`, not
+/// concrete rule tests are dispatched monomorphically by the caller, not
 /// through a `dyn`. `type_id` is the registry-held `RuleTestType<?>` identity
 /// the dispatch codec keys on; `as_any` is the downcast seam for encode.
 pub trait RuleTest: Any + Debug + Send + Sync + 'static {
@@ -73,6 +73,12 @@ pub trait RuleTest: Any + Debug + Send + Sync + 'static {
 /// The object-safe carrier the dispatch codec (de)serializes — the Rust
 /// analogue of Java's `RuleTest` value. Every `RuleTest` implements it via the
 /// blanket impl, so the concrete leaf units only implement `RuleTest`.
+///
+/// Erased evaluation is deferred: `test` is not object-safe (`RandomSource` is
+/// `Sized`) and no erased-path dispatch is ported (Java reaches `test` through
+/// the abstract method's polymorphic call; the port's concrete leaf types are
+/// known statically). A consumer holding an `Arc<dyn ErasedRuleTest>` can
+/// re-encode it but must downcast to a concrete `RuleTest` to evaluate it.
 pub trait ErasedRuleTest: Any + Debug + Send + Sync + 'static {
     /// `type()` — the registry-held type identity.
     fn type_id(&self) -> RuleTestTypeId;
@@ -107,23 +113,6 @@ pub fn rule_test_test_against_world_state<T: RuleTest + ?Sized, R: RandomSource>
 ) -> bool {
     let state = level.get_block_state(pos);
     test.test(&state, random)
-}
-
-/// `RuleTest.test(BlockState, RandomSource)` over the erased carrier.
-pub fn rule_test_test<T: ErasedRuleTest + ?Sized, R: RandomSource>(
-    test: &T,
-    state: &BlockState,
-    random: &mut R,
-) -> bool {
-    // STUB(mc.world.level.levelgen.structure.templatesystem.rules) — the
-    // dispatch hub. Java's abstract `test` is monomorphically overridden per
-    // concrete type; in the port the concrete types are known statically, so
-    // the type-id dispatch below is the only erased-entry path, and no
-    // production entry calls through a `dyn RuleTest` today.
-    let _ = (test, state, random);
-    unreachable!(
-        "rule_test_test is the erased dispatch hub; call the concrete RuleTest::test instead"
-    )
 }
 
 /// `RuleTest.CODEC` — the dispatch codec, as the ops-generic
