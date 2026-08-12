@@ -21,6 +21,7 @@ use crate::levelgen::synth::simplex_noise::GRADIENT;
 const SHIFT_UP_EPSILON: f32 = 1.0e-7;
 
 /// `net.minecraft.world.level.levelgen.synth.ImprovedNoise`.
+#[derive(Debug, Clone)]
 pub struct ImprovedNoise {
     /// The 256-entry permutation as Java `byte` values.
     p: [i8; 256],

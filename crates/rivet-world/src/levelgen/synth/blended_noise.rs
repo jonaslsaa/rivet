@@ -7,12 +7,12 @@
 //! via `PerlinNoise.createLegacyForBlendedNoise`, and the value surface is
 //! exposed directly (`compute`/`min_value`/`max_value`).
 //!
-//! Deferred seam: Java `BlendedNoise implements DensityFunction.SimpleFunction`
-//! and carries a `CODEC` (`KeyDispatchDataCodec`). The `DensityFunction` layer
-//! and its dispatch codecs are NOT ported here — RivetTodo(#177): `compute`
-//! takes the raw block coordinates instead of a `FunctionContext`, and `codec`
-//! is omitted. The `compute` loop's octave iteration and per-octave
-//! `noise(..., mainSmear * pow, mainY * pow)` folding are exact.
+//! The `DensityFunction` surface and `CODEC` are ported in
+//! `levelgen::noise::density_functions` (this leaf is lifted into the
+//! `old_blended_noise` dispatch branch); here `compute` takes the raw block
+//! coordinates, which the wrapper maps from a `FunctionContext`. The `compute`
+//! loop's octave iteration and per-octave `noise(..., mainSmear * pow, mainY *
+//! pow)` folding are exact.
 
 use rivet_util::mth;
 use rivet_util::random::XoroshiroRandomSource;
@@ -20,10 +20,13 @@ use rivet_util::random::XoroshiroRandomSource;
 use crate::levelgen::synth::perlin_noise::PerlinNoise;
 
 /// `net.minecraft.world.level.levelgen.synth.BlendedNoise`.
+#[derive(Debug, Clone)]
 pub struct BlendedNoise {
     min_limit_noise: PerlinNoise,
     max_limit_noise: PerlinNoise,
     main_noise: PerlinNoise,
+    xz_scale: f64,
+    y_scale: f64,
     xz_multiplier: f64,
     y_multiplier: f64,
     xz_factor: f64,
@@ -97,6 +100,8 @@ impl BlendedNoise {
             min_limit_noise,
             max_limit_noise,
             main_noise,
+            xz_scale,
+            y_scale,
             xz_multiplier,
             y_multiplier,
             xz_factor,
@@ -107,12 +112,10 @@ impl BlendedNoise {
     }
 
     /// `compute(DensityFunction.FunctionContext)` — with the `FunctionContext`
-    /// seam dropped, takes the block coordinates directly.
-    ///
-    /// RivetTodo(#177): Java takes a `DensityFunction.FunctionContext` and
-    /// reads `blockX`/`blockY`/`blockZ`; the context type is part of the
-    /// unported `DensityFunction` layer, so this port takes the ints it would
-    /// read.
+    /// seam dropped, takes the block coordinates directly. The
+    /// `DensityFunction` impl in `density_functions` (the `old_blended_noise`
+    /// dispatch branch) reads `blockX`/`blockY`/`blockZ` off the context and
+    /// forwards them here.
     pub fn compute(&self, block_x: i32, block_y: i32, block_z: i32) -> f64 {
         let limit_x = block_x as f64 * self.xz_multiplier;
         let limit_y = block_y as f64 * self.y_multiplier;
@@ -170,5 +173,30 @@ impl BlendedNoise {
     /// `maxValue()`.
     pub fn max_value(&self) -> f64 {
         self.max_value
+    }
+
+    /// `xzScale` (record accessor for the `DATA_CODEC`).
+    pub fn get_xz_scale(&self) -> f64 {
+        self.xz_scale
+    }
+
+    /// `yScale` (record accessor for the `DATA_CODEC`).
+    pub fn get_y_scale(&self) -> f64 {
+        self.y_scale
+    }
+
+    /// `xzFactor` (record accessor for the `DATA_CODEC`).
+    pub fn get_xz_factor(&self) -> f64 {
+        self.xz_factor
+    }
+
+    /// `yFactor` (record accessor for the `DATA_CODEC`).
+    pub fn get_y_factor(&self) -> f64 {
+        self.y_factor
+    }
+
+    /// `smearScaleMultiplier` (record accessor for the `DATA_CODEC`).
+    pub fn get_smear_scale_multiplier(&self) -> f64 {
+        self.smear_scale_multiplier
     }
 }
