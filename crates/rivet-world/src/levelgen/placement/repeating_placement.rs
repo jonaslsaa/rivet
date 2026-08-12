@@ -7,12 +7,12 @@
 //! `getPositions` shell — `IntStream.range(0, count(random, origin)).mapToObj(i
 //! -> origin)` — which every concrete subclass inherits (none overrides it).
 //!
-//! Eager-materialization divergence (see the inline note at the collect site):
-//! Java's shell is lazy, but the port's `get_positions` returns an eager
-//! `Vec<BlockPos>`. `count` is unbounded (`NoiseBasedCountPlacement`'s codec
-//! accepts a plain `Codec.INT` ratio and its `count()` saturates to `i32::MAX`),
-//! so a large serialized ratio OOMs (~25 GB) where Java degrades gracefully.
-//! Tracked as RivetTodo(#566).
+//! Lazy-materialization parity: Java's shell returns a lazy `IntStream.range(0,
+//! count)` (see the inline note at the shell). `count` is unbounded
+//! (`NoiseBasedCountPlacement`'s codec accepts a plain `Codec.INT` ratio and its
+//! `count()` saturates to `i32::MAX`), so Java degrades to a slow lazy pull; the
+//! port's `Box<dyn Iterator>` shell (`std::iter::repeat_n`) reproduces exactly
+//! that — each `next()` hands back the origin, no `count`-length allocation.
 //!
 //! `PlacementModifier` is a standalone trait in the port (not a superclass),
 //! so the base is ported as a trait with a *provided* `get_positions` default
@@ -44,8 +44,9 @@ pub trait RepeatingPlacement: Debug + Send + Sync + 'static {
     /// `getPositions(PlacementContext, RandomSource, BlockPos)` — the shared
     /// shell: `IntStream.range(0, count(random, origin)).mapToObj(i -> origin)`.
     /// `context` is unused exactly as in Java; the `IntStream.range` semantics
-    /// (empty for `count <= 0`, half-open `[0, count)`) are reproduced by the
-    /// `(0..count)` `Range<i32>`.
+    /// (empty for `count <= 0`, half-open `[0, count)`) are reproduced by
+    /// `repeat_n(*origin, count.max(0))` (zero `count` yields an empty
+    /// iterator, positive `count` yields exactly that many origin copies).
     ///
     /// The shell is **lazy** — it returns `std::iter::repeat_n(*origin,
     /// count as usize)` without materializing `count` positions (Java's
