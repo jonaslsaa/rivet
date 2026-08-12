@@ -3074,8 +3074,12 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
         );
         println!();
         println!("    expected result  : the current typed UNVERIFIED recenter disconnect is the");
-        println!("                      NEGATIVE regression result the scenario REQUIRES (issue #561);");
-        println!("                      if the recenter or RequireLoaded policy is fixed, this run FAILs,");
+        println!(
+            "                      NEGATIVE regression result the scenario REQUIRES (issue #561);"
+        );
+        println!(
+            "                      if the recenter or RequireLoaded policy is fixed, this run FAILs,"
+        );
         println!("                      pointing at the fix, until the route/slice is repointed.");
         println!();
 
@@ -3119,12 +3123,12 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
 
             // The client transcript must prove the spawn + the exact movement
             // route to the boot authority edge + the after-spawn disconnect.
-            let transcript =
-                transcript::normalize_recenter(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+            let transcript = transcript::normalize_recenter(&client_run.stdout_text)
+                .map_err(RunnerError::Transcript)?;
             let transcript_path = work.join("recenter.transcript.json");
             fs::write(&transcript_path, serde_json::to_string_pretty(&transcript)?)?;
-            let boundary = transcript::rivet_recenter_verdict(&transcript)
-                .map_err(RunnerError::Transcript)?;
+            let boundary =
+                transcript::rivet_recenter_verdict(&transcript).map_err(RunnerError::Transcript)?;
 
             // Server-side half: the typed UNVERIFIED failure text must be in the
             // rivet log, and the movement audit must prove the route was accepted
@@ -3208,7 +3212,10 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
             println!("\nRecentered-disconnect boundary reached: {boundary}");
             println!(
                 "    client route    : {} move frame(s), last in chunk {:?}",
-                transcript["move_frames"].as_array().map(|a| a.len()).unwrap_or(0),
+                transcript["move_frames"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0),
                 transcript["move_frames"]
                     .as_array()
                     .and_then(|a| a.last())
@@ -3223,19 +3230,25 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
                  session end (the Unsupported close is not a traced disconnect)",
                 movement_trace.moves.len()
             );
-            println!("    artifacts       : {} (transcript), {} (trace)", transcript_path.display(), trace_tp.display());
+            println!(
+                "    artifacts       : {} (transcript), {} (trace)",
+                transcript_path.display(),
+                trace_tp.display()
+            );
 
             // Negative control: prove the verdict path just exercised is
             // non-vacuous. Tamper the compared edge chunk (the load-bearing
             // geometry assertion) and require the real verdict to refuse PASS.
             println!();
-            println!("Negative case (tamper the route's final edge chunk through the real verdict path)");
+            println!(
+                "Negative case (tamper the route's final edge chunk through the real verdict path)"
+            );
             {
                 let mut tampered = transcript.clone();
-                if let Some(frames) = tampered["move_frames"].as_array_mut() {
-                    if let Some(last) = frames.last_mut() {
-                        last["chunk"] = json!([2, -3]);
-                    }
+                if let Some(frames) = tampered["move_frames"].as_array_mut()
+                    && let Some(last) = frames.last_mut()
+                {
+                    last["chunk"] = json!([2, -3]);
                 }
                 match transcript::rivet_recenter_verdict(&tampered) {
                     Err(e) if e.contains("edge") => {
@@ -3261,18 +3274,28 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
             }
 
             println!();
-            println!("VERDICT: PASS — the current typed UNVERIFIED recenter disconnect is reproduced");
+            println!(
+                "VERDICT: PASS — the current typed UNVERIFIED recenter disconnect is reproduced"
+            );
             println!("    as the expected negative regression result (issue #561):");
             println!("      * The real Azalea client spawned into the loaded world, drove the");
-            println!("        deterministic +x route across repeated chunk boundaries to the fixed");
+            println!(
+                "        deterministic +x route across repeated chunk boundaries to the fixed"
+            );
             println!("        boot authority edge, and was disconnected AFTER spawn.");
             println!("      * The rivet log proves the failure is movement-driven and typed: the");
-            println!("        'disconnecting play session on chunk-loader update failure' warn with");
-            println!("        'UNVERIFIED region-backed chunk', an accepted teleport ack + accepted");
+            println!(
+                "        'disconnecting play session on chunk-loader update failure' warn with"
+            );
+            println!(
+                "        'UNVERIFIED region-backed chunk', an accepted teleport ack + accepted"
+            );
             println!("        moves (the route reached the authoritative movement path), no");
             println!("        'read timeout' kick (not keepalive), and no RIVET_SESSION_END (the");
             println!("        Unsupported close is not a traced disconnect).");
-            println!("      * The negative case proved the verdict path is non-vacuous: a tampered");
+            println!(
+                "      * The negative case proved the verdict path is non-vacuous: a tampered"
+            );
             println!("        edge chunk was refused PASS by the real verdict.");
             Ok(())
         })();
