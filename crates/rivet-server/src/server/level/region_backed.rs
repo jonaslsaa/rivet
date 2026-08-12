@@ -1323,10 +1323,10 @@ mod tests {
     /// A movement-driven recenter (issue #521) onto a beyond-view chunk that
     /// carries non-empty `structures.starts` — the REAL New World case the
     /// Azalea acceptance surfaced: real chunks further from spawn carry
-    /// structure starts, which the #519 reconstruction used to reject as
-    /// `UnsupportedStructures`, disconnecting the session. The on-demand load
-    /// must carry the starts verbatim (the `StructureStart` load path is not
-    /// ported, #369) and keep the client connected — no UNVERIFIED failure, no
+    /// structure starts, which the #519 reconstruction used to reject at the
+    /// structures boundary, disconnecting the session. The on-demand load must
+    /// carry the starts verbatim (the `StructureStart` load path is not ported,
+    /// #369) and keep the client connected — no UNVERIFIED failure, no
     /// fabricated starts.
     #[test]
     fn movement_recenter_loads_on_demand_chunk_with_structure_starts() {
