@@ -86,6 +86,8 @@ const MAX_WRITTEN_TITLE_ENCODED_BYTES: usize = 32 * 4;
 const MAX_DATA_COMPONENT_PREDICATES: usize = 64;
 /// `PotDecorations.STREAM_CODEC` — `list(4)(registry ITEM)`.
 const MAX_POT_DECORATIONS: usize = 4;
+/// `Fireworks.MAX_EXPLOSIONS` — `list(256)`.
+const MAX_FIREWORK_EXPLOSIONS: usize = 256;
 /// `ByteBufCodecs.GAME_PROFILE_PROPERTIES` — `readCount(16)`.
 const MAX_PROFILE_PROPERTIES: usize = 16;
 /// `ByteBufCodecs.PLAYER_NAME` — `stringUtf8(16)`.
@@ -670,7 +672,9 @@ fn skip_custom_model_data(body: &[u8], off: &mut usize) -> Option<()> {
 
 fn skip_tooltip_display(body: &[u8], off: &mut usize) -> Option<()> {
     skip_bool(body, off)?;
-    skip_list(body, off, skip_varint) // set of DataComponentType registry ids
+    // set of DataComponentType ids, each a registry decode via byIdOrThrow, so
+    // a negative id is refused.
+    skip_list(body, off, skip_holder_registry)
 }
 
 fn skip_tool_rule(body: &[u8], off: &mut usize) -> Option<()> {
@@ -888,7 +892,8 @@ fn skip_firework_explosion(body: &[u8], off: &mut usize) -> Option<()> {
 
 fn skip_fireworks(body: &[u8], off: &mut usize) -> Option<()> {
     skip_varint(body, off)?; // flightDuration
-    skip_list(body, off, skip_firework_explosion)
+    // list(256)(FireworkExplosion) — Fireworks.MAX_EXPLOSIONS.
+    skip_list_limited(body, off, skip_firework_explosion, MAX_FIREWORK_EXPLOSIONS)
 }
 
 fn skip_game_profile_properties(body: &[u8], off: &mut usize) -> Option<()> {
@@ -1116,7 +1121,8 @@ fn skip_typed_data_component(body: &[u8], off: &mut usize, depth: usize) -> Opti
 }
 
 fn skip_data_component_exact_predicate(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
-    // list(64)(TypedDataComponent) — inlined because the element takes `depth`.
+    // list(TypedDataComponent) — unbounded (`ByteBufCodecs.list()`), inlined
+    // because the element takes `depth`.
     let count = frame::read_varint(body, off)?;
     if count < 0 {
         return None;
@@ -1534,7 +1540,8 @@ pub fn canon_update_advancements(body: &[u8]) -> Option<Vec<u8>> {
         if crit_count < 0 {
             return None;
         }
-        let mut criteria = Vec::with_capacity(crit_count as usize);
+        let capped_crit_count = (crit_count as usize).min(MAX_INITIAL_COLLECTION_SIZE);
+        let mut criteria = Vec::with_capacity(capped_crit_count);
         for _ in 0..crit_count {
             let name = read_string(body, &mut off)?;
             let obtained = *body.get(off)?;
@@ -1551,7 +1558,7 @@ pub fn canon_update_advancements(body: &[u8]) -> Option<Vec<u8>> {
             criteria.push((name, raw));
         }
         criteria.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut prog = Vec::with_capacity(crit_count as usize * 4 + id.len() + 4);
+        let mut prog = Vec::with_capacity(capped_crit_count * 4 + id.len() + 4);
         write_string(&mut prog, &id);
         frame::write_varint(&mut prog, criteria.len() as i32);
         for (_, raw) in &criteria {
@@ -3049,6 +3056,61 @@ mod tests {
         let canon = canon_update_advancements(&input)
             .expect("negative display id maps to Default and canonicalizes");
         assert_eq!(canon, input);
+    }
+
+    #[test]
+    fn fireworks_over_java_explosion_max_is_rejected() {
+        // Fireworks.STREAM_CODEC = [VarInt flightDuration][list(256) explosions].
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 0); // flightDuration
+        frame::write_varint(&mut value, 257); // explosions over list(256) max
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[(69u32, value)], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn tooltip_display_negative_hidden_component_id_is_rejected() {
+        // TooltipDisplay hiddenComponents is a set of DataComponentType registry
+        // ids decoded via byIdOrThrow; a negative id must fail the walk.
+        let mut value = Vec::new();
+        value.push(0); // hideTooltip: false
+        frame::write_varint(&mut value, 1); // set count
+        frame::write_varint(&mut value, -1); // hidden component id -> byIdOrThrow(-1)
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[(18u32, value)], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn progress_huge_criteria_count_is_bounded_not_allocated() {
+        // AdvancementProgress reads a VarInt criteria count; a near-i32::MAX
+        // count must fail fast (None) rather than pre-allocating a huge vector
+        // (the capacity is capped at MAX_INITIAL_COLLECTION_SIZE).
+        let mut prog = Vec::new();
+        write_string(&mut prog, "story:root");
+        frame::write_varint(&mut prog, i32::MAX); // criteria count
+        let adv = advancement("story:root", None, None, &[vec!["c".into()]], false);
+        let input = body(false, &[adv], &[], &[prog], true);
+        assert_eq!(
+            canon_update_advancements(&input),
+            None,
+            "huge criteria count must fail canonicalization, not abort the process"
+        );
     }
 
     #[test]
