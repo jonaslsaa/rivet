@@ -456,7 +456,9 @@ come from the committed M2 region payloads via the rivet-nbt codec.
   a corpus seed, so its sweep coverage is honestly 0/N (see below). The single
   `dir` argument overrides both source and destination (one tree): point it at a
   scratch copy of the corpus-forced superflat-full capture (#51) to report that
-  tree's 8 FULL chunks per dimension without touching committed fixtures. Exit 0.
+  tree's 8 FULL chunks per dimension without touching committed fixtures. Exit 0;
+  a missing/empty payload source is **UNVERIFIED (3)** — never a fabricated
+  zero-chunk manifest that could make a later diff vacuously green.
 - `hash-rivet <dir>` — reads a Rivet region tree (`chunk/<dim>/<region>/<cx>.<cz>.nbt`).
   There is no Rivet FULL serialization yet, so it exits **3 UNVERIFIED**, never
   green (Rivet chunk serialization is #231/#15; the Paper FULL side is now
@@ -470,12 +472,16 @@ come from the committed M2 region payloads via the rivet-nbt codec.
   missing required corpus coordinate are each real divergence — never a vacuous
   green. Exit 0 = PASS, 1 = FAIL (names each chunk), 3 = UNVERIFIED, 64 = usage.
 - `hash-diff --expect-fail <paper> <rivet> [kind]` — negative control: corrupt a
-  copy of the **Rivet** baseline and require the tampered chunk named. `kind` is
-  `block`/`light`/`heightmap`/`nbt-order`/`all` (runs every class, so a future
-  mutation the comparator silently ignores is caught). Order-only `nbt-order`
-  tampering is flagged as triage (canonical-identical) but still fails — order
-  divergence is divergence. The corrupted copy keeps the original manifest's
-  seed so the tamper is the only divergence.
+  copy of the **Rivet** baseline and require the tampered chunk named **and only
+  it** — a FAIL for any other reason (a different chunk, a provenance mismatch,
+  an unrelated divergence) is rejected as a wrong-reason pass. `kind` is
+  `block`/`light`/`heightmap`/`nbt-order`/`nbt-key`/`all` (runs every class, so a
+  future mutation the comparator silently ignores is caught). Order-only
+  `nbt-order` tampering is flagged as triage (canonical-identical to the
+  original) but still fails — order divergence is divergence; `nbt-key` inserts
+  a root NBT key Paper's writer never emits, a real content change whose
+  canonical digest differs from the original (unlike `nbt-order`). The corrupted
+  copy keeps the original manifest's seed so the tamper is the only divergence.
 
 The corpus (`corpus.json`) is the single source of truth for which seeds and
 coordinates a green sweep must cover; coverage is always reported against it,

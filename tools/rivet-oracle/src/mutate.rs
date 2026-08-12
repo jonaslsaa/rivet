@@ -9,13 +9,18 @@
 //! - `Heightmap`: flips a long of a `Heightmaps` array.
 //! - `NbtOrder`: swaps two root compound keys (order-only change — must NOT be
 //!   a canonical difference; proves the semantic triage split).
+//! - `NbtKey`: inserts a root NBT key Paper's writer never emits (a content
+//!   change — unlike `NbtOrder`, the canonical digest changes too; proves a
+//!   key-level tamper that adds data is detected, #175 7(d)).
 //!
 //! Every mutation is parse → locate → mutate → re-encode, so the changed bytes
 //! are exactly the named field's; the tests assert both that the serialized
 //! digest changed *and* that the mutation landed in the field the kind names
-//! (never just "something changed"). The `WrongSeed` negative is a manifest-
-//! level concern (a different seed produces different bytes), so it lives in
-//! the manifest tests, not here.
+//! (never just "something changed"). The bogus-seed negative (#175 7(e) — a
+//! capture generated under a different seed hashes differently) is a
+//! whole-tree concern, so it lives in the `hash-diff` tests, which regenerate
+//! the deterministic fixture payloads under a different seed via
+//! `fixture_full_payload_with_seed`.
 
 use std::io::Cursor;
 
@@ -32,23 +37,27 @@ pub enum TamperKind {
     Light,
     Heightmap,
     NbtOrder,
+    NbtKey,
 }
 
 impl TamperKind {
-    pub const ALL: [TamperKind; 4] = [
+    pub const ALL: [TamperKind; 5] = [
         TamperKind::Block,
         TamperKind::Light,
         TamperKind::Heightmap,
         TamperKind::NbtOrder,
+        TamperKind::NbtKey,
     ];
 
-    /// Parse the CLI name (`block`, `light`, `heightmap`, `nbt-order`).
+    /// Parse the CLI name (`block`, `light`, `heightmap`, `nbt-order`,
+    /// `nbt-key`).
     pub fn from_cli(name: &str) -> Option<TamperKind> {
         match name {
             "block" => Some(TamperKind::Block),
             "light" => Some(TamperKind::Light),
             "heightmap" => Some(TamperKind::Heightmap),
             "nbt-order" => Some(TamperKind::NbtOrder),
+            "nbt-key" => Some(TamperKind::NbtKey),
             _ => None,
         }
     }
@@ -60,6 +69,7 @@ impl TamperKind {
             TamperKind::Light => "light",
             TamperKind::Heightmap => "heightmap",
             TamperKind::NbtOrder => "nbt-order",
+            TamperKind::NbtKey => "nbt-key",
         }
     }
 }
@@ -88,16 +98,50 @@ pub fn encode_payload(compound: &CompoundTag) -> Result<Vec<u8>, String> {
 /// genuinely finished chunk (`structures` + all four FINAL heightmaps as 37-long
 /// arrays), so `build_from_payloads`' `validate_full_payload` accepts it and the
 /// synthetic trees hash the same way the live superflat FULL capture does.
+///
+/// Delegates to `fixture_full_payload_with_seed` with the working seed 42
+/// (mirroring `CAPTURE_SEED`) so a tree built by the plain builder is a
+/// different-seed tree from one built with a bogus seed — the seed flows into
+/// the block content (`block_states.data`), which is the bogus-seed negative's
+/// mechanism.
 #[cfg(test)]
 pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
+    fixture_full_payload_with_seed(cx, cz, 42)
+}
+
+/// Like `fixture_full_payload`, but carries the given world seed into the
+/// chunk's worldgen *content* (the `block_states.data` per-block array), so
+/// two payloads built for the same coordinate under different seeds hash
+/// differently — the deterministic analogue of the #175 7(e) bogus-seed
+/// negative without booting Paper.
+///
+/// The seed is deliberately **not** injected into the root `LastUpdate` /
+/// `InhabitedTime` tick counters: those are game/inhabited time, which in a
+/// fresh world are 0 for every seed and never a function of the world seed.
+/// The mechanism Paper actually has is that a different seed generates
+/// different worldgen content, so this builder folds the seed into the
+/// per-block placement array — an honest, multi-bit stand-in for that content
+/// difference (a single palette-name parity bit would model only two worlds
+/// and collide for same-parity seeds).
+#[cfg(test)]
+pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
     let mut root = CompoundTag::new();
     root.put_string("Status", "minecraft:full");
     root.put_int("xPos", cx);
     root.put_int("zPos", cz);
+    // Root tick counters `SerializableChunkData.write()` emits from Level state
+    // (`LastUpdate` = game time, `InhabitedTime` = per-chunk inhabited time).
+    // These are time-based, not seed-based — a fresh world is 0 for every seed,
+    // so they are fixed constants here, never derived from `seed`.
+    root.put_long("LastUpdate", 0);
+    root.put_long("InhabitedTime", 0);
     let mut section = CompoundTag::new();
     section.put_byte("Y", 0);
     let mut bs = CompoundTag::new();
     let mut palette = CompoundTag::new();
+    // The palette name alternates by coordinate only (air/stone) — the
+    // seed-dependent part of this chunk's content lives in the `data` array
+    // below, not here.
     palette.put_string(
         "Name",
         if (cx + cz) % 2 == 0 {
@@ -110,7 +154,12 @@ pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
         "palette".to_string(),
         Tag::List(ListTag::with_list(vec![Tag::Compound(palette)])),
     );
-    bs.put_long_array("data", vec![0; 256]);
+    // The seed folds into the `block_states.data` long array — the per-block
+    // packed placement real worldgen derives from the seed. Different seeds at
+    // the same coordinate produce different arrays, so two trees compared
+    // coordinate-for-coordinate (as the diff does) differ at every chunk for
+    // any seed pair, never just an opposite-parity pair.
+    bs.put_long_array("data", seed_block_data(seed, cx, cz));
     section.put("block_states".to_string(), Tag::Compound(bs));
     section.put_byte_array("SkyLight", vec![0i8; 2048]);
     section.put_byte_array("BlockLight", vec![0i8; 2048]);
@@ -140,6 +189,36 @@ pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
     encode_payload(&root).expect("fixture payload encodes")
 }
 
+/// Deterministic per-chunk block data derived from the world seed: a fixed
+/// 256-long array mixed with `(seed, cx, cz)` via a small xorshift-style
+/// mixer. For a **fixed coordinate** the seed mix is a bijection mod 2^64 (the
+/// multiplier is odd and the xorshift steps are invertible), so different seeds
+/// at the same coordinate *always* produce different arrays — the property the
+/// bogus-seed negative relies on, since it compares each coordinate across two
+/// trees. For a fixed seed, distinct coordinates diverge too (the xorshift
+/// steps are invertible and the coordinate xors differ). The joint
+/// (seed, coordinate) space is *not* injective: a seed `s` at `(cx, cz)` and a
+/// different seed `s'` at a different coordinate can coincide, so the claim is
+/// per-coordinate only, and the tests vary one axis at a time. Either way a
+/// two-seed comparison never reduces to a single parity bit (which would
+/// collide for same-parity seeds).
+#[cfg(test)]
+fn seed_block_data(seed: i64, cx: i32, cz: i32) -> Vec<i64> {
+    let mut state = (seed as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(0xBF58_476D_1CE4_E5B9);
+    state ^= (cx as u32 as u64) << 32;
+    state ^= cz as u32 as u64;
+    (0..256)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as i64
+        })
+        .collect()
+}
+
 /// Apply one mutation of `kind` to a serialized payload, returning the
 /// re-encoded bytes. Errors if the named field is absent (the caller is
 /// expected to use a fixture that carries it).
@@ -150,6 +229,7 @@ pub fn tamper(bytes: &[u8], kind: TamperKind) -> Result<Vec<u8>, String> {
         TamperKind::Light => tamper_light(&mut compound)?,
         TamperKind::Heightmap => tamper_heightmap(&mut compound)?,
         TamperKind::NbtOrder => tamper_nbt_order(&mut compound)?,
+        TamperKind::NbtKey => tamper_nbt_key(&mut compound)?,
     }
     encode_payload(&compound)
 }
@@ -255,6 +335,20 @@ fn tamper_nbt_order(compound: &mut CompoundTag) -> Result<(), String> {
     Ok(())
 }
 
+/// Insert a root NBT key that `SerializableChunkData.write()` never emits.
+/// Unlike `tamper_nbt_order` this is a real content change — the canonical
+/// digest changes too — so it proves a key-level tamper that *adds* data is
+/// detected (#175 7(d)), not just key reordering. Every existing key is kept;
+/// a root already carrying the marker is refused so the tamper is exactly one
+/// inserted key, never a rewrite.
+fn tamper_nbt_key(compound: &mut CompoundTag) -> Result<(), String> {
+    if compound.tags.contains_key("TamperKey") {
+        return Err("chunk root already carries the TamperKey marker".into());
+    }
+    compound.put_int("TamperKey", 1);
+    Ok(())
+}
+
 fn sections_mut(compound: &mut CompoundTag) -> Result<&mut ListTag, String> {
     if !matches!(compound.tags.get("sections"), Some(Tag::List(_))) {
         return Err("sections is not a list".into());
@@ -303,6 +397,18 @@ mod tests {
                     let mut_canon = crate::semantic_hash::canonical_xxh3_64(&m).unwrap();
                     assert_eq!(orig_canon, mut_canon, "order swap is canonical-identical");
                 }
+                TamperKind::NbtKey => {
+                    assert!(
+                        !orig.tags.contains_key("TamperKey"),
+                        "original has no marker key"
+                    );
+                    assert_eq!(m.get_int("TamperKey"), Some(1), "marker key inserted");
+                    assert_ne!(
+                        crate::semantic_hash::canonical_xxh3_64(&orig).unwrap(),
+                        crate::semantic_hash::canonical_xxh3_64(&m).unwrap(),
+                        "inserting a key is a content change, not order-only"
+                    );
+                }
             }
             assert_ne!(
                 xxh3_64_hex(&original),
@@ -350,5 +456,39 @@ mod tests {
                 _ => None,
             })
             .expect("Heightmaps has a long array")
+    }
+
+    /// A different seed must produce different bytes for the same coordinate —
+    /// the deterministic mechanism behind the #175 7(e) bogus-seed negative.
+    #[test]
+    fn different_seed_different_payload() {
+        let a = fixture_full_payload_with_seed(0, 0, 42);
+        let b = fixture_full_payload_with_seed(0, 0, 999);
+        assert_ne!(a, b, "bogus seed must change the serialized payload");
+        assert_ne!(xxh3_64_hex(&a), xxh3_64_hex(&b));
+        // Same parity, different seed (42 and 1000 are both even): the content
+        // difference must still be real — a single parity bit would make these
+        // byte-identical, so this pins the multi-bit seed mechanism.
+        let same_parity = fixture_full_payload_with_seed(0, 0, 1000);
+        assert_ne!(
+            a, same_parity,
+            "same-parity seeds must still produce different content"
+        );
+        assert_ne!(xxh3_64_hex(&a), xxh3_64_hex(&same_parity));
+        // Same seed, same coordinate — deterministic by construction.
+        assert_eq!(
+            fixture_full_payload_with_seed(0, 0, 42),
+            fixture_full_payload_with_seed(0, 0, 42)
+        );
+        // Same seed, different coordinate — distinct chunks hash distinctly.
+        // Pin the mixer's coordinate axis directly: the payload-level assert
+        // below is confounded by xPos/zPos and palette parity, so it alone
+        // could not catch a mixer that ignored the coordinate.
+        assert_ne!(
+            seed_block_data(42, 0, 0),
+            seed_block_data(42, 1, 0),
+            "the seed mixer must fold the coordinate into the block data"
+        );
+        assert_ne!(a, fixture_full_payload_with_seed(1, 0, 42));
     }
 }

@@ -2396,7 +2396,10 @@ fn to_targets_single_booting_kind(only: &[&str]) -> bool {
 // PASS=0 / FAIL=1 / UNVERIFIED=3 / usage=64):
 //   hash-self-check              -> 0 (known-answer vectors pass) or 1
 //   hash-paper [dir]             -> 0, builds/refreshes the committed Paper
-//                                   manifest under fixtures/chunk-hash/paper/
+//                                   manifest under fixtures/chunk-hash/paper/;
+//                                   3 UNVERIFIED when its payload source is
+//                                   unavailable (never a fabricated
+//                                   zero-chunk manifest)
 //   hash-rivet <dir>             -> 3 UNVERIFIED until a Rivet chunk tree with
 //                                   FULL chunks exists (no Rivet serialization
 //                                   today); reads a Rivet region tree layout
@@ -2409,7 +2412,8 @@ fn to_targets_single_booting_kind(only: &[&str]) -> bool {
 //                                   data) / 64 usage.
 //   hash-diff --expect-fail ...  -> negative control: corrupt a copy of the
 //                                   Rivet baseline, require the tampered chunk
-//                                   named.
+//                                   named — and only it. Kinds: block, light,
+//                                   heightmap, nbt-order, nbt-key, or all.
 //
 // Live FULL-chunk generation is blocked (#51 must capture status-FULL region
 // fixtures and Rivet worldgen must reach FULL, #231/#15); pre-worldgen the
@@ -2811,7 +2815,9 @@ fn compute_hash_diffs(
 
 /// `hash-diff --expect-fail`: negative control. Corrupt a copy of the baseline
 /// and require the tampered chunk to be named. Passes only when the diff names
-/// exactly the tampered chunk.
+/// exactly the tampered chunk — a FAIL for any other reason (a different chunk,
+/// a provenance mismatch, an unrelated divergence) is rejected as a
+/// wrong-reason pass.
 fn run_hash_diff_negative(
     paper_dir: &Path,
     rivet_dir: &Path,
@@ -4815,14 +4821,23 @@ mod tests {
     /// tree is exactly what `run_hash_paper`/`hash-rivet` produce from a real
     /// region capture, so `run_hash_diff` treats it identically.
     fn write_hash_fixture_tree(root: &Path, coords: &[(i32, i32)]) -> PathBuf {
+        write_hash_fixture_tree_seeded(root, coords, 42)
+    }
+
+    /// Like `write_hash_fixture_tree`, but the payloads carry the given world
+    /// seed into their block content (`fixture_full_payload_with_seed`), and the
+    /// manifest records that seed — so a tree under a different seed is a
+    /// genuinely different world, which is the #175 7(e) bogus-seed mechanism.
+    fn write_hash_fixture_tree_seeded(root: &Path, coords: &[(i32, i32)], seed: i64) -> PathBuf {
         let chunk_dir = root.join("chunk").join("the_nether").join("0.0");
         fs::create_dir_all(&chunk_dir).unwrap();
         for (cx, cz) in coords {
-            let bytes = crate::mutate::fixture_full_payload(*cx, *cz);
+            let bytes = crate::mutate::fixture_full_payload_with_seed(*cx, *cz, seed);
             fs::write(chunk_dir.join(format!("{cx}.{cz}.nbt")), bytes).unwrap();
         }
         let manifest =
-            hash_manifest::build_from_payloads(root, "42", "minecraft\\:normal").unwrap();
+            hash_manifest::build_from_payloads(root, &seed.to_string(), "minecraft\\:normal")
+                .unwrap();
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         fs::write(root.join("manifest.json"), json + "\n").unwrap();
         root.to_path_buf()
@@ -5543,6 +5558,161 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    /// The #175 7(e) bogus-seed negative: a capture generated under a *different*
+    /// seed hashes differently at every chunk. Because the two trees carry
+    /// different seeds, the diff refuses to compare at all — provenance drift
+    /// is UNVERIFIED (3), never a vacuous green or a misleading exit-1 digest
+    /// comparison of two different worlds. Unlike the tamper negatives (which
+    /// flip one field in a copy of the baseline), a bogus seed changes the
+    /// *whole* tree, so this is a genuine different-world comparison; the
+    /// every-chunk-differs claim is asserted on the payload level below.
+    #[test]
+    fn hash_diff_detects_bogus_seed() {
+        let tmp = hash_tmp("hash-bogus-seed");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        // Paper tree under the working seed 42; Rivet tree under a bogus seed.
+        let paper = write_hash_fixture_tree(&tmp.join("paper"), &all_corpus_coordinates());
+        let rivet =
+            write_hash_fixture_tree_seeded(&tmp.join("rivet"), &all_corpus_coordinates(), 999);
+        // The two trees carry different seeds — provenance drift, so the diff
+        // refuses to compare (UNVERIFIED, 3): a different-seed capture is a
+        // different world, and comparing its digests would be meaningless. The
+        // error is asserted to be the provenance refusal itself, not just any
+        // failure — an unrelated Err would not satisfy the stated intent.
+        let err = run_hash_diff(&paper, &rivet).unwrap_err();
+        assert!(
+            err.to_string().contains("provenance"),
+            "the diff must refuse on provenance drift, got: {err}"
+        );
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            EXIT_UNVERIFIED
+        );
+
+        // The genuine #175 7(e) assertion is on the *payload* level: the two
+        // worlds' serialized bytes differ at every chunk, so every digest
+        // differs. That is what the seeded fixture builder reproduces
+        // deterministically (asserted in mutate.rs too).
+        let paper_m = load_hash_manifest(&paper).unwrap();
+        let rivet_m = load_hash_manifest(&rivet).unwrap();
+        assert!(
+            paper_m.full_count > 0,
+            "the baseline tree must carry FULL chunks for the every-chunk-differs claim"
+        );
+        let mut different = 0usize;
+        for pe in paper_m.entries.iter().filter(|e| e.is_full()) {
+            // Every paper FULL chunk must exist on the bogus-seed side too — a
+            // missing counterpart is a hard failure, never a skipped comparison
+            // that could silently shrink the every-chunk-differs claim.
+            let re = rivet_m
+                .full_entry(&pe.dim, pe.cx, pe.cz)
+                .expect("bogus-seed tree has a FULL counterpart for every paper FULL chunk");
+            if pe.xxh3_64 != re.xxh3_64 {
+                different += 1;
+            }
+        }
+        assert_eq!(
+            different, paper_m.full_count,
+            "every FULL chunk of the bogus-seed world differs from the baseline world"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// The harder #175 7(e) case: a Rivet capture generated under a *bogus* seed
+    /// whose manifest **lies** and claims the baseline seed — so the provenance
+    /// guard passes (both sides claim seed 42) and only the digest comparison
+    /// can catch the different world. This is the real threat an honest
+    /// provenance check cannot stop (a capture mislabeling its own seed), and it
+    /// is the path the honest-seed test above cannot exercise: there the diff
+    /// bails on provenance before any digest is compared, here it must proceed
+    /// to the digest level and FAIL (exit 1) naming every diverged chunk.
+    #[test]
+    fn hash_diff_detects_bogus_seed_with_lying_manifest() {
+        let tmp = hash_tmp("hash-bogus-seed-lying");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let paper = write_hash_fixture_tree(&tmp.join("paper"), &all_corpus_coordinates());
+        // Rivet payloads genuinely generated under a bogus seed 999...
+        let rivet =
+            write_hash_fixture_tree_seeded(&tmp.join("rivet"), &all_corpus_coordinates(), 999);
+        // ...but the manifest lies and claims the baseline seed 42.
+        let mut m = load_hash_manifest(&rivet).unwrap();
+        m.seed = "42".to_string();
+        fs::write(
+            rivet.join("manifest.json"),
+            serde_json::to_string_pretty(&m).unwrap() + "\n",
+        )
+        .unwrap();
+
+        // Provenance now matches, so the diff must proceed to digest comparison
+        // and FAIL — never a vacuous green.
+        assert!(!run_hash_diff(&paper, &rivet).unwrap());
+        assert_eq!(hash_diff_exit(&hash_diff_args(&paper, &rivet)), EXIT_FAIL);
+        // Every corpus chunk diverged (the bogus-seed world differs at every
+        // chunk) and no chunk is one-sided: the FAIL names all of them.
+        let (mismatches, paper_only, rivet_only, compared) = compute_hash_diffs(
+            &load_hash_manifest(&paper).unwrap(),
+            &load_hash_manifest(&rivet).unwrap(),
+        );
+        assert_eq!(compared, all_corpus_coordinates().len());
+        assert_eq!(
+            mismatches.len(),
+            all_corpus_coordinates().len(),
+            "every FULL chunk of the lying-manifest bogus-seed world diverges"
+        );
+        assert!(
+            paper_only.is_empty() && rivet_only.is_empty(),
+            "no one-sided FULL divergence"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// The committed Paper manifest's digest table is grounded in the exact
+    /// payload bytes under `fixtures/regions/overworld-normal`: rebuilding the
+    /// manifest from those payloads reproduces the committed digest table
+    /// byte-identically. This pins the #175 §4 digest scope (the serialized
+    /// `Level` compound written by `SerializableChunkData.write()`, region
+    /// framing excluded) to the actual committed bytes, and guards against a
+    /// future hashing change silently retargeting every digest.
+    ///
+    /// This test is *load-bearing*: the committed Paper digest table and the
+    /// region payloads it is grounded in are committed deliverables, so their
+    /// absence is a hard failure (panic), never a silent skip — matching the
+    /// merged `committed_region_payloads_stamp_true_full_counts` convention
+    /// (D8: a missing load-bearing fixture is a red test, never a skip).
+    #[test]
+    fn committed_paper_manifest_digests_ground_in_payload_bytes() {
+        let dir = crate_dir().join("fixtures/chunk-hash/paper");
+        assert!(
+            dir.join("manifest.json").is_file(),
+            "committed Paper digest table {} is ABSENT — the #54 digest-scope grounding \
+             guard cannot verify; restore it (git checkout) or this test is red, never \
+             silently skipped",
+            dir.display()
+        );
+        let committed = load_hash_manifest(&dir).unwrap();
+        let payload_dir = crate_dir().join("fixtures/regions/overworld-normal");
+        assert!(
+            payload_dir.join("chunk").is_dir(),
+            "committed region payloads {} are ABSENT — the #54 digest-scope grounding guard \
+             cannot verify; restore them (git checkout) or this test is red, never silently \
+             skipped",
+            payload_dir.display()
+        );
+        let seed = source_region_seed(&payload_dir)
+            .unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
+        let rebuilt = hash_manifest::build_from_payloads(&payload_dir, &seed, "minecraft\\:normal")
+            .expect("rebuild from committed payloads");
+        assert_eq!(rebuilt.entries.len(), committed.entries.len());
+        for (re, ce) in rebuilt.entries.iter().zip(committed.entries.iter()) {
+            assert_eq!(re.dim, ce.dim, "dim for {}.{}", re.cx, re.cz);
+            assert_eq!((re.cx, re.cz), (ce.cx, ce.cz));
+            assert_eq!(re.bytes, ce.bytes, "payload byte length grounded");
+            assert_eq!(re.xxh3_64, ce.xxh3_64, "digest grounded in payload bytes");
+        }
+    }
+
     /// `hash-paper [dir]` dir override: run against a scratch copy of a tree
     /// without touching committed fixtures. The single dir is both the payload
     /// source and the manifest destination, and provenance (level-type,
@@ -5553,7 +5723,24 @@ mod tests {
         let tmp = hash_tmp("hash-paper-dir");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
-        let dir = write_hash_fixture_tree(&tmp.join("tree"), &all_corpus_coordinates());
+        // Generate the payloads under the *same* seed the region manifest below
+        // claims (corpus seed 0), so the tree is internally consistent: a
+        // manifest recording a seed the payloads were not generated under would
+        // be exactly the lying-manifest scenario this gate exists to catch.
+        // The fixture builder embeds the seed as i64, so corpus seed 0 must fit
+        // in i64 for its payload bit pattern to match the u64 decimal string the
+        // region manifest records (a high-bit seed would sign-flip through
+        // `as i64` and break coverage's u64 parse).
+        let seed = corpus::corpus_seed(0);
+        assert!(
+            seed <= i64::MAX as u64,
+            "corpus seed 0 ({seed}) must fit in i64 for the seeded fixture builder"
+        );
+        let dir = write_hash_fixture_tree_seeded(
+            &tmp.join("tree"),
+            &all_corpus_coordinates(),
+            seed as i64,
+        );
         // A region manifest with provenance the source region capture would
         // carry: flat level type, uncompressed regions, corpus seed 0.
         let region = serde_json::json!({
@@ -5562,7 +5749,7 @@ mod tests {
             "level-type": "minecraft\\:flat",
             "region-file-compression": "none",
             "kind": "full",
-            "chunk-count": 24,
+            "chunk-count": all_corpus_coordinates().len(),
         });
         fs::write(
             dir.join("manifest.json"),
