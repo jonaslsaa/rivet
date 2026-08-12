@@ -3718,6 +3718,10 @@ mod tests {
         assert!(parse(&["generated-world", "--dwell-seconds", "35"]).is_err());
         assert!(parse(&["generated-world", "--username", DEFAULT_USERNAME]).is_err());
         assert!(parse(&["generated-world", "--timeout-seconds", "40"]).is_err());
+        // An explicit --seed equal to the pinned contract seed is the contract
+        // itself, not a silent no-op: it parses cleanly and pins the same seed.
+        let explicit = parse(&["generated-world", "--seed", "42"]).unwrap();
+        assert_eq!(explicit.seed, Some(server::GENERATED_SEED));
         // `--seed` is a generated-world-only launch interface: an operator that
         // passes it to any other command must be rejected rather than silently
         // ignored.
