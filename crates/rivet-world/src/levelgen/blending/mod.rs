@@ -8,8 +8,8 @@
 //!
 //! - [`blender::BlendingOutput`] — the `blendOffsetAndFactor` result record.
 //! - [`blender::Blender`] — the empty singleton (`empty()`/`isEmpty()`), the
-//!   identity `blendDensity`, and the empty `blendOffsetAndFactor` constant
-//!   `(1.0, 0.0)`.
+//!   identity `blendDensity`, the empty `blendOffsetAndFactor` constant
+//!   `(1.0, 0.0)`, and the generic identity `getBiomeResolver` override.
 //!
 //! `BlendingData` (the per-chunk height/biome/density grid) is NOT ported in
 //! this slice: `Blender.of(WorldGenRegion)` and the non-empty weighted
