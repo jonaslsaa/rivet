@@ -21,12 +21,18 @@
 //!   is a plain `Double.parseDouble`).
 //! - `createNumeric` wraps a Gson `JsonPrimitive(Number)`. Integral variants
 //!   become exact `serde_json::Number`s; `Double` goes through
-//!   `serde_json::Number::from_f64`, and `Float` stores the `f64` nearest
-//!   Java's `Float.toString` literal (Gson renders a `JsonPrimitive(Float)`
-//!   with `Float.toString`, so `0.05f` encodes as `0.05`, not the widened
-//!   `0.05000000074505806`). NaN/Infinity cannot be represented (JSON has no
-//!   such literals) — they fall back to `Value::Null` (documented deviation;
-//!   Gson would emit a `JsonPrimitive` that serializes as `NaN`/`Infinity`).
+//!   `serde_json::Number::from_f64`; `Float` stores the exact `Float.toString`
+//!   literal (Gson renders a `JsonPrimitive(Float)` with `Float.toString`, so
+//!   `0.05f` encodes as `0.05`, `1.0E7` as `1.0E7`, and `-0.0f` as `-0.0` —
+//!   never the widened `0.05000000074505806` nor serde's lowercase-exponent
+//!   form). NaN/Infinity cannot be represented (JSON has no such literals) —
+//!   they fall back to `Value::Null` (documented deviation; Gson would emit a
+//!   `JsonPrimitive` that serializes as `NaN`/`Infinity`).
+//! - serde_json is built with `arbitrary_precision` so the `Float` literal is
+//!   preserved verbatim in `serde_json::Number` (the only way to serialize
+//!   `1.0E7`/`1.4E-45` byte-for-byte). Reading such a number back parses the
+//!   literal (`as_f64`/`float_value`), so the value round-trips regardless of
+//!   the stored notation.
 //! - `serde_json` is built with `preserve_order`, so `Value::Object` keeps
 //!   insertion order like Gson's `LinkedTreeMap`.
 //! - Java's `JsonOps` has no "pretty" variant in DFU 10.0.21 (`INSTANCE` and
@@ -752,9 +758,11 @@ fn number_from_json(number: &JsonNumber) -> Number {
 ///
 /// Java `JsonOps.createNumeric` is `new JsonPrimitive(Number)`, which stores
 /// the exact `Number`. Integral variants become the exact `serde_json::Number`;
-/// `Float`/`Double` go through `serde_json::Number::from_f64`, which returns
-/// `None` for NaN/Infinity — those fall back to `Value::Null` (documented
-/// deviation, see module docs).
+/// `Float` stores the exact `Float.toString` literal via serde_json's
+/// `arbitrary_precision` raw-number form (see below); `Double` goes through
+/// `serde_json::Number::from_f64`. NaN/Infinity cannot be represented in JSON —
+/// they fall back to `Value::Null` (documented deviation; Gson would emit a
+/// `JsonPrimitive` that serializes as `NaN`/`Infinity`, which is not valid JSON).
 fn json_from_number(number: Number) -> Value {
     match number {
         Number::Byte(v) => Value::Number(JsonNumber::from(v)),
@@ -763,18 +771,20 @@ fn json_from_number(number: Number) -> Value {
         Number::Long(v) => Value::Number(JsonNumber::from(v)),
         // Java `JsonOps.createFloat` wraps the `Float` in `new JsonPrimitive`,
         // which Gson serializes with `Float.toString()` — the shortest decimal
-        // that round-trips to the `float` (e.g. `0.05`, `1.0`). Widening
-        // straight to `f64` would print the long double form
-        // (`0.05000000074505806`), a divergence from Paper. `serde_json::Value`
-        // has no `f32` tag, so store the `f64` nearest Java's literal (Rust's
-        // `{:e}` yields the shortest round-trip digits); reading it back through
-        // `Number.float_value()` narrows to the identical `f32`.
+        // that round-trips to the `float` (`0.05`, `1.0`, `1.0E7`, `1.4E-45`,
+        // `-0.0`). Widening to `f64` would print the long double form
+        // (`0.05000000074505806`) or serde's lowercase exponent
+        // (`1e+30`), diverging from Paper. `serde_json::Value` has no `f32`
+        // tag, so the exact `Float.toString` text is stored as an
+        // `arbitrary_precision` raw number; reading it back through
+        // `Number.float_value()` parses the literal to the identical `f32`.
         Number::Float(v) => {
-            let f = format!("{:e}", v).parse::<f64>().unwrap_or(f64::NAN);
-            Value::Number(match JsonNumber::from_f64(f) {
-                Some(n) => n,
-                None => return Value::Null,
-            })
+            if !v.is_finite() {
+                return Value::Null;
+            }
+            Value::Number(JsonNumber::from_string_unchecked(
+                crate::float_format::java_float_to_string(v),
+            ))
         }
         Number::Double(v) => Value::Number(match JsonNumber::from_f64(v) {
             Some(n) => n,

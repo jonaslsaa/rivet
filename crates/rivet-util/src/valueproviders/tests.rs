@@ -10,11 +10,11 @@
 //! Codec JSON shapes and validation messages are captured from the live codecs
 //! and cross-checked against the Paper Java sources (the exact strings are
 //! quoted in the per-file module docs). A float field encodes through
-//! `JsonOps.createFloat` — `rivet-serialization` stores the `f64` nearest
-//! Java's `Float.toString` literal, so `0.05f` writes `0.05`, exactly as Gson
-//! renders a `JsonPrimitive(Float)` (see `create_float_uses_float_to_string_literal`
-//! in `rivet-serialization`'s `json_ops_tests`; `float_provider_round_trips`
-//! pins the shape end-to-end).
+//! `JsonOps.createFloat` — `rivet-serialization` stores the exact Java
+//! `Float.toString` literal, so `0.05f` writes `0.05`, exactly as Gson renders
+//! a `JsonPrimitive(Float)` (see `create_float_uses_float_to_string_literal` in
+//! `rivet-serialization`'s `json_ops_tests`; `float_provider_round_trips` pins
+//! the shape end-to-end).
 
 use crate::random::LegacyRandomSource;
 use crate::valueproviders::biased_to_bottom_int::BiasedToBottomInt;

@@ -41,12 +41,13 @@
 //! ## Float-field JSON encode
 //!
 //! A `Codec.FLOAT` field encodes through `JsonOps.createFloat`, which stores the
-//! `f64` nearest Java's `Float.toString` literal — Gson renders a
-//! `JsonPrimitive(Float)` with `Float.toString`, so `0.05f` writes `0.05`, not
-//! the widened `0.05000000074505806`. This matches Paper for `UniformFloat`,
-//! `TrapezoidFloat`, `ClampedNormalFloat`, and bare `ConstantFloat` encodes (see
-//! `create_float_uses_float_to_string_literal` in `rivet-serialization`'s
-//! `json_ops_tests`; `float_provider_round_trips` pins the shape end-to-end).
+//! exact Java `Float.toString` literal — Gson renders a `JsonPrimitive(Float)`
+//! with `Float.toString`, so `0.05f` writes `0.05`, `1.0E7` as `1.0E7`, never the
+//! widened `0.05000000074505806` nor serde's lowercase-exponent form. This
+//! matches Paper for `UniformFloat`, `TrapezoidFloat`, `ClampedNormalFloat`, and
+//! bare `ConstantFloat` encodes (see `create_float_uses_float_to_string_literal`
+//! in `rivet-serialization`'s `json_ops_tests`; `float_provider_round_trips`
+//! pins the shape end-to-end).
 
 pub mod biased_to_bottom_int;
 pub mod clamped_int;
