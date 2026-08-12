@@ -42,6 +42,7 @@ pub mod random;
 pub mod simple_bit_storage;
 pub mod string_representable;
 pub mod util;
+pub mod valueproviders;
 pub mod weighted;
 pub mod worldgen_random;
 pub mod zero_bit_storage;

@@ -625,7 +625,6 @@ dependencies = [
  "rivet-serialization",
  "rivet-text",
  "rivet-util",
- "ryu",
 ]
 
 [[package]]
@@ -697,6 +696,7 @@ name = "rivet-serialization"
 version = "0.1.0-dev+mc26.2"
 dependencies = [
  "rivet-nbt",
+ "ryu",
  "serde_json",
 ]
 
