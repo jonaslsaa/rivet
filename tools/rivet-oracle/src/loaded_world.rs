@@ -74,8 +74,10 @@ pub struct ChunkFingerprint {
     pub stored_pos: [i32; 2],
     /// Capability flags from `SerializableChunkData`: a chunk that the merged
     /// #519 full-chunk construction boundary cannot yet carry (non-empty
-    /// `structures.starts`, non-empty entities) must be reported honestly, so
-    /// the runner refuses PASS rather than trusting an incomplete server.
+    /// entities) must be reported honestly, so the runner refuses PASS rather
+    /// than trusting an incomplete server. Non-empty `structures.starts` is
+    /// carried verbatim off the parse (the `StructureStart` load path is not
+    /// ported, #369) and is no longer a flag.
     pub capability_flags: Vec<String>,
     /// The distinct block names across the sampled coordinates, sorted — the
     /// anti-superflat evidence.
@@ -334,14 +336,11 @@ fn fingerprint_chunk(
     // construction boundary cannot yet carry, so a chunk beyond that boundary
     // is recorded honestly, never silently accepted. (#519 constructs FULL
     // chunks carrying block entities, stored block/fluid ticks, and
-    // `structures.References`; an empty or references-only structures compound
-    // is no longer a flag. The still-uncarried surfaces are non-empty
-    // `structures.starts` — the `StructureStart` load path is not ported —
-    // and non-empty entities.) `status` non-FULL is folded in separately.
+    // `structures.References`; non-empty `structures.starts` is carried
+    // verbatim off the parse — the `StructureStart` load path is not ported,
+    // #369 — so starts no longer flag. The one still-uncarried surface is
+    // non-empty entities.) `status` non-FULL is folded in separately.
     let mut flags = Vec::new();
-    if data.has_unsupported_structure_starts() {
-        flags.push("structures".to_owned());
-    }
     if !data.entities().is_empty() {
         flags.push("entities".to_owned());
     }
@@ -547,8 +546,9 @@ mod tests {
 
     /// Rewrite the fixture chunk's `structures` compound to `structures`
     /// (preserving everything else) so a test can pin the #519 capability
-    /// boundary: an empty container and a References-only container must not be
-    /// flagged, while a non-empty `starts` compound must.
+    /// boundary: an empty container, a References-only container, and a
+    /// non-empty `starts` compound (carried verbatim, #369) must not be
+    /// flagged.
     fn tamper_structures(original: &[u8], structures: CompoundTag) -> Vec<u8> {
         use std::io::Cursor;
 
@@ -597,11 +597,12 @@ mod tests {
         );
     }
 
-    /// A non-empty `structures.starts` compound is the one structures surface
-    /// the #519 boundary cannot yet carry (the `StructureStart` load path is
-    /// not ported) — it must be flagged so the runner refuses PASS.
+    /// A non-empty `structures.starts` compound is carried verbatim off the
+    /// parse (the `StructureStart` load path is not ported, #369) — it must
+    /// NOT be flagged, since the on-demand loader can now serve a
+    /// starts-bearing chunk without disconnecting.
     #[test]
-    fn fingerprint_flags_a_non_empty_structures_starts_container() {
+    fn fingerprint_does_not_flag_a_non_empty_structures_starts_container() {
         let mut starts = CompoundTag::new();
         starts.put_int("minecraft:village", 1);
         let mut structures = CompoundTag::new();
@@ -609,8 +610,8 @@ mod tests {
 
         let flags = fingerprint_flags(&tamper_structures(PAPER_CHUNK_0_0, structures));
         assert!(
-            flags.iter().any(|f| f == "structures"),
-            "non-empty structures.starts must be flagged, got {flags:?}"
+            !flags.iter().any(|f| f == "structures"),
+            "carried non-empty structures.starts must not be flagged, got {flags:?}"
         );
     }
 }

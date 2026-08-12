@@ -2998,24 +2998,28 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
 /// The load-bearing rivet-server log fragment that proves the movement-driven
 /// recenter failed typed in the NEGATIVE control: the session-level warn emitted
 /// in `session.rs` `dispatch_move_player`'s `Err` arm (`disconnecting play
-/// session on chunk-loader update failure`), which carries the exact
-/// `UNVERIFIED region-backed chunk ... is not loaded` string from
-/// `encode_chunk_with_light` under the `RequireLoaded` policy. The positive
-/// acceptance REQUIRES this fragment to be ABSENT; the tampered-copy negative
-/// control REQUIRES it to be PRESENT.
+/// session on chunk-loader update failure`) when the on-demand load fails. The
+/// positive acceptance REQUIRES this fragment to be ABSENT; the tampered-copy
+/// negative control REQUIRES it to be PRESENT.
 const RECENTER_FAILURE_LOG_FRAGMENT: &str =
     "disconnecting play session on chunk-loader update failure";
 
-/// The typed missing-chunk text the `RequireLoaded` policy emits for a
-/// beyond-boot position the region source cannot resolve (missing or corrupt).
-const RECENTER_UNVERIFIED_TEXT: &str = "UNVERIFIED region-backed chunk";
+/// The typed failure prefix every `RegionBackedBootError` variant carries
+/// (`UNVERIFIED `). The on-demand recenter surfaces these verbatim
+/// (`UNVERIFIED read-only region read failed: corrupt chunk ...` for a corrupt
+/// chunk, `UNVERIFIED chunk ... is absent; ...` for a missing one) — the
+/// no-generation/no-superflat-fallback typed boundary. The positive acceptance
+/// REQUIRES the log to contain NO `UNVERIFIED` text at all; the tampered-copy
+/// negative control REQUIRES it.
+const RECENTER_UNVERIFIED_TEXT: &str = "UNVERIFIED";
 
 /// The overworld region file that holds the route's beyond-boot enter cells:
 /// chunks (0..7, -7..1) live in the region rooted at `(0, -1)`, whose file is
 /// `r.0.-1.mca` under `dimensions/minecraft/overworld/region/`. The negative
-/// control corrupts the region header entry for one of those cells here — the
-/// first cell the second beyond-boot crossing enters — so the on-demand read
-/// fails typed at the storage boundary.
+/// control corrupts the chunk DATA for one of those cells here — the first cell
+/// the second beyond-boot crossing enters — so the boot succeeds (the header
+/// stays valid and the booted 117-chunk square never reads the cell) and the
+/// on-demand recenter read fails typed at the storage boundary.
 const RECENTER_TAMPER_REGION_X: i32 = 0;
 const RECENTER_TAMPER_REGION_Z: i32 = -1;
 /// The chunk cell the negative control corrupts in the disposable copy's region
@@ -3299,11 +3303,12 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
 
         // Negative control: the positive acceptance is non-vacuous only if the
         // same harness FAILS typed when a beyond-boot chunk is genuinely missing
-        // or corrupt. Corrupt the region header entry for the first cell of the
-        // second beyond-boot enter column in a SECOND disposable copy (the
-        // source world is never touched — the copy is the only writable tree),
-        // boot a second rivet-server on an isolated port, drive the same route,
-        // and REQUIRE the typed `UNVERIFIED region-backed chunk` disconnect.
+        // or corrupt. Corrupt the chunk DATA of the first cell of the second
+        // beyond-boot enter column in a SECOND disposable copy (the source world
+        // is never touched — the copy is the only writable tree), boot a second
+        // rivet-server on an isolated port, drive the same route, and REQUIRE
+        // the typed `UNVERIFIED` disconnect (the session disconnects on the
+        // on-demand load failure, never a superflat/generation substitution).
         println!();
         println!("Negative case (tamper a beyond-boot chunk in a second disposable copy)");
         let negative_temp = load_world::TempWorld::create(&source, &work)?;
@@ -3321,15 +3326,14 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
             corrupt_region_chunk_entry(&negative_copy_region, RECENTER_TAMPER_CHUNK).map_err(
                 |e| {
                     RunnerError::Gate(format!(
-                        "negative control FAILED to corrupt the disposable copy's region entry for \
+                        "negative control FAILED to corrupt the disposable copy's region data for \
                      chunk {:?}: {e}",
                         RECENTER_TAMPER_CHUNK
                     ))
                 },
             )?;
             println!(
-                "    corrupted chunk ({},{}) in the copy's region {} (header entry -> \
-                 length 0xFFFFFF, compression 0xFF)",
+                "    corrupted chunk ({},{}) in the copy's region {} (compression id -> 0xFF)",
                 RECENTER_TAMPER_CHUNK[0],
                 RECENTER_TAMPER_CHUNK[1],
                 negative_copy_region.display()
@@ -3498,17 +3502,23 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
     result
 }
 
-/// Corrupt the region-file header entry for one chunk in the DISPOSABLE copy's
-/// `.mca` file: rewrite the 4-byte header entry (offset byte 0) to a
-/// `length = 0xFFFFFF, compression = 0xFF` pair — a declared stream that no
-/// valid chunk can carry. The region file layout is the standard §6 header: the
-/// first 4096 bytes are 1024 4-byte entries (`offset = byte 0..3`,
+/// Corrupt one chunk's DATA payload in the DISPOSABLE copy's `.mca` file:
+/// overwrite the chunk's 1-byte compression id (the byte after the 4-byte
+/// stream length in the chunk's first sector) with `0xFF` — an unregistered id
+/// no valid chunk can carry. The region file layout is the standard §6 header:
+/// the first 4096 bytes are 1024 4-byte entries (`offset = bytes 0..2`,
 /// `sector_count = byte 3`), each entry index `z*32 + x` for the local
-/// `(x % 32, z % 32)` coordinate. The rivet read-only region reader surfaces
-/// the garbage header as a typed `InvalidData` corrupt-chunk error (never a
-/// panic, never a silent absence) — exactly the no-generation/no-fallback
-/// failure the negative control requires. Only the copy is touched; the source
-/// world is never mutated.
+/// `(x % 32, z % 32)` coordinate, and each chunk's data starts at
+/// `sector_offset * 4096` with `[4-byte length][compression id]`.
+///
+/// The HEADER stays valid — the boot's read-only region open scans every header
+/// entry, and the booted 117-chunk square never reads this beyond-view cell —
+/// so the server reaches READY. The on-demand recenter read of the corrupted
+/// cell then surfaces the garbage compression id as a typed
+/// `corrupt chunk ... in read-only region: unsupported stream compression`
+/// `RegionBackedBootError` (never a panic, never a silent absence) — exactly
+/// the no-generation/no-fallback failure the negative control requires. Only
+/// the copy is touched; the source world is never mutated.
 fn corrupt_region_chunk_entry(region_path: &Path, chunk: [i32; 2]) -> io::Result<()> {
     use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -3535,9 +3545,24 @@ fn corrupt_region_chunk_entry(region_path: &Path, chunk: [i32; 2]) -> io::Result
             ),
         ));
     }
-    file.seek(SeekFrom::Start(entry_offset))?;
-    // length 0xFFFFFF (big-endian) + compression byte 0xFF.
-    file.write_all(&[0xFF, 0xFF, 0xFF, 0xFF])?;
+    // The header entry is big-endian `[sector_offset 24 bits][sector_count 8 bits]`.
+    let sector_offset = u32::from(entry[0]) << 16 | u32::from(entry[1]) << 8 | u32::from(entry[2]);
+    if sector_offset < 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "region {} has an invalid sector offset {} for chunk {:?} — cannot tamper the \
+                 data of a chunk whose header is already corrupt",
+                region_path.display(),
+                sector_offset,
+                chunk
+            ),
+        ));
+    }
+    // The compression id lives at `sector_offset * 4096 + 4` (after the 4-byte
+    // stream length). Overwrite it with an unregistered id.
+    file.seek(SeekFrom::Start(u64::from(sector_offset) * 4096 + 4))?;
+    file.write_all(&[0xFF])?;
     Ok(())
 }
 
@@ -3703,10 +3728,11 @@ fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), Ru
             )));
         }
         // A FULL chunk may still carry content the #519 capability boundary
-        // cannot yet construct (non-empty structures.starts, entities). The
-        // extractor records these flags honestly; refusing PASS here keeps the
-        // capability boundary honest instead of comparing a chunk the server
-        // could not have served faithfully.
+        // cannot yet construct (non-empty entities). The extractor records
+        // these flags honestly; refusing PASS here keeps the capability
+        // boundary honest instead of comparing a chunk the server could not
+        // have served faithfully. (Non-empty `structures.starts` is carried
+        // verbatim off the parse, #369, and is no longer a flag.)
         let flags: Vec<&str> = fingerprint["capability_flags"]
             .as_array()
             .map(|a| a.iter().filter_map(Value::as_str).collect())
