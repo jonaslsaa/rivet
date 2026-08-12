@@ -19,7 +19,7 @@
 //! (Java's `>>` binds looser than `+`, so the shift applies to the sum).
 
 use crate::biome::biome::BIOME_INFO_NOISE;
-use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::codec::{self, Codec, JavaEquals};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::extra_codecs;
 use rivet_serialization::map_codec;
@@ -191,6 +191,12 @@ pub enum GrassColorModifier {
     /// `SWAMP("swamp")` — reads `Biome.BIOME_INFO_NOISE` at `(x*0.0225,
     /// z*0.0225)`; `< -0.1` yields `-11766212`, else `-9801671`.
     Swamp,
+}
+
+impl JavaEquals for GrassColorModifier {
+    fn java_equals(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 impl GrassColorModifier {

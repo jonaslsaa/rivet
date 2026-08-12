@@ -52,7 +52,7 @@ use rivet_registry::holder_set::HolderSet;
 use rivet_registry::registry_file_codec::{HolderSetCodec, RegistryFileCodec};
 use rivet_registry::registry_ops::RegistryOpsLookup;
 use rivet_registry::{Identifier, Registry, ResourceKey};
-use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::codec::{self, Codec, JavaEquals};
 use rivet_serialization::decoder;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::encoder;
@@ -538,6 +538,12 @@ pub enum TemperatureModifier {
     Frozen,
 }
 
+impl JavaEquals for TemperatureModifier {
+    fn java_equals(&self, other: &Self) -> bool {
+        self == other
+    }
+}
+
 impl TemperatureModifier {
     /// `TemperatureModifier.CODEC` — the ops-generic enum codec.
     pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<TemperatureModifier, Ops>> {
@@ -609,6 +615,12 @@ impl fmt::Display for TemperatureModifier {
 /// module doc). Only the empty value is representable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EnvironmentAttributeMap;
+
+impl JavaEquals for EnvironmentAttributeMap {
+    fn java_equals(&self, _other: &Self) -> bool {
+        true
+    }
+}
 
 impl EnvironmentAttributeMap {
     /// `EnvironmentAttributeMap.EMPTY`.
