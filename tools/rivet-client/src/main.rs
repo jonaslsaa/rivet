@@ -133,20 +133,22 @@ enum Mode {
     /// (UNVERIFIED for non-FULL chunks and uncarried #369 capability flags)
     /// rather than reporting a fabricated PASS.
     Loaded,
-    /// The loaded-world recenter reproduction (issue #561): join a server
-    /// booted against a real loaded world (`--level <copy>`, issue #374),
+    /// The loaded-world sustained-walking route (issues #185/#561): join a
+    /// server booted against a real loaded world (`--level <copy>`, issue #374),
     /// advertise client view distance 2 (so the join burst's send-3 spawn view
     /// is a strict subset of the booted 117-chunk square), then drive a
     /// deterministic sustained +x movement route by writing finite movement
     /// frames directly (`write_packet` — the server accepts any finite post-ack
     /// frame). The route crosses the first chunk boundary successfully (the
-    /// send-3 enter cells are all inside the booted square) and the second
-    /// (the send-3 enter column falls outside the booted square → the typed
-    /// UNVERIFIED recenter disconnect). Each frame's exact position is emitted
-    /// as movement evidence, and the resulting `disconnect` record is the
-    /// negative regression result the runner asserts. Never generates, never
-    /// superflat-falls-back; the client spawns underground at the real spawn,
-    /// so the frames are driven directly rather than by physics walking.
+    /// send-3 enter cells are all inside the booted square) and crossings 2-4
+    /// enter the beyond-boot x=5/6/7 columns — each resolved by the #185
+    /// on-demand region load, so the client stays connected and emits the
+    /// positive `walked` terminal with the received chunk list. If a beyond-boot
+    /// chunk is genuinely missing/corrupt (the tampered-copy negative control),
+    /// the server fails typed and the `disconnect` handler emits the terminal
+    /// record instead. Never generates, never superflat-falls-back; the client
+    /// spawns underground at the real spawn, so the frames are driven directly
+    /// rather than by physics walking.
     LoadedRecenter,
 }
 
@@ -931,10 +933,10 @@ async fn loaded_walk(bot: &Client) -> Value {
     json!({ "before": before, "after": after })
 }
 
-/// The `loaded-recenter` movement route (issue #561): the block-X offsets of
-/// the +x frames the client drives, relative to the observed spawn block. The
-/// real New World spawn block is `(-16, 68, -48)` in chunk `(-1, -3)`, so
-/// offset +16 reaches block X 0 — the first block of chunk `(0, -3)` — and
+/// The `loaded-recenter` sustained-walking route (issues #185/#561): the block-X
+/// offsets of the +x frames the client drives, relative to the observed spawn
+/// block. The real New World spawn block is `(-16, 68, -48)` in chunk `(-1, -3)`,
+/// so offset +16 reaches block X 0 — the first block of chunk `(0, -3)` — and
 /// offset +32 reaches block X 16 — the first block of chunk `(1, -3)`. The
 /// client advertises view distance 2, so the join burst resolves send radius 3
 /// and the send-3 spawn view is the 81-chunk square `(-5..3, -7..1)` — a strict
@@ -942,35 +944,43 @@ async fn loaded_walk(bot: &Client) -> Value {
 ///
 /// Crossing the FIRST boundary (into chunk `(0, -3)`) enters the x=4 column
 /// `z=-7..1`, which the booted square still contains (`|4-(-1)|-2 = 3`,
-/// `3²+2² = 13 < 16`) — that move must SUCCEED, proving a genuine repeated
-/// chunk-boundary crossing. Crossing the SECOND boundary (into chunk `(1, -3)`)
-/// enters the x=5 column `z=-7..1`, which the booted square does NOT contain
-/// (`x=5` is outside its `-6..4` raster entirely) — the recenter must fail
-/// typed at the first enter cell `(5, -7)`.
-const RECENTER_ROUTE_X_OFFSETS: [f64; 2] = [16.0, 32.0];
+/// `3²+2² = 13 < 16`) — that move succeeds, proving a genuine repeated
+/// chunk-boundary crossing. Crossings 2-4 (into chunks `(1,-3)`, `(2,-3)`,
+/// `(3,-3)`) enter the x=5, x=6, x=7 columns — all OUTSIDE the boot square — so
+/// the region-backed recenter (issue #185) must load each on demand from the
+/// read-only Anvil region source and keep the client connected. The route
+/// therefore proves sustained movement across repeated boundaries, not a single
+/// disconnect.
+const RECENTER_ROUTE_X_OFFSETS: [f64; 4] = [16.0, 32.0, 48.0, 64.0];
 /// How long to wait between driven movement frames (ms). Longer than the
 /// server's 50 ms tick, so each boundary-crossing frame is processed as its own
 /// tick (a frame's recenter runs against the previously committed center) and
-/// the two crossings are observed as distinct server moves.
+/// the crossings are observed as distinct server moves.
 const RECENTER_FRAME_GAP: Duration = Duration::from_millis(120);
 /// Wait this long after spawn before driving the first frame: the spawn
 /// teleport ack (azalea auto-acks) must land first, or the first frame would be
 /// swallowed by the pending-teleport rotation-only snap instead of moving.
 const RECENTER_POST_SPAWN: Duration = Duration::from_millis(400);
 
-/// The `loaded-recenter` driver (issue #561): after spawn, let the teleport ack
-/// land and the join burst quiesce, then drive the deterministic +x movement
-/// route by writing finite movement frames directly (`write_packet` — the
-/// server accepts any finite post-ack frame, so the route is fully
-/// deterministic even though the client spawns underground and physics walking
-/// is impossible). Each frame is emitted as `move_frame` evidence with its exact
-/// absolute position and the chunk it lands in. The server disconnects on the
-/// second frame (the recenter fails typed at the boot authority edge); the
-/// existing `disconnect` handler emits the terminal record and exits. If the
-/// server never disconnects (a regression in the recenter or the RequireLoaded
-/// policy), the driver parks and the outer `--timeout-seconds` branch ends the
-/// run with a `timeout` outcome the runner FAILs — the expected negative result
-/// did not occur.
+/// The `loaded-recenter` sustained-walking driver (issues #185/#561): after
+/// spawn, let the teleport ack land and the join burst quiesce, then drive the
+/// deterministic +x movement route by writing finite movement frames directly
+/// (`write_packet` — the server accepts any finite post-ack frame, so the route
+/// is fully deterministic even though the client spawns underground and physics
+/// walking is impossible). Each frame is emitted as `move_frame` evidence with
+/// its exact absolute position and the chunk it lands in.
+///
+/// The #185 on-demand region load keeps the connection alive across every
+/// beyond-boot crossing, so after the route the driver waits for the chunk
+/// stream to quiesce (the on-demand cells land within the observation window),
+/// then emits the `walked` terminal with the full received chunk list and exits
+/// 0. The runner's positive verdict requires every beyond-boot enter cell in
+/// that list — the proof the recenter stayed connected and received the newly
+/// loaded chunks. If the server disconnects mid-route instead (the negative
+/// control: a tampered copy missing/corrupting a beyond-boot chunk, or a
+/// regression in the on-demand path), the existing `disconnect` handler emits
+/// the terminal record and exits first, so the run surfaces `disconnected`, not
+/// a false success.
 async fn loaded_recenter_and_emit(bot: Client, state: State) {
     let origin = state
         .spawn_origin
@@ -983,6 +993,7 @@ async fn loaded_recenter_and_emit(bot: Client, state: State) {
         .collect();
 
     tokio::time::sleep(RECENTER_POST_SPAWN).await;
+    let started = Instant::now();
     wait_chunk_quiescence(&state.chunks).await;
 
     emit(json!({
@@ -1016,15 +1027,27 @@ async fn loaded_recenter_and_emit(bot: Client, state: State) {
         tokio::time::sleep(RECENTER_FRAME_GAP).await;
     }
 
-    // Every planned frame was sent without a disconnect: the expected recenter
-    // failure did not occur. Park until the outer timeout ends the run with a
-    // `timeout` outcome (the runner FAILs — the negative result is missing). If
-    // a later server-initiated close fires, the handler emits the `disconnect`
-    // record and exits first.
-    let _ = bot;
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    // The route completed without a disconnect: the on-demand loads (issue
+    // #185) kept the session alive. Let the entered cells land and the stream
+    // quiesce, then emit the positive `walked` terminal with the received set
+    // as evidence. If the server closed us mid-route (a tampered copy, or a
+    // regression), the disconnect handler already emitted the terminal.
+    wait_chunk_quiescence(&state.chunks).await;
+    let received: Vec<[i32; 2]> = state
+        .chunks
+        .lock()
+        .expect("chunks lock poisoned")
+        .iter()
+        .map(|&(x, z)| [x, z])
+        .collect();
+    emit(json!({
+        "event": "walked",
+        "position": bot.position().ok().map(round_position),
+        "chunk_count": received.len(),
+        "chunks": received,
+        "observation_ms": started.elapsed().as_millis() as u64,
+    }));
+    hard_exit(0);
 }
 
 /// The overworld world-ceiling Y (the copied world is full-height 384).

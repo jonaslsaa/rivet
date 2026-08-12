@@ -73,7 +73,8 @@ use rivet_world::ticks::SavedTick;
 /// `structures.References` map is keyed by, matching the #519
 /// `ReconstructedLevelChunk` `S` parameter. Rivet has no `Structure` value
 /// type yet (#369), so the chunk holds the reference map keyed by identifier
-/// and `starts` remain an `UnsupportedStructures` boundary.
+/// and carries non-empty `starts` verbatim (see [`LevelChunk::structure_starts`])
+/// rather than fabricating `StructureStart` values.
 pub type StructureKey = Identifier;
 
 /// A dense biome global id. The `minecraft:worldgen/biome` registry is
@@ -125,6 +126,14 @@ pub struct LevelChunk {
     /// The typed stored fluid ticks — same carry semantics as
     /// [`Self::stored_block_ticks`].
     stored_fluid_ticks: Vec<SavedTick<FluidId>>,
+    /// The raw `structures.starts` compound off the #519/#185 reconstruction,
+    /// when the region-backed chunk carries non-empty structure starts. Owned
+    /// tick-thread carry state — the `StructureStart` load path is not ported
+    /// (#369), so nothing is parsed, fabricated, scheduled, or written. `None`
+    /// for a chunk with no starts (the superflat M1 world, and any region
+    /// chunk without starts). The client encoding path does not consume it; the
+    /// future #369 installer does.
+    structure_starts: Option<CompoundTag>,
 }
 
 impl LevelChunk {
@@ -164,6 +173,7 @@ impl LevelChunk {
             light_data,
             stored_block_ticks: Vec::new(),
             stored_fluid_ticks: Vec::new(),
+            structure_starts: None,
         }
     }
 
@@ -200,11 +210,20 @@ impl LevelChunk {
     /// surfaces its error instead of the `.expect` that used to abort the
     /// process (defense-in-depth: the reconstructed and server strategies share
     /// the same dense global-id ladder, so a failure is hostile input).
+    /// The carried raw `structures.starts` compound, when the chunk was
+    /// reconstructed from region data that carried non-empty structure starts
+    /// (see the field docs). `None` for a chunk with no starts. The future
+    /// #369 installer consumes this.
+    pub fn structure_starts(&self) -> Option<&CompoundTag> {
+        self.structure_starts.as_ref()
+    }
+
     pub fn from_bridge(reconstruction: ChunkReconstruction) -> Result<Self, LevelChunkBridgeError> {
         let ChunkReconstruction {
             chunk: world_chunk,
             stored_block_ticks,
             stored_fluid_ticks,
+            structure_starts,
             ..
         } = reconstruction;
         // Reject an unsupported persisted Starlight state before the #184 send
@@ -245,6 +264,7 @@ impl LevelChunk {
             light_data,
             stored_block_ticks,
             stored_fluid_ticks,
+            structure_starts,
         })
     }
 
