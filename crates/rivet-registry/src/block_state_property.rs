@@ -162,6 +162,31 @@ impl Property {
     }
 }
 
+impl std::fmt::Display for Property {
+    /// `Property.toString()` — Guava `MoreObjects.toStringHelper(this)`: the
+    /// concrete subclass simple name then `{name=…, clazz=…, values=[…]}`.
+    /// The value class is exact for the Bool/Int kinds (`BooleanProperty` /
+    /// `IntegerProperty`, `class java.lang.Boolean` / `class java.lang.Integer`);
+    /// the id-keyed model does not retain the Java enum FQN for `Enum`
+    /// properties (e.g. `net.minecraft.core.Direction$Axis`), so the enum case
+    /// omits the `clazz` field rather than fabricate one.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = self.name();
+        let values = self.values().join(", ");
+        match self.kind() {
+            PropertyKind::Bool => write!(
+                f,
+                "BooleanProperty{{name={name}, clazz=class java.lang.Boolean, values=[{values}]}}"
+            ),
+            PropertyKind::Int { .. } => write!(
+                f,
+                "IntegerProperty{{name={name}, clazz=class java.lang.Integer, values=[{values}]}}"
+            ),
+            PropertyKind::Enum => write!(f, "EnumProperty{{name={name}, values=[{values}]}}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +291,26 @@ mod tests {
         for p in all_properties() {
             let _ = p.kind();
         }
+    }
+
+    #[test]
+    fn display_matches_java_property_to_string() {
+        // `MoreObjects.toStringHelper(this)`: concrete class simple name then
+        // `{name=…, clazz=…, values=[…]}`. Bool/Int reproduce the Java value
+        // class exactly; the enum FQN is not in the id-keyed model, so the
+        // enum case omits `clazz` (documented divergence).
+        assert_eq!(
+            pid(BlockPropertyId::Powered).to_string(),
+            "BooleanProperty{name=powered, clazz=class java.lang.Boolean, values=[true, false]}"
+        );
+        assert_eq!(
+            pid(BlockPropertyId::Stage).to_string(),
+            "IntegerProperty{name=stage, clazz=class java.lang.Integer, values=[0, 1]}"
+        );
+        assert_eq!(
+            pid(BlockPropertyId::Facing).to_string(),
+            "EnumProperty{name=facing, values=[north, east, south, west, up, down]}"
+        );
     }
 
     #[test]

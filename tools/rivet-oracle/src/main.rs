@@ -120,6 +120,7 @@
 mod corpus;
 mod hash;
 mod hash_manifest;
+mod loaded_world;
 mod mutate;
 mod semantic_hash;
 
@@ -2446,6 +2447,66 @@ fn source_region_provenance(dir: &Path) -> Option<hash_manifest::CaptureProvenan
     ))
 }
 
+/// Parse the `extract-world` subcommand's `--to <path>` and world-dir
+/// positional args (shared by `run()` and the CLI exit-code tests). A missing
+/// world dir or malformed `--to` is a CLI usage error — `Error::Gate`, never
+/// `Error::Unverified`, so the runner classifies it as FAIL, not as a missing
+/// world prerequisite.
+fn parse_extract_world_args(rest: &[&str]) -> Result<(PathBuf, Option<PathBuf>), Error> {
+    let mut to: Option<PathBuf> = None;
+    let mut world_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--to" => {
+                let Some(path) = rest.get(i + 1) else {
+                    return Err(Error::Gate(
+                        "extract-world --to requires a destination path".into(),
+                    ));
+                };
+                to = Some(PathBuf::from(path));
+                i += 2;
+            }
+            other if !other.starts_with('-') => {
+                world_dir = Some(PathBuf::from(other));
+                i += 1;
+            }
+            other => {
+                return Err(Error::Gate(format!(
+                    "extract-world: unknown option {other}"
+                )));
+            }
+        }
+    }
+    let world_dir = world_dir.ok_or_else(|| {
+        Error::Gate("extract-world requires a disposable world root directory".into())
+    })?;
+    Ok((world_dir, to))
+}
+
+/// Extract the loaded-world ground-truth manifest from a disposable world copy
+/// (issue #374). The extraction is strictly read-only — every region opens
+/// through a read descriptor, and an allocated corrupt chunk is a hard
+/// `InvalidData` error rather than an absent chunk. The manifest is printed as
+/// compact JSON (or written to `to` when given) for the `rivet-loaded-world`
+/// runner's PASS comparison and for the tamper negative controls.
+fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
+    let manifest = loaded_world::extract_world(world_dir).map_err(|e| match e {
+        loaded_world::ExtractError::Unverified(m) => Error::Unverified(m),
+        loaded_world::ExtractError::Gate(m) => Error::Gate(m),
+        loaded_world::ExtractError::Io(io) => Error::Io(io),
+    })?;
+    let json = serde_json::to_string(&manifest)
+        .map_err(|e| Error::Gate(format!("serializing loaded-world manifest: {e}")))?;
+    match to {
+        Some(path) => fs::write(path, json.as_bytes())
+            .map_err(Error::Io)
+            .map(|_| ())?,
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
 /// `hash-paper`: rebuild the committed Paper manifest from the decompressed
 /// `.nbt` fixtures. The seed, level-type, region-file-compression, and corpus
 /// version recorded are all read back out of the source region capture's
@@ -2922,13 +2983,28 @@ fn fmt_hash_coord(cx: i32, cz: i32) -> String {
     format!("{cx}.{cz}")
 }
 
-/// The #54 chunk-hash engine's exit-code contract (see the comment block above
-/// `run_hash_paper`): PASS=0 / FAIL=1 / UNVERIFIED=3 / usage=64 (EX_USAGE).
-/// `main()` routes the `hash-*` subcommands here before `run()` so they own
-/// their exit codes precisely.
-const HASH_EXIT_FAIL: i32 = 1;
-const HASH_EXIT_UNVERIFIED: i32 = 3;
-const HASH_EXIT_USAGE: i32 = 64;
+/// The oracle's shared exit-code contract (the #54 chunk-hash engine and the
+/// issue #374 `extract-world` command, whose runner classifies on the code):
+/// PASS=0 / FAIL=1 / UNVERIFIED=3 / usage=64 (EX_USAGE). `main()` routes the
+/// `hash-*` subcommands here before `run()` so they own their exit codes
+/// precisely; `run()` errors map through `exit_code_for_run_error` so an
+/// `Error::Unverified` (a missing prerequisite, e.g. `extract-world` against a
+/// world with no region layout) exits 3, never a bare FAIL.
+const EXIT_FAIL: i32 = 1;
+const EXIT_UNVERIFIED: i32 = 3;
+const EXIT_USAGE: i32 = 64;
+
+/// Map a [`run()`] error onto the shared exit-code contract. An
+/// `Error::Unverified` is a missing prerequisite (3); every other error —
+/// malformed CLI, gate/internal failure, io — is a hard FAIL (1). The runner
+/// must never see a malformed manifest or an internal failure downgraded to
+/// UNVERIFIED.
+fn exit_code_for_run_error(e: &Error) -> i32 {
+    match e {
+        Error::Unverified(_) => EXIT_UNVERIFIED,
+        _ => EXIT_FAIL,
+    }
+}
 
 /// Dispatch a `hash-*` subcommand to the right runner, mapping outcomes to the
 /// #54 exit-code contract. Returns the process exit code; the caller exits with
@@ -2943,7 +3019,7 @@ fn hash_cli_exit(args: &[String]) -> Option<i32> {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("rivet-oracle: {e}");
-                HASH_EXIT_FAIL
+                EXIT_FAIL
             }
         },
         "hash-paper" => {
@@ -2952,24 +3028,24 @@ fn hash_cli_exit(args: &[String]) -> Option<i32> {
                 Ok(()) => 0,
                 Err(Error::Unverified(m)) => {
                     eprintln!("rivet-oracle: {m}");
-                    HASH_EXIT_UNVERIFIED
+                    EXIT_UNVERIFIED
                 }
                 Err(e) => {
                     eprintln!("rivet-oracle: {e}");
-                    HASH_EXIT_FAIL
+                    EXIT_FAIL
                 }
             }
         }
         "hash-rivet" => {
             let Some(dir) = args.get(1) else {
                 hash_usage("hash-rivet");
-                return Some(HASH_EXIT_USAGE);
+                return Some(EXIT_USAGE);
             };
             match run_hash_rivet(Path::new(dir)) {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("rivet-oracle: {e}");
-                    HASH_EXIT_UNVERIFIED
+                    EXIT_UNVERIFIED
                 }
             }
         }
@@ -2977,7 +3053,7 @@ fn hash_cli_exit(args: &[String]) -> Option<i32> {
         other => {
             eprintln!("rivet-oracle: unknown hash-* command `{other}`");
             hash_usage(other);
-            HASH_EXIT_USAGE
+            EXIT_USAGE
         }
     })
 }
@@ -2991,14 +3067,14 @@ fn hash_diff_exit(args: &[String]) -> i32 {
     }
     let [paper, rivet] = rest else {
         hash_usage("hash-diff");
-        return HASH_EXIT_USAGE;
+        return EXIT_USAGE;
     };
     match run_hash_diff(Path::new(paper), Path::new(rivet)) {
         Ok(true) => 0,
-        Ok(false) => HASH_EXIT_FAIL,
+        Ok(false) => EXIT_FAIL,
         Err(e) => {
             eprintln!("rivet-oracle: {e}");
-            HASH_EXIT_UNVERIFIED
+            EXIT_UNVERIFIED
         }
     }
 }
@@ -3017,13 +3093,13 @@ fn hash_diff_negative_exit(args: &[String]) -> i32 {
                 Some(kind) => vec![kind],
                 None => {
                     hash_usage("hash-diff --expect-fail");
-                    return HASH_EXIT_USAGE;
+                    return EXIT_USAGE;
                 }
             },
         },
         _ => {
             hash_usage("hash-diff --expect-fail");
-            return HASH_EXIT_USAGE;
+            return EXIT_USAGE;
         }
     };
     let mut failed = false;
@@ -3036,7 +3112,7 @@ fn hash_diff_negative_exit(args: &[String]) -> i32 {
             }
         }
     }
-    if failed { HASH_EXIT_FAIL } else { 0 }
+    if failed { EXIT_FAIL } else { 0 }
 }
 
 /// Print the #54 command usage line for the given `hash-*` subcommand.
@@ -3162,6 +3238,15 @@ fn run() -> Result<(), Error> {
             }
         }
         Some("sample") => regenerate_samples(),
+        Some("extract-world") => {
+            // Issue #374 ground-truth extraction: read a disposable world copy
+            // read-only and print the deterministic loaded-world manifest.
+            // `--to <path>` writes the manifest JSON to a file instead of
+            // stdout (the runner captures it for the PASS comparison).
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            let (world_dir, to) = parse_extract_world_args(&rest)?;
+            run_extract_world(&world_dir, to.as_deref())
+        }
         Some("regenerate") => {
             // `--to <dir>` overrides the destination for a single booting kind
             // (regenerate into a scratch dir for gate validation before
@@ -3212,7 +3297,7 @@ fn main() {
     }
     if let Err(e) = run() {
         eprintln!("rivet-oracle: {e}");
-        std::process::exit(1);
+        std::process::exit(exit_code_for_run_error(&e));
     }
 }
 
@@ -4844,10 +4929,7 @@ mod tests {
             "no one-sided chunks"
         );
         assert!(!run_hash_diff(&paper, &rivet).unwrap());
-        assert_eq!(
-            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
-            HASH_EXIT_FAIL
-        );
+        assert_eq!(hash_diff_exit(&hash_diff_args(&paper, &rivet)), EXIT_FAIL);
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -4910,10 +4992,7 @@ mod tests {
             "Rivet produced no extra FULL chunk in this case"
         );
         assert!(!run_hash_diff(&paper, &rivet).unwrap());
-        assert_eq!(
-            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
-            HASH_EXIT_FAIL
-        );
+        assert_eq!(hash_diff_exit(&hash_diff_args(&paper, &rivet)), EXIT_FAIL);
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -4960,7 +5039,7 @@ mod tests {
         );
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &paper)),
-            HASH_EXIT_UNVERIFIED
+            EXIT_UNVERIFIED
         );
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -5005,7 +5084,7 @@ mod tests {
         );
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &rivet)),
-            HASH_EXIT_UNVERIFIED
+            EXIT_UNVERIFIED
         );
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -5023,14 +5102,14 @@ mod tests {
         assert!(run_hash_diff(&paper, &empty).is_err());
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &empty)),
-            HASH_EXIT_UNVERIFIED
+            EXIT_UNVERIFIED
         );
         assert_eq!(
             hash_cli_exit(&[
                 "hash-rivet".to_string(),
                 empty.to_string_lossy().into_owned()
             ]),
-            Some(HASH_EXIT_UNVERIFIED)
+            Some(EXIT_UNVERIFIED)
         );
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -5051,7 +5130,7 @@ mod tests {
         assert!(run_hash_diff(&paper, &rivet).is_err());
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &rivet)),
-            HASH_EXIT_UNVERIFIED
+            EXIT_UNVERIFIED
         );
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -5090,7 +5169,7 @@ mod tests {
         assert!(run_hash_diff(&paper, &rivet).is_err());
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &rivet)),
-            HASH_EXIT_UNVERIFIED,
+            EXIT_UNVERIFIED,
             "a demoted-status chunk must be refused, never compared as FULL"
         );
 
@@ -5198,21 +5277,15 @@ mod tests {
     /// Bad argument counts map to usage (64) for every hash-* subcommand.
     #[test]
     fn hash_cli_usage_returns_64() {
-        assert_eq!(
-            hash_cli_exit(&["hash-diff".to_string()]),
-            Some(HASH_EXIT_USAGE)
-        );
+        assert_eq!(hash_cli_exit(&["hash-diff".to_string()]), Some(EXIT_USAGE));
         assert_eq!(
             hash_cli_exit(&["hash-diff".to_string(), "only-one".to_string()]),
-            Some(HASH_EXIT_USAGE)
+            Some(EXIT_USAGE)
         );
-        assert_eq!(
-            hash_cli_exit(&["hash-rivet".to_string()]),
-            Some(HASH_EXIT_USAGE)
-        );
+        assert_eq!(hash_cli_exit(&["hash-rivet".to_string()]), Some(EXIT_USAGE));
         assert_eq!(
             hash_cli_exit(&["hash-unknown".to_string()]),
-            Some(HASH_EXIT_USAGE)
+            Some(EXIT_USAGE)
         );
         assert_eq!(
             hash_diff_exit(&[
@@ -5222,7 +5295,7 @@ mod tests {
                 "b".to_string(),
                 "bogus".to_string()
             ]),
-            HASH_EXIT_USAGE
+            EXIT_USAGE
         );
     }
 
@@ -5230,6 +5303,60 @@ mod tests {
     #[test]
     fn hash_self_check_exits_zero() {
         assert_eq!(hash_cli_exit(&["hash-self-check".to_string()]), Some(0));
+    }
+
+    /// `extract-world` CLI usage errors (missing world dir, malformed `--to`)
+    /// are Gate — never the missing-prerequisite UNVERIFIED the runner treats
+    /// as "build it / point it at a real world first".
+    #[test]
+    fn extract_world_cli_usage_errors_are_gate_not_unverified() {
+        assert!(matches!(parse_extract_world_args(&[]), Err(Error::Gate(_))));
+        assert!(matches!(
+            parse_extract_world_args(&["--to"]),
+            Err(Error::Gate(_))
+        ));
+        assert!(matches!(
+            parse_extract_world_args(&["--bogus", "world"]),
+            Err(Error::Gate(_))
+        ));
+        assert!(matches!(
+            parse_extract_world_args(&["world", "--bogus"]),
+            Err(Error::Gate(_))
+        ));
+        let (dir, to) = parse_extract_world_args(&["world", "--to", "out.json"]).unwrap();
+        assert_eq!(dir, PathBuf::from("world"));
+        assert_eq!(to, Some(PathBuf::from("out.json")));
+    }
+
+    /// The `run()` exit-code mapping: only `Error::Unverified` (a missing
+    /// prerequisite) exits 3; every internal/gate/io error is a hard FAIL (1).
+    #[test]
+    fn run_error_exit_codes_keep_unverified_distinct_from_fail() {
+        assert_eq!(
+            exit_code_for_run_error(&Error::Unverified("missing region layout".into())),
+            EXIT_UNVERIFIED
+        );
+        assert_eq!(
+            exit_code_for_run_error(&Error::Gate("malformed CLI".into())),
+            EXIT_FAIL
+        );
+        assert_eq!(
+            exit_code_for_run_error(&Error::Io(io::Error::other("io"))),
+            EXIT_FAIL
+        );
+    }
+
+    /// `extract-world` against a world with no overworld region layout reports
+    /// `Error::Unverified` — which `main()` maps to exit 3 — so the runner
+    /// classifies a missing world prerequisite as UNVERIFIED, never a bare FAIL.
+    #[test]
+    fn extract_world_missing_region_layout_is_unverified() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("level.dat"), b"not a world").unwrap();
+        assert!(matches!(
+            run_extract_world(dir.path(), None),
+            Err(Error::Unverified(_))
+        ));
     }
 
     /// The negative-control "names exactly the tampered chunk" predicate: the
@@ -5335,7 +5462,7 @@ mod tests {
                 "hash-paper".to_string(),
                 missing.to_string_lossy().into_owned()
             ]),
-            Some(HASH_EXIT_UNVERIFIED)
+            Some(EXIT_UNVERIFIED)
         );
     }
 
@@ -5355,7 +5482,7 @@ mod tests {
                 "hash-paper".to_string(),
                 empty.to_string_lossy().into_owned()
             ]),
-            Some(HASH_EXIT_UNVERIFIED)
+            Some(EXIT_UNVERIFIED)
         );
         let _ = fs::remove_dir_all(&empty);
     }

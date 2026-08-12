@@ -28,7 +28,7 @@
 //! `ChunkAccess` implementation live with the structure and access units;
 //! this module ports the interface shape keyed by the caller's structure id.
 
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 use std::collections::HashMap;
 
 /// `net.minecraft.world.level.chunk.StructureAccess`.
@@ -41,16 +41,20 @@ pub struct StructureAccess<S> {
     /// keeps the set's semantics — amortized O(1) insert/contains, dedup on
     /// insert — but with first-insertion order where Java uses fastutil's
     /// deterministic hash-probe slot order (see the module `RivetTodo(#185)`
-    /// note on the parity divergence once references serialize).
-    structure_references: HashMap<S, IndexSet<u64>>,
+    /// note on the parity divergence once references serialize). The outer map
+    /// is an `IndexMap` — the runtime authority for structure references
+    /// (#537), so the decoded `structures.References` source order is carried
+    /// and a packet/derivation pass iterates it deterministically.
+    structure_references: IndexMap<S, IndexSet<u64>>,
 }
 
 impl<S: Eq + std::hash::Hash> StructureAccess<S> {
-    /// `ChunkAccess`'s field initializers (`Maps.newHashMap()`).
+    /// `ChunkAccess`'s field initializers (`Maps.newHashMap()`); the reference
+    /// map is insertion-ordered (#537).
     pub fn new() -> Self {
         StructureAccess {
             structure_starts: HashMap::new(),
-            structure_references: HashMap::new(),
+            structure_references: IndexMap::new(),
         }
     }
 
@@ -106,16 +110,24 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
     }
 
     /// `getAllReferences()` — `Collections.unmodifiableMap(...)` (read-only
-    /// view; the port returns a reference).
-    pub fn get_all_references(&self) -> &HashMap<S, IndexSet<u64>> {
+    /// view; the port returns a reference). The map is insertion-ordered
+    /// (#537): the decoded `structures.References` source order is carried, so
+    /// a derivation pass iterates it deterministically.
+    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
         &self.structure_references
     }
 
     /// `setAllReferences(Map)` — clear + putAll (the `markUnsaved` side
     /// effect is omitted). Java's values are already `LongOpenHashSet`s, so a
     /// caller handing over raw `Vec`s here must get the same set semantics:
-    /// duplicates dedupe on insert (first-insertion order preserved).
-    pub fn set_all_references(&mut self, data: HashMap<S, Vec<u64>>) {
+    /// duplicates dedupe on insert (first-insertion order preserved). The
+    /// caller's iteration order is preserved by the insertion-ordered outer
+    /// map (#537).
+    ///
+    /// Unlike Java's `Map` input (unique keys), this takes an `IntoIterator`,
+    /// so a key repeated across iterator items is not a replace: its
+    /// references merge into the same set, keeping the first-insertion key slot.
+    pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, data: I) {
         self.structure_references.clear();
         for (structure, references) in data {
             let set = self.structure_references.entry(structure).or_default();

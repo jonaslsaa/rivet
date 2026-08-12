@@ -24,22 +24,24 @@
 //! A FULL chunk carrying a decoded in-chunk `block_ticks`/`fluid_ticks` list
 //! reconstructs and carries the typed stored ticks on the result (plus the raw
 //! lists); nothing is installed into a runtime container, scheduled, or
-//! executed — the `LevelChunkTicks`/`ProtoChunkTicks` execution containers
-//! stay deferred with the tick-execution slice.
+//! executed — the `LevelChunkTicks`/`ProtoChunkTicks` containers now live in
+//! `ticks` (#522), but the wiring that installs unpacked ticks into them defers
+//! with the tick-execution slice.
 //!
 //! ## Block entities on the FULL path
 //!
 //! `SerializableChunkData.read`'s `postLoadChunk` materializes unpacked block
 //! entities and keeps `keepPacked` ones pending. The block-entity map is not
-//! ported (#341), so this slice carries every serialized block entity as
-//! pending NBT (the `ChunkAccess.pending_block_entities` carrier) instead of
+//! ported (#341), so this slice installs every serialized block entity into the
+//! `ChunkAccess.pending_block_entities` authority (#537) instead of
 //! materializing. That is Paper-faithful for the `keepPacked` branch and an
 //! honest, typed boundary for the unpacked branch: the raw tags are retained
 //! exactly, in source order, so a future #341 materialization pass can consume
-//! them. The registry-grounded type outcomes are computed on this path
-//! ([`SerializedBlockEntityOutcome`]), mirroring Paper's `postLoadChunk`
-//! keepPacked/unpacked split: `keepPacked` entries stay pending, unpacked
-//! entries resolve their `BlockEntityType` through the built-in registry.
+//! them from the authority. Duplicate corrected positions collapse last-wins in
+//! place (one entry per position), exactly like a map-backed runtime. The
+//! registry-grounded type outcomes are derived from the authority when a
+//! materialization/derivation pass needs them (#520), mirroring Paper's
+//! `postLoadChunk` keepPacked/unpacked split.
 //!
 //! ## Structure references
 //!
@@ -48,9 +50,10 @@
 //! installed: the references decode into [`StructureReference`]s at parse,
 //! are filtered by the >8-chunk chessboard rule against the requested position
 //! at reconstruction (Paper's `unpackStructureReferences`), and are installed
-//! into the chunk's `StructureAccess` map plus carried on the result. Non-empty
-//! `starts` still surfaces the `UnsupportedStructures` typed boundary (the
-//! `StructureStart` load path is not ported).
+//! into the chunk's `StructureAccess` map — the runtime authority (#537) — so
+//! no duplicate carry field is retained. Non-empty `starts` still surfaces the
+//! `UnsupportedStructures` typed boundary (the `StructureStart` load path is
+//! not ported).
 
 use crate::block::Block;
 use crate::chunk::level_chunk::LevelChunk;
@@ -60,9 +63,8 @@ use crate::chunk::storage::section_reconstruction::{
     current_version_container_factory, reconstruct_sections,
 };
 use crate::chunk::storage::serializable_chunk_data::{
-    BlockEntityChunkKind, ChunkParseDiagnostic, SerializableChunkData, SerializableChunkDataError,
-    SerializedBlockEntityOutcome, StructureReference, filter_structure_references,
-    reconstruct_block_entities, reconstruct_heightmaps, reconstruct_lights,
+    ChunkParseDiagnostic, SerializableChunkData, SerializableChunkDataError, StructureReference,
+    filter_structure_references, reconstruct_heightmaps, reconstruct_lights,
 };
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
 use crate::levelgen::heightmap::StateFlags;
@@ -152,26 +154,13 @@ pub struct ChunkReconstruction {
     /// The typed, per-chunk-filtered stored block ticks (`ChunkAccess.PackedTicks
     /// .blocks()`), faithfully decoded through `SavedTick.codec(...).listOf()`.
     /// Carried on the result — nothing schedules, executes, installs, or writes
-    /// them (#370 defers the `LevelChunkTicks`/`ProtoChunkTicks` containers).
+    /// them. The `LevelChunkTicks`/`ProtoChunkTicks` containers live in `ticks`
+    /// (#522); the wiring that installs them into reconstruction defers with the
+    /// tick-execution slice.
     pub stored_block_ticks: Vec<SavedTick<Block>>,
     /// The typed, per-chunk-filtered stored fluid ticks (`ChunkAccess.PackedTicks
     /// .fluids()`). Same carry semantics as [`Self::stored_block_ticks`].
     pub stored_fluid_ticks: Vec<SavedTick<FluidId>>,
-    /// The serialized block-entity compounds, retained in source order for the
-    /// #341 materialization pass.
-    pub block_entities: Vec<CompoundTag>,
-    /// The registry-grounded outcomes for the serialized block entities, in
-    /// source order: unpacked entries resolve their `BlockEntityType` through
-    /// the built-in registry (Paper's `postLoadChunk` unpacked branch),
-    /// `keepPacked`/proto entries stay pending, and invalid ids surface as
-    /// typed entry-local failures — nothing is materialized (#341).
-    pub block_entity_outcomes: Vec<SerializedBlockEntityOutcome>,
-    /// The decoded `structures.References` entries after the >8-chunk
-    /// chessboard-distance filter, in deterministic key-insertion order (a
-    /// stable carry, not a Paper-observable order). These are also installed
-    /// into the chunk's `StructureAccess` reference map (keyed by the structure
-    /// `Identifier`); the field is the caller's observable carry.
-    pub structures_references: Vec<StructureReference>,
 }
 
 /// Why a chunk is not reconstructable into an owned runtime `LevelChunk`.
@@ -312,20 +301,18 @@ pub fn reconstruct_runtime_chunk(
     );
     // `structures.References` are filtered against the requested position
     // (Paper's `unpackStructureReferences` distance rule) and installed into
-    // the chunk's reference map; the filtered entries are also carried.
+    // the chunk's reference map — the runtime authority for structure
+    // references (#537), so no separate carry field is retained.
     let (structures_references, structure_diagnostics) =
         filter_structure_references(data.structures_references(), &requested_pos);
     install_structure_references(&mut chunk, &structures_references);
 
-    // Move the serialized block entities out of the parse result once: the
-    // chunk's pending map and the returned field both need them, so clone only
-    // into the chunk map and move the owned list into the result.
+    // The serialized block entities are installed into the chunk's pending map
+    // — the runtime authority for loaded block entities (#537) — with
+    // duplicate corrected positions collapsing last-wins in place. No duplicate
+    // snapshot Vec is retained; the outcome/derivation passes read the map.
     let block_entities = data.take_block_entities();
     install_pending_block_entities(&mut chunk, &block_entities);
-    // The registry-grounded type outcomes mirror Paper's `postLoadChunk`
-    // keepPacked/unpacked split (entry-local invalid-id failures included).
-    let block_entity_outcomes =
-        reconstruct_block_entities(&requested_pos, &block_entities, BlockEntityChunkKind::Level);
 
     let mut parse_diagnostics = data.diagnostics().to_vec();
     if requested_pos != data.stored_pos() {
@@ -344,9 +331,6 @@ pub fn reconstruct_runtime_chunk(
         raw_fluid_ticks: data.raw_fluid_ticks().clone(),
         stored_block_ticks: data.stored_block_ticks().to_vec(),
         stored_fluid_ticks: data.stored_fluid_ticks().to_vec(),
-        block_entities,
-        block_entity_outcomes,
-        structures_references,
     })
 }
 
@@ -403,21 +387,21 @@ fn install_lights(
     chunk.set_light_correct(light.light_correct);
 }
 
-/// Carry every serialized block entity as pending NBT in source order
-/// (`ChunkAccess.setBlockEntityNbt`). Materialization is the #341 boundary;
-/// the raw tags stay available for that pass. Java's `postLoadChunk` only keeps
-/// `keepPacked` entries pending and materializes the rest, but the block-entity
-/// map is not ported — carrying all of them pending is the honest boundary.
-/// The tags are cloned into the chunk map; the caller keeps the owned list for
-/// the returned field.
+/// Install every serialized block entity into the chunk's pending-NBT
+/// authority (`ChunkAccess.setBlockEntityNbt`) — the runtime single source of
+/// truth for loaded block entities (#537). Materialization is the #341
+/// boundary; the raw tags stay available in the authority for that pass.
+/// Java's `postLoadChunk` only keeps `keepPacked` entries pending and
+/// materializes the rest, but the block-entity map is not ported — carrying
+/// all of them pending is the honest boundary.
 ///
 /// Serialized entries whose corrected position collides in the pending map
-/// collapse with the later tag winning: `set_block_entity_nbt` omits Paper's
-/// `containsKey` first-tag-wins guard (#216), so the chunk's pending map keeps
-/// one entry per position. The returned `block_entities` vector retains every
-/// serialized entry (including collapsed duplicates), and the
-/// `block_entity_outcomes` per-entry materialization results stay in source
-/// order, so no entry is lost on this path.
+/// collapse with the later tag winning, in place: `set_block_entity_nbt` omits
+/// Paper's `containsKey` first-tag-wins guard (#216), so the chunk's pending
+/// map keeps exactly one entry per position, first-insertion ordered for the
+/// survivors. The collapsed duplicates are intentionally not retained — the
+/// map IS the authority, and a packet materialization reflects its current
+/// state.
 fn install_pending_block_entities(
     chunk: &mut ReconstructedLevelChunk,
     block_entities: &[CompoundTag],
@@ -438,18 +422,25 @@ fn install_structure_references(
     if references.is_empty() {
         return;
     }
-    let mut data = std::collections::HashMap::with_capacity(references.len());
-    for entry in references {
-        // The `StructureAccess` reference map models the packed longs as their
-        // raw `u64` bit patterns (`IndexSet<u64>`); the parsed NBT carries the
-        // signed `i64` wire form, so the cast is the install-boundary only.
-        let packed: Vec<u64> = entry
-            .references
-            .iter()
-            .map(|reference| *reference as u64)
-            .collect();
-        data.insert(entry.identifier.clone(), packed);
-    }
+    // Install in the decoded source order: `set_all_references` now feeds an
+    // insertion-ordered `IndexMap` authority (#537), so building a
+    // `std::collections::HashMap` here would discard that order for
+    // `RandomState` bucket order. The Vec carries each `StructureReference`'s
+    // key and its `u64` packed bit patterns.
+    let data: Vec<(Identifier, Vec<u64>)> = references
+        .iter()
+        .map(|entry| {
+            // The `StructureAccess` reference map models the packed longs as their
+            // raw `u64` bit patterns (`IndexSet<u64>`); the parsed NBT carries the
+            // signed `i64` wire form, so the cast is the install-boundary only.
+            let packed: Vec<u64> = entry
+                .references
+                .iter()
+                .map(|reference| *reference as u64)
+                .collect();
+            (entry.identifier.clone(), packed)
+        })
+        .collect();
     chunk.set_all_references(data);
 }
 
@@ -457,6 +448,7 @@ fn install_structure_references(
 mod tests {
     use super::*;
     use crate::chunk::status::ChunkStatus;
+    use crate::chunk::storage::serializable_chunk_data::SerializedBlockEntityOutcome;
     use crate::level::height_accessor;
     use crate::levelgen::heightmap::Types;
     use crate::ticks::TickPriority;
@@ -528,10 +520,11 @@ mod tests {
         // primed.
         assert!(chunk.heightmaps()[Types::WorldSurface as usize].is_some());
         assert!(chunk.heightmaps()[Types::MotionBlocking as usize].is_some());
-        // The clean fixture carries no ticks and no block entities.
+        // The clean fixture carries no ticks and no block entities (the
+        // pending authority is empty).
         assert!(reconstructed.raw_block_ticks.list.is_empty());
         assert!(reconstructed.raw_fluid_ticks.list.is_empty());
-        assert!(reconstructed.block_entities.is_empty());
+        assert!(chunk.pending_block_entities().is_empty());
         // Light is carried (lightCorrect true on the fixture).
         assert!(chunk.is_light_correct());
         assert_eq!(chunk.block_nibbles().len(), 26);
@@ -631,7 +624,8 @@ mod tests {
         // The nether 0.0 fixture carries 13 real lava `fluid_ticks`; the FULL
         // chunk reconstructs and carries the typed stored ticks on the result
         // (plus the raw list). Nothing schedules or executes them — the
-        // `LevelChunkTicks`/`ProtoChunkTicks` containers stay deferred (#370).
+        // `LevelChunkTicks`/`ProtoChunkTicks` containers exist in `ticks`
+        // (#522) but are not wired into this reconstruction.
         let data = parse_fixture("the_nether", 0, 256);
         let reconstructed =
             reconstruct_runtime_chunk(ChunkPos::ZERO, data, height_accessor::create(0, 256), false)
@@ -649,8 +643,8 @@ mod tests {
         // `structures.References` entry (mineshaft -> chunk (5,-6), distance 5).
         // The FULL chunk reconstructs, the reference is filtered in-range and
         // installed into the chunk's `StructureAccess` map (keyed by the
-        // structure `Identifier`), and the filtered entry is carried on the
-        // result.
+        // structure `Identifier`) — the runtime authority (#537), so the
+        // installed map is the observable carry.
         let data = parse_loaded_world("0.-4.nbt");
         let reconstructed = reconstruct_runtime_chunk(
             ChunkPos::new(0, -4),
@@ -660,15 +654,12 @@ mod tests {
         )
         .expect("mineshaft FULL fixture reconstructs");
 
-        assert_eq!(reconstructed.structures_references.len(), 1);
-        let entry = &reconstructed.structures_references[0];
-        assert_eq!(entry.identifier.namespace(), "minecraft");
-        assert_eq!(entry.identifier.path(), "mineshaft");
-        assert_eq!(entry.references, vec![-25769803771]);
         assert!(reconstructed.parse_diagnostics.is_empty());
-
         let installed = reconstructed.chunk.get_all_references();
-        let mine = installed.get(&entry.identifier).expect("installed refs");
+        assert_eq!(installed.len(), 1);
+        let (identifier, mine) = installed.iter().next().expect("one installed ref");
+        assert_eq!(identifier.namespace(), "minecraft");
+        assert_eq!(identifier.path(), "mineshaft");
         assert_eq!(
             mine.iter().copied().collect::<Vec<_>>(),
             vec![-25769803771i64 as u64]
@@ -730,11 +721,12 @@ mod tests {
     }
 
     #[test]
-    fn chest_fixture_reconstructs_carrying_pending_block_entity() {
+    fn chest_fixture_reconstructs_installing_pending_block_entity_authority() {
         // The radius-1 loaded-world `-19.-21.nbt` fixture carries one unpacked
-        // chest. The FULL chunk reconstructs, resolves the type registry-grounded
-        // (`minecraft:chest`), installs the tag as pending NBT (the #341 carry
-        // boundary), and carries both the raw tag and the outcome.
+        // chest. The FULL chunk reconstructs and installs the tag into the
+        // chunk's pending-block-entity authority (the #341/#537 boundary); the
+        // position-keyed map is the observable carry, and the resolved type is
+        // derivable from it.
         let data = parse_loaded_world("-19.-21.nbt");
         let reconstructed = reconstruct_runtime_chunk(
             ChunkPos::new(-19, -21),
@@ -743,27 +735,25 @@ mod tests {
             true,
         )
         .expect("chest FULL fixture reconstructs");
-        assert_eq!(reconstructed.block_entities.len(), 1);
+        let pending = reconstructed.chunk.pending_block_entities();
+        assert_eq!(pending.len(), 1);
+        let (pos, tag) = pending.iter().next().expect("one installed chest");
         // `keepPacked` is byte 0 on the fixture, so the level branch resolves
         // the unpacked type (Paper's postLoadChunk keepPacked check).
+        assert_eq!(tag.get_byte_or("keepPacked", -1), 0);
         assert_eq!(
-            reconstructed.block_entities[0].get_byte_or("keepPacked", -1),
-            0
-        );
-        assert_eq!(
-            reconstructed.block_entities[0]
-                .get_string("id")
-                .map(String::as_str),
+            tag.get_string("id").map(String::as_str),
             Some("minecraft:chest")
         );
-        assert_eq!(reconstructed.block_entity_outcomes.len(), 1);
-        let SerializedBlockEntityOutcome::ResolvedUnpacked(entry) =
-            &reconstructed.block_entity_outcomes[0]
-        else {
+        assert_eq!(*pos, BlockPos::new(-299, -51, -321));
+        let resolved = crate::chunk::storage::serializable_chunk_data::reconstruct_block_entities(
+            &ChunkPos::new(-19, -21),
+            std::slice::from_ref(tag),
+            crate::chunk::storage::serializable_chunk_data::BlockEntityChunkKind::Level,
+        );
+        let SerializedBlockEntityOutcome::ResolvedUnpacked(entry) = &resolved[0] else {
             panic!("fixture chest was not resolved");
         };
-        assert_eq!(entry.source_index, 0);
-        assert_eq!(entry.position, BlockPos::new(-299, -51, -321));
         assert_eq!(entry.entity_type.name(), "minecraft:chest");
     }
 
@@ -894,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_block_entities_reconstruct_with_pending_nbt_carrier() {
+    fn non_empty_block_entities_reconstruct_into_pending_authority() {
         let mut entity = CompoundTag::new();
         entity.put_string("id", "minecraft:chest");
         entity.put_int("x", 1);
@@ -917,9 +907,8 @@ mod tests {
             height_accessor::create(-64, 384),
             true,
         )
-        .expect("block entities are carried pending, not rejected");
-        assert_eq!(reconstructed.block_entities.len(), 1);
-        assert_eq!(reconstructed.block_entities[0], entity);
+        .expect("block entities are installed pending, not rejected");
+        assert_eq!(reconstructed.chunk.pending_block_entities().len(), 1);
         let pos = BlockPos::new(1, 64, 1);
         assert!(reconstructed.chunk.get_block_entity_nbt(&pos).is_some());
         assert!(
