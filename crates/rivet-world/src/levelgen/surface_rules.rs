@@ -118,27 +118,27 @@ impl SurfaceRule for AirRule {
 // `Registries.BIOME` is typed over the unported `BiomeId` handle, and the
 // placeholder rule never reads it.
 
-/// STUB: `SurfaceRuleData.air()` — the `Air` rule source.
+/// STUB(mc.world.level.levelgen.surface): `SurfaceRuleData.air()` — the `Air` rule source.
 pub fn surface_rule_air() -> ArcRuleSource {
     Arc::new(Air)
 }
 
-/// STUB: `SurfaceRuleData.end()` — the `Air` stand-in.
+/// STUB(mc.world.level.levelgen.surface): `SurfaceRuleData.end()` — the `Air` stand-in.
 pub fn surface_rule_end() -> ArcRuleSource {
     Arc::new(Air)
 }
 
-/// STUB: `SurfaceRuleData.nether(HolderGetter<Biome>)` — the `Air` stand-in.
+/// STUB(mc.world.level.levelgen.surface): `SurfaceRuleData.nether(HolderGetter<Biome>)` — the `Air` stand-in.
 pub fn surface_rule_nether() -> ArcRuleSource {
     Arc::new(Air)
 }
 
-/// STUB: `SurfaceRuleData.overworld(HolderGetter<Biome>)` — the `Air` stand-in.
+/// STUB(mc.world.level.levelgen.surface): `SurfaceRuleData.overworld(HolderGetter<Biome>)` — the `Air` stand-in.
 pub fn surface_rule_overworld() -> ArcRuleSource {
     Arc::new(Air)
 }
 
-/// STUB: `SurfaceRuleData.overworldLike(HolderGetter<Biome>, boolean
+/// STUB(mc.world.level.levelgen.surface): `SurfaceRuleData.overworldLike(HolderGetter<Biome>, boolean
 /// hasCeiling, boolean hasFloor, boolean isFrozen)` — the `Air` stand-in.
 pub fn surface_rule_overworld_like(
     _has_ceiling: bool,
@@ -159,7 +159,7 @@ pub fn surface_rule_overworld_like(
 // compiles. `RandomState` holds it behind an `Option` (the constructor is
 // deferred) — see `random_state.rs`.
 
-/// STUB: `net.minecraft.world.level.levelgen.SurfaceSystem` — the type
+/// STUB(mc.world.level.levelgen.surface): `net.minecraft.world.level.levelgen.SurfaceSystem` — the type
 /// identity only (the owning `mc.world.level.levelgen.surface` unit ports the
 /// value/behavior).
 #[derive(Debug, Clone, Copy, Default)]

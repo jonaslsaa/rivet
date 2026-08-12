@@ -91,18 +91,17 @@ impl NoiseBasedChunkGenerator {
 
     /// `stable(ResourceKey<NoiseGeneratorSettings>)` — `settings.is(expectedPreset)`.
     ///
-    /// STUB(mc.world.level.levelgen.noisegen) — Java's
-    /// `Reference.is(ResourceKey)` is a direct key-identity comparison
-    /// (`this.key() == key`, no lookup); the port's `Holder::Reference {
-    /// registry, id }` (rivet-registry) stores no `ResourceKey`, so a Reference
-    /// settings holder cannot be compared against the expected preset without
-    /// resolving `id` through the owning registry, which is not threaded into
-    /// the generator (RivetTodo #126: the `settings` holder is resolved through
-    /// `NOISE_SETTINGS` at `RandomState.create_from_provider`). Java's
-    /// `Direct.is` returns `false` for the value form this unit constructs, so
-    /// `Direct` reports not-`stable`; a `Reference` holder panics (the
-    /// `settings_value` unbound-value contract) rather than silently reporting
-    /// a wrong `false`.
+    /// RivetTodo(#126): Java's `Reference.is(ResourceKey)` is a direct
+    /// key-identity comparison (`this.key() == key`, no lookup); the port's
+    /// `Holder::Reference { registry, id }` (rivet-registry) stores no
+    /// `ResourceKey`, so a Reference settings holder cannot be compared against
+    /// the expected preset without resolving `id` through the owning registry,
+    /// which is not threaded into the generator (the `settings` holder is
+    /// resolved through `NOISE_SETTINGS` at
+    /// `RandomState.create_from_provider`). Java's `Direct.is` returns `false`
+    /// for the value form this unit constructs, so `Direct` reports
+    /// not-`stable`; a `Reference` holder panics (the `settings_value`
+    /// unbound-value contract) rather than silently reporting a wrong `false`.
     pub fn stable(
         &self,
         _expected_preset: &rivet_registry::ResourceKey<NoiseGeneratorSettings>,
@@ -786,11 +785,11 @@ fn flags_of(state: BlockState) -> StateFlags {
 
 /// `settings.value()` — resolves the holder to its value.
 ///
-/// STUB(mc.world.level.levelgen.noisegen) — `Holder::value` needs the owning
-/// `HolderLookup` (RivetTodo #126); every noisegen construction resolves the
-/// settings holder through `NOISE_SETTINGS` (`RandomState.create_from_provider`),
-/// so the holder is a `Direct` value here and reads inline. A `Reference`
-/// holder (no threaded lookup) panics with Java's unbound-value contract.
+/// RivetTodo(#126): `Holder::value` needs the owning `HolderLookup`; every
+/// noisegen construction resolves the settings holder through `NOISE_SETTINGS`
+/// (`RandomState.create_from_provider`), so the holder is a `Direct` value here
+/// and reads inline. A `Reference` holder (no threaded lookup) panics with
+/// Java's unbound-value contract.
 fn settings_value(settings: &Holder<NoiseGeneratorSettings>) -> &NoiseGeneratorSettings {
     match settings {
         Holder::Direct(value) => value,
