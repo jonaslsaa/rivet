@@ -8,11 +8,12 @@
 //!
 //! Java's `buildTypes` builds a `RecursiveTypeFamily` when the schema has
 //! recursive types. That machinery (and the optics/recursive rewrite layer it
-//! feeds) is a separate, larger unit; this foundation builds every registered
-//! template via `TypeTemplate.toSimpleType()` (apply to the constant family
-//! that yields `emptyPart` at every index, then `apply(-1)`), which yields the
-//! concrete non-recursive type. Recursion points bottom out at `emptyPart`.
-//! This is a documented deferral, not a silent divergence: the builder's
+//! feeds) is a separate, larger unit; this foundation applies every registered
+//! template to a constant "simple" family (yielding `emptyPart` at every
+//! index) and evaluates at index `-1`, producing the concrete non-recursive
+//! type. Each built type is wrapped in `Named` exactly as Java's
+//! `getTemplate(name)` does. Recursion points bottom out at `emptyPart`. This
+//! is a documented deferral, not a silent divergence: the builder's
 //! ordering/lifecycle/error behavior (this unit's scope) is unaffected.
 
 use crate::data_result::DataResult;
@@ -74,9 +75,8 @@ impl<Ops: DynamicOps + 'static> Schema<Ops> {
 
     /// `Schema.buildTypes()`.
     ///
-    /// Ported via `TypeTemplate.toSimpleType()` (see the module docs): each
-    /// registered template is applied to the constant "simple" family and
-    /// evaluated at index `-1`.
+    /// Each registered template is applied to the constant "simple" family and
+    /// evaluated at index `-1` (see the module docs).
     pub fn build_types(&self) -> HashMap<String, Arc<dyn Type<Ops>>> {
         let mut types: HashMap<String, Arc<dyn Type<Ops>>> = HashMap::new();
         for name in self.type_templates.keys() {
@@ -223,8 +223,7 @@ impl<Ops: DynamicOps + 'static> Schema<Ops> {
     }
 }
 
-/// The constant "simple" family from `TypeTemplate.toSimpleType()`: every
-/// index yields `emptyPart`.
+/// The constant "simple" family: every index yields `emptyPart`.
 pub struct SimpleFamily<Ops> {
     _m: std::marker::PhantomData<Ops>,
 }
