@@ -532,9 +532,13 @@ impl PlayerChunkLoader {
 ///
 /// The light is the deterministic superflat light (`#184`): Java queries the
 /// `LevelLightEngine`; the engine is not ported, so every chunk carries the
-/// fixed superflat sky/block layers the golden fixture pins. The payload is
-/// computed once at `LevelChunk` construction and cloned here, so a per-chunk
-/// per-player encode never rebuilds the 26 layer arrays.
+/// fixed superflat sky/block layers the golden fixture pins. The light payload
+/// is precomputed once at `LevelChunk` construction and cloned here, so a
+/// per-chunk per-player encode never rebuilds the 26 layer arrays. The chunk-data
+/// half is derived per call: the block-entity list is materialized from the
+/// current pending authority (#537) through the merged #520 pure materializer
+/// (see `LevelChunk::chunk_packet_data`), so the packet reflects mutations made
+/// since construction rather than a construction-time snapshot.
 ///
 /// RivetTodo(#185): the chunk pipeline loads every view chunk; until then the
 /// content is the deterministic superflat build for every position.
