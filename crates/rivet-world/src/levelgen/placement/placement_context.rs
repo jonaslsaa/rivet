@@ -22,13 +22,25 @@
 //! constructor, the standalone reads the `WorldGenLevel` directly, and they
 //! can differ (exactly as in Java).
 //!
-//! RivetTodo(#228): `getHeight(Heightmap.Types,int,int)`,
-//! `getCarvingMask(ChunkPos)`, and `getBlockState(BlockPos)` reach into the
-//! `WorldGenLevel` read-write surface (heightmaps, chunks, `BlockState`) and
-//! defer with the block-state worldgen slice.
+//! `getHeight(Heightmap.Types,int,int)` delegates to the `WorldGenLevel`
+//! trait-default heightmap-read seam (see that method), which defers with the
+//! block-state worldgen slice (#228).
+//!
+//! The remaining two Java accessors are omitted as intentional partial ports.
+//! RivetTodo(#399): `getBlockState(BlockPos)` routes through
+//! `WorldGenLevel.getBlockState`, the `#399` world-access seam — today the
+//! reachable consumers call `context.get_level().get_block_state(...)` directly
+//! (e.g. `CountOnEveryLayerPlacement`) instead of a `PlacementContext` accessor.
+//! RivetTodo(#228): `getCarvingMask(ChunkPos)` routes through
+//! `WorldGenLevel.getChunk(pos.x(), pos.z())` plus
+//! `ProtoChunk.getOrCreateCarvingMask()`; the `WorldGenLevel` trait declares no
+//! `get_chunk` read (it defers with the `ChunkAccess` spine, #228), so the
+//! carving accessor has no replacement seam and no `CarvingMask` is reachable
+//! through `PlacementContext` until a chunk read exists.
 
 use crate::chunk::chunk_generator::ChunkGenerator;
 use crate::level::WorldGenLevel;
+use crate::levelgen::heightmap::Types;
 use crate::levelgen::placement::PlacedFeature;
 use crate::levelgen::world_generation_context::WorldGenerationContext;
 
@@ -94,6 +106,30 @@ impl<'a> PlacementContext<'a> {
     /// `generator()`.
     pub fn generator(&self) -> &dyn ChunkGenerator {
         self.generator
+    }
+
+    /// The composed superclass window — `this` viewed as the
+    /// `WorldGenerationContext` Java's `super(...)` built. Consumed by
+    /// `HeightRangePlacement.getPositions` (`this.height.sample(random, this)`).
+    pub fn world_generation_context(&self) -> &WorldGenerationContext {
+        &self.world_generation_context
+    }
+
+    /// `getHeight(Heightmap.Types, int, int)` — `this.level.getHeight(type, x, z)`
+    /// — the `LevelReader.getHeight` heightmap read, delegating to the
+    /// `WorldGenLevel` trait-default seam.
+    ///
+    /// Consumed by the surface-relative placement filters
+    /// (`SurfaceRelativeThresholdFilter`, `SurfaceWaterDepthFilter`),
+    /// `HeightmapPlacement`, `CountOnEveryLayerPlacement`, and by
+    /// `PlacedFeature.placeWithContext`-style callers. The read reaches into
+    /// the worldgen `LevelReader` heightmap surface, which defers with the
+    /// block-state worldgen slice (#228); the `WorldGenLevel` default fails
+    /// explicitly rather than fabricating a surface, so a level that answers
+    /// `getHeight` (a test double or a real world once #228 lands) keeps the
+    /// concrete filter bodies executable.
+    pub fn get_height(&self, ty: Types, x: i32, z: i32) -> i32 {
+        self.level.get_height_at(ty, x, z)
     }
 }
 
@@ -170,6 +206,20 @@ mod tests {
         let generator = TestGenerator { depth: 384 };
         let context = PlacementContext::new(&mut level, &generator, None);
         assert_eq!(context.get_min_y(), -64);
+    }
+
+    #[test]
+    fn get_min_gen_y_is_max_of_level_and_generator_min_y() {
+        // `getMinGenY()` — inherited `WorldGenerationContext` window:
+        // `Math.max(level.getMinY(), generator.getMinY())`. When the
+        // generator's minY exceeds the level's, the composed-window max-branch
+        // wins and `get_min_gen_y()` differs from the standalone `get_min_y()`.
+        let mut level = TestLevel(create(-64, 384));
+        let generator = TestGenerator { depth: 384 };
+        let context = PlacementContext::new(&mut level, &generator, None);
+        assert_eq!(context.get_min_gen_y(), 0);
+        assert_eq!(context.get_min_y(), -64);
+        assert_ne!(context.get_min_gen_y(), context.get_min_y());
     }
 
     #[test]

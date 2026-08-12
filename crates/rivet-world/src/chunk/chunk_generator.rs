@@ -18,4 +18,23 @@ pub trait ChunkGenerator: Send + Sync + 'static {
 
     /// `ChunkGenerator.getGenDepth()` — abstract in Java (no default).
     fn get_gen_depth(&self) -> i32;
+
+    /// `ChunkGenerator.getBiomeGenerationSettings(Holder<Biome>).hasFeature(
+    /// PlacedFeature)` — the biome-membership read `BiomeFilter.shouldPlace`
+    /// performs (`context.generator().getBiomeGenerationSettings(biome)
+    /// .hasFeature(feature)`).
+    ///
+    /// STUB(mc.world.level.biome.core) — `BiomeGenerationSettings` and its
+    /// `featureSet`/`hasFeature` memo are owned by the `#178` biome-core unit,
+    /// so the read fails explicitly rather than fabricating a membership
+    /// result (the same capability-unavailable seam as `WorldGenLevel::get_biome`).
+    fn get_biome_generation_settings_has_feature(
+        &self,
+        _biome: &rivet_registry::holder::Holder<rivet_registry::biome_id::BiomeId>,
+        _feature: &crate::levelgen::placement::PlacedFeature,
+    ) -> bool {
+        panic!(
+            "ChunkGenerator.getBiomeGenerationSettings(...).hasFeature is not implemented (RivetTodo #178)"
+        )
+    }
 }

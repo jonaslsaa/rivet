@@ -41,9 +41,11 @@
 //! tag).
 
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
+use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_util::bit_storage::BitStorage;
 use rivet_util::mth;
 use rivet_util::simple_bit_storage::SimpleBitStorage;
+use rivet_util::string_representable::{self, EnumCodec, EnumOrdinal, StringRepresentable};
 
 /// `Heightmap.Types` — the six world heightmap types, in Java's ordinal
 /// (declaration) order: the `EnumMap` key order `ChunkAccess.getHeightmaps()`
@@ -218,6 +220,60 @@ impl Types {
                 | Types::MotionBlockingNoLeaves
         )
     }
+}
+
+impl StringRepresentable for Types {
+    /// `getSerializedName()` — the serialization key (`serializationKey`
+    /// field), not the constant name.
+    fn get_serialized_name(&self) -> &str {
+        self.serialization_key()
+    }
+}
+
+impl EnumOrdinal for Types {
+    /// `Enum.ordinal()` — the declaration position in
+    /// `Heightmap.Types` (0-based, in Java's enum-declaration order).
+    fn ordinal(&self) -> usize {
+        match self {
+            Types::WorldSurfaceWg => 0,
+            Types::WorldSurface => 1,
+            Types::OceanFloorWg => 2,
+            Types::OceanFloor => 3,
+            Types::MotionBlocking => 4,
+            Types::MotionBlockingNoLeaves => 5,
+        }
+    }
+}
+
+impl std::fmt::Display for Types {
+    /// `Enum.toString()` — the constant name (`WORLD_SURFACE_WG`, ...), not
+    /// the serialized key. Only observable through the (unreachable for a real
+    /// enum) `id_resolver_codec` encode error `"Element with unknown id: " + e`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Types::WorldSurfaceWg => "WORLD_SURFACE_WG",
+            Types::WorldSurface => "WORLD_SURFACE",
+            Types::OceanFloorWg => "OCEAN_FLOOR_WG",
+            Types::OceanFloor => "OCEAN_FLOOR",
+            Types::MotionBlocking => "MOTION_BLOCKING",
+            Types::MotionBlockingNoLeaves => "MOTION_BLOCKING_NO_LEAVES",
+        })
+    }
+}
+
+/// `Heightmap.Types.CODEC` — `StringRepresentable.fromEnum(Types::values)`,
+/// as the ops-generic `types_codec::<Ops>()` factory (the same shape every
+/// static DFU `CODEC` constant takes in this codebase).
+///
+/// PROVENANCE: the `SurfaceRelativeThresholdFilter.CODEC` (the
+/// `mc.world.level.levelgen.placement.filter` unit) consumes
+/// `Heightmap.Types.CODEC` as its required `"heightmap"` field; the codec is
+/// proactively ported here (the same way `GenerationStep.Decoration.CODEC`
+/// was for the feature shell) — a later `mc.world.level.levelgen` wave must
+/// not re-port it.
+pub fn types_codec<Ops: DynamicOps + 'static>() -> EnumCodec<Types, Ops> {
+    const VALUES: [Types; 6] = Types::all();
+    string_representable::from_enum::<Types, Ops>(&VALUES)
 }
 
 /// `Heightmap` — `data` holds the height offset `height - minY` for each of the
@@ -728,5 +784,63 @@ mod tests {
         let mut hm = Heightmap::new(384);
         hm.set_raw_data(&[1, 2, 3]);
         assert!(hm.get_raw_data().iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn types_codec_round_trips_all_values_and_rejects_unknown() {
+        // `Heightmap.Types.CODEC` — `StringRepresentable.fromEnum`: encodes to
+        // the serialized-name string (`"OCEAN_FLOOR"`, not the constant name),
+        // decodes back through the orCompressed string branch.
+        use rivet_serialization::json_ops::JsonOps;
+        use rivet_serialization::{Decoder, Encoder};
+        let ops = JsonOps::INSTANCE;
+        let codec = types_codec::<JsonOps>();
+        for value in [
+            Types::WorldSurfaceWg,
+            Types::WorldSurface,
+            Types::OceanFloorWg,
+            Types::OceanFloor,
+            Types::MotionBlocking,
+            Types::MotionBlockingNoLeaves,
+        ] {
+            let encoded = codec
+                .encode_start(&ops, &value)
+                .get_or_throw("encode")
+                .clone();
+            assert_eq!(
+                encoded,
+                ops.create_string(value.get_serialized_name().to_string())
+            );
+            let decoded = codec.decode(&ops, &encoded).get_or_throw("decode").clone();
+            assert_eq!(decoded.0, value);
+        }
+        // An unknown name fails the string branch.
+        let unknown = ops.create_string("NOT_A_HEIGHTMAP".to_string());
+        assert!(codec.decode(&ops, &unknown).result().is_none());
+    }
+
+    #[test]
+    fn types_codec_integer_ordinal_branch_only_under_compressed_ops() {
+        // `StringRepresentable.fromEnum` is `orCompressed(stringResolver,
+        // idResolver)` — the int-ordinal branch fires only for compressed ops.
+        // Under the plain `INSTANCE` (non-compressed) an int input goes to the
+        // string branch and fails; `COMPRESSED` decodes the ordinal (the
+        // declaration order: `OCEAN_FLOOR` is ordinal 3).
+        use rivet_serialization::Decoder;
+        use rivet_serialization::json_ops::JsonOps;
+        let normal = JsonOps::INSTANCE;
+        let compressed = JsonOps::COMPRESSED;
+        let codec = types_codec::<JsonOps>();
+        assert!(
+            codec
+                .decode(&normal, &normal.create_int(0))
+                .result()
+                .is_none()
+        );
+        let decoded = codec
+            .decode(&compressed, &compressed.create_int(3))
+            .get_or_throw("decode")
+            .clone();
+        assert_eq!(decoded.0, Types::OceanFloor);
     }
 }

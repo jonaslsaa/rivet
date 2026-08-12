@@ -19,12 +19,14 @@
 //! (`RepeatingPlacement`'s `IntStream.range(0, count(...))`, `InSquarePlacement`'s
 //! two `random.nextInt(16)`, `HeightRangePlacement`'s `height.sample(...)`, …).
 //! The port's `get_positions` mirrors that: it draws eagerly from `random` and
-//! returns an eager `Vec<BlockPos>`. The laziness that matters for parity is
-//! *when* `get_positions` runs — Java's `flatMap` invokes it per upstream
-//! position, interleaved with placements — and that is preserved by
-//! `PlacedFeature::place_with_context`'s depth-first walk (see that method). A
-//! truly lazy pull would need to hold `R`-specific state in a type-erased list,
-//! which `RandomSource` (`Sized`, not object-safe) forbids.
+//! returns a lazy `Box<dyn Iterator<Item = BlockPos> + 'a>` tied to `&'a self`
+//! (so the iterator outlives the per-expansion `PlacementContext`). The laziness
+//! that matters for parity is *when* `get_positions` runs — Java's `flatMap`
+//! invokes it per upstream position, interleaved with placements — and that is
+//! preserved by `PlacedFeature::place_with_context`'s depth-first walk (see that
+//! method). The iterator form additionally keeps `RepeatingPlacement`'s unbounded
+//! `count` from materializing a `count`-length `Vec` (Java degrades to a slow
+//! lazy pull instead of OOM).
 
 use crate::levelgen::placement::PlacementContext;
 use crate::levelgen::placement::placement_modifier_type::PlacementModifierTypeId;
@@ -43,16 +45,30 @@ pub trait PlacementModifier: Debug + Send + Sync + 'static {
     /// `getPositions(PlacementContext, RandomSource, BlockPos)` — the
     /// modifier's per-position stream, flattened by `PlacedFeature.place`.
     ///
-    /// Returns an eager `Vec<BlockPos>` because every Java modifier draws
-    /// eagerly inside `getPositions` and returns a pure stream; the per-position
-    /// interleaving Java's lazy `flatMap` provides is reproduced by
-    /// `PlacedFeature::place_with_context`'s depth-first walk (see module doc).
-    fn get_positions<R: RandomSource>(
-        &self,
+    /// Returns a lazy `Box<dyn Iterator<Item = BlockPos> + 'a>` because Java's
+    /// `getPositions` returns a lazy `Stream<BlockPos>` (`IntStream.range(...)`
+    /// / `Stream.of(...)`); the per-position interleaving Java's lazy
+    /// `flatMap` provides is reproduced by `PlacedFeature::place_with_context`'s
+    /// depth-first walk (see module doc). Every Java modifier draws eagerly
+    /// *inside* `getPositions` (before returning the stream), so the port draws
+    /// eagerly too — the RNG draw order and count are unchanged from an eager
+    /// port; only the *materialization* is deferred, exactly as in Java. This
+    /// is what keeps `RepeatingPlacement`'s unbounded `count` from allocating a
+    /// `count`-length `Vec` (Java degrades to a slow lazy pull instead of OOM).
+    ///
+    /// The iterator's lifetime is tied to `&'a self` alone (NOT to
+    /// `context`/`random`/`origin`): `PlacedFeature::place_walk` reconstructs
+    /// the `PlacementContext` per expansion (the context mutably borrows the
+    /// level, and the walk must hand the level back to the recursive placement),
+    /// so the returned iterator must outlive the temporary context. Every
+    /// concrete modifier computes its positions eagerly from the inputs and
+    /// returns an owning iterator, so this is always satisfiable.
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         context: &PlacementContext,
         random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos>;
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a>;
 
     /// `type()` — the registry-held `PlacementModifierType<?>` identity this
     /// modifier dispatches on (the key `PlacementModifier.CODEC` uses).
@@ -84,12 +100,12 @@ impl<M: PlacementModifier + ?Sized> ErasedPlacementModifier for M {
 /// pre-wire stand-in for the generated dispatch, whose unknown-id path will
 /// throw `IllegalStateException` like Java's `Registry.getValueOrThrow` (Java
 /// throws only when the key is genuinely missing).
-pub fn placement_get_positions<R: RandomSource>(
-    modifier: &dyn ErasedPlacementModifier,
+pub fn placement_get_positions<'a, R: RandomSource>(
+    modifier: &'a dyn ErasedPlacementModifier,
     _context: &PlacementContext,
     _random: &mut R,
     _origin: &BlockPos,
-) -> Vec<BlockPos> {
+) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
     // STUB(mc.world.level.levelgen.placement.core) — the generated
     // `BuiltInRegistries.PLACEMENT_MODIFIER_TYPE` dispatch table (`modifier` is
     // downcast to the concrete modifier by the generated match; kept in the
@@ -113,13 +129,13 @@ mod tests {
     struct IdentityModifier(PlacementModifierTypeId);
 
     impl PlacementModifier for IdentityModifier {
-        fn get_positions<R: RandomSource>(
-            &self,
+        fn get_positions<'a, R: RandomSource>(
+            &'a self,
             _context: &PlacementContext,
             _random: &mut R,
             _origin: &BlockPos,
-        ) -> Vec<BlockPos> {
-            Vec::new()
+        ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
+            Box::new(std::iter::empty())
         }
 
         fn type_id(&self) -> PlacementModifierTypeId {
