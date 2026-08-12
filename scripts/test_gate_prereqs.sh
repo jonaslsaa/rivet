@@ -486,5 +486,94 @@ set -e
 grep -q "UNVERIFIED" "$TMP/out_sc3" && fail "scenario: UNVERIFIED printed for a FAILED Paper row (classification is FAIL, exit 1)"
 pass "scenario: failing Paper row -> hard exit 1 (FAIL), never UNVERIFIED"
 
+# --- test 7: loaded-world scenario row (issue #374) never silently skips --------
+# run_scenario_loaded_world always invokes `run-scenario.sh loaded-world` — the
+# Rivet-only row needs no paperclip jar — and classifies its machine-stable exit
+# code: 0 PASS, 1 FAIL (hard exit 1, never UNVERIFIED), 3 UNVERIFIED (sets
+# ORACLE_UNVERIFIED so the gate exits 3, or hard exit 1 under --require-oracle),
+# and any other nonzero (crash) FAIL (exit 1, never green). The shim records its
+# argv and exits with the code in $LW_EXIT_FILE.
+LW_SCENARIO_LOG="$TMP/lw-invocations.log"
+LW_EXIT_FILE="$TMP/lw-exit"
+printf '%s\n' 0 > "$LW_EXIT_FILE"
+set_lw_exit() { printf '%s\n' "$1" > "$LW_EXIT_FILE"; }
+# The existing test-6 shim is replaced here (test 6 already ran); the argv log
+# is separate so the loaded-world assertions stay isolated.
+cat > "$SCENARIO_SHIM_DIR/run-scenario.sh" <<LWEOF
+#!/bin/bash
+echo "\$@" >> '$LW_SCENARIO_LOG'
+exit "\$(cat '$LW_EXIT_FILE')"
+LWEOF
+chmod +x "$SCENARIO_SHIM_DIR/run-scenario.sh"
+
+# PASS (exit 0): the row reports PASS, sets no UNVERIFIED, and the wrapper is
+# invoked with exactly `loaded-world`.
+set_lw_exit 0
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+: > "$LW_SCENARIO_LOG"
+run_scenario_loaded_world > "$TMP/out_lw1" 2>&1
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "loaded-world: ORACLE_UNVERIFIED set on a PASS"
+grep -q "^    PASS" "$TMP/out_lw1" || fail "loaded-world: PASS not printed for exit 0"
+[ "$(wc -l < "$LW_SCENARIO_LOG" | tr -d ' ')" = 1 ] || fail "loaded-world: expected exactly 1 run-scenario invocation, got $(wc -l < "$LW_SCENARIO_LOG")"
+grep -qx "loaded-world" "$LW_SCENARIO_LOG" || fail "loaded-world: run-scenario.sh not invoked with exactly 'loaded-world' (got $(cat "$LW_SCENARIO_LOG"))"
+pass "loaded-world: exit 0 -> PASS, stays verified, invoked with exactly 'loaded-world'"
+
+# FAIL (exit 1): hard exit 1, reported FAILED, never UNVERIFIED, no
+# ORACLE_UNVERIFIED. run_scenario_loaded_world exits the shell in this branch,
+# so it runs in a subshell.
+set_lw_exit 1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+( run_scenario_loaded_world > "$TMP/out_lw2" 2>&1 )
+rc_lw2=$?
+set -e
+[ "$rc_lw2" = 1 ] || fail "loaded-world: FAIL should exit 1 (got $rc_lw2)"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "loaded-world: FAIL should not set ORACLE_UNVERIFIED"
+grep -q "^    FAILED" "$TMP/out_lw2" || fail "loaded-world: FAILED not printed for exit 1"
+grep -q "^    UNVERIFIED" "$TMP/out_lw2" && fail "loaded-world: UNVERIFIED printed for a FAIL (exit 1)"
+grep -q "^    PASS" "$TMP/out_lw2" && fail "loaded-world: PASS printed for a FAIL"
+pass "loaded-world: exit 1 -> FAILED, hard exit 1, never UNVERIFIED"
+
+# UNVERIFIED (exit 3) without --require-oracle: sets ORACLE_UNVERIFIED, returns
+# 0 (main turns it into gate exit 3).
+set_lw_exit 3
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+run_scenario_loaded_world > "$TMP/out_lw3" 2>&1
+rc_lw3=$?
+set -e
+[ "$rc_lw3" = 0 ] || fail "loaded-world: UNVERIFIED without --require-oracle should return 0 (got $rc_lw3)"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "loaded-world: ORACLE_UNVERIFIED not set on exit 3"
+grep -q "^    UNVERIFIED" "$TMP/out_lw3" || fail "loaded-world: UNVERIFIED not printed for exit 3"
+grep -q "^    PASS" "$TMP/out_lw3" && fail "loaded-world: PASS printed for an UNVERIFIED run"
+pass "loaded-world: exit 3 -> UNVERIFIED, ORACLE_UNVERIFIED set"
+
+# UNVERIFIED (exit 3) with --require-oracle: hard failure (exit 1), after
+# reporting UNVERIFIED. run_scenario_loaded_world exits the shell here.
+set_lw_exit 3
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_scenario_loaded_world > "$TMP/out_lw4" 2>&1 )
+rc_lw4=$?
+set -e
+REQUIRE_ORACLE=0
+[ "$rc_lw4" = 1 ] || fail "loaded-world: UNVERIFIED + --require-oracle should exit 1 (got $rc_lw4)"
+grep -q "^    UNVERIFIED" "$TMP/out_lw4" || fail "loaded-world: UNVERIFIED not printed before the hard failure"
+grep -q "hard failure" "$TMP/out_lw4" || fail "loaded-world: --require-oracle hard-failure message missing"
+pass "loaded-world: exit 3 + --require-oracle -> hard exit 1"
+
+# Crash / unexpected exit (101): FAIL (exit 1), reported FAILED, never green.
+set_lw_exit 101
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+( run_scenario_loaded_world > "$TMP/out_lw5" 2>&1 )
+rc_lw5=$?
+set -e
+[ "$rc_lw5" = 1 ] || fail "loaded-world: crash should exit 1 (got $rc_lw5)"
+grep -q "^    FAILED" "$TMP/out_lw5" || fail "loaded-world: FAILED not printed for exit 101"
+grep -q "^    PASS" "$TMP/out_lw5" && fail "loaded-world: PASS printed despite a crash"
+grep -q "^    UNVERIFIED" "$TMP/out_lw5" && fail "loaded-world: UNVERIFIED printed for a crash (classification is FAIL, exit 1)"
+pass "loaded-world: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
+
 echo
 echo "ALL GATE PREREQ TESTS PASSED"
