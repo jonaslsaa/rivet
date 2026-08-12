@@ -51,16 +51,21 @@
 //! maxima are enforced where the codec has them — `list(256)` lore/container/
 //! bundle, `list(1024)` charged projectiles, `list(100)` writable book,
 //! `list(64)` data-component predicates, `readCount(16)` profile properties,
-//! `STRING_UTF8` (32767*3 encoded bytes) strings, and the three-value
-//! `AdvancementType` display frame — and negative holder-registry / holder-set
-//! ids are refused like `Registry.byIdOrThrow`.
+//! `STRING_UTF8` (32767*3 encoded bytes AND 32767 decoded chars) strings, the
+//! 2 MiB NBT byte budget (`NbtAccounter.DEFAULT_NBT_QUOTA`), and the three-value
+//! `AdvancementType` display frame. Negative ids on the `holderRegistry` /
+//! `holder` / `holderSet` codecs (and the plain `registry()` codecs over
+//! non-defaulted registries like `BLOCK_ENTITY_TYPE`/`DATA_COMPONENT_TYPE`) are
+//! refused like `Registry.byIdOrThrow`; the plain `registry()` codecs over the
+//! `DefaultedRegistry`s (`ITEM`, `ENTITY_TYPE`) decode a negative id to the
+//! default value instead, so those are accepted.
 //!
 //! The display path is proven by synthetic display-bearing bodies in
 //! `tools/rivet-capture/src/normalize.rs`; issue #269 tracks exercising it via
 //! a real-boot capture that carries a display-bearing advancement.
 
 use crate::frame;
-use crate::nbt::{Nbt, read_nbt, write_nbt};
+use crate::nbt::{Nbt, read_nbt, read_nbt_unbounded, write_nbt};
 
 /// `STRING_UTF8`'s encoded-byte cap: `Utf8String.read(input, 32767)` rejects a
 /// `VarInt` buffer length over `32767 * 3` bytes (`ByteBufUtil.utf8MaxBytes` is
@@ -146,17 +151,30 @@ fn component_type_name(id: u32) -> Option<&'static str> {
     }
 }
 
-/// Read a `tagCodec` value — any non-`End` NBT tag (a `Component`). Java's
-/// `ByteBufCodecs.tagCodec.decode` calls `FriendlyByteBuf.readNbt`, which
-/// returns null for a root End tag, and throws
+/// Read a `tagCodec` value — any non-`End` NBT tag (a `Component`) — under the
+/// `defaultQuota` byte budget. Java's `ByteBufCodecs.tagCodec.decode` calls
+/// `FriendlyByteBuf.readNbt`, which returns null for a root End tag, and throws
 /// `DecoderException("Expected non-null compound tag")`; an End tag is refused
-/// the same way. A `Component` (`custom_name`, `item_name`, and the display
-/// `title`/`description`) serializes to an NBT tag through this codec. This is
-/// the tag-level bound only: the subsequent `Component` codec parse is not
-/// re-implemented, so a non-`Component` tag (e.g. an `IntTag`) is re-emitted
-/// rather than refused.
+/// the same way. A `Component` (`custom_name`, `item_name`) serializes to an
+/// NBT tag through this codec. This is the tag-level bound only: the subsequent
+/// `Component` codec parse is not re-implemented, so a non-`Component` tag
+/// (e.g. an `IntTag`) is re-emitted rather than refused.
 fn read_component_tag(body: &[u8], off: &mut usize) -> Option<Nbt> {
     let value = read_nbt(body, off)?;
+    if matches!(value, Nbt::End) {
+        return None;
+    }
+    Some(value)
+}
+
+/// Read a `TRUSTED_STREAM_CODEC` value — any non-`End` NBT tag read with
+/// `NbtAccounter.unlimitedHeap` (no byte budget). The display
+/// `title`/`description` go through `ComponentSerialization.TRUSTED_STREAM_CODEC`
+/// in `DisplayInfo.STREAM_CODEC`, which is `unlimitedHeap`, so no quota is
+/// charged here (unlike the `defaultQuota` `tagCodec`/`COMPOUND_TAG` component
+/// values).
+fn read_component_tag_unbounded(body: &[u8], off: &mut usize) -> Option<Nbt> {
+    let value = read_nbt_unbounded(body, off)?;
     if matches!(value, Nbt::End) {
         return None;
     }
@@ -221,8 +239,26 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
             }
             Some(out)
         }
-        "minecraft:entity_data" | "minecraft:block_entity_data" => {
-            // TypedEntityData.streamCodec = [type registry id VarInt][COMPOUND_TAG].
+        "minecraft:entity_data" => {
+            // TypedEntityData.streamCodec = [type registry id VarInt][COMPOUND_TAG],
+            // with EntityType.STREAM_CODEC = registry(ENTITY_TYPE). ENTITY_TYPE is
+            // a DefaultedRegistry (default "pig"), so a negative id decodes to the
+            // default value rather than throwing — accepted.
+            let type_id = frame::read_varint(body, off)?;
+            let value = read_nbt(body, off)?;
+            if !matches!(value, Nbt::Compound(_)) {
+                return None;
+            }
+            let mut out = Vec::with_capacity(body.len() / 4);
+            frame::write_varint(&mut out, type_id);
+            write_nbt(&mut out, &value);
+            Some(out)
+        }
+        "minecraft:block_entity_data" => {
+            // TypedEntityData.streamCodec = [type registry id VarInt][COMPOUND_TAG],
+            // with registry(BLOCK_ENTITY_TYPE). BLOCK_ENTITY_TYPE is a plain
+            // (non-defaulted) registry, so a negative id throws like byIdOrThrow —
+            // rejected.
             let type_id = frame::read_varint(body, off)?;
             if type_id < 0 {
                 return None;
@@ -262,11 +298,14 @@ enum Shape {
     /// through `ByIdMap.continuous(..., OutOfBoundsStrategy.ZERO)` to the first
     /// enum value, so a bare VarInt is the faithful bound for them.
     VarInt,
-    /// A `ByteBufCodecs.holderRegistry` VarInt — `byIdOrThrow(id)`, which rejects
-    /// a negative id. The registry's size is not pinned at build time, so the
-    /// upper bound is not checked (a non-negative out-of-range id is accepted
-    /// where Java would throw; only the registry-independent negative case is
-    /// enforced).
+    /// A `ByteBufCodecs.holderRegistry` VarInt — the holder map's `byIdOrThrow(id)`
+    /// (via `Registry.asHolderIdMap`), which rejects a negative id for every
+    /// registry, defaulted or not. (A plain `registry()` over a `DefaultedRegistry`
+    /// like `ITEM`/`ENTITY_TYPE` is lenient instead — see `skip_pot_decorations`
+    /// and `skip_typed_entity_data`.) The registry's size is not pinned at build
+    /// time, so the upper bound is not checked (a non-negative out-of-range id is
+    /// accepted where Java would throw; only the registry-independent negative
+    /// case is enforced).
     HolderRegistry,
     /// No bytes (`Unit`).
     Unit,
@@ -482,13 +521,22 @@ fn skip_utf8(body: &[u8], off: &mut usize) -> Option<()> {
 
 /// Skip a `[VarInt byte length][UTF-8 bytes]` string bounded by a
 /// Java-grounded encoded-byte cap (`Utf8String.read` rejects
-/// `bufferLength > maxLength * 3`).
+/// `bufferLength > maxLength * 3`) AND a decoded-char cap (`String.length()` —
+/// UTF-16 code units — over `maxLength` is rejected even when the encoded bytes
+/// fit). `max_encoded` is always `3 * maxLength` for the codecs this skips
+/// (`ByteBufUtil.utf8MaxBytes`), so the char cap is `max_encoded / 3`.
 fn skip_utf8_limited(body: &[u8], off: &mut usize, max_encoded: usize) -> Option<()> {
     let len = frame::read_varint(body, off)?;
     if len < 0 || len as usize > max_encoded {
         return None;
     }
-    skip_bytes(body, off, len as usize)
+    let bytes = body.get(*off..*off + len as usize)?;
+    let s = std::str::from_utf8(bytes).ok()?;
+    if s.encode_utf16().count() as usize > max_encoded / 3 {
+        return None;
+    }
+    *off += len as usize;
+    Some(())
 }
 
 /// Skip one NBT tag (`[type byte][payload]`), reusing the strict parser so a
@@ -767,7 +815,10 @@ fn skip_item_stack_template(body: &[u8], off: &mut usize, depth: usize) -> Optio
 fn skip_patch_value(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
     let positive = frame::read_varint(body, off)?;
     let negative = frame::read_varint(body, off)?;
-    if positive < 0 || negative < 0 {
+    // DataComponentPatch.decode only throws when the *sum* is negative (that is
+    // the map capacity, `new Reference2ObjectArrayMap<>(Math.min(sum, 65536))`);
+    // an individual negative count is tolerated (its loop runs zero times).
+    if positive as i64 + (negative as i64) < 0 {
         return None;
     }
     for _ in 0..positive {
@@ -991,9 +1042,11 @@ fn skip_banner_patterns(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 fn skip_pot_decorations(body: &[u8], off: &mut usize) -> Option<()> {
-    // list(4)(registry ITEM) — PotDecorations max 4; each element is a registry
-    // id decoded through byIdOrThrow, so a negative id is refused.
-    skip_list_limited(body, off, skip_holder_registry, MAX_POT_DECORATIONS)
+    // list(4)(registry ITEM) — PotDecorations max 4. Each element is decoded
+    // through `registry(ITEM)`, and ITEM is a `DefaultedRegistry` (default
+    // "air"), so a negative id decodes to the default value rather than
+    // throwing — accepted.
+    skip_list_limited(body, off, skip_varint, MAX_POT_DECORATIONS)
 }
 
 fn skip_block_state(body: &[u8], off: &mut usize) -> Option<()> {
@@ -1001,10 +1054,11 @@ fn skip_block_state(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 /// `TypedEntityData` — `[type registry id][COMPOUND_TAG]`. The type id is a
-/// registry decode (`EntityType.STREAM_CODEC` etc.), so a negative id is
-/// refused like `byIdOrThrow`.
+/// `registry(ENTITY_TYPE)` decode, and ENTITY_TYPE is a `DefaultedRegistry`
+/// (default "pig"), so a negative id decodes to the default value rather than
+/// throwing — accepted.
 fn skip_typed_entity_data(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_holder_registry(body, off)?;
+    skip_varint(body, off)?;
     skip_compound_tag(body, off)
 }
 
@@ -1337,12 +1391,16 @@ struct PatchEntry {
 /// A positive entry whose component is NBT-shaped is semantically canonicalized
 /// (NBT compound field order); every other registered component's value is
 /// copied byte-exact. A duplicate id within the positives or the negatives, a
-/// negative count, an id outside the registered 26.2 range, or a value that does
+/// negative *total* count (`positive + negative < 0`, the map capacity Java
+/// throws on), an id outside the registered 26.2 range, or a value that does
 /// not fit its shape fails the whole patch (`None`).
 fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u8>> {
     let positive = frame::read_varint(body, off)?;
     let negative = frame::read_varint(body, off)?;
-    if positive < 0 || negative < 0 {
+    // DataComponentPatch.decode throws only when the *sum* (map capacity) is
+    // negative; an individual negative count is tolerated (its loop runs zero
+    // times).
+    if positive as i64 + (negative as i64) < 0 {
         return None;
     }
     let mut seen = std::collections::HashSet::new();
@@ -1400,15 +1458,23 @@ fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u
 fn canon_display_info(body: &[u8], off: &mut usize) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(body.len() / 2);
 
-    let title = read_component_tag(body, off)?;
+    // DisplayInfo reads title/description through
+    // ComponentSerialization.TRUSTED_STREAM_CODEC (NbtAccounter.unlimitedHeap),
+    // so no byte budget is charged.
+    let title = read_component_tag_unbounded(body, off)?;
     write_nbt(&mut out, &title);
-    let description = read_component_tag(body, off)?;
+    let description = read_component_tag_unbounded(body, off)?;
     write_nbt(&mut out, &description);
 
     // icon: ItemStackTemplate = [item VarInt][count VarInt][DataComponentPatch].
+    // item is Item.STREAM_CODEC = holderRegistry(ITEM): a negative id throws
+    // like byIdOrThrow, and ItemStackTemplate's constructor refuses the air item
+    // (id 0, the defaulted registry's default). count is a plain VarInt; the
+    // constructor only rejects count == 0 (a negative count is accepted for a
+    // non-air item).
     let item = frame::read_varint(body, off)?;
     let count = frame::read_varint(body, off)?;
-    if item < 0 || count < 0 {
+    if item <= 0 || count == 0 {
         return None;
     }
     frame::write_varint(&mut out, item);
@@ -2056,12 +2122,15 @@ mod tests {
             raw_compound(&[("color", 8, raw_str("green")), ("text", 8, raw_str("D"))]);
 
         // DisplayInfo with the title/description compounds in unsorted field
-        // order on the wire: [title][description][icon item=0 count=0 patch
+        // order on the wire: [title][description][icon item=926 count=1 patch
         // (pos=0,neg=0)][frame 0][flags 0][x y floats].
         let mut display = Vec::new();
         display.extend_from_slice(&title_unsorted);
         display.extend_from_slice(&desc_unsorted);
-        display.extend_from_slice(&[0, 0, 0, 0]); // item, count, patch(0, 0)
+        frame::write_varint(&mut display, 926); // icon item (non-air)
+        frame::write_varint(&mut display, 1); // icon count
+        frame::write_varint(&mut display, 0); // patch positive
+        frame::write_varint(&mut display, 0); // patch negative
         display.extend_from_slice(&[0]); // frame
         display.extend_from_slice(&0i32.to_be_bytes()); // flags
         display.extend_from_slice(&0.5f32.to_be_bytes());
@@ -2073,11 +2142,12 @@ mod tests {
         assert_eq!(off, display.len(), "whole display consumed");
 
         // Title and description must be re-emitted with fields sorted by name,
-        // with every non-compound field passed through verbatim.
+        // with every non-compound field passed through verbatim. The icon
+        // (item 926, count 1, patch 0/0) is copied byte-exact.
         let mut expected = Vec::new();
         expected.extend_from_slice(&title_sorted);
         expected.extend_from_slice(&desc_sorted);
-        expected.extend_from_slice(&[0, 0, 0, 0]);
+        expected.extend_from_slice(&[0x9E, 0x07, 0x01, 0x00, 0x00]); // item 926, count 1, patch(0,0)
         expected.extend_from_slice(&[0]);
         expected.extend_from_slice(&0i32.to_be_bytes());
         expected.extend_from_slice(&0.5f32.to_be_bytes());
@@ -2263,8 +2333,8 @@ mod tests {
         // description: a valid empty compound.
         out.push(10);
         out.push(0);
-        // icon: item 0, count 1, patch (pos=0, neg=0).
-        frame::write_varint(&mut out, 0);
+        // icon: item 926 (non-air), count 1, patch (pos=0, neg=0).
+        frame::write_varint(&mut out, 926);
         frame::write_varint(&mut out, 1);
         frame::write_varint(&mut out, 0);
         frame::write_varint(&mut out, 0);
@@ -2341,7 +2411,7 @@ mod tests {
         let mut display = Vec::new();
         write_nbt(&mut display, &title);
         write_nbt(&mut display, &desc);
-        frame::write_varint(&mut display, 0); // icon item
+        frame::write_varint(&mut display, 926); // icon item (non-air; ItemStackTemplate rejects id 0)
         frame::write_varint(&mut display, 1); // icon count
         frame::write_varint(&mut display, 0); // patch positive
         frame::write_varint(&mut display, 0); // patch negative
@@ -3138,11 +3208,18 @@ mod tests {
         );
         let input = body(false, &[adv], &[], &[], true);
         assert_eq!(canon_update_advancements(&input), None);
+    }
 
-        // A single decoration whose item registry id is negative: byIdOrThrow.
+    #[test]
+    fn pot_decorations_negative_item_id_decodes_to_air() {
+        // PotDecorations.STREAM_CODEC = list(4)(registry ITEM), and ITEM is a
+        // DefaultedRegistry (default "air"): a negative registry id decodes to
+        // the default value rather than throwing, so it is accepted and
+        // canonicalized (a single decoration, id -1).
         let mut value = Vec::new();
         frame::write_varint(&mut value, 1);
         frame::write_varint(&mut value, -1);
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
         let adv = advancement(
             "story:root",
             None,
@@ -3151,7 +3228,10 @@ mod tests {
             false,
         );
         let input = body(false, &[adv], &[], &[], true);
-        assert_eq!(canon_update_advancements(&input), None);
+        let canon = canon_update_advancements(&input).expect(
+            "a negative pot decoration item id decodes to air in Java, so must be accepted",
+        );
+        assert!(!canon.is_empty());
     }
 
     #[test]
@@ -3243,7 +3323,7 @@ mod tests {
         let mut display = Vec::new();
         write_nbt(&mut display, &title);
         write_nbt(&mut display, &desc);
-        frame::write_varint(&mut display, 0); // icon item
+        frame::write_varint(&mut display, 926); // icon item (non-air)
         frame::write_varint(&mut display, 1); // icon count
         frame::write_varint(&mut display, 0); // patch positive
         frame::write_varint(&mut display, 0); // patch negative
@@ -3317,5 +3397,231 @@ mod tests {
         );
         let input = body(false, &[adv], &[], &[], true);
         assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    // -- Java-fidelity divergences found in release review ---------------------
+
+    #[test]
+    fn nbt_over_byte_budget_is_rejected() {
+        // NbtAccounter.DEFAULT_NBT_QUOTA = 2 MiB; FriendlyByteBuf.readNbt
+        // accounts every tag against it. A ByteArray of 3 MB accounts
+        // 24 + 3_000_000 bytes > 2_097_152 and must fail the parse (None)
+        // without materializing the payload.
+        let mut tag = Vec::new();
+        tag.push(7); // byte array
+        tag.extend_from_slice(&3_000_000i32.to_be_bytes()); // length (no data)
+        let mut off = 0;
+        assert_eq!(
+            read_nbt(&tag, &mut off),
+            None,
+            "a payload over the 2 MiB NBT quota must fail the parse"
+        );
+    }
+
+    #[test]
+    fn entity_data_negative_type_id_decodes_to_default() {
+        // entity_data's type id is registry(ENTITY_TYPE), and ENTITY_TYPE is a
+        // DefaultedRegistry (default "pig"): a negative id decodes to the
+        // default value rather than throwing — accepted and canonicalized.
+        let value = entity_data(-1, &nbt_compound(vec![("extra", nbt_str("x"))]));
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[value], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert!(
+            canon_update_advancements(&input).is_some(),
+            "a negative entity type id decodes to the default in Java"
+        );
+    }
+
+    #[test]
+    fn block_entity_data_negative_type_id_is_rejected() {
+        // block_entity_data's type id is registry(BLOCK_ENTITY_TYPE), a plain
+        // (non-defaulted) registry: a negative id throws like byIdOrThrow.
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, -1); // type id
+        write_nbt(&mut value, &nbt_compound(vec![("extra", nbt_str("x"))]));
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[(60u32, value)], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(
+            canon_update_advancements(&input),
+            None,
+            "a negative block entity type id throws in Java"
+        );
+    }
+
+    #[test]
+    fn icon_air_item_and_zero_count_are_rejected() {
+        // ItemStackTemplate's constructor throws for the air item (id 0, the
+        // defaulted ITEM registry's default) and for count == 0; Java rejects
+        // both.
+        let title = nbt_bytes(&nbt_compound(vec![("text", nbt_str("T"))]));
+        let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+        for (label, item, count) in [("air item", 0i32, 1i32), ("zero count", 926i32, 0i32)] {
+            let display = display_raw(
+                &title,
+                &desc,
+                &icon(item, count, &patch(&[], &[])),
+                0,
+                0,
+                (0.5, -1.25),
+                None,
+            );
+            let mut off = 0;
+            assert_eq!(
+                canon_display_info(&display, &mut off),
+                None,
+                "Java rejects the {label} icon"
+            );
+        }
+    }
+
+    #[test]
+    fn icon_negative_count_is_accepted_for_non_air_item() {
+        // ItemStackTemplate.STREAM_CODEC decodes count as a plain VarInt and
+        // the constructor only rejects count == 0 (or an air item); a negative
+        // count for a non-air item is accepted by Java.
+        let title = nbt_bytes(&nbt_compound(vec![("text", nbt_str("T"))]));
+        let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+        let display = display_raw(
+            &title,
+            &desc,
+            &icon(926, -1, &patch(&[], &[])),
+            0,
+            0,
+            (0.5, -1.25),
+            None,
+        );
+        let mut off = 0;
+        assert!(
+            canon_display_info(&display, &mut off).is_some(),
+            "Java accepts a negative count for a non-air item"
+        );
+    }
+
+    #[test]
+    fn patch_negative_individual_counts_with_positive_sum_are_accepted() {
+        // DataComponentPatch.decode only throws when positive + negative (the
+        // map capacity, `Math.min(sum, 65536)`) is negative; an individual
+        // negative count is tolerated (its loop runs zero times).
+        let mut patch_val = Vec::new();
+        frame::write_varint(&mut patch_val, -1); // positive count (loop runs 0×)
+        frame::write_varint(&mut patch_val, 5); // negative count (sum 4 >= 0)
+        for i in 1..=5 {
+            frame::write_varint(&mut patch_val, i); // distinct negative-entry type ids
+        }
+        let title = nbt_bytes(&nbt_compound(vec![("text", nbt_str("T"))]));
+        let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+        let display = display_raw(
+            &title,
+            &desc,
+            &icon(926, 1, &patch_val),
+            0,
+            0,
+            (0.5, -1.25),
+            None,
+        );
+        let mut off = 0;
+        assert!(
+            canon_display_info(&display, &mut off).is_some(),
+            "Java accepts a negative individual count when the total is non-negative"
+        );
+    }
+
+    #[test]
+    fn patch_negative_total_count_is_rejected() {
+        // positive + negative < 0 -> the map capacity is negative -> Java
+        // throws.
+        let mut patch_val = Vec::new();
+        frame::write_varint(&mut patch_val, -5); // positive count
+        frame::write_varint(&mut patch_val, 0); // negative count (sum -5 < 0)
+        let title = nbt_bytes(&nbt_compound(vec![("text", nbt_str("T"))]));
+        let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+        let display = display_raw(
+            &title,
+            &desc,
+            &icon(926, 1, &patch_val),
+            0,
+            0,
+            (0.5, -1.25),
+            None,
+        );
+        let mut off = 0;
+        assert_eq!(
+            canon_display_info(&display, &mut off),
+            None,
+            "a negative total patch count throws in Java"
+        );
+    }
+
+    #[test]
+    fn trusted_display_title_over_byte_budget_is_accepted() {
+        // DisplayInfo reads title/description through
+        // ComponentSerialization.TRUSTED_STREAM_CODEC (NbtAccounter.unlimitedHeap),
+        // so an NBT tag over the 2 MiB defaultQuota is accepted, not rejected.
+        let mut title = Vec::new();
+        title.push(7); // ByteArray tag
+        title.extend_from_slice(&2_500_000i32.to_be_bytes()); // length
+        title.extend(vec![0u8; 2_500_000]); // payload
+        let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+        let display = display_raw(
+            &title,
+            &desc,
+            &icon(926, 1, &patch(&[], &[])),
+            0,
+            0,
+            (0.5, -1.25),
+            None,
+        );
+        let mut off = 0;
+        assert!(
+            canon_display_info(&display, &mut off).is_some(),
+            "the TRUSTED display title is read with no byte budget in Java"
+        );
+    }
+
+    #[test]
+    fn component_patch_nbt_over_byte_budget_is_rejected() {
+        // Component values through COMPOUND_TAG use NbtAccounter.defaultQuota
+        // (2 MiB); an over-budget custom_data compound must fail the parse.
+        // Compound with a single field "big" = ByteArray(2.5M): the ByteArray
+        // accounts 24 + 2_500_000 bytes > 2_097_152.
+        let mut big = Vec::new();
+        big.push(7); // ByteArray type
+        big.extend_from_slice(&2_500_000i32.to_be_bytes());
+        big.extend(vec![0u8; 2_500_000]);
+        let mut tag = Vec::new();
+        tag.push(10); // compound
+        tag.push(7); // field type: byte array
+        tag.extend_from_slice(&3u16.to_be_bytes()); // field name len
+        tag.extend_from_slice(b"big");
+        tag.extend_from_slice(&big);
+        tag.push(0); // end tag
+        let title = nbt_compound(vec![("text", nbt_str("T"))]);
+        let adv = advancement(
+            "story:root",
+            None,
+            Some(&display_for(&title, &title, &[(0u32, tag)], &[], &[0])),
+            &[vec!["c".into()]],
+            false,
+        );
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(
+            canon_update_advancements(&input),
+            None,
+            "an over-budget COMPOUND_TAG component value must fail"
+        );
     }
 }

@@ -9,9 +9,15 @@
 //! the two canonicalizers cannot drift; `rivet-capture` depends on `rivet-decode`.
 //!
 //! Hostile input cannot abort the process: compound/list nesting is bounded by
-//! Java's `NbtAccounter.MAX_STACK_DEPTH` (512), and collection pre-allocation is
+//! Java's `NbtAccounter.MAX_STACK_DEPTH` (512), collection pre-allocation is
 //! capped at `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE` (65536) so a huge wire
-//! count fails the parse instead of forcing a huge allocation.
+//! count fails the parse instead of forcing a huge allocation, and reads on the
+//! `defaultQuota` codecs (`tagCodec`, `COMPOUND_TAG`, `fromCodecWithRegistries`)
+//! are charged against `NbtAccounter.DEFAULT_NBT_QUOTA` (2 MiB) exactly the way
+//! `FriendlyByteBuf.readNbt` accounts each tag, so a multi-megabyte payload
+//! fails the parse instead of being materialized. The `unlimitedHeap` codecs
+//! (e.g. `ComponentSerialization.TRUSTED_STREAM_CODEC`) use
+//! [`read_nbt_unbounded`]/[`read_payload_unbounded`] and charge no budget.
 //!
 //! Wire format (`NbtIo.writeAnyTag`): `[byte type][payload]` with the root
 //! un-named and compound fields named `[byte type][u16 len][name][payload]`.
@@ -33,6 +39,34 @@ const MAX_NBT_DEPTH: u32 = 512;
 /// slots so a hostile count cannot force a huge allocation before any element
 /// has been read.
 const MAX_INITIAL_COLLECTION_SIZE: usize = 65536;
+
+/// `NbtAccounter.DEFAULT_NBT_QUOTA` — the byte budget `FriendlyByteBuf.readNbt`
+/// enforces on network NBT. The canonicalizers parse the wire forms of
+/// `tagCodec` and `COMPOUND_TAG`, both of which pass `NbtAccounter::defaultQuota`
+/// (2 MiB); `NbtIo` accounts a fixed `SELF_SIZE` plus per-element bytes against
+/// this quota as each tag is read, throwing `NbtAccounterException` on
+/// overshoot. Charging the same budget keeps a hostile multi-megabyte payload
+/// from being materialized.
+const NBT_BYTE_BUDGET: i64 = 2097152;
+
+/// `NbtAccounter.accountBytes(size)` — consume `size` bytes from `budget`,
+/// failing the parse when the size is negative or the quota is exhausted. Java
+/// throws `IllegalArgumentException` for a negative size and
+/// `NbtAccounterException` when `usage + size > quota`; both surface as `None`
+/// here. `None` budget means unbounded (the `unlimitedHeap` paths), which never
+/// fails.
+fn account_bytes(budget: &mut Option<i64>, size: i64) -> Option<()> {
+    if size < 0 {
+        return None;
+    }
+    if let Some(b) = budget.as_mut() {
+        *b -= size;
+        if *b < 0 {
+            return None;
+        }
+    }
+    Some(())
+}
 
 /// A parsed network NBT value. Compound fields are kept in parse order;
 /// re-serialization sorts them by name so the wire form is canonical.
@@ -75,56 +109,91 @@ pub fn encode_modified_utf8(s: &str) -> Vec<u8> {
 
 /// Read a bare NBT payload of `type_byte` (no name prefix). Entry point for a
 /// single top-level tag; nesting depth starts at 0 (Java gives each tag codec
-/// invocation a fresh `NbtAccounter`).
+/// invocation a fresh `NbtAccounter`), and the whole read is charged against
+/// `NBT_BYTE_BUDGET`.
 pub fn read_payload(body: &[u8], off: &mut usize, type_byte: u8) -> Option<Nbt> {
-    read_payload_depth(body, off, type_byte, 0)
+    read_payload_with_budget(body, off, type_byte, Some(NBT_BYTE_BUDGET))
+}
+
+/// Like [`read_payload`] but unbounded (`NbtAccounter.unlimitedHeap`), for the
+/// `TRUSTED` codecs Java reads with no byte budget (e.g. an advancement's
+/// display title/description through `ComponentSerialization.TRUSTED_STREAM_CODEC`).
+pub fn read_payload_unbounded(body: &[u8], off: &mut usize, type_byte: u8) -> Option<Nbt> {
+    read_payload_with_budget(body, off, type_byte, None)
+}
+
+fn read_payload_with_budget(
+    body: &[u8],
+    off: &mut usize,
+    type_byte: u8,
+    budget: Option<i64>,
+) -> Option<Nbt> {
+    let mut budget = budget;
+    read_payload_depth(body, off, type_byte, 0, &mut budget)
 }
 
 /// Depth-aware core of [`read_payload`]. Every recursive descent (a list item
 /// or a compound field value) is one nesting level, bounded by
 /// `MAX_NBT_DEPTH` so hostile input cannot overflow the stack; collection
 /// pre-allocation is capped at `MAX_INITIAL_COLLECTION_SIZE` so a hostile
-/// count cannot force a huge allocation before any element is read.
-fn read_payload_depth(body: &[u8], off: &mut usize, type_byte: u8, depth: u32) -> Option<Nbt> {
+/// count cannot force a huge allocation before any element is read; and every
+/// tag is charged against `budget` exactly as `NbtIo` accounts it against
+/// `NbtAccounter`, so a payload over the quota fails the parse. `None` budget
+/// is unbounded.
+fn read_payload_depth(
+    body: &[u8],
+    off: &mut usize,
+    type_byte: u8,
+    depth: u32,
+    budget: &mut Option<i64>,
+) -> Option<Nbt> {
     if depth >= MAX_NBT_DEPTH {
         return None;
     }
     match type_byte {
         0 => Some(Nbt::End),
         1 => {
+            account_bytes(budget, 9)?; // ByteTag.SELF_SIZE_IN_BYTES
             let v = *body.get(*off)? as i8;
             *off += 1;
             Some(Nbt::Byte(v))
         }
         2 => {
+            account_bytes(budget, 10)?; // ShortTag.SELF_SIZE_IN_BYTES
             let b = frame::read_bytes(body, off, 2)?;
             Some(Nbt::Short(i16::from_be_bytes([b[0], b[1]])))
         }
         3 => {
+            account_bytes(budget, 12)?; // IntTag.SELF_SIZE_IN_BYTES
             let b = frame::read_bytes(body, off, 4)?;
             Some(Nbt::Int(i32::from_be_bytes([b[0], b[1], b[2], b[3]])))
         }
         4 => {
+            account_bytes(budget, 16)?; // LongTag.SELF_SIZE_IN_BYTES
             let b = frame::read_bytes(body, off, 8)?;
             Some(Nbt::Long(i64::from_be_bytes([
                 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
             ])))
         }
         5 => {
+            account_bytes(budget, 12)?; // FloatTag.SELF_SIZE_IN_BYTES
             let b = frame::read_bytes(body, off, 4)?;
             Some(Nbt::Float(f32::from_be_bytes([b[0], b[1], b[2], b[3]])))
         }
         6 => {
+            account_bytes(budget, 16)?; // DoubleTag.SELF_SIZE_IN_BYTES
             let b = frame::read_bytes(body, off, 8)?;
             Some(Nbt::Double(f64::from_be_bytes([
                 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
             ])))
         }
         7 => {
+            account_bytes(budget, 24)?; // ByteArrayTag.SELF_SIZE_IN_BYTES
             let n = frame::read_i32(body, off)?;
             if n < 0 {
                 return None; // Java: DecoderException on a negative array size
             }
+            account_bytes(budget, n as i64)?; // 1 byte per element
             let bytes = frame::read_bytes(body, off, n as usize)?.to_vec();
             Some(Nbt::ByteArray(bytes))
         }
@@ -132,9 +201,15 @@ fn read_payload_depth(body: &[u8], off: &mut usize, type_byte: u8, depth: u32) -
             let n = frame::read_u16(body, off)? as usize;
             let bytes = frame::read_bytes(body, off, n)?;
             let s = decode_modified_utf8(bytes)?;
+            // StringTag: SELF_SIZE_IN_BYTES (36) + 2 bytes per decoded char
+            // (`String.length()` — UTF-16 code units), matching
+            // `readAccounted`'s `accountBytes(36)` + `accountBytes(2, len)`.
+            account_bytes(budget, 36)?;
+            account_bytes(budget, 2 * s.encode_utf16().count() as i64)?;
             Some(Nbt::String(s))
         }
         9 => {
+            account_bytes(budget, 36)?; // ListTag.SELF_SIZE_IN_BYTES
             let elem = *body.get(*off)?;
             *off += 1;
             let n = frame::read_i32(body, off)?;
@@ -146,9 +221,10 @@ fn read_payload_depth(body: &[u8], off: &mut usize, type_byte: u8, depth: u32) -
             if elem == 0 && n > 0 {
                 return None;
             }
+            account_bytes(budget, 4 * n as i64)?; // 4 bytes per element header
             let mut items = Vec::with_capacity((n as usize).min(MAX_INITIAL_COLLECTION_SIZE));
             for _ in 0..n {
-                items.push(read_payload_depth(body, off, elem, depth + 1)?);
+                items.push(read_payload_depth(body, off, elem, depth + 1, budget)?);
             }
             Some(Nbt::List { elem, items })
         }
@@ -160,6 +236,7 @@ fn read_payload_depth(body: &[u8], off: &mut usize, type_byte: u8, depth: u32) -
             // Java's `NbtIo` throws a `DecoderException` for a negative array
             // size; silently treating such a compound as terminated would
             // accept wire bytes Paper rejects.
+            account_bytes(budget, 48)?; // CompoundTag.SELF_SIZE_IN_BYTES
             let mut fields = Vec::new();
             loop {
                 let type_byte = *body.get(*off)?;
@@ -171,16 +248,26 @@ fn read_payload_depth(body: &[u8], off: &mut usize, type_byte: u8, depth: u32) -
                 let name_bytes = frame::read_bytes(body, off, name_len)?;
                 // Field names are read with DataInput.readUTF (modified UTF-8).
                 let name = decode_modified_utf8(name_bytes)?;
-                let value = read_payload_depth(body, off, type_byte, depth + 1)?;
+                // readString: SELF_SIZE (28) + 2 bytes per decoded char; plus
+                // 36 for the map entry when the key is new (Java accounts it
+                // only when `values.put` returns null).
+                account_bytes(budget, 28)?;
+                account_bytes(budget, 2 * name.encode_utf16().count() as i64)?;
+                if !fields.iter().any(|(n, _)| n == &name) {
+                    account_bytes(budget, 36)?;
+                }
+                let value = read_payload_depth(body, off, type_byte, depth + 1, budget)?;
                 fields.push((name, value));
             }
             Some(Nbt::Compound(fields))
         }
         11 => {
+            account_bytes(budget, 24)?; // IntArrayTag.SELF_SIZE_IN_BYTES
             let n = frame::read_i32(body, off)?;
             if n < 0 {
                 return None; // Java: DecoderException on a negative array size
             }
+            account_bytes(budget, 4 * n as i64)?; // 4 bytes per element
             let mut items = Vec::with_capacity((n as usize).min(MAX_INITIAL_COLLECTION_SIZE));
             for _ in 0..n {
                 let b = frame::read_bytes(body, off, 4)?;
@@ -189,10 +276,12 @@ fn read_payload_depth(body: &[u8], off: &mut usize, type_byte: u8, depth: u32) -
             Some(Nbt::IntArray(items))
         }
         12 => {
+            account_bytes(budget, 24)?; // LongArrayTag.SELF_SIZE_IN_BYTES
             let n = frame::read_i32(body, off)?;
             if n < 0 {
                 return None; // Java: DecoderException on a negative array size
             }
+            account_bytes(budget, 8 * n as i64)?; // 8 bytes per element
             let mut items = Vec::with_capacity((n as usize).min(MAX_INITIAL_COLLECTION_SIZE));
             for _ in 0..n {
                 let b = frame::read_bytes(body, off, 8)?;
@@ -206,11 +295,21 @@ fn read_payload_depth(body: &[u8], off: &mut usize, type_byte: u8, depth: u32) -
     }
 }
 
-/// Read a root NBT value (`[byte type][payload]`, root un-named).
+/// Read a root NBT value (`[byte type][payload]`, root un-named) charged
+/// against `NBT_BYTE_BUDGET` (the `defaultQuota` codecs: `tagCodec`,
+/// `COMPOUND_TAG`, `fromCodecWithRegistries`).
 pub fn read_nbt(body: &[u8], off: &mut usize) -> Option<Nbt> {
     let type_byte = *body.get(*off)?;
     *off += 1;
     read_payload(body, off, type_byte)
+}
+
+/// Read a root NBT value with no byte budget (`NbtAccounter.unlimitedHeap`),
+/// for the `TRUSTED` codecs (e.g. `ComponentSerialization.TRUSTED_STREAM_CODEC`).
+pub fn read_nbt_unbounded(body: &[u8], off: &mut usize) -> Option<Nbt> {
+    let type_byte = *body.get(*off)?;
+    *off += 1;
+    read_payload_unbounded(body, off, type_byte)
 }
 
 pub fn nbt_type_id(v: &Nbt) -> u8 {
