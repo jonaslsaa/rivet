@@ -213,7 +213,7 @@ impl MultifaceGrowthConfiguration {
 /// `RegistryCodecs.homogeneousList(Registries.BLOCK)` — the `"can_be_placed_on"`
 /// field codec.
 fn can_be_placed_on_field_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
--> Arc<dyn rivet_serialization::map_codec::MapCodec<HolderSet<BlockType>, Ops>> {
+-> Arc<dyn map_codec::MapCodec<HolderSet<BlockType>, Ops>> {
     #[allow(clippy::arc_with_non_send_sync)]
     let element: Arc<dyn Codec<rivet_registry::holder::Holder<BlockType>, Ops>> = Arc::new(
         rivet_registry::registry_file_codec::RegistryFixedCodec::create(
