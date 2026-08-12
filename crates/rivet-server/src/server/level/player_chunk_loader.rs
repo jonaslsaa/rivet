@@ -26,11 +26,14 @@
 //!
 //! The chunk *pipeline* (tickets, distance maps, `SingleUserAreaMap` load/tick
 //! tracking, the rate limiters, the per-stage queues) is deferred with the
-//! owning unit's remaining scope (#185). The M1 world holds one loaded spawn
-//! chunk and every other view position has byte-identical deterministic
-//! superflat content (the #194 fixture proves all 117 bodies differ only in the
-//! 8-byte coordinate header), so the send path resolves each view chunk's
-//! content directly.
+//! owning unit's remaining scope (#185). On the legacy superflat world the send
+//! path resolves each view chunk's content directly (one loaded spawn chunk;
+//! every other view position has byte-identical deterministic superflat content
+//! — the #194 fixture proves all 117 bodies differ only in the 8-byte
+//! coordinate header). On a region-backed world (#185) a view chunk outside the
+//! boot-time square is loaded on demand from the read-only Anvil region source
+//! (`ServerLevel::load_chunk_from_region`) and installed into the `ChunkMap`
+//! before encoding — see [`encode_chunk_with_light`].
 //!
 //! Ownership per OWNERSHIP §Network: this runs on the tick thread and produces
 //! play-state packets for a connection's bounded outbound channel. The packets
@@ -257,7 +260,7 @@ impl PlayerChunkLoader {
     /// resolves to the world's own send distance (also 4 on the M1 world).
     pub fn add_and_send_chunks(
         &mut self,
-        world: &ServerLevel,
+        world: &mut ServerLevel,
         requested_view_distance: Option<i32>,
     ) -> Result<Vec<PlayPacket>, String> {
         // `add()`: derive the per-player distances from the world's Moonrise
@@ -376,9 +379,11 @@ impl PlayerChunkLoader {
     ///
     /// **No silent substitution.** Each entered position resolves through
     /// `encode_chunk_with_light`, which honors `MissingChunkPolicy`:
-    /// `RequireLoaded` fails typed `UNVERIFIED` on a missing chunk (no
-    /// generation fallback); `RepeatSpawnFixture` repeats spawn content. The
-    /// entered set is emitted as a bare level-chunk packet per cell — no
+    /// `RequireLoaded` loads the position on demand from the world's read-only
+    /// region source when it is region-backed (issue #185) and otherwise fails
+    /// typed `UNVERIFIED` on a genuinely missing/corrupt chunk (no generation
+    /// fallback); `RepeatSpawnFixture` repeats spawn content. The entered set
+    /// is emitted as a bare level-chunk packet per cell — no
     /// `ChunkBatchStart`/`Finished`, exactly like the join burst.
     ///
     /// RivetTodo(#185): the distance-map `broadcastMap`/`loadTicketCleanup`/
@@ -386,7 +391,7 @@ impl PlayerChunkLoader {
     /// re-center eventually feeds.
     pub fn update(
         &mut self,
-        world: &ServerLevel,
+        world: &mut ServerLevel,
         player_chunk: ChunkPos,
         requested_view_distance: Option<i32>,
     ) -> Result<Vec<PlayPacket>, String> {
@@ -525,10 +530,21 @@ impl PlayerChunkLoader {
 }
 
 /// `PlayerChunkSender.sendChunk` — the bare `ClientboundLevelChunkWithLightPacket`
-/// body for one view chunk. The M1 world loads exactly the spawn chunk (#156);
-/// the flat-generator content is position-independent (the #194 fixture proves
-/// all 117 bodies differ only in the 8-byte coordinate header), so any other
-/// view position resolves the spawn chunk's content.
+/// body for one view chunk.
+///
+/// **Resolution order.** A chunk already in the `ChunkMap` (the boot-time view
+/// square, or a position an earlier recenter loaded) encodes directly. A
+/// missing chunk resolves on demand when the world is region-backed (issue
+/// #185): `load_chunk_from_region` reads + preflights + reconstructs + bridges
+/// the existing current-version chunk from the read-only Anvil region and
+/// installs it into the `ChunkMap` — the single authority, never a duplicate
+/// cache — then the installed chunk encodes. A missing or corrupt chunk fails
+/// typed with the source's `RegionBackedBootError` (wrapped in the `UNVERIFIED`
+/// string the send path surfaces), never generation and never a superflat
+/// fallback. The legacy superflat world (`RepeatSpawnFixture`, no region
+/// source) keeps its deterministic content: any view position resolves the
+/// spawn chunk's position-independent superflat build (the #194 fixture proves
+/// all 117 bodies differ only in the 8-byte coordinate header).
 ///
 /// The light is the deterministic superflat light (`#184`): Java queries the
 /// `LevelLightEngine`; the engine is not ported, so every chunk carries the
@@ -539,10 +555,32 @@ impl PlayerChunkLoader {
 /// current pending authority (#537) through the merged #520 pure materializer
 /// (see `LevelChunk::chunk_packet_data`), so the packet reflects mutations made
 /// since construction rather than a construction-time snapshot.
-///
-/// RivetTodo(#185): the chunk pipeline loads every view chunk; until then the
-/// content is the deterministic superflat build for every position.
-fn encode_chunk_with_light(pos: ChunkPos, world: &ServerLevel) -> Result<Vec<u8>, String> {
+fn encode_chunk_with_light(pos: ChunkPos, world: &mut ServerLevel) -> Result<Vec<u8>, String> {
+    if world.chunk_map().get_chunk(pos).is_none() {
+        match world.missing_chunk_policy() {
+            MissingChunkPolicy::RequireLoaded => {
+                // The world carries its read-only region source (issue #185):
+                // resolve the beyond-view position on demand. Existing-only
+                // read + reconstruction, synchronous on the tick thread — no
+                // generation, no superflat fallback, no write. Missing/corrupt
+                // stay typed UNVERIFIED.
+                if world.is_region_backed() {
+                    world
+                        .load_chunk_from_region(pos)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    return Err(format!(
+                        "UNVERIFIED region-backed chunk {pos} is not loaded; generation and superflat fallback are disabled"
+                    ));
+                }
+            }
+            MissingChunkPolicy::RepeatSpawnFixture => {
+                // Legacy superflat: no on-demand load, no region source; the
+                // spawn chunk's position-independent content stands in for any
+                // view position. The chunk is already guaranteed loaded.
+            }
+        }
+    }
     let chunk = match world.chunk_map().get_chunk(pos) {
         Some(chunk) => chunk,
         None => match world.missing_chunk_policy() {
@@ -648,11 +686,11 @@ mod tests {
 
     #[test]
     fn region_backed_policy_rejects_missing_chunk_without_spawn_fallback() {
-        let world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
+        let mut world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
             missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
             ..Default::default()
         });
-        let error = encode_chunk_with_light(ChunkPos::new(1, 0), &world).unwrap_err();
+        let error = encode_chunk_with_light(ChunkPos::new(1, 0), &mut world).unwrap_err();
         assert!(error.contains("UNVERIFIED region-backed chunk"));
         assert!(error.contains("fallback are disabled"));
     }
@@ -737,9 +775,9 @@ mod tests {
 
     #[test]
     fn m1_send_set_is_117_chunks_in_deterministic_raster_order() {
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        let packets = loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader.add_and_send_chunks(&mut world, None).unwrap();
         assert_eq!(packets.len(), 3 + 117);
         assert_eq!(loader.last_send_distance(), 4);
         assert_eq!(loader.last_tick_distance(), 4);
@@ -772,9 +810,9 @@ mod tests {
 
     #[test]
     fn cache_packets_precede_chunks_in_moonrise_order() {
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        let packets = loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader.add_and_send_chunks(&mut world, None).unwrap();
         // radius, then simulation distance, then center — the Moonrise `add`
         // source order, before any chunk.
         assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheRadius.id());
@@ -790,9 +828,9 @@ mod tests {
 
     #[test]
     fn every_chunk_body_is_byte_identical_to_the_fixture_apart_from_coords() {
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        let packets = loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader.add_and_send_chunks(&mut world, None).unwrap();
         let golden = hex(GOLDEN_FULL);
         // The first send chunk is (-5,-4) — the fixture's coordinates.
         assert_eq!(
@@ -814,9 +852,9 @@ mod tests {
 
     #[test]
     fn frames_round_trip_through_the_wire_framing() {
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        let packets = loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader.add_and_send_chunks(&mut world, None).unwrap();
         // Frame every packet at the fixture's compression threshold 256.
         let frames: Vec<Bytes> = packets
             .iter()
@@ -842,9 +880,9 @@ mod tests {
 
     #[test]
     fn uncompressed_frames_are_the_plain_varint21_wire_form() {
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        let packets = loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader.add_and_send_chunks(&mut world, None).unwrap();
         let frame = encode_play_frame(&packets[0], -1).unwrap();
         // payload = varint(95) ++ [0x04]; length 2 -> varint21 header 0x02.
         assert_eq!(frame.to_vec(), vec![0x02, 0x5F, 0x04]);
@@ -859,10 +897,10 @@ mod tests {
         // `Err` only after the distances are committed — the Java ordering, not a
         // transactional all-or-nothing commit. The `Err` carries no send-set: the
         // cache packets built so far are dropped, never returned as a partial set.
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
         loader.set_fail_chunk_encoding(true);
-        let err = loader.add_and_send_chunks(&world, None).unwrap_err();
+        let err = loader.add_and_send_chunks(&mut world, None).unwrap_err();
         assert!(
             err.contains("chunk"),
             "error names the chunk encode step: {err}"
@@ -873,7 +911,7 @@ mod tests {
 
         // Clearing the seam restores the full 117-chunk send-set.
         loader.set_fail_chunk_encoding(false);
-        let packets = loader.add_and_send_chunks(&world, None).unwrap();
+        let packets = loader.add_and_send_chunks(&mut world, None).unwrap();
         assert_eq!(packets.len(), 3 + 117);
         assert_eq!(loader.last_send_distance(), 4);
         assert_eq!(loader.last_tick_distance(), 4);
@@ -891,10 +929,12 @@ mod tests {
     /// spawn send-set at (0,0), then a one-chunk-east move. Returns the
     /// `update` packet list and the loader for further assertions.
     fn loader_after_east_move() -> (PlayerChunkLoader, Vec<PlayPacket>) {
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        loader.add_and_send_chunks(&world, None).unwrap();
-        let packets = loader.update(&world, ChunkPos::new(1, 0), None).unwrap();
+        loader.add_and_send_chunks(&mut world, None).unwrap();
+        let packets = loader
+            .update(&mut world, ChunkPos::new(1, 0), None)
+            .unwrap();
         (loader, packets)
     }
 
@@ -946,10 +986,11 @@ mod tests {
     fn update_inside_the_same_chunk_emits_nothing() {
         // The nothing-to-do guard: same chunk, same distances → Java "nothing
         // we care about changed, so we're not re-calculating."
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        loader.add_and_send_chunks(&world, None).unwrap();
-        let packets = loader.update(&world, world.view().center(), None).unwrap();
+        loader.add_and_send_chunks(&mut world, None).unwrap();
+        let center = world.view().center();
+        let packets = loader.update(&mut world, center, None).unwrap();
         assert!(packets.is_empty());
         // State is untouched by the no-op.
         assert_eq!(loader.last_send_distance(), 4);
@@ -967,28 +1008,25 @@ mod tests {
         // it). The tick distance (`min(sim, load - 1)`) is world-pinned, so no
         // simulation packet follows; the shrink sends no new chunks, and the
         // center is unchanged, so the radius packet is the whole output.
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        loader.add_and_send_chunks(&world, None).unwrap();
-        let packets = loader
-            .update(&world, world.view().center(), Some(2))
-            .unwrap();
+        loader.add_and_send_chunks(&mut world, None).unwrap();
+        let center = world.view().center();
+        let packets = loader.update(&mut world, center, Some(2)).unwrap();
         assert_eq!(packets.len(), 1, "radius only: no sim/center/chunks");
         assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheRadius.id());
         assert_eq!(packets[0].body, vec![0x03]); // send 3
         assert_eq!(loader.last_send_distance(), 3);
         // The next update with the same request is a no-op (radius already 3).
-        let again = loader
-            .update(&world, world.view().center(), Some(2))
-            .unwrap();
+        let center = world.view().center();
+        let again = loader.update(&mut world, center, Some(2)).unwrap();
         assert!(again.is_empty());
         // Raising the request back to the world default re-emits radius 4 and
         // the newly-entered ring: the radius-4 view (117 cells) minus the
         // radius-3 view (the full 9×9 square = 81 cells) = 36 cells. Java's
         // `wantChunkSent` against the new send distance enqueues exactly these.
-        let packets = loader
-            .update(&world, world.view().center(), Some(8))
-            .unwrap();
+        let center = world.view().center();
+        let packets = loader.update(&mut world, center, Some(8)).unwrap();
         assert_eq!(packets.len(), 1 + 36, "radius + the grown ring");
         assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheRadius.id());
         assert_eq!(packets[0].body, vec![0x04]);
@@ -1003,12 +1041,16 @@ mod tests {
         // (0,0) -> (1,0) -> (2,0): the second move diffs against the first
         // move's view, entering the x=7 column and the (6,±5) corner-shift
         // cells — never re-sending the 117 original cells.
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        loader.add_and_send_chunks(&world, None).unwrap();
-        let first = loader.update(&world, ChunkPos::new(1, 0), None).unwrap();
+        loader.add_and_send_chunks(&mut world, None).unwrap();
+        let first = loader
+            .update(&mut world, ChunkPos::new(1, 0), None)
+            .unwrap();
         assert_eq!(first.len(), 1 + 11);
-        let second = loader.update(&world, ChunkPos::new(2, 0), None).unwrap();
+        let second = loader
+            .update(&mut world, ChunkPos::new(2, 0), None)
+            .unwrap();
         assert_eq!(second[0].id, PlayClientbound::SetChunkCacheCenter.id());
         assert_eq!(second[0].body, vec![0x02, 0x00]);
         let coords: Vec<ChunkPos> = second[1..]
@@ -1030,11 +1072,15 @@ mod tests {
     fn update_back_and_forth_is_symmetric() {
         // Moving east then west returns to the origin view and re-enters the
         // mirror-image west column — no dropped or duplicated cells.
-        let world = overworld();
+        let mut world = overworld();
         let mut loader = PlayerChunkLoader::new(world.view().center());
-        loader.add_and_send_chunks(&world, None).unwrap();
-        loader.update(&world, ChunkPos::new(1, 0), None).unwrap();
-        let back = loader.update(&world, ChunkPos::new(0, 0), None).unwrap();
+        loader.add_and_send_chunks(&mut world, None).unwrap();
+        loader
+            .update(&mut world, ChunkPos::new(1, 0), None)
+            .unwrap();
+        let back = loader
+            .update(&mut world, ChunkPos::new(0, 0), None)
+            .unwrap();
         assert_eq!(back[0].id, PlayClientbound::SetChunkCacheCenter.id());
         assert_eq!(back[0].body, vec![0x00, 0x00]);
         let coords: Vec<ChunkPos> = back[1..]
@@ -1054,13 +1100,13 @@ mod tests {
         // previous view makes the diff fall back to the full next view (Java's
         // `difference` else-branch), so the error fires on the first missing
         // cell of the 117-cell view.
-        let world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
+        let mut world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
             missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
             ..Default::default()
         });
         let mut loader = PlayerChunkLoader::new(world.view().center());
         let err = loader
-            .update(&world, ChunkPos::new(1, 0), None)
+            .update(&mut world, ChunkPos::new(1, 0), None)
             .unwrap_err();
         assert!(
             err.contains("UNVERIFIED region-backed chunk"),

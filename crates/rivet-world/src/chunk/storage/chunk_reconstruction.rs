@@ -51,9 +51,10 @@
 //! are filtered by the >8-chunk chessboard rule against the requested position
 //! at reconstruction (Paper's `unpackStructureReferences`), and are installed
 //! into the chunk's `StructureAccess` map — the runtime authority (#537) — so
-//! no duplicate carry field is retained. Non-empty `starts` still surfaces the
-//! `UnsupportedStructures` typed boundary (the `StructureStart` load path is
-//! not ported).
+//! no duplicate carry field is retained. Non-empty `starts` is carried verbatim
+//! on the reconstruction result (`ChunkReconstruction::structure_starts`, the
+//! `StructureStart` load path is not ported, #369) — never fabricated, never
+//! parsed, preserved for the future installer.
 
 use crate::block::Block;
 use crate::chunk::level_chunk::LevelChunk;
@@ -127,8 +128,8 @@ pub fn resolve_state_flags(state: &BlockState) -> StateFlags {
 /// The structure key `S` is the structure `Identifier` (the registry key the
 /// `structures.References` map is keyed by, #369). Rivet has no `Structure`
 /// value type yet, so the chunk holds the reference map keyed by identifier and
-/// `starts` remain an `UnsupportedStructures` boundary rather than fabricating
-/// starts.
+/// carries non-empty `starts` verbatim on the reconstruction result rather than
+/// fabricating `StructureStart` values.
 pub type ReconstructedLevelChunk = LevelChunk<BlockState, BiomeId, Identifier>;
 
 /// The products of the reconstruction, mirroring `SerializableChunkData.read`'s
@@ -161,6 +162,12 @@ pub struct ChunkReconstruction {
     /// The typed, per-chunk-filtered stored fluid ticks (`ChunkAccess.PackedTicks
     /// .fluids()`). Same carry semantics as [`Self::stored_block_ticks`].
     pub stored_fluid_ticks: Vec<SavedTick<FluidId>>,
+    /// The raw `structures.starts` compound, when the chunk carries non-empty
+    /// structure starts. Preserved verbatim as owned carry state — the
+    /// `StructureStart` load path is not ported (#369), so nothing is parsed or
+    /// fabricated — for the future installer, mirroring the stored-ticks carry
+    /// semantics. `None` when the chunk has no starts.
+    pub structure_starts: Option<CompoundTag>,
 }
 
 /// Why a chunk is not reconstructable into an owned runtime `LevelChunk`.
@@ -201,10 +208,13 @@ pub enum ChunkReconstructionError {
 /// not materialized (#341).
 ///
 /// Boundary: the FULL path rejects (via `SerializableChunkDataError`) blending
-/// data, non-empty structure `starts`, `UpgradeData` neighbor tick lists,
-/// persistent data, and non-empty entities with the same typed variants
-/// `validate_full_for_reconstruction` uses — so the caller can distinguish "chunk was
-/// never generated" (proto status) from "chunk carries a deferred surface".
+/// data, `UpgradeData` neighbor tick lists, persistent data, and non-empty
+/// entities with the same typed variants `validate_full_for_reconstruction`
+/// uses — so the caller can distinguish "chunk was never generated" (proto
+/// status) from "chunk carries a deferred surface". Non-empty structure `starts`
+/// is not a boundary: the raw compound is carried verbatim on the result
+/// (`ChunkReconstruction::structure_starts`), since the `StructureStart` load
+/// path is not ported (#369) and a real region-backed chunk may carry them.
 pub fn reconstruct_runtime_chunk(
     requested_pos: ChunkPos,
     mut data: SerializableChunkData,
@@ -331,6 +341,7 @@ pub fn reconstruct_runtime_chunk(
         raw_fluid_ticks: data.raw_fluid_ticks().clone(),
         stored_block_ticks: data.stored_block_ticks().to_vec(),
         stored_fluid_ticks: data.stored_fluid_ticks().to_vec(),
+        structure_starts: data.structure_starts_compound(),
     })
 }
 
@@ -920,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_structures_surface_a_typed_boundary() {
+    fn non_empty_structure_starts_are_carried_not_rejected() {
         let mut starts = CompoundTag::new();
         starts.put_int("minecraft:village", 1);
         let mut structures = CompoundTag::new();
@@ -934,19 +945,15 @@ mod tests {
         let data = SerializableChunkData::parse(height_accessor::create(-64, 384), &chunk)
             .unwrap()
             .unwrap();
-        let error = reconstruct_runtime_chunk(
+        let reconstructed = reconstruct_runtime_chunk(
             ChunkPos::ZERO,
             data,
             height_accessor::create(-64, 384),
             true,
         )
-        .err()
-        .expect("non-empty structures are an explicit #369 boundary");
-        assert!(matches!(
-            error,
-            ChunkReconstructionError::Serializable(
-                SerializableChunkDataError::UnsupportedStructures
-            )
-        ));
+        .expect("a starts-bearing chunk reconstructs with the starts carried");
+        let mut expected_starts = CompoundTag::new();
+        expected_starts.put_int("minecraft:village", 1);
+        assert_eq!(reconstructed.structure_starts, Some(expected_starts));
     }
 }
