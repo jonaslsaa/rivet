@@ -2514,8 +2514,10 @@ fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
 /// The generated-world acceptance contract's pinned seed (seed 42) — the seed
 /// the `generated-expected` ground-truth handoff is captured for, and the seed
 /// the `run-scenario generated-world` acceptance boots. Kept in sync with the
-/// runner's `GENERATED_SEED` (tools/rivet-client/.../server.rs); a divergence
-/// would silently compare the wrong world.
+/// runner's `GENERATED_SEED` (tools/rivet-client/.../server.rs). This default
+/// only applies to bare CLI use: the runner always passes its own seed
+/// explicitly to `generated-expected <seed>`, so the runner's constant is the
+/// source of truth for the harness.
 const GENERATED_SEED: u64 = 42;
 
 /// Parse the `generated-expected` subcommand's `--to <path>` and optional
