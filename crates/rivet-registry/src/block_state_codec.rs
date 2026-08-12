@@ -187,10 +187,29 @@ mod tests {
             .expect("encode should succeed")
             .clone();
         // Element-first encode order: the property codec writes first, then the
-        // "Name" type key (Java `KeyDispatchCodec.encode`).
+        // "Name" type key (Java `KeyDispatchCodec.encode`). `serde_json`'s Map
+        // equality is order-insensitive, so assert the actual key sequence.
         assert_eq!(
             encoded,
             json!({"Properties": {"axis": "x"}, "Name": "minecraft:oak_log"})
+        );
+        assert_eq!(
+            encoded
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["Properties", "Name"]
+        );
+        assert_eq!(
+            encoded["Properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["axis"]
         );
         let decoded = *codec()
             .parse(&JsonOps::INSTANCE, &encoded)
@@ -212,6 +231,16 @@ mod tests {
         assert_eq!(
             encoded,
             json!({"Properties": {"axis": "y"}, "Name": "minecraft:oak_log"})
+        );
+        // Element-first: `Properties` before `Name` (see `non_singleton_round_trips_properties`).
+        assert_eq!(
+            encoded
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["Properties", "Name"]
         );
     }
 
@@ -296,12 +325,31 @@ mod tests {
         // Properties encode in reverse name-sorted order (waterlogged,
         // persistent, distance) — the `PairMapCodec` fold encodes the
         // accumulated `second` first, so the alphabetically-last property
-        // (distance, folded last) lands first in the output.
+        // (distance, folded last) lands first in the output. Map equality is
+        // order-insensitive, so pin the actual key sequence.
         assert_eq!(
             encoded,
             json!({"Properties": {
                 "waterlogged": "false", "persistent": "true", "distance": "2"
             }, "Name": "minecraft:oak_leaves"})
+        );
+        assert_eq!(
+            encoded
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["Properties", "Name"]
+        );
+        assert_eq!(
+            encoded["Properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["waterlogged", "persistent", "distance"]
         );
         let decoded = *codec()
             .parse(&JsonOps::INSTANCE, &encoded)

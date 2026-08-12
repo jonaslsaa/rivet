@@ -223,7 +223,8 @@ mod tests {
             .expect("encode should succeed")
             .clone();
         // Element-first encode order: the value fields write first, then the
-        // "type" key (Java `KeyDispatchCodec.encode`).
+        // "type" key (Java `KeyDispatchCodec.encode`). Map equality is
+        // order-insensitive, so pin the actual key sequence.
         assert_eq!(
             encoded,
             json!({
@@ -232,6 +233,15 @@ mod tests {
                 "upper_size": 2,
                 "type": "minecraft:two_layers_feature_size",
             })
+        );
+        assert_eq!(
+            encoded
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["limit", "lower_size", "upper_size", "type"]
         );
         let decoded = round_trip(size);
         assert_eq!(
@@ -286,6 +296,21 @@ mod tests {
                 "type": "minecraft:two_layers_feature_size",
             })
         );
+        assert_eq!(
+            encoded
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                "limit",
+                "lower_size",
+                "upper_size",
+                "min_clipped_height",
+                "type"
+            ]
+        );
         let decoded = round_trip(size);
         let two = downcast_erased::<two_layers_feature_size::TwoLayersFeatureSize>(&decoded);
         assert_eq!(two.min_clipped_height, Some(8));
@@ -310,6 +335,22 @@ mod tests {
                 "upper_size": 3,
                 "type": "minecraft:three_layers_feature_size",
             })
+        );
+        assert_eq!(
+            encoded
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                "limit",
+                "upper_limit",
+                "lower_size",
+                "middle_size",
+                "upper_size",
+                "type"
+            ]
         );
         let decoded = round_trip(size);
         assert_eq!(
