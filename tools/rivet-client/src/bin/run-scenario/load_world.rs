@@ -5,8 +5,11 @@
 //! server's world-loading capability:
 //!
 //! - resolving and opening the known local Minecraft 26.2 world once (the
-//!   launcher-created save, overridable via `RIVET_WORLD_SRC`), rejecting
-//!   symlinks in every configured path component and retaining that identity;
+//!   `load-world` resolver reads the launcher-created save, overridable via
+//!   `RIVET_WORLD_SRC`; the `loaded-world` resolver defaults to the safe copied
+//!   world under `working/client-worlds/New World` and never inspects the
+//!   launcher save), rejecting symlinks in every configured path component and
+//!   retaining that identity;
 //! - copying it beneath a fresh private disposable directory ([`TempWorld`]),
 //!   refusing symlinks and retaining directory handles so pathname replacement
 //!   cannot redirect the server to the source, and exclusively creating the
@@ -48,6 +51,13 @@ use rustix::io::{FdFlags, fcntl_setfd};
 
 /// Default launcher-created Minecraft 26.2 world name (local-official-minecraft-client).
 const LAUNCHER_WORLD_NAME: &str = "New World";
+
+/// The `loaded-world` scenario's default source: the safe copied world under
+/// the repository's never-committed `working/client-worlds`. The loaded-world
+/// acceptance must never default to or inspect the launcher save under
+/// `~/Library/Application Support/minecraft/saves`; that save is a live
+/// official-client asset and is off-limits to the harness.
+const LOADED_WORLD_DEFAULT_RELATIVE: &str = "working/client-worlds/New World";
 
 /// Fixed upper bound for each file-content read while fingerprinting a world.
 const HASH_BUFFER_SIZE: usize = 64 * 1024;
@@ -98,7 +108,9 @@ fn resolve_from(override_path: Option<&Path>, home: &Path) -> Result<PathBuf, Er
 
 /// Resolve the known local Minecraft 26.2 world: `RIVET_WORLD_SRC` wins, then
 /// the default launcher save. A missing world is a prerequisite (UNVERIFIED),
-/// not a harness failure.
+/// not a harness failure. This is the `load-world` (#316) source contract; the
+/// `loaded-world` (#374) acceptance uses [`resolve_loaded_world_src`] instead
+/// so it never touches the launcher save.
 pub fn resolve_source_world() -> Result<PathBuf, Error> {
     let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
     resolve_from(
@@ -108,6 +120,57 @@ pub fn resolve_source_world() -> Result<PathBuf, Error> {
             .map(Path::new),
         &home,
     )
+}
+
+/// The repository-root-relative default source for the `loaded-world`
+/// acceptance: the safe copied world under `working/client-worlds`. The
+/// launcher save under a home directory is deliberately never a candidate.
+fn default_loaded_world_src(crate_root: &Path) -> PathBuf {
+    crate_root
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(crate_root)
+        .join(LOADED_WORLD_DEFAULT_RELATIVE)
+}
+
+/// Select the loaded-world source from an optional override and the crate root
+/// without opening it. [`SourceTree::open`] owns the single source
+/// validation/open and classifies a missing root as UNVERIFIED.
+fn resolve_loaded_from(override_path: Option<&Path>, crate_root: &Path) -> Result<PathBuf, Error> {
+    Ok(match override_path {
+        Some(p) => p.to_path_buf(),
+        None => default_loaded_world_src(crate_root),
+    })
+}
+
+/// The safe copied world the `loaded-world` acceptance reads and copies: the
+/// repository's `working/client-worlds/New World`, or an explicit
+/// `RIVET_WORLD_SRC` override. There is deliberately no launcher-save default:
+/// the launcher save is a live official-client asset the harness must never
+/// inspect or pass to a server. A missing default is a prerequisite
+/// (UNVERIFIED) that requires `RIVET_WORLD_SRC`, not a harness failure.
+pub fn resolve_loaded_world_src() -> Result<PathBuf, Error> {
+    let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = resolve_loaded_from(
+        std::env::var("RIVET_WORLD_SRC")
+            .ok()
+            .as_deref()
+            .map(Path::new),
+        &crate_root,
+    )?;
+    // The default path leads through the repository's `working` directory,
+    // which is a symlink to the shared never-committed scratch in git
+    // worktrees. Canonicalize it so [`SourceTree::open`] validates the real
+    // copied world instead of refusing the worktree symlink; a missing default
+    // stays a prerequisite (UNVERIFIED) that names `RIVET_WORLD_SRC`.
+    fs::canonicalize(&path).map_err(|error| {
+        Error::Unverified(format!(
+            "Minecraft 26.2 copied world not found at {} ({error}) — set RIVET_WORLD_SRC to \
+             point at the copied world under working/client-worlds (the launcher save is never \
+             inspected)",
+            path.display()
+        ))
+    })
 }
 
 /// Original whole-buffer SHA-256 path, retained as the streaming test oracle.
@@ -1127,6 +1190,83 @@ mod tests {
 
         cleanup(&world);
         cleanup(&home);
+    }
+
+    #[test]
+    fn loaded_world_source_prefers_override_and_defaults_to_the_copied_world() {
+        let world = fixture_world("loaded-resolve");
+        let crate_root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("rivet-loaded-crate-{}", std::process::id()));
+
+        // An explicit override pointing at a real world resolves unchanged.
+        assert_eq!(
+            resolve_loaded_from(Some(&world), &crate_root).unwrap(),
+            world,
+            "the override must win over the copied-world default"
+        );
+        // Selection does no preliminary pathname open; absence is classified
+        // by the owned source open (UNVERIFIED).
+        let missing = world.join("does-not-exist");
+        assert_eq!(
+            resolve_loaded_from(Some(&missing), &crate_root).unwrap(),
+            missing
+        );
+        assert!(matches!(
+            SourceTree::open(&missing),
+            Err(Error::Unverified(_))
+        ));
+
+        // No override selects the safe copied world under the repository's
+        // `working/client-worlds`, never the launcher save.
+        let default = default_loaded_world_src(&crate_root);
+        assert_eq!(resolve_loaded_from(None, &crate_root).unwrap(), default);
+        let default_str = default.to_string_lossy();
+        assert!(
+            default_str.ends_with("working/client-worlds/New World"),
+            "loaded-world must default to the copied world under working/client-worlds, got {default_str}"
+        );
+        assert!(
+            !default_str.contains("Library/Application Support/minecraft/saves"),
+            "loaded-world must never default to the launcher save, got {default_str}"
+        );
+        assert!(
+            !default_str.contains(LAUNCHER_WORLD_NAME)
+                || default_str.contains("working/client-worlds"),
+            "a 'New World' path component is only acceptable beneath working/client-worlds, got {default_str}"
+        );
+        // The default is not opened here; a missing copied world is a
+        // prerequisite classified UNVERIFIED by the owned open.
+        assert!(matches!(
+            SourceTree::open(&default),
+            Err(Error::Unverified(_))
+        ));
+
+        cleanup(&world);
+        cleanup(&crate_root);
+    }
+
+    #[test]
+    fn loaded_world_resolver_uses_the_crate_root_relative_default() {
+        // The default is derived from the crate root (repo root =
+        // crate_root/../..), so it is stable regardless of HOME or the
+        // launcher installation.
+        let crate_root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("rivet-loaded-crate2-{}", std::process::id()));
+        let default = default_loaded_world_src(&crate_root);
+        assert_eq!(
+            default,
+            crate_root
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("working/client-worlds/New World")
+        );
+        cleanup(&crate_root);
     }
 
     #[test]
