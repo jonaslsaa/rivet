@@ -291,7 +291,20 @@ pub fn multiface_growth_configuration_codec<Ops: DynamicOps + 'static + Registry
                 can_be_placed_on_codec_enc.encode(&c.can_be_placed_on, ops, prefix);
             },
         ),
-        Arc::new(|_ops: &Ops| -> Vec<Ops::Output> { Vec::new() }),
+        // Mirror the decode keys: Java's RecordCodecBuilder encoder (`Keyable`)
+        // exposes all seven field keys, which is what a compressed-map
+        // `KeyCompressor` is built from.
+        Arc::new(move |ops: &Ops| -> Vec<Ops::Output> {
+            vec![
+                ops.create_string("block".to_string()),
+                ops.create_string("search_range".to_string()),
+                ops.create_string("can_place_on_floor".to_string()),
+                ops.create_string("can_place_on_ceiling".to_string()),
+                ops.create_string("can_place_on_wall".to_string()),
+                ops.create_string("chance_of_spreading".to_string()),
+                ops.create_string("can_be_placed_on".to_string()),
+            ]
+        }),
     );
 
     // `Applicative.super.ap7`: `ap4(ap3(curry3, t1, t2, t3), t4, t5, t6, t7)`.
