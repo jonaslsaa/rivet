@@ -176,7 +176,7 @@ fn max_shape_len_bounds_every_shape() {
 /// the real table — including both boundaries of every run and the out-of-range
 /// fallback. This walks the ACTUAL generated function (not a re-implementation)
 /// against an independent linear-scan decode, so a `partition_point` off-by-one
-/// anywhere in the 16753-run table fails here.
+/// anywhere in the 16757-run table fails here.
 #[test]
 fn behavior_of_matches_rle_table_for_every_state() {
     use crate::generated::block_behaviors::BLOCK_BEHAVIOR_RUNS;

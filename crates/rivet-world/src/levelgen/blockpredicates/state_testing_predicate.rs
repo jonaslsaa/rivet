@@ -20,11 +20,13 @@
 //! there. The `test_state` behavior itself (the pure per-state predicate) is
 //! fully ported and tested; only the world-access step is deferred.
 //!
-//! The `SolidPredicate`/`MatchingBlocksPredicate`/`MatchingBlockTagPredicate`/
-//! `MatchingFluidsPredicate`/`ReplaceablePredicate`/`WouldSurvivePredicate`/
-//! `HasSturdyFacePredicate` state-testing subclasses (the `.states` unit) are
-//! out of this slice's scope; the base and its offset codec are the
-//! dependency-clean prerequisite.
+//! The `.states`-unit subclasses (`SolidPredicate`, `MatchingBlocksPredicate`,
+//! `MatchingBlockTagPredicate`, `MatchingFluidsPredicate`,
+//! `ReplaceablePredicate`, plus the `WouldSurvivePredicate`/
+//! `HasSturdyFacePredicate` leaves that share the offset field) are ported
+//! alongside this base; each implements `test_state` and the shared offset
+//! codec, and only the world-access `test` shell resolves through the `#399`
+//! seam.
 
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::Vec3i;
@@ -64,6 +66,38 @@ pub fn state_testing_test<C: StateTestingPredicate>(
     let pos = origin.offset_vec(predicate.offset());
     let state = level.get_block_state(&pos);
     predicate.test_state(&state)
+}
+
+/// `Vec3i.CODEC` — `Codec.INT_STREAM.comapFlatMap(Util.fixedSize(input, 3) ->
+/// Vec3i, pos -> IntStream)`, as the ops-generic `vec3i_codec::<Ops>()` factory.
+///
+/// Unlike `BlockPos.CODEC` (which is `.stable()`), `Vec3i.CODEC` is NOT stable
+/// — `UnobstructedPredicate.CODEC`'s `"offset"` field uses it directly.
+pub fn vec3i_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Vec3i, Ops>> {
+    codec::comap_flat_map::<Vec<i32>, Vec3i, Ops>(
+        codec::int_stream_codec::<Ops>(),
+        Arc::new(|input: &Vec<i32>| {
+            rivet_util::fixed_size_i32(input, 3).map(|ints| Vec3i::new(ints[0], ints[1], ints[2]))
+        }),
+        Arc::new(|v: &Vec3i| vec![v.get_x(), v.get_y(), v.get_z()]),
+    )
+}
+
+/// `Vec3i.CODEC.optionalFieldOf("offset", Vec3i.ZERO)` — the non-lenient
+/// optional offset field (`UnobstructedPredicate.CODEC` uses this form). DFU's
+/// `optionalFieldOf(name, default)` is built on the non-lenient
+/// `optionalField(name, codec, false)`, so a present-but-malformed field
+/// propagates its decode error (unlike `lenientOptionalFieldOf`, which falls
+/// back to the default). Absent decodes to ZERO, and the default ZERO is
+/// omitted on encode.
+pub fn vec3i_optional_field_codec<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<Vec3i, Ops>> {
+    let optional: Arc<dyn MapCodec<Option<Vec3i>, Ops>> =
+        codec::optional_field("offset".to_string(), vec3i_codec::<Ops>(), false);
+    map_codec::xmap(
+        optional,
+        Arc::new(|o: &Option<Vec3i>| o.unwrap_or(Vec3i::ZERO)),
+        Arc::new(|v: &Vec3i| if *v == Vec3i::ZERO { None } else { Some(*v) }),
+    )
 }
 
 /// `Vec3i.offsetCodec(int maxOffsetPerAxis)` — `Vec3i.CODEC.validate(...)` with
