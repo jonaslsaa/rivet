@@ -27,6 +27,11 @@
 
 use std::io::Read;
 
+// The base VarInt / byte-slice / big-endian primitives live in `rivet-decode::frame`
+// (the one shared copy for the decode/capture toolchain); re-export them here so
+// `rivet-capture` callers keep the same `frame::` path.
+pub use rivet_decode::frame::{read_bytes, read_i32, read_varint, write_varint};
+
 /// A packet parsed out of one direction of the connection.
 #[derive(Debug, Clone)]
 pub struct PacketFrame {
@@ -35,25 +40,6 @@ pub struct PacketFrame {
     /// The decoded packet body (everything after the packet id), still
     /// compressed/uncompressed as it was on the wire but never re-encoded.
     pub body: Vec<u8>,
-}
-
-/// Read a VarInt from `buf` starting at `*offset`, advancing the offset.
-/// Returns `None` when the buffer is exhausted before a complete VarInt.
-pub fn read_varint(buf: &[u8], offset: &mut usize) -> Option<i32> {
-    let mut value: i32 = 0;
-    let mut shift = 0;
-    loop {
-        let byte = *buf.get(*offset)?;
-        *offset += 1;
-        value |= i32::from(byte & 0x7F).wrapping_shl(shift);
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-        shift += 7;
-        if shift >= 35 {
-            return None;
-        }
-    }
 }
 
 /// Read a signed VarLong from `buf` starting at `*offset`, advancing the offset.
@@ -73,21 +59,6 @@ pub fn read_varlong(buf: &[u8], offset: &mut usize) -> Option<i64> {
         shift += 7;
         if shift >= 70 {
             return None;
-        }
-    }
-}
-
-/// Append the VarInt encoding of `value` to `out`.
-pub fn write_varint(out: &mut Vec<u8>, value: i32) {
-    let mut v = u32::from_le_bytes(value.to_le_bytes());
-    loop {
-        let byte = (v & 0x7F) as u8;
-        v >>= 7;
-        if v != 0 {
-            out.push(byte | 0x80);
-        } else {
-            out.push(byte);
-            return;
         }
     }
 }
@@ -173,26 +144,12 @@ pub fn frame_packet(id: i32, body: &[u8], compression: Compression) -> Vec<u8> {
     }
 }
 
-/// Read exactly `n` bytes from `buf` at `*offset`, advancing the offset.
-pub fn read_bytes<'a>(buf: &'a [u8], offset: &mut usize, n: usize) -> Option<&'a [u8]> {
-    let end = offset.checked_add(n)?;
-    let slice = buf.get(*offset..end)?;
-    *offset = end;
-    Some(slice)
-}
-
 /// Read a big-endian f64 (Java `writeDouble`).
 pub fn read_f64(buf: &[u8], offset: &mut usize) -> Option<f64> {
     let b = read_bytes(buf, offset, 8)?;
     Some(f64::from_be_bytes([
         b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
     ]))
-}
-
-/// Read a big-endian i32 (Java `writeInt`).
-pub fn read_i32(buf: &[u8], offset: &mut usize) -> Option<i32> {
-    let b = read_bytes(buf, offset, 4)?;
-    Some(i32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 /// Read a big-endian f32 (Java `writeFloat`).

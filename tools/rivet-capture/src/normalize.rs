@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use crate::frame;
 use crate::packet::{CapturedPacket, Direction, State};
 use crate::structured;
+use rivet_decode::nbt::MAX_INITIAL_COLLECTION_SIZE;
 
 /// A normalized packet: the raw (state, direction, id) plus the normalized body
 /// and a human-readable note describing any rewrite applied.
@@ -361,13 +362,15 @@ pub fn normalize_packet(packet: &CapturedPacket, spawn: Option<SpawnCtx>) -> Nor
             }
         }
         // update_advancements: the added/removed/progress lists iterate per-boot
-        // (HashMap/HashSet-backed); sort all three and zero the obtained
-        // instants (wall-clock when the fresh-join advancements were granted).
+        // (HashMap/HashSet-backed); sort all three, zero the obtained instants
+        // (wall-clock when the fresh-join advancements were granted), and
+        // structurally canonicalize each display payload (NBT compound field
+        // order + DataComponentPatch entry order) — see rivet-decode::advancement.
         (State::Play, Direction::Clientbound, 130) => {
-            match structured::canon_update_advancements(&packet.body) {
+            match rivet_decode::advancement::canon_update_advancements(&packet.body) {
                 Some(body) => (
                     body,
-                    "advancement added/removed/progress + criteria sorted; obtained instants -> 0 (per-boot) -> canonical".into(),
+                    "advancement added/removed/progress + criteria sorted; display NBT/DataComponentPatch canonicalized; obtained instants -> 0 (per-boot) -> canonical".into(),
                 ),
                 None => (packet.body.clone(), "update_advancements canonicalization FAILED — raw body kept".into()),
             }
@@ -460,7 +463,7 @@ fn canonical_set_time(body: &[u8]) -> Option<Vec<u8>> {
     let mut off = 0;
     frame::read_i64(body, &mut off)?; // gameTime (zeroed below)
     let count = frame::read_varint(body, &mut off)?;
-    let mut holders = Vec::with_capacity(count.max(0) as usize);
+    let mut holders = Vec::with_capacity((count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..count.max(0) {
         let holder = frame::read_varint(body, &mut off)?;
         frame::read_varlong(body, &mut off)?; // totalTicks (zeroed below)
@@ -574,6 +577,7 @@ mod tests {
     use super::*;
     use crate::frame::write_varint;
     use crate::frame::{read_f32, read_i64};
+    use std::path::PathBuf;
 
     fn pkt(state: State, direction: Direction, id: i32, body: Vec<u8>) -> CapturedPacket {
         CapturedPacket {
@@ -745,6 +749,221 @@ mod tests {
         let canon = canonicalize(&packets);
         assert_eq!(canon.len(), 1);
         assert_eq!(canon[0].id, 13);
+    }
+
+    // -- update_advancements display-canonicalization e2e (#221) --------------
+    // The builders below hand-craft raw wire bytes (VarInt counts, VarInt-
+    // prefixed identifiers, big-endian NBT strings, unsorted compound fields)
+    // so the tests exercise the REAL normalize_packet pipeline against display
+    // payloads that genuinely vary in per-boot order, independent of any writer
+    // that would sort on emit.
+
+    fn wstr(out: &mut Vec<u8>, s: &str) {
+        write_varint(out, s.len() as i32);
+        out.extend_from_slice(s.as_bytes());
+    }
+
+    /// Raw NBT string payload: `[u16 len][chars]` (no type byte).
+    fn raw_str(s: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(s.len() as u16).to_be_bytes());
+        out.extend_from_slice(s.as_bytes());
+        out
+    }
+
+    /// Raw NBT compound in the GIVEN field order (unsorted allowed) —
+    /// `[type 10][field]*[type 0]`.
+    fn raw_compound(fields: &[(&str, u8, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(10);
+        for (name, type_id, payload) in fields {
+            out.push(*type_id);
+            out.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(payload);
+        }
+        out.push(0);
+        out
+    }
+
+    /// A `DataComponentPatch` with the positive entries in the given order.
+    fn patch(entries: &[(u32, Vec<u8>)], neg: &[u32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_varint(&mut out, entries.len() as i32);
+        write_varint(&mut out, neg.len() as i32);
+        for (id, value) in entries {
+            write_varint(&mut out, *id as i32);
+            out.extend_from_slice(value);
+        }
+        for id in neg {
+            write_varint(&mut out, *id as i32);
+        }
+        out
+    }
+
+    /// A `DisplayInfo` value: title/desc as raw NBT, an icon whose patch entry
+    /// order follows `order`, frame 0, flags 0, fixed position floats.
+    fn display(
+        title: &[u8],
+        desc: &[u8],
+        components: &[(u32, Vec<u8>)],
+        neg: &[u32],
+        order: &[usize],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(title);
+        out.extend_from_slice(desc);
+        write_varint(&mut out, 926); // icon item
+        write_varint(&mut out, 1); // icon count
+        let mut entries = Vec::new();
+        for &i in order {
+            entries.push(components[i].clone());
+        }
+        out.extend_from_slice(&patch(&entries, neg));
+        write_varint(&mut out, 0); // frame
+        out.extend_from_slice(&0i32.to_be_bytes()); // flags
+        out.extend_from_slice(&0.5f32.to_be_bytes());
+        out.extend_from_slice(&(-1.25f32).to_be_bytes());
+        out
+    }
+
+    /// An advancement value: `[id][no parent][display?][requirements][telemetry]`.
+    fn advancement(id: &str, display: Option<&[u8]>) -> Vec<u8> {
+        let mut out = Vec::new();
+        wstr(&mut out, id);
+        out.push(0); // no parent
+        match display {
+            Some(d) => {
+                out.push(1);
+                out.extend_from_slice(d);
+            }
+            None => out.push(0),
+        }
+        write_varint(&mut out, 1); // one requirement group
+        write_varint(&mut out, 1); // one name
+        wstr(&mut out, "unlock_right_away");
+        out.push(0); // telemetry
+        out
+    }
+
+    /// An `update_advancements` body with no removed/progress entries.
+    fn adv_body(reset: bool, added: &[Vec<u8>], show: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(reset as u8);
+        write_varint(&mut out, added.len() as i32);
+        for a in added {
+            out.extend_from_slice(a);
+        }
+        write_varint(&mut out, 0); // removed
+        write_varint(&mut out, 0); // progress
+        out.push(show as u8);
+        out
+    }
+
+    #[test]
+    fn normalize_advancements_canonicalizes_display_in_the_real_pipeline() {
+        // #221 e2e through the REAL normalize path (normalize_packet), not the
+        // rivet-decode unit API. Two raw update_advancements bodies are
+        // semantically identical but their display wire bytes differ in
+        // per-boot order: the title NBT compound field order and the
+        // DataComponentPatch positive-entry order. Both must normalize to the
+        // SAME canonical bytes.
+        //
+        // This is non-vacuous for deletion/bypass: if someone removes the
+        // `rivet_decode::advancement` wiring from normalize_packet, each body is
+        // passed through raw, and because the two raws differ the equality
+        // assertion fails.
+        let title_unsorted =
+            raw_compound(&[("text", 8, raw_str("A")), ("color", 8, raw_str("red"))]);
+        let title_sorted = raw_compound(&[("color", 8, raw_str("red")), ("text", 8, raw_str("A"))]);
+        let desc = raw_compound(&[("text", 8, raw_str("D"))]);
+
+        let components = &[
+            (6u32, raw_compound(&[("text", 8, raw_str("x"))])), // custom_name
+            (0u32, raw_compound(&[("extra", 8, raw_str("y"))])), // custom_data
+        ];
+
+        // body_a: unsorted compound + unsorted patch entry order [6, 0].
+        let body_a = adv_body(
+            false,
+            &[advancement(
+                "story:root",
+                Some(&display(&title_unsorted, &desc, components, &[], &[0, 1])),
+            )],
+            true,
+        );
+        // body_b: sorted compound + sorted patch entry order [0, 6].
+        let body_b = adv_body(
+            false,
+            &[advancement(
+                "story:root",
+                Some(&display(&title_sorted, &desc, components, &[], &[1, 0])),
+            )],
+            true,
+        );
+        assert_ne!(body_a, body_b, "the two raw bodies must differ");
+
+        let na = normalize_packet(
+            &pkt(State::Play, Direction::Clientbound, 130, body_a.clone()),
+            None,
+        );
+        let nb = normalize_packet(&pkt(State::Play, Direction::Clientbound, 130, body_b), None);
+        assert_eq!(
+            na.body, nb.body,
+            "display-bearing bodies must canonicalize identically through normalize_packet"
+        );
+        assert!(
+            na.note.contains("display"),
+            "normalization note must document the display rewrite: {:?}",
+            na.note
+        );
+        // The canonical output must differ from the unsorted raw input — if the
+        // display path were bypassed (raw passed through), this fails.
+        assert_ne!(
+            na.body, body_a,
+            "the display payload must actually be rewritten, not passed through"
+        );
+        // Idempotent through the pipeline.
+        let twice = normalize_packet(
+            &pkt(State::Play, Direction::Clientbound, 130, na.body.clone()),
+            None,
+        );
+        assert_eq!(twice.body, na.body);
+    }
+
+    #[test]
+    fn normalize_advancements_keeps_real_no_display_fixture_byte_identical() {
+        // The pinned join fixture's update_advancements carries no display
+        // payload and its lists/criteria are already in canonical order, so
+        // normalize_packet must pass it through byte-identically. Proving this
+        // against the committed fixture guards against a regression where the
+        // display path rewrites bytes that the real (no-display) capture
+        // already produced.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/join");
+        let packets = crate::fixture::read_capture(&dir).expect("fixture loads");
+        let adv = packets
+            .iter()
+            .find(|p| {
+                p.state == State::Play && p.direction == Direction::Clientbound && p.id == 130
+            })
+            .expect("fixture contains update_advancements");
+        let n = normalize_packet(
+            &CapturedPacket {
+                state: State::Play,
+                direction: Direction::Clientbound,
+                id: 130,
+                body: adv.body.clone(),
+            },
+            None,
+        );
+        assert_eq!(
+            n.body, adv.body,
+            "the real no-display fixture body must pass through byte-identically"
+        );
+        assert!(
+            n.note.contains("display"),
+            "note should still describe the display canonicalization path"
+        );
     }
 
     #[test]
