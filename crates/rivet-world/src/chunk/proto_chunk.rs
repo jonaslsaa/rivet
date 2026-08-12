@@ -41,6 +41,7 @@ use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
+use indexmap::IndexMap;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
 
@@ -279,8 +280,8 @@ where
     }
 
     /// `ProtoChunk.getBlockEntityNbts()` — `Collections.unmodifiableMap(
-    /// pendingBlockEntities)`; read-only view.
-    pub fn get_block_entity_nbts(&self) -> &std::collections::HashMap<BlockPos, CompoundTag> {
+    /// pendingBlockEntities)`; read-only, insertion-ordered view (#537).
+    pub fn get_block_entity_nbts(&self) -> &IndexMap<BlockPos, CompoundTag> {
         self.base.pending_block_entities()
     }
 

@@ -1053,13 +1053,15 @@ mod tests {
             "the carried fluid is a real fluid"
         );
 
-        // The serialized block entity is carried (outcomes in source order,
-        // pending NBT retained); materialization stays the #341 boundary.
+        // The serialized block entity is installed into the chunk's pending
+        // authority (one position-keyed entry; outcomes derive from it in
+        // source order); materialization stays the #341/#520 boundary.
         let be_chunk = world.chunk_map().get_chunk(block_entity_pos).unwrap();
-        assert_eq!(be_chunk.block_entities().len(), 1);
+        assert_eq!(be_chunk.pending_block_entities().len(), 1);
         assert_eq!(be_chunk.block_entity_outcomes().len(), 1);
 
-        // The structure reference is carried onto the installed chunk.
+        // The structure reference is installed into the chunk's `StructureAccess`
+        // authority; the derived references reflect it.
         let ref_chunk = world.chunk_map().get_chunk(reference_pos).unwrap();
         let references = ref_chunk.structures_references();
         assert_eq!(references.len(), 1);

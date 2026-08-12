@@ -244,13 +244,14 @@ where
     /// `addReferenceForStructure(Structure, long)` — a no-op.
     pub fn add_reference_for_structure(&mut self, _structure: S, _reference: u64) {}
 
-    /// `getAllReferences()` — the wrapped chunk's references map.
-    pub fn get_all_references(&self) -> &std::collections::HashMap<S, indexmap::IndexSet<u64>> {
+    /// `getAllReferences()` — the wrapped chunk's references map
+    /// (insertion-ordered, #537).
+    pub fn get_all_references(&self) -> &indexmap::IndexMap<S, indexmap::IndexSet<u64>> {
         self.wrapped.get_all_references()
     }
 
     /// `setAllReferences(Map)` — a no-op.
-    pub fn set_all_references(&mut self, _data: std::collections::HashMap<S, Vec<u64>>) {}
+    pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, _data: I) {}
 
     /// `removeBlockEntity(BlockPos)` — a no-op.
     pub fn remove_block_entity(&mut self, _pos: &BlockPos) {}
