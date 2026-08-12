@@ -196,10 +196,16 @@ fn validate(root: Value) -> Result<Vec<Run>> {
         if word >> 27 != 0 {
             bail!("run {i} word {word} has reserved bits set");
         }
-        // Field bounds by bit width (light_dampening, light_emission <= 15,
-        // map_color <= 63, fluid_id <= 4) are implied by the width, so the
-        // reserved check above is the only field-level bound worth asserting
-        // here (the probe additionally pins fluid_id to 0..4).
+        // The 3-bit `fluid_id` field admits 0..=7, but the registry only
+        // defines the five built-in fluids (0..=4) — assert the narrower
+        // contract here (the probe pins it too) so a fixture with `fluid_id`
+        // 5..=7 is rejected rather than silently accepted.
+        if (word >> 24) & 0x7 > 4 {
+            bail!("run {i} word {word} has fluid_id out of 0..4");
+        }
+        // The remaining fields (light_dampening, light_emission <= 15,
+        // map_color <= 63, is_solid, can_be_replaced) are implied by their
+        // widths, so no further field-level bound is worth asserting here.
 
         if start != expected_start {
             bail!(
@@ -485,6 +491,21 @@ mod tests {
         v["runs"][0]["word"] = serde_json::json!(1u64 << 27);
         let err = validate(v).unwrap_err();
         assert!(err.to_string().contains("reserved bits"), "got: {err}");
+    }
+
+    #[test]
+    fn fluid_id_out_of_range_fails() {
+        // The 3-bit `fluid_id` field admits 0..=7, but the registry only
+        // defines 0..=4 — a fixture with fluid_id 5 must be rejected by the
+        // explicit bound (the reserved-bits check alone can no longer catch
+        // it, since bits 24..26 are a legitimate field).
+        let mut v = valid_root();
+        v["runs"][0]["word"] = serde_json::json!(5u64 << 24);
+        let err = validate(v).unwrap_err();
+        assert!(
+            err.to_string().contains("fluid_id out of 0..4"),
+            "got: {err}"
+        );
     }
 
     #[test]

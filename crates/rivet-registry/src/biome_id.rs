@@ -11,11 +11,13 @@
 //! compares those Copy pairs. The `Biome` value type itself defers with the
 //! `mc.world.level.biome` unit.
 //!
-//! Out-of-range numeric ids degrade to the default biome name on `name()`
-//! (biome id 0 is `minecraft:badlands`, alphabetical insertion — there is no
-//! DefaultedRegistry-style "default element", so the fallback is the first
-//! table entry, mirroring `DefaultedRegistry.byId`'s out-of-range behaviour of
-//! returning null, which the holder layer treats as absent).
+//! `name()` resolves an out-of-range id to the first table entry (`minecraft:
+//! badlands`, id 0 — alphabetical insertion). This is a display-only fallback:
+//! the biome registry is a plain `MappedRegistry` (unlike `FLUID`, which is a
+//! `DefaultedRegistry`), so Java's `MappedRegistry.byId` returns `null` for an
+//! out-of-range id and the holder layer treats it as absent. The pure-id
+//! `MatchingBiomesPredicate` never dereferences `name()`, so the fallback only
+//! surfaces in diagnostics.
 
 use crate::generated::biomes::{BIOME_BY_ID, BIOME_BY_NAME};
 

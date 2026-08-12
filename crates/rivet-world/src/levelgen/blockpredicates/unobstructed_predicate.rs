@@ -2,8 +2,9 @@
 //! (record, 26.2).
 //!
 //! Java: a `BlockPredicate` record holding `Vec3i offset` whose `test` is
-//! `worldGenLevel.isUnobstructed(null, Shapes.block().move(pos))` (the position
-//! with the offset applied) and whose `type()` is
+//! `worldGenLevel.isUnobstructed(null, Shapes.block().move(pos))` — the passed
+//! `pos` directly; Paper never applies `this.offset` in `test` (the component
+//! is a codec round-trip artifact only). Its `type()` is
 //! `BlockPredicateType.UNOBSTRUCTED`. Its `CODEC` is the offset optional field
 //! over `Vec3i.CODEC` — the plain (NOT `offsetCodec(16)`-validated) codec, and
 //! NOT `lenientOptionalFieldOf` but the non-lenient `optionalFieldOf("offset",
@@ -47,11 +48,11 @@ impl UnobstructedPredicate {
 impl BlockPredicate for UnobstructedPredicate {
     fn test(&self, level: &dyn WorldGenLevel, pos: &BlockPos) -> bool {
         // `worldGenLevel.isUnobstructed(null, Shapes.block().move(pos))` — the
-        // entity is null and the shape is the block shape moved to the position
-        // (the offset applied by `pos.offset(this.offset)` via the `move`). The
-        // collision check is the `#399` world-access seam.
-        let moved = pos.offset_vec(&self.offset);
-        level.is_unobstructed(&moved)
+        // entity is null and the shape is the block shape moved to the passed
+        // position. Paper does NOT apply `this.offset` here (it is a codec
+        // round-trip artifact only); the collision check is the `#399`
+        // world-access seam.
+        level.is_unobstructed(pos)
     }
 
     fn type_id(&self) -> BlockPredicateTypeId {
@@ -84,6 +85,7 @@ pub fn unobstructed_predicate_map_codec<Ops: DynamicOps + 'static>()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::level::height_accessor::LevelHeightAccessor;
     use crate::levelgen::blockpredicates::block_predicate::block_predicate_codec;
     use rivet_registry::access::RegistryAccess;
     use rivet_registry::registry_ops::RegistryOps;
@@ -159,5 +161,51 @@ mod tests {
             &json!({"type": "minecraft:unobstructed", "offset": [1, 2]}),
         );
         assert!(result.is_error());
+    }
+
+    /// A `WorldGenLevel` double that records the position passed to
+    /// `is_unobstructed` and answers `true` — the regression double proving
+    /// `test` passes the argument `pos` straight through.
+    #[derive(Default)]
+    struct RecordingLevel {
+        queried: std::sync::Mutex<Vec<BlockPos>>,
+    }
+
+    impl LevelHeightAccessor for RecordingLevel {
+        fn get_height(&self) -> i32 {
+            384
+        }
+
+        fn get_min_y(&self) -> i32 {
+            -64
+        }
+    }
+
+    impl WorldGenLevel for RecordingLevel {
+        fn get_seed(&self) -> i64 {
+            0
+        }
+
+        fn get_block_state(&self, _pos: &BlockPos) -> rivet_registry::block_state::BlockState {
+            panic!("unobstructed tests never read block state")
+        }
+
+        fn is_unobstructed(&self, pos: &BlockPos) -> bool {
+            self.queried.lock().unwrap().push(*pos);
+            true
+        }
+    }
+
+    #[test]
+    fn test_does_not_apply_offset() {
+        // Paper 26.2 `UnobstructedPredicate.test` is
+        // `isUnobstructed(null, Shapes.block().move(pos))` — the `offset`
+        // component is never applied. A predicate carrying a non-zero offset
+        // must query the ORIGINAL position, not `pos.offset(offset)`.
+        let level = RecordingLevel::default();
+        let p = UnobstructedPredicate::new(Vec3i::new(1, 2, 3));
+        let origin = BlockPos::new(10, 20, 30);
+        assert!(p.test(&level, &origin));
+        assert_eq!(level.queried.lock().unwrap().as_slice(), &[origin]);
     }
 }
