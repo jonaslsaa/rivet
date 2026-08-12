@@ -6,12 +6,17 @@
 //! second stack and combines both with the deviation-normalized `valueFactor`.
 //!
 //! The DFU `NoiseParameters` record is ported with its value surface
-//! (`firstOctave`/`amplitudes`); both the `DIRECT_CODEC` and the
-//! holder-backed `NoiseParameters.CODEC` (`RegistryFileCodec` over
-//! `Registries.NOISE`) are deferred — RivetTodo(#177) — since the noise
-//! registry and holder dispatch live in the later worldgen waves.
+//! (`firstOctave`/`amplitudes`) and both its codecs: `DIRECT_CODEC` (the
+//! `firstOctave`/`amplitudes` record) and the holder-backed `CODEC`
+//! (`RegistryFileCodec` over `Registries.NOISE`). The `#177` noise-value-layer
+//! unit resolves the previously-deferred `NoiseParameters.CODEC` seam here; the
+//! `DensityFunction.NoiseHolder` codec builds on it.
 
+use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::dynamic_ops::DynamicOps;
+use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use rivet_util::random::RandomSource;
+use std::sync::Arc;
 
 use crate::levelgen::synth::perlin_noise::PerlinNoise;
 
@@ -23,6 +28,7 @@ const INPUT_FACTOR: f64 = 1.0181268882175227;
 const VALUE_FACTOR_NUMERATOR: f64 = 0.16666666666666666;
 
 /// `net.minecraft.world.level.levelgen.synth.NormalNoise`.
+#[derive(Debug, Clone)]
 pub struct NormalNoise {
     value_factor: f64,
     first: PerlinNoise,
@@ -170,4 +176,52 @@ impl NoiseParameters {
             amplitudes: list,
         }
     }
+}
+
+/// `NormalNoise.NoiseParameters.DIRECT_CODEC` — the `firstOctave`/`amplitudes`
+/// record codec, as the ops-generic `noise_parameters_direct_codec::<Ops>()`
+/// factory.
+///
+/// Java:
+///
+/// ```java
+/// DIRECT_CODEC = RecordCodecBuilder.create(i -> i.group(
+///     Codec.INT.fieldOf("firstOctave").forGetter(NoiseParameters::firstOctave),
+///     Codec.DOUBLE.listOf().fieldOf("amplitudes").forGetter(NoiseParameters::amplitudes)
+/// ).apply(i, NoiseParameters::new));
+/// ```
+pub fn noise_parameters_direct_codec<Ops: DynamicOps + 'static>()
+-> Arc<dyn Codec<NoiseParameters, Ops>> {
+    record_builder::create(|instance| {
+        instance
+            .group(RecordCodecBuilder::of_named(
+                Arc::new(|p: &NoiseParameters| p.first_octave),
+                "firstOctave".to_string(),
+                codec::int_codec::<Ops>(),
+            ))
+            .and(RecordCodecBuilder::of_named(
+                Arc::new(|p: &NoiseParameters| p.amplitudes.clone()),
+                "amplitudes".to_string(),
+                codec::list(codec::double_codec::<Ops>()),
+            ))
+            .apply(instance, Arc::new(NoiseParameters::new))
+    })
+}
+
+/// `NormalNoise.NoiseParameters.CODEC` — `RegistryFileCodec.create(
+/// Registries.NOISE, DIRECT_CODEC)`, the holder-backed codec, as the
+/// ops-generic `noise_parameters_codec::<Ops>()` factory.
+///
+/// The `Ops: RegistryOpsLookup` bound pins the registry context (the
+/// `RegistryFileCodec` encode/decode resolves holders through the ops' lookup).
+pub fn noise_parameters_codec<Ops>() -> Arc<dyn Codec<rivet_registry::Holder<NoiseParameters>, Ops>>
+where
+    Ops: DynamicOps + 'static + rivet_registry::registry_ops::RegistryOpsLookup,
+{
+    Arc::new(
+        rivet_registry::registry_file_codec::RegistryFileCodec::create(
+            &crate::levelgen::noise::registry_keys::NOISE,
+            noise_parameters_direct_codec::<Ops>(),
+        ),
+    )
 }

@@ -13,10 +13,11 @@
 //! table in `block_predicate`, not stored on the id or the trait.
 //!
 //! All fourteen Paper constants are declared with their exact registry
-//! identity/declaration order; only the five in-scope predicates
-//! (`inside_world_bounds`, `any_of`, `all_of`, `not`, `true`) have codecs
-//! wired — dispatching to the remaining nine fails explicitly
-//! (RivetTodo #399, see `block_predicate::codec_for_type`).
+//! identity/declaration order, and every one resolves its `MapCodec` through
+//! the dispatch table in `block_predicate::codec_for_type` (all fourteen types
+//! are wired). Only the world-access *behavior* (state/biome/collision reads)
+//! is deferred with the world unit, failing explicitly through the `#399`
+//! seams — never fabricated.
 
 use std::fmt::Debug;
 
@@ -24,8 +25,8 @@ use std::fmt::Debug;
 /// identity.
 ///
 /// `P` is erased in Rust (like the `Feature` half of `ConfiguredFeature`); the
-/// per-type `MapCodec<P>` is resolved by the `#399` dispatch table, not
-/// through this trait.
+/// per-type `MapCodec<P>` is resolved by the dispatch table in
+/// `block_predicate`, not through this trait.
 pub trait BlockPredicateType: Debug + Send + Sync + 'static {}
 
 /// The `BlockPredicateType<P>` registry element identity — the per-type `u32`

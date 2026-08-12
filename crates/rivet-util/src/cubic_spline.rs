@@ -168,7 +168,15 @@ impl<I> CubicSpline<I> {
     }
 
     /// `CubicSpline.mapCoordinates(UnaryOperator<I>)`.
-    pub fn map_coordinates(&self, mapper: Arc<dyn Fn(I) -> I + Send + Sync>) -> CubicSpline<I>
+    ///
+    /// The mapper is applied to every coordinate and discarded within the call
+    /// (never stored), so it may borrow (lifetime-`'a`) rather than be
+    /// `'static` — e.g. a `map_children` visitor borrowed for the duration of
+    /// the recursion.
+    pub fn map_coordinates<'a>(
+        &self,
+        mapper: Arc<dyn Fn(I) -> I + Send + Sync + 'a>,
+    ) -> CubicSpline<I>
     where
         I: Clone + Send + Sync + 'static + BoundedFloat,
     {

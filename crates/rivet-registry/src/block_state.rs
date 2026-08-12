@@ -332,6 +332,35 @@ impl BlockState {
         self.behavior() & crate::generated::block_behaviors::BEHAVIOR_FLAG_FLUID_EMPTY != 0
     }
 
+    /// Whether the state is solid — Paper `BlockBehaviour.BlockStateBase.isSolid()`
+    /// (the cached `legacySolid` from `calculateSolid()`), NOT the
+    /// `Properties.hasCollision` flag. It is a collision-shape *bounds* check:
+    /// true only when `forceSolidOn`, or when the non-empty static collision
+    /// shape's bounds have volume >= 35/48 or a full 1.0 height; dynamic-shape
+    /// and empty-collision states are never solid. The `SolidPredicate` truth
+    /// value (`state.isSolid()`), grounded in the probe.
+    #[inline]
+    pub fn is_solid(self) -> bool {
+        self.behavior() & crate::generated::block_behaviors::BEHAVIOR_FLAG_IS_SOLID != 0
+    }
+
+    /// Whether the state can be replaced (Paper `BlockStateBase.canBeReplaced()`,
+    /// i.e. `BlockBehaviour.Properties.replaceable`). The `ReplaceablePredicate`
+    /// truth value (`state.canBeReplaced()`), grounded in the probe.
+    #[inline]
+    pub fn can_be_replaced(self) -> bool {
+        self.behavior() & crate::generated::block_behaviors::BEHAVIOR_FLAG_CAN_BE_REPLACED != 0
+    }
+
+    /// The state's fluid registry id — `BuiltInRegistries.FLUID.getId(
+    /// getFluidState().getType())` (0..=4: the five built-in fluids), grounded
+    /// in the probe. `0` is `minecraft:empty` (the no-fluid state).
+    #[inline]
+    pub fn fluid_id(self) -> u16 {
+        ((self.behavior() >> crate::generated::block_behaviors::BEHAVIOR_SHIFT_FLUID_ID)
+            & crate::generated::block_behaviors::BEHAVIOR_MASK_FLUID_ID) as u16
+    }
+
     /// The state's light dampening in `0..=15` (Paper `getLightDampening`).
     #[inline]
     pub fn light_dampening(self) -> u8 {
@@ -525,12 +554,14 @@ mod tests {
         // hand-derived, so any probe/fixture change that shifts a behavior
         // fails here loudly.
         let word = |name: &str| BlockState::of(BlockId::from_name(name).unwrap()).behavior();
-        assert_eq!(word("minecraft:air"), 0xA1);
-        assert_eq!(word("minecraft:stone"), 0xB0F8E);
-        assert_eq!(word("minecraft:water"), 0xC0100);
-        assert_eq!(word("minecraft:lava"), 0x4F140);
-        assert_eq!(word("minecraft:oak_leaves"), 0x701C2);
-        assert_eq!(word("minecraft:glass"), 0xA2);
+        // Bits 22..26 now carry is_solid / can_be_replaced / fluid_id (issue
+        // #180); the anchors are the live values emitted by the extended probe.
+        assert_eq!(word("minecraft:air"), 0x8000A1);
+        assert_eq!(word("minecraft:stone"), 0x4B0F8E);
+        assert_eq!(word("minecraft:water"), 0x28C0100);
+        assert_eq!(word("minecraft:lava"), 0x484F140);
+        assert_eq!(word("minecraft:oak_leaves"), 0x4701C2);
+        assert_eq!(word("minecraft:glass"), 0x4000A2);
         assert_eq!(word("minecraft:torch"), 0xE0A0);
     }
 
@@ -547,6 +578,9 @@ mod tests {
         // Note the anchors do not distinguish the correlated solid_render and
         // can_occlude bits, which are equal on every anchor.
         let state = |name: &str| BlockState::of(BlockId::from_name(name).unwrap());
+        // The trailing nested tuple is the #180 predicate semantics:
+        // `(is_solid, can_be_replaced, fluid_id)`, kept separate so the whole
+        // tuple stays within Rust's 12-element trait impl bounds.
         let fields = |s: BlockState| {
             (
                 s.is_air(),
@@ -560,46 +594,136 @@ mod tests {
                 s.light_dampening(),
                 s.light_emission(),
                 s.map_color_id(),
+                (s.is_solid(), s.can_be_replaced(), s.fluid_id()),
             )
         };
         // Paper 26.2 semantics for the probe anchors. Map colors are the
         // `MapColor` enum ids (STONE=11, WATER=12, FIRE/lava=4, PLANT/leaves=7).
         // Air, glass, and torch all propagate skylight down (bit 5): a
         // non-occluding block lets sky light pass straight through.
+        // The three trailing values are the #180 predicate semantics:
+        // `(is_solid, can_be_replaced, fluid_id)`. Air/water/lava are
+        // replaceable (never solid); stone/oak_leaves/glass are solid (never
+        // replaceable); torch is neither. Fluid ids follow the built-in fluid
+        // registry: water state -> 2 (`minecraft:water`), lava state -> 4
+        // (`minecraft:lava`), all non-fluid states -> 0 (`minecraft:empty`).
         assert_eq!(
             fields(state("minecraft:air")),
-            (true, false, false, false, false, true, false, true, 0, 0, 0)
+            (
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                0,
+                0,
+                0,
+                (false, true, 0)
+            )
         );
         assert_eq!(
             fields(state("minecraft:stone")),
             (
-                false, true, true, true, false, false, false, true, 15, 0, 11
+                false,
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
+                15,
+                0,
+                11,
+                (true, false, 0)
             )
         );
         assert_eq!(
             fields(state("minecraft:water")),
             (
-                false, false, false, false, false, false, false, false, 1, 0, 12
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                1,
+                0,
+                12,
+                (false, true, 2)
             )
         );
         assert_eq!(
             fields(state("minecraft:lava")),
             (
-                false, false, false, false, false, false, true, false, 1, 15, 4
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                1,
+                15,
+                4,
+                (false, true, 4)
             )
         );
         assert_eq!(
             fields(state("minecraft:oak_leaves")),
-            (false, true, false, false, false, false, true, true, 1, 0, 7)
+            (
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+                1,
+                0,
+                7,
+                (true, false, 0)
+            )
         );
         assert_eq!(
             fields(state("minecraft:glass")),
-            (false, true, false, false, false, true, false, true, 0, 0, 0)
+            (
+                false,
+                true,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                0,
+                0,
+                0,
+                (true, false, 0)
+            )
         );
         assert_eq!(
             fields(state("minecraft:torch")),
             (
-                false, false, false, false, false, true, false, true, 0, 14, 0
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                0,
+                14,
+                0,
+                (false, false, 0)
             )
         );
     }

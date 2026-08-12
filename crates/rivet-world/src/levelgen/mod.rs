@@ -26,6 +26,9 @@ pub mod heightmap;
 // `HeightProvider` value/codec layer, unblocked by the merged VerticalAnchor
 // #388 and weighted-random #353.
 pub mod heightproviders;
+// The `mc.world.level.levelgen.noise` unit's density-function/noise-router
+// value slice (issue #177).
+pub mod noise;
 pub mod placement;
 // The `mc.world.level.levelgen.random` unit's registry-aware overloads (issue
 // #208) live here because `BlockPos`/`Identifier` come from `rivet-registry`,

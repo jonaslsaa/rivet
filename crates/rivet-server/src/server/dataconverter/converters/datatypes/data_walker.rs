@@ -1,0 +1,73 @@
+//! Port of `ca.spottedleaf.dataconverter.converters.datatypes.DataWalker`.
+
+use std::marker::PhantomData;
+
+/// `DataWalker<T>` — a structure walker that may mutate and/or replace the
+/// value it walks (the `minecraft.walkers.*` units implement it; `WalkerUtils`
+/// calls `type.convert(...)` and writes replacements back with `data.setMap`/
+/// `list.setMap`). `None` means "no replacement" (Java null return).
+pub trait DataWalker<T> {
+    /// `DataWalker.walk(T, long fromVersion, long toVersion)`.
+    fn walk(&self, data: &mut T, from_version: i64, to_version: i64) -> Option<T>;
+}
+
+/// `DataWalker.NO_OP` — the singleton walker that never replaces.
+pub struct NoOpWalker<T> {
+    _marker: PhantomData<T>,
+}
+
+impl<T> NoOpWalker<T> {
+    /// `DataWalker.noOp()` — the `NO_OP` singleton cast to `DataWalker<T>`.
+    pub fn no_op() -> NoOpWalker<T> {
+        NoOpWalker {
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> DataWalker<T> for NoOpWalker<T> {
+    fn walk(&self, _data: &mut T, _from_version: i64, _to_version: i64) -> Option<T> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_op_walk_matches_paper_golden() {
+        // `hookWalker.noOpWalkNull` from the `dataconverter-foundation` golden.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../../../tools/rivet-oracle/fixtures/dataconverter/dataconverter-foundation.json"
+        ))
+        .expect("dataconverter-foundation.json parses");
+        let walker: NoOpWalker<&'static str> = NoOpWalker::no_op();
+        assert_eq!(
+            walker.walk(&mut "d", 1, 2).is_none(),
+            fixture["hookWalker"]["noOpWalkNull"].as_bool().unwrap()
+        );
+    }
+
+    #[test]
+    fn no_op_walk_returns_none() {
+        let walker: NoOpWalker<&'static str> = NoOpWalker::no_op();
+        assert!(walker.walk(&mut "data", 1, 2).is_none());
+    }
+
+    #[test]
+    fn walker_replacement_contract() {
+        struct Replacer;
+        impl DataWalker<&'static str> for Replacer {
+            fn walk(
+                &self,
+                _data: &mut &'static str,
+                _from_version: i64,
+                _to_version: i64,
+            ) -> Option<&'static str> {
+                Some("replaced")
+            }
+        }
+        assert_eq!(Replacer.walk(&mut "orig", 1, 2), Some("replaced"));
+    }
+}
