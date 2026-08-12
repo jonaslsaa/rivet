@@ -4124,6 +4124,92 @@ mod tests {
     }
 
     #[test]
+    fn classify_generated_world_boot_failure_pins_the_exact_unverified_reason() {
+        // The task contract requires the missing-capability exit to carry an
+        // exact, test-pinned reason. A rivet-server that rejects `--seed` as an
+        // unknown argument must be classified `Absent` and the runner error must
+        // lead with exactly [`GENERATED_WORLD_UNVERIFIED_REASON`] — never a
+        // superflat or loaded-world fallback.
+        let log = std::env::temp_dir().join(format!(
+            "rivet-generated-world-rejected-{}.log",
+            std::process::id()
+        ));
+        let rejected = concat!(
+            "thread 'main' panicked at crates/rivet-server/src/main.rs:\n",
+            "unknown argument \"--seed\" (expected --host/--port/--level)\n"
+        );
+        fs::write(&log, rejected).unwrap();
+
+        let absent = classify_generated_world_boot_failure(
+            server::Error::Unverified("boot timed out waiting for RIVET_READY".to_owned()),
+            &log,
+        );
+        match absent {
+            RunnerError::Unverified(ref message) => {
+                assert!(
+                    message.starts_with(GENERATED_WORLD_UNVERIFIED_REASON),
+                    "the missing-capability reason must be pinned exactly, got {message}"
+                );
+                assert!(
+                    message.contains("unknown argument \"--seed\""),
+                    "the reason must carry the launch evidence, got {message}"
+                );
+            }
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
+        assert_eq!(absent.exit_code(), EXIT_UNVERIFIED);
+
+        // A boot that fails for an unrelated reason (the log names `--level`,
+        // not `--seed`) is `FailedToBoot`: still UNVERIFIED, but the reason is
+        // the launch-probe evidence — it must NOT claim the generated-world
+        // capability is absent, which would be a fabricated diagnosis.
+        let wrong_arg = concat!(
+            "thread 'main' panicked at crates/rivet-server/src/main.rs:\n",
+            "unknown argument \"--level\" (expected --host/--port)\n"
+        );
+        fs::write(&log, wrong_arg).unwrap();
+        let failed = classify_generated_world_boot_failure(
+            server::Error::Unverified("boot timed out waiting for RIVET_READY".to_owned()),
+            &log,
+        );
+        match failed {
+            RunnerError::Unverified(ref message) => {
+                assert!(
+                    !message.starts_with(GENERATED_WORLD_UNVERIFIED_REASON),
+                    "a FailedToBoot must not claim the capability is absent, got {message}"
+                );
+                assert!(
+                    message.contains("unknown argument \"--level\""),
+                    "the FailedToBoot reason must carry its evidence, got {message}"
+                );
+            }
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
+        assert_eq!(failed.exit_code(), EXIT_UNVERIFIED);
+
+        // Gate and Io boot failures are real errors, not an UNVERIFIED absence:
+        // they stay hard FAIL, exactly like the loaded-world classifier.
+        let gate = classify_generated_world_boot_failure(
+            server::Error::Gate("non-executable binary".to_owned()),
+            &log,
+        );
+        assert!(matches!(gate, RunnerError::Server(server::Error::Gate(_))));
+        assert_eq!(gate.exit_code(), EXIT_FAIL);
+
+        let io = classify_generated_world_boot_failure(
+            server::Error::Io(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "invalid run directory",
+            )),
+            &log,
+        );
+        assert!(matches!(io, RunnerError::Server(server::Error::Io(_))));
+        assert_eq!(io.exit_code(), EXIT_FAIL);
+
+        fs::remove_file(log).unwrap();
+    }
+
+    #[test]
     fn accepts_rivet_and_both_servers() {
         let a = parse(&["join", "--server", "rivet", "--pairs", "paper:rivet"]).unwrap();
         assert_eq!(a.server, ServerSelection::Rivet);
