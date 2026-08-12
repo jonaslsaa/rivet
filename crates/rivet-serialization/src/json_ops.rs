@@ -20,11 +20,13 @@
 //!   `Number::Double` covers non-integral literals (`LazilyParsedNumber.doubleValue`
 //!   is a plain `Double.parseDouble`).
 //! - `createNumeric` wraps a Gson `JsonPrimitive(Number)`. Integral variants
-//!   become exact `serde_json::Number`s; `Float`/`Double` go through
-//!   `serde_json::Number::from_f64`, which rejects NaN/Infinity (JSON cannot
-//!   represent them) — such values fall back to `Value::Null` (documented
-//!   deviation; Gson would emit a `JsonPrimitive` that serializes as
-//!   `NaN`/`Infinity`).
+//!   become exact `serde_json::Number`s; `Double` goes through
+//!   `serde_json::Number::from_f64`, and `Float` stores the `f64` nearest
+//!   Java's `Float.toString` literal (Gson renders a `JsonPrimitive(Float)`
+//!   with `Float.toString`, so `0.05f` encodes as `0.05`, not the widened
+//!   `0.05000000074505806`). NaN/Infinity cannot be represented (JSON has no
+//!   such literals) — they fall back to `Value::Null` (documented deviation;
+//!   Gson would emit a `JsonPrimitive` that serializes as `NaN`/`Infinity`).
 //! - `serde_json` is built with `preserve_order`, so `Value::Object` keeps
 //!   insertion order like Gson's `LinkedTreeMap`.
 //! - Java's `JsonOps` has no "pretty" variant in DFU 10.0.21 (`INSTANCE` and
@@ -759,10 +761,21 @@ fn json_from_number(number: Number) -> Value {
         Number::Short(v) => Value::Number(JsonNumber::from(v)),
         Number::Int(v) => Value::Number(JsonNumber::from(v)),
         Number::Long(v) => Value::Number(JsonNumber::from(v)),
-        Number::Float(v) => Value::Number(match JsonNumber::from_f64(v as f64) {
-            Some(n) => n,
-            None => return Value::Null,
-        }),
+        // Java `JsonOps.createFloat` wraps the `Float` in `new JsonPrimitive`,
+        // which Gson serializes with `Float.toString()` — the shortest decimal
+        // that round-trips to the `float` (e.g. `0.05`, `1.0`). Widening
+        // straight to `f64` would print the long double form
+        // (`0.05000000074505806`), a divergence from Paper. `serde_json::Value`
+        // has no `f32` tag, so store the `f64` nearest Java's literal (Rust's
+        // `{:e}` yields the shortest round-trip digits); reading it back through
+        // `Number.float_value()` narrows to the identical `f32`.
+        Number::Float(v) => {
+            let f = format!("{:e}", v).parse::<f64>().unwrap_or(f64::NAN);
+            Value::Number(match JsonNumber::from_f64(f) {
+                Some(n) => n,
+                None => return Value::Null,
+            })
+        }
         Number::Double(v) => Value::Number(match JsonNumber::from_f64(v) {
             Some(n) => n,
             None => return Value::Null,

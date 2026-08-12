@@ -528,10 +528,12 @@ fn convert_to_narrows_numbers() {
 
     // 2^63 — `i64::MAX as f64` rounds up to this, so it is NOT a long
     // (Java `BigDecimal.longValueExact` throws) → double path → float (2^63
-    // is exact in f32). This pins the boundary of `exact_integral`.
+    // is exact in f32). This pins the boundary of `exact_integral`. The float
+    // path carries `Float.toString(2^63f)` = `9.223372E18` (f32-shortest
+    // digits), not the exact u64 — matching Paper.
     let two_pow_63 = 9_223_372_036_854_775_808f64;
     let input = Value::Number(Number::from_f64(two_pow_63).expect("2^63 fits f64"));
-    assert_eq!(ops.convert_to(&out, &input), json!(two_pow_63));
+    assert_eq!(ops.convert_to(&out, &input), json!(9.223372e18));
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +714,18 @@ fn float_double_codecs_round_trip_through_json() {
     let double = rivet_serialization::codec::double_codec::<JsonOps>();
     assert_eq!(round_trip(&ops, &double, 0.1), 0.1);
     assert_eq!(round_trip(&ops, &double, 1.0 / 3.0), 1.0 / 3.0);
+}
+
+/// `createFloat` renders the `Float.toString` literal, not the widened `f64`
+/// form — Gson prints `0.05` for a `JsonPrimitive(Float(0.05))`, never
+/// `0.05000000074505806`.
+#[test]
+fn create_float_uses_float_to_string_literal() {
+    let ops = JsonOps::INSTANCE;
+    assert_eq!(ops.create_float(0.05f32), json!(0.05));
+    assert_eq!(ops.create_float(0.1f32), json!(0.1));
+    assert_eq!(ops.create_float(1.0f32), json!(1.0));
+    assert_eq!(ops.create_float(0.001f32), json!(0.001));
 }
 
 /// Signed narrowing through the byte codec: reading a JSON number as a byte
