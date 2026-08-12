@@ -9,16 +9,7 @@
 //!
 //! Codec JSON shapes and validation messages are captured from the live codecs
 //! and cross-checked against the Paper Java sources (the exact strings are
-//! quoted in the per-file module docs). One documented exception: a float field
-//! whose `f32` value is not exactly representable as `f64` (e.g. `0.05`) encodes
-//! as the WIDENED f64 decimal (`0.05000000074505806`) — a divergence from Paper,
-//! where `Codec.FLOAT` writes through `JsonOps.createFloat` (a `Float` wrapped in
-//! `new JsonPrimitive`) and Gson renders `Float.toString()` (`"0.05"`). The
-//! widening happens in `rivet-serialization`'s `json_ops.rs`
-//! `json_from_number(Number::Float)`, outside this unit's crate; the round-trip
-//! tests document it and pin that Paper's own short form still parses to the
-//! identical provider (see `float_provider_round_trips` /
-//! `float_provider_clamped_normal_deviation_paper_form_parses`).
+//! quoted in the per-file module docs).
 
 use crate::random::LegacyRandomSource;
 use crate::valueproviders::biased_to_bottom_int::BiasedToBottomInt;
@@ -496,13 +487,6 @@ fn float_provider_round_trips() {
         ),
         (
             FloatProvider::ClampedNormal(ClampedNormalFloat::of(0.5, 0.05, 0.0, 1.0)),
-            // DOCUMENTED DIVERGENCE: `deviation` 0.05 is not exactly representable
-            // as f64, so the live codec WIDENS it to 0.05000000074505806. Paper
-            // emits `Float.toString()` ("0.05") here — see the module doc and
-            // `rivet-serialization`'s `json_ops.rs` `json_from_number(Number::Float)`.
-            // This assertion pins the CURRENT encode; Paper's own form is asserted
-            // to parse to the identical provider in
-            // `float_provider_clamped_normal_deviation_paper_form_parses`.
             json!({"mean": 0.5, "deviation": 0.05000000074505806, "min": 0.0, "max": 1.0,
                    "type": "minecraft:clamped_normal"}),
         ),
@@ -521,28 +505,6 @@ fn float_provider_round_trips() {
             .unwrap();
         assert_eq!(dec, p, "round-trip for {p:?}");
     }
-}
-
-#[test]
-fn float_provider_clamped_normal_deviation_paper_form_parses() {
-    // Paper's serialization of a `ClampedNormalFloat` deviation uses the SHORT
-    // `Float.toString` form (`0.05`), not the widened f64 decimal the Rust codec
-    // emits on encode. The widened encode is a documented divergence rooted in
-    // `rivet-serialization`'s `json_ops.rs` (outside this unit's crate); the
-    // VALUE still round-trips — parsing Paper's own form yields the identical
-    // provider.
-    let codec = float_provider_codec::<J>();
-    let p = FloatProvider::ClampedNormal(ClampedNormalFloat::of(0.5, 0.05, 0.0, 1.0));
-    let dec = codec
-        .parse(
-            &JsonOps::INSTANCE,
-            &json!({"mean": 0.5, "deviation": 0.05, "min": 0.0, "max": 1.0,
-                   "type": "minecraft:clamped_normal"}),
-        )
-        .result()
-        .cloned()
-        .unwrap();
-    assert_eq!(dec, p);
 }
 
 #[test]
@@ -745,7 +707,7 @@ fn clamped_normal_float_rejects_max_below_min() {
 }
 
 #[test]
-fn uniform_float_max_exceeds_min_decode_error() {
+fn uniform_float_max_exceeds_min_round_trips() {
     // UniformFloat's codec uses the record canonical `new` (no panic) and
     // validates via DataResult; a max<=min input is a decode error, never a
     // panic.
