@@ -69,7 +69,9 @@
 #                          keepalive kick limit (wall-clock, echoing every live keepalive).
 #                          The Paper rows are guarded by the paperclip jar, like oracle
 #                          verify; dwell/kick/loaded-world/generated-world need only the
-#                          rivet-server binary (run-scenario.sh builds it on demand).
+#                          rivet-server binary (run-scenario.sh builds it on demand; the
+#                          loaded-world and generated-world rows additionally need the
+#                          rivet-oracle and rivet-client binaries the harness resolves).
 #                          Each row exits 0 PASS / 1 FAIL / 3 UNVERIFIED (never silently
 #                          green).
 #   - join capture         rivet-capture: boots Paper, joins via the Azalea client
@@ -1069,8 +1071,10 @@ main() {
   # that could conceal the missing comparison behind a green-looking run (issue
   # #160). The dwell/kick/loaded-world/generated-world rows are Rivet-only —
   # they need no jar, only the rivet-server binary (which run-scenario.sh builds
-  # on demand; the loaded-world row additionally needs the rivet-oracle and
-  # rivet-client binaries the harness resolves). Every row exits 0 PASS / 1 FAIL
+  # on demand; the loaded-world and generated-world rows additionally need the
+  # rivet-oracle and rivet-client binaries the harness resolves — generated-world
+  # also invokes `rivet-oracle generated-expected` for the seed-42 ground-truth
+  # handoff). Every row exits 0 PASS / 1 FAIL
   # / 3 UNVERIFIED, so a missing prereq or a failed scenario can never look
   # green. Skipped when gating a crate subset (the scenario drives a whole
   # server).
