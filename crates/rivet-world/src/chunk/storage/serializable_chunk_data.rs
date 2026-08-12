@@ -11,8 +11,10 @@
 //! result. A FULL chunk carrying stored ticks now reconstructs, carrying the
 //! typed values for the caller's runtime composition — the parser neither
 //! executes, schedules, generates, installs, nor writes them (the
-//! `LevelChunkTicks`/`ProtoChunkTicks` execution containers stay deferred with
-//! the tick-execution slice). `UpgradeData`'s neighbor tick lists remain behind
+//! `LevelChunkTicks`/`ProtoChunkTicks` containers now live in `ticks` (#522),
+//! but the wiring that installs them defers with the tick-execution slice).
+//! `UpgradeData`'s
+//! neighbor tick lists remain behind
 //! the `UnsupportedUpgradeData` boundary: they are decodable (with the Java
 //! `orElse(Blocks.AIR)`/`orElse(Fluids.EMPTY)` asymmetry) but are not yet
 //! carried by the `UpgradeData` port.
@@ -563,6 +565,13 @@ impl SerializableChunkData {
     pub fn structure_data(&self) -> &CompoundTag {
         &self.structure_data
     }
+    /// Whether the chunk carries `structures.starts` entries — the one
+    /// structures surface the #519 full-chunk construction cannot yet carry.
+    /// References-only and empty structures containers decode into carried
+    /// [`StructureReference`]s and construct fine (#519).
+    pub fn has_unsupported_structure_starts(&self) -> bool {
+        structures_starts_are_non_empty(&self.structure_data)
+    }
     /// The decoded `structures.References` entries, in deterministic
     /// key-insertion order (a stable carry, not a Paper-observable order). The
     /// chunk position is not consulted until reconstruction (the >8-chunk
@@ -586,8 +595,8 @@ impl SerializableChunkData {
     /// see [`Self::validate_full_for_reconstruction`]). Carried as stored values
     /// only — the reconstruction consumes them off the parse result ([`Self`]
     /// installs them into no runtime container; the `LevelChunkTicks`/
-    /// `ProtoChunkTicks` execution containers defer with the tick-execution
-    /// slice (#370)).
+    /// `ProtoChunkTicks` containers live in `ticks` (#522), but the wiring that
+    /// installs them defers with the tick-execution slice).
     pub fn stored_block_ticks(&self) -> &[SavedTick<Block>] {
         &self.stored_block_ticks
     }
@@ -620,8 +629,9 @@ impl SerializableChunkData {
     /// Serialized block entities are NOT rejected — the reconstruction carries
     /// them as pending NBT (materialization defers with #341). Stored ticks are
     /// carried as typed values, never rejected (the `LevelChunkTicks`/
-    /// `ProtoChunkTicks` execution containers defer with the tick-execution
-    /// slice, #370). The remaining unsupported surfaces (proto status,
+    /// `ProtoChunkTicks` containers live in `ticks` (#522), but the wiring that
+    /// installs them defers with the tick-execution slice). The remaining unsupported
+    /// surfaces (proto status,
     /// `UpgradeData` neighbor ticks, blending data, persistent data, structure
     /// `starts`, non-empty entities, out-of-bounds post-processing) surface
     /// their typed errors here.
@@ -650,10 +660,10 @@ impl SerializableChunkData {
         }
         // Stored `block_ticks`/`fluid_ticks` decode into typed stored values on
         // parse and are carried. The runtime tick containers
-        // (`LevelChunkTicks`/`ProtoChunkTicks`) defer with the tick-execution
-        // slice, so a FULL chunk with stored ticks now reconstructs with the
-        // values carried — nothing is scheduled, generated, installed, or
-        // written (#370).
+        // (`LevelChunkTicks`/`ProtoChunkTicks`) exist in `ticks` (#522) but are
+        // not wired in, so a FULL chunk with stored ticks now reconstructs with
+        // the values carried — nothing is scheduled, generated, installed, or
+        // written.
         // `below_zero_retrogen` is deliberately not checked here: Paper's
         // LEVELCHUNK branch of `SerializableChunkData.read` never consults it
         // (only the proto branch does), so a FULL chunk carrying one loads as-is.
@@ -670,7 +680,7 @@ impl SerializableChunkData {
         // and no longer blocks construction. Non-empty `starts` remains an
         // unsupported surface (the `StructureStart` load path is not ported),
         // so a starts-bearing structures compound still fails here.
-        if structures_starts_are_non_empty(&self.structure_data) {
+        if self.has_unsupported_structure_starts() {
             return Err(SerializableChunkDataError::UnsupportedStructures);
         }
         if let Some(index) =
@@ -2476,8 +2486,8 @@ mod tests {
     /// the synthetic JsonOps round-trip the codec unit tests cover. This is the
     /// decode/carry layer only: the parse carries the typed ticks as stored
     /// values, nothing schedules or executes them, and the chunk is
-    /// full-capable (#370 remains open for the deferred
-    /// `LevelChunkTicks`/`ProtoChunkTicks` containers).
+    /// full-capable (the `LevelChunkTicks`/`ProtoChunkTicks` containers live in
+    /// `ticks` (#522); only the wiring that installs them defers).
     #[test]
     fn real_26_2_nether_fixture_decodes_stored_fluid_ticks_exactly() {
         let fixture = named_fixture("the_nether", "0.0", "0.0.nbt");
@@ -2493,8 +2503,8 @@ mod tests {
         assert_eq!(parsed.stored_pos(), ChunkPos::new(0, 0));
         // The chunk decodes its 13 stored lava ticks faithfully and is
         // full-capable: the typed ticks are carried as stored values, not
-        // scheduled (the `LevelChunkTicks`/`ProtoChunkTicks` containers stay
-        // deferred to #370).
+        // scheduled (the `LevelChunkTicks`/`ProtoChunkTicks` containers live in
+        // `ticks` (#522); only the wiring that installs them defers).
         assert_eq!(parsed.validate_full_for_reconstruction(), Ok(()));
         // The nether chunk stores fluid ticks only; its `block_ticks` list is
         // empty.

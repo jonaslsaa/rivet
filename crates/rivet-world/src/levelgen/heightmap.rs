@@ -27,11 +27,18 @@
 //!
 //! Issue #287 Part A adds the worldgen/live slice this module deferred: the
 //! four `FINAL_HEIGHTMAPS`/`WORLDGEN_HEIGHTMAPS` predicates (`is_opaque`),
-//! the per-block `update` mutator, the local leaves classifier, and the
-//! on-demand `primeHeightmaps`/`getHeight` compute on `ChunkAccess` (see
-//! `chunk::chunk_access`). Note `updateFromChunk` does NOT exist in the pinned
-//! Paper 26.2 `Heightmap` — only `update` — so the issue's mention of it is
-//! stale and only `update` is ported.
+//! the per-block `update` mutator, and the on-demand `primeHeightmaps`/
+//! `getHeight` compute on `ChunkAccess` (see `chunk::chunk_access`). Note
+//! `updateFromChunk` does NOT exist in the pinned Paper 26.2 `Heightmap` —
+//! only `update` — so the issue's mention of it is stale and only `update` is
+//! ported.
+//!
+//! The `MOTION_BLOCKING_NO_LEAVES` exclusion is `state.is(TagKey)`
+//! (`getBlock() instanceof LeavesBlock`), resolved by the caller through the
+//! generated `BlockTags.LEAVES` (`BlockState::is_in_tag`) — `rivet-registry`'s
+//! `blocks` feature is a production dependency of `rivet-world`, so the earlier
+//! hand-maintained `LEAVES_BLOCKS` list is gone (it duplicated the generated
+//! tag).
 
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_util::bit_storage::BitStorage;
@@ -87,34 +94,10 @@ pub struct StateFlags {
     /// `!state.getFluidState().isEmpty()` — true when the state carries a
     /// non-empty fluid state (the `MotionBlocking` predicate's disjunct).
     pub has_fluid: bool,
-    /// `state.getBlock() instanceof LeavesBlock`.
+    /// `state.getBlock() instanceof LeavesBlock` — i.e. the caller's
+    /// `BlockState::is_in_tag("minecraft:leaves")` (the generated
+    /// `BlockTags.LEAVES`).
     pub is_leaves: bool,
-}
-
-/// `BlockTags.LEAVES` — the 11 `minecraft:leaves` blocks `LeavesBlock`
-/// covers. Issue #287's "smallest local leaves classifier": `rivet-registry`'s
-/// generated tag table lives behind the dev-only `blocks` feature, so the
-/// world slice hard-codes the tag it needs for `MOTION_BLOCKING_NO_LEAVES`.
-pub const LEAVES_BLOCKS: [&str; 11] = [
-    "minecraft:jungle_leaves",
-    "minecraft:oak_leaves",
-    "minecraft:spruce_leaves",
-    "minecraft:pale_oak_leaves",
-    "minecraft:dark_oak_leaves",
-    "minecraft:acacia_leaves",
-    "minecraft:birch_leaves",
-    "minecraft:azalea_leaves",
-    "minecraft:flowering_azalea_leaves",
-    "minecraft:mangrove_leaves",
-    "minecraft:cherry_leaves",
-];
-
-/// `state.getBlock() instanceof LeavesBlock` — the local leaves classifier over
-/// a block name (the caller passes `BlockState::block().name()` where it has
-/// the registry; `rivet-world` production cannot name a `BlockId` because the
-/// `blocks` feature is dev-only).
-pub fn is_leaves_block(name: &str) -> bool {
-    LEAVES_BLOCKS.contains(&name)
 }
 
 impl Types {
@@ -343,7 +326,9 @@ impl Heightmap {
     /// - `OCEAN_FLOOR_WG`/`OCEAN_FLOOR` — `MATERIAL_MOTION_BLOCKING`
     ///   (`state.blocksMotion()`);
     /// - `MOTION_BLOCKING` — `blocksMotion || !fluidState.isEmpty()`;
-    /// - `MOTION_BLOCKING_NO_LEAVES` — the same, and not a `LeavesBlock`.
+    /// - `MOTION_BLOCKING_NO_LEAVES` — the same, and not a `LeavesBlock` (the
+    ///   caller's `is_leaves` flag, resolved via the generated
+    ///   `BlockTags.LEAVES`).
     ///
     /// Only `WorldSurface`/`MotionBlocking`/`MotionBlockingNoLeaves` are sent
     /// to clients (the `Usage.CLIENT` set); the other three are worldgen/live
@@ -526,22 +511,6 @@ mod tests {
                 Types::MotionBlockingNoLeaves
             ]
         );
-    }
-
-    #[test]
-    fn leaves_classifier_covers_the_tag_and_nothing_else() {
-        // `BlockTags.LEAVES` — the 11 blocks `LeavesBlock` accepts (verified
-        // against the generated tag table, which is dev-only in rivet-world).
-        assert!(LEAVES_BLOCKS.contains(&"minecraft:oak_leaves"));
-        assert!(LEAVES_BLOCKS.contains(&"minecraft:cherry_leaves"));
-        assert_eq!(LEAVES_BLOCKS.len(), 11);
-        for name in LEAVES_BLOCKS {
-            assert!(is_leaves_block(name), "{name}");
-        }
-        // Not leaves: stone, logs (a separate tag), and a namespace-less name.
-        assert!(!is_leaves_block("minecraft:stone"));
-        assert!(!is_leaves_block("minecraft:oak_log"));
-        assert!(!is_leaves_block("oak_leaves"));
     }
 
     #[test]

@@ -24,8 +24,9 @@
 //! A FULL chunk carrying a decoded in-chunk `block_ticks`/`fluid_ticks` list
 //! reconstructs and carries the typed stored ticks on the result (plus the raw
 //! lists); nothing is installed into a runtime container, scheduled, or
-//! executed — the `LevelChunkTicks`/`ProtoChunkTicks` execution containers
-//! stay deferred with the tick-execution slice.
+//! executed — the `LevelChunkTicks`/`ProtoChunkTicks` containers now live in
+//! `ticks` (#522), but the wiring that installs unpacked ticks into them defers
+//! with the tick-execution slice.
 //!
 //! ## Block entities on the FULL path
 //!
@@ -153,7 +154,9 @@ pub struct ChunkReconstruction {
     /// The typed, per-chunk-filtered stored block ticks (`ChunkAccess.PackedTicks
     /// .blocks()`), faithfully decoded through `SavedTick.codec(...).listOf()`.
     /// Carried on the result — nothing schedules, executes, installs, or writes
-    /// them (#370 defers the `LevelChunkTicks`/`ProtoChunkTicks` containers).
+    /// them. The `LevelChunkTicks`/`ProtoChunkTicks` containers live in `ticks`
+    /// (#522); the wiring that installs them into reconstruction defers with the
+    /// tick-execution slice.
     pub stored_block_ticks: Vec<SavedTick<Block>>,
     /// The typed, per-chunk-filtered stored fluid ticks (`ChunkAccess.PackedTicks
     /// .fluids()`). Same carry semantics as [`Self::stored_block_ticks`].
@@ -621,7 +624,8 @@ mod tests {
         // The nether 0.0 fixture carries 13 real lava `fluid_ticks`; the FULL
         // chunk reconstructs and carries the typed stored ticks on the result
         // (plus the raw list). Nothing schedules or executes them — the
-        // `LevelChunkTicks`/`ProtoChunkTicks` containers stay deferred (#370).
+        // `LevelChunkTicks`/`ProtoChunkTicks` containers exist in `ticks`
+        // (#522) but are not wired into this reconstruction.
         let data = parse_fixture("the_nether", 0, 256);
         let reconstructed =
             reconstruct_runtime_chunk(ChunkPos::ZERO, data, height_accessor::create(0, 256), false)
