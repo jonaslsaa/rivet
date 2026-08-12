@@ -613,3 +613,74 @@ fn double_range_message_uses_java_double_formatting() {
     let error_ref = result.error_ref().expect("error");
     assert_eq!(error_ref.message(), "Value -0.0 outside of range [0.0:1.0]");
 }
+
+// ---------------------------------------------------------------------------
+// Codec.optionalFieldOf(name, default) — the NON-lenient with-default form
+// ---------------------------------------------------------------------------
+
+/// `optionalFieldOf` maps an `Option` field with `default` on the decode side
+/// and omits the field on encode when value-equal to `default` (the DFU
+/// non-lenient with-default form). Wrapped via `codec_of` so the tests drive
+/// the `Codec` surface directly.
+fn optional_field_codec() -> Arc<dyn rivet_serialization::Codec<i32, TestOps>> {
+    rivet_serialization::map_codec::codec_of(rivet_serialization::codec::optional_field_of::<
+        i32,
+        TestOps,
+    >(
+        "radius", rivet_serialization::codec::int_codec(), 2
+    ))
+}
+
+#[test]
+fn optional_field_of_decodes_absent_to_default() {
+    let ops = TestOps;
+    let codec = optional_field_codec();
+    // The field is absent: the map decodes to the default `2`.
+    let result = codec.parse(&ops, &Value::Map(vec![]));
+    assert!(result.is_success());
+    assert_eq!(*result.result().expect("success"), 2);
+}
+
+#[test]
+fn optional_field_of_round_trips_a_present_value() {
+    let ops = TestOps;
+    let codec = optional_field_codec();
+    // Present and non-default: round-trips through the element codec.
+    let result = codec.parse(
+        &ops,
+        &Value::Map(vec![("radius".to_string(), Value::Num(7.0))]),
+    );
+    assert!(result.is_success());
+    assert_eq!(*result.result().expect("success"), 7);
+    // Re-encoding a non-default value writes the field back.
+    let result = codec.encode(&7, &ops, &Value::Map(vec![]));
+    let encoded = result.result().expect("encode");
+    assert_eq!(
+        encoded,
+        &Value::Map(vec![("radius".to_string(), Value::Num(7.0))])
+    );
+}
+
+#[test]
+fn optional_field_of_omits_the_default_on_encode() {
+    let ops = TestOps;
+    let codec = optional_field_codec();
+    // Value-equal to `default` (`Objects.equals(a, default)`): the field is
+    // OMITTED on encode.
+    let result = codec.encode(&2, &ops, &Value::Map(vec![]));
+    let encoded = result.result().expect("encode");
+    assert_eq!(encoded, &Value::Map(vec![]));
+}
+
+#[test]
+fn optional_field_of_is_non_lenient() {
+    let ops = TestOps;
+    let codec = optional_field_codec();
+    // A PRESENT but malformed value is a decode error — NOT a fallback to the
+    // default (the `optionalField(name, codec, false)` lenient flag).
+    let result = codec.parse(
+        &ops,
+        &Value::Map(vec![("radius".to_string(), Value::Str("x".to_string()))]),
+    );
+    assert!(result.is_error());
+}
