@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn builder_defaults_and_round_trip() {
         let biome = plains();
-        assert_eq!(biome.has_precipitation(), true);
+        assert!(biome.has_precipitation());
         assert_eq!(biome.get_base_temperature(), 0.8);
         assert_eq!(biome.climate_settings.downfall, 0.4);
         assert_eq!(
@@ -970,22 +970,20 @@ mod tests {
             encoded,
             json!({"has_precipitation": true, "temperature": 0.8, "downfall": 0.4})
         );
-        let decoded = codec
+        let decoded = *codec
             .parse(&JsonOps::INSTANCE, &encoded)
             .result()
-            .expect("decode")
-            .clone();
+            .expect("decode");
         assert_eq!(decoded, value);
 
         // A present "temperature_modifier" decodes.
-        let decoded = codec
+        let decoded = *codec
             .parse(
                 &JsonOps::INSTANCE,
                 &json!({"has_precipitation": false, "temperature": -0.5, "temperature_modifier": "frozen", "downfall": 0.2}),
             )
             .result()
-            .expect("decode")
-            .clone();
+            .expect("decode");
         assert_eq!(decoded.temperature_modifier, TemperatureModifier::Frozen);
     }
 

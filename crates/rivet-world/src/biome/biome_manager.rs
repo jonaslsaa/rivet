@@ -201,15 +201,18 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// The recorded quart positions, shared across the recorder clone by `Arc`.
+    type Calls = Arc<Mutex<Vec<(i32, i32, i32)>>>;
+
     /// A `NoiseBiomeSource` recording the quart positions it is asked for in a
     /// shared `Mutex` (the trait is not `Any`-downcastable, so the recorder is
     /// shared by `Arc` instead).
     struct RecordingSource {
-        calls: Arc<Mutex<Vec<(i32, i32, i32)>>>,
+        calls: Calls,
     }
 
     impl RecordingSource {
-        fn new() -> (Arc<Mutex<Vec<(i32, i32, i32)>>>, Self) {
+        fn new() -> (Calls, Self) {
             let calls = Arc::new(Mutex::new(Vec::new()));
             (calls.clone(), RecordingSource { calls })
         }

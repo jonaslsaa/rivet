@@ -40,10 +40,12 @@
 //! (`HolderSet<Block>`) and `carveBlock` writes `BlockState`s — the block
 //! slice owns those types.
 //!
-//! The erased wildcard `ConfiguredWorldCarver<?>` (stored by
-//! `BiomeGenerationSettings.carvers` and the codecs) is NOT in this shell: the
-//! `BiomeGenerationSettings` holder and the codecs that consume it are not
-//! ported, so there is no consumer yet — it lands with the biome unit / #180.
+//! The erased wildcard `ConfiguredWorldCarver<?>` is provided as
+//! [`ConfiguredWorldCarverErased`] (erasing the carver to its `WorldCarverId`
+//! and the configuration to `dyn CarverConfiguration`) and is consumed by
+//! `BiomeGenerationSettings.carvers` (issue #178, the biome value core). The
+//! concrete configuration type is recovered by the #180 dispatch, which
+//! downcasts before calling the concrete carver's behavior.
 
 pub mod carver_configuration;
 pub mod configured_world_carver;

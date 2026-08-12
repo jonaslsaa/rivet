@@ -549,11 +549,10 @@ mod tests {
     fn spawner_data_codec_round_trips() {
         let codec = map_codec::codec_of(SpawnerData::map_codec_of::<JsonOps>());
         let input = json!({"type": "minecraft:pig", "minCount": 1, "maxCount": 4});
-        let decoded = codec
+        let decoded = *codec
             .parse(&JsonOps::INSTANCE, &input)
             .result()
-            .expect("decode")
-            .clone();
+            .expect("decode");
         assert_eq!(decoded, pig_spawner());
         let encoded = codec
             .encode_start(&JsonOps::INSTANCE, &decoded)
