@@ -293,6 +293,8 @@ mod tests {
 
     #[test]
     fn codec_rejects_zero_inner() {
+        // `Codec.intRange(1, Integer.MAX_VALUE)` rejects 0 on both decode and
+        // encode.
         let codec =
             rivet_serialization::map_codec::codec_of(very_biased_to_bottom_height_map_codec::<
                 JsonOps,
@@ -303,5 +305,15 @@ mod tests {
             "inner": 0
         });
         assert!(codec.parse(&JsonOps::INSTANCE, &input).is_error());
+        let zero_inner = VeryBiasedToBottomHeight::of(
+            VerticalAnchor::absolute(0),
+            VerticalAnchor::absolute(9),
+            0,
+        );
+        assert!(
+            codec
+                .encode_start(&JsonOps::INSTANCE, &zero_inner)
+                .is_error()
+        );
     }
 }
