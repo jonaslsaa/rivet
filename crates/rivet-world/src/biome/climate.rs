@@ -24,14 +24,16 @@
 //!   seeds the search's initial min-distance, so it affects tie-breaking, not
 //!   the result for distinct targets.
 //! - **`Parameter.CODEC`'s `min > max` check** — Java's `min.compareTo(max)`
-//!   is `Float.compare` total order (NaN > every value, +0.0 > -0.0), so the
-//!   port uses `f32::total_cmp`. `Parameter.span` uses plain `>` (Java's
-//!   primitive `>`), matching Java exactly.
+//!   is `Float.compare` total order (NaN > every value, +0.0 > -0.0, all NaN
+//!   payloads equal), so the port uses `java_float_compare` (the
+//!   `float_format` helper that canonicalizes NaN like `Float.compare`).
+//!   `Parameter.span` uses plain `>` (Java's primitive `>`), matching Java
+//!   exactly.
 //! - **The interval codec encode** — Java's `Objects.equals(getMin(p),
-//!   getMax(p))` uses `Float.equals` (total order); the generic
-//!   `interval_codec` compares with `PartialEq`. For `Parameter.CODEC` the
-//!   two agree on every reachable value (no NaN/−0.0 can come out of
-//!   `unquantizeCoord`).
+//!   getMax(p))` uses `Float.equals` (all NaNs equal, signed zeros distinct).
+//!   The generic `interval_codec` takes an explicit `equals` callback; the
+//!   `Parameter` caller passes `java_float_equals` (not `PartialEq`, which
+//!   would treat `-0.0 == 0.0` and `NaN != NaN`).
 
 use crate::levelgen::noise::density_function::{DensityFunction, SinglePointContext};
 use crate::levelgen::noise::density_functions;
@@ -212,10 +214,16 @@ impl Parameter {
     }
 
     /// `Climate.Parameter.span(float min, float max)` — throws when
-    /// `min > max` (primitive `>`, so NaN passes through).
+    /// `min > max` (primitive `>`, so NaN passes through). The message renders
+    /// the floats with Java's `Float.toString` (`2.0`, `-0.0`), not Rust
+    /// `Display` (which would print `2`/`-0`).
     pub fn span(min: f32, max: f32) -> Parameter {
         if min > max {
-            panic!("min > max: {} {}", min, max);
+            panic!(
+                "min > max: {} {}",
+                java_float_to_string(min),
+                java_float_to_string(max)
+            );
         }
         Parameter::new(quantize_coord(min), quantize_coord(max))
     }
@@ -1264,6 +1272,27 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn parameter_span_panic_message_uses_java_float_formatting() {
+        // Java `Parameter.span` throws `IllegalArgumentException` with
+        // `"min > max: " + min + " " + max` — float string concatenation uses
+        // `Float.toString`, so integral floats keep a decimal point and the
+        // negative-zero sign is preserved.
+        let panicked = std::panic::catch_unwind(|| Parameter::span(2.0, 1.0))
+            .expect_err("min > max must panic");
+        let message = panicked
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or("<non-String panic>");
+        assert_eq!(message, "min > max: 2.0 1.0");
+
+        // `-0.0` is NOT greater than `1.0` (primitive `>`), so this does not
+        // panic; pin the message only for a real min > max. And `0.0 > -0.0`
+        // is false under primitive `>` (matching Java), so no panic either.
+        assert!(std::panic::catch_unwind(|| Parameter::span(-0.0, 1.0)).is_ok());
+        assert!(std::panic::catch_unwind(|| Parameter::span(0.0, -0.0)).is_ok());
     }
 
     #[test]
