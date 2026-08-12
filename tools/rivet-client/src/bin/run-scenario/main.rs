@@ -3245,7 +3245,10 @@ fn run_generated_expected(work: &Path) -> Result<Value, RunnerError> {
                 oracle_bin.display()
             ))
         })?;
-    classify_extract_status(status, &out)?;
+    // The oracle refuses to write an empty/fabricated manifest (it returns
+    // Unverified before touching `--to`), so `report_out` is false here — the
+    // UNVERIFIED reason is the oracle's own message, not a file to inspect.
+    classify_oracle_status("generated-expected", false, status, &out)?;
     let text = fs::read_to_string(&out)?;
     let manifest: Value = serde_json::from_str(&text).map_err(RunnerError::Json)?;
     Ok(manifest)
@@ -3303,6 +3306,23 @@ fn compare_generated_content(manifest: &Value, transcript: &Value) -> Result<(),
                 "generated sampled chunk {key} is {status} (not minecraft:full): the seed-42 \
                  ground-truth handoff does not yet have full per-coordinate content there, so \
                  this acceptance stays UNVERIFIED"
+            )));
+        }
+        // A FULL chunk may still carry content the #519 capability boundary
+        // cannot yet construct (non-empty structures.starts, entities). The
+        // seed-42 reference records these flags honestly; refusing PASS here
+        // keeps the capability boundary honest instead of comparing a chunk the
+        // server could not have served faithfully — the exact guard the loaded
+        // comparator applies.
+        let flags: Vec<&str> = fingerprint["capability_flags"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if !flags.is_empty() {
+            return Err(RunnerError::Unverified(format!(
+                "generated sampled chunk {key} is minecraft:full but carries #519-uncarried \
+                 capability flags {flags:?}; the runner refuses PASS rather than trusting an \
+                 incomplete server"
             )));
         }
         // The manifest stores surface/bedrock/below_feet as 16×16 arrays
@@ -3363,25 +3383,35 @@ fn oracle_binary() -> PathBuf {
     crate_root().join("../../target/debug/rivet-oracle")
 }
 
-/// Map an `rivet-oracle extract-world` exit status onto the runner's error
-/// contract: a nonzero UNVERIFIED (3) from the oracle — a missing world
-/// layout — stays UNVERIFIED, while any other nonzero exit (a malformed CLI,
-/// an internal gate error, or a signal) is a hard Gate — never downgraded to
-/// UNVERIFIED.
-fn classify_extract_status(status: ExitStatus, out: &Path) -> Result<(), RunnerError> {
+/// Map an `rivet-oracle` subcommand exit status onto the runner's error
+/// contract: a nonzero UNVERIFIED (3) from the oracle — a missing
+/// ground-truth artifact — stays UNVERIFIED, while any other nonzero exit (a
+/// malformed CLI, an internal gate error, or a signal) is a hard Gate — never
+/// downgraded to UNVERIFIED. `subcommand` names the oracle subcommand in the
+/// message (a shared classifier must not claim `extract-world` when it was
+/// `generated-expected`), and `report_out` says whether the `--to` file was
+/// actually written and is worth pointing the operator at.
+fn classify_oracle_status(
+    subcommand: &str,
+    report_out: bool,
+    status: ExitStatus,
+    out: &Path,
+) -> Result<(), RunnerError> {
+    let see = if report_out {
+        format!("; see {}", out.display())
+    } else {
+        String::new()
+    };
     match status.code() {
         Some(0) => Ok(()),
         Some(code) if code == EXIT_UNVERIFIED as i32 => Err(RunnerError::Unverified(format!(
-            "rivet-oracle extract-world is UNVERIFIED (exit {code}); see {}",
-            out.display()
+            "rivet-oracle {subcommand} is UNVERIFIED (exit {code}){see}"
         ))),
         Some(code) => Err(RunnerError::Gate(format!(
-            "rivet-oracle extract-world exited with {code}; see {}",
-            out.display()
+            "rivet-oracle {subcommand} exited with {code}{see}"
         ))),
         None => Err(RunnerError::Gate(format!(
-            "rivet-oracle extract-world was terminated by a signal; see {}",
-            out.display()
+            "rivet-oracle {subcommand} was terminated by a signal{see}"
         ))),
     }
 }
@@ -3404,7 +3434,7 @@ fn run_extract_world(world: &Path, work: &Path) -> Result<Value, RunnerError> {
                 oracle_bin.display()
             ))
         })?;
-    classify_extract_status(status, &out)?;
+    classify_oracle_status("extract-world", true, status, &out)?;
     let text = fs::read_to_string(&out)?;
     let manifest: Value = serde_json::from_str(&text).map_err(RunnerError::Json)?;
     let full_count = manifest["chunks"]
@@ -3972,28 +4002,48 @@ mod tests {
     }
 
     #[test]
-    fn classify_extract_status_maps_oracle_exit_codes() {
-        // A missing world layout surfaces as the oracle's UNVERIFIED (exit 3)
-        // and must stay UNVERIFIED; a FAIL/USAGE exit and a signal must be a
-        // hard Gate — never downgraded to a missing-prerequisite UNVERIFIED.
+    fn classify_oracle_status_maps_exit_codes_and_names_the_subcommand() {
+        // A missing ground-truth artifact surfaces as the oracle's UNVERIFIED
+        // (exit 3) and must stay UNVERIFIED; a FAIL/USAGE exit and a signal must
+        // be a hard Gate — never downgraded to a missing-prerequisite
+        // UNVERIFIED. The shared classifier must name the subcommand it was
+        // invoked for (a generated-expected UNVERIFIED must not claim
+        // extract-world), and only mention the `--to` file when it was written.
         let ok = std::process::Command::new("true").status().unwrap();
-        assert!(classify_extract_status(ok, Path::new("/tmp/out.json")).is_ok());
+        assert!(
+            classify_oracle_status("generated-expected", false, ok, Path::new("/tmp/out.json"))
+                .is_ok()
+        );
 
         let unverified = std::process::Command::new("sh")
             .args(["-c", "exit 3"])
             .status()
             .unwrap();
-        match classify_extract_status(unverified, Path::new("/tmp/out.json")) {
+        match classify_oracle_status(
+            "generated-expected",
+            false,
+            unverified,
+            Path::new("/tmp/out.json"),
+        ) {
             Err(RunnerError::Unverified(message)) => {
-                assert!(message.contains("UNVERIFIED"), "got {message}");
+                assert!(message.contains("generated-expected"), "got {message}");
+                assert!(
+                    !message.contains("extract-world"),
+                    "must name the invoked subcommand, got {message}"
+                );
+                assert!(
+                    !message.contains("/tmp/out.json"),
+                    "an unwritten --to file must not be pointed at, got {message}"
+                );
             }
             other => panic!("expected Unverified for exit 3, got {other:?}"),
         }
 
         let fail = std::process::Command::new("false").status().unwrap();
-        match classify_extract_status(fail, Path::new("/tmp/out.json")) {
+        match classify_oracle_status("extract-world", true, fail, Path::new("/tmp/out.json")) {
             Err(RunnerError::Gate(message)) => {
-                assert!(message.contains("exited with 1"), "got {message}");
+                assert!(message.contains("extract-world"), "got {message}");
+                assert!(message.contains("/tmp/out.json"), "got {message}");
             }
             other => panic!("expected Gate for exit 1, got {other:?}"),
         }
@@ -4147,6 +4197,26 @@ mod tests {
             compare_generated_content(&manifest, &transcript).is_ok(),
             "bare observed ids must match namespaced ground truth after canonicalization"
         );
+    }
+
+    #[test]
+    fn compare_generated_content_is_unverified_on_uncarried_capability_flags() {
+        // A seed-42 reference FULL chunk that carries an uncarried #519 surface
+        // (non-empty entities) is beyond the full-construction capability
+        // boundary even though its status is minecraft:full — exactly like the
+        // loaded comparator, the runner must refuse PASS rather than trust a
+        // chunk the server could not have served faithfully.
+        let manifest = manifest_with_flags(0, 0, &["entities"]);
+        let transcript = generated_transcript_with(matching_sample(0, 0));
+        match compare_generated_content(&manifest, &transcript) {
+            Err(RunnerError::Unverified(message)) => {
+                assert!(
+                    message.contains("entities") && message.contains("refuses PASS"),
+                    "must name the flag and the refusal, got {message}"
+                );
+            }
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
     }
 
     #[test]
