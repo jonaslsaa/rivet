@@ -284,6 +284,10 @@ mod tests {
         // `EnumProperty{name=axis, clazz=class net.minecraft.core.Direction
         // $Axis, values=[x, y, z]}` (documented divergence in
         // `rivet_registry::block_state_property`).
+        // RivetTodo(#228): the `EnumProperty` tail is intentionally
+        // non-byte-identical to Paper's `IllegalArgumentException` message;
+        // re-check against a Paper oracle if property message fidelity is ever
+        // exercised.
         assert_eq!(
             msg,
             "StateDefinition{block=Block{minecraft:stone}, properties=[]} \
