@@ -28,11 +28,13 @@
 //! embeds `BlockPredicate.CODEC`, whose `matching_blocks`/`matching_fluids`/
 //! `matching_biomes` fields resolve the registry through the ops.
 //!
-//! The Java-exact `POSITIVE_FLOAT` / `Codec.floatRange` validation codecs
-//! (`positive_float` / `float_range` in [`noise_based_state_provider`]) are
-//! kept local to this unit: rivet-serialization's `float_range` diverges from
-//! Java's message, and the unit brief forbids editing rivet-serialization. The
-//! `InclusiveRange` value used by `DualNoiseProvider`'s `variety` field is a
+//! The Java-exact `POSITIVE_FLOAT` validation codec (`positive_float` in
+//! [`noise_based_state_provider`]) is kept local to this unit:
+//! rivet-serialization has no `POSITIVE_FLOAT` equivalent. `Codec.floatRange`
+//! (the `threshold`/`high_chance` fields) comes from
+//! `rivet_serialization::codec::float_range`, which is DFU-exact since the
+//! merged total-order change. The `InclusiveRange` value used by
+//! `DualNoiseProvider`'s `variety` field is a
 //! cross-unit stub in `rivet-util` (owned by `mc.util`), ported only to the
 //! surface this unit consumes.
 //!

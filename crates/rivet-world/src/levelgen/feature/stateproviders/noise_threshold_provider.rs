@@ -23,7 +23,7 @@ use crate::levelgen::feature::stateproviders::codec_helpers::{
     map_decoder_ap8, map_encoder_fields8,
 };
 use crate::levelgen::feature::stateproviders::noise_based_state_provider::{
-    build_noise, float_range, get_noise_value,
+    build_noise, get_noise_value,
 };
 use crate::levelgen::synth::normal_noise::{NoiseParameters, NormalNoise};
 use rivet_registry::block_state::BlockState;
@@ -127,8 +127,14 @@ pub fn noise_threshold_provider_map_codec<Ops: DynamicOps + 'static>()
         ),
         "scale".to_string(),
     );
-    let threshold = codec::field_of(float_range::<Ops>(-1.0, 1.0), "threshold".to_string());
-    let high_chance = codec::field_of(float_range::<Ops>(0.0, 1.0), "high_chance".to_string());
+    let threshold = codec::field_of(
+        codec::float_range::<Ops>(-1.0, 1.0),
+        "threshold".to_string(),
+    );
+    let high_chance = codec::field_of(
+        codec::float_range::<Ops>(0.0, 1.0),
+        "high_chance".to_string(),
+    );
     let default_state = codec::field_of(
         rivet_registry::block_state_codec::block_state_codec::<Ops>(),
         "default_state".to_string(),
@@ -264,9 +270,65 @@ mod tests {
         assert!(result.is_error());
         let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
         // The `threshold` field errors last, but the record surfaces the whole
+        // field-failure chain. `threshold` is `Codec.floatRange` (DFU), not
+        // `ExtraCodecs.floatRange`: the message is "Value X outside of range
+        // [min:max]" and the check uses Float.compare total order.
+        assert!(
+            msg.ends_with("Value 1.5 outside of range [-1.0:1.0]"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn codec_rejects_threshold_below_min() {
+        // A negative value below `-1.0` must be rejected: the `Float.compare`
+        // total order orders the negative reals IEEE-wise (`-5.0 < -1.0`), so
+        // the signed-intBits fallback in a naive total-order port would
+        // mis-order them. This pins the ordered `<`/`>` first.
+        let codec = map_codec::codec_of(noise_threshold_provider_map_codec::<JsonOps>());
+        let input = json!({
+            "seed": 7,
+            "noise": {"firstOctave": 0, "amplitudes": [1.0]},
+            "scale": 2.0,
+            "threshold": -5.0,
+            "high_chance": 0.25,
+            "default_state": {"Name": "minecraft:air"},
+            "low_states": [{"Name": "minecraft:stone"}],
+            "high_states": [{"Name": "minecraft:oak_planks"}]
+        });
+        let result = codec.parse(&JsonOps::INSTANCE, &input);
+        assert!(result.is_error());
+        let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
+        assert!(
+            msg.ends_with("Value -5.0 outside of range [-1.0:1.0]"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn codec_rejects_negative_zero_high_chance() {
+        // `high_chance` is `Codec.floatRange(0.0F, 1.0F)` (DFU), whose check
+        // uses Float.compare total order: `Float.compare(-0.0, 0.0) = -1`, so a
+        // `-0.0` value fails the `0.0` lower bound. Rust `PartialOrd` would
+        // accept `-0.0 >= 0.0`, so this pins the total-order comparison.
+        let codec = map_codec::codec_of(noise_threshold_provider_map_codec::<JsonOps>());
+        let input = json!({
+            "seed": 7,
+            "noise": {"firstOctave": 0, "amplitudes": [1.0]},
+            "scale": 2.0,
+            "threshold": 0.0,
+            "high_chance": -0.0,
+            "default_state": {"Name": "minecraft:air"},
+            "low_states": [{"Name": "minecraft:stone"}],
+            "high_states": [{"Name": "minecraft:oak_planks"}]
+        });
+        let result = codec.parse(&JsonOps::INSTANCE, &input);
+        assert!(result.is_error());
+        let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
+        // The `high_chance` field errors last; the record surfaces the whole
         // field-failure chain.
         assert!(
-            msg.ends_with("Value must be within range [-1.0;1.0]: 1.5"),
+            msg.ends_with("Value -0.0 outside of range [0.0:1.0]"),
             "got: {msg}"
         );
     }
