@@ -155,10 +155,10 @@ pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
         Tag::List(ListTag::with_list(vec![Tag::Compound(palette)])),
     );
     // The seed folds into the `block_states.data` long array — the per-block
-    // packed placement real worldgen derives from the seed. Different seeds
-    // (or coordinates) produce different arrays, so the serialized digest
-    // differs at every chunk for any seed pair, never just an opposite-parity
-    // pair.
+    // packed placement real worldgen derives from the seed. Different seeds at
+    // the same coordinate produce different arrays, so two trees compared
+    // coordinate-for-coordinate (as the diff does) differ at every chunk for
+    // any seed pair, never just an opposite-parity pair.
     bs.put_long_array("data", seed_block_data(seed, cx, cz));
     section.put("block_states".to_string(), Tag::Compound(bs));
     section.put_byte_array("SkyLight", vec![0i8; 2048]);
@@ -191,11 +191,17 @@ pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
 
 /// Deterministic per-chunk block data derived from the world seed: a fixed
 /// 256-long array mixed with `(seed, cx, cz)` via a small xorshift-style
-/// mixer. For a fixed coordinate the seed mix is a bijection mod 2^64 (the
+/// mixer. For a **fixed coordinate** the seed mix is a bijection mod 2^64 (the
 /// multiplier is odd and the xorshift steps are invertible), so different seeds
-/// *always* produce different arrays — and distinct coordinates diverge too —
-/// so the bogus-seed negative never reduces to a single parity bit (which
-/// would collide for same-parity seeds).
+/// at the same coordinate *always* produce different arrays — the property the
+/// bogus-seed negative relies on, since it compares each coordinate across two
+/// trees. For a fixed seed, distinct coordinates diverge too (the xorshift
+/// steps are invertible and the coordinate xors differ). The joint
+/// (seed, coordinate) space is *not* injective: a seed `s` at `(cx, cz)` and a
+/// different seed `s'` at a different coordinate can coincide, so the claim is
+/// per-coordinate only, and the tests vary one axis at a time. Either way a
+/// two-seed comparison never reduces to a single parity bit (which would
+/// collide for same-parity seeds).
 #[cfg(test)]
 fn seed_block_data(seed: i64, cx: i32, cz: i32) -> Vec<i64> {
     let mut state = (seed as u64)
