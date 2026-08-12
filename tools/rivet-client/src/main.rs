@@ -7,17 +7,19 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use azalea::ClientInformation;
 use azalea::WalkDirection;
-use azalea::app::{App, Plugin, Update};
+use azalea::app::{App, Plugin, PreUpdate, Update};
 use azalea::attack::handle_attack_queued;
+use azalea::connection::read_packets;
 use azalea::core::game_type::GameMode;
 use azalea::core::position::BlockPos;
 use azalea::core::tick::GameTick;
 use azalea::ecs::message::MessageReader;
 use azalea::ecs::observer::On;
-use azalea::ecs::prelude::{Query, Res, Resource};
+use azalea::ecs::prelude::{Query, Res, Resource, With};
 use azalea::ecs::schedule::IntoScheduleConfigs;
-use azalea::entity::{EntityGeometryUpdateSystems, LastSentPosition, Physics};
+use azalea::entity::{EntityGeometryUpdateSystems, LastSentPosition, LocalEntity, Physics};
 use azalea::join::{ConnectionFailedEvent, poll_create_connection_task};
 use azalea::local_player::WorldHolder;
 use azalea::movement::{
@@ -547,6 +549,40 @@ fn translatable_key(reason: &azalea::FormattedText) -> Option<String> {
     match reason {
         azalea::FormattedText::Translatable(c) => Some(c.key.clone()),
         _ => None,
+    }
+}
+
+/// The loaded-recenter view-distance pin (issue #561). The `loaded-recenter`
+/// reproduction requires the server to resolve send radius 3 (the send-3 spawn
+/// view is a strict subset of the booted 117-chunk square), which needs the
+/// client to advertise client view distance 2. Azalea cannot set that
+/// deterministically from the handler: `ClientBuilder::start` returns `AppExit`
+/// (the user handler is dispatched as a bevy task per event), azalea inserts
+/// `ClientInformation::default()` (view 8) on the local player at join, and
+/// `send_client_information` writes it during the config-state transition
+/// (`RemovedComponents<InLoginState>`), so a handler-side
+/// `set_client_information` at `Event::Init` races that write and loses. The
+/// deterministic injection point is the ECS itself: a `PreUpdate` system that
+/// pins the local player's `ClientInformation.view_distance` to 2 immediately
+/// after `read_packets` (which is where `InLoginState` is removed) and before
+/// the `Update`-schedule `send_client_information` reads the component — so the
+/// wire packet always carries view 2 and the join burst always diff send 3.
+#[derive(Clone, Copy)]
+struct RecenterView2Pin;
+
+impl Plugin for RecenterView2Pin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(PreUpdate, pin_recenter_view_distance.after(read_packets));
+    }
+}
+
+fn pin_recenter_view_distance(
+    mut query: Query<(&mut ClientInformation, &State), With<LocalEntity>>,
+) {
+    for (mut client_information, state) in &mut query {
+        if state.mode == Mode::LoadedRecenter {
+            client_information.view_distance = 2;
+        }
     }
 }
 
@@ -1388,15 +1424,13 @@ async fn handle(bot: Client, event: Event, state: State) {
             // The loaded-recenter reproduction (issue #561) must resolve send
             // radius 3, not the default view-8 send-4 (whose very first east
             // boundary move already fails — it cannot show a repeated crossing).
-            // Advertise view distance 2 before the config-state handoff (the
-            // azalea-recommended Init point) so the server's join burst and
-            // every later recenter diff against send 3.
-            if state.mode == Mode::LoadedRecenter {
-                let _ = bot.set_client_information(azalea::ClientInformation {
-                    view_distance: 2,
-                    ..Default::default()
-                });
-            }
+            // The view-distance-2 advertisement is NOT set here: azalea sends
+            // ClientInformation during the config-state transition
+            // (`send_client_information` on `InLoginState` removal) and the
+            // handler is dispatched as a bevy task, so a handler-side
+            // `set_client_information` races that send and loses. The
+            // `RecenterView2Pin` plugin pins the component in PreUpdate after
+            // `read_packets`, deterministically before the config-state send.
         }
         Event::Login => emit(json!({ "event": "login" })),
         Event::ReceiveChunk(pos) => {
@@ -1531,6 +1565,7 @@ async fn main() -> ExitCode {
     let account = Account::offline(&args.username);
     let client = ClientBuilder::new()
         .reconnect_after(None)
+        .add_plugins(RecenterView2Pin)
         .add_plugins(ConnectionFailurePlugin(connection_failure))
         .add_plugins(MoveSamplerPlugin)
         .add_plugins(MoveObservationPlugin(MoveObservation {
