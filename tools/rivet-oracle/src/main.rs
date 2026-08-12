@@ -5581,7 +5581,7 @@ mod tests {
         assert!(run_hash_diff(&paper, &rivet).is_err());
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &rivet)),
-            HASH_EXIT_UNVERIFIED
+            EXIT_UNVERIFIED
         );
 
         // The genuine #175 7(e) assertion is on the *payload* level: the two
@@ -5635,10 +5635,7 @@ mod tests {
         // Provenance now matches, so the diff must proceed to digest comparison
         // and FAIL — never a vacuous green.
         assert!(!run_hash_diff(&paper, &rivet).unwrap());
-        assert_eq!(
-            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
-            HASH_EXIT_FAIL
-        );
+        assert_eq!(hash_diff_exit(&hash_diff_args(&paper, &rivet)), EXIT_FAIL);
         // Every corpus chunk diverged (the bogus-seed world differs at every
         // chunk) and no chunk is one-sided: the FAIL names all of them.
         let (mismatches, paper_only, rivet_only, compared) = compute_hash_diffs(
