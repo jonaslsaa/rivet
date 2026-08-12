@@ -175,6 +175,7 @@ fn check_outcome_terminal(records: &[Value], outcome: &str) -> Result<(), String
         "timeout" => "timeout",
         "connection_failed" => "connection_failed",
         "disconnected" => "disconnect",
+        "loaded" => "loaded",
         other => {
             return Err(format!(
                 "transcript has no terminal event (outcome {other}) — the run never completed \
@@ -194,6 +195,12 @@ fn outcome(records: &[Value]) -> &'static str {
         .any(|r| r.get("event") == Some(&json!("joined")))
     {
         return "spawned";
+    }
+    if records
+        .iter()
+        .any(|r| r.get("event") == Some(&json!("loaded")))
+    {
+        return "loaded";
     }
     if records
         .iter()
@@ -932,6 +939,152 @@ pub fn rivet_kick_verdict(t: &Value) -> Result<&'static str, String> {
         ));
     }
     Ok("disconnect (decoded multiplayer.disconnect.invalid_player_movement after spawn)")
+}
+
+/// Normalize the loaded-world client transcript (issue #374): the client
+/// joined a server booted against a real loaded world (`--level <copy>`),
+/// waited for chunk quiescence, then sampled the genuine per-coordinate block
+/// content its own loaded `ChunkStorage` holds and emitted the `loaded`
+/// record.
+///
+/// The transcript carries the spawn chunk, the received-chunk count, and the
+/// per-cell samples (surface / bedrock / below_feet block names at world
+/// coordinates anchored to each sampled chunk's center). This is the
+/// observed-content half the runner compares against the read-only
+/// ground-truth manifest (`rivet-oracle extract-world`); the `surface` /
+/// `bedrock` / `below_feet` names are the load-bearing evidence — a server
+/// that merely echoes repeated superflat bytes cannot match a genuine
+/// terrain chunk's distinct block set.
+pub fn normalize_loaded(raw: &str) -> Result<Value, String> {
+    let records = parse_records(raw)?;
+
+    let lifecycle: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.get("event").and_then(Value::as_str))
+        .filter(|e| LIFECYCLE_EVENTS.contains(e))
+        .map(str::to_owned)
+        .collect();
+
+    let outcome = outcome(&records);
+    check_outcome_terminal(&records, outcome)?;
+
+    let azalea_revision = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("starting")))
+        .and_then(|r| r.get("azalea_revision").and_then(Value::as_str))
+        .map(str::to_owned);
+
+    let loaded = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("loaded")))
+        .cloned();
+
+    let mut transcript = json!({
+        "protocol": PROTOCOL,
+        "scenario": "loaded",
+        "outcome": outcome,
+        "lifecycle": lifecycle,
+        "azalea_revision": azalea_revision,
+        "excluded": serde_json::Map::new(),
+    });
+
+    if let Some(loaded) = loaded {
+        transcript["loaded"] = json!({
+            "position": loaded.get("position").cloned().unwrap_or(Value::Null),
+            "spawn_chunk": loaded.get("spawn_chunk").cloned().unwrap_or(Value::Null),
+            "chunk_count": loaded.get("chunk_count").cloned().unwrap_or(Value::Null),
+            // The walk evidence (position before/after a bounded forward walk)
+            // is carried through so the runner can record the join/dwell/walk
+            // evidence, not assert it.
+            "walk": loaded.get("walk").cloned().unwrap_or(Value::Null),
+            "samples": loaded.get("samples").cloned().unwrap_or_else(|| json!([])),
+        });
+    }
+
+    Ok(transcript)
+}
+
+/// The minimum received-chunk count a loaded-world run must prove: the server
+/// must have served the client a genuine loaded view (chunks from the real
+/// world, not an empty/zero set). Mirrors the join scenario's deterministic
+/// send-set but is deliberately a floor, not an exact count — the loaded-world
+/// server's send-set is not yet pinned to the 117-chunk Rivet join contract.
+pub const LOADED_MIN_CHUNKS: usize = 1;
+
+/// Verify a normalized `loaded` transcript proves the real Azalea client
+/// joined a server serving genuine per-coordinate world content, then sampled
+/// it from its own loaded `ChunkStorage`.
+///
+/// Returns a human-readable description of the loaded-content boundary reached.
+/// Errors when the transcript does not prove that:
+///
+/// - the outcome is anything but `spawned` — the client never completed
+///   login/configuration into play against the loaded-world port.
+/// - the lifecycle does not contain both `login` and `spawn`.
+/// - `azalea_revision != PINNED_AZALEA_REVISION`.
+/// - the `loaded` record is absent or its `samples` is empty — the client did
+///   not sample any loaded content.
+/// - `chunk_count < LOADED_MIN_CHUNKS` — the server served no real view.
+///
+/// This verdict deliberately does NOT compare the sampled block content
+/// against the ground-truth manifest: that comparison lives in the runner
+/// (`rivet_loaded_verdict` below feeds the manifest, which is external to the
+/// client transcript). The verdict here only proves the client observed and
+/// reported genuine per-coordinate content.
+pub fn rivet_loaded_verdict(t: &Value) -> Result<&'static str, String> {
+    let outcome = t
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if outcome != "loaded" {
+        return Err(format!(
+            "loaded transcript outcome is {outcome} (expected loaded): the client never \
+             completed login/configuration into play and sampled the loaded world. \
+             connection_failed/timeout mean the connect or first write failed, and disconnected \
+             means the server closed the client before play"
+        ));
+    }
+    let lifecycle: Vec<&str> = t
+        .get("lifecycle")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !lifecycle.contains(&"login") || !lifecycle.contains(&"spawn") {
+        return Err(format!(
+            "loaded transcript lifecycle is {lifecycle:?} (expected to contain login and spawn) — \
+             malformed transcript or the client never reached play"
+        ));
+    }
+    if t.get("azalea_revision").and_then(Value::as_str) != Some(PINNED_AZALEA_REVISION) {
+        return Err(format!(
+            "loaded transcript azalea_revision is {:?} (expected {PINNED_AZALEA_REVISION}) — the \
+             client was not built from the pinned unmodified Azalea revision",
+            t.get("azalea_revision").and_then(Value::as_str)
+        ));
+    }
+    let loaded = t
+        .get("loaded")
+        .ok_or_else(|| "loaded transcript has no `loaded` record".to_owned())?;
+    let samples = loaded
+        .get("samples")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "loaded record has no samples array".to_owned())?;
+    if samples.is_empty() {
+        return Err(
+            "loaded record has no samples: the client did not sample any loaded content".to_owned(),
+        );
+    }
+    let chunk_count = loaded
+        .get("chunk_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    if chunk_count < LOADED_MIN_CHUNKS {
+        return Err(format!(
+            "loaded transcript chunk_count is {chunk_count} (expected at least \
+             {LOADED_MIN_CHUNKS}): the server served no genuine loaded view"
+        ));
+    }
+    Ok("loaded world content observed and sampled (per-coordinate block content reported)")
 }
 
 #[cfg(test)]
@@ -1754,5 +1907,73 @@ mod tests {
         assert_eq!(t["outcome"], "connection_failed");
         assert_eq!(t["lifecycle"], json!(["init"]));
         assert!(t.get("kick").is_none());
+    }
+
+    /// Raw loaded-mode client records: a genuine join against a loaded-world
+    /// server that spawned the client and served a real view, then sampled
+    /// per-coordinate block content (surface/bedrock/below_feet) near the
+    /// spawn chunk.
+    fn loaded_records() -> String {
+        [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":40,"mode":"loaded","azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":9.5,"y":-60.0,"z":-3.5},"protocol":1}"#,
+            r#"{"event":"loaded","position":{"x":9.5,"y":-60.0,"z":-3.5},"spawn_chunk":[0,-1],"chunk_count":81,"walk":{"before":{"x":9.5,"y":-60.0,"z":-3.5},"after":{"x":10.9,"y":-60.0,"z":-3.5}},"samples":[{"chunk_x":0,"chunk_z":0,"sample_x":8,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"},{"chunk_x":1,"chunk_z":0,"sample_x":24,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"}],"observation_ms":4100,"protocol":1}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn loaded_verdict_accepts_a_genuine_loaded_content_run() {
+        let t = normalize_loaded(&loaded_records()).expect("normalize");
+        assert_eq!(t["outcome"], "loaded");
+        assert_eq!(t["loaded"]["chunk_count"], json!(81));
+        assert_eq!(
+            t["loaded"]["samples"][0]["surface"],
+            "minecraft:grass_block"
+        );
+        assert!(rivet_loaded_verdict(&t).is_ok());
+    }
+
+    #[test]
+    fn loaded_verdict_rejects_an_empty_sample_set() {
+        // A transcript whose `loaded` record has no samples (the client did not
+        // sample any content) must not pass — the server never served a genuine
+        // loaded world.
+        let mut t = normalize_loaded(&loaded_records()).expect("normalize");
+        t["loaded"]["samples"] = json!([]);
+        assert!(
+            rivet_loaded_verdict(&t).is_err(),
+            "an empty sample set must not pass"
+        );
+    }
+
+    #[test]
+    fn loaded_verdict_rejects_a_failed_join() {
+        // connection_failed means the client never reached play, so the loaded
+        // content was never sampled.
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"mode":"loaded","azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"connection_failed","reason":"failed to create connection","protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_loaded(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "connection_failed");
+        assert!(
+            rivet_loaded_verdict(&t).is_err(),
+            "a failed join must not pass"
+        );
+    }
+
+    #[test]
+    fn loaded_verdict_rejects_a_wrong_azalea_revision() {
+        let mut t = normalize_loaded(&loaded_records()).expect("normalize");
+        t["azalea_revision"] = json!("deadbeef");
+        assert!(
+            rivet_loaded_verdict(&t).is_err(),
+            "a client not built from the pinned Azalea revision must not pass"
+        );
     }
 }
