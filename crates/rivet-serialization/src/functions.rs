@@ -28,6 +28,9 @@ pub type Fn4<A, B, C, D, R> = Arc<dyn Fn(&A, &B, &C, &D) -> R + Send + Sync>;
 /// 5-argument by-reference function (DFU `Function5`).
 pub type Fn5<A, B, C, D, E, R> = Arc<dyn Fn(&A, &B, &C, &D, &E) -> R + Send + Sync>;
 
+/// 6-argument by-reference function (DFU `Function6`).
+pub type Fn6<A, B, C, D, E, F, R> = Arc<dyn Fn(&A, &B, &C, &D, &E, &F) -> R + Send + Sync>;
+
 /// `Function<? super A, ? extends DataResult<? extends B>>` — a decoding step
 /// (`flatMap`/`flatXmap`/`validate`).
 pub type DecoderFn<A, B> = Arc<dyn Fn(&A) -> DataResult<B> + Send + Sync>;
