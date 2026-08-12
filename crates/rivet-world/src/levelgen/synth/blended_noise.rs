@@ -79,6 +79,22 @@ impl BlendedNoise {
         )
     }
 
+    /// `BlendedNoise.withNewRandom(RandomSource)` — re-seeds the three stacks
+    /// from `terrainRandom`, keeping the scale/factor parameters. The
+    /// `RandomState.NoiseWiringHelper` (`mc.world.level.levelgen.noisegen`)
+    /// calls this to bind the terrain random into the pre-bootstrapped
+    /// `BlendedNoise` values.
+    pub fn with_new_random(&self, random: &mut impl rivet_util::random::RandomSource) -> Self {
+        Self::new(
+            random,
+            self.xz_scale,
+            self.y_scale,
+            self.xz_factor,
+            self.y_factor,
+            self.smear_scale_multiplier,
+        )
+    }
+
     /// The private `BlendedNoise(PerlinNoise, PerlinNoise, PerlinNoise,
     /// double, ...)` constructor. The arity mirrors Java's 8-argument private
     /// constructor exactly.
