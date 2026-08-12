@@ -1031,8 +1031,9 @@ impl IntervalSelect {
     /// `validate` applies: the threshold count must be `functions.len() - 1`,
     /// and the thresholds must be non-decreasing (Guava
     /// `Comparators.isInOrder(thresholds, Double::compare)` returns `false` only
-    /// on a strictly decreasing adjacent pair, so equal thresholds are
-    /// accepted).
+    /// when a `Double.compare(prev, next) > 0`). `total_cmp` mirrors
+    /// `Double.compare` exactly — NaN sorts greatest (so `[x, NaN]` is accepted,
+    /// `[NaN, x]` rejected) and `-0.0 < 0.0`.
     fn validate(interval: &IntervalSelect) -> DataResult<IntervalSelect> {
         if interval.thresholds.len() != interval.functions.len() - 1 {
             return DataResult::error(format!(
@@ -1042,7 +1043,11 @@ impl IntervalSelect {
                 interval.thresholds.len()
             ));
         }
-        if !interval.thresholds.windows(2).all(|w| w[0] <= w[1]) {
+        if !interval
+            .thresholds
+            .windows(2)
+            .all(|w| w[0].total_cmp(&w[1]).is_le())
+        {
             return DataResult::error(
                 "Threshold values must be ordered from smallest to largest".to_string(),
             );
@@ -3947,14 +3952,29 @@ mod tests {
     #[test]
     fn interval_select_accepts_non_decreasing_thresholds() {
         // Java's `validate` uses Guava `Comparators.isInOrder(thresholds,
-        // Double::compare)`, which returns false only on a strictly decreasing
-        // adjacent pair — equal thresholds decode successfully.
+        // Double::compare)`, which returns false only when a
+        // `Double.compare(prev, next) > 0` — equal thresholds decode
+        // successfully, and NaN sorts greatest (so `[x, NaN]` is accepted).
         let valid = IntervalSelect::validate(&IntervalSelect::new(
             constant(0.0),
             vec![0.0, 0.0, 1.0],
             vec![constant(0.0), constant(1.0), constant(2.0), constant(3.0)],
         ));
         assert!(valid.result().is_some());
+        // NaN-as-largest: `Double.compare(0.0, NaN) = -1`, so `[0.0, NaN]`
+        // is in order (accepted), while `[NaN, 0.0]` is not (rejected).
+        let nan_last = IntervalSelect::validate(&IntervalSelect::new(
+            constant(0.0),
+            vec![0.0, f64::NAN],
+            vec![constant(0.0), constant(1.0), constant(2.0)],
+        ));
+        assert!(nan_last.result().is_some());
+        let nan_first = IntervalSelect::validate(&IntervalSelect::new(
+            constant(0.0),
+            vec![f64::NAN, 0.0],
+            vec![constant(0.0), constant(1.0), constant(2.0)],
+        ));
+        assert!(nan_first.result().is_none());
         // Strictly decreasing is rejected.
         let invalid = IntervalSelect::validate(&IntervalSelect::new(
             constant(0.0),

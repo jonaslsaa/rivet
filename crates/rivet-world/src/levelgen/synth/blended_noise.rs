@@ -112,12 +112,10 @@ impl BlendedNoise {
     }
 
     /// `compute(DensityFunction.FunctionContext)` — with the `FunctionContext`
-    /// seam dropped, takes the block coordinates directly.
-    ///
-    /// RivetTodo(#177): Java takes a `DensityFunction.FunctionContext` and
-    /// reads `blockX`/`blockY`/`blockZ`; the context type is part of the
-    /// unported `DensityFunction` layer, so this port takes the ints it would
-    /// read.
+    /// seam dropped, takes the block coordinates directly. The
+    /// `DensityFunction` impl in `density_functions` (the `old_blended_noise`
+    /// dispatch branch) reads `blockX`/`blockY`/`blockZ` off the context and
+    /// forwards them here.
     pub fn compute(&self, block_x: i32, block_y: i32, block_z: i32) -> f64 {
         let limit_x = block_x as f64 * self.xz_multiplier;
         let limit_y = block_y as f64 * self.y_multiplier;
