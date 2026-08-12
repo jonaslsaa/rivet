@@ -30,6 +30,7 @@ pub mod delegate_data_output;
 pub mod extra_codecs;
 pub mod fast_buffered_input_stream;
 pub mod hash_ops;
+pub mod inclusive_range;
 pub mod java_float_format;
 pub mod java_hash;
 pub mod known_pack;
