@@ -5577,8 +5577,14 @@ mod tests {
             write_hash_fixture_tree_seeded(&tmp.join("rivet"), &all_corpus_coordinates(), 999);
         // The two trees carry different seeds — provenance drift, so the diff
         // refuses to compare (UNVERIFIED, 3): a different-seed capture is a
-        // different world, and comparing its digests would be meaningless.
-        assert!(run_hash_diff(&paper, &rivet).is_err());
+        // different world, and comparing its digests would be meaningless. The
+        // error is asserted to be the provenance refusal itself, not just any
+        // failure — an unrelated Err would not satisfy the stated intent.
+        let err = run_hash_diff(&paper, &rivet).unwrap_err();
+        assert!(
+            err.to_string().contains("provenance"),
+            "the diff must refuse on provenance drift, got: {err}"
+        );
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &rivet)),
             EXIT_UNVERIFIED
@@ -5590,11 +5596,18 @@ mod tests {
         // deterministically (asserted in mutate.rs too).
         let paper_m = load_hash_manifest(&paper).unwrap();
         let rivet_m = load_hash_manifest(&rivet).unwrap();
+        assert!(
+            paper_m.full_count > 0,
+            "the baseline tree must carry FULL chunks for the every-chunk-differs claim"
+        );
         let mut different = 0usize;
         for pe in paper_m.entries.iter().filter(|e| e.is_full()) {
-            let Some(re) = rivet_m.full_entry(&pe.dim, pe.cx, pe.cz) else {
-                continue;
-            };
+            // Every paper FULL chunk must exist on the bogus-seed side too — a
+            // missing counterpart is a hard failure, never a skipped comparison
+            // that could silently shrink the every-chunk-differs claim.
+            let re = rivet_m
+                .full_entry(&pe.dim, pe.cx, pe.cz)
+                .expect("bogus-seed tree has a FULL counterpart for every paper FULL chunk");
             if pe.xxh3_64 != re.xxh3_64 {
                 different += 1;
             }
@@ -5714,10 +5727,19 @@ mod tests {
         // claims (corpus seed 0), so the tree is internally consistent: a
         // manifest recording a seed the payloads were not generated under would
         // be exactly the lying-manifest scenario this gate exists to catch.
+        // The fixture builder embeds the seed as i64, so corpus seed 0 must fit
+        // in i64 for its payload bit pattern to match the u64 decimal string the
+        // region manifest records (a high-bit seed would sign-flip through
+        // `as i64` and break coverage's u64 parse).
+        let seed = corpus::corpus_seed(0);
+        assert!(
+            seed <= i64::MAX as u64,
+            "corpus seed 0 ({seed}) must fit in i64 for the seeded fixture builder"
+        );
         let dir = write_hash_fixture_tree_seeded(
             &tmp.join("tree"),
             &all_corpus_coordinates(),
-            corpus::corpus_seed(0) as i64,
+            seed as i64,
         );
         // A region manifest with provenance the source region capture would
         // carry: flat level type, uncompressed regions, corpus seed 0.

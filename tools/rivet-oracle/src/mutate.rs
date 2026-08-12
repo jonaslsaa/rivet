@@ -191,9 +191,11 @@ pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
 
 /// Deterministic per-chunk block data derived from the world seed: a fixed
 /// 256-long array mixed with `(seed, cx, cz)` via a small xorshift-style
-/// mixer. Different seeds (or different coordinates) produce different arrays
-/// with overwhelming probability, so the bogus-seed negative never reduces to
-/// a single parity bit (which would collide for same-parity seeds).
+/// mixer. For a fixed coordinate the seed mix is a bijection mod 2^64 (the
+/// multiplier is odd and the xorshift steps are invertible), so different seeds
+/// *always* produce different arrays — and distinct coordinates diverge too —
+/// so the bogus-seed negative never reduces to a single parity bit (which
+/// would collide for same-parity seeds).
 #[cfg(test)]
 fn seed_block_data(seed: i64, cx: i32, cz: i32) -> Vec<i64> {
     let mut state = (seed as u64)

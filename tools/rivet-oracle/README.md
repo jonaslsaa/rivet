@@ -477,11 +477,11 @@ come from the committed M2 region payloads via the rivet-nbt codec.
   an unrelated divergence) is rejected as a wrong-reason pass. `kind` is
   `block`/`light`/`heightmap`/`nbt-order`/`nbt-key`/`all` (runs every class, so a
   future mutation the comparator silently ignores is caught). Order-only
-  `nbt-order` tampering is flagged as triage (canonical-identical) but still
-  fails — order divergence is divergence; `nbt-key` inserts a root NBT key
-  Paper's writer never emits and is a real content change (canonical-identical
-  to nothing). The corrupted copy keeps the original manifest's seed so the
-  tamper is the only divergence.
+  `nbt-order` tampering is flagged as triage (canonical-identical to the
+  original) but still fails — order divergence is divergence; `nbt-key` inserts
+  a root NBT key Paper's writer never emits, a real content change whose
+  canonical digest differs from the original (unlike `nbt-order`). The corrupted
+  copy keeps the original manifest's seed so the tamper is the only divergence.
 
 The corpus (`corpus.json`) is the single source of truth for which seeds and
 coordinates a green sweep must cover; coverage is always reported against it,
