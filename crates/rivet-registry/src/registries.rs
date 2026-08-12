@@ -67,6 +67,10 @@ pub static DIMENSION: LazyLock<ResourceKey<Registry<Level>>> = LazyLock::new(|| 
 /// numeric fluid id over the generated `FLUID_BY_*` tables, mirroring
 /// `BlockId`); fluid behaviour and `FluidState` defer with the
 /// `mc.world.level.material` unit.
+///
+/// Gated behind `blocks`: the `FluidId` element type reads the generated fluid
+/// tables, which exist only under the `blocks` feature.
+#[cfg(feature = "blocks")]
 pub static FLUID: LazyLock<ResourceKey<Registry<FluidId>>> =
     LazyLock::new(|| ResourceKey::create_registry_key(Identifier::with_default_namespace("fluid")));
 
@@ -78,6 +82,10 @@ pub static FLUID: LazyLock<ResourceKey<Registry<FluidId>>> =
 /// numeric biome id over the generated `BIOME_BY_*` tables, mirroring
 /// `BlockId`); the `Biome` value type defers with the
 /// `mc.world.level.biome` unit.
+///
+/// Gated behind `blocks`: the `BiomeId` element type reads the generated biome
+/// tables, which exist only under the `blocks` feature.
+#[cfg(feature = "blocks")]
 pub static BIOME: LazyLock<ResourceKey<Registry<BiomeId>>> = LazyLock::new(|| {
     ResourceKey::create_registry_key(Identifier::with_default_namespace("worldgen/biome"))
 });
@@ -211,9 +219,11 @@ pub struct LevelStem;
 /// tests compare `Holder::Reference` values).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DimensionType;
+#[cfg(feature = "blocks")]
 pub use crate::biome_id::BiomeId;
 pub use crate::block_entity_type::BlockEntityType;
 pub use crate::feature_size_type::FeatureSizeTypeId;
+#[cfg(feature = "blocks")]
 pub use crate::fluid_id::FluidId;
 /// `net.minecraft.world.entity.ai.attributes.Attribute` — the entity unit's
 /// registry element placeholder (see the `ATTRIBUTE` key above, #90).

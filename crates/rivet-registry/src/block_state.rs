@@ -332,8 +332,12 @@ impl BlockState {
         self.behavior() & crate::generated::block_behaviors::BEHAVIOR_FLAG_FLUID_EMPTY != 0
     }
 
-    /// Whether the state is solid (Paper `BlockBehaviour.BlockStateBase.isSolid()`,
-    /// i.e. `BlockBehaviour.Properties.hasCollision`). The `SolidPredicate` truth
+    /// Whether the state is solid — Paper `BlockBehaviour.BlockStateBase.isSolid()`
+    /// (the cached `legacySolid` from `calculateSolid()`), NOT the
+    /// `Properties.hasCollision` flag. It is a collision-shape *bounds* check:
+    /// true only when `forceSolidOn`, or when the non-empty static collision
+    /// shape's bounds have volume >= 35/48 or a full 1.0 height; dynamic-shape
+    /// and empty-collision states are never solid. The `SolidPredicate` truth
     /// value (`state.isSolid()`), grounded in the probe.
     #[inline]
     pub fn is_solid(self) -> bool {

@@ -3,7 +3,9 @@
 //!
 //! Java: a `StateTestingPredicate` whose `test(BlockState)` is
 //! `state.isSolid()` and whose `type()` is `BlockPredicateType.SOLID`
-//! (deprecated in 26.2, but still a registered predicate type). Its `CODEC`
+//! (deprecated in 26.2, but still a registered predicate type). `isSolid()` is
+//! the cached `legacySolid` from `calculateSolid()` — a collision-shape bounds
+//! check (volume >= 35/48 or full height), NOT `Properties.hasCollision`. Its `CODEC`
 //! is the shared `stateTestingCodec(i)` (the `"offset"` optional field,
 //! `Vec3i.offsetCodec(16)`, default `Vec3i.ZERO`) — the same record shape as
 //! `InsideWorldBoundsPredicate`, but read from the state at the offset rather

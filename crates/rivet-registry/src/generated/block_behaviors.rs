@@ -17,7 +17,9 @@
 //   bits  8-11   light_dampening (0..15)
 //   bits  12-15  light_emission (0..15)
 //   bits  16-21  map_color_id (0..63)
-//   bit  22 is_solid (isSolid() — BlockBehaviour.Properties.hasCollision)
+//   bit  22 is_solid (isSolid() — the cached legacySolid from calculateSolid():
+//            non-empty collision-shape bounds volume >= 35/48 or ysize >= 1.0,
+//            after the forceSolidOn/Off and dynamic-shape guards; NOT hasCollision)
 //   bit  23 can_be_replaced (canBeReplaced() — Properties.replaceable)
 //   bits  24-26  fluid_id (BuiltInRegistries.FLUID.getId(getFluidState().getType()), 0..4)
 //   bits  27-31  reserved (always 0)
@@ -43,7 +45,7 @@ pub const BEHAVIOR_FLAG_PROPAGATES_SKYLIGHT_DOWN: u32 = 1 << 5;
 pub const BEHAVIOR_FLAG_RANDOM_TICKING: u32 = 1 << 6;
 /// the state carries no fluid.
 pub const BEHAVIOR_FLAG_FLUID_EMPTY: u32 = 1 << 7;
-/// state is solid (BlockBehaviour.Properties.hasCollision — SolidPredicate).
+/// state is solid (BlockStateBase.isSolid() — cached legacySolid: collision-shape bounds volume >= 35/48 or ysize >= 1.0; SolidPredicate).
 pub const BEHAVIOR_FLAG_IS_SOLID: u32 = 1 << 22;
 /// state can be replaced (Properties.replaceable — ReplaceablePredicate).
 pub const BEHAVIOR_FLAG_CAN_BE_REPLACED: u32 = 1 << 23;
