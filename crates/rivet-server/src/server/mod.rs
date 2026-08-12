@@ -7,6 +7,7 @@
 //! OWNERSHIP "one owner: the tick thread"). The connection registry is the only
 //! shared mutable structure — the OWNERSHIP "connection registry" exception.
 
+pub mod dataconverter;
 pub mod keepalive;
 pub mod level;
 pub mod lighting;
