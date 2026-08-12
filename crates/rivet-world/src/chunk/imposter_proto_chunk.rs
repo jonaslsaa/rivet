@@ -251,7 +251,7 @@ where
     }
 
     /// `setAllReferences(Map)` — a no-op.
-    pub fn set_all_references(&mut self, _data: std::collections::HashMap<S, Vec<u64>>) {}
+    pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, _data: I) {}
 
     /// `removeBlockEntity(BlockPos)` — a no-op.
     pub fn remove_block_entity(&mut self, _pos: &BlockPos) {}
