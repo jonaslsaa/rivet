@@ -168,8 +168,8 @@ fn placed_feature_registry_key() -> ResourceKey<Registry<PlacedFeature>> {
 /// `PlacementModifier.CODEC` — the `"type"`-dispatch codec for the placement
 /// modifier list elements.
 ///
-/// STUB(mc.world.level.levelgen.feature.configurations.wave2): the per-modifier
-/// dispatch defers with the owning `net.minecraft.world.level.levelgen.placement`
+/// STUB(mc.world.level.levelgen.placement.core): the per-modifier
+/// dispatch defers with the owning `mc.world.level.levelgen.placement.core`
 /// unit; this stub errors on any element, so an empty `"placement"` list
 /// decodes and a non-empty list fails loudly instead of silently mis-decoding.
 fn placement_modifier_codec<Ops: DynamicOps + 'static>()
@@ -189,7 +189,7 @@ fn placement_modifier_codec<Ops: DynamicOps + 'static>()
 /// `Registries.CONFIGURED_FEATURE` whose identifier-reference form this unit's
 /// fixtures exercise.
 ///
-/// STUB(mc.world.level.levelgen.feature.configurations.wave2): the reference
+/// STUB(mc.world.level.levelgen.feature.core): the reference
 /// form (a `"minecraft:..."` identifier resolving a configured feature) is kept
 /// faithful; the inline direct form (a `{"type": ..., "config": ...}` map built
 /// through the `Feature.CODEC` dispatch) defers with issue #126 and errors via
@@ -205,7 +205,7 @@ fn configured_feature_holder_codec<Ops: DynamicOps + 'static + RegistryOpsLookup
 
 /// `ConfiguredFeature.DIRECT_CODEC` — the inline `{"type", "config"}` map form.
 ///
-/// STUB(mc.world.level.levelgen.feature.configurations.wave2): building a
+/// STUB(mc.world.level.levelgen.feature.core): building a
 /// `ConfiguredFeatureErased` from the map needs `Feature.CODEC` (the `"type"`
 /// by-name dispatch) and the per-feature config codec dispatch, which defer
 /// with issue #126; this stub errors on both directions.
@@ -254,8 +254,8 @@ fn placed_feature_direct_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
 /// inline definitions allowed, as the ops-generic `placed_feature_codec::<Ops>()`
 /// factory.
 ///
-/// STUB(mc.world.level.levelgen.feature.configurations.wave2): the codec surface
-/// is owned by the pending `net.minecraft.world.level.levelgen.placement` unit;
+/// STUB(mc.world.level.levelgen.placement.core): the codec surface
+/// is owned by the pending `mc.world.level.levelgen.placement.core` unit;
 /// this stub keeps the wire shape faithful (identifier reference or inline
 /// `DIRECT_CODEC`) with the two inner dispatches deferred (see
 /// [`configured_feature_direct_codec`] and [`placement_modifier_codec`]).

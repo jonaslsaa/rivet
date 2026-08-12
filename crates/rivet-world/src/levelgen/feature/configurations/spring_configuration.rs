@@ -72,8 +72,8 @@ impl SpringConfiguration {
 /// out-of-unit fluid-state value type this configuration's `"state"` field
 /// holds.
 ///
-/// STUB(mc.world.level.levelgen.feature.configurations.wave2): owned by the
-/// pending `net.minecraft.world.level.material` unit; this stub carries the
+/// STUB(mc.world.level.material): owned by the pending
+/// `mc.world.level.material` unit; this stub carries the
 /// value surface this configuration consumes. Java's `FluidState.CODEC` is
 /// `StateHolder.codec(BuiltInRegistries.FLUID.byNameCodec(),
 /// Fluid::defaultFluidState, Fluid::getStateDefinition)` — the same `"Name"`
@@ -104,7 +104,8 @@ impl FluidState {
     /// The minimal STUB carrier — a plain fluid-type handle with no properties
     /// (the wire shape of a state whose `"Properties"` compound is absent).
     ///
-    /// STUB: `new FluidState(FluidId)` is a placeholder for the
+    /// STUB(mc.world.level.material): `new FluidState(FluidId)` is a placeholder
+    /// for the
     /// state-definition-backed value; consumers in this unit construct it from
     /// a resolved fluid id.
     pub fn new(fluid: FluidId) -> Self {
@@ -122,7 +123,8 @@ impl FluidState {
 
 /// `FluidState.CODEC` — the ops-generic `fluid_state_codec::<Ops>()` factory.
 ///
-/// STUB: mirrors the `"Name"`-dispatch wire shape of `StateHolder.codec`
+/// STUB(mc.world.level.material): mirrors the `"Name"`-dispatch wire shape of
+/// `StateHolder.codec`
 /// (`ownerCodec.dispatch("Name", s -> s.owner, o -> ...)`) restricted to the
 /// fluid id-handle: the record codec writes/reads the `"Name"` key
 /// (`Registry.byNameCodec` shape — an unknown fluid name errors with the

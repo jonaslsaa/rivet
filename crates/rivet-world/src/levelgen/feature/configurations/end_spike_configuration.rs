@@ -80,8 +80,8 @@ impl EndSpikeConfiguration {
 /// (record, 26.2) — the out-of-unit spike value type this configuration's
 /// `"spikes"` field holds.
 ///
-/// STUB(mc.world.level.levelgen.feature.configurations.wave2): owned by the
-/// pending `net.minecraft.world.level.levelgen.feature.EndSpikeFeature` unit;
+/// STUB(mc.world.level.levelgen.feature.endspike): owned by the pending
+/// `mc.world.level.levelgen.feature.endspike` unit (`EndSpikeFeature`);
 /// this stub carries the value surface this configuration consumes — the five
 /// `CODEC` fields (`centerX`, `centerZ`, `radius`, `height` each
 /// `Codec.INT.optionalFieldOf(..., 0)`, `guarded`
@@ -107,7 +107,8 @@ impl EndSpike {
     /// `new EndSpike(int centerX, int centerZ, int radius, int height, boolean
     /// guarded)` — the record constructor (the codec's `apply` function).
     ///
-    /// STUB: Java's constructor also builds `topBoundingBox` (`new AABB(...)`);
+    /// STUB(mc.world.level.levelgen.feature.endspike): Java's constructor also
+    /// builds `topBoundingBox` (`new AABB(...)`);
     /// that field defers with the owning unit.
     pub fn new(center_x: i32, center_z: i32, radius: i32, height: i32, guarded: bool) -> Self {
         EndSpike {

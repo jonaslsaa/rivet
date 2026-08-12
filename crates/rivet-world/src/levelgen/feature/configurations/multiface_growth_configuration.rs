@@ -47,8 +47,8 @@ use std::sync::Arc;
 /// `net.minecraft.world.level.block.MultifaceSpreadeableBlock` — the marker
 /// class for blocks that grow across surfaces.
 ///
-/// STUB(mc.world.level.levelgen.feature.configurations.wave2): the class is
-/// owned by the block package (`MultifaceSpreadeableBlock`, `GlowLichenBlock`,
+/// STUB(mc.world.level.block): the class is owned by the block package
+/// (`MultifaceSpreadeableBlock`, `GlowLichenBlock`,
 /// `SculkVeinBlock`) and defers with the block-port type hierarchy (RivetTodo
 /// #228). `validateBlock` in this configuration checks
 /// `instanceof MultifaceSpreadeableBlock`; the port models the marker as the
