@@ -83,6 +83,16 @@
 //!   (`RIVET_WORLD_SRC` overrides; the launcher save is never touched), extract
 //!   the read-only ground-truth manifest, drive the real Azalea client in
 //!   `loaded` mode, and compare the observed per-coordinate content.
+//! - `generated-world` (seed-42 generated acceptance contract): boot Rivet with
+//!   the explicit generated-world launch option (`--seed 42`), drive the real
+//!   Azalea client in `generated` mode (join + dwell + bounded walk +
+//!   per-coordinate content sampling), and compare the observed content against
+//!   the seed-42 ground-truth handoff (`rivet-oracle generated-expected`).
+//!   Until the rivet-server `--seed` capability lands, the runner exits
+//!   UNVERIFIED (3) with the exact pinned
+//!   [`GENERATED_WORLD_UNVERIFIED_REASON`] — it never falls back to a superflat
+//!   boot or a copied loaded world, which would fabricate a PASS on the wrong
+//!   world.
 //!
 //! ## Deterministic Paper config (issue #266 / #333)
 //!
@@ -234,6 +244,7 @@ enum Subcommand {
     Capture,
     LoadWorld,
     LoadedWorld,
+    GeneratedWorld,
     Help,
 }
 
@@ -296,6 +307,10 @@ struct Args {
     timeout_seconds: u64,
     runs: usize,
     dwell_seconds: u64,
+    /// The seed the generated-world acceptance boots and compares. Only valid
+    /// for `generated-world` (which pins it to `server::GENERATED_SEED`); an
+    /// explicit `--seed` on any other command is a silent no-op and is rejected.
+    seed: Option<u64>,
 }
 
 impl Args {
@@ -313,12 +328,14 @@ impl Args {
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
         let mut runs = DEFAULT_RUNS;
         let mut dwell_seconds = DEFAULT_DWELL_SECONDS;
+        let mut seed: Option<u64> = None;
         let mut server_explicit = false;
         let mut runs_explicit = false;
         let mut pairs_explicit = false;
         let mut dwell_explicit = false;
         let mut username_explicit = false;
         let mut timeout_explicit = false;
+        let mut seed_explicit = false;
 
         if let Some(sub) = args.next() {
             command = match sub.as_str() {
@@ -329,6 +346,7 @@ impl Args {
                 "capture" => Subcommand::Capture,
                 "load-world" => Subcommand::LoadWorld,
                 "loaded-world" => Subcommand::LoadedWorld,
+                "generated-world" => Subcommand::GeneratedWorld,
                 "--help" | "-h" | "help" => Subcommand::Help,
                 _ => return Err(format!("unknown subcommand: {sub}\n\n{}", usage())),
             };
@@ -347,6 +365,13 @@ impl Args {
                         .parse()
                         .map_err(|_| format!("invalid --timeout-seconds value: {v}"))?;
                     timeout_explicit = true;
+                }
+                "--seed" => {
+                    let v = next_value(&mut args, "--seed")?;
+                    seed = Some(v.parse().map_err(|_| {
+                        format!("invalid --seed value: {v} (expected an unsigned 64-bit seed)")
+                    })?);
+                    seed_explicit = true;
                 }
                 "--runs" => {
                     let v = next_value(&mut args, "--runs")?;
@@ -388,8 +413,20 @@ impl Args {
         if dwell_explicit && command != Subcommand::Dwell {
             return Err(
                 "--dwell-seconds only applies to the dwell scenario (the keepalive-survival \
-                 gate); join/move/kick/capture/load-world/loaded-world never dwell, so an explicit \
-                 value would be a silent no-op — drop it"
+                 gate); join/move/kick/capture/load-world/loaded-world/generated-world never \
+                 dwell, so an explicit value would be a silent no-op — drop it"
+                    .to_owned(),
+            );
+        }
+
+        // `--seed` only has meaning for `generated-world`; on any other command
+        // it would be a silent no-op. Reject it (exit 64) rather than ignore it.
+        if seed_explicit && command != Subcommand::GeneratedWorld {
+            return Err(
+                "--seed only applies to the generated-world scenario (the seed-42 generated \
+                 acceptance contract); join/move/dwell/kick/capture/load-world/loaded-world never \
+                 boot a fresh generated world, so an explicit value would be a silent no-op — \
+                 drop it"
                     .to_owned(),
             );
         }
@@ -680,6 +717,66 @@ impl Args {
             runs = 1;
         }
 
+        if command == Subcommand::GeneratedWorld {
+            // `generated-world` (the generated-world acceptance contract, seed
+            // 42) boots exactly one Rivet server with `--seed 42` — the explicit
+            // generated-world capability. Until the rivet-server capability
+            // lands, the runner reports the exact pinned UNVERIFIED reason and
+            // never falls back to superflat or a copied loaded world. Paper has
+            // no place here; `--pairs`/`--runs` would be silent no-ops, and the
+            // client is driven only via its default timeout/username.
+            if server_explicit && server != ServerSelection::Rivet {
+                return Err(format!(
+                    "generated-world only supports --server rivet (the generated-world capability \
+                     is a Rivet launch seam); got --server {}",
+                    server.as_str()
+                ));
+            }
+            server = ServerSelection::Rivet;
+            if pairs_explicit {
+                return Err(
+                    "generated-world is a single-server acceptance probe and has no --pairs \
+                     comparison; drop it"
+                        .to_owned(),
+                );
+            }
+            if runs_explicit {
+                return Err(
+                    "generated-world always performs exactly one Rivet launch + generated client \
+                     run, so --runs is a silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if username_explicit {
+                return Err(
+                    "generated-world does not take a client username override; --username is a \
+                     silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if timeout_explicit {
+                return Err(
+                    "generated-world uses the client's default timeout; --timeout-seconds is a \
+                     silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            runs = 1;
+            // The generated-world acceptance contract is pinned to seed 42; an
+            // explicit --seed equal to it is the contract, and any other value
+            // would diverge from the Paper ground-truth handoff captured for
+            // seed 42 — reject it rather than silently rewriting it.
+            if seed_explicit && seed != Some(server::GENERATED_SEED) {
+                return Err(format!(
+                    "generated-world is pinned to seed {} (the seed-42 acceptance contract and its \
+                     Paper ground-truth handoff); --seed {} would diverge — drop it",
+                    server::GENERATED_SEED,
+                    seed.unwrap_or(0)
+                ));
+            }
+            seed = Some(server::GENERATED_SEED);
+        }
+
         Ok(Self {
             command,
             server,
@@ -689,6 +786,7 @@ impl Args {
             timeout_seconds,
             runs,
             dwell_seconds,
+            seed,
         })
     }
 }
@@ -700,16 +798,17 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: run-scenario <join|move|dwell|kick|capture|load-world|loaded-world> [options]\n\
+        "Usage: run-scenario <join|move|dwell|kick|capture|load-world|loaded-world|generated-world> [options]\n\
          Options:\n\
-         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick/load-world/loaded-world are always rivet)\n\
+         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick/load-world/loaded-world/generated-world are always rivet)\n\
          \x20 --pairs paper:paper|paper:rivet\n\
          \x20                            comparison to run (default paper:paper)\n\
          \x20 --address HOST:PORT        server address (default {DEFAULT_ADDRESS})\n\
          \x20 --username NAME            offline account name (default {DEFAULT_USERNAME})\n\
          \x20 --timeout-seconds N        client timeout per run (default {DEFAULT_TIMEOUT_SECONDS})\n\
          \x20 --dwell-seconds N          dwell-mode wall-clock window (default {DEFAULT_DWELL_SECONDS})\n\
-         \x20 --runs N                   boots to compare (default {DEFAULT_RUNS}; paper needs >=2; dwell rejects it)"
+         \x20 --runs N                   boots to compare (default {DEFAULT_RUNS}; paper needs >=2; dwell rejects it)\n\
+         \x20 --seed N                   generated-world seed (default 42; generated-world only)"
     )
 }
 
@@ -960,6 +1059,7 @@ fn one_join(
         None,
         &[],
         None,
+        None,
     )?;
     println!("[run  {idx}] joining via rivet-client ...");
     let client_run = run_client(
@@ -1158,6 +1258,7 @@ fn one_move(
         address,
         None,
         &[],
+        None,
         None,
     )?;
     println!("[run  {idx}] walking via rivet-client (move mode) ...");
@@ -1371,6 +1472,7 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
             base,
             None,
             &[],
+            None,
             None,
         )?;
         println!("[run  {idx}] connecting via rivet-client ...");
@@ -1905,6 +2007,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[],
         None,
+        None,
     )?;
     let paper_client = run_client(
         &client_bin,
@@ -1954,6 +2057,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         rivet_addr,
         Some(reservations.remove(0)),
         &[],
+        None,
         None,
     )?;
     let rivet_client = run_client(
@@ -2121,6 +2225,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[],
         None,
+        None,
     )?;
     let paper_client = run_client(
         &client_bin,
@@ -2168,6 +2273,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         rivet_addr,
         Some(reservations.remove(0)),
         &[(trace::TRACE_MOVEMENT_ENV, "1")],
+        None,
         None,
     )?;
     let rivet_client = run_client(
@@ -2375,6 +2481,7 @@ fn run_dwell(args: &Args) -> Result<(), RunnerError> {
         None,
         &[],
         None,
+        None,
     )?;
     println!("[run  1] dwelling via rivet-client (dwell mode) ...");
     let client_run = run_client(
@@ -2524,6 +2631,7 @@ fn run_kick(args: &Args) -> Result<(), RunnerError> {
         None,
         &[],
         None,
+        None,
     )?;
     println!("[run  1] kicking via rivet-client (kick mode) ...");
     let client_run = run_client(
@@ -2666,6 +2774,7 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         None,
         &[],
         None,
+        None,
     )?;
     let client_run = run_client(
         &client_bin,
@@ -2744,6 +2853,7 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
             None,
             &[],
             Some(&server_world_path),
+            None,
         ) {
             Ok(mut srv) => match server::shutdown(&mut srv) {
                 Ok(()) => Err(RunnerError::Unverified(
@@ -2866,6 +2976,7 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
             None,
             &[],
             Some(&server_world_path),
+            None,
         ) {
             Ok(srv) => srv,
             Err(error) => return Err(classify_load_world_boot_failure(error, &log_path)),
@@ -2948,6 +3059,287 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
     copy_check?;
     cleanup?;
     result
+}
+
+/// The exact, test-pinned UNVERIFIED reason the generated-world acceptance
+/// reports while the explicit generated-world server capability is absent. A
+/// rivet-server build with only `--host`/`--port`/`--level` (the state at this
+/// harness's landing) has no way to boot a fresh generated seed world, so the
+/// scenario must exit UNVERIFIED (3) with exactly this reason — it must never
+/// fall back to the superflat no-level boot or a copied loaded world, which
+/// would fabricate a PASS on the wrong world.
+pub const GENERATED_WORLD_UNVERIFIED_REASON: &str = "generated-world acceptance is UNVERIFIED: rivet-server has no generated-world capability \
+     yet (no --seed launch option; only --host/--port/--level). The scenario will not boot a \
+     superflat or copied-loaded-world stand-in. It reports UNVERIFIED until the rivet-server \
+     worldgen capability lands.";
+
+/// The official-client generated-world acceptance probe (seed-42 contract).
+///
+/// Boots Rivet with `--seed 42` — the explicit generated-world capability — on
+/// an isolated port with no world path, drives the real Azalea client in
+/// `generated` mode (join + dwell + bounded walk + per-coordinate content
+/// sampling from the client's own loaded `ChunkStorage`), compares the observed
+/// content against the seed-42 ground-truth handoff (`rivet-oracle
+/// generated-expected`), and requires a clean SIGTERM shutdown.
+///
+/// Until the rivet-server `--seed` capability lands, the boot is rejected and
+/// the seed probe classifies it `Absent`; the runner then exits UNVERIFIED (3)
+/// with the exact [`GENERATED_WORLD_UNVERIFIED_REASON`] — never a superflat or
+/// loaded-world fallback. When the capability IS present but the Paper
+/// seed-42 ground-truth reference has not been captured yet, the oracle
+/// `generated-expected` handoff is UNVERIFIED and the acceptance stays
+/// honestly UNVERIFIED rather than comparing against nothing.
+fn run_generated_world(args: &Args) -> Result<(), RunnerError> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/scenario-generated-world");
+    fs::create_dir_all(&work)?;
+
+    let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
+    let client_bin = ensure_client_binary()?;
+    let base = base_address(args)?;
+    let run_dir = work.join("rivet");
+    let log_path = work.join("rivet.log");
+    let seed = args.seed.unwrap_or(server::GENERATED_SEED);
+
+    let result = (|| -> Result<(), RunnerError> {
+        println!("rivet scenario runner: generated-world (seed-42 generated acceptance contract)");
+        println!("    rivet-server bin : {}", rivet_bin.display());
+        println!(
+            "    launch seam      : {} <seed>",
+            server::GENERATED_SEED_ARG
+        );
+        println!("    seed             : {seed}");
+        println!();
+
+        // Boot Rivet with the explicit generated-world launch option. The
+        // probe classifies a rejection honestly: a build without the `--seed`
+        // capability reports the exact pinned UNVERIFIED reason, never a
+        // superflat or loaded-world fallback.
+        let mut srv = match server::boot(
+            server::ServerKind::Rivet,
+            &run_dir,
+            &log_path,
+            &rivet_bin,
+            None,
+            None,
+            base,
+            None,
+            &[],
+            None,
+            Some(seed),
+        ) {
+            Ok(srv) => srv,
+            Err(error) => {
+                return Err(classify_generated_world_boot_failure(error, &log_path));
+            }
+        };
+
+        // The post-boot acceptance body. It never shuts `srv` down; the wrapper
+        // below always does.
+        let body = (|| -> Result<(), RunnerError> {
+            // Fetch the seed-42 ground-truth handoff. Until the Paper seed-42
+            // reference is captured, the oracle handoff is UNVERIFIED and the
+            // acceptance stays honestly UNVERIFIED — it never compares against
+            // nothing.
+            let expected = run_generated_expected(&work)?;
+
+            // Drive the real Azalea client in generated mode against the booted
+            // server.
+            let client_run = run_client(
+                &client_bin,
+                &ClientSpec {
+                    address: base.to_string(),
+                    username: args.username.clone(),
+                    timeout_seconds: args.timeout_seconds,
+                    dwell_seconds: 0,
+                    mode: "generated".to_owned(),
+                },
+                &work,
+                "generated-client",
+            )?;
+
+            // Prove the client genuinely reached the Rivet port.
+            verify_rivet_connection(&log_path)?;
+
+            // The client transcript must prove it joined, spawned, dwelled,
+            // walked, and sampled genuine per-coordinate content.
+            let transcript = transcript::normalize_generated(&client_run.stdout_text)
+                .map_err(RunnerError::Transcript)?;
+            let boundary = transcript::rivet_generated_verdict(&transcript)
+                .map_err(RunnerError::Transcript)?;
+
+            // Compare the client's observed block content against the seed-42
+            // ground truth. This is the load-bearing comparison: a server that
+            // only echoes repeated superflat bytes fails here.
+            compare_generated_content(&expected, &transcript)?;
+
+            println!("\nGenerated-world acceptance boundary reached: {boundary}");
+            Ok(())
+        })();
+
+        // A booted server must always be shut down cleanly before returning.
+        let shutdown_result = server::shutdown(&mut srv);
+        match body {
+            Err(e) => {
+                if let Err(shutdown_err) = shutdown_result {
+                    eprintln!(
+                        "    warning: clean shutdown after a failed generated-world run also \
+                         errored: {shutdown_err}"
+                    );
+                }
+                Err(e)
+            }
+            Ok(()) => shutdown_result.map_err(Into::into),
+        }
+    })();
+
+    // No disposable copy to clean up on the generated-world path — the fresh
+    // generated world lives entirely in the server's run dir, which the harness
+    // leaves in place as diagnostic state under `work/`.
+    result
+}
+
+/// Map a generated-world boot failure through the seed probe classifier.
+/// `Gate` and `Io` can happen before a child is spawned and remain hard
+/// failures without consulting a possibly stale log.
+fn classify_generated_world_boot_failure(error: server::Error, log_path: &Path) -> RunnerError {
+    let boot_error = match error {
+        server::Error::Unverified(message) => message,
+        error @ (server::Error::Gate(_) | server::Error::Io(_)) => return error.into(),
+    };
+    let log = fs::read_to_string(log_path).unwrap_or_default();
+    match server::classify_seed_probe(false, &log) {
+        server::ProbeVerdict::Absent { evidence } => RunnerError::Unverified(format!(
+            "{GENERATED_WORLD_UNVERIFIED_REASON} launch evidence: {evidence}"
+        )),
+        server::ProbeVerdict::FailedToBoot { evidence } => RunnerError::Unverified(format!(
+            "generated-world acceptance is UNVERIFIED: the launch probe did not reach READY \
+             ({boot_error}); last log evidence: {evidence}"
+        )),
+        server::ProbeVerdict::Present => unreachable!("the failed boot did not reach READY"),
+    }
+}
+
+/// The seed-42 ground-truth handoff filename the oracle `generated-expected`
+/// writes.
+const GENERATED_EXPECTED_JSON: &str = "generated-expected.json";
+
+/// Invoke `rivet-oracle generated-expected <seed>` and parse the seed-42
+/// ground-truth manifest into a `serde_json::Value`. The handoff is the future
+/// Paper-captured reference for the generated-world acceptance; until that
+/// reference is captured, the oracle reports UNVERIFIED and this stays honestly
+/// UNVERIFIED — the acceptance never compares against nothing.
+fn run_generated_expected(work: &Path) -> Result<Value, RunnerError> {
+    let oracle_bin = oracle_binary();
+    let out = work.join(GENERATED_EXPECTED_JSON);
+    let status = Command::new(&oracle_bin)
+        .args(["generated-expected"])
+        .arg(server::GENERATED_SEED.to_string())
+        .args(["--to"])
+        .arg(&out)
+        .status()
+        .map_err(|e| {
+            RunnerError::Unverified(format!(
+                "failed to run rivet-oracle generated-expected ({}): {e} — build it first with \
+                 cargo build -p rivet-oracle",
+                oracle_bin.display()
+            ))
+        })?;
+    classify_extract_status(status, &out)?;
+    let text = fs::read_to_string(&out)?;
+    let manifest: Value = serde_json::from_str(&text).map_err(RunnerError::Json)?;
+    Ok(manifest)
+}
+
+/// Compare the client's observed per-coordinate block content against the
+/// seed-42 ground-truth manifest. The `generated` record's `samples` carry
+/// `surface`/`bedrock`/`below_feet` block names at world coordinates; the
+/// manifest's per-chunk `surface`/`bedrock`/`below_feet` arrays are keyed by
+/// `"<chunk_x>,<chunk_z>"` and indexed `z*16+x` (row-major with the sample
+/// point at the chunk center offset `(8,8)`).
+///
+/// A sample whose chunk is absent from the manifest, or whose observed block
+/// name differs from ground truth, is a FAIL — the server did not serve the
+/// generated seed-42 world (or served the wrong seed, or echoed superflat
+/// bytes). A sampled chunk that is not `minecraft:full` in the manifest is
+/// UNVERIFIED — the seed-42 handoff does not yet have full ground truth there.
+fn compare_generated_content(manifest: &Value, transcript: &Value) -> Result<(), RunnerError> {
+    let chunks = manifest["chunks"].as_object().ok_or_else(|| {
+        RunnerError::Gate("generated-expected manifest has no chunks map".to_owned())
+    })?;
+    let samples = transcript["generated"]["samples"]
+        .as_array()
+        .ok_or_else(|| RunnerError::Transcript("generated record has no samples".to_owned()))?;
+
+    if samples.is_empty() {
+        return Err(RunnerError::Transcript(
+            "generated record has no samples; the client sampled no content".to_owned(),
+        ));
+    }
+
+    let mut checked = 0usize;
+    for sample in samples {
+        let chunk_x = sample["chunk_x"]
+            .as_i64()
+            .ok_or_else(|| RunnerError::Transcript("sample missing chunk_x".to_owned()))?;
+        let chunk_z = sample["chunk_z"]
+            .as_i64()
+            .ok_or_else(|| RunnerError::Transcript("sample missing chunk_z".to_owned()))?;
+        let key = format!("{chunk_x},{chunk_z}");
+        let fingerprint = chunks.get(&key).ok_or_else(|| {
+            RunnerError::Gate(format!(
+                "generated-expected manifest has no chunk {key} but the client sampled it — the \
+                 server served a chunk outside the seed-42 ground-truth world"
+            ))
+        })?;
+        let status = fingerprint["status"].as_str().ok_or_else(|| {
+            RunnerError::Gate(format!(
+                "generated-expected manifest chunk {key} has no string Status — refusing PASS on \
+                 a malformed manifest"
+            ))
+        })?;
+        if status != "minecraft:full" {
+            return Err(RunnerError::Unverified(format!(
+                "generated sampled chunk {key} is {status} (not minecraft:full): the seed-42 \
+                 ground-truth handoff does not yet have full per-coordinate content there, so \
+                 this acceptance stays UNVERIFIED"
+            )));
+        }
+        // The manifest stores surface/bedrock/below_feet as 16×16 arrays
+        // indexed row-major `z*16+x`. The client samples the chunk center
+        // offset (8,8), so the index is `8*16+8 = 136`.
+        const CENTER: usize = 8 * 16 + 8;
+        let manifest_surface = fingerprint["surface"][CENTER]
+            .as_str()
+            .unwrap_or("minecraft:air");
+        let manifest_bedrock = fingerprint["bedrock"][CENTER]
+            .as_str()
+            .unwrap_or("minecraft:air");
+        let manifest_below = fingerprint["below_feet"][CENTER]
+            .as_str()
+            .unwrap_or("minecraft:air");
+        let observed_surface = canonicalize_block_name(sample["surface"].as_str());
+        let observed_bedrock = canonicalize_block_name(sample["bedrock"].as_str());
+        let observed_below = canonicalize_block_name(sample["below_feet"].as_str());
+
+        let surface_match = observed_surface == manifest_surface;
+        let bedrock_match = observed_bedrock == manifest_bedrock;
+        let below_match = observed_below == manifest_below;
+        if !(surface_match && bedrock_match && below_match) {
+            return Err(RunnerError::Gate(format!(
+                "generated content mismatch at chunk {key} (sample {},{}, center): \
+                 observed surface={observed_surface} bedrock={observed_bedrock} \
+                 below_feet={observed_below}; ground truth surface={manifest_surface} \
+                 bedrock={manifest_bedrock} below_feet={manifest_below}",
+                sample["sample_x"].as_i64().unwrap_or(chunk_x * 16),
+                sample["sample_z"].as_i64().unwrap_or(chunk_z * 16),
+            )));
+        }
+        checked += 1;
+    }
+
+    println!("\n    verified {checked} sampled chunks against the seed-42 ground-truth manifest");
+    Ok(())
 }
 
 /// Resolve the `rivet-oracle` binary: a sibling in the same target dir (the
@@ -3206,6 +3598,7 @@ fn main() -> ExitCode {
         Subcommand::Capture => run_capture(&args),
         Subcommand::LoadWorld => run_load_world(&args),
         Subcommand::LoadedWorld => run_loaded_world(&args),
+        Subcommand::GeneratedWorld => run_generated_world(&args),
         Subcommand::Help => {
             println!("{}", usage());
             Ok(())
@@ -3273,6 +3666,35 @@ mod tests {
         assert!(parse(&["loaded-world", "--dwell-seconds", "35"]).is_err());
         assert!(parse(&["loaded-world", "--username", DEFAULT_USERNAME]).is_err());
         assert!(parse(&["loaded-world", "--timeout-seconds", "40"]).is_err());
+    }
+
+    #[test]
+    fn generated_world_is_a_single_rivet_acceptance_with_no_silent_options() {
+        // `generated-world` boots exactly one Rivet server with `--seed 42`;
+        // Paper has no place, and --pairs/--runs/--dwell-seconds would be
+        // silent no-ops on a fixed seed acceptance. The seed is pinned by the
+        // contract, never overridable by the operator.
+        let args = parse(&["generated-world"]).unwrap();
+        assert_eq!(args.command, Subcommand::GeneratedWorld);
+        assert_eq!(args.server, ServerSelection::Rivet);
+        assert_eq!(args.runs, 1);
+        assert_eq!(args.seed, Some(server::GENERATED_SEED));
+
+        assert!(parse(&["generated-world", "--server", "rivet"]).is_ok());
+        assert!(parse(&["generated-world", "--server", "paper"]).is_err());
+        assert!(parse(&["generated-world", "--server", "both"]).is_err());
+        assert!(parse(&["generated-world", "--pairs", "paper:rivet"]).is_err());
+        assert!(parse(&["generated-world", "--runs", "1"]).is_err());
+        assert!(parse(&["generated-world", "--dwell-seconds", "35"]).is_err());
+        assert!(parse(&["generated-world", "--username", DEFAULT_USERNAME]).is_err());
+        assert!(parse(&["generated-world", "--timeout-seconds", "40"]).is_err());
+        // `--seed` is a generated-world-only launch interface: an operator that
+        // passes it to any other command must be rejected rather than silently
+        // ignored.
+        assert!(parse(&["join", "--seed", "7"]).is_err());
+        assert!(parse(&["loaded-world", "--seed", "7"]).is_err());
+        assert!(parse(&["dwell", "--seed", "7"]).is_err());
+        assert!(parse(&["generated-world", "--seed", "99"]).is_err());
     }
 
     /// A minimal ground-truth manifest with one FULL chunk (0,0) carrying a
@@ -3577,6 +3999,130 @@ mod tests {
         }
     }
 
+    /// The generated-world transcript carries its samples under
+    /// `transcript["generated"]["samples"]` (the generated client record), so
+    /// the compare helpers mirror the loaded shape with that key.
+    fn generated_transcript_with(sample: Value) -> Value {
+        json!({ "generated": { "samples": [sample] } })
+    }
+
+    #[test]
+    fn compare_generated_content_passes_when_observed_matches_ground_truth() {
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let transcript = generated_transcript_with(matching_sample(0, 0));
+        assert!(
+            compare_generated_content(&manifest, &transcript).is_ok(),
+            "a genuine per-coordinate match must pass"
+        );
+    }
+
+    #[test]
+    fn compare_generated_content_fails_on_a_superflat_echo() {
+        // The client observed a repeated superflat surface where the seed-42
+        // ground truth has genuine terrain — the anti-superflat negative: a
+        // server that only echoes flat chunks cannot match the generated world.
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let mut sample = matching_sample(0, 0);
+        sample["surface"] = json!("minecraft:stone");
+        let transcript = generated_transcript_with(sample);
+        assert!(
+            compare_generated_content(&manifest, &transcript).is_err(),
+            "an observed content mismatch must fail"
+        );
+    }
+
+    #[test]
+    fn compare_generated_content_fails_on_a_chunk_outside_the_manifest() {
+        // The client sampled a chunk the seed-42 ground truth has no record of
+        // — the server served content outside the generated world.
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let transcript = generated_transcript_with(matching_sample(5, 5));
+        assert!(
+            compare_generated_content(&manifest, &transcript).is_err(),
+            "a sample outside the manifest must fail"
+        );
+    }
+
+    #[test]
+    fn compare_generated_content_fails_on_empty_samples() {
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let mut transcript = generated_transcript_with(json!({}));
+        transcript["generated"]["samples"] = json!([]);
+        assert!(
+            compare_generated_content(&manifest, &transcript).is_err(),
+            "an empty sample set must fail (never a vacuous pass)"
+        );
+    }
+
+    #[test]
+    fn compare_generated_content_is_unverified_on_a_non_full_chunk() {
+        // A sampled chunk that is not minecraft:full has no ground-truth
+        // content in the handoff — the acceptance must report UNVERIFIED, never
+        // a misleading content mismatch.
+        let manifest = manifest_with_status(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+            "minecraft:structure_starts",
+        );
+        let transcript = generated_transcript_with(matching_sample(0, 0));
+        match compare_generated_content(&manifest, &transcript) {
+            Err(RunnerError::Unverified(message)) => {
+                assert!(
+                    message.contains("structure_starts") && message.contains("UNVERIFIED"),
+                    "must name the non-FULL status and the UNVERIFIED boundary, got {message}"
+                );
+            }
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_generated_content_normalizes_observed_bare_ids() {
+        // The client emits azalea bare registry ids (`grass_block`); the
+        // manifest stores namespaced names. The comparison must canonicalize
+        // the observed side so a genuine content match is not defeated by the
+        // representation difference.
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let transcript = generated_transcript_with(matching_sample(0, 0));
+        assert!(
+            compare_generated_content(&manifest, &transcript).is_ok(),
+            "bare observed ids must match namespaced ground truth after canonicalization"
+        );
+    }
+
     #[test]
     fn accepts_rivet_and_both_servers() {
         let a = parse(&["join", "--server", "rivet", "--pairs", "paper:rivet"]).unwrap();
@@ -3739,6 +4285,7 @@ mod tests {
             timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
             runs: DEFAULT_RUNS,
             dwell_seconds: DEFAULT_DWELL_SECONDS,
+            seed: None,
         };
         let addr = base_address(&args).expect("hostname resolves");
         assert_eq!(addr.port(), 25599);
