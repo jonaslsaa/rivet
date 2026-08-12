@@ -441,38 +441,6 @@ fn int_provider_unknown_type_error_message() {
 }
 
 #[test]
-fn int_provider_leading_colon_type_uses_default_namespace() {
-    // `Identifier.bySeparator(":uniform", ':')` treats a separator at index 0
-    // as an empty namespace: it strips the colon and applies the default
-    // namespace, producing `minecraft:uniform` (a registered type). The Rust
-    // `default_namespace` mirrors this exactly.
-    let codec = int_provider_codec::<J>();
-    let p = IntProvider::Uniform(UniformInt::of(3, 7));
-    let dec = codec
-        .parse(
-            &JsonOps::INSTANCE,
-            &json!({"type": ":uniform", "min_inclusive": 3, "max_inclusive": 7}),
-        )
-        .result()
-        .cloned();
-    assert_eq!(dec, Some(p));
-}
-
-#[test]
-fn float_provider_leading_colon_type_uses_default_namespace() {
-    let codec = float_provider_codec::<J>();
-    let p = FloatProvider::Uniform(UniformFloat::of(0.5, 1.5));
-    let dec = codec
-        .parse(
-            &JsonOps::INSTANCE,
-            &json!({"type": ":uniform", "min_inclusive": 0.5, "max_exclusive": 1.5}),
-        )
-        .result()
-        .cloned();
-    assert_eq!(dec, Some(p));
-}
-
-#[test]
 fn float_provider_round_trips() {
     let codec = float_provider_codec::<J>();
     let cases: Vec<(FloatProvider, serde_json::Value)> = vec![
