@@ -21,6 +21,9 @@ pub mod player_chunk_loader;
 pub mod region_backed;
 pub mod server_level;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use chunk_map::{ChunkMap, MAX_VIEW_DISTANCE, MIN_VIEW_DISTANCE};
 pub use chunk_tracking_view::ChunkTrackingView;
 pub use entity_id_allocator::EntityIdAllocator;
