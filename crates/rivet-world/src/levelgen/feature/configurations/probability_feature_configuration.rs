@@ -118,4 +118,30 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn codec_rejects_negative_zero_probability_with_java_message() {
+        // `Codec.floatRange` validates with `Float.compare` total order, so
+        // `-0.0` is below the inclusive `0.0` lower bound and must be rejected
+        // on both decode and encode; the diagnostic uses Java's
+        // `Float.toString` ("-0.0", "0.0", "1.0"). serde_json preserves the
+        // `-0.0` sign bit.
+        let codec = probability_feature_configuration_codec::<JsonOps>();
+        let result = codec.parse(&JsonOps::INSTANCE, &json!({"probability": -0.0}));
+        assert!(result.is_error());
+        let error_ref = result.error_ref().expect("error");
+        let msg = error_ref.message();
+        assert!(
+            msg.contains("Value -0.0 outside of range [0.0:1.0]"),
+            "unexpected message: {msg}"
+        );
+        let neg_zero = ProbabilityFeatureConfiguration::new(-0.0);
+        assert!(
+            codec
+                .encode_start(&JsonOps::INSTANCE, &neg_zero)
+                .result()
+                .is_none(),
+            "-0.0 probability must fail the encode-side range check"
+        );
+    }
 }

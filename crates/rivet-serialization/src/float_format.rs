@@ -108,17 +108,6 @@ pub fn java_float_equals(a: f32, b: f32) -> bool {
     a == b
 }
 
-/// `Double.equals(Object)` parity — the f64 analogue of [`java_float_equals`].
-pub fn java_double_equals(a: f64, b: f64) -> bool {
-    if a.is_nan() && b.is_nan() {
-        return true;
-    }
-    if a == 0.0 && b == 0.0 {
-        return a.is_sign_negative() == b.is_sign_negative();
-    }
-    a == b
-}
-
 /// The f32 subnormal values whose shortest-round-trip digit string (Ryu) is a
 /// different member of the round-trip class than the one Java prints. Keyed by
 /// raw bits; the value is the exact Java `Float.toString` output.
@@ -353,17 +342,6 @@ mod tests {
         assert!(!java_float_equals(-0.0, 0.0));
         assert!(java_float_equals(-0.0, -0.0));
         assert!(java_float_equals(0.0, 0.0));
-    }
-
-    /// Java `Double.equals` parity.
-    #[test]
-    fn double_equals_matches_java() {
-        assert!(java_double_equals(f64::NAN, f64::NAN));
-        assert!(java_double_equals(
-            f64::NAN,
-            f64::from_bits(0x7ff8000000000001)
-        ));
-        assert!(!java_double_equals(-0.0, 0.0));
     }
 
     /// Java `Float.toString` ground-truth cases.

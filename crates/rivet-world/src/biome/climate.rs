@@ -913,7 +913,7 @@ where
 
     let mut min_cost = i64::MAX;
     let mut min_dimension = 0usize;
-    let mut min_buckets: Vec<Vec<Node<T>>> = Vec::new();
+    let mut min_buckets: Vec<SubTree<T>> = Vec::new();
     for d in 0..dimensions {
         // Java `sort(children, ...)` mutates `children` in place, so each
         // dimension buckets the *previously sorted* list (cumulative ordering).
@@ -921,8 +921,7 @@ where
         let buckets = bucketize(&children);
         let mut total_cost = 0i64;
         for bucket in &buckets {
-            let space = bucket_parameter_space(bucket);
-            total_cost = total_cost.wrapping_add(cost(&space));
+            total_cost = total_cost.wrapping_add(cost(&bucket.parameter_space));
         }
         if min_cost > total_cost {
             min_cost = total_cost;
@@ -934,7 +933,7 @@ where
     sort_buckets(&mut min_buckets, dimensions, min_dimension, true);
     let children_nodes: Vec<Node<T>> = min_buckets
         .into_iter()
-        .map(|bucket| build(dimensions, bucket))
+        .map(|bucket| build(dimensions, bucket.children))
         .collect();
     Node::SubTree(SubTree::new(children_nodes))
 }
@@ -957,10 +956,11 @@ fn sort<T>(children: &mut [Node<T>], dimensions: usize, dimension: usize, absolu
 }
 
 /// `Climate.RTree.sort(List<SubTree<T>>, ...)` — the bucket-list variant used
-/// after bucketing (the buckets are sorted by their first dimension only, then
-/// re-sorted with `absolute`).
+/// after bucketing. Each `SubTree` carries its cached bounding box (Java
+/// `SubTree.parameterSpace`), so the comparator reads it directly instead of
+/// rebuilding it per comparison.
 fn sort_buckets<T>(
-    buckets: &mut [Vec<Node<T>>],
+    buckets: &mut [SubTree<T>],
     dimensions: usize,
     dimension: usize,
     absolute: bool,
@@ -968,8 +968,8 @@ fn sort_buckets<T>(
     buckets.sort_by(|a, b| {
         for d in 0..dimensions {
             let dim = (dimension + d) % dimensions;
-            let ka = bucket_center(a, dim, absolute);
-            let kb = bucket_center(b, dim, absolute);
+            let ka = parameter_center(&a.parameter_space[dim], absolute);
+            let kb = parameter_center(&b.parameter_space[dim], absolute);
             let ord = ka.cmp(&kb);
             if ord != std::cmp::Ordering::Equal {
                 return ord;
@@ -980,9 +980,8 @@ fn sort_buckets<T>(
 }
 
 /// The comparator key — `(parameter.min() + parameter.max()) / 2L` (wrapping),
-/// `Math.abs`'d when `absolute`.
-fn center<T>(node: &Node<T>, dim: usize, absolute: bool) -> i64 {
-    let parameter = node.parameter_space(dim);
+/// `Math.abs`'d when `absolute` (Java `RTree.comparator`).
+fn parameter_center(parameter: &Parameter, absolute: bool) -> i64 {
     let center = parameter.min.wrapping_add(parameter.max) / 2;
     if absolute {
         center.wrapping_abs()
@@ -991,36 +990,31 @@ fn center<T>(node: &Node<T>, dim: usize, absolute: bool) -> i64 {
     }
 }
 
-/// A bucket's bound center — the center of the bucket's accumulated parameter
-/// space.
-fn bucket_center<T>(bucket: &[Node<T>], dim: usize, absolute: bool) -> i64 {
-    let space = bucket_parameter_space(bucket);
-    let center = space[dim].min.wrapping_add(space[dim].max) / 2;
-    if absolute {
-        center.wrapping_abs()
-    } else {
-        center
-    }
+/// The node variant of the comparator key.
+fn center<T>(node: &Node<T>, dim: usize, absolute: bool) -> i64 {
+    parameter_center(&node.parameter_space(dim), absolute)
 }
 
 /// `Climate.RTree.bucketize(List<Node>)` — splits into `expectedChildrenCount`
-/// (a power of six) sized buckets.
-fn bucketize<T>(nodes: &[Node<T>]) -> Vec<Vec<Node<T>>>
+/// (a power of six) sized buckets. Each bucket is a `SubTree<T>`, which caches
+/// its bounding parameter space (Java `new SubTree<>(children)` computes
+/// `buildParameterSpace` in the constructor).
+fn bucketize<T>(nodes: &[Node<T>]) -> Vec<SubTree<T>>
 where
     T: Clone,
 {
     let expected_children_count =
         (6.0f64).powf(((nodes.len() as f64 - 0.01).ln() / (6.0f64).ln()).floor()) as i32;
-    let mut buckets: Vec<Vec<Node<T>>> = Vec::new();
+    let mut buckets: Vec<SubTree<T>> = Vec::new();
     let mut children: Vec<Node<T>> = Vec::new();
     for child in nodes {
         children.push(child.clone());
         if children.len() as i32 >= expected_children_count {
-            buckets.push(std::mem::take(&mut children));
+            buckets.push(SubTree::new(std::mem::take(&mut children)));
         }
     }
     if !children.is_empty() {
-        buckets.push(children);
+        buckets.push(SubTree::new(children));
     }
     buckets
 }
@@ -1058,11 +1052,6 @@ fn build_parameter_space<T>(children: &[Node<T>]) -> [Parameter; PARAMETER_COUNT
         *slot = bounds[d].unwrap();
     }
     out
-}
-
-/// The parameter space of a bucket (all children present by construction).
-fn bucket_parameter_space<T>(bucket: &[Node<T>]) -> [Parameter; PARAMETER_COUNT] {
-    build_parameter_space(bucket)
 }
 
 /// `Climate.RTree`'s `<= 6` sort key — `Climate.RTree.sort`'s inner lambda:
@@ -1529,6 +1518,51 @@ mod tests {
             assert_eq!(
                 via_rtree, via_brute,
                 "RTree and brute force disagree for target {target:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rtree_bucket_sort_equivalence_and_stable_order() {
+        // A larger space that forces bucketing (`bucketize` splits at powers of
+        // six) and exercises the bucket sort's cached-parameter-space path. The
+        // RTree must agree with brute force on every target, and two separately
+        // built trees must produce byte-identical results (the bucket sort's
+        // tie/order is deterministic — the cached `SubTree.parameterSpace` is a
+        // pure fold over the same children).
+        let values: Vec<(ParameterPoint, String)> = (0..20)
+            .map(|i| {
+                let t = (i as f32 - 10.0) / 10.0; // -1.0 .. 0.9
+                let h = ((i * 3) % 7) as f32 / 10.0 - 0.3;
+                let c = ((i * 5) % 9) as f32 / 10.0 - 0.4;
+                let e = ((i * 7) % 11) as f32 / 10.0 - 0.5;
+                (
+                    params(t, h, c, e, t - h, c + e, i as f32 / 20.0),
+                    format!("p{i}"),
+                )
+            })
+            .collect();
+        let list_a = ParameterList::new(values.clone());
+        let list_b = ParameterList::new(values);
+        let targets = [
+            Climate::target(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            Climate::target(-0.7, 0.2, -0.4, 0.1, -0.9, 0.6),
+            Climate::target(0.8, -0.3, 0.5, -0.2, 0.1, -0.8),
+            Climate::target(0.3, 0.4, -0.1, 0.9, -0.5, 0.0),
+            Climate::target(-0.1, -0.6, 0.7, -0.9, 0.4, 0.3),
+            Climate::target(0.5, -0.8, 0.2, 0.6, -0.3, -0.4),
+        ];
+        for target in &targets {
+            let via_rtree = list_a.find_value(target);
+            let via_brute = list_a.find_value_brute_force(target);
+            assert_eq!(
+                via_rtree, via_brute,
+                "RTree and brute force disagree for target {target:?}"
+            );
+            assert_eq!(
+                list_a.find_value(target),
+                list_b.find_value(target),
+                "tree construction is not deterministic for target {target:?}"
             );
         }
     }
