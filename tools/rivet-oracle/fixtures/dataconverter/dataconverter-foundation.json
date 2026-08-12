@@ -1,0 +1,231 @@
+{
+  "paper": "26.2-DEV-main@0a99345",
+  "encodeVersions": [
+    {
+      "version": 0,
+      "step": 0,
+      "encoded": "0",
+      "roundTripVersion": 0,
+      "roundTripStep": 0,
+      "encodedToString": "0.0"
+    },
+    {
+      "version": 1,
+      "step": 0,
+      "encoded": "4294967296",
+      "roundTripVersion": 1,
+      "roundTripStep": 0,
+      "encodedToString": "1.0"
+    },
+    {
+      "version": 1,
+      "step": 1,
+      "encoded": "4294967297",
+      "roundTripVersion": 1,
+      "roundTripStep": 1,
+      "encodedToString": "1.1"
+    },
+    {
+      "version": 2,
+      "step": 0,
+      "encoded": "8589934592",
+      "roundTripVersion": 2,
+      "roundTripStep": 0,
+      "encodedToString": "2.0"
+    },
+    {
+      "version": -1,
+      "step": 0,
+      "encoded": "-4294967296",
+      "roundTripVersion": -1,
+      "roundTripStep": 0,
+      "encodedToString": "-1.0"
+    },
+    {
+      "version": -1,
+      "step": -1,
+      "encoded": "-1",
+      "roundTripVersion": -1,
+      "roundTripStep": -1,
+      "encodedToString": "-1.-1"
+    },
+    {
+      "version": 99,
+      "step": 0,
+      "encoded": "425201762304",
+      "roundTripVersion": 99,
+      "roundTripStep": 0,
+      "encodedToString": "99.0"
+    },
+    {
+      "version": 1344,
+      "step": 0,
+      "encoded": "5772436045824",
+      "roundTripVersion": 1344,
+      "roundTripStep": 0,
+      "encodedToString": "1344.0"
+    },
+    {
+      "version": 1344,
+      "step": 1,
+      "encoded": "5772436045825",
+      "roundTripVersion": 1344,
+      "roundTripStep": 1,
+      "encodedToString": "1344.1"
+    },
+    {
+      "version": 1344,
+      "step": 2147483647,
+      "encoded": "5774583529471",
+      "roundTripVersion": 1344,
+      "roundTripStep": 2147483647,
+      "encodedToString": "1344.2147483647"
+    },
+    {
+      "version": 1344,
+      "step": -2147483648,
+      "encoded": "5774583529472",
+      "roundTripVersion": 1344,
+      "roundTripStep": -2147483648,
+      "encodedToString": "1344.-2147483648"
+    },
+    {
+      "version": 268435456,
+      "step": 1234,
+      "encoded": "1152921504606848210",
+      "roundTripVersion": 268435456,
+      "roundTripStep": 1234,
+      "encodedToString": "268435456.1234"
+    },
+    {
+      "version": -2147483648,
+      "step": 0,
+      "encoded": "-9223372036854775808",
+      "roundTripVersion": -2147483648,
+      "roundTripStep": 0,
+      "encodedToString": "-2147483648.0"
+    },
+    {
+      "version": -2147483648,
+      "step": -2147483648,
+      "encoded": "-9223372034707292160",
+      "roundTripVersion": -2147483648,
+      "roundTripStep": -2147483648,
+      "encodedToString": "-2147483648.-2147483648"
+    }
+  ],
+  "stepMonotonic": {
+    "a": "21474836580",
+    "b": "21474836581",
+    "aLessThanB": true
+  },
+  "comparatorOrder": [
+    {
+      "name": "c30",
+      "toVersion": 3,
+      "versionStep": 0,
+      "encoded": "12884901888"
+    },
+    {
+      "name": "c3max",
+      "toVersion": 3,
+      "versionStep": 2147483647,
+      "encoded": "15032385535"
+    },
+    {
+      "name": "c50",
+      "toVersion": 5,
+      "versionStep": 0,
+      "encoded": "21474836480"
+    },
+    {
+      "name": "c51",
+      "toVersion": 5,
+      "versionStep": 1,
+      "encoded": "21474836481"
+    },
+    {
+      "name": "c52",
+      "toVersion": 5,
+      "versionStep": 2,
+      "encoded": "21474836482"
+    },
+    {
+      "name": "c5-1",
+      "toVersion": 5,
+      "versionStep": -1,
+      "encoded": "25769803775"
+    },
+    {
+      "name": "c100",
+      "toVersion": 100,
+      "versionStep": 0,
+      "encoded": "429496729600"
+    }
+  ],
+  "dataTypeConvertOrOriginal": {
+    "nullConverterKeepsOriginal": "orig",
+    "replacingConverterReplaces": "replaced"
+  },
+  "hookWalker": {
+    "preHookPassthrough": "d",
+    "postHookNull": true,
+    "noOpWalkNull": true
+  },
+  "objectType": {
+    "byte": "BYTE",
+    "short": "SHORT",
+    "int": "INT",
+    "long": "LONG",
+    "float": "FLOAT",
+    "double": "DOUBLE",
+    "string": "STRING",
+    "byteArray": "BYTE_ARRAY",
+    "shortArray": "SHORT_ARRAY",
+    "intArray": "INT_ARRAY",
+    "longArray": "LONG_ARRAY",
+    "map": "MAP",
+    "list": "LIST",
+    "null_npe": true
+  },
+  "mapTypeDefaults": {
+    "b": "1",
+    "s": "2",
+    "i": "3",
+    "l": "4",
+    "f": "5.5",
+    "d": "6.5",
+    "bool": "1",
+    "str": "seven",
+    "map": "ca.spottedleaf.dataconverter.types.nbt.NBTMapType",
+    "list": "ca.spottedleaf.dataconverter.types.nbt.NBTListType",
+    "bytes": "[8, 9]",
+    "ints": "[10, 11]",
+    "longs": "[12, 13]",
+    "getBooleanFromByte": true,
+    "getNumberFromByte": "1",
+    "getIntCoerced": 1,
+    "hasKey_int_AS_INT": true,
+    "hasKey_int_AS_BYTE": false,
+    "hasKey_int_AS_NUMBER": true,
+    "hasKey_str_AS_STRING": true,
+    "hasKey_unknown": false,
+    "getList_int_as_INT_notNull": true,
+    "getList_int_as_STRING_null": true,
+    "getList_empty_as_any_notNull": true,
+    "getList_missing_null": true,
+    "getListUnchecked_int_notNull": true,
+    "getOrCreateList_created": true,
+    "getOrCreateList_size": 1,
+    "getOrCreateMap_created": true,
+    "getOrCreateMap_inner": 7
+  },
+  "listTypeDefaults": {
+    "setGeneric_int": 3,
+    "addGeneric_short": 4,
+    "addGeneric_string": "five",
+    "addGeneric_map": "ca.spottedleaf.dataconverter.types.nbt.NBTMapType",
+    "addGeneric_ints": "[6, 7]",
+    "setGeneric_empty_oob": true
+  }
+}
