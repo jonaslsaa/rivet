@@ -18,10 +18,10 @@
 //! multiplied into the `double` sum before `Math.ceil`'s exact f64 `(int)`
 //! cast (Java's float/double→int casts saturate, matching Rust's `as`).
 //! The noise draw is read-only — the only world state these modifiers touch —
-//! so `count` stays a pure function of `(origin, this)`. The strict
+//! so `count` stays a pure function of `(origin, this)`. The
 //! optional-with-default `"noise_offset"` field is the serialization crate's
-//! generic `Codec.strictOptionalFieldOf` capability
-//! (`rivet_serialization::codec::strict_optional_field_of`), not a
+//! generic `Codec.optionalFieldOf` capability
+//! (`rivet_serialization::codec::optional_field_of`), not a
 //! placement-modifier concern.
 
 use crate::biome::BIOME_INFO_NOISE;
@@ -98,10 +98,10 @@ impl PlacementModifier for NoiseBasedCountPlacement {
 
 /// `NoiseBasedCountPlacement.CODEC` — a record codec over the required
 /// `"noise_to_count_ratio"` (`Codec.INT`), required `"noise_factor"`
-/// (`Codec.DOUBLE`), and the STRICT optional-with-default `"noise_offset"`
+/// (`Codec.DOUBLE`), and the optional-with-default `"noise_offset"`
 /// (`Codec.DOUBLE.optionalFieldOf("noise_offset", 0.0)` via the serialization
-/// crate's generic `Codec.strictOptionalFieldOf` — see
-/// `rivet_serialization::codec::strict_optional_field_of`), as the ops-generic
+/// crate's generic `Codec.optionalFieldOf` — see
+/// `rivet_serialization::codec::optional_field_of`), as the ops-generic
 /// `noise_based_count_placement_codec::<Ops>()` factory.
 ///
 /// Java:
@@ -133,7 +133,7 @@ pub fn noise_based_count_placement_codec<Ops: DynamicOps + 'static>()
                 // present-but-malformed value propagates the parse error, and
                 // only a `doubleToLongBits`-equal 0.0 (not -0.0) is omitted on
                 // encode.
-                codec::strict_optional_field_of("noise_offset", codec::double_codec::<Ops>(), 0.0),
+                codec::optional_field_of("noise_offset", codec::double_codec::<Ops>(), 0.0),
             ))
             .apply(
                 instance,
@@ -301,6 +301,14 @@ mod tests {
             encoded,
             json!({"noise_to_count_ratio": 10, "noise_factor": 0.05,
                    "noise_offset": -0.0})
+        );
+        // `serde_json::Value` equality treats `-0.0 == 0.0`, so the assert
+        // above cannot detect sign loss; the serialized string preserves the
+        // sign bit (`-0.0` vs `0.0`).
+        let encoded_str = encoded.to_string();
+        assert!(
+            encoded_str.contains("-0.0"),
+            "encode must preserve -0.0 noise_offset, got {encoded_str}"
         );
         let decoded = codec
             .parse(&JsonOps::INSTANCE, &encoded)

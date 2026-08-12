@@ -93,19 +93,11 @@ pub fn surface_relative_threshold_filter_map_codec<Ops: DynamicOps + 'static>()
             ))
             .and(record_builder::RecordCodecBuilder::of(
                 Arc::new(|c: &SurfaceRelativeThresholdFilter| c.min_inclusive),
-                codec::strict_optional_field_of(
-                    "min_inclusive",
-                    codec::int_codec::<Ops>(),
-                    i32::MIN,
-                ),
+                codec::optional_field_of("min_inclusive", codec::int_codec::<Ops>(), i32::MIN),
             ))
             .and(record_builder::RecordCodecBuilder::of(
                 Arc::new(|c: &SurfaceRelativeThresholdFilter| c.max_inclusive),
-                codec::strict_optional_field_of(
-                    "max_inclusive",
-                    codec::int_codec::<Ops>(),
-                    i32::MAX,
-                ),
+                codec::optional_field_of("max_inclusive", codec::int_codec::<Ops>(), i32::MAX),
             ))
             .apply(
                 instance,
