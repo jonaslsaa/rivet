@@ -8,16 +8,18 @@
 //! Only the surface consumed here is ported: the two `i32` bounds, the
 //! canonical-constructor validation (`min_inclusive must be less than or equal
 //! to max_inclusive`), and the ops-generic `codec(elementCodec, minAllowed,
-//! maxAllowed)` factory reproducing `ExtraCodecs.intervalCodec` plus the
-//! `.validate` bound check with Paper's exact messages. The rest of the record
-//! (`INT`, the `(T)` single-value constructor, `map`, `isValueInRange`,
-//! `contains`, `toString`) is owned by `mc.util` and lands with that unit.
+//! maxAllowed)` factory. The interval codec itself is NOT rebuilt here: it
+//! delegates to the shared `rivet_serialization::extra_codecs::interval_codec`
+//! (the DFU-exact `ExtraCodecs.intervalCodec`, merged with #557), which is then
+//! `.validate`d to the allowed bounds with Paper's exact messages. The rest of
+//! the record (`INT`, the `(T)` single-value constructor, `map`,
+//! `isValueInRange`, `contains`, `toString`) is owned by `mc.util` and lands
+//! with that unit.
 
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
-use rivet_serialization::either::Either;
-use rivet_serialization::pair::Pair;
+use rivet_serialization::extra_codecs;
 use std::sync::Arc;
 
 /// `net.minecraft.util.InclusiveRange<Integer>` — an inclusive `[min, max]`
@@ -64,47 +66,26 @@ impl InclusiveRange {
 /// The interval codec accepts the range three ways (the DFU `intervalCodec`
 /// shape): a single point (`"min_inclusive": 1` → `[1, 1]`), a two-element
 /// array (`[min, max]`), or an object (`{"min_inclusive": .., "max_inclusive":
-/// ..}`). The bounded variant adds Paper's exact `.validate` messages.
+/// ..}`). The unbounded form delegates to the shared
+/// `extra_codecs::interval_codec` (the DFU-exact `ExtraCodecs.intervalCodec`,
+/// merged with #557), and the bounded variant adds Paper's exact `.validate`
+/// messages on top.
 pub fn inclusive_range_codec<Ops: DynamicOps + 'static>(
     element_codec: Arc<dyn Codec<i32, Ops>>,
     min_allowed_inclusive: i32,
     max_allowed_inclusive: i32,
 ) -> Arc<dyn Codec<InclusiveRange, Ops>> {
-    // `Codec.list(pointCodec).comapFlatMap(list -> fixedSize(list, 2) ...,
-    //  p -> ImmutableList.of(min, max))`.
-    let array_codec = codec::comap_flat_map::<Vec<i32>, InclusiveRange, Ops>(
-        codec::list(element_codec.clone()),
-        Arc::new(|list: &Vec<i32>| {
-            crate::util::fixed_size(list, 2).flat_map(|v| InclusiveRange::create(v[0], v[1]))
-        }),
-        Arc::new(|r: &InclusiveRange| vec![r.min_inclusive, r.max_inclusive]),
-    );
-    // `RecordCodecBuilder.create(...).comapFlatMap(makeInterval, Pair::of)`.
-    let object_codec = codec::comap_flat_map::<Pair<i32, i32>, InclusiveRange, Ops>(
-        map_codec::codec_of(codec::map_pair::<i32, i32, Ops>(
-            codec::field_of(element_codec.clone(), "min_inclusive".to_string()),
-            codec::field_of(element_codec.clone(), "max_inclusive".to_string()),
-        )),
-        Arc::new(|p: &Pair<i32, i32>| InclusiveRange::create(*p.get_first(), *p.get_second())),
-        Arc::new(|r: &InclusiveRange| Pair::of(r.min_inclusive, r.max_inclusive)),
-    );
-    // `Codec.withAlternative(arrayCodec, objectCodec)`.
-    let array_or_object_codec =
-        codec::with_alternative::<InclusiveRange, Ops>(array_codec, object_codec);
-    // `Codec.either(pointCodec, arrayOrObjectCodec).comapFlatMap(...)`.
-    let unbounded = codec::comap_flat_map::<Either<i32, InclusiveRange>, InclusiveRange, Ops>(
-        codec::either(element_codec, array_or_object_codec),
-        Arc::new(|e: &Either<i32, InclusiveRange>| match e {
-            Either::Left(min) => InclusiveRange::create(*min, *min),
-            Either::Right(r) => DataResult::success(*r),
-        }),
-        Arc::new(|r: &InclusiveRange| {
-            if r.min_inclusive == r.max_inclusive {
-                Either::left(r.min_inclusive)
-            } else {
-                Either::right(*r)
-            }
-        }),
+    // `ExtraCodecs.intervalCodec(elementCodec, "min_inclusive", "max_inclusive",
+    //  InclusiveRange::create, InclusiveRange::minInclusive,
+    //  InclusiveRange::maxInclusive, Objects::equals)`.
+    let unbounded = extra_codecs::interval_codec::<i32, InclusiveRange, Ops>(
+        element_codec,
+        "min_inclusive".to_string(),
+        "max_inclusive".to_string(),
+        Arc::new(|min: &i32, max: &i32| InclusiveRange::create(*min, *max)),
+        Arc::new(|r: &InclusiveRange| r.min_inclusive),
+        Arc::new(|r: &InclusiveRange| r.max_inclusive),
+        Arc::new(|a: &i32, b: &i32| a == b),
     );
     // `.validate(...)` with the bound messages.
     codec::validate(
@@ -126,8 +107,6 @@ pub fn inclusive_range_codec<Ops: DynamicOps + 'static>(
         }),
     )
 }
-
-use rivet_serialization::map_codec;
 
 #[cfg(test)]
 mod tests {
