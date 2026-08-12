@@ -81,27 +81,37 @@ impl SpringConfiguration {
 /// definition validates the `"Properties"` map against its declared property
 /// value codecs. The fluid state-definition machinery (`Fluid.getStateDefinition`,
 /// `StateDefinition.propertiesCodec`) is not ported, so this stub resolves the
-/// `"Name"` to the [`FluidId`] id-handle and carries the property map
-/// verbatim (ordered, as encoded) without per-property validation; a
-/// wrong-typed or unknown property value round-trips instead of erroring
-/// (narrower than Java's `Property.valueCodec`). This is the wire shape the
+/// `"Name"` to the [`FluidId`] id-handle and carries the property map as
+/// ordered key→value string pairs (DFU `Property.valueCodec` is
+/// `Codec.STRING`, so the wire form of every property value is a string)
+/// without per-property validation; a present-but-malformed `"Properties"`
+/// compound errors instead of falling back (narrower than Java's
+/// `StateDefinition.createCodec` `orElseGet`). This is the wire shape the
 /// pinned `spring_lava_nether.json` fixture exercises
 /// (`{"Name": "minecraft:lava", "Properties": {"falling": "true"}}`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FluidState {
     /// The fluid type (`FluidState.getType()`).
     pub fluid: FluidId,
+    /// The `"Properties"` compound, as ordered key→value pairs in wire order.
+    /// Empty is the absent/empty property map (a singleton state's wire shape,
+    /// and what [`FluidState::new`] constructs); a non-empty list re-encodes
+    /// the `"Properties"` compound verbatim.
+    pub properties: Vec<(String, String)>,
 }
 
 impl FluidState {
-    /// The minimal STUB carrier — a plain fluid-type handle. The property map
-    /// defers with the owning unit, so `FluidState` holds only the fluid id.
+    /// The minimal STUB carrier — a plain fluid-type handle with no properties
+    /// (the wire shape of a state whose `"Properties"` compound is absent).
     ///
     /// STUB: `new FluidState(FluidId)` is a placeholder for the
     /// state-definition-backed value; consumers in this unit construct it from
     /// a resolved fluid id.
     pub fn new(fluid: FluidId) -> Self {
-        FluidState { fluid }
+        FluidState {
+            fluid,
+            properties: Vec::new(),
+        }
     }
 
     /// `getType()` — the fluid type id-handle.
@@ -117,11 +127,95 @@ impl FluidState {
 /// fluid id-handle: the record codec writes/reads the `"Name"` key
 /// (`Registry.byNameCodec` shape — an unknown fluid name errors with the
 /// vanilla `Unknown registry key ... minecraft:fluid` message, the same
-/// `block_by_name_codec` uses), and the value codec is `MapCodec.unit(default)`
-/// because the property map defers with the owning unit's state definitions
-/// (a non-singleton fluid's `"Properties"` compound is not carried). The
-/// `.stable()` lifecycle wrapper is applied like Java's `... .stable()`.
+/// `block_by_name_codec` uses), and the per-type value codec reads/writes the
+/// `"Properties"` compound as an ordered string map (every `Property.valueCodec`
+/// is `Codec.STRING`, so the wire form of each value is a string), carried
+/// verbatim without the owning unit's per-property validation. An absent
+/// `"Properties"` decodes to the empty map (a singleton state's wire shape); a
+/// present-but-malformed `"Properties"` (not a string map) is a decode error —
+/// narrower than Java's `StateDefinition.createCodec` `orElseGet` recovery. On
+/// encode the `"Properties"` compound is written only when non-empty, so the
+/// singleton wire shape stays `{"Name": "minecraft:lava"}`. The `.stable()`
+/// lifecycle wrapper is applied like Java's `... .stable()`, and
+/// `KeyDispatchCodec` writes the value element before the `"Name"` key (the
+/// `spring_lava_nether.json`-exercised `{"Properties": {"falling": "true"},
+/// "Name": "minecraft:lava"}` shape).
 pub fn fluid_state_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<FluidState, Ops>> {
+    use rivet_serialization::dynamic_ops::MapLike;
+    use rivet_serialization::map_decoder;
+    use rivet_serialization::map_encoder;
+
+    /// The per-fluid `"Properties"` value `MapCodec` — reads/writes the ordered
+    /// string map verbatim (see the codec doc). The dispatch resolves the fluid
+    /// type from `"Name"`; this codec carries the property map on top of it.
+    fn properties_codec<Ops: DynamicOps + 'static>(
+        fluid: FluidId,
+    ) -> Arc<dyn map_codec::MapCodec<FluidState, Ops>> {
+        let fluid_for_decode = fluid;
+        let encode = map_encoder::of(
+            Arc::new(
+                |state: &FluidState,
+                 ops: &Ops,
+                 prefix: &mut dyn rivet_serialization::dynamic_ops::RecordBuilder<
+                    Output = Ops::Output,
+                >| {
+                    if state.properties.is_empty() {
+                        return;
+                    }
+                    let entries: Vec<rivet_serialization::dynamic_ops::Pair<Ops::Output, Ops::Output>> =
+                        state
+                            .properties
+                            .iter()
+                            .map(|(k, v)| {
+                                rivet_serialization::dynamic_ops::Pair::of(
+                                    ops.create_string(k.clone()),
+                                    ops.create_string(v.clone()),
+                                )
+                            })
+                            .collect();
+                    prefix.add_string("Properties", ops.create_map(entries));
+                },
+            ),
+            Arc::new(|ops: &Ops| -> Vec<Ops::Output> {
+                vec![ops.create_string("Properties".to_string())]
+            }),
+        );
+        let decode = map_decoder::of(
+            Arc::new(move |ops: &Ops, input: &dyn MapLike<Ops::Output>| {
+                let Some(properties_value) = input.get_string("Properties") else {
+                    // Absent → the singleton wire shape.
+                    return DataResult::success(FluidState::new(fluid_for_decode));
+                };
+                let map = ops.get_map(&properties_value);
+                map.flat_map(|map| {
+                    let mut properties = Vec::with_capacity(map.entries().len());
+                    for entry in map.entries() {
+                        let key = ops.get_string_value(&entry.first);
+                        let value = ops.get_string_value(&entry.second);
+                        match (key.result(), value.result()) {
+                            (Some(k), Some(v)) => {
+                                properties.push((k.clone(), v.clone()));
+                            }
+                            _ => {
+                                return DataResult::error(
+                                    "Fluid state Properties entries must be strings".to_string(),
+                                );
+                            }
+                        }
+                    }
+                    DataResult::success(FluidState {
+                        fluid: fluid_for_decode,
+                        properties,
+                    })
+                })
+            }),
+            Arc::new(|ops: &Ops| -> Vec<Ops::Output> {
+                vec![ops.create_string("Properties".to_string())]
+            }),
+        );
+        map_codec::of(encode, decode, "FluidStateProperties".to_string())
+    }
+
     let dispatch = key_dispatch_codec::dispatch_map::<rivet_registry::Identifier, FluidState, Ops>(
         "Name",
         rivet_registry::identifier::identifier_codec::<Ops>(),
@@ -130,7 +224,7 @@ pub fn fluid_state_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<FluidStat
         }),
         Arc::new(
             |name: &rivet_registry::Identifier| match FluidId::from_name(&name.to_string()) {
-                Some(fluid) => DataResult::success(map_codec::unit(FluidState::new(fluid))),
+                Some(fluid) => DataResult::success(properties_codec::<Ops>(fluid)),
                 None => DataResult::error(format!(
                     "Unknown registry key in ResourceKey[minecraft:root / minecraft:fluid]: {}",
                     name
@@ -160,7 +254,7 @@ pub fn spring_configuration_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>
     record_builder::create(|instance| {
         instance
             .group(RecordCodecBuilder::of(
-                Arc::new(|c: &SpringConfiguration| c.state),
+                Arc::new(|c: &SpringConfiguration| c.state.clone()),
                 codec::field_of(fluid_state_codec::<Ops>(), "state".to_string()),
             ))
             .and(RecordCodecBuilder::of(
@@ -293,9 +387,9 @@ mod tests {
 
     #[test]
     fn fluid_state_codec_round_trips_lava() {
-        // The `spring_lava_nether.json` wire shape: `{"Name": "minecraft:lava"}`.
-        // (The fixture's `Properties: {"falling": "true"}` compound defers with
-        // the owning fluid unit's state definitions — see the STUB doc.)
+        // The `spring_lava_nether.json` wire shape: `{"Name": "minecraft:lava"}`
+        // — a singleton `FluidState` (empty property map) omits the
+        // `"Properties"` compound.
         let codec = fluid_state_codec::<JsonOps>();
         let state = FluidState::new(FluidId::LAVA);
         let encoded = codec
@@ -306,7 +400,55 @@ mod tests {
         assert_eq!(encoded, json!({"Name": "minecraft:lava"}));
         let result = codec.parse(&JsonOps::INSTANCE, &encoded);
         let decoded = result.result().expect("decode should succeed");
-        assert_eq!(*decoded, state);
+        assert_eq!(decoded, &state);
+    }
+
+    #[test]
+    fn fluid_state_codec_carries_properties_verbatim() {
+        // The `spring_lava_nether.json` fixture's full wire form: the falling
+        // lava state serializes with the `"Properties"` compound (value element
+        // before the `"Name"` key — `KeyDispatchCodec.encode`).
+        let codec = fluid_state_codec::<JsonOps>();
+        let state = FluidState {
+            fluid: FluidId::LAVA,
+            properties: vec![("falling".to_string(), "true".to_string())],
+        };
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &state)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(
+            encoded,
+            json!({"Properties": {"falling": "true"}, "Name": "minecraft:lava"})
+        );
+        assert_eq!(
+            encoded
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["Properties", "Name"]
+        );
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &encoded)
+            .result()
+            .expect("decode should succeed")
+            .clone();
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn fluid_state_codec_rejects_malformed_properties() {
+        // A present-but-non-string-map `"Properties"` errors (narrower than
+        // Java's `orElseGet` recovery — see the STUB doc).
+        let codec = fluid_state_codec::<JsonOps>();
+        let result = codec.parse(
+            &JsonOps::INSTANCE,
+            &json!({"Name": "minecraft:lava", "Properties": {"falling": 42}}),
+        );
+        assert!(result.is_error());
     }
 
     #[test]
@@ -398,6 +540,57 @@ mod tests {
             .expect("decode should succeed")
             .clone();
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn codec_decodes_the_pinned_spring_lava_nether_fixture() {
+        // The real `spring_lava_nether.json` wire shape: `state` with the
+        // falling-lava `"Properties"` compound plus the `valid_blocks` holder
+        // list (restricted to the test registry's registered blocks). The
+        // falling property must be carried verbatim through the decode/encode
+        // round trip — the `"Properties"` compound is no longer dropped.
+        let access = block_access();
+        let codec = spring_configuration_codec::<TestOps>();
+        let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, access);
+        let fixture = json!({
+            "state": {"Name": "minecraft:lava", "Properties": {"falling": "true"}},
+            "valid_blocks": ["minecraft:netherrack"],
+        });
+        let decoded = codec
+            .parse(&ops, &fixture)
+            .result()
+            .expect("decode the pinned fixture should succeed")
+            .clone();
+        assert_eq!(decoded.state.fluid, FluidId::LAVA);
+        assert_eq!(
+            decoded.state.properties,
+            vec![("falling".to_string(), "true".to_string())]
+        );
+        assert!(decoded.requires_block_below);
+        assert_eq!(decoded.rock_count, 4);
+        assert_eq!(decoded.hole_count, 1);
+        // Re-encode: the state half reproduces the fixture's `"Properties"`
+        // compound verbatim (carried, not coerced away). The `valid_blocks`
+        // half re-encodes a single element as the compressed reference string
+        // form (`HolderSetCodec`), not the fixture's array form — a pre-existing
+        // holder-set wire nuance unrelated to the property carry.
+        let encoded = codec
+            .encode_start(&ops, &decoded)
+            .result()
+            .expect("re-encode should succeed")
+            .clone();
+        assert_eq!(
+            encoded["state"],
+            json!({"Properties": {"falling": "true"}, "Name": "minecraft:lava"})
+        );
+        assert_eq!(encoded["valid_blocks"], json!("minecraft:netherrack"));
+        // The re-encoded form decodes back to the same configuration.
+        let round_tripped = codec
+            .parse(&ops, &encoded)
+            .result()
+            .expect("round-trip decode should succeed")
+            .clone();
+        assert_eq!(round_tripped, decoded);
     }
 
     #[test]
