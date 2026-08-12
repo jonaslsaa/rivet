@@ -60,6 +60,20 @@ pub const RIVET_READY: &str = "RIVET_READY";
 /// argv construction and the probe classification share one token.
 pub const WORLD_PATH_ARG: &str = "--level";
 
+/// The generated-world launch option the generated-world acceptance probe
+/// passes to rivet-server (`--seed <n>`). This is the explicit generated-world
+/// server capability: a rivet-server build that accepts `--seed` can boot a
+/// fresh generated world of the requested seed; a build that rejects it (only
+/// `--host`/`--port`/`--level`, the state at this harness's landing) has no
+/// such capability. Kept in the seam module so the argv construction and the
+/// probe classification share one token.
+pub const GENERATED_SEED_ARG: &str = "--seed";
+
+/// The seed the generated-world acceptance contract boots and compares: a
+/// fresh disposable seed-42 world. The Paper ground-truth reference
+/// (`rivet-oracle generated-expected`) is captured for exactly this seed.
+pub const GENERATED_SEED: u64 = 42;
+
 /// How long to wait for Paper to reach `Done (...)!` (covers the paperclip
 /// first-boot materialization of ~160MB libraries + worldgen).
 pub const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -493,16 +507,29 @@ pub enum ProbeVerdict {
 /// its log. Pure, so the classification is unit-tested on fixture logs instead
 /// of requiring a real boot.
 pub fn classify_probe(reached_ready: bool, log: &str) -> ProbeVerdict {
+    classify_arg_probe(reached_ready, log, WORLD_PATH_ARG)
+}
+
+/// Classify a generated-world launch probe (`--seed <n>`) from whether the
+/// server reached READY and its log. Pure and unit-tested like
+/// [`classify_probe`]. `Absent` means the server build has no generated-world
+/// capability — it exited before READY and its log names `--seed` as unknown.
+pub fn classify_seed_probe(reached_ready: bool, log: &str) -> ProbeVerdict {
+    classify_arg_probe(reached_ready, log, GENERATED_SEED_ARG)
+}
+
+/// The shared launch-capability classifier: a server that reached READY has the
+/// capability (`Present`); a server that exited before READY rejecting `arg` as
+/// an unknown argument has it `Absent` (the capability is not in this build);
+/// any other premature exit is `FailedToBoot` (the capability could not be
+/// confirmed present or absent, still UNVERIFIED per the exit contract).
+fn classify_arg_probe(reached_ready: bool, log: &str, arg: &str) -> ProbeVerdict {
     if reached_ready {
         return ProbeVerdict::Present;
     }
-    // The server rejected the world-path interface: it exited before READY and
-    // its log names `--level` as unknown. Since #363 rivet-server accepts the
-    // argument, so this is a defensive classification for a server build that
-    // still rejects it.
     let evidence = log
         .lines()
-        .find(|l| l.contains("unknown argument") && l.contains(WORLD_PATH_ARG))
+        .find(|l| l.contains("unknown argument") && l.contains(arg))
         .map(str::to_owned)
         .unwrap_or_else(|| {
             log.lines()
@@ -510,7 +537,7 @@ pub fn classify_probe(reached_ready: bool, log: &str) -> ProbeVerdict {
                 .map(str::to_owned)
                 .unwrap_or_else(|| "<empty log>".to_owned())
         });
-    if log.contains(WORLD_PATH_ARG) && log.contains("unknown argument") {
+    if log.contains(arg) && log.contains("unknown argument") {
         ProbeVerdict::Absent { evidence }
     } else {
         ProbeVerdict::FailedToBoot { evidence }
@@ -550,8 +577,9 @@ fn absolutize_artifact(artifact: &Path) -> PathBuf {
 /// The ten arguments are the distinct inputs a boot needs (server kind, run
 /// dir, log tee, artifact, optional properties source, optional world-defaults
 /// source, bind address, optional held port reservation, child envs, optional
-/// world-path launch option); the excess over clippy's default limit is
-/// inherent to the operation rather than a refactorable arity smell.
+/// world-path launch option, `seed` the generated-world `--seed` launch option);
+/// the excess over clippy's default limit is inherent to the operation rather
+/// than a refactorable arity smell.
 #[allow(clippy::too_many_arguments)]
 pub fn boot(
     kind: ServerKind,
@@ -564,6 +592,7 @@ pub fn boot(
     port_reservation: Option<rivet_harness_common::port::PortReservation>,
     envs: &[(&str, &str)],
     world_path: Option<&Path>,
+    seed: Option<u64>,
 ) -> Result<Server, Error> {
     prepare_run_dir(
         run_dir,
@@ -609,6 +638,17 @@ pub fn boot(
             // the probe classifier.
             if let Some(world) = world_path {
                 c.arg(WORLD_PATH_ARG).arg(world);
+            }
+            // The generated-world launch interface (`--seed <n>`): the explicit
+            // generated-world capability the generated-world acceptance probe
+            // drives. A rivet-server build that accepts it boots a fresh
+            // generated world of the requested seed; one that rejects it (the
+            // current `--host`/`--port`/`--level`-only build) is classified
+            // `Absent` by `classify_seed_probe` and the runner reports the
+            // exact pinned UNVERIFIED reason — never a superflat or loaded-world
+            // fallback.
+            if let Some(seed) = seed {
+                c.arg(GENERATED_SEED_ARG).arg(seed.to_string());
             }
             c
         }
@@ -735,6 +775,7 @@ mod tests {
             None,
             &[],
             Some(Path::new("world")),
+            None,
         )
         .err()
         .expect("a non-executable binary must not spawn");
@@ -770,6 +811,7 @@ mod tests {
             None,
             &[],
             Some(Path::new("world")),
+            None,
         )
         .err()
         .expect("a file cannot be prepared as a run directory");
@@ -810,6 +852,45 @@ mod tests {
             classify_probe(false, ""),
             ProbeVerdict::FailedToBoot {
                 evidence: "<empty log>".to_owned()
+            }
+        );
+    }
+
+    /// The generated-world launch probe (`--seed`) classifies ready, absent,
+    /// and unrelated failures exactly like the world-path probe — the
+    /// generated-world acceptance boundary depends on `Absent` meaning "this
+    /// rivet-server build has no generated-world capability", never a fallback.
+    #[test]
+    fn seed_probe_classifies_ready_absent_and_unrelated_failures() {
+        assert_eq!(classify_seed_probe(true, "anything"), ProbeVerdict::Present);
+
+        let rejected = concat!(
+            "thread 'main' panicked at crates/rivet-server/src/main.rs:\n",
+            "unknown argument \"--seed\" (expected --host/--port/--level)\n"
+        );
+        assert!(matches!(
+            classify_seed_probe(false, rejected),
+            ProbeVerdict::Absent { evidence }
+                if evidence.contains("unknown argument \"--seed\"")
+        ));
+
+        // A log that names the world-path argument but not `--seed` must NOT
+        // classify as `Absent` for the seed probe: the capability is unconfirmed.
+        let wrong_arg = concat!(
+            "thread 'main' panicked at crates/rivet-server/src/main.rs:\n",
+            "unknown argument \"--level\" (expected --host/--port)\n"
+        );
+        assert_eq!(
+            classify_seed_probe(false, wrong_arg),
+            ProbeVerdict::FailedToBoot {
+                evidence: "unknown argument \"--level\" (expected --host/--port)".to_owned()
+            }
+        );
+
+        assert_eq!(
+            classify_seed_probe(false, "server error: address already in use\n"),
+            ProbeVerdict::FailedToBoot {
+                evidence: "server error: address already in use".to_owned()
             }
         );
     }
