@@ -418,6 +418,26 @@ PACKAGE_SPLITS: dict[str, dict[str, list[str]]] = {
     # registry hub and the framework base (see SPLIT_NOTES and the structure
     # SPLIT_EDGES), so once the hub tables are generated (and the framework is
     # ported), leaves -> core is a clean DAG.
+    # net.minecraft.data.worldgen (issue #177/#178 prereq): the 3-file
+    # bootstrap/terrain prerequisites split out of the 29-file monolithic
+    # mc.data.worldgen row. The residual keeps the pre-split id (mc.data.worldgen)
+    # and its 26-file complement (pools/pieces/structures/features registries),
+    # so external dependents on net.minecraft.data.worldgen (the data rows in
+    # wave 3's cycle) still resolve to one hub. mc.data.worldgen.prereq is
+    # right-sized and not needs_split; the residual stays oversized and
+    # needs_split=yes. Same-package refs from the residual into the prereq
+    # (e.g. SurfaceRuleData/StructureSets referencing TerrainProvider or the
+    # bootstraps) are deliberately NOT dep edges (recorded in SPLIT_NOTES): the
+    # residual is not translated in this wave, so recording them would deadlock.
+    # Crate override: the prereq's Java files import only net.minecraft.util +
+    # net.minecraft.resources + net.minecraft.world.level.levelgen.synth, but the
+    # ported modules live in rivet-world (next to Noises/NormalNoise/CubicSpline
+    # usage); see CRATE_OVERRIDES.
+    "net.minecraft.data.worldgen": {
+        "mc.data.worldgen.prereq": [
+            "BootstrapContext.java", "NoiseData.java", "TerrainProvider.java",
+        ],
+    },
     "net.minecraft.world.level.levelgen": {
         "mc.world.level.levelgen.random": [
             "BitRandomSource.java", "LegacyRandomSource.java",
@@ -1080,6 +1100,7 @@ PACKAGE_SPLITS: dict[str, dict[str, list[str]]] = {
 # Packages selected by the --split-network / --split-game / --split-world /
 # --split-server flags.
 WORLD_SPLIT_PACKAGES = {
+    "net.minecraft.data.worldgen",
     "net.minecraft.world.level.levelgen",
     "net.minecraft.world.level.levelgen.feature",
     "net.minecraft.world.level.levelgen.feature.configurations",
@@ -1144,6 +1165,12 @@ SPLIT_EDGES: dict[str, set[str]] = {
         "mc.network.protocol.game.chunk",
         "mc.network.protocol.game.serverbound",
     },
+    # data.worldgen: the residual mc.data.worldgen -> its prereq sub-unit.
+    # Sub-unit back-refs into the residual (e.g. TerrainProvider has none; the
+    # residual's SurfaceRuleData/StructureSets/etc. reference the prereq) are
+    # deliberate STUBs (see the mc.data.worldgen.prereq note), so the edge is
+    # only residual -> prereq.
+    "mc.data.worldgen": {"mc.data.worldgen.prereq"},
     # levelgen root: the RNG leaf layer is the base; the density/noise-router
     # layer (noise) rides on random, the noise-based chunk generator (noisegen)
     # rides on noise + random, and settings (flat/debug/retrogen sources) and
@@ -1493,6 +1520,23 @@ SPLIT_NOTES: dict[str, str] = {
         "and register in GamePacketTypes (residual mc.network.protocol.game); "
         "translate-wave absorbs ServerGamePacketListener + GamePacketTypes as stubs"
     ),
+    "mc.data.worldgen.prereq": (
+        "#177/#178 prerequisite: the 3-file bootstrap/terrain slice "
+        "(BootstrapContext/TerrainProvider/NoiseData) split out of the "
+        "29-file mc.data.worldgen row into rivet-world::data::worldgen. "
+        "BootstrapContext is the registry bootstrap contract (register + "
+        "lookup); TerrainProvider is the overworld offset/factor/jaggedness "
+        "CubicSpline builders + peaksAndValleys; NoiseData is the noise "
+        "registration table (DEFAULT_SHIFT + the ~70 declaration-ordered "
+        "registrations). Crate override: net.minecraft.data normally maps to "
+        "rivet-registry, but this unit's modules live in rivet-world next to "
+        "the Noises/NormalNoise/CubicSpline layers they build on. STUBs: the "
+        "real RegistrySetBuilder BootstrapContext implementation (duplicate-"
+        "registration errors, UniversalLookup) defers to the registry-builder "
+        "unit; the residual mc.data.worldgen classes that reference these "
+        "(SurfaceRuleData/StructureSets/etc.) are the residual's STUBs, not "
+        "dep edges"
+    ),
     "mc.world.level.levelgen.noise": (
         "#177 wave-1: the density-function + noise-router value layer "
         "(Density/DensityFunction/DensityFunctions/NoiseRouter/NoiseRouterData's "
@@ -1778,6 +1822,16 @@ SPLIT_NOTES: dict[str, str] = {
 }
 
 
+# Unit-id crate overrides for split units whose ported modules live in a
+# different crate than CRATE_RULES would assign. Every override must target a
+# real split unit id; the test suite pins that each entry names an emitted unit
+# and that a dropped override fails fast (a wrong crate silently misroutes the
+# whole wave).
+CRATE_OVERRIDES: dict[str, str] = {
+    "mc.data.worldgen.prereq": "rivet-world",
+}
+
+
 def crate_for(pkg: str) -> str:
     if pkg == "net.minecraft":  # root-package classes only; subpackages match CRATE_RULES
         return "rivet-core"
@@ -1785,6 +1839,10 @@ def crate_for(pkg: str) -> str:
         if pkg == prefix or pkg.startswith(prefix + "."):
             return crate
     return "rivet-server"
+
+
+def crate_for_unit(unit_id: str, pkg: str) -> str:
+    return CRATE_OVERRIDES.get(unit_id, crate_for(pkg))
 
 
 def derive_id(pkg: str) -> str:
@@ -2176,7 +2234,7 @@ def main() -> None:
                 ) else ""
                 return [
                     unit_id, pkg, ",".join(sorted(paths)),
-                    source_root(pkg), str(len(files)), str(loc), crate_for(pkg),
+                    source_root(pkg), str(len(files)), str(loc), crate_for_unit(unit_id, pkg),
                     str(wave_n), str(in_cycle), needs_split,
                     ",".join(sorted(dep_tokens)), status, attempts, notes,
                 ]
