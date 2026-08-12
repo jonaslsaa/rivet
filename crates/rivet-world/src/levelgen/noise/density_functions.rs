@@ -4262,6 +4262,56 @@ mod tests {
     }
 
     #[test]
+    fn noise_value_codec_rejects_out_of_range_with_java_message() {
+        // `DensityFunctions.NOISE_VALUE_CODEC` is `Codec.doubleRange(-1000000.0,
+        // 1000000.0)`. It validates with `Double.compare` total order and
+        // renders diagnostics with Java's `Double.toString`. serde_json
+        // preserves the `-0.0` sign bit: `-0.0` is within this range (it is
+        // greater than the `-1000000.0` lower bound), which is itself a
+        // total-order pin — it must NOT be spuriously rejected, while a value
+        // below the lower bound fails with the exact Java-formatted message.
+        let ops = test_ops();
+        let codec = noise_value_codec::<TestOps>();
+        assert!(codec.parse(&ops, &serde_json::json!(0.5)).is_success());
+        assert!(
+            codec
+                .parse(&ops, &serde_json::json!(-1000000.0))
+                .is_success()
+        );
+        assert!(
+            codec
+                .parse(&ops, &serde_json::json!(1000000.0))
+                .is_success()
+        );
+        assert!(codec.parse(&ops, &serde_json::json!(-0.0)).is_success());
+        assert!(codec.parse(&ops, &serde_json::json!(1000000.5)).is_error());
+        let too_low = codec.parse(&ops, &serde_json::json!(-1000000.5));
+        assert!(too_low.is_error());
+        let error_ref = too_low.error_ref().expect("error");
+        let msg = error_ref.message();
+        assert!(
+            msg.contains("Value -1000000.5 outside of range [-1000000.0:1000000.0]"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn blended_noise_codec_rejects_out_of_range_smear() {
+        // `BlendedNoise.CODEC` constrains the scale fields to
+        // `doubleRange(0.001, 1000.0)` and `smear_scale_multiplier` to
+        // `doubleRange(1.0, 8.0)`. Encode validates every field, so a function
+        // whose smear is below 1.0 must fail the encode-side range check.
+        let ops = test_ops();
+        let f: Arc<dyn DensityFunction> =
+            Arc::new(SynthBlendedNoise::create_unseeded(2.0, 2.0, 8.0, 4.0, 0.5));
+        let codec = map_codec::codec_of(blended_noise_map_codec::<TestOps>());
+        assert!(
+            codec.encode_start(&ops, &f).result().is_none(),
+            "smear_scale_multiplier 0.5 must fail doubleRange(1.0, 8.0) on encode"
+        );
+    }
+
+    #[test]
     fn blended_noise_round_trips_through_dispatch() {
         // The `old_blended_noise` type now dispatches to the synth
         // `BlendedNoise` leaf. Round-trip through the recursive density

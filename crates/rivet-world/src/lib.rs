@@ -56,6 +56,12 @@
 //! re-exports the registry-owned `ChunkPos` (issue #125); the concrete world
 //! (`ServerLevel`) lives in `rivet-server`.
 
+/// `net.minecraft.world.level.biome` (issue #178): the `Climate` value layer,
+/// the `BiomeResolver`, and the five identity shells (`Biome`,
+/// `BiomeGenerationSettings`, `BiomeManager`, `BiomeSpecialEffects`,
+/// `MobSpawnSettings`) — the base every other biome cluster builds on. See
+/// `biome::mod`.
+pub mod biome;
 pub mod block;
 pub mod chunk;
 pub mod flag;
