@@ -50,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn next_is_deterministic_and_injective_per_step() {
+    fn next_is_deterministic_and_c_shifts_result() {
         // The same (rval, c) always yields the same result.
         assert_eq!(next(12345, 67890), next(12345, 67890));
         // A different c shifts the result by exactly c (the final add).

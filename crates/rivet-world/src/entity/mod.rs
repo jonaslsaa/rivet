@@ -188,14 +188,19 @@ impl EntityType {
 
     /// `EntityType.CODEC` — `BuiltInRegistries.ENTITY_TYPE.byNameCodec()`, as
     /// the ops-generic by-name codec. Resolves against the small `ENTITY_TYPES`
-    /// constant list (a name outside it errors honestly).
+    /// constant list; an unknown name errors with Paper's exact
+    /// `Registry.byNameCodec` diagnostic (`"Unknown registry key in " + key() +
+    /// ": " + name`, `Registries.ENTITY_TYPE` = `minecraft:entity_type`).
     pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<EntityType, Ops>> {
         codec::comap_flat_map(
             codec::string_codec::<Ops>(),
             Arc::new(
                 |name: &String| match entity_types().iter().find(|t| t.name == *name) {
                     Some(t) => DataResult::success(*t),
-                    None => DataResult::error(format!("Failed to get element {}", name)),
+                    None => DataResult::error(format!(
+                        "Unknown registry key in minecraft:entity_type: {}",
+                        name
+                    )),
                 },
             ),
             Arc::new(|t: &EntityType| t.name.to_string()),
@@ -250,8 +255,9 @@ pub struct EntityTypes;
 impl EntityTypes {
     /// `EntityTypes.PIG` — `EntityType.Builder.of(Pig::new, MobCategory.
     /// CREATURE)`; the `MISC`-category fallback in `SpawnerData`'s compact
-    /// constructor.
-    pub const PIG: EntityType = EntityType::new(92, "minecraft:pig", MobCategory::Creature);
+    /// constructor. Id `100` is PIG's `BuiltInRegistries.ENTITY_TYPE` index in
+    /// 26.2 (see `rivet-registry`'s generated `ENTITY_TYPE_BY_NAME`).
+    pub const PIG: EntityType = EntityType::new(100, "minecraft:pig", MobCategory::Creature);
 }
 
 /// The known entity types — the STUB registry (only `PIG`).
@@ -329,9 +335,9 @@ mod tests {
         let result = codec.parse(&JsonOps::INSTANCE, &json!("minecraft:zombie"));
         assert!(result.is_error());
         let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
-        assert!(
-            msg.contains("Failed to get element minecraft:zombie"),
-            "got: {msg}"
+        assert_eq!(
+            msg,
+            "Unknown registry key in minecraft:entity_type: minecraft:zombie"
         );
     }
 
