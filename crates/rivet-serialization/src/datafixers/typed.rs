@@ -54,7 +54,7 @@ impl<Ops: DynamicOps + 'static> Typed<Ops> {
         self.ty.write_dynamic(ops, &self.value)
     }
 
-    /// `Typed.toString()` (value is erased, so `"Typed[...]"`).
+    /// `Typed.toString()`; the value is erased, so the type is printed instead.
     pub fn to_debug_string(&self) -> String {
         format!("Typed[{}]", self.ty.type_to_string())
     }

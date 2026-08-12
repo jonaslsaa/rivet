@@ -89,9 +89,9 @@ pub trait Type<Ops: DynamicOps + 'static>: Debug + Send + Sync {
             return DataResult::success(input.clone());
         }
         self.read(ops, input).flat_map(|(value, rest)| {
-            let rewrite_result = rewrite_result.clone();
-            let fixed = rewrite_result.view.function.eval_cached()(ops, &value);
-            cap_write::<Ops>(expected_type, &rewrite_result.view, ops, &rest, &fixed)
+            // Java passes the raw decoded value to `capWrite`, the single
+            // application site of the rewrite function.
+            cap_write::<Ops>(expected_type, &rewrite_result.view, ops, &rest, &value)
         })
     }
 

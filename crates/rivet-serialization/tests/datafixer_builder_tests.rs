@@ -47,6 +47,7 @@ use rivet_serialization::datafixers::view::View;
 use rivet_serialization::dynamic::Dynamic;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::json_ops::JsonOps;
+use rivet_serialization::pair::Pair;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -355,13 +356,18 @@ fn data_fix_changes_type_parent_lookup() {
 // DataFixerUpper.update — end-to-end value-transforming rewrite
 // ---------------------------------------------------------------------------
 
-/// Builds the two schemas and a fix whose `makeRule` rewrites the `"name"`
-/// wrapper into an uppercasing function (a genuine non-nop value transform).
-fn fixer_with_uppercase_rule() -> DataFixerUpper<Json> {
-    // v100 schema has a `PrimitiveType<String>` named `"name"`; v200 same but
-    // parented, and the fix targets v200.
+/// Builds two schemas whose `"name"` type is `Named("name", Const(string))`
+/// and a fix whose `makeRule` replaces the "name" view function with `f`.
+fn fixer_with_value_rule(
+    f: impl Fn(&str) -> String + Clone + Send + Sync + 'static,
+) -> DataFixerUpper<Json> {
+    // v100 schema has a `NamedType["name", PrimitiveType<String>]`; v200 same
+    // but parented, and the fix targets v200.
     let s0 = {
         let mut s = Schema::new(make_key(100), None);
+        // Register the raw template; `build_types` wraps it in `Named` (Java's
+        // `registerSimple` stores `DSL::remainder`, `buildTypes` builds
+        // `getTemplate(name)` = `Named(name, ...)`).
         let template: Arc<dyn TypeTemplate<Json>> = Arc::new(Const::new(string_primitive()));
         s.type_templates.insert("name".to_string(), template);
         s.types = s.build_types();
@@ -374,9 +380,9 @@ fn fixer_with_uppercase_rule() -> DataFixerUpper<Json> {
         s.types = s.build_types();
         Arc::new(s)
     };
-    // The view's input/output must be the actual schema type instances:
-    // `PrimitiveType::equals_` is reference identity, and `cap_write` compares
-    // the view's output against the (same-instance) expected type.
+    // The view's input/output must be the actual schema type instances
+    // (`NamedType::equals_` is structural over its element, and `cap_write`
+    // compares the view's output against the same-instance expected type).
     let input_ty = s0.get_type_raw("name");
     let output_ty = s1.get_type_raw("name");
     let fix = DataFix::with_rule_factory(
@@ -384,42 +390,53 @@ fn fixer_with_uppercase_rule() -> DataFixerUpper<Json> {
         false,
         Arc::new(move || {
             // makeRule: a `TypeRewriteRule` whose rewrite replaces the view's
-            // function with an uppercasing transform.
-            struct UpperRule {
+            // function with the transform `f`.
+            struct TransformRule<G: Fn(&str) -> String> {
                 input: Arc<dyn Type<Json>>,
                 output: Arc<dyn Type<Json>>,
+                f: G,
             }
-            impl std::fmt::Debug for UpperRule {
+            impl<G: Fn(&str) -> String> std::fmt::Debug for TransformRule<G> {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    write!(f, "UpperRule")
+                    write!(f, "TransformRule")
                 }
             }
-            impl type_rewrite_rule::TypeRewriteRule<Json> for UpperRule {
+            impl<G: Fn(&str) -> String + Clone + Send + Sync + 'static>
+                type_rewrite_rule::TypeRewriteRule<Json> for TransformRule<G>
+            {
                 fn rewrite(&self, _ty: &dyn Type<Json>) -> Option<RewriteResult<Json>> {
+                    let f = self.f.clone();
                     let view = View::create(
                         "name".to_string(),
                         self.input.clone(),
                         self.output.clone(),
-                        Arc::new(|_ops: &Json, value: &AnyValue| {
-                            // The decoded element of a `PrimitiveType<String>` is a
-                            // `String` (Java's typed `A`), so the transform operates
-                            // on it directly.
-                            let s = value.downcast_ref::<String>().expect("string value");
-                            any(s.to_uppercase())
+                        Arc::new(move |_ops: &Json, value: &AnyValue| {
+                            // The decoded value is a `Pair<String, AnyValue>` — the
+                            // `NamedType` name plus the `PrimitiveType<String>`
+                            // element (Java's typed `Pair<String, A>`). The
+                            // transform operates on the element, preserving the
+                            // name so the codec's name check passes.
+                            let p = value
+                                .downcast_ref::<Pair<String, AnyValue>>()
+                                .expect("pair");
+                            let s = p.second.downcast_ref::<String>().expect("string element");
+                            any(Pair::of(p.first.clone(), any(f(s))))
                         }),
                     );
                     Some(RewriteResult::create(view, Vec::new()))
                 }
                 fn clone_rule(&self) -> Arc<dyn type_rewrite_rule::TypeRewriteRule<Json>> {
-                    Arc::new(UpperRule {
+                    Arc::new(TransformRule {
                         input: self.input.clone(),
                         output: self.output.clone(),
+                        f: self.f.clone(),
                     })
                 }
             }
-            Arc::new(UpperRule {
+            Arc::new(TransformRule {
                 input: input_ty.clone(),
                 output: output_ty.clone(),
+                f: f.clone(),
             }) as Arc<dyn type_rewrite_rule::TypeRewriteRule<Json>>
         }),
     );
@@ -435,11 +452,24 @@ fn update_runs_a_real_value_transforming_rewrite() {
     // A genuine non-nop fix: `makeRule` replaces the "name" view function with
     // an uppercasing transform. If `cap_write`/`read_and_write` short-circuits
     // or drops the transform, the output would keep the lowercased value.
-    let fixer = fixer_with_uppercase_rule();
+    let fixer = fixer_with_value_rule(|s| s.to_uppercase());
     let ops = JsonOps::INSTANCE;
     let input = Dynamic::new(&ops, ops.create_string("hello".to_string()));
     let out = fixer.update(&ops, "name", &input, 100, 200);
     assert_eq!(out.value, ops.create_string("HELLO".to_string()));
+}
+
+#[test]
+fn update_applies_the_rewrite_function_exactly_once() {
+    // Java's `readAndWrite` applies the rewrite function once, inside
+    // `capWrite`; a double application (e.g. also before `cap_write`) would
+    // corrupt any non-idempotent transform. Uppercasing is idempotent and so
+    // would not catch it; wrapping is not.
+    let fixer = fixer_with_value_rule(|s| format!("[{s}]"));
+    let ops = JsonOps::INSTANCE;
+    let input = Dynamic::new(&ops, ops.create_string("hello".to_string()));
+    let out = fixer.update(&ops, "name", &input, 100, 200);
+    assert_eq!(out.value, ops.create_string("[hello]".to_string()));
 }
 
 // ---------------------------------------------------------------------------

@@ -89,11 +89,10 @@ impl<Ops: DynamicOps + 'static> DataFixerBuilder<Ops> {
         }
         self.global_list.push(fix.clone());
         let fix_version = fix.get_version_key();
-        let pos = self
-            .fixer_versions
-            .binary_search(&fix_version)
-            .unwrap_or_else(|p| p);
-        self.fixer_versions.insert(pos, fix_version);
+        // Java's `IntAVLTreeSet` dedups; only insert when absent.
+        if let Err(pos) = self.fixer_versions.binary_search(&fix_version) {
+            self.fixer_versions.insert(pos, fix_version);
+        }
     }
 
     /// `build()`.

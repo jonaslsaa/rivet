@@ -80,7 +80,9 @@ impl<Ops: DynamicOps + 'static> Schema<Ops> {
     pub fn build_types(&self) -> HashMap<String, Arc<dyn Type<Ops>>> {
         let mut types: HashMap<String, Arc<dyn Type<Ops>>> = HashMap::new();
         for name in self.type_templates.keys() {
-            let template = self.resolve_template(name);
+            // Java `buildTypes` builds `getTemplate(name)` (the `Named`-wrapped
+            // template), so the built type carries the name like Java's.
+            let template = self.get_template(name).expect("registered template");
             let ty = template.apply(&SimpleFamily::default()).apply(-1);
             types.insert(name.clone(), ty);
         }

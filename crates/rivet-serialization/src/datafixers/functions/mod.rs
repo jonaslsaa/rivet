@@ -253,10 +253,7 @@ impl<Ops: DynamicOps + 'static> PointFreeCore<Ops> for Comp<Ops> {
         let mut new_functions: Vec<Arc<dyn PointFreeFunc<Ops>>> = Vec::new();
         let mut rewritten = false;
         for function in &self.functions {
-            // Java calls `rule.rewriteOrNop(function)` and compares reference
-            // identity; the port encodes "unchanged" as `None` (rules return
-            // `None` when they did not modify the node), so a present result
-            // here always means a real change.
+            // `None` = unchanged (see `PointFreeCore` doc).
             match rule.rewrite(function.as_core()) {
                 Some(rewrite) => {
                     if let Some(comp) = rewrite.as_any().downcast_ref::<Comp<Ops>>() {
@@ -280,8 +277,7 @@ impl<Ops: DynamicOps + 'static> PointFreeCore<Ops> for Comp<Ops> {
 
     fn one(&self, rule: &dyn PointFreeRule<Ops>) -> Option<Arc<dyn PointFreeCore<Ops>>> {
         for (i, function) in self.functions.iter().enumerate() {
-            // Java `one` calls `rule.rewrite` directly and checks
-            // `.isPresent()`; `None` here is the "no rewrite" signal.
+            // `None` = unchanged (see `PointFreeCore` doc).
             if let Some(rewrite) = rule.rewrite(function.as_core()) {
                 let mut new_functions: Vec<Arc<dyn PointFreeFunc<Ops>>> = Vec::new();
                 new_functions.extend_from_slice(&self.functions[..i]);

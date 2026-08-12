@@ -54,12 +54,9 @@ impl<Ops: DynamicOps + 'static> Debug for Nop<Ops> {
 }
 
 impl<Ops: DynamicOps + 'static> PointFreeRule<Ops> for Nop<Ops> {
-    // Java `Nop.rewrite` returns `Optional.of(expr)` — the same reference.
-    // `rewriteOrNop`'s `orElse(rewrite(expr), expr)` then recovers the
-    // original, which is what distinguishes "unchanged" from "rewritten" in
-    // `Comp.all`. Since `clone_core()` fabricates a distinct Arc, returning
-    // `None` here is the faithful translation (callers treat it as
-    // unchanged; `rewriteOrNop` falls back to the original node).
+    // Java returns `Optional.of(expr)` for the unchanged case; `None` is the
+    // port's "unchanged" signal (see `PointFreeCore` doc), so `rewriteOrNop`
+    // falls back to the original node.
     fn rewrite(&self, _expr: &dyn PointFreeCore<Ops>) -> Option<Arc<dyn PointFreeCore<Ops>>> {
         None
     }
@@ -85,10 +82,8 @@ impl<Ops: DynamicOps + 'static> PointFreeRule<Ops> for Seq<Ops> {
         let mut result = expr.clone_core();
         let mut changed = false;
         for rule in &self.rules {
-            // `None` means the rule left the node unchanged (Java's `Seq`
-            // chains `rewriteOrNop`, which preserves the same reference when
-            // nothing changed). Track that so an all-nop sequence reports no
-            // rewrite.
+            // `None` = unchanged (see `PointFreeCore` doc); track it so an
+            // all-nop sequence reports no rewrite.
             if let Some(rewrite) = rule.rewrite(result.as_ref()) {
                 result = rewrite;
                 changed = true;
@@ -225,10 +220,7 @@ impl<Ops: DynamicOps + 'static> PointFreeRule<Ops> for Many<Ops> {
                     result = new_result;
                     changed = true;
                 }
-                // Java returns `Optional.of(result)` where `result` is the
-                // same reference when the rule never fired; the port encodes
-                // "unchanged" as `None` so callers like `Comp.all` do not
-                // report a spurious rewrite.
+                // `None` = unchanged (see `PointFreeCore` doc).
                 None => return if changed { Some(result) } else { None },
             }
         }
@@ -261,9 +253,7 @@ impl<Ops: DynamicOps + 'static> PointFreeRule<Ops> for Everywhere<Ops> {
         let all_arc = all.clone().unwrap_or_else(|| top_down_arc.clone());
         let bottom_up = self.bottom_up.rewrite(all_arc.as_ref());
         let bottom_up_arc = bottom_up.clone().unwrap_or_else(|| all_arc.clone());
-        // Java returns `Optional.of(bottomUp)` where each stage falls back to
-        // the same reference when unchanged; the port encodes "unchanged" as
-        // `None` (only a present result is a real change).
+        // `None` = unchanged (see `PointFreeCore` doc).
         if top_down.is_some() || all.is_some() || bottom_up.is_some() {
             Some(bottom_up_arc)
         } else {

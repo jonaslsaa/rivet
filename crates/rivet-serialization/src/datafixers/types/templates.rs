@@ -49,9 +49,10 @@ impl<Ops: DynamicOps + 'static> TypeTemplate<Ops> for Const<Ops> {
     }
 
     fn template_eq(&self, other: &dyn TypeTemplate<Ops>) -> bool {
-        // Java `Const` is a record over `Type<?>`; type equality for the
-        // foundation's constant types is pointer identity (the `Const`
-        // template is rebuilt per type and the primitive types are singletons).
+        // Java's `Const` is a record over `Type<?>`; its equality compares the
+        // wrapped types. The port uses pointer identity on the template, a
+        // stricter stand-in that only holds because `Const` is built fresh per
+        // use and has no structural callers yet.
         crate::datafixers::types::ptr_eq_templates(self, other)
     }
 
