@@ -12,6 +12,7 @@
 //! - [`Blender::empty`] / [`Blender::is_empty`] — the `EMPTY` singleton.
 //! - [`Blender::blend_density`] — identity (`noiseValue` unchanged).
 //! - [`Blender::blend_offset_and_factor`] — the `(1.0, 0.0)` constant.
+//! - [`Blender::get_biome_resolver`] — the `EMPTY` identity override.
 //! - [`BlendingOutput`] — the result record.
 //!
 //! The non-empty surface defers as `RivetTodo(#177)` owned by the
@@ -23,11 +24,12 @@
 //! - The weighted height/density blends behind the non-empty
 //!   `blendOffsetAndFactor`/`blendDensity` (`getBlendingDataValue`,
 //!   `iterateHeights`/`iterateDensities`, `heightToOffset`).
-//! - `getBiomeResolver` — the identity biome-resolver seam is kept modular and
-//!   defers: `BiomeResolver` is typed by the concurrently-owned
-//!   `mc.world.level.levelgen.biome` climate surface, which is not yet
-//!   available. No placeholder is invented; the seam slots in when that unit
-//!   lands.
+//! - `getBiomeResolver` — the EMPTY identity override is fully ported as the
+//!   generic [`Blender::get_biome_resolver`]; the concrete `BiomeResolver`-typed
+//!   seam (the base-class `blendBiome`-wrapping form) defers: `BiomeResolver` is
+//!   typed by the concurrently-owned `mc.world.level.levelgen.biome` climate
+//!   surface, which is not yet available. No placeholder is invented; the seam
+//!   slots in when that unit lands.
 //! - `blendBiome` + the `SHIFT_NOISE` `NormalNoise`, and the
 //!   `generateBorderTicks`/`addAroundOldChunksCarvingMaskFilter`/
 //!   `makeOldChunkDistanceGetter`/`DistanceGetter` chunk-border surfaces.
@@ -37,9 +39,10 @@ use crate::levelgen::noise::density_function::FunctionContext;
 /// `Blender.BlendingOutput(double alpha, double blendingOffset)` record — the
 /// `blendOffsetAndFactor` result.
 ///
-/// Equality mirrors the Java record's generated `equals`, which compares each
-/// `double` component with `Double.compare(...) == 0`: NaN equals itself and
-/// `-0.0` is distinct from `0.0` (the derived IEEE `==` does neither).
+/// Equality mirrors the Java record's generated `equals`: each `double`
+/// component compares via `Double.compare` — every NaN payload canonicalizes
+/// to one value, and `-0.0` is distinct from `0.0` (the derived IEEE `==`
+/// treats NaN as unequal to itself and `-0.0 == 0.0`).
 #[derive(Debug, Clone, Copy)]
 pub struct BlendingOutput {
     alpha: f64,
@@ -48,13 +51,17 @@ pub struct BlendingOutput {
 
 impl PartialEq for BlendingOutput {
     fn eq(&self, other: &Self) -> bool {
-        // `total_cmp` mirrors `Double.compare` exactly, unlike the derived
-        // `PartialEq`.
-        self.alpha.total_cmp(&other.alpha).is_eq()
-            && self
-                .blending_offset
-                .total_cmp(&other.blending_offset)
-                .is_eq()
+        // `Double.doubleToLongBits` canonical-bit comparison: every NaN maps
+        // to one canonical pattern, and signed zero keeps its sign bit.
+        fn canonical_bits(value: f64) -> u64 {
+            if value.is_nan() {
+                f64::NAN.to_bits()
+            } else {
+                value.to_bits()
+            }
+        }
+        canonical_bits(self.alpha) == canonical_bits(other.alpha)
+            && canonical_bits(self.blending_offset) == canonical_bits(other.blending_offset)
     }
 }
 
@@ -124,12 +131,26 @@ impl Blender {
     pub fn blend_offset_and_factor(&self, _block_x: i32, _block_z: i32) -> BlendingOutput {
         BlendingOutput::new(1.0, 0.0)
     }
+
+    /// `getBiomeResolver(BiomeResolver)` — the empty singleton's identity
+    /// override (Blender.java lines 49-51): returns the resolver unchanged.
+    ///
+    /// The `EMPTY` anonymous subclass overrides the base-class
+    /// `getBiomeResolver`, which wraps the resolver with `blendBiome`. The
+    /// identity is pure value behavior that needs no concrete `BiomeResolver`
+    /// type, so it is expressed generically here; the wrapped base-class form
+    /// defers with the `mc.world.level.levelgen.biome` climate surface
+    /// (RivetTodo #177).
+    pub fn get_biome_resolver<R>(&self, resolver: R) -> R {
+        resolver
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::levelgen::noise::density_function::SinglePointContext;
+    use std::cmp::Ordering;
 
     /// `Blender.EMPTY.blendDensity(context, noiseValue) == noiseValue`
     /// (Blender.java line 44).
@@ -163,9 +184,21 @@ mod tests {
         assert!(Blender::empty().is_empty());
     }
 
+    /// `Blender.EMPTY.getBiomeResolver(biomeResolver)` returns its argument
+    /// unchanged (Blender.java lines 49-51) — the identity override. The
+    /// generic is exercised with a plain integer stand-in for the not-yet-ported
+    /// `BiomeResolver`.
+    #[test]
+    fn empty_get_biome_resolver_is_identity() {
+        let blender = Blender::empty();
+        for resolver in [0, 1, -1, 42] {
+            assert_eq!(blender.get_biome_resolver(resolver), resolver);
+        }
+    }
+
     /// `BlendingOutput` value semantics — record accessors and Java record
     /// equality: each `double` component compares via `Double.compare`
-    /// (NaN equals itself; `-0.0` is distinct from `0.0`).
+    /// (every NaN payload canonicalizes; `-0.0` is distinct from `0.0`).
     #[test]
     fn blending_output_value_semantics() {
         let output = BlendingOutput::new(0.5, -3.25);
@@ -173,11 +206,15 @@ mod tests {
         assert_eq!(output.blending_offset(), -3.25);
         assert_eq!(output, BlendingOutput::new(0.5, -3.25));
         assert_ne!(output, BlendingOutput::new(0.5, 0.0));
-        // `Double.compare(NaN, NaN) == 0` — NaN equals itself, which the
-        // derived IEEE `==` (NaN != NaN) would reject.
+        // `Double.compare` canonicalizes every NaN payload: two distinct
+        // payloads compare equal (IEEE `==` and `total_cmp` both reject).
+        let nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
+        let nan_b = f64::from_bits(0x7ff8_0000_0000_0002);
+        assert!(nan_a.is_nan() && nan_b.is_nan());
+        assert_ne!(nan_a.total_cmp(&nan_b), Ordering::Equal);
         assert_eq!(
-            BlendingOutput::new(f64::NAN, 1.0),
-            BlendingOutput::new(f64::NAN, 1.0)
+            BlendingOutput::new(nan_a, 1.0),
+            BlendingOutput::new(nan_b, 1.0)
         );
         // `Double.compare(-0.0, 0.0) != 0` — signed zero is distinct.
         assert_ne!(
