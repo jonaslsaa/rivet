@@ -99,6 +99,18 @@ mod tests {
             encoded,
             json!({"state": {"Name": "minecraft:oak_log", "Properties": {"axis": "y"}}})
         );
+        // Map equality is order-insensitive (IndexMap), so pin the actual key
+        // sequence of the nested dispatch too: element (`Properties`) before
+        // the `Name` type key (Java `KeyDispatchCodec.encode`).
+        assert_eq!(
+            encoded["state"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["Properties", "Name"]
+        );
         let decoded = *codec
             .parse(&JsonOps::INSTANCE, &encoded)
             .result()

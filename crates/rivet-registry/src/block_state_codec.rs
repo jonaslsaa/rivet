@@ -125,7 +125,8 @@ fn state_codec_for_block<Ops: DynamicOps + 'static>(
 
 /// `Property.valueCodec` — `Codec.STRING.comapFlatMap(name ->
 /// this.getValue(name).map(success).orElseGet(() -> error("Unable to read
-/// property: <prop> with value: <name>")), this::getName)`.
+/// property: <prop> with value: <name>")), this::getName)`. The property
+/// renders via its `Display` impl (`Property.toString()`).
 pub fn property_value_codec<Ops: DynamicOps + 'static>(
     prop: Property,
 ) -> Arc<dyn Codec<PropertyValue, Ops>> {
@@ -136,8 +137,7 @@ pub fn property_value_codec<Ops: DynamicOps + 'static>(
             Some(value) => DataResult::success(value),
             None => DataResult::error(format!(
                 "Unable to read property: {} with value: {}",
-                prop_for_error.name(),
-                name
+                prop_for_error, name
             )),
         }),
         Arc::new(move |value: &PropertyValue| {
