@@ -14,6 +14,7 @@
 use crate::levelgen::blockpredicates::{BlockPredicate, block_predicate_codec};
 use rivet_registry::block_state::BlockState;
 use rivet_registry::block_state_codec::block_state_codec;
+use rivet_registry::registry_ops::RegistryOpsLookup;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use std::sync::Arc;
@@ -63,7 +64,7 @@ impl BlockBlobConfiguration {
 ///     BlockPredicate.CODEC.fieldOf("can_place_on"))
 ///     .apply(i, BlockBlobConfiguration::new))
 /// ```
-pub fn block_blob_configuration_codec<Ops: DynamicOps + 'static>()
+pub fn block_blob_configuration_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
 -> Arc<dyn rivet_serialization::codec::Codec<BlockBlobConfiguration, Ops>> {
     record_builder::create(|instance| {
         instance
@@ -95,19 +96,31 @@ impl crate::levelgen::feature::configurations::FeatureConfiguration for BlockBlo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivet_registry::access::RegistryAccess;
     use rivet_registry::generated::blocks::BlockId;
+    use rivet_registry::registry_ops::RegistryOps;
     use rivet_serialization::json_ops::JsonOps;
     use serde_json::json;
 
+    /// `block_predicate_codec` dispatches over the registry-backed matching
+    /// predicates, so the codec requires `RegistryOps` (the `RegistryOpsLookup`
+    /// ops). An empty access is enough — the predicates here are `always_true`.
+    type TestOps = RegistryOps<serde_json::Value, JsonOps>;
+
+    fn ops() -> TestOps {
+        RegistryOps::create_from_access(&JsonOps::INSTANCE, RegistryAccess::empty())
+    }
+
     #[test]
     fn codec_round_trip() {
-        let codec = block_blob_configuration_codec::<JsonOps>();
+        let codec = block_blob_configuration_codec::<TestOps>();
+        let ops = ops();
         let config = BlockBlobConfiguration::new(
             BlockState::of(BlockId::from_name("minecraft:stone").unwrap()),
             crate::levelgen::blockpredicates::always_true(),
         );
         let encoded = codec
-            .encode_start(&JsonOps::INSTANCE, &config)
+            .encode_start(&ops, &config)
             .result()
             .expect("encode should succeed")
             .clone();
@@ -119,7 +132,7 @@ mod tests {
             })
         );
         let decoded = codec
-            .parse(&JsonOps::INSTANCE, &encoded)
+            .parse(&ops, &encoded)
             .result()
             .expect("decode should succeed")
             .clone();
@@ -132,14 +145,12 @@ mod tests {
 
     #[test]
     fn codec_requires_both_fields() {
-        let codec = block_blob_configuration_codec::<JsonOps>();
-        assert!(codec.parse(&JsonOps::INSTANCE, &json!({})).is_error());
+        let codec = block_blob_configuration_codec::<TestOps>();
+        let ops = ops();
+        assert!(codec.parse(&ops, &json!({})).is_error());
         assert!(
             codec
-                .parse(
-                    &JsonOps::INSTANCE,
-                    &json!({"state": {"Name": "minecraft:stone"}})
-                )
+                .parse(&ops, &json!({"state": {"Name": "minecraft:stone"}}))
                 .is_error()
         );
     }

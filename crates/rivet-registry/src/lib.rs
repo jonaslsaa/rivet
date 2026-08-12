@@ -53,6 +53,12 @@ pub mod generated;
 #[cfg(feature = "blocks")]
 pub mod fluid_id;
 
+/// The pure biome id-handle (`BiomeId`) over the generated
+/// `minecraft:worldgen/biome` tables (issue #180), mirroring `BlockId`'s
+/// ownership. Gated behind `blocks` like the biome tables it reads.
+#[cfg(feature = "blocks")]
+pub mod biome_id;
+
 /// Hand-written `BlockState` value type over the generated global-id + behavior
 /// tables (issue #228). The "pure table ops, no world types" surface the
 /// worldgen/heightmap/lighting work consumes; gated behind `blocks` like the
