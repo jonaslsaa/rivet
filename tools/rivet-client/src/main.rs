@@ -983,8 +983,8 @@ async fn generated_and_emit(bot: Client, state: State) {
     tokio::time::sleep(dwell).await;
     let log = settle_and_snapshot(
         &state.keepalive_log,
-        DWELL_SETTLE_TIMEOUT,
-        DWELL_SETTLE_INTERVAL,
+        KEEPALIVE_SETTLE_TIMEOUT,
+        KEEPALIVE_SETTLE_INTERVAL,
     )
     .await;
     let connected_wall_seconds = elapsed_secs_f64(start, Instant::now());
