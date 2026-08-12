@@ -13,7 +13,9 @@
 //! these modifiers touch — so `count` stays a pure function of `(origin, this)`.
 
 use crate::biome::BIOME_INFO_NOISE;
-use crate::levelgen::placement::placement_modifier_type::PlacementModifierTypeId;
+use crate::levelgen::placement::placement_modifier_type::{
+    PlacementModifierTypeId, PlacementModifierTypes,
+};
 use crate::levelgen::placement::{PlacementContext, PlacementModifier, RepeatingPlacement};
 use rivet_registry::core::BlockPos;
 use rivet_serialization::codec;
@@ -83,7 +85,7 @@ impl PlacementModifier for NoiseThresholdCountPlacement {
     /// `type()` — `PlacementModifierType.NOISE_THRESHOLD_COUNT` (insertion
     /// index 7 in `PlacementModifierType.java`'s registration order).
     fn type_id(&self) -> PlacementModifierTypeId {
-        PlacementModifierTypeId::new(7, "minecraft:noise_threshold_count")
+        PlacementModifierTypes::NOISE_THRESHOLD_COUNT
     }
 }
 

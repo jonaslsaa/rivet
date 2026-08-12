@@ -25,7 +25,9 @@
 //! placement-modifier concern.
 
 use crate::biome::BIOME_INFO_NOISE;
-use crate::levelgen::placement::placement_modifier_type::PlacementModifierTypeId;
+use crate::levelgen::placement::placement_modifier_type::{
+    PlacementModifierTypeId, PlacementModifierTypes,
+};
 use crate::levelgen::placement::{PlacementContext, PlacementModifier, RepeatingPlacement};
 use rivet_registry::core::BlockPos;
 use rivet_serialization::codec;
@@ -90,7 +92,7 @@ impl PlacementModifier for NoiseBasedCountPlacement {
     /// `type()` — `PlacementModifierType.NOISE_BASED_COUNT` (insertion index 6
     /// in `PlacementModifierType.java`'s registration order).
     fn type_id(&self) -> PlacementModifierTypeId {
-        PlacementModifierTypeId::new(6, "minecraft:noise_based_count")
+        PlacementModifierTypes::NOISE_BASED_COUNT
     }
 }
 

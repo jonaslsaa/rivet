@@ -45,14 +45,11 @@ impl PlacementModifierTypes {
     pub const BIOME_FILTER: PlacementModifierTypeId =
         PlacementModifierTypeId::new(4, "minecraft:biome");
     /// `register("count", CountPlacement.CODEC)`.
-    #[allow(dead_code)] // consumed by the CountPlacement unit once it lands
     pub const COUNT: PlacementModifierTypeId = PlacementModifierTypeId::new(5, "minecraft:count");
     /// `register("noise_based_count", NoiseBasedCountPlacement.CODEC)`.
-    #[allow(dead_code)] // consumed by the NoiseBasedCountPlacement unit once it lands
     pub const NOISE_BASED_COUNT: PlacementModifierTypeId =
         PlacementModifierTypeId::new(6, "minecraft:noise_based_count");
     /// `register("noise_threshold_count", NoiseThresholdCountPlacement.CODEC)`.
-    #[allow(dead_code)] // consumed by the NoiseThresholdCountPlacement unit once it lands
     pub const NOISE_THRESHOLD_COUNT: PlacementModifierTypeId =
         PlacementModifierTypeId::new(7, "minecraft:noise_threshold_count");
     /// `register("count_on_every_layer", CountOnEveryLayerPlacement.CODEC)`.

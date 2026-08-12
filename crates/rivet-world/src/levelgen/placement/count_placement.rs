@@ -14,7 +14,9 @@
 //! (`PartialEq` on the wrapped provider, the `IntProvider` enum's documented
 //! value-equality convention).
 
-use crate::levelgen::placement::placement_modifier_type::PlacementModifierTypeId;
+use crate::levelgen::placement::placement_modifier_type::{
+    PlacementModifierTypeId, PlacementModifierTypes,
+};
 use crate::levelgen::placement::{PlacementContext, PlacementModifier, RepeatingPlacement};
 use rivet_registry::core::BlockPos;
 use rivet_serialization::codec;
@@ -73,7 +75,7 @@ impl PlacementModifier for CountPlacement {
     /// `type()` — `PlacementModifierType.COUNT` (insertion index 5 in
     /// `PlacementModifierType.java`'s registration order).
     fn type_id(&self) -> PlacementModifierTypeId {
-        PlacementModifierTypeId::new(5, "minecraft:count")
+        PlacementModifierTypes::COUNT
     }
 }
 
