@@ -32,8 +32,8 @@ use rivet_serialization::codec;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec::MapCodec;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
-use rivet_util::mth;
 use rivet_util::RandomSource;
+use rivet_util::mth;
 use std::any::Any;
 use std::sync::Arc;
 
