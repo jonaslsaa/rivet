@@ -66,8 +66,12 @@ mod tests {
                 + MOVE_DRAIN_SECONDS_CEIL
                 + KEEPALIVE_SETTLE_TIMEOUT_SECS
         );
-        assert!(MOVE_TIMEOUT_HEADROOM_SECONDS > 0);
     }
+
+    /// The budget is a compile-time constant; a refactor that zeroes every
+    /// summand would still satisfy the `assert_eq!` above (0 == 0 + 0 + 0 + 0)
+    /// while leaving no wall-clock budget for the walk, so pin it above zero.
+    const _: () = assert!(MOVE_TIMEOUT_HEADROOM_SECONDS > 0);
 
     #[test]
     fn dwell_headroom_is_settle_plus_login() {
