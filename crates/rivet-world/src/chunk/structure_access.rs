@@ -123,6 +123,10 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
     /// duplicates dedupe on insert (first-insertion order preserved). The
     /// caller's iteration order is preserved by the insertion-ordered outer
     /// map (#537).
+    ///
+    /// Unlike Java's `Map` input (unique keys), this takes an `IntoIterator`,
+    /// so a key repeated across iterator items is not a replace: its
+    /// references merge into the same set, keeping the first-insertion key slot.
     pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, data: I) {
         self.structure_references.clear();
         for (structure, references) in data {

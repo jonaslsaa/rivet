@@ -307,6 +307,11 @@ impl LevelChunk {
     /// unpacked entries are turned into wire `BlockEntityInfo` values in
     /// authority order.
     ///
+    /// The wire list order is deliberately the authority's insertion order:
+    /// Paper iterates its live `blockEntities` map, whose fastutil probe order
+    /// is not insertion order. RivetTodo(#537): model Paper's probe order in
+    /// the send path once the live block-entity map unit lands.
+    ///
     /// Refused entries are surfaced loudly, never silently dropped or
     /// fabricated: Paper does not send `keepPacked`/pending or invalid-type
     /// entries in the chunk packet (they never join the live block-entity map),
@@ -383,7 +388,10 @@ impl LevelChunk {
     /// authority (#537/#520): each tag in insertion order is resolved to its
     /// `SerializedBlockEntityOutcome` — unpacked entries resolve their
     /// `BlockEntityType`, `keepPacked`/proto entries stay pending, invalid ids
-    /// surface as entry-local failures.
+    /// surface as entry-local failures. Each outcome's `source_index` is its
+    /// index in the surviving authority iteration — the `.values()` position
+    /// after duplicate corrected positions collapsed last-wins in place — not
+    /// an index into the original decoded NBT list.
     pub fn block_entity_outcomes(&self) -> Vec<SerializedBlockEntityOutcome> {
         let pos = self.pos();
         reconstruct_block_entities(

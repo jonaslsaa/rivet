@@ -21,7 +21,8 @@
 //!   `PackedTicks` record (the `world.ticks` unit);
 //! - the `blockEntities` map, `setBlockEntity`/`getBlockEntity` and the
 //!   `getBlockEntityNbtForSaving` promote-then-save logic (the block-entity
-//!   unit); the port keeps the pending-NBT carrier on the base;
+//!   unit); the port keeps only the `pendingBlockEntities` map on the base,
+//!   which is the runtime authority for loaded block entities (#537);
 //! - `setBlockState`'s mutators (with #216);
 //! - the game-event listener registries, tickers, and the Paper `unsavedListener`
 //!   (`markUnsaved` is the bare base version — the listener is a Paper dirty-tick
