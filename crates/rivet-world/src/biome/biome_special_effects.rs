@@ -78,7 +78,7 @@ impl BiomeSpecialEffects {
                 ))
                 .and(record_builder::RecordCodecBuilder::of(
                     Arc::new(|e: &BiomeSpecialEffects| e.grass_color_modifier),
-                    codec::lenient_optional_field_of(
+                    codec::optional_field_of(
                         "grass_color_modifier",
                         GrassColorModifier::codec::<Ops>(),
                         GrassColorModifier::None,

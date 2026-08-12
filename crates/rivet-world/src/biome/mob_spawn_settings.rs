@@ -113,7 +113,7 @@ impl MobSpawnSettings {
             instance
                 .group(RecordCodecBuilder::of(
                     Arc::new(|m: &MobSpawnSettings| m.creature_generation_probability),
-                    codec::lenient_optional_field_of(
+                    codec::optional_field_of(
                         "creature_spawn_probability",
                         codec::float_range::<Ops>(0.0, 0.9999999),
                         DEFAULT_CREATURE_SPAWN_PROBABILITY,

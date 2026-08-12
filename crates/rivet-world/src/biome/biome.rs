@@ -31,10 +31,11 @@
 //!   `AttributeModifier`, the dispatched-map `CODEC_ONLY_POSITIONAL`). Vanilla
 //!   biomes never set attributes (no `putAttributes`/`setAttribute` usage in
 //!   `Biomes.java`/worldgen), so the port carries a unit `EMPTY`-only STUB:
-//!   the `"attributes"` field is `lenientOptionalFieldOf(...)` — it omits on
-//!   encode (the value is always `EMPTY`) and a present-but-malformed
-//!   `"attributes"` falls back to `EMPTY` (Java's lenient optional field turns
-//!   a decode error into `success(Optional.empty())`).
+//!   the `"attributes"` field is `optionalFieldOf("attributes", EMPTY)` — it
+//!   omits on encode (the value is always `EMPTY`) and a present `"attributes"`
+//!   key decodes through the STUB, which errors honestly (RivetTodo #178) rather
+//!   than silently dropping the attribute data. Vanilla biomes never set
+//!   attributes, so the honest strict boundary only fires on malformed input.
 //! - **`shouldFreeze`/`shouldSnow` defer.** Both read the `LevelReader` block
 //!   surface (`getBlockState`/`getFluidState`/`getBrightness`/`isWaterAt`/
 //!   `isInsideBuildHeight`), which the #232 `mc.world.level` value slice has
@@ -447,7 +448,7 @@ impl ClimateSettings {
                 ))
                 .and(RecordCodecBuilder::of(
                     Arc::new(|c: &ClimateSettings| c.temperature_modifier),
-                    codec::lenient_optional_field_of(
+                    codec::optional_field_of(
                         "temperature_modifier",
                         TemperatureModifier::codec::<Ops>(),
                         TemperatureModifier::None,
@@ -615,9 +616,13 @@ impl EnvironmentAttributeMap {
 }
 
 /// The `"attributes"` field codec — `optionalFieldOf("attributes", EMPTY)`.
-/// Encode omits the field (the value is always `EMPTY`, equal to the default);
-/// a present `"attributes"` decode errors honestly (the real dispatched-map
-/// codec defers with the `mc.world.attribute` unit).
+/// Encode omits the field (the value is always `EMPTY`, equal to the default).
+/// A present `"attributes"` key decodes strictly: absent → `EMPTY`, but a
+/// present value routes through the STUB element codec, which errors honestly
+/// (RivetTodo #178) rather than silently discarding the attribute data. This
+/// matches Java's strict `optionalFieldOf` shape; because the STUB always
+/// errors, any present attributes key fails the decode with the STUB's message
+/// (the real dispatched-map codec defers with the `mc.world.attribute` unit).
 fn environment_attribute_map_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn MapCodec<EnvironmentAttributeMap, Ops>> {
     let stub: Arc<dyn Codec<EnvironmentAttributeMap, Ops>> = codec::of(
@@ -629,7 +634,7 @@ fn environment_attribute_map_codec<Ops: DynamicOps + 'static>()
         ),
         "EnvironmentAttributeMap[STUB]".to_string(),
     );
-    codec::lenient_optional_field_of("attributes", stub, EnvironmentAttributeMap::EMPTY)
+    codec::optional_field_of("attributes", stub, EnvironmentAttributeMap::EMPTY)
 }
 
 /// `Biome.BiomeBuilder`.
@@ -1037,14 +1042,15 @@ mod tests {
     }
 
     #[test]
-    fn direct_codec_attributes_present_falls_back_to_empty() {
+    fn direct_codec_attributes_present_errors_honestly() {
         let access = direct_codec_access();
         let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, access);
         let codec = Biome::direct_codec::<TestOps>();
-        // A present-but-malformed "attributes" falls back to the EMPTY default:
-        // the field is `lenientOptionalFieldOf("attributes", STUB, EMPTY)`, and
-        // Java's lenient optional field turns a decode error into
-        // `success(Optional.empty())` (verified against the pinned DFU).
+        // A present "attributes" key decodes through the STUB element codec,
+        // which errors honestly (RivetTodo #178) — the field is Java's strict
+        // `optionalFieldOf("attributes", EMPTY)`, so a present value is routed
+        // to the STUB rather than silently swallowed to EMPTY. Vanilla biomes
+        // never set attributes, so only malformed input reaches this boundary.
         let mut json = codec
             .encode_start(&ops, &plains())
             .result()
@@ -1054,8 +1060,12 @@ mod tests {
             "attributes".to_string(),
             json!({"minecraft:generic.max_health": 20}),
         );
-        let decoded = codec.parse(&ops, &json).result().expect("decode").clone();
-        assert_eq!(decoded.get_attributes(), &EnvironmentAttributeMap::EMPTY);
+        let parsed = codec.parse(&ops, &json);
+        let result = parsed.result();
+        assert!(
+            result.is_none(),
+            "present attributes must error (STUB #178), not fall back to EMPTY"
+        );
     }
 
     #[test]
