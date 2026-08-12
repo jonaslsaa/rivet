@@ -719,7 +719,10 @@ run_scenario_loaded_world() {
 # rivet-parity/self-test boundary.
 run_scenario_generated_world() {
   echo "==> scenario runner (generated-world: official-client acceptance vs a fresh seed-42 generated world)"
-  if [ -z "${RIVET_GENERATED_WORLD:-}" ]; then
+  # The opt-in uses the same convention as RIVET_REQUIRE_ORACLE: any non-empty
+  # value other than "0" enables the strict check, so an operator can disable
+  # the row explicitly with RIVET_GENERATED_WORLD=0 (never silently enabling it).
+  if [ -z "${RIVET_GENERATED_WORLD:-}" ] || [ "$RIVET_GENERATED_WORLD" = "0" ]; then
     echo "    NOTICE — generated-world acceptance is UNVERIFIED and milestone-gated: the"
     echo "      rivet-server --seed capability and/or the Paper seed-42 ground-truth reference"
     echo "      are not present yet (the runner exits 3 with the exact pinned"

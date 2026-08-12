@@ -615,6 +615,22 @@ grep -q "RIVET_GENERATED_WORLD=1" "$TMP/out_gw0" || fail "generated-world: NOTIC
 [ -s "$GW_SCENARIO_LOG" ] && fail "generated-world: run-scenario.sh must not be invoked on the NOTICE path (got $(cat "$GW_SCENARIO_LOG"))"
 pass "generated-world: capability absent -> explicit NOTICE, no invocation, stays mergeable"
 
+# Milestone NOTICE with RIVET_GENERATED_WORLD=0: an explicit "0" must keep the
+# row off (the same '0 = off' convention as RIVET_REQUIRE_ORACLE), never
+# silently enable it and then block the release lane with an UNVERIFIED exit.
+RIVET_GENERATED_WORLD=0
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+: > "$GW_SCENARIO_LOG"
+set +e
+run_scenario_generated_world > "$TMP/out_gw0b" 2>&1
+rc_gw0b=$?
+set -e
+[ "$rc_gw0b" = 0 ] || fail "generated-world: RIVET_GENERATED_WORLD=0 must keep the row off (got $rc_gw0b)"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-world: RIVET_GENERATED_WORLD=0 must not set ORACLE_UNVERIFIED"
+grep -q "NOTICE" "$TMP/out_gw0b" || fail "generated-world: RIVET_GENERATED_WORLD=0 must still print the NOTICE"
+[ -s "$GW_SCENARIO_LOG" ] && fail "generated-world: RIVET_GENERATED_WORLD=0 must not invoke run-scenario.sh"
+pass "generated-world: RIVET_GENERATED_WORLD=0 -> NOTICE (0 = off, never silent enable)"
+
 # PASS (exit 0) with the strict flag: the row reports PASS, sets no UNVERIFIED,
 # and the wrapper is invoked with exactly `generated-world`.
 set_gw_exit 0
