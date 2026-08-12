@@ -61,8 +61,7 @@ const SAMPLE_TICKS: u32 = 100;
 /// sent positions and any trailing correction are recorded before exit. Shared
 /// with `run-scenario` via [`rivet_harness_common::timing`] so the move timeout
 /// headroom cannot drift from the actual drain.
-const MOVE_DRAIN: Duration =
-    Duration::from_millis(rivet_harness_common::timing::MOVE_DRAIN_MS);
+const MOVE_DRAIN: Duration = Duration::from_millis(rivet_harness_common::timing::MOVE_DRAIN_MS);
 /// How long the keepalive settle loop (dwell and move modes) waits between
 /// coherence checks before snapshotting. The keepalive cadence is 1 s, so a
 /// 50 ms check interval is ample: it lets an in-flight challenge/echo pair land
@@ -1829,8 +1828,13 @@ mod tests {
         // (ExitCode 2, spurious FAIL); the budget rounds the 200 ms drain up to
         // 1 s, so meeting it is already safe.
         let headroom = rivet_harness_common::timing::MOVE_TIMEOUT_HEADROOM_SECONDS;
-        let err = parse(&["--mode", "move", "--timeout-seconds", &(headroom - 1).to_string()])
-            .unwrap_err();
+        let err = parse(&[
+            "--mode",
+            "move",
+            "--timeout-seconds",
+            &(headroom - 1).to_string(),
+        ])
+        .unwrap_err();
         assert!(
             err.contains("--timeout-seconds") && err.contains("move mode"),
             "error must explain the move-mode headroom, got {err}"

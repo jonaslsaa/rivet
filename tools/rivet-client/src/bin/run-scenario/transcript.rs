@@ -512,14 +512,15 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
 
         // Semantic invariant: a `moved` run must have observed keepalives. The
         // server challenges at 1/s, so a 6 s walk always draws several; an
-        // empty keepalive set means the observer failed, and reporting a vacuous
-        // 1:1 (`set_equality([], [])` == true) would let a broken keepalive
-        // observation pass parity against a healthy boot. Reject it as a hard
-        // error rather than emit a transcript that compares vacuously.
+        // empty keepalive set means the keepalive observation (or the server)
+        // failed, and reporting a vacuous 1:1 (`set_equality([], [])` == true)
+        // would let a broken keepalive observation pass parity against a
+        // healthy boot. Reject it as a hard error rather than emit a transcript
+        // that compares vacuously.
         if keepalives.as_array().map(|a| a.is_empty()).unwrap_or(true) {
             return Err(
-                "moved run recorded no keepalives: the keepalive observer failed (a 6 s walk at \
-                 the server's 1/s cadence always draws several)"
+                "moved run recorded no keepalives (a 6 s walk at the server's 1/s cadence always \
+                 draws several): the keepalive observation or server failed"
                     .to_owned(),
             );
         }
@@ -683,6 +684,26 @@ pub fn normalize_dwell(raw: &str) -> Result<Value, String> {
             (Some(first), Some(last)) if last >= first => Some(last - first),
             _ => None,
         };
+
+        // Semantic invariant: a `dwelled` run must have observed keepalives —
+        // the same guard as move. A valid dwell survives well past the server's
+        // 1/s cadence (>= DWELL_MIN_DWELL_SECONDS), so an empty challenge set
+        // means the keepalive observation (or the server) failed; without this,
+        // `set_equality([], [])` would emit `echo_relationship: true` for a
+        // relationship that was never observed. The `challenge_count >= 30`
+        // verdict would also catch it, but only after the transcript has
+        // reported a misleadingly-true 1:1.
+        if challenge_ids
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true)
+        {
+            return Err(format!(
+                "dwelled run recorded no keepalives (a dwell of at least {DWELL_MIN_DWELL_SECONDS}s \
+                 at the server's 1/s cadence always draws dozens): the keepalive observation or \
+                 server failed"
+            ));
+        }
         transcript["dwell"] = json!({
             "requested_dwell_seconds": dwell.get("requested_dwell_seconds").cloned().unwrap_or(Value::Null),
             "connected_wall_seconds": dwell.get("connected_wall_seconds").cloned().unwrap_or(Value::Null),
@@ -1348,6 +1369,19 @@ mod tests {
     }
 
     #[test]
+    fn move_rejects_an_empty_keepalive_observation() {
+        // A moved run with no keepalives would otherwise report a vacuous 1:1
+        // (`keepalive_echo: set_equality([], []) == true`); the empty set must
+        // be rejected as a broken observation, not pass parity vacuously.
+        let raw = move_records().replace("\"keepalives\":[266783496]", "\"keepalives\":[]");
+        let err = normalize_move(&raw).expect_err("empty keepalives must be rejected");
+        assert!(
+            err.contains("no keepalives"),
+            "error must name the empty keepalive observation, got {err}"
+        );
+    }
+
+    #[test]
     fn failed_move_normalizes_without_movement_observables() {
         let raw = [
             r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"mode":"move","azalea_revision":"x","protocol":1}"#,
@@ -1605,6 +1639,27 @@ mod tests {
         assert_eq!(t["dwell"]["echo_relationship"], json!(false));
         assert_eq!(t["dwell"]["challenge_count"], json!(3));
         assert_eq!(t["dwell"]["echo_count"], json!(2));
+    }
+
+    #[test]
+    fn dwell_rejects_an_empty_keepalive_observation() {
+        // A dwelled run with no keepalives would otherwise report a vacuous 1:1
+        // (`echo_relationship: set_equality([], []) == true`); the empty set
+        // must be rejected as a broken observation rather than emit a
+        // misleadingly-true 1:1 relationship.
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":50,"mode":"dwell","dwell_seconds":41,"azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
+            r#"{"event":"dwell","requested_dwell_seconds":41,"connected_wall_seconds":41.2,"challenge_count":0,"echo_count":0,"challenge_ids":[],"echo_ids":[],"first_challenge_offset_ms":1200,"last_challenge_offset_ms":41100,"challenge_span_ms":39900,"protocol":1}"#,
+        ]
+        .join("\n");
+        let err = normalize_dwell(&raw).expect_err("empty keepalives must be rejected");
+        assert!(
+            err.contains("no keepalives"),
+            "error must name the empty keepalive observation, got {err}"
+        );
     }
 
     #[test]
