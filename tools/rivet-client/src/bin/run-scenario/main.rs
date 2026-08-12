@@ -3004,14 +3004,16 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
 const RECENTER_FAILURE_LOG_FRAGMENT: &str =
     "disconnecting play session on chunk-loader update failure";
 
-/// The typed failure prefix every `RegionBackedBootError` variant carries
-/// (`UNVERIFIED `). The on-demand recenter surfaces these verbatim
-/// (`UNVERIFIED read-only region read failed: corrupt chunk ...` for a corrupt
-/// chunk, `UNVERIFIED chunk ... is absent; ...` for a missing one) — the
-/// no-generation/no-superflat-fallback typed boundary. The positive acceptance
-/// REQUIRES the log to contain NO `UNVERIFIED` text at all; the tampered-copy
-/// negative control REQUIRES it.
-const RECENTER_UNVERIFIED_TEXT: &str = "UNVERIFIED";
+/// The typed failure the on-demand region load surfaces when a chunk is corrupt
+/// at the storage boundary: the `RegionRead` `RegionBackedBootError` displays
+/// `UNVERIFIED read-only region read failed: <io error>`, and the corrupt chunk
+/// the negative control creates surfaces `<io error>` =
+/// `corrupt chunk [5, -7] in read-only region: external stream is missing or
+/// unsupported`. This is the narrow typed signal the negative control REQUIRES
+/// and the positive acceptance REQUIRES to be absent — narrower than a bare
+/// `UNVERIFIED` grep, so an unrelated future `UNVERIFIED`-prefixed log line
+/// cannot spuriously fail the acceptance.
+const RECENTER_UNVERIFIED_TEXT: &str = "UNVERIFIED read-only region read failed";
 
 /// The overworld region file that holds the route's beyond-boot enter cells:
 /// chunks (0..7, -7..1) live in the region rooted at `(0, -1)`, whose file is
@@ -3052,7 +3054,7 @@ const RECENTER_TAMPER_CHUNK: [i32; 2] = [5, -7];
 /// - the rivet-server log: `connection established`, an accepted teleport ack +
 ///   accepted move frames (the route reached the authoritative movement path),
 ///   NO `read timeout` kick (not keepalive), and NO
-///   `RECENTER_FAILURE_LOG_FRAGMENT` / `UNVERIFIED region-backed chunk` text (the
+///   `RECENTER_FAILURE_LOG_FRAGMENT` / `RECENTER_UNVERIFIED_TEXT` text (the
 ///   on-demand loads all succeeded — a single typed failure would have
 ///   disconnected the session mid-route).
 ///
@@ -3063,8 +3065,8 @@ const RECENTER_TAMPER_CHUNK: [i32; 2] = [5, -7];
 ///
 /// A NON-VACUOUS negative control then corrupts a beyond-boot chunk in a SECOND
 /// disposable copy (never the source) and boots a second rivet-server on an
-/// isolated port. The same route now REQUIRES the typed `UNVERIFIED region-backed
-/// chunk` disconnect — the server must fail typed on the corrupt/missing chunk
+/// isolated port. The same route now REQUIRES the typed `RECENTER_UNVERIFIED_TEXT`
+/// disconnect — the server must fail typed on the corrupt/missing chunk
 /// (no generation, no superflat fallback, no silent substitution), the client
 /// must surface `disconnected` (not `walked`), and the source + both copies'
 /// safety checks must still pass. This proves the positive acceptance is
@@ -3504,21 +3506,23 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
 
 /// Corrupt one chunk's DATA payload in the DISPOSABLE copy's `.mca` file:
 /// overwrite the chunk's 1-byte compression id (the byte after the 4-byte
-/// stream length in the chunk's first sector) with `0xFF` — an unregistered id
-/// no valid chunk can carry. The region file layout is the standard §6 header:
-/// the first 4096 bytes are 1024 4-byte entries (`offset = bytes 0..2`,
+/// stream length in the chunk's first sector) with `0xFF` — a compression id no
+/// valid chunk can carry. The region file layout is the standard §6 header: the
+/// first 4096 bytes are 1024 4-byte entries (`offset = bytes 0..2`,
 /// `sector_count = byte 3`), each entry index `z*32 + x` for the local
 /// `(x % 32, z % 32)` coordinate, and each chunk's data starts at
 /// `sector_offset * 4096` with `[4-byte length][compression id]`.
 ///
-/// The HEADER stays valid — the boot's read-only region open scans every header
-/// entry, and the booted 117-chunk square never reads this beyond-view cell —
-/// so the server reaches READY. The on-demand recenter read of the corrupted
-/// cell then surfaces the garbage compression id as a typed
-/// `corrupt chunk ... in read-only region: unsupported stream compression`
-/// `RegionBackedBootError` (never a panic, never a silent absence) — exactly
-/// the no-generation/no-fallback failure the negative control requires. Only
-/// the copy is touched; the source world is never mutated.
+/// `0xFF` sets the external-stream high bit, so the read path treats the chunk
+/// as an external `.mcc` stream: no external file exists for the cell, so the
+/// read-only storage surfaces the typed `corrupt chunk ... in read-only region:
+/// external stream is missing or unsupported` `InvalidData` (never a panic,
+/// never a silent absence). The HEADER stays valid — the boot's read-only
+/// region open scans every header entry, and the booted 117-chunk square never
+/// reads this beyond-view cell — so the server reaches READY, and the on-demand
+/// recenter read of the corrupted cell fails typed `UNVERIFIED` — exactly the
+/// no-generation/no-fallback failure the negative control requires. Only the
+/// copy is touched; the source world is never mutated.
 fn corrupt_region_chunk_entry(region_path: &Path, chunk: [i32; 2]) -> io::Result<()> {
     use std::io::{Read, Seek, SeekFrom, Write};
 
