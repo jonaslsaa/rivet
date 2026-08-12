@@ -160,9 +160,12 @@ impl RegionChunkSource {
             .read(&pos)
             .map_err(RegionBackedBootError::RegionRead)?
             .ok_or(RegionBackedBootError::MissingChunkNoGeneration(pos))?;
-        SerializableChunkData::parse(height_accessor::create(-64, 384), &tag)
-            .map_err(RegionBackedBootError::SerializableChunk)?
-            .ok_or(RegionBackedBootError::MissingChunkStatus(pos))
+        SerializableChunkData::parse(
+            height_accessor::create(OVERWORLD_MIN_Y, OVERWORLD_HEIGHT),
+            &tag,
+        )
+        .map_err(RegionBackedBootError::SerializableChunk)?
+        .ok_or(RegionBackedBootError::MissingChunkStatus(pos))
     }
 
     /// Read, extract, and validate one serialized chunk for runtime
