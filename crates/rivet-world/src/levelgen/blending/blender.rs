@@ -36,11 +36,29 @@ use crate::levelgen::noise::density_function::FunctionContext;
 
 /// `Blender.BlendingOutput(double alpha, double blendingOffset)` record — the
 /// `blendOffsetAndFactor` result.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Equality mirrors the Java record's generated `equals`, which compares each
+/// `double` component with `Double.compare(...) == 0`: NaN equals itself and
+/// `-0.0` is distinct from `0.0` (the derived IEEE `==` does neither).
+#[derive(Debug, Clone, Copy)]
 pub struct BlendingOutput {
     alpha: f64,
     blending_offset: f64,
 }
+
+impl PartialEq for BlendingOutput {
+    fn eq(&self, other: &Self) -> bool {
+        // `total_cmp` mirrors `Double.compare` exactly, unlike the derived
+        // `PartialEq`.
+        self.alpha.total_cmp(&other.alpha).is_eq()
+            && self
+                .blending_offset
+                .total_cmp(&other.blending_offset)
+                .is_eq()
+    }
+}
+
+impl Eq for BlendingOutput {}
 
 impl BlendingOutput {
     /// The record constructor.
@@ -145,7 +163,9 @@ mod tests {
         assert!(Blender::empty().is_empty());
     }
 
-    /// `BlendingOutput` value semantics — record accessors and equality.
+    /// `BlendingOutput` value semantics — record accessors and Java record
+    /// equality: each `double` component compares via `Double.compare`
+    /// (NaN equals itself; `-0.0` is distinct from `0.0`).
     #[test]
     fn blending_output_value_semantics() {
         let output = BlendingOutput::new(0.5, -3.25);
@@ -153,5 +173,16 @@ mod tests {
         assert_eq!(output.blending_offset(), -3.25);
         assert_eq!(output, BlendingOutput::new(0.5, -3.25));
         assert_ne!(output, BlendingOutput::new(0.5, 0.0));
+        // `Double.compare(NaN, NaN) == 0` — NaN equals itself, which the
+        // derived IEEE `==` (NaN != NaN) would reject.
+        assert_eq!(
+            BlendingOutput::new(f64::NAN, 1.0),
+            BlendingOutput::new(f64::NAN, 1.0)
+        );
+        // `Double.compare(-0.0, 0.0) != 0` — signed zero is distinct.
+        assert_ne!(
+            BlendingOutput::new(-0.0, 1.0),
+            BlendingOutput::new(0.0, 1.0)
+        );
     }
 }
