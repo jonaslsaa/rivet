@@ -1,0 +1,18 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "data-worldgen",
+  "note": "Paper-grounded TerrainProvider/NoiseData value-leaf goldens (the mc.data.worldgen.prereq unit): `terrain-provider-goldens.json` records the overworld offset/factor/jaggedness CubicSpline min/max/sample outputs and the peaksAndValleys sweep as hex-float, plus Paper's `parityString()` output, asserted bit-exactly by crates/rivet-world/src/data/worldgen/terrain_provider.rs tests; `noise-data-goldens.json` records NoiseData.bootstrap's registered key/parameter order, asserted by crates/rivet-world/src/data/worldgen/noise_data.rs tests. Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/TerrainProviderProbe.java and NoiseDataProbe.java; regenerate with `scripts/run_data_worldgen_probe.sh`.",
+  "captured": [
+    {
+      "path": "terrain-provider-goldens.json",
+      "sha256": "bcf075d57a14f96c7f550a4a547d85ddbf1c18ddde47c90fb1b9e317f1ec1fa3",
+      "bytes": 59678
+    },
+    {
+      "path": "noise-data-goldens.json",
+      "sha256": "eca230ffc54f0d0699fe55543b6337645b359af321d01b109fc033518fef0ff0",
+      "bytes": 9559
+    }
+  ]
+}

@@ -117,10 +117,29 @@ TEMPLATESYSTEM_PKG = "net.minecraft.world.level.levelgen.structure.templatesyste
 CHUNK_PKG = "net.minecraft.world.level.chunk"
 STORAGE_PKG = "net.minecraft.world.level.storage"
 LIGHTING_PKG = "net.minecraft.world.level.lighting"
+DATA_WORLDGEN_PKG = "net.minecraft.data.worldgen"
 WORLD_PACKAGES = (LEVELGEN_PKG, FEATURE_PKG, CONFIG_PKG, BLOCKPREDICATES_PKG,
                   PLACEMENT_PKG, BIOME_PKG, STRUCTURE_PKG,
                   STRUCTURES_PKG, TEMPLATESYSTEM_PKG, CHUNK_PKG, STORAGE_PKG,
                   LIGHTING_PKG)
+# data.worldgen (#177/#178 prereq): the 3-file bootstrap/terrain slice splits
+# out of the 29-file monolithic row; the residual keeps the pre-split id.
+DATA_WORLDGEN_PREREQ_FILES = {
+    "BootstrapContext.java", "NoiseData.java", "TerrainProvider.java",
+}
+DATA_WORLDGEN_RESIDUAL_FILES = {
+    "AncientCityStructurePieces.java", "AncientCityStructurePools.java",
+    "BastionBridgePools.java", "BastionHoglinStablePools.java",
+    "BastionHousingUnitsPools.java", "BastionPieces.java",
+    "BastionSharedPools.java", "BastionTreasureRoomPools.java",
+    "BiomeDefaultFeatures.java", "Carvers.java", "DesertVillagePools.java",
+    "DimensionTypes.java", "PillagerOutpostPools.java", "PlainVillagePools.java",
+    "Pools.java", "ProcessorLists.java", "SavannaVillagePools.java",
+    "SnowyVillagePools.java", "StructureSets.java", "Structures.java",
+    "SurfaceRuleData.java", "TaigaVillagePools.java",
+    "TrailRuinsStructurePools.java", "TrialChambersStructurePools.java",
+    "VillagePools.java", "package-info.java",
+}
 # Fully-partitioned packages emit no residual row: their pre-split row id
 # disappears and external deps resolve to the lowest-id cluster.
 FULLY_PARTITIONED = {LEVELGEN_PKG, FEATURE_PKG, CONFIG_PKG, BLOCKPREDICATES_PKG,
@@ -1024,6 +1043,37 @@ def main() -> None:
                    "mc.world.level.storage.saveddata", "mc.world.level.storage.value",
                    "mc.world.level.lighting.core", "mc.world.level.lighting.engine")))
 
+        # data.worldgen (#177/#178 prereq): the 3-file bootstrap/terrain slice
+        # splits out of the monolithic row; the residual keeps the pre-split id
+        # (so the data rows in wave 3's cycle still resolve to one hub) and the
+        # 26-file complement, and stays needs_split=yes.
+        check("data.worldgen splits into residual + prereq",
+              {r["id"] for r in w_by_pkg[DATA_WORLDGEN_PKG]}
+              == {"mc.data.worldgen", "mc.data.worldgen.prereq"})
+        check("data.worldgen.prereq owns the bootstrap/terrain slice",
+              w_file_set(w_by_id["mc.data.worldgen.prereq"])
+              == DATA_WORLDGEN_PREREQ_FILES)
+        check("data.worldgen residual owns the 26-file complement",
+              w_file_set(w_by_id["mc.data.worldgen"]) == DATA_WORLDGEN_RESIDUAL_FILES
+              and DATA_WORLDGEN_PREREQ_FILES.isdisjoint(
+                  w_file_set(w_by_id["mc.data.worldgen"])))
+        check("data.worldgen.prereq is right-sized (no needs_split) and rides on the residual",
+              w_by_id["mc.data.worldgen.prereq"]["needs_split"] == ""
+              and w_by_id["mc.data.worldgen"]["needs_split"] == "yes"
+              and "mc.data.worldgen.prereq"
+              in w_by_id["mc.data.worldgen"]["deps"].split(","))
+        check("data.worldgen.prereq crate-overrides to rivet-world",
+              w_by_id["mc.data.worldgen.prereq"]["crate"] == "rivet-world"
+              and w_by_id["mc.data.worldgen"]["crate"] == "rivet-registry")
+        data_dir = (REPO / "working/Paper/paper-server/src/minecraft/java"
+                    / "net/minecraft/data/worldgen")
+        if data_dir.is_dir():
+            data_owned = set().union(
+                *[w_file_set(w_by_id[u]) for u in
+                  ("mc.data.worldgen", "mc.data.worldgen.prereq")])
+            check("data.worldgen package: every on-disk *.java owned exactly once",
+                  data_owned == {p.name for p in data_dir.glob("*.java")})
+
         # All world dep tokens resolve via the wave-picker rules (unit id,
         # derived package id, or lowest-id shared-package row).
         w_unresolved = []
@@ -1051,6 +1101,16 @@ def main() -> None:
                       src in b_by_id
                       and tgt in b_by_id[src]["deps"].split(","),
                       f"missing edge {src}->{tgt}")
+        # CRATE_OVERRIDES must name real emitted split units (a dropped or stale
+        # override would silently misroute a wave to the wrong crate).
+        from analyze_graph import CRATE_OVERRIDES
+        for unit_id, crate in sorted(CRATE_OVERRIDES.items()):
+            check(f"CRATE_OVERRIDES: {unit_id} is an emitted unit",
+                  unit_id in b_by_id,
+                  f"override names unknown unit {unit_id}")
+            check(f"CRATE_OVERRIDES: {unit_id} crate is {crate}",
+                  b_by_id[unit_id]["crate"] == crate,
+                  f"{unit_id} crate is {b_by_id[unit_id]['crate']}, want {crate}")
         # And the reverse: no extra authored same-package edges beyond the set.
         # (The nbt split authors its same-package unit-id deps in NBT_UNITS, not
         # SPLIT_EDGES, so it is excluded here.)

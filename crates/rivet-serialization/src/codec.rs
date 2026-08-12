@@ -426,6 +426,39 @@ where
     )
 }
 
+/// `Codec.optionalFieldOf(String, F default)` — the with-default form of a
+/// NON-lenient optional field.
+///
+/// Java (DFU 10.0.21, verified from the pinned jar's bytecode):
+/// `optionalField(name, codec, false).xmap(o -> o.orElse(default), a ->
+/// Objects.equals(a, default) ? Optional.empty() : Optional.of(a))`. Unlike
+/// [`lenient_optional_field_of`], a present-but-malformed value is a decode
+/// error (the optional field is NOT lenient). The field value defaults on
+/// decode when absent, and is OMITTED on encode when value-equal to `default`.
+pub fn optional_field_of<F, Ops: DynamicOps + 'static>(
+    name: &str,
+    element_codec: Arc<dyn Codec<F, Ops>>,
+    default: F,
+) -> Arc<dyn MapCodec<F, Ops>>
+where
+    F: 'static + Clone + PartialEq + Send + Sync,
+{
+    let inner = optional_field(name.to_string(), element_codec, false);
+    let default_for_decode = default.clone();
+    let default_for_encode = default;
+    map_codec::xmap(
+        inner,
+        Arc::new(move |o: &Option<F>| o.clone().unwrap_or_else(|| default_for_decode.clone())),
+        Arc::new(move |a: &F| {
+            if *a == default_for_encode {
+                None
+            } else {
+                Some(a.clone())
+            }
+        }),
+    )
+}
+
 /// `Codec.recursive(String, Function<Codec<A>, Codec<A>>)`.
 pub fn recursive<A, Ops: DynamicOps + 'static>(
     name: String,

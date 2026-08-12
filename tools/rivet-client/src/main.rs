@@ -7,17 +7,19 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use azalea::ClientInformation;
 use azalea::WalkDirection;
-use azalea::app::{App, Plugin, Update};
+use azalea::app::{App, Plugin, PreUpdate, Update};
 use azalea::attack::handle_attack_queued;
+use azalea::connection::read_packets;
 use azalea::core::game_type::GameMode;
 use azalea::core::position::BlockPos;
 use azalea::core::tick::GameTick;
 use azalea::ecs::message::MessageReader;
 use azalea::ecs::observer::On;
-use azalea::ecs::prelude::{Query, Res, Resource};
+use azalea::ecs::prelude::{Query, Res, Resource, With};
 use azalea::ecs::schedule::IntoScheduleConfigs;
-use azalea::entity::{EntityGeometryUpdateSystems, LastSentPosition, Physics};
+use azalea::entity::{EntityGeometryUpdateSystems, LastSentPosition, LocalEntity, Physics};
 use azalea::join::{ConnectionFailedEvent, poll_create_connection_task};
 use azalea::local_player::WorldHolder;
 use azalea::movement::{
@@ -46,8 +48,10 @@ const TRANSCRIPT_PROTOCOL: u64 = 1;
 /// the 1s Paper keepalive cadence (proving keepalive echo while moving) and to
 /// show a few send_position deltas, short enough that the walk stays inside the
 /// spawn chunk (spawn is ~10 blocks from the chunk corner; walking +x stays
-/// well within the loaded view).
-const MOVE_TICKS: u32 = 120;
+/// well within the loaded view). Shared with `run-scenario` via
+/// [`rivet_harness_common::timing`] so the move timeout headroom cannot drift
+/// from the actual walk length.
+const MOVE_TICKS: u32 = rivet_harness_common::timing::MOVE_WALK_TICKS;
 /// Game ticks of the walk that are sampled into the transcript. Kept below
 /// `MOVE_TICKS` so the walk always continues a few unsampled ticks after the
 /// last sample: if the server re-syncs the player (`player_position`) at some
@@ -56,20 +60,31 @@ const MOVE_TICKS: u32 = 120;
 /// to knock the local player airborne for the final 3 samples on one boot).
 const SAMPLE_TICKS: u32 = 100;
 /// Wait this long after the walk stops before ending the client, so the final
-/// sent positions and any trailing correction are recorded before exit.
-const MOVE_DRAIN: Duration = Duration::from_millis(200);
-/// How long the dwell settle loop waits between coherence checks after the dwell
-/// window elapses. The keepalive cadence is 1 s, so a 50 ms check interval is
-/// ample: it lets an in-flight challenge/echo pair land and be observed well
-/// before the next challenge.
-const DWELL_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
-/// How long the dwell settle loop waits for the echo stream to catch up to the
-/// challenge stream before giving up and snapshotting anyway. Bounded so a
-/// genuinely missing echo (a client that stopped echoing, which the server would
-/// kick) cannot hold the record open forever — the emitted mismatch still fails
-/// the verdict. 1 s is far shorter than the survival-window proof and keeps the
-/// wall-clock record honest.
-const DWELL_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
+/// sent positions and any trailing correction are recorded before exit. Shared
+/// with `run-scenario` via [`rivet_harness_common::timing`] so the move timeout
+/// headroom cannot drift from the actual drain.
+const MOVE_DRAIN: Duration = Duration::from_millis(rivet_harness_common::timing::MOVE_DRAIN_MS);
+/// How long the keepalive settle loop (dwell and move modes) waits between
+/// coherence checks before snapshotting. The keepalive cadence is 1 s, so a
+/// 50 ms check interval is ample: it lets an in-flight challenge/echo pair land
+/// and be observed well before the next challenge.
+const KEEPALIVE_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
+/// How long the keepalive settle loop waits for the challenge and echo streams
+/// to reach 1:1 correspondence before giving up and snapshotting anyway. Bounded
+/// so a genuinely missing echo (a client that stopped echoing, which the server
+/// would kick) cannot hold the record open forever — the emitted mismatch still
+/// fails the verdict. 1 s is far shorter than the move walk or the dwell
+/// survival-window proof, and keeps the record honest.
+///
+/// Callers that pass `--timeout-seconds` must reserve this settle time: in move
+/// mode the emit happens after login + walk + `MOVE_DRAIN` + up to this settle,
+/// so a tight timeout (near that total) can cut the client off before it emits
+/// (ExitCode 2, spurious FAIL). The defaults (30 s client / 60 s runner) absorb
+/// it comfortably; both dwell and move modes additionally enforce the
+/// reservation at parse time via the shared validators in
+/// `rivet_harness_common::timing`.
+const KEEPALIVE_SETTLE_TIMEOUT: Duration =
+    Duration::from_secs(rivet_harness_common::timing::KEEPALIVE_SETTLE_TIMEOUT_SECS);
 /// The minimum wall-clock dwell window (s) `--mode dwell` accepts. The
 /// transcript verdict requires the challenge span to reach 30 s, and the first
 /// challenge lands ~1.2 s after spawn, so a 31 s window (the server's 30 s kick
@@ -78,14 +93,6 @@ const DWELL_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
 /// `transcript::DWELL_MIN_DWELL_SECONDS`; kept in sync so a direct client
 /// invocation cannot be told to run a window that cannot prove survival.
 const DWELL_MIN_DWELL_SECONDS: u64 = 35;
-/// Reserved client-side headroom (s) beyond the dwell window + settle timeout
-/// that `--timeout-seconds` must accommodate. The timeout starts at process
-/// launch while the dwell window only starts at `Event::Spawn` (after offline
-/// login and configuration), so the timeout must reserve that pre-spawn time
-/// too, or the timeout branch cuts the client off before it emits the `dwell`
-/// record. Mirrors `run-scenario`'s `DWELL_TIMEOUT_HEADROOM_SECONDS` (5 s here
-/// + the 1 s settle above = the 6 s the runner reserves).
-const DWELL_LOGIN_HEADROOM_SECONDS: u64 = 5;
 
 /// After `Event::Spawn` we keep the client alive for a short observation window
 /// so the observable outcome is stable (chunks arrived, health/inventory
@@ -126,6 +133,21 @@ enum Mode {
     /// (UNVERIFIED for non-FULL chunks and uncarried #369 capability flags)
     /// rather than reporting a fabricated PASS.
     Loaded,
+    /// The loaded-world recenter reproduction (issue #561): join a server
+    /// booted against a real loaded world (`--level <copy>`, issue #374),
+    /// advertise client view distance 2 (so the join burst's send-3 spawn view
+    /// is a strict subset of the booted 117-chunk square), then drive a
+    /// deterministic sustained +x movement route by writing finite movement
+    /// frames directly (`write_packet` — the server accepts any finite post-ack
+    /// frame). The route crosses the first chunk boundary successfully (the
+    /// send-3 enter cells are all inside the booted square) and the second
+    /// (the send-3 enter column falls outside the booted square → the typed
+    /// UNVERIFIED recenter disconnect). Each frame's exact position is emitted
+    /// as movement evidence, and the resulting `disconnect` record is the
+    /// negative regression result the runner asserts. Never generates, never
+    /// superflat-falls-back; the client spawns underground at the real spawn,
+    /// so the frames are driven directly rather than by physics walking.
+    LoadedRecenter,
 }
 
 impl Mode {
@@ -136,6 +158,7 @@ impl Mode {
             Mode::Dwell => "dwell",
             Mode::Kick => "kick",
             Mode::Loaded => "loaded",
+            Mode::LoadedRecenter => "loaded-recenter",
         }
     }
 
@@ -146,6 +169,7 @@ impl Mode {
             "dwell" => Some(Mode::Dwell),
             "kick" => Some(Mode::Kick),
             "loaded" => Some(Mode::Loaded),
+            "loaded-recenter" => Some(Mode::LoadedRecenter),
             _ => None,
         }
     }
@@ -187,7 +211,7 @@ impl Args {
                     let value = next_value(&mut args, "--mode")?;
                     mode = Mode::parse(&value).ok_or_else(|| {
                         format!(
-                            "invalid --mode value: {value} (expected join|move|dwell|kick|loaded)"
+                            "invalid --mode value: {value} (expected join|move|dwell|kick|loaded|loaded-recenter)"
                         )
                     })?;
                 }
@@ -228,24 +252,24 @@ impl Args {
         }
         // The timeout starts at process launch while the dwell window only
         // starts at spawn; after the window the client spends up to
-        // DWELL_SETTLE_TIMEOUT settling the keepalive stream before emitting
-        // the `dwell` record. `dwell < timeout` is therefore not enough — the
-        // timeout must reserve the settle loop AND the pre-spawn
+        // KEEPALIVE_SETTLE_TIMEOUT settling the keepalive stream before
+        // emitting the `dwell` record. `dwell < timeout` is therefore not
+        // enough — the timeout must reserve the settle loop AND the pre-spawn
         // login/configuration time, or the timeout branch cuts the client off
-        // before it emits.
-        if mode == Mode::Dwell
-            && timeout_seconds
-                <= dwell_seconds + DWELL_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS
-        {
-            return Err(format!(
-                "--timeout-seconds must exceed --dwell-seconds by more than {}s (the client \
-                 spends up to {}s settling the keepalive stream after the dwell window, plus {}s \
-                 of login/configuration time before spawn, and must emit the dwell record before \
-                 the timeout fires)",
-                DWELL_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS,
-                DWELL_SETTLE_TIMEOUT.as_secs(),
-                DWELL_LOGIN_HEADROOM_SECONDS
-            ));
+        // before it emits. Shared with the runner via
+        // `rivet_harness_common::timing::validate_dwell_timeout`.
+        if mode == Mode::Dwell {
+            rivet_harness_common::timing::validate_dwell_timeout(dwell_seconds, timeout_seconds)?;
+        }
+        // Move mode has the same emit-before-timeout invariant as dwell: the
+        // `moved` record is emitted only after login/configuration, the fixed
+        // walk, MOVE_DRAIN, and up to KEEPALIVE_SETTLE_TIMEOUT of keepalive
+        // settling. A timeout at or below that total cuts the client off before
+        // it emits (ExitCode 2, spurious FAIL), so the reservation is enforced
+        // here rather than only in the runner. Shared via
+        // `rivet_harness_common::timing::validate_move_timeout`.
+        if mode == Mode::Move {
+            rivet_harness_common::timing::validate_move_timeout(timeout_seconds)?;
         }
 
         Ok(Self {
@@ -265,7 +289,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: rivet-client [--mode join|move|dwell|kick|loaded] [--address HOST:PORT] [--username NAME] \
+        "Usage: rivet-client [--mode join|move|dwell|kick|loaded|loaded-recenter] [--address HOST:PORT] [--username NAME] \
          [--timeout-seconds N] [--dwell-seconds N]\n\
          Defaults: --mode {DEFAULT_MODE} --address {DEFAULT_ADDRESS} --username {DEFAULT_USERNAME} \
          --timeout-seconds {DEFAULT_TIMEOUT_SECONDS} --dwell-seconds {DEFAULT_DWELL_SECONDS}"
@@ -533,6 +557,40 @@ fn translatable_key(reason: &azalea::FormattedText) -> Option<String> {
     }
 }
 
+/// The loaded-recenter view-distance pin (issue #561). The `loaded-recenter`
+/// reproduction requires the server to resolve send radius 3 (the send-3 spawn
+/// view is a strict subset of the booted 117-chunk square), which needs the
+/// client to advertise client view distance 2. Azalea cannot set that
+/// deterministically from the handler: `ClientBuilder::start` returns `AppExit`
+/// (the user handler is dispatched as a bevy task per event), azalea inserts
+/// `ClientInformation::default()` (view 8) on the local player at join, and
+/// `send_client_information` writes it during the config-state transition
+/// (`RemovedComponents<InLoginState>`), so a handler-side
+/// `set_client_information` at `Event::Init` races that write and loses. The
+/// deterministic injection point is the ECS itself: a `PreUpdate` system that
+/// pins the local player's `ClientInformation.view_distance` to 2 immediately
+/// after `read_packets` (which is where `InLoginState` is removed) and before
+/// the `Update`-schedule `send_client_information` reads the component — so the
+/// wire packet always carries view 2 and the join burst always diff send 3.
+#[derive(Clone, Copy)]
+struct RecenterView2Pin;
+
+impl Plugin for RecenterView2Pin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(PreUpdate, pin_recenter_view_distance.after(read_packets));
+    }
+}
+
+fn pin_recenter_view_distance(
+    mut query: Query<(&mut ClientInformation, &State), With<LocalEntity>>,
+) {
+    for (mut client_information, state) in &mut query {
+        if state.mode == Mode::LoadedRecenter {
+            client_information.view_distance = 2;
+        }
+    }
+}
+
 #[derive(Clone, Resource)]
 struct ConnectionFailure(Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>);
 
@@ -560,16 +618,25 @@ struct KeepaliveLog {
 }
 
 impl KeepaliveLog {
-    /// Whether the echo stream has caught up to the challenge stream: every
-    /// challenge received so far has a recorded echo. The server challenges at
-    /// a 1 s cadence and azalea echoes within a tick, so a settled log is in a
-    /// coherent state — snapshotting it now cannot observe a challenge whose
-    /// echo is still in flight. A challenge whose echo genuinely never lands
-    /// (a client that stopped echoing would be kicked) keeps this false, so the
-    /// dwell settle window expires and the emitted mismatch still fails the
-    /// verdict.
+    /// Whether the challenge and echo streams are 1:1 as multisets — the exact
+    /// predicate the transcript's `set_equality` verdict comparison uses (every
+    /// challenge echoed, every echo matches a challenge, and no duplicate on
+    /// either side). The single source of truth for both the settle loop's
+    /// success predicate and the test assertions, so the two cannot drift.
+    ///
+    /// Requires a non-empty challenge set: a real walk always draws keepalives
+    /// (the server challenges at 1/s), so an empty log is a broken observer,
+    /// not a healthy settled state — this prevents a fully-broken keepalive
+    /// observation from reporting a vacuous 1:1.
     fn settled(&self) -> bool {
-        self.echoes.len() >= self.challenges.len()
+        if self.challenges.is_empty() || self.challenges.len() != self.echoes.len() {
+            return false;
+        }
+        let mut challenges = self.challenges.clone();
+        let mut echoes = self.echoes.clone();
+        challenges.sort_unstable();
+        echoes.sort_unstable();
+        challenges == echoes
     }
 }
 
@@ -864,6 +931,102 @@ async fn loaded_walk(bot: &Client) -> Value {
     json!({ "before": before, "after": after })
 }
 
+/// The `loaded-recenter` movement route (issue #561): the block-X offsets of
+/// the +x frames the client drives, relative to the observed spawn block. The
+/// real New World spawn block is `(-16, 68, -48)` in chunk `(-1, -3)`, so
+/// offset +16 reaches block X 0 — the first block of chunk `(0, -3)` — and
+/// offset +32 reaches block X 16 — the first block of chunk `(1, -3)`. The
+/// client advertises view distance 2, so the join burst resolves send radius 3
+/// and the send-3 spawn view is the 81-chunk square `(-5..3, -7..1)` — a strict
+/// subset of the booted 117-chunk square `(-6..4, -8..2)`.
+///
+/// Crossing the FIRST boundary (into chunk `(0, -3)`) enters the x=4 column
+/// `z=-7..1`, which the booted square still contains (`|4-(-1)|-2 = 3`,
+/// `3²+2² = 13 < 16`) — that move must SUCCEED, proving a genuine repeated
+/// chunk-boundary crossing. Crossing the SECOND boundary (into chunk `(1, -3)`)
+/// enters the x=5 column `z=-7..1`, which the booted square does NOT contain
+/// (`x=5` is outside its `-6..4` raster entirely) — the recenter must fail
+/// typed at the first enter cell `(5, -7)`.
+const RECENTER_ROUTE_X_OFFSETS: [f64; 2] = [16.0, 32.0];
+/// How long to wait between driven movement frames (ms). Longer than the
+/// server's 50 ms tick, so each boundary-crossing frame is processed as its own
+/// tick (a frame's recenter runs against the previously committed center) and
+/// the two crossings are observed as distinct server moves.
+const RECENTER_FRAME_GAP: Duration = Duration::from_millis(120);
+/// Wait this long after spawn before driving the first frame: the spawn
+/// teleport ack (azalea auto-acks) must land first, or the first frame would be
+/// swallowed by the pending-teleport rotation-only snap instead of moving.
+const RECENTER_POST_SPAWN: Duration = Duration::from_millis(400);
+
+/// The `loaded-recenter` driver (issue #561): after spawn, let the teleport ack
+/// land and the join burst quiesce, then drive the deterministic +x movement
+/// route by writing finite movement frames directly (`write_packet` — the
+/// server accepts any finite post-ack frame, so the route is fully
+/// deterministic even though the client spawns underground and physics walking
+/// is impossible). Each frame is emitted as `move_frame` evidence with its exact
+/// absolute position and the chunk it lands in. The server disconnects on the
+/// second frame (the recenter fails typed at the boot authority edge); the
+/// existing `disconnect` handler emits the terminal record and exits. If the
+/// server never disconnects (a regression in the recenter or the RequireLoaded
+/// policy), the driver parks and the outer `--timeout-seconds` branch ends the
+/// run with a `timeout` outcome the runner FAILs — the expected negative result
+/// did not occur.
+async fn loaded_recenter_and_emit(bot: Client, state: State) {
+    let origin = state
+        .spawn_origin
+        .lock()
+        .expect("spawn origin lock poisoned")
+        .unwrap_or_else(|| azalea::core::position::Vec3::new(-16.0, 68.0, -48.0));
+    let frames: Vec<(f64, f64, f64)> = RECENTER_ROUTE_X_OFFSETS
+        .iter()
+        .map(|&dx| (origin.x + dx, origin.y, origin.z))
+        .collect();
+
+    tokio::time::sleep(RECENTER_POST_SPAWN).await;
+    wait_chunk_quiescence(&state.chunks).await;
+
+    emit(json!({
+        "event": "route",
+        "origin": round_position(origin),
+        "frames": frames.iter().map(|(x, y, z)| json!({
+            "x": round_to(*x, 3),
+            "y": round_to(*y, 3),
+            "z": round_to(*z, 3),
+        })).collect::<Vec<_>>(),
+    }));
+
+    let mut sent = 0usize;
+    for &(x, y, z) in &frames {
+        bot.write_packet(
+            azalea::protocol::packets::game::ServerboundMovePlayerPosRot {
+                pos: azalea::Vec3 { x, y, z },
+                look_direction: azalea::entity::LookDirection::new(0.0, 0.0),
+                flags: MoveFlags::default(),
+            },
+        );
+        sent += 1;
+        emit(json!({
+            "event": "move_frame",
+            "index": sent,
+            "x": round_to(x, 3),
+            "y": round_to(y, 3),
+            "z": round_to(z, 3),
+            "chunk": [x.div_euclid(16.0) as i32, z.div_euclid(16.0) as i32],
+        }));
+        tokio::time::sleep(RECENTER_FRAME_GAP).await;
+    }
+
+    // Every planned frame was sent without a disconnect: the expected recenter
+    // failure did not occur. Park until the outer timeout ends the run with a
+    // `timeout` outcome (the runner FAILs — the negative result is missing). If
+    // a later server-initiated close fires, the handler emits the `disconnect`
+    // record and exits first.
+    let _ = bot;
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// The overworld world-ceiling Y (the copied world is full-height 384).
 const WORLD_CEILING_Y: i32 = 320;
 /// The bedrock-slab sample Y (mirrors the extractor's `BEDROCK_Y`).
@@ -927,7 +1090,9 @@ fn sample_cell(world: &azalea::world::World, x: i32, z: i32) -> (String, String,
 /// approach — so the position/velocity sequence is deterministic across boots.
 ///
 /// After the walk this task drains briefly so the final sent positions and any
-/// trailing server correction land before the record is emitted.
+/// trailing server correction land before the record is emitted, then settles
+/// the keepalive stream (see `settle_and_snapshot`) so the transcript's
+/// challenge/echo relationship is observed coherently across the boundary.
 ///
 /// The walk's first observed tick is a setup tick (direction set, no movement),
 /// so the walk spans `MOVE_TICKS` observed ticks of which `MOVE_TICKS - 1` move
@@ -960,22 +1125,15 @@ async fn move_and_emit(bot: Client, state: State) {
     // Let the last sent positions and any trailing server correction flush.
     tokio::time::sleep(MOVE_DRAIN).await;
 
-    // Snapshot the observables. The keepalive challenges and echoes are read
-    // together under one lock (coherent by construction), while the remaining
-    // values each take their own lock. The walk finished earlier and MOVE_DRAIN
-    // let the write side quiesce: no further teleports/corrections arrive once
-    // the player stops moving, so in practice these reads observe the final
-    // sets.
-    let (
-        samples,
-        teleports,
-        teleport_acks,
-        keepalives,
-        keepalive_echoes,
-        corrections,
-        origin,
-        last_sent,
-    ) = {
+    // Snapshot the parity-compared observables FIRST, right after MOVE_DRAIN,
+    // so their reads keep the tight post-walk window. The walk finished earlier
+    // and MOVE_DRAIN let the write side quiesce: no further teleports/corrections
+    // arrive once the player stops moving, so in practice these reads observe
+    // the final sets. They must not wait for the keepalive settle below — that
+    // can extend up to KEEPALIVE_SETTLE_TIMEOUT past the walk, and a server
+    // `player_position` re-sync landing in that widened idle window on one boot
+    // (but outside it on another) would add a compared-field diff.
+    let (samples, teleports, teleport_acks, corrections, origin, last_sent) = {
         let samples = state
             .move_samples
             .lock()
@@ -991,12 +1149,6 @@ async fn move_and_emit(bot: Client, state: State) {
             .lock()
             .expect("teleport acks lock poisoned")
             .clone();
-        let keepalive_log = state
-            .keepalive_log
-            .lock()
-            .expect("keepalive log lock poisoned");
-        let keepalives = keepalive_log.challenges.clone();
-        let keepalive_echoes = keepalive_log.echoes.clone();
         let corrections = state
             .corrections
             .lock()
@@ -1011,8 +1163,6 @@ async fn move_and_emit(bot: Client, state: State) {
             samples,
             teleports,
             teleport_acks,
-            keepalives,
-            keepalive_echoes,
             corrections,
             origin,
             last_sent,
@@ -1020,6 +1170,27 @@ async fn move_and_emit(bot: Client, state: State) {
     };
     let origin = origin.expect("move mode requires a recorded spawn position");
     let last_sent = last_sent.expect("move mode requires the walk's last sent position");
+
+    // Then snapshot the keepalive log via the bounded settle-and-coherent-snapshot
+    // mechanism dwell mode uses. A challenge can arrive exactly as MOVE_DRAIN
+    // elapses, and because azalea records the echo synchronously while the
+    // challenge record only lands after the async event channel drains, either
+    // stream can straddle the boundary (observed: a Paper boot with one more
+    // echo than challenge — the mirror of the dwell in-flight-pair case). The
+    // settle waits (bounded by KEEPALIVE_SETTLE_TIMEOUT) for the streams to
+    // reach bidirectional 1:1, then snapshots the full live log, so the
+    // transcript's `keepalive_echo` relationship is observed coherently; a
+    // genuinely missing echo still times out and fails. Keepalive counts are
+    // excluded from move parity — only the structural `keepalive_echo` flag is
+    // compared — so the widened keepalive window does not affect the verdict.
+    let keepalive_log = settle_and_snapshot(
+        &state.keepalive_log,
+        KEEPALIVE_SETTLE_TIMEOUT,
+        KEEPALIVE_SETTLE_INTERVAL,
+    )
+    .await;
+    let keepalives = keepalive_log.challenges;
+    let keepalive_echoes = keepalive_log.echoes;
 
     // Samples are normalized to spawn-relative X/Z deltas at full precision
     // (subtract the origin, then round), so the walk is identical across boots
@@ -1102,18 +1273,26 @@ async fn move_and_emit(bot: Client, state: State) {
     hard_exit(0);
 }
 
-/// Wait until the keepalive echo stream has caught up to the challenge stream
-/// (bounded by `timeout`), then return a coherent snapshot of the log.
+/// Wait (bounded by `timeout`) for the challenge and echo streams to reach 1:1
+/// correspondence, then return a coherent snapshot of the full live log.
 ///
-/// The 1 s cadence means a challenge can arrive exactly as the dwell window
-/// elapses, with azalea's echo still in flight; snapshotting immediately would
-/// record that challenge without its echo and spuriously fail the
-/// challenge->echo relationship. This waits (polling every `interval`) for the
-/// in-flight pair to land and be observed coherently. A challenge whose echo
-/// truly never arrives (a client that stopped echoing, which the server would
-/// kick) keeps the log unsettled until `timeout`; the snapshot then preserves
-/// the mismatch, so a genuinely missing echo still fails the verdict — the
-/// settle window never masks it.
+/// A challenge/echo pair can straddle the emit boundary in either order — a
+/// challenge with its echo still in flight, or a stray echo whose challenge
+/// record has not landed (the move-mode flake). The 1:1 check is multiset
+/// equality (`KeepaliveLog::settled` — every challenge echoed, every echo has
+/// its challenge, no duplicates), which is exactly the transcript's
+/// `keepalive_echo` verdict comparison, so a straddling pair in either order
+/// keeps the loop going until it resolves. Legitimate straddles resolve within
+/// a tick or an event-channel drain — milliseconds, well inside `timeout` — so
+/// the success path fires promptly on a healthy run (the log is 1:1 for ~all
+/// but a few ms of each keepalive second, so the loop settles on its first or
+/// second poll). The deadline path fires only after `timeout` of *persistent*
+/// non-1:1 (a client that stopped echoing, which the server would kick, or a
+/// broken stream), and returns the full live log so the honest mismatch is
+/// preserved: a missing echo or a stray echo both fail the transcript's
+/// `keepalive_echo` check. Never truncating to a settle-entry prefix means
+/// dwell's verdict-checked challenge count and span, and move's structural
+/// relationship, are all observed exactly as the streams stood.
 ///
 /// `timeout` and `interval` are parameters so the straddle/missing-echo
 /// counterfactuals can be driven deterministically in tests.
@@ -1124,12 +1303,10 @@ async fn settle_and_snapshot(
 ) -> KeepaliveLog {
     let settle_deadline = Instant::now() + timeout;
     loop {
-        // Hold the log's single lock across the settled decision AND the clone:
-        // no writer can interleave, so a returned snapshot is guaranteed to be a
-        // settled, coherent state (every challenge it contains has its echo). A
-        // challenge that lands only after the clone is simply outside the
-        // snapshot — a coherent prefix, never a split pair. The guard is scoped
-        // to this block so it is dropped before the sleep below (it is not Send).
+        // Hold the log's single lock across the decision and the clone: no
+        // writer can interleave, so a returned snapshot is coherent. The guard
+        // is scoped to this block so it is dropped before the sleep below (it
+        // is not Send).
         let snapshot = {
             let guard = log.lock().expect("keepalive log lock poisoned");
             if guard.settled() || Instant::now() >= settle_deadline {
@@ -1202,8 +1379,8 @@ async fn dwell_and_emit(bot: Client, state: State) {
     // with its echo instead of spuriously failing the relationship.
     let log = settle_and_snapshot(
         &state.keepalive_log,
-        DWELL_SETTLE_TIMEOUT,
-        DWELL_SETTLE_INTERVAL,
+        KEEPALIVE_SETTLE_TIMEOUT,
+        KEEPALIVE_SETTLE_INTERVAL,
     )
     .await;
     let keepalives = log.challenges;
@@ -1270,7 +1447,19 @@ async fn kick_and_wait(bot: Client, _state: State) {
 
 async fn handle(bot: Client, event: Event, state: State) {
     match event {
-        Event::Init => emit(json!({ "event": "init" })),
+        Event::Init => {
+            emit(json!({ "event": "init" }));
+            // The loaded-recenter reproduction (issue #561) must resolve send
+            // radius 3, not the default view-8 send-4 (whose very first east
+            // boundary move already fails — it cannot show a repeated crossing).
+            // The view-distance-2 advertisement is NOT set here: azalea sends
+            // ClientInformation during the config-state transition
+            // (`send_client_information` on `InLoginState` removal) and the
+            // handler is dispatched as a bevy task, so a handler-side
+            // `set_client_information` races that send and loses. The
+            // `RecenterView2Pin` plugin pins the component in PreUpdate after
+            // `read_packets`, deterministically before the config-state send.
+        }
         Event::Login => emit(json!({ "event": "login" })),
         Event::ReceiveChunk(pos) => {
             state
@@ -1302,6 +1491,7 @@ async fn handle(bot: Client, event: Event, state: State) {
                 Mode::Dwell => runtime.spawn(dwell_and_emit(bot, state)),
                 Mode::Kick => runtime.spawn(kick_and_wait(bot, state)),
                 Mode::Loaded => runtime.spawn(loaded_and_emit(bot, state)),
+                Mode::LoadedRecenter => runtime.spawn(loaded_recenter_and_emit(bot, state)),
             };
         }
         // Move-mode packet observables. Recorded alongside the per-tick samples
@@ -1403,6 +1593,7 @@ async fn main() -> ExitCode {
     let account = Account::offline(&args.username);
     let client = ClientBuilder::new()
         .reconnect_after(None)
+        .add_plugins(RecenterView2Pin)
         .add_plugins(ConnectionFailurePlugin(connection_failure))
         .add_plugins(MoveSamplerPlugin)
         .add_plugins(MoveObservationPlugin(MoveObservation {
@@ -1503,6 +1694,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn move_settle_snapshots_an_echo_without_challenge_coherently() {
+        // Counterfactual for the move-mode flake (observed gating PR #562):
+        // MOVE_DRAIN elapses exactly as azalea records an echo synchronously
+        // (the `SendGamePacketEvent` observer fires while the challenge packet
+        // is being processed) but before the challenge record lands on the
+        // async event channel — the echo stream then leads the challenge stream
+        // (Paper transcript: 6 challenges / 7 echoes). A snapshot taken at that
+        // moment records an echo with no matching challenge, which fails the 1:1
+        // `keepalive_echo` relationship and false-FAILs parity. The settle loop
+        // must wait for the stray echo's challenge record to land, then snapshot
+        // the full 1:1 set together.
+        let log = Arc::new(Mutex::new(KeepaliveLog {
+            challenges: vec![1001, 1002, 1003],
+            instants: vec![],
+            echoes: vec![1001, 1002, 1003, 1004],
+        }));
+        // The straddling challenge's record lands 50 ms later — well inside the
+        // settle timeout but after the first coherence check.
+        let log_for_challenge = Arc::clone(&log);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            log_for_challenge
+                .lock()
+                .expect("test lock poisoned")
+                .challenges
+                .push(1004);
+        });
+
+        let started = Instant::now();
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_secs(2), Duration::from_millis(5)).await;
+
+        // Once the straggler challenge lands, the full live log is 1:1 and is
+        // snapshotted whole (4 challenges / 4 echoes). If the settle had
+        // snapshotted the raw log immediately, this would be 3 challenges vs 4
+        // echoes and the verdict would FAIL.
+        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1003, 1004]);
+        assert!(snapshot.settled());
+        // The straggler challenge physically cannot land before 50 ms, so the
+        // settle must have waited for it — the pass above is not a race where
+        // the challenge beat the first coherence check.
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "settle returned before the straggler challenge could land"
+        );
+    }
+
+    #[tokio::test]
+    async fn settle_deadline_preserves_the_genuine_mismatch() {
+        // Counterfactual for the deadline branch: a challenge's echo genuinely
+        // never lands (a client that stopped echoing, which the server would
+        // kick) at the same moment the echo stream carries a stray echo whose
+        // challenge record has not landed. The settle times out and returns the
+        // full live log, preserving BOTH the missing echo (1003) and the stray
+        // (1005): the bidirectional 1:1 check fails on either, so the
+        // transcript's keepalive_echo verdict fails honestly — it is not masked
+        // by filtering to a settle-entry prefix.
+        let log = Arc::new(Mutex::new(KeepaliveLog {
+            challenges: vec![1001, 1002, 1003, 1004],
+            instants: vec![],
+            // Echo 1003 is genuinely missing; echo 1005 is a stray whose
+            // challenge record has not landed.
+            echoes: vec![1001, 1002, 1004, 1005],
+        }));
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_millis(20), Duration::from_millis(5)).await;
+
+        // The full live log is returned unchanged: every observed id is present,
+        // so the mismatch (missing 1003, stray 1005) is preserved and fails.
+        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1004, 1005]);
+        assert!(!snapshot.settled());
+    }
+
+    #[tokio::test]
+    async fn settle_deadline_does_not_vacuously_pass_an_empty_challenge_stream() {
+        // Counterfactual for the empty challenge stream: the challenge recorder
+        // saw nothing while the echo recorder observed strays (a broken
+        // observation). The settle times out and returns the full log; the
+        // bidirectional 1:1 check fails (echoes have no challenges), so
+        // keepalive_echo cannot pass vacuously.
+        let log = Arc::new(Mutex::new(KeepaliveLog {
+            challenges: vec![],
+            instants: vec![],
+            echoes: vec![1005, 1006],
+        }));
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_millis(20), Duration::from_millis(5)).await;
+
+        assert_eq!(snapshot.challenges, Vec::<u64>::new());
+        assert_eq!(snapshot.echoes, vec![1005, 1006]);
+        assert!(!snapshot.settled());
+    }
+
+    #[tokio::test]
+    async fn dwell_settle_success_path_preserves_the_full_live_log() {
+        // Counterfactual for the dwell count/span truncation: the settle starts
+        // with an in-flight echo (4 challenges / 3 echoes, echo 1004 still on
+        // the way), and while it waits, a new challenge/echo pair (1005) lands.
+        // The success path must snapshot the full live log once 1:1 — including
+        // the post-entry pair — so dwell's verdict-checked challenge_count and
+        // challenge_span_ms are never truncated to the settle-entry set.
+        let log = Arc::new(Mutex::new(log_with(4, 3)));
+        let log_for_pair = Arc::clone(&log);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut guard = log_for_pair.lock().expect("test lock poisoned");
+            guard.echoes.push(1004);
+            guard.challenges.push(1005);
+            guard.echoes.push(1005);
+        });
+
+        let started = Instant::now();
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_secs(2), Duration::from_millis(5)).await;
+
+        // The in-flight echo and the post-entry pair are all in the snapshot:
+        // the full live log (5 challenges / 5 echoes), not the settle-entry 4.
+        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004, 1005]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1003, 1004, 1005]);
+        assert!(snapshot.settled());
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "settle returned before the in-flight echo and post-entry pair could land"
+        );
+    }
+
+    #[tokio::test]
     async fn dwell_settle_never_masks_a_missing_echo() {
         // Counterfactual for the "no masking" half of the fix: a challenge is
         // recorded whose echo never arrives (a client that stopped echoing,
@@ -1579,6 +1899,24 @@ mod tests {
         assert!(
             err.contains("--dwell-seconds") && err.contains("silent no-op"),
             "loaded must reject --dwell-seconds as a silent no-op, got {err}"
+        );
+    }
+
+    #[test]
+    fn loaded_recenter_mode_parses_and_rejects_silent_dwell() {
+        // `loaded-recenter` is the #561 reproduction mode: it advertises view
+        // distance 2 (send radius 3), drives the deterministic +x boundary
+        // route, and emits the movement evidence + disconnect negative result.
+        let a = parse(&["--mode", "loaded-recenter"]).unwrap();
+        assert_eq!(a.mode, Mode::LoadedRecenter);
+        assert_eq!(a.mode.as_str(), "loaded-recenter");
+
+        // --dwell-seconds is dwell-mode-only; an explicit value on
+        // loaded-recenter is a silent no-op and must be rejected.
+        let err = parse(&["--mode", "loaded-recenter", "--dwell-seconds", "41"]).unwrap_err();
+        assert!(
+            err.contains("--dwell-seconds") && err.contains("silent no-op"),
+            "loaded-recenter must reject --dwell-seconds as a silent no-op, got {err}"
         );
     }
 
@@ -1661,5 +1999,30 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn move_timeout_must_reserve_login_walk_drain_and_settle() {
+        // The `moved` record is emitted only after login/configuration, the
+        // fixed walk, MOVE_DRAIN, and up to 1 s of keepalive settling. A timeout
+        // below the shared move budget cuts the client off before it emits
+        // (ExitCode 2, spurious FAIL); the budget rounds the 200 ms drain up to
+        // 1 s, so meeting it is already safe.
+        let headroom = rivet_harness_common::timing::MOVE_TIMEOUT_HEADROOM_SECONDS;
+        let err = parse(&[
+            "--mode",
+            "move",
+            "--timeout-seconds",
+            &(headroom - 1).to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("--timeout-seconds") && err.contains("move mode"),
+            "error must explain the move-mode headroom, got {err}"
+        );
+        assert!(parse(&["--mode", "move", "--timeout-seconds", &headroom.to_string()]).is_ok());
+        // The default 30 s client timeout comfortably exceeds the move budget,
+        // so a bare `--mode move` parse is unaffected.
+        assert!(parse(&["--mode", "move"]).is_ok());
     }
 }
