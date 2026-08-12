@@ -33,12 +33,14 @@
 //! authoritative parity account (why the ordering of RNG draws and level-state
 //! reads matters, and the #181 revisit note).
 
+mod cave_surface;
 mod placed_feature;
 mod placement_context;
 mod placement_filter;
 mod placement_modifier;
 mod placement_modifier_type;
 
+pub use cave_surface::{CaveSurface, cave_surface_codec};
 pub use placed_feature::PlacedFeature;
 pub use placement_context::PlacementContext;
 pub use placement_filter::PlacementFilter;
