@@ -61,7 +61,7 @@ impl PlacementFilter for SurfaceWaterDepthFilter {
         let y_ocean_floor = context.get_height(Types::OceanFloor, origin.get_x(), origin.get_z());
         let y_surface_floor =
             context.get_height(Types::WorldSurface, origin.get_x(), origin.get_z());
-        y_surface_floor - y_ocean_floor <= self.max_water_depth
+        y_surface_floor.wrapping_sub(y_ocean_floor) <= self.max_water_depth
     }
 
     fn type_id(&self) -> PlacementModifierTypeId {
