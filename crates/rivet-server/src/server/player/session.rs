@@ -2897,7 +2897,7 @@ mod tests {
     #[test]
     fn recenter_send_overflow_prunes_the_connection() {
         // Channel cap 150: the view-8 join burst (135 frames) fits, but the
-        // fringe move's recenter (1 center + 68 chunks) after it does not. The
+        // fringe move's recenter (1 center + 89 chunks) after it does not. The
         // receiver is kept alive so the overflow is a full channel, not a closed
         // one (the EndOfStream path would record a different reason).
         let (mut registry, _out_rx) = connected_registry_with_capacity(150);

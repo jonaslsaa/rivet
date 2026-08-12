@@ -212,6 +212,30 @@ mod tests {
     }
 
     #[test]
+    fn codec_rejects_negative_zero_probability_with_java_message() {
+        // The `placementProbabilityPerValidPosition` `floatRange(0.0F, 1.0F)`
+        // validates with `Float.compare` total order, so `-0.0` is below the
+        // inclusive `0.0` lower bound and must fail decode with Java's
+        // `Float.toString` message. serde_json preserves the `-0.0` sign bit.
+        let codec = underwater_magma_configuration_codec::<JsonOps>();
+        let result = codec.parse(
+            &JsonOps::INSTANCE,
+            &json!({
+                "floor_search_range": 10,
+                "placement_radius_around_floor": 4,
+                "placement_probability_per_valid_position": -0.0,
+            }),
+        );
+        assert!(result.is_error());
+        let error_ref = result.error_ref().expect("error");
+        let msg = error_ref.message();
+        assert!(
+            msg.contains("Value -0.0 outside of range [0.0:1.0]"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
     fn codec_requires_all_fields() {
         let codec = underwater_magma_configuration_codec::<JsonOps>();
         assert!(

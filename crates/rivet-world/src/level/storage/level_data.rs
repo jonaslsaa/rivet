@@ -410,6 +410,48 @@ mod tests {
         );
     }
 
+    /// The `yaw` `floatRange(-180.0, 180.0)` validates with `Float.compare`
+    /// total order and renders the diagnostic with Java's `Float.toString`, so
+    /// an out-of-range yaw fails decode with the exact Paper-style message.
+    /// (`-0.0` is within this range — it is greater than the `-180.0` lower
+    /// bound — so an out-of-range value is the meaningful pin here; the
+    /// `-0.0`-below-`0.0` total-order case is pinned by the `[0.0, 1.0]`-bound
+    /// configuration codecs.)
+    #[test]
+    fn respawn_codec_rejects_out_of_range_yaw_with_java_message() {
+        let ops = NbtOps::instance();
+        let mut spawn = rivet_nbt::compound_tag::CompoundTag::new();
+        spawn.put(
+            "pos".to_string(),
+            rivet_nbt::tag::Tag::IntArray(rivet_nbt::int_array_tag::IntArrayTag::new(vec![
+                0, 0, 0,
+            ])),
+        );
+        spawn.put(
+            "pitch".to_string(),
+            rivet_nbt::tag::Tag::Float(rivet_nbt::float_tag::FloatTag::new(0.0)),
+        );
+        spawn.put(
+            "yaw".to_string(),
+            rivet_nbt::tag::Tag::Float(rivet_nbt::float_tag::FloatTag::new(180.5)),
+        );
+        spawn.put(
+            "dimension".to_string(),
+            rivet_nbt::tag::Tag::String(rivet_nbt::string_tag::StringTag::value_of(
+                "minecraft:overworld".to_string(),
+            )),
+        );
+        let dynamic = Dynamic::new(&ops, rivet_nbt::tag::Tag::Compound(spawn));
+        let result = dynamic.decode(&ops, &*respawn_data_codec::<NbtOps>());
+        assert!(result.is_error(), "180.5 yaw must fail the yaw range check");
+        let error_ref = result.error_ref().expect("error");
+        let msg = error_ref.message();
+        assert!(
+            msg.contains("Value 180.5 outside of range [-180.0:180.0]"),
+            "unexpected message: {msg}"
+        );
+    }
+
     fn workspace_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
