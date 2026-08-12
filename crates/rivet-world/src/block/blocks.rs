@@ -77,6 +77,24 @@ impl Blocks {
     pub const SOUL_SAND: Block = Block::new(BlockId(286));
     /// `Blocks.DEEPSLATE`.
     pub const DEEPSLATE: Block = Block::new(BlockId(1151));
+    /// `Blocks.DEEPSLATE_IRON_ORE` (noisegen: `OreVeinifier.VeinType.IRON`).
+    pub const DEEPSLATE_IRON_ORE: Block = Block::new(BlockId(45));
+    /// `Blocks.END_STONE` (noisegen: `NoiseGeneratorSettings.end`).
+    pub const END_STONE: Block = Block::new(BlockId(393));
+    /// `Blocks.OAK_BUTTON` (noisegen: `OreVeinifier` debug ore-veins).
+    pub const OAK_BUTTON: Block = Block::new(BlockId(443));
+    /// `Blocks.SLIME_BLOCK` (noisegen: `debugPreliminarySurfaceLevel`).
+    pub const SLIME_BLOCK: Block = Block::new(BlockId(523));
+    /// `Blocks.TUFF` (noisegen: `OreVeinifier.VeinType.IRON` filler).
+    pub const TUFF: Block = Block::new(BlockId(984));
+    /// `Blocks.COPPER_ORE` (noisegen: `OreVeinifier.VeinType.COPPER`).
+    pub const COPPER_ORE: Block = Block::new(BlockId(1042));
+    /// `Blocks.RAW_IRON_BLOCK` (noisegen: `OreVeinifier.VeinType.IRON`).
+    pub const RAW_IRON_BLOCK: Block = Block::new(BlockId(1173));
+    /// `Blocks.RAW_COPPER_BLOCK` (noisegen: `OreVeinifier.VeinType.COPPER`).
+    pub const RAW_COPPER_BLOCK: Block = Block::new(BlockId(1174));
+    /// `Blocks.HONEY_BLOCK` (noisegen: `debugPreliminarySurfaceLevel`).
+    pub const HONEY_BLOCK: Block = Block::new(BlockId(913));
 }
 
 #[cfg(test)]
@@ -118,6 +136,15 @@ mod tests {
             Blocks::NETHERRACK,
             Blocks::SOUL_SAND,
             Blocks::DEEPSLATE,
+            Blocks::DEEPSLATE_IRON_ORE,
+            Blocks::END_STONE,
+            Blocks::OAK_BUTTON,
+            Blocks::SLIME_BLOCK,
+            Blocks::TUFF,
+            Blocks::COPPER_ORE,
+            Blocks::RAW_IRON_BLOCK,
+            Blocks::RAW_COPPER_BLOCK,
+            Blocks::HONEY_BLOCK,
         ];
         for block in all {
             let by_name = BlockId::from_name(block.name())
