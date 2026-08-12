@@ -33,10 +33,15 @@ pub const MOVE_DRAIN_MS: u64 = 200;
 /// ceiled to a whole second so the headroom budget is a whole-second floor.
 pub const MOVE_DRAIN_SECONDS_CEIL: u64 = MOVE_DRAIN_MS.div_ceil(1000);
 
-/// The headroom (s) a `move` `--timeout-seconds` must exceed: the pre-spawn
+/// The minimum safe `move` `--timeout-seconds`: the pre-spawn
 /// login/configuration, the fixed walk, the post-walk drain, and the keepalive
-/// settle. A timeout at or below this total cuts the client off before it emits
-/// `moved`.
+/// settle, each rounded up to a whole second. The 200 ms drain rounds to 1 s,
+/// so this budget over-covers the nominal emit path (5 + 6 + 0.2 + 1 = ~12.2 s)
+/// by ~0.8 s — a timeout equal to this budget is already safe.
+///
+/// The walk (120 ticks @ 20 TPS) and login are nominal estimates; a server
+/// tick-rate dip or login overshoot stretches the real path, and the 0.8 s
+/// rounding margin above nominal is that safety reserve.
 ///
 /// Computed below as `DWELL_LOGIN_HEADROOM_SECONDS + MOVE_WALK_SECONDS +
 /// MOVE_DRAIN_SECONDS_CEIL + KEEPALIVE_SETTLE_TIMEOUT_SECS` so the runner and
@@ -51,17 +56,19 @@ pub const MOVE_TIMEOUT_HEADROOM_SECONDS: u64 = DWELL_LOGIN_HEADROOM_SECONDS
 /// in every build (not just test builds).
 const _: () = assert!(MOVE_TIMEOUT_HEADROOM_SECONDS > 0);
 
-/// Reject a `move` `--timeout-seconds` that cannot outlast the emit path: the
+/// Reject a `move` `--timeout-seconds` below the minimum safe budget: the
 /// `moved` record is emitted only after login/configuration, the fixed walk,
-/// the drain, and the keepalive settle. A timeout at or below that total cuts
-/// the client off before it emits (ExitCode 2, spurious FAIL). Returns the
-/// shared error so both parsers cannot drift.
+/// the drain, and the keepalive settle. A timeout below that total cuts the
+/// client off before it emits (ExitCode 2, spurious FAIL). Because the budget
+/// rounds the 200 ms drain up to 1 s, a timeout equal to the budget already
+/// outlasts the nominal emit path — only strictly smaller timeouts are unsafe.
+/// Returns the shared error so both parsers cannot drift.
 pub fn validate_move_timeout(timeout_seconds: u64) -> Result<(), String> {
-    if timeout_seconds <= MOVE_TIMEOUT_HEADROOM_SECONDS {
+    if timeout_seconds < MOVE_TIMEOUT_HEADROOM_SECONDS {
         Err(format!(
-            "--timeout-seconds must exceed {MOVE_TIMEOUT_HEADROOM_SECONDS}s in move mode (the \
-             client spends up to {DWELL_LOGIN_HEADROOM_SECONDS}s on login/configuration, \
-             {MOVE_WALK_SECONDS}s walking, {MOVE_DRAIN_SECONDS_CEIL}s draining, and \
+            "--timeout-seconds must be at least {MOVE_TIMEOUT_HEADROOM_SECONDS}s in move mode \
+             (the client spends up to {DWELL_LOGIN_HEADROOM_SECONDS}s on login/configuration, \
+             {MOVE_WALK_SECONDS}s walking, {MOVE_DRAIN_MS}ms draining, and \
              {KEEPALIVE_SETTLE_TIMEOUT_SECS}s settling the keepalive stream before emitting the \
              moved record, and must emit before the timeout fires); got timeout {timeout_seconds}s"
         ))
@@ -112,9 +119,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_move_timeout_rejects_at_or_below_the_budget() {
-        assert!(validate_move_timeout(MOVE_TIMEOUT_HEADROOM_SECONDS).is_err());
-        assert!(validate_move_timeout(MOVE_TIMEOUT_HEADROOM_SECONDS + 1).is_ok());
+    fn validate_move_timeout_rejects_below_the_budget() {
+        // The budget rounds the 200 ms drain up to 1 s, so meeting it (a timeout
+        // equal to the budget) already outlasts the nominal emit path; only
+        // strictly smaller timeouts are unsafe.
+        assert!(validate_move_timeout(MOVE_TIMEOUT_HEADROOM_SECONDS - 1).is_err());
+        assert!(validate_move_timeout(MOVE_TIMEOUT_HEADROOM_SECONDS).is_ok());
     }
 
     #[test]

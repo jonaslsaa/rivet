@@ -566,12 +566,15 @@ struct KeepaliveLog {
 }
 
 impl KeepaliveLog {
-    /// Test-only: whether a snapshot is 1:1. On a snapshot the echoes are
-    /// already filtered to the frozen challenge set, so this reports exactly
-    /// whether every frozen challenge has its echo.
+    /// Test-only: whether a snapshot is bidirectionally 1:1 — every challenge
+    /// echoed and every echo has its challenge. Mirrors the settle loop's
+    /// success predicate.
     #[cfg(test)]
     fn settled(&self) -> bool {
-        self.echoes.len() == self.challenges.len()
+        self.challenges
+            .iter()
+            .all(|c| self.echoes.contains(c))
+            && self.echoes.iter().all(|e| self.challenges.contains(e))
     }
 }
 
@@ -1016,12 +1019,12 @@ async fn move_and_emit(bot: Client, state: State) {
     // challenge record only lands after the async event channel drains, either
     // stream can straddle the boundary (observed: a Paper boot with one more
     // echo than challenge — the mirror of the dwell in-flight-pair case). The
-    // settle freezes the challenges already observed and waits for their echoes
-    // (bounded by KEEPALIVE_SETTLE_TIMEOUT) so the transcript's `keepalive_echo`
-    // relationship is observed coherently; a genuinely missing echo still times
-    // out and fails. Keepalive counts are excluded from move parity — only the
-    // structural `keepalive_echo` flag is compared — so the widened keepalive
-    // window does not affect the verdict.
+    // settle waits (bounded by KEEPALIVE_SETTLE_TIMEOUT) for the streams to
+    // reach bidirectional 1:1, then snapshots the full live log, so the
+    // transcript's `keepalive_echo` relationship is observed coherently; a
+    // genuinely missing echo still times out and fails. Keepalive counts are
+    // excluded from move parity — only the structural `keepalive_echo` flag is
+    // compared — so the widened keepalive window does not affect the verdict.
     let keepalive_log = settle_and_snapshot(
         &state.keepalive_log,
         KEEPALIVE_SETTLE_TIMEOUT,
@@ -1113,18 +1116,22 @@ async fn move_and_emit(bot: Client, state: State) {
 }
 
 /// Wait (bounded by `timeout`) for the challenge and echo streams to reach 1:1
-/// correspondence, then return a coherent snapshot.
+/// correspondence, then return a coherent snapshot of the full live log.
 ///
 /// A challenge/echo pair can straddle the emit boundary in either order — a
 /// challenge with its echo still in flight, or a stray echo whose challenge
-/// record has not landed (the move-mode flake). The success path waits until
-/// the *live* streams are 1:1 (every challenge echoed, every echo has its
-/// challenge) and snapshots the full live log, so dwell's verdict-checked
-/// challenge count and span are never truncated. Only the deadline path — a
-/// genuinely missing echo keeping the streams apart until `timeout` — falls
-/// back to a coherent prefix: the challenges frozen at settle entry with their
-/// echoes, so an echo-without-challenge is never emitted, and a missing echo
-/// still fails the verdict.
+/// record has not landed (the move-mode flake). The 1:1 check is bidirectional
+/// (every challenge echoed AND every echo has its challenge), so a straddling
+/// pair in either order keeps the loop going until it resolves. Legitimate
+/// straddles resolve within a tick or an event-channel drain — milliseconds,
+/// well inside `timeout` — so the success path always fires for a healthy run.
+/// The deadline path only fires after `timeout` of genuine mismatch (a client
+/// that stopped echoing, which the server would kick, or a broken stream), and
+/// returns the full live log so the honest mismatch is preserved: a missing
+/// echo or a stray echo both fail the transcript's `keepalive_echo` check.
+/// Never truncating to a settle-entry prefix means dwell's verdict-checked
+/// challenge count and span, and move's structural relationship, are all
+/// observed exactly as the streams stood.
 ///
 /// `timeout` and `interval` are parameters so the straddle/missing-echo
 /// counterfactuals can be driven deterministically in tests.
@@ -1134,15 +1141,6 @@ async fn settle_and_snapshot(
     interval: Duration,
 ) -> KeepaliveLog {
     let settle_deadline = Instant::now() + timeout;
-    // The challenge set at settle entry, for the deadline path's coherent
-    // prefix. In dwell mode the challenge/instant pair is written atomically
-    // (same handler), so the first `frozen_challenges.len()` instants are the
-    // frozen challenges' instants; move mode records no instants.
-    let frozen_challenges = log
-        .lock()
-        .expect("keepalive log lock poisoned")
-        .challenges
-        .clone();
     loop {
         // Hold the log's single lock across the decision and the clone: no
         // writer can interleave, so a returned snapshot is coherent. The guard
@@ -1158,37 +1156,8 @@ async fn settle_and_snapshot(
                     .echoes
                     .iter()
                     .all(|e| guard.challenges.contains(e));
-            if settled {
-                // Full live log: the streams are 1:1, so every challenge has
-                // its echo and every echo has its challenge.
+            if settled || Instant::now() >= settle_deadline {
                 Some(guard.clone())
-            } else if Instant::now() >= settle_deadline {
-                // Deadline: emit the frozen challenges with only their echoes,
-                // so an echo-without-challenge is never emitted. An empty
-                // frozen set with stray echoes is a broken observation, not a
-                // vacuous pass — keep the raw echoes so the mismatch still
-                // fails the verdict.
-                let challenges = frozen_challenges.clone();
-                let echoes = if challenges.is_empty() {
-                    guard.echoes.clone()
-                } else {
-                    guard
-                        .echoes
-                        .iter()
-                        .filter(|e| challenges.contains(e))
-                        .copied()
-                        .collect()
-                };
-                Some(KeepaliveLog {
-                    challenges,
-                    instants: guard
-                        .instants
-                        .iter()
-                        .take(frozen_challenges.len())
-                        .copied()
-                        .collect(),
-                    echoes,
-                })
             } else {
                 None
             }
@@ -1607,14 +1576,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settle_deadline_path_never_emits_a_split_pair() {
-        // Counterfactual for the deadline branch: a frozen challenge's echo
-        // genuinely never lands (a client that stopped echoing, which the server
-        // would kick) at the same moment the echo stream carries a stray echo
-        // whose challenge record has not landed. The settle times out, but the
-        // snapshot must still exclude the stray echo — the preserved mismatch is
-        // exactly the missing echo (4 challenges / 3 echoes), never an echo
-        // without its challenge (which would be the original false-FAIL shape).
+    async fn settle_deadline_preserves_the_genuine_mismatch() {
+        // Counterfactual for the deadline branch: a challenge's echo genuinely
+        // never lands (a client that stopped echoing, which the server would
+        // kick) at the same moment the echo stream carries a stray echo whose
+        // challenge record has not landed. The settle times out and returns the
+        // full live log, preserving BOTH the missing echo (1003) and the stray
+        // (1005): the bidirectional 1:1 check fails on either, so the
+        // transcript's keepalive_echo verdict fails honestly — it is not masked
+        // by filtering to a settle-entry prefix.
         let log = Arc::new(Mutex::new(KeepaliveLog {
             challenges: vec![1001, 1002, 1003, 1004],
             instants: vec![],
@@ -1625,23 +1595,20 @@ mod tests {
         let snapshot =
             settle_and_snapshot(&log, Duration::from_millis(20), Duration::from_millis(5)).await;
 
-        // The stray echo 1005 is excluded: the snapshot's echoes are exactly the
-        // frozen challenges' echoes (1001, 1002, 1004), missing only 1003.
+        // The full live log is returned unchanged: every observed id is present,
+        // so the mismatch (missing 1003, stray 1005) is preserved and fails.
         assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004]);
-        assert_eq!(snapshot.echoes, vec![1001, 1002, 1004]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1004, 1005]);
         assert!(!snapshot.settled());
-        // No echo in the snapshot lacks its challenge — the 1:1 relationship
-        // cannot false-FAIL on a split pair, only on the genuinely missing echo.
-        assert!(snapshot.echoes.iter().all(|e| snapshot.challenges.contains(e)));
     }
 
     #[tokio::test]
     async fn settle_deadline_does_not_vacuously_pass_an_empty_challenge_stream() {
-        // Counterfactual for the empty-frozen-set deadline case: the challenge
-        // recorder saw nothing while the echo recorder observed strays (a broken
-        // observation). The settle times out; filtering echoes to the empty
-        // frozen set would make keepalive_echo vacuously true and mask the
-        // broken stream, so the raw echoes are kept and the mismatch survives.
+        // Counterfactual for the empty challenge stream: the challenge recorder
+        // saw nothing while the echo recorder observed strays (a broken
+        // observation). The settle times out and returns the full log; the
+        // bidirectional 1:1 check fails (echoes have no challenges), so
+        // keepalive_echo cannot pass vacuously.
         let log = Arc::new(Mutex::new(KeepaliveLog {
             challenges: vec![],
             instants: vec![],
@@ -1853,19 +1820,17 @@ mod tests {
     fn move_timeout_must_reserve_login_walk_drain_and_settle() {
         // The `moved` record is emitted only after login/configuration, the
         // fixed walk, MOVE_DRAIN, and up to 1 s of keepalive settling. A timeout
-        // at or below that total cuts the client off before it emits (ExitCode
-        // 2, spurious FAIL). The reservation is the shared move headroom: the
-        // boundary value is rejected, one second above it is accepted.
+        // below the shared move budget cuts the client off before it emits
+        // (ExitCode 2, spurious FAIL); the budget rounds the 200 ms drain up to
+        // 1 s, so meeting it is already safe.
         let headroom = rivet_harness_common::timing::MOVE_TIMEOUT_HEADROOM_SECONDS;
-        let err = parse(&["--mode", "move", "--timeout-seconds", &headroom.to_string()])
+        let err = parse(&["--mode", "move", "--timeout-seconds", &(headroom - 1).to_string()])
             .unwrap_err();
         assert!(
             err.contains("--timeout-seconds") && err.contains("move mode"),
             "error must explain the move-mode headroom, got {err}"
         );
-        assert!(
-            parse(&["--mode", "move", "--timeout-seconds", &(headroom + 1).to_string()]).is_ok()
-        );
+        assert!(parse(&["--mode", "move", "--timeout-seconds", &headroom.to_string()]).is_ok());
         // The default 30 s client timeout comfortably exceeds the move budget,
         // so a bare `--mode move` parse is unaffected.
         assert!(parse(&["--mode", "move"]).is_ok());

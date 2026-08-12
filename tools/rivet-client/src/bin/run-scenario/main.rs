@@ -3628,16 +3628,17 @@ mod tests {
     fn move_timeout_must_reserve_login_walk_drain_and_settle() {
         // The `moved` record is emitted only after login/configuration, the
         // fixed walk, MOVE_DRAIN, and up to 1 s of keepalive settling; a timeout
-        // at or below that total cuts the client off before it emits (ExitCode
-        // 2, spurious FAIL). Mirror the client's own parse-time validation: the
-        // boundary value is rejected, one second above it is accepted.
+        // below the shared move budget cuts the client off before it emits
+        // (ExitCode 2, spurious FAIL). Mirror the client's own parse-time
+        // validation: the budget rounds the 200 ms drain up to 1 s, so meeting
+        // it is already safe.
         let headroom = rivet_harness_common::timing::MOVE_TIMEOUT_HEADROOM_SECONDS;
-        let err = parse(&["move", "--timeout-seconds", &headroom.to_string()]).unwrap_err();
+        let err = parse(&["move", "--timeout-seconds", &(headroom - 1).to_string()]).unwrap_err();
         assert!(
             err.contains("--timeout-seconds") && err.contains("move mode"),
             "error must explain the move-mode headroom, got {err}"
         );
-        assert!(parse(&["move", "--timeout-seconds", &(headroom + 1).to_string()]).is_ok());
+        assert!(parse(&["move", "--timeout-seconds", &headroom.to_string()]).is_ok());
         // The default 60 s runner timeout comfortably exceeds the move budget,
         // so a bare `move` parse is unaffected.
         assert!(parse(&["move"]).is_ok());

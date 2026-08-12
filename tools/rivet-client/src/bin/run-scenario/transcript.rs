@@ -80,17 +80,16 @@ const LIFECYCLE_EVENTS: [&str; 3] = ["init", "login", "spawn"];
 ///   matching echo — is compared structurally via `keepalive_echo` set.
 ///
 ///   Timing-skew note: the client snapshots the keepalive log only after the
-///   walk finishes — `settle_and_snapshot` freezes the challenges observed at
-///   settle entry (right after `MOVE_DRAIN`, ~0.2 s post-walk) and waits up to
-///   1 s for their echoes. The server keeps challenging at 1/s while the client
-///   stays connected, so the frozen challenge set is cut at ~0.2 s after the
-///   walk stopped, and the 1 s settle window is only the echo-wait bound, not a
-///   challenge-collection window. The counts are therefore a coherent prefix of
-///   the live stream, not exactly "challenges during the walk", and stray
-///   echoes whose challenge record has not landed are excluded. That is fine for
-///   the verdict (only the structural `keepalive_echo` flag is compared; the
-///   counts are diagnostic) but the transcript's `keepalives` count must not be
-///   read as a precise "during the walk" observation.
+///   walk finishes — `settle_and_snapshot` starts right after `MOVE_DRAIN`
+///   (~0.2 s post-walk) and waits up to 1 s for the challenge/echo streams to
+///   reach 1:1, then snapshots the full live log. The server keeps challenging
+///   at 1/s while the client stays connected, so a challenge landing during the
+///   settle wait is included: the counts cover a slightly wider window than the
+///   walk (up to ~1.2 s past it), and are not exactly "challenges during the
+///   walk". That is fine for the verdict (only the structural `keepalive_echo`
+///   flag is compared; the counts are diagnostic) but the transcript's
+///   `keepalives` count must not be read as a precise "during the walk"
+///   observation.
 /// - `walk.corrections` / `walk.corrections_count`: `entity_position_sync`
 ///   packets are a timing-dependent server observation — how many client
 ///   position packets land before each server tick decides how often the server
