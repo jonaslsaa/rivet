@@ -63,6 +63,13 @@ ground-truth handoff (`rivet-oracle generated-expected`, itself UNVERIFIED until
 the Paper seed-42 reference is captured). A superflat echo, a chunk outside the
 handoff, or non-FULL sampled chunks all refuse PASS.
 
+The full-gate row is milestone-gated like the `RIVET_HASH_DIR` hash-diff: while
+the `--seed` capability and/or the Paper seed-42 reference are absent it is an
+explicit NOTICE and stays mergeable, so it does not block the release lane
+ahead of the generator. Set `RIVET_GENERATED_WORLD=1` in `scripts/gate.sh`'s
+environment to opt into the strict check (exit 3 then sets ORACLE_UNVERIFIED,
+and `--require-oracle` hard-fails it).
+
 `load-world` is the independent #316 harness slice. `RIVET_WORLD_SRC` may
 override the default launcher save at
 `~/Library/Application Support/minecraft/saves/New World`. The runner opens the

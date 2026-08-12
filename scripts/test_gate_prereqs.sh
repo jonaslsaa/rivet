@@ -575,5 +575,121 @@ grep -q "^    PASS" "$TMP/out_lw5" && fail "loaded-world: PASS printed despite a
 grep -q "^    UNVERIFIED" "$TMP/out_lw5" && fail "loaded-world: UNVERIFIED printed for a crash (classification is FAIL, exit 1)"
 pass "loaded-world: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
 
+# --- test 8: generated-world scenario row (seed-42 contract) milestone-gates ----
+# run_scenario_generated_world is milestone-gated like the RIVET_HASH_DIR
+# hash-diff: while the rivet-server `--seed` capability and/or the Paper seed-42
+# reference are absent (RIVET_GENERATED_WORLD unset) the row prints an explicit
+# NOTICE and never invokes run-scenario.sh — it stays mergeable and must NOT set
+# ORACLE_UNVERIFIED. Setting RIVET_GENERATED_WORLD=1 opts into the strict check,
+# where the machine-stable exit code is classified exactly like loaded-world:
+# 0 PASS, 1 FAIL (hard exit 1, never UNVERIFIED), 3 UNVERIFIED (sets
+# ORACLE_UNVERIFIED, or hard exit 1 under --require-oracle), and any other
+# nonzero (crash) FAIL (exit 1, never green). The shim records its argv and
+# exits with the code in $GW_EXIT_FILE.
+GW_SCENARIO_LOG="$TMP/gw-invocations.log"
+GW_EXIT_FILE="$TMP/gw-exit"
+printf '%s\n' 0 > "$GW_EXIT_FILE"
+set_gw_exit() { printf '%s\n' "$1" > "$GW_EXIT_FILE"; }
+cat > "$SCENARIO_SHIM_DIR/run-scenario.sh" <<GWEOF
+#!/bin/bash
+echo "\$@" >> '$GW_SCENARIO_LOG'
+exit "\$(cat '$GW_EXIT_FILE')"
+GWEOF
+chmod +x "$SCENARIO_SHIM_DIR/run-scenario.sh"
+
+# Milestone NOTICE (RIVET_GENERATED_WORLD unset): the row must not invoke
+# run-scenario.sh at all, must not set ORACLE_UNVERIFIED, and must report the
+# exact UNVERIFIED nature as a NOTICE — the release lane stays mergeable ahead
+# of the generator capability.
+unset RIVET_GENERATED_WORLD
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+: > "$GW_SCENARIO_LOG"
+set +e
+run_scenario_generated_world > "$TMP/out_gw0" 2>&1
+rc_gw0=$?
+set -e
+[ "$rc_gw0" = 0 ] || fail "generated-world: milestone NOTICE should return 0 (got $rc_gw0)"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-world: NOTICE must not set ORACLE_UNVERIFIED"
+grep -q "NOTICE" "$TMP/out_gw0" || fail "generated-world: NOTICE not printed when the capability is absent"
+grep -q "RIVET_GENERATED_WORLD=1" "$TMP/out_gw0" || fail "generated-world: NOTICE must name the opt-in flag"
+[ -s "$GW_SCENARIO_LOG" ] && fail "generated-world: run-scenario.sh must not be invoked on the NOTICE path (got $(cat "$GW_SCENARIO_LOG"))"
+pass "generated-world: capability absent -> explicit NOTICE, no invocation, stays mergeable"
+
+# PASS (exit 0) with the strict flag: the row reports PASS, sets no UNVERIFIED,
+# and the wrapper is invoked with exactly `generated-world`.
+set_gw_exit 0
+RIVET_GENERATED_WORLD=1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+: > "$GW_SCENARIO_LOG"
+run_scenario_generated_world > "$TMP/out_gw1" 2>&1
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-world: ORACLE_UNVERIFIED set on a PASS"
+grep -q "^    PASS" "$TMP/out_gw1" || fail "generated-world: PASS not printed for exit 0"
+[ "$(wc -l < "$GW_SCENARIO_LOG" | tr -d ' ')" = 1 ] || fail "generated-world: expected exactly 1 run-scenario invocation, got $(wc -l < "$GW_SCENARIO_LOG")"
+grep -qx "generated-world" "$GW_SCENARIO_LOG" || fail "generated-world: run-scenario.sh not invoked with exactly 'generated-world' (got $(cat "$GW_SCENARIO_LOG"))"
+pass "generated-world: exit 0 -> PASS, stays verified, invoked with exactly 'generated-world'"
+
+# FAIL (exit 1) with the strict flag: hard exit 1, reported FAILED, never
+# UNVERIFIED, no ORACLE_UNVERIFIED. run_scenario_generated_world exits the
+# shell in this branch, so it runs in a subshell.
+set_gw_exit 1
+RIVET_GENERATED_WORLD=1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+( run_scenario_generated_world > "$TMP/out_gw2" 2>&1 )
+rc_gw2=$?
+set -e
+[ "$rc_gw2" = 1 ] || fail "generated-world: FAIL should exit 1 (got $rc_gw2)"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-world: FAIL should not set ORACLE_UNVERIFIED"
+grep -q "^    FAILED" "$TMP/out_gw2" || fail "generated-world: FAILED not printed for exit 1"
+grep -q "^    UNVERIFIED" "$TMP/out_gw2" && fail "generated-world: UNVERIFIED printed for a FAIL (exit 1)"
+grep -q "^    PASS" "$TMP/out_gw2" && fail "generated-world: PASS printed for a FAIL"
+pass "generated-world: exit 1 -> FAILED, hard exit 1, never UNVERIFIED"
+
+# UNVERIFIED (exit 3) with the strict flag and no --require-oracle: sets
+# ORACLE_UNVERIFIED, returns 0 (main turns it into gate exit 3).
+set_gw_exit 3
+RIVET_GENERATED_WORLD=1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+run_scenario_generated_world > "$TMP/out_gw3" 2>&1
+rc_gw3=$?
+set -e
+[ "$rc_gw3" = 0 ] || fail "generated-world: UNVERIFIED without --require-oracle should return 0 (got $rc_gw3)"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "generated-world: ORACLE_UNVERIFIED not set on exit 3"
+grep -q "^    UNVERIFIED" "$TMP/out_gw3" || fail "generated-world: UNVERIFIED not printed for exit 3"
+grep -q "^    PASS" "$TMP/out_gw3" && fail "generated-world: PASS printed for an UNVERIFIED run"
+pass "generated-world: exit 3 -> UNVERIFIED, ORACLE_UNVERIFIED set"
+
+# UNVERIFIED (exit 3) with the strict flag and --require-oracle: hard failure
+# (exit 1), after reporting UNVERIFIED. run_scenario_generated_world exits the
+# shell here.
+set_gw_exit 3
+RIVET_GENERATED_WORLD=1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_scenario_generated_world > "$TMP/out_gw4" 2>&1 )
+rc_gw4=$?
+set -e
+REQUIRE_ORACLE=0
+[ "$rc_gw4" = 1 ] || fail "generated-world: UNVERIFIED + --require-oracle should exit 1 (got $rc_gw4)"
+grep -q "^    UNVERIFIED" "$TMP/out_gw4" || fail "generated-world: UNVERIFIED not printed before the hard failure"
+grep -q "hard failure" "$TMP/out_gw4" || fail "generated-world: --require-oracle hard-failure message missing"
+pass "generated-world: exit 3 + --require-oracle -> hard exit 1"
+
+# Crash / unexpected exit (101) with the strict flag: FAIL (exit 1), reported
+# FAILED, never green.
+set_gw_exit 101
+RIVET_GENERATED_WORLD=1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+( run_scenario_generated_world > "$TMP/out_gw5" 2>&1 )
+rc_gw5=$?
+set -e
+[ "$rc_gw5" = 1 ] || fail "generated-world: crash should exit 1 (got $rc_gw5)"
+grep -q "^    FAILED" "$TMP/out_gw5" || fail "generated-world: FAILED not printed for exit 101"
+grep -q "^    PASS" "$TMP/out_gw5" && fail "generated-world: PASS printed despite a crash"
+grep -q "^    UNVERIFIED" "$TMP/out_gw5" && fail "generated-world: UNVERIFIED printed for a crash (classification is FAIL, exit 1)"
+pass "generated-world: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
+
 echo
 echo "ALL GATE PREREQ TESTS PASSED"

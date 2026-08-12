@@ -62,8 +62,9 @@ built_rivet() {
 }
 
 # Rivet-only modes must always trigger the server build (server selection is
-# pinned to Rivet even without --server).
-for mode in dwell kick load-world loaded-world; do
+# pinned to Rivet even without --server; generated-world is the seed-42
+# acceptance contract that always boots one rivet-server with --seed 42).
+for mode in dwell kick load-world loaded-world generated-world; do
   run_wrapper "$mode"
   built_rivet || fail "$mode must build rivet-server (cargo log: $(cat "$CARGO_LOG"))"
   [ "$(wc -l < "$SCENARIO_ARGV_LOG" | tr -d ' ')" = 1 ] || fail "$mode: expected exactly 1 run-scenario invocation"
