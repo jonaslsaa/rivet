@@ -452,6 +452,26 @@ mod tests {
         )
     }
 
+    /// A config with every field non-default, so a full encode emits all seven
+    /// fields (the optional ones are omitted only when they equal their
+    /// defaults: 10 / false / false / false / 0.5).
+    fn full_config(access: &RegistryAccess) -> MultifaceGrowthConfiguration {
+        let registry = rivet_registry::access::RegistryAccess::lookup(
+            access,
+            &*rivet_registry::registries::BLOCK,
+        )
+        .expect("block registry");
+        MultifaceGrowthConfiguration::new(
+            Block::from_name("minecraft:glow_lichen").unwrap(),
+            20,
+            true,
+            true,
+            true,
+            0.25,
+            HolderSet::direct(vec![Holder::reference(registry.registry_id(), 0)]),
+        )
+    }
+
     #[test]
     fn constructor_derives_valid_directions() {
         // ceiling → UP, floor → DOWN, wall → HORIZONTAL (N, E, S, W).
@@ -654,6 +674,82 @@ mod tests {
         );
         let decoded = codec
             .parse(&ops, &encoded)
+            .result()
+            .expect("decode should succeed")
+            .clone();
+        assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn codec_encoded_key_order_matches_java_group_order() {
+        // Java's `RecordCodecBuilder` group order is block, search_range,
+        // can_place_on_floor, can_place_on_ceiling, can_place_on_wall,
+        // chance_of_spreading, can_be_placed_on. With all fields non-default the
+        // full encode emits every field; serde_json is built with
+        // `preserve_order`, so the map's key sequence locks the encode closure
+        // order against Java's group order.
+        let access = block_access();
+        let codec = multiface_growth_configuration_codec::<TestOps>();
+        let ops = ops(&access);
+        let config = full_config(&access);
+        let encoded = codec
+            .encode_start(&ops, &config)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        let keys: Vec<&str> = encoded
+            .as_object()
+            .expect("encoded config should be a JSON object")
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "block",
+                "search_range",
+                "can_place_on_floor",
+                "can_place_on_ceiling",
+                "can_place_on_wall",
+                "chance_of_spreading",
+                "can_be_placed_on",
+            ]
+        );
+    }
+
+    #[test]
+    fn codec_compressed_key_order_matches_java_group_order() {
+        // Under compressed ops the codec builds its `KeyCompressor` from the
+        // `keys()` lists (`map_encoder::compressed_builder`), so the positional
+        // array locks the key order exactly as a compressed NBT map would:
+        // slot 0 = block ... slot 6 = can_be_placed_on.
+        let access = block_access();
+        let codec = multiface_growth_configuration_codec::<TestOps>();
+        let compressed = RegistryOps::create_from_access(&JsonOps::COMPRESSED, access.clone());
+        let config = full_config(&access);
+        let encoded = codec
+            .encode_start(&compressed, &config)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(
+            encoded,
+            json!([
+                "minecraft:glow_lichen",
+                20,
+                true,
+                true,
+                true,
+                0.25,
+                // A one-element homogeneous list compacts to a bare value.
+                "minecraft:glow_lichen",
+            ])
+        );
+        // Decode reads the list positionally through the decoder's `keys()`;
+        // a reorder of either `keys()` list relative to Java's group order
+        // breaks the round-trip here.
+        let decoded = codec
+            .parse(&compressed, &encoded)
             .result()
             .expect("decode should succeed")
             .clone();
