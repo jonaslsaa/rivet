@@ -24,7 +24,7 @@ pub mod biome_special_effects;
 pub mod climate;
 pub mod mob_spawn_settings;
 
-pub use biome::Biome;
+pub use biome::{BIOME_INFO_NOISE, Biome};
 pub use biome_generation_settings::BiomeGenerationSettings;
 pub use biome_manager::BiomeManager;
 pub use biome_resolver::BiomeResolver;
