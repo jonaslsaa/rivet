@@ -51,9 +51,9 @@ use std::sync::LazyLock;
 /// built on the already-ported `synth::PerlinSimplexNoise` — the exact
 /// seed/RNG construction from `Biome.java`'s static initializer. The
 /// declaration deliberately lives in this consuming unit, NOT `biome.rs`, so it
-/// cannot collide with the owning `biome.core` declaration (PR #571) when that
-/// lands; the placement unit then reads it through `crate::biome::` and this
-/// stub is deleted.
+/// cannot collide with the owning `biome.core` declaration (issue #178) when
+/// that unit lands it; the placement unit then reads it through `crate::biome::`
+/// and this stub is deleted.
 pub static BIOME_INFO_NOISE: LazyLock<PerlinSimplexNoise> = LazyLock::new(|| {
     let mut random = WorldgenRandom::new(LegacyRandomSource::new(2345));
     PerlinSimplexNoise::new(&mut random, &[0])
