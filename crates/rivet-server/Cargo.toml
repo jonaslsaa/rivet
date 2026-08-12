@@ -23,6 +23,9 @@ rivet-serialization = { workspace = true }
 rivet-text = { workspace = true }
 rivet-util = { workspace = true }
 rivet-world = { workspace = true }
+# `IndexMap` — the insertion-ordered runtime block-entity authority surface
+# the chunk exposes (#537).
+indexmap = { workspace = true }
 thiserror = { workspace = true }
 # `signal` is only used by the binary (SIGTERM clean shutdown); the library's
 # own tests do not need it.

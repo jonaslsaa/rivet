@@ -8,22 +8,16 @@
 //! `fillCrashReportCategory` default that composes the `LevelData` spawn
 //! detail with the "Level name" and "Level game mode" details.
 //!
-//! ## Deviation: `fillCrashReportCategory` override dispatch
+//! ## `fillCrashReportCategory` override dispatch
 //!
-//! The Java default calls `WritableLevelData.super.fillCrashReportCategory(...)`
-//! — Java's `Interface.super` always runs the interface **default body**, never
-//! a concrete override. The Rust port's `LevelData::fill_crash_report_category(
-//! self, ...)` inside the default resolves through the vtable, so a concrete
-//! type that *overrides* `LevelData::fill_crash_report_category` (none in-tree
-//! today — `PrimaryLevelData.parse` is out of scope, #398) would run its
-//! override instead of the default. Accepted: the only in-tree impls use the
-//! default body, so behavior is identical; documented for the future
-//! `PrimaryLevelData` port.
-//!
-//! RivetTodo(#398): upcasting a `ServerLevelData` implementor to
-//! `&dyn LevelData` runs only the `LevelData` default (the server-level
-//! details are lost); the future `PrimaryLevelData` must override **both**
-//! trait methods.
+//! Java's `Interface.super` always runs the interface **default body**, never a
+//! concrete override. The port reproduces this by delegating the `LevelData`
+//! default body to the free [`level_data_fill_default`](super::level_data::level_data_fill_default)
+//! function: the `ServerLevelData` default and the concrete `PrimaryLevelData`
+//! override both call it, so a concrete override never re-dispatches through
+//! the vtable. `PrimaryLevelData` overrides **both** `LevelData::…` and
+//! `ServerLevelData::…` with the same composed body (Java's single class
+//! method), so an upcast to either `&dyn` runs the full override.
 //!
 //! The `"Level game mode"` detail is `String.format(Locale.ROOT,
 //! "Game mode: %s (ID %d). Hardcore: %b. Commands: %b", getName(), getId(),
@@ -74,7 +68,12 @@ pub trait ServerLevelData: WritableLevelData {
         category: &mut rivet_core::CrashReportCategory,
         level_height_accessor: &dyn LevelHeightAccessor,
     ) {
-        // WritableLevelData.super.fillCrashReportCategory(...)
+        // WritableLevelData.super.fillCrashReportCategory(...). For a concrete
+        // implementor that overrides `LevelData::fill_crash_report_category`
+        // (only `PrimaryLevelData`), the monomorphized call dispatches through
+        // the override — but that type overrides this `ServerLevelData` method
+        // too, so this default never runs for it (the composed body lives in
+        // `PrimaryLevelData::fill_crash_report_category_impl`).
         LevelData::fill_crash_report_category(self, category, level_height_accessor);
         category.set_detail("Level name", self.get_level_name());
         category.set_detail(

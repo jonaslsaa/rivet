@@ -66,6 +66,14 @@ pub mod biome_id;
 #[cfg(feature = "blocks")]
 pub mod block_state;
 
+/// `BlockState.CODEC` (issue #391) — the `"Name"`-dispatch DFU codec
+/// (`StateHolder.codec`) the `feature.configurations.blockstate`/`layer`/
+/// `spike`/`blockblob` value types reach through `BlockState.CODEC.fieldOf(
+/// "state")`. Depends on the `StateDefinition`/`Property` surface, so it is
+/// gated behind `blocks` with them.
+#[cfg(feature = "blocks")]
+pub mod block_state_codec;
+
 /// `MapColor` + `Brightness` — the material color surface lighting/heightmap
 /// code reads off a `BlockState` (issue #228). Table-driven over the 62
 /// generated constants; see the module doc for the Paper 26.2 grounding.

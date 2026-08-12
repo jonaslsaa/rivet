@@ -496,6 +496,14 @@ impl PlayerChunkLoader {
         Ok(packets)
     }
 
+    /// `PlayerChunkLoaderData.lastChunkX/lastChunkZ` — the cache center the
+    /// last `add`/`update` emitted (the chunk the player's view is centered
+    /// on). Test/observability seam for the movement-driven recenter (issue
+    /// #521).
+    pub fn last_chunk_pos(&self) -> ChunkPos {
+        ChunkPos::new(self.last_chunk_x, self.last_chunk_z)
+    }
+
     /// `PlayerChunkLoaderData.lastSendDistance` — the cache radius emitted by
     /// the last `add`/`update`.
     pub fn last_send_distance(&self) -> i32 {
@@ -524,9 +532,13 @@ impl PlayerChunkLoader {
 ///
 /// The light is the deterministic superflat light (`#184`): Java queries the
 /// `LevelLightEngine`; the engine is not ported, so every chunk carries the
-/// fixed superflat sky/block layers the golden fixture pins. The payload is
-/// computed once at `LevelChunk` construction and cloned here, so a per-chunk
-/// per-player encode never rebuilds the 26 layer arrays.
+/// fixed superflat sky/block layers the golden fixture pins. The light payload
+/// is precomputed once at `LevelChunk` construction and cloned here, so a
+/// per-chunk per-player encode never rebuilds the 26 layer arrays. The chunk-data
+/// half is derived per call: the block-entity list is materialized from the
+/// current pending authority (#537) through the merged #520 pure materializer
+/// (see `LevelChunk::chunk_packet_data`), so the packet reflects mutations made
+/// since construction rather than a construction-time snapshot.
 ///
 /// RivetTodo(#185): the chunk pipeline loads every view chunk; until then the
 /// content is the deterministic superflat build for every position.

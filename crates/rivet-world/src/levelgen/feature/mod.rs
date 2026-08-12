@@ -56,6 +56,11 @@ pub mod configurations;
 mod feature_count_tracker;
 mod feature_place_context;
 
+// The `net.minecraft.world.level.levelgen.feature.featuresize` value layer
+// (issue #391) — the `FeatureSize` hierarchy and its declaration-order codec
+// dispatch. Owned by the `mc.world.level.levelgen.feature.featuresize` unit.
+pub mod featuresize;
+
 use crate::chunk::chunk_generator::ChunkGenerator;
 use crate::level::WorldGenLevel;
 use crate::levelgen::feature::configurations::FeatureConfiguration;

@@ -65,6 +65,7 @@ use rivet_text::Component;
 
 use crate::server::keepalive::{KEEPALIVE_LIMIT_NS, KeepaliveResponseOutcome, KeepaliveState};
 use crate::server::level::entity_id_allocator::EntityIdAllocator;
+use crate::server::level::player_chunk_loader::PlayerChunkLoader;
 use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
 use crate::server::movement_math::{
     DEFAULT_MOVED_TOO_QUICKLY_MULTIPLIER, MoveState, build_move_targets, contains_invalid_values,
@@ -155,13 +156,25 @@ pub struct PlayerSessionManager {
 }
 
 /// The tick-owned session state for one connection (issue #158): the
-/// authoritative `ServerPlayer` (OWNERSHIP "one owner: the tick thread") and
-/// the `awaitingTeleport` ack machine plus the Paper `firstGood/lastGood` move
-/// anchors. The network task only forwards wire frames over the bounded
-/// channel; all mutation happens here on the tick thread.
+/// authoritative `ServerPlayer` (OWNERSHIP "one owner: the tick thread"), the
+/// `awaitingTeleport` ack machine plus the Paper `firstGood/lastGood` move
+/// anchors, and the per-player `PlayerChunkLoader` (issue #521) that tracks the
+/// player's last chunk/view state. The network task only forwards wire frames
+/// over the bounded channel; all mutation happens here on the tick thread.
 struct Session {
     player: ServerPlayer,
     movement: SessionMovement,
+    /// The per-player chunk loader (issue #521): the last chunk center +
+    /// send/tick distances committed by the join burst's `add()`, then advanced
+    /// by `update()` on each accepted chunk-boundary move. Dropped with the
+    /// session on disconnect. The world reference the `update` path needs is the
+    /// manager's level (the loader holds only the committed scalar state, never
+    /// a world reference).
+    loader: PlayerChunkLoader,
+    /// The client's requested view distance (the handoff `ClientInformation`),
+    /// re-fed into `update` so the send/tick distances re-derive identically to
+    /// the join burst.
+    requested_view_distance: Option<i32>,
     /// The number of accepted post-ack movements this session routed into the
     /// tick-owned player (each `RIVET_MOVE_ACCEPTED` record increments it). The
     /// per-session counter is tick-owned — no shared state — and is reported in
@@ -318,6 +331,14 @@ impl PlayerSessionManager {
         self.sessions.get(&id).map(|s| s.player.player_id())
     }
 
+    /// The chunk center the session's `PlayerChunkLoader` is currently
+    /// centered on (issue #521 test observability: proves a move recentered the
+    /// loader — the cache center the client's cache is anchored to). `None`
+    /// when the connection has no session.
+    pub fn chunk_center(&self, id: ConnectionId) -> Option<rivet_registry::core::ChunkPos> {
+        self.sessions.get(&id).map(|s| s.loader.last_chunk_pos())
+    }
+
     /// The first `firstGood` anchor of a live session (issue #158 test
     /// observability for the per-tick `resetPosition` mirror). `None` when the
     /// connection has no session.
@@ -407,6 +428,20 @@ impl PlayerSessionManager {
         // cache-radius packet this burst emits. The burst embeds `teleport_id`,
         // so it must succeed before the session (and its awaited spawn teleport)
         // is registered.
+        //
+        // The session-owned `PlayerChunkLoader` (issue #521) is built at the
+        // player's chunk position and handed into the burst as its `add()` —
+        // the burst commits the loader's last-chunk/distance state to the spawn
+        // view, so the movement-driven `update` later diffs against exactly the
+        // send-set the client received.
+        let requested_view_distance = Some(client_information.view_distance() as i32);
+        let mut loader = PlayerChunkLoader::new(rivet_registry::core::ChunkPos::containing(
+            &rivet_registry::core::BlockPos::containing(
+                player.position().x,
+                player.position().y,
+                player.position().z,
+            ),
+        ));
         if let Err(e) = place_new_player(
             &mut self.sender,
             ctx.connections,
@@ -414,7 +449,8 @@ impl PlayerSessionManager {
             &player,
             &self.level,
             &self.join,
-            Some(client_information.view_distance() as i32),
+            requested_view_distance,
+            &mut loader,
             teleport_id,
         ) {
             // A burst encode/send failure is a server-side fault or an outbound
@@ -435,12 +471,16 @@ impl PlayerSessionManager {
         self.entity_ids.mark_in_use(entity_id);
 
         // The session is live: the tick-owned player (the movement/teleport
-        // write target) plus the ack/anchors state, keyed by connection.
+        // write target), the ack/anchors state, and the per-player chunk loader
+        // (issue #521) whose committed state now matches the burst the client
+        // received, keyed by connection.
         self.sessions.insert(
             connection_id,
             Session {
                 player,
                 movement,
+                loader,
+                requested_view_distance,
                 accepted_frames: 0,
             },
         );
@@ -804,6 +844,55 @@ impl PlayerSessionManager {
             targets.x_rot,
             session.accepted_frames,
         );
+
+        // Issue #521: after an accepted chunk-boundary move, recenter the
+        // player's chunk view. `update` early-returns for an intra-chunk move
+        // (the nothing-to-do guard), so calling it on every accepted move is
+        // exactly the boundary-gated behavior — only a chunk crossing (or a
+        // send/tick distance change) produces output. It re-derives the
+        // send/tick distances from the same `requested_view_distance` the join
+        // burst used, so the `lastChunk`/`lastSendDistance` it diffs against
+        // are the ones the client's cache actually holds. `self.level` (read)
+        // and `session` (mutated) are disjoint fields, so the borrow splits.
+        let new_chunk = rivet_registry::core::ChunkPos::containing(
+            &rivet_registry::core::BlockPos::containing(targets.x, targets.y, targets.z),
+        );
+        let recenter =
+            session
+                .loader
+                .update(&self.level, new_chunk, session.requested_view_distance);
+        match recenter {
+            Ok(packets) => {
+                // Queue the ordered cache-center + newly entered chunks over the
+                // bounded outbound channel, exactly like the join burst's
+                // `PlaySender` path. A send failure (outbound overflow / gone
+                // connection) prunes the connection — the same backpressure
+                // policy as every other tick→network send.
+                for packet in packets {
+                    if let Err(e) =
+                        self.sender
+                            .send_packet(ctx.connections, id, packet.id, &packet.body)
+                    {
+                        tracing::warn!(%id, %e, "disconnecting play session on chunk send");
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                // A typed missing-chunk failure (the `RequireLoaded` UNVERIFIED
+                // error — no generation fallback, no silent substitution) or an
+                // encode failure is a server-side fault; Paper disconnects on a
+                // chunk send failure. The connection is being torn down, so the
+                // loader state `update` committed for the new center is moot.
+                tracing::warn!(%id, %e, "disconnecting play session on chunk-loader update failure");
+                let _ = ctx.connections.send(
+                    id,
+                    OutboundEvent::Disconnect {
+                        reason: DisconnectReason::Unsupported(format!("chunk update: {e}")),
+                    },
+                );
+            }
+        }
     }
 
     /// Remove sessions whose connection is gone (the tick pruned the registry
@@ -1102,6 +1191,7 @@ fn world_clock_access() -> RegistryAccess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::level::ChunkTrackingView;
     use crate::server::movement_trace::{TAG_MOVE_ACCEPTED, TAG_SESSION_END, TAG_TELEPORT_ACK};
     use crate::server::tick::channels::{InboundDrained, LifecycleEvent, OutboundEvent};
     use crate::server::tick::registry::ConnectionRegistry;
@@ -1109,7 +1199,7 @@ mod tests {
     use rivet_protocol::protocol::common::client_information::ClientInformation;
     use rivet_protocol::protocol::game::clientbound_set_chunk_cache_radius::ClientboundSetChunkCacheRadiusPacket;
     use rivet_protocol::protocol::game::clientbound_set_simulation_distance::ClientboundSetSimulationDistancePacket;
-    use rivet_registry::core::{GameProfile, create_offline_player_uuid};
+    use rivet_registry::core::{ChunkPos, GameProfile, create_offline_player_uuid};
 
     /// A connected connection id for the counterfactual tests.
     const ID: ConnectionId = ConnectionId(1);
@@ -1199,9 +1289,22 @@ mod tests {
         ConnectionRegistry,
         tokio::sync::mpsc::Receiver<OutboundEvent>,
     ) {
+        connected_registry_with_capacity(256)
+    }
+
+    /// `connected_registry` with a specific outbound channel capacity — the
+    /// overflow test needs a channel that holds the join burst (135 frames) but
+    /// not the burst plus a large recenter, so it can exercise the
+    /// tick→network backpressure policy on the recenter path.
+    fn connected_registry_with_capacity(
+        out_capacity: usize,
+    ) -> (
+        ConnectionRegistry,
+        tokio::sync::mpsc::Receiver<OutboundEvent>,
+    ) {
         let mut registry = ConnectionRegistry::new();
         let (in_tx, in_rx) = tokio::sync::mpsc::channel(4);
-        let (out_tx, out_rx) = tokio::sync::mpsc::channel(256);
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(out_capacity);
         registry.apply(LifecycleEvent::Connect {
             id: ID,
             remote: "127.0.0.1:25565".parse().unwrap(),
@@ -1226,6 +1329,30 @@ mod tests {
             id: ID,
             profile: probe_profile(),
             client_information: ClientInformation::create_default(),
+        });
+    }
+
+    /// `apply_enter_play` with a specific client view distance — the session
+    /// tests default to `create_default` (view 2 → send 3), but the official-
+    /// client boundary case reproduces the capture client's view 8 (→ send 4).
+    fn apply_enter_play_vd(registry: &mut ConnectionRegistry, view_distance: i8) {
+        use rivet_protocol::protocol::common::chat_visiblity::ChatVisiblity;
+        use rivet_protocol::protocol::common::humanoid_arm::HumanoidArm;
+        use rivet_protocol::protocol::common::particle_status::ParticleStatus;
+        registry.apply(LifecycleEvent::EnterPlay {
+            id: ID,
+            profile: probe_profile(),
+            client_information: ClientInformation::new(
+                "en_us".to_string(),
+                view_distance,
+                ChatVisiblity::Full,
+                true,
+                0,
+                HumanoidArm::Right,
+                false,
+                false,
+                ParticleStatus::All,
+            ),
         });
     }
 
@@ -2473,5 +2600,333 @@ mod tests {
                 false => assert_eq!(delta, 0, "a deliberate close emits no session end"),
             }
         }
+    }
+
+    // ---- Issue #521: live chunk recentering on accepted movement --------------
+
+    /// Decode the chunk x/z from a `level_chunk_with_light` body — the 8-byte BE
+    /// coordinate header at the head of the body (the same layout the join-burst
+    /// and chunk_send tests decode).
+    fn chunk_body_coords(body: &[u8]) -> ChunkPos {
+        let x = i32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+        let z = i32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+        ChunkPos::new(x, z)
+    }
+
+    /// Decode the x/z of a `set_chunk_cache_center` body — two varints
+    /// (`varint(x) ++ varint(z)`, the `(0,0)` body `[0x00, 0x00]`).
+    fn center_body_coords(body: &[u8]) -> ChunkPos {
+        let mut buf = bytes::BytesMut::from(body);
+        let x = rivet_protocol::var_int::read(&mut buf);
+        let z = rivet_protocol::var_int::read(&mut buf);
+        assert_eq!(buf.len(), 0, "center body is exactly two varints");
+        ChunkPos::new(x, z)
+    }
+
+    /// The enter cells of a center move, recomputed independently of the loader:
+    /// every cell of the new view the old view does not contain. Iterating the
+    /// new view's raster gives the set; the exact emit order is pinned by the
+    /// primitive's own difference-walker tests, so this asserts the set and the
+    /// no-duplicate/no-old-cell invariants.
+    fn expected_enter(
+        old_center: ChunkPos,
+        old_send: i32,
+        new_center: ChunkPos,
+        new_send: i32,
+    ) -> std::collections::HashSet<ChunkPos> {
+        let old = ChunkTrackingView::of(old_center, old_send);
+        let new = ChunkTrackingView::of(new_center, new_send);
+        let mut out = std::collections::HashSet::new();
+        new.for_each(|p| {
+            if !old.contains_pos(&p) {
+                out.insert(p);
+            }
+        });
+        out
+    }
+
+    /// The official-client boundary case (issue #521): a client reporting view
+    /// distance 8 (the capture client) joins at spawn chunk (0,0) — the send-4
+    /// 117-chunk square spanning -5..5 — then moves into the fringe chunk
+    /// (-6,-5). The session must recenter the loader (cache center → (-6,-5))
+    /// and send exactly the newly entered cells of the missing neighboring view,
+    /// so the client's static invisible fringe is populated. The move is a
+    /// teleport-scale jump; the M1 too-quickly stub is permissive (logs only),
+    /// so it is accepted.
+    #[test]
+    fn official_client_boundary_move_recenters_and_sends_the_missing_view() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play_vd(&mut registry, 8);
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        // The send-4 join burst is 135 frames; drain it before the move.
+        let burst = drain_outbound_frames(&mut out_rx);
+        assert!(
+            burst
+                .iter()
+                .filter(|(id, _)| *id
+                    == rivet_protocol::generated::packets::play::clientbound::PacketType::LevelChunkWithLight
+                        .id())
+                .count()
+                == 117,
+            "the view-8 client gets the 117-chunk send-4 burst"
+        );
+
+        // Move into fringe chunk (-6,-5): block (-90,-63,-72).
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(-90.0, -63.0, -72.0))],
+        );
+        assert_eq!(
+            manager.chunk_center(ID),
+            Some(ChunkPos::new(-6, -5)),
+            "the loader recenters to the fringe chunk"
+        );
+        let recenter = drain_outbound_frames(&mut out_rx);
+        assert_eq!(
+            recenter[0].0,
+            rivet_protocol::generated::packets::play::clientbound::PacketType::SetChunkCacheCenter
+                .id(),
+            "the recenter leads with the cache-center packet"
+        );
+        assert_eq!(center_body_coords(&recenter[0].1), ChunkPos::new(-6, -5));
+        // No radius/simulation packets: the distances did not change.
+        assert!(
+            recenter[1..]
+                .iter()
+                .all(|(id, _)| *id
+                    == rivet_protocol::generated::packets::play::clientbound::PacketType::LevelChunkWithLight
+                        .id()),
+            "the rest is exactly the newly entered chunk set"
+        );
+
+        let entered: Vec<ChunkPos> = recenter[1..]
+            .iter()
+            .map(|(_, body)| chunk_body_coords(body))
+            .collect();
+        let expected = expected_enter(ChunkPos::ZERO, 4, ChunkPos::new(-6, -5), 4);
+        assert_eq!(entered.len(), expected.len(), "enter count matches");
+        assert_eq!(
+            entered
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            expected,
+            "every emitted chunk is a newly entered cell of the new view"
+        );
+        // The missing neighboring view is populated — the client's cache gains
+        // the cells it had no data for, with no duplicates.
+        let seen: std::collections::HashSet<ChunkPos> = entered.iter().copied().collect();
+        assert_eq!(seen.len(), entered.len(), "no duplicate sends");
+        for pos in &entered {
+            assert!(
+                !ChunkTrackingView::of(ChunkPos::ZERO, 4).contains_pos(pos),
+                "no cell from the original view is re-sent: {pos}"
+            );
+        }
+    }
+
+    /// An intra-chunk move (still inside the spawn chunk) emits nothing — the
+    /// loader's nothing-to-do guard, so no cache-center packet and no chunks are
+    /// queued, and the loader's center stays at the spawn chunk.
+    #[test]
+    fn intra_chunk_move_emits_no_recenter() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        drain_outbound_frames(&mut out_rx);
+
+        // Block (5,-63,5) is inside chunk (0,0).
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(5.0, -63.0, 5.0))],
+        );
+        assert_eq!(
+            manager.chunk_center(ID),
+            Some(ChunkPos::ZERO),
+            "intra-chunk move does not recenter"
+        );
+        assert!(
+            drain_outbound_frames(&mut out_rx).is_empty(),
+            "an intra-chunk move emits no chunk packets"
+        );
+    }
+
+    /// A negative-coordinate boundary move recenters to the negative chunk and
+    /// emits exactly the newly entered cells — negative chunk coordinates encode
+    /// through the loader's wrapping arithmetic without issue.
+    #[test]
+    fn negative_coordinate_move_recenters() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        drain_outbound_frames(&mut out_rx);
+
+        // Block (-10,-63,-10) is in chunk (-1,-1).
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(-10.0, -63.0, -10.0))],
+        );
+        assert_eq!(manager.chunk_center(ID), Some(ChunkPos::new(-1, -1)));
+        let recenter = drain_outbound_frames(&mut out_rx);
+        assert_eq!(center_body_coords(&recenter[0].1), ChunkPos::new(-1, -1));
+        let entered: Vec<ChunkPos> = recenter[1..]
+            .iter()
+            .map(|(_, body)| chunk_body_coords(body))
+            .collect();
+        let expected = expected_enter(ChunkPos::ZERO, 3, ChunkPos::new(-1, -1), 3);
+        assert_eq!(entered.len(), expected.len());
+        assert_eq!(
+            entered
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+    }
+
+    /// A RequireLoaded world with the spawn view fully loaded but a missing
+    /// enter cell: the accepted move's `update` fails typed `UNVERIFIED` (no
+    /// generation fallback, no silent substitution) and the session disconnects
+    /// with the typed error in the reason.
+    #[test]
+    fn require_loaded_missing_enter_chunk_disconnects_typed() {
+        // A RequireLoaded world whose spawn view (send 3, the create_default
+        // handoff) is fully loaded — the join burst must succeed — but whose
+        // region has no data beyond it.
+        let mut level = ServerLevel::new(ServerLevelConfig {
+            missing_chunk_policy: crate::server::level::MissingChunkPolicy::RequireLoaded,
+            ..Default::default()
+        });
+        let spawn_view = ChunkTrackingView::of(ChunkPos::ZERO, 3);
+        let positions: Vec<ChunkPos> = {
+            let mut v = Vec::new();
+            spawn_view.for_each(|p| v.push(p));
+            v
+        };
+        for pos in positions {
+            level
+                .chunk_map_mut()
+                .install(pos, crate::server::level::LevelChunk::new(pos));
+        }
+        let mut config = default_session_config(256);
+        config.level = level;
+
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(config);
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        drain_outbound_frames(&mut out_rx);
+
+        // Move east to chunk (1,0): its enter set is the x=5 column (z -4..4),
+        // none of which the region loaded. `update` fails typed UNVERIFIED and
+        // the session disconnects rather than silently serving a superflat
+        // substitution.
+        run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(17.0, -63.0, 0.0))],
+        );
+        let reason =
+            drained_disconnect_reason(&mut out_rx).expect("the update failure disconnects");
+        match reason {
+            DisconnectReason::Unsupported(message) => {
+                assert!(
+                    message.contains("UNVERIFIED"),
+                    "the typed missing-chunk error survives: {message}"
+                );
+                assert!(
+                    message.contains("fallback are disabled"),
+                    "no generation fallback: {message}"
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        // No center packet, no chunk was queued for the failed recenter (the
+        // `update` Err carries no partial send-set).
+        assert!(
+            drain_outbound_frames(&mut out_rx).is_empty(),
+            "a failed update queues no packets"
+        );
+    }
+
+    /// Consecutive boundary moves never re-send a chunk: each move's enter set
+    /// is disjoint from the previous views', so the client's cache gains cells
+    /// without duplicates and no cell from the initial burst is repeated.
+    #[test]
+    fn consecutive_boundary_moves_never_duplicate_chunks() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        drain_outbound_frames(&mut out_rx);
+
+        let mut seen: std::collections::HashSet<ChunkPos> = std::collections::HashSet::new();
+        for block in [(16.0, -63.0, 0.0), (32.0, -63.0, 0.0)] {
+            manager = run_tick(
+                manager,
+                &mut registry,
+                vec![(ID, move_pos_frame(block.0, block.1, block.2))],
+            );
+            let recenter = drain_outbound_frames(&mut out_rx);
+            for (_, body) in &recenter[1..] {
+                let pos = chunk_body_coords(body);
+                assert!(
+                    seen.insert(pos),
+                    "chunk {pos} is sent exactly once across consecutive moves"
+                );
+                assert!(
+                    !ChunkTrackingView::of(ChunkPos::ZERO, 3).contains_pos(&pos),
+                    "no initial-view cell is re-sent: {pos}"
+                );
+            }
+        }
+        // Two east moves at send 3 enter two disjoint x-columns (9 cells each).
+        assert_eq!(seen.len(), 18, "two moves enter 18 distinct cells");
+    }
+
+    /// Backpressure on the recenter path: the bounded outbound channel holds the
+    /// join burst but not the burst + a large recenter, so the recenter's send
+    /// overflows and the connection is pruned (Paper disconnects on outbound
+    /// overflow), with the registry recording the overflow reason.
+    #[test]
+    fn recenter_send_overflow_prunes_the_connection() {
+        // Channel cap 150: the view-8 join burst (135 frames) fits, but the
+        // fringe move's recenter (1 center + 68 chunks) after it does not. The
+        // receiver is kept alive so the overflow is a full channel, not a closed
+        // one (the EndOfStream path would record a different reason).
+        let (mut registry, _out_rx) = connected_registry_with_capacity(150);
+        apply_enter_play_vd(&mut registry, 8);
+
+        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+
+        // Drive the move directly (not through `tick`, whose end-of-tick
+        // `prune_lost` consumes the recorded reason before this test can assert
+        // it): route the accepted move, which sends the recenter over the
+        // near-full channel and overflows.
+        let mut ctx = TickContext {
+            tick: 1,
+            now_ns: 0,
+            now_ms: 0,
+            connections: &mut registry,
+            inbound: Vec::new(),
+        };
+        manager.route_inbound(&mut ctx, ID, move_pos_frame(-90.0, -63.0, -72.0));
+
+        assert!(
+            !registry.contains(ID),
+            "the overflow prunes the connection (Paper disconnects on overflow)"
+        );
+        assert_eq!(
+            registry.take_disconnect_reason(ID),
+            Some(DisconnectReason::Overflow),
+            "the recorded reason is the outbound overflow"
+        );
     }
 }

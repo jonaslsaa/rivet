@@ -639,10 +639,13 @@ name = "rivet-oracle"
 version = "0.1.0"
 dependencies = [
  "rivet-nbt",
+ "rivet-registry",
  "rivet-util",
+ "rivet-world",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "xxhash-rust",
 ]
 
@@ -701,6 +704,7 @@ version = "0.1.0-dev+mc26.2"
 dependencies = [
  "bytes",
  "flate2",
+ "indexmap",
  "phf",
  "rivet-nbt",
  "rivet-protocol",

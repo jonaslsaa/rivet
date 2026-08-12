@@ -49,8 +49,9 @@
 //!   `rivet_dwell_verdict`, and a tamper negative on `connected_wall_seconds`.
 //!   `dwell` has no comparison concept, so any explicit `--runs` or `--pairs`
 //!   is rejected (exit 64) rather than silently ignored, and `--dwell-seconds`
-//!   is dwell-only (an explicit value on join/move/capture is a silent no-op
-//!   and is rejected the same way). The window must be at least
+//!   is dwell-only (an explicit value on join/move/kick/capture/load-world/
+//!   loaded-world is a silent no-op and is rejected the same way). The window
+//!   must be at least
 //!   `transcript::DWELL_MIN_DWELL_SECONDS` (a 31 s window would span only
 //!   ~29.8 s of challenges and fail the verdict), and `--timeout-seconds` must
 //!   exceed it by more than `DWELL_TIMEOUT_HEADROOM_SECONDS` so the client's
@@ -72,12 +73,16 @@
 //!   `rivet` is refused the same way.
 //! - `load-world` (#316 independent harness slice): resolve the known local
 //!   Minecraft 26.2 save, fingerprint it, create and verify a deterministic
-//!   disposable copy, and pass only that copy through Rivet's future
-//!   `--level <path>` seam. The retained source and copy are re-fingerprinted
-//!   and ordinary-operation cleanup removes the copy on every probe outcome.
-//!   Until #339 supplies the server
-//!   world-path/loading capability and real official-client acceptance, the
-//!   command returns UNVERIFIED (exit 3), never a placeholder PASS.
+//!   disposable copy, and pass only that copy through Rivet's `--level <path>`
+//!   seam. The retained source and copy are re-fingerprinted and
+//!   ordinary-operation cleanup removes the copy on every probe outcome. The
+//!   command returns UNVERIFIED (exit 3) when the server is not yet ready for a
+//!   genuine loaded-world PASS — never a placeholder PASS.
+//! - `loaded-world` (#374 official-client acceptance): boot Rivet against a
+//!   disposable copy of the safe world under `working/client-worlds/New World`
+//!   (`RIVET_WORLD_SRC` overrides; the launcher save is never touched), extract
+//!   the read-only ground-truth manifest, drive the real Azalea client in
+//!   `loaded` mode, and compare the observed per-coordinate content.
 //!
 //! ## Deterministic Paper config (issue #266 / #333)
 //!
@@ -128,7 +133,7 @@ use std::fs;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, ExitStatus, Stdio};
 
 use serde_json::{Value, json};
 
@@ -228,6 +233,7 @@ enum Subcommand {
     Kick,
     Capture,
     LoadWorld,
+    LoadedWorld,
     Help,
 }
 
@@ -322,6 +328,7 @@ impl Args {
                 "kick" => Subcommand::Kick,
                 "capture" => Subcommand::Capture,
                 "load-world" => Subcommand::LoadWorld,
+                "loaded-world" => Subcommand::LoadedWorld,
                 "--help" | "-h" | "help" => Subcommand::Help,
                 _ => return Err(format!("unknown subcommand: {sub}\n\n{}", usage())),
             };
@@ -374,15 +381,15 @@ impl Args {
         }
 
         // `--dwell-seconds` only has meaning for the dwell scenario; on
-        // join/move/kick/capture/load-world the client is never asked to dwell, so an
-        // explicit value would be a silent no-op. Reject it (exit 64) rather
-        // than ignore it — the same no-silent-noop policy as --runs/--pairs on
-        // dwell.
+        // join/move/kick/capture/load-world/loaded-world the client is never
+        // asked to dwell, so an explicit value would be a silent no-op. Reject
+        // it (exit 64) rather than ignore it — the same no-silent-noop policy
+        // as --runs/--pairs on dwell.
         if dwell_explicit && command != Subcommand::Dwell {
             return Err(
                 "--dwell-seconds only applies to the dwell scenario (the keepalive-survival \
-                 gate); join/move/kick/capture/load-world never dwell, so an explicit value would be a \
-                 silent no-op — drop it"
+                 gate); join/move/kick/capture/load-world/loaded-world never dwell, so an explicit \
+                 value would be a silent no-op — drop it"
                     .to_owned(),
             );
         }
@@ -628,6 +635,51 @@ impl Args {
             runs = 1;
         }
 
+        if command == Subcommand::LoadedWorld {
+            // `loaded-world` (issue #374) boots exactly one Rivet server against
+            // a disposable copy of the safe copied world (`--level <copy>`),
+            // drives the loaded client, and compares its observed per-coordinate
+            // content against the read-only ground-truth manifest. Paper has no
+            // place here; `--pairs`/`--runs` would be silent no-ops.
+            if server_explicit && server != ServerSelection::Rivet {
+                return Err(format!(
+                    "loaded-world only supports --server rivet (Paper does not use Rivet's \
+                     world-path launch seam); got --server {}",
+                    server.as_str()
+                ));
+            }
+            server = ServerSelection::Rivet;
+            if pairs_explicit {
+                return Err(
+                    "loaded-world is a single-server acceptance probe and has no --pairs \
+                     comparison; drop it"
+                        .to_owned(),
+                );
+            }
+            if runs_explicit {
+                return Err(
+                    "loaded-world always performs exactly one Rivet launch + loaded client run, so \
+                     --runs is a silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if username_explicit {
+                return Err(
+                    "loaded-world does not take a client username override; --username is a silent \
+                     no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if timeout_explicit {
+                return Err(
+                    "loaded-world uses the client's default timeout; --timeout-seconds is a silent \
+                     no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            runs = 1;
+        }
+
         Ok(Self {
             command,
             server,
@@ -648,9 +700,9 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: run-scenario <join|move|dwell|kick|capture|load-world> [options]\n\
+        "Usage: run-scenario <join|move|dwell|kick|capture|load-world|loaded-world> [options]\n\
          Options:\n\
-         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick/load-world are always rivet)\n\
+         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick/load-world/loaded-world are always rivet)\n\
          \x20 --pairs paper:paper|paper:rivet\n\
          \x20                            comparison to run (default paper:paper)\n\
          \x20 --address HOST:PORT        server address (default {DEFAULT_ADDRESS})\n\
@@ -2639,11 +2691,11 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
 
 /// Independent loaded-world harness slice for #316.
 ///
-/// This deliberately stops at the #339 capability boundary: it makes and
-/// verifies a disposable copy, proves the source remains immutable, and probes
-/// the future `--level <copy>` launch seam. It does not parse or load the world
-/// and therefore cannot report PASS, even if a server unexpectedly accepts the
-/// argument and reaches READY.
+/// This is the copy-and-probe slice: it makes and verifies a disposable copy,
+/// proves the source remains immutable, and probes the `--level <copy>` launch
+/// seam. It deliberately does not parse or load the world (that belongs to
+/// #323/#339), so it reports the #339 launch outcome rather than a loaded-world
+/// content PASS.
 fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-loaded-world");
@@ -2695,9 +2747,10 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
         ) {
             Ok(mut srv) => match server::shutdown(&mut srv) {
                 Ok(()) => Err(RunnerError::Unverified(
-                    "rivet-server accepted the loaded-world path and reached READY, but the #339 \
-                     loaded-chunk official-client acceptance is not part of this independent slice; \
-                     refusing to claim PASS until that real acceptance exists"
+                    "rivet-server accepted the loaded-world path and reached READY, but this #316 \
+                     slice only proves the copy-and-launch seam; the #374 loaded-world acceptance \
+                     (per-coordinate content comparison) is the PASS contract, so this slice \
+                     refuses to claim PASS"
                         .to_owned(),
                 )),
                 Err(error) => Err(error.into()),
@@ -2722,6 +2775,398 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
     probe_result
 }
 
+/// The official-client loaded-world acceptance probe (issue #374).
+///
+/// This is the honest successor to `load-world`: it makes and verifies a
+/// disposable copy of the safe world under `working/client-worlds/New World`,
+/// extracts its read-only ground-truth manifest (`rivet-oracle extract-world`),
+/// boots Rivet against the copy with `--level <copy>`, drives the real Azalea
+/// client in `loaded` mode (join, wait for chunk quiescence, sample the genuine
+/// per-coordinate block content the server served, then take a short bounded
+/// walk), and compares the client's observed content against the manifest.
+///
+/// The PASS contract is deliberately strict and honest:
+///
+/// - The client must actually join, spawn, sample per-coordinate content, and
+///   walk (never a vacuous green) — `rivet_loaded_verdict` enforces the
+///   transcript boundary. The walk is recorded as `before`/`after` position
+///   evidence; the per-coordinate grid is the load-bearing content check.
+/// - The sampled surface/bedrock/below_feet block names must match the
+///   ground-truth manifest at the same coordinates. The manifest records the
+///   read-only world's per-coordinate content, so a server that serves a
+///   different world — e.g. echoing repeated superflat bytes for every chunk —
+///   fails the comparison at the first sampled coordinate whose content differs
+///   from ground truth.
+/// - The disposable copy must be byte-for-byte unchanged after the run (the
+///   server must not mutate the loaded world), and the source world must be
+///   untouched.
+///
+/// The source is the safe copied world under `working/client-worlds/New World`
+/// (or `RIVET_WORLD_SRC`); the launcher save is never defaulted to or
+/// inspected. A chunk whose ground-truth status is not `minecraft:full`, or
+/// that carries an uncarried #519 capability flag, is honestly classified
+/// UNVERIFIED (exit 3) rather than misreported — never a fabricated PASS.
+fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/scenario-loaded-world");
+    // The loaded-world acceptance reads the safe copied world under
+    // `working/client-worlds` (or an explicit `RIVET_WORLD_SRC`); it never
+    // defaults to or inspects the launcher save.
+    let source_path = load_world::resolve_loaded_world_src()?;
+    let source = load_world::SourceTree::open(&source_path)?;
+    load_world::validate_prospective_storage(&source, &work)?;
+    fs::create_dir_all(&work)?;
+
+    let source_before = source.fingerprint()?;
+    let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
+    let client_bin = ensure_client_binary()?;
+    let base = base_address(args)?;
+    let run_dir = work.join("rivet");
+    let log_path = work.join("rivet.log");
+    let mut temp = load_world::TempWorld::create(&source, &work)?;
+
+    let result = (|| -> Result<(), RunnerError> {
+        load_world::assert_copy_equals_source(&source_before, &temp.hash_tree()?)?;
+        let server_world_path = temp.server_path();
+
+        // Extract the read-only ground-truth manifest of the disposable copy
+        // BEFORE booting Rivet: the manifest is the per-coordinate world
+        // content the client's observed samples must match.
+        let manifest = run_extract_world(&server_world_path, &work)?;
+
+        println!("rivet scenario runner: loaded-world (#374 official-client acceptance)");
+        println!(
+            "    source world      : {} (read only; never passed to a server)",
+            source.configured_path().display()
+        );
+        println!("    disposable copy  : {}", temp.path().display());
+        println!(
+            "    ground-truth      : {} FULL chunks, {} non-FULL (manifest)",
+            manifest["full_count"], manifest["non_full_count"]
+        );
+        println!("    rivet-server bin : {}", rivet_bin.display());
+        println!(
+            "    launch seam      : {} <disposable-copy>",
+            server::WORLD_PATH_ARG
+        );
+        println!();
+
+        // Boot Rivet against the disposable copy. #363 merged `--level` into
+        // rivet-server; a boot failure is still classified via the probe so an
+        // unexpected rejection surfaces as UNVERIFIED rather than a fabricated
+        // PASS.
+        let mut srv = match server::boot(
+            server::ServerKind::Rivet,
+            &run_dir,
+            &log_path,
+            &rivet_bin,
+            None,
+            None,
+            base,
+            None,
+            &[],
+            Some(&server_world_path),
+        ) {
+            Ok(srv) => srv,
+            Err(error) => return Err(classify_load_world_boot_failure(error, &log_path)),
+        };
+
+        // The post-boot acceptance body. It never shuts `srv` down; the wrapper
+        // below always does, so a failure here (client run, transcript, content
+        // mismatch) cannot drop the booted server (SIGKILL) and race the
+        // disposable-copy cleanup.
+        let body = (|| -> Result<(), RunnerError> {
+            // Drive the real Azalea client in loaded mode against the booted
+            // server.
+            let client_run = run_client(
+                &client_bin,
+                &ClientSpec {
+                    address: base.to_string(),
+                    username: args.username.clone(),
+                    timeout_seconds: args.timeout_seconds,
+                    dwell_seconds: 0,
+                    mode: "loaded".to_owned(),
+                },
+                &work,
+                "loaded-client",
+            )?;
+
+            // Prove the client genuinely reached the Rivet port (the server's
+            // `connection established` line). The client run above completed, so
+            // the connection line is already in the log.
+            verify_rivet_connection(&log_path)?;
+
+            // The client transcript must prove it joined, spawned, and sampled
+            // genuine per-coordinate content.
+            let transcript = transcript::normalize_loaded(&client_run.stdout_text)
+                .map_err(RunnerError::Transcript)?;
+            let boundary =
+                transcript::rivet_loaded_verdict(&transcript).map_err(RunnerError::Transcript)?;
+
+            // Compare the client's observed block content against the
+            // ground-truth manifest. This is the load-bearing comparison: a
+            // server that only echoes repeated superflat bytes fails here.
+            compare_loaded_content(&manifest, &transcript)?;
+
+            println!("\nLoaded-world acceptance boundary reached: {boundary}");
+            Ok(())
+        })();
+
+        // A booted server must always be shut down cleanly before the
+        // disposable-copy cleanup below runs. On the error path the body above
+        // returned before any shutdown, and dropping `srv` would SIGKILL the
+        // child — a live server racing the copy cleanup and holding the port.
+        // `server::shutdown` is a no-op on a stopped child, so this is safe on
+        // both the success path (the body never shuts down) and every error
+        // path. A shutdown failure is surfaced only when the acceptance
+        // otherwise succeeded, so an original acceptance error is never masked.
+        let shutdown_result = server::shutdown(&mut srv);
+        match body {
+            Err(e) => {
+                if let Err(shutdown_err) = shutdown_result {
+                    eprintln!(
+                        "    warning: clean shutdown after a failed loaded-world run also \
+                         errored: {shutdown_err}"
+                    );
+                }
+                Err(e)
+            }
+            Ok(()) => shutdown_result.map_err(Into::into),
+        }
+    })();
+
+    // Run all safety checks even when the acceptance returns UNVERIFIED: an
+    // untouched source and an unchanged disposable copy are mandatory on every
+    // exit path.
+    let copy_check = temp
+        .hash_tree()
+        .and_then(|after| load_world::assert_copy_equals_source(&source_before, &after));
+    let source_check = source.verify_unchanged(&source_before);
+    let cleanup = temp.cleanup();
+
+    source_check?;
+    copy_check?;
+    cleanup?;
+    result
+}
+
+/// Resolve the `rivet-oracle` binary: a sibling in the same target dir (the
+/// common `cargo build` layout), then an explicit `RIVET_ORACLE_BIN`, then the
+/// workspace `target/debug` default.
+fn oracle_binary() -> PathBuf {
+    let sibling = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("rivet-oracle")));
+    if let Some(p) = sibling
+        && p.is_file()
+    {
+        return p;
+    }
+    if let Ok(p) = std::env::var("RIVET_ORACLE_BIN") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return p;
+        }
+    }
+    crate_root().join("../../target/debug/rivet-oracle")
+}
+
+/// Map an `rivet-oracle extract-world` exit status onto the runner's error
+/// contract: a nonzero UNVERIFIED (3) from the oracle — a missing world
+/// layout — stays UNVERIFIED, while any other nonzero exit (a malformed CLI,
+/// an internal gate error, or a signal) is a hard Gate — never downgraded to
+/// UNVERIFIED.
+fn classify_extract_status(status: ExitStatus, out: &Path) -> Result<(), RunnerError> {
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(code) if code == EXIT_UNVERIFIED as i32 => Err(RunnerError::Unverified(format!(
+            "rivet-oracle extract-world is UNVERIFIED (exit {code}); see {}",
+            out.display()
+        ))),
+        Some(code) => Err(RunnerError::Gate(format!(
+            "rivet-oracle extract-world exited with {code}; see {}",
+            out.display()
+        ))),
+        None => Err(RunnerError::Gate(format!(
+            "rivet-oracle extract-world was terminated by a signal; see {}",
+            out.display()
+        ))),
+    }
+}
+
+/// Invoke `rivet-oracle extract-world <world> --to <json>` and parse the
+/// ground-truth manifest into a `serde_json::Value`.
+fn run_extract_world(world: &Path, work: &Path) -> Result<Value, RunnerError> {
+    let oracle_bin = oracle_binary();
+    let out = work.join("loaded-manifest.json");
+    let status = Command::new(&oracle_bin)
+        .args(["extract-world"])
+        .arg(world)
+        .args(["--to"])
+        .arg(&out)
+        .status()
+        .map_err(|e| {
+            RunnerError::Unverified(format!(
+                "failed to run rivet-oracle extract-world ({}): {e} — build it first with \
+                 cargo build -p rivet-oracle",
+                oracle_bin.display()
+            ))
+        })?;
+    classify_extract_status(status, &out)?;
+    let text = fs::read_to_string(&out)?;
+    let manifest: Value = serde_json::from_str(&text).map_err(RunnerError::Json)?;
+    let full_count = manifest["chunks"]
+        .as_object()
+        .map(|m| {
+            m.values()
+                .filter(|c| c.get("status").and_then(Value::as_str) == Some("minecraft:full"))
+                .count()
+        })
+        .unwrap_or(0);
+    let non_full_count = manifest["chunks"]
+        .as_object()
+        .map(|m| m.len().saturating_sub(full_count))
+        .unwrap_or(0);
+    let mut out = manifest;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("full_count".to_owned(), json!(full_count));
+        obj.insert("non_full_count".to_owned(), json!(non_full_count));
+    }
+    Ok(out)
+}
+
+/// Canonicalize an observed block name into the manifest's namespaced form.
+/// The client emits azalea bare registry ids (`grass_block`); the manifest
+/// stores namespaced names (`minecraft:grass_block`). Comparison must be on a
+/// single representation, so a bare id is prefixed with `minecraft:` before it
+/// is matched against ground truth.
+fn canonicalize_block_name(name: Option<&str>) -> String {
+    match name {
+        Some(n) if n.contains(':') => n.to_owned(),
+        Some(n) => format!("minecraft:{n}"),
+        None => "minecraft:air".to_owned(),
+    }
+}
+
+/// Compare the client's observed per-coordinate block content against the
+/// ground-truth manifest. The `loaded` record's `samples` carry
+/// `surface`/`bedrock`/`below_feet` block names at world coordinates; the
+/// manifest's per-chunk `surface`/`bedrock`/`below_feet` arrays are keyed by
+/// `"<chunk_x>,<chunk_z>"` and indexed `z*16+x` (row-major with the sample
+/// point at the chunk center offset `(8,8)`).
+///
+/// A sample whose chunk is absent from the manifest, or whose observed block
+/// name differs from ground truth, is a FAIL — the server did not serve the
+/// loaded world (or served content that does not match the read-only copy).
+fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), RunnerError> {
+    let chunks = manifest["chunks"]
+        .as_object()
+        .ok_or_else(|| RunnerError::Gate("loaded-world manifest has no chunks map".to_owned()))?;
+    let samples = transcript["loaded"]["samples"]
+        .as_array()
+        .ok_or_else(|| RunnerError::Transcript("loaded record has no samples".to_owned()))?;
+
+    if samples.is_empty() {
+        return Err(RunnerError::Transcript(
+            "loaded record has no samples; the client sampled no content".to_owned(),
+        ));
+    }
+
+    let mut checked = 0usize;
+    for sample in samples {
+        let chunk_x = sample["chunk_x"]
+            .as_i64()
+            .ok_or_else(|| RunnerError::Transcript("sample missing chunk_x".to_owned()))?;
+        let chunk_z = sample["chunk_z"]
+            .as_i64()
+            .ok_or_else(|| RunnerError::Transcript("sample missing chunk_z".to_owned()))?;
+        let key = format!("{chunk_x},{chunk_z}");
+        let fingerprint = chunks.get(&key).ok_or_else(|| {
+            RunnerError::Gate(format!(
+                "loaded-world manifest has no chunk {key} but the client sampled it — the \
+                     server served a chunk outside the ground-truth world"
+            ))
+        })?;
+        // A fingerprint with no string `Status` is a malformed manifest: it
+        // must never default to minecraft:full (that would compare — and
+        // possibly PASS — a chunk whose ground-truth status is unknown). Refuse
+        // honestly as a gate error, the same classification as a missing chunks
+        // map.
+        let status = fingerprint["status"].as_str().ok_or_else(|| {
+            RunnerError::Gate(format!(
+                "loaded-world manifest chunk {key} has no string Status — refusing PASS on a \
+                 malformed manifest (never defaulting an unknown chunk to minecraft:full)"
+            ))
+        })?;
+        // A non-FULL chunk's content is not ground truth: the extractor records
+        // its (partial/empty) sections honestly, but the client would observe
+        // real terrain there. Comparing against an all-air fingerprint would be
+        // a misleading "content mismatch"; the honest classification is the
+        // #519 capability boundary — UNVERIFIED until full-chunk construction
+        // can carry it.
+        if status != "minecraft:full" {
+            return Err(RunnerError::Unverified(format!(
+                "loaded-world sampled chunk {key} is {status} (not minecraft:full): the #519 \
+                 full-chunk construction capability is required to compare its per-coordinate \
+                 content, so this acceptance stays UNVERIFIED"
+            )));
+        }
+        // A FULL chunk may still carry content the #519 capability boundary
+        // cannot yet construct (non-empty structures.starts, entities). The
+        // extractor records these flags honestly; refusing PASS here keeps the
+        // capability boundary honest instead of comparing a chunk the server
+        // could not have served faithfully.
+        let flags: Vec<&str> = fingerprint["capability_flags"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if !flags.is_empty() {
+            return Err(RunnerError::Unverified(format!(
+                "loaded-world sampled chunk {key} is minecraft:full but carries #519-uncarried \
+                 capability flags {flags:?}; the runner refuses PASS rather than trusting an \
+                 incomplete server"
+            )));
+        }
+        // The manifest stores surface/bedrock/below_feet as 16×16 arrays
+        // indexed row-major `z*16+x`. The client samples the chunk center
+        // offset (8,8), so the index is `8*16+8 = 136`.
+        const CENTER: usize = 8 * 16 + 8;
+        let manifest_surface = fingerprint["surface"][CENTER]
+            .as_str()
+            .unwrap_or("minecraft:air");
+        let manifest_bedrock = fingerprint["bedrock"][CENTER]
+            .as_str()
+            .unwrap_or("minecraft:air");
+        let manifest_below = fingerprint["below_feet"][CENTER]
+            .as_str()
+            .unwrap_or("minecraft:air");
+        // Canonicalize the observed names into the manifest's namespace: the
+        // client emits azalea bare ids (`grass_block`) which must compare equal
+        // to the manifest's namespaced names (`minecraft:grass_block`).
+        let observed_surface = canonicalize_block_name(sample["surface"].as_str());
+        let observed_bedrock = canonicalize_block_name(sample["bedrock"].as_str());
+        let observed_below = canonicalize_block_name(sample["below_feet"].as_str());
+
+        let surface_match = observed_surface == manifest_surface;
+        let bedrock_match = observed_bedrock == manifest_bedrock;
+        let below_match = observed_below == manifest_below;
+        if !(surface_match && bedrock_match && below_match) {
+            return Err(RunnerError::Gate(format!(
+                "loaded-world content mismatch at chunk {key} (sample {},{}, center): \
+                 observed surface={observed_surface} bedrock={observed_bedrock} \
+                 below_feet={observed_below}; ground truth surface={manifest_surface} \
+                 bedrock={manifest_bedrock} below_feet={manifest_below}",
+                sample["sample_x"].as_i64().unwrap_or(chunk_x * 16),
+                sample["sample_z"].as_i64().unwrap_or(chunk_z * 16),
+            )));
+        }
+        checked += 1;
+    }
+
+    println!("\n    verified {checked} sampled chunks against the ground-truth manifest");
+    Ok(())
+}
+
 /// Map only the post-spawn READY/exit `Unverified` result through the
 /// world-path probe classifier. `Gate` and `Io` can happen before a child is
 /// spawned (run-dir preparation or `Command::spawn`) and must remain hard
@@ -2734,13 +3179,12 @@ fn classify_load_world_boot_failure(error: server::Error, log_path: &Path) -> Ru
     let log = fs::read_to_string(log_path).unwrap_or_default();
     match server::classify_probe(false, &log) {
         server::ProbeVerdict::Absent { evidence } => RunnerError::Unverified(format!(
-            "loaded-world acceptance is UNVERIFIED: rivet-server has no world-path/loading \
-             capability yet (#339); launch evidence: {evidence}"
+            "loaded-world acceptance is UNVERIFIED: rivet-server rejected the --level launch \
+             interface; launch evidence: {evidence}"
         )),
         server::ProbeVerdict::FailedToBoot { evidence } => RunnerError::Unverified(format!(
-            "loaded-world acceptance is UNVERIFIED: the launch probe did not reach READY and did \
-             not prove the expected missing #339 interface ({boot_error}); last log evidence: \
-             {evidence}"
+            "loaded-world acceptance is UNVERIFIED: the launch probe did not reach READY \
+             ({boot_error}); last log evidence: {evidence}"
         )),
         server::ProbeVerdict::Present => unreachable!("the failed boot did not reach READY"),
     }
@@ -2761,6 +3205,7 @@ fn main() -> ExitCode {
         Subcommand::Kick => run_kick(&args),
         Subcommand::Capture => run_capture(&args),
         Subcommand::LoadWorld => run_load_world(&args),
+        Subcommand::LoadedWorld => run_loaded_world(&args),
         Subcommand::Help => {
             println!("{}", usage());
             Ok(())
@@ -2808,6 +3253,328 @@ mod tests {
         assert!(parse(&["load-world", "--dwell-seconds", "35"]).is_err());
         assert!(parse(&["load-world", "--username", DEFAULT_USERNAME]).is_err());
         assert!(parse(&["load-world", "--timeout-seconds", "40"]).is_err());
+    }
+
+    #[test]
+    fn loaded_world_is_a_single_rivet_acceptance_with_no_silent_options() {
+        // `loaded-world` (#374) boots exactly one Rivet server against a
+        // disposable world copy and drives the loaded client; Paper has no
+        // place, and --pairs/--runs would be silent no-ops.
+        let args = parse(&["loaded-world"]).unwrap();
+        assert_eq!(args.command, Subcommand::LoadedWorld);
+        assert_eq!(args.server, ServerSelection::Rivet);
+        assert_eq!(args.runs, 1);
+
+        assert!(parse(&["loaded-world", "--server", "rivet"]).is_ok());
+        assert!(parse(&["loaded-world", "--server", "paper"]).is_err());
+        assert!(parse(&["loaded-world", "--server", "both"]).is_err());
+        assert!(parse(&["loaded-world", "--pairs", "paper:rivet"]).is_err());
+        assert!(parse(&["loaded-world", "--runs", "1"]).is_err());
+        assert!(parse(&["loaded-world", "--dwell-seconds", "35"]).is_err());
+        assert!(parse(&["loaded-world", "--username", DEFAULT_USERNAME]).is_err());
+        assert!(parse(&["loaded-world", "--timeout-seconds", "40"]).is_err());
+    }
+
+    /// A minimal ground-truth manifest with one FULL chunk (0,0) carrying a
+    /// genuine terrain signature at the center sample index.
+    fn manifest_with(
+        chunk_x: i32,
+        chunk_z: i32,
+        surface: &str,
+        bedrock: &str,
+        below: &str,
+    ) -> Value {
+        manifest_with_status(chunk_x, chunk_z, surface, bedrock, below, "minecraft:full")
+    }
+
+    /// A minimal ground-truth manifest whose chunk carries an explicit status
+    /// (FULL or a pre-full status the #519 capability cannot yet carry).
+    fn manifest_with_status(
+        chunk_x: i32,
+        chunk_z: i32,
+        surface: &str,
+        bedrock: &str,
+        below: &str,
+        status: &str,
+    ) -> Value {
+        let mut surface_arr = vec!["minecraft:air".to_owned(); 256];
+        let mut bedrock_arr = vec!["minecraft:air".to_owned(); 256];
+        let mut below_arr = vec!["minecraft:air".to_owned(); 256];
+        // Center sample index: z*16+x = 8*16+8.
+        surface_arr[8 * 16 + 8] = surface.to_owned();
+        bedrock_arr[8 * 16 + 8] = bedrock.to_owned();
+        below_arr[8 * 16 + 8] = below.to_owned();
+        json!({
+            "chunks": {
+                format!("{chunk_x},{chunk_z}"): {
+                    "status": status,
+                    "stored_pos": [chunk_x, chunk_z],
+                    "capability_flags": [],
+                    "distinct": [surface, bedrock, below],
+                    "surface": surface_arr,
+                    "bedrock": bedrock_arr,
+                    "below_feet": below_arr,
+                    "distinct_state_ids": 3,
+                    "section_count": 24,
+                }
+            }
+        })
+    }
+
+    fn loaded_transcript_with(sample: Value) -> Value {
+        json!({
+            "loaded": { "samples": [sample] }
+        })
+    }
+
+    fn matching_sample(chunk_x: i32, chunk_z: i32) -> Value {
+        json!({
+            "chunk_x": chunk_x,
+            "chunk_z": chunk_z,
+            "sample_x": chunk_x * 16 + 8,
+            "sample_z": chunk_z * 16 + 8,
+            // Bare azalea ids (`grass_block`) — the form the real client emits
+            // via `BlockTrait::id()` — must still match the namespaced manifest
+            // names (`minecraft:grass_block`) once canonicalized.
+            "surface": "grass_block",
+            "bedrock": "bedrock",
+            "below_feet": "stone",
+        })
+    }
+
+    #[test]
+    fn compare_loaded_content_passes_when_observed_matches_ground_truth() {
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_ok(),
+            "a genuine per-coordinate match must pass"
+        );
+    }
+
+    #[test]
+    fn compare_loaded_content_fails_on_a_content_mismatch() {
+        // The client observed a different surface than the ground truth — the
+        // anti-superflat negative: a server that echoes repeated superflat
+        // bytes cannot match a genuine terrain chunk.
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let mut sample = matching_sample(0, 0);
+        sample["surface"] = json!("minecraft:stone");
+        let transcript = loaded_transcript_with(sample);
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_err(),
+            "an observed content mismatch must fail"
+        );
+    }
+
+    #[test]
+    fn compare_loaded_content_fails_on_a_chunk_outside_the_manifest() {
+        // The client sampled a chunk the ground-truth manifest has no record
+        // of — the server served content that is not in the loaded world.
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let transcript = loaded_transcript_with(matching_sample(5, 5));
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_err(),
+            "a sample outside the manifest must fail"
+        );
+    }
+
+    #[test]
+    fn compare_loaded_content_fails_on_empty_samples() {
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let mut transcript = loaded_transcript_with(json!({}));
+        transcript["loaded"]["samples"] = json!([]);
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_err(),
+            "an empty sample set must fail (never a vacuous pass)"
+        );
+    }
+
+    /// A minimal ground-truth manifest whose FULL chunk carries the given
+    /// #519-uncarried capability flags.
+    fn manifest_with_flags(chunk_x: i32, chunk_z: i32, flags: &[&str]) -> Value {
+        let mut m = manifest_with(
+            chunk_x,
+            chunk_z,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        m["chunks"][format!("{chunk_x},{chunk_z}")]["capability_flags"] =
+            json!(flags.iter().map(|f| f.to_string()).collect::<Vec<_>>());
+        m
+    }
+
+    #[test]
+    fn compare_loaded_content_is_unverified_on_uncarried_capability_flags() {
+        // A FULL chunk that carries an uncarried #519 surface (non-empty
+        // entities) is beyond the full-construction capability boundary even
+        // though its status is minecraft:full. The runner must refuse PASS —
+        // comparing its content would trust a server that could not have served
+        // it faithfully.
+        let manifest = manifest_with_flags(0, 0, &["entities"]);
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        match compare_loaded_content(&manifest, &transcript) {
+            Err(RunnerError::Unverified(message)) => {
+                assert!(
+                    message.contains("entities") && message.contains("refuses PASS"),
+                    "must name the flag and the refusal, got {message}"
+                );
+            }
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_loaded_content_normalizes_observed_bare_ids() {
+        // The client emits azalea bare registry ids (`grass_block`); the
+        // manifest stores namespaced names. The comparison must canonicalize
+        // the observed side so a genuine content match is not defeated by the
+        // representation difference (the anti-superflat contract).
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        // `matching_sample` now emits bare ids; a pass proves normalization.
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        assert!(
+            compare_loaded_content(&manifest, &transcript).is_ok(),
+            "bare observed ids must match namespaced ground truth after canonicalization"
+        );
+    }
+
+    #[test]
+    fn compare_loaded_content_is_unverified_on_a_non_full_chunk() {
+        // A sampled chunk that is not minecraft:full has no ground-truth
+        // content (the #519 full-construction capability is absent) — the
+        // acceptance must report UNVERIFIED, never a misleading content
+        // mismatch.
+        let manifest = manifest_with_status(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+            "minecraft:structure_starts",
+        );
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        match compare_loaded_content(&manifest, &transcript) {
+            Err(RunnerError::Unverified(message)) => {
+                assert!(
+                    message.contains("structure_starts") && message.contains("UNVERIFIED"),
+                    "must name the non-FULL status and the UNVERIFIED boundary, got {message}"
+                );
+            }
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_loaded_content_refuses_a_missing_status() {
+        // A fingerprint with no Status must never default to minecraft:full —
+        // that would compare (and possibly PASS) a chunk whose ground-truth
+        // status is unknown. The malformed-manifest contract refuses it as a
+        // Gate instead.
+        let mut manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        manifest["chunks"]["0,0"]
+            .as_object_mut()
+            .unwrap()
+            .remove("status");
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        match compare_loaded_content(&manifest, &transcript) {
+            Err(RunnerError::Gate(message)) => {
+                assert!(
+                    message.contains("Status") && message.contains("malformed"),
+                    "must name the missing Status and the malformed-manifest refusal, got {message}"
+                );
+            }
+            other => panic!("expected a Gate refusal for a missing Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compare_loaded_content_refuses_a_non_string_status() {
+        // A non-string Status is the same malformed manifest: refusing it
+        // honestly rather than defaulting to minecraft:full.
+        let mut manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        manifest["chunks"]["0,0"]["status"] = json!(42);
+        let transcript = loaded_transcript_with(matching_sample(0, 0));
+        match compare_loaded_content(&manifest, &transcript) {
+            Err(RunnerError::Gate(message)) => {
+                assert!(
+                    message.contains("Status") && message.contains("malformed"),
+                    "must name the Status and the malformed-manifest refusal, got {message}"
+                );
+            }
+            other => panic!("expected a Gate refusal for a non-string Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_extract_status_maps_oracle_exit_codes() {
+        // A missing world layout surfaces as the oracle's UNVERIFIED (exit 3)
+        // and must stay UNVERIFIED; a FAIL/USAGE exit and a signal must be a
+        // hard Gate — never downgraded to a missing-prerequisite UNVERIFIED.
+        let ok = std::process::Command::new("true").status().unwrap();
+        assert!(classify_extract_status(ok, Path::new("/tmp/out.json")).is_ok());
+
+        let unverified = std::process::Command::new("sh")
+            .args(["-c", "exit 3"])
+            .status()
+            .unwrap();
+        match classify_extract_status(unverified, Path::new("/tmp/out.json")) {
+            Err(RunnerError::Unverified(message)) => {
+                assert!(message.contains("UNVERIFIED"), "got {message}");
+            }
+            other => panic!("expected Unverified for exit 3, got {other:?}"),
+        }
+
+        let fail = std::process::Command::new("false").status().unwrap();
+        match classify_extract_status(fail, Path::new("/tmp/out.json")) {
+            Err(RunnerError::Gate(message)) => {
+                assert!(message.contains("exited with 1"), "got {message}");
+            }
+            other => panic!("expected Gate for exit 1, got {other:?}"),
+        }
     }
 
     #[test]

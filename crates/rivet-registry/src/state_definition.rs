@@ -25,6 +25,7 @@ use crate::block_state::BlockState;
 use crate::block_state_property::{Property, PropertyValue};
 use crate::generated::block_states::shape_of;
 use crate::generated::blocks::BlockId;
+use std::sync::Arc;
 
 /// `StateDefinition<Block, BlockState>` for a single block — the name-sorted
 /// property map plus the operations `NbtUtils.readBlockState` needs.
@@ -101,6 +102,83 @@ impl StateDefinition {
     /// `StateDefinition.any()` — the block's default state.
     pub fn any(self) -> BlockState {
         BlockState::of(self.block)
+    }
+
+    /// `StateDefinition.propertiesCodec()` — the `MapCodec<BlockState>` that
+    /// decodes/encodes this block's `Properties` compound (the `StateHolder
+    /// .codec` dispatch's per-block body for non-singleton states).
+    ///
+    /// Java (StateDefinition.java:57-64, 142-155):
+    /// ```java
+    /// MapCodec<S> codec = MapCodec.unit(defaultSupplier);
+    /// for (Entry<String, Property<?>> entry : propertiesByName.entrySet())
+    ///     codec = appendPropertyCodec(codec, defaultSupplier, entry.getKey(), entry.getValue());
+    /// ```
+    /// where `appendPropertyCodec` is
+    /// `Codec.mapPair(codec, property.valueCodec().fieldOf(name).orElseGet(
+    /// var0 -> {}, () -> property.value(defaultSupplier.get())))` folded with
+    /// an `.xmap` that collapses the accumulated pair onto the state. The port
+    /// mirrors that fold with [`rivet_serialization::codec::map_pair`] (the
+    /// `PairMapCodec`) and [`crate::block_state_codec::property_value_codec`]
+    /// (`Property.valueCodec`). Per-property fields are name-sorted (the shape
+    /// is name-sorted); an invalid or absent value falls back to the
+    /// property's value on the block's default state via `orElseGet`; encode
+    /// always writes every property.
+    pub fn properties_codec<Ops: rivet_serialization::dynamic_ops::DynamicOps + 'static>(
+        self,
+    ) -> Arc<dyn rivet_serialization::map_codec::MapCodec<BlockState, Ops>>
+    where
+        BlockState: Clone + 'static,
+    {
+        use crate::block_state_codec::property_value_codec;
+        use rivet_serialization::codec;
+        use rivet_serialization::map_codec;
+        use rivet_serialization::pair::Pair;
+        use std::sync::Arc;
+
+        let default = self.any();
+        // `MapCodec.unit(defaultSupplier)`.
+        let mut codec: Arc<dyn rivet_serialization::map_codec::MapCodec<BlockState, Ops>> =
+            map_codec::unit_with(Arc::new(move || default));
+
+        for prop in self.properties() {
+            let prop_name = prop.name().to_string();
+            // `property.valueCodec().fieldOf(name)`.
+            let value_field = map_codec::field_of(
+                prop_name,
+                codec::encoder_of_codec(property_value_codec::<Ops>(prop)),
+                codec::decoder_of_codec(property_value_codec::<Ops>(prop)),
+            );
+            // `.orElseGet(var0 -> {}, () -> property.value(defaultSupplier.get()))` —
+            // an absent/invalid value falls back to the default state's value.
+            let default_value = default
+                .get_value(prop)
+                .expect("block-state codec property is on its default state");
+            let value_field = map_codec::or_else_get(
+                value_field,
+                Arc::new(|_| {}),
+                Arc::new(move || default_value),
+            );
+            // `Codec.mapPair(codec, valueField)`.
+            let pair_codec = codec::map_pair(codec, value_field);
+            // `.xmap(pair -> pair.getFirst().setValue(property, value),
+            // state -> Pair.of(state, property.value(state)))`.
+            codec = map_codec::xmap(
+                pair_codec,
+                Arc::new(move |pair: &Pair<BlockState, PropertyValue>| {
+                    pair.first
+                        .set_value(prop, pair.second)
+                        .expect("validated property value on the block's state")
+                }),
+                Arc::new(move |state: &BlockState| {
+                    let value = state
+                        .get_value(prop)
+                        .expect("block-state codec property is on the state");
+                    Pair::of(*state, value)
+                }),
+            );
+        }
+        codec
     }
 }
 

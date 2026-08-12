@@ -43,6 +43,7 @@ use crate::generated::block_states::{
 };
 use crate::generated::blocks::BlockId;
 use crate::generated::tags::BLOCK_TAG_BY_NAME;
+use crate::map_color::MapColor;
 
 /// A concrete block state: a dense global state id with the owning block's
 /// property values already fixed. `Copy`/`Eq`/`Hash` mirror the id it wraps, so
@@ -372,6 +373,26 @@ impl BlockState {
     #[inline]
     pub fn map_color_id(self) -> u8 {
         ((self.behavior() >> BEHAVIOR_SHIFT_MAP_COLOR) & BEHAVIOR_MASK_MAP_COLOR) as u8
+    }
+
+    /// The state's `MapColor` value (Paper `BlockStateBase.getMapColor` — the
+    /// `BlockBehaviour.Properties.mapColor` the block registered with, cached at
+    /// state construction; the `level`/`pos` arguments are unused by the port
+    /// because Paper itself never reads them from this accessor).
+    #[inline]
+    pub fn map_color(self) -> MapColor {
+        MapColor::by_id(self.map_color_id())
+    }
+
+    /// The lighting opacity — Paper `LightEngine.getOpacity(BlockState)` =
+    /// `Math.max(1, state.getLightDampening())`. This is the block-opacity
+    /// surface Starlight's `BlockLightEngine`/`SkyLightEngine` subtract from the
+    /// incoming light level during propagation (issue #184); it is deliberately
+    /// distinct from `light_dampening` so a caller can't confuse the dampening
+    /// a block reports with the >=1 opacity the light engine clamps to.
+    #[inline]
+    pub fn light_opacity(self) -> u8 {
+        self.light_dampening().max(1)
     }
 
     // --- tag query ----------------------------------------------------------
@@ -704,6 +725,41 @@ mod tests {
     }
 
     #[test]
+    fn map_color_returns_the_state_map_color_value() {
+        // Paper `BlockStateBase.getMapColor` returns the block's registered
+        // `MapColor`; the `level`/`pos` args are never read. MapColor equality
+        // is (id, col), so this both resolves the id and asserts the col the
+        // behavior word encodes (STONE=11/7368816, WATER=12/4210943,
+        // PLANT/leaves=7/31744 — the MapColor table's pinned RGBs).
+        let state = |name: &str| BlockState::of(BlockId::from_name(name).unwrap());
+        assert_eq!(state("minecraft:stone").map_color(), MapColor::STONE);
+        assert_eq!(state("minecraft:water").map_color(), MapColor::WATER);
+        assert_eq!(state("minecraft:oak_leaves").map_color(), MapColor::PLANT);
+        assert_eq!(state("minecraft:lava").map_color(), MapColor::FIRE);
+        assert_eq!(state("minecraft:air").map_color(), MapColor::NONE);
+        // The color value decodes the same rgb the table pins.
+        assert_eq!(state("minecraft:stone").map_color().col, 7368816);
+    }
+
+    #[test]
+    fn light_opacity_is_max_of_one_and_dampening() {
+        // Paper `LightEngine.getOpacity(BlockState) = Math.max(1,
+        // state.getLightDampening())` — the value Starlight's block/sky engines
+        // subtract during propagation. A full block (stone, dampening 15) reads
+        // 15; a dampening-1 block (water/lava/oak_leaves) reads 1; a
+        // dampening-0 block (air/glass/torch, propagates skylight down) is
+        // CLAMPED to 1, never 0.
+        let state = |name: &str| BlockState::of(BlockId::from_name(name).unwrap());
+        assert_eq!(state("minecraft:stone").light_opacity(), 15);
+        assert_eq!(state("minecraft:water").light_opacity(), 1);
+        assert_eq!(state("minecraft:lava").light_opacity(), 1);
+        assert_eq!(state("minecraft:oak_leaves").light_opacity(), 1);
+        assert_eq!(state("minecraft:air").light_opacity(), 1);
+        assert_eq!(state("minecraft:glass").light_opacity(), 1);
+        assert_eq!(state("minecraft:torch").light_opacity(), 1);
+    }
+
+    #[test]
     fn tag_membership_reads_owning_block() {
         let planks = BlockState::of(BlockId::from_name("minecraft:oak_planks").unwrap());
         assert!(planks.is_in_tag("minecraft:planks"));
@@ -712,6 +768,36 @@ mod tests {
         assert!(!log.is_in_tag("minecraft:planks"));
         // Unknown tags read as false, not an error.
         assert!(!log.is_in_tag("minecraft:does_not_exist"));
+    }
+
+    #[test]
+    fn leaves_tag_covers_exactly_the_heightmap_leaves_set() {
+        // The `MOTION_BLOCKING_NO_LEAVES` exclusion is
+        // `getBlock() instanceof LeavesBlock` == `is_in_tag("minecraft:leaves")`
+        // — the generated `BlockTags.LEAVES`. This pins the 11 members (the
+        // same set the heightmap's removed `LEAVES_BLOCKS` constant carried, so
+        // the generated table is a faithful, single-source replacement). It also
+        // asserts a non-leaf (stone) is excluded.
+        let is_leaves = |name: &str| {
+            BlockState::of(BlockId::from_name(name).unwrap()).is_in_tag("minecraft:leaves")
+        };
+        for name in [
+            "minecraft:jungle_leaves",
+            "minecraft:oak_leaves",
+            "minecraft:spruce_leaves",
+            "minecraft:pale_oak_leaves",
+            "minecraft:dark_oak_leaves",
+            "minecraft:acacia_leaves",
+            "minecraft:birch_leaves",
+            "minecraft:azalea_leaves",
+            "minecraft:flowering_azalea_leaves",
+            "minecraft:mangrove_leaves",
+            "minecraft:cherry_leaves",
+        ] {
+            assert!(is_leaves(name), "{name} must be in minecraft:leaves");
+        }
+        assert!(!is_leaves("minecraft:stone"));
+        assert!(!is_leaves("minecraft:oak_log"));
     }
 
     #[test]

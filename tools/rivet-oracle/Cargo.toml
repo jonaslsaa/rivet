@@ -17,3 +17,15 @@ sha2 = "0.10"
 xxhash-rust = { workspace = true }
 rivet-nbt = { path = "../../crates/rivet-nbt" }
 rivet-util = { path = "../../crates/rivet-util" }
+# The loaded-world ground-truth extractor (#374) reads the overworld region
+# files through rivet-world's read-only RegionFileStorage + section
+# reconstruction, and names blocks through the generated rivet-registry block
+# table. It is a pure read of the disposable world copy — never a write.
+rivet-world = { path = "../../crates/rivet-world" }
+rivet-registry = { path = "../../crates/rivet-registry", features = ["blocks"] }
+
+[dev-dependencies]
+# The loaded-world extractor tests build synthetic disposable worlds (a real
+# 26.2 region file inside a tempdir) and assert the extraction never mutates
+# them.
+tempfile = { workspace = true }
