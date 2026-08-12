@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use crate::frame;
 use crate::packet::{CapturedPacket, Direction, State};
 use crate::structured;
+use rivet_decode::nbt::MAX_INITIAL_COLLECTION_SIZE;
 
 /// A normalized packet: the raw (state, direction, id) plus the normalized body
 /// and a human-readable note describing any rewrite applied.
@@ -462,7 +463,7 @@ fn canonical_set_time(body: &[u8]) -> Option<Vec<u8>> {
     let mut off = 0;
     frame::read_i64(body, &mut off)?; // gameTime (zeroed below)
     let count = frame::read_varint(body, &mut off)?;
-    let mut holders = Vec::with_capacity(count.max(0) as usize);
+    let mut holders = Vec::with_capacity((count.max(0) as usize).min(MAX_INITIAL_COLLECTION_SIZE));
     for _ in 0..count.max(0) {
         let holder = frame::read_varint(body, &mut off)?;
         frame::read_varlong(body, &mut off)?; // totalTicks (zeroed below)

@@ -69,17 +69,13 @@
 //! a real-boot capture that carries a display-bearing advancement.
 
 use crate::frame;
-use crate::nbt::{Nbt, read_nbt, read_nbt_unbounded, write_nbt};
+use crate::nbt::{MAX_INITIAL_COLLECTION_SIZE, Nbt, read_nbt, read_nbt_unbounded, write_nbt};
 
 /// `STRING_UTF8`'s encoded-byte cap: `Utf8String.read(input, 32767)` rejects a
 /// `VarInt` buffer length over `32767 * 3` bytes (`ByteBufUtil.utf8MaxBytes` is
 /// `maxLength * MAX_BYTES_PER_CHAR_UTF8`, and the JDK UTF-8 encoder reports
 /// `maxBytesPerChar = 3.0`).
 const MAX_STRING_ENCODED_BYTES: usize = 32767 * 3;
-/// `DataComponentPatch.decode` caps its map's initial capacity at
-/// `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE`; the canonicalizer pre-allocates
-/// at most this many slots so a hostile count cannot force a huge allocation.
-const MAX_INITIAL_COLLECTION_SIZE: usize = 65536;
 /// `ItemLore.MAX_LINES` — `list(256)`.
 const MAX_LORE_LINES: usize = 256;
 /// `ItemContainerContents.MAX_SIZE` — `list(256)`.
@@ -3081,6 +3077,63 @@ mod tests {
             read_nbt(&tag, &mut off),
             None,
             "compound nesting past 512 must fail the parse"
+        );
+    }
+
+    #[test]
+    fn nbt_depth_512_scalar_accepted_but_513th_container_rejected() {
+        // Java's NbtAccounter.pushDepth fires only when a compound/list is
+        // loaded, never for a scalar, so exactly 512 container levels are
+        // accepted (the 512th push passes `depth 511 < 512`); a scalar nested
+        // under them reads without a push and is accepted too. The 513th
+        // container fails. The Rust parser must match that boundary: a scalar
+        // leaf at depth 512 parses, a compound at depth 512 is refused.
+        // Build a chain of `depth + 1` compound levels: the innermost is
+        // `{ a: byte 7 }` and each outer level is `{ a: <inner compound> }`.
+        // A compound's wire form is `[type 10][field...][end 0]`; a field is
+        // `[type][u16 name len][name bytes][value]`, where a compound field
+        // value is the inner's fields + end (the inner type byte is already the
+        // field's type byte, so it is not repeated inside the value).
+        fn chain(depth: usize) -> Vec<u8> {
+            let mut fields_and_end = vec![
+                1, // field type: byte
+                0, 1,    // u16 name len = 1
+                b'a', // name
+                7,    // byte value
+                0,    // end tag
+            ];
+            for _ in 0..depth {
+                let mut outer = vec![
+                    10u8, // field type: compound
+                    0, 1, // u16 name len = 1
+                    b'a',
+                ];
+                outer.extend_from_slice(&fields_and_end); // inner fields + end
+                outer.push(0); // this level's end tag
+                fields_and_end = outer;
+            }
+            // Prepend the root compound's type byte.
+            let mut full = vec![10u8];
+            full.extend_from_slice(&fields_and_end);
+            full
+        }
+
+        // 512 compounds (chain(511)): the 512th pushDepth is depth 511 ->
+        // accepted; the scalar leaf reads at depth 512 without a push ->
+        // accepted.
+        let mut off = 0;
+        assert!(
+            read_nbt(&chain(511), &mut off).is_some(),
+            "exactly 512 container levels are accepted by Java"
+        );
+
+        // 513 compounds (chain(512)): the 513th pushDepth is depth 512 ->
+        // throws.
+        let mut off = 0;
+        assert_eq!(
+            read_nbt(&chain(512), &mut off),
+            None,
+            "the 513th container level is rejected by Java"
         );
     }
 

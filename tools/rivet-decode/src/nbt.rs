@@ -161,7 +161,13 @@ fn read_payload_depth(
     depth: u32,
     budget: &mut Option<i64>,
 ) -> Option<Nbt> {
-    if depth >= MAX_NBT_DEPTH {
+    // Java's `NbtAccounter.pushDepth()` fires only when a compound or list is
+    // loaded (`CompoundTag.load`/`ListTag.load`), never for a scalar tag, so a
+    // scalar nested under exactly `MAX_NBT_DEPTH` containers is accepted by
+    // Java while a 513th container is rejected. Guard only the container tags
+    // to match; scalars are leaves (no recursion), so the cap still bounds the
+    // recursion depth exactly like Java's counter.
+    if depth >= MAX_NBT_DEPTH && matches!(type_byte, 9 | 10) {
         return None;
     }
     match type_byte {
