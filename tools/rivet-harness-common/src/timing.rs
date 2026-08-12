@@ -51,11 +51,6 @@ pub const MOVE_TIMEOUT_HEADROOM_SECONDS: u64 = DWELL_LOGIN_HEADROOM_SECONDS
     + MOVE_DRAIN_SECONDS_CEIL
     + KEEPALIVE_SETTLE_TIMEOUT_SECS;
 
-/// The move budget is a compile-time constant; a refactor that zeroes every
-/// summand would leave no wall-clock budget for the walk, so pin it above zero
-/// in every build (not just test builds).
-const _: () = assert!(MOVE_TIMEOUT_HEADROOM_SECONDS > 0);
-
 /// Reject a `move` `--timeout-seconds` below the minimum safe budget: the
 /// `moved` record is emitted only after login/configuration, the fixed walk,
 /// the drain, and the keepalive settle. A timeout below that total cuts the

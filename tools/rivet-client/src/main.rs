@@ -566,15 +566,25 @@ struct KeepaliveLog {
 }
 
 impl KeepaliveLog {
-    /// Test-only: whether a snapshot is bidirectionally 1:1 — every challenge
-    /// echoed and every echo has its challenge. Mirrors the settle loop's
-    /// success predicate.
-    #[cfg(test)]
+    /// Whether the challenge and echo streams are 1:1 as multisets — the exact
+    /// predicate the transcript's `set_equality` verdict comparison uses (every
+    /// challenge echoed, every echo matches a challenge, and no duplicate on
+    /// either side). The single source of truth for both the settle loop's
+    /// success predicate and the test assertions, so the two cannot drift.
+    ///
+    /// Requires a non-empty challenge set: a real walk always draws keepalives
+    /// (the server challenges at 1/s), so an empty log is a broken observer,
+    /// not a healthy settled state — this prevents a fully-broken keepalive
+    /// observation from reporting a vacuous 1:1.
     fn settled(&self) -> bool {
-        self.challenges
-            .iter()
-            .all(|c| self.echoes.contains(c))
-            && self.echoes.iter().all(|e| self.challenges.contains(e))
+        if self.challenges.is_empty() || self.challenges.len() != self.echoes.len() {
+            return false;
+        }
+        let mut challenges = self.challenges.clone();
+        let mut echoes = self.echoes.clone();
+        challenges.sort_unstable();
+        echoes.sort_unstable();
+        challenges == echoes
     }
 }
 
@@ -1120,18 +1130,21 @@ async fn move_and_emit(bot: Client, state: State) {
 ///
 /// A challenge/echo pair can straddle the emit boundary in either order — a
 /// challenge with its echo still in flight, or a stray echo whose challenge
-/// record has not landed (the move-mode flake). The 1:1 check is bidirectional
-/// (every challenge echoed AND every echo has its challenge), so a straddling
-/// pair in either order keeps the loop going until it resolves. Legitimate
-/// straddles resolve within a tick or an event-channel drain — milliseconds,
-/// well inside `timeout` — so the success path always fires for a healthy run.
-/// The deadline path only fires after `timeout` of genuine mismatch (a client
-/// that stopped echoing, which the server would kick, or a broken stream), and
-/// returns the full live log so the honest mismatch is preserved: a missing
-/// echo or a stray echo both fail the transcript's `keepalive_echo` check.
-/// Never truncating to a settle-entry prefix means dwell's verdict-checked
-/// challenge count and span, and move's structural relationship, are all
-/// observed exactly as the streams stood.
+/// record has not landed (the move-mode flake). The 1:1 check is multiset
+/// equality (`KeepaliveLog::settled` — every challenge echoed, every echo has
+/// its challenge, no duplicates), which is exactly the transcript's
+/// `keepalive_echo` verdict comparison, so a straddling pair in either order
+/// keeps the loop going until it resolves. Legitimate straddles resolve within
+/// a tick or an event-channel drain — milliseconds, well inside `timeout` — so
+/// the success path fires promptly on a healthy run (the log is 1:1 for ~all
+/// but a few ms of each keepalive second, so the loop settles on its first or
+/// second poll). The deadline path fires only after `timeout` of *persistent*
+/// non-1:1 (a client that stopped echoing, which the server would kick, or a
+/// broken stream), and returns the full live log so the honest mismatch is
+/// preserved: a missing echo or a stray echo both fail the transcript's
+/// `keepalive_echo` check. Never truncating to a settle-entry prefix means
+/// dwell's verdict-checked challenge count and span, and move's structural
+/// relationship, are all observed exactly as the streams stood.
 ///
 /// `timeout` and `interval` are parameters so the straddle/missing-echo
 /// counterfactuals can be driven deterministically in tests.
@@ -1148,15 +1161,7 @@ async fn settle_and_snapshot(
         // is not Send).
         let snapshot = {
             let guard = log.lock().expect("keepalive log lock poisoned");
-            let settled = guard
-                .challenges
-                .iter()
-                .all(|c| guard.echoes.contains(c))
-                && guard
-                    .echoes
-                    .iter()
-                    .all(|e| guard.challenges.contains(e));
-            if settled || Instant::now() >= settle_deadline {
+            if guard.settled() || Instant::now() >= settle_deadline {
                 Some(guard.clone())
             } else {
                 None

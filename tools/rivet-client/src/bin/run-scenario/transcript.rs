@@ -510,6 +510,20 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
             "corrections": corrections,
         });
 
+        // Semantic invariant: a `moved` run must have observed keepalives. The
+        // server challenges at 1/s, so a 6 s walk always draws several; an
+        // empty keepalive set means the observer failed, and reporting a vacuous
+        // 1:1 (`set_equality([], [])` == true) would let a broken keepalive
+        // observation pass parity against a healthy boot. Reject it as a hard
+        // error rather than emit a transcript that compares vacuously.
+        if keepalives.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+            return Err(
+                "moved run recorded no keepalives: the keepalive observer failed (a 6 s walk at \
+                 the server's 1/s cadence always draws several)"
+                    .to_owned(),
+            );
+        }
+
         // Semantic invariant: the sampled walk must show meaningful forward
         // progress. A no-op boot (the walk direction was never applied, or the
         // player never actually moved) is a harness failure, not a valid `moved`
