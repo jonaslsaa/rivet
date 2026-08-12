@@ -159,6 +159,25 @@ where
     Arc::new(PairCodec { first, second })
 }
 
+/// `Codec.mapPair(MapCodec<F>, MapCodec<S>)` — `new PairMapCodec<>(first,
+/// second)`, the map-keyed twin of [`pair`].
+///
+/// Java `Codec.mapPair` combines two `MapCodec`s into one `MapCodec` over the
+/// pair (the `appendPropertyCodec` fold in `StateDefinition` chains these).
+/// Decode is sequential (no error accumulation); encode applies the second
+/// field first.
+pub fn map_pair<F, S, Ops: DynamicOps + 'static>(
+    first: Arc<dyn crate::map_codec::MapCodec<F, Ops>>,
+    second: Arc<dyn crate::map_codec::MapCodec<S, Ops>>,
+) -> Arc<dyn crate::map_codec::MapCodec<Pair<F, S>, Ops>>
+where
+    F: 'static + Clone,
+    S: 'static + Clone,
+{
+    use crate::codecs::pair_map_codec::PairMapCodec;
+    Arc::new(PairMapCodec { first, second })
+}
+
 /// `Codec.either(Codec<F>, Codec<S>)`.
 pub fn either<F, S, Ops: DynamicOps + 'static>(
     first: Arc<dyn Codec<F, Ops>>,
