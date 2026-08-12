@@ -51,7 +51,7 @@
 //! maxima are enforced where the codec has them — `list(256)` lore/container/
 //! bundle, `list(1024)` charged projectiles, `list(100)` writable book,
 //! `list(64)` data-component predicates, `readCount(16)` profile properties,
-//! `STRING_UTF8` (32767*4 encoded bytes) strings, and the three-value
+//! `STRING_UTF8` (32767*3 encoded bytes) strings, and the three-value
 //! `AdvancementType` display frame — and negative holder-registry / holder-set
 //! ids are refused like `Registry.byIdOrThrow`.
 //!
@@ -63,8 +63,10 @@ use crate::frame;
 use crate::nbt::{Nbt, read_nbt, write_nbt};
 
 /// `STRING_UTF8`'s encoded-byte cap: `Utf8String.read(input, 32767)` rejects a
-/// `VarInt` buffer length over `32767 * 4` bytes (Java's `utf8MaxBytes`).
-const MAX_STRING_ENCODED_BYTES: usize = 32767 * 4;
+/// `VarInt` buffer length over `32767 * 3` bytes (`ByteBufUtil.utf8MaxBytes` is
+/// `maxLength * MAX_BYTES_PER_CHAR_UTF8`, and the JDK UTF-8 encoder reports
+/// `maxBytesPerChar = 3.0`).
+const MAX_STRING_ENCODED_BYTES: usize = 32767 * 3;
 /// `DataComponentPatch.decode` caps its map's initial capacity at
 /// `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE`; the canonicalizer pre-allocates
 /// at most this many slots so a hostile count cannot force a huge allocation.
@@ -79,9 +81,9 @@ const MAX_BUNDLE_ITEMS: usize = 256;
 const MAX_CHARGED_PROJECTILES: usize = 1024;
 /// `WritableBookContent` — `list(100)` of `Filterable(stringUtf8(1024))`.
 const MAX_WRITABLE_BOOK_PAGES: usize = 100;
-const MAX_WRITABLE_PAGE_ENCODED_BYTES: usize = 1024 * 4;
+const MAX_WRITABLE_PAGE_ENCODED_BYTES: usize = 1024 * 3;
 /// `WrittenBookContent` title — `Filterable(stringUtf8(32))`.
-const MAX_WRITTEN_TITLE_ENCODED_BYTES: usize = 32 * 4;
+const MAX_WRITTEN_TITLE_ENCODED_BYTES: usize = 32 * 3;
 /// `DataComponentPredicate.STREAM_CODEC` — `list(64)`.
 const MAX_DATA_COMPONENT_PREDICATES: usize = 64;
 /// `PotDecorations.STREAM_CODEC` — `list(4)(registry ITEM)`.
@@ -91,15 +93,19 @@ const MAX_FIREWORK_EXPLOSIONS: usize = 256;
 /// `ByteBufCodecs.GAME_PROFILE_PROPERTIES` — `readCount(16)`.
 const MAX_PROFILE_PROPERTIES: usize = 16;
 /// `ByteBufCodecs.PLAYER_NAME` — `stringUtf8(16)`.
-const MAX_PROFILE_NAME_ENCODED_BYTES: usize = 16 * 4;
+const MAX_PROFILE_NAME_ENCODED_BYTES: usize = 16 * 3;
 /// Game-profile property name — `Utf8String.read(input, 64)`.
-const MAX_PROFILE_PROPERTY_NAME_ENCODED_BYTES: usize = 64 * 4;
+const MAX_PROFILE_PROPERTY_NAME_ENCODED_BYTES: usize = 64 * 3;
 /// Game-profile property signature — `Utf8String.read(in, 1024)`.
-const MAX_PROFILE_SIGNATURE_ENCODED_BYTES: usize = 1024 * 4;
+const MAX_PROFILE_SIGNATURE_ENCODED_BYTES: usize = 1024 * 3;
 /// `AdvancementType` has three values (TASK=0, CHALLENGE=1, GOAL=2); the
 /// display's `writeEnum`/`readEnum` frame field is bounded by that count.
 const MAX_ADVANCEMENT_TYPE_ID: i32 = 2;
 
+/// `Utf8String.read(input, 32767)` rejects a buffer length over
+/// `32767 * 3` encoded bytes AND a decoded string over 32767 chars
+/// (`String.length()` — UTF-16 code units), so a string that fits the byte cap
+/// but exceeds the char count is refused too.
 fn read_string(body: &[u8], off: &mut usize) -> Option<String> {
     let len = frame::read_varint(body, off)?;
     if len < 0 || len as usize > MAX_STRING_ENCODED_BYTES {
@@ -109,6 +115,9 @@ fn read_string(body: &[u8], off: &mut usize) -> Option<String> {
         .ok()?
         .to_owned();
     *off += len as usize;
+    if s.encode_utf16().count() > 32767 {
+        return None;
+    }
     Some(s)
 }
 
@@ -466,14 +475,14 @@ fn skip_uuid(body: &[u8], off: &mut usize) -> Option<()> {
 }
 
 /// Skip `[VarInt byte length][UTF-8 bytes]` (`Utf8String` / `Identifier`,
-/// default `STRING_UTF8` max of 32767 chars / 32767*4 encoded bytes).
+/// default `STRING_UTF8` max of 32767 chars / 32767*3 encoded bytes).
 fn skip_utf8(body: &[u8], off: &mut usize) -> Option<()> {
     skip_utf8_limited(body, off, MAX_STRING_ENCODED_BYTES)
 }
 
 /// Skip a `[VarInt byte length][UTF-8 bytes]` string bounded by a
 /// Java-grounded encoded-byte cap (`Utf8String.read` rejects
-/// `bufferLength > maxLength * 4`).
+/// `bufferLength > maxLength * 3`).
 fn skip_utf8_limited(body: &[u8], off: &mut usize, max_encoded: usize) -> Option<()> {
     let len = frame::read_varint(body, off)?;
     if len < 0 || len as usize > max_encoded {
@@ -3249,9 +3258,22 @@ mod tests {
     #[test]
     fn advancement_id_over_string_max_is_rejected() {
         // Identifier.STREAM_CODEC = stringUtf8(32767); the encoded-byte max is
-        // 32767*4. A VarInt length beyond that fails the parse.
+        // 32767*3 (ByteBufUtil.utf8MaxBytes = maxLength * 3). A VarInt length
+        // beyond that fails the parse.
         let mut adv = Vec::new();
-        frame::write_varint(&mut adv, 32767 * 4 + 1);
+        frame::write_varint(&mut adv, 32767 * 3 + 1);
+        let input = body(false, &[adv], &[], &[], true);
+        assert_eq!(canon_update_advancements(&input), None);
+    }
+
+    #[test]
+    fn advancement_id_under_string_byte_max_but_over_char_max_is_rejected() {
+        // Utf8String.read rejects a decoded string over 32767 chars even when
+        // the encoded bytes fit the byte cap: 40000 ASCII bytes < 32767*3, but
+        // 40000 chars > 32767, so Java throws DecoderException.
+        let mut adv = Vec::new();
+        frame::write_varint(&mut adv, 40000);
+        adv.extend(vec![b'x'; 40000]);
         let input = body(false, &[adv], &[], &[], true);
         assert_eq!(canon_update_advancements(&input), None);
     }
