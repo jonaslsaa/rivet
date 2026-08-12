@@ -8,7 +8,8 @@
 //! `IntervalSelect`, `Shift`/`ShiftA`/`ShiftB`/`ShiftNoise`, `ShiftedNoise`,
 //! `Noise`, `Spline`, `YClampedGradient`, `FindTopSurface`,
 //! `EndIslandDensityFunction`, `BlendAlpha`, `BlendOffset`, `HolderHolder`,
-//! `BeardifierMarker`).
+//! `BeardifierMarker`, and the `old_blended_noise`/`BlendedNoise` leaf lifted
+//! from `synth::BlendedNoise`).
 //!
 //! ## The dispatch codec
 //!
@@ -51,6 +52,7 @@ use crate::levelgen::noise::density_function::{DensityFunction, FunctionContext,
 use crate::levelgen::noise::density_function_type::{
     DensityFunctionTypeId, DensityFunctionTypes, density_function_type_by_name,
 };
+use crate::levelgen::synth::blended_noise::BlendedNoise as SynthBlendedNoise;
 use crate::levelgen::synth::normal_noise::NoiseParameters;
 use crate::levelgen::synth::simplex_noise::SimplexNoise;
 use rivet_registry::Holder;
@@ -168,6 +170,8 @@ where
         Some(blend_offset_map_codec::<Ops>())
     } else if *k == DensityFunctionTypes::BEARDIFIER {
         Some(beardifier_marker_map_codec::<Ops>())
+    } else if *k == DensityFunctionTypes::OLD_BLENDED_NOISE {
+        Some(blended_noise_map_codec::<Ops>())
     } else if *k == DensityFunctionTypes::INTERPOLATED {
         Some(marker_map_codec::<Ops>(
             MarkerType::Interpolated,
@@ -679,8 +683,8 @@ impl Mapped {
             Mapped {
                 mapped_type,
                 input,
-                min_value: max_image.max(0.0),
-                max_value: max_image.max(min_value),
+                min_value: min_value.max(0.0),
+                max_value: min_image.max(max_image),
             }
         }
     }
@@ -1021,7 +1025,10 @@ impl IntervalSelect {
 
     /// `validate()` — the `DataResult` checks Paper's `IntervalSelect.CODEC`
     /// `validate` applies: the threshold count must be `functions.len() - 1`,
-    /// and the thresholds must be strictly ascending.
+    /// and the thresholds must be non-decreasing (Guava
+    /// `Comparators.isInOrder(thresholds, Double::compare)` returns `false` only
+    /// on a strictly decreasing adjacent pair, so equal thresholds are
+    /// accepted).
     fn validate(interval: &IntervalSelect) -> DataResult<IntervalSelect> {
         if interval.thresholds.len() != interval.functions.len() - 1 {
             return DataResult::error(format!(
@@ -1031,7 +1038,7 @@ impl IntervalSelect {
                 interval.thresholds.len()
             ));
         }
-        if !interval.thresholds.windows(2).all(|w| w[0] < w[1]) {
+        if !interval.thresholds.windows(2).all(|w| w[0] <= w[1]) {
             return DataResult::error(
                 "Threshold values must be ordered from smallest to largest".to_string(),
             );
@@ -1152,6 +1159,31 @@ impl DensityFunction for Noise {
     }
     fn type_id(&self) -> DensityFunctionTypeId {
         DensityFunctionTypes::NOISE
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn clone_arc(&self) -> Arc<dyn DensityFunction> {
+        Arc::new(self.clone())
+    }
+}
+
+/// `DensityFunctions.BlendedNoise` — the `synth::BlendedNoise` value leaf
+/// lifted into the density-function framework (Java `BlendedNoise implements
+/// DensityFunction.SimpleFunction`; the `#177` seam is now closed). It is a
+/// leaf, so `map_children`/`fill_array` use the `SimpleFunction` defaults.
+impl DensityFunction for SynthBlendedNoise {
+    fn compute(&self, context: &dyn FunctionContext) -> f64 {
+        self.compute(context.block_x(), context.block_y(), context.block_z())
+    }
+    fn min_value(&self) -> f64 {
+        self.min_value()
+    }
+    fn max_value(&self) -> f64 {
+        self.max_value()
+    }
+    fn type_id(&self) -> DensityFunctionTypeId {
+        DensityFunctionTypes::OLD_BLENDED_NOISE
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -1469,7 +1501,7 @@ pub fn two_argument_create(
             }
         }
         TwoArgumentType::Min => min1.min(min2),
-        TwoArgumentType::Max => max1.max(max2),
+        TwoArgumentType::Max => min1.max(min2),
     };
 
     let max_value = match two_arg_type {
@@ -2279,13 +2311,14 @@ impl EndIslandDensityFunction {
     }
 }
 
-/// `it.unimi.dsi.fastutil.HashCommon.mix(long)` — the `staffordMix13`
-/// finalizer used by the `NoiseCache` index.
-fn mix_i64(mut z: i64) -> i64 {
-    z = z.wrapping_add(0x9e3779b97f4a7c15u64 as i64);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9u64 as i64);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111ebu64 as i64);
-    z ^ (z >> 31)
+/// `it.unimi.dsi.fastutil.HashCommon.mix(long)` — the multiply-phi + double
+/// xorshift finalizer used by the `NoiseCache` index (Paper calls
+/// `HashCommon.mix(chunkKey)`). NOT splitmix64/staffordMix13 — fastutil's
+/// `mix` is `h = x * LONG_PHI; h ^= h >>> 32; h ^ (h >>> 16)`.
+fn mix_i64(x: i64) -> i64 {
+    let mut h = x.wrapping_mul(0x9e3779b97f4a7c15u64 as i64);
+    h ^= h >> 32;
+    h ^ (h >> 16)
 }
 
 impl DensityFunction for EndIslandDensityFunction {
@@ -2668,11 +2701,67 @@ fn constant_map_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn MapCodec<Arc<dyn DensityFunction>, Ops>> {
     erase_map_codec::<Constant, Ops>(
         map_codec::xmap(
-            codec::field_of(noise_value_codec::<Ops>(), "value".to_string()),
+            codec::field_of(noise_value_codec::<Ops>(), "argument".to_string()),
             Arc::new(|v: &f64| Constant::new(*v)),
             Arc::new(|c: &Constant| c.value),
         ),
         "minecraft:constant".to_string(),
+    )
+}
+
+/// `BlendedNoise.CODEC` — the `synth::BlendedNoise` `DATA_CODEC`:
+/// `xz_scale`/`y_scale`/`xz_factor`/`y_factor` over `Codec.doubleRange(0.001,
+/// 1000.0)` and `smear_scale_multiplier` over `Codec.doubleRange(1.0, 8.0)`,
+/// applied via `BlendedNoise::createUnseeded`.
+fn blended_noise_map_codec<Ops: DynamicOps + 'static>()
+-> Arc<dyn MapCodec<Arc<dyn DensityFunction>, Ops>> {
+    let xz_scale = codec::field_of(
+        codec::double_range::<Ops>(0.001, 1000.0),
+        "xz_scale".to_string(),
+    );
+    let y_scale = codec::field_of(
+        codec::double_range::<Ops>(0.001, 1000.0),
+        "y_scale".to_string(),
+    );
+    let xz_factor = codec::field_of(
+        codec::double_range::<Ops>(0.001, 1000.0),
+        "xz_factor".to_string(),
+    );
+    let y_factor = codec::field_of(
+        codec::double_range::<Ops>(0.001, 1000.0),
+        "y_factor".to_string(),
+    );
+    let smear = codec::field_of(
+        codec::double_range::<Ops>(1.0, 8.0),
+        "smear_scale_multiplier".to_string(),
+    );
+    erase_map_codec::<SynthBlendedNoise, Ops>(
+        map_codec::of(
+            map_encoder_fields5(
+                xz_scale.clone(),
+                y_scale.clone(),
+                xz_factor.clone(),
+                y_factor.clone(),
+                smear.clone(),
+                Arc::new(|b: &SynthBlendedNoise| b.get_xz_scale()),
+                Arc::new(|b: &SynthBlendedNoise| b.get_y_scale()),
+                Arc::new(|b: &SynthBlendedNoise| b.get_xz_factor()),
+                Arc::new(|b: &SynthBlendedNoise| b.get_y_factor()),
+                Arc::new(|b: &SynthBlendedNoise| b.get_smear_scale_multiplier()),
+            ),
+            map_decoder_ap5(
+                xz_scale,
+                y_scale,
+                xz_factor,
+                y_factor,
+                smear,
+                Arc::new(|xs: &f64, ys: &f64, xf: &f64, yf: &f64, s: &f64| {
+                    SynthBlendedNoise::create_unseeded(*xs, *ys, *xf, *yf, *s)
+                }),
+            ),
+            "BlendedNoise".to_string(),
+        ),
+        "minecraft:old_blended_noise".to_string(),
     )
 }
 
@@ -3673,33 +3762,6 @@ where
 }
 
 #[cfg(test)]
-fn old_blended_noise_stub() -> Arc<dyn DensityFunction> {
-    #[derive(Debug)]
-    struct OldBlendedNoise;
-    impl DensityFunction for OldBlendedNoise {
-        fn compute(&self, _context: &dyn FunctionContext) -> f64 {
-            0.0
-        }
-        fn min_value(&self) -> f64 {
-            -2.0
-        }
-        fn max_value(&self) -> f64 {
-            2.0
-        }
-        fn type_id(&self) -> DensityFunctionTypeId {
-            DensityFunctionTypes::OLD_BLENDED_NOISE
-        }
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-        fn clone_arc(&self) -> Arc<dyn DensityFunction> {
-            Arc::new(OldBlendedNoise)
-        }
-    }
-    Arc::new(OldBlendedNoise)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::levelgen::noise::density_function::{
@@ -3755,14 +3817,15 @@ mod tests {
     fn mapped_computes_and_bounds() {
         let abs = mapped(&*constant(-3.0), MappedType::Abs);
         assert_eq!(abs.compute(&at(0, 0, 0)), 3.0);
-        // `Mapped.create(Abs, constant(-3))`: both bounds image to 3, and the
-        // `Abs` branch takes `max(image, 0)` -> 3 / `max(image, min)` -> 3.
-        assert_eq!(abs.min_value(), 3.0);
+        // `Mapped.create(Abs, constant(-3))`: minValue = max(0.0, -3.0) = 0.0,
+        // maxValue = max(abs(-3), abs(-3)) = 3.0 (DensityFunctions.java — the
+        // ABS/SQUARE branch, not the image-to-image fallback).
+        assert_eq!(abs.min_value(), 0.0);
         assert_eq!(abs.max_value(), 3.0);
 
         let sq = mapped(&*constant(-2.0), MappedType::Square);
         assert_eq!(sq.compute(&at(0, 0, 0)), 4.0);
-        assert_eq!(sq.min_value(), 4.0);
+        assert_eq!(sq.min_value(), 0.0);
         assert_eq!(sq.max_value(), 4.0);
 
         let inv = mapped(&*constant(0.5), MappedType::Invert);
@@ -3844,6 +3907,44 @@ mod tests {
         // value so a `-0.9` regression is caught.
         assert_eq!(EndIslandDensityFunction::ISLAND_THRESHOLD_D, -0.9f32 as f64);
         assert_ne!(EndIslandDensityFunction::ISLAND_THRESHOLD_D, -0.9f64);
+    }
+
+    #[test]
+    fn end_islands_cache_index_uses_fastutil_mix() {
+        // Paper's `NoiseCache` indexes with
+        // `HashCommon.mix(chunkKey) & 8191` — fastutil's multiply-phi + double
+        // xorshift (NOT splitmix64/staffordMix13). Pin several chunk keys so a
+        // hash regression that changes which island chunks collide is caught.
+        for (key, expected) in [
+            (0i64, 0i64),
+            (1, 1233),
+            (2, 2466),
+            (8191, 5379),
+            (-1, 1232),
+            (123456789012345, 2573),
+        ] {
+            assert_eq!(mix_i64(key) & 8191, expected);
+        }
+    }
+
+    #[test]
+    fn interval_select_accepts_non_decreasing_thresholds() {
+        // Java's `validate` uses Guava `Comparators.isInOrder(thresholds,
+        // Double::compare)`, which returns false only on a strictly decreasing
+        // adjacent pair — equal thresholds decode successfully.
+        let valid = IntervalSelect::validate(&IntervalSelect::new(
+            constant(0.0),
+            vec![0.0, 0.0, 1.0],
+            vec![constant(0.0), constant(1.0), constant(2.0), constant(3.0)],
+        ));
+        assert!(valid.result().is_some());
+        // Strictly decreasing is rejected.
+        let invalid = IntervalSelect::validate(&IntervalSelect::new(
+            constant(0.0),
+            vec![2.0, 1.0, 0.0],
+            vec![constant(0.0), constant(1.0), constant(2.0), constant(3.0)],
+        ));
+        assert!(invalid.result().is_none());
     }
 
     #[test]
@@ -4081,6 +4182,85 @@ mod tests {
     }
 
     #[test]
+    fn max_bounds_use_union_of_minima() {
+        // Java `TwoArgumentSimpleFunction.create`, `case MAX -> minValue =
+        // Math.max(min1, min2)` (DensityFunctions.java), not max(max1, max2).
+        // arg1 (-5, 10), arg2 (3, 4) -> minValue = max(-5, 3) = 3, maxValue =
+        // max(10, 4) = 10.
+        let arg1 = constant(-5.0).clamp(-5.0, 10.0);
+        let arg2 = constant(3.0).clamp(3.0, 4.0);
+        let f = max(arg1, arg2);
+        assert_eq!(f.min_value(), 3.0);
+        assert_eq!(f.max_value(), 10.0);
+
+        // MIN uses the union of minima as well: minValue = min(min1, min2).
+        let f2 = min(
+            constant(-5.0).clamp(-5.0, 10.0),
+            constant(3.0).clamp(3.0, 4.0),
+        );
+        assert_eq!(f2.min_value(), -5.0);
+        assert_eq!(f2.max_value(), 4.0);
+    }
+
+    #[test]
+    fn constant_codec_uses_argument_field() {
+        // Java `Constant.CODEC = singleArgumentCodec(...)` -> field
+        // `"argument"`. Drive the per-type `constant_map_codec` directly (a
+        // bare constant encodes as the `Either.left` double in DIRECT_CODEC, so
+        // the `"argument"` field is only exercised through the explicit codec).
+        let ops = test_ops();
+        let const_codec = map_codec::codec_of(constant_map_codec::<TestOps>());
+        let encoded_const = const_codec
+            .encode_start(&ops, &constant(7.0))
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(encoded_const, serde_json::json!({"argument": 7.0}));
+        let decoded = const_codec
+            .parse(&ops, &encoded_const)
+            .result()
+            .expect("decode should succeed")
+            .clone();
+        assert_eq!(decoded.compute(&at(0, 0, 0)), 7.0);
+    }
+
+    #[test]
+    fn blended_noise_round_trips_through_dispatch() {
+        // The `old_blended_noise` type now dispatches to the synth
+        // `BlendedNoise` leaf. Round-trip through the recursive density
+        // function codec: encode writes `"type":"minecraft:old_blended_noise"`
+        // + the five scale fields; decode rebuilds via `createUnseeded` with
+        // the same parameters, so compute matches.
+        let f: Arc<dyn DensityFunction> =
+            Arc::new(SynthBlendedNoise::create_unseeded(2.0, 2.0, 8.0, 4.0, 2.0));
+        let codec = density_function_codec::<TestOps>();
+        let ops = test_ops();
+        let encoded = codec
+            .encode_start(&ops, &f)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(
+            encoded["type"],
+            serde_json::json!("minecraft:old_blended_noise")
+        );
+        assert_eq!(encoded["xz_scale"], serde_json::json!(2.0));
+        assert_eq!(encoded["y_scale"], serde_json::json!(2.0));
+        assert_eq!(encoded["xz_factor"], serde_json::json!(8.0));
+        assert_eq!(encoded["y_factor"], serde_json::json!(4.0));
+        assert_eq!(encoded["smear_scale_multiplier"], serde_json::json!(2.0));
+
+        let decoded = round_trip(f.clone());
+        assert_eq!(
+            DensityFunction::type_id(&*decoded),
+            DensityFunctionTypes::OLD_BLENDED_NOISE
+        );
+        for (x, y, z) in [(0, 0, 0), (1, 2, 3), (-4, 64, 7)] {
+            assert_eq!(decoded.compute(&at(x, y, z)), f.compute(&at(x, y, z)));
+        }
+    }
+
+    #[test]
     fn y_clamped_gradient_round_trips() {
         let f = y_clamped_gradient(-64, 320, -2.0, 1.0);
         let decoded = round_trip(f.clone());
@@ -4097,17 +4277,40 @@ mod tests {
 
     #[test]
     fn codec_rejects_unknown_type() {
-        // A dispatch key that is not in the #177 table errors on encode
-        // (`"Density function type '...' is not ported"`); here the encode of
-        // a function whose type_id has no codec is exercised via OLD_BLENDED_NOISE.
+        // Every Paper-registered type (0..=33) now has a #177 codec, so the
+        // "not ported" encode error is exercised with a synthetic unknown type
+        // id (a carrier whose `type_id` is outside the dispatch table).
+        #[derive(Debug)]
+        struct UnknownType;
+        impl DensityFunction for UnknownType {
+            fn compute(&self, _context: &dyn FunctionContext) -> f64 {
+                0.0
+            }
+            fn min_value(&self) -> f64 {
+                0.0
+            }
+            fn max_value(&self) -> f64 {
+                0.0
+            }
+            fn type_id(&self) -> DensityFunctionTypeId {
+                DensityFunctionTypeId::new(999, "minecraft:not_a_density_function")
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn clone_arc(&self) -> Arc<dyn DensityFunction> {
+                Arc::new(UnknownType)
+            }
+        }
         let codec = density_function_codec::<TestOps>();
         let ops = test_ops();
-        let f = old_blended_noise_stub();
+        let f: Arc<dyn DensityFunction> = Arc::new(UnknownType);
         let result = codec.encode_start(&ops, &f);
-        // The old_blended_noise stub is a real carrier but has no #177 codec.
+        // The unknown type id resolves to no codec: `"Density function type
+        // 'minecraft:not_a_density_function' is not ported"`.
         assert!(
             result.result().is_none(),
-            "unported type must fail to encode"
+            "type outside the dispatch table must fail to encode"
         );
     }
 }

@@ -7,12 +7,12 @@
 //! via `PerlinNoise.createLegacyForBlendedNoise`, and the value surface is
 //! exposed directly (`compute`/`min_value`/`max_value`).
 //!
-//! Deferred seam: Java `BlendedNoise implements DensityFunction.SimpleFunction`
-//! and carries a `CODEC` (`KeyDispatchDataCodec`). The `DensityFunction` layer
-//! and its dispatch codecs are NOT ported here — RivetTodo(#177): `compute`
-//! takes the raw block coordinates instead of a `FunctionContext`, and `codec`
-//! is omitted. The `compute` loop's octave iteration and per-octave
-//! `noise(..., mainSmear * pow, mainY * pow)` folding are exact.
+//! The `DensityFunction` surface and `CODEC` are ported in
+//! `levelgen::noise::density_functions` (this leaf is lifted into the
+//! `old_blended_noise` dispatch branch); here `compute` takes the raw block
+//! coordinates, which the wrapper maps from a `FunctionContext`. The `compute`
+//! loop's octave iteration and per-octave `noise(..., mainSmear * pow, mainY *
+//! pow)` folding are exact.
 
 use rivet_util::mth;
 use rivet_util::random::XoroshiroRandomSource;
@@ -20,10 +20,13 @@ use rivet_util::random::XoroshiroRandomSource;
 use crate::levelgen::synth::perlin_noise::PerlinNoise;
 
 /// `net.minecraft.world.level.levelgen.synth.BlendedNoise`.
+#[derive(Debug, Clone)]
 pub struct BlendedNoise {
     min_limit_noise: PerlinNoise,
     max_limit_noise: PerlinNoise,
     main_noise: PerlinNoise,
+    xz_scale: f64,
+    y_scale: f64,
     xz_multiplier: f64,
     y_multiplier: f64,
     xz_factor: f64,
@@ -97,6 +100,8 @@ impl BlendedNoise {
             min_limit_noise,
             max_limit_noise,
             main_noise,
+            xz_scale,
+            y_scale,
             xz_multiplier,
             y_multiplier,
             xz_factor,
@@ -170,5 +175,30 @@ impl BlendedNoise {
     /// `maxValue()`.
     pub fn max_value(&self) -> f64 {
         self.max_value
+    }
+
+    /// `xzScale` (record accessor for the `DATA_CODEC`).
+    pub fn get_xz_scale(&self) -> f64 {
+        self.xz_scale
+    }
+
+    /// `yScale` (record accessor for the `DATA_CODEC`).
+    pub fn get_y_scale(&self) -> f64 {
+        self.y_scale
+    }
+
+    /// `xzFactor` (record accessor for the `DATA_CODEC`).
+    pub fn get_xz_factor(&self) -> f64 {
+        self.xz_factor
+    }
+
+    /// `yFactor` (record accessor for the `DATA_CODEC`).
+    pub fn get_y_factor(&self) -> f64 {
+        self.y_factor
+    }
+
+    /// `smearScaleMultiplier` (record accessor for the `DATA_CODEC`).
+    pub fn get_smear_scale_multiplier(&self) -> f64 {
+        self.smear_scale_multiplier
     }
 }
