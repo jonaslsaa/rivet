@@ -1191,7 +1191,7 @@ fn world_clock_access() -> RegistryAccess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::level::ChunkTrackingView;
+    use crate::server::level::{ChunkTrackingView, MissingChunkPolicy};
     use crate::server::movement_trace::{TAG_MOVE_ACCEPTED, TAG_SESSION_END, TAG_TELEPORT_ACK};
     use crate::server::tick::channels::{InboundDrained, LifecycleEvent, OutboundEvent};
     use crate::server::tick::registry::ConnectionRegistry;
@@ -2849,6 +2849,126 @@ mod tests {
         }
         // No center packet, no chunk was queued for the failed recenter (the
         // `update` Err carries no partial send-set).
+        assert!(
+            drain_outbound_frames(&mut out_rx).is_empty(),
+            "a failed update queues no packets"
+        );
+    }
+
+    /// The real loaded-world recenter failure (issue #561), server-level: a
+    /// `RequireLoaded` world booted with the actual region-backed geometry
+    /// (spawn block (-16,68,-48) → spawn chunk (-1,-3), view distance 4) has
+    /// EXACTLY the 117-chunk view square installed. A view-distance-2 client
+    /// (send radius 3) joins with the 81-chunk send-3 view — a strict subset of
+    /// the booted square — so the FIRST +x boundary crossing (into chunk (0,-3))
+    /// enters the x=4 column, every cell of which the booted square still
+    /// contains, and the recenter SUCCEEDS (proving a genuine repeated
+    /// boundary crossing). The SECOND +x crossing (into chunk (1,-3)) enters the
+    /// x=5 column; its first enter cell (5,-7) is outside the booted square's
+    /// raster, so `update` fails typed UNVERIFIED and the session disconnects —
+    /// exactly the current Azalea-client regression #561 reproduces.
+    #[test]
+    fn loaded_world_recenter_fails_typed_on_second_boundary_move() {
+        let spawn_pos = rivet_registry::core::BlockPos::new(-16, 68, -48);
+        let spawn_chunk = ChunkPos::containing(&spawn_pos);
+        assert_eq!((spawn_chunk.x(), spawn_chunk.z()), (-1, -3));
+
+        let config = ServerLevelConfig {
+            dimension: crate::server::level::overworld_dimension(),
+            seed: 9_110_734_097_863_663_269,
+            min_y: -64,
+            height: 384,
+            sea_level: -63,
+            spawn_chunk,
+            respawn_data: rivet_world::level::storage::level_data::RespawnData::of(
+                crate::server::level::overworld_dimension(),
+                spawn_pos,
+                0.0,
+                0.0,
+            ),
+            view_distance: 4,
+            simulation_distance: 4,
+            missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
+            is_flat: false,
+        };
+        // The empty `ChunkMap` + `RequireLoaded` guarantee a position the boot
+        // did not install fails typed (never a superflat substitution).
+        let mut level = ServerLevel::new_region_backed(config);
+        let booted = ChunkTrackingView::of(spawn_chunk, 4);
+        let booted_cells: Vec<ChunkPos> = {
+            let mut v = Vec::new();
+            booted.for_each(|p| v.push(p));
+            v
+        };
+        assert_eq!(
+            booted_cells.len(),
+            117,
+            "the region-backed boot installs exactly the 117-chunk view square"
+        );
+        for pos in booted_cells {
+            level
+                .chunk_map_mut()
+                .install(pos, crate::server::level::LevelChunk::new(pos));
+        }
+
+        let mut config = default_session_config(256);
+        config.level = level;
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(config);
+        apply_enter_play(&mut registry); // view distance 2 → send 3
+        manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        drain_outbound_frames(&mut out_rx);
+
+        // FIRST boundary crossing: block x=0 → chunk (0,-3). The recenter
+        // enters the x=4 column (z=-7..1), all of which the booted 117-square
+        // still contains — the move must SUCCEED (a genuine repeated crossing).
+        manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(0.0, 68.0, -48.0))],
+        );
+        let recenter1 = drain_outbound_frames(&mut out_rx);
+        assert!(
+            drained_disconnect_reason(&mut out_rx).is_none(),
+            "the first +x crossing must not disconnect: its enter cells are all inside \
+             the booted square"
+        );
+        assert!(
+            !recenter1.is_empty(),
+            "the first crossing recenters (a center + enter chunks are queued)"
+        );
+        for (_, body) in &recenter1[1..] {
+            let pos = chunk_body_coords(body);
+            assert!(
+                booted.contains_pos(&pos),
+                "first-crossing enter cell {pos} must be inside the booted 117-square"
+            );
+        }
+
+        // SECOND boundary crossing: block x=16 → chunk (1,-3). The first enter
+        // cell (5,-7) is outside the booted square — the recenter fails typed
+        // UNVERIFIED and the session disconnects.
+        run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, move_pos_frame(16.0, 68.0, -48.0))],
+        );
+        let reason = drained_disconnect_reason(&mut out_rx)
+            .expect("the second crossing's update failure disconnects");
+        match reason {
+            DisconnectReason::Unsupported(message) => {
+                assert!(
+                    message.contains("UNVERIFIED"),
+                    "the typed missing-chunk error survives: {message}"
+                );
+                assert!(
+                    message.contains("fallback are disabled"),
+                    "no generation fallback: {message}"
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        // No center packet, no chunk was queued for the failed recenter.
         assert!(
             drain_outbound_frames(&mut out_rx).is_empty(),
             "a failed update queues no packets"
