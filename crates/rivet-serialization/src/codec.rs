@@ -377,8 +377,7 @@ impl<T: JavaEquals> JavaEquals for Vec<T> {
     fn java_equals(&self, other: &Self) -> bool {
         // Java `List.equals` — element-wise `equals`, short-circuiting on the
         // first unequal element (Rust `==` on `Vec` is the same deep equality).
-        self.len() == other.len()
-            && self.iter().zip(other.iter()).all(|(a, b)| a.java_equals(b))
+        self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| a.java_equals(b))
     }
 }
 
