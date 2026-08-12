@@ -25,7 +25,6 @@ pub mod block_state_match_test;
 #[cfg(test)]
 pub mod codec_test_util;
 pub mod linear_pos_test;
-pub mod optional_field_codecs;
 pub mod pos_always_true_test;
 pub mod pos_rule_test;
 pub mod pos_rule_test_type;

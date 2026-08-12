@@ -24,7 +24,6 @@
 //! `axis_aligned_linear_pos_test_map_codec::<Ops>()` factory) and lifted to the
 //! erased carrier in `pos_rule_test`.
 
-use crate::levelgen::structure::templatesystem::optional_field_codecs::defaulted_optional_field_of;
 use crate::levelgen::structure::templatesystem::pos_rule_test::PosRuleTest;
 use crate::levelgen::structure::templatesystem::pos_rule_test_type::{
     PosRuleTestTypeId, PosRuleTestTypes,
@@ -123,7 +122,7 @@ pub fn axis_aligned_linear_pos_test_map_codec<Ops: DynamicOps + 'static>()
         instance
             .group(RecordCodecBuilder::of(
                 Arc::new(|t: &AxisAlignedLinearPosTest| t.min_chance),
-                defaulted_optional_field_of::<f32, Ops>(
+                codec::optional_field_of::<f32, Ops>(
                     "min_chance",
                     codec::float_codec::<Ops>(),
                     0.0,
@@ -131,7 +130,7 @@ pub fn axis_aligned_linear_pos_test_map_codec<Ops: DynamicOps + 'static>()
             ))
             .and(RecordCodecBuilder::of(
                 Arc::new(|t: &AxisAlignedLinearPosTest| t.max_chance),
-                defaulted_optional_field_of::<f32, Ops>(
+                codec::optional_field_of::<f32, Ops>(
                     "max_chance",
                     codec::float_codec::<Ops>(),
                     0.0,
@@ -139,15 +138,15 @@ pub fn axis_aligned_linear_pos_test_map_codec<Ops: DynamicOps + 'static>()
             ))
             .and(RecordCodecBuilder::of(
                 Arc::new(|t: &AxisAlignedLinearPosTest| t.min_dist),
-                defaulted_optional_field_of::<i32, Ops>("min_dist", codec::int_codec::<Ops>(), 0),
+                codec::optional_field_of::<i32, Ops>("min_dist", codec::int_codec::<Ops>(), 0),
             ))
             .and(RecordCodecBuilder::of(
                 Arc::new(|t: &AxisAlignedLinearPosTest| t.max_dist),
-                defaulted_optional_field_of::<i32, Ops>("max_dist", codec::int_codec::<Ops>(), 0),
+                codec::optional_field_of::<i32, Ops>("max_dist", codec::int_codec::<Ops>(), 0),
             ))
             .and(RecordCodecBuilder::of(
                 Arc::new(|t: &AxisAlignedLinearPosTest| t.axis),
-                defaulted_optional_field_of::<Axis, Ops>(
+                codec::optional_field_of::<Axis, Ops>(
                     "axis",
                     crate::levelgen::structure::templatesystem::axis_codec::axis_codec::<Ops>(),
                     Axis::Y,

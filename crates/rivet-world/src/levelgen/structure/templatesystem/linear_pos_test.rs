@@ -23,7 +23,6 @@
 //! the same wrapping arithmetic (`Vec3i.distManhattan`'s float-abs-then-truncate
 //! sum).
 
-use crate::levelgen::structure::templatesystem::optional_field_codecs::defaulted_optional_field_of;
 use crate::levelgen::structure::templatesystem::pos_rule_test::PosRuleTest;
 use crate::levelgen::structure::templatesystem::pos_rule_test_type::{
     PosRuleTestTypeId, PosRuleTestTypes,
@@ -125,7 +124,7 @@ pub fn linear_pos_test_map_codec<Ops: DynamicOps + 'static>()
         instance
             .group(RecordCodecBuilder::of(
                 Arc::new(|t: &LinearPosTest| t.min_chance),
-                defaulted_optional_field_of::<f32, Ops>(
+                codec::optional_field_of::<f32, Ops>(
                     "min_chance",
                     codec::float_codec::<Ops>(),
                     0.0,
@@ -133,7 +132,7 @@ pub fn linear_pos_test_map_codec<Ops: DynamicOps + 'static>()
             ))
             .and(RecordCodecBuilder::of(
                 Arc::new(|t: &LinearPosTest| t.max_chance),
-                defaulted_optional_field_of::<f32, Ops>(
+                codec::optional_field_of::<f32, Ops>(
                     "max_chance",
                     codec::float_codec::<Ops>(),
                     0.0,
@@ -141,11 +140,11 @@ pub fn linear_pos_test_map_codec<Ops: DynamicOps + 'static>()
             ))
             .and(RecordCodecBuilder::of(
                 Arc::new(|t: &LinearPosTest| t.min_dist),
-                defaulted_optional_field_of::<i32, Ops>("min_dist", codec::int_codec::<Ops>(), 0),
+                codec::optional_field_of::<i32, Ops>("min_dist", codec::int_codec::<Ops>(), 0),
             ))
             .and(RecordCodecBuilder::of(
                 Arc::new(|t: &LinearPosTest| t.max_dist),
-                defaulted_optional_field_of::<i32, Ops>("max_dist", codec::int_codec::<Ops>(), 0),
+                codec::optional_field_of::<i32, Ops>("max_dist", codec::int_codec::<Ops>(), 0),
             ))
             .apply(
                 instance,
