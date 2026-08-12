@@ -46,8 +46,10 @@ const TRANSCRIPT_PROTOCOL: u64 = 1;
 /// the 1s Paper keepalive cadence (proving keepalive echo while moving) and to
 /// show a few send_position deltas, short enough that the walk stays inside the
 /// spawn chunk (spawn is ~10 blocks from the chunk corner; walking +x stays
-/// well within the loaded view).
-const MOVE_TICKS: u32 = 120;
+/// well within the loaded view). Shared with `run-scenario` via
+/// [`rivet_harness_common::timing`] so the move timeout headroom cannot drift
+/// from the actual walk length.
+const MOVE_TICKS: u32 = rivet_harness_common::timing::MOVE_WALK_TICKS;
 /// Game ticks of the walk that are sampled into the transcript. Kept below
 /// `MOVE_TICKS` so the walk always continues a few unsampled ticks after the
 /// last sample: if the server re-syncs the player (`player_position`) at some
@@ -76,7 +78,8 @@ const KEEPALIVE_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// (ExitCode 2, spurious FAIL). The defaults (30 s client / 60 s runner) absorb
 /// it comfortably; dwell mode additionally enforces the reservation at parse
 /// time via `DWELL_LOGIN_HEADROOM_SECONDS`.
-const KEEPALIVE_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
+const KEEPALIVE_SETTLE_TIMEOUT: Duration =
+    Duration::from_secs(rivet_harness_common::timing::KEEPALIVE_SETTLE_TIMEOUT_SECS);
 /// The minimum wall-clock dwell window (s) `--mode dwell` accepts. The
 /// transcript verdict requires the challenge span to reach 30 s, and the first
 /// challenge lands ~1.2 s after spawn, so a 31 s window (the server's 30 s kick
@@ -85,14 +88,29 @@ const KEEPALIVE_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
 /// `transcript::DWELL_MIN_DWELL_SECONDS`; kept in sync so a direct client
 /// invocation cannot be told to run a window that cannot prove survival.
 const DWELL_MIN_DWELL_SECONDS: u64 = 35;
-/// Reserved client-side headroom (s) beyond the dwell window + settle timeout
-/// that `--timeout-seconds` must accommodate. The timeout starts at process
-/// launch while the dwell window only starts at `Event::Spawn` (after offline
-/// login and configuration), so the timeout must reserve that pre-spawn time
-/// too, or the timeout branch cuts the client off before it emits the `dwell`
-/// record. Mirrors `run-scenario`'s `DWELL_TIMEOUT_HEADROOM_SECONDS` (5 s here
-/// + the 1 s settle above = the 6 s the runner reserves).
-const DWELL_LOGIN_HEADROOM_SECONDS: u64 = 5;
+/// Reserved client-side headroom (s) beyond the dwell window plus the settle
+/// timeout that `--timeout-seconds` must accommodate. The timeout starts at
+/// process launch while the dwell window only starts at `Event::Spawn` (after
+/// offline login and configuration), so the timeout must reserve that pre-spawn
+/// time too, or the timeout branch cuts the client off before it emits the
+/// `dwell` record. Mirrors `run-scenario`'s `DWELL_TIMEOUT_HEADROOM_SECONDS`
+/// (5 s login here plus the 1 s settle above is the 6 s the runner reserves).
+/// Shared with the runner via [`rivet_harness_common::timing`] so the two cannot
+/// drift.
+const DWELL_LOGIN_HEADROOM_SECONDS: u64 =
+    rivet_harness_common::timing::DWELL_LOGIN_HEADROOM_SECONDS;
+
+/// Move-mode emit budget: login/configuration + the fixed walk + MOVE_DRAIN +
+/// the keepalive settle. `--timeout-seconds` must exceed this in move mode.
+/// Shared with `run-scenario` via [`rivet_harness_common::timing`].
+const MOVE_TIMEOUT_HEADROOM_SECONDS: u64 =
+    rivet_harness_common::timing::MOVE_TIMEOUT_HEADROOM_SECONDS;
+/// Move-mode walk wall-clock seconds (MOVE_TICKS @ 20 TPS). See
+/// [`rivet_harness_common::timing::MOVE_WALK_SECONDS`].
+const MOVE_WALK_SECONDS: u64 = rivet_harness_common::timing::MOVE_WALK_SECONDS;
+/// Move-mode post-walk drain seconds (MOVE_DRAIN, ceiled). See
+/// [`rivet_harness_common::timing::MOVE_DRAIN_SECONDS_CEIL`].
+const MOVE_DRAIN_SECONDS_CEIL: u64 = rivet_harness_common::timing::MOVE_DRAIN_SECONDS_CEIL;
 
 /// After `Event::Spawn` we keep the client alive for a short observation window
 /// so the observable outcome is stable (chunks arrived, health/inventory
@@ -252,6 +270,24 @@ impl Args {
                 KEEPALIVE_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS,
                 KEEPALIVE_SETTLE_TIMEOUT.as_secs(),
                 DWELL_LOGIN_HEADROOM_SECONDS
+            ));
+        }
+        // Move mode has the same emit-before-timeout invariant as dwell: the
+        // `moved` record is emitted only after login/configuration, the fixed
+        // walk, MOVE_DRAIN, and up to KEEPALIVE_SETTLE_TIMEOUT of keepalive
+        // settling. A timeout at or below that total cuts the client off before
+        // it emits (ExitCode 2, spurious FAIL), so the reservation is enforced
+        // here rather than only in the runner.
+        if mode == Mode::Move && timeout_seconds <= MOVE_TIMEOUT_HEADROOM_SECONDS {
+            return Err(format!(
+                "--timeout-seconds must exceed {}s in move mode (the client spends up to {}s on \
+                 login/configuration, {}s walking, {}s draining, and {}s settling the keepalive \
+                 stream before emitting the moved record, and must emit before the timeout fires)",
+                MOVE_TIMEOUT_HEADROOM_SECONDS,
+                DWELL_LOGIN_HEADROOM_SECONDS,
+                MOVE_WALK_SECONDS,
+                MOVE_DRAIN_SECONDS_CEIL,
+                KEEPALIVE_SETTLE_TIMEOUT.as_secs(),
             ));
         }
 
@@ -1735,5 +1771,37 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn move_timeout_must_reserve_login_walk_drain_and_settle() {
+        // The `moved` record is emitted only after login/configuration, the
+        // fixed walk, MOVE_DRAIN, and up to 1 s of keepalive settling. A timeout
+        // at or below that total cuts the client off before it emits (ExitCode
+        // 2, spurious FAIL). The reservation is the shared move headroom: the
+        // boundary value is rejected, one second above it is accepted.
+        let err = parse(&[
+            "--mode",
+            "move",
+            "--timeout-seconds",
+            &MOVE_TIMEOUT_HEADROOM_SECONDS.to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            err.contains("--timeout-seconds") && err.contains("move mode"),
+            "error must explain the move-mode headroom, got {err}"
+        );
+        assert!(
+            parse(&[
+                "--mode",
+                "move",
+                "--timeout-seconds",
+                &(MOVE_TIMEOUT_HEADROOM_SECONDS + 1).to_string(),
+            ])
+            .is_ok()
+        );
+        // The default 30 s client timeout comfortably exceeds the move budget,
+        // so a bare `--mode move` parse is unaffected.
+        assert!(parse(&["--mode", "move"]).is_ok());
     }
 }

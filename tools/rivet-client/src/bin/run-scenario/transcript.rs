@@ -78,6 +78,16 @@ const LIFECYCLE_EVENTS: [&str; 3] = ["init", "login", "spawn"];
 ///   since the JVM started (ServerCommonPacketListenerImpl), so the raw ids
 ///   differ every boot. The relationship — every keepalive has exactly one
 ///   matching echo — is compared structurally via `keepalive_echo` set.
+///
+///   Timing-skew note: the client snapshots the keepalive log only after the
+///   walk finishes (via `settle_and_snapshot`, which waits up to 1 s for the
+///   challenge/echo streams to reach 1:1 correspondence). The server keeps
+///   challenging at 1/s while the client stays connected, so the arrays can
+///   include pairs that landed up to ~1 s *after* the walk stopped — they are
+///   not exactly "challenges during the walk". That is fine for the verdict
+///   (only the structural `keepalive_echo` flag is compared; the counts are
+///   diagnostic) but the transcript's `keepalives` count must not be read as a
+///   precise "during the walk" observation.
 /// - `walk.corrections` / `walk.corrections_count`: `entity_position_sync`
 ///   packets are a timing-dependent server observation — how many client
 ///   position packets land before each server tick decides how often the server
