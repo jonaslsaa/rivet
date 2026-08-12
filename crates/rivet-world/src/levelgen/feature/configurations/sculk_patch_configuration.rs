@@ -481,11 +481,9 @@ mod tests {
             "catalyst_chance": 0.5,
         });
         assert!(codec.parse(&JsonOps::INSTANCE, &spread_rounds).is_error());
-        // catalyst_chance above [0.0, 1.0] — an out-of-range error. The exact
-        // message is not pinned: `codec::check_range` formats f32 bounds via
-        // Rust's `Display` (`0`/`1`) while Java's `Float.toString` prints
-        // `0.0`/`1.0`, so the message currently diverges from Paper and is
-        // owned by rivet-serialization (out of this unit's crate).
+        // catalyst_chance above [0.0, 1.0] — the out-of-range message matches
+        // Paper exactly: `check_range_f32` renders bounds via Java's
+        // `Float.toString` (PR #557), pinning the message here.
         let chance = json!({
             "charge_count": 5,
             "amount_per_charge": 10,
@@ -495,11 +493,18 @@ mod tests {
             "extra_rare_growths": 0,
             "catalyst_chance": 1.5,
         });
-        assert!(codec.parse(&JsonOps::INSTANCE, &chance).is_error());
+        let result = codec.parse(&JsonOps::INSTANCE, &chance);
+        let err = result.error_ref().map(|e| e.message().to_string());
+        assert!(
+            err.as_deref()
+                .unwrap_or_default()
+                .contains("Value 1.5 outside of range [0.0:1.0]"),
+            "catalyst_chance above range should surface Paper's exact message, got: {err:?}"
+        );
         // catalyst_chance = -0.0 is below [0.0, 1.0]: `Float.compare` places
         // -0.0 before +0.0 (Paper's `checkRange` rejects it) even though IEEE
         // `-0.0 >= 0.0` is true. `codec::float_range` implements this via
-        // `java_float_compare` (merged with PR #557).
+        // `java_float_compare` (via PR #557).
         let negative_zero = json!({
             "charge_count": 5,
             "amount_per_charge": 10,
