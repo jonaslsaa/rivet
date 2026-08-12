@@ -68,6 +68,7 @@ pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus, block_pos_co
 pub use chunk_pos::ChunkPos;
 pub use cursor3d::Cursor3D;
 pub use difficulty::{Difficulty, difficulty_codec};
+pub use direction::direction_codec;
 pub use direction::{Axis, AxisDirection, Direction, Plane};
 pub use direction8::Direction8;
 pub use game_profile::{GameProfile, Property, PropertyMap};
