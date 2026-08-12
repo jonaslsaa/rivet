@@ -154,6 +154,11 @@ const DEFAULT_DWELL_SECONDS: u64 = 41;
 /// (`rivet-client`'s `DWELL_LOGIN_HEADROOM_SECONDS`). Mirrors the client's own
 /// parse-time validation so a `run-scenario`-accepted invocation is never cut
 /// off by the client's timeout branch before it emits the `dwell` record.
+///
+/// This is coupled by convention to the client's two constants (1 s settle +
+/// 5 s login headroom). Keep it equal to
+/// `KEEPALIVE_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS` in
+/// `rivet-client`'s `Args` validation; if either side changes, update both.
 const DWELL_TIMEOUT_HEADROOM_SECONDS: u64 = 6;
 
 // Machine-stable exit codes. PASS/FAIL/UNVERIFIED are the shared contract

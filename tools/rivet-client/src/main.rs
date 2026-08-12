@@ -69,6 +69,13 @@ const KEEPALIVE_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// would kick) cannot hold the record open forever — the emitted mismatch still
 /// fails the verdict. 1 s is far shorter than the move walk or the dwell
 /// survival-window proof, and keeps the record honest.
+///
+/// Callers that pass `--timeout-seconds` must reserve this settle time: in move
+/// mode the emit happens after login + walk + `MOVE_DRAIN` + up to this settle,
+/// so a tight timeout (near that total) can cut the client off before it emits
+/// (ExitCode 2, spurious FAIL). The defaults (30 s client / 60 s runner) absorb
+/// it comfortably; dwell mode additionally enforces the reservation at parse
+/// time via `DWELL_LOGIN_HEADROOM_SECONDS`.
 const KEEPALIVE_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
 /// The minimum wall-clock dwell window (s) `--mode dwell` accepts. The
 /// transcript verdict requires the challenge span to reach 30 s, and the first
@@ -976,6 +983,13 @@ async fn move_and_emit(bot: Client, state: State) {
     // settle loop waits for 1:1 correspondence (bounded by
     // KEEPALIVE_SETTLE_TIMEOUT) so the transcript's `keepalive_echo` relationship
     // is observed coherently; a genuinely missing echo still times out and fails.
+    //
+    // The settle window can extend up to KEEPALIVE_SETTLE_TIMEOUT past the walk
+    // (the server keeps challenging at 1/s while the client stays connected), so
+    // the keepalive arrays may cover a slightly wider window than the walk.
+    // They are excluded from move parity — only the structural `keepalive_echo`
+    // 1:1 relationship is compared (transcript.rs `walk.keepalive_echo`) — so
+    // this only affects the reported counts, not the verdict.
     let keepalive_log = settle_and_snapshot(
         &state.keepalive_log,
         KEEPALIVE_SETTLE_TIMEOUT,
