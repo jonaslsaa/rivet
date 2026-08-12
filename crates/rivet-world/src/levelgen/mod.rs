@@ -18,6 +18,13 @@
 //! far; the generators/feature worldgen live under the owning manifest unit.
 
 pub mod blockpredicates;
+// The `mc.world.level.levelgen.blending` unit's shared Blender value
+// prerequisite (issue #177): the empty singleton (`empty()`/`isEmpty()`, the
+// identity `blendDensity`, the `(1.0, 0.0)` empty
+// `blendOffsetAndFactor`/`BlendingOutput`, and the generic identity
+// `getBiomeResolver` override) — the non-empty `of`/`BlendingData` surface
+// defers (RivetTodo #177, see `blending::blender`).
+pub mod blending;
 pub mod carver;
 pub mod feature;
 pub mod generation_step;
