@@ -240,6 +240,57 @@ where
     Arc::new(EmptyMapEncoder)
 }
 
+/// `MapEncoder.of`'s write half — `TriFunction<A, Ops, RecordBuilder, ()>`.
+///
+/// See `RecursiveFn` in `codec.rs` for why `type_alias_bounds` is allowed.
+#[allow(type_alias_bounds)]
+pub type MapEncodeFn<A, Ops: DynamicOps + 'static> =
+    Arc<dyn Fn(&A, &Ops, &mut dyn RecordBuilder<Output = Ops::Output>) + Send + Sync>;
+
+/// `MapEncoder.of`'s keys half — `Function<Ops, List<T>>` (`Keyable`).
+#[allow(type_alias_bounds)]
+pub type MapKeysFn<Ops: DynamicOps + 'static> = Arc<dyn Fn(&Ops) -> Vec<Ops::Output> + Send + Sync>;
+
+/// `MapEncoder.of(encode, keys)` — build a `MapEncoder` from raw closures
+/// (the encoder half of `codecs.OfMapEncoder`). `encode` writes the fields
+/// into the record builder; `keys` produces the field keys for `Keyable`
+/// (compressed-map support).
+pub fn of<A, Ops: DynamicOps + 'static>(
+    encode: MapEncodeFn<A, Ops>,
+    keys: MapKeysFn<Ops>,
+) -> Arc<dyn MapEncoder<A, Ops>>
+where
+    A: 'static,
+{
+    Arc::new(ClosureMapEncoder {
+        encode,
+        keys,
+        _marker: std::marker::PhantomData,
+    })
+}
+
+/// The closure-backed `MapEncoder` built by `of`.
+pub struct ClosureMapEncoder<A, Ops: DynamicOps + 'static> {
+    encode: MapEncodeFn<A, Ops>,
+    keys: MapKeysFn<Ops>,
+    _marker: std::marker::PhantomData<fn(A) -> A>,
+}
+impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for ClosureMapEncoder<A, Ops> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ClosureMapEncoder")
+    }
+}
+impl<A, Ops: DynamicOps + 'static> Keyable<Ops> for ClosureMapEncoder<A, Ops> {
+    fn keys(&self, ops: &Ops) -> Vec<Ops::Output> {
+        (self.keys)(ops)
+    }
+}
+impl<A, Ops: DynamicOps + 'static> MapEncoder<A, Ops> for ClosureMapEncoder<A, Ops> {
+    fn encode(&self, input: &A, ops: &Ops, prefix: &mut dyn RecordBuilder<Output = Ops::Output>) {
+        (self.encode)(input, ops, prefix)
+    }
+}
+
 /// `FieldEncoder` — `Encoder.fieldOf(name)` / `codecs.FieldEncoder`.
 pub fn field_encoder<A, Ops: DynamicOps + 'static>(
     name: String,

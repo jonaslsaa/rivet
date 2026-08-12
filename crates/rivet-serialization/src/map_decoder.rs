@@ -139,6 +139,57 @@ where
     })
 }
 
+/// `MapDecoder.of`'s field-reader half — `BiFunction<Ops, MapLike, DataResult<A>>`.
+///
+/// See `RecursiveFn` in `codec.rs` for why `type_alias_bounds` is allowed.
+#[allow(type_alias_bounds)]
+pub type MapDecodeFn<A, Ops: DynamicOps + 'static> =
+    Arc<dyn Fn(&Ops, &dyn MapLike<Ops::Output>) -> DataResult<A> + Send + Sync>;
+
+/// `MapDecoder.of`'s keys half — `Function<Ops, List<T>>` (`Keyable`).
+#[allow(type_alias_bounds)]
+pub type MapKeysFn<Ops: DynamicOps + 'static> = Arc<dyn Fn(&Ops) -> Vec<Ops::Output> + Send + Sync>;
+
+/// `MapDecoder.of(decode, keys)` — build a `MapDecoder` from raw closures
+/// (the decoder half of `codecs.OfMapDecoder`). `decode` reads the fields from
+/// the `MapLike` input; `keys` produces the field keys for `Keyable`
+/// (compressed-map support).
+pub fn of<A, Ops: DynamicOps + 'static>(
+    decode: MapDecodeFn<A, Ops>,
+    keys: MapKeysFn<Ops>,
+) -> Arc<dyn MapDecoder<A, Ops>>
+where
+    A: 'static,
+{
+    Arc::new(ClosureMapDecoder {
+        decode,
+        keys,
+        _marker: std::marker::PhantomData,
+    })
+}
+
+/// The closure-backed `MapDecoder` built by `of`.
+pub struct ClosureMapDecoder<A, Ops: DynamicOps + 'static> {
+    decode: MapDecodeFn<A, Ops>,
+    keys: MapKeysFn<Ops>,
+    _marker: std::marker::PhantomData<fn(A) -> A>,
+}
+impl<A, Ops: DynamicOps + 'static> std::fmt::Debug for ClosureMapDecoder<A, Ops> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ClosureMapDecoder")
+    }
+}
+impl<A, Ops: DynamicOps + 'static> Keyable<Ops> for ClosureMapDecoder<A, Ops> {
+    fn keys(&self, ops: &Ops) -> Vec<Ops::Output> {
+        (self.keys)(ops)
+    }
+}
+impl<A, Ops: DynamicOps + 'static> MapDecoder<A, Ops> for ClosureMapDecoder<A, Ops> {
+    fn decode(&self, ops: &Ops, input: &dyn MapLike<Ops::Output>) -> DataResult<A> {
+        (self.decode)(ops, input)
+    }
+}
+
 /// `codecs.FieldDecoder`.
 pub struct FieldDecoder<A, Ops: DynamicOps + 'static> {
     name: String,
