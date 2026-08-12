@@ -42,6 +42,10 @@ const MAX_NBT_DEPTH: u32 = 512;
 /// has been read.
 const MAX_INITIAL_COLLECTION_SIZE: usize = 65536;
 
+/// Spigot's `checkArgument(length < 1 << 24)` cap on `ByteArrayTag` and
+/// `IntArrayTag` reads (a 16 MiB array). `LongArrayTag` has no such cap.
+const SPIGOT_MAX_ARRAY_LENGTH: i32 = 1 << 24;
+
 /// `NbtAccounter.DEFAULT_NBT_QUOTA` — the byte budget `FriendlyByteBuf.readNbt`
 /// enforces on network NBT. The canonicalizers parse the wire forms of
 /// `tagCodec` and `COMPOUND_TAG`, both of which pass `NbtAccounter::defaultQuota`
@@ -195,6 +199,9 @@ fn read_payload_depth(
             if n < 0 {
                 return None; // Java: DecoderException on a negative array size
             }
+            if n >= SPIGOT_MAX_ARRAY_LENGTH {
+                return None; // Spigot checkArgument(length < 1 << 24)
+            }
             account_bytes(budget, n as i64)?; // 1 byte per element
             let bytes = frame::read_bytes(body, off, n as usize)?.to_vec();
             Some(Nbt::ByteArray(bytes))
@@ -273,6 +280,9 @@ fn read_payload_depth(
             let n = frame::read_i32(body, off)?;
             if n < 0 {
                 return None; // Java: DecoderException on a negative array size
+            }
+            if n >= SPIGOT_MAX_ARRAY_LENGTH {
+                return None; // Spigot checkArgument(length < 1 << 24)
             }
             account_bytes(budget, 4 * n as i64)?; // 4 bytes per element
             let mut items = Vec::with_capacity((n as usize).min(MAX_INITIAL_COLLECTION_SIZE));

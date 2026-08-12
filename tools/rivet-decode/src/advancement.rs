@@ -298,9 +298,11 @@ fn read_component_value(body: &[u8], off: &mut usize, name: &str) -> Option<Vec<
 enum Shape {
     /// A scalar or id-mapper VarInt that accepts any signed value. The idMapper
     /// enums in the 26.2 component set (`Rarity`, `DyeColor`, `EquipmentSlot`,
-    /// `FireworkExplosion.Shape`, ...) all map out-of-range and negative ids
-    /// through `ByIdMap.continuous(..., OutOfBoundsStrategy.ZERO)` to the first
-    /// enum value, so a bare VarInt is the faithful bound for them.
+    /// `FireworkExplosion.Shape`, ...) map out-of-range and negative ids through
+    /// `ByIdMap.continuous` — most with `OutOfBoundsStrategy.ZERO` to the first
+    /// enum value, `horse/variant` with `OutOfBoundsStrategy.WRAP` — but either
+    /// strategy reads exactly one VarInt, so a bare VarInt is the faithful bound
+    /// for all of them.
     VarInt,
     /// A `ByteBufCodecs.holderRegistry` VarInt — the holder map's `byIdOrThrow(id)`
     /// (via `Registry.asHolderIdMap`), which rejects a negative id for every
@@ -568,6 +570,19 @@ fn skip_compound_tag(body: &[u8], off: &mut usize) -> Option<()> {
 /// Skip a `tagCodec` value — any non-`End` NBT tag (a `Component`).
 fn skip_component_tag(body: &[u8], off: &mut usize) -> Option<()> {
     let value = read_nbt(body, off)?;
+    if matches!(value, Nbt::End) {
+        return None;
+    }
+    Some(())
+}
+
+/// Skip a `TRUSTED_STREAM_CODEC` value — any non-`End` NBT tag read with
+/// `NbtAccounter.unlimitedHeap` (no byte budget). `PaintingVariant`'s
+/// `title`/`author` go through `ComponentSerialization.TRUSTED_OPTIONAL_STREAM_CODEC`,
+/// which is `unlimitedHeap`, so no quota is charged (unlike the `defaultQuota`
+/// `tagCodec` component values).
+fn skip_component_tag_unbounded(body: &[u8], off: &mut usize) -> Option<()> {
+    let value = read_nbt_unbounded(body, off)?;
     if matches!(value, Nbt::End) {
         return None;
     }
@@ -1086,12 +1101,14 @@ fn skip_attribute_modifiers(body: &[u8], off: &mut usize) -> Option<()> {
 
 fn skip_painting_variant_holder(body: &[u8], off: &mut usize) -> Option<()> {
     // holder(PAINTING_VARIANT, [VarInt][VarInt][Identifier][?Component][?Component]).
+    // The title/author are TRUSTED_OPTIONAL_STREAM_CODEC (unlimitedHeap), so the
+    // component tags are skipped with no byte budget.
     skip_holder(body, off, |b, o| {
         skip_varint(b, o)?;
         skip_varint(b, o)?;
         skip_utf8(b, o)?;
-        skip_optional(b, o, skip_component_tag)?;
-        skip_optional(b, o, skip_component_tag)
+        skip_optional(b, o, skip_component_tag_unbounded)?;
+        skip_optional(b, o, skip_component_tag_unbounded)
     })
 }
 
@@ -1225,8 +1242,15 @@ fn walk_work(body: &[u8], off: &mut usize, root: Work) -> Option<()> {
                 leaf => skip_shape_leaf(body, off, leaf)?,
             },
             Work::ItemStack => {
-                skip_holder_registry(body, off)?; // item holderRegistry
-                skip_varint(body, off)?; // count
+                // ItemStackTemplate.STREAM_CODEC's constructor rejects the air
+                // item (id 0, the ITEM registry's default) and count == 0; a
+                // negative id throws like byIdOrThrow. Mirror the top-level
+                // icon check so nested stacks are bounded the same way.
+                let item = frame::read_varint(body, off)?;
+                let count = frame::read_varint(body, off)?;
+                if item <= 0 || count == 0 {
+                    return None;
+                }
                 stack.push(Work::Patch);
             }
             Work::Patch => {
@@ -2765,7 +2789,7 @@ mod tests {
             let mut value = Vec::new();
             frame::write_varint(&mut value, 2); // list count
             for _ in 0..2 {
-                frame::write_varint(&mut value, 0); // item
+                frame::write_varint(&mut value, 926); // item (non-air)
                 frame::write_varint(&mut value, 1); // count
                 frame::write_varint(&mut value, 0); // patch positive
                 frame::write_varint(&mut value, 0); // patch negative
@@ -2894,14 +2918,14 @@ mod tests {
         let mut container = Vec::new();
         frame::write_varint(&mut container, 1); // list count
         container.push(1); // Optional present
-        frame::write_varint(&mut container, 0); // item
+        frame::write_varint(&mut container, 926); // item (non-air)
         frame::write_varint(&mut container, 1); // count
         container.extend_from_slice(&patch);
         assert_composite_value_passes_byte_exact((75u32, container));
 
         // UseRemainder: [item][count][patch] — a single ItemStackTemplate.
         let mut use_remainder = Vec::new();
-        frame::write_varint(&mut use_remainder, 0); // item
+        frame::write_varint(&mut use_remainder, 926); // item (non-air)
         frame::write_varint(&mut use_remainder, 1); // count
         use_remainder.extend_from_slice(&patch);
         assert_composite_value_passes_byte_exact((25u32, use_remainder));
@@ -2909,7 +2933,7 @@ mod tests {
         // BundleContents: [count][item][count][patch] — plain, NOT Optional.
         let mut bundle = Vec::new();
         frame::write_varint(&mut bundle, 1); // list count
-        frame::write_varint(&mut bundle, 0); // item
+        frame::write_varint(&mut bundle, 926); // item (non-air)
         frame::write_varint(&mut bundle, 1); // count
         bundle.extend_from_slice(&patch);
         assert_composite_value_passes_byte_exact((50u32, bundle));
@@ -3803,6 +3827,115 @@ mod tests {
         match value {
             Nbt::Compound(fields) => assert_eq!(fields.len(), 2000),
             other => panic!("expected a compound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn painting_variant_title_over_byte_budget_is_accepted() {
+        // PaintingVariant.DIRECT_STREAM_CODEC reads title/author through
+        // ComponentSerialization.TRUSTED_OPTIONAL_STREAM_CODEC
+        // (NbtAccounter.unlimitedHeap), so a painting title NBT tag over the
+        // 2 MiB defaultQuota is accepted, not rejected. Drive it through the
+        // icon patch: a positive entry id 103 = painting/variant, whose wire
+        // shape is holder(PAINTING_VARIANT, [VarInt][VarInt][Identifier][?Component][?Component]).
+        let mut big = Vec::new();
+        big.push(7); // ByteArray tag
+        big.extend_from_slice(&2_500_000i32.to_be_bytes()); // length
+        big.extend(vec![0u8; 2_500_000]); // payload
+
+        let mut value = Vec::new();
+        frame::write_varint(&mut value, 0); // holder id 0 -> direct
+        frame::write_varint(&mut value, 16); // width
+        frame::write_varint(&mut value, 16); // height
+        write_string(&mut value, "minecraft:test"); // asset_id Identifier
+        value.push(1); // title present
+        value.extend_from_slice(&big); // title component (> 2 MiB)
+        value.push(0); // author absent
+
+        let title = nbt_bytes(&nbt_compound(vec![("text", nbt_str("T"))]));
+        let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+        let display = display_raw(
+            &title,
+            &desc,
+            &icon(926, 1, &patch(&[(103u32, value)], &[])),
+            0,
+            0,
+            (0.5, -1.25),
+            None,
+        );
+        let mut off = 0;
+        assert!(
+            canon_display_info(&display, &mut off).is_some(),
+            "the TRUSTED painting title is read with no byte budget in Java"
+        );
+    }
+
+    #[test]
+    fn nested_item_stack_air_and_zero_count_are_rejected() {
+        // ItemStackTemplate.STREAM_CODEC's constructor refuses the air item
+        // (id 0) and count == 0 on *every* nested stack, not just the display
+        // icon. The walker must bound nested Container/ChargedProjectiles/
+        // BundleContents stacks the same way. id 75 = Container =
+        // list(256)(?ItemStackTemplate).
+        for (item, count) in [(0i32, 1i32), (926, 0)] {
+            let mut value = Vec::new();
+            frame::write_varint(&mut value, 1); // list count
+            value.push(1); // Optional present
+            frame::write_varint(&mut value, item); // item holderRegistry
+            frame::write_varint(&mut value, count); // item count
+            frame::write_varint(&mut value, 0); // patch positive
+            frame::write_varint(&mut value, 0); // patch negative
+
+            let title = nbt_bytes(&nbt_compound(vec![("text", nbt_str("T"))]));
+            let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+            let display = display_raw(
+                &title,
+                &desc,
+                &icon(926, 1, &patch(&[(75u32, value)], &[])),
+                0,
+                0,
+                (0.5, -1.25),
+                None,
+            );
+            let mut off = 0;
+            assert_eq!(
+                canon_display_info(&display, &mut off),
+                None,
+                "a nested air/zero-count ItemStackTemplate must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn byte_array_over_spigot_cap_is_rejected() {
+        // ByteArrayTag (7) and IntArrayTag (11) read through a Spigot
+        // `checkArgument(length < 1 << 24)` cap, applied on read regardless of
+        // the NBT quota. An array length at the cap must fail the parse even on
+        // the unbounded (TRUSTED) path. LongArrayTag (12) has no such cap.
+        let cases: &[(u8, usize)] = &[(7, 0), (11, 4), (12, 8)];
+        for (type_id, _elem) in cases {
+            let mut tag = Vec::new();
+            tag.push(*type_id);
+            tag.extend_from_slice(&(1i32 << 24).to_be_bytes()); // length at the cap
+            let mut off = 0;
+            match *type_id {
+                12 => {
+                    // No Spigot cap: the parse must fail only on truncation
+                    // (a 16 MiB LongArray with no body), not on the length.
+                    let truncated = read_nbt_unbounded(&tag, &mut off);
+                    assert_eq!(
+                        truncated, None,
+                        "LongArray length 1<<24 is allowed by Java; only body truncation fails"
+                    );
+                }
+                _ => {
+                    assert_eq!(
+                        read_nbt_unbounded(&tag, &mut off),
+                        None,
+                        "ByteArray/IntArray length at the Spigot cap must fail"
+                    );
+                }
+            }
         }
     }
 }
