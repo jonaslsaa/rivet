@@ -49,7 +49,7 @@ pcre2 = "0.2"
 rivet-test-support = { path = "crates/rivet-test-support" }
 ryu = "1.0"
 phf = "0.11"
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 # xxh3_64 serves the #54 chunk-hash engine; xxh32 serves lz4-java region-block
 # checksums (seeded at the codec call site). xxh64/xxh128 remain disabled.
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3", "xxh32"] }

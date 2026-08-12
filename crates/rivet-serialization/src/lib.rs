@@ -26,6 +26,7 @@ pub mod dynamic_ops;
 pub mod either;
 pub mod encoder;
 pub mod extra_codecs;
+pub mod float_format;
 pub mod functions;
 pub mod json_ops;
 pub mod key_dispatch_codec;
