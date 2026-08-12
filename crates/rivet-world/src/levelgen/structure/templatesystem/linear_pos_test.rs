@@ -223,7 +223,9 @@ mod tests {
 
     #[test]
     fn test_below_min_chance_is_false() {
-        // maxChance 0.0 → every rnd > 0 is false (rnd is never <= 0).
+        // maxChance 0.0 clamps the ramp to 0.0, so `test` is `rnd <= 0.0`; the
+        // pinned seed's first draw (0.73096776 > 0) makes it false. A 0.0 draw
+        // (2^-24) would flip it, so the seed pin matters.
         let t = LinearPosTest::new(0.0, 0.0, 0, 10);
         let mut random = rivet_util::random::LegacyRandomSource::new(0);
         let far = BlockPos::new(0, 0, 100);
