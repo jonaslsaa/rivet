@@ -423,6 +423,15 @@ fn set_equality(a: &Value, b: &Value) -> bool {
     key(a) == key(b)
 }
 
+/// Whether a request-id array is empty or absent. A completed run must have
+/// observed every relationship it reports 1:1 for; an empty set would let a
+/// vacuous `set_equality([], [])` pass as a real relationship, so the callers
+/// reject an unobserved set as a broken observation rather than emit a
+/// transcript that compares vacuously.
+fn is_unobserved(ids: &Value) -> bool {
+    ids.as_array().map(|a| a.is_empty()).unwrap_or(true)
+}
+
 /// Project a client run onto the canonical `move` transcript.
 ///
 /// The client's `moved` record already carries per-tick spawn-relative deltas
@@ -511,16 +520,21 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
         });
 
         // Semantic invariant: a `moved` run must have observed keepalives. The
-        // server challenges at 1/s, so a 6 s walk always draws several; an
-        // empty keepalive set means the keepalive observation (or the server)
-        // failed, and reporting a vacuous 1:1 (`set_equality([], [])` == true)
-        // would let a broken keepalive observation pass parity against a
-        // healthy boot. Reject it as a hard error rather than emit a transcript
-        // that compares vacuously.
-        if keepalives.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        // server challenges at 1/s, so a 6 s walk always draws several.
+        if is_unobserved(&keepalives) {
             return Err(
                 "moved run recorded no keepalives (a 6 s walk at the server's 1/s cadence always \
                  draws several): the keepalive observation or server failed"
+                    .to_owned(),
+            );
+        }
+        // Semantic invariant: a `moved` run must have observed the spawn
+        // teleport — on a fresh boot the spawn teleport is always the first
+        // (id 1, Paper's per-connection awaitingTeleport counter).
+        if is_unobserved(&teleports) {
+            return Err(
+                "moved run recorded no teleports (a spawned run always receives the spawn \
+                 teleport): the teleport observation failed"
                     .to_owned(),
             );
         }
@@ -688,16 +702,8 @@ pub fn normalize_dwell(raw: &str) -> Result<Value, String> {
         // Semantic invariant: a `dwelled` run must have observed keepalives —
         // the same guard as move. A valid dwell survives well past the server's
         // 1/s cadence (>= DWELL_MIN_DWELL_SECONDS), so an empty challenge set
-        // means the keepalive observation (or the server) failed; without this,
-        // `set_equality([], [])` would emit `echo_relationship: true` for a
-        // relationship that was never observed. The `challenge_count >= 30`
-        // verdict would also catch it, but only after the transcript has
-        // reported a misleadingly-true 1:1.
-        if challenge_ids
-            .as_array()
-            .map(|a| a.is_empty())
-            .unwrap_or(true)
-        {
+        // means the keepalive observation (or the server) failed.
+        if is_unobserved(&challenge_ids) {
             return Err(format!(
                 "dwelled run recorded no keepalives (a dwell of at least {DWELL_MIN_DWELL_SECONDS}s \
                  at the server's 1/s cadence always draws dozens): the keepalive observation or \
@@ -1378,6 +1384,21 @@ mod tests {
         assert!(
             err.contains("no keepalives"),
             "error must name the empty keepalive observation, got {err}"
+        );
+    }
+
+    #[test]
+    fn move_rejects_an_empty_teleport_observation() {
+        // A moved run with no teleports would otherwise report a vacuous 1:1
+        // (`teleport_ack_echo: set_equality([], []) == true`) and pass parity
+        // against another identically-broken boot; a spawned run always
+        // receives the spawn teleport, so the empty set must be rejected as a
+        // broken teleport observation.
+        let raw = move_records().replace("\"teleports\":[1]", "\"teleports\":[]");
+        let err = normalize_move(&raw).expect_err("empty teleports must be rejected");
+        assert!(
+            err.contains("no teleports"),
+            "error must name the empty teleport observation, got {err}"
         );
     }
 
