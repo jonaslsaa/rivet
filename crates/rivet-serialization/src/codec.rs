@@ -560,8 +560,8 @@ pub fn float_range<Ops: DynamicOps + 'static>(
 ) -> Arc<dyn Codec<f32, Ops>> {
     flat_xmap(
         float_codec::<Ops>(),
-        Arc::new(move |v: &f32| check_range(*v, min_inclusive, max_inclusive)),
-        Arc::new(move |v: &f32| check_range(*v, min_inclusive, max_inclusive)),
+        Arc::new(move |v: &f32| check_range_f32(*v, min_inclusive, max_inclusive)),
+        Arc::new(move |v: &f32| check_range_f32(*v, min_inclusive, max_inclusive)),
     )
 }
 
@@ -572,14 +572,49 @@ pub fn double_range<Ops: DynamicOps + 'static>(
 ) -> Arc<dyn Codec<f64, Ops>> {
     flat_xmap(
         double_codec::<Ops>(),
-        Arc::new(move |v: &f64| check_range(*v, min_inclusive, max_inclusive)),
-        Arc::new(move |v: &f64| check_range(*v, min_inclusive, max_inclusive)),
+        Arc::new(move |v: &f64| check_range_f64(*v, min_inclusive, max_inclusive)),
+        Arc::new(move |v: &f64| check_range_f64(*v, min_inclusive, max_inclusive)),
     )
 }
 
-/// `Codec.checkRange(N minInclusive, N maxInclusive)` — the private helper.
+/// `Codec.checkRange(N minInclusive, N maxInclusive)` — the private helper
+/// (integer overloads). Integer `compareTo` and `PartialOrd` agree.
 fn check_range<T: PartialOrd + std::fmt::Display>(value: T, min: T, max: T) -> DataResult<T> {
     if value >= min && value <= max {
+        DataResult::success(value)
+    } else {
+        DataResult::error(format!(
+            "Value {} outside of range [{}:{}]",
+            value, min, max
+        ))
+    }
+}
+
+/// `Codec.checkRange(Float, Float)` — the f32 overload. Java's generic
+/// `checkRange` calls `Comparable.compareTo`, which for `Float` is the IEEE
+/// **total order** (`Float.compare`): `-0.0f < 0.0f` and `NaN` compares
+/// greater than every value. `PartialOrd`'s `>=`/`<=` treat `-0.0 == 0.0`
+/// and reject `NaN`, so a faithful port must use `total_cmp` for the bounds
+/// check (the error message still renders the value/range via `Display`, which
+/// matches Java's string concatenation for `-0.0`/`NaN`).
+fn check_range_f32(value: f32, min: f32, max: f32) -> DataResult<f32> {
+    if value.total_cmp(&min) != std::cmp::Ordering::Less
+        && value.total_cmp(&max) != std::cmp::Ordering::Greater
+    {
+        DataResult::success(value)
+    } else {
+        DataResult::error(format!(
+            "Value {} outside of range [{}:{}]",
+            value, min, max
+        ))
+    }
+}
+
+/// `Codec.checkRange(Double, Double)` — the f64 overload (`Double.compare`).
+fn check_range_f64(value: f64, min: f64, max: f64) -> DataResult<f64> {
+    if value.total_cmp(&min) != std::cmp::Ordering::Less
+        && value.total_cmp(&max) != std::cmp::Ordering::Greater
+    {
         DataResult::success(value)
     } else {
         DataResult::error(format!(

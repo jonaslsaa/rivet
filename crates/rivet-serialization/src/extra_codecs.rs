@@ -579,7 +579,6 @@ where
     I: Clone + Send + Sync + 'static,
     Ops: DynamicOps + 'static,
 {
-    // Step 1: the 2-element array form.
     let make_interval_for_array = make_interval.clone();
     let get_min_for_array = get_min.clone();
     let get_max_for_array = get_max.clone();
@@ -592,7 +591,6 @@ where
         Arc::new(move |i: &I| vec![get_min_for_array(i), get_max_for_array(i)]),
     );
 
-    // Step 2: the `{lowerBoundName, upperBoundName}` object form (a Pair<P, P>).
     let make_interval_for_object = make_interval.clone();
     let get_min_for_object = get_min.clone();
     let get_max_for_object = get_max.clone();
@@ -613,8 +611,6 @@ where
         Arc::new(move |i: &I| (get_min_for_object(i), get_max_for_object(i))),
     );
 
-    // Step 3 + 4: `Codec.withAlternative(arrayCodec, objectCodec)`, then the
-    // outer `Codec.either(pointCodec, arrayOrObjectCodec)`.
     let array_or_object_codec = codec::with_alternative(array_codec, object_codec);
     let make_interval_for_either = make_interval.clone();
     let get_min_for_final = get_min.clone();

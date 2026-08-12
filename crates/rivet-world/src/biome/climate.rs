@@ -1387,6 +1387,42 @@ mod tests {
         assert!(codec.parse(&JsonOps::INSTANCE, &bad).is_error());
     }
 
+    #[test]
+    fn parameter_point_codec_rejects_negative_zero_offset() {
+        // Java's `Codec.floatRange(0.0F, 1.0F)` bounds check is `Float.compare`
+        // (total order): `-0.0f < 0.0f`, so an offset of `-0.0` is out of range.
+        // serde_json preserves the `-0.0` sign bit; the port must reject it too.
+        let codec = ParameterPoint::codec::<JsonOps>();
+        let bad = json!({
+            "temperature": 0.0,
+            "humidity": 0.0,
+            "continentalness": 0.0,
+            "erosion": 0.0,
+            "depth": 0.0,
+            "weirdness": 0.0,
+            "offset": -0.0,
+        });
+        assert!(
+            codec.parse(&JsonOps::INSTANCE, &bad).is_error(),
+            "-0.0 offset must be rejected (Float.compare total order)"
+        );
+    }
+
+    #[test]
+    fn float_range_uses_float_total_order() {
+        // Pins the shared `Codec.floatRange` fidelity fix (DFU `checkRange` uses
+        // `Comparable.compareTo`, i.e. `Float.compare` total order): `-0.0` is
+        // below `0.0`, so `[0.0, 1.0]` rejects it (serde_json preserves the
+        // sign bit); ordinary boundary values still pass. (NaN is covered at
+        // the `TestOps` level in rivet-serialization's codec_tests, where the
+        // ops value can actually hold a NaN.)
+        let codec = codec::float_range::<JsonOps>(0.0, 1.0);
+        assert!(codec.parse(&JsonOps::INSTANCE, &json!(0.5)).is_success());
+        assert!(codec.parse(&JsonOps::INSTANCE, &json!(0.0)).is_success());
+        assert!(codec.parse(&JsonOps::INSTANCE, &json!(1.0)).is_success());
+        assert!(codec.parse(&JsonOps::INSTANCE, &json!(-0.0)).is_error());
+    }
+
     // ------------------------------------------------------------------
     // ParameterList + RTree vs brute force
     // ------------------------------------------------------------------

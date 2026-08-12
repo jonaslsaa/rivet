@@ -465,3 +465,29 @@ fn compound_list_codec_skips_entries_past_a_full_error() {
         }
     }
 }
+
+#[test]
+fn float_range_rejects_nan_and_negative_zero_via_total_order() {
+    // DFU `Codec.checkRange` calls `Comparable.compareTo`; for `Float` that is
+    // the IEEE total order (`Float.compare`): `NaN` compares greater than every
+    // value and `-0.0f < 0.0f`, so both fail `floatRange(0.0F, 1.0F)`. The
+    // `TestOps` `Value::Num(f64)` carries a real NaN (serde_json cannot).
+    let ops = TestOps;
+    let codec = rivet_serialization::codec::float_range::<TestOps>(0.0, 1.0);
+
+    assert!(codec.decode(&ops, &Value::Num(0.5)).is_success());
+    assert!(codec.decode(&ops, &Value::Num(0.0)).is_success());
+    assert!(codec.decode(&ops, &Value::Num(1.0)).is_success());
+
+    // `-0.0f64` narrows to `-0.0f32`; total order places it below `0.0f32`.
+    assert!(
+        codec.decode(&ops, &Value::Num(-0.0)).is_error(),
+        "-0.0 must be outside [0.0, 1.0] under Float.compare"
+    );
+    // NaN narrows to NaN; `Float.compare(NaN, 0.0f)` is positive (NaN is
+    // greater), so `value.compareTo(maxInclusive) <= 0` is false.
+    assert!(
+        codec.decode(&ops, &Value::Num(f64::NAN)).is_error(),
+        "NaN must be outside [0.0, 1.0] under Float.compare"
+    );
+}
