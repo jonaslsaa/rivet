@@ -19,12 +19,14 @@
 //! (`RepeatingPlacement`'s `IntStream.range(0, count(...))`, `InSquarePlacement`'s
 //! two `random.nextInt(16)`, `HeightRangePlacement`'s `height.sample(...)`, …).
 //! The port's `get_positions` mirrors that: it draws eagerly from `random` and
-//! returns an eager `Vec<BlockPos>`. The laziness that matters for parity is
-//! *when* `get_positions` runs — Java's `flatMap` invokes it per upstream
-//! position, interleaved with placements — and that is preserved by
-//! `PlacedFeature::place_with_context`'s depth-first walk (see that method). A
-//! truly lazy pull would need to hold `R`-specific state in a type-erased list,
-//! which `RandomSource` (`Sized`, not object-safe) forbids.
+//! returns a lazy `Box<dyn Iterator<Item = BlockPos> + 'a>` tied to `&'a self`
+//! (so the iterator outlives the per-expansion `PlacementContext`). The laziness
+//! that matters for parity is *when* `get_positions` runs — Java's `flatMap`
+//! invokes it per upstream position, interleaved with placements — and that is
+//! preserved by `PlacedFeature::place_with_context`'s depth-first walk (see that
+//! method). The iterator form additionally keeps `RepeatingPlacement`'s unbounded
+//! `count` from materializing a `count`-length `Vec` (Java degrades to a slow
+//! lazy pull instead of OOM).
 
 use crate::levelgen::placement::PlacementContext;
 use crate::levelgen::placement::placement_modifier_type::PlacementModifierTypeId;

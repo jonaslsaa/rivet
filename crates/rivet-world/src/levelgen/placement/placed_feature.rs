@@ -144,10 +144,11 @@ impl PlacedFeature {
     /// (`RepeatingPlacement`'s `count(random, origin)` then
     /// `IntStream.range(0, count)`, `InSquarePlacement`'s two
     /// `random.nextInt(16)`, `HeightRangePlacement`'s `height.sample(...)`, …),
-    /// so the port draws eagerly too (returning `Vec<BlockPos>`) and reproduces
-    /// the interleaving with this walk: expand a position through the current
-    /// modifier, recurse into the next, and only at the last stage place the
-    /// feature — pulling one position through the whole chain before the next.
+    /// so the port draws eagerly too (returning a lazy `Box<dyn Iterator>`) and
+    /// reproduces the interleaving with this walk: expand a position through the
+    /// current modifier, recurse into the next, and only at the last stage place
+    /// the feature — pulling one position through the whole chain before the
+    /// next.
     ///
     /// That ordering is the parity-critical bit. The eager two-phase fold this
     /// walk replaces reordered the RNG draws for every chain: e.g. `count` ->

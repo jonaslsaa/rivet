@@ -49,7 +49,7 @@ pub trait RepeatingPlacement: Debug + Send + Sync + 'static {
     /// iterator, positive `count` yields exactly that many origin copies).
     ///
     /// The shell is **lazy** — it returns `std::iter::repeat_n(*origin,
-    /// count as usize)` without materializing `count` positions (Java's
+    /// count.max(0))` without materializing `count` positions (Java's
     /// `IntStream.range` is equally lazy). `count` is unbounded —
     /// `NoiseBasedCountPlacement`'s codec accepts a plain `Codec.INT` ratio and
     /// its `count()` saturates to `i32::MAX`, so Java degrades to a slow lazy
