@@ -447,7 +447,7 @@ impl PlayerSessionManager {
             ctx.connections,
             connection_id,
             &player,
-            &self.level,
+            &mut self.level,
             &self.join,
             requested_view_distance,
             &mut loader,
@@ -857,10 +857,13 @@ impl PlayerSessionManager {
         let new_chunk = rivet_registry::core::ChunkPos::containing(
             &rivet_registry::core::BlockPos::containing(targets.x, targets.y, targets.z),
         );
+        // `self.level` (mutated: a region-backed recenter may install an
+        // on-demand chunk) and `session` (mutated) are disjoint fields, so the
+        // borrow splits.
         let recenter =
             session
                 .loader
-                .update(&self.level, new_chunk, session.requested_view_distance);
+                .update(&mut self.level, new_chunk, session.requested_view_distance);
         match recenter {
             Ok(packets) => {
                 // Queue the ordered cache-center + newly entered chunks over the
