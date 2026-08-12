@@ -496,13 +496,20 @@ mod tests {
             "catalyst_chance": 1.5,
         });
         assert!(codec.parse(&JsonOps::INSTANCE, &chance).is_error());
-        // catalyst_chance = -0.0: Java-correct `Float.compare` places -0.0
-        // below +0.0, so Paper's `checkRange` rejects it — but that behavior
-        // lives in `codec::float_range` (rivet-serialization), which on the
-        // current base uses `PartialOrd` (`-0.0 >= 0.0` is IEEE-true) and
-        // accepts it. The Java-correct rejection lands with PR #557's
-        // `check_range_f32`. RivetTodo(#557): re-assert `-0.0` rejection on
-        // both decode and encode once #557 merges.
+        // catalyst_chance = -0.0 is below [0.0, 1.0]: `Float.compare` places
+        // -0.0 before +0.0 (Paper's `checkRange` rejects it) even though IEEE
+        // `-0.0 >= 0.0` is true. `codec::float_range` implements this via
+        // `java_float_compare` (merged with PR #557).
+        let negative_zero = json!({
+            "charge_count": 5,
+            "amount_per_charge": 10,
+            "spread_attempts": 3,
+            "growth_rounds": 2,
+            "spread_rounds": 1,
+            "extra_rare_growths": 0,
+            "catalyst_chance": -0.0,
+        });
+        assert!(codec.parse(&JsonOps::INSTANCE, &negative_zero).is_error());
     }
 
     #[test]
@@ -540,8 +547,22 @@ mod tests {
                 .result()
                 .is_none()
         );
-        // catalyst_chance = -0.0 is deferred to PR #557's Java-correct float
-        // range semantics (see the decode test's RivetTodo).
+        // catalyst_chance = -0.0 is below [0.0, 1.0] (see the decode test).
+        let negative_zero = SculkPatchConfiguration::new(
+            5,
+            10,
+            3,
+            2,
+            1,
+            IntProvider::Constant(ConstantInt::of(0)),
+            -0.0,
+        );
+        assert!(
+            codec
+                .encode_start(&JsonOps::INSTANCE, &negative_zero)
+                .result()
+                .is_none()
+        );
     }
 
     #[test]
