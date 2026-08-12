@@ -21,12 +21,12 @@ use std::fmt::Debug;
 /// order in `PlacementModifierType.java` (the `BuiltInRegistries.
 /// PLACEMENT_MODIFIER_TYPE` insertion order, so element ids 0..=14).
 ///
-/// STUB(mc.world.level.levelgen.placement.simple) — the concrete modifier units
-/// report their identity from these constants instead of inlining
-/// `PlacementModifierTypeId::new`. The registration table itself (the `#181`
-/// generated dispatch) and the per-type `MapCodec`s still defer with the codec
-/// surface (`#126`), exactly as this module's doc describes; these are pure
-/// registry-identity declarations mirroring `BlockPredicateTypes`.
+/// The concrete modifier units (filter/simple/repeating) report their identity
+/// from these constants instead of inlining `PlacementModifierTypeId::new`.
+/// These are pure registry-identity declarations mirroring
+/// `BlockPredicateTypes`; the registration table itself (the `#181` generated
+/// dispatch) and the per-type `MapCodec`s still defer with the codec surface
+/// (`#126`, see the module doc and the `placement.core` STUB below).
 pub struct PlacementModifierTypes;
 impl PlacementModifierTypes {
     /// `register("block_predicate_filter", BlockPredicateFilter.CODEC)`.
