@@ -528,10 +528,19 @@ fn convert_to_narrows_numbers() {
 
     // 2^63 — `i64::MAX as f64` rounds up to this, so it is NOT a long
     // (Java `BigDecimal.longValueExact` throws) → double path → float (2^63
-    // is exact in f32). This pins the boundary of `exact_integral`.
+    // is exact in f32). This pins the boundary of `exact_integral`. The float
+    // path carries `Float.toString(2^63f)` = `9.223372E18` (f32-shortest
+    // digits, Java exponent casing), not the exact u64 nor serde's
+    // `9.223372e+18` — matching Paper/Gson byte-for-byte.
     let two_pow_63 = 9_223_372_036_854_775_808f64;
     let input = Value::Number(Number::from_f64(two_pow_63).expect("2^63 fits f64"));
-    assert_eq!(ops.convert_to(&out, &input), json!(two_pow_63));
+    let converted = ops.convert_to(&out, &input);
+    assert_eq!(
+        serde_json::to_string(&converted).expect("serialize"),
+        "9.223372E18"
+    );
+    // The float path is f32-precision: the literal narrows back to 2^63.
+    assert_eq!(converted.as_f64().expect("f64") as f32, two_pow_63 as f32);
 }
 
 // ---------------------------------------------------------------------------
@@ -714,6 +723,51 @@ fn float_double_codecs_round_trip_through_json() {
     assert_eq!(round_trip(&ops, &double, 1.0 / 3.0), 1.0 / 3.0);
 }
 
+/// `createFloat` renders the exact Gson `Float` bytes — `Float.toString` for a
+/// `JsonPrimitive(Float)` — across signed zero, plain range, thresholds
+/// (1e-3/1e7), subnormals, and extremes, with Java's exponent casing/sign and
+/// shortest tie-breaking. Each case is pinned against JDK 25 / Gson output.
+#[test]
+fn create_float_uses_float_to_string_literal() {
+    let ops = JsonOps::INSTANCE;
+    let cases: &[(f32, &str)] = &[
+        // Signed zero, plain range, and the ~1.1% subnormal tie-breaks.
+        (0.0, "0.0"),
+        (-0.0, "-0.0"),
+        (1.0, "1.0"),
+        (-1.0, "-1.0"),
+        (0.5, "0.5"),
+        (0.05, "0.05"),
+        (0.1, "0.1"),
+        (0.001, "0.001"),
+        (9999999.0, "9999999.0"),
+        // 123456.789 is not exactly representable in f32; the nearest float is
+        // 123456.7890625, which Java prints as 123456.79.
+        (f32::from_bits(0x47f1_2065), "123456.79"),
+        // Subnormal shortest tie-break (Java prints the "preferred" digits).
+        (f32::from_bits(0x0000_0001), "1.4E-45"),
+        (f32::from_bits(0x0000_0005), "7.0E-45"),
+        // Thresholds: `10^-3 <= |v| < 10^7` is plain, outside is scientific.
+        (1.0e-4, "1.0E-4"),
+        (9.999999e-4, "9.999999E-4"),
+        (1.0e7, "1.0E7"),
+        (1.0000001e7, "1.0000001E7"),
+        // Extremes and exponent casing/sign.
+        (1.0e30, "1.0E30"),
+        (-1.0e-20, "-1.0E-20"),
+        (f32::MAX, "3.4028235E38"),
+        (f32::MIN_POSITIVE, "1.1754944E-38"),
+    ];
+    for (value, expected) in cases {
+        let v = ops.create_float(*value);
+        let bytes = serde_json::to_string(&v).expect("serialize float");
+        assert_eq!(bytes, *expected, "create_float({value:?})");
+        // Round-trip: reading the literal back yields the identical f32.
+        let n = v.as_f64().expect("float literal parses to f64");
+        assert_eq!(n as f32, *value, "round-trip {value:?}");
+    }
+}
+
 /// Signed narrowing through the byte codec: reading a JSON number as a byte
 /// wraps via `(int)` then `(byte)`.
 #[test]
@@ -724,4 +778,49 @@ fn byte_codec_narrows_through_json() {
     assert_eq!(byte.parse(&ops, &json!(300)).unwrap_result("parse"), 44i8);
     assert_eq!(byte.parse(&ops, &json!(-300)).unwrap_result("parse"), -44i8);
     assert_eq!(byte.parse(&ops, &json!(42)).unwrap_result("parse"), 42i8);
+}
+
+/// Every f32 in the committed Gson golden (`gson-float-to-string.txt`) must
+/// serialize through `createFloat` to the exact `Float.toString` bytes Gson
+/// emits for a `JsonPrimitive(Float)` — Gson delegates float rendering to the
+/// JDK's `Float.toString`, so the bytes are version-independent (Paper pins
+/// Gson 2.14.0). The golden was captured from JDK 25 across every exponent
+/// class, several mantissas, both signs, thresholds (1e-3 / 1e7), subnormals,
+/// extremes, and shortest tie-breaks — so `JsonOps.createFloat` is
+/// byte-for-byte Paper/Gson-faithful, including signed zero, exponent
+/// casing/sign, and the ~1.1% subnormal tie-breaks.
+#[test]
+fn create_float_matches_gson_byte_for_byte() {
+    let ops = JsonOps::INSTANCE;
+    let golden = include_str!("golden/gson-float-to-string.txt");
+    for line in golden.lines() {
+        let mut parts = line.splitn(2, ' ');
+        let bits: u32 = parts.next().expect("bits").parse().expect("u32 bits");
+        let expected = parts.next().expect("gson bytes").to_string();
+        let v = f32::from_bits(bits);
+        let bytes = serde_json::to_string(&ops.create_float(v)).expect("serialize");
+        assert_eq!(bytes, expected, "create_float(f32 {bits:#010x})");
+    }
+}
+
+/// The same golden, driven through the `float_codec` (the `Codec.FLOAT` path
+/// valueproviders use), not just the raw ops primitive.
+#[test]
+fn float_codec_matches_gson_byte_for_byte() {
+    let ops = JsonOps::INSTANCE;
+    let float = rivet_serialization::codec::float_codec::<JsonOps>();
+    let golden = include_str!("golden/gson-float-to-string.txt");
+    for line in golden.lines() {
+        let mut parts = line.splitn(2, ' ');
+        let bits: u32 = parts.next().expect("bits").parse().expect("u32 bits");
+        let expected = parts.next().expect("gson bytes").to_string();
+        let v = f32::from_bits(bits);
+        let encoded = float
+            .encode_start(&ops, &v)
+            .result()
+            .cloned()
+            .expect("encode");
+        let bytes = serde_json::to_string(&encoded).expect("serialize");
+        assert_eq!(bytes, expected, "float_codec(f32 {bits:#010x})");
+    }
 }
