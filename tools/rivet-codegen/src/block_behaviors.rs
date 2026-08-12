@@ -635,7 +635,7 @@ mod tests {
     /// The emitted `behavior_of` binary search must reproduce the fixture words
     /// for every state in the real table (the RLE decode is the load-bearing
     /// consumer path). Walking all 32366 states — including both boundaries of
-    /// every one of the 16753 runs and the out-of-range fallback — proves the
+    /// every one of the 16757 runs and the out-of-range fallback — proves the
     /// `partition_point` decode has no off-by-one anywhere.
     #[test]
     fn behavior_of_matches_fixture_words() {

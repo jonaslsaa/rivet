@@ -20,11 +20,13 @@
 //! there. The `test_state` behavior itself (the pure per-state predicate) is
 //! fully ported and tested; only the world-access step is deferred.
 //!
-//! The `SolidPredicate`/`MatchingBlocksPredicate`/`MatchingBlockTagPredicate`/
-//! `MatchingFluidsPredicate`/`ReplaceablePredicate`/`WouldSurvivePredicate`/
-//! `HasSturdyFacePredicate` state-testing subclasses (the `.states` unit) are
-//! out of this slice's scope; the base and its offset codec are the
-//! dependency-clean prerequisite.
+//! The `.states`-unit subclasses (`SolidPredicate`, `MatchingBlocksPredicate`,
+//! `MatchingBlockTagPredicate`, `MatchingFluidsPredicate`,
+//! `ReplaceablePredicate`, plus the `WouldSurvivePredicate`/
+//! `HasSturdyFacePredicate` leaves that share the offset field) are ported
+//! alongside this base; each implements `test_state` and the shared offset
+//! codec, and only the world-access `test` shell resolves through the `#399`
+//! seam.
 
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::Vec3i;
@@ -81,11 +83,12 @@ pub fn vec3i_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Vec3i, Ops>> {
     )
 }
 
-/// `Vec3i.CODEC.optionalFieldOf("offset", Vec3i.ZERO)` — the NON-lenient
-/// optional offset field (`UnobstructedPredicate.CODEC` uses this form;
-/// `lenientOptionalFieldOf` is the strict-with-default variant Java's
-/// `optionalFieldOf(name, default)` is NOT — it propagates a present-but-
-/// malformed field's error). Absent decodes to ZERO, and the default ZERO is
+/// `Vec3i.CODEC.optionalFieldOf("offset", Vec3i.ZERO)` — the non-lenient
+/// optional offset field (`UnobstructedPredicate.CODEC` uses this form). DFU's
+/// `optionalFieldOf(name, default)` is built on the non-lenient
+/// `optionalField(name, codec, false)`, so a present-but-malformed field
+/// propagates its decode error (unlike `lenientOptionalFieldOf`, which falls
+/// back to the default). Absent decodes to ZERO, and the default ZERO is
 /// omitted on encode.
 pub fn vec3i_optional_field_codec<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<Vec3i, Ops>> {
     let optional: Arc<dyn MapCodec<Option<Vec3i>, Ops>> =
