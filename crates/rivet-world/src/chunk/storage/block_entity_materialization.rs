@@ -7,18 +7,23 @@
 //! `getUpdateTag` + Paper's `sanitizeSentNbt`. This layer models that
 //! load → update-tag transform as a pure data transform over the already
 //! computed [`SerializedBlockEntityOutcome`]s, with no live entity, no world
-//! mutation, and no save writes. It is the #341 materialization boundary the
-//! reconstruction carries the outcomes for; the active #516 server send path
-//! consumes it but is deliberately not wired here.
+//! mutation, and no save writes. It is the #341 materialization boundary; the
+//! #516 server send path consumes it — the server `LevelChunk` derives the
+//! outcomes from the chunk's pending-map authority and feeds them here for
+//! packet materialization (#537).
 //!
-//! Authority boundary (#537): the server `LevelChunk` currently carries the
-//! serialized block entities both in `ChunkAccess`'s pending-NBT map and as the
-//! `block_entities`/`block_entity_outcomes` Vec snapshots the reconstruction
-//! returns, and runtime mutators update only the map. Choosing one authority is
-//! tracked separately; this materializer deliberately takes an immutable
-//! outcome slice and produces owned wire values, so it neither creates nor
-//! cements any duplicate mutable ownership — the caller decides which snapshot
-//! feeds it once #537 lands.
+//! Authority (#537): `ChunkAccess.pending_block_entities` — an
+//! insertion-ordered, position-keyed `IndexMap<BlockPos, CompoundTag>` — is the
+//! single runtime source of truth for loaded block entities. Reconstruction
+//! installs the serialized tags straight into that map (duplicate corrected
+//! positions collapse last-wins in place, first-insertion order for the
+//! survivors) and retains no `block_entities`/`block_entity_outcomes` snapshot
+//! Vecs; runtime mutators update the map, and the derived outcome/
+//! materialization path reads it per call. This materializer deliberately takes
+//! an immutable outcome slice and produces owned wire values, so it neither
+//! creates nor cements any duplicate mutable ownership — the caller owns the
+//! authority, and the outcomes it feeds here are derived from that authority,
+//! not from any second snapshot.
 //!
 //! ## Paper-faithful mapping
 //!

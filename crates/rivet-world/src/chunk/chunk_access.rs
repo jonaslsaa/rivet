@@ -22,7 +22,9 @@
 //! Deferred with their owning units:
 //! - the `blockEntities` map and `setBlockEntity`/`getBlockEntity` (the block-
 //!   entity unit, `mc.world.level.block.entity`); the port carries only the
-//!   `pendingBlockEntities` NBT map;
+//!   `pendingBlockEntities` NBT map, which is the runtime authority for loaded
+//!   block entities (#537): insertion-ordered, position-keyed, one entry per
+//!   position (duplicates collapse last-wins, in place);
 //! - the Starlight emptiness maps, `setBlockEntityNbt`'s
 //!   `!blockEntities.containsKey` guard, and the `blendingData` field — with
 //!   their lighting/blending units; the merged #184 nibble value surface and
@@ -50,7 +52,7 @@
 
 use std::collections::HashMap;
 
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::light_chunk::LightChunk;
@@ -106,8 +108,14 @@ where
     /// `structureStarts`/`structuresRefences` — the `StructureAccess`
     /// implementation.
     structure_access: StructureAccess<S>,
-    /// `pendingBlockEntities` — block-entity NBT awaiting materialization.
-    pending_block_entities: HashMap<BlockPos, CompoundTag>,
+    /// `pendingBlockEntities` — block-entity NBT awaiting materialization. An
+    /// insertion-ordered `IndexMap` (the runtime authority for loaded block
+    /// entities, #537): source-order iteration is a stable carry — Rivet has no
+    /// `BlockEntity` map yet, so the pending map IS the runtime chunk's block
+    /// entities; duplicate corrected positions collapse with the later tag
+    /// winning, in place, so the map is exactly one entry per position and
+    /// iteration order is first-insertion for surviving positions.
+    pending_block_entities: IndexMap<BlockPos, CompoundTag>,
     /// `heightmaps` — the `EnumMap<Heightmap.Types, Heightmap>`, keyed by the
     /// world `Types` ordinal (see the module doc).
     heightmaps: [Option<Heightmap>; 6],
@@ -189,7 +197,7 @@ where
             light_correct: false,
             inhabited_time,
             structure_access: StructureAccess::new(),
-            pending_block_entities: HashMap::new(),
+            pending_block_entities: IndexMap::new(),
             heightmaps: [None, None, None, None, None, None],
             block_nibbles: filled_empty_light(light_section_count),
             sky_nibbles: filled_empty_light(light_section_count),
@@ -489,26 +497,36 @@ where
         self.pending_block_entities.get(pos)
     }
 
-    /// `pendingBlockEntities` — the read-only map (`ProtoChunk.getBlockEntityNbts`
-    /// returns `Collections.unmodifiableMap(...)`).
-    pub fn pending_block_entities(&self) -> &HashMap<BlockPos, CompoundTag> {
+    /// `pendingBlockEntities` — the read-only map, insertion-ordered
+    /// (`ProtoChunk.getBlockEntityNbts` returns
+    /// `Collections.unmodifiableMap(...)`).
+    pub fn pending_block_entities(&self) -> &IndexMap<BlockPos, CompoundTag> {
         &self.pending_block_entities
     }
 
     /// `ProtoChunk.removeBlockEntity(BlockPos)`'s pending half —
     /// `pendingBlockEntities.remove(pos)` (the `blockEntities` half is not
-    /// ported with the block-entity unit).
+    /// ported with the block-entity unit). Removes the position from the
+    /// runtime authority, so a later packet materialization no longer emits it.
     pub fn remove_block_entity_nbt(&mut self, pos: &BlockPos) -> Option<CompoundTag> {
-        self.pending_block_entities.remove(pos)
+        self.pending_block_entities.shift_remove(pos)
     }
 
     /// `ChunkAccess.setBlockEntityNbt(CompoundTag)` — computes the position
     /// from the tag (`BlockEntity.getPosFromTag`) and stores the NBT pending.
     /// Java's `!blockEntities.containsKey(posFromTag)` guard is omitted with
-    /// the block-entity map (#216).
+    /// the block-entity map (#216), so a tag whose corrected position already
+    /// has a pending entry overwrites it in place — the later tag wins and the
+    /// position keeps its first-insertion slot (a duplicate never creates a
+    /// second entry). This is the runtime set/update mutator (#537).
     pub fn set_block_entity_nbt(&mut self, entity_tag: CompoundTag) {
         let pos_from_tag = get_pos_from_tag(Some(&self.pos), &entity_tag);
-        self.pending_block_entities.insert(pos_from_tag, entity_tag);
+        match self.pending_block_entities.get_mut(&pos_from_tag) {
+            Some(slot) => *slot = entity_tag,
+            None => {
+                self.pending_block_entities.insert(pos_from_tag, entity_tag);
+            }
+        }
     }
 
     /// `ChunkAccess.getPostProcessing()` — the per-section packed-offset lists.
@@ -674,14 +692,16 @@ where
         self.mark_unsaved();
     }
 
-    /// `ChunkAccess.getAllReferences()`.
-    pub fn get_all_references(&self) -> &HashMap<S, IndexSet<u64>> {
+    /// `ChunkAccess.getAllReferences()` — the insertion-ordered runtime
+    /// authority for structure references (#537).
+    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
         self.structure_access.get_all_references()
     }
 
     /// `ChunkAccess.setAllReferences(Map)` — clear + putAll, then marks
-    /// unsaved.
-    pub fn set_all_references(&mut self, data: HashMap<S, Vec<u64>>) {
+    /// unsaved. The caller's iteration order is preserved by the
+    /// insertion-ordered authority (#537).
+    pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, data: I) {
         self.structure_access.set_all_references(data);
         self.mark_unsaved();
     }
@@ -1139,6 +1159,60 @@ mod tests {
                 .map(String::as_str),
             Some("minecraft:furnace")
         );
+    }
+
+    #[test]
+    fn pending_map_is_an_insertion_ordered_position_authority() {
+        let mut base = default_base();
+        // Three distinct corrected positions install in insertion order.
+        let mut a = CompoundTag::new();
+        a.put_int("x", 1);
+        a.put_int("y", 0);
+        a.put_int("z", 2);
+        let mut b = CompoundTag::new();
+        b.put_int("x", 3);
+        b.put_int("y", 0);
+        b.put_int("z", 4);
+        let mut c = CompoundTag::new();
+        c.put_int("x", 5);
+        c.put_int("y", 0);
+        c.put_int("z", 6);
+        base.set_block_entity_nbt(a.clone());
+        base.set_block_entity_nbt(b.clone());
+        base.set_block_entity_nbt(c.clone());
+        let pos_a = BlockPos::new(1, 0, 2);
+        let pos_b = BlockPos::new(3, 0, 4);
+        let pos_c = BlockPos::new(5, 0, 6);
+        let order: Vec<BlockPos> = base.pending_block_entities().keys().copied().collect();
+        assert_eq!(order, vec![pos_a, pos_b, pos_c]);
+        assert_eq!(base.pending_block_entities().len(), 3);
+
+        // A duplicate corrected position collapses with the later tag winning
+        // IN PLACE — the position keeps its first-insertion slot (pos_b stays
+        // between a and c), and no second entry appears.
+        let mut replacement = CompoundTag::new();
+        replacement.put_int("x", 3);
+        replacement.put_int("y", 0);
+        replacement.put_int("z", 4);
+        replacement.put_string("id", "minecraft:furnace");
+        base.set_block_entity_nbt(replacement);
+        assert_eq!(base.pending_block_entities().len(), 3);
+        let order: Vec<BlockPos> = base.pending_block_entities().keys().copied().collect();
+        assert_eq!(order, vec![pos_a, pos_b, pos_c]);
+        assert_eq!(
+            base.get_block_entity_nbt(&pos_b)
+                .and_then(|tag| tag.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:furnace")
+        );
+
+        // Removal drops the position from the authority (order preserved for
+        // the survivors), so a packet materialization stops emitting it.
+        assert!(base.remove_block_entity_nbt(&pos_b).is_some());
+        assert_eq!(base.pending_block_entities().len(), 2);
+        let order: Vec<BlockPos> = base.pending_block_entities().keys().copied().collect();
+        assert_eq!(order, vec![pos_a, pos_c]);
+        assert!(base.remove_block_entity_nbt(&pos_b).is_none());
     }
 
     #[test]
