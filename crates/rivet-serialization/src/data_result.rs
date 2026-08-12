@@ -12,7 +12,7 @@
 //! curried fallback of `ap2`/`ap3` (which applies the function to partial
 //! values) can own its captured values (`Box<dyn Fn>` is not cloneable).
 
-use crate::functions::{Fn1, Fn2, Fn3, Fn4, Fn5};
+use crate::functions::{Fn1, Fn2, Fn3, Fn4, Fn5, Fn6};
 use crate::lifecycle::Lifecycle;
 use std::fmt;
 use std::sync::Arc;
@@ -596,6 +596,46 @@ pub fn ap5<
     });
     let step1 = ap2(curried, a, b);
     ap3(step1, c, d, e)
+}
+
+/// `Applicative.super.ap6` — Java's default:
+/// `ap3(ap3(map(Function6::curry3, func), t1, t2, t3), t4, t5, t6)`.
+/// `Function6.curry3`: `(t1, t2, t3) -> (t4, t5, t6) -> f(t1..t6)`.
+#[allow(clippy::type_complexity)] // nested `Fn3` mirror Java's `Function` curry
+pub fn ap6<
+    T1: Clone + Send + Sync + 'static,
+    T2: Clone + Send + Sync + 'static,
+    T3: Clone + Send + Sync + 'static,
+    T4: Clone + Send + Sync + 'static,
+    T5: Clone + Send + Sync + 'static,
+    T6: Clone + Send + Sync + 'static,
+    R: 'static,
+>(
+    fr: DataResult<Fn6<T1, T2, T3, T4, T5, T6, R>>,
+    a: DataResult<T1>,
+    b: DataResult<T2>,
+    c: DataResult<T3>,
+    d: DataResult<T4>,
+    e: DataResult<T5>,
+    f: DataResult<T6>,
+) -> DataResult<R> {
+    // `curry3` on the 6-arg function: `(t1, t2, t3) -> (t4, t5, t6) -> f(t1..t6)`.
+    let curried: DataResult<Fn3<T1, T2, T3, Fn3<T4, T5, T6, R>>> = fr.map(|f| {
+        let f = f.clone();
+        let curried_fn: Fn3<T1, T2, T3, Fn3<T4, T5, T6, R>> =
+            Arc::new(move |x1: &T1, x2: &T2, x3: &T3| {
+                let f = f.clone();
+                let x1 = x1.clone();
+                let x2 = x2.clone();
+                let x3 = x3.clone();
+                let inner: Fn3<T4, T5, T6, R> =
+                    Arc::new(move |y1: &T4, y2: &T5, y3: &T6| f(&x1, &x2, &x3, y1, y2, y3));
+                inner
+            });
+        curried_fn
+    });
+    let step1 = ap3(curried, a, b, c);
+    ap3(step1, d, e, f)
 }
 
 /// `DataResult.appendMessages(String, String)`.
