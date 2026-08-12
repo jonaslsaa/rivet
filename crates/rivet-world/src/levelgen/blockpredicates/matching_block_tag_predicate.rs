@@ -178,11 +178,12 @@ mod tests {
             BlockPredicate::type_id(&*decoded),
             BlockPredicateTypes::MATCHING_BLOCK_TAG
         );
-        let as_tag = p
+        let as_tag = decoded
             .as_any()
             .downcast_ref::<MatchingBlockTagPredicate>()
             .expect("decoded matching_block_tag predicate");
         assert_eq!(as_tag.tag(), &logs_tag());
+        assert_eq!(as_tag.offset(), &Vec3i::new(1, 2, 3));
     }
 
     #[test]
