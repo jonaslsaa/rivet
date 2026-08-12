@@ -701,7 +701,11 @@ fn hex_color<Ops: DynamicOps + 'static>(expected_digits: u32) -> Arc<dyn Codec<i
             if !string.starts_with('#') {
                 return DataResult::error("Hex color must begin with #".to_string());
             }
-            let digits = string.len() - 1;
+            // Java `string.length() - "#".length()` counts UTF-16 code units
+            // (`String.length()`), not bytes — so a malformed non-ASCII input
+            // reports the same "got N" as Paper (`encode_utf16` counts
+            // surrogate pairs as 2, matching Java exactly).
+            let digits = string[1..].encode_utf16().count();
             if digits != expected_digits as usize {
                 return DataResult::error(format!(
                     "Hex color is wrong size, expected {} digits but got {}",
@@ -1014,6 +1018,19 @@ mod string_rgb_color_tests {
         assert_eq!(
             error_message(&codec.parse(&JsonOps::INSTANCE, &json!("#+7d8c"))),
             "Failed to parse either. First: Hex color is wrong size, expected 6 digits but got 5; Second: Failed to parse either. First: Not a number: \"#+7d8c\"; Second: Not a json array: \"#+7d8c\""
+        );
+    }
+
+    #[test]
+    fn hex_form_wrong_size_counts_utf16_units_like_java() {
+        let codec = string_rgb_color::<JsonOps>();
+        // `"#7d8c6e\u{e9}"` is 8 UTF-16 code units (1 prefix + 6 hex + 1 for
+        // the BMP 'é'), so Java `string.length() - 1` reports 7 — NOT 8 (which
+        // a byte count would produce for the 2-byte UTF-8 'é'). The message
+        // must match Paper's exact "got 7".
+        assert_eq!(
+            error_message(&codec.parse(&JsonOps::INSTANCE, &json!("#7d8c6e\u{e9}"))),
+            "Failed to parse either. First: Hex color is wrong size, expected 6 digits but got 7; Second: Failed to parse either. First: Not a number: \"#7d8c6e\u{e9}\"; Second: Not a json array: \"#7d8c6e\u{e9}\""
         );
     }
 
