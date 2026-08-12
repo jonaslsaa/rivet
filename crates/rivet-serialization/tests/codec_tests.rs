@@ -525,8 +525,8 @@ fn float_range_signed_zero_boundaries() {
     assert!(codec.decode(&ops, &Value::Num(0.0)).is_success());
     assert!(codec.decode(&ops, &Value::Num(-0.0)).is_error());
     assert!(codec.decode(&ops, &Value::Num(1.0)).is_success());
-    // Just above the upper bound (as f64) narrows to 1.0 exactly and passes;
-    // a clearly larger value is rejected.
+    // A value above the upper bound that stays above 1.0 as f32 is rejected
+    // (`1.000001f64` narrows to ~1.00000095, not down to 1.0).
     assert!(codec.decode(&ops, &Value::Num(1.000001)).is_error());
 }
 
