@@ -9,5 +9,6 @@ description = "Decode/capture harness for the ported serverbound play packets (i
 bytes = "1"
 rivet-protocol = { path = "../../crates/rivet-protocol", features = ["packets"] }
 rivet-registry = { path = "../../crates/rivet-registry" }
+rivet-util = { path = "../../crates/rivet-util" }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
