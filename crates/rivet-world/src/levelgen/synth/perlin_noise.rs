@@ -23,6 +23,7 @@ use crate::levelgen::synth::improved_noise::ImprovedNoise;
 const ROUND_OFF: f64 = 3.3554432E7;
 
 /// `net.minecraft.world.level.levelgen.synth.PerlinNoise`.
+#[derive(Debug, Clone)]
 pub struct PerlinNoise {
     noise_levels: Vec<Option<ImprovedNoise>>,
     first_octave: i32,
