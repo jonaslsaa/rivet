@@ -56,6 +56,11 @@ pub mod configurations;
 mod feature_count_tracker;
 mod feature_place_context;
 
+// The `net.minecraft.world.level.levelgen.feature.stateproviders` value layer
+// (this unit) — the `BlockStateProvider` hierarchy and its declaration-order
+// codec dispatch (see the submodule doc).
+pub mod stateproviders;
+
 // The `net.minecraft.world.level.levelgen.feature.featuresize` value layer
 // (issue #391) — the `FeatureSize` hierarchy and its declaration-order codec
 // dispatch. Owned by the `mc.world.level.levelgen.feature.featuresize` unit.
