@@ -58,18 +58,18 @@ const SAMPLE_TICKS: u32 = 100;
 /// Wait this long after the walk stops before ending the client, so the final
 /// sent positions and any trailing correction are recorded before exit.
 const MOVE_DRAIN: Duration = Duration::from_millis(200);
-/// How long the dwell settle loop waits between coherence checks after the dwell
-/// window elapses. The keepalive cadence is 1 s, so a 50 ms check interval is
-/// ample: it lets an in-flight challenge/echo pair land and be observed well
-/// before the next challenge.
-const DWELL_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
-/// How long the dwell settle loop waits for the echo stream to catch up to the
-/// challenge stream before giving up and snapshotting anyway. Bounded so a
-/// genuinely missing echo (a client that stopped echoing, which the server would
-/// kick) cannot hold the record open forever — the emitted mismatch still fails
-/// the verdict. 1 s is far shorter than the survival-window proof and keeps the
-/// wall-clock record honest.
-const DWELL_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long the keepalive settle loop (dwell and move modes) waits between
+/// coherence checks before snapshotting. The keepalive cadence is 1 s, so a
+/// 50 ms check interval is ample: it lets an in-flight challenge/echo pair land
+/// and be observed well before the next challenge.
+const KEEPALIVE_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
+/// How long the keepalive settle loop waits for the challenge and echo streams
+/// to reach 1:1 correspondence before giving up and snapshotting anyway. Bounded
+/// so a genuinely missing echo (a client that stopped echoing, which the server
+/// would kick) cannot hold the record open forever — the emitted mismatch still
+/// fails the verdict. 1 s is far shorter than the move walk or the dwell
+/// survival-window proof, and keeps the record honest.
+const KEEPALIVE_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
 /// The minimum wall-clock dwell window (s) `--mode dwell` accepts. The
 /// transcript verdict requires the challenge span to reach 30 s, and the first
 /// challenge lands ~1.2 s after spawn, so a 31 s window (the server's 30 s kick
@@ -228,22 +228,22 @@ impl Args {
         }
         // The timeout starts at process launch while the dwell window only
         // starts at spawn; after the window the client spends up to
-        // DWELL_SETTLE_TIMEOUT settling the keepalive stream before emitting
-        // the `dwell` record. `dwell < timeout` is therefore not enough — the
-        // timeout must reserve the settle loop AND the pre-spawn
+        // KEEPALIVE_SETTLE_TIMEOUT settling the keepalive stream before
+        // emitting the `dwell` record. `dwell < timeout` is therefore not
+        // enough — the timeout must reserve the settle loop AND the pre-spawn
         // login/configuration time, or the timeout branch cuts the client off
         // before it emits.
         if mode == Mode::Dwell
             && timeout_seconds
-                <= dwell_seconds + DWELL_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS
+                <= dwell_seconds + KEEPALIVE_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS
         {
             return Err(format!(
                 "--timeout-seconds must exceed --dwell-seconds by more than {}s (the client \
                  spends up to {}s settling the keepalive stream after the dwell window, plus {}s \
                  of login/configuration time before spawn, and must emit the dwell record before \
                  the timeout fires)",
-                DWELL_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS,
-                DWELL_SETTLE_TIMEOUT.as_secs(),
+                KEEPALIVE_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS,
+                KEEPALIVE_SETTLE_TIMEOUT.as_secs(),
                 DWELL_LOGIN_HEADROOM_SECONDS
             ));
         }
@@ -560,16 +560,21 @@ struct KeepaliveLog {
 }
 
 impl KeepaliveLog {
-    /// Whether the echo stream has caught up to the challenge stream: every
-    /// challenge received so far has a recorded echo. The server challenges at
-    /// a 1 s cadence and azalea echoes within a tick, so a settled log is in a
-    /// coherent state — snapshotting it now cannot observe a challenge whose
-    /// echo is still in flight. A challenge whose echo genuinely never lands
-    /// (a client that stopped echoing would be kicked) keeps this false, so the
-    /// dwell settle window expires and the emitted mismatch still fails the
+    /// Whether the challenge and echo streams have reached 1:1 correspondence.
+    /// The server challenges at a 1 s cadence and azalea echoes within a tick,
+    /// but the two streams are observed on different paths — the echo observer
+    /// records synchronously when the challenge packet is processed, while the
+    /// challenge itself is recorded only after azalea's async event channel
+    /// drains to the client handler — so either stream can briefly lead the
+    /// other at a snapshot boundary. Requiring exact 1:1 (not `echoes >=
+    /// challenges`) means a settled log is always a coherent state: it cannot
+    /// observe a challenge whose echo is still in flight, and it cannot observe
+    /// an echo whose challenge record has not landed yet. A genuinely missing
+    /// echo (a client that stopped echoing would be kicked) keeps this false, so
+    /// the settle window expires and the emitted mismatch still fails the
     /// verdict.
     fn settled(&self) -> bool {
-        self.echoes.len() >= self.challenges.len()
+        self.echoes.len() == self.challenges.len()
     }
 }
 
@@ -927,7 +932,9 @@ fn sample_cell(world: &azalea::world::World, x: i32, z: i32) -> (String, String,
 /// approach — so the position/velocity sequence is deterministic across boots.
 ///
 /// After the walk this task drains briefly so the final sent positions and any
-/// trailing server correction land before the record is emitted.
+/// trailing server correction land before the record is emitted, then settles
+/// the keepalive stream (see `settle_and_snapshot`) so the transcript's
+/// challenge/echo relationship is observed coherently across the boundary.
 ///
 /// The walk's first observed tick is a setup tick (direction set, no movement),
 /// so the walk spans `MOVE_TICKS` observed ticks of which `MOVE_TICKS - 1` move
@@ -960,22 +967,29 @@ async fn move_and_emit(bot: Client, state: State) {
     // Let the last sent positions and any trailing server correction flush.
     tokio::time::sleep(MOVE_DRAIN).await;
 
-    // Snapshot the observables. The keepalive challenges and echoes are read
-    // together under one lock (coherent by construction), while the remaining
-    // values each take their own lock. The walk finished earlier and MOVE_DRAIN
-    // let the write side quiesce: no further teleports/corrections arrive once
-    // the player stops moving, so in practice these reads observe the final
-    // sets.
-    let (
-        samples,
-        teleports,
-        teleport_acks,
-        keepalives,
-        keepalive_echoes,
-        corrections,
-        origin,
-        last_sent,
-    ) = {
+    // Snapshot the keepalive log via the bounded settle-and-coherent-snapshot
+    // mechanism dwell mode uses: a challenge can arrive exactly as MOVE_DRAIN
+    // elapses, and because azalea records the echo synchronously while the
+    // challenge record only lands after the async event channel drains, either
+    // stream can straddle the boundary (observed: a Paper boot with one more
+    // echo than challenge — the mirror of the dwell in-flight-pair case). The
+    // settle loop waits for 1:1 correspondence (bounded by
+    // KEEPALIVE_SETTLE_TIMEOUT) so the transcript's `keepalive_echo` relationship
+    // is observed coherently; a genuinely missing echo still times out and fails.
+    let keepalive_log = settle_and_snapshot(
+        &state.keepalive_log,
+        KEEPALIVE_SETTLE_TIMEOUT,
+        KEEPALIVE_SETTLE_INTERVAL,
+    )
+    .await;
+    let keepalives = keepalive_log.challenges;
+    let keepalive_echoes = keepalive_log.echoes;
+
+    // Snapshot the remaining observables, each under its own lock. The walk
+    // finished earlier and MOVE_DRAIN let the write side quiesce: no further
+    // teleports/corrections arrive once the player stops moving, so in practice
+    // these reads observe the final sets.
+    let (samples, teleports, teleport_acks, corrections, origin, last_sent) = {
         let samples = state
             .move_samples
             .lock()
@@ -991,12 +1005,6 @@ async fn move_and_emit(bot: Client, state: State) {
             .lock()
             .expect("teleport acks lock poisoned")
             .clone();
-        let keepalive_log = state
-            .keepalive_log
-            .lock()
-            .expect("keepalive log lock poisoned");
-        let keepalives = keepalive_log.challenges.clone();
-        let keepalive_echoes = keepalive_log.echoes.clone();
         let corrections = state
             .corrections
             .lock()
@@ -1011,8 +1019,6 @@ async fn move_and_emit(bot: Client, state: State) {
             samples,
             teleports,
             teleport_acks,
-            keepalives,
-            keepalive_echoes,
             corrections,
             origin,
             last_sent,
@@ -1102,18 +1108,21 @@ async fn move_and_emit(bot: Client, state: State) {
     hard_exit(0);
 }
 
-/// Wait until the keepalive echo stream has caught up to the challenge stream
-/// (bounded by `timeout`), then return a coherent snapshot of the log.
+/// Wait until the challenge and echo streams reach 1:1 correspondence (bounded
+/// by `timeout`), then return a coherent snapshot of the log.
 ///
-/// The 1 s cadence means a challenge can arrive exactly as the dwell window
-/// elapses, with azalea's echo still in flight; snapshotting immediately would
-/// record that challenge without its echo and spuriously fail the
-/// challenge->echo relationship. This waits (polling every `interval`) for the
-/// in-flight pair to land and be observed coherently. A challenge whose echo
-/// truly never arrives (a client that stopped echoing, which the server would
-/// kick) keeps the log unsettled until `timeout`; the snapshot then preserves
-/// the mismatch, so a genuinely missing echo still fails the verdict — the
-/// settle window never masks it.
+/// The 1 s cadence means a challenge/echo pair can straddle the emit boundary:
+/// a challenge can arrive exactly as the window elapses with azalea's echo
+/// still in flight (dwell mode), or — because the echo observer records
+/// synchronously while the challenge record only lands after azalea's async
+/// event channel drains (move mode) — an echo can be observed with its
+/// challenge still in flight. Snapshotting immediately in either case records a
+/// pair half and spuriously fails the 1:1 challenge->echo relationship. This
+/// waits (polling every `interval`) for the in-flight pair to land and be
+/// observed coherently. A pair half whose match truly never arrives (a client
+/// that stopped echoing, which the server would kick) keeps the log unsettled
+/// until `timeout`; the snapshot then preserves the mismatch, so a genuinely
+/// missing echo still fails the verdict — the settle window never masks it.
 ///
 /// `timeout` and `interval` are parameters so the straddle/missing-echo
 /// counterfactuals can be driven deterministically in tests.
@@ -1202,8 +1211,8 @@ async fn dwell_and_emit(bot: Client, state: State) {
     // with its echo instead of spuriously failing the relationship.
     let log = settle_and_snapshot(
         &state.keepalive_log,
-        DWELL_SETTLE_TIMEOUT,
-        DWELL_SETTLE_INTERVAL,
+        KEEPALIVE_SETTLE_TIMEOUT,
+        KEEPALIVE_SETTLE_INTERVAL,
     )
     .await;
     let keepalives = log.challenges;
@@ -1499,6 +1508,57 @@ mod tests {
         assert!(
             started.elapsed() >= Duration::from_millis(50),
             "settle returned before the in-flight echo could land"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_settle_snapshots_an_echo_without_challenge_coherently() {
+        // Counterfactual for the move-mode flake (observed gating PR #562):
+        // MOVE_DRAIN elapses exactly as azalea records an echo synchronously
+        // (the `SendGamePacketEvent` observer fires while the challenge packet
+        // is being processed) but before the challenge record lands on the
+        // async event channel — the echo stream then leads the challenge stream
+        // (Paper transcript: 6 challenges / 7 echoes). A snapshot taken at that
+        // moment records an echo with no matching challenge, which fails the 1:1
+        // `keepalive_echo` relationship and false-FAILs parity. The settle loop
+        // must wait for the missing challenge, then snapshot echo+challenge
+        // together so the relationship holds.
+        let log = Arc::new(Mutex::new(KeepaliveLog {
+            challenges: vec![1001, 1002, 1003],
+            instants: vec![],
+            echoes: vec![1001, 1002, 1003, 1004],
+        }));
+        // The straddling challenge lands 50 ms later — well inside the settle
+        // timeout but definitely after the loop's first coherence check.
+        let log_for_challenge = Arc::clone(&log);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            log_for_challenge
+                .lock()
+                .expect("test lock poisoned")
+                .challenges
+                .push(1004);
+        });
+
+        let started = Instant::now();
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_secs(2), Duration::from_millis(5)).await;
+
+        // The snapshot observed the straddling echo together with its challenge:
+        // the 1:1 relationship holds (challenge_count == echo_count). If the
+        // settle loop had snapshot immediately, this would be 3 challenges vs 4
+        // echoes and the verdict would FAIL. Under the pre-fix `echoes >=
+        // challenges` predicate the settle loop would also return immediately —
+        // the pass above proves the strict 1:1 predicate waits for coherence.
+        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1003, 1004]);
+        assert!(snapshot.settled());
+        // The challenge physically cannot land before 50 ms, so the settle loop
+        // must have waited for it — the pass above is not a race where the
+        // challenge beat the first coherence check.
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "settle returned before the in-flight challenge could land"
         );
     }
 

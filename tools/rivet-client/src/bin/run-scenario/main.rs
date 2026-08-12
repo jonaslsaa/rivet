@@ -149,11 +149,11 @@ const DEFAULT_RUNS: usize = 2;
 const DEFAULT_DWELL_SECONDS: u64 = 41;
 /// Reserved client-side headroom (s) beyond the dwell window that
 /// `--timeout-seconds` must accommodate before it can pass validation: the
-/// client's 1 s keepalive settle loop (`rivet-client`'s `DWELL_SETTLE_TIMEOUT`)
-/// plus the login/configuration time before spawn (`rivet-client`'s
-/// `DWELL_LOGIN_HEADROOM_SECONDS`). Mirrors the client's own parse-time
-/// validation so a `run-scenario`-accepted invocation is never cut off by the
-/// client's timeout branch before it emits the `dwell` record.
+/// client's 1 s keepalive settle loop (`rivet-client`'s
+/// `KEEPALIVE_SETTLE_TIMEOUT`) plus the login/configuration time before spawn
+/// (`rivet-client`'s `DWELL_LOGIN_HEADROOM_SECONDS`). Mirrors the client's own
+/// parse-time validation so a `run-scenario`-accepted invocation is never cut
+/// off by the client's timeout branch before it emits the `dwell` record.
 const DWELL_TIMEOUT_HEADROOM_SECONDS: u64 = 6;
 
 // Machine-stable exit codes. PASS/FAIL/UNVERIFIED are the shared contract
