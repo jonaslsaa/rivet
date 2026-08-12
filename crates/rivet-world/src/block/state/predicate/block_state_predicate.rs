@@ -204,6 +204,7 @@ fn state_definition_to_string(def: StateDefinition) -> String {
 mod tests {
     use super::*;
     use crate::block::blocks::Blocks;
+    use crate::block::state::predicate::BlockPredicate;
     use rivet_registry::block_state_properties::BlockStateProperties;
     use rivet_registry::core::Axis;
 
@@ -212,6 +213,18 @@ mod tests {
             .default_block_state()
             .set_value(BlockStateProperties::AXIS, value)
             .expect("axis is on oak_log")
+    }
+
+    /// An oak_leaves state with the given `distance` (Int 1..=7) and
+    /// `waterlogged` (Bool) — defaults are distance=7, waterlogged=false,
+    /// persistent=false.
+    fn oak_leaves_state(distance: i32, waterlogged: bool) -> BlockState {
+        Blocks::OAK_LEAVES
+            .default_block_state()
+            .set_value(BlockStateProperties::DISTANCE, distance)
+            .expect("distance is on oak_leaves")
+            .set_value(BlockStateProperties::WATERLOGGED, waterlogged)
+            .expect("waterlogged is on oak_leaves")
     }
 
     #[test]
@@ -263,6 +276,74 @@ mod tests {
     }
 
     #[test]
+    fn where_conjoins_two_distinct_properties() {
+        // Java `where` puts both (property, predicate) pairs in the map; `test`
+        // requires every entry to pass, so the constraints combine by
+        // conjunction. DISTANCE (Int) and WATERLOGGED (Bool) are distinct
+        // properties on oak_leaves.
+        let p = BlockStatePredicate::for_block(Blocks::OAK_LEAVES)
+            .r#where(
+                BlockStateProperties::DISTANCE,
+                Box::new(|v| *v == PropertyValue::Int(1)),
+            )
+            .r#where(
+                BlockStateProperties::WATERLOGGED,
+                Box::new(|v| *v == PropertyValue::Bool(true)),
+            );
+        assert!(p.test(Some(&oak_leaves_state(1, true))));
+        assert!(!p.test(Some(&oak_leaves_state(7, true))));
+        assert!(!p.test(Some(&oak_leaves_state(1, false))));
+        assert!(!p.test(Some(&oak_leaves_state(7, false))));
+    }
+
+    #[test]
+    fn where_on_a_bool_property() {
+        // WATERLOGGED is a BooleanProperty; the predicate receives the Bool
+        // value (`input.getValue(key)` yields a Boolean).
+        let p = BlockStatePredicate::for_block(Blocks::OAK_LEAVES).r#where(
+            BlockStateProperties::WATERLOGGED,
+            Box::new(|v| *v == PropertyValue::Bool(true)),
+        );
+        assert!(p.test(Some(&oak_leaves_state(7, true))));
+        assert!(!p.test(Some(&oak_leaves_state(7, false))));
+    }
+
+    #[test]
+    fn where_on_an_int_property() {
+        // DISTANCE is an IntegerProperty (1..=7); the predicate receives the
+        // Int value. The default oak_leaves distance is 7, so a `== 1`
+        // predicate rejects the default state.
+        let p = BlockStatePredicate::for_block(Blocks::OAK_LEAVES).r#where(
+            BlockStateProperties::DISTANCE,
+            Box::new(|v| *v == PropertyValue::Int(1)),
+        );
+        assert!(p.test(Some(&oak_leaves_state(1, false))));
+        assert!(!p.test(Some(&oak_leaves_state(7, false))));
+    }
+
+    #[test]
+    fn any_combines_through_the_state_predicate_combinators() {
+        // ANY is a full StatePredicate (its own anonymous implementation in
+        // Java), so it composes with `and`/`or`/`negate` like any other
+        // predicate. `and` short-circuits on the right side; `or` short-circuits
+        // on ANY's constant true.
+        let stone = BlockPredicate::for_block(Blocks::STONE);
+        let and = BlockStatePredicate::ANY.and(stone);
+        assert!(and.test(Some(&Blocks::STONE.default_block_state())));
+        assert!(!and.test(Some(&Blocks::DIRT.default_block_state())));
+        assert!(!and.test(None));
+
+        let or = BlockStatePredicate::ANY.or(stone);
+        assert!(or.test(Some(&Blocks::STONE.default_block_state())));
+        assert!(or.test(Some(&Blocks::DIRT.default_block_state())));
+        assert!(or.test(None));
+
+        let negated = BlockStatePredicate::ANY.negate();
+        assert!(!negated.test(Some(&Blocks::STONE.default_block_state())));
+        assert!(!negated.test(None));
+    }
+
+    #[test]
     fn where_on_a_missing_property_panics() {
         // stone has no properties; `where(AXIS, …)` panics where Java throws
         // `IllegalArgumentException` with the `StateDefinition`-based message.
@@ -284,10 +365,6 @@ mod tests {
         // `EnumProperty{name=axis, clazz=class net.minecraft.core.Direction
         // $Axis, values=[x, y, z]}` (documented divergence in
         // `rivet_registry::block_state_property`).
-        // RivetTodo(#228): the `EnumProperty` tail is intentionally
-        // non-byte-identical to Paper's `IllegalArgumentException` message;
-        // re-check against a Paper oracle if property message fidelity is ever
-        // exercised.
         assert_eq!(
             msg,
             "StateDefinition{block=Block{minecraft:stone}, properties=[]} \

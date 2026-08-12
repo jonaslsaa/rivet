@@ -102,15 +102,6 @@ impl<P: StatePredicate> StatePredicate for NegatedPredicate<P> {
     }
 }
 
-/// A boxed predicate is itself a [`StatePredicate`] — the pattern framework
-/// (`BlockInWorld.hasState`) stores `Predicate<BlockState>` values, and a boxed
-/// trait object must stay usable and chainable once boxed.
-impl StatePredicate for Box<dyn StatePredicate + '_> {
-    fn test(&self, input: Option<&BlockState>) -> bool {
-        self.as_ref().test(input)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -26,10 +26,9 @@ use super::StatePredicate;
 /// `PartialEq`/`Eq` are a deliberate ergonomic divergence from Java, where
 /// `BlockPredicate` does not override `equals` (identity equality). Here `Block`
 /// is the id-handle (OWNERSHIP: arenas + ids), so two predicates for the same
-/// block compare equal — natural value equality, used by this unit's own tests
-/// (`new_and_for_block_are_equivalent`). Predicate semantics are unaffected:
-/// `test` is the only behavior, and the id-handle model makes value equality
-/// observably identical to identity equality for a porter.
+/// block compare equal — natural value equality; `test` is the only behavior,
+/// and the id-handle model makes value equality observably identical to
+/// identity equality for a porter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BlockPredicate {
     block: Block,
