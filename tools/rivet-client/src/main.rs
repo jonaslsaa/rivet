@@ -79,8 +79,9 @@ const KEEPALIVE_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// mode the emit happens after login + walk + `MOVE_DRAIN` + up to this settle,
 /// so a tight timeout (near that total) can cut the client off before it emits
 /// (ExitCode 2, spurious FAIL). The defaults (30 s client / 60 s runner) absorb
-/// it comfortably; dwell mode additionally enforces the reservation at parse
-/// time via `DWELL_LOGIN_HEADROOM_SECONDS`.
+/// it comfortably; both dwell and move modes additionally enforce the
+/// reservation at parse time via the shared validators in
+/// `rivet_harness_common::timing`.
 const KEEPALIVE_SETTLE_TIMEOUT: Duration =
     Duration::from_secs(rivet_harness_common::timing::KEEPALIVE_SETTLE_TIMEOUT_SECS);
 /// The minimum wall-clock dwell window (s) `--mode dwell` accepts. The

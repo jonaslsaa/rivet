@@ -80,16 +80,17 @@ const LIFECYCLE_EVENTS: [&str; 3] = ["init", "login", "spawn"];
 ///   matching echo — is compared structurally via `keepalive_echo` set.
 ///
 ///   Timing-skew note: the client snapshots the keepalive log only after the
-///   walk finishes (via `settle_and_snapshot`, which freezes the challenges
-///   already observed and waits up to 1 s for their echoes). The server keeps
-///   challenging at 1/s while the client stays connected, so the frozen
-///   challenge set can include pairs that landed up to ~1 s *after* the walk
-///   stopped — the counts are not exactly "challenges during the walk". Stray
-///   echoes whose challenge record has not landed are excluded, so the counts
-///   are a coherent prefix. That is fine for the verdict (only the structural
-///   `keepalive_echo` flag is compared; the counts are diagnostic) but the
-///   transcript's `keepalives` count must not be read as a precise "during the
-///   walk" observation.
+///   walk finishes — `settle_and_snapshot` freezes the challenges observed at
+///   settle entry (right after `MOVE_DRAIN`, ~0.2 s post-walk) and waits up to
+///   1 s for their echoes. The server keeps challenging at 1/s while the client
+///   stays connected, so the frozen challenge set is cut at ~0.2 s after the
+///   walk stopped, and the 1 s settle window is only the echo-wait bound, not a
+///   challenge-collection window. The counts are therefore a coherent prefix of
+///   the live stream, not exactly "challenges during the walk", and stray
+///   echoes whose challenge record has not landed are excluded. That is fine for
+///   the verdict (only the structural `keepalive_echo` flag is compared; the
+///   counts are diagnostic) but the transcript's `keepalives` count must not be
+///   read as a precise "during the walk" observation.
 /// - `walk.corrections` / `walk.corrections_count`: `entity_position_sync`
 ///   packets are a timing-dependent server observation — how many client
 ///   position packets land before each server tick decides how often the server

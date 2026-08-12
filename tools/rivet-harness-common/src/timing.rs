@@ -23,8 +23,11 @@ pub const DWELL_TIMEOUT_HEADROOM_SECONDS: u64 =
 pub const MOVE_WALK_TICKS: u32 = 120;
 /// Server tick rate (game ticks per second).
 pub const TICKS_PER_SECOND: u32 = 20;
-/// Move-mode walk wall-clock seconds.
-pub const MOVE_WALK_SECONDS: u64 = (MOVE_WALK_TICKS / TICKS_PER_SECOND) as u64;
+/// Move-mode walk wall-clock seconds, ceiled to a whole second (like
+/// `MOVE_DRAIN_SECONDS_CEIL`) so a tick count that is not divisible by the tick
+/// rate cannot silently truncate the reserved budget below the true walk time.
+pub const MOVE_WALK_SECONDS: u64 =
+    ((MOVE_WALK_TICKS + TICKS_PER_SECOND - 1) / TICKS_PER_SECOND) as u64;
 /// Move-mode post-walk drain in milliseconds (the client's `MOVE_DRAIN`).
 pub const MOVE_DRAIN_MS: u64 = 200;
 /// Move-mode post-walk drain (s) before the record emits: `MOVE_DRAIN_MS`
@@ -93,7 +96,7 @@ mod tests {
 
     #[test]
     fn move_headroom_matches_the_fixed_emit_budget() {
-        // The self-sum is implied by the definition; the literal pins it so a
+        // The self-sum is implied by the definition; the literals pin it so a
         // refactor that shrinks every summand cannot silently shrink the budget.
         assert_eq!(MOVE_TIMEOUT_HEADROOM_SECONDS, 13);
         assert_eq!(MOVE_DRAIN_SECONDS_CEIL, 1);
