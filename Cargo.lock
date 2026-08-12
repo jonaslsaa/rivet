@@ -625,7 +625,6 @@ dependencies = [
  "rivet-serialization",
  "rivet-text",
  "rivet-util",
- "ryu",
 ]
 
 [[package]]

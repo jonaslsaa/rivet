@@ -20,4 +20,3 @@ rivet-registry = { workspace = true, features = ["blocks"] }
 rivet-serialization = { workspace = true }
 rivet-text = { workspace = true }
 rivet-util = { workspace = true }
-ryu = { workspace = true }
