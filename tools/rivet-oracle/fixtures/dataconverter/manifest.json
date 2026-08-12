@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "dataconverter-foundation",
+  "note": "Ground-truth samples of the DataConverter foundation classes (issue #535): DataConverter.encodeVersions/getVersion/getStep/encodedToString + LOWEST_VERSION_COMPARATOR ordering, DataType.convertOrOriginal, DataHook/DataWalker contract, ObjectType.getType boundaries (incl. the NPE on null), and the MapType/ListType default-method dispatch (setGeneric, getList(type), getOrCreateList/Map, getBoolean coercion) exercised over the real NBT backing. Captured from the pinned Paper 26.2 runtime via DataConverterProbe. Deterministic across boots.",
+  "captured": [
+    {
+      "path": "dataconverter-foundation.json",
+      "sha256": "5314f7bd11ec30d97f9ab592568a1da31259c377da902b89575a0850b0917dc1",
+      "bytes": 5350
+    }
+  ]
+}
