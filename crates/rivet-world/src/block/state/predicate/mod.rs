@@ -1,5 +1,5 @@
 //! `net.minecraft.world.level.block.state.predicate` — the simple block-state
-//! predicates (issue #547): [`BlockPredicate`] and [`BlockStatePredicate`],
+//! predicates (issue #228): [`BlockPredicate`] and [`BlockStatePredicate`],
 //! the `java.util.function.Predicate<BlockState>` implementations the block
 //! pattern framework builds on (`EndPortalFrameBlock`, `CarvedPumpkinBlock`,
 //! `WitherSkullBlock`, `DesertWellFeature`, `EnderDragonFight`).

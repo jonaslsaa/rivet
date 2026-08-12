@@ -1,5 +1,5 @@
 //! `net.minecraft.world.level.block.state` — module mirror for the
-//! state-predicate sub-package (issue #547).
+//! state-predicate sub-package (issue #228).
 //!
 //! The value surface of the `mc.world.level.block.state` unit (`BlockState`,
 //! `StateDefinition`, `Property`) lives in `rivet-registry` (issue #228), where
