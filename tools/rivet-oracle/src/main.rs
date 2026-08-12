@@ -104,6 +104,10 @@
 //!   cargo run -p rivet-oracle -- verify --full --expect-fail [dir]
 //!                                # M2 FULL negative control against the superflat region baseline
 //!   cargo run -p rivet-oracle -- sample                # regenerate worldgen/ semantic samples + manifest
+//!   cargo run -p rivet-oracle -- generated-expected [<seed>] [--to <path>]
+//!                                # generated-world acceptance ground-truth handoff (seed
+//!                                # defaults to the pinned 42);
+//!                                # UNVERIFIED (3) until the Paper seed reference is captured
 //!   cargo run -p rivet-oracle -- regenerate            # regenerate all fixture kinds
 //!                                                      # (sub-select: --m0/--m2/--full/--samples/--text)
 //!   RIVET_ORACLE_JAR=/path/jar.jar cargo run -p rivet-oracle -- verify
@@ -2507,6 +2511,77 @@ fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
     Ok(())
 }
 
+/// The generated-world acceptance contract's pinned seed (seed 42) — the seed
+/// the `generated-expected` ground-truth handoff is captured for, and the seed
+/// the `run-scenario generated-world` acceptance boots. Kept in sync with the
+/// runner's `GENERATED_SEED` (tools/rivet-client/.../server.rs); a divergence
+/// would silently compare the wrong world.
+const GENERATED_SEED: u64 = 42;
+
+/// Parse the `generated-expected` subcommand's `--to <path>` and optional
+/// `<seed>` positional args (shared by `run()` and the CLI exit-code tests). A
+/// missing seed defaults to the pinned [`GENERATED_SEED`] (the acceptance
+/// contract); a malformed `--to` or non-numeric seed is a CLI usage error —
+/// `Error::Gate`, never `Error::Unverified`, so the runner classifies it as
+/// FAIL, not as a missing prerequisite.
+fn parse_generated_expected_args(rest: &[&str]) -> Result<(u64, Option<PathBuf>), Error> {
+    let mut to: Option<PathBuf> = None;
+    let mut seed: Option<u64> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--to" => {
+                let Some(path) = rest.get(i + 1) else {
+                    return Err(Error::Gate(
+                        "generated-expected --to requires a destination path".into(),
+                    ));
+                };
+                to = Some(PathBuf::from(path));
+                i += 2;
+            }
+            other if !other.starts_with('-') => {
+                let Ok(v) = other.parse::<u64>() else {
+                    return Err(Error::Gate(format!(
+                        "generated-expected: invalid seed {other} (expected an unsigned 64-bit \
+                         seed)"
+                    )));
+                };
+                seed = Some(v);
+                i += 1;
+            }
+            other => {
+                return Err(Error::Gate(format!(
+                    "generated-expected: unknown option {other}"
+                )));
+            }
+        }
+    }
+    Ok((seed.unwrap_or(GENERATED_SEED), to))
+}
+
+/// Capture the seed-42 generated-world ground-truth handoff for the
+/// `generated-world` acceptance runner (the future Paper seed-42 reference).
+///
+/// The generated-world acceptance compares the client's observed per-coordinate
+/// content against a ground-truth manifest of what Paper actually generates for
+/// seed 42. That reference does not exist yet — the harness lands ahead of the
+/// generator, and the Paper capture is a separate artifact. Until it is
+/// captured, this subcommand is honestly UNVERIFIED (exit 3): it refuses to
+/// write an empty or fabricated manifest, so a future `generated-world` run can
+/// never PASS against nothing.
+fn run_generated_expected(seed: u64, to: Option<&Path>) -> Result<(), Error> {
+    let target = to
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<stdout>".to_owned());
+    Err(Error::Unverified(format!(
+        "generated-expected: no seed-{seed} ground-truth reference is captured yet — the Paper \
+         seed-{seed} generation handoff is a future artifact. This is UNVERIFIED (exit 3), never \
+         an empty or fabricated manifest (the runner asked to write {target}): the \
+         generated-world acceptance must not PASS against nothing. Capture the Paper \
+         seed-{seed} ground-truth and wire it into this subcommand's output contract."
+    )))
+}
+
 /// `hash-paper`: rebuild the committed Paper manifest from the decompressed
 /// `.nbt` fixtures. The seed, level-type, region-file-compression, and corpus
 /// version recorded are all read back out of the source region capture's
@@ -3246,6 +3321,14 @@ fn run() -> Result<(), Error> {
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
             let (world_dir, to) = parse_extract_world_args(&rest)?;
             run_extract_world(&world_dir, to.as_deref())
+        }
+        Some("generated-expected") => {
+            // The generated-world acceptance's seed ground-truth handoff. Until
+            // the Paper seed-42 reference is captured, this is honestly
+            // UNVERIFIED (exit 3) — the runner never PASSes against nothing.
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            let (seed, to) = parse_generated_expected_args(&rest)?;
+            run_generated_expected(seed, to.as_deref())
         }
         Some("regenerate") => {
             // `--to <dir>` overrides the destination for a single booting kind
@@ -5326,6 +5409,61 @@ mod tests {
         let (dir, to) = parse_extract_world_args(&["world", "--to", "out.json"]).unwrap();
         assert_eq!(dir, PathBuf::from("world"));
         assert_eq!(to, Some(PathBuf::from("out.json")));
+    }
+
+    /// `generated-expected` CLI usage errors (invalid seed, malformed `--to`)
+    /// are Gate — never the missing-prerequisite UNVERIFIED the runner treats
+    /// as "the seed reference is a future artifact". A missing seed defaults to
+    /// the pinned [`GENERATED_SEED`]; an invalid value or a malformed `--to` is
+    /// a malformed CLI, not a missing reference.
+    #[test]
+    fn generated_expected_cli_usage_errors_are_gate_not_unverified() {
+        assert!(matches!(
+            parse_generated_expected_args(&["--to"]),
+            Err(Error::Gate(_))
+        ));
+        assert!(matches!(
+            parse_generated_expected_args(&["not-a-seed"]),
+            Err(Error::Gate(_))
+        ));
+        assert!(matches!(
+            parse_generated_expected_args(&["42", "--bogus"]),
+            Err(Error::Gate(_))
+        ));
+        let (seed, to) = parse_generated_expected_args(&["42", "--to", "out.json"]).unwrap();
+        assert_eq!(seed, GENERATED_SEED);
+        assert_eq!(to, Some(PathBuf::from("out.json")));
+        // A missing seed is the pinned acceptance seed, not a usage error — the
+        // runner always passes it, and the oracle defaulting to the contract
+        // seed is coherent.
+        let (seed, to) = parse_generated_expected_args(&[]).unwrap();
+        assert_eq!(seed, GENERATED_SEED);
+        assert_eq!(to, None);
+    }
+
+    /// Until the Paper seed-42 ground-truth reference is captured,
+    /// `generated-expected` is UNVERIFIED (exit 3) — it must never write an
+    /// empty or fabricated manifest, so the generated-world acceptance can never
+    /// PASS against nothing.
+    #[test]
+    fn generated_expected_is_unverified_until_the_reference_lands() {
+        assert!(matches!(
+            run_generated_expected(GENERATED_SEED, None),
+            Err(Error::Unverified(message))
+                if message.contains("UNVERIFIED") && message.contains("seed-42")
+        ));
+        // The runner passes `--to`; the refusal must not depend on the output
+        // path existing or being writable — it fails before touching it.
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("generated-expected.json");
+        assert!(matches!(
+            run_generated_expected(GENERATED_SEED, Some(&out)),
+            Err(Error::Unverified(_))
+        ));
+        assert!(
+            !out.exists(),
+            "must never write an empty/fabricated manifest"
+        );
     }
 
     /// The `run()` exit-code mapping: only `Error::Unverified` (a missing
