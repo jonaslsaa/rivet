@@ -65,12 +65,24 @@ pub struct MobSpawnSettings {
 }
 
 impl MobSpawnSettings {
-    /// `MobSpawnSettings.EMPTY` — Java's static field; a fresh empty value here
-    /// because the `IndexMap` fields are not `const`-constructible.
+    /// `MobSpawnSettings.EMPTY` — Java's static field, `new Builder().build()`.
+    /// A function here because the `IndexMap` fields are not `const`-
+    /// constructible. Like the `Builder`, it seeds every `MobCategory` (each an
+    /// empty `WeightedSpawnerDataList`), so DIRECT_CODEC serialization carries
+    /// all eight category keys — Paper-faithful.
     pub fn empty() -> MobSpawnSettings {
+        let spawners = MOB_CATEGORY_VALUES
+            .iter()
+            .map(|category| {
+                (
+                    *category,
+                    WeightedSpawnerDataList::from_weighted_list(WeightedList::of()),
+                )
+            })
+            .collect();
         MobSpawnSettings {
             creature_generation_probability: DEFAULT_CREATURE_SPAWN_PROBABILITY,
-            spawners: indexmap::IndexMap::new(),
+            spawners,
             mob_spawn_costs: indexmap::IndexMap::new(),
         }
     }
@@ -495,7 +507,13 @@ mod tests {
         assert_eq!(empty.get_creature_probability(), 0.1);
         assert!(empty.get_mobs(MobCategory::Creature).is_empty());
         assert_eq!(empty.get_mob_spawn_cost(&EntityTypes::PIG), None);
-        assert!(empty.spawners().is_empty());
+        // Java's `EMPTY = new Builder().build()` — the `EnumMap`-seeded
+        // `Builder` carries every MobCategory, so all eight keys are present,
+        // each an empty spawner list.
+        assert_eq!(empty.spawners().len(), MOB_CATEGORY_VALUES.len());
+        for category in MOB_CATEGORY_VALUES {
+            assert!(empty.get_mobs(*category).is_empty(), "{}", category.name());
+        }
     }
 
     #[test]
@@ -593,7 +611,16 @@ mod tests {
             .result()
             .expect("encode")
             .clone();
-        assert_eq!(encoded, json!({"spawners": {}, "spawn_costs": {}}));
+        // Paper's `EMPTY` (the `Builder`-seeded shape) carries all eight
+        // MobCategory keys, each an empty list; the spawn_costs map is empty.
+        let mut expected_spawners = serde_json::Map::new();
+        for category in MOB_CATEGORY_VALUES {
+            expected_spawners.insert(category.name().to_string(), json!([]));
+        }
+        assert_eq!(
+            encoded,
+            json!({"spawners": expected_spawners, "spawn_costs": {}})
+        );
         let decoded = codec
             .parse(&JsonOps::INSTANCE, &encoded)
             .result()
