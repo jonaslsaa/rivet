@@ -605,7 +605,7 @@ impl DensityFunction for Marker {
     ) -> Arc<dyn DensityFunction> {
         // Java `MarkerOrMarked.mapChildren` default: `new Marker(type,
         // visitor.apply(wrapped))`.
-        Arc::new(Marker::new(self.marker_type, visitor.apply(&*self.wrapped)))
+        Arc::new(Marker::new(self.marker_type, visitor.apply(&self.wrapped)))
     }
     fn min_value(&self) -> f64 {
         if self.marker_type == MarkerType::BlendDensity {
@@ -763,10 +763,7 @@ impl DensityFunction for Mapped {
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> Arc<dyn DensityFunction> {
-        Arc::new(Mapped::create(
-            self.mapped_type,
-            visitor.apply(&*self.input),
-        ))
+        Arc::new(Mapped::create(self.mapped_type, visitor.apply(&self.input)))
     }
     fn min_value(&self) -> f64 {
         self.min_value
@@ -847,7 +844,7 @@ impl DensityFunction for Clamp {
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(Clamp::new(
-            visitor.apply(&*self.input),
+            visitor.apply(&self.input),
             self.min_value,
             self.max_value,
         ))
@@ -951,11 +948,11 @@ impl DensityFunction for RangeChoice {
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(RangeChoice::new(
-            visitor.apply(&*self.input),
+            visitor.apply(&self.input),
             self.min_inclusive,
             self.max_exclusive,
-            visitor.apply(&*self.when_in_range),
-            visitor.apply(&*self.when_out_of_range),
+            visitor.apply(&self.when_in_range),
+            visitor.apply(&self.when_out_of_range),
         ))
     }
     fn min_value(&self) -> f64 {
@@ -1077,10 +1074,10 @@ impl DensityFunction for IntervalSelect {
         let functions = self
             .functions
             .iter()
-            .map(|f| visitor.apply(&**f))
+            .map(|f| visitor.apply(f))
             .collect::<Vec<_>>();
         Arc::new(IntervalSelect::new(
-            visitor.apply(&*self.input),
+            visitor.apply(&self.input),
             self.thresholds.clone(),
             functions,
         ))
@@ -1446,9 +1443,9 @@ impl DensityFunction for ShiftedNoise {
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(ShiftedNoise::new(
-            visitor.apply(&*self.shift_x),
-            visitor.apply(&*self.shift_y),
-            visitor.apply(&*self.shift_z),
+            visitor.apply(&self.shift_x),
+            visitor.apply(&self.shift_y),
+            visitor.apply(&self.shift_z),
             self.xz_scale,
             self.y_scale,
             visitor.visit_noise(&self.noise),
@@ -1659,7 +1656,7 @@ impl DensityFunction for MulOrAdd {
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> Arc<dyn DensityFunction> {
-        let function = visitor.apply(&*self.input);
+        let function = visitor.apply(&self.input);
         let min = function.min_value();
         let max = function.max_value();
         let (min_value, max_value) = match self.specific_type {
@@ -1837,8 +1834,8 @@ impl DensityFunction for Ap2 {
     ) -> Arc<dyn DensityFunction> {
         two_argument_create(
             self.two_arg_type,
-            visitor.apply(&*self.argument1),
-            visitor.apply(&*self.argument2),
+            visitor.apply(&self.argument1),
+            visitor.apply(&self.argument2),
         )
     }
     fn min_value(&self) -> f64 {
@@ -1957,7 +1954,7 @@ impl SplineCoordinate {
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> SplineCoordinate {
-        SplineCoordinate::new(visitor.apply(&*self.function))
+        SplineCoordinate::new(visitor.apply(&self.function))
     }
 }
 
@@ -2173,8 +2170,8 @@ impl DensityFunction for FindTopSurface {
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(FindTopSurface::new(
-            visitor.apply(&*self.density),
-            visitor.apply(&*self.upper_bound),
+            visitor.apply(&self.density),
+            visitor.apply(&self.upper_bound),
             self.lower_bound,
             self.cell_height,
         ))
@@ -2414,7 +2411,7 @@ impl DensityFunction for HolderHolder {
     ) -> Arc<dyn DensityFunction> {
         // Java `new HolderHolder(Holder.direct(visitor.apply(this.function.value())))`.
         match &self.function {
-            Holder::Direct(f) => Arc::new(HolderHolder::new(Holder::direct(visitor.apply(&**f)))),
+            Holder::Direct(f) => Arc::new(HolderHolder::new(Holder::direct(visitor.apply(f)))),
             Holder::Reference { .. } => {
                 panic!("HolderHolder.value() requires a HolderLookup (RivetTodo #177)")
             }
@@ -4037,11 +4034,11 @@ mod tests {
     /// A visitor that squares every `Constant` it reaches.
     struct SquareConstant;
     impl Visitor for SquareConstant {
-        fn apply(&self, input: &dyn DensityFunction) -> Arc<dyn DensityFunction> {
+        fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction> {
             if let Some(c) = input.as_any().downcast_ref::<Constant>() {
                 constant(c.value() * c.value())
             } else {
-                input.clone_arc()
+                input.clone()
             }
         }
     }
@@ -4051,7 +4048,7 @@ mod tests {
         // `cache2d(clamp(constant(3), 0, 10))` — the visitor rewrites the
         // inner constant to 9, recursing through the marker and the clamp.
         let f = cache2d(constant(3.0).clamp(0.0, 10.0));
-        let mapped = map_all(&*f, &SquareConstant);
+        let mapped = map_all(&f, &SquareConstant);
         assert_eq!(
             DensityFunction::type_id(&*mapped),
             DensityFunctionTypes::CACHE_2D
@@ -4080,7 +4077,7 @@ mod tests {
         // A `Constant` leaf's `map_children` returns itself; `map_all` then
         // applies the visitor to the same leaf (Java `apply(input.mapChildren
         // (this))`).
-        let mapped = map_all(&*constant(3.0), &SquareConstant);
+        let mapped = map_all(&constant(3.0), &SquareConstant);
         assert_eq!(mapped.compute(&at(0, 0, 0)), 9.0);
     }
 

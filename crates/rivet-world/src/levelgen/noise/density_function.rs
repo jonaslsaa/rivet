@@ -54,7 +54,44 @@ use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use std::any::Any;
 use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+/// A `HashMap` key that hashes on object identity and holds its
+/// `Arc<dyn DensityFunction>` key strongly.
+///
+/// Java's visitor wrap caches (`NoiseChunk.wrapped`,
+/// `RandomState`'s anonymous visitors) are `HashMap<DensityFunction,
+/// DensityFunction>` keyed on reference identity, and the map keeps its keys
+/// strongly reachable. The `#177` value model has no `Hash` on
+/// `dyn DensityFunction`, so identity is the Arc allocation address — but the
+/// key must ALSO be retained: `mapChildren` produces fresh intermediate `Arc`s
+/// that would otherwise be dropped and their addresses recycled by a later
+/// allocation, giving a spurious cache hit (Java's strong keys make that
+/// impossible).
+#[derive(Clone)]
+pub struct IdentityKey(Arc<dyn DensityFunction>);
+
+impl IdentityKey {
+    /// Wraps an owned function reference as an identity key.
+    pub fn new(arc: Arc<dyn DensityFunction>) -> Self {
+        IdentityKey(arc)
+    }
+}
+
+impl PartialEq for IdentityKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for IdentityKey {}
+
+impl Hash for IdentityKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0).cast::<()>() as usize).hash(state)
+    }
+}
 
 /// `net.minecraft.world.level.levelgen.DensityFunction` — the behavior contract
 /// of every density function.
@@ -114,15 +151,25 @@ pub trait DensityFunction: Any + Debug + Send + Sync + 'static {
 /// `DensityFunction.mapAll(Visitor)` — the recursive visitor: `apply(input
 /// .mapChildren(this))`. Ported as a free function because Rust has no
 /// anonymous local classes; the `RecursiveVisitor` is a local struct.
-pub fn map_all(function: &dyn DensityFunction, visitor: &dyn Visitor) -> Arc<dyn DensityFunction> {
+///
+/// The function is handed to the visitor as the owned `&Arc` so a wrap cache
+/// can key on object identity AND retain the key (see [`IdentityKey`]) —
+/// Java's `mapAll` passes its `DensityFunction` references and the visitor's
+/// `HashMap` keeps them strongly reachable, so a rebuilt intermediate whose
+/// address would otherwise be recycled can never spuriously alias a live cache
+/// key.
+pub fn map_all(
+    function: &Arc<dyn DensityFunction>,
+    visitor: &dyn Visitor,
+) -> Arc<dyn DensityFunction> {
     struct RecursiveVisitor<'a> {
         visitor: &'a dyn Visitor,
     }
 
     impl Visitor for RecursiveVisitor<'_> {
-        fn apply(&self, input: &dyn DensityFunction) -> Arc<dyn DensityFunction> {
+        fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction> {
             let mapped = input.map_children(self);
-            self.visitor.apply(&*mapped)
+            self.visitor.apply(&mapped)
         }
 
         fn visit_noise(&self, noise: &NoiseHolder) -> NoiseHolder {
@@ -195,7 +242,13 @@ pub trait ContextProvider {
 }
 
 /// `DensityFunction.FunctionContext` — the block coordinates a function reads.
-pub trait FunctionContext: Debug + Send + Sync {
+///
+/// `Any` is a supertrait (like `DensityFunction`) because the noisegen unit's
+/// `NoiseChunk` inner classes must distinguish their owning chunk from an
+/// arbitrary context — Java's `context != NoiseChunk.this` reference-identity
+/// check — by downcasting the context (`(context as &dyn Any).downcast_ref`).
+/// `SinglePointContext` is `'static`, so the bound adds no new impl burden.
+pub trait FunctionContext: Debug + Send + Sync + Any {
     /// `blockX()`.
     fn block_x(&self) -> i32;
 
@@ -243,7 +296,12 @@ impl FunctionContext for SinglePointContext {
 /// `DensityFunction.Visitor` — the `mapChildren`/`mapAll` transformer.
 pub trait Visitor: Send + Sync {
     /// `apply(DensityFunction)`.
-    fn apply(&self, input: &dyn DensityFunction) -> Arc<dyn DensityFunction>;
+    ///
+    /// Receives the owned `&Arc` so an identity-keyed wrap cache can retain the
+    /// key (Java's `HashMap<DensityFunction, DensityFunction>` keeps its keys
+    /// strongly reachable; an address-keyed cache must too, or a freed
+    /// intermediate's recycled address would spuriously hit a live entry).
+    fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction>;
 
     /// `visitNoise(NoiseHolder)` — default identity.
     fn visit_noise(&self, noise: &NoiseHolder) -> NoiseHolder {
