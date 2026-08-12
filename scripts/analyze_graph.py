@@ -1527,7 +1527,7 @@ SPLIT_NOTES: dict[str, str] = {
         "BootstrapContext is the registry bootstrap contract (register + "
         "lookup); TerrainProvider is the overworld offset/factor/jaggedness "
         "CubicSpline builders + peaksAndValleys; NoiseData is the noise "
-        "registration table (DEFAULT_SHIFT + the ~70 declaration-ordered "
+        "registration table (DEFAULT_SHIFT + the 63 declaration-ordered "
         "registrations). Crate override: net.minecraft.data normally maps to "
         "rivet-registry, but this unit's modules live in rivet-world next to "
         "the Noises/NormalNoise/CubicSpline layers they build on. STUBs: the "

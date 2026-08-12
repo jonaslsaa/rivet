@@ -18,7 +18,7 @@
 //!   `#177` density-function consumers need these values before the
 //!   data-driven registries exist).
 //! - `NoiseData` — the noise registry bootstrap: `DEFAULT_SHIFT` plus the
-//!   ~70 declaration-ordered `register` calls and the `registerBiomeNoises`
+//!   63 declaration-ordered `register` calls and the `registerBiomeNoises`
 //!   /`register` helpers.
 //!
 //! The `data::worldgen` module is deliberately kept minimal: no speculative
