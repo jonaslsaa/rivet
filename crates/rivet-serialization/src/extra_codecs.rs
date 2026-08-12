@@ -30,6 +30,13 @@
 //!   error. One range member is ported here (ahead of the rest of the ranges)
 //!   because it is a pure-DFU `validate` with no Minecraft dependency; the
 //!   remaining range surface stays `mc.util` scope.
+//! - `intervalCodec(Codec<P>, String, String, BiFunction, Function,
+//!   Function)` — the interval/value codec — required by
+//!   `Climate.Parameter.CODEC` (issue #178, the `mc.world.level.biome` unit).
+//!   It is pure `com.mojang.serialization` surface (the `Util.fixedSize`
+//!   list-of-2 validation is inlined so the module stays free of the
+//!   Minecraft-bound `Util`), so it belongs here; when the full `mc.util`
+//!   unit is ported it keeps this signature and semantics.
 //!
 //! RECONCILIATION: when the full `mc.util` unit is ported, these free functions
 //! move into that unit's `extra_codecs.rs`; they keep the exact same signatures
@@ -41,8 +48,10 @@
 use crate::codec::{self, Codec, ResultFunction};
 use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, Keyable, MapLike, RecordBuilder};
+use crate::either::Either;
 use crate::lifecycle::Lifecycle;
 use crate::map_codec::MapCodec;
+use crate::record_builder::{self, RecordCodecBuilder};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -507,4 +516,313 @@ where
 /// type name to its `MapCodec`.
 pub fn late_bound_entries<K: Clone, V: Clone>(mapper: &LateBoundIdMapper<K, V>) -> Vec<(K, V)> {
     mapper.entries.lock().unwrap().clone()
+}
+
+// ---------------------------------------------------------------------------
+// intervalCodec
+// ---------------------------------------------------------------------------
+
+/// `Util.fixedSize(List<T>, int)` with `size = 2` — the `intervalCodec`
+/// array-form validation. `"Input is not a list of 2 elements"`; a longer list
+/// keeps the first 2 as a partial, a shorter list has no partial.
+fn fixed_size_two<P: Clone>(input: &[P]) -> DataResult<Vec<P>> {
+    if input.len() != 2 {
+        if input.len() >= 2 {
+            DataResult::error_with_partial(
+                "Input is not a list of 2 elements".to_string(),
+                input[..2].to_vec(),
+            )
+        } else {
+            DataResult::error("Input is not a list of 2 elements")
+        }
+    } else {
+        DataResult::success(input.to_vec())
+    }
+}
+
+/// `ExtraCodecs.intervalCodec(Codec<P> pointCodec, String lowerBoundName,
+/// String upperBoundName, BiFunction<P, P, DataResult<I>> makeInterval,
+/// Function<I, P> getMin, Function<I, P> getMax)` — the interval/value codec
+/// (required by `Climate.Parameter.CODEC`).
+///
+/// Java builds, in order:
+/// 1. `arrayCodec` = `Codec.list(pointCodec).comapFlatMap(list ->
+///    Util.fixedSize(list, 2).flatMap(l -> makeInterval(l[0], l[1])),
+///    p -> ImmutableList.of(getMin(p), getMax(p)))` — a 2-element array form
+///    (an interval with min/max);
+/// 2. `objectCodec` = a `RecordCodecBuilder` over the `lowerBoundName` and
+///    `upperBoundName` fields (a `Pair<P, P>`) `.comapFlatMap(p ->
+///    makeInterval(p.first, p.second), i -> Pair.of(getMin(i), getMax(i)))` —
+///    an object form;
+/// 3. `arrayOrObjectCodec` = `Codec.withAlternative(arrayCodec, objectCodec)`;
+/// 4. the result = `Codec.either(pointCodec, arrayOrObjectCodec)
+///    .comapFlatMap(either -> either.map(min -> makeInterval(min, min),
+///    DataResult::success), p -> equals(getMin(p), getMax(p)) ? Either.left(min)
+///    : Either.right(p))` — a bare point decodes to the degenerate
+///    `makeInterval(min, min)` interval; encode picks the point form when the
+///    interval is degenerate, else the array-or-object form.
+///
+/// The `BiFunction<P, P, DataResult<I>>` is `Fn(&P, &P) -> DataResult<I>`
+/// (references — Java's by-value call is unobservable for the port's
+/// value-semantic `P`); `getMin`/`getMax` are `Fn(&I) -> P`.
+///
+/// The degenerate encode check calls Java's `Objects.equals(getMin(p),
+/// getMax(p))`, whose semantics depend on `P`'s `equals` — for `Float` that is
+/// `Float.equals` (all NaNs equal, `-0.0` distinct from `+0.0`), which is not
+/// `PartialEq`. The caller therefore supplies `equals` explicitly; the
+/// `Parameter` caller passes [`crate::float_format::java_float_equals`].
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn interval_codec<P, I, Ops>(
+    point_codec: Arc<dyn Codec<P, Ops>>,
+    lower_bound_name: String,
+    upper_bound_name: String,
+    make_interval: Arc<dyn Fn(&P, &P) -> DataResult<I> + Send + Sync>,
+    get_min: Arc<dyn Fn(&I) -> P + Send + Sync>,
+    get_max: Arc<dyn Fn(&I) -> P + Send + Sync>,
+    equals: Arc<dyn Fn(&P, &P) -> bool + Send + Sync>,
+) -> Arc<dyn Codec<I, Ops>>
+where
+    P: Clone + Send + Sync + 'static,
+    I: Clone + Send + Sync + 'static,
+    Ops: DynamicOps + 'static,
+{
+    let make_interval_for_array = make_interval.clone();
+    let get_min_for_array = get_min.clone();
+    let get_max_for_array = get_max.clone();
+    let array_codec: Arc<dyn Codec<I, Ops>> = codec::comap_flat_map(
+        codec::list(point_codec.clone()),
+        Arc::new(move |list: &Vec<P>| {
+            let make = make_interval_for_array.clone();
+            fixed_size_two(list).flat_map(move |two: Vec<P>| make(&two[0], &two[1]))
+        }),
+        Arc::new(move |i: &I| vec![get_min_for_array(i), get_max_for_array(i)]),
+    );
+
+    let make_interval_for_object = make_interval.clone();
+    let get_min_for_object = get_min.clone();
+    let get_max_for_object = get_max.clone();
+    let object_codec: Arc<dyn Codec<I, Ops>> = codec::comap_flat_map(
+        record_builder::create(|instance| {
+            instance
+                .group(RecordCodecBuilder::of(
+                    Arc::new(|pair: &(P, P)| pair.0.clone()),
+                    codec::field_of(point_codec.clone(), lower_bound_name),
+                ))
+                .and(RecordCodecBuilder::of(
+                    Arc::new(|pair: &(P, P)| pair.1.clone()),
+                    codec::field_of(point_codec.clone(), upper_bound_name),
+                ))
+                .apply(instance, Arc::new(|min: P, max: P| (min, max)))
+        }),
+        Arc::new(move |pair: &(P, P)| make_interval_for_object(&pair.0, &pair.1)),
+        Arc::new(move |i: &I| (get_min_for_object(i), get_max_for_object(i))),
+    );
+
+    let array_or_object_codec = codec::with_alternative(array_codec, object_codec);
+    let make_interval_for_either = make_interval.clone();
+    let get_min_for_final = get_min.clone();
+    let get_max_for_final = get_max.clone();
+    let equals_for_final = equals.clone();
+    codec::comap_flat_map(
+        codec::either(point_codec, array_or_object_codec),
+        Arc::new(move |e: &Either<P, I>| match e {
+            Either::Left(min) => make_interval_for_either(min, min),
+            Either::Right(i) => DataResult::success(i.clone()),
+        }),
+        Arc::new(move |i: &I| {
+            let min = get_min_for_final(i);
+            let max = get_max_for_final(i);
+            if equals_for_final(&min, &max) {
+                Either::left(min)
+            } else {
+                Either::right(i.clone())
+            }
+        }),
+    )
+}
+
+#[cfg(test)]
+mod interval_codec_tests {
+    use super::*;
+    use crate::float_format::{java_float_compare, java_float_equals, java_float_to_string};
+    use crate::json_ops::JsonOps;
+    use serde_json::json;
+
+    /// A trivial quantized interval used to exercise the codec's forms.
+    /// `makeInterval` quantizes to `(min*10000, max*10000)` (i64).
+    type TestInterval = (i64, i64);
+
+    /// A float-pass-through interval whose points are the raw f32 bounds — the
+    /// only way to exercise `-0.0`/NaN degenerate-encode semantics (the i64
+    /// `TestInterval` cannot represent them).
+    fn float_interval_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<(f32, f32), Ops>> {
+        interval_codec(
+            codec::float_codec::<Ops>(),
+            "min".to_string(),
+            "max".to_string(),
+            Arc::new(|min: &f32, max: &f32| {
+                if java_float_compare(*min, *max) == std::cmp::Ordering::Greater {
+                    DataResult::error(format!(
+                        "min > max ({} > {})",
+                        java_float_to_string(*min),
+                        java_float_to_string(*max)
+                    ))
+                } else {
+                    DataResult::success((*min, *max))
+                }
+            }),
+            Arc::new(|i: &(f32, f32)| i.0),
+            Arc::new(|i: &(f32, f32)| i.1),
+            // Java `Objects.equals(getMin(p), getMax(p))` → `Float.equals`.
+            Arc::new(|a: &f32, b: &f32| java_float_equals(*a, *b)),
+        )
+    }
+
+    fn test_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<TestInterval, Ops>> {
+        interval_codec(
+            codec::float_codec::<Ops>(),
+            "min".to_string(),
+            "max".to_string(),
+            Arc::new(|min: &f32, max: &f32| {
+                if min > max {
+                    DataResult::error(format!("min > max ({} > {})", min, max))
+                } else {
+                    DataResult::success(((min * 10000.0f32) as i64, (max * 10000.0f32) as i64))
+                }
+            }),
+            Arc::new(|i: &TestInterval| i.0 as f32 / 10000.0f32),
+            Arc::new(|i: &TestInterval| i.1 as f32 / 10000.0f32),
+            // The points are f32 (`float_codec`); for the finite values this
+            // codec decodes, `Float.equals` and `PartialEq` agree, so the plain
+            // `==` is the faithful equality.
+            Arc::new(|a: &f32, b: &f32| a == b),
+        )
+    }
+
+    fn encode<I: Clone>(
+        codec: &Arc<dyn Codec<I, JsonOps>>,
+        value: &I,
+    ) -> Option<serde_json::Value> {
+        codec
+            .encode_start(&JsonOps::INSTANCE, value)
+            .result()
+            .cloned()
+    }
+
+    fn decode<I: Clone>(
+        codec: &Arc<dyn Codec<I, JsonOps>>,
+        input: &serde_json::Value,
+    ) -> DataResult<I> {
+        codec.parse(&JsonOps::INSTANCE, input)
+    }
+
+    #[test]
+    fn degenerate_interval_round_trips_as_bare_point() {
+        // A degenerate interval encodes as a bare point (Either.left) and a
+        // bare point decodes to the degenerate interval.
+        let codec = test_codec::<JsonOps>();
+        let value = (5000, 5000);
+        let encoded = encode(&codec, &value).expect("encode should succeed");
+        assert_eq!(encoded, json!(0.5));
+        let result = decode(&codec, &encoded);
+        let decoded = result.result().expect("decode should succeed");
+        assert_eq!(*decoded, value);
+    }
+
+    #[test]
+    fn wide_interval_encodes_as_two_element_array() {
+        // A non-degenerate interval encodes as `[min, max]` (the array form is
+        // `withAlternative`'s primary, so encode always produces it).
+        let codec = test_codec::<JsonOps>();
+        let value = (0, 10000);
+        let encoded = encode(&codec, &value).expect("encode should succeed");
+        assert_eq!(encoded, json!([0.0, 1.0]));
+    }
+
+    #[test]
+    fn wide_interval_decodes_from_array() {
+        let codec = test_codec::<JsonOps>();
+        let result = decode(&codec, &json!([0.0, 1.0]));
+        let decoded = result.result().expect("decode should succeed");
+        assert_eq!(*decoded, (0, 10000));
+    }
+
+    #[test]
+    fn interval_decodes_from_object() {
+        // The object form is the `withAlternative` fallback: a map that the
+        // array form cannot decode.
+        let codec = test_codec::<JsonOps>();
+        let result = decode(&codec, &json!({"min": 0.0, "max": 1.0}));
+        let decoded = result.result().expect("decode should succeed");
+        assert_eq!(*decoded, (0, 10000));
+    }
+
+    #[test]
+    fn array_of_wrong_length_is_an_error() {
+        // `Util.fixedSize(list, 2)`: a one-element list has no partial and
+        // errors.
+        let codec = test_codec::<JsonOps>();
+        let result = decode(&codec, &json!([0.0]));
+        assert!(result.is_error());
+    }
+
+    #[test]
+    fn min_greater_than_max_is_an_error() {
+        let codec = test_codec::<JsonOps>();
+        let result = decode(&codec, &json!([1.0, 0.0]));
+        assert!(result.is_error());
+    }
+
+    #[test]
+    fn float_interval_encode_signed_zero_uses_float_equals() {
+        // Java `Objects.equals(getMin(p), getMax(p))` → `Float.equals`, which
+        // treats `-0.0` and `+0.0` as DISTINCT. Under `PartialEq` they'd be
+        // equal and `(-0.0, 0.0)` would wrongly encode as a bare point.
+        let codec = float_interval_codec::<JsonOps>();
+        // Degenerate (0.0, 0.0) → bare point (a single JSON number).
+        let encoded = encode(&codec, &(0.0, 0.0)).expect("encode");
+        assert!(
+            encoded.is_number(),
+            "(0.0, 0.0) must encode as the bare point, got {encoded}"
+        );
+        // Degenerate (-0.0, -0.0) → bare point too.
+        let encoded = encode(&codec, &(-0.0, -0.0)).expect("encode");
+        assert!(
+            encoded.is_number(),
+            "(-0.0, -0.0) must be a bare point, got {encoded}"
+        );
+        // Non-degenerate (-0.0, 0.0) → the two-element array form.
+        let encoded = encode(&codec, &(-0.0, 0.0)).expect("encode");
+        assert!(
+            encoded.is_array(),
+            "(-0.0, 0.0) must encode as the array form, got {encoded}"
+        );
+        let result = decode(&codec, &encoded);
+        let decoded = result.result().expect("decode should succeed");
+        assert!(java_float_equals(decoded.0, -0.0));
+        assert!(java_float_equals(decoded.1, 0.0));
+    }
+
+    #[test]
+    fn float_interval_encode_nan_payloads_are_all_equal() {
+        // `Float.equals`: ALL NaN payloads are equal, so a degenerate NaN
+        // interval encodes as the bare point even for distinct payloads.
+        // JsonOps renders a NaN as `Null` (documented deviation), so the bare
+        // point is `Null` while the array form would be `[Null, Null]`.
+        let codec = float_interval_codec::<JsonOps>();
+        let nan_a = f32::from_bits(0x7fc00001);
+        let nan_b = f32::from_bits(0x7ff12345);
+        assert!(nan_a.is_nan() && nan_b.is_nan());
+
+        let encoded = encode(&codec, &(f32::NAN, f32::NAN)).expect("encode");
+        assert!(
+            encoded.is_null(),
+            "degenerate NaN interval must encode as the bare point, got {encoded}"
+        );
+        let encoded = encode(&codec, &(nan_a, nan_b)).expect("encode");
+        assert!(
+            encoded.is_null(),
+            "distinct NaN payloads are equal under Float.equals -> bare point, got {encoded}"
+        );
+    }
 }

@@ -465,3 +465,151 @@ fn compound_list_codec_skips_entries_past_a_full_error() {
         }
     }
 }
+
+#[test]
+fn float_range_rejects_nan_and_negative_zero_under_float_compare() {
+    // DFU `Codec.checkRange` calls `Comparable.compareTo`; for `Float` that is
+    // the IEEE total order (`Float.compare`): `NaN` compares greater than every
+    // value and `-0.0f < 0.0f`, so both fail `floatRange(0.0F, 1.0F)`. The
+    // `TestOps` `Value::Num(f64)` carries a real NaN (serde_json cannot).
+    let ops = TestOps;
+    let codec = rivet_serialization::codec::float_range::<TestOps>(0.0, 1.0);
+
+    assert!(codec.decode(&ops, &Value::Num(0.5)).is_success());
+    assert!(codec.decode(&ops, &Value::Num(0.0)).is_success());
+    assert!(codec.decode(&ops, &Value::Num(1.0)).is_success());
+
+    // `-0.0f64` narrows to `-0.0f32`; `Float.compare(-0.0f, 0.0f)` is -1, so it
+    // is below the inclusive lower bound.
+    assert!(
+        codec.decode(&ops, &Value::Num(-0.0)).is_error(),
+        "-0.0 must be outside [0.0, 1.0] under Float.compare"
+    );
+    // NaN narrows to NaN; `Float.compare(NaN, 0.0f)` is positive (NaN is
+    // greater), so `value.compareTo(maxInclusive) <= 0` is false.
+    assert!(
+        codec.decode(&ops, &Value::Num(f64::NAN)).is_error(),
+        "NaN must be outside [0.0, 1.0] under Float.compare"
+    );
+}
+
+#[test]
+fn float_range_canonicalizes_distinct_nan_payloads() {
+    // `Float.compare` first canonicalizes every NaN to the same payload
+    // (`floatToIntBits`), so a NaN with ANY payload compares greater than the
+    // max bound and is rejected — distinct payloads must behave identically.
+    let ops = TestOps;
+    let codec = rivet_serialization::codec::float_range::<TestOps>(0.0, 1.0);
+
+    // A quiet-NaN payload, a signaling-NaN payload, and the canonical NaN.
+    let nan_a = f32::from_bits(0x7fc0_0001);
+    let nan_b = f32::from_bits(0x7f80_1234);
+    let nan_c = f32::from_bits(0xffc0_dead); // negative NaN payload
+    assert!(nan_a.is_nan() && nan_b.is_nan() && nan_c.is_nan());
+
+    for nan in [f32::NAN, nan_a, nan_b, nan_c] {
+        assert!(
+            codec.decode(&ops, &Value::Num(nan as f64)).is_error(),
+            "NaN payload {:#x} must be rejected like every other NaN",
+            nan.to_bits()
+        );
+    }
+}
+
+#[test]
+fn float_range_signed_zero_boundaries() {
+    // `Float.compare` total order: `-0.0 < 0.0`, so `[0.0, 1.0]` rejects
+    // `-0.0` but accepts `+0.0`; the exact upper bound `1.0` passes.
+    let ops = TestOps;
+    let codec = rivet_serialization::codec::float_range::<TestOps>(0.0, 1.0);
+    assert!(codec.decode(&ops, &Value::Num(0.0)).is_success());
+    assert!(codec.decode(&ops, &Value::Num(-0.0)).is_error());
+    assert!(codec.decode(&ops, &Value::Num(1.0)).is_success());
+    // A value above the upper bound that stays above 1.0 as f32 is rejected
+    // (`1.000001f64` narrows to ~1.00000095, not down to 1.0).
+    assert!(codec.decode(&ops, &Value::Num(1.000001)).is_error());
+}
+
+#[test]
+fn float_range_message_uses_java_float_formatting() {
+    // The range diagnostic renders the value and bounds with Java's
+    // `Float.toString` (the shared formatter), matching Paper's
+    // "Value -0.0 outside of range [0.0:1.0]" — Rust `Display` would print
+    // `-0` for `-0.0` and `1` for `1.0`.
+    let ops = TestOps;
+    let codec = rivet_serialization::codec::float_range::<TestOps>(0.0, 1.0);
+    let result = codec.decode(&ops, &Value::Num(-0.0));
+    let error_ref = result.error_ref().expect("error");
+    assert_eq!(error_ref.message(), "Value -0.0 outside of range [0.0:1.0]");
+}
+
+#[test]
+fn double_range_rejects_nan_and_negative_zero_under_double_compare() {
+    // Same total-order semantics as float_range, via `Double.compare`:
+    // `-0.0 < 0.0` and NaN compares greater than every value, so both fail
+    // `doubleRange(0.0, 1.0)`. This is the shared behavior every `doubleRange`
+    // caller relies on (density-function noise value/spline bounds).
+    let ops = TestOps;
+    let codec = rivet_serialization::codec::double_range::<TestOps>(0.0, 1.0);
+
+    assert!(codec.decode(&ops, &Value::Num(0.5)).is_success());
+    assert!(codec.decode(&ops, &Value::Num(0.0)).is_success());
+    assert!(codec.decode(&ops, &Value::Num(1.0)).is_success());
+
+    assert!(
+        codec.decode(&ops, &Value::Num(-0.0)).is_error(),
+        "-0.0 must be outside [0.0, 1.0] under Double.compare"
+    );
+    assert!(
+        codec.decode(&ops, &Value::Num(f64::NAN)).is_error(),
+        "NaN must be outside [0.0, 1.0] under Double.compare"
+    );
+}
+
+#[test]
+fn double_range_canonicalizes_distinct_nan_payloads() {
+    // `Double.compare` canonicalizes every NaN to the same payload
+    // (`doubleToLongBits`) before comparing, so a NaN with ANY payload
+    // compares greater than the max bound and is rejected — distinct payloads
+    // must behave identically.
+    let ops = TestOps;
+    let codec = rivet_serialization::codec::double_range::<TestOps>(0.0, 1.0);
+
+    // A quiet-NaN payload, a signaling-NaN payload, and the canonical NaN.
+    let nan_a = f64::from_bits(0x7ff8_0000_0000_0001);
+    let nan_b = f64::from_bits(0x7ff0_0000_0000_1234);
+    let nan_c = f64::from_bits(0xfff8_0000_0000_dead); // negative NaN payload
+    assert!(nan_a.is_nan() && nan_b.is_nan() && nan_c.is_nan());
+
+    for nan in [f64::NAN, nan_a, nan_b, nan_c] {
+        assert!(
+            codec.decode(&ops, &Value::Num(nan)).is_error(),
+            "NaN payload {:#x} must be rejected like every other NaN",
+            nan.to_bits()
+        );
+    }
+}
+
+#[test]
+fn double_range_signed_zero_boundaries() {
+    // `Double.compare` total order: `-0.0 < 0.0`, so `[0.0, 1.0]` rejects
+    // `-0.0` but accepts `+0.0`; the exact upper bound `1.0` passes.
+    let ops = TestOps;
+    let codec = rivet_serialization::codec::double_range::<TestOps>(0.0, 1.0);
+    assert!(codec.decode(&ops, &Value::Num(0.0)).is_success());
+    assert!(codec.decode(&ops, &Value::Num(-0.0)).is_error());
+    assert!(codec.decode(&ops, &Value::Num(1.0)).is_success());
+    assert!(codec.decode(&ops, &Value::Num(1.000001)).is_error());
+}
+
+#[test]
+fn double_range_message_uses_java_double_formatting() {
+    // The range diagnostic renders the value and bounds with Java's
+    // `Double.toString` (the shared formatter), matching Paper's
+    // "Value -0.0 outside of range [0.0:1.0]".
+    let ops = TestOps;
+    let codec = rivet_serialization::codec::double_range::<TestOps>(0.0, 1.0);
+    let result = codec.decode(&ops, &Value::Num(-0.0));
+    let error_ref = result.error_ref().expect("error");
+    assert_eq!(error_ref.message(), "Value -0.0 outside of range [0.0:1.0]");
+}
