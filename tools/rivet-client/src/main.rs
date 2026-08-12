@@ -126,6 +126,18 @@ enum Mode {
     /// (UNVERIFIED for non-FULL chunks and uncarried #369 capability flags)
     /// rather than reporting a fabricated PASS.
     Loaded,
+    /// Join a server that boots a fresh generated seed-42 world (`--seed 42`,
+    /// the generated-world acceptance contract), wait for chunk quiescence,
+    /// dwell briefly (keepalive survival evidence), walk a bounded distance
+    /// (movement evidence), then sample the genuine per-coordinate block
+    /// content the server served (surface/bedrock/under-feet names from the
+    /// client's own loaded `ChunkStorage`) and emit the `generated` record.
+    /// The runner compares this against the seed-42 ground-truth handoff
+    /// (`rivet-oracle generated-expected`); a server that merely echoes
+    /// superflat bytes or a copied loaded world cannot match it. Until the
+    /// rivet-server `--seed` capability lands, the runner never boots this
+    /// mode and reports the exact pinned UNVERIFIED reason instead.
+    Generated,
 }
 
 impl Mode {
@@ -136,6 +148,7 @@ impl Mode {
             Mode::Dwell => "dwell",
             Mode::Kick => "kick",
             Mode::Loaded => "loaded",
+            Mode::Generated => "generated",
         }
     }
 
@@ -146,6 +159,7 @@ impl Mode {
             "dwell" => Some(Mode::Dwell),
             "kick" => Some(Mode::Kick),
             "loaded" => Some(Mode::Loaded),
+            "generated" => Some(Mode::Generated),
             _ => None,
         }
     }
@@ -187,7 +201,7 @@ impl Args {
                     let value = next_value(&mut args, "--mode")?;
                     mode = Mode::parse(&value).ok_or_else(|| {
                         format!(
-                            "invalid --mode value: {value} (expected join|move|dwell|kick|loaded)"
+                            "invalid --mode value: {value} (expected join|move|dwell|kick|loaded|generated)"
                         )
                     })?;
                 }
@@ -208,8 +222,8 @@ impl Args {
         // rather than ignored.
         if dwell_explicit && mode != Mode::Dwell {
             return Err(
-                "--dwell-seconds only applies to --mode dwell; join/move/kick/loaded never dwell, \
-                 so an explicit value would be a silent no-op — drop it"
+                "--dwell-seconds only applies to --mode dwell; join/move/kick/loaded/generated \
+                 never dwell, so an explicit value would be a silent no-op — drop it"
                     .to_owned(),
             );
         }
@@ -265,7 +279,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: rivet-client [--mode join|move|dwell|kick|loaded] [--address HOST:PORT] [--username NAME] \
+        "Usage: rivet-client [--mode join|move|dwell|kick|loaded|generated] [--address HOST:PORT] [--username NAME] \
          [--timeout-seconds N] [--dwell-seconds N]\n\
          Defaults: --mode {DEFAULT_MODE} --address {DEFAULT_ADDRESS} --username {DEFAULT_USERNAME} \
          --timeout-seconds {DEFAULT_TIMEOUT_SECONDS} --dwell-seconds {DEFAULT_DWELL_SECONDS}"
@@ -850,6 +864,17 @@ async fn loaded_and_emit(bot: Client, state: State) {
 /// client timeout.
 const LOADED_WALK: Duration = Duration::from_millis(1500);
 
+/// How long the generated-mode dwell runs (wall-clock): long enough for at
+/// least one keepalive challenge to land and be echoed while the client is
+/// connected (the generated-world dwell evidence), short enough to stay well
+/// inside the client timeout. The generated-mode walk runs afterward.
+const GENERATED_DWELL: Duration = Duration::from_secs(2);
+
+/// How long the generated-mode walk runs (wall-clock): same bound as the
+/// loaded-mode walk — long enough to move at least one block, short enough to
+/// stay inside the timeout.
+const GENERATED_WALK: Duration = Duration::from_millis(1500);
+
 /// Drive a short bounded forward walk (yaw -90 faces +x) and report the
 /// position before and after as the walk evidence. A server that accepted the
 /// client but served a frozen world yields `before == after`; the runner
@@ -862,6 +887,126 @@ async fn loaded_walk(bot: &Client) -> Value {
     bot.walk(WalkDirection::None);
     let after = bot.position().ok().map(round_position);
     json!({ "before": before, "after": after })
+}
+
+/// Emit the `generated` record — the generated-world acceptance observable —
+/// after joining a server booting a fresh generated seed-42 world, dwelling
+/// briefly (keepalive survival evidence), walking a bounded distance
+/// (movement evidence), and sampling the genuine per-coordinate block content
+/// the server served. Then end the client.
+///
+/// The sampling contract is exactly the `loaded` mode's: sample the 5×5 grid
+/// of chunks centered on the spawn chunk, one cell per chunk at the chunk
+/// center offset, from the client's own loaded `ChunkStorage`. The runner
+/// compares these against the seed-42 ground-truth handoff
+/// (`rivet-oracle generated-expected`); a server that merely echoes superflat
+/// bytes or a copied loaded world cannot match it.
+async fn generated_and_emit(bot: Client, state: State) {
+    let chunks = Arc::clone(&state.chunks);
+    let started = Instant::now();
+    wait_chunk_quiescence(&chunks).await;
+
+    let position = bot.position().ok().map(round_position);
+    let spawn_pos = state
+        .spawn_origin
+        .lock()
+        .expect("spawn origin lock poisoned")
+        .map(|p| azalea::core::position::BlockPos {
+            x: p.x.floor() as i32,
+            y: p.y.floor() as i32,
+            z: p.z.floor() as i32,
+        });
+    let spawn_chunk = spawn_pos.map(|p| (p.x.div_euclid(16), p.z.div_euclid(16)));
+
+    // Sample the block content the server served (the `loaded` sampling
+    // contract). The `WorldHolder` read guard is scoped and dropped before the
+    // dwell/walk below, so the future stays `Send`.
+    let samples: Vec<Value> = {
+        let holder = bot
+            .component::<WorldHolder>()
+            .map_err(|_| "client has no loaded WorldHolder".to_owned())
+            .expect("generated mode requires a joined client");
+        match (spawn_chunk, position.as_ref()) {
+            (Some((cx, cz)), Some(_)) => {
+                let shared = holder.shared.read();
+                let mut out = Vec::new();
+                for dx in -2..=2i32 {
+                    for dz in -2..=2i32 {
+                        let chunk_x = cx + dx;
+                        let chunk_z = cz + dz;
+                        let origin_x = chunk_x * 16 + 8;
+                        let origin_z = chunk_z * 16 + 8;
+                        let (surface, bedrock, below_feet) =
+                            sample_cell(&shared, origin_x, origin_z);
+                        out.push(json!({
+                            "chunk_x": chunk_x,
+                            "chunk_z": chunk_z,
+                            "sample_x": origin_x,
+                            "sample_z": origin_z,
+                            "surface": surface,
+                            "bedrock": bedrock,
+                            "below_feet": below_feet,
+                        }));
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    };
+
+    // Dwell briefly: stay connected so at least one keepalive challenge lands
+    // and is echoed (the dwell survival evidence), then settle and snapshot the
+    // keepalive log coherently. The generated mode carries its own fixed dwell
+    // window (the runner passes dwell_seconds 0 and `--dwell-seconds` is
+    // rejected on non-dwell modes), so the evidence is deterministic.
+    let dwell = GENERATED_DWELL;
+    let start = state
+        .spawn_instant
+        .lock()
+        .expect("spawn instant lock poisoned")
+        .unwrap_or_else(Instant::now);
+    tokio::time::sleep(dwell).await;
+    let log = settle_and_snapshot(
+        &state.keepalive_log,
+        DWELL_SETTLE_TIMEOUT,
+        DWELL_SETTLE_INTERVAL,
+    )
+    .await;
+    let connected_wall_seconds = elapsed_secs_f64(start, Instant::now());
+    let challenge_count = log.challenges.len();
+    let echo_count = log.echoes.len();
+
+    // Bounded forward walk: the client must have moved in the served world. The
+    // position delta is recorded and asserted by the verdict (a frozen world
+    // cannot pass).
+    let walk = {
+        let before = bot.position().ok().map(round_position);
+        let _ = bot.set_direction(-90.0, 0.0);
+        bot.walk(WalkDirection::Forward);
+        tokio::time::sleep(GENERATED_WALK).await;
+        bot.walk(WalkDirection::None);
+        let after = bot.position().ok().map(round_position);
+        json!({ "before": before, "after": after })
+    };
+
+    emit(json!({
+        "event": "generated",
+        "position": position,
+        "spawn_chunk": spawn_chunk.map(|(x, z)| [x, z]),
+        "chunk_count": chunks.lock().expect("chunks lock poisoned").len(),
+        "samples": samples,
+        "walk": walk,
+        "dwell": {
+            "connected_wall_seconds": round_to(connected_wall_seconds, 3),
+            "challenge_count": challenge_count,
+            "echo_count": echo_count,
+        },
+        "observation_ms": started.elapsed().as_millis() as u64,
+    }));
+
+    let _ = bot;
+    hard_exit(0);
 }
 
 /// The overworld world-ceiling Y (the copied world is full-height 384).
@@ -1302,6 +1447,7 @@ async fn handle(bot: Client, event: Event, state: State) {
                 Mode::Dwell => runtime.spawn(dwell_and_emit(bot, state)),
                 Mode::Kick => runtime.spawn(kick_and_wait(bot, state)),
                 Mode::Loaded => runtime.spawn(loaded_and_emit(bot, state)),
+                Mode::Generated => runtime.spawn(generated_and_emit(bot, state)),
             };
         }
         // Move-mode packet observables. Recorded alongside the per-tick samples
