@@ -37,6 +37,21 @@
 //! through a `codec::recursive` graph exactly like `BlockPredicate.CODEC` and
 //! `HeightProvider.CODEC`. `FloatProviders.CODEC` has no recursion (no float
 //! provider embeds a `FloatProvider`), matching Java.
+//!
+//! ## Float-field JSON encode divergence
+//!
+//! A `Codec.FLOAT` field whose `f32` value is not exactly representable as `f64`
+//! (e.g. `0.05`) encodes as the WIDENED f64 decimal (`0.05000000074505806`),
+//! because `rivet-serialization`'s `JsonOps` stores `Number::Float` via
+//! `json_from_number` as `v as f64` (crates/rivet-serialization/src/json_ops.rs,
+//! outside this unit's crate). Paper writes such fields through
+//! `JsonOps.createFloat` → `new JsonPrimitive(Float)`, which Gson renders with
+//! `Float.toString()` (`"0.05"`). This affects `UniformFloat`, `TrapezoidFloat`,
+//! `ClampedNormalFloat`, and bare `ConstantFloat` encodes whenever the value is
+//! not exactly representable as `f64`. The divergence is documented and pinned in
+//! the tests (see `float_provider_round_trips` /
+//! `float_provider_clamped_normal_deviation_paper_form_parses`); the root-cause
+//! fix belongs to the shared serialization crate, not this unit.
 
 pub mod biased_to_bottom_int;
 pub mod clamped_int;
