@@ -276,15 +276,15 @@ mod tests {
         let decoded = codec
             .parse(&ops, &encoded)
             .result()
-            .expect("decode should succeed")
-            .clone();
+            .copied()
+            .expect("decode should succeed");
         assert_eq!(decoded, BiomeFilter::INSTANCE);
         // A unit codec also decodes an arbitrary map to the singleton.
         let decoded_other = codec
             .parse(&ops, &json!({"anything": 1}))
             .result()
-            .expect("unit codec always decodes")
-            .clone();
+            .copied()
+            .expect("unit codec always decodes");
         assert_eq!(decoded_other, BiomeFilter::INSTANCE);
     }
 }

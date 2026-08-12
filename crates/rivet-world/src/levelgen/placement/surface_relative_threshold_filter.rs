@@ -93,11 +93,19 @@ pub fn surface_relative_threshold_filter_map_codec<Ops: DynamicOps + 'static>()
             ))
             .and(record_builder::RecordCodecBuilder::of(
                 Arc::new(|c: &SurfaceRelativeThresholdFilter| c.min_inclusive),
-                codec::optional_field_of("min_inclusive", codec::int_codec::<Ops>(), i32::MIN),
+                codec::strict_optional_field_of(
+                    "min_inclusive",
+                    codec::int_codec::<Ops>(),
+                    i32::MIN,
+                ),
             ))
             .and(record_builder::RecordCodecBuilder::of(
                 Arc::new(|c: &SurfaceRelativeThresholdFilter| c.max_inclusive),
-                codec::optional_field_of("max_inclusive", codec::int_codec::<Ops>(), i32::MAX),
+                codec::strict_optional_field_of(
+                    "max_inclusive",
+                    codec::int_codec::<Ops>(),
+                    i32::MAX,
+                ),
             ))
             .apply(
                 instance,
@@ -270,8 +278,8 @@ mod tests {
         let decoded = codec
             .parse(&ops, &encoded)
             .result()
-            .expect("decode should succeed")
-            .clone();
+            .copied()
+            .expect("decode should succeed");
         assert_eq!(decoded, filter);
         // Defaults: a filter with the default bounds encodes to just the
         // heightmap field, and decodes back to the default bounds.
@@ -285,8 +293,8 @@ mod tests {
         let decoded_default = codec
             .parse(&ops, &json!({"heightmap": "WORLD_SURFACE"}))
             .result()
-            .expect("decode should succeed")
-            .clone();
+            .copied()
+            .expect("decode should succeed");
         assert_eq!(decoded_default, defaulted);
     }
 

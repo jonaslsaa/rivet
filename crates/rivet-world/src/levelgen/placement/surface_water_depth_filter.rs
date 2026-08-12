@@ -246,8 +246,8 @@ mod tests {
         let decoded = codec
             .parse(&ops, &encoded)
             .result()
-            .expect("decode should succeed")
-            .clone();
+            .copied()
+            .expect("decode should succeed");
         assert_eq!(decoded, filter);
     }
 
