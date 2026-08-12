@@ -481,6 +481,14 @@ mod tests {
             fixture_full_payload_with_seed(0, 0, 42)
         );
         // Same seed, different coordinate — distinct chunks hash distinctly.
+        // Pin the mixer's coordinate axis directly: the payload-level assert
+        // below is confounded by xPos/zPos and palette parity, so it alone
+        // could not catch a mixer that ignored the coordinate.
+        assert_ne!(
+            seed_block_data(42, 0, 0),
+            seed_block_data(42, 1, 0),
+            "the seed mixer must fold the coordinate into the block data"
+        );
         assert_ne!(a, fixture_full_payload_with_seed(1, 0, 42));
     }
 }
