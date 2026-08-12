@@ -37,12 +37,12 @@ impl FixedPlacement {
 }
 
 impl PlacementModifier for FixedPlacement {
-    fn get_positions<R: RandomSource>(
-        &self,
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         _context: &PlacementContext,
         _random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
         let chunk_x = SectionPos::block_to_section_coord(origin.get_x());
         let chunk_z = SectionPos::block_to_section_coord(origin.get_z());
         let has_positions = self
@@ -50,13 +50,17 @@ impl PlacementModifier for FixedPlacement {
             .iter()
             .any(|p| Self::is_same_chunk(chunk_x, chunk_z, p));
         if !has_positions {
-            return Vec::new();
+            return Box::new(std::iter::empty());
         }
-        self.positions
-            .iter()
-            .filter(|p| Self::is_same_chunk(chunk_x, chunk_z, p))
-            .copied()
-            .collect()
+        Box::new(
+            self.positions
+                .iter()
+                // `move`: capture the Copy `chunk_x`/`chunk_z` by value so the
+                // returned `+ 'a` iterator (tied to `&'a self`) does not borrow
+                // locals that die at the end of this function.
+                .filter(move |p| Self::is_same_chunk(chunk_x, chunk_z, p))
+                .copied(),
+        )
     }
 
     fn type_id(
@@ -150,7 +154,9 @@ mod tests {
         let generator = NoopGenerator;
         let context = PlacementContext::new(&mut level, &generator, None);
         let mut random = LegacyRandomSource::new(0);
-        modifier.get_positions(&context, &mut random, origin)
+        modifier
+            .get_positions(&context, &mut random, origin)
+            .collect()
     }
 
     #[test]

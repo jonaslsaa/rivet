@@ -175,7 +175,8 @@ mod tests {
         let generator = NoopGenerator;
         let context = PlacementContext::new(&mut level, &generator, None);
         let mut random = LegacyRandomSource::new(0);
-        let result = PlacementModifier::get_positions(&filter, &context, &mut random, &origin);
+        let result: Vec<_> =
+            PlacementModifier::get_positions(&filter, &context, &mut random, &origin).collect();
         assert_eq!(result, vec![origin]);
     }
 

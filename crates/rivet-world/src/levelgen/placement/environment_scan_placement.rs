@@ -102,28 +102,28 @@ impl EnvironmentScanPlacement {
 }
 
 impl PlacementModifier for EnvironmentScanPlacement {
-    fn get_positions<R: RandomSource>(
-        &self,
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         context: &PlacementContext,
         _random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
         // `pos = origin.mutable()`, `level = context.getLevel()`.
         let mut pos = origin.mutable();
         let level = context.get_level();
         let allowed = self.allowed_search_condition();
         if !allowed.test(level, &pos.immutable()) {
-            return Vec::new();
+            return Box::new(std::iter::empty());
         }
 
         for _ in 0..self.max_steps {
             if self.target_condition.test(level, &pos.immutable()) {
-                return vec![pos.immutable()];
+                return Box::new(std::iter::once(pos.immutable()));
             }
 
             pos.move_dir(&self.direction_of_search);
             if level.is_outside_build_height(pos.get_y()) {
-                return Vec::new();
+                return Box::new(std::iter::empty());
             }
 
             if !allowed.test(level, &pos.immutable()) {
@@ -132,9 +132,9 @@ impl PlacementModifier for EnvironmentScanPlacement {
         }
 
         if self.target_condition.test(level, &pos.immutable()) {
-            vec![pos.immutable()]
+            Box::new(std::iter::once(pos.immutable()))
         } else {
-            Vec::new()
+            Box::new(std::iter::empty())
         }
     }
 
@@ -314,7 +314,9 @@ mod tests {
         let generator = NoopGenerator;
         let context = PlacementContext::new(&mut level, &generator, None);
         let mut random = LegacyRandomSource::new(0);
-        modifier.get_positions(&context, &mut random, origin)
+        modifier
+            .get_positions(&context, &mut random, origin)
+            .collect()
     }
 
     #[test]

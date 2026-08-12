@@ -62,17 +62,19 @@ impl RandomOffsetPlacement {
 }
 
 impl PlacementModifier for RandomOffsetPlacement {
-    fn get_positions<R: RandomSource>(
-        &self,
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         _context: &PlacementContext,
         random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
         // Java int addition wraps; the XZ provider samples once per axis.
         let scatter_x = origin.get_x().wrapping_add(self.xz_spread.sample(random));
         let scatter_y = origin.get_y().wrapping_add(self.y_spread.sample(random));
         let scatter_z = origin.get_z().wrapping_add(self.xz_spread.sample(random));
-        vec![BlockPos::new(scatter_x, scatter_y, scatter_z)]
+        Box::new(std::iter::once(BlockPos::new(
+            scatter_x, scatter_y, scatter_z,
+        )))
     }
 
     fn type_id(
@@ -167,7 +169,7 @@ mod tests {
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
         let context = PlacementContext::new(&mut level, &generator, None);
-        modifier.get_positions(&context, random, origin)
+        modifier.get_positions(&context, random, origin).collect()
     }
 
     #[test]

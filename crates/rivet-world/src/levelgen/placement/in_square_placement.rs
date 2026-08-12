@@ -32,16 +32,16 @@ impl InSquarePlacement {
 }
 
 impl PlacementModifier for InSquarePlacement {
-    fn get_positions<R: RandomSource>(
-        &self,
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         _context: &PlacementContext,
         random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
         // `random.nextInt(16) + origin.getX()` — Java int addition wraps.
         let x = random.next_int_bound(16).wrapping_add(origin.get_x());
         let z = random.next_int_bound(16).wrapping_add(origin.get_z());
-        vec![BlockPos::new(x, origin.get_y(), z)]
+        Box::new(std::iter::once(BlockPos::new(x, origin.get_y(), z)))
     }
 
     fn type_id(
@@ -116,7 +116,9 @@ mod tests {
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
         let context = PlacementContext::new(&mut level, &generator, None);
-        InSquarePlacement::spread().get_positions(&context, random, origin)
+        InSquarePlacement::spread()
+            .get_positions(&context, random, origin)
+            .collect()
     }
 
     #[test]

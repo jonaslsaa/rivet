@@ -293,13 +293,13 @@ mod tests {
     struct IdentityModifier(PlacementModifierTypeId);
 
     impl PlacementModifier for IdentityModifier {
-        fn get_positions<R: RandomSource>(
-            &self,
+        fn get_positions<'a, R: RandomSource>(
+            &'a self,
             _context: &PlacementContext,
             _random: &mut R,
             _origin: &BlockPos,
-        ) -> Vec<BlockPos> {
-            Vec::new()
+        ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
+            Box::new(std::iter::empty())
         }
 
         fn type_id(&self) -> PlacementModifierTypeId {

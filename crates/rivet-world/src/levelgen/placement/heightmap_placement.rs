@@ -39,19 +39,19 @@ impl HeightmapPlacement {
 }
 
 impl PlacementModifier for HeightmapPlacement {
-    fn get_positions<R: RandomSource>(
-        &self,
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         context: &PlacementContext,
         _random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
         let x = origin.get_x();
         let z = origin.get_z();
         let height = context.get_height(self.heightmap, x, z);
         if height > context.get_min_y() {
-            vec![BlockPos::new(x, height, z)]
+            Box::new(std::iter::once(BlockPos::new(x, height, z)))
         } else {
-            Vec::new()
+            Box::new(std::iter::empty())
         }
     }
 

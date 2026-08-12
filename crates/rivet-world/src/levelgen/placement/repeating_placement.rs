@@ -46,23 +46,24 @@ pub trait RepeatingPlacement: Debug + Send + Sync + 'static {
     /// `context` is unused exactly as in Java; the `IntStream.range` semantics
     /// (empty for `count <= 0`, half-open `[0, count)`) are reproduced by the
     /// `(0..count)` `Range<i32>`.
-    fn get_positions<R: RandomSource>(
-        &self,
+    ///
+    /// The shell is **lazy** — it returns `std::iter::repeat_n(*origin,
+    /// count as usize)` without materializing `count` positions (Java's
+    /// `IntStream.range` is equally lazy). `count` is unbounded —
+    /// `NoiseBasedCountPlacement`'s codec accepts a plain `Codec.INT` ratio and
+    /// its `count()` saturates to `i32::MAX`, so Java degrades to a slow lazy
+    /// pull; the iterator reproduces exactly that (each `next()` hands back the
+    /// origin, no `count`-length allocation). A caller that pushes every element
+    /// into a `Vec` re-introduces the eager shape, but the placement walk
+    /// consumes the iterator incrementally.
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         _context: &PlacementContext,
         random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
         let count = self.count(random, origin);
-        // Eager-parity note: Java's `IntStream.range(0, count)` shell is lazy
-        // and never materializes per element; the port's `get_positions`
-        // returns an eager `Vec<BlockPos>` (placement.core's documented
-        // design). `count` is unbounded — `NoiseBasedCountPlacement`'s codec
-        // accepts a plain `Codec.INT` ratio and its `count()` saturates to
-        // `i32::MAX`, so a large serialized ratio attempts a ~25 GB allocation
-        // here where Java degrades gracefully (slow lazy pull).
-        // RivetTodo(#566): lazy iteration (or a shell bound on count) so large
-        // counts cannot OOM the process.
-        (0..count).map(|_| *origin).collect()
+        Box::new(std::iter::repeat_n(*origin, count.max(0) as usize))
     }
 }
 
@@ -123,12 +124,12 @@ mod tests {
     }
 
     impl PlacementModifier for FixedRepeat {
-        fn get_positions<R: RandomSource>(
-            &self,
+        fn get_positions<'a, R: RandomSource>(
+            &'a self,
             context: &PlacementContext,
             random: &mut R,
             origin: &BlockPos,
-        ) -> Vec<BlockPos> {
+        ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
             RepeatingPlacement::get_positions(self, context, random, origin)
         }
 
@@ -148,6 +149,7 @@ mod tests {
         // `RepeatingPlacement`, each with a `get_positions` — Java's single
         // inherited method maps to the `PlacementModifier` trait entry.
         <FixedRepeat as PlacementModifier>::get_positions(repeat, &context, &mut random, origin)
+            .collect()
     }
 
     #[test]

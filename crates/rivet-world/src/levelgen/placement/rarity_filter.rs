@@ -143,7 +143,7 @@ mod tests {
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
         let context = PlacementContext::new(&mut level, &generator, None);
-        PlacementModifier::get_positions(filter, &context, random, origin)
+        PlacementModifier::get_positions(filter, &context, random, origin).collect()
     }
 
     #[test]

@@ -79,13 +79,13 @@ impl RepeatingPlacement for NoiseBasedCountPlacement {
 }
 
 impl PlacementModifier for NoiseBasedCountPlacement {
-    /// `getPositions` — the inherited `RepeatingPlacement` shell.
-    fn get_positions<R: RandomSource>(
-        &self,
+    /// `getPositions` — the inherited `RepeatingPlacement` shell (lazy).
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         context: &PlacementContext,
         random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
         RepeatingPlacement::get_positions(self, context, random, origin)
     }
 

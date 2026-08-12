@@ -57,21 +57,21 @@ impl HeightRangePlacement {
 }
 
 impl PlacementModifier for HeightRangePlacement {
-    fn get_positions<R: RandomSource>(
-        &self,
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         context: &PlacementContext,
         random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
         // `origin.atY(this.height.sample(random, context))` — the provider
         // samples against the `WorldGenerationContext` window Java holds as
         // its superclass.
-        vec![
+        Box::new(std::iter::once(
             origin.at_y(
                 self.height
                     .sample(random, context.world_generation_context()),
             ),
-        ]
+        ))
     }
 
     fn type_id(
@@ -163,7 +163,7 @@ mod tests {
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
         let context = PlacementContext::new(&mut level, &generator, None);
-        modifier.get_positions(&context, random, origin)
+        modifier.get_positions(&context, random, origin).collect()
     }
 
     #[test]

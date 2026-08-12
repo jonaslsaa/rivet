@@ -26,12 +26,14 @@
 //! per-type `MapCodec` defers with the codec surface (`#126`).
 //!
 //! Every Java modifier draws eagerly *inside* `getPositions` and returns a
-//! pure stream, so the port's `get_positions` returns an eager `Vec<BlockPos>`;
-//! Java's laziness is in *when* `getPositions` runs — its lazy `flatMap` invokes
-//! it per upstream position, interleaved with placements. `PlacedFeature`
-//! reproduces that with a depth-first walk; see `place_walk` there for the
-//! authoritative parity account (why the ordering of RNG draws and level-state
-//! reads matters, and the #181 revisit note).
+//! lazy `Stream<BlockPos>`, so the port's `get_positions` draws eagerly and
+//! returns a lazy `Box<dyn Iterator<Item = BlockPos> + 'a>` (Java's laziness in
+//! *when* `getPositions` runs — its lazy `flatMap` invokes it per upstream
+//! position, interleaved with placements — is reproduced by `PlacedFeature`'s
+//! depth-first walk; the iterator form additionally keeps `RepeatingPlacement`'s
+//! unbounded `count` from materializing a `count`-length `Vec`). See
+//! `place_walk` there for the authoritative parity account (why the ordering of
+//! RNG draws and level-state reads matters, and the #181 revisit note).
 
 mod biome_filter;
 mod block_predicate_filter;

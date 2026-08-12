@@ -190,7 +190,7 @@ mod tests {
     ) -> Vec<BlockPos> {
         let generator = NoopGenerator;
         let context = PlacementContext::new(level, &generator, None);
-        PlacementModifier::get_positions(filter, &context, random, origin)
+        PlacementModifier::get_positions(filter, &context, random, origin).collect()
     }
 
     #[test]

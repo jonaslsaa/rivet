@@ -54,12 +54,17 @@ impl CountOnEveryLayerPlacement {
 }
 
 impl PlacementModifier for CountOnEveryLayerPlacement {
-    fn get_positions<R: RandomSource>(
-        &self,
+    fn get_positions<'a, R: RandomSource>(
+        &'a self,
         context: &PlacementContext,
         random: &mut R,
         origin: &BlockPos,
-    ) -> Vec<BlockPos> {
+    ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
+        // Eager shape is bounded: `count` is `IntProviders.codec(0, 256)` and
+        // the layer loop terminates once a layer finds no on-ground position
+        // (the column's air gaps are exhausted, bounded by the world height),
+        // so the positions vector cannot grow without bound. The `Box<dyn
+        // Iterator>` return keeps the uniform lazy `PlacementModifier` contract.
         let mut positions = Vec::new();
         let mut layer = 0i32;
 
@@ -96,7 +101,7 @@ impl PlacementModifier for CountOnEveryLayerPlacement {
             }
         }
 
-        positions
+        Box::new(positions.into_iter())
     }
 
     fn type_id(
