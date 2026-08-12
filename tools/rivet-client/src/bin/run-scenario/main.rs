@@ -4044,6 +4044,32 @@ mod tests {
     }
 
     #[test]
+    fn compare_generated_content_fails_on_a_wrong_seed_world() {
+        // The server generated a different seed's terrain than the seed-42
+        // contract: the observed block names at the sampled chunk differ from
+        // the seed-42 ground truth across all three compared columns (a real
+        // seed-7 world would not share the seed-42 surface/bedrock/below at the
+        // same coordinates). The comparison must refuse PASS — a wrong-seed
+        // world is a different world, never a pass.
+        let manifest = manifest_with(
+            0,
+            0,
+            "minecraft:grass_block",
+            "minecraft:bedrock",
+            "minecraft:stone",
+        );
+        let mut sample = matching_sample(0, 0);
+        sample["surface"] = json!("minecraft:podzol");
+        sample["bedrock"] = json!("minecraft:deepslate");
+        sample["below_feet"] = json!("minecraft:tuff");
+        let transcript = generated_transcript_with(sample);
+        assert!(
+            compare_generated_content(&manifest, &transcript).is_err(),
+            "a world generated from the wrong seed must not pass the seed-42 contract"
+        );
+    }
+
+    #[test]
     fn compare_generated_content_fails_on_a_chunk_outside_the_manifest() {
         // The client sampled a chunk the seed-42 ground truth has no record of
         // — the server served content outside the generated world.
