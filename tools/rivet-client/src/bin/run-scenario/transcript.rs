@@ -1140,6 +1140,242 @@ pub fn rivet_loaded_verdict(t: &Value) -> Result<&'static str, String> {
     Ok("loaded world content observed and sampled (per-coordinate block content reported)")
 }
 
+/// The deterministic +x movement route the `loaded-recenter` client drives
+/// (issue #561), as chunk offsets from the observed spawn chunk (-1,-3): the
+/// first frame crosses into chunk (0,-3) — inside the booted 117-chunk square —
+/// and the second crosses into chunk (1,-3), whose first enter cell (5,-7) is
+/// outside that square's raster (the fixed boot authority edge). The runner
+/// requires the transcript's final move frame to land on exactly this edge.
+pub const RECENTER_EDGE_CHUNK: [i32; 2] = [1, -3];
+/// The chunk the FIRST +x boundary frame must land in: the crossing that proves
+/// a genuine repeated boundary crossing succeeds before the edge is reached.
+pub const RECENTER_FIRST_CHUNK: [i32; 2] = [0, -3];
+
+/// Normalize the `loaded-recenter` client transcript (issue #561): the client
+/// advertises view distance 2 (send radius 3), spawns into the loaded world,
+/// then drives the deterministic +x boundary route by writing finite movement
+/// frames directly. The server recenters on the second frame and disconnects
+/// with an `Unsupported` reason (`chunk update: UNVERIFIED region-backed chunk
+/// ...`), which is NOT encoded as a `ClientboundDisconnectPacket` — so the
+/// client's `disconnect.reason_key` is `null` (the typed UNVERIFIED text lives
+/// only in the rivet-server log, which the runner asserts separately).
+///
+/// The transcript carries the exact route (origin + planned frames) and every
+/// driven `move_frame` sample (absolute position + the chunk it lands in) as
+/// the recorded movement evidence, plus the disconnect record.
+pub fn normalize_recenter(raw: &str) -> Result<Value, String> {
+    let records = parse_records(raw)?;
+
+    let lifecycle: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.get("event").and_then(Value::as_str))
+        .filter(|e| LIFECYCLE_EVENTS.contains(e))
+        .map(str::to_owned)
+        .collect();
+
+    let outcome = outcome(&records);
+    check_outcome_terminal(&records, outcome)?;
+
+    let azalea_revision = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("starting")))
+        .and_then(|r| r.get("azalea_revision").and_then(Value::as_str))
+        .map(str::to_owned);
+
+    let route = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("route")))
+        .cloned();
+    let move_frames: Vec<Value> = records
+        .iter()
+        .filter(|r| r.get("event") == Some(&json!("move_frame")))
+        .map(|r| {
+            json!({
+                "index": r.get("index").cloned().unwrap_or(Value::Null),
+                "x": r.get("x").cloned().unwrap_or(Value::Null),
+                "y": r.get("y").cloned().unwrap_or(Value::Null),
+                "z": r.get("z").cloned().unwrap_or(Value::Null),
+                "chunk": r.get("chunk").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    let disconnect = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("disconnect")))
+        .cloned();
+
+    let mut transcript = json!({
+        "protocol": PROTOCOL,
+        "scenario": "loaded-recenter",
+        "outcome": outcome,
+        "lifecycle": lifecycle,
+        "azalea_revision": azalea_revision,
+        "move_frames": move_frames,
+        "excluded": serde_json::Map::new(),
+    });
+
+    if let Some(route) = route {
+        transcript["route"] = json!({
+            "origin": route.get("origin").cloned().unwrap_or(Value::Null),
+            "frames": route.get("frames").cloned().unwrap_or(Value::Null),
+        });
+    }
+
+    if let Some(disconnect) = disconnect {
+        transcript["disconnect"] = json!({
+            "reason": disconnect.get("reason").cloned().unwrap_or(Value::Null),
+            "reason_key": disconnect.get("reason_key").cloned().unwrap_or(Value::Null),
+            "after_spawn": disconnect.get("after_spawn").cloned().unwrap_or(Value::Null),
+        });
+    }
+
+    Ok(transcript)
+}
+
+/// Verify a normalized `loaded-recenter` transcript proves the real Azalea
+/// client spawned into the loaded world, drove the deterministic +x boundary
+/// route past repeated chunk crossings, and was disconnected AFTER spawn with
+/// an encoded-reason-free disconnect (the recenter `Unsupported` close carries
+/// no `ClientboundDisconnectPacket`, so `reason_key` is `null`).
+///
+/// Returns a human-readable description of the movement boundary reached.
+/// Errors when the transcript does not prove that:
+///
+/// - the outcome is anything but `disconnected` — a `timeout` means the server
+///   never recenter-disconnected (a regression in the recenter or the
+///   RequireLoaded policy), and `connection_failed` means the connect failed.
+/// - the lifecycle does not contain both `login` and `spawn`.
+/// - `azalea_revision != PINNED_AZALEA_REVISION`.
+/// - `after_spawn != true` — the disconnect happened before the client reached
+///   spawn, not via the movement-driven recenter path.
+/// - `reason_key` is not `null` — an encoded `ClientboundDisconnectPacket`
+///   reason (the kick scenario, a generic server close) would carry a key; the
+///   recenter `Unsupported` close does not encode one.
+/// - the `route` record is absent — the client did not announce its planned
+///   movement route.
+/// - fewer than two `move_frame` records — the route did not cross repeated
+///   chunk boundaries (a single crossing cannot reach the boot authority edge
+///   from the send-3 spawn view).
+/// - the first move frame does not land in `RECENTER_FIRST_CHUNK` — the first
+///   boundary crossing was not the inside-the-booted-square crossing that
+///   proves the route genuinely started moving.
+/// - the LAST move frame does not land in `RECENTER_EDGE_CHUNK` — the route did
+///   not reach the fixed boot authority edge (the recenter would have failed at
+///   a different cell, i.e. a different geometry than the intended one).
+///
+/// The typed `UNVERIFIED region-backed chunk ... is not loaded` text and the
+/// server-side movement audit (accepted teleport ack, accepted move frames, no
+/// traced session end) are asserted by the runner against the rivet-server log;
+/// this verdict proves the client-side half of the reproduction.
+pub fn rivet_recenter_verdict(t: &Value) -> Result<&'static str, String> {
+    let outcome = t
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if outcome != "disconnected" {
+        return Err(format!(
+            "loaded-recenter transcript outcome is {outcome} (expected disconnected): the server \
+             never recenter-disconnected the client after the route. A timeout means the recenter \
+             or the RequireLoaded policy regressed (no disconnect), connection_failed means the \
+             connect failed, and loaded/spawned means the client never drove the route to the edge"
+        ));
+    }
+    let lifecycle: Vec<&str> = t
+        .get("lifecycle")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !lifecycle.contains(&"login") || !lifecycle.contains(&"spawn") {
+        return Err(format!(
+            "loaded-recenter transcript lifecycle is {lifecycle:?} (expected to contain login and \
+             spawn) — malformed transcript or the client never reached play"
+        ));
+    }
+    if t.get("azalea_revision").and_then(Value::as_str) != Some(PINNED_AZALEA_REVISION) {
+        return Err(format!(
+            "loaded-recenter transcript azalea_revision is {:?} (expected {PINNED_AZALEA_REVISION}) \
+             — the client was not built from the pinned unmodified Azalea revision",
+            t.get("azalea_revision").and_then(Value::as_str)
+        ));
+    }
+    if t.get("route").is_none() {
+        return Err(
+            "loaded-recenter transcript has no route record — the client never announced its \
+             planned movement route"
+                .to_owned(),
+        );
+    }
+    let frames = t
+        .get("move_frames")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "loaded-recenter transcript has no move_frames array".to_owned())?;
+    if frames.len() < 2 {
+        return Err(format!(
+            "loaded-recenter transcript records {} move frames (expected at least 2): the route \
+             did not cross repeated chunk boundaries from the send-3 spawn view",
+            frames.len()
+        ));
+    }
+    let first_chunk = frames
+        .first()
+        .and_then(|f| f.get("chunk").and_then(Value::as_array))
+        .map(|c| c.iter().filter_map(Value::as_i64).collect::<Vec<_>>());
+    if first_chunk.as_deref()
+        != Some(&[
+            i64::from(RECENTER_FIRST_CHUNK[0]),
+            i64::from(RECENTER_FIRST_CHUNK[1]),
+        ])
+    {
+        return Err(format!(
+            "loaded-recenter first move frame chunk is {first_chunk:?} (expected \
+             {RECENTER_FIRST_CHUNK:?}): the first boundary crossing did not land inside the \
+             booted square"
+        ));
+    }
+    let last_chunk = frames
+        .last()
+        .and_then(|f| f.get("chunk").and_then(Value::as_array))
+        .map(|c| c.iter().filter_map(Value::as_i64).collect::<Vec<_>>());
+    if last_chunk.as_deref()
+        != Some(&[
+            i64::from(RECENTER_EDGE_CHUNK[0]),
+            i64::from(RECENTER_EDGE_CHUNK[1]),
+        ])
+    {
+        return Err(format!(
+            "loaded-recenter last move frame chunk is {last_chunk:?} (expected \
+             {RECENTER_EDGE_CHUNK:?}): the route did not reach the fixed boot authority edge"
+        ));
+    }
+    let disconnect = t
+        .get("disconnect")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "loaded-recenter transcript has no disconnect record".to_owned())?;
+    if disconnect.get("after_spawn").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "loaded-recenter disconnect after_spawn is {:?} (expected true): the disconnect \
+             happened before the client reached spawn, not via the movement-driven recenter path",
+            disconnect.get("after_spawn")
+        ));
+    }
+    if !disconnect
+        .get("reason_key")
+        .map(Value::is_null)
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "loaded-recenter disconnect reason_key is {:?} (expected null): the recenter \
+             Unsupported close carries no encoded ClientboundDisconnectPacket, so a decoded key \
+             means the disconnect was a different (encoded) close",
+            disconnect.get("reason_key")
+        ));
+    }
+    Ok(
+        "movement-driven recenter disconnect after spawn (route crossed repeated boundaries and \
+        reached the boot authority edge)",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2076,6 +2312,142 @@ mod tests {
         assert!(
             rivet_loaded_verdict(&t).is_err(),
             "a client not built from the pinned Azalea revision must not pass"
+        );
+    }
+
+    /// A genuine `loaded-recenter` run: the client spawned into the loaded world
+    /// at the region-backed spawn block (-16, 68, -48), announced the +x route
+    /// (frames at +16 and +32), drove both frames (landing in chunks [0,-3] and
+    /// [1,-3]), and was disconnected after spawn with an encoded-reason-free
+    /// close (the recenter `Unsupported` disconnect).
+    fn recenter_records() -> String {
+        [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":20,"mode":"loaded-recenter","azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":-16.0,"y":68.0,"z":-48.0},"protocol":1}"#,
+            r#"{"event":"route","origin":{"x":-16.0,"y":68.0,"z":-48.0},"frames":[{"x":0.0,"y":68.0,"z":-48.0},{"x":16.0,"y":68.0,"z":-48.0}],"protocol":1}"#,
+            r#"{"event":"move_frame","index":1,"x":0.0,"y":68.0,"z":-48.0,"chunk":[0,-3],"protocol":1}"#,
+            r#"{"event":"move_frame","index":2,"x":16.0,"y":68.0,"z":-48.0,"chunk":[1,-3],"protocol":1}"#,
+            r#"{"event":"disconnect","reason":"Disconnected: server closed the connection","reason_key":null,"after_spawn":true,"protocol":1}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn normalizes_a_genuine_recenter_disconnect() {
+        let t = normalize_recenter(&recenter_records()).expect("normalize");
+        assert_eq!(t["outcome"], "disconnected");
+        assert_eq!(t["scenario"], "loaded-recenter");
+        assert_eq!(t["lifecycle"], json!(["init", "login", "spawn"]));
+        assert_eq!(
+            t["route"]["origin"],
+            json!({"x": -16.0, "y": 68.0, "z": -48.0})
+        );
+        assert_eq!(t["move_frames"].as_array().unwrap().len(), 2);
+        assert_eq!(t["move_frames"][0]["chunk"], json!([0, -3]));
+        assert_eq!(t["move_frames"][1]["chunk"], json!([1, -3]));
+        assert_eq!(t["disconnect"]["after_spawn"], json!(true));
+        assert!(t["disconnect"]["reason_key"].is_null());
+    }
+
+    #[test]
+    fn recenter_verdict_accepts_a_genuine_recenter_run() {
+        let t = normalize_recenter(&recenter_records()).expect("normalize");
+        let verdict = rivet_recenter_verdict(&t).expect("recenter verdict");
+        assert!(
+            verdict.contains("recenter disconnect"),
+            "verdict must name the recenter boundary, got {verdict}"
+        );
+    }
+
+    #[test]
+    fn recenter_verdict_rejects_a_timeout_without_the_disconnect() {
+        // Counterfactual against a regression in the recenter or the
+        // RequireLoaded policy: the client drove the route but the server never
+        // disconnected, so the run ended in a timeout. This must NOT pass as a
+        // reproduction of the expected typed disconnect.
+        let raw = recenter_records().replace(
+            r#"{"event":"disconnect","reason":"Disconnected: server closed the connection","reason_key":null,"after_spawn":true,"protocol":1}"#,
+            r#"{"event":"timeout","timeout_seconds":20,"protocol":1}"#,
+        );
+        let t = normalize_recenter(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "timeout");
+        let err = rivet_recenter_verdict(&t).expect_err("timeout is not the expected disconnect");
+        assert!(
+            err.contains("disconnected"),
+            "error must demand the disconnected outcome, got {err}"
+        );
+    }
+
+    #[test]
+    fn recenter_verdict_rejects_a_pre_spawn_disconnect() {
+        // Counterfactual against a server that closed the client before play:
+        // after_spawn is false, so the disconnect did not come from the
+        // movement-driven recenter path.
+        let mut t = normalize_recenter(&recenter_records()).expect("normalize");
+        t["disconnect"]["after_spawn"] = json!(false);
+        let err = rivet_recenter_verdict(&t).expect_err("pre-spawn close is not the recenter path");
+        assert!(
+            err.contains("after_spawn"),
+            "error must name after_spawn, got {err}"
+        );
+    }
+
+    #[test]
+    fn recenter_verdict_rejects_a_route_that_misses_the_edge() {
+        // Counterfactual against a different geometry (e.g. a send-4 join whose
+        // very first east move already fails): the route's last frame lands in
+        // chunk [0,-3] instead of the [1,-3] boot authority edge, so the client
+        // never reached the fixed edge.
+        let raw = recenter_records().replace(
+            r#"{"event":"move_frame","index":2,"x":16.0,"y":68.0,"z":-48.0,"chunk":[1,-3],"protocol":1}"#,
+            r#"{"event":"move_frame","index":2,"x":0.0,"y":68.0,"z":-48.0,"chunk":[0,-3],"protocol":1}"#,
+        );
+        let t = normalize_recenter(&raw).expect("normalize");
+        let err =
+            rivet_recenter_verdict(&t).expect_err("edge miss is not the intended reproduction");
+        assert!(
+            err.contains("edge"),
+            "error must name the boot authority edge, got {err}"
+        );
+    }
+
+    #[test]
+    fn recenter_verdict_rejects_a_single_crossing_route() {
+        // Counterfactual against a route that crossed only one boundary: a
+        // single crossing cannot show the repeated-crossing route the issue
+        // demands (a send-4 join's first move already fails).
+        let one_frame = [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":20,"mode":"loaded-recenter","azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":-16.0,"y":68.0,"z":-48.0},"protocol":1}"#,
+            r#"{"event":"route","origin":{"x":-16.0,"y":68.0,"z":-48.0},"frames":[{"x":0.0,"y":68.0,"z":-48.0}],"protocol":1}"#,
+            r#"{"event":"move_frame","index":1,"x":0.0,"y":68.0,"z":-48.0,"chunk":[0,-3],"protocol":1}"#,
+            r#"{"event":"disconnect","reason":"Disconnected: server closed the connection","reason_key":null,"after_spawn":true,"protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_recenter(&one_frame).expect("normalize");
+        let err =
+            rivet_recenter_verdict(&t).expect_err("a single crossing is not the repeated route");
+        assert!(
+            err.contains("at least 2"),
+            "error must demand at least two move frames, got {err}"
+        );
+    }
+
+    #[test]
+    fn recenter_verdict_rejects_an_encoded_disconnect_reason() {
+        // Counterfactual against a generic encoded disconnect (the kick
+        // scenario, a server sending a ClientboundDisconnectPacket): the reason
+        // carries a decoded key, which the recenter Unsupported close never does.
+        let mut t = normalize_recenter(&recenter_records()).expect("normalize");
+        t["disconnect"]["reason_key"] = json!("multiplayer.disconnect.kicked");
+        let err = rivet_recenter_verdict(&t).expect_err("an encoded reason is a different close");
+        assert!(
+            err.contains("reason_key"),
+            "error must name reason_key, got {err}"
         );
     }
 }
