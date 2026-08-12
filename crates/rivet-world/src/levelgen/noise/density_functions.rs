@@ -2142,8 +2142,10 @@ impl FindTopSurface {
 
 impl DensityFunction for FindTopSurface {
     fn compute(&self, context: &dyn FunctionContext) -> f64 {
+        // Java `int` arithmetic wraps on overflow (the codec caps inputs, but
+        // `constant()`/programmatic construction is unvalidated).
         let top_y = mth::floor_d(self.upper_bound.compute(context) / self.cell_height as f64)
-            * self.cell_height;
+            .wrapping_mul(self.cell_height);
         if top_y <= self.lower_bound {
             return self.lower_bound as f64;
         }
@@ -2157,7 +2159,7 @@ impl DensityFunction for FindTopSurface {
             if self.density.compute(&point) > 0.0 {
                 return block_y as f64;
             }
-            block_y -= self.cell_height;
+            block_y = block_y.wrapping_sub(self.cell_height);
         }
         self.lower_bound as f64
     }
@@ -2263,7 +2265,7 @@ impl EndIslandDensityFunction {
         let sub_section_z = section_z % 2;
         // Paper: `configFixMC159283() ? Mth.sqrt((long)sectionX *
         // (long)sectionX + ...) : ...` — the config is pinned `true` (the
-        // long-sqrt path). `Mth.sqrt(float)` returns `x.sqrt()`.
+        // long-sqrt path); the configurable-disable path defers (RivetTodo #177).
         let doffs_raw = 100.0
             - mth::sqrt(
                 ((section_x as i64 * section_x as i64) + (section_z as i64 * section_z as i64))
@@ -2318,26 +2320,22 @@ impl EndIslandDensityFunction {
 /// `it.unimi.dsi.fastutil.HashCommon.mix(long)` — the multiply-phi + double
 /// xorshift finalizer used by the `NoiseCache` index (Paper calls
 /// `HashCommon.mix(chunkKey)`). NOT splitmix64/staffordMix13 — fastutil's
-/// `mix` is `h = x * LONG_PHI; h ^= h >>> 32; h ^ (h >>> 16)`.
+/// `mix` is `h = x * LONG_PHI; h ^= h >>> 32; h ^ (h >>> 16)`. Java `>>>` is
+/// a logical shift, so the shifts operate on the `u64` view of `h` (Rust `>>`
+/// on `i64` is arithmetic and would sign-fill).
 fn mix_i64(x: i64) -> i64 {
     let mut h = x.wrapping_mul(0x9e3779b97f4a7c15u64 as i64);
-    h ^= h >> 32;
-    h ^ (h >> 16)
+    h ^= (h as u64 >> 32) as i64;
+    h ^ (h as u64 >> 16) as i64
 }
 
 impl DensityFunction for EndIslandDensityFunction {
     fn compute(&self, context: &dyn FunctionContext) -> f64 {
-        // Java `compute`:
-        //   return ((double)this.getHeightValue(this.islandNoise,
-        //       context.blockX() / 8, context.blockZ() / 8) - 8.0) / 128.0;
-        // where `context.blockX() / 8` is integer division (truncating toward
-        // zero), which the `section_x = context.block_x() / 8` port matches
-        // exactly (NOT `blockX / 8.0` floored — those differ on negative coords).
-        // The cache is `Mutex` (the value layer's per-function cache; the
-        // value-layer `EndIslandDensityFunction` runs single-threaded in the
-        // chunk-gen path) — Paper's `ThreadLocal` cache is serialized here
-        // behind a `Mutex` (correct: the cached island size per chunk is
-        // deterministic).
+        // Java `getHeightValue(islandNoise, blockX() / 8, blockZ() / 8)`:
+        // `blockX() / 8` is integer division (truncating toward zero) — NOT
+        // `blockX / 8.0` floored, which differs on negative coords. The
+        // `Mutex` serializes Paper's `ThreadLocal` cache (deterministic per
+        // chunk).
         let section_x = context.block_x() / 8;
         let section_z = context.block_z() / 8;
         let height = self.get_height_value(section_x, section_z);
