@@ -741,7 +741,9 @@ fn create_float_uses_float_to_string_literal() {
         (0.1, "0.1"),
         (0.001, "0.001"),
         (9999999.0, "9999999.0"),
-        (123456.789, "123456.79"),
+        // 123456.789 is not exactly representable in f32; the nearest float is
+        // 123456.7890625, which Java prints as 123456.79.
+        (f32::from_bits(0x47f1_2065), "123456.79"),
         // Subnormal shortest tie-break (Java prints the "preferred" digits).
         (f32::from_bits(0x0000_0001), "1.4E-45"),
         (f32::from_bits(0x0000_0005), "7.0E-45"),
