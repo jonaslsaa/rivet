@@ -33,12 +33,45 @@
 //! authoritative parity account (why the ordering of RNG draws and level-state
 //! reads matters, and the #181 revisit note).
 
+mod biome_filter;
+mod block_predicate_filter;
+mod cave_surface;
+mod count_on_every_layer_placement;
+mod count_placement;
+mod environment_scan_placement;
+mod fixed_placement;
+mod height_range_placement;
+mod heightmap_placement;
+mod in_square_placement;
+mod noise_based_count_placement;
+mod noise_threshold_count_placement;
 mod placed_feature;
 mod placement_context;
 mod placement_filter;
 mod placement_modifier;
 mod placement_modifier_type;
+mod random_offset_placement;
+mod rarity_filter;
+mod repeating_placement;
+mod surface_relative_threshold_filter;
+mod surface_water_depth_filter;
 
+pub use biome_filter::BiomeFilter;
+pub use block_predicate_filter::BlockPredicateFilter;
+pub use cave_surface::CaveSurface;
+pub use count_on_every_layer_placement::CountOnEveryLayerPlacement;
+pub use count_placement::{CountPlacement, count_placement_codec};
+pub use environment_scan_placement::EnvironmentScanPlacement;
+pub use fixed_placement::FixedPlacement;
+pub use height_range_placement::HeightRangePlacement;
+pub use heightmap_placement::HeightmapPlacement;
+pub use in_square_placement::InSquarePlacement;
+pub use noise_based_count_placement::{
+    NoiseBasedCountPlacement, noise_based_count_placement_codec,
+};
+pub use noise_threshold_count_placement::{
+    NoiseThresholdCountPlacement, noise_threshold_count_placement_codec,
+};
 pub use placed_feature::PlacedFeature;
 pub use placement_context::PlacementContext;
 pub use placement_filter::PlacementFilter;
@@ -46,3 +79,8 @@ pub use placement_modifier::{ErasedPlacementModifier, PlacementModifier, placeme
 pub use placement_modifier_type::{
     PlacementModifierType, PlacementModifierTypeId, placement_modifier_type,
 };
+pub use random_offset_placement::RandomOffsetPlacement;
+pub use rarity_filter::RarityFilter;
+pub use repeating_placement::RepeatingPlacement;
+pub use surface_relative_threshold_filter::SurfaceRelativeThresholdFilter;
+pub use surface_water_depth_filter::SurfaceWaterDepthFilter;
