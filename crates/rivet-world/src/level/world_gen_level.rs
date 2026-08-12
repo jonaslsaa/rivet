@@ -14,6 +14,7 @@
 //! overrides it for debug narration, so no current consumer reads it.
 
 use crate::level::height_accessor::LevelHeightAccessor;
+use crate::levelgen::heightmap::Types;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
@@ -56,6 +57,24 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + Sync + 'static {
     /// rather than fabricating a biome — the same capability-unavailable seam.
     fn get_biome(&self, _pos: &BlockPos) -> Holder<BiomeId> {
         panic!("WorldGenLevel.getBiome is not implemented (RivetTodo #399)")
+    }
+
+    /// `LevelReader.getHeight(Heightmap.Types, int, int)` — the column-height
+    /// read `PlacementContext.getHeight` delegates to (`this.level.getHeight(
+    /// type, x, z)`), consumed by the surface-relative placement filters.
+    ///
+    /// Named `get_height_at` because Rust cannot overload: Java's 0-arg
+    /// `LevelHeightAccessor.getHeight()` (the world's vertical extent, already
+    /// on this trait's supertrait) and this heightmap read collide on the Java
+    /// name — the same `_at` suffix `ChunkAccess::get_height_at` uses for
+    /// exactly this collision.
+    ///
+    /// RivetTodo(#228): the worldgen `LevelReader` heightmap read is not ported
+    /// yet, so the default fails explicitly (panics) rather than fabricating a
+    /// surface — the same capability-unavailable seam as `get_biome`. Concrete
+    /// worlds and test doubles override it with real behavior when they land.
+    fn get_height_at(&self, _ty: Types, _x: i32, _z: i32) -> i32 {
+        panic!("WorldGenLevel.getHeight is not implemented (RivetTodo #228)")
     }
 
     /// `LevelAccessor.isUnobstructed(@Nullable Entity, VoxelShape)` — the
