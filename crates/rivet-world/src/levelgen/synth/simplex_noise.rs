@@ -52,6 +52,7 @@ const F2: f64 = 0.5 * (SQRT_3 - 1.0);
 const G2: f64 = (3.0 - SQRT_3) / 6.0;
 
 /// `net.minecraft.world.level.levelgen.synth.SimplexNoise`.
+#[derive(Debug, Clone)]
 pub struct SimplexNoise {
     /// The 256-entry permutation (Java's `int[512]` fills/reads only `[0,256)`).
     p: [u8; 256],
