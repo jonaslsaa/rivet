@@ -47,7 +47,11 @@
 //! Hostile input cannot abort the process: the shared NBT parser caps its
 //! recursion at Java's `NbtAccounter` depth (512) and pre-allocates at most
 //! `ByteBufCodecs.MAX_INITIAL_COLLECTION_SIZE` (65536) slots per collection;
-//! patch and advancement collections use the same allocation cap. Java-grounded
+//! patch and advancement collections use the same allocation cap, and the
+//! component walker is iterative (an explicit heap stack) so a re-entrant
+//! `ItemStackTemplate`/`Container`/`BlockPredicate` chain of any depth — which
+//! Paper accepts unbounded on this packet path — cannot overflow the native
+//! stack. Java-grounded
 //! maxima are enforced where the codec has them — `list(256)` lore/container/
 //! bundle, `list(1024)` charged projectiles, `list(100)` writable book,
 //! `list(64)` data-component predicates, `readCount(16)` profile properties,
@@ -747,94 +751,11 @@ fn skip_tool(body: &[u8], off: &mut usize) -> Option<()> {
     skip_bool(body, off)
 }
 
-/// `MobEffectInstance.Details` — `[VarInt][VarInt][Bool][Bool][Bool][?Details]`.
-fn skip_effect_details(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
-    if depth > 8 {
-        return None;
-    }
-    skip_varint(body, off)?; // amplifier
-    skip_varint(body, off)?; // duration
-    skip_bool(body, off)?; // ambient
-    skip_bool(body, off)?; // showParticles
-    skip_bool(body, off)?; // showIcon
-    // hiddenEffect: [Bool present][recursive Details].
-    let present = *body.get(*off)?;
-    *off += 1;
-    if present != 0 {
-        skip_effect_details(body, off, depth + 1)?;
-    }
-    Some(())
-}
-
-fn skip_mob_effect_instance(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_holder_registry(body, off)?; // MobEffect holderRegistry
-    skip_effect_details(body, off, 0)
-}
-
-/// `ConsumeEffect.STREAM_CODEC` — `[registry id][subtype by id]`. The five
-/// registered subtype ids follow `ConsumeEffect.Type` registration order.
-fn skip_consume_effect(body: &[u8], off: &mut usize) -> Option<()> {
-    match frame::read_varint(body, off)? {
-        0 => {
-            // ApplyStatusEffectsConsumeEffect: [list(MobEffectInstance)][Float].
-            skip_list(body, off, skip_mob_effect_instance)?;
-            skip_float(body, off)
-        }
-        1 => skip_holder_set(body, off), // RemoveStatusEffectsConsumeEffect: holderSet(MOB_EFFECT)
-        2 => Some(()),                   // ClearAllStatusEffectsConsumeEffect: unit
-        3 => skip_float(body, off),      // TeleportRandomlyConsumeEffect
-        4 => skip_sound_event(body, off), // PlaySoundConsumeEffect
-        _ => None,
-    }
-}
-
-fn skip_consumable(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_float(body, off)?; // consumeSeconds
-    skip_varint(body, off)?; // ItemUseAnimation idMapper
-    skip_sound_event(body, off)?; // sound
-    skip_bool(body, off)?; // hasConsumeParticles
-    skip_list(body, off, skip_consume_effect)
-}
-
 /// `AttributeModifier` — `[Identifier][Double][Operation idMapper]`.
 fn skip_attribute_modifier(body: &[u8], off: &mut usize) -> Option<()> {
     skip_utf8(body, off)?;
     skip_double(body, off)?;
     skip_varint(body, off)
-}
-
-fn skip_item_stack_template(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
-    // ItemStackTemplate = [Item holderRegistry][count VarInt][DataComponentPatch].
-    skip_holder_registry(body, off)?;
-    skip_varint(body, off)?;
-    skip_patch_value(body, off, depth)
-}
-
-/// The `DataComponentPatch` VALUE (the entry's type id has already been read):
-/// `[positive VarInt][negative VarInt][positive entries][negative entries]`.
-fn skip_patch_value(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
-    let positive = frame::read_varint(body, off)?;
-    let negative = frame::read_varint(body, off)?;
-    // DataComponentPatch.decode only throws when the *sum* is negative (that is
-    // the map capacity, `new Reference2ObjectArrayMap<>(Math.min(sum, 65536))`);
-    // an individual negative count is tolerated (its loop runs zero times).
-    if positive as i64 + (negative as i64) < 0 {
-        return None;
-    }
-    for _ in 0..positive {
-        let id = frame::read_varint(body, off)?;
-        if id < 0 {
-            return None;
-        }
-        skip_any_component_value(body, off, id as u32, depth + 1)?;
-    }
-    for _ in 0..negative {
-        let id = frame::read_varint(body, off)?;
-        if id < 0 {
-            return None; // DataComponentType registry byIdOrThrow rejects negative ids
-        }
-    }
-    Some(())
 }
 
 fn skip_equippable(body: &[u8], off: &mut usize) -> Option<()> {
@@ -849,10 +770,6 @@ fn skip_equippable(body: &[u8], off: &mut usize) -> Option<()> {
     skip_bool(body, off)?; // equipOnInteract
     skip_bool(body, off)?; // canBeSheared
     skip_sound_event(body, off) // shearingSound
-}
-
-fn skip_death_protection(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_list(body, off, skip_consume_effect)
 }
 
 fn skip_damage_reduction(body: &[u8], off: &mut usize) -> Option<()> {
@@ -1072,18 +989,6 @@ fn skip_bees(body: &[u8], off: &mut usize) -> Option<()> {
     skip_list(body, off, skip_beehive_occupant)
 }
 
-fn skip_container(body: &[u8], off: &mut usize) -> Option<()> {
-    // list(256)(?ItemStackTemplate) — ItemContainerContents.MAX_SIZE.
-    skip_list_limited(body, off, skip_optional_item_stack, MAX_CONTAINER_SLOTS)
-}
-
-fn skip_potion_contents(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_optional(body, off, skip_holder_registry)?; // potion holderRegistry(POTION)
-    skip_optional(body, off, skip_int)?; // customColor
-    skip_list(body, off, skip_mob_effect_instance)?; // customEffects
-    skip_optional(body, off, skip_utf8) // customName
-}
-
 fn skip_suspicious_stew_effects(body: &[u8], off: &mut usize) -> Option<()> {
     // list(Entry = [MobEffect holderRegistry][VarInt duration]).
     skip_list(body, off, |b, o| {
@@ -1125,16 +1030,6 @@ fn skip_filterable_component(body: &[u8], off: &mut usize) -> Option<()> {
     skip_filterable(body, off, skip_component_tag)
 }
 
-/// A depth-0 `ItemStackTemplate` (no deeper patch nesting is ever valid here).
-fn skip_item_stack_leaf(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_item_stack_template(body, off, 0)
-}
-
-/// `[?ItemStackTemplate]` (`Optional<ItemStackTemplate>`).
-fn skip_optional_item_stack(body: &[u8], off: &mut usize) -> Option<()> {
-    skip_optional(body, off, skip_item_stack_leaf)
-}
-
 /// `RangedMatcher` — `[?String min][?String max]`.
 fn skip_ranged_matcher(body: &[u8], off: &mut usize) -> Option<()> {
     skip_optional(body, off, skip_utf8)?;
@@ -1172,80 +1067,6 @@ fn skip_nbt_predicate(body: &[u8], off: &mut usize) -> Option<()> {
     skip_compound_tag(body, off) // NbtPredicate.STREAM_CODEC = COMPOUND_TAG
 }
 
-/// `TypedDataComponent` — `[DataComponentType registry VarInt][value]`, where the
-/// value uses the component's own stream codec (recursing into
-/// [`skip_any_component_value`]).
-fn skip_typed_data_component(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
-    let id = frame::read_varint(body, off)?;
-    if id < 0 {
-        return None;
-    }
-    skip_any_component_value(body, off, id as u32, depth + 1)
-}
-
-fn skip_data_component_exact_predicate(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
-    // list(TypedDataComponent) — unbounded (`ByteBufCodecs.list()`), inlined
-    // because the element takes `depth`.
-    let count = frame::read_varint(body, off)?;
-    if count < 0 {
-        return None;
-    }
-    for _ in 0..count {
-        skip_typed_data_component(body, off, depth)?;
-    }
-    Some(())
-}
-
-fn skip_data_component_predicate(body: &[u8], off: &mut usize, _depth: usize) -> Option<()> {
-    // list(64)(Single). Single = [Type either][value]. The Type either reads
-    // [readBoolean][registry varint]: a nonzero byte selects a concrete
-    // DATA_COMPONENT_PREDICATE_TYPE, a zero byte a DATA_COMPONENT_TYPE (AnyValue).
-    // Both registries decode through `byIdOrThrow`, so a negative id is refused.
-    // The value for BOTH branches is a fromCodecWithRegistries NBT tag — a
-    // concrete predicate's `singleStreamCodec` serializes the whole predicate to
-    // one tag, and an AnyValueType's `unitCodec` encodes to an empty compound —
-    // so every element is [bool][varint][NBT tag], fully bounded by the NBT
-    // parser (no depth recursion). An End tag is refused like Java's tagCodec.
-    let count = frame::read_varint(body, off)?;
-    if count < 0 || count as usize > MAX_DATA_COMPONENT_PREDICATES {
-        return None;
-    }
-    for _ in 0..count {
-        skip_bool(body, off)?; // either flag (nonzero = concrete predicate type)
-        skip_holder_registry(body, off)?; // predicate-type or component-type registry id
-        let value = read_nbt(body, off)?;
-        if matches!(value, Nbt::End) {
-            return None;
-        }
-    }
-    Some(())
-}
-
-fn skip_data_component_matchers(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
-    skip_data_component_exact_predicate(body, off, depth)?;
-    skip_data_component_predicate(body, off, depth)
-}
-
-fn skip_block_predicate(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
-    skip_optional(body, off, skip_holder_set)?; // blocks
-    skip_optional(body, off, skip_state_properties_predicate)?; // properties
-    skip_optional(body, off, skip_nbt_predicate)?; // nbt
-    skip_data_component_matchers(body, off, depth) // components
-}
-
-/// `AdventureModePredicate` (`can_place_on`/`can_break`) — `list(BlockPredicate)`.
-fn skip_block_predicate_list(body: &[u8], off: &mut usize, depth: usize) -> Option<()> {
-    // list(BlockPredicate) — inlined because the element takes `depth`.
-    let count = frame::read_varint(body, off)?;
-    if count < 0 {
-        return None;
-    }
-    for _ in 0..count {
-        skip_block_predicate(body, off, depth)?;
-    }
-    Some(())
-}
-
 fn skip_attribute_modifiers_entry(body: &[u8], off: &mut usize) -> Option<()> {
     skip_holder_registry(body, off)?; // Attribute holderRegistry
     skip_attribute_modifier(body, off)?; // modifier
@@ -1263,17 +1084,6 @@ fn skip_attribute_modifiers(body: &[u8], off: &mut usize) -> Option<()> {
     skip_list(body, off, skip_attribute_modifiers_entry)
 }
 
-fn skip_charged_projectiles(body: &[u8], off: &mut usize) -> Option<()> {
-    // list(1024)(ItemStackTemplate) — the elements are NOT Optional (only
-    // ItemContainerContents wraps its ItemStackTemplates in an Optional).
-    skip_list_limited(body, off, skip_item_stack_leaf, MAX_CHARGED_PROJECTILES)
-}
-
-fn skip_bundle_contents(body: &[u8], off: &mut usize) -> Option<()> {
-    // list(256)(ItemStackTemplate) — the elements are NOT Optional.
-    skip_list_limited(body, off, skip_item_stack_leaf, MAX_BUNDLE_ITEMS)
-}
-
 fn skip_painting_variant_holder(body: &[u8], off: &mut usize) -> Option<()> {
     // holder(PAINTING_VARIANT, [VarInt][VarInt][Identifier][?Component][?Component]).
     skip_holder(body, off, |b, o| {
@@ -1285,15 +1095,330 @@ fn skip_painting_variant_holder(body: &[u8], off: &mut usize) -> Option<()> {
     })
 }
 
-/// Bound `shape`'s wire value, advancing `*off` past it. The depth cap guards
-/// against pathological nesting through `ItemStackTemplate`/`DataComponentMatchers`
-/// recursion on hostile input (the advancement packet is not `trackDepth`-wrapped,
-/// so this cap is the walker's own recursion bound, deliberately conservative).
-fn skip_shape(body: &[u8], off: &mut usize, shape: Shape, depth: usize) -> Option<()> {
-    use Shape::*;
-    if depth > 8 {
-        return None;
+/// Iterative walker over component values.
+///
+/// The component tree is re-entrant: an `ItemStackTemplate` embeds a
+/// `DataComponentPatch` whose entries can be `ItemStackTemplate`-holding
+/// components (`Container`/`ChargedProjectiles`/`BundleContents`), a
+/// `BlockPredicateList` recurses through `DataComponentMatchers` →
+/// `TypedDataComponent` → any component, and a `MobEffectInstance`'s hidden
+/// effect is itself a `MobEffectInstance`. Paper places no depth bound on the
+/// `update_advancements` path — the `trackDepth`/`increaseDepth` guards only
+/// fire on packet paths wrapped in `ByteBufCodecs.trackDepth`, which this packet
+/// is not — so hostile nesting has no Java-side cap. Recursing with the native
+/// stack would overflow it.
+///
+/// Instead, [`walk_work`] keeps an explicit work stack on the heap. Every work
+/// item consumes at least one wire byte before pushing more work, so the stack
+/// is bounded by the input body size: hostile nesting returns `None` (and the
+/// harness falls back to the raw body) rather than aborting the process.
+#[derive(Clone)]
+enum Work {
+    /// Skip one component value by registered id (the id has already been read).
+    Component(u32),
+    /// Skip one shape's value.
+    Shape(Shape),
+    /// `[Item holderRegistry][count VarInt][DataComponentPatch]`.
+    ItemStack,
+    /// `[positive VarInt][negative VarInt][pos entries][neg entries]`.
+    Patch,
+    /// Process the positive patch entries (each `[id VarInt][value]`).
+    PatchPositive { remaining: usize },
+    /// Process the negative patch entries (each `[id VarInt]`).
+    PatchNegative { remaining: usize },
+    /// `[VarInt count][count × elem]`, processed one element at a time so the
+    /// heap stack stays O(depth), not O(count).
+    List { elem: Box<Work>, remaining: usize },
+    /// `[Bool present][if present: value]`.
+    Optional { value: Box<Work> },
+    /// A `BlockPredicate`: `[?holderSet][?StatePropertiesPredicate][?NbtPredicate][matchers]`.
+    BlockPredicate,
+    /// `DataComponentMatchers`: `[exact-predicate list][predicates list]`.
+    Matchers,
+    /// The predicates list — `list(64)([bool][varint][NBT tag])`, leaf.
+    MatchersPredicates,
+    /// `TypedDataComponent`: `[type id VarInt][component value]`.
+    TypedDataComponent,
+    /// `MobEffectInstance`: `[effect holderRegistry][Details]`.
+    MobEffectInstance,
+    /// `MobEffectInstance.Details`: `[amp][dur][ambient][showParticles][showIcon][?Details]`.
+    Details,
+    /// `ConsumeEffect`: `[registry id][subtype by id]`.
+    ConsumeEffect,
+    /// `Consumable` fixed prefix + `list(ConsumeEffect)`.
+    Consumable,
+    /// `PotionContents` fixed prefix + `list(MobEffectInstance)` + trailing `?customName`.
+    PotionContents,
+    /// `list(ConsumeEffect)` (DeathProtection).
+    DeathProtection,
+    /// `[Bool present][if present: STRING_UTF8]`.
+    OptionalUtf8,
+    /// A single `FLOAT`.
+    Float,
+}
+
+/// Run `root` work to completion, advancing `*off` past every value.
+fn walk_work(body: &[u8], off: &mut usize, root: Work) -> Option<()> {
+    let mut stack: Vec<Work> = vec![root];
+    while let Some(work) = stack.pop() {
+        match work {
+            Work::Component(id) => match component_type_name(id) {
+                Some(name) => {
+                    let _ = read_component_value(body, off, name)?;
+                }
+                None => {
+                    let shape = component_shape(id)?;
+                    stack.push(Work::Shape(shape));
+                }
+            },
+            Work::Shape(shape) => match shape {
+                Shape::ItemStackTemplate => stack.push(Work::ItemStack),
+                Shape::Container => {
+                    // list(256)(?ItemStackTemplate) — ItemContainerContents.MAX_SIZE.
+                    let count = frame::read_varint(body, off)?;
+                    if count < 0 || count as usize > MAX_CONTAINER_SLOTS {
+                        return None;
+                    }
+                    stack.push(Work::List {
+                        elem: Box::new(Work::Optional {
+                            value: Box::new(Work::ItemStack),
+                        }),
+                        remaining: count as usize,
+                    });
+                }
+                Shape::ChargedProjectiles => {
+                    // list(1024)(ItemStackTemplate) — NOT Optional.
+                    let count = frame::read_varint(body, off)?;
+                    if count < 0 || count as usize > MAX_CHARGED_PROJECTILES {
+                        return None;
+                    }
+                    stack.push(Work::List {
+                        elem: Box::new(Work::ItemStack),
+                        remaining: count as usize,
+                    });
+                }
+                Shape::BundleContents => {
+                    // list(256)(ItemStackTemplate) — NOT Optional.
+                    let count = frame::read_varint(body, off)?;
+                    if count < 0 || count as usize > MAX_BUNDLE_ITEMS {
+                        return None;
+                    }
+                    stack.push(Work::List {
+                        elem: Box::new(Work::ItemStack),
+                        remaining: count as usize,
+                    });
+                }
+                Shape::BlockPredicateList => {
+                    // list(BlockPredicate) — unbounded (`ByteBufCodecs.list()`).
+                    let count = frame::read_varint(body, off)?;
+                    if count < 0 {
+                        return None;
+                    }
+                    stack.push(Work::List {
+                        elem: Box::new(Work::BlockPredicate),
+                        remaining: count as usize,
+                    });
+                }
+                Shape::Consumable => stack.push(Work::Consumable),
+                Shape::DeathProtection => stack.push(Work::DeathProtection),
+                Shape::PotionContents => stack.push(Work::PotionContents),
+                leaf => skip_shape_leaf(body, off, leaf)?,
+            },
+            Work::ItemStack => {
+                skip_holder_registry(body, off)?; // item holderRegistry
+                skip_varint(body, off)?; // count
+                stack.push(Work::Patch);
+            }
+            Work::Patch => {
+                let positive = frame::read_varint(body, off)?;
+                let negative = frame::read_varint(body, off)?;
+                // DataComponentPatch.decode throws only when the *sum* (map
+                // capacity) is negative; an individual negative count is
+                // tolerated (its loop runs zero times).
+                if positive as i64 + (negative as i64) < 0 {
+                    return None;
+                }
+                stack.push(Work::PatchNegative {
+                    remaining: negative as usize,
+                });
+                stack.push(Work::PatchPositive {
+                    remaining: positive as usize,
+                });
+            }
+            Work::PatchPositive { remaining } => {
+                if remaining > 0 {
+                    let id = frame::read_varint(body, off)?;
+                    if id < 0 {
+                        return None; // DataComponentType registry byIdOrThrow
+                    }
+                    stack.push(Work::PatchPositive {
+                        remaining: remaining - 1,
+                    });
+                    stack.push(Work::Component(id as u32));
+                }
+            }
+            Work::PatchNegative { remaining } => {
+                if remaining > 0 {
+                    let id = frame::read_varint(body, off)?;
+                    if id < 0 {
+                        return None; // DataComponentType registry byIdOrThrow
+                    }
+                    stack.push(Work::PatchNegative {
+                        remaining: remaining - 1,
+                    });
+                }
+            }
+            Work::List { elem, remaining } => {
+                if remaining > 0 {
+                    let next = (*elem).clone();
+                    stack.push(Work::List {
+                        elem,
+                        remaining: remaining - 1,
+                    });
+                    stack.push(next);
+                }
+            }
+            Work::Optional { value } => {
+                let present = *body.get(*off)?;
+                *off += 1;
+                if present != 0 {
+                    stack.push(*value);
+                }
+            }
+            Work::BlockPredicate => {
+                skip_optional(body, off, skip_holder_set)?; // blocks
+                skip_optional(body, off, skip_state_properties_predicate)?; // properties
+                skip_optional(body, off, skip_nbt_predicate)?; // nbt
+                stack.push(Work::Matchers); // components
+            }
+            Work::Matchers => {
+                let count = frame::read_varint(body, off)?;
+                if count < 0 {
+                    return None;
+                }
+                // exact-predicate list first; the predicates list follows.
+                stack.push(Work::MatchersPredicates);
+                stack.push(Work::List {
+                    elem: Box::new(Work::TypedDataComponent),
+                    remaining: count as usize,
+                });
+            }
+            Work::MatchersPredicates => {
+                // list(64)(Single). Single = [Type either][value]. The Type
+                // either reads [readBoolean][registry varint]; the value for
+                // BOTH branches is a fromCodecWithRegistries NBT tag, so every
+                // element is [bool][varint][NBT tag], fully bounded by the NBT
+                // parser (no recursion). An End tag is refused like Java's
+                // tagCodec.
+                let count = frame::read_varint(body, off)?;
+                if count < 0 || count as usize > MAX_DATA_COMPONENT_PREDICATES {
+                    return None;
+                }
+                for _ in 0..count {
+                    skip_bool(body, off)?; // either flag (nonzero = concrete predicate type)
+                    skip_holder_registry(body, off)?; // predicate-type or component-type id
+                    let value = read_nbt(body, off)?;
+                    if matches!(value, Nbt::End) {
+                        return None;
+                    }
+                }
+            }
+            Work::TypedDataComponent => {
+                let id = frame::read_varint(body, off)?;
+                if id < 0 {
+                    return None;
+                }
+                stack.push(Work::Component(id as u32));
+            }
+            Work::MobEffectInstance => {
+                skip_holder_registry(body, off)?; // MobEffect holderRegistry
+                stack.push(Work::Details);
+            }
+            Work::Details => {
+                skip_varint(body, off)?; // amplifier
+                skip_varint(body, off)?; // duration
+                skip_bool(body, off)?; // ambient
+                skip_bool(body, off)?; // showParticles
+                skip_bool(body, off)?; // showIcon
+                let present = *body.get(*off)?;
+                *off += 1;
+                if present != 0 {
+                    stack.push(Work::Details); // hiddenEffect
+                }
+            }
+            Work::ConsumeEffect => match frame::read_varint(body, off)? {
+                0 => {
+                    // ApplyStatusEffectsConsumeEffect: [list(MobEffectInstance)][Float].
+                    let count = frame::read_varint(body, off)?;
+                    if count < 0 {
+                        return None;
+                    }
+                    stack.push(Work::Float);
+                    stack.push(Work::List {
+                        elem: Box::new(Work::MobEffectInstance),
+                        remaining: count as usize,
+                    });
+                }
+                1 => skip_holder_set(body, off)?, // RemoveStatusEffectsConsumeEffect: holderSet(MOB_EFFECT)
+                2 => {}                           // ClearAllStatusEffectsConsumeEffect: unit
+                3 => skip_float(body, off)?,      // TeleportRandomlyConsumeEffect
+                4 => skip_sound_event(body, off)?, // PlaySoundConsumeEffect
+                _ => return None,
+            },
+            Work::Consumable => {
+                skip_float(body, off)?; // consumeSeconds
+                skip_varint(body, off)?; // ItemUseAnimation idMapper
+                skip_sound_event(body, off)?; // sound
+                skip_bool(body, off)?; // hasConsumeParticles
+                let count = frame::read_varint(body, off)?;
+                if count < 0 {
+                    return None;
+                }
+                stack.push(Work::List {
+                    elem: Box::new(Work::ConsumeEffect),
+                    remaining: count as usize,
+                });
+            }
+            Work::PotionContents => {
+                skip_optional(body, off, skip_holder_registry)?; // potion holderRegistry(POTION)
+                skip_optional(body, off, skip_int)?; // customColor
+                let count = frame::read_varint(body, off)?;
+                if count < 0 {
+                    return None;
+                }
+                stack.push(Work::OptionalUtf8); // trailing customName
+                stack.push(Work::List {
+                    elem: Box::new(Work::MobEffectInstance),
+                    remaining: count as usize,
+                });
+            }
+            Work::DeathProtection => {
+                let count = frame::read_varint(body, off)?;
+                if count < 0 {
+                    return None;
+                }
+                stack.push(Work::List {
+                    elem: Box::new(Work::ConsumeEffect),
+                    remaining: count as usize,
+                });
+            }
+            Work::OptionalUtf8 => {
+                let present = *body.get(*off)?;
+                *off += 1;
+                if present != 0 {
+                    skip_utf8(body, off)?;
+                }
+            }
+            Work::Float => skip_float(body, off)?,
+        }
     }
+    Some(())
+}
+
+/// The non-recursive shapes, walked directly (each reads only wire primitives).
+/// The re-entrant shapes are handled as [`Work`] frames by [`walk_work`].
+fn skip_shape_leaf(body: &[u8], off: &mut usize, shape: Shape) -> Option<()> {
+    use Shape::*;
     match shape {
         VarInt => skip_varint(body, off),
         HolderRegistry => skip_holder_registry(body, off),
@@ -1317,10 +1442,7 @@ fn skip_shape(body: &[u8], off: &mut usize, shape: Shape, depth: usize) -> Optio
         CustomModelData => skip_custom_model_data(body, off),
         TooltipDisplay => skip_tooltip_display(body, off),
         Tool => skip_tool(body, off),
-        Consumable => skip_consumable(body, off),
-        ItemStackTemplate => skip_item_stack_template(body, off, depth),
         Equippable => skip_equippable(body, off),
-        DeathProtection => skip_death_protection(body, off),
         BlocksAttacks => skip_blocks_attacks(body, off),
         PiercingWeapon => skip_piercing_weapon(body, off),
         KineticWeapon => skip_kinetic_weapon(body, off),
@@ -1336,42 +1458,27 @@ fn skip_shape(body: &[u8], off: &mut usize, shape: Shape, depth: usize) -> Optio
         PotDecorations => skip_pot_decorations(body, off),
         BlockState => skip_block_state(body, off),
         Bees => skip_bees(body, off),
-        Container => skip_container(body, off),
-        PotionContents => skip_potion_contents(body, off),
         SuspiciousStewEffects => skip_suspicious_stew_effects(body, off),
         WritableBookContent => skip_writable_book_content(body, off),
         WrittenBookContent => skip_written_book_content(body, off),
-        BlockPredicateList => skip_block_predicate_list(body, off, depth),
         AttributeModifiers => skip_attribute_modifiers(body, off),
-        ChargedProjectiles => skip_charged_projectiles(body, off),
-        BundleContents => skip_bundle_contents(body, off),
         PaintingVariant => skip_painting_variant_holder(body, off),
+        // The re-entrant shapes are handled by the Work loop, never here.
+        ItemStackTemplate | Container | ChargedProjectiles | BundleContents
+        | BlockPredicateList | Consumable | DeathProtection | PotionContents => {
+            unreachable!("re-entrant shape must be handled by the Work loop")
+        }
     }
 }
 
 /// Bound one registered component's wire value (the entry's type id has already
 /// been read), advancing `*off` past it. `None` for an id outside the registered
-/// range or a value that does not fit its shape.
-fn skip_component_value(body: &[u8], off: &mut usize, id: u32, depth: usize) -> Option<()> {
-    let shape = component_shape(id)?;
-    skip_shape(body, off, shape, depth)
-}
-
-/// Consume one registered component's wire value (the entry's type id has
-/// already been read), dispatching the NBT-shaped ids (0/6/9/11/58/59/60) —
-/// which are not expressible as a [`Shape`] — to the shared reader, and every
-/// other registered id to its byte-exact shape walker. Used where a composite
-/// embeds a `DataComponentPatch` (an `ItemStackTemplate`-holding component) or a
-/// `TypedDataComponent`, so a nested `custom_name`/`custom_data`/... value is
-/// skipped instead of failing the whole canonicalization.
-fn skip_any_component_value(body: &[u8], off: &mut usize, id: u32, depth: usize) -> Option<()> {
-    match component_type_name(id) {
-        Some(name) => {
-            let _ = read_component_value(body, off, name)?;
-            Some(())
-        }
-        None => skip_component_value(body, off, id, depth),
-    }
+/// range or a value that does not fit its shape. The NBT-shaped ids
+/// (0/6/9/11/58/59/60) — which are not expressible as a [`Shape`] — are
+/// dispatched to the shared reader inside [`walk_work`], matching how a
+/// composite embeds a `DataComponentPatch` or `TypedDataComponent`.
+fn skip_component_value(body: &[u8], off: &mut usize, id: u32) -> Option<()> {
+    walk_work(body, off, Work::Component(id))
 }
 
 /// One positive patch entry: the component type id plus the canonical value.
@@ -1414,7 +1521,7 @@ fn canon_data_component_patch_body(body: &[u8], off: &mut usize) -> Option<Vec<u
             Some(name) => read_component_value(body, off, name)?,
             None => {
                 let start = *off;
-                skip_component_value(body, off, type_id as u32, 0)?;
+                skip_component_value(body, off, type_id as u32)?;
                 body[start..*off].to_vec()
             }
         };
@@ -3623,5 +3730,79 @@ mod tests {
             None,
             "an over-budget COMPOUND_TAG component value must fail"
         );
+    }
+
+    #[test]
+    fn deeply_nested_item_stack_chain_does_not_overflow() {
+        // A hostile display icon whose DataComponentPatch carries a Container
+        // (75) component nested inside itself many thousands of levels deep.
+        // Paper places no depth bound on the update_advancements path, and the
+        // iterative walker must traverse it on the heap (O(body) stack) instead
+        // of overflowing the native stack, returning a canonicalized body
+        // rather than aborting the process.
+        let mut level: Vec<u8> = Vec::new(); // innermost patch: [0][0]
+        for _ in 0..50_000 {
+            let mut next = Vec::new();
+            frame::write_varint(&mut next, 1); // list count
+            next.push(1); // Optional present
+            frame::write_varint(&mut next, 926); // item holderRegistry (non-air)
+            frame::write_varint(&mut next, 1); // item count
+            if level.is_empty() {
+                frame::write_varint(&mut next, 0); // patch positive
+                frame::write_varint(&mut next, 0); // patch negative
+            } else {
+                frame::write_varint(&mut next, 1); // patch positive
+                frame::write_varint(&mut next, 0); // patch negative
+                frame::write_varint(&mut next, 75); // type id: Container
+                next.extend_from_slice(&level);
+            }
+            level = next;
+        }
+        // The icon patch wraps the deepest value as one Container entry.
+        let mut patch_val = Vec::new();
+        frame::write_varint(&mut patch_val, 1); // positive
+        frame::write_varint(&mut patch_val, 0); // negative
+        frame::write_varint(&mut patch_val, 75); // Container id
+        patch_val.extend_from_slice(&level);
+
+        let title = nbt_bytes(&nbt_compound(vec![("text", nbt_str("T"))]));
+        let desc = nbt_bytes(&nbt_compound(vec![("text", nbt_str("D"))]));
+        let display = display_raw(
+            &title,
+            &desc,
+            &icon(926, 1, &patch_val),
+            0,
+            0,
+            (0.5, -1.25),
+            None,
+        );
+        let mut off = 0;
+        let canon = canon_display_info(&display, &mut off)
+            .expect("deeply nested item-stack chain canonicalizes without overflowing");
+        assert_eq!(off, display.len(), "whole display consumed");
+        assert!(!canon.is_empty());
+    }
+
+    #[test]
+    fn compound_with_duplicate_field_names_parses() {
+        // Java's CompoundTag.loadCompound charges the 36-byte map entry once per
+        // distinct key (on the first `values.put` that returns null); duplicate
+        // names still parse (later puts overwrite). A hostile compound with many
+        // duplicate names must parse correctly and stay within the byte budget —
+        // the seen-key set keeps this O(n), not O(n²).
+        let mut tag = vec![10u8]; // compound
+        for _ in 0..2000 {
+            tag.push(1); // field type: byte
+            tag.extend_from_slice(&1u16.to_be_bytes()); // field name len
+            tag.push(b'a'); // field name (duplicate)
+            tag.push(7); // byte value
+        }
+        tag.push(0); // end tag
+        let mut off = 0;
+        let value = read_nbt(&tag, &mut off).expect("a compound with duplicate field names parses");
+        match value {
+            Nbt::Compound(fields) => assert_eq!(fields.len(), 2000),
+            other => panic!("expected a compound, got {other:?}"),
+        }
     }
 }

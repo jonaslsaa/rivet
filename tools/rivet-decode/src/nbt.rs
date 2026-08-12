@@ -26,6 +26,8 @@
 //!
 //! [`crate::advancement`]: crate::advancement
 
+use std::collections::HashSet;
+
 use crate::frame;
 
 /// `NbtAccounter.MAX_STACK_DEPTH` — the compound/list nesting depth `NbtIo`
@@ -238,6 +240,11 @@ fn read_payload_depth(
             // accept wire bytes Paper rejects.
             account_bytes(budget, 48)?; // CompoundTag.SELF_SIZE_IN_BYTES
             let mut fields = Vec::new();
+            // Track seen field names so the 36-byte map-entry charge is applied
+            // once per distinct key (Java charges it only when `values.put`
+            // returns null — the first insertion), not per duplicate. A set
+            // keeps this O(n) instead of O(n²) on hostile compounds.
+            let mut seen: HashSet<String> = HashSet::new();
             loop {
                 let type_byte = *body.get(*off)?;
                 *off += 1;
@@ -253,7 +260,7 @@ fn read_payload_depth(
                 // only when `values.put` returns null).
                 account_bytes(budget, 28)?;
                 account_bytes(budget, 2 * name.encode_utf16().count() as i64)?;
-                if !fields.iter().any(|(n, _)| n == &name) {
+                if seen.insert(name.clone()) {
                     account_bytes(budget, 36)?;
                 }
                 let value = read_payload_depth(body, off, type_byte, depth + 1, budget)?;
