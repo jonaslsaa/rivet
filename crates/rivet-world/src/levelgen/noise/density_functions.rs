@@ -683,8 +683,10 @@ impl Mapped {
             Mapped {
                 mapped_type,
                 input,
-                min_value: min_value.max(0.0),
-                max_value: min_image.max(max_image),
+                // Java `Math.max(0.0, minValue)` / `Math.max(minImage, maxImage)` —
+                // NaN-propagating (Rust `f64::max` returns the non-NaN operand).
+                min_value: mth::max_f64(min_value, 0.0),
+                max_value: mth::max_f64(min_image, max_image),
             }
         }
     }
@@ -957,14 +959,16 @@ impl DensityFunction for RangeChoice {
         ))
     }
     fn min_value(&self) -> f64 {
-        self.when_in_range
-            .min_value()
-            .min(self.when_out_of_range.min_value())
+        mth::min_f64(
+            self.when_in_range.min_value(),
+            self.when_out_of_range.min_value(),
+        )
     }
     fn max_value(&self) -> f64 {
-        self.when_in_range
-            .max_value()
-            .max(self.when_out_of_range.max_value())
+        mth::max_f64(
+            self.when_in_range.max_value(),
+            self.when_out_of_range.max_value(),
+        )
     }
     fn type_id(&self) -> DensityFunctionTypeId {
         DensityFunctionTypes::RANGE_CHOICE
@@ -1079,14 +1083,14 @@ impl DensityFunction for IntervalSelect {
     fn min_value(&self) -> f64 {
         let mut min_value = f64::MAX;
         for f in &self.functions {
-            min_value = f.min_value().min(min_value);
+            min_value = mth::min_f64(f.min_value(), min_value);
         }
         min_value
     }
     fn max_value(&self) -> f64 {
         let mut max_value = -f64::MAX;
         for f in &self.functions {
-            max_value = f.max_value().max(max_value);
+            max_value = mth::max_f64(f.max_value(), max_value);
         }
         max_value
     }
@@ -1497,11 +1501,11 @@ pub fn two_argument_create(
             } else if max1 < 0.0 && max2 < 0.0 {
                 max1 * max2
             } else {
-                (min1 * max2).min(max1 * min2)
+                mth::min_f64(min1 * max2, max1 * min2)
             }
         }
-        TwoArgumentType::Min => min1.min(min2),
-        TwoArgumentType::Max => min1.max(min2),
+        TwoArgumentType::Min => mth::min_f64(min1, min2),
+        TwoArgumentType::Max => mth::max_f64(min1, min2),
     };
 
     let max_value = match two_arg_type {
@@ -1512,11 +1516,11 @@ pub fn two_argument_create(
             } else if max1 < 0.0 && max2 < 0.0 {
                 min1 * min2
             } else {
-                (min1 * min2).max(max1 * max2)
+                mth::max_f64(min1 * min2, max1 * max2)
             }
         }
-        TwoArgumentType::Min => max1.min(max2),
-        TwoArgumentType::Max => max1.max(max2),
+        TwoArgumentType::Min => mth::min_f64(max1, max2),
+        TwoArgumentType::Max => mth::max_f64(max1, max2),
     };
 
     if two_arg_type == TwoArgumentType::Mul || two_arg_type == TwoArgumentType::Add {
@@ -1762,14 +1766,14 @@ impl DensityFunction for Ap2 {
                 if v1 < self.argument2.min_value() {
                     v1
                 } else {
-                    v1.min(self.argument2.compute(context))
+                    mth::min_f64(v1, self.argument2.compute(context))
                 }
             }
             TwoArgumentType::Max => {
                 if v1 > self.argument2.max_value() {
                     v1
                 } else {
-                    v1.max(self.argument2.compute(context))
+                    mth::max_f64(v1, self.argument2.compute(context))
                 }
             }
         }
@@ -1805,7 +1809,7 @@ impl DensityFunction for Ap2 {
                     *slot = if v < min {
                         v
                     } else {
-                        v.min(self.argument2.compute(&context_provider.for_index(i)))
+                        mth::min_f64(v, self.argument2.compute(&context_provider.for_index(i)))
                     };
                 }
             }
@@ -1816,7 +1820,7 @@ impl DensityFunction for Ap2 {
                     *slot = if v > max {
                         v
                     } else {
-                        v.max(self.argument2.compute(&context_provider.for_index(i)))
+                        mth::max_f64(v, self.argument2.compute(&context_provider.for_index(i)))
                     };
                 }
             }
@@ -2076,10 +2080,10 @@ impl DensityFunction for YClampedGradient {
         )
     }
     fn min_value(&self) -> f64 {
-        self.from_value.min(self.to_value)
+        mth::min_f64(self.from_value, self.to_value)
     }
     fn max_value(&self) -> f64 {
-        self.from_value.max(self.to_value)
+        mth::max_f64(self.from_value, self.to_value)
     }
     fn type_id(&self) -> DensityFunctionTypeId {
         DensityFunctionTypes::Y_CLAMPED_GRADIENT
@@ -2172,7 +2176,7 @@ impl DensityFunction for FindTopSurface {
         self.lower_bound as f64
     }
     fn max_value(&self) -> f64 {
-        (self.lower_bound as f64).max(self.upper_bound.max_value())
+        mth::max_f64(self.lower_bound as f64, self.upper_bound.max_value())
     }
     fn type_id(&self) -> DensityFunctionTypeId {
         DensityFunctionTypes::FIND_TOP_SURFACE
@@ -2217,17 +2221,16 @@ impl Debug for EndIslandDensityFunction {
 
 impl Clone for EndIslandDensityFunction {
     fn clone(&self) -> Self {
-        // `SimplexNoise` is not `Clone`; reconstruct from the seed is not
-        // possible (the seed is not retained). The `EndIslandDensityFunction`
-        // codec decodes a fresh instance (`MapCodec.unit(new
-        // EndIslandDensityFunction(0L))`), so the clone path (used by
-        // `map_children`'s identity default and `erase_map_codec`) shares the
-        // same noise by rebuilding the noise — a `LegacyRandomSource` with the
-        // same construction path. Rather than duplicate state, the clone
-        // delegates to `EndIslandDensityFunction::new(0)` — the value-layer
-        // codec's canonical instance, whose `compute` only depends on the
-        // seeded noise, which the unit constructor reproduces deterministically.
-        Self::new(0)
+        // Java's `SimpleFunction.mapChildren` default returns `this`, so a
+        // clone (via `clone_arc` in `map_children`) must preserve the seeded
+        // noise exactly — NOT re-seed to 0 (which would change `compute` for
+        // any non-zero seed). `SimplexNoise` is `Clone`, so the noise is
+        // cloned directly; the cache is a fresh one (deterministic — it only
+        // affects lookup performance, not values).
+        EndIslandDensityFunction {
+            island_noise: self.island_noise.clone(),
+            cache: Mutex::new(NoiseCache::new()),
+        }
     }
 }
 
@@ -2302,7 +2305,8 @@ impl EndIslandDensityFunction {
                     let zd = sub_section_z as f32 - (zo * 2) as f32;
                     let new_doffs = 100.0 - mth::sqrt(xd * xd + zd * zd) * island_size;
                     let new_doffs = mth::clamp_f32(new_doffs, -100.0, 80.0);
-                    doffs = doffs.max(new_doffs);
+                    // Java `Math.max(float, float)` — NaN-propagating.
+                    doffs = mth::max_f32(doffs, new_doffs);
                 }
             }
         }
@@ -3907,6 +3911,21 @@ mod tests {
         // value so a `-0.9` regression is caught.
         assert_eq!(EndIslandDensityFunction::ISLAND_THRESHOLD_D, -0.9f32 as f64);
         assert_ne!(EndIslandDensityFunction::ISLAND_THRESHOLD_D, -0.9f64);
+    }
+
+    #[test]
+    fn end_islands_clone_preserves_nonzero_seed() {
+        // Java `SimpleFunction.mapChildren` default returns `this`, so cloning
+        // (via `clone_arc`) must preserve the seeded noise — NOT re-seed to 0
+        // (which would change `compute` for any non-zero seed).
+        let seeded = end_islands(12345);
+        let cloned = seeded.clone_arc();
+        // The clone computes identically to the original at every point (a
+        // re-seeding clone would diverge for this non-zero seed).
+        for (x, y, z) in [(0, 64, 0), (3, 64, -7), (-30000, 0, 30000)] {
+            let p = SinglePointContext::new(x, y, z);
+            assert_eq!(cloned.compute(&p), seeded.compute(&p));
+        }
     }
 
     #[test]
