@@ -43,6 +43,7 @@ pub trait StatePredicate {
     /// trait-object-less memory model here, keep the result chainable, and
     /// expose no mutable state. No consumer has any need of Java's opacity
     /// (all combinators are consumed through [`StatePredicate`]).
+    #[must_use]
     fn and<O>(self, other: O) -> AndPredicate<Self, O>
     where
         Self: Sized,
@@ -55,6 +56,7 @@ pub trait StatePredicate {
     /// `t -> test(t) || other.test(t)`. This is the combinator a consumer like
     /// `WitherSkullBlock` uses:
     /// `forBlock(WITHER_SKELETON_SKULL).or(forBlock(WITHER_SKELETON_WALL_SKULL))`.
+    #[must_use]
     fn or<O>(self, other: O) -> OrPredicate<Self, O>
     where
         Self: Sized,
@@ -64,6 +66,7 @@ pub trait StatePredicate {
     }
 
     /// `Predicate.negate()` — `t -> !test(t)`.
+    #[must_use]
     fn negate(self) -> NegatedPredicate<Self>
     where
         Self: Sized,

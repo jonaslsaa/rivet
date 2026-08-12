@@ -14,7 +14,7 @@
 
 pub mod blocks;
 /// `net.minecraft.world.level.block.state` — the package mirror hosting the
-/// `state.predicate` sub-package (issue #547); the `BlockState`/`StateDefinition`
+/// `state.predicate` sub-package (issue #228); the `BlockState`/`StateDefinition`
 /// value types themselves live in `rivet-registry` (issue #228).
 pub mod state;
 

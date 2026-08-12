@@ -80,9 +80,9 @@ pub struct BlockStatePredicate {
 }
 
 impl std::fmt::Debug for BlockStatePredicate {
-    /// The boxed predicates are opaque, so the name-sorted property keys and
-    /// the definition are shown; `HashMap` iteration order is not observable
-    /// here (Java `Map` has no ordering either).
+    /// The boxed predicates are opaque, so the property keys sorted by their
+    /// generated id and the definition are shown; `HashMap` iteration order is
+    /// not observable here (Java `Map` has no ordering either).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut keys: Vec<Property> = self.properties.keys().copied().collect();
         keys.sort_unstable_by_key(|p| p.id() as u16);
@@ -149,8 +149,10 @@ impl BlockStatePredicate {
     /// accumulation `p.where(a); p.where(b);` on one binding has no silent Rust
     /// equivalent — each `where` moves `self`, so the second call on the moved
     /// `p` is a use-after-move compile error, forcing a porter to rebind
-    /// (`p = p.r#where(a);`) or to chain. The first constraint cannot be
-    /// dropped silently.
+    /// (`p = p.r#where(a);`) or to chain. `#[must_use]` additionally turns a
+    /// single discarded `p.r#where(a);` into a compiler warning rather than a
+    /// silently dropped constraint.
+    #[must_use]
     pub fn r#where(mut self, property: Property, predicate: PropertyPredicate) -> Self {
         if !self.definition.properties().contains(&property) {
             panic!(
@@ -265,7 +267,9 @@ mod tests {
         // stone has no properties; `where(AXIS, …)` panics where Java throws
         // `IllegalArgumentException` with the `StateDefinition`-based message.
         let result = std::panic::catch_unwind(|| {
-            BlockStatePredicate::for_block(Blocks::STONE)
+            // `#[must_use]` would warn on the discarded value — deliberately
+            // silenced: the panic is the point of this test.
+            let _ = BlockStatePredicate::for_block(Blocks::STONE)
                 .r#where(BlockStateProperties::AXIS, Box::new(|_| true));
         });
         let err = result.expect_err("where with an unsupported property must panic");
