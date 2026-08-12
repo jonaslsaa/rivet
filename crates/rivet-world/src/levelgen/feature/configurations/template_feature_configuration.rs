@@ -15,13 +15,15 @@
 //! `template_entry_codec::<Ops>()` factories.
 //!
 //! [`rotation_codec`] is the `Rotation.CODEC` value (`StringRepresentable.
-//! fromEnum(Rotation::values)` — a plain by-name string codec). The `Rotation`
-//! value type lives in `rivet-registry` (issue #126's RivetTodo defers the
-//! codec surface to rivet-protocol), so the codec is ported here in-module via
-//! [`codec::string_resolver`], exactly like `direction_codec`'s string half but
-//! WITHOUT the `or_compressed` id-resolution alternative (Java's `Rotation.CODEC`
-//! is only the enum-string form; `Rotation.BY_ID`/`STREAM_CODEC` are separate
-//! surfaces). Unknown names error with the DFU-exact `"Unknown element name:{name}"`.
+//! fromEnum(Rotation::values)`, the `orCompressed(stringResolver,
+//! idResolverCodec)` form). The `Rotation` value type lives in
+//! `rivet-registry` (issue #126's RivetTodo defers the codec surface to
+//! rivet-protocol), so the codec is ported here in-module via
+//! [`codec::string_resolver`] + [`extra_codecs::or_compressed`], exactly like
+//! `direction_codec`: the string branch maps `getSerializedName()` and the
+//! compressed branch routes through the enum ordinal id when `ops.compress_maps()`
+//! (network/NBT compressed form). Unknown names error with the DFU-exact
+//! `"Unknown element name:{name}"`.
 //!
 //! The record is value-semantic, so `PartialEq`/`Eq` are derived (the
 //! `WeightedList` compares `totalWeight` + ordered items; `Rotation` is an
@@ -33,6 +35,7 @@ use rivet_registry::core::Rotation;
 use rivet_registry::identifier::identifier_codec;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
+use rivet_serialization::extra_codecs;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use rivet_util::weighted::{WeightedList, weighted_list_codec};
 use std::sync::Arc;
@@ -94,18 +97,22 @@ impl TemplateEntry {
     }
 }
 
-/// `Rotation.CODEC` — `StringRepresentable.fromEnum(Rotation::values)`, as the
-/// ops-generic `rotation_codec::<Ops>()` factory.
+/// `Rotation.CODEC` — `StringRepresentable.fromEnum(Rotation::values)`, the
+/// `orCompressed(Codec.stringResolver(...), ExtraCodecs.idResolverCodec(...))`
+/// form (`StringRepresentable.StringRepresentableCodec` with the enum's
+/// `ordinal()` id resolver), as the ops-generic `rotation_codec::<Ops>()` factory.
 ///
 /// `Rotation` in `rivet-registry` carries the `get_serialized_name`/`VALUES`
 /// surface this enum codec needs but does not implement
 /// `string_representable::StringRepresentable` (the codec surface defers with
 /// rivet-protocol under RivetTodo(#126)), so this is built via
-/// [`codec::string_resolver`] with the exact `EnumCodec.decode` semantics: an
-/// unknown name errors with `"Unknown element name:{name}"`, and encode writes
-/// the serialized name.
+/// [`codec::string_resolver`] + [`extra_codecs::or_compressed`] exactly like the
+/// sibling `direction_codec` (`rivet-registry::core::direction`): the string
+/// branch maps the enum's `getSerializedName()` to the variant and errors on an
+/// unknown name with `"Unknown element name:{name}"`; the compressed branch
+/// routes through the enum ordinal id codec when `ops.compress_maps()`.
 pub fn rotation_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Rotation, Ops>> {
-    codec::string_resolver(
+    let by_name = codec::string_resolver(
         Arc::new(|r: &Rotation| Some(r.get_serialized_name().to_string())),
         Arc::new(|name: &String| {
             Rotation::VALUES
@@ -113,6 +120,20 @@ pub fn rotation_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Rotation, Op
                 .find(|r| r.get_serialized_name() == name)
                 .copied()
         }),
+    );
+    extra_codecs::or_compressed(
+        by_name,
+        extra_codecs::id_resolver_codec(
+            Arc::new(|r: &Rotation| *r as i32),
+            Arc::new(|id: i32| {
+                if id >= 0 && (id as usize) < Rotation::VALUES.len() {
+                    Some(Rotation::VALUES[id as usize])
+                } else {
+                    None
+                }
+            }),
+            -1,
+        ),
     )
 }
 
@@ -205,6 +226,38 @@ mod tests {
         assert!(result.is_error());
         let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
         assert_eq!(msg, "Unknown element name:spin");
+    }
+
+    #[test]
+    fn rotation_codec_compressed_branch_uses_enum_ordinal_id() {
+        // `StringRepresentableCodec` wraps `orCompressed(stringResolver,
+        // idResolverCodec)`, so with `compressMaps()` ops the compressed branch
+        // routes through the enum ordinal id (`Codec.INT`).
+        let codec = rotation_codec::<JsonOps>();
+        for value in Rotation::VALUES {
+            let encoded = codec
+                .encode_start(&JsonOps::COMPRESSED, &value)
+                .result()
+                .expect("encode should succeed")
+                .clone();
+            assert_eq!(encoded, json!(value as i32));
+            let decoded = *codec
+                .parse(&JsonOps::COMPRESSED, &encoded)
+                .result()
+                .expect("decode should succeed");
+            assert_eq!(decoded, value);
+        }
+    }
+
+    #[test]
+    fn rotation_codec_compressed_branch_rejects_out_of_range_id() {
+        // `idResolverCodec(…, -1)` — an out-of-range id errors with the
+        // DFU-exact `"Unknown element id: " + id` message.
+        let codec = rotation_codec::<JsonOps>();
+        let result = codec.parse(&JsonOps::COMPRESSED, &json!(4));
+        assert!(result.is_error());
+        let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
+        assert_eq!(msg, "Unknown element id: 4");
     }
 
     #[test]
