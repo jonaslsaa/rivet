@@ -22,10 +22,10 @@
 //! the config derives `Clone`+`Debug` only — no `PartialEq` (the same shape
 //! the `DiskConfiguration` unit takes for its erased provider field).
 //!
-//! `BlockPileConfiguration` itself is owned by the pending
-//! `mc.world.level.levelgen.feature.configurations.blockpile` unit; this file
-//! uses the cross-unit stub in `block_pile_configuration.rs` (marked
-//! `STUB(...blockpile)`), which is replaced wholesale when that unit lands.
+//! `BlockPileConfiguration` is owned by the
+//! `mc.world.level.levelgen.feature.configurations.blockpile` manifest unit and
+//! is fully ported in this wave (issue #391), so the embedded superclass half
+//! is the real port in `block_pile_configuration.rs`, not a cross-unit stub.
 
 use crate::levelgen::feature::configurations::BlockPileConfiguration;
 use crate::levelgen::feature::stateproviders::block_state_provider::{
