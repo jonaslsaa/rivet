@@ -40,6 +40,9 @@ use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::{DynamicOps, Keyable, MapLike, RecordBuilder};
 use rivet_serialization::extra_codecs;
+use rivet_serialization::float_format::{
+    java_float_compare, java_float_equals, java_float_to_string,
+};
 use rivet_serialization::map_codec::{self, MapCodecDecoderHalf, MapCodecEncoderHalf};
 use rivet_serialization::map_decoder::MapDecoder;
 use rivet_serialization::map_encoder::MapEncoder;
@@ -184,11 +187,12 @@ impl Parameter {
             "max".to_string(),
             Arc::new(|min: &f32, max: &f32| {
                 // Java `min.compareTo(max) > 0` — `Float.compare` total order
-                // (NaN > every value; +0.0 > -0.0).
-                if min.total_cmp(max) == std::cmp::Ordering::Greater {
+                // (NaN > every value; +0.0 > -0.0; all NaNs compare equal).
+                if java_float_compare(*min, *max) == std::cmp::Ordering::Greater {
                     DataResult::error(format!(
                         "Cannon construct interval, min > max ({} > {})",
-                        min, max
+                        java_float_to_string(*min),
+                        java_float_to_string(*max)
                     ))
                 } else {
                     DataResult::success(Parameter::new(quantize_coord(*min), quantize_coord(*max)))
@@ -196,6 +200,9 @@ impl Parameter {
             }),
             Arc::new(|p: &Parameter| unquantize_coord(p.min)),
             Arc::new(|p: &Parameter| unquantize_coord(p.max)),
+            // The degenerate encode check mirrors Java's `Objects.equals(getMin(p),
+            // getMax(p))` — `Float.equals` (all NaNs equal, signed zeros distinct).
+            Arc::new(|a: &f32, b: &f32| java_float_equals(*a, *b)),
         )
     }
 
@@ -1334,6 +1341,31 @@ mod tests {
         assert!(
             message.contains("Cannon construct interval, min > max"),
             "unexpected message: {message}"
+        );
+    }
+
+    #[test]
+    fn parameter_codec_min_max_message_uses_java_float_formatting() {
+        // The interval diagnostic renders the values with Java's `Float.toString`
+        // (the shared formatter), not Rust `Display` (which would print `2` for
+        // `2.0` and drop the `-0.0` sign). Paper's message is
+        // "Cannon construct interval, min > max (2.0 > 1.0)".
+        let codec = Parameter::codec::<JsonOps>();
+        let result = codec.parse(&JsonOps::INSTANCE, &json!([2.0, 1.0]));
+        let error_ref = result.error_ref().expect("error");
+        assert!(
+            error_ref.message().contains("min > max (2.0 > 1.0)"),
+            "unexpected message: {}",
+            error_ref.message()
+        );
+        // Signed zero: +0.0 > -0.0 under Float.compare, and the message keeps
+        // the negative sign on the max.
+        let result = codec.parse(&JsonOps::INSTANCE, &json!({"min": 0.0, "max": -0.0}));
+        let error_ref = result.error_ref().expect("error");
+        assert!(
+            error_ref.message().contains("min > max (0.0 > -0.0)"),
+            "unexpected message: {}",
+            error_ref.message()
         );
     }
 

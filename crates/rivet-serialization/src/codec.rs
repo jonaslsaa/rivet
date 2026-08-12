@@ -19,6 +19,9 @@ use crate::codecs::xor_codec::XorCodec;
 use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, Keyable};
 use crate::either::Either;
+use crate::float_format::{
+    java_double_compare, java_double_to_string, java_float_compare, java_float_to_string,
+};
 use crate::functions::DecoderFn;
 use crate::lifecycle::Lifecycle;
 use crate::map_codec::{self, MapCodec};
@@ -592,34 +595,38 @@ fn check_range<T: PartialOrd + std::fmt::Display>(value: T, min: T, max: T) -> D
 
 /// `Codec.checkRange(Float, Float)` — the f32 overload. Java's generic
 /// `checkRange` calls `Comparable.compareTo`, which for `Float` is the IEEE
-/// **total order** (`Float.compare`): `-0.0f < 0.0f` and `NaN` compares
-/// greater than every value. `PartialOrd`'s `>=`/`<=` treat `-0.0 == 0.0`
-/// and reject `NaN`, so a faithful port must use `total_cmp` for the bounds
-/// check (the error message still renders the value/range via `Display`, which
-/// matches Java's string concatenation for `-0.0`/`NaN`).
+/// **total order** (`Float.compare`): `-0.0f < 0.0f`, `NaN` compares greater
+/// than every value, and distinct NaN payloads compare equal (Java
+/// canonicalizes to `0x7fc00000`). The port uses [`java_float_compare`], and
+/// renders the message with Java's `Float.toString` (Rust `Display` prints
+/// `NaN`/`-0.0` identically but `1.0` as `1`).
 fn check_range_f32(value: f32, min: f32, max: f32) -> DataResult<f32> {
-    if value.total_cmp(&min) != std::cmp::Ordering::Less
-        && value.total_cmp(&max) != std::cmp::Ordering::Greater
-    {
+    let in_range = java_float_compare(value, min) != std::cmp::Ordering::Less
+        && java_float_compare(value, max) != std::cmp::Ordering::Greater;
+    if in_range {
         DataResult::success(value)
     } else {
         DataResult::error(format!(
             "Value {} outside of range [{}:{}]",
-            value, min, max
+            java_float_to_string(value),
+            java_float_to_string(min),
+            java_float_to_string(max)
         ))
     }
 }
 
 /// `Codec.checkRange(Double, Double)` — the f64 overload (`Double.compare`).
 fn check_range_f64(value: f64, min: f64, max: f64) -> DataResult<f64> {
-    if value.total_cmp(&min) != std::cmp::Ordering::Less
-        && value.total_cmp(&max) != std::cmp::Ordering::Greater
-    {
+    let in_range = java_double_compare(value, min) != std::cmp::Ordering::Less
+        && java_double_compare(value, max) != std::cmp::Ordering::Greater;
+    if in_range {
         DataResult::success(value)
     } else {
         DataResult::error(format!(
             "Value {} outside of range [{}:{}]",
-            value, min, max
+            java_double_to_string(value),
+            java_double_to_string(min),
+            java_double_to_string(max)
         ))
     }
 }

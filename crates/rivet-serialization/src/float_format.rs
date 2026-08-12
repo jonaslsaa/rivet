@@ -67,6 +67,58 @@ pub fn java_double_to_string(value: f64) -> String {
     format_java_decimal(&digits)
 }
 
+/// `Float.compare(float, float)` parity — the IEEE **total order** over f32,
+/// including the Java NaN canonicalization: **every** NaN payload sorts equal
+/// (Java's `Float.compare` first canonicalizes both NaN operands to the same
+/// `0x7fc00000` before comparing, so distinct payloads compare equal, unlike
+/// `f32::total_cmp`, which orders by payload bits).
+///
+/// Ordering (ascending): `-Infinity`, negative finite values, `-0.0`, `+0.0`,
+/// positive finite values, `+Infinity`, `NaN`.
+pub fn java_float_compare(a: f32, b: f32) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        _ => a.total_cmp(&b),
+    }
+}
+
+/// `Double.compare(double, double)` parity — the f64 analogue of
+/// [`java_float_compare`].
+pub fn java_double_compare(a: f64, b: f64) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        _ => a.total_cmp(&b),
+    }
+}
+
+/// `Float.equals(Object)` parity — Java's boxed `Float.equals`: `NaN` equals
+/// `NaN` (any payload), `-0.0` is **distinct** from `+0.0`, and every other
+/// pair compares by value.
+pub fn java_float_equals(a: f32, b: f32) -> bool {
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
+    if a == 0.0 && b == 0.0 {
+        return a.is_sign_negative() == b.is_sign_negative();
+    }
+    a == b
+}
+
+/// `Double.equals(Object)` parity — the f64 analogue of [`java_float_equals`].
+pub fn java_double_equals(a: f64, b: f64) -> bool {
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
+    if a == 0.0 && b == 0.0 {
+        return a.is_sign_negative() == b.is_sign_negative();
+    }
+    a == b
+}
+
 /// The f32 subnormal values whose shortest-round-trip digit string (Ryu) is a
 /// different member of the round-trip class than the one Java prints. Keyed by
 /// raw bits; the value is the exact Java `Float.toString` output.
@@ -250,6 +302,69 @@ fn format_java_decimal(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cmp::Ordering;
+
+    /// Java `Float.compare` parity: total order with NaN canonicalization.
+    #[test]
+    fn float_compare_matches_java_total_order() {
+        assert_eq!(java_float_compare(1.0, 2.0), Ordering::Less);
+        assert_eq!(java_float_compare(2.0, 1.0), Ordering::Greater);
+        assert_eq!(java_float_compare(1.0, 1.0), Ordering::Equal);
+        // Signed zero: `Float.compare(-0.0f, 0.0f)` is -1.
+        assert_eq!(java_float_compare(-0.0, 0.0), Ordering::Less);
+        assert_eq!(java_float_compare(0.0, -0.0), Ordering::Greater);
+        assert_eq!(java_float_compare(-0.0, -0.0), Ordering::Equal);
+        // NaN is greater than every finite value and than +Infinity.
+        assert_eq!(
+            java_float_compare(f32::NAN, f32::INFINITY),
+            Ordering::Greater
+        );
+        assert_eq!(java_float_compare(f32::NAN, f32::MAX), Ordering::Greater);
+        assert_eq!(java_float_compare(f32::MAX, f32::NAN), Ordering::Less);
+        // Distinct NaN payloads compare equal (Java canonicalizes to 0x7fc00000).
+        let nan_a = f32::from_bits(0x7fc00001);
+        let nan_b = f32::from_bits(0x7ff12345);
+        assert!(nan_a.is_nan() && nan_b.is_nan());
+        assert_eq!(java_float_compare(nan_a, nan_b), Ordering::Equal);
+        assert_eq!(java_float_compare(f32::NAN, nan_a), Ordering::Equal);
+    }
+
+    /// Java `Double.compare` parity (same rules, f64).
+    #[test]
+    fn double_compare_matches_java_total_order() {
+        assert_eq!(java_double_compare(-0.0, 0.0), Ordering::Less);
+        assert_eq!(
+            java_double_compare(f64::NAN, f64::INFINITY),
+            Ordering::Greater
+        );
+        let nan_a = f64::from_bits(0x7ff8000000000001);
+        let nan_b = f64::from_bits(0x7ff8deadbeef0000);
+        assert!(nan_a.is_nan() && nan_b.is_nan());
+        assert_eq!(java_double_compare(nan_a, nan_b), Ordering::Equal);
+    }
+
+    /// Java `Float.equals` parity: all NaNs equal, signed zeros distinct.
+    #[test]
+    fn float_equals_matches_java() {
+        assert!(java_float_equals(1.0, 1.0));
+        assert!(!java_float_equals(1.0, 1.5));
+        assert!(java_float_equals(f32::NAN, f32::NAN));
+        assert!(java_float_equals(f32::NAN, f32::from_bits(0x7fc00001)));
+        assert!(!java_float_equals(-0.0, 0.0));
+        assert!(java_float_equals(-0.0, -0.0));
+        assert!(java_float_equals(0.0, 0.0));
+    }
+
+    /// Java `Double.equals` parity.
+    #[test]
+    fn double_equals_matches_java() {
+        assert!(java_double_equals(f64::NAN, f64::NAN));
+        assert!(java_double_equals(
+            f64::NAN,
+            f64::from_bits(0x7ff8000000000001)
+        ));
+        assert!(!java_double_equals(-0.0, 0.0));
+    }
 
     /// Java `Float.toString` ground-truth cases.
     #[test]
