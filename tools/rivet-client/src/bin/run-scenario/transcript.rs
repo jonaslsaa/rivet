@@ -188,6 +188,7 @@ fn check_outcome_terminal(records: &[Value], outcome: &str) -> Result<(), String
         "connection_failed" => "connection_failed",
         "disconnected" => "disconnect",
         "loaded" => "loaded",
+        "walked" => "walked",
         other => {
             return Err(format!(
                 "transcript has no terminal event (outcome {other}) — the run never completed \
@@ -202,6 +203,15 @@ fn check_outcome_terminal(records: &[Value], outcome: &str) -> Result<(), String
 
 /// Determine the terminal outcome from the raw records.
 fn outcome(records: &[Value]) -> &'static str {
+    // The `loaded-recenter` positive terminal (issues #185/#561): the route
+    // completed and the client stayed connected, so it emitted `walked`. Checked
+    // first so a stray earlier marker cannot shadow it.
+    if records
+        .iter()
+        .any(|r| r.get("event") == Some(&json!("walked")))
+    {
+        return "walked";
+    }
     if records
         .iter()
         .any(|r| r.get("event") == Some(&json!("joined")))
@@ -1140,29 +1150,69 @@ pub fn rivet_loaded_verdict(t: &Value) -> Result<&'static str, String> {
     Ok("loaded world content observed and sampled (per-coordinate block content reported)")
 }
 
-/// The deterministic +x movement route the `loaded-recenter` client drives
-/// (issue #561), as chunk offsets from the observed spawn chunk (-1,-3): the
-/// first frame crosses into chunk (0,-3) — inside the booted 117-chunk square —
-/// and the second crosses into chunk (1,-3), whose first enter cell (5,-7) is
-/// outside that square's raster (the fixed boot authority edge). The runner
-/// requires the transcript's final move frame to land on exactly this edge.
-pub const RECENTER_EDGE_CHUNK: [i32; 2] = [1, -3];
+/// The final +x boundary the `loaded-recenter` route crosses (issues #185/#561):
+/// the spawn chunk is (-1,-3), and the route drives +16/+32/+48/+64 blocks, so
+/// the LAST frame lands in chunk (3,-3). Its enter column is x=7 — outside the
+/// booted 117-chunk square — so completing it requires the #185 on-demand
+/// region load; the positive verdict requires the final frame to land here.
+pub const RECENTER_EDGE_CHUNK: [i32; 2] = [3, -3];
 /// The chunk the FIRST +x boundary frame must land in: the crossing that proves
-/// a genuine repeated boundary crossing succeeds before the edge is reached.
+/// a genuine repeated boundary crossing succeeds before the beyond-boot columns.
 pub const RECENTER_FIRST_CHUNK: [i32; 2] = [0, -3];
 
-/// Normalize the `loaded-recenter` client transcript (issue #561): the client
-/// advertises view distance 2 (send radius 3), spawns into the loaded world,
-/// then drives the deterministic +x boundary route by writing finite movement
-/// frames directly. The server recenters on the second frame and disconnects
-/// with an `Unsupported` reason (`chunk update: UNVERIFIED region-backed chunk
-/// ...`), which is NOT encoded as a `ClientboundDisconnectPacket` — so the
-/// client's `disconnect.reason_key` is `null` (the typed UNVERIFIED text lives
-/// only in the rivet-server log, which the runner asserts separately).
+/// The 27 enter cells the `loaded-recenter` route (issues #185/#561) loads on
+/// demand from the read-only region source: every cell outside the booted
+/// 117-chunk square that the +16/+32/+48/+64 route enters (chunks (0,-3),
+/// (1,-3), (2,-3), (3,-3) with send radius 3). The x=5, x=6, x=7 columns
+/// (z=-7..1) are all beyond the boot square `(-6..4, -8..2)`. The positive
+/// verdict requires every one of these cells in the client's received chunk
+/// list — the proof the recenter stayed connected and received the newly
+/// loaded chunks.
+pub const RECENTER_BEYOND_BOOT_CELLS: [[i32; 2]; 27] = [
+    [5, -7],
+    [5, -6],
+    [5, -5],
+    [5, -4],
+    [5, -3],
+    [5, -2],
+    [5, -1],
+    [5, 0],
+    [5, 1],
+    [6, -7],
+    [6, -6],
+    [6, -5],
+    [6, -4],
+    [6, -3],
+    [6, -2],
+    [6, -1],
+    [6, 0],
+    [6, 1],
+    [7, -7],
+    [7, -6],
+    [7, -5],
+    [7, -4],
+    [7, -3],
+    [7, -2],
+    [7, -1],
+    [7, 0],
+    [7, 1],
+];
+
+/// Normalize the `loaded-recenter` client transcript (issues #185/#561): the
+/// client advertises view distance 2 (send radius 3), spawns into the loaded
+/// world, then drives the deterministic +x boundary route by writing finite
+/// movement frames directly. On a region-backed world with the #185 on-demand
+/// load, every beyond-boot crossing succeeds and the client stays connected,
+/// then emits the positive `walked` terminal with the full received chunk list
+/// (the runner proves every `RECENTER_BEYOND_BOOT_CELLS` cell is in it). If a
+/// beyond-boot chunk is genuinely missing or corrupt (the tampered-copy
+/// negative control), the server fails typed and the `disconnect` handler emits
+/// the terminal record instead.
 ///
-/// The transcript carries the exact route (origin + planned frames) and every
-/// driven `move_frame` sample (absolute position + the chunk it lands in) as
-/// the recorded movement evidence, plus the disconnect record.
+/// The transcript carries the exact route (origin + planned frames), every
+/// driven `move_frame` sample (absolute position + the chunk it lands in), the
+/// received chunk list (when `walked`), and — when the run disconnected — the
+/// disconnect record.
 pub fn normalize_recenter(raw: &str) -> Result<Value, String> {
     let records = parse_records(raw)?;
 
@@ -1199,6 +1249,10 @@ pub fn normalize_recenter(raw: &str) -> Result<Value, String> {
             })
         })
         .collect();
+    let walked = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("walked")))
+        .cloned();
     let disconnect = records
         .iter()
         .find(|r| r.get("event") == Some(&json!("disconnect")))
@@ -1221,6 +1275,16 @@ pub fn normalize_recenter(raw: &str) -> Result<Value, String> {
         });
     }
 
+    // The positive terminal's received chunk set (issues #185/#561): the client
+    // emitted `walked` after the route completed and the stream quiesced. The
+    // runner proves every beyond-boot enter cell is present.
+    if let Some(walked) = walked {
+        transcript["walked"] = json!({
+            "chunk_count": walked.get("chunk_count").cloned().unwrap_or(Value::Null),
+            "chunks": walked.get("chunks").cloned().unwrap_or(Value::Null),
+        });
+    }
+
     if let Some(disconnect) = disconnect {
         transcript["disconnect"] = json!({
             "reason": disconnect.get("reason").cloned().unwrap_or(Value::Null),
@@ -1233,51 +1297,55 @@ pub fn normalize_recenter(raw: &str) -> Result<Value, String> {
 }
 
 /// Verify a normalized `loaded-recenter` transcript proves the real Azalea
-/// client spawned into the loaded world, drove the deterministic +x boundary
-/// route past repeated chunk crossings, and was disconnected AFTER spawn with
-/// an encoded-reason-free disconnect (the recenter `Unsupported` close carries
-/// no `ClientboundDisconnectPacket`, so `reason_key` is `null`).
+/// client spawned into the loaded world and SUSTAINED movement across repeated
+/// chunk boundaries: the +x route completed (all four frames), the client stayed
+/// connected (no disconnect), and it received every chunk the region-backed
+/// recenter (issues #185/#561) loaded on demand from the read-only region —
+/// the x=5, x=6, x=7 enter columns (`RECENTER_BEYOND_BOOT_CELLS`), all outside
+/// the booted 117-chunk square.
 ///
-/// Returns a human-readable description of the movement boundary reached.
+/// Returns a human-readable description of the sustained route reached.
 /// Errors when the transcript does not prove that:
 ///
-/// - the outcome is anything but `disconnected` — a `timeout` means the server
-///   never recenter-disconnected (a regression in the recenter or the
-///   RequireLoaded policy), and `connection_failed` means the connect failed.
+/// - the outcome is anything but `walked` — a `disconnected` outcome means the
+///   server disconnected mid-route (the tampered-copy negative control, or a
+///   regression where an on-demand load fails), a `timeout` means the client
+///   never completed the route, and `connection_failed` means the connect failed.
 /// - the lifecycle does not contain both `login` and `spawn`.
 /// - `azalea_revision != PINNED_AZALEA_REVISION`.
-/// - `after_spawn != true` — the disconnect happened before the client reached
-///   spawn, not via the movement-driven recenter path.
-/// - `reason_key` is not `null` — an encoded `ClientboundDisconnectPacket`
-///   reason (the kick scenario, a generic server close) would carry a key; the
-///   recenter `Unsupported` close does not encode one.
 /// - the `route` record is absent — the client did not announce its planned
 ///   movement route.
-/// - fewer than two `move_frame` records — the route did not cross repeated
-///   chunk boundaries (a single crossing cannot reach the boot authority edge
-///   from the send-3 spawn view).
+/// - fewer than four `move_frame` records — the route did not cross the full
+///   repeated-boundary span (every crossing from the spawn view to the final
+///   x=7 column).
 /// - the first move frame does not land in `RECENTER_FIRST_CHUNK` — the first
 ///   boundary crossing was not the inside-the-booted-square crossing that
 ///   proves the route genuinely started moving.
 /// - the LAST move frame does not land in `RECENTER_EDGE_CHUNK` — the route did
-///   not reach the fixed boot authority edge (the recenter would have failed at
-///   a different cell, i.e. a different geometry than the intended one).
+///   not reach the final beyond-boot column (a truncated route would not prove
+///   sustained movement past the boot authority).
+/// - the `walked` terminal is absent or carries no `chunks` list.
+/// - any cell of `RECENTER_BEYOND_BOOT_CELLS` is missing from the received
+///   chunk list — the recenter did not actually deliver a newly loaded chunk
+///   (a regression would show as a missing cell, or a superflat/generation
+///   substitution would show as a fabricated cell at the wrong coordinates).
 ///
-/// The typed `UNVERIFIED region-backed chunk ... is not loaded` text and the
-/// server-side movement audit (accepted teleport ack, accepted move frames, no
-/// traced session end) are asserted by the runner against the rivet-server log;
-/// this verdict proves the client-side half of the reproduction.
+/// The server-side half — accepted teleport ack, accepted move frames, no
+/// `UNVERIFIED` text, no traced session end, source immutability — is asserted
+/// by the runner against the rivet-server log; this verdict proves the
+/// client-side half of the sustained-walking acceptance.
 pub fn rivet_recenter_verdict(t: &Value) -> Result<&'static str, String> {
     let outcome = t
         .get("outcome")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    if outcome != "disconnected" {
+    if outcome != "walked" {
         return Err(format!(
-            "loaded-recenter transcript outcome is {outcome} (expected disconnected): the server \
-             never recenter-disconnected the client after the route. A timeout means the recenter \
-             or the RequireLoaded policy regressed (no disconnect), connection_failed means the \
-             connect failed, and loaded/spawned means the client never drove the route to the edge"
+            "loaded-recenter transcript outcome is {outcome} (expected walked): the client did \
+             not sustain the movement route to its end. A disconnected outcome means the server \
+             closed the session mid-route (a tampered copy missing/corrupting a beyond-boot chunk, \
+             or a regression in the #185 on-demand load), timeout means the route never completed, \
+             and connection_failed means the connect failed"
         ));
     }
     let lifecycle: Vec<&str> = t
@@ -1309,10 +1377,11 @@ pub fn rivet_recenter_verdict(t: &Value) -> Result<&'static str, String> {
         .get("move_frames")
         .and_then(Value::as_array)
         .ok_or_else(|| "loaded-recenter transcript has no move_frames array".to_owned())?;
-    if frames.len() < 2 {
+    if frames.len() < 4 {
         return Err(format!(
-            "loaded-recenter transcript records {} move frames (expected at least 2): the route \
-             did not cross repeated chunk boundaries from the send-3 spawn view",
+            "loaded-recenter transcript records {} move frames (expected at least 4): the route \
+             did not cross the full repeated-boundary span from the send-3 spawn view to the \
+             final x=7 column",
             frames.len()
         ));
     }
@@ -1344,35 +1413,48 @@ pub fn rivet_recenter_verdict(t: &Value) -> Result<&'static str, String> {
     {
         return Err(format!(
             "loaded-recenter last move frame chunk is {last_chunk:?} (expected \
-             {RECENTER_EDGE_CHUNK:?}): the route did not reach the fixed boot authority edge"
+             {RECENTER_EDGE_CHUNK:?}): the route did not reach the final beyond-boot column"
         ));
     }
-    let disconnect = t
-        .get("disconnect")
+
+    // The positive half: the `walked` terminal proves the client stayed
+    // connected after the route, and its received chunk list must contain every
+    // beyond-boot enter cell the region-backed recenter loaded on demand.
+    let walked = t
+        .get("walked")
         .and_then(Value::as_object)
-        .ok_or_else(|| "loaded-recenter transcript has no disconnect record".to_owned())?;
-    if disconnect.get("after_spawn").and_then(Value::as_bool) != Some(true) {
-        return Err(format!(
-            "loaded-recenter disconnect after_spawn is {:?} (expected true): the disconnect \
-             happened before the client reached spawn, not via the movement-driven recenter path",
-            disconnect.get("after_spawn")
-        ));
+        .ok_or_else(|| "loaded-recenter transcript has no walked terminal record".to_owned())?;
+    let received = walked
+        .get("chunks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "loaded-recenter walked terminal carries no chunks list".to_owned())?;
+    let received_set: std::collections::HashSet<(i64, i64)> = received
+        .iter()
+        .filter_map(|c| {
+            let arr = c.as_array()?;
+            Some((arr.first()?.as_i64()?, arr.get(1)?.as_i64()?))
+        })
+        .collect();
+    if received_set.len() != received.len() {
+        return Err(
+            "loaded-recenter walked chunks list contains a duplicate cell — the received set \
+             is not a genuine set"
+                .to_owned(),
+        );
     }
-    if !disconnect
-        .get("reason_key")
-        .map(Value::is_null)
-        .unwrap_or(false)
-    {
-        return Err(format!(
-            "loaded-recenter disconnect reason_key is {:?} (expected null): the recenter \
-             Unsupported close carries no encoded ClientboundDisconnectPacket, so a decoded key \
-             means the disconnect was a different (encoded) close",
-            disconnect.get("reason_key")
-        ));
+    for cell in RECENTER_BEYOND_BOOT_CELLS {
+        if !received_set.contains(&(i64::from(cell[0]), i64::from(cell[1]))) {
+            return Err(format!(
+                "loaded-recenter received chunks are missing the beyond-boot enter cell \
+                 ({},{}): the recenter did not deliver a chunk the #185 on-demand load should \
+                 have installed (no superflat/generation substitution, no dropped cell)",
+                cell[0], cell[1]
+            ));
+        }
     }
     Ok(
-        "movement-driven recenter disconnect after spawn (route crossed repeated boundaries and \
-        reached the boot authority edge)",
+        "sustained movement across repeated chunk boundaries; recenter stayed connected and \
+        received every on-demand loaded beyond-boot chunk",
     )
 }
 
@@ -2315,109 +2397,170 @@ mod tests {
         );
     }
 
-    /// A genuine `loaded-recenter` run: the client spawned into the loaded world
-    /// at the region-backed spawn block (-16, 68, -48), announced the +x route
-    /// (frames at +16 and +32), drove both frames (landing in chunks [0,-3] and
-    /// [1,-3]), and was disconnected after spawn with an encoded-reason-free
-    /// close (the recenter `Unsupported` disconnect).
+    /// The complete received chunk list of a genuine sustained-walking run: the
+    /// 81-cell send-3 spawn view plus the 36 enter cells of the +16/+32/+48/+64
+    /// route (9 per crossing). The 27 cells of `RECENTER_BEYOND_BOOT_CELLS`
+    /// (the x=5, x=6, x=7 columns) are the on-demand-loaded proof.
+    fn recenter_received_chunks() -> String {
+        let mut cells = Vec::new();
+        for x in -5i32..=3 {
+            for z in -7i32..=1 {
+                cells.push(format!("[{x},{z}]"));
+            }
+        }
+        for x in 4i32..=7 {
+            for z in -7i32..=1 {
+                cells.push(format!("[{x},{z}]"));
+            }
+        }
+        cells.join(",")
+    }
+
+    /// A genuine `loaded-recenter` sustained-walking run (issues #185/#561): the
+    /// client spawned into the loaded world at the region-backed spawn block
+    /// (-16, 68, -48), announced and drove the full +x route (frames at +16,
+    /// +32, +48, +64 landing in chunks [0,-3], [1,-3], [2,-3], [3,-3]), stayed
+    /// connected, and emitted the `walked` terminal with the complete received
+    /// chunk list (the spawn view plus the 36 entered cells).
     fn recenter_records() -> String {
         [
             r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":20,"mode":"loaded-recenter","azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
             r#"{"event":"init","protocol":1}"#,
             r#"{"event":"login","protocol":1}"#,
             r#"{"event":"spawn","position":{"x":-16.0,"y":68.0,"z":-48.0},"protocol":1}"#,
-            r#"{"event":"route","origin":{"x":-16.0,"y":68.0,"z":-48.0},"frames":[{"x":0.0,"y":68.0,"z":-48.0},{"x":16.0,"y":68.0,"z":-48.0}],"protocol":1}"#,
+            r#"{"event":"route","origin":{"x":-16.0,"y":68.0,"z":-48.0},"frames":[{"x":0.0,"y":68.0,"z":-48.0},{"x":16.0,"y":68.0,"z":-48.0},{"x":32.0,"y":68.0,"z":-48.0},{"x":48.0,"y":68.0,"z":-48.0}],"protocol":1}"#,
             r#"{"event":"move_frame","index":1,"x":0.0,"y":68.0,"z":-48.0,"chunk":[0,-3],"protocol":1}"#,
             r#"{"event":"move_frame","index":2,"x":16.0,"y":68.0,"z":-48.0,"chunk":[1,-3],"protocol":1}"#,
-            r#"{"event":"disconnect","reason":"Disconnected: server closed the connection","reason_key":null,"after_spawn":true,"protocol":1}"#,
+            r#"{"event":"move_frame","index":3,"x":32.0,"y":68.0,"z":-48.0,"chunk":[2,-3],"protocol":1}"#,
+            r#"{"event":"move_frame","index":4,"x":48.0,"y":68.0,"z":-48.0,"chunk":[3,-3],"protocol":1}"#,
+            &format!(
+                r#"{{"event":"walked","position":{{"x":48.0,"y":68.0,"z":-48.0}},"chunk_count":117,"chunks":[{}],"observation_ms":6000,"protocol":1}}"#,
+                recenter_received_chunks()
+            ),
         ]
         .join("\n")
     }
 
     #[test]
-    fn normalizes_a_genuine_recenter_disconnect() {
+    fn normalizes_a_genuine_sustained_recenter_run() {
         let t = normalize_recenter(&recenter_records()).expect("normalize");
-        assert_eq!(t["outcome"], "disconnected");
+        assert_eq!(t["outcome"], "walked");
         assert_eq!(t["scenario"], "loaded-recenter");
         assert_eq!(t["lifecycle"], json!(["init", "login", "spawn"]));
         assert_eq!(
             t["route"]["origin"],
             json!({"x": -16.0, "y": 68.0, "z": -48.0})
         );
-        assert_eq!(t["move_frames"].as_array().unwrap().len(), 2);
+        assert_eq!(t["move_frames"].as_array().unwrap().len(), 4);
         assert_eq!(t["move_frames"][0]["chunk"], json!([0, -3]));
-        assert_eq!(t["move_frames"][1]["chunk"], json!([1, -3]));
-        assert_eq!(t["disconnect"]["after_spawn"], json!(true));
-        assert!(t["disconnect"]["reason_key"].is_null());
-    }
-
-    #[test]
-    fn recenter_verdict_accepts_a_genuine_recenter_run() {
-        let t = normalize_recenter(&recenter_records()).expect("normalize");
-        let verdict = rivet_recenter_verdict(&t).expect("recenter verdict");
-        assert!(
-            verdict.contains("recenter disconnect"),
-            "verdict must name the recenter boundary, got {verdict}"
+        assert_eq!(t["move_frames"][3]["chunk"], json!([3, -3]));
+        assert_eq!(t["walked"]["chunk_count"], json!(117));
+        assert_eq!(
+            t["walked"]["chunks"].as_array().unwrap().len(),
+            117,
+            "the sustained run received the full spawn view plus the entered cells"
         );
     }
 
     #[test]
-    fn recenter_verdict_rejects_a_timeout_without_the_disconnect() {
-        // Counterfactual against a regression in the recenter or the
-        // RequireLoaded policy: the client drove the route but the server never
-        // disconnected, so the run ended in a timeout. This must NOT pass as a
-        // reproduction of the expected typed disconnect.
+    fn recenter_verdict_accepts_a_genuine_sustained_recenter_run() {
+        let t = normalize_recenter(&recenter_records()).expect("normalize");
+        let verdict = rivet_recenter_verdict(&t).expect("recenter verdict");
+        assert!(
+            verdict.contains("sustained movement"),
+            "verdict must name the sustained route, got {verdict}"
+        );
+    }
+
+    /// The exact `walked` record a genuine sustained run emits (the full chunks
+    /// list plus the observation tail), so a `replace` can target it precisely.
+    fn recenter_walked_record() -> String {
+        format!(
+            r#"{{"event":"walked","position":{{"x":48.0,"y":68.0,"z":-48.0}},"chunk_count":117,"chunks":[{}],"observation_ms":6000,"protocol":1}}"#,
+            recenter_received_chunks()
+        )
+    }
+
+    #[test]
+    fn recenter_verdict_rejects_a_timeout_without_the_route_completing() {
+        // Counterfactual against a regression in the on-demand load: the client
+        // drove the route but the run ended in a timeout (the entered cells
+        // never arrived). This must NOT pass as sustained walking.
         let raw = recenter_records().replace(
-            r#"{"event":"disconnect","reason":"Disconnected: server closed the connection","reason_key":null,"after_spawn":true,"protocol":1}"#,
+            &recenter_walked_record(),
             r#"{"event":"timeout","timeout_seconds":20,"protocol":1}"#,
         );
         let t = normalize_recenter(&raw).expect("normalize");
         assert_eq!(t["outcome"], "timeout");
-        let err = rivet_recenter_verdict(&t).expect_err("timeout is not the expected disconnect");
+        let err = rivet_recenter_verdict(&t).expect_err("timeout is not sustained walking");
         assert!(
-            err.contains("disconnected"),
-            "error must demand the disconnected outcome, got {err}"
+            err.contains("walked"),
+            "error must demand the walked outcome, got {err}"
         );
     }
 
     #[test]
-    fn recenter_verdict_rejects_a_pre_spawn_disconnect() {
-        // Counterfactual against a server that closed the client before play:
-        // after_spawn is false, so the disconnect did not come from the
-        // movement-driven recenter path.
-        let mut t = normalize_recenter(&recenter_records()).expect("normalize");
-        t["disconnect"]["after_spawn"] = json!(false);
-        let err = rivet_recenter_verdict(&t).expect_err("pre-spawn close is not the recenter path");
-        assert!(
-            err.contains("after_spawn"),
-            "error must name after_spawn, got {err}"
-        );
-    }
-
-    #[test]
-    fn recenter_verdict_rejects_a_route_that_misses_the_edge() {
-        // Counterfactual against a different geometry (e.g. a send-4 join whose
-        // very first east move already fails): the route's last frame lands in
-        // chunk [0,-3] instead of the [1,-3] boot authority edge, so the client
-        // never reached the fixed edge.
+    fn recenter_verdict_rejects_a_disconnect_mid_route() {
+        // Counterfactual against the tampered-copy negative control or a
+        // regression in the on-demand load: the server disconnected the client
+        // after the first beyond-boot crossing instead of keeping it connected.
         let raw = recenter_records().replace(
-            r#"{"event":"move_frame","index":2,"x":16.0,"y":68.0,"z":-48.0,"chunk":[1,-3],"protocol":1}"#,
-            r#"{"event":"move_frame","index":2,"x":0.0,"y":68.0,"z":-48.0,"chunk":[0,-3],"protocol":1}"#,
+            &recenter_walked_record(),
+            r#"{"event":"disconnect","reason":"Disconnected: server closed the connection","reason_key":null,"after_spawn":true,"protocol":1}"#,
+        );
+        let t = normalize_recenter(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "disconnected");
+        let err = rivet_recenter_verdict(&t).expect_err("a mid-route disconnect is not sustained");
+        assert!(
+            err.contains("walked"),
+            "error must demand the walked outcome, got {err}"
+        );
+    }
+
+    #[test]
+    fn recenter_verdict_rejects_a_route_that_misses_the_final_edge() {
+        // Counterfactual against a truncated route (e.g. a regression that
+        // disconnects before the last beyond-boot column): the route's last
+        // frame lands in chunk [2,-3] instead of the [3,-3] final column, so
+        // the client never sustained movement to the route's end.
+        let raw = recenter_records().replace(
+            r#"{"event":"move_frame","index":4,"x":48.0,"y":68.0,"z":-48.0,"chunk":[3,-3],"protocol":1}"#,
+            r#"{"event":"move_frame","index":4,"x":32.0,"y":68.0,"z":-48.0,"chunk":[2,-3],"protocol":1}"#,
         );
         let t = normalize_recenter(&raw).expect("normalize");
         let err =
-            rivet_recenter_verdict(&t).expect_err("edge miss is not the intended reproduction");
+            rivet_recenter_verdict(&t).expect_err("edge miss is not the intended sustained route");
         assert!(
-            err.contains("edge"),
-            "error must name the boot authority edge, got {err}"
+            err.contains("final beyond-boot column"),
+            "error must name the final beyond-boot column, got {err}"
+        );
+    }
+
+    #[test]
+    fn recenter_verdict_rejects_a_route_that_skips_a_beyond_boot_cell() {
+        // Counterfactual against a regression in the on-demand load: the recenter
+        // dropped one of the 27 beyond-boot enter cells (e.g. a chunk that was
+        // never installed/encoded), so the received list is missing it. The cell
+        // [5,1] is unique to the beyond-boot columns (not in the spawn view), so
+        // swapping it out leaves no duplicate — the missing-cell check fires.
+        let received = recenter_received_chunks().replace("[5,1]", "[9,9]");
+        let raw = recenter_records().replace(
+            &format!(r#""chunks":[{}]"#, recenter_received_chunks()),
+            &format!(r#""chunks":[{received}]"#),
+        );
+        let t = normalize_recenter(&raw).expect("normalize");
+        let err = rivet_recenter_verdict(&t).expect_err("a dropped cell is not sustained walking");
+        assert!(
+            err.contains("beyond-boot"),
+            "error must name the missing beyond-boot cell, got {err}"
         );
     }
 
     #[test]
     fn recenter_verdict_rejects_a_single_crossing_route() {
         // Counterfactual against a route that crossed only one boundary: a
-        // single crossing cannot show the repeated-crossing route the issue
-        // demands (a send-4 join's first move already fails).
+        // single crossing cannot show the repeated-crossing route the issues
+        // demand (a send-4 join's first move already fails).
         let one_frame = [
             r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":20,"mode":"loaded-recenter","azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
             r#"{"event":"init","protocol":1}"#,
@@ -2425,29 +2568,34 @@ mod tests {
             r#"{"event":"spawn","position":{"x":-16.0,"y":68.0,"z":-48.0},"protocol":1}"#,
             r#"{"event":"route","origin":{"x":-16.0,"y":68.0,"z":-48.0},"frames":[{"x":0.0,"y":68.0,"z":-48.0}],"protocol":1}"#,
             r#"{"event":"move_frame","index":1,"x":0.0,"y":68.0,"z":-48.0,"chunk":[0,-3],"protocol":1}"#,
-            r#"{"event":"disconnect","reason":"Disconnected: server closed the connection","reason_key":null,"after_spawn":true,"protocol":1}"#,
+            r#"{"event":"walked","position":{"x":0.0,"y":68.0,"z":-48.0},"chunk_count":81,"chunks":[],"observation_ms":4000,"protocol":1}"#,
         ]
         .join("\n");
         let t = normalize_recenter(&one_frame).expect("normalize");
         let err =
-            rivet_recenter_verdict(&t).expect_err("a single crossing is not the repeated route");
+            rivet_recenter_verdict(&t).expect_err("a single crossing is not the sustained route");
         assert!(
-            err.contains("at least 2"),
-            "error must demand at least two move frames, got {err}"
+            err.contains("at least 4"),
+            "error must demand at least four move frames, got {err}"
         );
     }
 
     #[test]
-    fn recenter_verdict_rejects_an_encoded_disconnect_reason() {
-        // Counterfactual against a generic encoded disconnect (the kick
-        // scenario, a server sending a ClientboundDisconnectPacket): the reason
-        // carries a decoded key, which the recenter Unsupported close never does.
-        let mut t = normalize_recenter(&recenter_records()).expect("normalize");
-        t["disconnect"]["reason_key"] = json!("multiplayer.disconnect.kicked");
-        let err = rivet_recenter_verdict(&t).expect_err("an encoded reason is a different close");
+    fn recenter_verdict_rejects_a_duplicate_received_cell() {
+        // Counterfactual against a corrupt walked chunks list: a duplicate cell
+        // proves the list is not a genuine set, so the received-set proof is
+        // vacuous.
+        let received = recenter_received_chunks();
+        let received = format!("{received},[5,1]");
+        let raw = recenter_records().replace(
+            &format!(r#""chunks":[{}]"#, recenter_received_chunks()),
+            &format!(r#""chunks":[{received}]"#),
+        );
+        let t = normalize_recenter(&raw).expect("normalize");
+        let err = rivet_recenter_verdict(&t).expect_err("a duplicate cell is not a genuine set");
         assert!(
-            err.contains("reason_key"),
-            "error must name reason_key, got {err}"
+            err.contains("duplicate"),
+            "error must name the duplicate, got {err}"
         );
     }
 }
