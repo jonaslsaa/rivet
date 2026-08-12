@@ -104,9 +104,10 @@
 //!   cargo run -p rivet-oracle -- verify --full --expect-fail [dir]
 //!                                # M2 FULL negative control against the superflat region baseline
 //!   cargo run -p rivet-oracle -- sample                # regenerate worldgen/ semantic samples + manifest
-//!   cargo run -p rivet-oracle -- generated-expected [<seed>] [--to <path>]
-//!                                # generated-world acceptance ground-truth handoff (seed
-//!                                # defaults to the pinned 42);
+//!   cargo run -p rivet-oracle -- generated-expected <seed> [--to <path>]
+//!                                # generated-world acceptance ground-truth handoff (the seed
+//!                                # is required — the runner always passes the contract seed
+//!                                # explicitly, so the oracle has no default to drift);
 //!                                # UNVERIFIED (3) until the Paper seed reference is captured
 //!   cargo run -p rivet-oracle -- regenerate            # regenerate all fixture kinds
 //!                                                      # (sub-select: --m0/--m2/--full/--samples/--text)
@@ -2511,21 +2512,22 @@ fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
     Ok(())
 }
 
-/// The generated-world acceptance contract's pinned seed (seed 42) — the seed
-/// the `generated-expected` ground-truth handoff is captured for, and the seed
-/// the `run-scenario generated-world` acceptance boots. Kept in sync with the
-/// runner's `GENERATED_SEED` (tools/rivet-client/.../server.rs). This default
-/// only applies to bare CLI use: the runner always passes its own seed
-/// explicitly to `generated-expected <seed>`, so the runner's constant is the
-/// source of truth for the harness.
-const GENERATED_SEED: u64 = 42;
-
-/// Parse the `generated-expected` subcommand's `--to <path>` and optional
-/// `<seed>` positional args (shared by `run()` and the CLI exit-code tests). A
-/// missing seed defaults to the pinned [`GENERATED_SEED`] (the acceptance
-/// contract); a malformed `--to` or non-numeric seed is a CLI usage error —
-/// `Error::Gate`, never `Error::Unverified`, so the runner classifies it as
-/// FAIL, not as a missing prerequisite.
+/// The `generated-expected` subcommand takes the seed explicitly — it has no
+/// default of its own. The seed the acceptance contract pins (seed 42) lives
+/// solely in the runner (`tools/rivet-client/src/bin/run-scenario/server.rs`
+/// `GENERATED_SEED`), which always passes it explicitly to both the server boot
+/// and `generated-expected <seed>`. Keeping the seed out of this crate means
+/// there is no second copy of the constant for the runner and oracle to drift
+/// apart on: the oracle captures whatever seed it is asked for, and a bare CLI
+/// call without a seed is a usage error (`Error::Gate`), never a silent
+/// comparison of the wrong world.
+///
+/// Parse the `generated-expected` subcommand's required `<seed>` and optional
+/// `--to <path>` positional args (shared by `run()` and the CLI exit-code
+/// tests). The seed is required — the runner always passes the contract seed
+/// explicitly, so a missing seed is a usage error (`Error::Gate`), never
+/// `Error::Unverified`, so the runner classifies it as FAIL, not as a missing
+/// prerequisite.
 fn parse_generated_expected_args(rest: &[&str]) -> Result<(u64, Option<PathBuf>), Error> {
     let mut to: Option<PathBuf> = None;
     let mut seed: Option<u64> = None;
@@ -2558,7 +2560,14 @@ fn parse_generated_expected_args(rest: &[&str]) -> Result<(u64, Option<PathBuf>)
             }
         }
     }
-    Ok((seed.unwrap_or(GENERATED_SEED), to))
+    seed.ok_or_else(|| {
+        Error::Gate(
+            "generated-expected requires a seed (the runner passes the contract seed \
+             explicitly; the oracle has no seed default of its own)"
+                .into(),
+        )
+    })
+    .map(|seed| (seed, to))
 }
 
 /// Capture the seed-42 generated-world ground-truth handoff for the
@@ -5413,13 +5422,18 @@ mod tests {
         assert_eq!(to, Some(PathBuf::from("out.json")));
     }
 
-    /// `generated-expected` CLI usage errors (invalid seed, malformed `--to`)
-    /// are Gate — never the missing-prerequisite UNVERIFIED the runner treats
-    /// as "the seed reference is a future artifact". A missing seed defaults to
-    /// the pinned [`GENERATED_SEED`]; an invalid value or a malformed `--to` is
-    /// a malformed CLI, not a missing reference.
+    /// `generated-expected` CLI usage errors (missing/invalid seed, malformed
+    /// `--to`) are Gate — never the missing-prerequisite UNVERIFIED the runner
+    /// treats as "the seed reference is a future artifact". The seed is
+    /// required: the acceptance contract's seed lives only in the runner
+    /// (tools/rivet-client/.../server.rs), which always passes it explicitly,
+    /// so a missing seed is a malformed CLI, not a missing reference.
     #[test]
     fn generated_expected_cli_usage_errors_are_gate_not_unverified() {
+        assert!(matches!(
+            parse_generated_expected_args(&[]),
+            Err(Error::Gate(_))
+        ));
         assert!(matches!(
             parse_generated_expected_args(&["--to"]),
             Err(Error::Gate(_))
@@ -5433,24 +5447,23 @@ mod tests {
             Err(Error::Gate(_))
         ));
         let (seed, to) = parse_generated_expected_args(&["42", "--to", "out.json"]).unwrap();
-        assert_eq!(seed, GENERATED_SEED);
+        assert_eq!(seed, 42);
         assert_eq!(to, Some(PathBuf::from("out.json")));
-        // A missing seed is the pinned acceptance seed, not a usage error — the
-        // runner always passes it, and the oracle defaulting to the contract
-        // seed is coherent.
-        let (seed, to) = parse_generated_expected_args(&[]).unwrap();
-        assert_eq!(seed, GENERATED_SEED);
+        let (seed, to) = parse_generated_expected_args(&["42"]).unwrap();
+        assert_eq!(seed, 42);
         assert_eq!(to, None);
     }
 
     /// Until the Paper seed-42 ground-truth reference is captured,
     /// `generated-expected` is UNVERIFIED (exit 3) — it must never write an
     /// empty or fabricated manifest, so the generated-world acceptance can never
-    /// PASS against nothing.
+    /// PASS against nothing. The seed 42 here is the acceptance contract seed,
+    /// defined in the runner (tools/rivet-client/.../server.rs) — the oracle
+    /// just captures whatever seed it is asked for.
     #[test]
     fn generated_expected_is_unverified_until_the_reference_lands() {
         assert!(matches!(
-            run_generated_expected(GENERATED_SEED, None),
+            run_generated_expected(42, None),
             Err(Error::Unverified(message))
                 if message.contains("UNVERIFIED") && message.contains("seed-42")
         ));
@@ -5459,7 +5472,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path().join("generated-expected.json");
         assert!(matches!(
-            run_generated_expected(GENERATED_SEED, Some(&out)),
+            run_generated_expected(42, Some(&out)),
             Err(Error::Unverified(_))
         ));
         assert!(
