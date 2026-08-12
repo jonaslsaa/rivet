@@ -58,8 +58,11 @@ const MOVE_TICKS: u32 = rivet_harness_common::timing::MOVE_WALK_TICKS;
 /// to knock the local player airborne for the final 3 samples on one boot).
 const SAMPLE_TICKS: u32 = 100;
 /// Wait this long after the walk stops before ending the client, so the final
-/// sent positions and any trailing correction are recorded before exit.
-const MOVE_DRAIN: Duration = Duration::from_millis(200);
+/// sent positions and any trailing correction are recorded before exit. Shared
+/// with `run-scenario` via [`rivet_harness_common::timing`] so the move timeout
+/// headroom cannot drift from the actual drain.
+const MOVE_DRAIN: Duration =
+    Duration::from_millis(rivet_harness_common::timing::MOVE_DRAIN_MS);
 /// How long the keepalive settle loop (dwell and move modes) waits between
 /// coherence checks before snapshotting. The keepalive cadence is 1 s, so a
 /// 50 ms check interval is ample: it lets an in-flight challenge/echo pair land
@@ -88,29 +91,6 @@ const KEEPALIVE_SETTLE_TIMEOUT: Duration =
 /// `transcript::DWELL_MIN_DWELL_SECONDS`; kept in sync so a direct client
 /// invocation cannot be told to run a window that cannot prove survival.
 const DWELL_MIN_DWELL_SECONDS: u64 = 35;
-/// Reserved client-side headroom (s) beyond the dwell window plus the settle
-/// timeout that `--timeout-seconds` must accommodate. The timeout starts at
-/// process launch while the dwell window only starts at `Event::Spawn` (after
-/// offline login and configuration), so the timeout must reserve that pre-spawn
-/// time too, or the timeout branch cuts the client off before it emits the
-/// `dwell` record. Mirrors `run-scenario`'s `DWELL_TIMEOUT_HEADROOM_SECONDS`
-/// (5 s login here plus the 1 s settle above is the 6 s the runner reserves).
-/// Shared with the runner via [`rivet_harness_common::timing`] so the two cannot
-/// drift.
-const DWELL_LOGIN_HEADROOM_SECONDS: u64 =
-    rivet_harness_common::timing::DWELL_LOGIN_HEADROOM_SECONDS;
-
-/// Move-mode emit budget: login/configuration + the fixed walk + MOVE_DRAIN +
-/// the keepalive settle. `--timeout-seconds` must exceed this in move mode.
-/// Shared with `run-scenario` via [`rivet_harness_common::timing`].
-const MOVE_TIMEOUT_HEADROOM_SECONDS: u64 =
-    rivet_harness_common::timing::MOVE_TIMEOUT_HEADROOM_SECONDS;
-/// Move-mode walk wall-clock seconds (MOVE_TICKS @ 20 TPS). See
-/// [`rivet_harness_common::timing::MOVE_WALK_SECONDS`].
-const MOVE_WALK_SECONDS: u64 = rivet_harness_common::timing::MOVE_WALK_SECONDS;
-/// Move-mode post-walk drain seconds (MOVE_DRAIN, ceiled). See
-/// [`rivet_harness_common::timing::MOVE_DRAIN_SECONDS_CEIL`].
-const MOVE_DRAIN_SECONDS_CEIL: u64 = rivet_harness_common::timing::MOVE_DRAIN_SECONDS_CEIL;
 
 /// After `Event::Spawn` we keep the client alive for a short observation window
 /// so the observable outcome is stable (chunks arrived, health/inventory
@@ -257,38 +237,20 @@ impl Args {
         // emitting the `dwell` record. `dwell < timeout` is therefore not
         // enough — the timeout must reserve the settle loop AND the pre-spawn
         // login/configuration time, or the timeout branch cuts the client off
-        // before it emits.
-        if mode == Mode::Dwell
-            && timeout_seconds
-                <= dwell_seconds + KEEPALIVE_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS
-        {
-            return Err(format!(
-                "--timeout-seconds must exceed --dwell-seconds by more than {}s (the client \
-                 spends up to {}s settling the keepalive stream after the dwell window, plus {}s \
-                 of login/configuration time before spawn, and must emit the dwell record before \
-                 the timeout fires)",
-                KEEPALIVE_SETTLE_TIMEOUT.as_secs() + DWELL_LOGIN_HEADROOM_SECONDS,
-                KEEPALIVE_SETTLE_TIMEOUT.as_secs(),
-                DWELL_LOGIN_HEADROOM_SECONDS
-            ));
+        // before it emits. Shared with the runner via
+        // `rivet_harness_common::timing::validate_dwell_timeout`.
+        if mode == Mode::Dwell {
+            rivet_harness_common::timing::validate_dwell_timeout(dwell_seconds, timeout_seconds)?;
         }
         // Move mode has the same emit-before-timeout invariant as dwell: the
         // `moved` record is emitted only after login/configuration, the fixed
         // walk, MOVE_DRAIN, and up to KEEPALIVE_SETTLE_TIMEOUT of keepalive
         // settling. A timeout at or below that total cuts the client off before
         // it emits (ExitCode 2, spurious FAIL), so the reservation is enforced
-        // here rather than only in the runner.
-        if mode == Mode::Move && timeout_seconds <= MOVE_TIMEOUT_HEADROOM_SECONDS {
-            return Err(format!(
-                "--timeout-seconds must exceed {}s in move mode (the client spends up to {}s on \
-                 login/configuration, {}s walking, {}s draining, and {}s settling the keepalive \
-                 stream before emitting the moved record, and must emit before the timeout fires)",
-                MOVE_TIMEOUT_HEADROOM_SECONDS,
-                DWELL_LOGIN_HEADROOM_SECONDS,
-                MOVE_WALK_SECONDS,
-                MOVE_DRAIN_SECONDS_CEIL,
-                KEEPALIVE_SETTLE_TIMEOUT.as_secs(),
-            ));
+        // here rather than only in the runner. Shared via
+        // `rivet_harness_common::timing::validate_move_timeout`.
+        if mode == Mode::Move {
+            rivet_harness_common::timing::validate_move_timeout(timeout_seconds)?;
         }
 
         Ok(Self {
@@ -603,19 +565,10 @@ struct KeepaliveLog {
 }
 
 impl KeepaliveLog {
-    /// Whether the challenge and echo streams have reached 1:1 correspondence.
-    /// The server challenges at a 1 s cadence and azalea echoes within a tick,
-    /// but the two streams are observed on different paths — the echo observer
-    /// records synchronously when the challenge packet is processed, while the
-    /// challenge itself is recorded only after azalea's async event channel
-    /// drains to the client handler — so either stream can briefly lead the
-    /// other at a snapshot boundary. Requiring exact 1:1 (not `echoes >=
-    /// challenges`) means a settled log is always a coherent state: it cannot
-    /// observe a challenge whose echo is still in flight, and it cannot observe
-    /// an echo whose challenge record has not landed yet. A genuinely missing
-    /// echo (a client that stopped echoing would be kicked) keeps this false, so
-    /// the settle window expires and the emitted mismatch still fails the
-    /// verdict.
+    /// Test-only: whether a snapshot is 1:1. On a snapshot the echoes are
+    /// already filtered to the frozen challenge set, so this reports exactly
+    /// whether every frozen challenge has its echo.
+    #[cfg(test)]
     fn settled(&self) -> bool {
         self.echoes.len() == self.challenges.len()
     }
@@ -1010,35 +963,14 @@ async fn move_and_emit(bot: Client, state: State) {
     // Let the last sent positions and any trailing server correction flush.
     tokio::time::sleep(MOVE_DRAIN).await;
 
-    // Snapshot the keepalive log via the bounded settle-and-coherent-snapshot
-    // mechanism dwell mode uses: a challenge can arrive exactly as MOVE_DRAIN
-    // elapses, and because azalea records the echo synchronously while the
-    // challenge record only lands after the async event channel drains, either
-    // stream can straddle the boundary (observed: a Paper boot with one more
-    // echo than challenge — the mirror of the dwell in-flight-pair case). The
-    // settle loop waits for 1:1 correspondence (bounded by
-    // KEEPALIVE_SETTLE_TIMEOUT) so the transcript's `keepalive_echo` relationship
-    // is observed coherently; a genuinely missing echo still times out and fails.
-    //
-    // The settle window can extend up to KEEPALIVE_SETTLE_TIMEOUT past the walk
-    // (the server keeps challenging at 1/s while the client stays connected), so
-    // the keepalive arrays may cover a slightly wider window than the walk.
-    // They are excluded from move parity — only the structural `keepalive_echo`
-    // 1:1 relationship is compared (transcript.rs `walk.keepalive_echo`) — so
-    // this only affects the reported counts, not the verdict.
-    let keepalive_log = settle_and_snapshot(
-        &state.keepalive_log,
-        KEEPALIVE_SETTLE_TIMEOUT,
-        KEEPALIVE_SETTLE_INTERVAL,
-    )
-    .await;
-    let keepalives = keepalive_log.challenges;
-    let keepalive_echoes = keepalive_log.echoes;
-
-    // Snapshot the remaining observables, each under its own lock. The walk
-    // finished earlier and MOVE_DRAIN let the write side quiesce: no further
-    // teleports/corrections arrive once the player stops moving, so in practice
-    // these reads observe the final sets.
+    // Snapshot the parity-compared observables FIRST, right after MOVE_DRAIN,
+    // so their reads keep the tight post-walk window. The walk finished earlier
+    // and MOVE_DRAIN let the write side quiesce: no further teleports/corrections
+    // arrive once the player stops moving, so in practice these reads observe
+    // the final sets. They must not wait for the keepalive settle below — that
+    // can extend up to KEEPALIVE_SETTLE_TIMEOUT past the walk, and a server
+    // `player_position` re-sync landing in that widened idle window on one boot
+    // (but outside it on another) would add a compared-field diff.
     let (samples, teleports, teleport_acks, corrections, origin, last_sent) = {
         let samples = state
             .move_samples
@@ -1076,6 +1008,27 @@ async fn move_and_emit(bot: Client, state: State) {
     };
     let origin = origin.expect("move mode requires a recorded spawn position");
     let last_sent = last_sent.expect("move mode requires the walk's last sent position");
+
+    // Then snapshot the keepalive log via the bounded settle-and-coherent-snapshot
+    // mechanism dwell mode uses. A challenge can arrive exactly as MOVE_DRAIN
+    // elapses, and because azalea records the echo synchronously while the
+    // challenge record only lands after the async event channel drains, either
+    // stream can straddle the boundary (observed: a Paper boot with one more
+    // echo than challenge — the mirror of the dwell in-flight-pair case). The
+    // settle freezes the challenges already observed and waits for their echoes
+    // (bounded by KEEPALIVE_SETTLE_TIMEOUT) so the transcript's `keepalive_echo`
+    // relationship is observed coherently; a genuinely missing echo still times
+    // out and fails. Keepalive counts are excluded from move parity — only the
+    // structural `keepalive_echo` flag is compared — so the widened keepalive
+    // window does not affect the verdict.
+    let keepalive_log = settle_and_snapshot(
+        &state.keepalive_log,
+        KEEPALIVE_SETTLE_TIMEOUT,
+        KEEPALIVE_SETTLE_INTERVAL,
+    )
+    .await;
+    let keepalives = keepalive_log.challenges;
+    let keepalive_echoes = keepalive_log.echoes;
 
     // Samples are normalized to spawn-relative X/Z deltas at full precision
     // (subtract the origin, then round), so the walk is identical across boots
@@ -1158,21 +1111,18 @@ async fn move_and_emit(bot: Client, state: State) {
     hard_exit(0);
 }
 
-/// Wait until the challenge and echo streams reach 1:1 correspondence (bounded
-/// by `timeout`), then return a coherent snapshot of the log.
+/// Freeze the challenge set at settle entry and wait (bounded by `timeout`) for
+/// every frozen challenge to be echoed, then return a coherent snapshot.
 ///
-/// The 1 s cadence means a challenge/echo pair can straddle the emit boundary:
-/// a challenge can arrive exactly as the window elapses with azalea's echo
-/// still in flight (dwell mode), or — because the echo observer records
-/// synchronously while the challenge record only lands after azalea's async
-/// event channel drains (move mode) — an echo can be observed with its
-/// challenge still in flight. Snapshotting immediately in either case records a
-/// pair half and spuriously fails the 1:1 challenge->echo relationship. This
-/// waits (polling every `interval`) for the in-flight pair to land and be
-/// observed coherently. A pair half whose match truly never arrives (a client
-/// that stopped echoing, which the server would kick) keeps the log unsettled
-/// until `timeout`; the snapshot then preserves the mismatch, so a genuinely
-/// missing echo still fails the verdict — the settle window never masks it.
+/// A challenge/echo pair can straddle the emit boundary in either order — a
+/// challenge with its echo still in flight, or a stray echo whose challenge
+/// record has not landed (the move-mode flake). Freezing the challenges we
+/// already have and filtering echoes to that set closes both orderings: an
+/// in-flight echo keeps the loop going until it lands, while a stray echo is
+/// excluded. Because the snapshot's echoes are always a subset of the frozen
+/// challenges' echoes, even the deadline path (a genuinely missing echo) can
+/// never emit an echo without its challenge — only a missing echo, which still
+/// fails the verdict.
 ///
 /// `timeout` and `interval` are parameters so the straddle/missing-echo
 /// counterfactuals can be driven deterministically in tests.
@@ -1182,17 +1132,42 @@ async fn settle_and_snapshot(
     interval: Duration,
 ) -> KeepaliveLog {
     let settle_deadline = Instant::now() + timeout;
+    // Freeze the challenges observed so far. The challenge/instant pair is
+    // written atomically (same handler), so the first `frozen_challenges.len()`
+    // instants are exactly the frozen challenges' instants.
+    let frozen_challenges = log
+        .lock()
+        .expect("keepalive log lock poisoned")
+        .challenges
+        .clone();
     loop {
         // Hold the log's single lock across the settled decision AND the clone:
         // no writer can interleave, so a returned snapshot is guaranteed to be a
-        // settled, coherent state (every challenge it contains has its echo). A
-        // challenge that lands only after the clone is simply outside the
-        // snapshot — a coherent prefix, never a split pair. The guard is scoped
-        // to this block so it is dropped before the sleep below (it is not Send).
+        // coherent state. The guard is scoped to this block so it is dropped
+        // before the sleep below (it is not Send).
         let snapshot = {
             let guard = log.lock().expect("keepalive log lock poisoned");
-            if guard.settled() || Instant::now() >= settle_deadline {
-                Some(guard.clone())
+            // Only echoes of the frozen challenges count: a stray echo recorded
+            // before its challenge record landed is excluded, so the snapshot
+            // can never contain an echo without its challenge.
+            let echoes = guard
+                .echoes
+                .iter()
+                .filter(|e| frozen_challenges.contains(e))
+                .copied()
+                .collect::<Vec<_>>();
+            let settled = frozen_challenges.iter().all(|c| echoes.contains(c));
+            if settled || Instant::now() >= settle_deadline {
+                Some(KeepaliveLog {
+                    challenges: frozen_challenges.clone(),
+                    instants: guard
+                        .instants
+                        .iter()
+                        .take(frozen_challenges.len())
+                        .copied()
+                        .collect(),
+                    echoes,
+                })
             } else {
                 None
             }
@@ -1571,15 +1546,17 @@ mod tests {
         // (Paper transcript: 6 challenges / 7 echoes). A snapshot taken at that
         // moment records an echo with no matching challenge, which fails the 1:1
         // `keepalive_echo` relationship and false-FAILs parity. The settle loop
-        // must wait for the missing challenge, then snapshot echo+challenge
-        // together so the relationship holds.
+        // freezes the challenges it already has and filters echoes to that set,
+        // so the stray echo (whose challenge record has not landed) is excluded:
+        // the snapshot is 1:1 without waiting for the straggler.
         let log = Arc::new(Mutex::new(KeepaliveLog {
             challenges: vec![1001, 1002, 1003],
             instants: vec![],
             echoes: vec![1001, 1002, 1003, 1004],
         }));
-        // The straddling challenge lands 50 ms later — well inside the settle
-        // timeout but definitely after the loop's first coherence check.
+        // The straddling challenge's record would land 50 ms later — but the
+        // settle must NOT wait for it: every frozen challenge already has its
+        // echo, so the coherent snapshot is available immediately.
         let log_for_challenge = Arc::clone(&log);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1594,22 +1571,48 @@ mod tests {
         let snapshot =
             settle_and_snapshot(&log, Duration::from_secs(2), Duration::from_millis(5)).await;
 
-        // The snapshot observed the straddling echo together with its challenge:
-        // the 1:1 relationship holds (challenge_count == echo_count). If the
-        // settle loop had snapshot immediately, this would be 3 challenges vs 4
-        // echoes and the verdict would FAIL. Under the pre-fix `echoes >=
-        // challenges` predicate the settle loop would also return immediately —
-        // the pass above proves the strict 1:1 predicate waits for coherence.
-        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004]);
-        assert_eq!(snapshot.echoes, vec![1001, 1002, 1003, 1004]);
+        // The stray echo (1004) is excluded because its challenge record has not
+        // landed, so the snapshot is 1:1 (3 challenges / 3 echoes) and settled.
+        // If the settle had snapshot the raw log, this would be 3 challenges vs
+        // 4 echoes and the verdict would FAIL.
+        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1003]);
         assert!(snapshot.settled());
-        // The challenge physically cannot land before 50 ms, so the settle loop
-        // must have waited for it — the pass above is not a race where the
-        // challenge beat the first coherence check.
+        // The straggler challenge cannot land before 50 ms, and the settle must
+        // not have waited for it — a coherent snapshot was available immediately.
         assert!(
-            started.elapsed() >= Duration::from_millis(50),
-            "settle returned before the in-flight challenge could land"
+            started.elapsed() < Duration::from_millis(50),
+            "settle waited for a challenge record outside the frozen set"
         );
+    }
+
+    #[tokio::test]
+    async fn settle_deadline_path_never_emits_a_split_pair() {
+        // Counterfactual for the deadline branch: a frozen challenge's echo
+        // genuinely never lands (a client that stopped echoing, which the server
+        // would kick) at the same moment the echo stream carries a stray echo
+        // whose challenge record has not landed. The settle times out, but the
+        // snapshot must still exclude the stray echo — the preserved mismatch is
+        // exactly the missing echo (4 challenges / 3 echoes), never an echo
+        // without its challenge (which would be the original false-FAIL shape).
+        let log = Arc::new(Mutex::new(KeepaliveLog {
+            challenges: vec![1001, 1002, 1003, 1004],
+            instants: vec![],
+            // Echo 1003 is genuinely missing; echo 1005 is a stray whose
+            // challenge record has not landed.
+            echoes: vec![1001, 1002, 1004, 1005],
+        }));
+        let snapshot =
+            settle_and_snapshot(&log, Duration::from_millis(20), Duration::from_millis(5)).await;
+
+        // The stray echo 1005 is excluded: the snapshot's echoes are exactly the
+        // frozen challenges' echoes (1001, 1002, 1004), missing only 1003.
+        assert_eq!(snapshot.challenges, vec![1001, 1002, 1003, 1004]);
+        assert_eq!(snapshot.echoes, vec![1001, 1002, 1004]);
+        assert!(!snapshot.settled());
+        // No echo in the snapshot lacks its challenge — the 1:1 relationship
+        // cannot false-FAIL on a split pair, only on the genuinely missing echo.
+        assert!(snapshot.echoes.iter().all(|e| snapshot.challenges.contains(e)));
     }
 
     #[tokio::test]
@@ -1780,25 +1783,15 @@ mod tests {
         // at or below that total cuts the client off before it emits (ExitCode
         // 2, spurious FAIL). The reservation is the shared move headroom: the
         // boundary value is rejected, one second above it is accepted.
-        let err = parse(&[
-            "--mode",
-            "move",
-            "--timeout-seconds",
-            &MOVE_TIMEOUT_HEADROOM_SECONDS.to_string(),
-        ])
-        .unwrap_err();
+        let headroom = rivet_harness_common::timing::MOVE_TIMEOUT_HEADROOM_SECONDS;
+        let err = parse(&["--mode", "move", "--timeout-seconds", &headroom.to_string()])
+            .unwrap_err();
         assert!(
             err.contains("--timeout-seconds") && err.contains("move mode"),
             "error must explain the move-mode headroom, got {err}"
         );
         assert!(
-            parse(&[
-                "--mode",
-                "move",
-                "--timeout-seconds",
-                &(MOVE_TIMEOUT_HEADROOM_SECONDS + 1).to_string(),
-            ])
-            .is_ok()
+            parse(&["--mode", "move", "--timeout-seconds", &(headroom + 1).to_string()]).is_ok()
         );
         // The default 30 s client timeout comfortably exceeds the move budget,
         // so a bare `--mode move` parse is unaffected.

@@ -54,7 +54,8 @@
 //!   must be at least
 //!   `transcript::DWELL_MIN_DWELL_SECONDS` (a 31 s window would span only
 //!   ~29.8 s of challenges and fail the verdict), and `--timeout-seconds` must
-//!   exceed it by more than `DWELL_TIMEOUT_HEADROOM_SECONDS` so the client's
+//!   exceed it by the shared settle/login headroom
+//!   (`rivet_harness_common::timing::validate_dwell_timeout`) so the client's
 //!   post-window settle loop and pre-spawn login time cannot let the timeout
 //!   cut the `dwell` record off.
 //! - `kick` (issue #86: decoded disconnect reason): the Rivet-only anti-cheat
@@ -147,21 +148,6 @@ const DEFAULT_RUNS: usize = 2;
 /// `KEEPALIVE_LIMIT_MS`), with headroom for the first challenge to land after
 /// the join burst settles.
 const DEFAULT_DWELL_SECONDS: u64 = 41;
-/// Reserved client-side headroom (s) beyond the dwell window that
-/// `--timeout-seconds` must accommodate before it can pass validation: the
-/// client's 1 s keepalive settle loop plus the login/configuration time before
-/// spawn. Mirrors the client's own parse-time validation so a
-/// `run-scenario`-accepted invocation is never cut off by the client's timeout
-/// branch before it emits the `dwell` record. Shared with the client via
-/// [`rivet_harness_common::timing`] so the two cannot drift.
-const DWELL_TIMEOUT_HEADROOM_SECONDS: u64 =
-    rivet_harness_common::timing::DWELL_TIMEOUT_HEADROOM_SECONDS;
-/// Reserved client-side headroom (s) that a `move` `--timeout-seconds` must
-/// exceed: login/configuration + the walk + drain + keepalive settle, after
-/// which the client emits `moved`. Mirrors the client's own parse-time
-/// validation. Shared via [`rivet_harness_common::timing`].
-const MOVE_TIMEOUT_HEADROOM_SECONDS: u64 =
-    rivet_harness_common::timing::MOVE_TIMEOUT_HEADROOM_SECONDS;
 
 // Machine-stable exit codes. PASS/FAIL/UNVERIFIED are the shared contract
 // (rivet-harness-common::exit); usage errors are a separate 64.
@@ -500,15 +486,9 @@ impl Args {
             // timeout at or below that total cuts the client off before it
             // emits (ExitCode 2, spurious FAIL). Mirror the client's own
             // parse-time validation so a `run-scenario`-accepted invocation is
-            // never one the client then rejects or times out on.
-            if timeout_seconds <= MOVE_TIMEOUT_HEADROOM_SECONDS {
-                return Err(format!(
-                    "--timeout-seconds must exceed {MOVE_TIMEOUT_HEADROOM_SECONDS}s in move mode \
-                     (the client spends up to {MOVE_TIMEOUT_HEADROOM_SECONDS}s on \
-                     login/configuration, the walk, the drain, and keepalive settling before \
-                     emitting the moved record); got timeout {timeout_seconds}s"
-                ));
-            }
+            // never one the client then rejects or times out on. Shared with
+            // the client so the two cannot drift.
+            rivet_harness_common::timing::validate_move_timeout(timeout_seconds)?;
         }
 
         if command == Subcommand::Dwell {
@@ -568,16 +548,9 @@ impl Args {
             // the `dwell` record. `dwell < timeout` is therefore not enough —
             // the timeout must reserve the settle loop AND the pre-spawn
             // login/configuration time, or the timeout branch cuts the client
-            // off before it emits.
-            if timeout_seconds <= dwell_seconds + DWELL_TIMEOUT_HEADROOM_SECONDS {
-                return Err(format!(
-                    "--timeout-seconds must exceed --dwell-seconds by more than \
-                     {DWELL_TIMEOUT_HEADROOM_SECONDS}s of settle/login headroom (the client spends \
-                     up to 1 s settling the keepalive stream after the dwell window, plus the \
-                     login/configuration time before spawn, and must emit the dwell record before \
-                     the timeout fires); got dwell {dwell_seconds}s timeout {timeout_seconds}s"
-                ));
-            }
+            // off before it emits. Shared with the client so the two cannot
+            // drift.
+            rivet_harness_common::timing::validate_dwell_timeout(dwell_seconds, timeout_seconds)?;
         }
 
         if command == Subcommand::Kick {
@@ -3658,24 +3631,13 @@ mod tests {
         // at or below that total cuts the client off before it emits (ExitCode
         // 2, spurious FAIL). Mirror the client's own parse-time validation: the
         // boundary value is rejected, one second above it is accepted.
-        let err = parse(&[
-            "move",
-            "--timeout-seconds",
-            &MOVE_TIMEOUT_HEADROOM_SECONDS.to_string(),
-        ])
-        .unwrap_err();
+        let headroom = rivet_harness_common::timing::MOVE_TIMEOUT_HEADROOM_SECONDS;
+        let err = parse(&["move", "--timeout-seconds", &headroom.to_string()]).unwrap_err();
         assert!(
             err.contains("--timeout-seconds") && err.contains("move mode"),
             "error must explain the move-mode headroom, got {err}"
         );
-        assert!(
-            parse(&[
-                "move",
-                "--timeout-seconds",
-                &(MOVE_TIMEOUT_HEADROOM_SECONDS + 1).to_string(),
-            ])
-            .is_ok()
-        );
+        assert!(parse(&["move", "--timeout-seconds", &(headroom + 1).to_string()]).is_ok());
         // The default 60 s runner timeout comfortably exceeds the move budget,
         // so a bare `move` parse is unaffected.
         assert!(parse(&["move"]).is_ok());
