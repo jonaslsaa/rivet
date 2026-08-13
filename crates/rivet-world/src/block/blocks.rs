@@ -69,6 +69,10 @@ impl Blocks {
     pub const OAK_LEAVES: Block = Block::new(BlockId(88));
     /// `Blocks.GLASS`.
     pub const GLASS: Block = Block::new(BlockId(101));
+    /// `Blocks.SANDSTONE` (SurfaceRuleData: overworld `sandAndSandstone`
+    /// `DEEP_UNDER_FLOOR`/`VERY_DEEP_UNDER_FLOOR` + overworldLike
+    /// `sandOrSandstoneIfCeiling`).
+    pub const SANDSTONE: Block = Block::new(BlockId(106));
     /// `Blocks.ICE`.
     pub const ICE: Block = Block::new(BlockId(277));
     /// `Blocks.ORANGE_STAINED_GLASS` (carver: `CarverDebugSettings.DEFAULT`
@@ -80,8 +84,31 @@ impl Blocks {
     pub const NETHERRACK: Block = Block::new(BlockId(285));
     /// `Blocks.SOUL_SAND`.
     pub const SOUL_SAND: Block = Block::new(BlockId(286));
+    /// `Blocks.SOUL_SOIL` (SurfaceRuleData: nether `soulSandValley`
+    /// `UNDER_CEILING`/`UNDER_FLOOR`).
+    pub const SOUL_SOIL: Block = Block::new(BlockId(287));
+    /// `Blocks.BASALT` (SurfaceRuleData: nether `basaltDeltas`
+    /// `UNDER_CEILING`/`UNDER_FLOOR`).
+    pub const BASALT: Block = Block::new(BlockId(288));
     /// `Blocks.ACACIA_BUTTON` (carver: `CarverDebugSettings.DEFAULT` air state).
     pub const ACACIA_BUTTON: Block = Block::new(BlockId(447));
+    /// `Blocks.RED_SANDSTONE` (SurfaceRuleData: overworld badlands `ON_CEILING`).
+    pub const RED_SANDSTONE: Block = Block::new(BlockId(595));
+    /// `Blocks.NETHER_WART_BLOCK` (SurfaceRuleData: nether `crimsonForest`
+    /// `netherWart` selector).
+    pub const NETHER_WART_BLOCK: Block = Block::new(BlockId(672));
+    /// `Blocks.WARPED_NYLIUM` (SurfaceRuleData: nether `warpedForest`).
+    pub const WARPED_NYLIUM: Block = Block::new(BlockId(866));
+    /// `Blocks.WARPED_WART_BLOCK` (SurfaceRuleData: nether `warpedForest`
+    /// `netherWart` selector).
+    pub const WARPED_WART_BLOCK: Block = Block::new(BlockId(868));
+    /// `Blocks.CRIMSON_NYLIUM` (SurfaceRuleData: nether `crimsonForest`).
+    pub const CRIMSON_NYLIUM: Block = Block::new(BlockId(875));
+    /// `Blocks.BLACKSTONE` (SurfaceRuleData: nether `basaltDeltas`
+    /// `UNDER_FLOOR` `netherStateSelector`).
+    pub const BLACKSTONE: Block = Block::new(BlockId(924));
+    /// `Blocks.MUD` (SurfaceRuleData: overworld `mangroveSwamp`).
+    pub const MUD: Block = Block::new(BlockId(1150));
     /// `Blocks.DEEPSLATE`.
     pub const DEEPSLATE: Block = Block::new(BlockId(1151));
     /// `Blocks.DEEPSLATE_IRON_ORE` (noisegen: `OreVeinifier.VeinType.IRON`).
@@ -101,6 +128,18 @@ impl Blocks {
     pub const CANDLE: Block = Block::new(BlockId(944));
     /// `Blocks.TUFF` (noisegen: `OreVeinifier.VeinType.IRON` filler).
     pub const TUFF: Block = Block::new(BlockId(984));
+    /// `Blocks.SULFUR` (SurfaceRuleData: overworld `sulfurCaveBands` in
+    /// `SULFUR_CAVES`).
+    pub const SULFUR: Block = Block::new(BlockId(998));
+    /// `Blocks.CINNABAR` (SurfaceRuleData: overworld `sulfurCaveBands` in
+    /// `SULFUR_CAVES`).
+    pub const CINNABAR: Block = Block::new(BlockId(1012));
+    /// `Blocks.CALCITE` (SurfaceRuleData: overworld calcite bands on
+    /// `CALCITE` noise).
+    pub const CALCITE: Block = Block::new(BlockId(1025));
+    /// `Blocks.POWDER_SNOW` (SurfaceRuleData: overworld `powderSnow` on
+    /// snowy slopes/jagged peaks).
+    pub const POWDER_SNOW: Block = Block::new(BlockId(1027));
     /// `Blocks.COPPER_ORE` (noisegen: `OreVeinifier.VeinType.COPPER`).
     pub const COPPER_ORE: Block = Block::new(BlockId(1042));
     /// `Blocks.RAW_IRON_BLOCK` (noisegen: `OreVeinifier.VeinType.IRON`).
@@ -146,12 +185,22 @@ mod tests {
             Blocks::BIRCH_LOG,
             Blocks::OAK_LEAVES,
             Blocks::GLASS,
+            Blocks::SANDSTONE,
             Blocks::ICE,
             Blocks::ORANGE_STAINED_GLASS,
             Blocks::SNOW_BLOCK,
             Blocks::NETHERRACK,
             Blocks::SOUL_SAND,
+            Blocks::SOUL_SOIL,
+            Blocks::BASALT,
             Blocks::ACACIA_BUTTON,
+            Blocks::RED_SANDSTONE,
+            Blocks::NETHER_WART_BLOCK,
+            Blocks::WARPED_NYLIUM,
+            Blocks::WARPED_WART_BLOCK,
+            Blocks::CRIMSON_NYLIUM,
+            Blocks::BLACKSTONE,
+            Blocks::MUD,
             Blocks::DEEPSLATE,
             Blocks::DEEPSLATE_IRON_ORE,
             Blocks::END_STONE,
@@ -161,6 +210,10 @@ mod tests {
             Blocks::CAVE_AIR,
             Blocks::CANDLE,
             Blocks::TUFF,
+            Blocks::SULFUR,
+            Blocks::CINNABAR,
+            Blocks::CALCITE,
+            Blocks::POWDER_SNOW,
             Blocks::COPPER_ORE,
             Blocks::RAW_IRON_BLOCK,
             Blocks::RAW_COPPER_BLOCK,
@@ -175,6 +228,46 @@ mod tests {
                 by_name.name(),
                 "name mismatch for id {}",
                 block.id().0
+            );
+        }
+    }
+
+    /// The Paper 26.2 `SurfaceRuleData` block constants must pin the exact raw
+    /// registry ids from the generated `BLOCK_BY_NAME` table: name, raw id,
+    /// and the generated-table mapping must all agree.
+    #[test]
+    fn surface_rule_data_constants_pin_raw_ids() {
+        let cases: [(Block, u16, &str); 14] = [
+            (Blocks::SANDSTONE, 106, "minecraft:sandstone"),
+            (Blocks::SOUL_SOIL, 287, "minecraft:soul_soil"),
+            (Blocks::BASALT, 288, "minecraft:basalt"),
+            (Blocks::RED_SANDSTONE, 595, "minecraft:red_sandstone"),
+            (
+                Blocks::NETHER_WART_BLOCK,
+                672,
+                "minecraft:nether_wart_block",
+            ),
+            (Blocks::WARPED_NYLIUM, 866, "minecraft:warped_nylium"),
+            (
+                Blocks::WARPED_WART_BLOCK,
+                868,
+                "minecraft:warped_wart_block",
+            ),
+            (Blocks::CRIMSON_NYLIUM, 875, "minecraft:crimson_nylium"),
+            (Blocks::BLACKSTONE, 924, "minecraft:blackstone"),
+            (Blocks::SULFUR, 998, "minecraft:sulfur"),
+            (Blocks::CINNABAR, 1012, "minecraft:cinnabar"),
+            (Blocks::CALCITE, 1025, "minecraft:calcite"),
+            (Blocks::POWDER_SNOW, 1027, "minecraft:powder_snow"),
+            (Blocks::MUD, 1150, "minecraft:mud"),
+        ];
+        for (block, raw_id, name) in cases {
+            assert_eq!(block.id().0, raw_id, "raw id for `{name}`");
+            assert_eq!(block.name(), name, "name for raw id {raw_id}");
+            assert_eq!(
+                BlockId::from_name(name).map(|id| id.0),
+                Some(raw_id),
+                "generated table maps `{name}` -> {raw_id}"
             );
         }
     }
