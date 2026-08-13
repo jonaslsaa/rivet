@@ -68,6 +68,27 @@ pub trait RuleTest: Any + Debug + Send + Sync + 'static {
     /// `as_any` — the downcast seam (Java's erased `RuleTest` cast) the
     /// dispatch codec uses on encode to recover the concrete rule test type.
     fn as_any(&self) -> &dyn Any;
+
+    /// `RuleTest.testAgainstWorldState(LevelReader, BlockPos, RandomSource)` —
+    /// the Java shell: `this.test(level.getBlockState(pos), random)`.
+    ///
+    /// The default impl resolves `getBlockState` through the
+    /// capability-unavailable seam ([`crate::level::WorldGenLevel::get_block_state`],
+    /// RivetTodo #399): no production world provides it yet, so calling through
+    /// panics rather than fabricating a state (the same explicit seam
+    /// `blockpredicates` uses). Like Java, the shell is a trait method so the
+    /// override can dispatch: `AlwaysTrueTest` overrides it to return `true`
+    /// without touching the level; every other rule test surfaces the
+    /// unavailable capability through the seam.
+    fn test_against_world_state<R: RandomSource>(
+        &self,
+        level: &dyn WorldGenLevel,
+        pos: &BlockPos,
+        random: &mut R,
+    ) -> bool {
+        let state = level.get_block_state(pos);
+        self.test(&state, random)
+    }
 }
 
 /// The object-safe carrier the dispatch codec (de)serializes — the Rust
@@ -95,24 +116,6 @@ impl<T: RuleTest + ?Sized> ErasedRuleTest for T {
     fn as_any(&self) -> &dyn Any {
         RuleTest::as_any(self)
     }
-}
-
-/// `RuleTest.testAgainstWorldState(LevelReader, BlockPos, RandomSource)` — the
-/// Java shell: `this.test(level.getBlockState(pos), random)`.
-///
-/// The `getBlockState` call is the capability-unavailable seam (RivetTodo
-/// #399): no production world provides it yet, so calling through panics rather
-/// than fabricating a state (the same explicit seam `blockpredicates` uses).
-/// `AlwaysTrueTest` overrides this shell to return `true` without touching the
-/// level, exactly like Java.
-pub fn rule_test_test_against_world_state<T: RuleTest + ?Sized, R: RandomSource>(
-    test: &T,
-    level: &dyn WorldGenLevel,
-    pos: &BlockPos,
-    random: &mut R,
-) -> bool {
-    let state = level.get_block_state(pos);
-    test.test(&state, random)
 }
 
 /// `RuleTest.CODEC` — the dispatch codec, as the ops-generic
@@ -316,7 +319,7 @@ mod tests {
         let origin = BlockPos::new(0, 0, 0);
         let mut random = rivet_util::random::LegacyRandomSource::new(0);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rule_test_test_against_world_state(&t, &CapabilityGapLevel, &origin, &mut random)
+            t.test_against_world_state(&CapabilityGapLevel, &origin, &mut random)
         }));
         assert!(
             result.is_err(),

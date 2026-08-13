@@ -46,17 +46,18 @@ impl RuleTest for AlwaysTrueTest {
     fn as_any(&self) -> &dyn Any {
         self
     }
-}
 
-/// `AlwaysTrueTest.testAgainstWorldState(LevelReader, BlockPos, RandomSource)` —
-/// overridden to `true` without touching the level (Java's override; the only
-/// rule test that avoids the `getBlockState` seam).
-pub fn always_true_test_against_world_state<R: RandomSource>(
-    _level: &dyn WorldGenLevel,
-    _pos: &BlockPos,
-    _random: &mut R,
-) -> bool {
-    true
+    /// `AlwaysTrueTest.testAgainstWorldState` — overridden to `true` without
+    /// touching the level (Java's `@Override`; the only rule test that avoids
+    /// the `getBlockState` seam).
+    fn test_against_world_state<R: RandomSource>(
+        &self,
+        _level: &dyn WorldGenLevel,
+        _pos: &BlockPos,
+        _random: &mut R,
+    ) -> bool {
+        true
+    }
 }
 
 /// `AlwaysTrueTest.CODEC` — `MapCodec.unit(INSTANCE)`, as the ops-generic
@@ -78,8 +79,9 @@ mod tests {
             .default_block_state();
         assert!(AlwaysTrueTest::INSTANCE.test(&air, &mut random));
         // Java overrides `testAgainstWorldState` to return true without
-        // touching the level — the port's standalone override mirrors that.
-        assert!(always_true_test_against_world_state(
+        // touching the level — the port's trait override dispatches to that
+        // (the default shell would panic on the capability-gap level).
+        assert!(AlwaysTrueTest::INSTANCE.test_against_world_state(
             &capability_gap_level(),
             &BlockPos::ZERO,
             &mut random

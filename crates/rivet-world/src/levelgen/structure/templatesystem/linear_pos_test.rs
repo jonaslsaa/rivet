@@ -18,10 +18,10 @@
 //! The codec is ported here (as the ops-generic `linear_pos_test_map_codec::<Ops>()`
 //! factory) and lifted to the erased carrier in `pos_rule_test`.
 //!
-//! `BlockPos.distManhattan` is inherited from `Vec3i` in Java but only declared
-//! on `Vec3i` in the port, so the Manhattan distance is replicated here with
-//! the same wrapping arithmetic (`Vec3i.distManhattan`'s float-abs-then-truncate
-//! sum).
+//! `BlockPos.distManhattan` is inherited from `Vec3i` in Java and re-declared
+//! on `BlockPos` in the port (like the other Java-inherited `Vec3i` methods,
+//! e.g. `dist_chessboard`), so `test` calls
+//! `world_pos.dist_manhattan(world_reference)` directly.
 
 use crate::levelgen::structure::templatesystem::pos_rule_test::PosRuleTest;
 use crate::levelgen::structure::templatesystem::pos_rule_test_type::{
@@ -67,25 +67,6 @@ impl LinearPosTest {
     }
 }
 
-/// `Vec3i.distManhattan(BlockPos)` — Java's float-abs-then-truncate sum, with
-/// wrapping int subtraction (the same arithmetic `Vec3i::dist_manhattan`
-/// performs; re-declared here because the port only exposes it on `Vec3i`).
-fn dist_manhattan(world_pos: &BlockPos, world_reference: &BlockPos) -> i32 {
-    let xd = world_pos
-        .get_x()
-        .wrapping_sub(world_reference.get_x())
-        .wrapping_abs() as f32;
-    let yd = world_pos
-        .get_y()
-        .wrapping_sub(world_reference.get_y())
-        .wrapping_abs() as f32;
-    let zd = world_pos
-        .get_z()
-        .wrapping_sub(world_reference.get_z())
-        .wrapping_abs() as f32;
-    (xd + yd + zd) as i32
-}
-
 impl PosRuleTest for LinearPosTest {
     /// `LinearPosTest.test` — `rnd <= clampedLerp(inverseLerp(dist, minDist,
     /// maxDist), minChance, maxChance)` with `dist = distManhattan(worldPos,
@@ -98,7 +79,7 @@ impl PosRuleTest for LinearPosTest {
         world_reference: &BlockPos,
         random: &mut R,
     ) -> bool {
-        let dist = dist_manhattan(world_pos, world_reference);
+        let dist = world_pos.dist_manhattan(world_reference);
         let rnd = random.next_float();
         rnd <= mth::clamped_lerp_f32(
             mth::inverse_lerp_f32(dist as f32, self.min_dist as f32, self.max_dist as f32),

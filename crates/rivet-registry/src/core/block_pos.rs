@@ -135,6 +135,19 @@ impl BlockPos {
         xd.max(yd).max(zd)
     }
 
+    /// `Vec3i.distManhattan(Vec3i)` — float absolute values summed then cast
+    /// to int (Java: `(int)(xd + yd + zd)`; the float sum truncates).
+    ///
+    /// Re-declared on `BlockPos` like the other Java-inherited `Vec3i` methods
+    /// so `LinearPosTest` (Java `LinearPosTest.test` calling
+    /// `worldPos.distManhattan(worldReference)`) can call it on a `BlockPos`.
+    pub fn dist_manhattan(&self, pos: &BlockPos) -> i32 {
+        let xd = self.x.wrapping_sub(pos.x).wrapping_abs() as f32;
+        let yd = self.y.wrapping_sub(pos.y).wrapping_abs() as f32;
+        let zd = self.z.wrapping_sub(pos.z).wrapping_abs() as f32;
+        (xd + yd + zd) as i32
+    }
+
     /// `BlockPos.asLong()`.
     pub fn as_long(&self) -> i64 {
         Self::as_long_coords(self.x, self.y, self.z)
