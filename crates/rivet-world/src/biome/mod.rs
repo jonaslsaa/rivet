@@ -30,16 +30,36 @@
 #[allow(clippy::module_inception)]
 pub mod biome;
 pub mod biome_generation_settings;
+pub mod biome_id_codec;
 pub mod biome_manager;
 pub mod biome_resolver;
+pub mod biome_source;
+pub mod biome_source_type;
+pub mod biome_sources;
 pub mod biome_special_effects;
+pub mod biomes;
+pub mod checkerboard_column_biome_source;
 pub mod climate;
+pub mod fixed_biome_source;
 pub mod mob_spawn_settings;
+pub mod multi_noise_biome_source;
+pub mod multi_noise_biome_source_parameter_list;
+pub mod multi_noise_biome_source_parameter_lists;
+pub mod overworld_biome_builder;
+pub mod the_end_biome_source;
 
 pub use biome::Biome;
 pub use biome_generation_settings::BiomeGenerationSettings;
 pub use biome_manager::BiomeManager;
 pub use biome_resolver::BiomeResolver;
+pub use biome_source::BiomeSource;
+pub use biome_source_type::BiomeSourceTypeId;
 pub use biome_special_effects::BiomeSpecialEffects;
+pub use checkerboard_column_biome_source::CheckerboardColumnBiomeSource;
 pub use climate::{Climate, Parameter, ParameterList, ParameterPoint, Sampler, TargetPoint};
+pub use fixed_biome_source::FixedBiomeSource;
 pub use mob_spawn_settings::MobSpawnSettings;
+pub use multi_noise_biome_source::MultiNoiseBiomeSource;
+pub use multi_noise_biome_source_parameter_list::MultiNoiseBiomeSourceParameterList;
+pub use overworld_biome_builder::OverworldBiomeBuilder;
+pub use the_end_biome_source::TheEndBiomeSource;
