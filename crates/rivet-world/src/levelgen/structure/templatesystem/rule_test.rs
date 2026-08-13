@@ -394,4 +394,75 @@ mod tests {
             .clone();
         assert_eq!(type_id_of(&decoded), RuleTestTypes::ALWAYS_TRUE_TEST);
     }
+
+    #[test]
+    fn dispatch_round_trips_blockstate_match() {
+        // A record-based rule test round-trips through the full dispatch codec:
+        // `"predicate_type"` picks the blockstate_match entry, whose
+        // `BlockState.CODEC` half is the real ported codec.
+        use crate::levelgen::structure::templatesystem::block_state_match_test::BlockStateMatchTest;
+        use rivet_registry::generated::blocks::BlockId;
+
+        let codec = rule_test_codec::<JsonOps>();
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
+        let t: Arc<dyn ErasedRuleTest> = Arc::new(BlockStateMatchTest::new(stone));
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &t)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(
+            encoded,
+            json!({
+                "predicate_type": "minecraft:blockstate_match",
+                "block_state": {"Name": "minecraft:stone"}
+            })
+        );
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &encoded)
+            .result()
+            .expect("decode should succeed")
+            .clone();
+        assert_eq!(type_id_of(&decoded), RuleTestTypes::BLOCKSTATE_TEST);
+        let as_bsm = decoded
+            .as_any()
+            .downcast_ref::<BlockStateMatchTest>()
+            .expect("decoded blockstate_match");
+        assert_eq!(as_bsm.block_state, stone);
+    }
+
+    #[test]
+    fn dispatch_round_trips_random_blockstate_match() {
+        use crate::levelgen::structure::templatesystem::random_block_state_match_test::RandomBlockStateMatchTest;
+        use rivet_registry::generated::blocks::BlockId;
+
+        let codec = rule_test_codec::<JsonOps>();
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
+        let t: Arc<dyn ErasedRuleTest> = Arc::new(RandomBlockStateMatchTest::new(stone, 0.5));
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &t)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(
+            encoded,
+            json!({
+                "predicate_type": "minecraft:random_blockstate_match",
+                "block_state": {"Name": "minecraft:stone"},
+                "probability": 0.5
+            })
+        );
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &encoded)
+            .result()
+            .expect("decode should succeed")
+            .clone();
+        assert_eq!(type_id_of(&decoded), RuleTestTypes::RANDOM_BLOCKSTATE_TEST);
+        let as_rbsm = decoded
+            .as_any()
+            .downcast_ref::<RandomBlockStateMatchTest>()
+            .expect("decoded random_blockstate_match");
+        assert_eq!(as_rbsm.block_state, stone);
+        assert_eq!(as_rbsm.probability, 0.5);
+    }
 }

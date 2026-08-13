@@ -5,13 +5,10 @@
 //! `BlockState.CODEC.fieldOf("block_state").xmap(...)`, and its `test` is
 //! `blockState == this.blockState` (identity `==` — `BlockState` is an
 //! immutable id-handle, so identity equals value equality and the port derives
-//! `PartialEq` on the state id). The `BlockState.CODEC` itself is NOT ported
-//! (RivetTodo #202, owned by the `mc.world.level.block.state` unit); the
-//! [`block_state_codec`] STUB keeps the dispatch table type-correct, and the
-//! field codec fails loudly through the stub when actually used. The `test`
-//! equality is fully ported and tested; only the field codec defers.
+//! `PartialEq` on the state id). The `BlockState.CODEC` half is the ported
+//! `rivet_registry::block_state_codec` (issue #391); the field codec round-trips
+//! through it like every other `BlockState`-carrying codec in the codebase.
 
-use crate::levelgen::structure::templatesystem::block_state_codec::block_state_codec;
 use crate::levelgen::structure::templatesystem::rule_test::RuleTest;
 use crate::levelgen::structure::templatesystem::rule_test_type::{RuleTestTypeId, RuleTestTypes};
 use rivet_registry::block_state::BlockState;
@@ -55,12 +52,14 @@ impl RuleTest for BlockStateMatchTest {
 
 /// `BlockStateMatchTest.CODEC` — `BlockState.CODEC.fieldOf("block_state")
 /// .xmap(...)`, as the ops-generic `block_state_match_test_map_codec::<Ops>()`
-/// factory. Constructing the codec succeeds (so the `blockstate_match` dispatch
-/// entry resolves); encoding/decoding through it fails loudly — the
-/// `BlockState.CODEC` half is the `block_state_codec` STUB (RivetTodo #202).
+/// factory. The `BlockState.CODEC` half is the ported
+/// `rivet_registry::block_state_codec` (issue #391).
 pub fn block_state_match_test_map_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn MapCodec<BlockStateMatchTest, Ops>> {
-    let field = codec::field_of(block_state_codec::<Ops>(), "block_state".to_string());
+    let field = codec::field_of(
+        rivet_registry::block_state_codec::block_state_codec::<Ops>(),
+        "block_state".to_string(),
+    );
     map_codec::xmap(
         field,
         Arc::new(|b: &BlockState| BlockStateMatchTest::new(*b)),
@@ -87,21 +86,47 @@ mod tests {
     }
 
     #[test]
-    fn codec_construction_succeeds_but_use_panics() {
-        // The `BlockState.CODEC` half is the STUB (RivetTodo #202): building
-        // the dispatch entry must not fail, but actually using it must fail
-        // loudly rather than fabricate a state codec.
+    fn codec_round_trips_singleton_state() {
+        // A singleton block state (stone) encodes through the real
+        // `BlockState.CODEC` as just `{"Name": ...}`, and the `block_state`
+        // field wraps it.
         use crate::levelgen::structure::templatesystem::codec_test_util;
-        let codec = codec_test_util::codec(block_state_match_test_map_codec::<
-            rivet_serialization::json_ops::JsonOps,
-        >());
-        let stone = crate::block::Block::from_name("minecraft:stone")
-            .unwrap()
-            .default_block_state();
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_serialization::json_ops::JsonOps;
+        use serde_json::json;
+
+        let codec = codec_test_util::codec(block_state_match_test_map_codec::<JsonOps>());
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
         let t = BlockStateMatchTest::new(stone);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = codec_test_util::encode(&codec, &t);
-        }));
-        assert!(result.is_err());
+        let encoded = codec_test_util::encode(&codec, &t);
+        assert_eq!(encoded, json!({"block_state": {"Name": "minecraft:stone"}}));
+        let decoded = codec_test_util::decode(&codec, &encoded);
+        assert_eq!(decoded, t);
+    }
+
+    #[test]
+    fn codec_round_trips_state_with_properties() {
+        // A multi-property state (oak_log with a non-default axis) round-trips
+        // through the `Properties` fold, mirroring the `block_state_codec`
+        // tests.
+        use crate::levelgen::structure::templatesystem::codec_test_util;
+        use rivet_registry::generated::block_properties::BlockPropertyId;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_serialization::json_ops::JsonOps;
+        use serde_json::json;
+
+        let codec = codec_test_util::codec(block_state_match_test_map_codec::<JsonOps>());
+        let oak_log = BlockId::from_name("minecraft:oak_log").unwrap();
+        let state = BlockState::of(oak_log)
+            .set_property(BlockPropertyId::Axis, 0)
+            .unwrap();
+        let t = BlockStateMatchTest::new(state);
+        let encoded = codec_test_util::encode(&codec, &t);
+        assert_eq!(
+            encoded,
+            json!({"block_state": {"Name": "minecraft:oak_log", "Properties": {"axis": "x"}}})
+        );
+        let decoded = codec_test_util::decode(&codec, &encoded);
+        assert_eq!(decoded, t);
     }
 }

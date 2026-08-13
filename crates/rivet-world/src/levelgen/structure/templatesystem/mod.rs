@@ -20,7 +20,6 @@ pub mod always_true_test;
 pub mod axis_aligned_linear_pos_test;
 pub mod axis_codec;
 pub mod block_match_test;
-pub mod block_state_codec;
 pub mod block_state_match_test;
 #[cfg(test)]
 pub mod codec_test_util;
