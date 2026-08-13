@@ -249,50 +249,34 @@ mod tests {
     }
 
     /// The Paper 26.2 `SurfaceRuleData` block constants must pin the exact raw
-    /// registry ids from the generated `BLOCK_BY_NAME` table: name, raw id,
-    /// and the generated-table mapping must all agree.
+    /// registry ids from the generated `BLOCK_BY_NAME` table. (Name and
+    /// `from_name` round-trips are covered by
+    /// [`constants_match_generated_names_and_ids`], so this asserts only the
+    /// raw-id pin.)
     #[test]
     fn surface_rule_data_constants_pin_raw_ids() {
-        let cases: [(Block, u16, &str); 18] = [
-            (Blocks::SANDSTONE, 106, "minecraft:sandstone"),
-            (Blocks::SOUL_SOIL, 287, "minecraft:soul_soil"),
-            (Blocks::BASALT, 288, "minecraft:basalt"),
-            (Blocks::WHITE_TERRACOTTA, 484, "minecraft:white_terracotta"),
-            (
-                Blocks::ORANGE_TERRACOTTA,
-                485,
-                "minecraft:orange_terracotta",
-            ),
-            (Blocks::TERRACOTTA, 554, "minecraft:terracotta"),
-            (Blocks::PACKED_ICE, 556, "minecraft:packed_ice"),
-            (Blocks::RED_SANDSTONE, 595, "minecraft:red_sandstone"),
-            (
-                Blocks::NETHER_WART_BLOCK,
-                672,
-                "minecraft:nether_wart_block",
-            ),
-            (Blocks::WARPED_NYLIUM, 866, "minecraft:warped_nylium"),
-            (
-                Blocks::WARPED_WART_BLOCK,
-                868,
-                "minecraft:warped_wart_block",
-            ),
-            (Blocks::CRIMSON_NYLIUM, 875, "minecraft:crimson_nylium"),
-            (Blocks::BLACKSTONE, 924, "minecraft:blackstone"),
-            (Blocks::SULFUR, 998, "minecraft:sulfur"),
-            (Blocks::CINNABAR, 1012, "minecraft:cinnabar"),
-            (Blocks::CALCITE, 1025, "minecraft:calcite"),
-            (Blocks::POWDER_SNOW, 1027, "minecraft:powder_snow"),
-            (Blocks::MUD, 1150, "minecraft:mud"),
+        let cases: [(Block, u16); 18] = [
+            (Blocks::SANDSTONE, 106),
+            (Blocks::SOUL_SOIL, 287),
+            (Blocks::BASALT, 288),
+            (Blocks::WHITE_TERRACOTTA, 484),
+            (Blocks::ORANGE_TERRACOTTA, 485),
+            (Blocks::TERRACOTTA, 554),
+            (Blocks::PACKED_ICE, 556),
+            (Blocks::RED_SANDSTONE, 595),
+            (Blocks::NETHER_WART_BLOCK, 672),
+            (Blocks::WARPED_NYLIUM, 866),
+            (Blocks::WARPED_WART_BLOCK, 868),
+            (Blocks::CRIMSON_NYLIUM, 875),
+            (Blocks::BLACKSTONE, 924),
+            (Blocks::SULFUR, 998),
+            (Blocks::CINNABAR, 1012),
+            (Blocks::CALCITE, 1025),
+            (Blocks::POWDER_SNOW, 1027),
+            (Blocks::MUD, 1150),
         ];
-        for (block, raw_id, name) in cases {
-            assert_eq!(block.id().0, raw_id, "raw id for `{name}`");
-            assert_eq!(block.name(), name, "name for raw id {raw_id}");
-            assert_eq!(
-                BlockId::from_name(name).map(|id| id.0),
-                Some(raw_id),
-                "generated table maps `{name}` -> {raw_id}"
-            );
+        for (block, raw_id) in cases {
+            assert_eq!(block.id().0, raw_id, "raw id for `{}`", block.name());
         }
     }
 
