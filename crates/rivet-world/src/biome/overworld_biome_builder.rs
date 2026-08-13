@@ -85,7 +85,8 @@ impl OverworldBiomeBuilder {
         }
     }
 
-    /// STUB(#178) — `addBiomes(Consumer<Pair<ParameterPoint, ResourceKey<Biome>>>)`.
+    /// STUB(mc.world.level.biome.data) — `addBiomes(Consumer<Pair<ParameterPoint,
+    /// ResourceKey<Biome>>>)`.
     ///
     /// The `addPeaks`/`addHighSlice`/`addLowSlice`/`addValleys`/
     /// `addOffCoastBiomes` tables that emit the full overworld parameter list

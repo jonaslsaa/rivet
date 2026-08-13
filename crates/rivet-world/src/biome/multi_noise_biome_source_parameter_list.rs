@@ -22,8 +22,8 @@
 //!   `Hash`). `Preset.CODEC` is `Identifier.CODEC.flatXmap` with Java's exact
 //!   `"Unknown preset: <name>"` error.
 //! - The `OVERWORLD` preset applies the `OverworldBiomeBuilder.add_biomes`
-//!   STUB (`mc.world.level.biome.data`), which currently emits nothing. The
-//!   provider application is therefore **fallible**: it reports
+//!   stub (the `mc.world.level.biome.data` table), which currently emits
+//!   nothing. The provider application is therefore **fallible**: it reports
 //!   [`OverworldDeferred`] rather than building an empty `ParameterList` (whose
 //!   RTree construction panics). `used_biomes` and
 //!   `MultiNoiseBiomeSourceParameterList::new` propagate the typed deferral;
