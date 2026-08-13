@@ -3295,7 +3295,6 @@ pub fn bandlands() -> ArcRuleSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::biome::biome_manager::NoiseBiomeSource;
     use crate::chunk::chunk_generator::ChunkGenerator;
     use crate::level::WorldGenLevel;
     use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor, create};
@@ -3884,14 +3883,6 @@ mod tests {
         );
     }
 
-    /// A `NoiseBiomeSource` returning a fixed biome for every quart position.
-    struct FixedBiomeSource(BiomeId);
-    impl NoiseBiomeSource for FixedBiomeSource {
-        fn get_noise_biome(&self, _qx: i32, _qy: i32, _qz: i32) -> Holder<BiomeId> {
-            Holder::direct(self.0)
-        }
-    }
-
     /// The `RandomState` + `NoiseChunk` needed to drive `build_surface` —
     /// built like the noise_chunk.rs tests (real `RandomState::create` against
     /// a bootstrap noise registry, the zero-output surface-system noises).
@@ -3967,7 +3958,9 @@ mod tests {
         // on the `old == defaultBlock` stone columns.
         let rule_source: ArcRuleSource = state(Blocks::AIR.default_block_state());
         let biome_manager = Arc::new(BiomeManager::new(
-            Arc::new(FixedBiomeSource(BiomeId::from_id(0))),
+            Arc::new(crate::biome::FixedBiomeSource::new(Holder::direct(
+                BiomeId::from_id(0),
+            ))),
             0,
         ));
         let gen_context = Arc::new(worldgen_context(-64, 384, 384));
@@ -4018,7 +4011,9 @@ mod tests {
             state(Blocks::AIR.default_block_state()),
         );
         let biome_manager = Arc::new(BiomeManager::new(
-            Arc::new(FixedBiomeSource(BiomeId::from_id(0))),
+            Arc::new(crate::biome::FixedBiomeSource::new(Holder::direct(
+                BiomeId::from_id(0),
+            ))),
             0,
         ));
         let gen_context = Arc::new(worldgen_context(-64, 384, 384));
@@ -4074,7 +4069,9 @@ mod tests {
             state(Blocks::GRASS_BLOCK.default_block_state()),
         );
         let biome_manager = Arc::new(BiomeManager::new(
-            Arc::new(FixedBiomeSource(BiomeId::from_id(0))),
+            Arc::new(crate::biome::FixedBiomeSource::new(Holder::direct(
+                BiomeId::from_id(0),
+            ))),
             0,
         ));
         let biome_getter: BiomeGetter = {

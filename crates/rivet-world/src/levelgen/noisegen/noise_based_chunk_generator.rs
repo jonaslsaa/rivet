@@ -35,11 +35,13 @@
 //!   `Holder::value`.
 //!
 //! The still-unported world/level surfaces this slice touches (`WorldGenRegion`,
-//! `StructureManager`, `BiomeSource`, `NaturalSpawner`, `NoiseColumn`) defer
-//! with their owning units; the surfaces that have landed (`BiomeManager`,
-//! `CarvingContext`/`CarvingMask`, `BiomeGenerationSettings`,
-//! `ConfiguredWorldCarver`, `LevelChunkSection`, `ProtoChunk`, `Heightmap`)
-//! are consumed directly; see the noisegen module doc.
+//! `StructureManager`, `NaturalSpawner`, `NoiseColumn`) defer with their owning
+//! units; the `BiomeSource` family is ported while the `ChunkGenerator` base
+//! that owns a `BiomeSource` field defers with the `mc.world.level.chunk.generator`
+//! unit; the surfaces that have landed (`BiomeManager`, `CarvingContext`/
+//! `CarvingMask`, `BiomeGenerationSettings`, `ConfiguredWorldCarver`,
+//! `LevelChunkSection`, `ProtoChunk`, `Heightmap`) are consumed directly; see
+//! the noisegen module doc.
 
 use crate::block::BlockState;
 use crate::block::blocks::Blocks;
@@ -427,9 +429,9 @@ impl NoiseBasedChunkGenerator {
     /// `CarvingContext`, `CarvingMask`, `BiomeGenerationSettings.getCarvers`,
     /// `ConfiguredWorldCarver.carve`, and `BiomeManager.withDifferentSource` live in
     /// their owning units, and `NoiseChunk.aquifer()` is here (see `noise_chunk.rs`).
-    /// Only `WorldGenRegion`, `BiomeSource.getNoiseBiome`, and
-    /// `WorldgenRandom.setLargeFeatureSeed` defer with the `chunk.generator` wave
-    /// (RivetTodo #185).
+    /// Only `WorldGenRegion`, the carver loop calling `BiomeSource.getNoiseBiome`
+    /// with a `Climate.Sampler`, and `WorldgenRandom.setLargeFeatureSeed` defer
+    /// with the `chunk.generator` wave (RivetTodo #185).
     pub fn apply_carvers_stub(&self) {}
 
     /// `fillFromNoise(Blender, RandomState, StructureManager, ChunkAccess)` —
