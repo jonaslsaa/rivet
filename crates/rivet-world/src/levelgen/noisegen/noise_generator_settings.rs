@@ -18,13 +18,15 @@
 //! - `spawnTarget` inlines `new OverworldBiomeBuilder().spawnTarget()` (the
 //!   two `ParameterPoint`s the biome unit's builder returns — the only leaf
 //!   this SCC reads; see the module doc).
-//! - `SurfaceRuleData.end/nether/overworld/overworldLike` are STUBs in
+//! - `SurfaceRuleData.end` is ported (the end-stone `block` rule);
+//!   `SurfaceRuleData.nether/overworld/overworldLike` are AIR STUBs in
 //!   `levelgen::surface_rules` (the real builders belong to the
-//!   `mc.data.worldgen` unit, still pending); each preset carries the same AIR
-//!   block-state `block` rule — the real `SurfaceRules.state(Blocks.AIR)`
-//!   (Java's `makeStateRule`), whether via `surface_rule_air()` directly or
-//!   one of the STUB builders that resolve to it — so the `surface_rule` field
-//!   composes and round-trips through the `MATERIAL_RULE` codec.
+//!   `mc.data.worldgen` unit, still pending; RivetTodo #179) because a faithful
+//!   port needs the biome `HolderGetter` threaded through the settings
+//!   bootstrap. Each STUB preset carries the same AIR block-state `block` rule
+//!   — the real `SurfaceRules.state(Blocks.AIR)` (Java's `makeStateRule`) — so
+//!   the `surface_rule` field composes and round-trips through the
+//!   `MATERIAL_RULE` codec.
 //! - `Blocks.END_STONE/NETHERRACK/LAVA/STONE/WATER/AIR` all have
 //!   `default_block_state()` handles.
 //! - `WorldgenRandom.Algorithm` — `rivet_util::worldgen_random::Algorithm`.

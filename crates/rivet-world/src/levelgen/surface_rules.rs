@@ -78,7 +78,10 @@
 //! defers with the `#216` section write (RivetTodo #216); the worldgen
 //! heightmap reads (`getHeight(WORLD_SURFACE_WG)`) and the `Biome`-value reads
 //! (`coldEnoughToSnow`, `shouldMeltFrozenOceanIcebergSlightly`) are the
-//! `#185`/biome-value seams.
+//! `#185`/biome-value seams. `SurfaceRuleData.end` is ported (the end-stone
+//! `block` rule); the `nether`/`overworld`/`overworldLike` builders remain AIR
+//! shims (the `mc.data.worldgen` unit, RivetTodo #179) because a faithful port
+//! needs the biome `HolderGetter` threaded through the settings bootstrap.
 
 use crate::biome::BiomeManager;
 use crate::block::BlockState;
@@ -1038,21 +1041,25 @@ impl Condition for TemperatureHelperCondition {
     }
 }
 
-/// The `#185`-seam heightmap read — see the module doc.
+/// The `RivetTodo(#185)` heightmap seam — see the module doc.
 fn seam_get_height(_x: i32, _z: i32) -> i32 {
     // STUB(mc.world.level.chunk.access): the `ChunkAccess.getHeight(
     // WORLD_SURFACE_WG, x, z)` read needs the `&mut` heightmap prime (the
-    // `#216` write slice / `#185` worldgen chunk seam). Returning 0 keeps the
-    // steep condition from spuriously triggering; the real caller replaces
-    // this.
+    // `RivetTodo(#216)` write slice / `RivetTodo(#185)` worldgen chunk seam).
+    // Returning 0 unconditionally means `SteepMaterialCondition` never fires:
+    // every worldgen-heightmap-driven surface is deferred until the heightmap
+    // write slice lands; the real caller replaces this with the actual reads.
     0
 }
 
-/// The `#185`/biome-value seam — `getBiome().value().coldEnoughToSnow(...)`.
+/// The `RivetTodo(#185)` biome-value seam —
+/// `getBiome().value().coldEnoughToSnow(pos, seaLevel)`.
 fn seam_cold_enough_to_snow() -> bool {
     // STUB(mc.world.level.biome.core): `BiomeManager` yields
     // `Holder<BiomeId>`; the `Biome`-value registry is unported, so the
-    // temperature condition is deferred (RivetTodo #185).
+    // temperature condition is permanently false (no snow coverage from this
+    // rule) until `RivetTodo(#185)` ports the value registry and this becomes
+    // the real `coldEnoughToSnow` call.
     false
 }
 
@@ -2957,26 +2964,38 @@ pub fn surface_rule_air() -> ArcRuleSource {
     state(Blocks::AIR.default_block_state())
 }
 
-/// STUB(mc.data.worldgen): `SurfaceRuleData.end()` — a complex
-/// sequence; the placeholder writes air everywhere (a `block` rule so the
-/// value still round-trips through `rule_source_codec`).
+/// `SurfaceRuleData.end()` — Java's `return ENDSTONE` =
+/// `makeStateRule(Blocks.END_STONE)` (a `block` rule carrying the end-stone
+/// default state). The end preset's real surface rule.
 pub fn surface_rule_end() -> ArcRuleSource {
+    state(Blocks::END_STONE.default_block_state())
+}
+
+/// `SurfaceRuleData.nether(HolderGetter<Biome>)` — the lava/nylium/soul-sand/
+/// gravel nether surface tree. The port keeps an AIR shim (a `block` rule so
+/// the value still round-trips through `rule_source_codec`): a faithful port
+/// needs the biome `HolderGetter` threaded through the settings bootstrap (the
+/// `mc.data.worldgen` unit, RivetTodo #179) and the biome-value registry
+/// (`RivetTodo #185`/`#178`). Until the `build_surface` production wire
+/// (RivetTodo #177) lands, the shim is inert; once it lands, the nether preset
+/// would silently get an all-air surface — this is the tracked deferral.
+pub(crate) fn surface_rule_nether() -> ArcRuleSource {
     state(Blocks::AIR.default_block_state())
 }
 
-/// STUB(mc.data.worldgen): `SurfaceRuleData.nether(HolderGetter<Biome>)`.
-pub fn surface_rule_nether() -> ArcRuleSource {
+/// `SurfaceRuleData.overworld(HolderGetter<Biome>)` — the full overworld
+/// surface tree. The port keeps an AIR shim for the same reason as
+/// `surface_rule_nether` (see there): the biome `HolderGetter` threading is
+/// the `mc.data.worldgen` unit (RivetTodo #179).
+pub(crate) fn surface_rule_overworld() -> ArcRuleSource {
     state(Blocks::AIR.default_block_state())
 }
 
-/// STUB(mc.data.worldgen): `SurfaceRuleData.overworld(HolderGetter<Biome>)`.
-pub fn surface_rule_overworld() -> ArcRuleSource {
-    state(Blocks::AIR.default_block_state())
-}
-
-/// STUB(mc.data.worldgen): `SurfaceRuleData.overworldLike(
-/// HolderGetter<Biome>, boolean hasCeiling, boolean hasFloor, boolean isFrozen)`.
-pub fn surface_rule_overworld_like(
+/// `SurfaceRuleData.overworldLike(HolderGetter<Biome>, boolean hasCeiling,
+/// boolean hasFloor, boolean isFrozen)` — the overworld tree parametrized for
+/// the `caves`/`floating_islands` presets. The port keeps an AIR shim for the
+/// same reason as `surface_rule_nether` (see there).
+pub(crate) fn surface_rule_overworld_like(
     _has_ceiling: bool,
     _has_floor: bool,
     _is_frozen: bool,
@@ -3424,6 +3443,25 @@ mod tests {
         assert_eq!(
             encoded,
             json!({"type": "minecraft:block", "result_state": {"Name": "minecraft:air"}})
+        );
+        let decoded = codec.parse(&ops, &encoded).get_or_throw("decode").clone();
+        assert!(decoded.as_any().is::<BlockRuleSource>());
+    }
+
+    /// `SurfaceRuleData.end()` must round-trip through `rule_source_codec` as a
+    /// `block` rule carrying end stone (Java's `makeStateRule(Blocks.END_STONE)`),
+    /// never the fabricated all-air placeholder.
+    #[test]
+    fn surface_rule_end_encodes_as_end_stone_block_rule() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let encoded = codec
+            .encode_start(&ops, &surface_rule_end())
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            encoded,
+            json!({"type": "minecraft:block", "result_state": {"Name": "minecraft:end_stone"}})
         );
         let decoded = codec.parse(&ops, &encoded).get_or_throw("decode").clone();
         assert!(decoded.as_any().is::<BlockRuleSource>());
