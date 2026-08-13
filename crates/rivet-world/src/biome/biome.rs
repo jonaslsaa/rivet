@@ -297,7 +297,11 @@ impl Biome {
                 (pos.get_z() as f32 / 8.0f32) as f64,
                 false,
             ) * 8.0) as f32;
-            adjusted_temperature - (v + (pos.get_y() - snow_level) as f32) * 0.05f32 / 40.0f32
+            // Java: `adjustedTemperature - (v + pos.getY() - snowLevel) *
+            // 0.05F / 40.0F` — the whole `v + pos.getY() - snowLevel` sum runs
+            // left-to-right in float (each int widened at its operand), so the
+            // i32 difference must NOT be formed first.
+            adjusted_temperature - (v + pos.get_y() as f32 - snow_level as f32) * 0.05f32 / 40.0f32
         } else {
             adjusted_temperature
         }
