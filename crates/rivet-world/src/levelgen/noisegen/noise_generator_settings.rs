@@ -546,10 +546,12 @@ impl<Ops: DynamicOps + 'static> MapEncoder<NoiseGeneratorSettings, Ops>
         self.sea_level.encode(&input.sea_level, ops, prefix);
         self.disable_mob_generation
             .encode(&input.disable_mob_generation, ops, prefix);
+        // Java's `DIRECT_CODEC` `forGetter` is the DEBUG-gated accessor
+        // (`isAquifersEnabled` / `oreVeinsEnabled`), so encode through it.
         self.aquifers_enabled
-            .encode(&input.aquifers_enabled, ops, prefix);
+            .encode(&input.is_aquifers_enabled(), ops, prefix);
         self.ore_veins_enabled
-            .encode(&input.ore_veins_enabled, ops, prefix);
+            .encode(&input.ore_veins_enabled(), ops, prefix);
         self.legacy_random_source
             .encode(&input.use_legacy_random_source, ops, prefix);
     }

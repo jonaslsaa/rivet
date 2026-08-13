@@ -2686,19 +2686,20 @@ impl SurfaceSystem {
         proto_chunk_min_y: i32,
     ) {
         let pillar_noise_scale = 0.2;
-        let pillar_buffer =
+        // Java `Math.min(Math.abs(...), ...)` — `min_f64` propagates NaN from
+        // either operand like Java's `Math.min` (Rust `f64::min` would drop it).
+        let pillar_buffer = mth::min_f64(
             (self
                 .badlands_surface_noise
                 .get_value(block_x as f64, 0.0, block_z as f64)
                 * 8.25)
-                .abs()
-                .min(
-                    self.badlands_pillar_noise.get_value(
-                        block_x as f64 * pillar_noise_scale,
-                        0.0,
-                        block_z as f64 * pillar_noise_scale,
-                    ) * 15.0,
-                );
+                .abs(),
+            self.badlands_pillar_noise.get_value(
+                block_x as f64 * pillar_noise_scale,
+                0.0,
+                block_z as f64 * pillar_noise_scale,
+            ) * 15.0,
+        );
         if pillar_buffer <= 0.0 {
             return;
         }
@@ -2710,8 +2711,11 @@ impl SurfaceSystem {
             block_z as f64 * floor_noise_sample_resolution,
         ) * floor_amplitude)
             .abs();
-        let extension_top =
-            64.0 + (pillar_buffer * pillar_buffer * 2.5).min((pillar_floor * 50.0).ceil() + 24.0);
+        let extension_top = 64.0
+            + mth::min_f64(
+                pillar_buffer * pillar_buffer * 2.5,
+                (pillar_floor * 50.0).ceil() + 24.0,
+            );
         let start_y = mth::floor_d(extension_top);
         if height > start_y {
             return;
@@ -2752,18 +2756,20 @@ impl SurfaceSystem {
         height: i32,
     ) {
         let pillar_scale = 1.28;
-        let iceberg = (self
-            .iceberg_surface_noise
-            .get_value(block_x as f64, 0.0, block_z as f64)
-            * 8.25)
-            .abs()
-            .min(
-                self.iceberg_pillar_noise.get_value(
-                    block_x as f64 * pillar_scale,
-                    0.0,
-                    block_z as f64 * pillar_scale,
-                ) * 15.0,
-            );
+        // Java `Math.min(Math.abs(...), ...)` — NaN-propagating `min_f64` (see
+        // `eroded_badlands_extension`).
+        let iceberg = mth::min_f64(
+            (self
+                .iceberg_surface_noise
+                .get_value(block_x as f64, 0.0, block_z as f64)
+                * 8.25)
+                .abs(),
+            self.iceberg_pillar_noise.get_value(
+                block_x as f64 * pillar_scale,
+                0.0,
+                block_z as f64 * pillar_scale,
+            ) * 15.0,
+        );
         if iceberg <= 1.8 {
             return;
         }
@@ -2775,7 +2781,7 @@ impl SurfaceSystem {
             block_z as f64 * roof_scale,
         ) * roof_amplitude)
             .abs();
-        let mut top = (iceberg * iceberg * 1.2).min((iceberg_roof * 40.0).ceil() + 14.0);
+        let mut top = mth::min_f64(iceberg * iceberg * 1.2, (iceberg_roof * 40.0).ceil() + 14.0);
         if _surface_biome_melt {
             top -= 2.0;
         }
