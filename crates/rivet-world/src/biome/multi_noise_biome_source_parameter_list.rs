@@ -21,21 +21,23 @@
 //!   `Identifier`, the port by the identifier string (the `Identifier` is not
 //!   `Hash`). `Preset.CODEC` is `Identifier.CODEC.flatXmap` with Java's exact
 //!   `"Unknown preset: <name>"` error.
-//! - The `OVERWORLD` preset applies the `OverworldBiomeBuilder.add_biomes`
-//!   stub (the `mc.world.level.biome.data` table), which currently emits
-//!   nothing. The provider application is therefore **fallible**: it reports
-//!   [`OverworldDeferred`] rather than building an empty `ParameterList` (whose
-//!   RTree construction panics). `used_biomes` and
-//!   `MultiNoiseBiomeSourceParameterList::new` propagate the typed deferral;
-//!   `Preset::overworld` itself still resolves by name (`BY_NAME`), matching
-//!   Java. When the `.data` unit fills the table the provider starts returning
-//!   `Ok` and no call site changes.
+//! - The `OVERWORLD` preset applies the `.data`-owned
+//!   `OverworldBiomeBuilder.add_biomes`, which emits the 7594-point overworld
+//!   table from the generated `OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS`; the
+//!   `NETHER` preset iterates the generated `NETHER_BIOME_SOURCE_PARAMETER_POINTS`.
+//!   Both applications are infallible — each preset always builds a nonempty
+//!   `ParameterList`. A biome registry missing one of the referenced keys panics
+//!   in `get_or_throw` (`"Missing element ..."`), which is Java-faithful:
+//!   `HolderGetter.getOrThrow` throws `IllegalStateException`, propagating out of
+//!   `MultiNoiseBiomeSourceParameterList::new` in the same codec-decode and
+//!   bootstrap paths.
 
 use crate::biome::biome_source::keys;
-use crate::biome::biomes;
-use crate::biome::climate::{Climate, ParameterList};
+use crate::biome::biomes::register_from_full_name;
+use crate::biome::climate::{ParameterList, ParameterPoint};
 use crate::biome::overworld_biome_builder::OverworldBiomeBuilder;
 use rivet_registry::biome_id::BiomeId;
+use rivet_registry::generated::worldgen::NETHER_BIOME_SOURCE_PARAMETER_POINTS;
 use rivet_registry::holder::Holder;
 use rivet_registry::holder_lookup::{HolderGetter, RegistryGetter};
 use rivet_registry::identifier::{Identifier, identifier_codec};
@@ -89,15 +91,9 @@ impl PartialEq for MultiNoiseBiomeSourceParameterList {
 
 impl MultiNoiseBiomeSourceParameterList {
     /// `new MultiNoiseBiomeSourceParameterList(Preset, HolderGetter<Biome>)`.
-    ///
-    /// Fallible: applying a deferred preset (currently `OVERWORLD`) reports
-    /// [`OverworldDeferred`] instead of building an empty `ParameterList`.
-    pub fn new(
-        preset: Preset,
-        biomes: &dyn HolderGetter<BiomeId>,
-    ) -> Result<Self, OverworldDeferred> {
-        let parameters = preset.provider_biome_id().apply(biomes)?;
-        Ok(MultiNoiseBiomeSourceParameterList { preset, parameters })
+    pub fn new(preset: Preset, biomes: &dyn HolderGetter<BiomeId>) -> Self {
+        let parameters = preset.provider_biome_id().apply(biomes);
+        MultiNoiseBiomeSourceParameterList { preset, parameters }
     }
 
     /// `MultiNoiseBiomeSourceParameterList.parameters()`.
@@ -173,24 +169,16 @@ impl<Ops: DynamicOps + 'static> MapDecoder<MultiNoiseBiomeSourceParameterList, O
         let getter = self.getter.decode(ops, input);
         // Java `RecordCodecBuilder.create(...).apply(i, MultiNoiseBiomeSourceParameterList::new)`
         // — `DataResult.ap2` over the `(Preset, HolderGetter<Biome>)` pair. The
-        // constructor is fallible in the port (a deferred `OVERWORLD` preset
-        // errors instead of building an empty list), so the applicative returns
-        // a nested `DataResult` flattened with the identity `flat_map`.
+        // constructor is infallible, so the applicative result is flattened with
+        // the identity `flat_map`.
         preset
             .apply2(
                 |p: &Preset, g: &RegistryGetter<BiomeId>| {
-                    match p.provider_biome_id().apply(g) {
-                        Ok(parameters) => {
-                            DataResult::success(MultiNoiseBiomeSourceParameterList {
-                                preset: p.clone(),
-                                parameters,
-                            })
-                        }
-                        Err(_) => DataResult::error(format!(
-                            "Preset '{}' cannot be applied (OverworldBiomeBuilder is deferred to mc.world.level.biome.data)",
-                            p.id
-                        )),
-                    }
+                    let parameters = p.provider_biome_id().apply(g);
+                    DataResult::success(MultiNoiseBiomeSourceParameterList {
+                        preset: p.clone(),
+                        parameters,
+                    })
                 },
                 getter,
             )
@@ -244,30 +232,13 @@ pub struct Preset {
     provider: PresetProvider,
 }
 
-/// The `OVERWORLD` preset's application deferral.
-///
-/// The `.data`-owned `OverworldBiomeBuilder::add_biomes` table
-/// (`mc.world.level.biome.data`) is a STUB that currently emits nothing, so
-/// applying `Preset::overworld` cannot build its `ParameterList`. The provider
-/// application surfaces report this typed deferral instead of reaching the
-/// generic RTree empty-list panic (`ParameterList::new` requires >= 1 entry).
-/// Removed when the `.data` unit fills the table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OverworldDeferred;
-
 /// `Preset.SourceProvider` — `Function<ResourceKey<Biome>, T>` specialized to
-/// the id element `Holder<BiomeId>` (the only element this unit builds). The
-/// application is fallible: a deferred preset (currently only `OVERWORLD`)
-/// reports [`OverworldDeferred`] instead of building an empty list.
+/// the id element `Holder<BiomeId>` (the only element this unit builds).
 #[derive(Clone)]
 #[allow(clippy::type_complexity)] // Java's generic `SourceProvider` function type.
 pub struct PresetProvider(
-    Arc<dyn Fn(&dyn HolderGetter<BiomeId>) -> PresetApplyResult + Send + Sync>,
+    Arc<dyn Fn(&dyn HolderGetter<BiomeId>) -> ParameterList<Holder<BiomeId>> + Send + Sync>,
 );
-
-/// The provider application result — `ParameterList` or the deferred-preset
-/// marker (see [`OverworldDeferred`]).
-pub type PresetApplyResult = Result<ParameterList<Holder<BiomeId>>, OverworldDeferred>;
 
 impl std::fmt::Debug for PresetProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -285,17 +256,16 @@ impl PartialEq for PresetProvider {
 impl Eq for PresetProvider {}
 
 impl PresetProvider {
-    /// Wrap a `Fn(&dyn HolderGetter<BiomeId>) -> PresetApplyResult`.
+    /// Wrap a `Fn(&dyn HolderGetter<BiomeId>) -> ParameterList<Holder<BiomeId>>`.
     pub fn new(
-        f: impl Fn(&dyn HolderGetter<BiomeId>) -> PresetApplyResult + Send + Sync + 'static,
+        f: impl Fn(&dyn HolderGetter<BiomeId>) -> ParameterList<Holder<BiomeId>> + Send + Sync + 'static,
     ) -> Self {
         PresetProvider(Arc::new(f))
     }
 
     /// `Preset.SourceProvider.apply(Function<ResourceKey<Biome>, T>)` — apply
-    /// with the biome getter (Java's `apply(biomes::getOrThrow)`). Fallible for
-    /// the deferred overworld preset.
-    pub fn apply(&self, biomes: &dyn HolderGetter<BiomeId>) -> PresetApplyResult {
+    /// with the biome getter (Java's `apply(biomes::getOrThrow)`).
+    pub fn apply(&self, biomes: &dyn HolderGetter<BiomeId>) -> ParameterList<Holder<BiomeId>> {
         (self.0)(biomes)
     }
 }
@@ -317,52 +287,42 @@ impl Preset {
     }
 
     /// `Preset.NETHER` — `Identifier.withDefaultNamespace("nether")` and the
-    /// five-entry nether parameter list.
+    /// five-entry nether parameter list from the generated
+    /// `NETHER_BIOME_SOURCE_PARAMETER_POINTS` (Paper `knownPresets()`, the
+    /// builder's value order).
     pub fn nether() -> Preset {
         Preset::new(
             Identifier::with_default_namespace("nether"),
             PresetProvider::new(|biomes| {
-                let biome = |key: &ResourceKey<BiomeId>| biomes.get_or_throw(key);
-                let params =
-                    |t: f32, h: f32, w: f32| Climate::parameters(t, h, 0.0, 0.0, 0.0, 0.0, w);
-                Ok(ParameterList::new(vec![
-                    (params(0.0, 0.0, 0.0), biome(&biomes::NETHER_WASTES)),
-                    (params(0.0, -0.5, 0.0), biome(&biomes::SOUL_SAND_VALLEY)),
-                    (params(0.4, 0.0, 0.0), biome(&biomes::CRIMSON_FOREST)),
-                    (params(0.0, 0.5, 0.375), biome(&biomes::WARPED_FOREST)),
-                    (params(-0.5, 0.0, 0.175), biome(&biomes::BASALT_DELTAS)),
-                ]))
+                let mut builder = Vec::with_capacity(NETHER_BIOME_SOURCE_PARAMETER_POINTS.len());
+                for generated in NETHER_BIOME_SOURCE_PARAMETER_POINTS {
+                    let key = register_from_full_name(generated.biome);
+                    builder.push((ParameterPoint::from(generated), biomes.get_or_throw(&key)));
+                }
+                ParameterList::new(builder)
             }),
         )
     }
 
     /// `Preset.OVERWORLD` — `Identifier.withDefaultNamespace("overworld")` and
-    /// `generateOverworldBiomes(lookup)` through the `OverworldBiomeBuilder`
-    /// STUB (`mc.world.level.biome.data`).
+    /// `generateOverworldBiomes(lookup)` through the `OverworldBiomeBuilder`.
     ///
-    /// Applying the provider is fallible: while the `add_biomes` STUB emits
-    /// nothing the builder stays empty, and the application reports
-    /// [`OverworldDeferred`] instead of reaching the RTree empty-list panic.
-    /// When the `.data` unit fills the table the provider starts returning
-    /// `Ok` and no call site changes.
+    /// The builder emits the 7594-point overworld table from the generated
+    /// `OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS` (`.data` unit), so the provider
+    /// always builds a nonempty `ParameterList`.
     pub fn overworld() -> Preset {
         Preset::new(
             Identifier::with_default_namespace("overworld"),
             PresetProvider::new(|biomes| {
-                let mut builder: Vec<(crate::biome::climate::ParameterPoint, Holder<BiomeId>)> =
-                    Vec::new();
-                let builder_stub = OverworldBiomeBuilder::new();
-                builder_stub.add_biomes(&mut |(point, key): (
-                    crate::biome::climate::ParameterPoint,
+                let mut builder: Vec<(ParameterPoint, Holder<BiomeId>)> = Vec::new();
+                let biome_builder = OverworldBiomeBuilder::new();
+                biome_builder.add_biomes(&mut |(point, key): (
+                    ParameterPoint,
                     ResourceKey<BiomeId>,
                 )| {
                     builder.push((point, biomes.get_or_throw(&key)));
                 });
-                if builder.is_empty() {
-                    Err(OverworldDeferred)
-                } else {
-                    Ok(ParameterList::new(builder))
-                }
+                ParameterList::new(builder)
             }),
         )
     }
@@ -375,18 +335,16 @@ impl Preset {
     /// used set is the distinct keys the provider asks `getOrThrow` for. The
     /// port runs the provider against a recording getter and dedupes the
     /// recorded keys (the id element cannot carry the `ResourceKey` itself).
-    /// Fallible like the provider application: a deferred preset (currently
-    /// `OVERWORLD`) reports [`OverworldDeferred`].
-    pub fn used_biomes(&self) -> Result<Vec<ResourceKey<BiomeId>>, OverworldDeferred> {
+    pub fn used_biomes(&self) -> Vec<ResourceKey<BiomeId>> {
         let recorder = RecordingGetter::new();
-        self.provider.apply(&recorder)?;
+        self.provider.apply(&recorder);
         let mut seen = Vec::new();
         for key in recorder.keys() {
             if !seen.contains(&key) {
                 seen.push(key);
             }
         }
-        Ok(seen)
+        seen
     }
 
     /// `Preset.CODEC` — `Identifier.CODEC.flatXmap` over `BY_NAME` with the
@@ -470,10 +428,7 @@ mod tests {
     fn nether_preset_builds_five_entries_in_declaration_order() {
         let preset = Preset::nether();
         assert_eq!(preset.id().to_string(), "minecraft:nether");
-        let list = preset
-            .provider_biome_id()
-            .apply(&NameGetter)
-            .expect("the nether preset is never deferred");
+        let list = preset.provider_biome_id().apply(&NameGetter);
         assert_eq!(list.values().len(), 5);
         // Entry order and the first parameter point mirror Java exactly.
         let (p0, h0) = &list.values()[0];
@@ -496,9 +451,7 @@ mod tests {
     #[test]
     fn used_biomes_returns_the_distinct_keys_in_order() {
         let preset = Preset::nether();
-        let used = preset
-            .used_biomes()
-            .expect("the nether preset is never deferred");
+        let used = preset.used_biomes();
         let names: Vec<String> = used.iter().map(|k| k.identifier().to_string()).collect();
         assert_eq!(
             names,
@@ -513,27 +466,38 @@ mod tests {
     }
 
     #[test]
-    fn overworld_preset_application_reports_a_typed_deferral() {
-        // The `.data`-owned `OverworldBiomeBuilder::add_biomes` STUB emits
-        // nothing, so applying the overworld provider returns the typed
-        // `OverworldDeferred` instead of the generic RTree empty-list panic.
-        // The preset itself still resolves by name (Java `BY_NAME`), matching
-        // the codec.
+    fn overworld_preset_application_builds_the_full_parameter_list() {
+        // The `.data`-owned `OverworldBiomeBuilder::add_biomes` emits the
+        // 7594-point overworld table, so applying the overworld provider builds
+        // a nonempty `ParameterList` (Java `generateOverworldBiomes`).
         let preset = BY_NAME
             .get("minecraft:overworld")
             .expect("overworld preset present");
         assert_eq!(preset.id().to_string(), "minecraft:overworld");
-        // `ParameterList` carries no `PartialEq`/`Debug` (the RTree index), so
-        // the provider result is matched structurally.
-        assert!(matches!(
-            preset.provider_biome_id().apply(&NameGetter),
-            Err(OverworldDeferred)
-        ));
-        assert_eq!(preset.used_biomes(), Err(OverworldDeferred));
+        let list = preset.provider_biome_id().apply(&NameGetter);
+        assert_eq!(list.values().len(), 7594);
+        // `used_biomes` recovers the 55 distinct overworld biomes (the surface
+        // set plus the underground dripstone/lush/sulfur/deep_dark), in
+        // first-reference order.
+        let used = preset.used_biomes();
+        assert_eq!(used.len(), 55);
         assert_eq!(
-            MultiNoiseBiomeSourceParameterList::new(preset.clone(), &NameGetter),
-            Err(OverworldDeferred)
+            used[0].identifier().to_string(),
+            "minecraft:mushroom_fields"
         );
+        let names: Vec<String> = used.iter().map(|k| k.identifier().to_string()).collect();
+        for expected in [
+            "minecraft:mushroom_fields",
+            "minecraft:plains",
+            "minecraft:deep_dark",
+            "minecraft:dripstone_caves",
+            "minecraft:lush_caves",
+            "minecraft:sulfur_caves",
+        ] {
+            assert!(names.contains(&expected.to_string()), "{expected} used");
+        }
+        let list = MultiNoiseBiomeSourceParameterList::new(preset.clone(), &NameGetter);
+        assert_eq!(list.parameters().values().len(), 7594);
     }
 
     #[test]
@@ -578,8 +542,7 @@ mod tests {
         let getter = ops
             .getter(&rivet_registry::registries::BIOME)
             .expect("biome registry present");
-        let list = MultiNoiseBiomeSourceParameterList::new(Preset::nether(), &getter)
-            .expect("the nether preset is never deferred");
+        let list = MultiNoiseBiomeSourceParameterList::new(Preset::nether(), &getter);
 
         let codec = rivet_serialization::map_codec::codec_of(
             MultiNoiseBiomeSourceParameterList::direct_codec::<TestOps>(),
