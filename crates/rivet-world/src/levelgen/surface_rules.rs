@@ -10,7 +10,8 @@
 //! manifest unit. `NoiseGeneratorSettings` carries a `SurfaceRules.RuleSource`
 //! field (and its `CODEC` a `surface_rule` field), so the noisegen unit ports
 //! the type *identity* and defers the value surface with a
-//! `RivetTodo(#177)`-style marker to the owning unit.
+//! `STUB(mc.world.level.levelgen.surface)` marker to the owning unit
+//! (RivetTodo #177).
 //!
 //! Java source:
 //! `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/level/levelgen/SurfaceRules.java`.

@@ -28,11 +28,11 @@
 //! - `lookup` is Java's `<S> HolderGetter<S> lookup(ResourceKey<? extends
 //!   Registry<? extends S>> key)` — generic over the *element* type `S`. The
 //!   Rust signature is `fn lookup<S: Send + Sync + 'static>(&self, key:
-//!   &RegistryKey<S>) -> Option<Box<dyn HolderGetter<S> + '_>>`. The `Option` is
+//!   &RegistryKey<S>) -> Option<&dyn HolderGetter<S>>`. The `Option` is
 //!   a documented seam deviation: Java always returns a getter (the empty
 //!   `UniversalLookup` fallback for unknown registries), but an owned getter
 //!   value is not constructible outside `rivet-registry` (`RegistryGetter::new`
-//!   is `pub(crate)`), so the boxed getter resolves through the access and an
+//!   is `pub(crate)`), so the getter resolves through the access and an
 //!   absent registry reports `None` — the empty answer. The deferred
 //!   `RegistrySetBuilder` implementation (inside `rivet-registry`) returns
 //!   `Some` for every key, matching `getOrDefault`.
@@ -41,8 +41,9 @@
 //!   which the `NoiseRouterData`/`NoiseGeneratorSettings` bootstraps rely on
 //!   (they read back functions registered moments earlier). `RecordingContext`
 //!   stores the building registry's `RegistryKey<T>` and serves the pending
-//!   values as `Direct` holders (first registration wins, Java's
-//!   `getOrCreate`).
+//!   values as `Direct` holders (Java's `getOrCreate`: a duplicate key is a
+//!   `Duplicate registration` error — unreachable in this slice — so the
+//!   first registration stands).
 //! - The default `register(key, value)` delegates with `Lifecycle::stable()`.
 
 use rivet_registry::holder::{Holder, RegistryId};
@@ -65,7 +66,7 @@ pub trait BootstrapContext<T> {
     }
 
     /// `BootstrapContext.lookup(ResourceKey<? extends Registry<? extends S>>)`
-    /// — `HolderGetter<S>` (boxed; see the module docs for the `Option`).
+    /// — `HolderGetter<S>` (borrowed; see the module docs for the `Option`).
     ///
     /// Java's `lookup` always returns a non-null `HolderGetter` (falling back to
     /// an empty `UniversalLookup` for unknown registries). The Rust signature is
@@ -128,7 +129,8 @@ pub struct RecordingContext<T> {
     registrations: VecDeque<RecordedRegistration<T>>,
     /// The in-progress keyed holders — Java's `UniversalLookup.getOrCreate`
     /// view: a value registered earlier in the same pass is visible to
-    /// `lookup`, with a duplicate key returning the *first* holder. Stored as
+    /// `lookup`; a duplicate key is a `Duplicate registration` error
+    /// (unreachable here), so the first holder stands. Stored as
     /// the type-erased `PendingLookup` getter so `lookup` can borrow it
     /// directly for any requested element type.
     pending: PendingLookup,
@@ -167,7 +169,8 @@ impl<T: Send + Sync + Clone + 'static> BootstrapContext<T> for RecordingContext<
     /// a fresh id per call (see `RecordingContext`), a deliberate test-seam
     /// deviation; the keyed `getOrCreate` semantics land with the deferred
     /// `RegistrySetBuilder` implementation. The in-progress `pending` view is
-    /// keyed (first registration wins, Java's `getOrCreate`).
+    /// keyed (a duplicate key is a `Duplicate registration` error, unreachable
+    /// here, so the first registration stands).
     fn register(&mut self, key: &ResourceKey<T>, value: T, lifecycle: Lifecycle) -> Holder<T> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -211,8 +214,11 @@ struct PendingLookup {
 }
 
 impl PendingLookup {
-    /// Record a value under its key (Java's `UniversalLookup.getOrCreate` —
-    /// first registration wins).
+    /// Record a value under its key — the first registration stands (Java's
+    /// `BuildState` collect path is last-wins for a duplicate key and records
+    /// a `Duplicate registration` error; unreachable in this slice, so the
+    /// pending view keeps the first value, matching `getOrCreate`'s holder
+    /// identity).
     fn register<T: Any>(&mut self, key: &ResourceKey<T>, value: T) {
         self.entries
             .entry(key.identifier().clone())
