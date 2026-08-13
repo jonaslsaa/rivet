@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "surface-rule-data",
+  "note": "Paper-grounded SurfaceRuleData golden harness: `surface-rule-data.json` captures the canonical `RuleSource.CODEC`/`ConditionSource.CODEC` JSON (under RegistryOps) for every static `SurfaceRuleData` surface tree (nether/overworld/overworldLike/end/air) at the pinned Paper commit, plus structural occurrence-count stats and the referenced biome holder list. crates/rivet-world/tests/surface_rule_data_golden.rs asserts the nether tree parses and re-encodes byte-exactly through the merged surface-rules codecs (serde-normalized exponent casing) and keeps overworld/overworldLike present but UNVERIFIED until the missing overworld biome/noise/block leaves land. Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/SurfaceRuleDataProbe.java; regenerate with `scripts/run_surface_rule_data_probe.sh`.",
+  "captured": [
+    {
+      "path": "surface-rule-data.json",
+      "sha256": "8cd8795e78cb583654d2d6fbe0252a0937b204918c5b56911cf8d60813b2abfb",
+      "bytes": 363441
+    }
+  ]
+}
