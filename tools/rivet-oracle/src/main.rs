@@ -923,15 +923,30 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
     );
     // The composed-noise golden comparison: beyond the manifest hashes, assert
     // the NOISE-checkpoint goldens (provenance, FULL_CHUNK_STEP reachability,
-    // non-vacuous #175 matrix) and print the status/provenance scoreboard.
-    let composed = crate_dir().join("fixtures/composed-noise");
-    if composed.join("manifest.json").is_file() {
-        composed_noise::verify_composed_noise(&composed)?;
-        println!(
-            "PASS: composed-noise seed-42 golden verified (pinned Paper 0a99345 provenance, reachability, value↔bits round-trip)"
-        );
-        composed_noise::print_scoreboard();
+    // non-vacuous #175 matrix) and print the status/provenance scoreboard. The
+    // committed seed-42 golden is a load-bearing deliverable — if the fixture
+    // tree is absent this is UNVERIFIED (exit 3), never a silent green (D8:
+    // never weaken/delete fixtures to go green).
+    verify_composed_noise_step(&crate_dir().join("fixtures/composed-noise"))?;
+    Ok(())
+}
+
+/// Verify the committed composed-noise golden, failing with `Error::Unverified`
+/// (exit 3) when the fixture tree is absent rather than silently skipping it.
+fn verify_composed_noise_step(dir: &Path) -> Result<(), Error> {
+    if !dir.join("manifest.json").is_file() {
+        return Err(Error::Unverified(format!(
+            "composed-noise fixtures {} are ABSENT — the seed-42 golden and its \
+             NOISE-checkpoint gate cannot verify (git checkout or regenerate via \
+             --composed-noise); refusing to pass green without them",
+            dir.display()
+        )));
     }
+    composed_noise::verify_composed_noise(dir)?;
+    println!(
+        "PASS: composed-noise seed-42 golden verified (pinned Paper 0a99345 provenance, reachability, value↔bits round-trip)"
+    );
+    composed_noise::print_scoreboard();
     Ok(())
 }
 

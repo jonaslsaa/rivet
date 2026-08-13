@@ -130,8 +130,10 @@ pub struct ByDistance {
 }
 
 /// A scoreboard row: the checkpoint status, its measured reachability level
-/// (`ChunkLevel.byStatus`), the number of committed bit-pattern entries that
-/// would be asserted when the checkpoint is wired, and whether it is covered.
+/// (`ChunkLevel.byStatus`), and the number of committed fixture sample rows
+/// (density rows, or climate rows for BIOMES) a green checkpoint would assert.
+/// Each density row carries 3 bit-patterns (density/finalDensity/
+/// preliminarySurfaceLevel); each climate row carries 8.
 #[derive(Debug)]
 pub struct ScoreboardRow {
     pub status: ChunkStatus,
@@ -156,10 +158,10 @@ pub fn load(dir: &Path) -> Result<ComposedNoise, Error> {
 }
 
 /// The generated-world scoreboard: every checkpoint, its reachability level,
-/// and how many bit-exact entries a green checkpoint would assert. Printed by
-/// verify; the checkpoint statuses are asserted to be a faithful port (the
-/// FULL_CHUNK_STEP reachability and byStatus levels come from `chunk_level`,
-/// never from the fixture).
+/// and how many committed fixture sample rows a green checkpoint would assert.
+/// Printed by verify; the checkpoint statuses are asserted to be a faithful
+/// port (the FULL_CHUNK_STEP reachability and byStatus levels come from
+/// `chunk_level`, never from the fixture).
 pub fn scoreboard() -> Vec<ScoreboardRow> {
     let step = ChunkPyramid::generation_pyramid()
         .get_step_to(ChunkStatus::Full)
@@ -167,12 +169,13 @@ pub fn scoreboard() -> Vec<ScoreboardRow> {
     let mut rows: Vec<ScoreboardRow> = Vec::new();
     for status in CHECKPOINTS {
         let level = by_status(&step, *status) as i64;
-        // A checkpoint asserts the bit-pattern entries that cover its
-        // checkpoint's value leaves: NOISE asserts all 80 density + 8 climate
-        // entries (finalDensity/density/weirdness/peaksAndValleys/etc.);
-        // BIOMES/SURFACE/etc. reach the same columns at their own level. For a
-        // not-yet-wired checkpoint the count is the number that WOULD be
-        // asserted — the scoreboard is forward-looking.
+        // A checkpoint asserts the fixture sample rows that cover its value
+        // leaves: NOISE asserts all 80 density + 8 climate rows (each density
+        // row carries density/finalDensity/preliminarySurfaceLevel; each
+        // climate row the 8 climate fields). BIOMES/SURFACE/etc. reach the same
+        // columns at their own level. For a not-yet-wired checkpoint the count
+        // is the number that WOULD be asserted — the scoreboard is
+        // forward-looking.
         let entries = match status {
             ChunkStatus::Biomes => 8,
             ChunkStatus::Noise => 88,
@@ -199,7 +202,7 @@ pub fn print_scoreboard() {
     println!("=============================================");
     println!(
         "{:<20} {:>6} {:>10}   coverage",
-        "checkpoint", "level", "bit-entries"
+        "checkpoint", "level", "samples"
     );
     let step = ChunkPyramid::generation_pyramid()
         .get_step_to(ChunkStatus::Full)
@@ -307,15 +310,12 @@ pub fn verify_full_chunk_step(fixture: &ComposedNoise) -> Result<(), Error> {
     // The byStatus reachability: each checkpoint's serialization level.
     for status in CHECKPOINTS {
         let level = by_status(&step, *status) as i64;
-        // Sanity: FULL at 33, STRUCTURE_STARTS at 44, monotone in the ladder.
+        // Sanity: FULL at 33. (STRUCTURE_STARTS' 44 is covered by the by-distance
+        // comparison above — it reaches out at distances 4..=11 — so it needs no
+        // separate check here.)
         if *status == ChunkStatus::Full && level != 33 {
             return Err(Error::Manifest(format!(
                 "byStatus(FULL) = {level}, expected 33"
-            )));
-        }
-        if *status == ChunkStatus::StructureStarts && level != 44 {
-            return Err(Error::Manifest(format!(
-                "byStatus(STRUCTURE_STARTS) = {level}, expected 44"
             )));
         }
     }
@@ -335,6 +335,33 @@ pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
         return Err(Error::Manifest(format!(
             "composed-noise seed {} != pinned seed 42",
             fixture.seed
+        )));
+    }
+    // The golden is the overworld NOISE checkpoint — the generator identity
+    // must be pinned too, not just the seed/commit. A fixture regenerated
+    // against a different generator is drift, not the pinned golden.
+    if fixture.dimension != "overworld" {
+        return Err(Error::Manifest(format!(
+            "composed-noise dimension {} != overworld",
+            fixture.dimension
+        )));
+    }
+    if fixture.generator != "normal" {
+        return Err(Error::Manifest(format!(
+            "composed-noise generator {} != normal",
+            fixture.generator
+        )));
+    }
+    if fixture.level_type != "minecraft:normal" {
+        return Err(Error::Manifest(format!(
+            "composed-noise level-type {} != minecraft:normal",
+            fixture.level_type
+        )));
+    }
+    if fixture.noise_settings != "minecraft:overworld" {
+        return Err(Error::Manifest(format!(
+            "composed-noise noise-settings {} != minecraft:overworld",
+            fixture.noise_settings
         )));
     }
     let manifest = crate::verify_fixtures(dir)?;
@@ -441,11 +468,14 @@ fn verify_value_bits(fixture: &ComposedNoise) -> Result<(), Error> {
             ("peaksAndValleys", &s.peaks_and_valleys),
         ] {
             // Climate fields are float-cast (`(double) f` in the probe), so
-            // the JSON value must equal the widened f32 the bits encode.
-            // A "NaN" string (probe float NaN) skips the value comparison.
-            let Some(v) = sample.value.as_f64() else {
-                continue;
-            };
+            // the JSON value must equal the widened f32 the bits encode. Like
+            // density, a non-numeric value (the probe's "NaN" string, or JSON
+            // null) is a malformed golden — never a legal skip.
+            let v = sample.value.as_f64().ok_or_else(|| {
+                Error::Manifest(format!(
+                    "climate[{ci}] {name} is NaN — climate goldens must be finite"
+                ))
+            })?;
             let rt = f32::from_bits(sample.bits as u32) as f64;
             if rt != v {
                 return Err(Error::Manifest(format!(
@@ -594,21 +624,32 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
     }
 
+    /// The committed composed-noise golden is a load-bearing deliverable: a test
+    /// that needs it must FAIL when it is absent, never silently return (D8:
+    /// never weaken/delete fixtures to go green; a missing load-bearing fixture
+    /// is a hard failure).
+    fn require_fixture(dir: &std::path::Path) {
+        if !dir.join("manifest.json").is_file() {
+            panic!(
+                "committed composed-noise fixtures {} are ABSENT — the seed-42 golden \
+                 and its NOISE-checkpoint gate cannot verify; restore them (git \
+                 checkout) or this test is red, never silently skipped",
+                dir.display()
+            );
+        }
+    }
+
     #[test]
     fn committed_composed_noise_verifies() {
         let dir = fixtures_dir().join("composed-noise");
-        if !dir.join("manifest.json").is_file() {
-            return;
-        }
+        require_fixture(&dir);
         verify_composed_noise(&dir).expect("committed composed-noise golden should verify");
     }
 
     #[test]
     fn committed_composed_noise_is_non_vacuous() {
         let dir = fixtures_dir().join("composed-noise");
-        if !dir.join(FIXTURE_BASENAME).is_file() {
-            return;
-        }
+        require_fixture(&dir);
         let fixture = load(&dir).unwrap();
         assert_eq!(fixture.seed, 42, "seed-42 golden");
         assert_eq!(fixture.paper, "26.2-DEV-main@0a99345");
@@ -662,6 +703,73 @@ mod tests {
         assert!(columns.contains_key(&(-31, -31)));
     }
 
+    /// A climate entry with a NaN value (the probe's "NaN" string) must be
+    /// rejected like a NaN density — the golden must be finite, and a NaN
+    /// climate field is a malformed fixture, not a legal skip.
+    #[test]
+    fn climate_nan_value_is_rejected() {
+        let finite = |bits: i64, value: f64| BitSample {
+            bits,
+            value: serde_json::json!(value),
+        };
+        let fixture = ComposedNoise {
+            seed: 42,
+            paper: "26.2-DEV-main@0a99345".into(),
+            dimension: "overworld".into(),
+            generator: "normal".into(),
+            level_type: "minecraft:normal".into(),
+            noise_settings: "minecraft:overworld".into(),
+            format: 1,
+            full_chunk_step: FullChunkStep {
+                level: 33,
+                accumulated_radius: 11,
+                max_level: 44,
+                by_distance: vec![],
+            },
+            climate: vec![ClimateSample {
+                x: 0,
+                y: -60,
+                z: 0,
+                cx: 0,
+                cz: 0,
+                temperature: BitSample {
+                    bits: f32::NAN.to_bits() as i64,
+                    value: serde_json::json!("NaN"),
+                },
+                vegetation: finite(0x3F800000, 1.0),
+                continents: finite(0x3F800000, 1.0),
+                erosion: finite(0x3F800000, 1.0),
+                depth: finite(0x3F800000, 1.0),
+                ridges: finite(0x3F800000, 1.0),
+                weirdness: finite(0x3F800000, 1.0),
+                peaks_and_valleys: finite(0x3F800000, 1.0),
+            }],
+            density: vec![],
+        };
+        let err = verify_value_bits(&fixture).expect_err("NaN climate must be rejected");
+        // The error names the offending field.
+        let msg = err.to_string();
+        assert!(msg.contains("is NaN"), "unexpected error: {msg}");
+    }
+
+    /// The default `verify` path must fail UNVERIFIED when the committed
+    /// composed-noise fixture tree is absent — never silently skip (D8).
+    #[test]
+    fn missing_fixture_tree_is_unverified() {
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-cn-missing-{}", std::process::id()));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        fs::create_dir_all(&scratch).unwrap();
+        let result = crate::verify_composed_noise_step(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        assert!(
+            matches!(result, Err(crate::Error::Unverified(_))),
+            "expected Error::Unverified (exit 3), got {result:?}"
+        );
+    }
+
     /// Regenerating the composed-noise manifest in Rust is byte-identical to the
     /// committed manifest (given an unchanged golden) — regeneration is git-clean
     /// and the committed manifest is what the writer would produce, exactly like
@@ -669,9 +777,7 @@ mod tests {
     #[test]
     fn manifest_regeneration_is_byte_identical() {
         let dir = fixtures_dir().join("composed-noise");
-        if !dir.join("manifest.json").is_file() {
-            return;
-        }
+        require_fixture(&dir);
         let scratch =
             std::env::temp_dir().join(format!("rivet-oracle-cn-regen-{}", std::process::id()));
         if scratch.exists() {
@@ -694,9 +800,7 @@ mod tests {
     #[test]
     fn tamper_negative_control_detects_corruption() {
         let dir = fixtures_dir().join("composed-noise");
-        if !dir.join(FIXTURE_BASENAME).is_file() {
-            return;
-        }
+        require_fixture(&dir);
         tamper_negative_control(&dir).expect("tamper must be detected");
     }
 
