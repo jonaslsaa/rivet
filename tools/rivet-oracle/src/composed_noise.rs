@@ -521,14 +521,15 @@ pub enum ComposedNoiseMode {
 /// usage error — before, a typo'd `--sampple` fell through to the verify
 /// branch and exited 0 after verifying, silently misreading the intended mode.
 /// `--tamper` and `--sample` are mutually exclusive, mirroring the `verify`
-/// subcommand's `--m2`/`--full` handling.
+/// subcommand's `--m2`/`--full` handling. `--help`/`-h` are handled by the
+/// dispatcher before this runs, so they never reach here.
 pub fn parse_mode(flags: &[&str]) -> Result<ComposedNoiseMode, Error> {
     let tamper = flags.contains(&"--tamper");
     let sample = flags.contains(&"--sample");
     for flag in flags {
         if *flag != "--tamper" && *flag != "--sample" {
             return Err(Error::Gate(format!(
-                "composed-noise takes only --tamper/--sample, got {flag}"
+                "composed-noise takes only --tamper/--sample, got {flag} (see --help)"
             )));
         }
     }
@@ -544,6 +545,24 @@ pub fn parse_mode(flags: &[&str]) -> Result<ComposedNoiseMode, Error> {
     } else {
         ComposedNoiseMode::Verify
     })
+}
+
+/// Assert the committed composed-noise fixture tree is present (both the golden
+/// and its manifest), classifying an absent or partial tree as
+/// `Error::Unverified` (exit 3) — the missing-prerequisite contract — never a
+/// hard FAIL. Every operation that consumes the committed golden (verify and
+/// the tamper negative control) must pass this first; `--sample` regeneration
+/// does not, since it writes the golden from the Paper runtime.
+pub fn require_fixture_tree(dir: &Path) -> Result<(), Error> {
+    if !dir.join(FIXTURE_BASENAME).is_file() || !dir.join("manifest.json").is_file() {
+        return Err(Error::Unverified(format!(
+            "composed-noise fixtures {} are ABSENT — the seed-42 golden and its \
+             NOISE-checkpoint gate cannot verify (git checkout or regenerate via \
+             --composed-noise); refusing to pass green without them",
+            dir.display()
+        )));
+    }
+    Ok(())
 }
 
 /// The tamper negative control: corrupt a committed bit pattern (flip one byte
@@ -801,6 +820,23 @@ mod tests {
         }
         fs::create_dir_all(&scratch).unwrap();
         let result = crate::verify_composed_noise_step(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        assert!(
+            matches!(result, Err(crate::Error::Unverified(_))),
+            "expected Error::Unverified (exit 3), got {result:?}"
+        );
+    }
+
+    /// A partial tree (manifest present, golden absent) is still an absent
+    /// prerequisite — UNVERIFIED, never a hard FAIL via a later read error.
+    #[test]
+    fn partial_fixture_tree_is_unverified() {
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-cn-partial-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::write(scratch.join("manifest.json"), "{}").unwrap();
+        let result = require_fixture_tree(&scratch);
         let _ = fs::remove_dir_all(&scratch);
         assert!(
             matches!(result, Err(crate::Error::Unverified(_))),

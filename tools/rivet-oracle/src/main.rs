@@ -934,14 +934,7 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
 /// Verify the committed composed-noise golden, failing with `Error::Unverified`
 /// (exit 3) when the fixture tree is absent rather than silently skipping it.
 fn verify_composed_noise_step(dir: &Path) -> Result<(), Error> {
-    if !dir.join("manifest.json").is_file() {
-        return Err(Error::Unverified(format!(
-            "composed-noise fixtures {} are ABSENT — the seed-42 golden and its \
-             NOISE-checkpoint gate cannot verify (git checkout or regenerate via \
-             --composed-noise); refusing to pass green without them",
-            dir.display()
-        )));
-    }
+    composed_noise::require_fixture_tree(dir)?;
     composed_noise::verify_composed_noise(dir)?;
     println!(
         "PASS: composed-noise seed-42 golden verified (pinned Paper 0a99345 provenance, reachability, value↔bits round-trip)"
@@ -3294,9 +3287,14 @@ fn run() -> Result<(), Error> {
             //   cargo run -p rivet-oracle -- composed-noise --tamper   negative control
             //   cargo run -p rivet-oracle -- composed-noise --sample   regenerate from pinned Paper
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            if rest.contains(&"--help") || rest.contains(&"-h") {
+                print_usage();
+                return Ok(());
+            }
             let dir = crate_dir().join("fixtures/composed-noise");
             match composed_noise::parse_mode(&rest)? {
                 composed_noise::ComposedNoiseMode::Tamper => {
+                    composed_noise::require_fixture_tree(&dir)?;
                     composed_noise::tamper_negative_control(&dir)
                 }
                 composed_noise::ComposedNoiseMode::Sample => composed_noise::run_probe(&dir),
