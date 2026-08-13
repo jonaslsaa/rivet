@@ -48,10 +48,12 @@ use crate::levelgen::noise::noise_router::NoiseRouter;
 use crate::levelgen::noisegen::aquifer::{self, Aquifer, FluidPicker, PreliminarySurfaceLevelFn};
 use crate::levelgen::noisegen::column_pos::ColumnPos;
 use crate::levelgen::noisegen::noise_generator_settings::NoiseGeneratorSettings;
+use crate::levelgen::noisegen::noise_router_data::DensityFunctionValue;
 use crate::levelgen::noisegen::ore_veinifier::create as create_ore_veinifier;
 use crate::levelgen::noisegen::random_state::RandomState;
 use rivet_registry::core::{ChunkPos, QuartPos, SectionPos};
 use rivet_registry::holder::Holder;
+use rivet_registry::registry::Registry;
 use rivet_util::mth;
 use std::any::Any;
 use std::collections::HashMap;
@@ -303,6 +305,7 @@ impl NoiseChunk {
             first_noise_z,
             noise_size_xz,
             wrapped: wrapped.clone(),
+            functions: Some(random_state.functions()),
         };
 
         // The `blendAlpha`/`blendOffset` flat caches (Java's constructor block).
@@ -799,7 +802,7 @@ impl NoiseChunk {
 /// Captures the construction-time context so the inner functions can be
 /// created and registered (Java's inner-class constructors register into
 /// `NoiseChunk.this.interpolators`/`cellCaches` via the shared state).
-struct NoiseChunkWrap {
+struct NoiseChunkWrap<'a> {
     state: Arc<Mutex<InterpolationState>>,
     blender: Blender,
     beardifier: Arc<dyn DensityFunction>,
@@ -818,10 +821,15 @@ struct NoiseChunkWrap {
     /// with the `NoiseChunk` so `cachedClimateSampler` reuses the
     /// construction-time wraps (Java's single `this.wrapped` map).
     wrapped: Arc<Mutex<HashMap<IdentityKey, Arc<dyn DensityFunction>>>>,
+    /// The density-function registry — resolves `HolderHolder::Reference`
+    /// values during the wrap (Java's `holder.value()`, which `BuildState`
+    /// binds before the router reaches `NoiseChunk`). `None` in tests that
+    /// construct a router without reference nodes.
+    functions: Option<&'a Registry<DensityFunctionValue>>,
 }
 
 #[allow(clippy::too_many_arguments)]
-impl NoiseChunkWrap {
+impl<'a> NoiseChunkWrap<'a> {
     fn with_blend(
         self,
         blend_alpha: Option<Arc<FlatCache>>,
@@ -895,7 +903,14 @@ impl NoiseChunkWrap {
             match holder.function() {
                 Holder::Direct(value) => value.clone(),
                 Holder::Reference { .. } => {
-                    panic!("Trying to access unbound value '{}'", render_unbound())
+                    // Java `holder.value()` — `BuildState` binds every reference
+                    // before the router reaches `NoiseChunk`. The Rust holder
+                    // model resolves references through the density-function
+                    // registry the wrap visitor carries.
+                    match &self.functions {
+                        Some(functions) => holder.function().value(*functions).clone(),
+                        None => panic!("Trying to access unbound value '{}'", render_unbound()),
+                    }
                 }
             }
         } else if function
@@ -932,7 +947,7 @@ impl NoiseChunkWrap {
     }
 }
 
-impl Visitor for NoiseChunkWrap {
+impl Visitor for NoiseChunkWrap<'_> {
     fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction> {
         let key = IdentityKey::new(input.clone());
         {
@@ -944,6 +959,20 @@ impl Visitor for NoiseChunkWrap {
         let value = self.wrap_new(input.as_ref());
         self.wrapped.lock().unwrap().insert(key, value.clone());
         value
+    }
+
+    fn resolve_holder(
+        &self,
+        holder: &Holder<Arc<dyn DensityFunction>>,
+    ) -> Option<Arc<dyn DensityFunction>> {
+        // Java's `holder.value()` resolves a bound reference; the reference
+        // holder resolves through the density-function registry the wrap
+        // carries. An unset registry (tests without reference nodes) reports
+        // `None` — the `HolderHolder.map_children` panic path.
+        match &self.functions {
+            Some(functions) => Some(holder.value(*functions).clone()),
+            None => None,
+        }
     }
 }
 

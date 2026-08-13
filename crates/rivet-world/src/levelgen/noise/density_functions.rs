@@ -604,8 +604,12 @@ impl DensityFunction for Marker {
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> Arc<dyn DensityFunction> {
         // Java `MarkerOrMarked.mapChildren` default: `new Marker(type,
-        // visitor.apply(wrapped))`.
-        Arc::new(Marker::new(self.marker_type, visitor.apply(&self.wrapped)))
+        // visitor.apply(wrapped))`. The wrap visitor then re-creates the
+        // concrete inner class (`NoiseChunk.wrapNew`), so a re-Marked
+        // FlatCache is re-FILLED and a re-Marked interpolator re-registered —
+        // Java's identity semantics for a second `mapAll`.
+        let child = visitor.apply(&self.wrapped);
+        Arc::new(Marker::new(self.marker_type, child))
     }
     fn min_value(&self) -> f64 {
         if self.marker_type == MarkerType::BlendDensity {
@@ -2409,12 +2413,18 @@ impl DensityFunction for HolderHolder {
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> Arc<dyn DensityFunction> {
-        // Java `new HolderHolder(Holder.direct(visitor.apply(this.function.value())))`.
+        // Java `new HolderHolder(Holder.direct(visitor.apply(this.function.value())))`
+        // — `value()` resolves a bound reference (Java's `BuildState` binds
+        // every reference before the router reaches `NoiseChunk`). The Rust
+        // holder model cannot resolve a `(RegistryId, id)` back-reference
+        // without a `HolderLookup`; the visitor supplies it (see
+        // [`crate::levelgen::noise::density_function::Visitor::resolve_holder`]).
         match &self.function {
             Holder::Direct(f) => Arc::new(HolderHolder::new(Holder::direct(visitor.apply(f)))),
-            Holder::Reference { .. } => {
-                panic!("HolderHolder.value() requires a HolderLookup (RivetTodo #177)")
-            }
+            Holder::Reference { .. } => match visitor.resolve_holder(&self.function) {
+                Some(value) => Arc::new(HolderHolder::new(Holder::direct(visitor.apply(&value)))),
+                None => panic!("HolderHolder.value() requires a HolderLookup (RivetTodo #177)"),
+            },
         }
     }
     fn min_value(&self) -> f64 {

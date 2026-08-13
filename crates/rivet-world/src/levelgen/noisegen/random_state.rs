@@ -56,6 +56,10 @@ pub struct RandomState<'a> {
     random: AlgorithmPositionalRandomFactory,
     /// `noises` — the `Registries.NOISE` registry.
     noises: &'a Registry<NoiseParameters>,
+    /// `functions` — the `Registries.DENSITY_FUNCTION` registry. Carried so the
+    /// `NoiseChunk` wrap can resolve `HolderHolder::Reference` values (Java's
+    /// `BuildState`-bound `holder.value()` during the chunk construction wrap).
+    functions: &'a Registry<DensityFunctionValue>,
     /// `router` — the noise-wired router.
     router: NoiseRouter,
     /// `sampler` — the climate sampler over the flattened router.
@@ -150,6 +154,7 @@ impl<'a> RandomState<'a> {
         RandomState {
             random,
             noises,
+            functions,
             router,
             sampler,
             surface_system: SurfaceSystem,
@@ -183,6 +188,12 @@ impl<'a> RandomState<'a> {
     /// `router()`.
     pub fn router(&self) -> &NoiseRouter {
         &self.router
+    }
+
+    /// `functions()` — the density-function registry (resolves
+    /// `HolderHolder::Reference` values during the `NoiseChunk` wrap).
+    pub fn functions(&self) -> &Registry<DensityFunctionValue> {
+        self.functions
     }
 
     /// `sampler()`.

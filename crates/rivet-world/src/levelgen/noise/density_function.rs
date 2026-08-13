@@ -317,6 +317,23 @@ pub trait Visitor: Send + Sync {
     fn visit_noise(&self, noise: &NoiseHolder) -> NoiseHolder {
         noise.clone()
     }
+
+    /// Resolve a `Holder::Reference` to its value (default: the visitor has no
+    /// registry view, so the holder stays unresolved).
+    ///
+    /// Java's `HolderHolder.mapChildren` calls `function.value()`, which resolves
+    /// a bound reference (Java's `BuildState` binds every reference before the
+    /// router is used). The Rust holder model stores references as
+    /// `(RegistryId, id)` back-references (OWNERSHIP) that only resolve through
+    /// a `HolderLookup`, so the value layer cannot resolve them — the visitor
+    /// supplies the lookup. `RandomState`'s noise-wiring visitor overrides this
+    /// to resolve through the density-function registry.
+    fn resolve_holder(
+        &self,
+        _holder: &Holder<Arc<dyn DensityFunction>>,
+    ) -> Option<Arc<dyn DensityFunction>> {
+        None
+    }
 }
 
 /// `DensityFunction.NoiseHolder(Holder<NoiseParameters>, @Nullable NormalNoise)`.
