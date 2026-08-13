@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "biome-temperature",
+  "note": "bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis (frozenIcePatches/frozenSmall/frozenPins) is computed from Paper's raw noise so the inner and outer sub-checks are independently discriminable. Deterministic across boots.",
+  "captured": [
+    {
+      "path": "biome-temperature.json",
+      "sha256": "a686231778c37fea856c6b3c2bc449278484428aaec3bba08fb391cf73e030ac",
+      "bytes": 114583
+    }
+  ]
+}
