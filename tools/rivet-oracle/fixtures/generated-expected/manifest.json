@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "seed": "42",
+  "level-type": "minecraft:normal",
+  "kind": "generated-expected",
+  "note": "Seed-42 generated-world ground-truth handoff (PR #563): the per-chunk surface/bedrock/below_feet sample contract for the forced spawn grid (-4..=4 in both axes, 81 minecraft:full chunks) captured from the pinned Paper runtime by booting a fresh normal-overworld world and force-generating the grid to FULL. Arrays are 16x16 row-major z*16+x; surface is the highest non-air block, bedrock the block at y=-60, below_feet at y=-61, up to WORLD_CEILING_Y=320; the acceptance samples at the chunk center offset (8,8). Regenerate with `rivet-oracle regenerate --generated-expected` (twin-boot byte-identity proof).",
+  "captured": [
+    {
+      "path": "generated-expected.json",
+      "sha256": "9b9e17adf6876bb6884ec9af08150f2071a57cdf3ee12dce6151b2986eb7421f",
+      "bytes": 1461601
+    }
+  ]
+}
