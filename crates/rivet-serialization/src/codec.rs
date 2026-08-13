@@ -376,7 +376,10 @@ impl JavaEquals for f32 {
 impl<T: JavaEquals> JavaEquals for Vec<T> {
     fn java_equals(&self, other: &Self) -> bool {
         // Java `List.equals` — element-wise `equals`, short-circuiting on the
-        // first unequal element (Rust `==` on `Vec` is the same deep equality).
+        // first unequal element. This is Java `equals` via `JavaEquals`, not
+        // Rust `==`: for `f32`/`f64` elements Java `List.equals` uses
+        // `Float.equals`/`Double.equals` bit semantics (NaN equals itself,
+        // `-0.0 != 0.0`), which Rust `Vec` `==` would get wrong.
         self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| a.java_equals(b))
     }
 }
