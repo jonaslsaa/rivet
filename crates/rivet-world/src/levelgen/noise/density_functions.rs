@@ -935,11 +935,11 @@ impl DensityFunction for RangeChoice {
         for (i, slot) in output.iter_mut().enumerate() {
             let v = *slot;
             if v >= self.min_inclusive && v < self.max_exclusive {
-                *slot = self.when_in_range.compute(&context_provider.for_index(i));
+                *slot = self.when_in_range.compute(context_provider.for_index(i));
             } else {
                 *slot = self
                     .when_out_of_range
-                    .compute(&context_provider.for_index(i));
+                    .compute(context_provider.for_index(i));
             }
         }
     }
@@ -1064,7 +1064,7 @@ impl DensityFunction for IntervalSelect {
     ) {
         self.input.fill_array(output, context_provider);
         for (i, slot) in output.iter_mut().enumerate() {
-            *slot = self.compute_with_input(&context_provider.for_index(i), *slot);
+            *slot = self.compute_with_input(context_provider.for_index(i), *slot);
         }
     }
     fn map_children(
@@ -1800,7 +1800,7 @@ impl DensityFunction for Ap2 {
                     *slot = if v == 0.0 {
                         0.0
                     } else {
-                        v * self.argument2.compute(&context_provider.for_index(i))
+                        v * self.argument2.compute(context_provider.for_index(i))
                     };
                 }
             }
@@ -1811,7 +1811,7 @@ impl DensityFunction for Ap2 {
                     *slot = if v < min {
                         v
                     } else {
-                        mth::min_f64(v, self.argument2.compute(&context_provider.for_index(i)))
+                        mth::min_f64(v, self.argument2.compute(context_provider.for_index(i)))
                     };
                 }
             }
@@ -1822,7 +1822,7 @@ impl DensityFunction for Ap2 {
                     *slot = if v > max {
                         v
                     } else {
-                        mth::max_f64(v, self.argument2.compute(&context_provider.for_index(i)))
+                        mth::max_f64(v, self.argument2.compute(context_provider.for_index(i)))
                     };
                 }
             }
@@ -4000,12 +4000,12 @@ mod tests {
 
     struct LinearCtx(Vec<SinglePointContext>);
     impl ContextProvider for LinearCtx {
-        fn for_index(&self, index: usize) -> SinglePointContext {
-            self.0[index]
+        fn for_index(&self, index: usize) -> &dyn FunctionContext {
+            &self.0[index]
         }
         fn fill_all_directly(&self, output: &mut [f64], function: &dyn DensityFunction) {
             for (i, slot) in output.iter_mut().enumerate() {
-                *slot = function.compute(&self.for_index(i));
+                *slot = function.compute(self.for_index(i));
             }
         }
     }

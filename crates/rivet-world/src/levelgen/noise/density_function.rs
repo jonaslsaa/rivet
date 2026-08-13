@@ -114,8 +114,8 @@ pub trait DensityFunction: Any + Debug + Send + Sync + 'static {
     /// run through a trait object).
     fn fill_array(&self, output: &mut [f64], context_provider: &dyn ContextProvider) {
         for (i, slot) in output.iter_mut().enumerate() {
-            let point = context_provider.for_index(i);
-            *slot = self.compute(&point);
+            let context = context_provider.for_index(i);
+            *slot = self.compute(context);
         }
     }
 
@@ -231,9 +231,19 @@ impl dyn DensityFunction {
 // ---------------------------------------------------------------------------
 
 /// `DensityFunction.ContextProvider` — per-index context + direct array fill.
+///
+/// Java's `forIndex(int)` returns the *owning* context (`NoiseChunk.this` for
+/// both `NoiseChunk` and its `sliceFillingContextProvider`), so the inner
+/// functions reached through the per-index fill paths take the interpolation
+/// loop branch (`context != NoiseChunk.this` is false). The Rust trait returns
+/// a `&dyn FunctionContext` borrow of the provider so the concrete
+/// `NoiseChunk` identity survives — the `NoiseChunk` impls return `&self`, and
+/// [`crate::levelgen::noisegen::noise_chunk`]'s `is_owning_chunk` recognizes
+/// them by downcast + shared-state identity exactly like Java's reference
+/// comparison.
 pub trait ContextProvider {
-    /// `forIndex(int index)`.
-    fn for_index(&self, index: usize) -> SinglePointContext;
+    /// `forIndex(int index)` — the owning context for that cell index.
+    fn for_index(&self, index: usize) -> &dyn FunctionContext;
 
     /// `fillAllDirectly(double[], DensityFunction)` — fills `output` by
     /// `compute`ing the function once per index (the `SimpleFunction` default
