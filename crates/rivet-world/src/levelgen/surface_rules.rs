@@ -71,21 +71,28 @@
 //! The value codecs, the applied `Condition`/`SurfaceRule` runtime, the
 //! `Context` lazy caches, and the `SurfaceSystem` noise set/clay-bands are
 //! faithful ports of the Java arithmetic. `buildSurface` is ported as the
-//! internal [`SurfaceSystem::build_surface`] seam driver (crate-visible,
-//! exercised only against a caller-supplied [`ChunkSurface`]) — the
-//! production wire from `NoiseBasedChunkGenerator.doFill` defers (RivetTodo
-//! #177). Within that driver the block-write half (`ProtoChunk.setBlockState`)
-//! defers with the `#216` section write (RivetTodo #216); the worldgen
-//! heightmap reads (`getHeight(WORLD_SURFACE_WG)`) and the `Biome`-value reads
-//! (`coldEnoughToSnow`, `shouldMeltFrozenOceanIcebergSlightly`) are the
-//! `#185`/biome-value seams. `SurfaceRuleData.end` is ported (the end-stone
-//! `block` rule); the `nether`/`overworld`/`overworldLike` builders remain AIR
-//! shims (the `mc.data.worldgen` unit, RivetTodo #179) because a faithful port
-//! needs the biome `HolderGetter` threaded through the settings bootstrap.
-//! The `@Deprecated` single-column [`SurfaceSystem::top_material`] probe (the
-//! carver's grass-replacement call) is ported and composed into the carver
-//! `CarvingContext` seam through [`bind_carver_top_material`]; the production
-//! carver loop that binds it defers (RivetTodo #185).
+//! internal [`SurfaceSystem::build_surface`] driver (crate-visible), driven
+//! against the real [`ProtoChunk`](crate::chunk::proto_chunk::ProtoChunk)
+//! `ChunkSurface` impl — the production wire from
+//! `NoiseBasedChunkGenerator.doFill` defers (RivetTodo #177). Within the
+//! driver the column write (`ProtoChunk.setBlockState` +
+//! `markPosForPostProcessing`) is the real worldgen write path; the worldgen
+//! heightmap reads (`getHeight(WORLD_SURFACE_WG)`) are the `#185` seam — the
+//! applied `SteepMaterialCondition` reads a snapshot of the primed heights
+//! captured at `build_surface` start (the applied rules are `'static`/`Send +
+//! Sync` and cannot carry the `&mut` chunk; the snapshot is bit-identical to
+//! Java's live reads for the end-stone and overworld surface writes, with the
+//! one accepted divergence being a rule that writes `AIR` over the topmost
+//! `defaultBlock`). The `Biome`-value reads (`coldEnoughToSnow`,
+//! `shouldMeltFrozenOceanIcebergSlightly`) are the biome-value seams
+//! (RivetTodo #185). `SurfaceRuleData.end` is ported (the
+//! end-stone `block` rule); the `nether`/`overworld`/`overworldLike` builders
+//! remain AIR shims (the `mc.data.worldgen` unit, RivetTodo #179) because a
+//! faithful port needs the biome `HolderGetter` threaded through the settings
+//! bootstrap. The `@Deprecated` single-column [`SurfaceSystem::top_material`]
+//! probe (the carver's grass-replacement call) is ported and composed into the
+//! carver `CarvingContext` seam through [`bind_carver_top_material`]; the
+//! production carver loop that binds it defers (RivetTodo #185).
 
 use crate::biome::BiomeManager;
 use crate::block::BlockState;
@@ -570,6 +577,12 @@ pub(crate) struct SurfaceContext {
     biome_getter: BiomeGetter,
     /// `Context.context` — the `WorldGenerationContext` (vertical anchors).
     worldgen_context: Arc<WorldGenerationContext>,
+    /// `Context.chunk`'s primed `WORLD_SURFACE_WG` heights, captured at
+    /// `buildSurface` start — the `#185` heightmap seam. The applied rules are
+    /// `'static`/`Send + Sync`, so they cannot carry the `&mut` chunk; the
+    /// heights are snapshotted into the shared context instead. `None` for the
+    /// single-column [`SurfaceSystem::top_material`] probe, which has no chunk.
+    world_surface_heights: Option<Arc<[i32; 256]>>,
 }
 
 // RivetTodo(#177): the surface-build runtime is test-exercised through the
@@ -800,11 +813,12 @@ impl<'a> Context<'a> {
     /// `new Context(SurfaceSystem, RandomState, ChunkAccess, NoiseChunk,
     /// Function<BlockPos, Holder<Biome>>, WorldGenerationContext,
     /// @Nullable Set<Holder<Biome>>)` — Java's `ChunkAccess chunk` is the
-    /// `#185` heightmap seam (the port reads heights through `seam_get_height`,
-    /// so the `Context` does not carry the chunk). The `SurfaceSystem` is the
-    /// `Arc` shared from `RandomState` (Java's `Context.system` is the same
-    /// object the `RandomState` holds); the `RandomState` is borrowed for the
-    /// context's lifetime.
+    /// `#185` heightmap seam: the port snapshots the primed `WORLD_SURFACE_WG`
+    /// heights (`world_surface_heights`) so the applied rules read them without
+    /// carrying the `&mut` chunk; `None` when there is no chunk (the carver
+    /// probe). The `SurfaceSystem` is the `Arc` shared from `RandomState`
+    /// (Java's `Context.system` is the same object the `RandomState` holds);
+    /// the `RandomState` is borrowed for the context's lifetime.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         system: Arc<SurfaceSystem>,
@@ -813,12 +827,14 @@ impl<'a> Context<'a> {
         biome_getter: BiomeGetter,
         worldgen_context: Arc<WorldGenerationContext>,
         possible_biomes: Option<Vec<Holder<BiomeId>>>,
+        world_surface_heights: Option<Arc<[i32; 256]>>,
     ) -> Self {
         let surface_context = Arc::new(SurfaceContext {
             system,
             cells: SharedCells::new(),
             biome_getter,
             worldgen_context,
+            world_surface_heights,
         });
         let temperature = Arc::new(TemperatureHelperCondition {
             cache: LazyCache::new(surface_context.cells.last_update_y()),
@@ -983,8 +999,10 @@ impl Condition for HoleCondition {
 }
 
 /// `Context.SteepMaterialCondition` — a `LazyXZCondition` reading the chunk's
-/// `WORLD_SURFACE_WG` heights. The chunk reads are the `#185` seam (the
-/// `&mut` heightmap prime); the port keeps the arithmetic and marks the read.
+/// `WORLD_SURFACE_WG` heights. The chunk reads are the `#185` heightmap seam:
+/// the applied condition cannot prime/read the `&mut` heightmap through `&self`,
+/// so it reads the snapshot `build_surface` captured at its start (see
+/// [`SurfaceContext::world_surface_heights`]); the arithmetic is faithful.
 struct SteepMaterialCondition {
     cache: LazyCache,
     surface_context: Arc<SurfaceContext>,
@@ -1007,21 +1025,28 @@ impl Condition for SteepMaterialCondition {
     fn test(&self) -> bool {
         self.cache
             .test(self.surface_context.cells.last_update_xz(), || {
+                // The `ChunkAccess.getHeight(WORLD_SURFACE_WG, ...)` reads are
+                // the `#185` heightmap seam — the applied rule cannot prime/
+                // read the `&mut` heightmap through `&self`, so it reads the
+                // snapshot `build_surface` captured at its start. The single-
+                // column carver probe has no chunk (`None`), so the steep
+                // condition cannot fire there — Java's probe does have a
+                // chunk, but the seam cannot construct one (see the module
+                // doc).
+                let Some(heights) = &self.surface_context.world_surface_heights else {
+                    return false;
+                };
                 let chunk_block_x = self.surface_context.cells.block_x() & 15;
                 let chunk_block_z = self.surface_context.cells.block_z() & 15;
                 let (z_north, z_south, x_west, x_east) =
                     steep_neighbor_probes(chunk_block_x, chunk_block_z);
-                // The `ChunkAccess.getHeight(WORLD_SURFACE_WG, ...)` reads are the
-                // `#185`/`#216` seam — the port cannot prime/read the worldgen
-                // heightmap through the `&mut` accessor inside `&self`. See the
-                // module doc.
-                let height_north = seam_get_height(chunk_block_x, z_north);
-                let height_south = seam_get_height(chunk_block_x, z_south);
+                let height_north = seam_get_height(heights, chunk_block_x, z_north);
+                let height_south = seam_get_height(heights, chunk_block_x, z_south);
                 if height_south >= height_north + 4 {
                     return true;
                 }
-                let height_west = seam_get_height(x_west, chunk_block_z);
-                let height_east = seam_get_height(x_east, chunk_block_z);
+                let height_west = seam_get_height(heights, x_west, chunk_block_z);
+                let height_east = seam_get_height(heights, x_east, chunk_block_z);
                 height_west >= height_east + 4
             })
     }
@@ -1049,15 +1074,17 @@ impl Condition for TemperatureHelperCondition {
     }
 }
 
-/// The `RivetTodo(#185)` heightmap seam — see the module doc.
-fn seam_get_height(_x: i32, _z: i32) -> i32 {
-    // STUB(mc.world.level.chunk.access): the `ChunkAccess.getHeight(
-    // WORLD_SURFACE_WG, x, z)` read needs the `&mut` heightmap prime (the
-    // `RivetTodo(#216)` write slice / `RivetTodo(#185)` worldgen chunk seam).
-    // Returning 0 unconditionally means `SteepMaterialCondition` never fires:
-    // every worldgen-heightmap-driven surface is deferred until the heightmap
-    // write slice lands; the real caller replaces this with the actual reads.
-    0
+/// The `ChunkAccess.getHeight(WORLD_SURFACE_WG, x, z)` read — `getFirstAvailable
+/// (x & 15, z & 15) - 1` over the primed heightmap (issue #185). The read
+/// happens against the snapshot `build_surface` captured at its start. The
+/// snapshot is bit-identical to Java's live reads for every surface write that
+/// keeps the topmost non-air block in place — the end-stone rule and the
+/// default-block-to-surface-state writes of the overworld rules; the one
+/// divergence is a rule that writes `AIR` over the topmost `defaultBlock`
+/// (Java's `setBlock` lowers the worldgen height there and the live probe
+/// would see it), which the seam accepts (RivetTodo #185).
+fn seam_get_height(heights: &[i32; 256], x: i32, z: i32) -> i32 {
+    heights[(x & 15) as usize + (z & 15) as usize * 16]
 }
 
 /// The `RivetTodo(#185)` biome-value seam —
@@ -2489,19 +2516,21 @@ impl SurfaceSystem {
     /// production wire.** Java calls `SurfaceSystem.buildSurface` from
     /// `NoiseBasedChunkGenerator.doFill`; the port's production call site is
     /// `NoiseBasedChunkGenerator::build_surface_stub` (RivetTodo #177, the
-    /// `levelgen.surface` wave). This method exists so the column-loop
-    /// arithmetic and the `ChunkColumnAdapter` x/z threading are exercised
-    /// against a caller-supplied [`ChunkSurface`]; the production `ProtoChunk`
-    /// implements the trait once the `#216` section-write slice lands.
+    /// `levelgen.surface` wave). This method drives the column-loop arithmetic
+    /// and the `ChunkColumnAdapter` x/z threading against a caller-supplied
+    /// [`ChunkSurface`]; the production `ProtoChunk` implements the trait (see
+    /// `chunk::proto_chunk`), exercised by the real-chunk integration tests.
     ///
     /// The block-column read is ported faithfully (the `column.getBlock` /
     /// `isStone` / `updateY` / `old == defaultBlock` / `rule.tryApply`
     /// cascade). The `getHeight(WORLD_SURFACE_WG)` reads are the `#185` seam
-    /// (`ChunkSurface::get_height`); the `Biome`-value reads
-    /// (`surfaceBiome.is(Biomes.X)`, `shouldMeltFrozenOceanIcebergSlightly`)
-    /// are the biome-value seams (`holder_biome_id` + `false`); the column
-    /// write (`ProtoChunk.setBlockState` + `markPosForPostProcessing`) is the
-    /// `#216` seam (`ChunkColumnAdapter` guards + writes, the mark defers).
+    /// (snapshotted at [`Self::build_surface`] start into the shared
+    /// `SurfaceContext`, then read by `SteepMaterialCondition`); the
+    /// `Biome`-value reads (`surfaceBiome.is(Biomes.X)`,
+    /// `shouldMeltFrozenOceanIcebergSlightly`) are the biome-value seams
+    /// (`holder_biome_id` + `false`); the column write
+    /// (`ProtoChunk.setBlockState` + `markPosForPostProcessing`) is the real
+    /// worldgen write path (`ChunkColumnAdapter` guards + writes + marks).
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)] // #177 — seam driver until `NoiseBasedChunkGenerator` wires it.
     pub(crate) fn build_surface<'a>(
@@ -2524,6 +2553,20 @@ impl SurfaceSystem {
             let bm = Arc::clone(&biome_manager);
             Arc::new(move |pos: &BlockPos| bm.get_biome(pos)) as BiomeGetter
         };
+        // Capture the primed `WORLD_SURFACE_WG` heights before the context is
+        // built (the `#185` heightmap seam): the applied rules read the
+        // `SteepMaterialCondition` probes through this snapshot, never the
+        // `&mut` chunk. Bit-identical to Java's live reads for the end-stone and
+        // overworld surface writes (which keep the topmost non-air block in
+        // place); a rule writing `AIR` over the topmost `defaultBlock` is the
+        // one accepted divergence (see [`seam_get_height`]).
+        let mut world_surface_heights = [0i32; 256];
+        for x in 0..16i32 {
+            for z in 0..16i32 {
+                world_surface_heights[(x + z * 16) as usize] =
+                    column.chunk.borrow().get_height(x, z);
+            }
+        }
         let context = Context::new(
             random_state.surface_system(),
             random_state,
@@ -2531,6 +2574,7 @@ impl SurfaceSystem {
             biome_getter,
             generation_context,
             possible_biomes.map(|set| set.to_vec()),
+            Some(Arc::new(world_surface_heights)),
         );
         let rule = rule_source.apply(&context);
         let min_block_x = column.chunk.borrow().min_block_x();
@@ -2689,6 +2733,9 @@ impl SurfaceSystem {
             noise_chunk,
             biome_getter,
             worldgen_context,
+            None,
+            // No chunk: the single-column probe has no heightmap to snapshot,
+            // so `SteepMaterialCondition` cannot fire here (RivetTodo #185).
             None,
         );
         let rule = rule_source.apply(&context);
@@ -2964,7 +3011,7 @@ pub(crate) fn bind_carver_top_material<'a>(
 
 /// The `buildSurface` chunk seam — the `BlockColumn` over the chunk + the
 /// worldgen heightmap reads (`#216`/`#185`). The production `ProtoChunk`
-/// implements this once the section-write slice lands.
+/// implements this (issue #179); a test double can too.
 pub trait ChunkSurface {
     /// `ProtoChunk.getHeight(WORLD_SURFACE_WG, x, z)` — the `#185` seam.
     fn get_height(&self, x: i32, z: i32) -> i32;
@@ -2975,12 +3022,17 @@ pub trait ChunkSurface {
     /// `ChunkPos.getMinBlockZ()` — the chunk's north edge in block coords.
     fn min_block_z(&self) -> i32;
     /// `LevelHeightAccessor.isInsideBuildHeight(int)` — the build-height guard
-    /// the `#216` write path applies before `setBlockState`.
+    /// the write path applies before `setBlockState`.
     fn is_inside_build_height(&self, y: i32) -> bool;
     /// `ProtoChunk.getBlockState(x, y, z)`.
     fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState;
-    /// `ProtoChunk.setBlockState(x, y, z, state)` — the `#216` seam.
+    /// `ProtoChunk.setBlockState(x, y, z, state)` — the worldgen write
+    /// (section write + heightmap updates + post-processing mark).
     fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState);
+    /// `ProtoChunk.markPosForPostProcessing(BlockPos)` — the surface
+    /// `BlockColumn.setBlock` calls this for every non-empty fluid write
+    /// (Java, after `protoChunk.setBlockState`).
+    fn mark_pos_for_post_processing(&mut self, x: i32, y: i32, z: i32);
 }
 
 /// The `buildSurface` `BlockColumn` over the chunk seam — Java's anonymous
@@ -3006,12 +3058,14 @@ impl BlockColumn<BlockState> for ChunkColumnAdapter<'_> {
 
     fn set_block(&mut self, block_y: i32, state: BlockState) {
         // Java: `heightAccessor.isInsideBuildHeight(blockY)` guards the write,
-        // and a non-empty fluid state triggers `markPosForPostProcessing` (the
-        // `#216` section-write seam — deferred, the conditional is preserved
-        // as `state.fluid_empty()`'s contract on the caller).
+        // and a non-empty fluid state triggers `markPosForPostProcessing` —
+        // both on the `ChunkSurface` seam (issue #179).
         let mut chunk = self.chunk.borrow_mut();
         if chunk.is_inside_build_height(block_y) {
             chunk.set_block_state(self.x.get(), block_y, self.z.get(), state);
+            if !state.fluid_empty() {
+                chunk.mark_pos_for_post_processing(self.x.get(), block_y, self.z.get());
+            }
         }
     }
 }
@@ -3298,6 +3352,7 @@ mod tests {
     use crate::chunk::chunk_generator::ChunkGenerator;
     use crate::level::WorldGenLevel;
     use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor, create};
+    use crate::levelgen::heightmap::Types;
     use crate::levelgen::noisegen::NoiseGeneratorSettings;
     use rivet_registry::access::RegistryAccess;
     use rivet_registry::builder::RegistryBuilder;
@@ -3407,6 +3462,7 @@ mod tests {
             cells: SharedCells::new(),
             biome_getter: Arc::new(|_: &BlockPos| Holder::direct(BiomeId::from_id(0))),
             worldgen_context: Arc::new(worldgen_context(-64, 384, 384)),
+            world_surface_heights: None,
         })
     }
 
@@ -3852,6 +3908,7 @@ mod tests {
         fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) {
             self.writes.push((x, y, z, state));
         }
+        fn mark_pos_for_post_processing(&mut self, _x: i32, _y: i32, _z: i32) {}
     }
 
     /// Java's anonymous `buildSurface` `BlockColumn` closes over the shared
@@ -4097,5 +4154,134 @@ mod tests {
 
         // An unbound seam yields Java's `Optional.empty()` (no replacement).
         assert_eq!(unbound.top_material(&pos, false), None);
+    }
+
+    /// A real-chunk integration test for the surface driver (issue #179): a
+    /// hand-built 24-section `ProtoChunk<BlockState, BiomeId, &str>` (the real
+    /// worldgen chunk shape) filled with stone `default_block` below y=64, with
+    /// the worldgen heightmaps primed exactly as `fill_from_noise` leaves them.
+    /// `build_surface` with the END rule (end stone — `SurfaceRuleData.end`)
+    /// must replace every stone cell in the real chunk's sections and keep the
+    /// worldgen heightmaps stable (the surface write never moves the topmost
+    /// non-air block).
+    #[test]
+    fn build_surface_replaces_stone_in_a_real_proto_chunk() {
+        use crate::chunk::proto_chunk::ProtoChunk;
+        use crate::chunk::storage::chunk_reconstruction::{
+            block_state_predicates, resolve_state_flags,
+        };
+        use crate::chunk::storage::section_reconstruction::current_version_container_factory;
+        use crate::chunk::upgrade_data::UpgradeData;
+
+        let (_settings, random_state, noise_chunk) = build_surface_state();
+        let system = random_state.surface_system();
+
+        let mut proto: ProtoChunk<
+            BlockState,
+            crate::chunk::storage::section_reconstruction::BiomeId,
+            &'static str,
+        > = ProtoChunk::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(24),
+            create(-64, 384),
+            &current_version_container_factory(),
+            None,
+            Blocks::AIR.default_block_state(),
+            Blocks::AIR.default_block_state(),
+            &resolve_state_flags,
+        );
+        // Fill the lower 8 sections (`[-64, 64)`) with stone via the real
+        // section write, then prime the worldgen heightmaps column-by-column
+        // (topmost stone at y=63 -> `getHeight = 63`, like the doFill output).
+        let stone = Blocks::STONE.default_block_state();
+        let flags = resolve_state_flags(&stone);
+        let predicates = block_state_predicates();
+        for y in -64..64 {
+            let section_index = proto.get_section_index(y) as usize;
+            let y_in_section = y & 15;
+            let section = proto.get_section_mut(section_index);
+            for x in 0..16 {
+                for z in 0..16 {
+                    section.set_block_state(
+                        x,
+                        y_in_section,
+                        z,
+                        stone,
+                        &predicates.is_air,
+                        &predicates.is_randomly_ticking,
+                        &predicates.fluid_is_empty,
+                        &predicates.fluid_is_randomly_ticking,
+                        &predicates.is_special_colliding,
+                    );
+                }
+            }
+        }
+        for x in 0..16 {
+            for z in 0..16 {
+                proto.update_heightmaps_after(x, 63, z, flags);
+            }
+        }
+        // The primed heightmap reads back the topmost non-air y (63), exactly
+        // what Java's `getHeight(WORLD_SURFACE_WG)` returns for this column.
+        let height_before = proto
+            .get_or_create_heightmap_unprimed(Types::WorldSurfaceWg)
+            .get_height_at(0, 0, -64);
+        assert_eq!(height_before, 63);
+
+        let biome_manager = Arc::new(BiomeManager::new(
+            Arc::new(crate::biome::FixedBiomeSource::new(Holder::direct(
+                BiomeId::from_id(0),
+            ))),
+            0,
+        ));
+        let gen_context = Arc::new(worldgen_context(-64, 384, 384));
+        let rule_source: ArcRuleSource = surface_rule_end();
+
+        system.build_surface(
+            &random_state,
+            biome_manager,
+            false,
+            gen_context,
+            &mut proto,
+            noise_chunk,
+            &rule_source,
+            None,
+        );
+
+        // Every stone `default_block` cell became the END rule result (end
+        // stone) — 16x16x128 real section writes through
+        // `ProtoChunk::setBlockState` + the heightmap updates.
+        assert_eq!(
+            proto.get_block_state(0, 63, 0),
+            Blocks::END_STONE.default_block_state()
+        );
+        assert_eq!(
+            proto.get_block_state(15, -64, 15),
+            Blocks::END_STONE.default_block_state()
+        );
+        assert_eq!(
+            proto.get_block_state(7, 0, 7),
+            Blocks::END_STONE.default_block_state()
+        );
+        // The air above the surface is untouched.
+        assert_eq!(
+            proto.get_block_state(0, 64, 0),
+            Blocks::AIR.default_block_state()
+        );
+        // The worldgen heightmaps stayed stable: the surface write replaced
+        // stone (non-air) with end stone (non-air), so the topmost non-air y
+        // never moves and `getHeight` is unchanged.
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::WorldSurfaceWg)
+                .get_height_at(0, 0, -64),
+            63
+        );
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::OceanFloorWg)
+                .get_height_at(15, 15, -64),
+            63
+        );
     }
 }
