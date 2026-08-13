@@ -24,8 +24,12 @@
 //! - **Color tables.** `GrassColor`/`FoliageColor`/`DryFoliageColor` are
 //!   `init`-filled texture tables generated at startup (`ColorMapColorUtil.get`
 //!   indexes a 65536-entry pixel array). Rivet has no such generator, so the
-//!   table reads are STUBs returning the documented default colors
-//!   (`-65281`/`-12012264`/`-10732494`).
+//!   table reads are STUBs over an uninitialized (zero) 65536-entry array: the
+//!   `Biome` getters clamp temperature/downfall to [0,1] before reading, which
+//!   keeps the index in [0, 65535] and always reads `pixels[index]` — the
+//!   `defaultMapColor` fallbacks (`-65281`/`-12012264`/`-10732494`) are
+//!   unreachable, and the zero table reads `0`, exactly the uninitialized Java
+//!   value.
 //! - **`EnvironmentAttributeMap` STUB.** The attribute map is genuinely
 //!   entangled with the `mc.world.attribute` unit (`EnvironmentAttribute`,
 //!   `AttributeModifier`, the dispatched-map `CODEC_ONLY_POSITIONAL`). Vanilla
@@ -870,28 +874,37 @@ fn fmt_opt_debug<T: fmt::Debug>(value: Option<&T>) -> String {
 }
 
 /// `net.minecraft.world.level.GrassColor` — STUB: the texture pixel table is
-/// `init`-filled at startup and Rivet has no generator, so `get` returns the
-/// documented default color (`-65281`).
+/// `init`-filled at startup and Rivet has no generator. The table is modeled
+/// as uninitialized (all zeros) like Java's `new int[65536]`, and every call
+/// through `Biome.getGrassColorFromTexture` clamps temperature/downfall to
+/// [0,1], so `ColorMapColorUtil.get` always reads `pixels[y<<8|x]` (the index
+/// is in [0, 65535], never past the 65536-length table) — the `defaultMapColor`
+/// fallback (`-65281`) is unreachable and the uninitialized table reads `0`.
+/// `get` returns `0`, exactly the value the zero-filled Java table produces.
 ///
 /// RivetTodo(#178): the `ColorMapColorUtil.get` table read (and the `init`
 /// surface) lands with a grass/foliage color-map source.
 mod grass_color {
     pub fn get(_temp: f64, _rain: f64) -> i32 {
-        -65281
+        0
     }
 }
 
-/// `net.minecraft.world.level.FoliageColor` — STUB (default `-12012264`).
+/// `net.minecraft.world.level.FoliageColor` — STUB: same uninitialized
+/// zero-table semantics as `GrassColor` (`FOLIAGE_DEFAULT` `-12012264` is the
+/// unreachable `defaultMapColor` fallback; the clamped table read is `0`).
 mod foliage_color {
     pub fn get(_temp: f64, _rain: f64) -> i32 {
-        -12012264
+        0
     }
 }
 
-/// `net.minecraft.world.level.DryFoliageColor` — STUB (default `-10732494`).
+/// `net.minecraft.world.level.DryFoliageColor` — STUB: same uninitialized
+/// zero-table semantics as `GrassColor` (`FOLIAGE_DRY_DEFAULT` `-10732494` is
+/// the unreachable `defaultMapColor` fallback; the clamped table read is `0`).
 mod dry_foliage_color {
     pub fn get(_temp: f64, _rain: f64) -> i32 {
-        -10732494
+        0
     }
 }
 
@@ -1115,10 +1128,13 @@ mod tests {
     #[test]
     fn grass_color_falls_back_to_texture_stub() {
         let biome = plains();
-        // No grass override -> the GrassColor STUB default.
-        assert_eq!(biome.get_grass_color(0.0, 0.0), -65281);
-        assert_eq!(biome.get_foliage_color(), -12012264);
-        assert_eq!(biome.get_dry_foliage_color(), -10732494);
+        // No grass override -> the GrassColor STUB over an uninitialized (zero)
+        // 65536-entry table. The clamped [0,1] temperature/downfall keep the
+        // index in [0, 65535], so `ColorMapColorUtil.get` reads `pixels[index]`
+        // = 0 — the Java `defaultMapColor` fallbacks are unreachable here.
+        assert_eq!(biome.get_grass_color(0.0, 0.0), 0);
+        assert_eq!(biome.get_foliage_color(), 0);
+        assert_eq!(biome.get_dry_foliage_color(), 0);
     }
 
     #[test]

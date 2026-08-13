@@ -12,14 +12,17 @@
 //!
 //! - **Spawner map order.** Java's `Builder` holds an `EnumMap<MobCategory,
 //!   Builder>` (enum declaration order) and `ImmutableMap.copyOf`s it at
-//!   `build()`; the CODEC encodes that stored map in declaration order and
-//!   decodes through `SimpleMapCodec`'s `HashMap` (hash iteration order) into
-//!   `ImmutableMap.copyOf(HashMap)`. The port mirrors the field as an `IndexMap`
-//!   (insertion order): the codec (`ordered_map_codec`) encodes by iterating
-//!   the `IndexMap` directly (Java's stored order) and decodes through
-//!   `simple_map`'s `HashMap`, collecting into the `IndexMap` in hash iteration
-//!   order (exactly what Java's `ImmutableMap.copyOf(HashMap)` would preserve).
-//!   The same holds for `spawn_costs` (Java `LinkedHashMap` insertion order).
+//!   `build()`, so the CODEC encodes the stored map in declaration order. On
+//!   decode, `BaseMapCodec.decode` (datafixerupper 10.0.21) accumulates the
+//!   entries into a fastutil `Object2ObjectArrayMap` (insertion order) and
+//!   wraps it with `ImmutableMap.copyOf`, which iterates the source map's entry
+//!   set — the decoded map order IS the serialized input order (there is no
+//!   `HashMap` hash-order step, so a decode→re-encode round trip is
+//!   byte-exact). The port mirrors the field as an `IndexMap` (insertion
+//!   order): the codec (`ordered_map_codec`) encodes by iterating the
+//!   `IndexMap` directly (Java's stored order) and decodes directly into the
+//!   `IndexMap` in input order (Java's `Object2ObjectArrayMap` order). The same
+//!   holds for `spawn_costs`.
 //! - **`SpawnerData` compact constructor.** `type.getCategory() == MISC`
 //!   replaces the type with `EntityTypes.PIG`. The record `toString` is
 //!   `EntityType.getKey(type) + "*(" + minCount + "-" + maxCount + ")"`.
@@ -37,17 +40,18 @@
 use crate::entity::{EntityType, MOB_CATEGORY_VALUES, MobCategory, entity_type_keys};
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
-use rivet_serialization::dynamic_ops::DynamicOps;
+use rivet_serialization::dynamic_ops::{DynamicOps, MapLike};
+use rivet_serialization::lifecycle::Lifecycle;
 use rivet_serialization::map_codec;
 use rivet_serialization::map_codec::MapCodec;
-use rivet_serialization::map_codec::MapCodecDecoderHalf;
 use rivet_serialization::map_decoder;
 use rivet_serialization::map_encoder;
+use rivet_serialization::pair::Pair;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
+use rivet_serialization::unit::Unit;
 use rivet_util::extra_codecs::positive_int;
 use rivet_util::string_representable;
 use rivet_util::weighted::{Weighted, WeightedList, weighted_list_codec_map};
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::ops::Deref;
@@ -75,13 +79,17 @@ pub struct MobSpawnSettings {
 ///
 /// Java's `MobSpawnSettings` encodes `b.spawners`/`b.mobSpawnCosts` in their
 /// stored map order — `ImmutableMap` preserves the `EnumMap` declaration order
-/// for spawners and the `LinkedHashMap` insertion order for spawn_costs — but
-/// decodes through `SimpleMapCodec`'s `HashMap` and then
-/// `ImmutableMap.copyOf(HashMap)` (hash order). The port mirrors the stored
-/// order with an `IndexMap`; this codec encodes by iterating the `IndexMap`
-/// directly (Java's stored order) and decodes through the hash-ordered
-/// `simple_map` (Java's `ImmutableMap.copyOf(HashMap)`), transcoding each
-/// value between the serialized `VS` and stored `VF` types.
+/// for spawners and the `LinkedHashMap` insertion order for spawn_costs — and
+/// decodes through `BaseMapCodec.decode` (datafixerupper 10.0.21), which
+/// accumulates the entries into a fastutil `Object2ObjectArrayMap` (insertion
+/// order) and wraps them with `ImmutableMap.copyOf` (which preserves the
+/// source's iteration order) — so the decoded map order IS the serialized
+/// input order, and a decode→re-encode round trip is byte-exact. The port
+/// mirrors the stored order with an `IndexMap`; this codec encodes by
+/// iterating the `IndexMap` directly (Java's stored order) and decodes
+/// directly into the `IndexMap` in input order (Java's `Object2ObjectArrayMap`
+/// order), transcoding each value between the serialized `VS` and stored `VF`
+/// types.
 fn ordered_map_codec<K, VS, VF, Ops: DynamicOps + 'static>(
     key_codec: Arc<dyn Codec<K, Ops>>,
     value_codec: Arc<dyn Codec<VS, Ops>>,
@@ -94,17 +102,71 @@ where
     VS: 'static + Clone + Send + Sync,
     VF: 'static + Clone + Send + Sync,
 {
-    // Decode: `SimpleMapCodec` into a `HashMap` (hash order), then
-    // `ImmutableMap.copyOf(HashMap)`-style into the `IndexMap` (hash order
-    // preserved) — exactly Java's decode ordering.
+    // Decode: Java's `BaseMapCodec.decode` (datafixerupper 10.0.21)
+    // accumulates the entries into a fastutil `Object2ObjectArrayMap`
+    // (insertion order) and wraps it with `ImmutableMap.copyOf`, which
+    // iterates the source map's entry set — so the decoded map order IS the
+    // serialized input order (there is no `HashMap` hash-order step, and a
+    // decode→re-encode round trip is byte-exact). Replicated here directly
+    // into the `IndexMap`; a duplicate key keeps its first slot and records an
+    // error, exactly Java's `putIfAbsent` + duplicate-entry handling.
+    let raw_decoder = map_decoder::of(
+        {
+            let key_codec = key_codec.clone();
+            let value_codec = value_codec.clone();
+            Arc::new(move |ops: &Ops, input: &dyn MapLike<Ops::Output>| {
+                let mut read: indexmap::IndexMap<K, VS> = indexmap::IndexMap::new();
+                let mut failed: Vec<Pair<Ops::Output, Ops::Output>> = Vec::new();
+                let mut result: DataResult<Unit> =
+                    DataResult::success_with_lifecycle(Unit, Lifecycle::stable());
+                for pair in input.entries() {
+                    let key = key_codec.parse(ops, &pair.first);
+                    let value = value_codec.parse(ops, &pair.second);
+                    let entry_result: DataResult<(K, VS)> = DataResult::apply2_stable(
+                        key,
+                        |k: &K, v: &VS| (k.clone(), v.clone()),
+                        value,
+                    );
+                    if let Some(entry) = entry_result.clone().result_or_partial_silent() {
+                        let k = entry.0.clone();
+                        match read.entry(k.clone()) {
+                            indexmap::map::Entry::Occupied(_) => {
+                                failed.push(pair.clone());
+                                result = result.apply2_stable(
+                                    |_u: &Unit, _p: &Unit| Unit,
+                                    DataResult::error(format!("Duplicate entry for key: '{}'", k)),
+                                );
+                            }
+                            indexmap::map::Entry::Vacant(slot) => {
+                                slot.insert(entry.1.clone());
+                            }
+                        }
+                    }
+                    if entry_result.is_error() {
+                        failed.push(pair.clone());
+                    }
+                    let r = result.clone();
+                    result =
+                        r.apply2_stable(|_u: &Unit, _p: &Unit| Unit, entry_result.map(|_| Unit));
+                }
+                let elements = read.clone();
+                let errors = ops.create_map(failed);
+                result
+                    .map(|_| elements.clone())
+                    .set_partial(elements)
+                    .map_error(|e| format!("{} missed input: {:?}", e, errors))
+            })
+        },
+        {
+            let keys = keys.clone();
+            Arc::new(move |ops: &Ops| keys.keys(ops))
+        },
+    );
     let decoder = map_decoder::map(
-        Arc::new(MapCodecDecoderHalf(codec::simple_map(
-            key_codec.clone(),
-            value_codec.clone(),
-            keys.clone(),
-        ))),
-        Arc::new(move |hm: &HashMap<K, VS>| {
-            hm.iter()
+        raw_decoder,
+        Arc::new(move |ordered: &indexmap::IndexMap<K, VS>| {
+            ordered
+                .iter()
                 .map(|(k, v)| (k.clone(), decode_value(v)))
                 .collect()
         }),
@@ -753,6 +815,52 @@ mod tests {
                 "water_ambient",
                 "misc",
             ]
+        );
+    }
+
+    #[test]
+    fn codec_decode_keeps_input_order_for_reencode() {
+        let codec = map_codec::codec_of(MobSpawnSettings::map_codec_of::<JsonOps>());
+        // Java's `BaseMapCodec.decode` (datafixerupper 10.0.21) accumulates
+        // entries into a fastutil `Object2ObjectArrayMap` (insertion order) and
+        // `ImmutableMap.copyOf` preserves that order — there is no `HashMap`
+        // hash-order step. So a decode→re-encode round trip must emit exactly
+        // the serialized input key order, not the Builder's declaration order.
+        let input = json!({
+            "spawners": {
+                "misc": [{"type": "minecraft:pig", "minCount": 1, "maxCount": 2, "weight": 3}],
+                "creature": [],
+                "monster": [{"type": "minecraft:pig", "minCount": 4, "maxCount": 6, "weight": 7}]
+            },
+            "spawn_costs": {
+                "minecraft:pig": {"energy_budget": 0.15, "charge": 0.7}
+            }
+        });
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &input)
+            .result()
+            .expect("decode")
+            .clone();
+        // The decoded map stores spawners in input order, not declaration
+        // order (declaration order is monster, creature, ..., misc).
+        let spawner_keys: Vec<&str> = decoded.spawners().keys().map(|k| k.name()).collect();
+        assert_eq!(spawner_keys, vec!["misc", "creature", "monster"]);
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .expect("encode")
+            .clone();
+        // Re-encode preserves that input order (observable because serde_json
+        // is built with `preserve_order`).
+        let spawners = encoded["spawners"].as_object().expect("spawners");
+        let keys: Vec<&str> = spawners.keys().map(|s| s.as_str()).collect();
+        assert_eq!(keys, vec!["misc", "creature", "monster"]);
+        // The `spawn_costs` path shares `ordered_map_codec`; with the STUB's
+        // single entity the order is trivial, but the field round-trips.
+        let costs = encoded["spawn_costs"].as_object().expect("spawn_costs");
+        assert_eq!(
+            costs["minecraft:pig"],
+            json!({"energy_budget": 0.15, "charge": 0.7})
         );
     }
 

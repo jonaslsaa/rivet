@@ -726,10 +726,14 @@ fn hex_color<Ops: DynamicOps + 'static>(expected_digits: u32) -> Arc<dyn Codec<i
         }),
         Arc::new(move |value: &i32| {
             // Java `HexFormat.of().toHexDigits(value.intValue(), expectedDigits)`
-            // — the low `expectedDigits*4` bits, lowercase, zero-padded.
+            // — the low `expectedDigits*4` bits, lowercase, zero-padded. The
+            // mask is computed in `u64` so `expected_digits = 8` (the full
+            // 32-bit ARGB surface) doesn't overflow `1 << 32` on a 32-bit
+            // shift (`HexFormat` rejects digits > 8 for `int`).
+            let mask = (1u64 << (expected_digits * 4)) - 1;
             format!(
                 "#{:0width$x}",
-                value & ((1 << (expected_digits * 4)) - 1),
+                (*value as i64) & mask as i64,
                 width = expected_digits as usize
             )
         }),
@@ -1032,6 +1036,53 @@ mod string_rgb_color_tests {
             error_message(&codec.parse(&JsonOps::INSTANCE, &json!("#7d8c6e\u{e9}"))),
             "Failed to parse either. First: Hex color is wrong size, expected 6 digits but got 7; Second: Failed to parse either. First: Not a number: \"#7d8c6e\u{e9}\"; Second: Not a json array: \"#7d8c6e\u{e9}\""
         );
+    }
+
+    #[test]
+    fn hex_color_8_digit_argb_round_trips_without_overflow() {
+        // `hexColor(8)` is the `#RRGGBBAA`-style full 32-bit surface
+        // (`STRING_ARGB_COLOR` when ported). The encode mask must not overflow
+        // `1 << 32` and must preserve the high (alpha) bits of a negative i32.
+        let codec = hex_color::<JsonOps>(8);
+        // 0xFFFF0000 (negative i32) — the high bit survives the encode mask.
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!("#ffff0000"))
+            .result()
+            .cloned()
+            .expect("decode");
+        assert_eq!(decoded, 0xFFFF0000u32 as i32);
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .cloned()
+            .expect("encode");
+        assert_eq!(encoded, json!("#ffff0000"));
+        // Full 8-digit round trip with alpha bits set.
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!("#ff334455"))
+            .result()
+            .cloned()
+            .expect("decode");
+        assert_eq!(decoded, 0xFF334455u32 as i32);
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .cloned()
+            .expect("encode");
+        assert_eq!(encoded, json!("#ff334455"));
+        // All-ones (0xFFFFFFFF, i32 -1).
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!("#ffffffff"))
+            .result()
+            .cloned()
+            .expect("decode");
+        assert_eq!(decoded, -1);
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .cloned()
+            .expect("encode");
+        assert_eq!(encoded, json!("#ffffffff"));
     }
 
     #[test]
