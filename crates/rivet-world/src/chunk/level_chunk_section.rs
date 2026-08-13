@@ -21,9 +21,11 @@
 //! exact-for-content stand-ins where it does not.
 //!
 //! Deferred with the owning unit: the Anti-Xray `chunkPacketInfo`/
-//! `chunkSectionIndex` write params (with `paper.antixray`), and the
-//! set-block/fluid accessors (with the mutator unit; the section read/write
-//! paths do not need them).
+//! `chunkSectionIndex` write params (with `paper.antixray`), the fluid
+//! set/accessors (with the fluid-state unit), and `setBlockState`'s client-side
+//! `isClient` shortcut (the section has no client flag; the worldgen `doFill`
+//! write path uses `checkThreading = false`, so the non-client branch is the
+//! only one this port's [`set_block_state`](Self::set_block_state) reaches).
 
 use crate::chunk::moonrise_short_list::ShortList;
 use crate::chunk::paletted_container::PalettedContainer;
@@ -187,6 +189,106 @@ impl<
     /// `getBlockState(int, int, int)`.
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> T {
         self.states.get(x, y, z)
+    }
+
+    /// `acquire()` — the section's `PalettedContainer.acquire()`.
+    ///
+    /// Paper disables the `ThreadingDetector` (`// Paper - disable this - use
+    /// proper synchronization`), so Java's acquire/release are NO-OPs; the
+    /// port mirrors them as documented no-ops. The `NoiseBasedChunkGenerator`
+    /// `fillFromNoise` lifecycle acquires every section it will write and
+    /// releases them in `finally`, so the no-ops keep the call structure
+    /// faithful (the section set writes are already `&mut self`-exclusive here).
+    pub fn acquire(&self) {}
+
+    /// `release()` — the section's `PalettedContainer.release()` (a NO-OP; see
+    /// [`acquire`](Self::acquire)).
+    pub fn release(&self) {}
+
+    /// `setBlockState(int sectionX, int sectionY, int sectionZ, BlockState
+    /// state, boolean checkThreading)` — the `checkThreading = false` path
+    /// (`getAndSetUnchecked`).
+    ///
+    /// The count bookkeeping is ported exactly: Java decrements the previous
+    /// state's counts (non-empty, randomly-ticking block, fluid, randomly-
+    /// ticking fluid) and increments the new state's, then runs Paper's
+    /// `updateBlockCallback` (special-colliding tally + the `tickingBlocks`
+    /// list). The `isClient` branch of `updateBlockCallback` is unreachable
+    /// here (no client flag — see the module doc); the special-colliding and
+    /// randomly-ticking branches use the same caller-supplied predicates
+    /// [`new`](Self::new)/`recalc_block_counts` take, so the write stays
+    /// faithful to the caller's real `BlockBehaviour` flags. `checkThreading`
+    /// itself is omitted (Paper's `getAndSet`/`getAndSetUnchecked` differ only
+    /// by the acquire/release no-ops, which [`get_and_set`] already omits).
+    ///
+    /// Returns the previous state, matching Java.
+    #[allow(clippy::too_many_arguments)] // Java's `setBlockState` has 7 params + the `BlockBehaviour` predicate set.
+    pub fn set_block_state(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: T,
+        is_air: &dyn Fn(&T) -> bool,
+        is_randomly_ticking: &dyn Fn(&T) -> bool,
+        fluid_is_empty: &dyn Fn(&T) -> bool,
+        fluid_is_randomly_ticking: &dyn Fn(&T) -> bool,
+        is_special_colliding: &dyn Fn(&T) -> bool,
+    ) -> T {
+        // `getAndSet` moves the new state into the container; the increment
+        // branch below still reads the caller's `state` (`T: Clone`), so clone
+        // here rather than re-reading the container.
+        let previous = self.states.get_and_set(x, y, z, state.clone());
+        // All counts are Java `short` fields; Java's compound assignment narrows
+        // the `int` result back to `short` (wrapping on overflow), so the port
+        // uses wrapping arithmetic (PORTING.md) rather than debug-build panics.
+        if !is_air(&previous) {
+            self.non_empty_block_count = self.non_empty_block_count.wrapping_sub(1);
+            if is_randomly_ticking(&previous) {
+                self.ticking_block_count = self.ticking_block_count.wrapping_sub(1);
+            }
+            if !fluid_is_empty(&previous) {
+                self.fluid_count = self.fluid_count.wrapping_sub(1);
+                if fluid_is_randomly_ticking(&previous) {
+                    self.ticking_fluid_count = self.ticking_fluid_count.wrapping_sub(1);
+                }
+            }
+        }
+        if !is_air(&state) {
+            self.non_empty_block_count = self.non_empty_block_count.wrapping_add(1);
+            if is_randomly_ticking(&state) {
+                self.ticking_block_count = self.ticking_block_count.wrapping_add(1);
+            }
+            if !fluid_is_empty(&state) {
+                self.fluid_count = self.fluid_count.wrapping_add(1);
+                if fluid_is_randomly_ticking(&state) {
+                    self.ticking_fluid_count = self.ticking_fluid_count.wrapping_add(1);
+                }
+            }
+        }
+        // `updateBlockCallback(x, y, z, state, previous)`.
+        if previous != state {
+            let is_special_old = is_special_colliding(&previous);
+            let is_special_new = is_special_colliding(&state);
+            if is_special_old != is_special_new {
+                if is_special_old {
+                    self.special_colliding_blocks = self.special_colliding_blocks.wrapping_sub(1);
+                } else {
+                    self.special_colliding_blocks = self.special_colliding_blocks.wrapping_add(1);
+                }
+            }
+            let old_ticking = is_randomly_ticking(&previous);
+            let new_ticking = is_randomly_ticking(&state);
+            if old_ticking != new_ticking {
+                let position = (x | (z << 4) | (y << 8)) as i16;
+                if old_ticking {
+                    self.ticking_blocks.remove(position);
+                } else {
+                    self.ticking_blocks.add(position);
+                }
+            }
+        }
+        previous
     }
 
     /// `getNoiseBiome(int, int, int)` — the 4×4×4 biome container read
@@ -719,5 +821,154 @@ mod tests {
         assert!(section.is_randomly_ticking_blocks());
         assert!(section.is_randomly_ticking_fluids());
         assert_eq!(section.ticking_blocks().size(), 1);
+    }
+
+    /// `setBlockState`'s count bookkeeping — the Paper port:
+    /// `getAndSetUnchecked` then decrement/increment the previous/new counts.
+    #[test]
+    fn set_block_state_adjusts_counts_and_returns_previous() {
+        let mut section = all_air_section();
+        // Value 1: non-air (`*s != 0`), block-ticking (`*s == 1`), non-empty
+        // fluid (`!fluid_is_empty`, i.e. `*s != 0`), ticking fluid (`*s == 1`).
+        // Value 0 (air): none of those — the same predicates Java's real
+        // `BlockBehaviour` flags give air.
+        let block_ticks = |s: &u8| *s == 1;
+        let fluid_is_empty = |s: &u8| *s == 0; // value 0 (air) has no fluid
+        let fluid_ticks = |s: &u8| *s == 1;
+        let special = |s: &u8| *s == 2;
+        let previous = section.set_block_state(
+            0,
+            0,
+            0,
+            1,
+            &is_air,
+            &block_ticks,
+            &fluid_is_empty,
+            &fluid_ticks,
+            &special,
+        );
+        assert_eq!(previous, 0);
+        assert_eq!(section.get_block_state(0, 0, 0), 1);
+        assert_eq!(section.non_empty_block_count(), 1);
+        assert_eq!(section.ticking_block_count(), 1);
+        assert_eq!(section.fluid_count(), 1);
+        assert_eq!(section.ticking_fluid_count(), 1);
+        assert!(section.is_randomly_ticking());
+        // The ticking position is `x | z<<4 | y<<8` (0 here).
+        assert_eq!(section.ticking_blocks().size(), 1);
+        assert_eq!(section.ticking_blocks().get_raw(0), 0);
+
+        // Overwrite with air: previous counts are decremented; the ticking
+        // position is removed; previous state is returned.
+        let previous = section.set_block_state(
+            0,
+            0,
+            0,
+            0,
+            &is_air,
+            &block_ticks,
+            &fluid_is_empty,
+            &fluid_ticks,
+            &special,
+        );
+        assert_eq!(previous, 1);
+        assert_eq!(section.get_block_state(0, 0, 0), 0);
+        assert_eq!(section.non_empty_block_count(), 0);
+        assert_eq!(section.ticking_block_count(), 0);
+        assert_eq!(section.fluid_count(), 0);
+        assert_eq!(section.ticking_fluid_count(), 0);
+        assert_eq!(section.ticking_blocks().size(), 0);
+    }
+
+    /// The packed ticking position matches Java's `(short)(x | z << 4 |
+    /// y << 8)` for a non-zero cell.
+    #[test]
+    fn set_block_state_packs_ticking_position_like_java() {
+        let mut section = all_air_section();
+        // Cell (x=3, y=5, z=7) → `3 | 7<<4 | 5<<8 = 3 | 112 | 1280 = 1395`.
+        section.set_block_state(
+            3,
+            5,
+            7,
+            1,
+            &is_air,
+            &|s| *s == 1, // block randomly ticking
+            &|_| true,    // fluid empty — no fluid counts
+            &|_| true,
+            &|_| false,
+        );
+        assert_eq!(section.ticking_blocks().size(), 1);
+        assert_eq!(
+            section.ticking_blocks().get_raw(0),
+            (3 | (7 << 4) | (5 << 8)) as i16
+        );
+        assert_eq!(section.fluid_count(), 0);
+        assert_eq!(section.non_empty_block_count(), 1);
+    }
+
+    /// A non-ticking block never enters the ticking list even though the cell
+    /// is written; an overwrite that drops the special-colliding flag adjusts
+    /// the special-colliding tally (Paper's `updateBlockCallback`).
+    #[test]
+    fn set_block_state_tracks_special_colliding_swap() {
+        let mut section = all_air_section();
+        // Value 2: non-air, non-ticking, special-colliding.
+        section.set_block_state(
+            0,
+            0,
+            0,
+            2,
+            &is_air,
+            &|_| false, // not randomly ticking
+            &|_| true,  // fluid empty
+            &|_| true,
+            &|s| *s == 2, // special colliding
+        );
+        assert_eq!(section.non_empty_block_count(), 1);
+        assert!(section.has_special_colliding_blocks());
+        assert_eq!(section.ticking_blocks().size(), 0);
+
+        // Swap to value 1 (non-ticking, non-special): the special-colliding
+        // tally drops and the ticking list stays empty.
+        section.set_block_state(
+            0,
+            0,
+            0,
+            1,
+            &is_air,
+            &|_| false,
+            &|_| true,
+            &|_| true,
+            &|s| *s == 2,
+        );
+        assert_eq!(section.non_empty_block_count(), 1);
+        assert!(!section.has_special_colliding_blocks());
+        assert_eq!(section.ticking_blocks().size(), 0);
+    }
+
+    /// `acquire`/`release` are documented no-ops (Paper disables the
+    /// `ThreadingDetector`); they must be callable and leave the section
+    /// unchanged.
+    #[test]
+    fn acquire_release_are_noops() {
+        let section = all_air_section();
+        let counts = (
+            section.non_empty_block_count(),
+            section.fluid_count(),
+            section.ticking_block_count(),
+            section.ticking_fluid_count(),
+        );
+        section.acquire();
+        section.release();
+        section.acquire();
+        assert_eq!(
+            (
+                section.non_empty_block_count(),
+                section.fluid_count(),
+                section.ticking_block_count(),
+                section.ticking_fluid_count(),
+            ),
+            counts
+        );
     }
 }
