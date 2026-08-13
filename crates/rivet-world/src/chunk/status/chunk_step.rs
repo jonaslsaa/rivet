@@ -14,8 +14,7 @@
 //! The value-layer pyramid through NOISE is built by `ChunkPyramid`; the task
 //! bodies and the ordering enforcement live in the executor seam
 //! (`world_gen_context.rs`). `ChunkStep.apply`'s async `CompletableFuture`
-//! dispatch is deferred with the scheduler (#185); the synchronous
-//! `WorldGenContext::run_step` mirrors it.
+//! dispatch is deferred with the scheduler (#185).
 
 use crate::chunk::status::ChunkStatus;
 use crate::chunk::status::chunk_dependencies::ChunkDependencies;
