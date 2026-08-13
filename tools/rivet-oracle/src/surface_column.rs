@@ -21,11 +21,13 @@
 //!   * the surface biome the surface pass saw at the top of the column.
 //!
 //! The verify command asserts the committed golden's provenance (Paper pin +
-//! manifest SHA-256s), the pinned seed/generator/height shape, that every
+//! manifest SHA-256s), the pinned seed/generator/height shape, and that every
 //! column really had surface blocks changed (non-vacuity: a no-op capture that
-//! recorded the chunk pre-surface fails), and that the committed surface-biome
-//! ids are the seed-42 overworld biomes. The tamper negative control proves
-//! the comparison detects a flipped byte (the manifest SHA-256 gate).
+//! recorded the chunk pre-surface fails). The surface-biome ids are part of the
+//! fixture — pinned byte-for-byte by the manifest SHA-256 like every other
+//! field — but are not individually interpreted: verify never asserts they are
+//! the seed-42 overworld biomes. The tamper negative control proves the
+//! comparison detects a flipped byte (the manifest SHA-256 gate).
 
 use crate::{CapturedFile, Error, sha256_hex};
 use std::collections::BTreeMap;

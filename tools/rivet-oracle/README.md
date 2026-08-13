@@ -393,7 +393,9 @@ column records:
 - pre/post block states at every 4th Y (block registry key + raw state id),
   so the exact post-surface block id per sampled Y is pinned;
 - pre/post `WORLD_SURFACE_WG` + `OCEAN_FLOOR_WG` heights for all 256 columns;
-- the surface biome the surface pass read at the top of the column;
+- the surface biome the surface pass read at the top of the column (captured
+  and hash-pinned with the rest of the fixture; verification does not
+  semantically assert the id);
 - `any-surface-changed` / `any-height-changed` flags plus the pre-surface
   snapshot, so a no-op capture is detectable: the pre snapshot is taken on an
   all-air chunk with unprimed heightmaps (`-65` = `MIN_Y-1`), so a probe that
