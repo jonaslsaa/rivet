@@ -855,8 +855,11 @@ fn verify_fixtures_dir(dir: &Path) -> Result<(), Error> {
 /// M0 root (`<root>/manifest.json`) plus each subdir with a `manifest.json`
 /// (recursive — `fixtures/worldgen/` and `fixtures/regions/overworld-normal/`
 /// both qualify today, and kinds may nest arbitrarily). Kinds verify
-/// independently and can grow without a format migration.
+/// independently and can grow without a format migration. The
+/// `<root>/composed-noise` dir is excluded: its golden has a strict
+/// missing-prerequisite contract of its own, handled after the generic kinds.
 fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
+    let composed_noise = root.join("composed-noise");
     let mut out = Vec::new();
     if root.join("manifest.json").is_file() {
         out.push(root.to_path_buf());
@@ -867,6 +870,9 @@ fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if !path.is_dir() {
+                    continue;
+                }
+                if path == composed_noise {
                     continue;
                 }
                 if path.join("manifest.json").is_file() {
@@ -887,14 +893,14 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
 
 /// Verify every committed fixture kind under `root`.
 ///
-/// The composed-noise golden is load-bearing: its presence is asserted BEFORE
-/// the generic hash loop, so a missing golden (whole tree absent, or manifest
-/// present but the golden file missing) is classified `Error::Unverified`
-/// (exit 3) — the same classification the composed-noise subcommand gives it —
-/// never the generic loop's `Error::Manifest` (exit 1). A present-but-corrupt
-/// golden still fails hard (exit 1) once the generic hash loop compares it.
+/// Generic kinds (auto-discovered by manifest) verify first, surfacing their
+/// hard failures (exit 1) before the composed-noise golden is consulted. The
+/// composed-noise golden has a strict missing-prerequisite contract of its
+/// own: an absent or partial tree is `Error::Unverified` (exit 3), asserted
+/// here after the generic kinds pass. The composed-noise dir is excluded from
+/// the generic walk so a partial golden is never misreported as the generic
+/// loop's `Error::Manifest` (exit 1).
 fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
-    composed_noise::require_fixture_tree(&root.join("composed-noise"))?;
     let kinds = all_fixture_manifests_from(root);
     if kinds.is_empty() {
         return Err(Error::Manifest(
@@ -904,7 +910,16 @@ fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
     }
     println!("verifying all committed fixture kinds:");
     for d in &kinds {
-        let rel = d.strip_prefix(root).unwrap_or(d).display().to_string();
+        // The root fixture kind labels as the root dir's name (e.g. "fixtures"),
+        // never the empty relative path.
+        let rel = if d == root {
+            root.file_name()
+                .unwrap_or(d.as_os_str())
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            d.strip_prefix(root).unwrap_or(d).display().to_string()
+        };
         println!("  - {rel}");
     }
     println!();
@@ -929,10 +944,6 @@ fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
         "PASS: all {} fixture kinds match their manifest SHA-256s",
         kinds.len()
     );
-    // The composed-noise golden comparison: beyond the manifest hashes, assert
-    // the NOISE-checkpoint goldens (provenance, FULL_CHUNK_STEP reachability,
-    // non-vacuous #175 matrix) and print the status/provenance scoreboard.
-    // Presence was already asserted above; this runs the actual comparison.
     verify_composed_noise_step(&root.join("composed-noise"))?;
     Ok(())
 }
@@ -3293,14 +3304,14 @@ fn run() -> Result<(), Error> {
             //   cargo run -p rivet-oracle -- composed-noise --tamper   negative control
             //   cargo run -p rivet-oracle -- composed-noise --sample   regenerate from pinned Paper
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
-            if rest.contains(&"--help") || rest.contains(&"-h") {
+            // --help is accepted only as the sole argument; combined with a mode
+            // or another flag it is a hard usage error via parse_mode below.
+            if rest.as_slice() == ["--help"] || rest.as_slice() == ["-h"] {
                 print_usage();
                 return Ok(());
             }
             let dir = crate_dir().join("fixtures/composed-noise");
             match composed_noise::parse_mode(&rest)? {
-                // The absent-golden exit-3 contract lives in require_fixture_tree
-                // (shared by verify and the tamper control, matching the gate).
                 composed_noise::ComposedNoiseMode::Tamper => {
                     composed_noise::tamper_negative_control(&dir)
                 }
