@@ -18,15 +18,15 @@
 //! - `spawnTarget` inlines `new OverworldBiomeBuilder().spawnTarget()` (the
 //!   two `ParameterPoint`s the biome unit's builder returns — the only leaf
 //!   this SCC reads; see the module doc).
-//! - `SurfaceRuleData.end` is ported (the end-stone `block` rule);
-//!   `SurfaceRuleData.nether/overworld/overworldLike` are AIR STUBs in
-//!   `levelgen::surface_rules` (the real builders belong to the
-//!   `mc.data.worldgen` unit, still pending; RivetTodo #179) because a faithful
-//!   port needs the biome `HolderGetter` threaded through the settings
-//!   bootstrap. Each STUB preset carries the same AIR block-state `block` rule
-//!   — the real `SurfaceRules.state(Blocks.AIR)` (Java's `makeStateRule`) — so
-//!   the `surface_rule` field composes and round-trips through the
-//!   `MATERIAL_RULE` codec.
+//! - `SurfaceRuleData.end` is ported (the end-stone `block` rule), and
+//!   `SurfaceRuleData.nether/overworld/overworldLike` are ported faithfully in
+//!   `levelgen::surface_rules` (the `mc.data.worldgen` unit, RivetTodo #179).
+//!   The Java `bootstrap` threads `context.lookup(Registries.BIOME)` into the
+//!   surface-rule builders; the port mirrors that with
+//!   `context.lookup(&*registries::BIOME)` resolved inside `bootstrap`, so the
+//!   biome registry must be present in the bootstrap access (the recording
+//!   context answers `None` for an absent registry, and `getOrThrow` on a
+//!   missing biome key panics with Java's `Missing element <key>` message).
 //! - `Blocks.END_STONE/NETHERRACK/LAVA/STONE/WATER/AIR` all have
 //!   `default_block_state()` handles.
 //! - `WorldgenRandom.Algorithm` — `rivet_util::worldgen_random::Algorithm`.
@@ -42,11 +42,12 @@ use crate::levelgen::surface_rules::{
     surface_rule_overworld, surface_rule_overworld_like,
 };
 use crate::levelgen::synth::normal_noise::NoiseParameters;
+use rivet_registry::biome_id::BiomeId;
 use rivet_registry::holder::Holder;
 use rivet_registry::holder_lookup::HolderGetter;
 use rivet_registry::registry_file_codec::RegistryFileCodec;
 use rivet_registry::registry_ops::RegistryOpsLookup;
-use rivet_registry::{Identifier, ResourceKey};
+use rivet_registry::{Identifier, ResourceKey, registries};
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::{DynamicOps, Keyable, MapLike, RecordBuilder};
@@ -69,9 +70,9 @@ pub struct NoiseGeneratorSettings {
     pub default_fluid: BlockState,
     /// `noiseRouter`.
     pub noise_router: NoiseRouter,
-    /// `surfaceRule` — the erased `ArcRuleSource`: the ported end-stone rule
-    /// plus the AIR `block`-rule shims for the pending `mc.data.worldgen`
-    /// nether/overworld/overworldLike builders (RivetTodo #179).
+    /// `surfaceRule` — the erased `ArcRuleSource`: the real
+    /// `SurfaceRuleData` tree for the preset (`end`/`nether`/`overworld`/
+    /// `overworldLike`/`air`).
     pub surface_rule: ArcRuleSource,
     /// `spawnTarget`.
     pub spawn_target: Vec<ParameterPoint>,
@@ -189,6 +190,20 @@ impl NoiseGeneratorSettings {
     }
 }
 
+/// `context.lookup(Registries.BIOME)` — the biome `HolderGetter` the
+/// `SurfaceRuleData.nether/overworld/overworldLike` builders need. Java's
+/// `BootstrapContext.lookup` always returns a getter; the port's `Option` is a
+/// documented seam deviation, so the settings bootstrap `.expect`s the biome
+/// registry exactly like the functions/noises lookups (the biome registry is
+/// always present when worldgen settings are bootstrapped).
+fn biomes_lookup(
+    context: &impl crate::data::worldgen::bootstrap_context::BootstrapContext<NoiseGeneratorSettings>,
+) -> &dyn HolderGetter<BiomeId> {
+    context
+        .lookup(&*registries::BIOME)
+        .expect("biome registry present in settings bootstrap")
+}
+
 /// `NoiseGeneratorSettings.bootstrap(BootstrapContext<NoiseGeneratorSettings>)`.
 ///
 /// `context.register` mutates the build state, so the Rust port takes a `&mut`
@@ -209,7 +224,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        overworld(functions, noises, false, false)
+        let biomes = biomes_lookup(context);
+        overworld(functions, noises, biomes, false, false)
     });
     context.register_default(&LARGE_BIOMES, {
         let functions = context
@@ -218,7 +234,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        overworld(functions, noises, false, true)
+        let biomes = biomes_lookup(context);
+        overworld(functions, noises, biomes, false, true)
     });
     context.register_default(&AMPLIFIED, {
         let functions = context
@@ -227,7 +244,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        overworld(functions, noises, true, false)
+        let biomes = biomes_lookup(context);
+        overworld(functions, noises, biomes, true, false)
     });
     context.register_default(&NETHER, {
         let functions = context
@@ -236,7 +254,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        nether(functions, noises)
+        let biomes = biomes_lookup(context);
+        nether(functions, noises, biomes)
     });
     context.register_default(&END, {
         let functions = context
@@ -248,7 +267,8 @@ pub fn bootstrap(
         let functions = context
             .lookup(&crate::levelgen::noise::registry_keys::DENSITY_FUNCTION)
             .expect("density function registry present in settings bootstrap");
-        caves(functions)
+        let biomes = biomes_lookup(context);
+        caves(functions, biomes)
     });
     context.register_default(&FLOATING_ISLANDS, {
         let functions = context
@@ -257,7 +277,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        floating_islands(functions, noises)
+        let biomes = biomes_lookup(context);
+        floating_islands(functions, noises, biomes)
     });
 }
 
@@ -288,13 +309,14 @@ fn end(functions: &dyn HolderGetter<DensityFunctionValue>) -> NoiseGeneratorSett
 fn nether(
     functions: &dyn HolderGetter<DensityFunctionValue>,
     noises: &dyn HolderGetter<NoiseParameters>,
+    biomes: &dyn HolderGetter<BiomeId>,
 ) -> NoiseGeneratorSettings {
     NoiseGeneratorSettings::new(
         crate::levelgen::noise::noise_settings::NETHER_NOISE_SETTINGS,
         Blocks::NETHERRACK.default_block_state(),
         Blocks::LAVA.default_block_state(),
         crate::levelgen::noisegen::noise_router_data::nether(functions, noises),
-        surface_rule_nether(),
+        surface_rule_nether(biomes),
         Vec::new(),
         32,
         false,
@@ -312,6 +334,7 @@ fn nether(
 fn overworld(
     functions: &dyn HolderGetter<DensityFunctionValue>,
     noises: &dyn HolderGetter<NoiseParameters>,
+    biomes: &dyn HolderGetter<BiomeId>,
     is_amplified: bool,
     large_biomes: bool,
 ) -> NoiseGeneratorSettings {
@@ -325,7 +348,7 @@ fn overworld(
             large_biomes,
             is_amplified,
         ),
-        surface_rule_overworld(),
+        surface_rule_overworld(biomes),
         spawn_target(),
         63,
         false,
@@ -339,13 +362,16 @@ fn overworld(
 /// water fluid, `NoiseRouterData.caves`, `SurfaceRuleData.overworldLike(false,
 /// true, true)`, no spawn target, sea level 32, no mob generation, no
 /// aquifers, no ore veins, legacy random.
-fn caves(functions: &dyn HolderGetter<DensityFunctionValue>) -> NoiseGeneratorSettings {
+fn caves(
+    functions: &dyn HolderGetter<DensityFunctionValue>,
+    biomes: &dyn HolderGetter<BiomeId>,
+) -> NoiseGeneratorSettings {
     NoiseGeneratorSettings::new(
         crate::levelgen::noise::noise_settings::CAVES_NOISE_SETTINGS,
         Blocks::STONE.default_block_state(),
         Blocks::WATER.default_block_state(),
         crate::levelgen::noisegen::noise_router_data::caves(functions),
-        surface_rule_overworld_like(false, true, true),
+        surface_rule_overworld_like(biomes, false, true, true),
         Vec::new(),
         32,
         false,
@@ -363,13 +389,14 @@ fn caves(functions: &dyn HolderGetter<DensityFunctionValue>) -> NoiseGeneratorSe
 fn floating_islands(
     functions: &dyn HolderGetter<DensityFunctionValue>,
     noises: &dyn HolderGetter<NoiseParameters>,
+    biomes: &dyn HolderGetter<BiomeId>,
 ) -> NoiseGeneratorSettings {
     NoiseGeneratorSettings::new(
         crate::levelgen::noise::noise_settings::FLOATING_ISLANDS_NOISE_SETTINGS,
         Blocks::STONE.default_block_state(),
         Blocks::WATER.default_block_state(),
         crate::levelgen::noisegen::noise_router_data::floating_islands(functions, noises),
-        surface_rule_overworld_like(false, false, false),
+        surface_rule_overworld_like(biomes, false, false, false),
         Vec::new(),
         -64,
         false,
@@ -773,8 +800,68 @@ mod tests {
         noise_builder.freeze()
     }
 
-    /// A `RegistryAccess` with the noise + density-function registries
-    /// populated (the `NoiseGeneratorSettings.bootstrap` lookups need them).
+    /// The 33 `Biomes` keys the `SurfaceRuleData` builders reference (the
+    /// nether's 5 + the overworld's 28 — the surface-rule-data fixture's
+    /// `biomes` set, PR #597). The settings bootstrap resolves each through
+    /// `getOrThrow`, so every
+    /// referenced biome must be registered in the test access.
+    const SURFACE_RULE_BIOMES: &[&str] = &[
+        "badlands",
+        "basalt_deltas",
+        "beach",
+        "crimson_forest",
+        "deep_frozen_ocean",
+        "deep_lukewarm_ocean",
+        "desert",
+        "dripstone_caves",
+        "eroded_badlands",
+        "frozen_ocean",
+        "frozen_peaks",
+        "grove",
+        "ice_spikes",
+        "jagged_peaks",
+        "lukewarm_ocean",
+        "mangrove_swamp",
+        "mushroom_fields",
+        "nether_wastes",
+        "old_growth_pine_taiga",
+        "old_growth_spruce_taiga",
+        "snowy_beach",
+        "snowy_slopes",
+        "soul_sand_valley",
+        "stony_peaks",
+        "stony_shore",
+        "sulfur_caves",
+        "swamp",
+        "warm_ocean",
+        "warped_forest",
+        "windswept_gravelly_hills",
+        "windswept_hills",
+        "windswept_savanna",
+        "wooded_badlands",
+    ];
+
+    /// A frozen biome registry carrying the 33 `SurfaceRuleData`-referenced
+    /// keys as `BiomeId` handles (the surface trees only need the holder
+    /// identity, so every key maps to its hub index — a `Direct`/registry
+    /// `Reference` the `HolderSet` composes identically).
+    fn build_biome_registry() -> Registry<BiomeId> {
+        let biome_key = &*rivet_registry::registries::BIOME;
+        let mut builder: RegistryBuilder<BiomeId> = RegistryBuilder::new(biome_key);
+        for (i, name) in SURFACE_RULE_BIOMES.iter().enumerate() {
+            builder.register(
+                &ResourceKey::create(biome_key, Identifier::with_default_namespace(name)),
+                Arc::new(BiomeId::from_id(i as u16)),
+                RegistrationInfo::BUILT_IN,
+            );
+        }
+        builder.freeze()
+    }
+
+    /// A `RegistryAccess` with the noise, density-function, and biome
+    /// registries populated (the `NoiseGeneratorSettings.bootstrap` lookups —
+    /// including the `SurfaceRuleData` builders' `Registries.BIOME` — need
+    /// them).
     fn make_access() -> RegistryAccess {
         let noise_key = &crate::levelgen::noise::registry_keys::NOISE;
         let df_key = &crate::levelgen::noise::registry_keys::DENSITY_FUNCTION;
@@ -806,6 +893,12 @@ mod tests {
             (
                 ResourceKey::create_registry_key(df_key.identifier().clone()),
                 Box::new(df_registry) as AnyBox,
+            ),
+            (
+                ResourceKey::create_registry_key(
+                    rivet_registry::registries::BIOME.identifier().clone(),
+                ),
+                Box::new(build_biome_registry()) as AnyBox,
             ),
         ])
     }
@@ -869,7 +962,10 @@ mod tests {
         let noises = access
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry");
-        let settings = overworld(functions, noises, false, false);
+        let biomes = access
+            .lookup(&*rivet_registry::registries::BIOME)
+            .expect("biome registry");
+        let settings = overworld(functions, noises, biomes, false, false);
         assert_eq!(settings.sea_level, 63);
         assert!(settings.aquifers_enabled);
         assert!(settings.ore_veins_enabled);

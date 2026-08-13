@@ -117,16 +117,84 @@ fn build_density_function_registry() -> Registry<DensityFunctionValue> {
     builder.freeze()
 }
 
+/// `Registries.BIOME` key erased to the access's stored key type.
+fn biome_key() -> ErasedKey {
+    ResourceKey::create_registry_key(rivet_registry::registries::BIOME.identifier().clone())
+}
+
+/// The 33 `Biomes` keys the `SurfaceRuleData` builders reference (the nether's
+/// 5 + the overworld's 28 — the surface-rule-data fixture's `biomes` set,
+/// PR #597). The settings bootstrap resolves each through `getOrThrow`, so
+/// every referenced biome must
+/// be registered.
+const SURFACE_RULE_BIOMES: &[&str] = &[
+    "badlands",
+    "basalt_deltas",
+    "beach",
+    "crimson_forest",
+    "deep_frozen_ocean",
+    "deep_lukewarm_ocean",
+    "desert",
+    "dripstone_caves",
+    "eroded_badlands",
+    "frozen_ocean",
+    "frozen_peaks",
+    "grove",
+    "ice_spikes",
+    "jagged_peaks",
+    "lukewarm_ocean",
+    "mangrove_swamp",
+    "mushroom_fields",
+    "nether_wastes",
+    "old_growth_pine_taiga",
+    "old_growth_spruce_taiga",
+    "snowy_beach",
+    "snowy_slopes",
+    "soul_sand_valley",
+    "stony_peaks",
+    "stony_shore",
+    "sulfur_caves",
+    "swamp",
+    "warm_ocean",
+    "warped_forest",
+    "windswept_gravelly_hills",
+    "windswept_hills",
+    "windswept_savanna",
+    "wooded_badlands",
+];
+
+/// A frozen biome registry carrying the 33 `SurfaceRuleData`-referenced keys
+/// as `BiomeId` handles (the surface trees only need the holder identity).
+fn build_biome_registry() -> Registry<rivet_registry::biome_id::BiomeId> {
+    use rivet_registry::biome_id::BiomeId;
+    let biome_key = &*rivet_registry::registries::BIOME;
+    let mut builder: RegistryBuilder<BiomeId> = RegistryBuilder::new(biome_key);
+    for (i, name) in SURFACE_RULE_BIOMES.iter().enumerate() {
+        builder.register(
+            &ResourceKey::create(
+                biome_key,
+                rivet_registry::Identifier::with_default_namespace(name),
+            ),
+            Arc::new(BiomeId::from_id(i as u16)),
+            RegistrationInfo::BUILT_IN,
+        );
+    }
+    builder.freeze()
+}
+
 /// A frozen NOISE_SETTINGS registry (via [`noise_generator_settings::bootstrap`]).
 ///
-/// Freezes fresh NOISE + DENSITY_FUNCTION registries into the bootstrap access
-/// (the module doc explains the rebuilds).
+/// Freezes fresh NOISE + DENSITY_FUNCTION + BIOME registries into the bootstrap
+/// access (the module doc explains the rebuilds; the biome registry is required
+/// by the `SurfaceRuleData` builders the settings bootstrap resolves).
 fn build_noise_settings_registry() -> Registry<NoiseGeneratorSettings> {
     let noise = build_noise_registry();
     let functions = build_density_function_registry();
+    let biomes = build_biome_registry();
     let with_worldgen = RegistryAccess::from_pairs(vec![
         (noise_key(), Box::new(noise) as AnyBox),
         (density_function_key(), Box::new(functions) as AnyBox),
+        (biome_key(), Box::new(biomes) as AnyBox),
     ]);
     let mut builder: RegistryBuilder<NoiseGeneratorSettings> =
         RegistryBuilder::new(&registry_keys::NOISE_SETTINGS);
@@ -146,16 +214,20 @@ fn build_noise_settings_registry() -> Registry<NoiseGeneratorSettings> {
     builder.freeze()
 }
 
-/// The worldgen registries — NOISE, DENSITY_FUNCTION, NOISE_SETTINGS — frozen
-/// and bundled in a `RegistryAccess`. Build once per world/seed; the access is
-/// cheap to clone (shares the frozen registries).
+/// The worldgen registries — NOISE, DENSITY_FUNCTION, BIOME, NOISE_SETTINGS —
+/// frozen and bundled in a `RegistryAccess`. Build once per world/seed; the
+/// access is cheap to clone (shares the frozen registries). The BIOME registry
+/// rides along because the NOISE_SETTINGS bootstrap's `SurfaceRuleData` builders
+/// resolve their biome holders through it.
 pub fn build_worldgen_registries() -> RegistryAccess {
     let noise = build_noise_registry();
     let functions = build_density_function_registry();
+    let biomes = build_biome_registry();
     let settings = build_noise_settings_registry();
     RegistryAccess::from_pairs(vec![
         (noise_key(), Box::new(noise) as AnyBox),
         (density_function_key(), Box::new(functions) as AnyBox),
+        (biome_key(), Box::new(biomes) as AnyBox),
         (noise_settings_key(), Box::new(settings) as AnyBox),
     ])
 }
