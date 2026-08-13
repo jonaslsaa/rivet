@@ -1109,8 +1109,9 @@ mod tests {
             authority_behavior.blocks_motion(),
             "(-82,70,-65) blocks_motion parity"
         );
-        // The pinned real-save block: (-82,70,-65) is sky air — it renders open
-        // and offers no collision, the #328 invisible-collidable-block inverse.
+        // The pinned block: (-82,70,-65) in the booted synthetic content is sky
+        // air — it renders open and offers no collision, the #328
+        // invisible-collidable-block inverse.
         assert!(
             packet_behavior.is_air(),
             "(-82,70,-65) must be air, got StateId {packet:?}"
