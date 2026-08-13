@@ -423,9 +423,15 @@ scripts/run_surface_column_probe.sh <out-dir>          # raw probe into an out-d
 ```
 
 Regeneration requires the materialized pinned runtime (or
-`RIVET_PAPER_RUNTIME_JAR` / `RIVET_PAPER_LIBRARIES`). `verify` (and the
-no-arg `cargo run -p rivet-oracle`) gates on this golden exactly like the
-composed-noise fixtures; a missing fixture tree exits nonzero with `UNVERIFIED`.
+`RIVET_PAPER_RUNTIME_JAR` / `RIVET_PAPER_LIBRARIES`). Before running, the runner
+authenticates the runtime jar's `Git-Commit` manifest attribute against the
+pinned `26.2-DEV-main@0a99345` commit — the same source of truth `verify`'s pin
+check reads — so a jar at a different (or unverifiable) commit can never
+relabel fixtures with provenance it does not have. A missing runtime or an
+unconfirmed pin exits **3 UNVERIFIED**; only a genuine probe failure exits 1.
+`verify` (and the no-arg `cargo run -p rivet-oracle`) gates on this golden
+exactly like the composed-noise fixtures; a missing fixture tree exits nonzero
+with `UNVERIFIED`.
 
 ## Regenerate: `regenerate`
 

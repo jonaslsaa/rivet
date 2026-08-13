@@ -43,6 +43,10 @@ const MAX_Y: i64 = 320;
 const SAMPLE_COUNT: usize = ((MAX_Y - MIN_Y) / SAMPLE_STEP) as usize; // 96
 const HEIGHTMAP_COUNT: usize = 16 * 16; // 256
 
+/// The Paper commit the surface-column golden is captured against (both the
+/// fixture/manifest provenance and the runtime jar's `Git-Commit` attribute).
+const PINNED_COMMIT: &str = "0a99345";
+
 /// A captured block state.
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq)]
 pub struct BlockState {
@@ -230,7 +234,7 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
             manifest.kind
         )));
     }
-    if crate::parse_paper_pin(manifest.paper.as_deref()).as_deref() != Some("0a99345") {
+    if crate::parse_paper_pin(manifest.paper.as_deref()).as_deref() != Some(PINNED_COMMIT) {
         return Err(Error::Manifest(format!(
             "surface-column fixture not pinned to Paper 0a99345: {:?}",
             manifest.paper
@@ -451,6 +455,12 @@ pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
 /// Run the Paper-side probe into `dir` (regenerating surface-columns.json), then
 /// rewrite the manifest. Requires the materialized pinned Paper runtime (or the
 /// env overrides).
+///
+/// The runner exits 3 (UNVERIFIED) when a runtime prerequisite is absent or the
+/// materialized jar's Git-Commit cannot be confirmed to match the pinned
+/// {PINNED_COMMIT} — mapped to `Error::Unverified` so `--surface-column --sample`
+/// fails with exit 3, never a bare FAIL or a relabeled fixture. Only a genuine
+/// probe failure (javac/java) is a Gate.
 pub fn run_probe(dir: &Path) -> Result<(), Error> {
     let crate_root = crate::crate_dir();
     let script = crate_root.join("scripts/run_surface_column_probe.sh");
@@ -461,9 +471,16 @@ pub fn run_probe(dir: &Path) -> Result<(), Error> {
         .status()
         .map_err(|e| Error::Gate(format!("failed to run {}: {e}", script.display())))?;
     if !status.success() {
-        return Err(Error::Gate(format!(
-            "run_surface_column_probe.sh exited {status} — see its stderr"
-        )));
+        return Err(match status.code() {
+            Some(crate::EXIT_UNVERIFIED) => Error::Unverified(format!(
+                "run_surface_column_probe.sh exited {status} — runtime prerequisite \
+                 absent or not pinned (no materialized paper jar / libraries, or the jar's \
+                 Git-Commit is not {PINNED_COMMIT}); see its stderr"
+            )),
+            _ => Error::Gate(format!(
+                "run_surface_column_probe.sh exited {status} — see its stderr"
+            )),
+        });
     }
     regenerate_manifest(dir)?;
     Ok(())
@@ -642,6 +659,30 @@ mod tests {
         assert!(
             msg.contains("any-surface-changed=false"),
             "unexpected error: {msg}"
+        );
+    }
+
+    /// The probe runner's exit-code contract: a missing runtime prerequisite
+    /// exits 3 (UNVERIFIED, the same code `Error::Unverified` maps to), so the
+    /// regeneration path can never relabel fixtures captured against a jar it
+    /// could not authenticate. Hermetic: a nonexistent RIVET_PAPER_RUNTIME_JAR
+    /// forces the script's missing-jar branch before any javac/java work.
+    #[test]
+    fn probe_runner_missing_runtime_exits_unverified() {
+        let crate_root = crate::crate_dir();
+        let script = crate_root.join("scripts/run_surface_column_probe.sh");
+        let status = std::process::Command::new("bash")
+            .arg(&script)
+            .arg(std::env::temp_dir().join("rivet-oracle-sc-sample-probe"))
+            .env("RIVET_PAPER_RUNTIME_JAR", "/nonexistent/paper-26.2.jar")
+            .env("RIVET_PAPER_LIBRARIES", "/nonexistent/libraries")
+            .stdin(std::process::Stdio::null())
+            .status()
+            .expect("bash must run");
+        assert_eq!(
+            status.code(),
+            Some(crate::EXIT_UNVERIFIED),
+            "missing runtime must exit 3 UNVERIFIED, got {status}"
         );
     }
 }

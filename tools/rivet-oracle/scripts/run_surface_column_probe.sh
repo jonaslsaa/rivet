@@ -42,14 +42,39 @@ if [ ! -f "$RUNTIME_JAR" ]; then
   echo "materialized server jar not found: $RUNTIME_JAR" >&2
   echo "boot the M0 fixture server once (tools/rivet-oracle/README.md) or set" >&2
   echo "RIVET_PAPER_RUNTIME_JAR to a versions/26.2/paper-26.2.jar" >&2
-  exit 1
+  exit 3
 fi
+
+# Authenticate the runtime's provenance before running: the golden is pinned to
+# PAPER_PIN's commit, and regenerating from a jar at a different (or
+# unverifiable) commit would relabel fixtures with provenance they do not have.
+# Mirrors the verify CLI's PinMismatch/PinUnavailable gating. The jar's
+# `Git-Commit` MANIFEST attribute is the same source of truth `check_pin` reads.
+# All "runtime prerequisite absent / pin not confirmed" paths exit 3 UNVERIFIED;
+# only a genuine probe failure (javac/java) exits 1.
+PIN_COMMIT="${PAPER_PIN##*@}"
+if [ -z "$PIN_COMMIT" ]; then
+  echo "paper pin '$PAPER_PIN' has no '@<commit>' suffix; cannot authenticate runtime" >&2
+  exit 3
+fi
+ACTUAL_COMMIT="$(unzip -p "$RUNTIME_JAR" META-INF/MANIFEST.MF 2>/dev/null \
+  | sed -n 's/^Git-Commit:[[:space:]]*//p' | tr -d '\r' | head -n1 || true)"
+if [ -z "$ACTUAL_COMMIT" ]; then
+  echo "materialized server jar $RUNTIME_JAR carries no Git-Commit attribute; cannot confirm pinned provenance" >&2
+  exit 3
+fi
+if [ "$ACTUAL_COMMIT" != "$PIN_COMMIT" ]; then
+  echo "materialized server jar is Git-Commit $ACTUAL_COMMIT but the pinned golden" >&2
+  echo "provenance is $PAPER_PIN (commit $PIN_COMMIT); refusing to relabel fixtures" >&2
+  exit 3
+fi
+echo "paper pin OK: $PAPER_PIN matches runtime jar Git-Commit $ACTUAL_COMMIT"
 
 LIBS_DIR="${RIVET_PAPER_LIBRARIES:-$ROOT/work/run/libraries}"
 LIBS="$(find "$LIBS_DIR" -name '*.jar' 2>/dev/null | tr '\n' ':')"
 if [ -z "$LIBS" ]; then
   echo "no library jars under $LIBS_DIR" >&2
-  exit 1
+  exit 3
 fi
 
 CLASSES="$ROOT/.cache/surface-column-java"
