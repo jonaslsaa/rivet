@@ -15,18 +15,19 @@
 //! dispatch is the `#181` codegen hub `placement_get_positions`, mirroring how
 //! `ConfiguredFeature` dispatches features through `feature_place`.
 //!
-//! Two Java surfaces defer with their unported dependencies:
-//! - `feature.value()` resolves a registry-backed holder through a
-//!   `HolderLookup`; the configured-feature registry lives in `rivet-registry`
-//!   (#126) and its lookup isn't threaded through placement yet, so this port
-//!   resolves the holder's inline `Direct` value and panics on any registry
-//!   reference. Java's `Holder.Reference.value()` only throws on a genuinely
-//!   unbound reference ("Trying to access unbound value") and resolves a bound
-//!   one; the port has no lookup to resolve through, so the panic is broader —
-//!   deferred until #126 threads the configured-feature `HolderLookup`.
-//! - `SharedConstants.DEBUG_FEATURE_COUNT` + `FeatureCountTracker.featurePlaced`
-//!   (keyed on `ServerLevel`, `rivet-server`) defer; the tracker is STUB'd in
-//!   `feature.core`.
+//! `feature.value()` resolves through the threaded
+//! `&dyn HolderLookup<ConfiguredFeatureErased>` (the back-reference rule from
+//! `holder.rs`: `Holder::value` takes the lookup, since the Rust `Reference` is
+//! a pure `(RegistryId, id)` pair). `Direct` yields the inline value; a
+//! `Reference` resolves by id through the owning lookup, panicking with Java's
+//! "Trying to access unbound value ..." message only when the id genuinely
+//! cannot resolve (Java `Reference.value()` throws for an unbound reference and
+//! resolves a bound one). Every value-resolving surface threads the lookup:
+//! `place`/`place_with_biome_check`/`get_features` pass it to `resolved_feature`.
+//!
+//! `SharedConstants.DEBUG_FEATURE_COUNT` + `FeatureCountTracker.featurePlaced`
+//! (keyed on `ServerLevel`, `rivet-server`) defer; the tracker is STUB'd in
+//! `feature.core`.
 //!
 //! See `place_walk` for the depth-first interleaving that reproduces Java's
 //! lazy `flatMap` + `forEach` (the single authoritative parity account; the
@@ -40,6 +41,7 @@ use crate::levelgen::placement::{
 };
 use rivet_registry::Holder;
 use rivet_registry::core::BlockPos;
+use rivet_registry::holder_lookup::HolderLookup;
 use rivet_util::RandomSource;
 use std::fmt;
 use std::sync::Arc;
@@ -78,26 +80,32 @@ impl PlacedFeature {
     /// `PlacedFeature.place(WorldGenLevel, ChunkGenerator, RandomSource,
     /// BlockPos)` — `placeWithContext(new PlacementContext(level, generator,
     /// Optional.empty()), random, origin)`.
+    ///
+    /// `lookup` is the configured-feature `HolderLookup` the feature holder
+    /// resolves through (Java's holder stores its value; the Rust `Reference`
+    /// resolves by id — the back-reference rule).
     pub fn place<R: RandomSource>(
         &self,
+        lookup: &dyn HolderLookup<ConfiguredFeatureErased>,
         level: &mut dyn WorldGenLevel,
         generator: &dyn ChunkGenerator,
         random: &mut R,
         origin: &BlockPos,
     ) -> bool {
-        self.place_with_context(level, generator, random, origin, None)
+        self.place_with_context(lookup, level, generator, random, origin, None)
     }
 
     /// `PlacedFeature.placeWithBiomeCheck(...)` — same with the top feature set
     /// to `this` (used by the biome decoration pass).
     pub fn place_with_biome_check<R: RandomSource>(
         &self,
+        lookup: &dyn HolderLookup<ConfiguredFeatureErased>,
         level: &mut dyn WorldGenLevel,
         generator: &dyn ChunkGenerator,
         random: &mut R,
         origin: &BlockPos,
     ) -> bool {
-        self.place_with_context(level, generator, random, origin, Some(self))
+        self.place_with_context(lookup, level, generator, random, origin, Some(self))
     }
 
     /// `placeWithContext` — walk `Stream.of(origin)` depth-first through each
@@ -111,6 +119,7 @@ impl PlacedFeature {
     /// authoritative account).
     fn place_with_context<R: RandomSource>(
         &self,
+        lookup: &dyn HolderLookup<ConfiguredFeatureErased>,
         level: &mut dyn WorldGenLevel,
         generator: &dyn ChunkGenerator,
         random: &mut R,
@@ -119,7 +128,7 @@ impl PlacedFeature {
     ) -> bool {
         // `this.feature.value()` is resolved once, before the `forEach`
         // (Java: `ConfiguredFeature<?, ?> feature = this.feature.value();`).
-        let feature = self.resolved_feature();
+        let feature = self.resolved_feature(lookup);
         let mut placed_any = false;
         self.place_walk(
             0,
@@ -211,34 +220,36 @@ impl PlacedFeature {
     /// `PlacedFeature.getFeatures()` — `Stream.concat(Stream.of(this.feature),
     /// this.feature.value().getSubFeatures())` — the lazy concat iterator
     /// (Java's `Stream.concat` is lazy; sub-features are produced on demand).
-    pub fn get_features(&self) -> Box<dyn Iterator<Item = Holder<ConfiguredFeatureErased>> + '_> {
+    ///
+    /// `lookup` is the configured-feature `HolderLookup` the feature holder
+    /// resolves through (`this.feature.value()`), as in `place`; the returned
+    /// iterator borrows both `self` and `lookup` (the resolved feature's
+    /// sub-features), so both share one lifetime.
+    pub fn get_features<'a>(
+        &'a self,
+        lookup: &'a dyn HolderLookup<ConfiguredFeatureErased>,
+    ) -> Box<dyn Iterator<Item = Holder<ConfiguredFeatureErased>> + 'a> {
         Box::new(
-            std::iter::once(self.feature.clone()).chain(self.resolved_feature().get_sub_features()),
+            std::iter::once(self.feature.clone())
+                .chain(self.resolved_feature(lookup).get_sub_features()),
         )
     }
 
-    /// `this.feature.value()` — the holder's configured feature.
+    /// `this.feature.value()` — the holder's configured feature, resolved
+    /// through the owning configured-feature `HolderLookup`.
     ///
-    /// RivetTodo(#126): a registry `Reference` panics on resolution — the
-    /// configured-feature `HolderLookup` is not threaded through placement yet;
-    /// the prose below details Java's narrower unbound-only throw.
-    ///
-    /// A `Direct` holder yields its inline value; a registry `Reference` needs
-    /// the configured-feature `HolderLookup`, which is not threaded through
-    /// placement yet. Java's `Reference.value()` throws only for a genuinely
-    /// unbound reference and resolves a bound one; without the lookup the port
-    /// cannot resolve either, so it panics on every reference — deferred until
-    /// #126 threads the lookup (then route through `Holder::value`).
-    fn resolved_feature(&self) -> &ConfiguredFeatureErased {
-        match &self.feature {
-            Holder::Direct(feature) => feature,
-            Holder::Reference { registry, id } => panic!(
-                "Trying to resolve configured feature id {} from registry {}: the \
-                 configured-feature registry lookup is not threaded through placement \
-                 (deferred with #126)",
-                id, registry.0
-            ),
-        }
+    /// `Holder::value(lookup)` is the back-reference-rule resolution (OWNERSHIP
+    /// §Registries): a `Direct` holder yields its inline value; a `Reference`
+    /// resolves by id through the lookup, panicking with Java's literal
+    /// "Trying to access unbound value '<key>' from registry <id>" message only
+    /// when the id genuinely cannot resolve — Java's `Reference.value()` throws
+    /// only for an unbound reference and resolves a bound one, so the lookup
+    /// resolution is byte-faithful.
+    fn resolved_feature<'a>(
+        &'a self,
+        lookup: &'a dyn HolderLookup<ConfiguredFeatureErased>,
+    ) -> &'a ConfiguredFeatureErased {
+        self.feature.value(lookup)
     }
 }
 
@@ -255,7 +266,7 @@ mod tests {
     use super::*;
     use crate::levelgen::feature::configurations::FeatureConfiguration;
     use crate::levelgen::feature::{ConfiguredFeatureErased, FeatureId};
-    use rivet_registry::RegistryId;
+    use rivet_registry::RegistryBuilder;
 
     /// A configured feature with the `None` configuration (no sub-features).
     fn no_op_feature() -> ConfiguredFeatureErased {
@@ -289,6 +300,50 @@ mod tests {
 
     use crate::levelgen::placement::placement_modifier_type::PlacementModifierTypeId;
     use crate::levelgen::placement::{PlacementContext, PlacementModifier};
+
+    /// The `worldgen/configured_feature` registry key — the configured-feature
+    /// registry a `Holder::Reference` resolves through.
+    fn configured_feature_registry_key()
+    -> rivet_registry::ResourceKey<rivet_registry::Registry<ConfiguredFeatureErased>> {
+        rivet_registry::ResourceKey::create_registry_key(
+            rivet_registry::Identifier::with_default_namespace("worldgen/configured_feature"),
+        )
+    }
+
+    /// A frozen configured-feature registry holding `values` — the test double
+    /// for the `HolderLookup` `resolved_feature` resolves references through.
+    /// `Registry` implements `HolderLookup<ConfiguredFeatureErased>`, so the
+    /// returned registry is used directly as the lookup.
+    fn configured_feature_lookup(
+        values: Vec<ConfiguredFeatureErased>,
+    ) -> rivet_registry::Registry<ConfiguredFeatureErased> {
+        let mut builder = RegistryBuilder::new(&configured_feature_registry_key());
+        for (i, value) in values.into_iter().enumerate() {
+            builder.register(
+                &rivet_registry::ResourceKey::create(
+                    &configured_feature_registry_key(),
+                    rivet_registry::Identifier::with_default_namespace(&format!("feature_{i}")),
+                ),
+                Arc::new(value),
+                rivet_registry::RegistrationInfo::BUILT_IN,
+            );
+        }
+        builder.freeze()
+    }
+
+    /// A config whose `getSubFeatures` yields a registry `Reference` — nesting
+    /// the holder-resolution seam inside the sub-feature stream (the yielded
+    /// holder is itself unresolved until `.value(lookup)`).
+    #[derive(Debug)]
+    struct NestedSubFeatureConfig(rivet_registry::RegistryId, u32);
+
+    impl FeatureConfiguration for NestedSubFeatureConfig {
+        fn get_sub_features(
+            &self,
+        ) -> Box<dyn Iterator<Item = Holder<ConfiguredFeatureErased>> + '_> {
+            Box::new(std::iter::once(Holder::reference(self.0, self.1)))
+        }
+    }
 
     #[derive(Debug)]
     struct IdentityModifier(PlacementModifierTypeId);
@@ -333,7 +388,10 @@ mod tests {
             Holder::direct(top),
             vec![count_modifier(), count_modifier()],
         );
-        let features: Vec<_> = placed.get_features().collect();
+        // A Direct holder never resolves through the lookup, but the lookup is
+        // still threaded through `get_features` (Java's `this.feature.value()`).
+        let lookup = configured_feature_lookup(Vec::new());
+        let features: Vec<_> = placed.get_features(&lookup).collect();
         // The holder carries the inline top feature; its config reports one
         // sub-feature.
         assert_eq!(features.len(), 2);
@@ -348,6 +406,113 @@ mod tests {
             assert_eq!(f.feature, FeatureId::new(0));
         } else {
             panic!("sub feature holder must be Direct");
+        }
+    }
+
+    #[test]
+    fn get_features_resolves_a_reference_holder_through_the_lookup() {
+        // The threaded-lookup seam: `this.feature.value()` resolves the
+        // `Reference` by id through the owning lookup to reach the value whose
+        // sub-features are concatenated. `getFeatures` is
+        // `Stream.concat(Stream.of(this.feature), value.getSubFeatures())` — the
+        // first element is the ORIGINAL holder (still a `Reference`), only the
+        // sub-features are materialized fresh.
+        let sub = no_op_feature();
+        let top = ConfiguredFeatureErased {
+            feature: FeatureId::new(1),
+            config: Arc::new(SubFeatureConfig(sub.clone())),
+        };
+        let lookup = configured_feature_lookup(vec![top]);
+        let registry_id = lookup.registry_id();
+        // The reference points at the registry's sole element (id 0) — the same
+        // holder shape `RegistryLookup.get(key)` constructs.
+        let placed = PlacedFeature::new(Holder::reference(registry_id, 0), Vec::new());
+        let features: Vec<_> = placed.get_features(&lookup).collect();
+        assert_eq!(features.len(), 2);
+        // Element 0 is the original holder — a `Reference` to id 0.
+        match &features[0] {
+            Holder::Reference { registry: r, id } => {
+                assert_eq!(*r, registry_id);
+                assert_eq!(*id, 0);
+            }
+            Holder::Direct(_) => panic!("top feature holder must stay a Reference"),
+        }
+        // Element 1 is the resolved top feature's sub-feature.
+        if let Holder::Direct(f) = &features[1] {
+            assert_eq!(f.feature, FeatureId::new(0));
+        } else {
+            panic!("sub feature holder must be Direct");
+        }
+    }
+
+    #[test]
+    fn get_features_panics_on_missing_key_with_java_message() {
+        // A `Reference` whose id the lookup cannot resolve is Java's unbound
+        // reference: `Holder::value` panics with the literal "Trying to access
+        // unbound value ..." message (Java `Reference.value()`).
+        let lookup = configured_feature_lookup(Vec::new());
+        let registry_id = lookup.registry_id();
+        // id 42 is out of range — the lookup cannot resolve it.
+        let placed = PlacedFeature::new(Holder::reference(registry_id, 42), Vec::new());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Vec<_> = placed.get_features(&lookup).collect();
+        }));
+        let msg = panic_message(result);
+        assert_eq!(
+            msg,
+            format!(
+                "Trying to access unbound value 'null' from registry {}",
+                registry_id.0
+            ),
+        );
+    }
+
+    #[test]
+    fn nested_sub_feature_reference_resolves_through_the_lookup() {
+        // `this.feature.value().getSubFeatures()` may yield a *Reference* sub
+        // feature holder; it is resolved against the same threaded lookup. The
+        // top feature (id 0) is registered with a config whose `getSubFeatures`
+        // yields a `Reference` to id 1 (a nested sub-feature). `RegistryId` is
+        // assigned at builder construction, so the config can reference it
+        // before freeze.
+        let mut builder = RegistryBuilder::new(&configured_feature_registry_key());
+        let registry_id = builder.registry_id();
+        builder.register(
+            &rivet_registry::ResourceKey::create(
+                &configured_feature_registry_key(),
+                rivet_registry::Identifier::with_default_namespace("top"),
+            ),
+            Arc::new(ConfiguredFeatureErased {
+                feature: FeatureId::new(2),
+                config: Arc::new(NestedSubFeatureConfig(registry_id, 1)),
+            }),
+            rivet_registry::RegistrationInfo::BUILT_IN,
+        );
+        builder.register(
+            &rivet_registry::ResourceKey::create(
+                &configured_feature_registry_key(),
+                rivet_registry::Identifier::with_default_namespace("nested"),
+            ),
+            Arc::new(no_op_feature()),
+            rivet_registry::RegistrationInfo::BUILT_IN,
+        );
+        let lookup = builder.freeze();
+
+        // `this.feature.value()` resolves the top feature; the concatenated
+        // `getSubFeatures()` yields the nested `Reference` holder. Java returns
+        // holders (resolved lazily downstream), so the yielded holder is still a
+        // `Reference` — resolved here through the same lookup.
+        let placed = PlacedFeature::new(Holder::reference(registry_id, 0), Vec::new());
+        let features: Vec<_> = placed.get_features(&lookup).collect();
+        assert_eq!(features.len(), 2);
+        match &features[1] {
+            Holder::Reference { registry: r, id } => {
+                assert_eq!(*r, registry_id);
+                assert_eq!(*id, 1);
+                // The nested holder resolves to the registry's second element.
+                assert_eq!(features[1].value(&lookup).feature, FeatureId::new(0),);
+            }
+            Holder::Direct(_) => panic!("nested sub feature holder must be a Reference"),
         }
     }
 
@@ -414,7 +579,7 @@ mod tests {
     }
 
     /// The panic payload, as `&str` if it was a format-string `panic!`.
-    fn panic_message(result: std::thread::Result<bool>) -> String {
+    fn panic_message<T>(result: std::thread::Result<T>) -> String {
         match result {
             Ok(_) => panic!("expected a panic, got Ok"),
             Err(payload) => payload
@@ -427,26 +592,29 @@ mod tests {
     #[test]
     fn place_resolves_the_feature_before_walking_the_modifiers() {
         // Java's `placeWithContext` resolves `this.feature.value()` before the
-        // `forEach` walks the pipeline. With a `Reference` holder the port's
-        // `resolved_feature` panics (broader than Java's unbound-only throw;
-        // deferred with #126), and it must panic before the #181 modifier
-        // dispatch runs — pinning Java's resolution-before-walk ordering.
-        let placed = PlacedFeature::new(
-            Holder::Reference {
-                registry: RegistryId(0),
-                id: 1,
-            },
-            vec![count_modifier()],
-        );
+        // `forEach` walks the pipeline. With an unresolvable `Reference` holder
+        // the resolution panics with Java's "Trying to access unbound value"
+        // message, and it must panic before the #181 modifier dispatch runs —
+        // pinning Java's resolution-before-walk ordering.
+        let lookup = configured_feature_lookup(Vec::new());
+        let registry_id = lookup.registry_id();
+        // id 0 is out of range — the empty lookup cannot resolve it.
+        let placed = PlacedFeature::new(Holder::reference(registry_id, 0), vec![count_modifier()]);
         let mut level = TestLevel;
         let generator = NoopGenerator;
         let mut random = rivet_util::random::LegacyRandomSource::new(42);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            placed.place(&mut level, &generator, &mut random, &BlockPos::new(0, 0, 0))
+            placed.place(
+                &lookup,
+                &mut level,
+                &generator,
+                &mut random,
+                &BlockPos::new(0, 0, 0),
+            )
         }));
         let msg = panic_message(result);
         assert!(
-            msg.contains("configured feature"),
+            msg.contains("Trying to access unbound value"),
             "expected the holder-resolution panic, got: {msg}"
         );
     }
@@ -458,13 +626,21 @@ mod tests {
         // that the pipeline is wired end-to-end (`place` -> `place_with_context`
         // -> `place_walk` -> `placement_get_positions`); the depth-first
         // interleaving the walk performs is not observable until #181 wires
-        // both dispatch points (feature placement panics too).
+        // both dispatch points (feature placement panics too). A `Direct` holder
+        // resolves without touching the lookup, so an empty lookup suffices.
         let placed = PlacedFeature::new(Holder::direct(no_op_feature()), vec![count_modifier()]);
+        let lookup = configured_feature_lookup(Vec::new());
         let mut level = TestLevel;
         let generator = NoopGenerator;
         let mut random = rivet_util::random::LegacyRandomSource::new(42);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            placed.place(&mut level, &generator, &mut random, &BlockPos::new(0, 0, 0))
+            placed.place(
+                &lookup,
+                &mut level,
+                &generator,
+                &mut random,
+                &BlockPos::new(0, 0, 0),
+            )
         }));
         let msg = panic_message(result);
         assert!(
@@ -474,26 +650,29 @@ mod tests {
     }
 
     #[test]
-    fn resolved_feature_panics_on_registry_reference() {
-        // A `Reference` holder needs the configured-feature registry lookup
-        // (deferred with #126); `resolved_feature` panics on every reference.
-        // The panic is broader than Java's `Holder.Reference.value()`, which
-        // throws ("Trying to access unbound value") only for a genuinely
-        // unbound reference and resolves a bound one; with no lookup threaded
-        // through the port resolves neither, and the message is non-Java.
-        let placed = PlacedFeature::new(
-            Holder::Reference {
-                registry: RegistryId(0),
-                id: 1,
-            },
-            vec![],
-        );
+    fn place_with_biome_check_resolves_a_bound_reference() {
+        // `placeWithBiomeCheck` threads the same lookup: a `Reference` to a
+        // bound id resolves through the lookup before the modifier dispatch
+        // (which then panics as the #181 stub).
+        let lookup = configured_feature_lookup(vec![no_op_feature()]);
+        let registry_id = lookup.registry_id();
+        let placed = PlacedFeature::new(Holder::reference(registry_id, 0), vec![count_modifier()]);
+        let mut level = TestLevel;
+        let generator = NoopGenerator;
+        let mut random = rivet_util::random::LegacyRandomSource::new(42);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // `get_features` builds the concat chain eagerly, resolving the
-            // holder immediately, so constructing it panics on a Reference
-            // holder; collect is not reached.
-            let _: Vec<_> = placed.get_features().collect();
+            placed.place_with_biome_check(
+                &lookup,
+                &mut level,
+                &generator,
+                &mut random,
+                &BlockPos::new(0, 0, 0),
+            )
         }));
-        assert!(result.is_err());
+        let msg = panic_message(result);
+        assert!(
+            msg.contains("placement modifier"),
+            "expected the #181 dispatch panic after resolving the reference, got: {msg}"
+        );
     }
 }
