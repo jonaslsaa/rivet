@@ -10,13 +10,17 @@
 //! - Java extends the abstract `ChunkGenerator` (biome source + codec dispatch),
 //!   owned by `mc.world.level.chunk.generator`. The noisegen unit does not port
 //!   that base; the methods that are pure overrides of it and have unported
-//!   parameter types (`createBiomes`, `applyCarvers`, `fillFromNoise`,
-//!   `buildSurface`, `spawnOriginalMobs`) are `STUB`-marked `*_stub` methods on
-//!   the value shell — they keep Java's exact intent and defer the
-//!   world-touching body to its owning unit. `addDebugScreenInfo` (router reads
-//!   + string formatting) has fully ported parameter types, so it is ported in
-//!     full. `CODEC` (the `BiomeSource` + `NoiseGeneratorSettings` record codec)
-//!     defers with the `ChunkGenerator` unit (no `BiomeSource` ported here).
+//!   parameter types (`createBiomes`, `applyCarvers`, `buildSurface`,
+//!   `spawnOriginalMobs`) are `STUB`-marked `*_stub` methods on the value shell
+//!   — they keep Java's exact intent and defer the world-touching body to its
+//!   owning unit. `fillFromNoise`/`doFill` (the worldgen block-write slice) is
+//!   the one `ChunkGenerator` override ported here: its `ProtoChunk`/
+//!   `LevelChunkSection`/`Heightmap`/post-processing seams are all present in
+//!   the `chunk` module, and its `NoiseChunk`/`Aquifer`/`Blender` dependencies
+//!   live in this noisegen unit. `addDebugScreenInfo` (router reads + string
+//!   formatting) has fully ported parameter types, so it is ported in full.
+//!   `CODEC` (the `BiomeSource` + `NoiseGeneratorSettings` record codec)
+//!   defers with the `ChunkGenerator` unit (no `BiomeSource` ported here).
 //! - Java memoizes the global fluid picker in `Suppliers.memoize`; the picker
 //!   is a pure `Copy` struct here (the three `FluidStatus` values Java's
 //!   closure captures), so it needs no memoization wrapper.
@@ -38,6 +42,8 @@
 
 use crate::block::BlockState;
 use crate::block::blocks::Blocks;
+use crate::chunk::proto_chunk::ProtoChunk;
+use crate::chunk::storage::chunk_reconstruction::block_state_predicates;
 use crate::level::dimension::dimension_type::MIN_Y as DIMENSION_TYPE_MIN_Y;
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::levelgen::blending::blender::Blender;
@@ -421,15 +427,223 @@ impl NoiseBasedChunkGenerator {
     /// `NoiseChunk.aquifer()` seam it consumes is ported (see `noise_chunk.rs`).
     pub fn apply_carvers_stub(&self) {}
 
-    /// `fillFromNoise` — STUB(mc.world.level.chunk.generator).
+    /// `fillFromNoise(Blender, RandomState, StructureManager, ChunkAccess)` —
+    /// the worldgen block-write slice.
     ///
-    /// Java's `doFill` writes blocks into `LevelChunkSection`s, updates the
-    /// `OCEAN_FLOOR_WG`/`WORLD_SURFACE_WG` heightmaps, and consults
-    /// `aquifer.shouldScheduleFluidUpdate()` for post-processing. The
-    /// block-column seam is ported as [`Self::iterate_noise_column`]; the
-    /// section/heightmap/post-processing surfaces defer with the chunk units
-    /// (the `chunk.generator` wave, RivetTodo #185).
-    pub fn fill_from_noise_stub(&self) {}
+    /// A faithful port of Java's `fillFromNoise`: clamps the noise settings to
+    /// the chunk's height accessor, computes the cell-Y geometry, early-returns
+    /// on the `cellCountY <= 0` degenerate path, acquires every section the
+    /// fill will touch, runs [`Self::do_fill`], and releases them (Java's
+    /// `try`/`finally`). `acquire`/`release` are NO-OPs here (Paper disables
+    /// the `ThreadingDetector`); the loops keep the lifecycle call structure
+    /// faithful. The `getOrCreateNoiseChunk` lazy cache is not ported —
+    /// `fillFromNoise` is the only caller in this slice and constructs the
+    /// `NoiseChunk` exactly once via [`Self::create_noise_chunk`] (RivetTodo
+    /// #185: a later stage composing biomes/surface over the same chunk adds
+    /// the cache).
+    pub fn fill_from_noise<B, S>(
+        &self,
+        blender: Blender,
+        random_state: &RandomState,
+        center_chunk: &mut ProtoChunk<BlockState, B, S>,
+    ) where
+        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        let noise_settings = settings_value(&self.settings)
+            .noise_settings
+            .clamp_to_height_accessor(&center_chunk.height_accessor());
+        let min_y = noise_settings.min_y();
+        let cell_height = noise_settings.get_cell_height();
+        let cell_min_y = mth::floor_div(min_y, cell_height);
+        let cell_count_y = mth::floor_div(noise_settings.height(), cell_height);
+        if cell_count_y <= 0 {
+            return;
+        }
+
+        // `cellCountY * cellHeight - 1 + minY` — the section of the highest
+        // filled block (wrapping arithmetic, as Java's plain `int` math).
+        let top_section_index = center_chunk.get_section_index(
+            cell_count_y
+                .wrapping_mul(cell_height)
+                .wrapping_sub(1)
+                .wrapping_add(min_y),
+        );
+        let bottom_section_index = center_chunk.get_section_index(min_y);
+        // `section.acquire()` over `[bottom, top]`, then `section.release()` in
+        // the `finally` — both documented no-ops.
+        for section_index in (bottom_section_index..=top_section_index).rev() {
+            center_chunk.get_section(section_index as usize).acquire();
+        }
+        self.do_fill(
+            blender,
+            random_state,
+            center_chunk,
+            cell_min_y,
+            cell_count_y,
+        );
+        for section_index in (bottom_section_index..=top_section_index).rev() {
+            center_chunk.get_section(section_index as usize).release();
+        }
+    }
+
+    /// `createNoiseChunk(ChunkAccess, StructureManager, Blender, RandomState)` —
+    /// `NoiseChunk.forChunk(chunk, randomState, beardifier, settings.value(),
+    /// globalFluidPicker.get(), blender)`.
+    ///
+    /// `Beardifier.forStructuresInChunk(structureManager, chunk.getPos())` is
+    /// the `BeardifierMarker` value shell (the structure unit defers, RivetTodo
+    /// #177) — the same seam the single-column probes use.
+    fn create_noise_chunk<B, S>(
+        &self,
+        center_chunk: &ProtoChunk<BlockState, B, S>,
+        random_state: &RandomState,
+        blender: Blender,
+    ) -> NoiseChunk
+    where
+        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        let pos = center_chunk.get_pos();
+        NoiseChunk::for_chunk(
+            &center_chunk.height_accessor(),
+            &pos,
+            random_state,
+            Arc::new(BeardifierMarker::instance()) as Arc<dyn DensityFunction>,
+            settings_value(&self.settings),
+            Box::new(self.global_fluid_picker),
+            blender,
+        )
+    }
+
+    /// `doFill(Blender, StructureManager, RandomState, ChunkAccess, int
+    /// cellMinY, int cellCountY)` — the interpolated block-write loop.
+    ///
+    /// A faithful port of Java's nested cell loops: `cellXIndex` × `cellZIndex`
+    /// × `cellYIndex` (descending) × `yInCell` (descending) × `xInCell` ×
+    /// `zInCell`, with the noise-chunk `updateForY/X/Z` factor calls, the
+    /// `getInterpolatedState()` → `settings.defaultBlock()` fallback, the
+    /// `debugPreliminarySurfaceLevel` overlay, the `state != AIR &&
+    /// !debugVoidTerrain` write gate, and the per-block section write + both
+    /// worldgen heightmap updates ([`ProtoChunk::write_worldgen_block`] — the
+    /// `OCEAN_FLOOR_WG` then `WORLD_SURFACE_WG` order). The `doFill` prologue
+    /// creates the two worldgen heightmaps via `getOrCreateHeightmapUnprimed`
+    /// before the loop. When `aquifer.shouldScheduleFluidUpdate()` and the
+    /// state's fluid is non-empty, the block is marked for post-processing
+    /// (`markPosForPostProcessing`). `swapSlices` runs after each `cellXIndex`;
+    /// `stopInterpolation` after the loops.
+    ///
+    /// The `lastSectionIndex`/`section` reference cache is Java's
+    /// micro-optimization; the port re-indexes `center_chunk` per block (the
+    /// section is identical), so the swap is not carried.
+    fn do_fill<B, S>(
+        &self,
+        blender: Blender,
+        random_state: &RandomState,
+        center_chunk: &mut ProtoChunk<BlockState, B, S>,
+        cell_min_y: i32,
+        cell_count_y: i32,
+    ) where
+        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        let noise_chunk = self.create_noise_chunk(center_chunk, random_state, blender);
+        // `getOrCreateHeightmapUnprimed(OCEAN_FLOOR_WG)` then
+        // `getOrCreateHeightmapUnprimed(WORLD_SURFACE_WG)` — the doFill prologue
+        // creates the two `Usage.WORLDGEN` heightmaps before the loop;
+        // [`ProtoChunk::write_worldgen_block`] `expect`s them.
+        center_chunk.get_or_create_heightmap_unprimed(Types::OceanFloorWg);
+        center_chunk.get_or_create_heightmap_unprimed(Types::WorldSurfaceWg);
+        let chunk_pos = center_chunk.get_pos();
+        let chunk_start_block_x = chunk_pos.get_min_block_x();
+        let chunk_start_block_z = chunk_pos.get_min_block_z();
+        let aquifer = noise_chunk.aquifer();
+        noise_chunk.initialize_for_first_cell_x();
+        let cell_width = noise_chunk.cell_width();
+        let cell_height = noise_chunk.cell_height();
+        let cell_count_x = 16 / cell_width;
+        let cell_count_z = 16 / cell_width;
+        let settings = settings_value(&self.settings);
+        let air = Blocks::AIR.default_block_state();
+        let predicates = block_state_predicates();
+
+        for cell_x_index in 0..cell_count_x {
+            noise_chunk.advance_cell_x(cell_x_index);
+
+            for cell_z_index in 0..cell_count_z {
+                for cell_y_index in (0..cell_count_y).rev() {
+                    noise_chunk.select_cell_yz(cell_y_index, cell_z_index);
+
+                    for y_in_cell in (0..cell_height).rev() {
+                        let pos_y = cell_min_y
+                            .wrapping_add(cell_y_index)
+                            .wrapping_mul(cell_height)
+                            .wrapping_add(y_in_cell);
+                        let y_in_section = pos_y & 15;
+                        let section_index = center_chunk.get_section_index(pos_y);
+                        let factor_y = y_in_cell as f64 / cell_height as f64;
+                        noise_chunk.update_for_y(pos_y, factor_y);
+
+                        for x_in_cell in 0..cell_width {
+                            let pos_x = chunk_start_block_x
+                                .wrapping_add(cell_x_index.wrapping_mul(cell_width))
+                                .wrapping_add(x_in_cell);
+                            let x_in_section = pos_x & 15;
+                            let factor_x = x_in_cell as f64 / cell_width as f64;
+                            noise_chunk.update_for_x(pos_x, factor_x);
+
+                            for z_in_cell in 0..cell_width {
+                                let pos_z = chunk_start_block_z
+                                    .wrapping_add(cell_z_index.wrapping_mul(cell_width))
+                                    .wrapping_add(z_in_cell);
+                                let z_in_section = pos_z & 15;
+                                let factor_z = z_in_cell as f64 / cell_width as f64;
+                                noise_chunk.update_for_z(pos_z, factor_z);
+                                let base_state = noise_chunk.get_interpolated_state();
+                                let state = self.debug_preliminary_surface_level(
+                                    &noise_chunk,
+                                    pos_x,
+                                    pos_y,
+                                    pos_z,
+                                    base_state.unwrap_or(settings.default_block),
+                                );
+                                if state != air
+                                    && !rivet_core::shared_constants::debug_void_terrain(
+                                        chunk_start_block_x,
+                                        chunk_start_block_z,
+                                    )
+                                {
+                                    center_chunk.write_worldgen_block(
+                                        section_index,
+                                        x_in_section,
+                                        y_in_section,
+                                        z_in_section,
+                                        pos_y,
+                                        state,
+                                        &predicates.is_air,
+                                        &predicates.is_randomly_ticking,
+                                        &predicates.fluid_is_empty,
+                                        &predicates.fluid_is_randomly_ticking,
+                                        &predicates.is_special_colliding,
+                                    );
+                                    if aquifer.should_schedule_fluid_update()
+                                        && !state.fluid_empty()
+                                    {
+                                        let block_pos = BlockPos::new(pos_x, pos_y, pos_z);
+                                        center_chunk.mark_pos_for_post_processing(&block_pos);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            noise_chunk.swap_slices();
+        }
+
+        noise_chunk.stop_interpolation();
+    }
 
     /// `buildSurface` — STUB(mc.world.level.levelgen.surface).
     ///
@@ -834,6 +1048,23 @@ fn settings_value(settings: &Holder<NoiseGeneratorSettings>) -> &NoiseGeneratorS
 mod tests {
     use super::*;
 
+    use crate::chunk::level_chunk_section::LevelChunkSection;
+    use crate::chunk::storage::chunk_reconstruction::resolve_state_flags;
+    use crate::chunk::storage::section_reconstruction::{
+        BiomeId, current_version_container_factory,
+    };
+    use crate::chunk::upgrade_data::UpgradeData;
+    use crate::level::height_accessor::create as create_accessor;
+    use crate::levelgen::noise::density_functions::{self as fns};
+    use crate::levelgen::noise::noise_router::NoiseRouter;
+    use crate::levelgen::noise::noise_settings::OVERWORLD_NOISE_SETTINGS;
+    use crate::levelgen::noisegen::noise_router_data::DensityFunctionValue;
+    use crate::levelgen::surface_rules::surface_rule_air;
+    use crate::levelgen::synth::normal_noise::NoiseParameters;
+    use rivet_registry::RegistryBuilder;
+    use rivet_registry::core::ChunkPos;
+    use rivet_registry::registry::Registry;
+
     /// A settings preset with `seaLevel = 63`, lava at -54, water default
     /// fluid, and a `Direct` holder (the noisegen construction form).
     fn settings_holder() -> Holder<NoiseGeneratorSettings> {
@@ -920,6 +1151,285 @@ mod tests {
         // Non-debug: the lava/sea split holds (not empty).
         let status = picker.compute_fluid(0, -1000, 0);
         assert_eq!(status.fluid_level, -54);
+    }
+
+    /// A settings record whose router's `finalDensity` is the non-trivial
+    /// interpolated constant 3.5 (aquifers/ore-veins disabled) — the same
+    /// shape as `noise_chunk::tests::test_settings`, so the filled blocks are
+    /// `defaultBlock` (stone) everywhere (the disabled aquifer returns `None`
+    /// for `density > 0` and the `unwrap_or(defaultBlock)` fallback runs).
+    fn test_settings() -> NoiseGeneratorSettings {
+        test_settings_with_final_density(fns::interpolated(fns::cache_once(fns::constant(3.5))))
+    }
+
+    /// The `test_settings` router with an arbitrary `finalDensity` — the same
+    /// shape as `noise_chunk::tests::test_settings_with_final_density`, keeping
+    /// `preliminarySurfaceLevel = constant(100)` and aquifers disabled.
+    fn test_settings_with_final_density(
+        final_density: Arc<dyn DensityFunction>,
+    ) -> NoiseGeneratorSettings {
+        let z = fns::zero();
+        let router = NoiseRouter::new(
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            z.clone(),
+            fns::constant(100.0),
+            final_density,
+            z.clone(),
+            z.clone(),
+            z,
+        );
+        NoiseGeneratorSettings::new(
+            OVERWORLD_NOISE_SETTINGS,
+            Blocks::STONE.default_block_state(),
+            Blocks::WATER.default_block_state(),
+            router,
+            surface_rule_air(),
+            Vec::new(),
+            63,
+            true,
+            false,
+            false,
+            false,
+        )
+    }
+
+    /// Empty registries — the test router has no registry-resolved nodes, so
+    /// `RandomState::create` never touches them (the `noise_chunk` tests'
+    /// helper).
+    fn empty_registries() -> (Registry<NoiseParameters>, Registry<DensityFunctionValue>) {
+        let noise_key = &crate::levelgen::noise::registry_keys::NOISE;
+        let noise_registry: Registry<NoiseParameters> = RegistryBuilder::new(noise_key).freeze();
+        let df_key = &crate::levelgen::noise::registry_keys::DENSITY_FUNCTION;
+        let df_registry: Registry<DensityFunctionValue> = RegistryBuilder::new(df_key).freeze();
+        (noise_registry, df_registry)
+    }
+
+    /// The worldgen chunk shape `NoiseBasedChunkGenerator.fillFromNoise` needs:
+    /// 24 all-air sections over the overworld accessor (`-64..=319`), a
+    /// `current_version_container_factory()` (the real block-state/biome
+    /// strategies), `air`/`void_air` = air, and the canonical state-flags
+    /// resolver (so the heightmap `update`s classify stone/air exactly as the
+    /// runtime chunk would).
+    fn worldgen_proto(pos: ChunkPos) -> ProtoChunk<BlockState, BiomeId, &'static str> {
+        let factory = current_version_container_factory();
+        let air = Blocks::AIR.default_block_state();
+        let sections: Vec<LevelChunkSection<BlockState, BiomeId>> = (0..24)
+            .map(|_| {
+                LevelChunkSection::new_all_air(
+                    factory.create_for_block_states(),
+                    factory.create_for_biomes(),
+                )
+            })
+            .collect();
+        ProtoChunk::new(
+            pos,
+            UpgradeData::empty(24),
+            create_accessor(-64, 384),
+            &factory,
+            Some(sections),
+            air,
+            air,
+            &resolve_state_flags,
+        )
+    }
+
+    #[test]
+    fn fill_from_noise_writes_default_block_everywhere_and_creates_heightmaps() {
+        let settings = test_settings();
+        let (noise_registry, df_registry) = empty_registries();
+        let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
+        let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
+        let mut proto = worldgen_proto(ChunkPos::ZERO);
+
+        generator.fill_from_noise(Blender::empty(), &state, &mut proto);
+
+        let stone = Blocks::STONE.default_block_state();
+        let air = Blocks::AIR.default_block_state();
+        // Every in-build-height block is the `defaultBlock` fallback (the
+        // disabled aquifer returns `None` for the constant 3.5 density).
+        for y in -64..=319 {
+            let section = proto.get_section(proto.get_section_index(y) as usize);
+            let y_in_section = y & 15;
+            assert_eq!(
+                section.get_block_state(0, y_in_section, 0),
+                stone,
+                "block at y {y}"
+            );
+        }
+        // Outside build height stays void air.
+        assert_eq!(proto.get_block_state(0, -65, 0), air);
+        assert_eq!(proto.get_block_state(0, 320, 0), air);
+
+        // The two worldgen heightmaps were created by the doFill prologue and
+        // updated to the top of the fill: the first available slot is one above
+        // the highest non-air block, so height (firstAvailable - 1) = 319.
+        let min_y = -64;
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::WorldSurfaceWg)
+                .get_height_at(0, 0, min_y),
+            319
+        );
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::OceanFloorWg)
+                .get_height_at(0, 0, min_y),
+            319
+        );
+    }
+
+    #[test]
+    fn fill_from_noise_matches_java_wrapping_at_negative_chunk_coords() {
+        // Chunk (-1, -1): `chunkStartBlockX = -16`, `chunkStartBlockZ = -16`.
+        // Java's `posX = chunkStartBlockX + cellXIndex * cellWidth + xInCell`
+        // (plain int math, no wrapping here) yields block x in [-16, -1], so
+        // `xInSection = posX & 15` covers all 16 local coords and every cell
+        // writes into the chunk's own sections. This pins the `& 15` masking
+        // (no negative-section indexing) and that the block writes stay inside
+        // the chunk.
+        let settings = test_settings();
+        let (noise_registry, df_registry) = empty_registries();
+        let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
+        let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
+        let mut proto = worldgen_proto(ChunkPos::new(-1, -1));
+
+        generator.fill_from_noise(Blender::empty(), &state, &mut proto);
+
+        let stone = Blocks::STONE.default_block_state();
+        // `get_block_state` takes LOCAL x/z, so every `xInSection`/`zInSection`
+        // in [0, 15] was written (the `posX & 15` masking maps the absolute
+        // [-16, -1] range onto all 16 local columns — Java's `& 15` on the
+        // negative block coords). A complete fill covers all four corners.
+        for (lx, lz) in [(0, 0), (15, 0), (0, 15), (15, 15)] {
+            assert_eq!(
+                proto.get_block_state(lx, 0, lz),
+                stone,
+                "corner ({lx}, {lz})"
+            );
+            assert_eq!(
+                proto.get_block_state(lx, 319, lz),
+                stone,
+                "corner ({lx}, {lz}) at the top"
+            );
+        }
+    }
+
+    #[test]
+    fn fill_from_noise_early_returns_when_cell_count_y_nonpositive() {
+        // A height accessor whose height is below one cell (`create(0, 1)` →
+        // `cellCountY = floorDiv(1, 8) = 0`): Java returns before touching any
+        // section. The chunk has a single section; `fill_from_noise` must not
+        // index into it.
+        let settings = test_settings();
+        let (noise_registry, df_registry) = empty_registries();
+        let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
+        let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
+
+        let factory = current_version_container_factory();
+        let air = Blocks::AIR.default_block_state();
+        let sections = vec![LevelChunkSection::new_all_air(
+            factory.create_for_block_states(),
+            factory.create_for_biomes(),
+        )];
+        let mut proto: ProtoChunk<BlockState, BiomeId, &'static str> = ProtoChunk::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(1),
+            create_accessor(0, 1),
+            &factory,
+            Some(sections),
+            air,
+            air,
+            &resolve_state_flags,
+        );
+
+        generator.fill_from_noise(Blender::empty(), &state, &mut proto);
+
+        // Nothing written — the section stays all-air (non_empty_block_count 0).
+        assert_eq!(
+            proto.get_section(0).non_empty_block_count(),
+            0,
+            "the cellCountY <= 0 path must return before writing"
+        );
+    }
+
+    /// A `fillFromNoise` fill over a fluid column: `finalDensity` is the
+    /// `yClampedGradient(-64, 63, 1.0, -1.0)` (linearly +1.0 at the world floor
+    /// down to -1.0 at sea level, crossing zero at `y = -0.5`) through the same
+    /// `interpolated(cacheOnce(...))` shape the real router's `finalDensity`
+    /// takes. With the disabled aquifer (`Aquifer.createDisabled`), `density >
+    /// 0` yields `null` → the `settings.defaultBlock()` (stone) fallback, and
+    /// `density <= 0` yields `fluidRule.computeFluid(x, y, z).at(y)` — water
+    /// for `y < 63` (the overworld sea level), air at/above 63. So every
+    /// column is stone at `-64..-1`, water at `0..62`, air at `63+`.
+    ///
+    /// The point is the heightmap divergence Java's two `Usage.WORLDGEN`
+    /// predicates produce on that column: `WORLD_SURFACE_WG` is `NOT_AIR` (the
+    /// water surface, height 62), while `OCEAN_FLOOR_WG` is
+    /// `MATERIAL_MOTION_BLOCKING` — water does not block motion, so the floor
+    /// resolves to the topmost stone at `y = -1` (height -1). The doFill
+    /// top-down write makes both updates deterministic. The disabled aquifer's
+    /// `shouldScheduleFluidUpdate()` is a constant `false`, so the fill must
+    /// mark nothing for post-processing.
+    #[test]
+    fn fill_from_noise_writes_fluid_column_and_diverges_worldgen_heightmaps() {
+        let gradient =
+            fns::interpolated(fns::cache_once(fns::y_clamped_gradient(-64, 63, 1.0, -1.0)));
+        let settings = test_settings_with_final_density(gradient);
+        let (noise_registry, df_registry) = empty_registries();
+        let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
+        let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
+        let mut proto = worldgen_proto(ChunkPos::ZERO);
+
+        generator.fill_from_noise(Blender::empty(), &state, &mut proto);
+
+        let stone = Blocks::STONE.default_block_state();
+        let water = Blocks::WATER.default_block_state();
+        let air = Blocks::AIR.default_block_state();
+        // The density crosses zero between y=-1 (stone) and y=0 (water); the
+        // fluid picker returns water below the sea level 63 and air at/above.
+        for y in -64..=-1 {
+            assert_eq!(proto.get_block_state(0, y, 0), stone, "stone at y {y}");
+        }
+        for y in 0..=62 {
+            assert_eq!(proto.get_block_state(0, y, 0), water, "water at y {y}");
+        }
+        assert_eq!(proto.get_block_state(0, 63, 0), air);
+
+        // WORLD_SURFACE_WG (NOT_AIR) tops out at the water surface; OCEAN_FLOOR_WG
+        // (MATERIAL_MOTION_BLOCKING) ignores the water and tops out at the stone
+        // floor — the two diverge by exactly the water depth.
+        let min_y = -64;
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::WorldSurfaceWg)
+                .get_height_at(0, 0, min_y),
+            62
+        );
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::OceanFloorWg)
+                .get_height_at(0, 0, min_y),
+            -1
+        );
+
+        // The disabled aquifer never schedules a fluid update, so no block is
+        // marked for post-processing (`markPosForPostProcessing` is gated on
+        // `aquifer.shouldScheduleFluidUpdate()`).
+        assert!(
+            proto
+                .get_post_processing()
+                .iter()
+                .all(|list| list.is_empty()),
+            "the disabled aquifer must not mark fluid updates"
+        );
     }
 }
 

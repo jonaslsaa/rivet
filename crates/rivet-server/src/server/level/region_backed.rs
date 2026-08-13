@@ -1141,6 +1141,39 @@ mod tests {
             !server.join_is_flat(),
             "the noise overworld must advertise not-flat in the login"
         );
+        // The region-backed boot reads the real seed from world_gen_settings.dat
+        // — the config's generated-world seed must not leak into a loaded world.
+        assert_eq!(
+            server.join_seed(),
+            REAL_SEED,
+            "the loaded world keeps its real seed, not the config default"
+        );
+    }
+
+    /// The `enable_join: false` mirror branch: `Server::try_new` with no live
+    /// session manager still advertises the booted region-backed world's real
+    /// seed (the recomputed `region_level` path), so the `join_seed` accessor is
+    /// identical whether or not a session manager is installed.
+    #[test]
+    fn try_new_wires_region_backed_seed_without_join() {
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+
+        let server = crate::server::Server::try_new(crate::server::ServerConfig {
+            enable_join: false,
+            level_path: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .expect("a real region-backed world boots the server");
+        assert!(
+            !server.join_is_flat(),
+            "the noise overworld must advertise not-flat in the login"
+        );
+        assert_eq!(
+            server.join_seed(),
+            REAL_SEED,
+            "the loaded world keeps its real seed without a session manager"
+        );
     }
 
     /// The `Server::try_new` login `is_flat` integration for a flat generator:
@@ -1165,6 +1198,13 @@ mod tests {
             server.join_is_flat(),
             "minecraft:flat must keep the login is_flat flag true"
         );
+        // A flat generator still carries the persisted seed from
+        // world_gen_settings.dat, not the config's generated-world seed.
+        assert_eq!(
+            server.join_seed(),
+            REAL_SEED,
+            "the loaded flat world keeps its real seed"
+        );
     }
 
     /// The superflat default: `Server::try_new` with no `level_path` advertises
@@ -1179,6 +1219,32 @@ mod tests {
         assert!(
             server.join_is_flat(),
             "the no-level superflat boot must advertise flat"
+        );
+        // The no-level superflat boot carries the config's generated-world seed
+        // into the world and login; the default stays the M1 fixture seed.
+        assert_eq!(
+            server.join_seed(),
+            ServerLevelConfig::M1_FIXTURE_SEED,
+            "the superflat default seed is the M1 fixture"
+        );
+    }
+
+    /// `Server::try_new` with an explicit generated-world seed: the no-level
+    /// superflat world and login advertise it (the `generated-world` contract's
+    /// `rivet-server --seed 42`). A non-default seed proves the config value is
+    /// carried, not the M1 fixture default.
+    #[test]
+    fn try_new_carries_the_config_seed_into_the_superflat_world() {
+        let server = crate::server::Server::try_new(crate::server::ServerConfig {
+            enable_join: true,
+            seed: 7,
+            ..Default::default()
+        })
+        .expect("the no-level superflat boot succeeds");
+        assert_eq!(
+            server.join_seed(),
+            7,
+            "the superflat world must carry the --seed value"
         );
     }
 
