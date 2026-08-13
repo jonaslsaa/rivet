@@ -67,7 +67,7 @@ echo "wrote $FIXTURE_FILE"
 SHA="$(shasum -a 256 "$FIXTURE_FILE" | awk '{print $1}')"
 BYTES="$(wc -c < "$FIXTURE_FILE" | tr -d ' ')"
 MANIFEST="$OUT_DIR/manifest.json"
-NOTE="bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis (frozenIcePatches/frozenSmall/frozenPins) is computed from Paper's raw noise so the inner and outer sub-checks are independently discriminable. Deterministic across boots."
+NOTE="bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis uses the raw frozenLarge/frozenEdge/frozenEdge01/frozenSmall noise samples plus the per-sample frozenPins flag so the inner and outer sub-checks are independently discriminable. Deterministic across boots."
 printf '%s\n' \
   '{' \
   '  "format": 1,' \
