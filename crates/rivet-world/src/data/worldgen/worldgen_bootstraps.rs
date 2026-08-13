@@ -16,7 +16,11 @@
 //!
 //! `RegistryAccess::from_pairs` consumes each frozen `Registry<T>` and
 //! `Registry<T>` is not `Clone`, so each build function freezes its own
-//! prerequisites: NOISE is frozen three times and DENSITY_FUNCTION twice. All
+//! prerequisites: NOISE is frozen four times (once in
+//! [`build_density_function_registry`], then again in
+//! [`build_noise_settings_registry`] — once directly and once through its
+//! `build_density_function_registry` call — and once more in
+//! [`build_worldgen_registries`]) and DENSITY_FUNCTION twice. All
 //! instances of a given registry have identical declaration-ordered contents,
 //! so the `Holder::Reference`s the density-function bootstrap produces resolve
 //! through whichever NOISE / DENSITY_FUNCTION instance `RandomState` is handed
