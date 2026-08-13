@@ -1045,15 +1045,15 @@ mod tests {
     }
 
     /// The #328 sentinel: boot the disposable loaded-world fixture, obtain the
-    /// fringe chunk (-6,-5) (the x-edge column of the 117-chunk boot view; the
-    /// chunk holding the real-save block (-82,70,-65)), decode its exact
-    /// `sections_buffer` through the client
+    /// fringe chunk (-6,-5) (the x-edge column of the 117-chunk boot view),
+    /// decode its exact `sections_buffer` through the client
     /// `LevelChunkSection`/`PalettedContainer` packet read path, and compare
     /// every decoded `StateId` against the authoritative
-    /// `LevelChunk::get_block_state` at the same absolute coordinate. A
-    /// tampered packet (one cell re-encoded to a different state through the
-    /// same wire format) is caught at exactly that position — the comparator is
-    /// non-vacuous.
+    /// `LevelChunk::get_block_state` at the same absolute coordinate — including
+    /// the targeted absolute block (-82,70,-65) (chunk-local (14,70,15), in the
+    /// booted world's synthetic content). A tampered packet (one cell
+    /// re-encoded to a different state through the same wire format) is caught
+    /// at exactly that position — the comparator is non-vacuous.
     #[test]
     fn loaded_world_packet_sections_decode_to_authoritative_block_states() {
         // Boot the disposable loaded-world fixture (the committed synthetic
