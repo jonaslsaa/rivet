@@ -102,7 +102,7 @@ newest_mtime() { # $1 = path to stat; $2 = cache dirs (one per line), or empty
     [ -n "$d" ] || continue
     m=$(stat -f %m "$d" 2>/dev/null || echo 0)
     [ "$m" -gt "$newest" ] && newest=$m
-  done <<< "$2"
+  done <<< "${2:-}"
   echo "$newest"
 }
 

@@ -292,6 +292,12 @@ noinput=$(newest_mtime "$W3" "")
 [ "$noinput" -eq "$root_m" ] || fail "newest_mtime with an empty list: got $noinput want $root_m"
 pass "newest_mtime with an empty cache list returns the root mtime"
 
+# a bare call (no $2 at all) must not abort under set -u: the documented
+# contract is "$2 ... or empty", so a missing argument means no cache list
+barecall=$(newest_mtime "$W3")
+[ "$barecall" -eq "$root_m" ] || fail "newest_mtime without a cache list: got $barecall want $root_m"
+pass "newest_mtime without a cache list returns the root mtime (no set -u abort)"
+
 # regression: newest_mtime must never consume the caller's stdin. The old
 # implementation read its list with `cat` whenever stdin was not a tty, which
 # swallowed the remaining lines of a pipe-fed while loop (the worktree sweep's
