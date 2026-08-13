@@ -125,8 +125,7 @@ impl ChunkStatus {
     }
 
     /// `ChunkStatus.max(a, b)` — the later status (higher index). Java uses
-    /// strict `isAfter`, so `max(a, a) == b`; the enum makes them equal
-    /// values, so the result is indistinguishable.
+    /// strict `isAfter`, so `max(a, a)` falls through to `b` (equal values).
     pub const fn max(a: Self, b: Self) -> Self {
         if a.is_after(b) { a } else { b }
     }
