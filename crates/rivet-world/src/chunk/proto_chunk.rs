@@ -201,6 +201,61 @@ where
         self.base.get_section(section_index)
     }
 
+    /// `ChunkAccess.getSection(int)` — the mutable half, for the worldgen
+    /// block writes (`NoiseBasedChunkGenerator.doFill`).
+    pub fn get_section_mut(&mut self, section_index: usize) -> &mut LevelChunkSection<T, B> {
+        self.base.get_section_mut(section_index)
+    }
+
+    /// `ChunkAccess.getSectionIndex(int blockY)`.
+    pub fn get_section_index(&self, block_y: i32) -> i32 {
+        self.base.get_section_index(block_y)
+    }
+
+    /// The contained `levelHeightAccessor` value — `ChunkAccess.getHeightAccessorForGeneration()`
+    /// (the `UPGRADE_HEIGHT_ACCESSOR` branch defers with `BelowZeroRetrogen`).
+    pub fn height_accessor(&self) -> SimpleLevelHeightAccessor {
+        self.base.height_accessor()
+    }
+
+    /// `ChunkAccess.getOrCreateHeightmapUnprimed(Types)` — the worldgen
+    /// `doFill` prologue creates the two `Usage.WORLDGEN` heightmaps here.
+    pub fn get_or_create_heightmap_unprimed(&mut self, ty: Types) -> &mut Heightmap {
+        self.base.get_or_create_heightmap_unprimed(ty)
+    }
+
+    /// The worldgen `doFill` per-block write (see
+    /// [`ChunkAccess::write_worldgen_block`]).
+    #[allow(clippy::too_many_arguments)] // the 5 coords/state + the 5 `BlockBehaviour` predicates.
+    pub fn write_worldgen_block(
+        &mut self,
+        section_index: i32,
+        x_in_section: i32,
+        y_in_section: i32,
+        z_in_section: i32,
+        pos_y: i32,
+        state: T,
+        is_air: &dyn Fn(&T) -> bool,
+        is_randomly_ticking: &dyn Fn(&T) -> bool,
+        fluid_is_empty: &dyn Fn(&T) -> bool,
+        fluid_is_randomly_ticking: &dyn Fn(&T) -> bool,
+        is_special_colliding: &dyn Fn(&T) -> bool,
+    ) {
+        self.base.write_worldgen_block(
+            section_index,
+            x_in_section,
+            y_in_section,
+            z_in_section,
+            pos_y,
+            state,
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
+        );
+    }
+
     /// `ChunkAccess.getNoiseBiome(int, int, int)` — the base read. Java guards
     /// with `getHighestGeneratedStatus().isOrAfter(ChunkStatus.BIOMES)` and
     /// throws otherwise; the guard defers with the status unit (#185).
