@@ -101,7 +101,9 @@ async fn run_server(server: Server) -> ExitCode {
 /// `--seed <i64>` is the generated-world seed (the `generated-world`
 /// capability contract: the scenario runner boots `rivet-server --seed 42`);
 /// the no-level superflat boot carries it into the world object and the login
-/// packet's obfuscated seed.
+/// packet's obfuscated seed. A disk `--level` keeps its persisted seed from
+/// `world_gen_settings.dat`; a combined `--seed` is then ignored (loaded-world
+/// behavior is untouched, so no rejection).
 ///
 /// The production binary always enables the live play path: `Server::new`
 /// wires the tick-owned session manager that consumes the configuration→play
