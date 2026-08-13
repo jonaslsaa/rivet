@@ -33,13 +33,16 @@
 //! `markPosForPostProcessing`'s parent `postProcessGeneration` consumer and
 //! `addPackedPostProcess`'s `ShortList` read path remain with that owning unit.
 
+use crate::block::BlockState;
 use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
+use crate::chunk::storage::chunk_reconstruction::block_state_predicates;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
+use crate::levelgen::surface_rules::ChunkSurface;
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
 use indexmap::IndexMap;
 use rivet_nbt::compound_tag::CompoundTag;
@@ -389,6 +392,112 @@ where
     /// `ChunkAccess.getUpgradeData()`.
     pub fn get_upgrade_data(&self) -> &UpgradeData {
         self.base.get_upgrade_data()
+    }
+}
+
+// The worldgen surface-driver specialization: `ProtoChunk.setBlockState` and
+// the `ChunkSurface` seam (`build_surface`'s block-column over the real chunk,
+// issue #179/#185). `BlockState` satisfies the `T` bounds of the generic
+// `ProtoChunk`; the biome type `B` is opaque to the surface write (only the
+// heightmap `placed` flags and section predicates are resolved, through the
+// generated `BlockState` behavior table — `block_state_predicates` — exactly
+// like `NoiseBasedChunkGenerator.doFill`'s `write_worldgen_block`).
+
+impl<B, S> ProtoChunk<BlockState, B, S>
+where
+    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash,
+{
+    /// `ProtoChunk.setBlockState(BlockPos, BlockState, flags)` — the worldgen
+    /// write path Java's `buildSurface` `BlockColumn.setBlock` calls.
+    ///
+    /// Java's full `setBlockState`: the build-height guard (returns `VOID_AIR`,
+    /// no write), the `wasEmpty && state.is(AIR)` fast path, the section write,
+    /// then the `getPersistedStatus().heightmapsAfter()` heightmap updates
+    /// (priming missing entries first). The light half (the
+    /// `status.isOrAfter(ChunkStatus.INITIALIZE_LIGHT)` branch) defers with the
+    /// lighting unit (#184/#216); a worldgen `ProtoChunk` is always below that
+    /// status, so the omission is unreachable on this path. The section write
+    /// uses the generated `BlockState` behavior predicates
+    /// ([`block_state_predicates`]), the same set `doFill` passes to
+    /// `write_worldgen_block`.
+    ///
+    /// Returns the previous state, matching Java.
+    pub fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) -> BlockState {
+        if self.base.is_outside_build_height(y) {
+            return self.void_air;
+        }
+        let section_index = self.base.get_section_index(y) as usize;
+        let was_empty = self.base.get_section(section_index).has_only_air();
+        let predicates = block_state_predicates();
+        if was_empty && (predicates.is_air)(&state) {
+            return state;
+        }
+        let local_x = x & 15;
+        let local_y = y & 15;
+        let local_z = z & 15;
+        let placed = self.base.resolve_flags(&state);
+        let old_state = self.base.get_section_mut(section_index).set_block_state(
+            local_x,
+            local_y,
+            local_z,
+            state,
+            &predicates.is_air,
+            &predicates.is_randomly_ticking,
+            &predicates.fluid_is_empty,
+            &predicates.fluid_is_randomly_ticking,
+            &predicates.is_special_colliding,
+        );
+        self.update_heightmaps_after(local_x, y, local_z, placed);
+        old_state
+    }
+}
+
+impl<B, S> ChunkSurface for ProtoChunk<BlockState, B, S>
+where
+    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash,
+{
+    fn get_height(&self, x: i32, z: i32) -> i32 {
+        // `ChunkAccess.getHeight(WORLD_SURFACE_WG, x, z)` — Java primes a
+        // missing heightmap on demand (a `&mut` read). The surface driver
+        // consumes a chunk whose worldgen heightmaps are already primed
+        // (`doFill` creates them), so this reads the primed entry; an absent
+        // entry decodes as `minY - 1`, the exact value Java's `getHeight`
+        // yields for an all-air (never-opaque) chunk (issue #185 seam).
+        let min_y = self.base.get_min_y();
+        match &self.base.heightmaps()[Types::WorldSurfaceWg as usize] {
+            Some(hm) => hm.get_height_at(x & 15, z & 15, min_y),
+            None => min_y - 1,
+        }
+    }
+
+    fn get_min_y(&self) -> i32 {
+        self.base.get_min_y()
+    }
+
+    fn min_block_x(&self) -> i32 {
+        self.base.get_pos().get_min_block_x()
+    }
+
+    fn min_block_z(&self) -> i32 {
+        self.base.get_pos().get_min_block_z()
+    }
+
+    fn is_inside_build_height(&self, y: i32) -> bool {
+        self.base.is_inside_build_height(y)
+    }
+
+    fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState {
+        ProtoChunk::get_block_state(self, x, y, z)
+    }
+
+    fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) {
+        ProtoChunk::set_block_state(self, x, y, z, state);
+    }
+
+    fn mark_pos_for_post_processing(&mut self, x: i32, y: i32, z: i32) {
+        ProtoChunk::mark_pos_for_post_processing(self, &BlockPos::new(x, y, z));
     }
 }
 
