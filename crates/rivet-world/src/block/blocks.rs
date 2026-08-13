@@ -108,18 +108,6 @@ impl Blocks {
     pub const BASALT: Block = Block::new(BlockId(288));
     /// `Blocks.ACACIA_BUTTON` (carver: `CarverDebugSettings.DEFAULT` air state).
     pub const ACACIA_BUTTON: Block = Block::new(BlockId(447));
-    /// `Blocks.DYED_TERRACOTTA.white()` (SurfaceRuleData: overworld badlands
-    /// `notUnderDeepWater`).
-    pub const WHITE_TERRACOTTA: Block = Block::new(BlockId(484));
-    /// `Blocks.DYED_TERRACOTTA.orange()` (SurfaceRuleData: overworld badlands
-    /// `badlandsTop`/`aboveOverworldSeaLevel`).
-    pub const ORANGE_TERRACOTTA: Block = Block::new(BlockId(485));
-    /// `Blocks.TERRACOTTA` (SurfaceRuleData: overworld badlands
-    /// `clayBand1`-`clayBand3` terracotta bands).
-    pub const TERRACOTTA: Block = Block::new(BlockId(554));
-    /// `Blocks.PACKED_ICE` (SurfaceRuleData: overworld `FROZEN_PEAKS` on
-    /// `Noises.PACKED_ICE`).
-    pub const PACKED_ICE: Block = Block::new(BlockId(556));
     /// `Blocks.RED_SANDSTONE` (SurfaceRuleData: overworld badlands `ON_CEILING`).
     pub const RED_SANDSTONE: Block = Block::new(BlockId(595));
     /// `Blocks.NETHER_WART_BLOCK` (SurfaceRuleData: nether `crimsonForest`
@@ -230,10 +218,6 @@ mod tests {
             Blocks::SOUL_SOIL,
             Blocks::BASALT,
             Blocks::ACACIA_BUTTON,
-            Blocks::WHITE_TERRACOTTA,
-            Blocks::ORANGE_TERRACOTTA,
-            Blocks::TERRACOTTA,
-            Blocks::PACKED_ICE,
             Blocks::RED_SANDSTONE,
             Blocks::NETHER_WART_BLOCK,
             Blocks::WARPED_NYLIUM,
@@ -272,21 +256,17 @@ mod tests {
         }
     }
 
-    /// The Paper 26.2 `SurfaceRuleData` block constants must pin the exact raw
-    /// registry ids from the generated `BLOCK_BY_NAME` table. (Name and
-    /// `from_name` round-trips are covered by
+    /// The Paper 26.2 `SurfaceRuleData` block constants this PR adds must pin
+    /// the exact raw registry ids from the generated `BLOCK_BY_NAME` table.
+    /// (The constants already on main are covered by
     /// [`constants_match_generated_names_and_ids`], so this asserts only the
-    /// raw-id pin.)
+    /// raw-id pin for the PR-owned additions.)
     #[test]
     fn surface_rule_data_constants_pin_raw_ids() {
-        let cases: [(Block, u16); 18] = [
+        let cases: [(Block, u16); 14] = [
             (Blocks::SANDSTONE, 106),
             (Blocks::SOUL_SOIL, 287),
             (Blocks::BASALT, 288),
-            (Blocks::WHITE_TERRACOTTA, 484),
-            (Blocks::ORANGE_TERRACOTTA, 485),
-            (Blocks::TERRACOTTA, 554),
-            (Blocks::PACKED_ICE, 556),
             (Blocks::RED_SANDSTONE, 595),
             (Blocks::NETHER_WART_BLOCK, 672),
             (Blocks::WARPED_NYLIUM, 866),
