@@ -17,11 +17,21 @@
 //! `RegistryAccess::from_pairs` consumes each frozen `Registry<T>` and
 //! `Registry<T>` is not `Clone`, so each build function freezes its own
 //! prerequisites: NOISE is frozen three times and DENSITY_FUNCTION twice. All
-//! instances of a given registry are identical (same declaration-ordered
-//! registrations, same `RegistryId`), so the `Holder::Reference`s the
-//! density-function bootstrap produces resolve through whichever NOISE /
-//! DENSITY_FUNCTION instance `RandomState` is handed — the same pattern the
-//! noisegen unit tests use.
+//! instances of a given registry have identical declaration-ordered contents,
+//! so the `Holder::Reference`s the density-function bootstrap produces resolve
+//! through whichever NOISE / DENSITY_FUNCTION instance `RandomState` is handed
+//! — the same pattern the noisegen unit tests use. `Registry::value_of` resolves
+//! a `Reference` by element id (the registration insertion index), which
+//! matches the declaration order on every instance; the holder's `registry`
+//! owner field is only consulted by `can_serialize_in` (a codec-path owner
+//! check, not exercised by this helper).
+//!
+//! The `RecordingContext` owner `RegistryId`s are hardcoded (0/1/2) — a
+//! test-seam simplification inherited from the noisegen unit tests. Each frozen
+//! registry actually carries a distinct per-instance `RegistryId` from the
+//! builder; the ids do not affect holder resolution here (see above), but a
+//! future `can_serialize_in`/codec consumer of the returned holders must
+//! re-key them through the real registry identity (`#126`).
 //!
 //! The `RegistrySetBuilder` production bootstrap (Java's `BuildState`) is a
 //! separate, later unit (`#126`); until it lands, `RecordingContext` is the
