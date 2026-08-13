@@ -15,11 +15,13 @@
 //! - the raw `FROZEN_TEMPERATURE_NOISE` / `BIOME_INFO_NOISE` samples are
 //!   asserted bit-exactly against Rust, so an amplitude/octave drift in either
 //!   noise port fails even when it does not flip a sampled branch decision;
-//! - the position grid includes coordinates that sit near the branch
-//!   thresholds (`ice_patches ~ 0.3`, `groundValueSmallVariation ~ 0.8`) so a
-//!   moderate constant drift in `modify_temperature` (the `* 7.0` amplitude,
-//!   the `0.3`/`0.8` gates, the `0.2` edge scale) flips a sampled branch
-//!   decision and the aggregate `getTemperature` golden fails.
+//! - the position grid includes coordinates that sit within ~1e-6 of the
+//!   branch thresholds (`ice_patches = 0.3 +/- 1.2e-6`, `small = 0.8 +/-
+//!   5.4e-5`), so a constant drift in `modify_temperature` — the `* 7.0`
+//!   amplitude (a relative change of ~1e-5 flips a decision), the `0.3`/`0.8`
+//!   gates, or the `0.2` edge scale — flips a sampled branch decision, which
+//!   changes the aggregate `getTemperature` (the FROZEN output is 0.2 when the
+//!   pin fires, the base otherwise) and the bit-exact golden fails.
 //!
 //! The grid also samples high Y values so the FROZEN pin (`0.2`) minus the
 //! snow-level drop crosses the `0.15` `warmEnoughToRain` boundary — the

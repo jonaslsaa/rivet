@@ -60,6 +60,14 @@ public final class BiomeTemperatureProbe {
             {0, 112}, {4, 175}, {5, 97},
             // inner: ice_patches < 0.3, small-variation just above/below 0.8.
             {2, 55}, {3, 52},
+            // Ultra-tight gate margins so the FROZEN constants (the * 7.0
+            // amplitude, the 0.3/0.8 thresholds) are pinned to high precision:
+            // (282,359) is ice_patches = 0.3 + 1.17e-6, (238,439) is
+            // 0.3 - 1.50e-5, (160,426) is small = 0.8 - 5.39e-5, (223,359) is
+            // 0.8 + 3.32e-5 (with ice < 0.3 so the inner gate decides). A
+            // relative amplitude drift of ~1e-5 or a threshold shift of ~1e-6
+            // flips one of these decisions (and the aggregate getTemperature).
+            {282, 359}, {238, 439}, {160, 426}, {223, 359},
         };
 
         JsonObject root = new JsonObject();
@@ -87,6 +95,10 @@ public final class BiomeTemperatureProbe {
             double v = temp * 8.0;
             e.addProperty("temperatureNoise", Double.doubleToLongBits(temp));
             e.addProperty("snowLevelV", Float.floatToIntBits((float) v));
+            // `frozenLarge`/`frozenEdge`/`frozenSmall` are the RAW noise
+            // samples (Double.doubleToLongBits) — the `* 7.0` amplitude is NOT
+            // applied to `frozenLarge` here. Consumers reconstruct the FROZEN
+            // branch as `icePatches = frozenLarge * 7.0 + frozenEdge`.
             e.addProperty("frozenLarge", Double.doubleToLongBits(frozenLarge(p[0], p[1])));
             e.addProperty("frozenEdge", Double.doubleToLongBits(frozenEdge(p[0], p[1])));
             e.addProperty("frozenSmall", Double.doubleToLongBits(frozenSmall(p[0], p[1])));

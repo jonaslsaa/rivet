@@ -1616,6 +1616,286 @@
           "coldEnoughToSnow": false,
           "warmEnoughToRain": true,
           "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 282,
+          "y": 1,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1061997773,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 282,
+          "y": 80,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1061997773,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 282,
+          "y": 81,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1062000381,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 282,
+          "y": 100,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1061601922,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 282,
+          "y": 120,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1061182491,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 282,
+          "y": 150,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1060553346,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 282,
+          "y": 200,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1059504770,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 238,
+          "y": 1,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1061997773,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 238,
+          "y": 80,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1061997773,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 238,
+          "y": 81,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1061944213,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 238,
+          "y": 100,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1061545754,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 238,
+          "y": 120,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1061126323,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 238,
+          "y": 150,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1060497178,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 238,
+          "y": 200,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1059448602,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 160,
+          "y": 1,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1061997773,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 160,
+          "y": 80,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1061997773,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 160,
+          "y": 81,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1061887609,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 160,
+          "y": 100,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1061489150,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 160,
+          "y": 120,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1061069720,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 160,
+          "y": 150,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1060440574,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 160,
+          "y": 200,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1059391998,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 223,
+          "y": 1,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1061997773,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 223,
+          "y": 80,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1061997773,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 223,
+          "y": 81,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1061850397,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 223,
+          "y": 100,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1061451938,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 223,
+          "y": 120,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1061032508,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 223,
+          "y": 150,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1060403362,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
+        },
+        {
+          "x": 223,
+          "y": 200,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1059354786,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain"
         }
       ]
     },
@@ -3231,6 +3511,286 @@
           "z": 52,
           "seaLevel": 63,
           "getTemperature": -1105375714,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 282,
+          "y": 1,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 0,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 282,
+          "y": 80,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 0,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 282,
+          "y": 81,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 958593762,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 282,
+          "y": 100,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1128183450,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 282,
+          "y": 120,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1119417574,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 282,
+          "y": 150,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1112518054,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 282,
+          "y": 200,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1105712851,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 238,
+          "y": 1,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 0,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 238,
+          "y": 80,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 0,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 238,
+          "y": 81,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1152305029,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 238,
+          "y": 100,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1126386069,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 238,
+          "y": 120,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1118518883,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 238,
+          "y": 150,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1112068708,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 238,
+          "y": 200,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1105488178,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 160,
+          "y": 1,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 0,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 160,
+          "y": 80,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 0,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 160,
+          "y": 81,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1143526891,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 160,
+          "y": 100,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1124574750,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 160,
+          "y": 120,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1117613224,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 160,
+          "y": 150,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1111615879,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 160,
+          "y": 200,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1105261764,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 223,
+          "y": 1,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 0,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 223,
+          "y": 80,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 0,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 223,
+          "y": 81,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1139807242,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 223,
+          "y": 100,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1123728724,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 223,
+          "y": 120,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1117017838,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 223,
+          "y": 150,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1111318187,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow"
+        },
+        {
+          "x": 223,
+          "y": 200,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1105112918,
           "coldEnoughToSnow": true,
           "warmEnoughToRain": false,
           "getPrecipitationAt": "snow"
@@ -5013,6 +5573,314 @@
           "warmEnoughToRain": true,
           "getPrecipitationAt": "rain",
           "frozenPins": false
+        },
+        {
+          "x": 282,
+          "y": 1,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1060320051,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 282,
+          "y": 80,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1060320051,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 282,
+          "y": 81,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1060322659,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 282,
+          "y": 100,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1059924200,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 282,
+          "y": 120,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1059504769,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 282,
+          "y": 150,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1058875624,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 282,
+          "y": 200,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1057827048,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 238,
+          "y": 1,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1045220557,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": true
+        },
+        {
+          "x": 238,
+          "y": 80,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1045220557,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": true
+        },
+        {
+          "x": 238,
+          "y": 81,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1045006315,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": true
+        },
+        {
+          "x": 238,
+          "y": 100,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1043412480,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": true
+        },
+        {
+          "x": 238,
+          "y": 120,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1041734758,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow",
+          "frozenPins": true
+        },
+        {
+          "x": 238,
+          "y": 150,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1038248958,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow",
+          "frozenPins": true
+        },
+        {
+          "x": 238,
+          "y": 200,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": 1027921916,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow",
+          "frozenPins": true
+        },
+        {
+          "x": 160,
+          "y": 1,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1045220557,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": true
+        },
+        {
+          "x": 160,
+          "y": 80,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1045220557,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": true
+        },
+        {
+          "x": 160,
+          "y": 81,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1044779900,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": true
+        },
+        {
+          "x": 160,
+          "y": 100,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1043186065,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": true
+        },
+        {
+          "x": 160,
+          "y": 120,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1041508343,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow",
+          "frozenPins": true
+        },
+        {
+          "x": 160,
+          "y": 150,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1037796129,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow",
+          "frozenPins": true
+        },
+        {
+          "x": 160,
+          "y": 200,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": 1027016260,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "snow",
+          "frozenPins": true
+        },
+        {
+          "x": 223,
+          "y": 1,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1060320051,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 223,
+          "y": 80,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1060320051,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 223,
+          "y": 81,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1060172675,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 223,
+          "y": 100,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1059774216,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 223,
+          "y": 120,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1059354786,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 223,
+          "y": 150,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1058725640,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
+        },
+        {
+          "x": 223,
+          "y": 200,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": 1057677064,
+          "coldEnoughToSnow": false,
+          "warmEnoughToRain": true,
+          "getPrecipitationAt": "rain",
+          "frozenPins": false
         }
       ]
     },
@@ -6631,6 +7499,286 @@
           "coldEnoughToSnow": true,
           "warmEnoughToRain": false,
           "getPrecipitationAt": "none"
+        },
+        {
+          "x": 282,
+          "y": 1,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1082130432,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 282,
+          "y": 80,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1082130432,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 282,
+          "y": 81,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1082133040,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 282,
+          "y": 100,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1081932506,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 282,
+          "y": 120,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1081722791,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 282,
+          "y": 150,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1081408218,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 282,
+          "y": 200,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1080883930,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 238,
+          "y": 1,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1082130432,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 238,
+          "y": 80,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1082130432,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 238,
+          "y": 81,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1082103652,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 238,
+          "y": 100,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1081904422,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 238,
+          "y": 120,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1081694707,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 238,
+          "y": 150,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1081380134,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 238,
+          "y": 200,
+          "z": 439,
+          "seaLevel": 63,
+          "getTemperature": -1080855846,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 160,
+          "y": 1,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1082130432,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 160,
+          "y": 80,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1082130432,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 160,
+          "y": 81,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1082075350,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 160,
+          "y": 100,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1081876120,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 160,
+          "y": 120,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1081666405,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 160,
+          "y": 150,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1081351832,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 160,
+          "y": 200,
+          "z": 426,
+          "seaLevel": 63,
+          "getTemperature": -1080827544,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 223,
+          "y": 1,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1082130432,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 223,
+          "y": 80,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1082130432,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 223,
+          "y": 81,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1082056744,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 223,
+          "y": 100,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1081857515,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 223,
+          "y": 120,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1081647799,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 223,
+          "y": 150,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1081333227,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
+        },
+        {
+          "x": 223,
+          "y": 200,
+          "z": 359,
+          "seaLevel": 63,
+          "getTemperature": -1080808939,
+          "coldEnoughToSnow": true,
+          "warmEnoughToRain": false,
+          "getPrecipitationAt": "none"
         }
       ]
     }
@@ -6842,6 +7990,42 @@
       "frozenLarge": -4624784825596254199,
       "frozenEdge": -4638557092626571807,
       "frozenSmall": 4605399416550770129
+    },
+    {
+      "x": 282,
+      "z": 359,
+      "temperatureNoise": -4629140414054564602,
+      "snowLevelV": -1081087345,
+      "frozenLarge": 4591764695723566308,
+      "frozenEdge": -4622679276243074372,
+      "frozenSmall": -4618800137288096915
+    },
+    {
+      "x": 238,
+      "z": 439,
+      "temperatureNoise": 4596166460096640023,
+      "snowLevelV": 1070000218,
+      "frozenLarge": 4592902466973965167,
+      "frozenEdge": -4620690551351647444,
+      "frozenSmall": -4624687245860608847
+    },
+    {
+      "x": 160,
+      "z": 426,
+      "temperatureNoise": 4602963711652160941,
+      "snowLevelV": 1082661086,
+      "frozenLarge": -4623014809212543409,
+      "frozenEdge": 4600295051974254249,
+      "frozenSmall": 4605380493750490435
+    },
+    {
+      "x": 223,
+      "z": 359,
+      "temperatureNoise": 4604961497033155671,
+      "snowLevelV": 1086382251,
+      "frozenLarge": -4619801464610122822,
+      "frozenEdge": -4619703587583741990,
+      "frozenSmall": 4605381277582577363
     }
   ]
 }
