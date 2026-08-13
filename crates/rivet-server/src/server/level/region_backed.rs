@@ -1141,6 +1141,13 @@ mod tests {
             !server.join_is_flat(),
             "the noise overworld must advertise not-flat in the login"
         );
+        // The region-backed boot reads the real seed from world_gen_settings.dat
+        // — the config's generated-world seed must not leak into a loaded world.
+        assert_eq!(
+            server.join_seed(),
+            REAL_SEED,
+            "the loaded world keeps its real seed, not the config default"
+        );
     }
 
     /// The `Server::try_new` login `is_flat` integration for a flat generator:
@@ -1179,6 +1186,28 @@ mod tests {
         assert!(
             server.join_is_flat(),
             "the no-level superflat boot must advertise flat"
+        );
+        // The no-level superflat boot carries the config's generated-world seed
+        // into the world and login; the default stays the M1 fixture 42.
+        assert_eq!(server.join_seed(), 42, "the superflat default seed is 42");
+    }
+
+    /// `Server::try_new` with an explicit generated-world seed: the no-level
+    /// superflat world and login advertise it (draft PR #563's
+    /// `rivet-server --seed 42` contract). A non-default seed proves the config
+    /// value is carried, not the M1 fixture default.
+    #[test]
+    fn try_new_carries_the_config_seed_into_the_superflat_world() {
+        let server = crate::server::Server::try_new(crate::server::ServerConfig {
+            enable_join: true,
+            seed: 7,
+            ..Default::default()
+        })
+        .expect("the no-level superflat boot succeeds");
+        assert_eq!(
+            server.join_seed(),
+            7,
+            "the superflat world must carry the --seed value"
         );
     }
 
