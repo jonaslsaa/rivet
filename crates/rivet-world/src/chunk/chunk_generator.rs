@@ -61,7 +61,7 @@
 //! `getBaseHeight` seam, so they stay executable once an implementor provides
 //! a real `getBaseHeight`.
 //!
-//! RivetTodo(#185) integration blocker: the noisegen value shell already has
+//! RivetTodo(#185): integration blocker — the noisegen value shell already has
 //! real bodies for `getSeaLevel`/`getBaseHeight`/`getBaseColumn`/
 //! `addDebugScreenInfo` (and `fill_from_noise`/the `*_stub` lifecycle shells)
 //! under the same names on `NoiseBasedChunkGenerator`, which does not implement
