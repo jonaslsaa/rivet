@@ -394,3 +394,325 @@ fn save_ticks(tag: &mut CompoundTag, data: &SerializableChunkData) {
         &data.stored_fluid_ticks().to_vec(),
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::storage::chunk_reconstruction::reconstruct_runtime_chunk;
+    use crate::chunk::storage::section_reconstruction::current_version_container_factory;
+    use crate::level::height_accessor;
+    use crate::lighting::swmr_nibble_array::InitState;
+    use rivet_nbt::nbt_accounter::NbtAccounter;
+    use rivet_nbt::nbt_io;
+    use rivet_util::DataInputStream;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> CompoundTag {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rivet-oracle/fixtures/loaded-world/chunk")
+            .join(name);
+        let bytes = std::fs::read(path).expect("Paper 26.2 loaded-world chunk fixture");
+        let mut input = DataInputStream::new(Cursor::new(bytes));
+        nbt_io::read(&mut input, &mut NbtAccounter::unlimited_heap()).expect("valid fixture")
+    }
+
+    /// Recursively assert two tags carry the same content, ignoring compound
+    /// key order. Rivet's insertion-ordered `CompoundTag` writes heightmap and
+    /// section keys in a different order than Paper's fastutil hash map (the
+    /// `compound_key_order` divergence), so byte identity is never the oracle
+    /// here — structural equality is.
+    fn assert_equivalent(actual: &Tag, expected: &Tag, path: &str) {
+        match (actual, expected) {
+            (Tag::Compound(a), Tag::Compound(e)) => {
+                assert_eq!(a.size(), e.size(), "compound {path} size");
+                for key in a.key_set() {
+                    let expected_tag = e
+                        .get(key.as_str())
+                        .unwrap_or_else(|| panic!("missing key {path}.{key}"));
+                    assert_equivalent(
+                        a.get(key.as_str()).unwrap(),
+                        expected_tag,
+                        &format!("{path}.{key}"),
+                    );
+                }
+            }
+            (Tag::List(a), Tag::List(e)) => {
+                assert_eq!(a.size(), e.size(), "list {path} size");
+                for (index, (actual_tag, expected_tag)) in
+                    a.list.iter().zip(e.list.iter()).enumerate()
+                {
+                    assert_equivalent(actual_tag, expected_tag, &format!("{path}[{index}]"));
+                }
+            }
+            _ => assert_eq!(actual, expected, "tag {path}"),
+        }
+    }
+
+    /// Parse -> reconstruct -> write once, returning the written payload. The
+    /// reconstruction consumes its [`SerializableChunkData`], so the caller
+    /// keeps a separate parse alive for `write` (the writer's input split is
+    /// data + chunk, mirroring `copyOf`'s split of auxiliary fields and live
+    /// sections).
+    fn write_once(root: &CompoundTag) -> CompoundTag {
+        let height = height_accessor::create(-64, 384);
+        let data = SerializableChunkData::parse(height, root)
+            .expect("fixture parses")
+            .expect("fixture has a Status");
+        assert_eq!(data.validate_full_for_reconstruction(), Ok(()));
+        let for_reconstruction = SerializableChunkData::parse(height, root)
+            .expect("fixture parses")
+            .expect("fixture has a Status");
+        let reconstruction =
+            reconstruct_runtime_chunk(data.stored_pos(), for_reconstruction, height, true)
+                .expect("fixture reconstructs");
+        write(&data, &reconstruction.chunk)
+    }
+
+    /// The loaded-world fixtures are vanilla-format writes: `isLightOn` present
+    /// but no `starlight.light_version`, so `light_correct` is false and Paper's
+    /// own re-save would normalize them (drop `isLightOn`, stamp Starlight state
+    /// INTs). They cannot be compared byte- or structure-identical to a fresh
+    /// write of the same chunk. This helper re-stamps them into a genuine
+    /// Starlight-lit save so the writer's fixed point is well-defined: every
+    /// in-bounds section carries the `getFilledEmptyLight` Uninitialised block
+    /// and sky states, the two sky-lit sections (Y=4,5) carry the Initialised
+    /// sky state that matches their byte arrays, and the chunk carries the
+    /// Starlight light version.
+    fn make_starlight_lit(mut root: CompoundTag) -> CompoundTag {
+        root.put_int(STARLIGHT_VERSION_TAG, STARLIGHT_LIGHT_VERSION);
+        let mut sky_lit = 0;
+        root.for_each(|key, value| {
+            if key != "sections" {
+                return;
+            }
+            let Tag::List(sections) = value else {
+                return;
+            };
+            for section in sections.list.iter_mut() {
+                let Tag::Compound(section) = section else {
+                    continue;
+                };
+                let y = section.get_byte_or("Y", 0);
+                section.put_int(BLOCKLIGHT_STATE_TAG, InitState::Uninitialised.to_i32());
+                let sky_state = if y == 4 || y == 5 {
+                    sky_lit += 1;
+                    InitState::Initialised.to_i32()
+                } else {
+                    InitState::Uninitialised.to_i32()
+                };
+                section.put_int(SKYLIGHT_STATE_TAG, sky_state);
+            }
+        });
+        assert_eq!(sky_lit, 2, "the two sky-lit fixture sections are stamped");
+        root
+    }
+
+    /// The writer's fixed-point oracle on a genuine Starlight-lit chunk:
+    /// `write` must be a fixed point of `parse` given a light-correct chunk,
+    /// because the reconstruction installs the light state INTs exactly as the
+    /// write reads them back.
+    fn assert_write_idempotent(root: &CompoundTag) {
+        let first = write_once(root);
+        let second = write_once(&first);
+        assert_equivalent(&Tag::Compound(first), &Tag::Compound(second), "chunk");
+    }
+
+    #[test]
+    fn paletted_container_single_value_omits_data() {
+        let factory = current_version_container_factory();
+        // A single-value (all-air) block-state container packs with no storage.
+        let single = factory.create_for_block_states();
+        let encoded = encode_paletted_container(&single.pack(), block_state_element);
+        assert!(
+            encoded.get_long_array("data").is_none(),
+            "single-value palette omits data"
+        );
+        let Tag::List(palette) = encoded.get("palette").expect("palette is a list") else {
+            panic!("palette must be a list");
+        };
+        assert_eq!(palette.size(), 1);
+        let Tag::Compound(first) = &palette.list[0] else {
+            panic!("block-state element is a compound");
+        };
+        assert_eq!(
+            first.get_string("Name").map(String::as_str),
+            Some("minecraft:air")
+        );
+        assert!(
+            first.get("Properties").is_none(),
+            "singleton state omits Properties"
+        );
+    }
+
+    #[test]
+    fn paletted_container_multi_value_writes_data_and_name_sorted_properties() {
+        let factory = current_version_container_factory();
+        let mut states = factory.create_for_block_states();
+        // Two distinct states force a non-zero bits-on-disc storage.
+        let stone = crate::block::Block::from_name("minecraft:stone")
+            .unwrap()
+            .default_block_state();
+        let grass = crate::block::Block::from_name("minecraft:grass_block")
+            .unwrap()
+            .default_block_state();
+        states.set(0, 0, 0, stone);
+        states.set(1, 0, 0, grass);
+        let packed = states.pack();
+        assert!(
+            packed.storage.is_some(),
+            "multi-value container has storage"
+        );
+        assert!(
+            packed.bits_per_entry > 0,
+            "multi-value container has non-zero bits"
+        );
+        let encoded = encode_paletted_container(&packed, block_state_element);
+        assert!(
+            encoded.get_long_array("data").is_some(),
+            "data written for non-zero storage"
+        );
+        let Tag::List(palette) = encoded.get("palette").unwrap() else {
+            panic!("palette must be a list");
+        };
+        // `pack_with_strategy` re-encodes against a fresh HashMapPalette seeded
+        // empty, so the packed entries are the distinct storage values in
+        // index-scan order (slot 0 = stone, slot 1 = grass, the remaining air
+        // slots) — size 3, not the two hand-set states.
+        assert_eq!(palette.size(), 3);
+        let Tag::Compound(stone_tag) = &palette.list[0] else {
+            panic!()
+        };
+        assert_eq!(
+            stone_tag.get_string("Name").map(String::as_str),
+            Some("minecraft:stone")
+        );
+        assert!(
+            stone_tag.get("Properties").is_none(),
+            "singleton stone omits Properties"
+        );
+        let Tag::Compound(grass_tag) = &palette.list[1] else {
+            panic!()
+        };
+        assert_eq!(
+            grass_tag.get_string("Name").map(String::as_str),
+            Some("minecraft:grass_block")
+        );
+        // grass_block is a multi-state block: Properties present, name-sorted.
+        let properties = grass_tag
+            .get_compound("Properties")
+            .expect("multi-state block has Properties");
+        assert_eq!(
+            properties.key_set().map(String::as_str).collect::<Vec<_>>(),
+            vec!["snowy"]
+        );
+        let Tag::Compound(air_tag) = &palette.list[2] else {
+            panic!()
+        };
+        assert_eq!(
+            air_tag.get_string("Name").map(String::as_str),
+            Some("minecraft:air")
+        );
+    }
+
+    #[test]
+    fn biome_container_palette_uses_plain_registry_name_strings() {
+        let factory = current_version_container_factory();
+        let biomes = factory.create_for_biomes();
+        let encoded = encode_paletted_container(&biomes.pack(), biome_element);
+        assert!(encoded.get_long_array("data").is_none());
+        let Tag::List(palette) = encoded.get("palette").unwrap() else {
+            panic!("palette must be a list");
+        };
+        assert_eq!(palette.size(), 1);
+        assert_eq!(
+            palette.list[0],
+            Tag::String(StringTag::value_of("minecraft:plains".to_string()))
+        );
+    }
+
+    #[test]
+    fn starlight_lit_fixture_write_is_a_fixed_point() {
+        // Re-stamp the genuine FULL loaded-world fixture as a Starlight-lit
+        // save (the exact `parse_light_correct` predicate) and assert the
+        // writer's fixed point: parsing the first write back and writing again
+        // reproduces it structurally. This is the real parity contract — Paper
+        // `copyOf`+`write` on a light-correct chunk round-trips the section
+        // contents, light states, `isLightOn` (clobbered false) and
+        // `starlight.light_version`.
+        let lit = make_starlight_lit(fixture("-1.-3.nbt"));
+        assert_write_idempotent(&lit);
+    }
+
+    #[test]
+    fn starlight_tail_writes_clobbered_is_light_on_and_light_version() {
+        // The tail's `isLightOn` clobber + `starlight.light_version` stamp are
+        // asserted directly on a light-correct write: `isLightOn` must be
+        // present-as-false and the light version stamped.
+        let lit = make_starlight_lit(fixture("-1.-3.nbt"));
+        let written = write_once(&lit);
+        assert_eq!(
+            written.get_int(STARLIGHT_VERSION_TAG),
+            Some(STARLIGHT_LIGHT_VERSION),
+            "light-correct write stamps the Starlight light version"
+        );
+        assert_eq!(
+            written.get_boolean("isLightOn"),
+            Some(false),
+            "Starlight tail clobbers isLightOn to false"
+        );
+        assert_eq!(STARLIGHT_LIGHT_VERSION, 10);
+    }
+
+    #[test]
+    fn vanilla_fixture_write_drops_is_light_on_and_light_arrays() {
+        // The unmodified fixture is a vanilla-format save: `light_correct`
+        // false, so Paper's own `write()` writes no `isLightOn` and no Starlight
+        // state INTs. The reconstructed chunk carries the vanilla light arrays
+        // as Initialised nibbles (the #531 boundary), but without a light
+        // version the write must not stamp the Starlight tail.
+        let written = write_once(&fixture("-1.-3.nbt"));
+        assert!(
+            written.get("isLightOn").is_none(),
+            "non-light-correct write omits isLightOn"
+        );
+        assert!(
+            written.get(STARLIGHT_VERSION_TAG).is_none(),
+            "non-light-correct write omits starlight.light_version"
+        );
+        // The sections carry the un-stamped light arrays verbatim.
+        let Tag::List(sections) = written.get("sections").unwrap() else {
+            panic!("sections is a list");
+        };
+        let sky_arrays = sections
+            .compound_stream()
+            .filter(|section| section.get_byte_array("SkyLight").is_some())
+            .count();
+        assert_eq!(sky_arrays, 2, "the two sky-lit sections keep their arrays");
+    }
+
+    #[test]
+    fn root_fields_preserve_paper_field_order_and_status() {
+        // Field order mirrors `SerializableChunkData.write()` exactly: the
+        // DataVersion prefix, position, times, status, then the aux compounds.
+        let lit = make_starlight_lit(fixture("-1.-3.nbt"));
+        let written = write_once(&lit);
+        let keys: Vec<&str> = written.key_set().map(String::as_str).collect();
+        assert_eq!(
+            keys[0], "DataVersion",
+            "DataVersion is written first (NbtUtils.addCurrentDataVersion)"
+        );
+        assert_eq!(
+            &keys[1..5],
+            &["xPos", "yPos", "zPos", "LastUpdate"],
+            "position and last-update follow in Paper order"
+        );
+        assert_eq!(
+            written.get_string("Status").map(String::as_str),
+            Some("minecraft:full")
+        );
+        assert_eq!(written.get_int("xPos"), Some(-1));
+        assert_eq!(written.get_int("zPos"), Some(-3));
+        assert_eq!(written.get_int("yPos"), Some(-4), "yPos is minSectionY");
+    }
+}
