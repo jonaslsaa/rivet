@@ -1121,7 +1121,7 @@ mod tests {
         // `MutableBlockPos` overrides return a fresh immutable `BlockPos` and
         // leave the receiver untouched (Java overrides construct from
         // `super.offset(...)` without mutating `this`).
-        let mut m = MutableBlockPos::new(1, 2, 3);
+        let m = MutableBlockPos::new(1, 2, 3);
         let before = (m.get_x(), m.get_y(), m.get_z());
         m.offset(4, -5, 6);
         m.multiply(3);
