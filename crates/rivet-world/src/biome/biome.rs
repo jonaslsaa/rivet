@@ -405,6 +405,14 @@ impl Biome {
 /// resolver wires `getBiome()` through the eventual value registry. [`Biome`]
 /// itself implements it (the value test, exactly
 /// [`Biome::cold_enough_to_snow`]).
+///
+/// The temperature noise terms the test computes depend only on `(x, z)`, so a
+/// caller evaluating a full column re-samples them once per `y`. Java
+/// memoizes this in a `ThreadLocal` temperature cache; the module doc declines
+/// to port that cache (the pure `getValue` math is deterministic and the cache
+/// is dead state in the value model), so a per-column memoization, if ever
+/// needed, belongs to the production `SurfaceRules` wiring — not this
+/// capability seam.
 pub trait ColdEnoughToSnow: Send + Sync {
     /// `Biome.coldEnoughToSnow(BlockPos, int seaLevel)` — whether the biome is
     /// cold enough to snow at `pos` (`!warmEnoughToRain`, i.e.
