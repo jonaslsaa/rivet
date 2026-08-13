@@ -65,7 +65,11 @@ pub fn overworld_dimension() -> ResourceKey<Level> {
 pub struct ServerLevelConfig {
     /// The dimension key (`Level.OVERWORLD` for the M1 world).
     pub dimension: ResourceKey<Level>,
-    /// The world seed (the `level-seed=42` oracle fixture).
+    /// The world seed. The default is the M1 superflat fixture 42 (the #153
+    /// capture's `level-seed=42` flat world, which the byte-exact join-burst
+    /// fixtures pin); the server boot path supplies the generated-world seed
+    /// from `ServerConfig.seed` (the `--seed` CLI argument) instead, and the
+    /// region-backed boot reads the real seed from `world_gen_settings.dat`.
     pub seed: i64,
     /// The superflat world's min Y (`min_y=-64`).
     pub min_y: i32,
@@ -94,13 +98,25 @@ pub struct ServerLevelConfig {
     pub is_flat: bool,
 }
 
+impl ServerLevelConfig {
+    /// The M1 superflat fixture seed — the #153 capture's `level-seed=42` flat
+    /// world, which the byte-exact join-burst fixtures pin (`obfuscate_seed(42)`).
+    /// Single source of truth for the fixture value so a recapture changes one
+    /// constant instead of stale literals at every test call site.
+    pub const M1_FIXTURE_SEED: i64 = 42;
+}
+
 impl Default for ServerLevelConfig {
     fn default() -> Self {
         let dimension = overworld_dimension();
         let spawn_pos = BlockPos::new(0, SUPERFLAT_MIN_Y + 1, 0); // y = -63
         ServerLevelConfig {
             dimension: dimension.clone(),
-            seed: 42,
+            // The M1 superflat fixture seed (see
+            // [`ServerLevelConfig::M1_FIXTURE_SEED`]). The server boot path
+            // overrides it from `ServerConfig.seed`; loaded worlds use their
+            // real seed from `world_gen_settings.dat`.
+            seed: Self::M1_FIXTURE_SEED,
             min_y: SUPERFLAT_MIN_Y,
             height: SUPERFLAT_HEIGHT,
             sea_level: -63,
