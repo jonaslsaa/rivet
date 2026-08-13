@@ -863,10 +863,12 @@ fn verify_fixtures_dir(dir: &Path) -> Result<(), Error> {
 /// (recursive — `fixtures/worldgen/` and `fixtures/regions/overworld-normal/`
 /// both qualify today, and kinds may nest arbitrarily). Kinds verify
 /// independently and can grow without a format migration. The
-/// `<root>/composed-noise` dir is excluded: its golden has a strict
-/// missing-prerequisite contract of its own, handled after the generic kinds.
+/// `<root>/composed-noise` and `<root>/generated-expected` dirs are excluded:
+/// both goldens have a strict missing-prerequisite contract of their own,
+/// handled by dedicated steps after the generic kinds.
 fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
     let composed_noise = root.join("composed-noise");
+    let generated_expected = root.join("generated-expected");
     let mut out = Vec::new();
     if root.join("manifest.json").is_file() {
         out.push(root.to_path_buf());
@@ -879,7 +881,7 @@ fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
                 if !path.is_dir() {
                     continue;
                 }
-                if path == composed_noise {
+                if path == composed_noise || path == generated_expected {
                     continue;
                 }
                 if path.join("manifest.json").is_file() {
@@ -901,15 +903,16 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
 /// Verify every committed fixture kind under `root`.
 ///
 /// Generic kinds (auto-discovered by manifest) verify first, surfacing their
-/// hard failures (exit 1) before the composed-noise golden is consulted. The
-/// composed-noise dir is excluded from the generic walk: its golden is
-/// load-bearing in every run and carries its own tri-state contract
-/// (`composed_noise::FixtureState`) — wholly absent is `Error::Unverified`
-/// (exit 3), partial/corrupt hard-fails (exit 1) — asserted after the generic
-/// kinds pass. A root with no generic kinds still reaches that classification.
+/// hard failures (exit 1) before the load-bearing goldens are consulted. The
+/// `<root>/composed-noise` and `<root>/generated-expected` dirs are excluded
+/// from the generic walk: each golden is load-bearing in every run and carries
+/// its own tri-state contract (wholly absent is `Error::Unverified` (exit 3),
+/// partial/corrupt hard-fails (exit 1)) — asserted after the generic kinds
+/// pass. A root with no generic kinds still reaches those classifications.
 fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
     let kinds = all_fixture_manifests_from(root);
     let composed_noise_dir = root.join("composed-noise");
+    let generated_expected_dir = root.join("generated-expected");
     if !kinds.is_empty() {
         println!("verifying all committed fixture kinds:");
         for d in &kinds {
@@ -955,7 +958,7 @@ fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
     // hashes, assert the seed-42 handoff's provenance, forced-grid shape, and
     // anti-superflat per-chunk sample contract. Absent -> UNVERIFIED (exit 3),
     // never a silent green.
-    generated_expected::verify_generated_expected_step(&root.join("generated-expected"))?;
+    generated_expected::verify_generated_expected_step(&generated_expected_dir)?;
     println!(
         "PASS: generated-expected seed-42 handoff verified (pinned Paper 0a99345 provenance, manifest hash, forced-grid per-chunk sample contract)"
     );
