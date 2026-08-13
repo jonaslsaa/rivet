@@ -145,7 +145,7 @@ impl NoiseBasedChunkGenerator {
         let block_x = context.block_x();
         let block_y = context.block_y();
         let block_z = context.block_z();
-        if block_y >= min_y && block_y < min_y + noise_settings.height() {
+        if block_y >= min_y && block_y < min_y.wrapping_add(noise_settings.height()) {
             let noise_chunk = NoiseChunk::new(
                 1,
                 random_state,
@@ -159,10 +159,11 @@ impl NoiseBasedChunkGenerator {
             );
             noise_chunk.initialize_for_first_cell_x();
             noise_chunk.advance_cell_x(0);
-            noise_chunk.select_cell_yz(mth::floor_div(block_y - min_y, cell_height), 0);
+            noise_chunk.select_cell_yz(mth::floor_div(block_y.wrapping_sub(min_y), cell_height), 0);
             noise_chunk.update_for_y(
                 block_y,
-                mth::positive_modulo(block_y - min_y, cell_height) as f64 / cell_height as f64,
+                mth::positive_modulo(block_y.wrapping_sub(min_y), cell_height) as f64
+                    / cell_height as f64,
             );
             noise_chunk.update_for_x(
                 block_x,
@@ -338,7 +339,10 @@ impl NoiseBasedChunkGenerator {
             noise_chunk.select_cell_yz(cell_y_index, 0);
 
             for y_in_cell in (0..cell_height).rev() {
-                let pos_y = (cell_min_y + cell_y_index) * cell_height + y_in_cell;
+                let pos_y = cell_min_y
+                    .wrapping_add(cell_y_index)
+                    .wrapping_mul(cell_height)
+                    .wrapping_add(y_in_cell);
                 let factor_y = y_in_cell as f64 / cell_height as f64;
                 noise_chunk.update_for_y(pos_y, factor_y);
                 noise_chunk.update_for_x(block_x, factor_x);
@@ -346,7 +350,9 @@ impl NoiseBasedChunkGenerator {
                 let base_state = noise_chunk.get_interpolated_state();
                 let state = base_state.unwrap_or(settings.default_block);
                 if let Some((_, block_states)) = column.as_mut() {
-                    let y_index = cell_y_index * cell_height + y_in_cell;
+                    let y_index = cell_y_index
+                        .wrapping_mul(cell_height)
+                        .wrapping_add(y_in_cell);
                     block_states[y_index as usize] = state;
                 }
 

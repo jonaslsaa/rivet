@@ -242,7 +242,9 @@ impl NoiseBasedAquifer {
         let max_grid_z =
             grid_z(pos.get_max_block_z().wrapping_add(SAMPLE_OFFSET_Z)).wrapping_add(1);
         let grid_size_z = max_grid_z.wrapping_sub(min_grid_z).wrapping_add(1);
-        let total_grid_size = grid_size_x * grid_size_y * grid_size_z;
+        let total_grid_size = grid_size_x
+            .wrapping_mul(grid_size_y)
+            .wrapping_mul(grid_size_z);
         let state = Mutex::new(AquiferState {
             aquifer_cache: vec![None; total_grid_size as usize],
             aquifer_location_cache: vec![i64::MAX; total_grid_size as usize],
@@ -668,8 +670,8 @@ impl Aquifer for NoiseBasedAquifer {
             if fluid_state.block() == Blocks::WATER.id()
                 && self
                     .global_fluid_picker
-                    .compute_fluid(pos_x, pos_y - 1, pos_z)
-                    .at(pos_y - 1)
+                    .compute_fluid(pos_x, pos_y.wrapping_sub(1), pos_z)
+                    .at(pos_y.wrapping_sub(1))
                     .block()
                     == Blocks::LAVA.id()
             {
