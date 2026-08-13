@@ -686,16 +686,111 @@ fn superflat_content() -> rivet_world::superflat::SuperflatChunkContent<StateId,
 
 #[cfg(test)]
 mod tests {
-    use super::LevelChunk;
+    use super::{BiomeId, LevelChunk, StateId, strategies};
+    use bytes::BytesMut;
     use rivet_nbt::compound_tag::CompoundTag;
+    use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
     use rivet_protocol::protocol::game::level_chunk_packet_data::BlockEntityInfo;
     use rivet_registry::Identifier;
+    use rivet_registry::block_state::BlockState;
     use rivet_registry::core::{BlockPos, ChunkPos};
+    use rivet_world::chunk::level_chunk_section::LevelChunkSection;
     use rivet_world::chunk::palette::GlobalIdMap;
     use rivet_world::chunk::paletted_container::PalettedContainer;
     use rivet_world::chunk::storage::block_entity_materialization::BlockEntityMaterializeError;
     use rivet_world::chunk::storage::serializable_chunk_data::PendingBlockEntityReason;
     use rivet_world::chunk::strategy::Strategy;
+
+    use crate::server::level::region_backed::boot_level;
+    use crate::server::level::test_support::{
+        ChunkPayload, load_fixture, loaded_world_fixture, loaded_world_root, write_region_chunks,
+    };
+
+    /// Decode a `sections_buffer` through the client read path — the exact
+    /// `LevelChunkSection::read`/`PalettedContainer::read` a client applies to
+    /// the `ClientboundLevelChunkWithLightPacket` body. Each fresh section
+    /// adopts the wire counts and containers (Java's
+    /// `LevelChunkSection(containerFactory)` + `read`).
+    fn decode_sections(
+        buffer: &[u8],
+        section_count: usize,
+        block_strategy: &Strategy<StateId>,
+        biome_strategy: &Strategy<BiomeId>,
+    ) -> Vec<LevelChunkSection<StateId, BiomeId>> {
+        let mut reader = FriendlyByteBuf::new(BytesMut::from(buffer));
+        let mut sections = Vec::with_capacity(section_count);
+        for _ in 0..section_count {
+            // The fresh all-air section Java's `LevelChunkSection(containerFactory)`
+            // read path builds; `read` then adopts the wire counts and containers.
+            let mut section = LevelChunkSection::new(
+                PalettedContainer::new(StateId(0), block_strategy.clone()),
+                PalettedContainer::new(BiomeId(40), biome_strategy.clone()),
+                |_| true,  // is_air
+                |_| false, // is_randomly_ticking
+                |_| true,  // fluid_is_empty
+                |_| false, // fluid_is_randomly_ticking
+                |_| false, // is_special_colliding
+            );
+            section.read(&mut reader, &|_| false);
+            sections.push(section);
+        }
+        sections
+    }
+
+    /// The server-side mirror of [`LevelChunk::sections_buffer`] — concatenate
+    /// every section's wire bytes (`Java calculateChunkSize`+`extractChunkData`).
+    fn encode_sections(sections: &[LevelChunkSection<StateId, BiomeId>]) -> Vec<u8> {
+        let mut buf = FriendlyByteBuf::new(BytesMut::new());
+        for section in sections {
+            section.write(&mut buf);
+        }
+        buf.into_inner().to_vec()
+    }
+
+    /// A decoded-packet vs authoritative block-state disagreement at an
+    /// absolute world coordinate.
+    #[derive(Debug)]
+    struct PacketStateMismatch {
+        x: i32,
+        y: i32,
+        z: i32,
+        packet: StateId,
+        authority: StateId,
+    }
+
+    /// Compare every decoded packet `StateId` against the authoritative
+    /// `LevelChunk::get_block_state` at the same absolute coordinate (x/z
+    /// chunk-local, y absolute — the `getBlockStateFinal` index space).
+    fn compare_packet_to_authority(
+        chunk: &LevelChunk,
+        sections: &[LevelChunkSection<StateId, BiomeId>],
+    ) -> Vec<PacketStateMismatch> {
+        let min_y = chunk.get_min_y();
+        let chunk_x = chunk.get_x() * 16;
+        let chunk_z = chunk.get_z() * 16;
+        let mut mismatches = Vec::new();
+        for (section_index, section) in sections.iter().enumerate() {
+            let section_min_y = min_y + (section_index as i32) * 16;
+            for x in 0..16 {
+                for y in 0..16 {
+                    for z in 0..16 {
+                        let packet = section.get_block_state(x, y, z);
+                        let authority = chunk.get_block_state(x, section_min_y + y, z);
+                        if packet != authority {
+                            mismatches.push(PacketStateMismatch {
+                                x: chunk_x + x,
+                                y: section_min_y + y,
+                                z: chunk_z + z,
+                                packet,
+                                authority,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        mismatches
+    }
 
     /// A serialized block-entity tag carrying its position and `id`.
     fn block_entity(id: &str, x: i32, y: i32, z: i32) -> CompoundTag {
@@ -949,5 +1044,135 @@ mod tests {
             error.contains("Invalid bit count"),
             "expected the bit-count mismatch, got {error}"
         );
+    }
+
+    /// The #328 sentinel: boot the disposable loaded-world fixture, obtain the
+    /// fringe chunk (-6,-5) (the chunk holding the real-save block (-82,70,-65))
+    /// on demand from the region, decode its exact `sections_buffer` through the
+    /// client `LevelChunkSection`/`PalettedContainer` packet read path, and
+    /// compare every decoded `StateId` against the authoritative
+    /// `LevelChunk::get_block_state` at the same absolute coordinate. A
+    /// tampered packet (one cell re-encoded to a different state through the
+    /// same wire format) is caught at exactly that position — the comparator is
+    /// non-vacuous.
+    #[test]
+    fn loaded_world_packet_sections_decode_to_authoritative_block_states() {
+        // Boot the disposable loaded-world fixture (the committed synthetic
+        // clean spawn chunk installed at every view position) and extend the
+        // region with the fringe chunk (-6,-5) — the launcher save and the
+        // `working/` tree are never touched.
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+        let region_dir = temp.path().join("dimensions/minecraft/overworld/region");
+        let mut fringe = load_fixture(&loaded_world_fixture());
+        fringe.put_int("xPos", -6);
+        fringe.put_int("zPos", -5);
+        write_region_chunks(
+            &region_dir,
+            &[(ChunkPos::new(-6, -5), ChunkPayload::Valid(fringe))],
+        );
+
+        let mut world = boot_level(temp.path()).expect("the loaded world boots");
+        world
+            .load_chunk_from_region(ChunkPos::new(-6, -5))
+            .expect("the fringe chunk loads on demand from the region");
+        let chunk = world
+            .chunk_map()
+            .get_chunk(ChunkPos::new(-6, -5))
+            .expect("the fringe chunk is installed");
+        assert_eq!(chunk.pos(), ChunkPos::new(-6, -5));
+
+        // Decode the exact wire bytes a client reads and compare every state.
+        let (block_strategy, biome_strategy) = strategies();
+        let buffer = chunk.sections_buffer();
+        let sections = decode_sections(
+            &buffer,
+            chunk.get_sections().len(),
+            &block_strategy,
+            &biome_strategy,
+        );
+        let mismatches = compare_packet_to_authority(chunk, &sections);
+        assert!(
+            mismatches.is_empty(),
+            "packet sections disagree with authoritative block states: {mismatches:?}"
+        );
+
+        // Targeted (-82,70,-65) parity: chunk (-6,-5), section 8 (y 64..79),
+        // local (14, 6, 15). The packet state and the authoritative read agree,
+        // and their is_air / blocks_motion behavior tables agree.
+        let packet = sections[8].get_block_state(14, 6, 15);
+        let authority = chunk.get_block_state(14, 70, 15);
+        assert_eq!(
+            packet, authority,
+            "(-82,70,-65) packet state equals the authoritative read"
+        );
+        let packet_behavior = BlockState::new(packet);
+        let authority_behavior = BlockState::new(authority);
+        // is_air / blocks_motion parity — the decoded packet state and the
+        // authoritative read resolve through the same behavior tables.
+        assert_eq!(
+            packet_behavior.is_air(),
+            authority_behavior.is_air(),
+            "(-82,70,-65) is_air parity"
+        );
+        assert_eq!(
+            packet_behavior.blocks_motion(),
+            authority_behavior.blocks_motion(),
+            "(-82,70,-65) blocks_motion parity"
+        );
+        // The pinned real-save block: (-82,70,-65) is sky air — it renders open
+        // and offers no collision, the #328 invisible-collidable-block inverse.
+        assert!(
+            packet_behavior.is_air(),
+            "(-82,70,-65) must be air, got StateId {packet:?}"
+        );
+        assert!(
+            !packet_behavior.blocks_motion(),
+            "(-82,70,-65) air must not block motion"
+        );
+
+        // Tamper/control: swap one cell's state, re-encode the whole packet body
+        // through the server wire format, and re-decode through the same client
+        // read path. The comparator must report exactly the tampered position —
+        // proving it actually catches a mismatched packet state instead of
+        // always passing.
+        let current = sections[8].get_block_state(14, 6, 15);
+        let tampered_state = if current == StateId(1) {
+            StateId(2)
+        } else {
+            StateId(1)
+        };
+        assert_ne!(
+            tampered_state, current,
+            "the tamper must replace the decoded state with a different one"
+        );
+        let mut tampered = sections;
+        tampered[8].set_block_state(
+            14,
+            6,
+            15,
+            tampered_state,
+            &|_| false, // is_air — the wire counts are bookkeeping only here
+            &|_| false, // is_randomly_ticking
+            &|_| true,  // fluid_is_empty
+            &|_| false, // fluid_is_randomly_ticking
+            &|_| false, // is_special_colliding
+        );
+        let tampered_buffer = encode_sections(&tampered);
+        let tampered_sections = decode_sections(
+            &tampered_buffer,
+            chunk.get_sections().len(),
+            &block_strategy,
+            &biome_strategy,
+        );
+        let caught = compare_packet_to_authority(chunk, &tampered_sections);
+        assert_eq!(
+            caught.len(),
+            1,
+            "the comparator catches exactly the tampered cell, got: {caught:?}"
+        );
+        assert_eq!((caught[0].x, caught[0].y, caught[0].z), (-82, 70, -65));
+        assert_eq!(caught[0].packet, tampered_state);
+        assert_eq!(caught[0].authority, authority);
     }
 }
