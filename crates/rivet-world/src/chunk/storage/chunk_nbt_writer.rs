@@ -11,9 +11,10 @@
 //!
 //! Field order and omission rules mirror `SerializableChunkData.write()`
 //! exactly: `DataVersion` (first, via `NbtUtils.addCurrentDataVersion`), then
-//! `xPos`/`yPos`(=minSectionY)/`zPos`/`LastUpdate`/`InhabitedTime`/`Status`,
-//! `blending_data`/`below_zero_retrogen` when the raw carried compound is
-//! present, `UpgradeData` only when non-empty, the `sections` list (each entry
+//! `xPos`/`yPos`(=minSectionY)/`zPos`/`LastUpdate`/`InhabitedTime`/`Status`
+//! (`blending_data` is never written and `below_zero_retrogen` only on the
+//! proto-only branch — see the honest boundaries below), `UpgradeData` only
+//! when non-empty, the `sections` list (each entry
 //! carrying `block_states`/`biomes` when the block section is present, plain
 //! `BlockLight`/`SkyLight` byte arrays and the Starlight state INTs only for a
 //! light-correct chunk when the saved nibble carried data / a state > 0 —
@@ -36,13 +37,21 @@
 //! single-value palette).
 //!
 //! Honest boundaries, retained not fabricated:
-//! - `blending_data`/`below_zero_retrogen` are written verbatim from the raw
-//!   parse-carried compound instead of re-encoded through
-//!   `BlendingData.Packed.CODEC`/`BelowZeroRetrogen.CODEC`, which are not
-//!   ported (the #336 blending value layer). A genuine FULL chunk carries these
-//!   only when they failed to decode (effective blending data is rejected by
-//!   `validate_full_for_reconstruction`), so the verbatim write preserves the
-//!   wire bytes rather than fabricating a re-encode.
+//! - `blending_data` is never written. Paper's `parse` decodes it through
+//!   `BlendingData.Packed.CODEC` (`orElse(null)` on failure), `read` unpacks it
+//!   into the chunk, and `copyOf` re-packs + `write` re-encodes only a
+//!   decodable value. A decodable one is rejected before reconstruction by
+//!   `validate_full_for_reconstruction` (the #336 blending layer); an
+//!   undecodable one decodes to null on parse and is dropped — so neither
+//!   reaches this writer, matching Paper's re-save.
+//! - `below_zero_retrogen` is written only on the proto-only branch. Paper's
+//!   `read` installs it only on the proto branch
+//!   (`protoChunk.setBelowZeroRetrogen`); the LEVELCHUNK branch never does, so
+//!   `copyOf`'s `chunk.getBelowZeroRetrogen()` is null for a FULL chunk and
+//!   `write` omits it — even when it decoded. On the proto branch it is written
+//!   verbatim from the raw carried compound (the `BelowZeroRetrogen.CODEC` is
+//!   not ported, #336), but the FULL reconstruction this writer serves never
+//!   reaches that branch.
 //! - `entities`/`carving_mask` (proto-only) are written for a proto status
 //!   from the carried values, but the reconstruction accepts only FULL chunks,
 //!   so a reconstructable chunk never reaches that branch.
@@ -50,10 +59,13 @@
 //!   `copyOf`'s `persistentDataContainer.isEmpty()` null-out.
 //!
 //! The input split mirrors `copyOf`: the auxiliary fields live on
-//! [`SerializableChunkData`]; the live sections and Starlight nibbles live on
-//! the reconstructed chunk. [`reconstruct_runtime_chunk`] consumes its
-//! [`SerializableChunkData`], so a round-trip caller keeps a separate parse
-//! alive for [`write`] (the tests do exactly this).
+//! [`SerializableChunkData`]; the live sections, heightmaps, and Starlight
+//! nibbles live on the reconstructed chunk (the heightmaps especially: Paper's
+//! `read` primes missing ones before `copyOf`, so the write must read them from
+//! the chunk — the authoritative primed result — not the stored parse map).
+//! [`reconstruct_runtime_chunk`] consumes its [`SerializableChunkData`], so a
+//! round-trip caller keeps a separate parse alive for [`write`] (the tests do
+//! exactly this).
 
 use std::sync::{Arc, LazyLock};
 
@@ -76,9 +88,11 @@ use crate::chunk::storage::chunk_reconstruction::ReconstructedLevelChunk;
 use crate::chunk::storage::section_reconstruction::BiomeId;
 use crate::chunk::storage::serializable_chunk_data::{
     BLOCK_LIGHT_TAG, BLOCKLIGHT_STATE_TAG, SKY_LIGHT_TAG, SKYLIGHT_STATE_TAG,
-    STARLIGHT_LIGHT_VERSION, STARLIGHT_VERSION_TAG, SerializableChunkData, write_heightmaps,
+    STARLIGHT_LIGHT_VERSION, STARLIGHT_VERSION_TAG, SerializableChunkData, StoredHeightmaps,
+    write_heightmaps,
 };
 use crate::level::height_accessor::LevelHeightAccessor;
+use crate::levelgen::heightmap::Types;
 use crate::ticks::{SavedTick, saved_tick_codec};
 use rivet_registry::fluid_id::FluidId;
 
@@ -181,6 +195,27 @@ fn pack_offsets(post_processing: &[Option<Vec<i16>>]) -> ListTag {
     list
 }
 
+/// `copyOf`'s heightmap snapshot: the live chunk's `heightmapsAfter()` types,
+/// cloned raw data. Paper's `read` primes missing heightmaps
+/// (`Heightmap.primeHeightmaps`) before `copyOf`, so a wire chunk whose
+/// `Heightmaps` omitted a type (or carried a wrong-length array) re-saves with
+/// the primed value, not a dropped key — the reconstructed chunk is the
+/// authoritative result. `write_heightmaps` then emits ordinal order, matching
+/// Paper's `write` iterating the `EnumMap`.
+fn chunk_heightmaps(
+    chunk: &ReconstructedLevelChunk,
+    heightmaps_after: &[Types],
+) -> StoredHeightmaps {
+    let mut stored: StoredHeightmaps = std::array::from_fn(|_| None);
+    for ty in heightmaps_after {
+        let index = *ty as usize;
+        if let Some(heightmap) = &chunk.heightmaps()[index] {
+            stored[index] = Some(heightmap.get_raw_data().to_vec());
+        }
+    }
+    stored
+}
+
 /// Write the full current-version chunk `CompoundTag` from the extracted
 /// [`SerializableChunkData`] and the reconstructed runtime chunk — the write
 /// counterpart to [`SerializableChunkData::parse`] +
@@ -188,12 +223,12 @@ fn pack_offsets(post_processing: &[Option<Vec<i16>>]) -> ListTag {
 /// field-for-field.
 ///
 /// The input split mirrors `copyOf`'s: the auxiliary fields (position, times,
-/// status, upgrade data, raw blending/below-zero compounds, block entities,
-/// post-processing, structures, persistent data) live on
-/// [`SerializableChunkData`]; the live sections and Starlight nibbles live on
-/// the reconstructed [`ReconstructedLevelChunk`]. `LastUpdate` is the parsed
-/// carry (a live save would pass the current game time, exactly what `copyOf`
-/// reads from `level.getGameTime()`).
+/// status, upgrade data, below-zero retrogen on the proto-only branch, block
+/// entities, post-processing, structures, persistent data) live on
+/// [`SerializableChunkData`]; the live sections, heightmaps, and Starlight
+/// nibbles live on the reconstructed [`ReconstructedLevelChunk`]. `LastUpdate`
+/// is the parsed carry (a live save would pass the current game time, exactly
+/// what `copyOf` reads from `level.getGameTime()`).
 pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> CompoundTag {
     let mut tag = CompoundTag::new();
     add_current_data_version(&mut tag);
@@ -209,16 +244,22 @@ pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> C
     tag.put_long("LastUpdate", data.last_update_time());
     tag.put_long("InhabitedTime", chunk.get_inhabited_time());
     tag.put_string("Status", data.status().serialization_name());
-    // `blending_data` / `below_zero_retrogen` are written verbatim from the
-    // raw parse-carried compound. Paper re-encodes through
-    // `BlendingData.Packed.CODEC` / `BelowZeroRetrogen.CODEC`, which are not
-    // ported (the #336 blending value layer); a genuine FULL chunk reaches
-    // write only without decodable blending data, so the verbatim compound is
-    // the honest preservation of the wire bytes.
-    if let Some(raw) = data.raw_blending_data() {
-        tag.put("blending_data".to_string(), Tag::Compound(raw.clone()));
-    }
-    if let Some(raw) = data.raw_below_zero_retrogen() {
+    // `blending_data` is never written: Paper's `parse` decodes it through
+    // `BlendingData.Packed.CODEC` (`orElse(null)` on failure), `read` unpacks
+    // it into the chunk, and `copyOf` re-packs + `write` re-encodes only a
+    // decodable value. A decodable one is rejected before reconstruction
+    // (`validate_full_for_reconstruction`, #336); an undecodable one decodes to
+    // null and is dropped — matching Paper's re-save.
+    //
+    // `below_zero_retrogen` mirrors Paper's `read` branch split: only the proto
+    // branch installs it (`protoChunk.setBelowZeroRetrogen`), so `copyOf`'s
+    // `chunk.getBelowZeroRetrogen()` is null for a FULL chunk and `write` omits
+    // it — even when it decoded. The proto branch writes it verbatim (the
+    // `BelowZeroRetrogen.CODEC` is not ported, #336); the FULL reconstruction
+    // this writer serves never reaches that branch.
+    if data.status().chunk_type() == ChunkType::ProtoChunk
+        && let Some(raw) = data.raw_below_zero_retrogen()
+    {
         tag.put(
             "below_zero_retrogen".to_string(),
             Tag::Compound(raw.clone()),
@@ -360,9 +401,17 @@ pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> C
         Tag::List(pack_offsets(data.post_processing_sections())),
     );
 
+    // `copyOf` snapshots the live chunk's `heightmapsAfter()` set — which after
+    // `read`'s `Heightmap.primeHeightmaps` includes the primed missing entries —
+    // so the write reads from the reconstructed chunk, not the stored parse
+    // map, normalizing a wire chunk that omitted (or carried a wrong-length)
+    // heightmap instead of dropping the key.
     tag.put(
         "Heightmaps".to_string(),
-        Tag::Compound(write_heightmaps(data.heightmaps().clone())),
+        Tag::Compound(write_heightmaps(chunk_heightmaps(
+            chunk,
+            data.status().heightmaps_after(),
+        ))),
     );
 
     tag.put(
@@ -804,5 +853,161 @@ mod tests {
         assert_eq!(written.get_int("xPos"), Some(-1));
         assert_eq!(written.get_int("zPos"), Some(-3));
         assert_eq!(written.get_int("yPos"), Some(-4), "yPos is minSectionY");
+    }
+
+    #[test]
+    fn full_write_drops_decodable_below_zero_retrogen() {
+        // Paper `read`'s LEVELCHUNK branch never installs `below_zero_retrogen`
+        // onto the chunk (only the proto branch does), so `copyOf` reads null
+        // and `write` omits it — even when the value decoded. The FULL writer
+        // must drop the carried compound, not write it verbatim.
+        let mut root = fixture("-1.-3.nbt");
+        let mut retrogen = CompoundTag::new();
+        retrogen.put_string("target_status", "minecraft:noise");
+        root.put("below_zero_retrogen".to_string(), Tag::Compound(retrogen));
+
+        let data = SerializableChunkData::parse(height_accessor::create(-64, 384), &root)
+            .expect("fixture parses")
+            .expect("fixture has a Status");
+        assert!(
+            data.effective_below_zero_retrogen(),
+            "the injected retrogen decodes"
+        );
+        assert_eq!(data.validate_full_for_reconstruction(), Ok(()));
+
+        let written = write_once(&root);
+        assert!(
+            written.get("below_zero_retrogen").is_none(),
+            "FULL re-save drops a decodable below_zero_retrogen"
+        );
+    }
+
+    #[test]
+    fn full_write_drops_undecodable_retrogen_and_blending_data() {
+        // Hostile inputs: an undecodable `below_zero_retrogen` and an
+        // undecodable `blending_data` both decode to null on Paper's parse
+        // (`CODEC` `orElse(null)`), so `copyOf` snapshots null and `write`
+        // omits them — the carried raw compounds must not be written verbatim.
+        let mut root = fixture("-1.-3.nbt");
+        let mut retrogen = CompoundTag::new();
+        retrogen.put_string("target_status", "minecraft:not_a_status");
+        root.put("below_zero_retrogen".to_string(), Tag::Compound(retrogen));
+        let mut blending = CompoundTag::new();
+        blending.put_int("min_section", -4); // missing max_section -> undecodable
+        root.put("blending_data".to_string(), Tag::Compound(blending));
+
+        let data = SerializableChunkData::parse(height_accessor::create(-64, 384), &root)
+            .expect("fixture parses")
+            .expect("fixture has a Status");
+        assert!(!data.effective_below_zero_retrogen());
+        assert_eq!(data.validate_full_for_reconstruction(), Ok(()));
+
+        let written = write_once(&root);
+        assert!(written.get("below_zero_retrogen").is_none());
+        assert!(written.get("blending_data").is_none());
+    }
+
+    #[test]
+    fn missing_wire_heightmap_is_primed_and_written_not_dropped() {
+        // Paper's `read` primes a missing heightmap (`toPrime` +
+        // `Heightmap.primeHeightmaps`) before `copyOf`, which snapshots the
+        // live chunk's complete `heightmapsAfter()` set. Removing one stored
+        // key from the wire must produce a re-save that writes the primed
+        // value, not a dropped key.
+        let original = fixture("-1.-3.nbt");
+        let stored_blocking = original
+            .get_compound("Heightmaps")
+            .and_then(|maps| maps.get_long_array("MOTION_BLOCKING"))
+            .cloned()
+            .expect("fixture carries MOTION_BLOCKING");
+        let mut root = original.clone();
+        root.get_compound_or_empty_mut("Heightmaps")
+            .remove("MOTION_BLOCKING");
+
+        let written = write_once(&root);
+        let written_maps = written
+            .get_compound("Heightmaps")
+            .expect("Heightmaps written");
+        assert!(
+            written_maps.contains("MOTION_BLOCKING_NO_LEAVES"),
+            "the remaining FINAL types are all still written"
+        );
+        let blocking = written_maps
+            .get_long_array("MOTION_BLOCKING")
+            .expect("missing heightmap is primed and written, not dropped");
+        assert_eq!(
+            blocking.len(),
+            stored_blocking.len(),
+            "primed MOTION_BLOCKING is a full-length array"
+        );
+        assert_eq!(
+            *blocking, stored_blocking,
+            "the primed value matches the stored one Paper computed from the same blocks"
+        );
+    }
+
+    #[test]
+    fn wrong_length_wire_heightmap_is_primed_and_normalized() {
+        // A wrong-length stored heightmap triggers Paper's `setRawData` re-prime
+        // path (warn + `primeHeightmaps`), so `copyOf` writes the primed
+        // full-length value, not the malformed array.
+        let original = fixture("-1.-3.nbt");
+        let stored_blocking = original
+            .get_compound("Heightmaps")
+            .and_then(|maps| maps.get_long_array("MOTION_BLOCKING"))
+            .cloned()
+            .expect("fixture carries MOTION_BLOCKING");
+        let mut root = original;
+        root.get_compound_or_empty_mut("Heightmaps")
+            .put_long_array("MOTION_BLOCKING", vec![7; 1]);
+
+        let written = write_once(&root);
+        let blocking = written
+            .get_compound("Heightmaps")
+            .expect("Heightmaps written")
+            .get_long_array("MOTION_BLOCKING")
+            .expect("wrong-length heightmap is primed and written");
+        assert_eq!(
+            blocking.len(),
+            stored_blocking.len(),
+            "the wrong-length stored array is replaced by a full-length prime"
+        );
+    }
+
+    #[test]
+    fn empty_persistent_data_container_is_not_written() {
+        // Paper's `copyOf` nulls the PDC when `persistentDataContainer.isEmpty()`
+        // (and `read`'s `putAll` of an empty wire compound leaves it empty), so
+        // a present-but-empty `ChunkBukkitValues` is not re-written.
+        let mut root = fixture("-1.-3.nbt");
+        root.put(
+            "ChunkBukkitValues".to_string(),
+            Tag::Compound(CompoundTag::new()),
+        );
+        let written = write_once(&root);
+        assert!(written.get("ChunkBukkitValues").is_none());
+    }
+
+    #[test]
+    fn stored_block_tick_fixture_writes_typed_tick_back() {
+        // The `-17.-19.nbt` fixture carries one sand `block_ticks` entry; the
+        // write reproduces it through the faithful `SavedTick.codec` list codec
+        // (Paper's `saveTicks`).
+        let written = write_once(&fixture("-17.-19.nbt"));
+        let Tag::List(ticks) = written.get("block_ticks").expect("block_ticks written") else {
+            panic!("block_ticks must be a list");
+        };
+        assert_eq!(ticks.list.len(), 1);
+        let Tag::Compound(tick) = &ticks.list[0] else {
+            panic!("tick is a compound");
+        };
+        assert_eq!(
+            tick.get_string("i").map(String::as_str),
+            Some("minecraft:sand")
+        );
+        assert_eq!(tick.get_int("x"), Some(-268));
+        assert_eq!(tick.get_int("y"), Some(61));
+        assert_eq!(tick.get_int("z"), Some(-302));
+        assert_eq!(tick.get_int("t"), Some(-59));
     }
 }
