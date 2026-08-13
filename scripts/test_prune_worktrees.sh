@@ -1,18 +1,25 @@
 #!/bin/bash
-# Focused tests for prune-worktrees.sh's tmp-scratch classification.
+# Focused tests for prune-worktrees.sh's cargo-scratch classification and sweeps.
 #
 # Regression: the tmp sweep originally treated any /tmp child whose root had
 # CACHEDIR.TAG as disposable cargo scratch and rm -rf'd the whole directory.
 # CACHEDIR.TAG is a generic cache marker — an unrelated cache tool or a source
 # checkout can carry one at its root — so the sweep could destroy a checkout or
 # a generic cache. These tests pin the tightened classifier: only an
-# unambiguous bare cargo target dir (CACHEDIR.TAG + .rustc_info.json + a
-# profile dir, no Cargo.toml/.git) is removable wholesale; a checkout's nested
-# target/ is pruned on its own; a tagged generic cache or a tagged source
-# checkout is left untouched.
+# unambiguous bare cargo target dir (CACHEDIR.TAG + .rustc_info.json +
+# .fingerprint, no Cargo.toml/.git) is removable wholesale; a checkout's nested
+# target/ is pruned on its own via the lighter nested-target tier (CACHEDIR.TAG
+# + .fingerprint); a tagged generic cache or a tagged source checkout is left
+# untouched.
+#
+# The nested-target tier is deliberately lighter: it must recognize genuine
+# cargo layouts that a debug/release-name check would miss (custom profiles
+# build into target/dist/, cargo doc adds target/doc/, a partial cleanup can
+# drop .rustc_info.json), while never deleting the enclosing checkout.
 #
 # Sources scripts/prune-worktrees.sh (its main body is guarded) and drives
-# is_cargo_target / tmp_cache_dirs / sweep_tmp against a sandbox tree.
+# is_cargo_target / is_cargo_scratch / cache_dirs / newest_mtime /
+# tmp_cache_dirs / sweep_tmp against a sandbox tree, under bash and zsh.
 #
 #   ./scripts/test_prune_worktrees.sh
 set -euo pipefail
@@ -21,12 +28,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
+# shellcheck source=./prune-worktrees.sh
 source "$SCRIPT_DIR/prune-worktrees.sh"
 
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "ok:   $1"; }
 
-# --- sandbox fixtures (all old, so sweep_tmp treats them as idle) ------------
+# --- sandbox fixtures (all old, so sweeps treat them as idle) ---------------
 CARGO_TAG='Signature: 8a477f597d28d172789f06886806bc55
 # This file is a cache directory tag created by cargo.
 # For information about cache directory tags see https://bford.info/cachedir/'
@@ -34,21 +42,29 @@ GENERIC_TAG='Signature: 8a477f597d28d172789f06886806bc55
 # This file is a cache directory tag.
 # For information about cache directory tags see https://bford.info/cachedir/'
 
-mk_cargo_target() { # $1 dir; a recognizable cargo CARGO_TARGET_DIR
+oldtouch() { touch -m -t 202001010000 "$@"; }
+
+mk_cargo_target() { # $1 dir; a recognizable cargo CARGO_TARGET_DIR (debug build)
   mkdir -p "$1/debug/.fingerprint"
   printf '%s\n' "$CARGO_TAG" > "$1/CACHEDIR.TAG"
   printf '{}\n' > "$1/.rustc_info.json"
-  touch -m -t 202001010000 "$1" "$1/CACHEDIR.TAG" "$1/.rustc_info.json" "$1/debug" "$1/debug/.fingerprint"
+  oldtouch "$1" "$1/CACHEDIR.TAG" "$1/.rustc_info.json" "$1/debug" "$1/debug/.fingerprint"
+}
+mk_custom_target() { # $1 dir; cargo target built with a custom profile (dist/)
+  mkdir -p "$1/dist/.fingerprint"
+  printf '%s\n' "$CARGO_TAG" > "$1/CACHEDIR.TAG"
+  printf '{}\n' > "$1/.rustc_info.json"
+  oldtouch "$1" "$1/CACHEDIR.TAG" "$1/.rustc_info.json" "$1/dist" "$1/dist/.fingerprint"
 }
 mk_tagged() { # $1 dir; generic cache: CACHEDIR.TAG only, no cargo artifacts
   mkdir -p "$1"
   printf '%s\n' "$GENERIC_TAG" > "$1/CACHEDIR.TAG"
-  touch -m -t 202001010000 "$1" "$1/CACHEDIR.TAG"
+  oldtouch "$1" "$1/CACHEDIR.TAG"
 }
 
 classify() { tmp_cache_dirs "$1"; }  # prints eligible cache dirs, one per line
 
-# --- classification: is_cargo_target ----------------------------------------
+# --- classification: strict bare-dir tier (is_cargo_target) -----------------
 R="root-classify"
 mkdir -p "$SANDBOX/$R"
 
@@ -68,22 +84,22 @@ fi
 
 mk_tagged "$SANDBOX/$R/tag-no-profile"
 printf '{}\n' > "$SANDBOX/$R/tag-no-profile/.rustc_info.json"
-touch -m -t 202001010000 "$SANDBOX/$R/tag-no-profile/.rustc_info.json"
+oldtouch "$SANDBOX/$R/tag-no-profile/.rustc_info.json"
 if is_cargo_target "$SANDBOX/$R/tag-no-profile"; then
-  fail "tag + .rustc_info.json but no profile dir was classified disposable"
+  fail "tag + .rustc_info.json but no .fingerprint was classified disposable"
 else
-  pass "tag + .rustc_info.json but no profile dir is refused"
+  pass "tag + .rustc_info.json but no .fingerprint is refused"
 fi
 
 # hostile: generic (non-cargo) CACHEDIR.TAG content plus cargo-shaped extras
 # must still be refused — the tag's origin line is the cargo discriminator
 foreign="$SANDBOX/$R/foreign-tag"
-mkdir -p "$foreign/debug"
+mkdir -p "$foreign/debug/.fingerprint"
 printf 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag.\n' > "$foreign/CACHEDIR.TAG"
 printf '{}\n' > "$foreign/.rustc_info.json"
-touch -m -t 202001010000 "$foreign" "$foreign/CACHEDIR.TAG" "$foreign/.rustc_info.json" "$foreign/debug"
+oldtouch "$foreign" "$foreign/CACHEDIR.TAG" "$foreign/.rustc_info.json" "$foreign/debug" "$foreign/debug/.fingerprint"
 if is_cargo_target "$foreign"; then
-  fail "dir with generic tag content + .rustc_info.json + profile was classified disposable"
+  fail "dir with generic tag content + cargo-shaped extras was classified disposable"
 else
   pass "generic tag content is refused even with cargo-shaped extras"
 fi
@@ -97,7 +113,34 @@ else
   pass "cargo-marked dir that is also a source/VCS root is refused"
 fi
 
-# --- classification: tmp_cache_dirs (what the sweep would consider) ----------
+# genuine custom-profile layout (target/dist/ only, no debug/release) is
+# recognized wholesale when it is a bare target dir
+mk_custom_target "$SANDBOX/$R/custom-bare"
+if is_cargo_target "$SANDBOX/$R/custom-bare"; then
+  pass "custom-profile-only bare target dir is classified disposable"
+else
+  fail "custom-profile-only bare target dir was refused"
+fi
+
+# --- classification: nested-target tier (is_cargo_scratch) -------------------
+# a nested target/ that lost .rustc_info.json to a partial cleanup is still
+# clearly cargo scratch and must be prunable on its own
+SCRATCH="$SANDBOX/$R/nested-no-rustc"
+mkdir -p "$SCRATCH/debug/.fingerprint"
+printf '%s\n' "$CARGO_TAG" > "$SCRATCH/CACHEDIR.TAG"
+oldtouch "$SCRATCH" "$SCRATCH/CACHEDIR.TAG" "$SCRATCH/debug" "$SCRATCH/debug/.fingerprint"
+if is_cargo_scratch "$SCRATCH"; then
+  pass "nested cargo target without .rustc_info.json is prunable"
+else
+  fail "nested cargo target without .rustc_info.json was refused"
+fi
+if is_cargo_target "$SCRATCH"; then
+  fail "bare-dir tier accepted a dir without .rustc_info.json"
+else
+  pass "bare-dir tier still refuses a dir without .rustc_info.json"
+fi
+
+# --- classification: tmp_cache_dirs (what the tmp sweep would consider) ------
 R2="root-dirs"
 mkdir -p "$SANDBOX/$R2"
 
@@ -142,6 +185,67 @@ got=$(classify "$CK3")
 [ "$got" = "$CK3/tools/rivet-oracle/target" ] || fail "tools target not returned: [$got]"
 pass "tools/*/target inside a tmp checkout is pruned"
 
+# custom-profile-only nested target is pruned on its own even without
+# .rustc_info.json
+CK4="$SANDBOX/$R2/custom-nested"
+mkdir -p "$CK4/target/dist/.fingerprint"
+printf '%s\n' "$CARGO_TAG" > "$CK4/target/CACHEDIR.TAG"
+printf '[workspace]\n' > "$CK4/Cargo.toml"
+mkdir "$CK4/.git"
+oldtouch "$CK4/target" "$CK4/target/CACHEDIR.TAG" "$CK4/target/dist" "$CK4/target/dist/.fingerprint"
+got=$(classify "$CK4")
+[ "$got" = "$CK4/target" ] || fail "custom-profile nested target not returned: [$got]"
+pass "custom-profile nested target (dist/ only, no .rustc_info.json) is pruned"
+
+# --- cache_dirs / newest_mtime (worktree sweep path) -------------------------
+R3="wt-caches"
+mkdir -p "$SANDBOX/$R3"
+
+# a worktree whose nested target lost .rustc_info.json is still pruned, not
+# stranded: cache_dirs must return it under the nested-target tier
+W1="$SANDBOX/$R3/wt-no-rustc"
+mkdir -p "$W1/target/debug/.fingerprint"
+printf '%s\n' "$CARGO_TAG" > "$W1/target/CACHEDIR.TAG"
+printf '[workspace]\n' > "$W1/Cargo.toml"
+mkdir "$W1/.git"
+oldtouch "$W1/target" "$W1/target/CACHEDIR.TAG" "$W1/target/debug" "$W1/target/debug/.fingerprint"
+got=$(cache_dirs "$W1")
+[ "$got" = "$W1/target" ] || fail "cache_dirs stranded a nested target without .rustc_info.json: [$got]"
+pass "cache_dirs prunes a nested target without .rustc_info.json"
+
+# cache_dirs also returns tools/*/target dirs
+W2="$SANDBOX/$R3/wt-with-tools"
+mkdir -p "$W2/target/debug/.fingerprint" "$W2/tools/rivet-oracle/target/debug/.fingerprint"
+printf '%s\n' "$CARGO_TAG" > "$W2/target/CACHEDIR.TAG"
+printf '%s\n' "$CARGO_TAG" > "$W2/tools/rivet-oracle/target/CACHEDIR.TAG"
+printf '{}\n' > "$W2/target/.rustc_info.json"
+printf '{}\n' > "$W2/tools/rivet-oracle/target/.rustc_info.json"
+printf '[workspace]\n' > "$W2/Cargo.toml"
+mkdir "$W2/.git"
+oldtouch "$W2/target" "$W2/tools/rivet-oracle/target"
+got=$(cache_dirs "$W2" | sort)
+exp=$(printf '%s\n' "$W2/target" "$W2/tools/rivet-oracle/target" | sort)
+[ "$got" = "$exp" ] || fail "cache_dirs missing tools target: [$got]"
+pass "cache_dirs returns root target and tools/*/target"
+
+# newest_mtime reads its cache list from stdin (root + every cache mtime maxed)
+W3="$SANDBOX/$R3/mtime"
+mkdir -p "$W3/target/debug/.fingerprint"
+printf '%s\n' "$CARGO_TAG" > "$W3/target/CACHEDIR.TAG"
+printf '[workspace]\n' > "$W3/Cargo.toml"
+mkdir "$W3/.git"
+oldtouch "$W3"
+oldtouch "$W3/target" "$W3/target/CACHEDIR.TAG" "$W3/target/debug" "$W3/target/debug/.fingerprint"
+# the cache dir itself is the newest; the root stays older. mtimes are read
+# back via stat (touch -t is local-time, so no fixed epoch constants).
+touch -m -t 202002020000 "$W3/target"
+want=$(stat -f %m "$W3/target")
+root_m=$(stat -f %m "$W3")
+[ "$root_m" -lt "$want" ] || fail "fixture: root mtime should be older than cache"
+newest=$(newest_mtime "$W3" <<< "$W3/target")
+[ "$newest" -eq "$want" ] || fail "newest_mtime did not max cache mtimes: got $newest want $want"
+pass "newest_mtime takes the cache list on stdin and maxes mtimes"
+
 # --- sweep_tmp end to end ----------------------------------------------------
 SWEEP_ROOT="$SANDBOX/root-sweep"
 mkdir -p "$SWEEP_ROOT"
@@ -151,12 +255,19 @@ mk_cargo_target "$SWEEP_ROOT/bare"
 mk_tagged "$SWEEP_ROOT/cache"
 touch "$SWEEP_ROOT/cache/data.bin"
 # hostile: tagged source checkout survives wholesale; its target is deleted
-CK4="$SWEEP_ROOT/checkout"
-mkdir -p "$CK4/target"
-printf '[workspace]\n' > "$CK4/Cargo.toml"
-mkdir "$CK4/.git"
-mk_tagged "$CK4"
-mk_cargo_target "$CK4/target"
+CK5="$SWEEP_ROOT/checkout"
+mkdir -p "$CK5/target"
+printf '[workspace]\n' > "$CK5/Cargo.toml"
+mkdir "$CK5/.git"
+mk_tagged "$CK5"
+mk_cargo_target "$CK5/target"
+# custom-profile-only nested target inside a checkout is deleted too
+CK6="$SWEEP_ROOT/custom-checkout"
+mkdir -p "$CK6/target/dist/.fingerprint"
+printf '[workspace]\n' > "$CK6/Cargo.toml"
+mkdir "$CK6/.git"
+printf '%s\n' "$CARGO_TAG" > "$CK6/target/CACHEDIR.TAG"
+oldtouch "$CK6/target" "$CK6/target/CACHEDIR.TAG" "$CK6/target/dist" "$CK6/target/dist/.fingerprint"
 
 DRY=0; IDLE_HOURS=24; freed_kb=0; pruned=0
 sweep_tmp "$SWEEP_ROOT" >/dev/null
@@ -164,9 +275,11 @@ sweep_tmp "$SWEEP_ROOT" >/dev/null
 [ -d "$SWEEP_ROOT/bare" ] && fail "bare cargo target dir not deleted" || true
 [ -d "$SWEEP_ROOT/cache" ] || fail "generic cache was deleted"
 [ -d "$SWEEP_ROOT/checkout" ] || fail "tagged source checkout was deleted"
-[ -d "$CK4/target" ] && fail "checkout's nested target/ not deleted" || true
+[ -d "$CK5/target" ] && fail "checkout's nested target/ not deleted" || true
 [ -f "$SWEEP_ROOT/cache/data.bin" ] || fail "generic cache contents were deleted"
-pass "real sweep: bare target pruned; generic cache and tagged checkout survive; nested target pruned"
+[ -d "$CK6" ] || fail "custom-profile checkout was deleted wholesale"
+[ -d "$CK6/target" ] && fail "custom-profile checkout's nested target/ not deleted" || true
+pass "real sweep: bare target + nested targets pruned; generic cache and checkouts survive"
 
 # --- dry-run reporting is prospective, not a claim of completed deletion -----
 SWEEP_ROOT2="$SANDBOX/root-sweep2"
@@ -205,3 +318,74 @@ echo "$out" | grep -q "REMOVE .*feature/merged" || fail "e2e real run missing RE
 [ -d "$E2E/wt" ] && fail "e2e real run did not remove the merged worktree" || true
 git -C "$E2E/main" branch --list feature/merged | grep -q . && fail "e2e real run did not delete the merged branch" || true
 pass "e2e real run removes the merged worktree and branch"
+
+# --- worktree sweep prunes a dirty worktree's nested target, never the wt ----
+E2E2="$SANDBOX/e2e2"
+mkdir -p "$E2E2/main"
+git init -q "$E2E2/main"
+git -C "$E2E2/main" config user.email test@example.com
+git -C "$E2E2/main" config user.name "test"
+git -C "$E2E2/main" config commit.gpgsign false
+printf 'x\n' > "$E2E2/main/a.txt"
+git -C "$E2E2/main" add a.txt
+git -C "$E2E2/main" commit -qm c1
+git -C "$E2E2/main" update-ref refs/remotes/origin/main HEAD
+git -C "$E2E2/main" worktree add -q -b feature/dirty "$E2E2/wt" HEAD
+# dirty the worktree so it is never removed wholesale
+printf 'y\n' >> "$E2E2/wt/a.txt"
+# give it an idle nested target without .rustc_info.json (would have been
+# stranded by the old strict-only classifier). Everything under the worktree
+# root must be old — the root's own mtime is what newest_mtime starts from.
+mkdir -p "$E2E2/wt/target/debug/.fingerprint"
+printf '%s\n' "$CARGO_TAG" > "$E2E2/wt/target/CACHEDIR.TAG"
+printf '[workspace]\n' > "$E2E2/wt/Cargo.toml"
+oldtouch "$E2E2/wt"
+oldtouch "$E2E2/wt/target" "$E2E2/wt/target/CACHEDIR.TAG" "$E2E2/wt/target/debug" "$E2E2/wt/target/debug/.fingerprint"
+
+cd "$E2E2/main"
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --no-tmp 2>&1)
+echo "$out" | grep -q "PRUNE .*wt/target" || fail "wt sweep missing PRUNE line for nested target: $out"
+[ -d "$E2E2/wt/target" ] && fail "wt sweep did not prune the dirty worktree's nested target" || true
+[ -d "$E2E2/wt" ] || fail "wt sweep removed the dirty worktree"
+pass "wt sweep prunes a dirty worktree's nested target and keeps the worktree"
+
+# --- zsh: sourcing + classification works (no failglob abort) ----------------
+if command -v zsh >/dev/null 2>&1; then
+  zrc=0
+  zsh -c '
+    set -o pipefail
+    cd "$1"
+    source ./scripts/prune-worktrees.sh
+    S=$(mktemp -d)
+    mkdir -p "$S/debug/.fingerprint"
+    printf "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n" > "$S/CACHEDIR.TAG"
+    printf "{}\n" > "$S/.rustc_info.json"
+    touch -m -t 202001010000 "$S" "$S/CACHEDIR.TAG" "$S/.rustc_info.json" "$S/debug" "$S/debug/.fingerprint"
+    is_cargo_target "$S" || { echo "zsh: strict tier failed"; exit 1; }
+    # a custom-profile-only dir (dist/, no debug/release) must not abort on the
+    # fingerprint probe even though no debug/release glob would match
+    S2=$(mktemp -d)
+    mkdir -p "$S2/dist/.fingerprint"
+    printf "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n" > "$S2/CACHEDIR.TAG"
+    printf "{}\n" > "$S2/.rustc_info.json"
+    touch -m -t 202001010000 "$S2" "$S2/CACHEDIR.TAG" "$S2/.rustc_info.json" "$S2/dist" "$S2/dist/.fingerprint"
+    is_cargo_target "$S2" || { echo "zsh: custom-profile strict tier failed"; exit 1; }
+    # a dir with no profile at all must be refused without aborting
+    S3=$(mktemp -d)
+    printf "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n" > "$S3/CACHEDIR.TAG"
+    printf "{}\n" > "$S3/.rustc_info.json"
+    if is_cargo_target "$S3"; then echo "zsh: no-profile dir accepted"; exit 1; fi
+    rm -rf "$S" "$S2" "$S3"
+    echo "zsh-ok"
+  ' _ "$SCRIPT_DIR/.." || zrc=$?
+  if [ "$zrc" -eq 0 ]; then
+    pass "zsh: source + classification works, no failglob abort"
+  else
+    fail "zsh source/use test failed (rc=$zrc)"
+  fi
+else
+  pass "zsh not installed; skipping zsh source/use test"
+fi
+
+echo
+echo "ALL TESTS PASSED"

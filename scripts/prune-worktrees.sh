@@ -15,13 +15,24 @@
 # probe dirs, per-ticket target dirs), which no worktree sweep can see. Those
 # accumulated to 39GB unnoticed in 2026-08, so the tmp sweep runs by default.
 #
-# Both sweeps remove a directory only when it is clearly disposable cargo build
-# scratch: a CACHEDIR.TAG that cargo itself wrote, cargo's .rustc_info.json, a
-# profile output dir, and no source/VCS evidence (Cargo.toml/.git). The generic
-# CACHEDIR.TAG marker alone is not enough — any cache tool drops one, and a
-# checkout can carry one at its root; the old tag-only check would have rm -rf'd
-# both a source checkout and an unrelated cache. A checkout's nested target/
-# dirs are pruned individually, never the checkout itself.
+# Cargo identifies its own build scratch. Every CARGO_TARGET_DIR carries a
+# CACHEDIR.TAG that cargo itself wrote (a distinctive "created by cargo" line,
+# vs the generic marker any cache tool drops), a .rustc_info.json host-info
+# file, and .fingerprint dirs under each profile (debug, release, custom,
+# cross-compiled, doc). The generic CACHEDIR.TAG marker alone is not enough —
+# the old tag-only check would rm -rf both a source checkout and an unrelated
+# cache on the strength of a marker those dirs can also carry.
+#
+# Two trust tiers, because deleting a whole /tmp child is riskier than pruning
+# a nested target/ that is provably inside a known checkout:
+#   - a directory is removed WHOLESALE (a bare tmp CARGO_TARGET_DIR) only when
+#     it is unambiguous cargo scratch: cargo CACHEDIR.TAG + .rustc_info.json +
+#     .fingerprint, and no source/VCS evidence (Cargo.toml/.git).
+#   - a nested target/ dir (inside a worktree or tmp checkout) is pruned on its
+#     own when it is clearly cargo scratch (cargo CACHEDIR.TAG + .fingerprint);
+#     the checkout itself is never removed on that path, so the .rustc_info.json
+#     and source/VCS guards are not required there.
+# Ambiguous tagged directories are left alone.
 #
 # Usage: scripts/prune-worktrees.sh [--dry-run] [--idle-hours N] [--no-tmp]  (default 24)
 set -uo pipefail
@@ -42,57 +53,60 @@ act() { # mutation verb for this mode; a dry run must not claim it happened
 
 dir_kb() { local kb; kb=$(du -sk "$1" 2>/dev/null | cut -f1); echo "${kb:-0}"; }
 
-cache_dirs() { # only clearly disposable cargo scratch; tools/* have their own target/
-  local d
-  [ -d "$1/target" ] && is_cargo_target "$1/target" && echo "$1/target"
-  for d in "$1"/tools/*/target; do
-    [ -d "$d" ] && is_cargo_target "$d" && echo "$d"
-  done
+# Classification is find/grep based (quoted paths, no shell globs), so sourcing
+# this file under zsh — or any shell with failglob semantics — cannot abort on
+# an unmatched pattern.
+
+has_cargo_tag() { # $1 = dir; carries the CACHEDIR.TAG that cargo itself wrote
+  [ -f "$1/CACHEDIR.TAG" ] || return 1
+  grep -q "cache directory tag created by cargo" "$1/CACHEDIR.TAG"
+}
+
+has_cargo_fingerprint() { # $1 = dir; cargo writes .fingerprint dirs under each profile
+  [ -n "$(find "$1" -maxdepth 4 -type d -name .fingerprint -print -quit 2>/dev/null)" ]
+}
+
+is_cargo_scratch() { # $1 = dir; clearly cargo build scratch (nested-target tier)
+  has_cargo_tag "$1" || return 1
+  has_cargo_fingerprint "$1" || return 1
   return 0
 }
 
-newest_mtime() { # worktree root + every build cache: whichever was touched last
+is_cargo_target() { # $1 = dir; an unambiguous bare CARGO_TARGET_DIR (safe to rm -rf wholesale)
+  is_cargo_scratch "$1" || return 1
+  [ -f "$1/.rustc_info.json" ] || return 1
+  [ -e "$1/Cargo.toml" ] && return 1
+  [ -e "$1/.git" ] && return 1
+  return 0
+}
+
+cache_dirs() { # worktree build caches: nested target/ dirs, pruned on their own
+  local d
+  [ -d "$1/target" ] && is_cargo_scratch "$1/target" && echo "$1/target"
+  while IFS= read -r d; do
+    [ -d "$d" ] && is_cargo_scratch "$d" && echo "$d"
+  done < <(find "$1/tools" -maxdepth 2 -type d -name target 2>/dev/null)
+  return 0
+}
+
+newest_mtime() { # $1 = path to stat; reads cache dirs (one per line) from stdin
   local newest m d
   newest=$(stat -f %m "$1" 2>/dev/null || echo 0)
   while read -r d; do
     [ -n "$d" ] || continue
     m=$(stat -f %m "$d" 2>/dev/null || echo 0)
     [ "$m" -gt "$newest" ] && newest=$m
-  done < <(cache_dirs "$1")
-  echo "$newest"
-}
-
-has_cargo_profile() { # any profile output tree, native or cross-compiled
-  local d=$1 p
-  for p in "$d"/debug "$d"/release "$d"/*/debug "$d"/*/release; do
-    [ -d "$p" ] && return 0
   done
-  return 1
-}
-
-is_cargo_target() { # is $1 an unambiguous cargo CARGO_TARGET_DIR (safe to delete)?
-  # Cargo marks every target dir with a CACHEDIR.TAG it wrote itself, so the
-  # tag's origin line identifies it; generic cache tools drop their own tag
-  # with a different (or no) origin, and a checkout can carry one at its root.
-  # The old tag-presence-only check would rm -rf a whole /tmp child (source
-  # checkout or unrelated cache) on that basis. Only a dir carrying cargo's own
-  # build markers and no source/VCS evidence is disposable build scratch.
-  local d=$1
-  [ -f "$d/CACHEDIR.TAG" ] || return 1
-  grep -q "cache directory tag created by cargo" "$d/CACHEDIR.TAG" || return 1
-  [ -f "$d/.rustc_info.json" ] || return 1
-  has_cargo_profile "$d" || return 1
-  [ -e "$d/Cargo.toml" ] && return 1
-  [ -e "$d/.git" ] && return 1
-  return 0
+  echo "$newest"
 }
 
 tmp_cache_dirs() { # a bare cargo target dir, or the cargo target dirs in a checkout
   local d=$1 c
   if is_cargo_target "$d"; then echo "$d"; return 0; fi
-  for c in "$d/target" "$d"/tools/*/target; do
-    is_cargo_target "$c" && echo "$c"
-  done
+  [ -d "$d/target" ] && is_cargo_scratch "$d/target" && echo "$d/target"
+  while IFS= read -r c; do
+    [ -d "$c" ] && is_cargo_scratch "$c" && echo "$c"
+  done < <(find "$d/tools" -maxdepth 2 -type d -name target 2>/dev/null)
   return 0
 }
 
@@ -104,8 +118,7 @@ sweep_tmp() {
   local root d caches cache kb mins=$((IDLE_HOURS * 60))
   for root in "$@"; do
     [ -d "$root" ] || continue
-    for d in "$root"/*/; do
-      d=${d%/}
+    while IFS= read -r d; do
       [ -O "$d" ] || continue
       caches=$(tmp_cache_dirs "$d")
       [ -n "$caches" ] || continue
@@ -120,7 +133,7 @@ sweep_tmp() {
         run rm -rf "$cache"
         freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
       done <<< "$caches"
-    done
+    done < <(find "$root" -maxdepth 1 -mindepth 1 -type d -not -name '.*' 2>/dev/null)
   done
 }
 
@@ -166,7 +179,7 @@ main() {
 
     caches=$(cache_dirs "$wt")
     if [ -n "$caches" ]; then
-      age_h=$(( (NOW - $(newest_mtime "$wt")) / 3600 ))
+      age_h=$(( (NOW - $(newest_mtime "$wt" <<< "$caches")) / 3600 ))
       if [ "$age_h" -ge "$IDLE_HOURS" ]; then
         while read -r cache; do
           [ -n "$cache" ] || continue
