@@ -96,6 +96,16 @@ impl ChunkStatus {
         self.index() >= other.index()
     }
 
+    /// `ChunkStatus.isAfter` — strict.
+    pub const fn is_after(self, other: Self) -> bool {
+        self.index() > other.index()
+    }
+
+    /// `ChunkStatus.isBefore` — strict.
+    pub const fn is_before(self, other: Self) -> bool {
+        self.index() < other.index()
+    }
+
     /// `ChunkStatus.isOrBefore(ChunkStatus)` — `this.getIndex() <=
     /// other.getIndex()` (the pipeline ring/status contract `WorldGenRegion`
     /// uses to bound a requested status by the step's per-ring dependency).
@@ -103,11 +113,23 @@ impl ChunkStatus {
         self.index() <= other.index()
     }
 
-    /// `ChunkStatus.getName()` — the full registry identifier (`toString()`
-    /// on the key), i.e. the serialization name. `WorldGenRegion`'s
-    /// unavailable-chunk diagnostic and write-zone warnings read it.
-    pub const fn name(self) -> &'static str {
-        self.serialization_name()
+    /// `ChunkStatus.getParent()` — the previous rung of the ladder; `EMPTY`
+    /// is its own parent (Java stores `this` when the parent is null). Derived
+    /// from `ALL`/index order so there is a single source of truth for the
+    /// chain (a transposed hand-written match would silently corrupt
+    /// `byRadius`/`required_status_at_radius`).
+    pub const fn parent(self) -> Self {
+        if self.index() == 0 {
+            Self::Empty
+        } else {
+            Self::ALL[self.index() - 1]
+        }
+    }
+
+    /// `ChunkStatus.max(a, b)` — the later status (higher index). Java uses
+    /// strict `isAfter`, so `max(a, a)` falls through to `b` (equal values).
+    pub const fn max(a: Self, b: Self) -> Self {
+        if a.is_after(b) { a } else { b }
     }
 }
 
@@ -153,13 +175,19 @@ mod tests {
             );
             assert_eq!(status.is_or_after(ChunkStatus::Light), status.index() >= 9);
             assert_eq!(status.is_or_before(ChunkStatus::Light), status.index() <= 9);
-            assert_eq!(status.name(), status.serialization_name());
+            assert_eq!(status.is_before(ChunkStatus::Light), status.index() < 9);
+            assert_eq!(status.is_after(ChunkStatus::Light), status.index() > 9);
         }
         // The exact ladder bounds: `is_or_before` is inclusive, `is_or_after`
-        // is inclusive, and `name()` is the full-key `serialization_name`.
+        // is inclusive, and the strict `is_before`/`is_after` are exclusive.
         assert!(ChunkStatus::Empty.is_or_before(ChunkStatus::Full));
         assert!(!ChunkStatus::Full.is_or_before(ChunkStatus::Features));
-        assert_eq!(ChunkStatus::Features.name(), "minecraft:features");
+        assert!(!ChunkStatus::Light.is_before(ChunkStatus::Light));
+        assert!(!ChunkStatus::Light.is_after(ChunkStatus::Light));
+        assert_eq!(
+            ChunkStatus::Features.serialization_name(),
+            "minecraft:features"
+        );
         assert_eq!(
             ChunkStatus::Surface.heightmaps_after(),
             &WORLDGEN_HEIGHTMAPS

@@ -38,5 +38,5 @@ pub use region_backed::{
 };
 pub use server_level::{MissingChunkPolicy, ServerLevel, ServerLevelConfig, overworld_dimension};
 pub use world_gen_region::{
-    ChunkStepView, GenerationChunkHolderView, UnavailableChunkDiagnostic, WorldGenRegion,
+    GenerationChunkHolderView, UnavailableChunkDiagnostic, WorldGenRegion,
 };

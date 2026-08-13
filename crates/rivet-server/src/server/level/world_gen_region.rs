@@ -18,11 +18,11 @@
 //! `ChunkPyramid` tables, server production generation, or generator
 //! realization — those defer with their owning units (#185).
 //!
-//! ## The two typed seams
+//! ## The typed seam
 //!
-//! Two upstream types the region consumes are not ported yet, so the region
-//! reads them through the smallest typed contract it needs instead of
-//! fabricating their internals:
+//! One upstream type the region consumes is not ported yet, so the region
+//! reads it through the smallest typed contract it needs instead of
+//! fabricating its internals:
 //!
 //! - [`GenerationChunkHolderView`] — the `mc.server.level.pipeline.holder`
 //!   `GenerationChunkHolder` surface (`getChunkIfPresentUnchecked` /
@@ -30,11 +30,10 @@
 //!   The real holder (futures, scheduling, status ladder) lands with the
 //!   holder unit; the region only needs a holder that can hand back a chunk
 //!   completed to a given status.
-//! - [`ChunkStepView`] — the `net.minecraft.world.level.chunk.status.ChunkStep`
-//!   surface the region reads (`directDependencies` / `targetStatus` /
-//!   `blockStateWriteRadius`). The real `ChunkStep`/`ChunkDependencies` land
-//!   with the chunk.status unit; the region only needs the per-ring dependency
-//!   list and the write radius.
+//!
+//! The generating step is the real merged `net.minecraft.world.level.chunk.status.ChunkStep`
+//! (`rivet_world::chunk::status::ChunkStep`): the region reads
+//! `directDependencies()` / `targetStatus()` / `blockStateWriteRadius()` off it.
 //!
 //! ## The `ServerLevel` seam
 //!
@@ -78,7 +77,7 @@ use rivet_util::mth;
 use rivet_util::util::log_and_pause_if_in_ide;
 use rivet_world::biome::biome_manager::{BiomeManager, NoiseBiomeSource};
 use rivet_world::chunk::chunk_access::ChunkAccess;
-use rivet_world::chunk::status::ChunkStatus;
+use rivet_world::chunk::status::{ChunkStatus, ChunkStep};
 use rivet_world::level::WorldGenLevel;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::levelgen::heightmap::Types;
@@ -123,29 +122,6 @@ pub trait GenerationChunkHolderView: Send {
     ) -> Option<&mut ChunkAccess<StateId, ServerBiomeId, StructureKey>>;
 }
 
-/// `net.minecraft.world.level.chunk.status.ChunkStep` STUB — the generating-step
-/// surface `WorldGenRegion` reads.
-///
-/// Java `ChunkStep` (owned by the pending chunk.status unit) carries the
-/// per-ring `ChunkDependencies` (`directDependencies` — a status per chessboard
-/// distance ring), the `targetStatus`, and the `blockStateWriteRadius`. The
-/// region reads exactly those three; the step's `task`/scheduler surface defers
-/// with #185. A `ChunkStepView` is the smallest contract the region needs, so
-/// the real `ChunkStep` can implement it when it lands.
-pub trait ChunkStepView: Send {
-    /// `ChunkStep.directDependencies()` — the per-ring dependency statuses, by
-    /// chessboard distance from the generating chunk (`size()` / `get(int)` on
-    /// Java's `ChunkDependencies`).
-    fn direct_dependencies(&self) -> &[ChunkStatus];
-
-    /// `ChunkStep.targetStatus()` — the status the step is generating toward.
-    fn target_status(&self) -> ChunkStatus;
-
-    /// `ChunkStep.blockStateWriteRadius()` — the write-zone radius (in chunks)
-    /// around the generating chunk.
-    fn block_state_write_radius(&self) -> i32;
-}
-
 /// Why a `getChunk(x, z, status, loadOrGenerate)` request failed during world
 /// generation — the typed form of Java's `ReportedException(CrashReport)`
 /// "Requested chunk unavailable during world generation" diagnostic.
@@ -180,16 +156,19 @@ impl std::fmt::Display for UnavailableChunkDiagnostic {
         let actual = if self.max_allowed_status.is_none() {
             "[out of cache bounds]".to_string()
         } else {
-            self.actual_status
-                .map_or_else(|| "[no chunk held]".to_string(), |s| s.name().to_string())
+            self.actual_status.map_or_else(
+                || "[no chunk held]".to_string(),
+                |s| s.serialization_name().to_string(),
+            )
         };
-        let max_allowed = self
-            .max_allowed_status
-            .map_or_else(|| "null".to_string(), |s| s.name().to_string());
+        let max_allowed = self.max_allowed_status.map_or_else(
+            || "null".to_string(),
+            |s| s.serialization_name().to_string(),
+        );
         let deps = self
             .dependencies
             .iter()
-            .map(|s| s.name())
+            .map(|s| s.serialization_name())
             .collect::<Vec<_>>()
             .join(", ");
         write!(
@@ -200,8 +179,8 @@ impl std::fmt::Display for UnavailableChunkDiagnostic {
             self.generating_chunk.x(),
             self.generating_chunk.z(),
             self.distance,
-            self.generating_status.name(),
-            self.requested_status.name(),
+            self.generating_status.serialization_name(),
+            self.requested_status.serialization_name(),
             actual,
             max_allowed,
             deps,
@@ -213,7 +192,7 @@ impl std::fmt::Display for UnavailableChunkDiagnostic {
 /// container.
 ///
 /// Owns a [`StaticCache2D`] square of [`GenerationChunkHolderView`] references
-/// (the chunk view), the generating [`ChunkStepView`] (per-ring dependencies +
+/// (the chunk view), the generating [`ChunkStep`] (per-ring dependencies +
 /// write radius), the center chunk position, and the scalar `ServerLevel` seam
 /// values. The value-layer slice implements the ring/status/distance contract,
 /// the write-radius gate, and the minimal [`WorldGenLevel`] facade; the heavy
@@ -229,7 +208,7 @@ pub struct WorldGenRegion {
     center_chunk_z: i32,
     /// `generatingStep` — the step whose per-ring dependencies bound chunk
     /// availability and whose `blockStateWriteRadius` bounds writes.
-    generating_step: Box<dyn ChunkStepView>,
+    generating_step: ChunkStep,
     /// `writeRadius` — `generatingStep.blockStateWriteRadius()`.
     write_radius: i32,
     /// `seed` — `level.getSeed()`.
@@ -262,7 +241,7 @@ impl WorldGenRegion {
     pub fn new(
         cache: StaticCache2D<Box<dyn GenerationChunkHolderView>>,
         center_pos: ChunkPos,
-        generating_step: Box<dyn ChunkStepView>,
+        generating_step: ChunkStep,
         seed: i64,
         min_y: i32,
         height: i32,
@@ -302,7 +281,7 @@ impl WorldGenRegion {
         let distance = self
             .center_pos
             .get_chessboard_distance_coords(chunk_x, chunk_z);
-        distance < self.generating_step.direct_dependencies().len() as i32
+        distance < self.generating_step.direct_dependencies().size() as i32
     }
 
     /// `WorldGenRegion.getChunk(int, int)` — the 2-arg form, targeting
@@ -342,10 +321,10 @@ impl WorldGenRegion {
         // The per-ring dependency slice is only materialized for the error
         // diagnostic; the happy path reads it by index (no per-access Vec).
         let dependencies = self.generating_step.direct_dependencies();
-        let max_allowed_status = if distance >= dependencies.len() as i32 {
+        let max_allowed_status = if distance >= dependencies.size() as i32 {
             None
         } else {
-            Some(dependencies[distance as usize])
+            Some(dependencies.get(distance as usize))
         };
 
         let actual_status = if let Some(max_allowed) = max_allowed_status {
@@ -367,7 +346,7 @@ impl WorldGenRegion {
             requested_status: target_status,
             actual_status,
             max_allowed_status,
-            dependencies: dependencies.to_vec(),
+            dependencies: dependencies.as_list().to_vec(),
             distance,
             generating_chunk: self.center_pos,
         })
@@ -391,10 +370,10 @@ impl WorldGenRegion {
         // Vec on the happy path; the diagnostic re-fetches it).
         let max_allowed_status = {
             let dependencies = self.generating_step.direct_dependencies();
-            if distance >= dependencies.len() as i32 {
+            if distance >= dependencies.size() as i32 {
                 None
             } else {
-                Some(dependencies[distance as usize])
+                Some(dependencies.get(distance as usize))
             }
         };
 
@@ -421,7 +400,7 @@ impl WorldGenRegion {
             requested_status: target_status,
             actual_status,
             max_allowed_status,
-            dependencies: self.generating_step.direct_dependencies().to_vec(),
+            dependencies: self.generating_step.direct_dependencies().as_list().to_vec(),
             distance,
             generating_chunk: self.center_pos,
         })
@@ -557,7 +536,7 @@ impl WorldGenRegion {
                 chunk_x,
                 chunk_z,
                 pos,
-                self.generating_step.target_status().name()
+                self.generating_step.target_status().serialization_name()
             ));
             return false;
         }
@@ -598,7 +577,7 @@ impl WorldGenRegion {
                 self.center_chunk_z,
                 read_distance,
                 self.write_radius,
-                self.generating_step.target_status().name()
+                self.generating_step.target_status().serialization_name()
             ));
         }
     }
@@ -818,6 +797,7 @@ mod tests {
     use super::*;
     use rivet_registry::core::QuartPos;
     use rivet_util::StaticCache2D;
+    use rivet_world::chunk::status::GENERATION_PYRAMID;
     use rivet_world::chunk::upgrade_data::UpgradeData;
     use rivet_world::level::height_accessor::create as create_accessor;
 
@@ -907,35 +887,6 @@ mod tests {
         }
     }
 
-    /// A test step — a fixed per-ring dependency list, target, and write radius.
-    struct TestStep {
-        deps: Vec<ChunkStatus>,
-        target: ChunkStatus,
-        write_radius: i32,
-    }
-
-    impl TestStep {
-        fn new(deps: Vec<ChunkStatus>, target: ChunkStatus, write_radius: i32) -> Self {
-            TestStep {
-                deps,
-                target,
-                write_radius,
-            }
-        }
-    }
-
-    impl ChunkStepView for TestStep {
-        fn direct_dependencies(&self) -> &[ChunkStatus] {
-            &self.deps
-        }
-        fn target_status(&self) -> ChunkStatus {
-            self.target
-        }
-        fn block_state_write_radius(&self) -> i32 {
-            self.write_radius
-        }
-    }
-
     /// A test noise source — a fixed biome at every quart.
     struct TestBiomeSource {
         biome: BiomeId,
@@ -947,19 +898,17 @@ mod tests {
         }
     }
 
-    /// A feature-step region: `directDependencies = [BIOMES, NOISE, FEATURES,
-    /// FULL]` (rings 0..3), write radius 1, every ring chunk present at its
-    /// ring's allowed status. `cache` is a `2 * 3 + 1 = 7`-square centered on
-    /// (0, 0), covering all four dependency rings.
+    /// A feature-step region: `generatingStep = getStepTo(FEATURES)` from the
+    /// shared generation pyramid — `directDependencies = [CARVERS, CARVERS,
+    /// STRUCTURE_STARTS x7]` (rings 0..8), write radius 1 — with every ring
+    /// chunk present at its ring's allowed status. `cache` is a
+    /// `2 * 8 + 1 = 17`-square centered on (0, 0), covering all nine rings.
     fn feature_region() -> WorldGenRegion {
-        let deps = vec![
-            ChunkStatus::Biomes,
-            ChunkStatus::Noise,
-            ChunkStatus::Features,
-            ChunkStatus::Full,
-        ];
-        let step = TestStep::new(deps.clone(), ChunkStatus::Features, 1);
-        let cache = StaticCache2D::create(0, 0, 3, &|x, z| {
+        let step = GENERATION_PYRAMID
+            .get_step_to(ChunkStatus::Features)
+            .clone();
+        let deps = step.direct_dependencies().as_list().to_vec();
+        let cache = StaticCache2D::create(0, 0, 8, &|x, z| {
             let distance = ChunkPos::new(0, 0).get_chessboard_distance_coords(x, z);
             let status = deps[distance.min(deps.len() as i32 - 1) as usize];
             Box::new(TestHolder::new(test_chunk(ChunkPos::new(x, z)), status))
@@ -968,7 +917,7 @@ mod tests {
         WorldGenRegion::new(
             cache,
             ChunkPos::new(0, 0),
-            Box::new(step),
+            step,
             0,
             SUPERFLAT_MIN_Y,
             SUPERFLAT_HEIGHT,
@@ -989,84 +938,95 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Requesting a chunk at distance 0 (the center) with a target at or before
-    /// the ring's `BIOMES` allowed status returns it.
+    /// the ring's `CARVERS` allowed status returns it.
     #[test]
     fn center_ring_returns_the_chunk_for_allowed_status() {
         let region = feature_region();
         assert_eq!(
             region
                 .try_get_chunk(0, 0, ChunkStatus::Empty, true)
-                .expect("center at BIOMES serves EMPTY")
+                .expect("center at CARVERS serves EMPTY")
                 .get_pos(),
             center()
         );
         assert_eq!(
             region
-                .try_get_chunk(0, 0, ChunkStatus::Biomes, true)
-                .expect("center at BIOMES serves BIOMES")
+                .try_get_chunk(0, 0, ChunkStatus::Carvers, true)
+                .expect("center at CARVERS serves CARVERS")
                 .get_pos(),
             center()
         );
     }
 
-    /// The per-ring allowed status: ring 1 allows `NOISE`, ring 2 allows
-    /// `FEATURES`, ring 3 allows `FULL`; each returns the chunk for a target at
-    /// or before the ring's status and diagnoses a target after it.
+    /// The per-ring allowed status: rings 0..1 allow `CARVERS`, rings 2..8
+    /// allow `STRUCTURE_STARTS`; each returns the chunk for a target at or
+    /// before the ring's status and diagnoses a target after it.
     #[test]
     fn per_ring_allowed_status_bounds_the_contract() {
         let region = feature_region();
-        // Ring 1: NOISE.
-        assert!(region.try_get_chunk(1, 0, ChunkStatus::Noise, true).is_ok());
-        let diagnostic = region
-            .try_get_chunk(1, 0, ChunkStatus::Features, true)
-            .err()
-            .expect("target after ring-1 NOISE is unavailable");
-        assert_eq!(diagnostic.distance, 1);
-        assert_eq!(diagnostic.max_allowed_status, Some(ChunkStatus::Noise));
-        assert_eq!(diagnostic.requested_status, ChunkStatus::Features);
-
-        // Ring 2: FEATURES.
+        // Ring 1: CARVERS.
         assert!(
             region
-                .try_get_chunk(2, 0, ChunkStatus::Features, true)
+                .try_get_chunk(1, 0, ChunkStatus::Carvers, true)
                 .is_ok()
         );
         let diagnostic = region
-            .try_get_chunk(2, 0, ChunkStatus::Full, true)
+            .try_get_chunk(1, 0, ChunkStatus::Features, true)
             .err()
-            .expect("target after ring-2 FEATURES is unavailable");
-        assert_eq!(diagnostic.distance, 2);
-        assert_eq!(diagnostic.max_allowed_status, Some(ChunkStatus::Features));
-        assert_eq!(diagnostic.requested_status, ChunkStatus::Full);
+            .expect("target after ring-1 CARVERS is unavailable");
+        assert_eq!(diagnostic.distance, 1);
+        assert_eq!(diagnostic.max_allowed_status, Some(ChunkStatus::Carvers));
+        assert_eq!(diagnostic.requested_status, ChunkStatus::Features);
 
-        // Ring 3: FULL (chunk (3, 0) is chessboard distance 3).
-        assert!(region.try_get_chunk(3, 0, ChunkStatus::Full, true).is_ok());
+        // Ring 2: STRUCTURE_STARTS.
+        assert!(
+            region
+                .try_get_chunk(2, 0, ChunkStatus::StructureStarts, true)
+                .is_ok()
+        );
+        let diagnostic = region
+            .try_get_chunk(2, 0, ChunkStatus::Carvers, true)
+            .err()
+            .expect("target after ring-2 STRUCTURE_STARTS is unavailable");
+        assert_eq!(diagnostic.distance, 2);
+        assert_eq!(
+            diagnostic.max_allowed_status,
+            Some(ChunkStatus::StructureStarts)
+        );
+        assert_eq!(diagnostic.requested_status, ChunkStatus::Carvers);
+
+        // Ring 8: STRUCTURE_STARTS (chunk (8, 0) is chessboard distance 8).
+        assert!(
+            region
+                .try_get_chunk(8, 0, ChunkStatus::StructureStarts, true)
+                .is_ok()
+        );
         assert_eq!(
             region
-                .try_get_chunk(3, 0, ChunkStatus::Full, true)
-                .expect("ring-3 FULL serves FULL")
+                .try_get_chunk(8, 0, ChunkStatus::StructureStarts, true)
+                .expect("ring-8 STRUCTURE_STARTS serves STRUCTURE_STARTS")
                 .get_pos(),
-            ChunkPos::new(3, 0)
+            ChunkPos::new(8, 0)
         );
     }
 
     /// The unavailable-chunk diagnostic: a request beyond the dependency list
-    /// (distance 4, outside the 4-ring `[BIOMES, NOISE, FEATURES, FULL]`) yields
-    /// `max_allowed_status = None` and the "out of cache bounds" actual status;
-    /// a request at distance 1 for a status after the ring carries the full
-    /// crash-report surface.
+    /// (distance 9, outside the 9-ring `[CARVERS, CARVERS, STRUCTURE_STARTS x7]`)
+    /// yields `max_allowed_status = None` and the "out of cache bounds" actual
+    /// status; a request at distance 1 for a status after the ring carries the
+    /// full crash-report surface.
     #[test]
     fn unavailable_chunk_diagnostic_carries_the_request_details() {
         let region = feature_region();
 
         // Beyond the dependency list: the ring has no allowed status at all.
         let beyond = region
-            .try_get_chunk(4, 0, ChunkStatus::Empty, true)
+            .try_get_chunk(9, 0, ChunkStatus::Empty, true)
             .err()
-            .expect("distance 4 is beyond the 4-ring dependency list");
-        assert_eq!(beyond.chunk_x, 4);
+            .expect("distance 9 is beyond the 9-ring dependency list");
+        assert_eq!(beyond.chunk_x, 9);
         assert_eq!(beyond.chunk_z, 0);
-        assert_eq!(beyond.distance, 4);
+        assert_eq!(beyond.distance, 9);
         assert_eq!(beyond.max_allowed_status, None);
         assert_eq!(beyond.actual_status, None);
         assert_eq!(beyond.generating_status, ChunkStatus::Features);
@@ -1074,36 +1034,44 @@ mod tests {
         assert_eq!(
             beyond.dependencies,
             vec![
-                ChunkStatus::Biomes,
-                ChunkStatus::Noise,
-                ChunkStatus::Features,
-                ChunkStatus::Full,
+                ChunkStatus::Carvers,
+                ChunkStatus::Carvers,
+                ChunkStatus::StructureStarts,
+                ChunkStatus::StructureStarts,
+                ChunkStatus::StructureStarts,
+                ChunkStatus::StructureStarts,
+                ChunkStatus::StructureStarts,
+                ChunkStatus::StructureStarts,
+                ChunkStatus::StructureStarts,
             ]
         );
 
         // A ring-1 request past the allowed status: actual status is the held
-        // chunk's NOISE, the max allowed is NOISE.
+        // chunk's CARVERS, the max allowed is CARVERS.
         let too_far = region
             .try_get_chunk(1, 0, ChunkStatus::Full, true)
             .err()
             .expect("target after the ring-1 allowed status is unavailable");
-        assert_eq!(too_far.actual_status, Some(ChunkStatus::Noise));
-        assert_eq!(too_far.max_allowed_status, Some(ChunkStatus::Noise));
+        assert_eq!(too_far.actual_status, Some(ChunkStatus::Carvers));
+        assert_eq!(too_far.max_allowed_status, Some(ChunkStatus::Carvers));
         assert_eq!(too_far.requested_status, ChunkStatus::Full);
 
         // The Display message mirrors the crash-report surface (generating
         // status, requested, actual, max allowed, dependencies, distance).
         let message = beyond.to_string();
         assert!(message.contains("Requested chunk unavailable during world generation"));
-        assert!(message.contains("requesting chunk [4, 0]"));
-        assert!(message.contains("distance: 4"));
+        assert!(message.contains("requesting chunk [9, 0]"));
+        assert!(message.contains("distance: 9"));
         assert!(message.contains("generating status: minecraft:features"));
         assert!(message.contains("requested status: minecraft:empty"));
         assert!(message.contains("actual status: [out of cache bounds]"));
         assert!(message.contains("maximum allowed status: null"));
         assert!(
-            message
-                .contains("minecraft:biomes, minecraft:noise, minecraft:features, minecraft:full")
+            message.contains(
+                "minecraft:carvers, minecraft:carvers, minecraft:structure_starts, \
+                 minecraft:structure_starts, minecraft:structure_starts, minecraft:structure_starts, \
+                 minecraft:structure_starts, minecraft:structure_starts, minecraft:structure_starts"
+            )
         );
     }
 
@@ -1112,20 +1080,16 @@ mod tests {
     /// supplier), rendered honestly instead of conflated with out-of-cache.
     #[test]
     fn in_ring_diagnostic_distinguishes_no_chunk_held_from_out_of_cache() {
-        let deps = vec![
-            ChunkStatus::Biomes,
-            ChunkStatus::Noise,
-            ChunkStatus::Features,
-            ChunkStatus::Full,
-        ];
-        let step = TestStep::new(deps.clone(), ChunkStatus::Features, 1);
+        let step = GENERATION_PYRAMID
+            .get_step_to(ChunkStatus::Features)
+            .clone();
         let cache = StaticCache2D::create(0, 0, 1, &|_x, _z| {
             Box::new(TestEmptyHolder) as Box<dyn GenerationChunkHolderView>
         });
         let region = WorldGenRegion::new(
             cache,
             ChunkPos::new(0, 0),
-            Box::new(step),
+            step,
             0,
             SUPERFLAT_MIN_Y,
             SUPERFLAT_HEIGHT,
@@ -1135,29 +1099,30 @@ mod tests {
             }),
         );
 
-        // Ring 1 (chunk (1,0)) allows NOISE; the holder has no chunk, so a
-        // request for NOISE fails with no actual status to report.
+        // Ring 1 (chunk (1,0)) allows CARVERS; the holder has no chunk, so a
+        // request at the ring's allowed status fails with no actual status to
+        // report.
         let diagnostic = region
-            .try_get_chunk(1, 0, ChunkStatus::Noise, true)
+            .try_get_chunk(1, 0, ChunkStatus::Carvers, true)
             .err()
             .expect("in-ring empty holder cannot serve the request");
-        assert_eq!(diagnostic.max_allowed_status, Some(ChunkStatus::Noise));
+        assert_eq!(diagnostic.max_allowed_status, Some(ChunkStatus::Carvers));
         assert_eq!(diagnostic.actual_status, None);
         let message = diagnostic.to_string();
         assert!(message.contains("actual status: [no chunk held]"));
-        assert!(message.contains("maximum allowed status: minecraft:noise"));
+        assert!(message.contains("maximum allowed status: minecraft:carvers"));
     }
 
     /// `hasChunk` is the same distance bound as the ring contract.
     #[test]
     fn has_chunk_matches_the_ring_bound() {
         let region = feature_region();
-        for distance in 0..4 {
-            // A chunk at (distance, 0) is within the 4-ring dependency list.
+        for distance in 0..9 {
+            // A chunk at (distance, 0) is within the 9-ring dependency list.
             assert!(region.has_chunk(distance, 0), "ring {distance} has a chunk");
         }
-        assert!(!region.has_chunk(4, 0));
-        assert!(!region.has_chunk(-4, 0));
+        assert!(!region.has_chunk(9, 0));
+        assert!(!region.has_chunk(-9, 0));
     }
 
     // -----------------------------------------------------------------------
@@ -1269,11 +1234,11 @@ mod tests {
         assert_eq!(region.get_sky_darken(), 0);
         assert!(!region.is_client_side());
         assert_eq!(region.get_center(), center());
-        // `getHeight` of the superflat content: `WorldSurface` is a
-        // FINAL_HEIGHTMAPS entry never primed by a BIOMES-persisted chunk, so
-        // the None fallback returns `minY + 1` — Java's region `getHeight` for
-        // the stone floor whose topmost block sits at `minY` (first available
-        // = `minY + 1`).
+        // `getHeight` of the superflat content: the center chunk is persisted
+        // at CARVERS (the FEATURES step's ring-0 dependency) but no block was
+        // ever written, so `WorldSurface` is never primed and the None fallback
+        // returns `minY + 1` — Java's region `getHeight` for the stone floor
+        // whose topmost block sits at `minY` (first available = `minY + 1`).
         assert_eq!(
             region.get_height_at(Types::WorldSurface, 0, 0),
             SUPERFLAT_MIN_Y + 1
@@ -1290,19 +1255,20 @@ mod tests {
         // Write stone at block (0, 0, 0) — chunk (0, 0), inside the write radius.
         let pos = BlockPos::new(0, 0, 0);
         assert!(region.set_block(&pos, BlockState::new(StateId(1)), UPDATE_ALL, 0));
-        // The center chunk's persisted status is BIOMES (< CARVERS), so the
-        // WORLDGEN_HEIGHTMAPS types are maintained. `getHeight` is first
-        // available — one above the topmost block — so the written stone at 0
-        // reads 1 (the floor at -64 is below it).
-        assert_eq!(region.get_height_at(Types::WorldSurfaceWg, 0, 0), 1);
-        // `OceanFloorWg` (blocks-motion) tracks the same column.
-        assert_eq!(region.get_height_at(Types::OceanFloorWg, 0, 0), 1);
+        // The center chunk's persisted status is CARVERS (the FEATURES step's
+        // ring-0 dependency), so `heightmaps_after()` returns the
+        // FINAL_HEIGHTMAPS types. `getHeight` is first available — one above
+        // the topmost block — so the written stone at 0 reads 1 (the floor at
+        // -64 is below it).
+        assert_eq!(region.get_height_at(Types::WorldSurface, 0, 0), 1);
+        // `OceanFloor` (blocks-motion) tracks the same column.
+        assert_eq!(region.get_height_at(Types::OceanFloor, 0, 0), 1);
         // The block itself reads back as non-air.
         assert!(!region.get_block_state(&pos).is_air());
         // A column that was never written still reads above the floor's topmost
         // block (`minY + 1`).
         assert_eq!(
-            region.get_height_at(Types::WorldSurfaceWg, 15, 15),
+            region.get_height_at(Types::WorldSurface, 15, 15),
             SUPERFLAT_MIN_Y + 1
         );
     }
