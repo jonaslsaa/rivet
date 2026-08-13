@@ -15,9 +15,9 @@
 //! trailing zero words, so `get` is false beyond them (Java's `wordsInUse`
 //! bound) and `set` grows the array on demand.
 //!
-//! RivetTodo(#181): `CarvingContext` and the carvers that consume this mask
-//! (the `mc.world.level.levelgen.carver` unit) are not ported; this module
-//! ports the mask value alone. Java's default `additionalMask` is the lambda
+//! RivetTodo(#399): the carver unit's `CarveChunk` block-surface trait is
+//! unbound; the ported `CarvingContext` and concrete carvers consume this mask
+//! directly. Java's default `additionalMask` is the lambda
 //! `(x, y, z) -> false` (`CarvingMask.java` field initializer) — never `null`;
 //! the port models it as `Option`, treating `None` as always-false, which
 //! preserves the default semantics.
