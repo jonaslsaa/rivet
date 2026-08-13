@@ -95,6 +95,20 @@ impl ChunkStatus {
     pub const fn is_or_after(self, other: Self) -> bool {
         self.index() >= other.index()
     }
+
+    /// `ChunkStatus.isOrBefore(ChunkStatus)` — `this.getIndex() <=
+    /// other.getIndex()` (the pipeline ring/status contract `WorldGenRegion`
+    /// uses to bound a requested status by the step's per-ring dependency).
+    pub const fn is_or_before(self, other: Self) -> bool {
+        self.index() <= other.index()
+    }
+
+    /// `ChunkStatus.getName()` — the full registry identifier (`toString()`
+    /// on the key), i.e. the serialization name. `WorldGenRegion`'s
+    /// unavailable-chunk diagnostic and write-zone warnings read it.
+    pub const fn name(self) -> &'static str {
+        self.serialization_name()
+    }
 }
 
 #[cfg(test)]
@@ -138,7 +152,14 @@ mod tests {
                 }
             );
             assert_eq!(status.is_or_after(ChunkStatus::Light), status.index() >= 9);
+            assert_eq!(status.is_or_before(ChunkStatus::Light), status.index() <= 9);
+            assert_eq!(status.name(), status.serialization_name());
         }
+        // The exact ladder bounds: `is_or_before` is inclusive, `is_or_after`
+        // is inclusive, and `name()` is the full-key `serialization_name`.
+        assert!(ChunkStatus::Empty.is_or_before(ChunkStatus::Full));
+        assert!(!ChunkStatus::Full.is_or_before(ChunkStatus::Features));
+        assert_eq!(ChunkStatus::Features.name(), "minecraft:features");
         assert_eq!(
             ChunkStatus::Surface.heightmaps_after(),
             &WORLDGEN_HEIGHTMAPS

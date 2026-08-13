@@ -20,6 +20,7 @@ pub mod level_chunk;
 pub mod player_chunk_loader;
 pub mod region_backed;
 pub mod server_level;
+pub mod world_gen_region;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -36,3 +37,6 @@ pub use region_backed::{
     RegionBackedBootError, RegionChunkSource, RegionLevelPreparation, RegionWorldLayout,
 };
 pub use server_level::{MissingChunkPolicy, ServerLevel, ServerLevelConfig, overworld_dimension};
+pub use world_gen_region::{
+    ChunkStepView, GenerationChunkHolderView, UnavailableChunkDiagnostic, WorldGenRegion,
+};
