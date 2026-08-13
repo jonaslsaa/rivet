@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Compile and run the Paper-side `ComposedNoiseProbe` against the pinned Paper
-# 26.2 runtime, regenerating `fixtures/worldgen/composed-noise.json` (the
+# 26.2 runtime, regenerating `fixtures/composed-noise/composed-noise.json` (the
 # NOISE-checkpoint golden for the composed seed-42 overworld noise stack). The
 # probe boots the vanilla registries (no server boot) exactly like
 # WorldGenSampler and emits every value as the round-tripping JSON double PLUS
