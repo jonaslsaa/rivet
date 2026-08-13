@@ -1380,7 +1380,10 @@ impl CacheAllInCell {
     ) -> Self {
         let values = Arc::new(Mutex::new(vec![
             0.0;
-            (cell_width.wrapping_mul(cell_width).wrapping_mul(cell_height)) as usize
+            (cell_width
+                .wrapping_mul(cell_width)
+                .wrapping_mul(cell_height))
+                as usize
         ]));
         CacheAllInCell {
             noise_filler,
