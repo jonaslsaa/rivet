@@ -475,8 +475,11 @@ pub trait WorldSurfaceHeight: Send + Sync {
     /// `ChunkAccess.getHeight(WORLD_SURFACE_WG, x, z)` — the column's topmost
     /// non-air Y, or `min_y - 1` for a never-set (unprimed) column. `x`/`z`
     /// are masked to the local `0..=15` chunk range by the implementer (Java's
-    /// `getHeight` does `x & 15, z & 15`), so absolute or out-of-range
-    /// coordinates are safe.
+    /// `getHeight` does `x & 15, z & 15`), exactly like Java: the mask
+    /// prevents an out-of-bounds read, but a coordinate outside the chunk's own
+    /// 16-block range silently selects a different local column — callers pass
+    /// chunk-local or already-masked coordinates (`SteepMaterialCondition`
+    /// probes `blockX & 15`).
     fn get_world_surface_wg_height(&self, x: i32, z: i32) -> i32;
 }
 

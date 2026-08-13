@@ -83,9 +83,10 @@ pub static BIOME: LazyLock<ResourceKey<Registry<Biome>>> = LazyLock::new(|| {
 });
 
 // Java's `TEMPERATURE_CACHE_SIZE` (`1024`) and the frozen
-// `ThreadLocal<Long2FloatLinkedOpenHashMap>` temperature cache are not ported:
-// the pure `getValue` math is deterministic and the cache is a memoization
-// only, so it would be dead state in the value model.
+// `ThreadLocal<Long2FloatLinkedOpenHashMap>` temperature cache field are not
+// ported: the field is declared but never read in the pinned Paper 26.2
+// `Biome` (Java re-evaluates the noise per call), and the pure `getValue` math
+// is deterministic, so the cache would be dead state in the value model.
 
 /// `Biome.TEMPERATURE_NOISE` — `PerlinSimplexNoise(WorldgenRandom(
 /// LegacyRandomSource(1234L)), ImmutableList.of(0))`.
@@ -407,11 +408,11 @@ impl Biome {
 /// [`Biome::cold_enough_to_snow`]).
 ///
 /// The temperature noise terms the test computes depend only on `(x, z)`, so a
-/// caller evaluating a full column re-samples them once per `y`. Java
-/// memoizes this in a `ThreadLocal` temperature cache; the module doc declines
-/// to port that cache (the pure `getValue` math is deterministic and the cache
-/// is dead state in the value model), so a per-column memoization, if ever
-/// needed, belongs to the production `SurfaceRules` wiring — not this
+/// caller evaluating a full column re-samples them once per `y`. Java's
+/// `ThreadLocal` `temperatureCache` field is declared but never read in the
+/// pinned Paper 26.2 `Biome` — Java re-evaluates the noise per call too — so
+/// this port is not trading away a Java memoization. A per-column memoization,
+/// if ever wanted, belongs to the production `SurfaceRules` wiring — not this
 /// capability seam.
 pub trait ColdEnoughToSnow: Send + Sync {
     /// `Biome.coldEnoughToSnow(BlockPos, int seaLevel)` — whether the biome is
