@@ -38,10 +38,6 @@
 //! dispatch folds them in. Until they are emitted, dispatching to an unavailable
 //! leaf fails explicitly (an honest panic naming the id), never fabricating
 //! success — the same capability-unavailable seam as `#399` world access.
-//! `feature_is_placed` is the parallel dispatch surface for the "is the placed
-//! feature genuinely placed" query, mirroring `feature_place`'s shape (no Java
-//! method is named `isPlaced`; Java surfaces the boolean directly as the
-//! `place` return value).
 //!
 //! The configured/registry codecs (`DIRECT_CODEC` by-name dispatch,
 //! `RegistryFileCodec`/`RegistryCodecs.homogeneousList`, the per-feature
@@ -147,28 +143,6 @@ impl<FC: FeatureConfiguration> ConfiguredFeature<FC> {
         self.config.get_sub_features()
     }
 
-    /// "Is this configured feature genuinely placed" — the query form of
-    /// `place`, dispatched through the parallel `#181` surface
-    /// [`feature_is_placed`]. Java has no `isPlaced` method; it surfaces the
-    /// boolean directly as the `place` return value. Kept distinct so the two
-    /// dispatch forms stay folded together in the generated table.
-    pub fn is_placed<R: RandomSource>(
-        &self,
-        level: &mut dyn WorldGenLevel,
-        chunk_generator: &dyn ChunkGenerator,
-        random: &mut R,
-        origin: &BlockPos,
-    ) -> bool {
-        feature_is_placed(
-            self.feature.clone(),
-            &self.config,
-            level,
-            chunk_generator,
-            random,
-            origin,
-        )
-    }
-
     /// Erase to the wildcard `ConfiguredFeature<?, ?>` — the form stored in
     /// `PlacedFeature` holders and the `LIST_CODEC` holder sets.
     pub fn into_erased(self) -> ConfiguredFeatureErased {
@@ -228,25 +202,6 @@ impl ConfiguredFeatureErased {
         &self,
     ) -> Box<dyn Iterator<Item = Holder<ConfiguredFeatureErased>> + '_> {
         self.config.get_sub_features()
-    }
-
-    /// The query form of `place` (see [`ConfiguredFeature::is_placed`]),
-    /// dispatched through [`feature_is_placed`].
-    pub fn is_placed<R: RandomSource>(
-        &self,
-        level: &mut dyn WorldGenLevel,
-        chunk_generator: &dyn ChunkGenerator,
-        random: &mut R,
-        origin: &BlockPos,
-    ) -> bool {
-        feature_is_placed(
-            self.feature.clone(),
-            self.config.as_ref(),
-            level,
-            chunk_generator,
-            random,
-            origin,
-        )
     }
 }
 
@@ -349,9 +304,10 @@ impl FeatureId {
 /// reach: `minecraft:no_op` (id 0, `NoOpFeature` over `NoneFeatureConfiguration`).
 /// Every other registered feature is an unavailable leaf (owned by its own
 /// manifest unit) — dispatching to one fails explicitly with an honest panic
-/// naming the feature id, never fabricating success. Java's generated path
-/// throws `IllegalStateException` via `Registry.getValueOrThrow` only when the
-/// key is genuinely missing; here the id is *registered* but its behavior has
+/// naming the feature id, never fabricating success. `Registry.getValueOrThrow`
+/// is the by-name CODEC path (`#126`), not placement dispatch — `ConfiguredFeature.place`
+/// calls the `Feature` object directly, so Java cannot fail placement on an
+/// unregistered key at all. Here the id is *registered* but its behavior has
 /// not been emitted, so the failure is the same capability-unavailable seam as
 /// `#399` world access and `block_state_provider_get_state`'s unknown-type
 /// arm. The `minecraft:no_op` id is the feature registry's insertion index 0
@@ -381,26 +337,6 @@ pub fn feature_place<R: RandomSource>(
             other
         ),
     }
-}
-
-/// The `#181` hub, query form — "is the placed feature genuinely placed".
-///
-/// No Java method is named `isPlaced`; Java surfaces the boolean directly as
-/// the `place` return value (`ConfiguredFeature.place` → `Feature.place(...)`).
-/// This is the parallel dispatch surface `ConfiguredFeature`/`PlacedFeature`
-/// expose for the query form, mirroring [`feature_place`]'s dispatch shape so
-/// the generated `#181` table can fold both into the same monomorphized match.
-/// Where a leaf is unavailable it fails explicitly (honest), never fabricating
-/// a verdict.
-pub fn feature_is_placed<R: RandomSource>(
-    feature: FeatureId,
-    config: &dyn FeatureConfiguration,
-    level: &mut dyn WorldGenLevel,
-    chunk_generator: &dyn ChunkGenerator,
-    random: &mut R,
-    origin: &BlockPos,
-) -> bool {
-    feature_place(feature, config, level, chunk_generator, random, origin)
 }
 
 // ---------------------------------------------------------------------------
@@ -504,25 +440,6 @@ mod tests {
         assert!(placed);
     }
 
-    /// `feature_is_placed` is the parallel dispatch surface; for the one leaf
-    /// the core can faithfully reach it mirrors `feature_place`'s verdict.
-    #[test]
-    fn feature_is_placed_returns_true_for_no_op() {
-        let mut level = TestLevel;
-        let generator = TestGenerator;
-        let mut random = LegacyRandomSource::new(1);
-        let origin = BlockPos::new(0, 0, 0);
-        let placed = feature_is_placed(
-            FeatureId::new(0),
-            &NoneFeatureConfiguration::INSTANCE,
-            &mut level,
-            &generator,
-            &mut random,
-            &origin,
-        );
-        assert!(placed);
-    }
-
     /// `ConfiguredFeature.place` routes through `feature_place` with the
     /// feature's config; a configured `minecraft:no_op` places `true`.
     #[test]
@@ -548,19 +465,6 @@ mod tests {
         let mut random = LegacyRandomSource::new(1);
         let origin = BlockPos::new(0, 0, 0);
         assert!(configured.place(&mut level, &generator, &mut random, &origin));
-    }
-
-    /// The query form on both the generic and erased configured features.
-    #[test]
-    fn configured_no_op_feature_is_placed_returns_true() {
-        let generic = ConfiguredFeature::new(FeatureId::new(0), NoneFeatureConfiguration::INSTANCE);
-        let erased = generic.clone().into_erased();
-        let mut level = TestLevel;
-        let generator = TestGenerator;
-        let mut random = LegacyRandomSource::new(1);
-        let origin = BlockPos::new(0, 0, 0);
-        assert!(generic.is_placed(&mut level, &generator, &mut random, &origin));
-        assert!(erased.is_placed(&mut level, &generator, &mut random, &origin));
     }
 
     /// Hostile: dispatching to a registered feature whose behavior has not been
