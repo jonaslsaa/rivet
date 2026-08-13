@@ -39,6 +39,7 @@ use crate::levelgen::synth::blended_noise::BlendedNoise;
 use crate::levelgen::synth::normal_noise::{NoiseParameters, NormalNoise};
 use rivet_registry::Identifier;
 use rivet_registry::ResourceKey;
+use rivet_registry::Holder;
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::holder_lookup::HolderGetter;
 use rivet_registry::registry::Registry;
@@ -127,6 +128,7 @@ impl<'a> RandomState<'a> {
             let helper = NoiseWiringHelper {
                 random: &random,
                 noises,
+                functions,
                 seed,
                 use_legacy_init,
                 noise_instances: &noise_instances,
@@ -223,6 +225,10 @@ impl<'a> RandomState<'a> {
 struct NoiseWiringHelper<'a> {
     random: &'a AlgorithmPositionalRandomFactory,
     noises: &'a Registry<NoiseParameters>,
+    /// The density-function registry — resolves `HolderHolder::Reference` values
+    /// the router carries from a bootstrap (Java's `BuildState` binds every
+    /// reference before the router reaches the wiring visitor).
+    functions: &'a Registry<DensityFunctionValue>,
     seed: i64,
     use_legacy_init: bool,
     noise_instances: &'a Mutex<HashMap<ResourceKey<NoiseParameters>, NormalNoise>>,
@@ -308,6 +314,13 @@ impl Visitor for NoiseWiringHelper<'_> {
     fn visit_noise(&self, noise: &NoiseHolder) -> NoiseHolder {
         self.visit_noise_impl(noise)
     }
+
+    fn resolve_holder(
+        &self,
+        holder: &Holder<Arc<dyn DensityFunction>>,
+    ) -> Option<Arc<dyn DensityFunction>> {
+        Some(holder.value(&*self.functions).clone())
+    }
 }
 
 /// `RandomState`'s anonymous noise-flattener visitor — resolves every
@@ -342,6 +355,13 @@ impl Visitor for NoiseFlattener<'_> {
         let value = self.wrap_new(input.as_ref());
         self.wrapped.lock().unwrap().insert(key, value.clone());
         value
+    }
+
+    fn resolve_holder(
+        &self,
+        holder: &Holder<Arc<dyn DensityFunction>>,
+    ) -> Option<Arc<dyn DensityFunction>> {
+        Some(holder.value(&*self.functions).clone())
     }
 }
 

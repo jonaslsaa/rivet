@@ -175,6 +175,19 @@ pub fn map_all(
         fn visit_noise(&self, noise: &NoiseHolder) -> NoiseHolder {
             self.visitor.visit_noise(noise)
         }
+
+        // `mapChildren` runs against `self` (Java's anonymous `RecursiveVisitor`),
+        // so `HolderHolder.mapChildren` reaches the resolve seam through THIS
+        // visitor — forward it to the wrapped visitor (Java's reference
+        // resolution has no equivalent seam; the bound holder is a plain
+        // `Holder`). Without the forward a registry-backed visitor's
+        // `resolve_holder` would never fire.
+        fn resolve_holder(
+            &self,
+            holder: &Holder<Arc<dyn DensityFunction>>,
+        ) -> Option<Arc<dyn DensityFunction>> {
+            self.visitor.resolve_holder(holder)
+        }
     }
 
     RecursiveVisitor { visitor }.apply(function)
