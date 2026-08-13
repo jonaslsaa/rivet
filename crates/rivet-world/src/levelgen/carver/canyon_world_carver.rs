@@ -13,9 +13,10 @@
 //!   (`random_source_create_thread_local_instance_with_seed`); `initWidthFactors`
 //!   consumes `nextInt(widthSmoothness)`/`nextFloat()` from it before the walk.
 //! - `widthFactorPerHeight` is indexed `[yIndex - 1]` in `shouldSkip`, where
-//!   `yIndex = y - context.getMinGenY()`; the first carve block (`yIndex == 1`)
-//!   reads `widthFactorPerHeight[0]` — the closure must see the full array
-//!   (`&[f32]`).
+//!   `yIndex = y - context.getMinGenY()`. `carveEllipsoid`'s y-loop starts at
+//!   the top (`worldY = maxY`) and descends while `worldY > minY`, with
+//!   `minY >= getMinGenY() + 1`, so `yIndex >= 2` and index 0 is never read;
+//!   the closure still captures the full array (`&[f32]`).
 //! - `updateVerticalRadius`'s `Mth.randomBetween(random, 0.75F, 1.0F)` is
 //!   `mth::random_between(random, 0.75, 1.0)` (max-exclusive).
 //! - `maxDistance = (getRange() * 2 - 1) * 16` = 112 for the default range 4.
