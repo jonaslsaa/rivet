@@ -2178,7 +2178,8 @@ mod tests {
             RegistrationInfo::BUILT_IN,
         );
         let df_registry = df_builder.freeze();
-        let reference = df_registry.get_or_throw(&crate::levelgen::noisegen::noise_router_data::FACTOR);
+        let reference =
+            df_registry.get_or_throw(&crate::levelgen::noisegen::noise_router_data::FACTOR);
         let final_density = Arc::new(fns::HolderHolder::new(reference));
 
         let settings = test_settings_with_final_density(final_density);
