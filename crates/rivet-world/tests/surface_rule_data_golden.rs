@@ -7,9 +7,11 @@
 //! Paper 26.2 runtime (`0a99345`), plus structural occurrence-count stats.
 //! Regenerate with `scripts/run_surface_rule_data_probe.sh`.
 //!
-//! The nether tree is the only one verified here: it exercises every node type
-//! the merged codec surface ports and needs only the five nether biomes in the
-//! test registry. The overworld / overworldLike trees stay present in the
+//! The nether tree is the only one verified here: it exercises ten of the
+//! fifteen dispatch types the merged codec surface ports (the other five —
+//! `above_preliminary_surface`, `bandlands`, `steep`, `temperature`, `water` —
+//! appear only in the overworld trees) and needs only the five nether biomes in
+//! the test registry. The overworld / overworldLike trees stay present in the
 //! fixture but UNVERIFIED (see `overworld_trees_are_unverified`) because their
 //! `biome_is` holder sets reference the 28 overworld biomes, which the nether-
 //! only test registry cannot resolve.
