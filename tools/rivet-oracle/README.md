@@ -406,8 +406,9 @@ byte-deterministic), injects level-33 forced tickets for a -6..6 spawn grid
 (the issue #51 mechanism), and boot2 finishes them to `minecraft:full`. The
 committed handoff is the -4..4 interior subset — every committed chunk's
 neighbors are forced FULL too, keeping border-tree placement deterministic. The
-capture runs on its own isolated `server-port` (25600) so it never collides
-with a concurrent release gate booting on the shared 25599. The
+capture runs in its own dedicated scratch run dir and binds `server-port=0` (an
+OS-assigned free port) so it never collides with a concurrent release gate
+booting on the shared 25599 or any other fixed port. The
 `regenerate --generated-expected` path requires two independent captures to be
 byte-identical AND contract-valid before committing anything — two equally-wrong
 captures are refused, never committed.

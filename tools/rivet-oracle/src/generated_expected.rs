@@ -97,19 +97,22 @@ pub fn forced_coordinates() -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// The capture boot's dedicated `server-port`, isolated from the oracle's
-/// default 25599 (which the serialized release-gate boots and the generated-
-/// world runner reuse). The capture is headless (no client joins, `enable-status
-/// =false`), so the port only needs to be free for the server to bind; pinning a
-/// distinct port keeps a concurrent strict gate on 25599 from colliding.
-const CAPTURE_SERVER_PORT: &str = "25600";
+/// The capture boot's `server-port` setting: `0` asks Paper to bind an
+/// OS-assigned free port. The capture is headless (no client joins,
+/// `enable-status=false`), so the bound port is never addressed; a fixed
+/// isolated port would risk colliding with another worktree's concurrent
+/// tooling, and the shared 25599 is the serialized release gate's port. Binding
+/// port 0 keeps a concurrent strict gate (or any other server) on any port from
+/// colliding with the capture boot.
+const CAPTURE_SERVER_PORT: &str = "0";
 
 /// Rewrite the committed M2 `server.properties` text for a capture: pin `level-
-/// seed` to `seed` and isolate `server-port` to `CAPTURE_SERVER_PORT` (the
-/// committed 25599 is shared by the M2 gate and the generated-world runner; a
-/// concurrent strict gate must not collide with the capture boot). Returns
-/// `Error::Gate` when either line is absent — the capture config must not be
-/// silently derived from a config that lacks the lines it depends on.
+/// seed` to `seed` and set `server-port` to `CAPTURE_SERVER_PORT` (`0` → an
+/// OS-assigned free port), so the capture never binds the shared oracle port
+/// 25599 (the serialized release gate's port) or any fixed port another
+/// worktree might use. Returns `Error::Gate` when either line is absent — the
+/// capture config must not be silently derived from a config that lacks the
+/// lines it depends on.
 fn rewrite_properties(text: &str, seed: i64) -> Result<String, Error> {
     let seed_line = format!("level-seed={seed}");
     let mut rewritten = String::new();
@@ -161,6 +164,53 @@ fn seed_properties(seed: i64) -> Result<PathBuf, Error> {
     Ok(path)
 }
 
+/// The capture's dedicated run dir — a scratch space isolated from the shared
+/// `work/verify/run` the oracle gates (M0/M2/FULL) boot in, so a capture can
+/// never wipe or be wiped by a concurrent gate run.
+fn capture_run_dir() -> PathBuf {
+    crate::crate_dir().join("work/generated-expected/run")
+}
+
+/// Link an existing materialized Paper runtime into the capture run dir so the
+/// capture does not re-materialize ~160MB of libraries on first use. Reuses
+/// whatever runtime is already materialized: the dedicated dir's own copy
+/// first, then the shared `work/run` (the M0 fixture-boot runtime), then the
+/// shared `work/verify/run`. Each `sub` (`libraries`, `versions`, `cache`) is
+/// symlinked only when the capture dir lacks it. `prepare_run_dir` reuses
+/// linked dirs exactly like real dirs (it keeps them across prepares), so this
+/// is safe across the capture's two boots and across captures.
+fn ensure_runtime_reuse(run_dir: &Path) -> Result<(), Error> {
+    let root = crate::crate_dir().join("work");
+    let candidates = [
+        run_dir.to_path_buf(),
+        root.join("run"),
+        root.join("verify/run"),
+    ];
+    for sub in ["libraries", "versions", "cache"] {
+        let dest = run_dir.join(sub);
+        if dest.exists() {
+            continue;
+        }
+        for cand in &candidates {
+            let src = cand.join(sub);
+            if src.is_dir() {
+                if !run_dir.exists() {
+                    fs::create_dir_all(run_dir)?;
+                }
+                std::os::unix::fs::symlink(&src, &dest).map_err(|e| {
+                    Error::Gate(format!(
+                        "cannot symlink {} -> {}: {e}",
+                        src.display(),
+                        dest.display()
+                    ))
+                })?;
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Boot the pinned Paper on a fresh seed world, force-generate the spawn grid
 /// to FULL, and extract the deterministic per-chunk sample contract.
 ///
@@ -177,7 +227,11 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
         ))
     })?;
     let props = seed_properties(seed)?;
-    let run_dir = crate::crate_dir().join("work/verify/run");
+    let run_dir = capture_run_dir();
+    // Reuse the materialized Paper runtime (libraries/versions/cache) from any
+    // existing oracle runtime so the first capture does not re-materialize
+    // ~160MB; the dedicated dir's own copies are reused on later captures.
+    ensure_runtime_reuse(&run_dir)?;
     let grid = grid_coordinates();
     let forced = forced_coordinates();
 
@@ -778,8 +832,9 @@ mod tests {
     /// The capture config must isolate the capture boot from the shared oracle
     /// port: the committed `server-normal.properties` serves the M2 gate on
     /// 25599, so a capture that reuses it concurrently collides with the
-    /// serialized release gate. `rewrite_properties` pins both the seed and a
-    /// dedicated port.
+    /// serialized release gate. `rewrite_properties` pins the seed and sets
+    /// `server-port=0` so Paper binds an OS-assigned free port (the headless
+    /// capture never addresses it).
     #[test]
     fn capture_properties_rewrite_seed_and_isolate_port() {
         let src = fixtures_dir().join("server-normal.properties");
@@ -794,9 +849,8 @@ mod tests {
             "unexpected seed in the capture config"
         );
         assert!(
-            rewritten.contains(&format!("server-port={CAPTURE_SERVER_PORT}\n")),
-            "capture server-port {} not pinned",
-            CAPTURE_SERVER_PORT
+            rewritten.contains("server-port=0\n"),
+            "capture server-port must be 0 (OS-assigned free port)"
         );
         assert!(
             !rewritten.contains("server-port=25599"),
