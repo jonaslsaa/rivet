@@ -240,11 +240,14 @@ impl PlacedFeature {
     ///
     /// `Holder::value(lookup)` is the back-reference-rule resolution (OWNERSHIP
     /// §Registries): a `Direct` holder yields its inline value; a `Reference`
-    /// resolves by id through the lookup, panicking with Java's literal
-    /// "Trying to access unbound value '<key>' from registry <id>" message only
-    /// when the id genuinely cannot resolve — Java's `Reference.value()` throws
-    /// only for an unbound reference and resolves a bound one, so the lookup
-    /// resolution is byte-faithful.
+    /// resolves by id through the lookup, panicking with Java's
+    /// "Trying to access unbound value '<key>' from registry <id>" message shape
+    /// only when the id genuinely cannot resolve — Java's `Reference.value()`
+    /// throws only for an unbound reference and resolves a bound one. The
+    /// message is shape-faithful, not byte-identical: the pure-ID `Reference`
+    /// stores no key, so an unresolvable id renders the key as "null" and the
+    /// registry as its numeric id, where Java interpolates the reference's key
+    /// and owner strings (see `render_holder` in `holder.rs`).
     fn resolved_feature<'a>(
         &'a self,
         lookup: &'a dyn HolderLookup<ConfiguredFeatureErased>,
@@ -448,8 +451,10 @@ mod tests {
     #[test]
     fn get_features_panics_on_missing_key_with_java_message() {
         // A `Reference` whose id the lookup cannot resolve is Java's unbound
-        // reference: `Holder::value` panics with the literal "Trying to access
-        // unbound value ..." message (Java `Reference.value()`).
+        // reference: `Holder::value` panics with Java's
+        // "Trying to access unbound value ..." message shape (`Reference.value()`),
+        // the key rendering as "null" — the pure-ID `Reference` stores no key,
+        // so an unresolvable id cannot recover it (see `render_holder`).
         let lookup = configured_feature_lookup(Vec::new());
         let registry_id = lookup.registry_id();
         // id 42 is out of range — the lookup cannot resolve it.
