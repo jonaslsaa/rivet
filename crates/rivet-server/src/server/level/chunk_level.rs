@@ -20,6 +20,7 @@
 use rivet_world::chunk::status::ChunkStatus;
 use rivet_world::chunk::status::chunk_pyramid::GENERATION_PYRAMID;
 use rivet_world::chunk::status::chunk_step::ChunkStep;
+use std::sync::LazyLock;
 
 use super::FullChunkStatus;
 
@@ -29,17 +30,20 @@ pub const FULL_CHUNK_LEVEL: i32 = 33;
 pub const BLOCK_TICKING_LEVEL: i32 = 32;
 /// `ChunkLevel.ENTITY_TICKING_LEVEL` — the level at which a chunk entity-ticks.
 pub const ENTITY_TICKING_LEVEL: i32 = 31;
-/// `ChunkLevel.MAX_LEVEL` — the highest level a chunk can be loaded at
-/// (`FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK`).
-pub const MAX_LEVEL: i32 = FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK;
 
 /// `ChunkLevel.RADIUS_AROUND_FULL_CHUNK` — the FULL step's accumulated-
 /// dependency radius (the number of levels a chunk can be below FULL and still
-/// be in generation range). Java derives it from
-/// `FULL_CHUNK_STEP.accumulatedDependencies().getRadius()`; `const` here is
-/// Java's `static final int`, and the value is pinned against the authoritative
-/// pyramid in `tests::radius_and_constants_match_the_generation_pyramid`.
-pub const RADIUS_AROUND_FULL_CHUNK: i32 = 11;
+/// be in generation range). Java computes it once at class-init as
+/// `FULL_CHUNK_STEP.accumulatedDependencies().getRadius()`; here the pyramid's
+/// FULL step (#594) is the single source of truth and the value is derived once
+/// into a `LazyLock` (Java's `static final int`). No hardcoded copy.
+pub static RADIUS_AROUND_FULL_CHUNK: LazyLock<i32> =
+    LazyLock::new(|| full_step().accumulated_dependencies().get_radius() as i32);
+
+/// `ChunkLevel.MAX_LEVEL` — the highest level a chunk can be loaded at
+/// (`FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK`), Java's `static final`.
+pub static MAX_LEVEL: LazyLock<i32> =
+    LazyLock::new(|| FULL_CHUNK_LEVEL + *RADIUS_AROUND_FULL_CHUNK);
 
 /// `ChunkLevel.FULL_CHUNK_STEP` — the generation pyramid's FULL step
 /// (`ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL)`), consumed
@@ -65,7 +69,7 @@ pub fn get_status_around_full_chunk_with_default(
     distance_to_full_chunk: i32,
     default_value: Option<ChunkStatus>,
 ) -> Option<ChunkStatus> {
-    if distance_to_full_chunk > RADIUS_AROUND_FULL_CHUNK {
+    if distance_to_full_chunk > *RADIUS_AROUND_FULL_CHUNK {
         default_value
     } else if distance_to_full_chunk <= 0 {
         Some(ChunkStatus::Full)
@@ -112,7 +116,7 @@ pub fn full_status(level: i32) -> FullChunkStatus {
 /// a `FullChunkStatus` ladder rung.
 pub fn by_full_status(status: FullChunkStatus) -> i32 {
     match status {
-        FullChunkStatus::Inaccessible => MAX_LEVEL,
+        FullChunkStatus::Inaccessible => *MAX_LEVEL,
         FullChunkStatus::Full => FULL_CHUNK_LEVEL,
         FullChunkStatus::BlockTicking => BLOCK_TICKING_LEVEL,
         FullChunkStatus::EntityTicking => ENTITY_TICKING_LEVEL,
@@ -131,7 +135,7 @@ pub fn is_block_ticking(level: i32) -> bool {
 
 /// `ChunkLevel.isLoaded(int level)` — `level <= MAX_LEVEL`.
 pub fn is_loaded(level: i32) -> bool {
-    level <= MAX_LEVEL
+    level <= *MAX_LEVEL
 }
 
 #[cfg(test)]
@@ -168,18 +172,20 @@ mod tests {
         }
     }
 
-    /// The `const` level↔status constants must match the authoritative
-    /// generation pyramid (`#594`), which is the same source Java derives them
-    /// from. This is the composition seam: no parallel table exists, so the
-    /// consts (Java's `static final int`) are pinned against the pyramid here.
+    /// The derived level↔status constants must match the authoritative
+    /// generation pyramid (#594), the same source Java derives them from. This
+    /// is the composition seam: `RADIUS_AROUND_FULL_CHUNK` and `MAX_LEVEL` are
+    /// `LazyLock`s computed from the pyramid, so the assertions here pin the
+    /// derivation (index 0 = SPAWN, the radius, the by_status radii) rather
+    /// than a hand-coded copy.
     #[test]
     fn radius_and_constants_match_the_generation_pyramid() {
         let full = GENERATION_PYRAMID.get_step_to(ChunkStatus::Full);
         assert_eq!(
-            RADIUS_AROUND_FULL_CHUNK,
+            *RADIUS_AROUND_FULL_CHUNK,
             full.accumulated_dependencies().get_radius() as i32
         );
-        assert_eq!(MAX_LEVEL, FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK);
+        assert_eq!(*MAX_LEVEL, FULL_CHUNK_LEVEL + *RADIUS_AROUND_FULL_CHUNK);
         // Index 0 of the FULL accumulated dependencies is SPAWN (the parent),
         // never FULL itself — the #594 arbitration (the target status is never
         // its own dependency). ChunkLevel never reads it (distance <= 0
@@ -213,12 +219,12 @@ mod tests {
             c["ENTITY_TICKING_LEVEL"].as_i64().unwrap() as i32
         );
         assert_eq!(
-            RADIUS_AROUND_FULL_CHUNK,
+            *RADIUS_AROUND_FULL_CHUNK,
             c["RADIUS_AROUND_FULL_CHUNK"].as_i64().unwrap() as i32
         );
-        assert_eq!(MAX_LEVEL, c["MAX_LEVEL"].as_i64().unwrap() as i32);
+        assert_eq!(*MAX_LEVEL, c["MAX_LEVEL"].as_i64().unwrap() as i32);
         // MAX_LEVEL derives from the radius.
-        assert_eq!(MAX_LEVEL, FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK);
+        assert_eq!(*MAX_LEVEL, FULL_CHUNK_LEVEL + *RADIUS_AROUND_FULL_CHUNK);
     }
 
     #[test]

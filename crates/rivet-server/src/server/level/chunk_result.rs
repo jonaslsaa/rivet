@@ -15,9 +15,18 @@
 //! scheduler seams (CompletableFuture chains, chunk-task dispatchers) and holds
 //! static unloaded-chunk constants (Paper's `ChunkMap.UNLOADED_CHUNK_LIST_RESULT`
 //! / `GenerationChunkHolder.UNLOADED_CHUNK`) — the boxed closure must cross
-//! thread boundaries. Java's `@Nullable` value is modeled with `Option<T>` at
-//! the call sites that need it — `Success(T)` cannot hold null, so the static
-//! `orElse`'s null-through branch cannot arise.
+//! thread boundaries.
+//!
+//! **`Success(null)`.** Java's `ChunkResult.of(T)` accepts a `@Nullable T`, so
+//! `Success(null)` is legal, and the static `orElse` falls through to the
+//! fallback when a `Success` holds null. Rust models this with the value type
+//! `Option<R>`: `ChunkResult<Option<R>>::Success(None)` *is* Java's
+//! `Success(null)`. The instance `or_else` keeps that shape (a `Success(None)`
+//! yields `None` — Java's `Success(null).orElse(x)` returns null), and the
+//! faithful static null-through is `or_else_nullable` (Java's static `orElse`:
+//! `Success(None)` / `Fail` → the fallback, `Success(Some(r))` → `r`). The
+//! non-null static `or_else_value` is the `Success(T)`-only form, used when the
+//! pipeline holds a concrete value and the fallback is non-null.
 
 /// `ChunkResult<T>` — `Success(T)` or `Fail(error supplier)`.
 pub enum ChunkResult<T> {
@@ -32,6 +41,10 @@ impl<T> ChunkResult<T> {
     /// so a `Success` result can be a `static` item (the pipeline's unloaded
     /// chunk results; Paper's `error` statics need `LazyLock` in Rust — see
     /// the `Send`/`Sync` test).
+    ///
+    /// Java's `of(@Nullable T)` also permits `Success(null)`; pass the value as
+    /// `Option<R>` to represent nullability (`of(None::<R>)` is Java's
+    /// `Success(null)`) — see the module doc and `or_else_nullable`.
     pub const fn of(value: T) -> Self {
         Self::Success(value)
     }
@@ -69,10 +82,27 @@ impl<T> ChunkResult<T> {
         }
     }
 
+    /// Static `ChunkResult.orElse(result, orElse)` over a nullable value type:
+    /// Java's exact null-through semantics. `result` is a `ChunkResult<Option<R>>`
+    /// — `Success(None)` is Java's `Success(null)` — and `orElse` is the
+    /// `@Nullable` fallback. Returns `r` for `Success(Some(r))`, and `or_else`
+    /// for both `Success(None)` (the null-through branch) and `Fail`.
+    pub fn or_else_nullable<R>(result: Self, or_else: R) -> R
+    where
+        T: Into<Option<R>>,
+    {
+        match result {
+            Self::Success(value) => match value.into() {
+                Some(r) => r,
+                None => or_else,
+            },
+            Self::Fail { .. } => or_else,
+        }
+    }
+
     /// Static `ChunkResult.orElse(result, orElse)` — the value on `Success`,
-    /// the fallback on `Fail`. Java's null-through case (`Success` holding a
-    /// null value → fallback) cannot arise: Rust `Success(T)` cannot hold
-    /// null, so the `result != null` test always passes for a `Success`.
+    /// the fallback on `Fail`. This is the non-null form (the value type is a
+    /// concrete `T`); the nullable form is `or_else_nullable`.
     pub fn or_else_value(result: Self, or_else: T) -> T {
         match result {
             Self::Success(value) => value,
@@ -197,6 +227,28 @@ mod tests {
         assert_eq!(ChunkResult::or_else_value(ChunkResult::of(5), 99), 5);
         assert_eq!(
             ChunkResult::or_else_value(ChunkResult::<i32>::error("x"), 99),
+            99
+        );
+    }
+
+    /// Java's static `orElse` falls through to the fallback when a `Success`
+    /// holds null. `ChunkResult<Option<R>>::Success(None)` is that
+    /// `Success(null)`; `or_else_nullable` reproduces the null-through exactly.
+    #[test]
+    fn or_else_nullable_models_java_success_null_through() {
+        // Success(Some(r)) -> r.
+        assert_eq!(
+            ChunkResult::or_else_nullable(ChunkResult::of(Some(5)), 99),
+            5
+        );
+        // Success(None) is Java's Success(null) -> the fallback.
+        assert_eq!(
+            ChunkResult::or_else_nullable(ChunkResult::of(None::<i32>), 99),
+            99
+        );
+        // Fail -> the fallback.
+        assert_eq!(
+            ChunkResult::or_else_nullable::<i32>(ChunkResult::<Option<i32>>::error("x"), 99),
             99
         );
     }
