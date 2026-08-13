@@ -95,19 +95,14 @@ cache_dirs() { # worktree build caches: nested target/ dirs, pruned on their own
   nested_cargo_targets "$1"
 }
 
-newest_mtime() { # $1 = path to stat; reads cache dirs (one per line) from stdin
-  local newest m d list
+newest_mtime() { # $1 = path to stat; $2 = cache dirs (one per line), or empty
+  local newest m d
   newest=$(stat -f %m "$1" 2>/dev/null || echo 0)
-  if [ -t 0 ]; then
-    list=$(cache_dirs "$1") # stdin is a tty (interactive call): derive the list
-  else
-    list=$(cat)             # consume stdin; an empty pipe yields nothing to block on
-  fi
   while read -r d; do
     [ -n "$d" ] || continue
     m=$(stat -f %m "$d" 2>/dev/null || echo 0)
     [ "$m" -gt "$newest" ] && newest=$m
-  done <<< "$list"
+  done <<< "$2"
   echo "$newest"
 }
 
@@ -121,6 +116,12 @@ touched_within() { # cargo writes deep, so a root stat alone would call live bui
   # <hash>/lib-<crate>.json) in place at depth 4, which does not bump the
   # depth-3 hash dir's mtime — a shallower probe would miss an active build.
   [ -n "$(find "$1" -maxdepth 4 -mmin "-$2" -print -quit 2>/dev/null)" ]
+}
+
+canonical_dir() { # $1 = path; canonical absolute path if it is a real dir, else empty
+  local r=${1:-}
+  [ -n "$r" ] && [ -d "$r" ] || return 0
+  cd "$r" 2>/dev/null && pwd -P
 }
 
 sweep_tmp() {
@@ -194,7 +195,7 @@ main() {
 
     caches=$(cache_dirs "$wt")
     if [ -n "$caches" ]; then
-      age_h=$(( (NOW - $(newest_mtime "$wt" <<< "$caches")) / 3600 ))
+      age_h=$(( (NOW - $(newest_mtime "$wt" "$caches")) / 3600 ))
       if [ "$age_h" -ge "$IDLE_HOURS" ]; then
         while read -r cache; do
           [ -n "$cache" ] || continue
@@ -203,7 +204,8 @@ main() {
             continue
           fi
           kb=$(dir_kb "$cache")
-          say "$(act PRUNE)  $cache  [$branch: ${dirty:+dirty, }${merged:-unmerged}, idle ${age_h}h, $((kb / 1024))MB]"
+          cache_age_h=$(( (NOW - $(stat -f %m "$cache" 2>/dev/null || echo 0)) / 3600 ))
+          say "$(act PRUNE)  $cache  [$branch: ${dirty:+dirty, }${merged:-unmerged}, idle ${cache_age_h}h, $((kb / 1024))MB]"
           run rm -rf "$cache"
           freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
         done <<< "$caches"
@@ -218,7 +220,16 @@ main() {
   run git -C "$MAIN" worktree prune
 
   if [ "$SWEEP_TMP" = 1 ]; then
-    sweep_tmp /private/tmp "${TMPDIR:-}"
+    # /tmp is a symlink to /private/tmp on macOS, so $TMPDIR often names the
+    # same tree; sweep each canonical root once.
+    local t1 t2
+    t1=$(canonical_dir /private/tmp)
+    t2=$(canonical_dir "${TMPDIR:-}")
+    if [ -n "$t2" ] && [ "$t2" = "$t1" ]; then
+      sweep_tmp "$t1"
+    else
+      sweep_tmp "$t1" "$t2"
+    fi
   fi
 
   say "----"

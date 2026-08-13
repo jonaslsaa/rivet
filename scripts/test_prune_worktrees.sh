@@ -268,7 +268,8 @@ exp=$(printf '%s\n' "$W2/target" "$W2/tools/rivet-oracle/target" | sort)
 [ "$got" = "$exp" ] || fail "cache_dirs missing tools target: [$got]"
 pass "cache_dirs returns root target and tools/*/target"
 
-# newest_mtime reads its cache list from stdin (root + every cache mtime maxed)
+# newest_mtime takes the cache list as an explicit argument and maxes the
+# root + cache mtimes
 W3="$SANDBOX/$R3/mtime"
 mkdir -p "$W3/target/debug/.fingerprint"
 printf '%s\n' "$CARGO_TAG" > "$W3/target/CACHEDIR.TAG"
@@ -282,15 +283,25 @@ touch -m -t 202002020000 "$W3/target"
 want=$(stat -f %m "$W3/target")
 root_m=$(stat -f %m "$W3")
 [ "$root_m" -lt "$want" ] || fail "fixture: root mtime should be older than cache"
-newest=$(newest_mtime "$W3" <<< "$W3/target")
+newest=$(newest_mtime "$W3" "$W3/target")
 [ "$newest" -eq "$want" ] || fail "newest_mtime did not max cache mtimes: got $newest want $want"
-pass "newest_mtime takes the cache list on stdin and maxes mtimes"
+pass "newest_mtime takes the cache list as an argument and maxes mtimes"
 
-# newest_mtime with an empty/closed stdin must not hang or crash: it falls back
-# to the root mtime (the caller omitted the cache list)
-noinput=$(newest_mtime "$W3" </dev/null)
-[ "$noinput" -eq "$root_m" ] || fail "newest_mtime with empty stdin: got $noinput want $root_m"
-pass "newest_mtime with empty stdin returns the root mtime (no hang)"
+# newest_mtime with an empty cache list falls back to the root mtime
+noinput=$(newest_mtime "$W3" "")
+[ "$noinput" -eq "$root_m" ] || fail "newest_mtime with an empty list: got $noinput want $root_m"
+pass "newest_mtime with an empty cache list returns the root mtime"
+
+# regression: newest_mtime must never consume the caller's stdin. The old
+# implementation read its list with `cat` whenever stdin was not a tty, which
+# swallowed the remaining lines of a pipe-fed while loop (the worktree sweep's
+# input) and silently dropped every worktree after the first.
+seen=$(printf '%s\n' a b c | while read -r wt; do
+  newest_mtime "$W3" "" >/dev/null  # list from the argument, never stdin
+  printf '%s ' "$wt"
+done)
+[ "$seen" = "a b c " ] || fail "newest_mtime consumed the caller's stdin: saw [$seen]"
+pass "newest_mtime with an explicit list leaves the caller's stdin intact"
 
 # a worktree target/ that was actively built has deep cargo files that never
 # bump the root or the target/ dir itself: the deep touched_within probe must
@@ -367,6 +378,20 @@ echo "$out" | grep -q "WOULD PRUNE" || fail "dry-run line does not say WOULD PRU
 [ -d "$SWEEP_ROOT2/bare" ] || fail "dry-run deleted the bare target dir"
 echo "$out" | grep -q "DRY: rm -rf" || fail "dry-run did not report the pending rm -rf"
 pass "dry-run reports WOULD PRUNE and touches nothing"
+
+# --- TMPDIR dedup: two names for one tree sweep once --------------------------
+# /tmp is a symlink to /private/tmp on macOS, so $TMPDIR can name the same
+# directory as the primary tmp root; canonical_dir must resolve both to one
+# path so the sweep does not walk the tree twice.
+R4="$SANDBOX/root-canon"
+mkdir -p "$R4/real"
+ln -s "$R4/real" "$R4/alias"
+c_alias=$(canonical_dir "$R4/alias")
+c_real=$(canonical_dir "$R4/real")
+[ -n "$c_alias" ] && [ "$c_alias" = "$c_real" ] || fail "canonical_dir did not dedup a symlinked root: [$c_alias] vs [$c_real]"
+c_missing=$(canonical_dir "$R4/nonexistent")
+[ -z "$c_missing" ] || fail "canonical_dir returned a path for a missing dir: [$c_missing]"
+pass "canonical_dir resolves a symlinked tmp root and ignores missing dirs"
 
 # --- end to end: main() dry-run is prospective; real run removes a merged wt --
 E2E="$SANDBOX/e2e"
