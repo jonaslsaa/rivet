@@ -20,12 +20,12 @@
 //! far; the generators/feature worldgen live under the owning manifest unit.
 
 pub mod blockpredicates;
-// The `mc.world.level.levelgen.blending` unit's shared Blender value
-// prerequisite (issue #177): the empty singleton (`empty()`/`isEmpty()`, the
-// identity `blendDensity`, the `(1.0, 0.0)` empty
-// `blendOffsetAndFactor`/`BlendingOutput`, and the generic identity
-// `getBiomeResolver` override) — the non-empty `of`/`BlendingData` surface
-// defers (RivetTodo #177, see `blending::blender`).
+// The `mc.world.level.levelgen.blending` unit (issue #177): the full value
+// surface — `Blender` (empty singleton + the non-empty weighted height/density
+// blends, `BlendingOutput`, `blendBiome` + the `SHIFT_NOISE` gate) and
+// `BlendingData` (the per-old-chunk grid + `Packed` codec). The chunk-reading
+// half (`of(WorldGenRegion)`, `calculateData`, the carving-mask/border-tick
+// surfaces) defers (RivetTodo #177, see `blending::mod`).
 pub mod blending;
 pub mod carver;
 pub mod feature;
