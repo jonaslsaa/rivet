@@ -95,6 +95,47 @@ impl ChunkStatus {
     pub const fn is_or_after(self, other: Self) -> bool {
         self.index() >= other.index()
     }
+
+    /// `ChunkStatus.isAfter` — strict.
+    pub const fn is_after(self, other: Self) -> bool {
+        self.index() > other.index()
+    }
+
+    /// `ChunkStatus.isOrBefore`.
+    pub const fn is_or_before(self, other: Self) -> bool {
+        self.index() <= other.index()
+    }
+
+    /// `ChunkStatus.isBefore` — strict.
+    pub const fn is_before(self, other: Self) -> bool {
+        self.index() < other.index()
+    }
+
+    /// `ChunkStatus.getParent()` — the previous rung of the ladder; `EMPTY`
+    /// is its own parent (Java stores `this` when the parent is null).
+    pub const fn parent(self) -> Self {
+        match self {
+            Self::Empty => Self::Empty,
+            Self::StructureStarts => Self::Empty,
+            Self::StructureReferences => Self::StructureStarts,
+            Self::Biomes => Self::StructureReferences,
+            Self::Noise => Self::Biomes,
+            Self::Surface => Self::Noise,
+            Self::Carvers => Self::Surface,
+            Self::Features => Self::Carvers,
+            Self::InitializeLight => Self::Features,
+            Self::Light => Self::InitializeLight,
+            Self::Spawn => Self::Light,
+            Self::Full => Self::Spawn,
+        }
+    }
+
+    /// `ChunkStatus.max(a, b)` — the later status (higher index). Java uses
+    /// strict `isAfter`, so `max(a, a) == b`; the enum makes them equal
+    /// values, so the result is indistinguishable.
+    pub const fn max(a: Self, b: Self) -> Self {
+        if a.is_after(b) { a } else { b }
+    }
 }
 
 #[cfg(test)]
