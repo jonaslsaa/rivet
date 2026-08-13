@@ -434,8 +434,10 @@ impl NoiseBasedChunkGenerator {
     /// `buildSurface` — STUB(mc.world.level.levelgen.surface).
     ///
     /// Java: `randomState.surfaceSystem().buildSurface(...)`. The `SurfaceSystem`
-    /// is the `levelgen::surface_rules` STUB; the owning surface unit ports the
-    /// build (the `levelgen.surface` wave, RivetTodo #177).
+    /// and the surface-build value surface are ported in
+    /// `levelgen::surface_rules`; only the production wire (the
+    /// `ChunkAccess`/heightmap writes `doFill` feeds it) is deferred, with the
+    /// `levelgen.surface` wave (RivetTodo #177).
     pub fn build_surface_stub(&self) {}
 
     /// `spawnOriginalMobs` — STUB(mc.world.level.chunk.generator).

@@ -21,8 +21,12 @@
 //! - `noiseInstances`/`positionalRandoms` are Java `ConcurrentHashMap`s; the
 //!   sync-tick model uses `Mutex<HashMap>` (`OWNERSHIP.md` — no shared game
 //!   state; the mutex is the visitor `&self` seam, uncontended).
-//! - `SurfaceSystem` is the `levelgen::surface_rules` STUB (the owning surface
-//!   unit ports the constructor; `RandomState` carries the type identity).
+//! - `SurfaceSystem` (`levelgen::surface_rules`) is constructed in `create`
+//!   through the same `noise_instances` cache the `getOrCreateNoise` method
+//!   uses — Java builds `new SurfaceSystem(this, settings.defaultBlock(),
+//!   settings.seaLevel(), this.random)` inside `RandomState.create` before the
+//!   struct exists, so the port resolves the constructor's nine `Noises.*`
+//!   keys through an inline closure over the shared cache.
 
 use crate::biome::Sampler;
 use crate::levelgen::noise::density_function::{
@@ -65,8 +69,11 @@ pub struct RandomState<'a> {
     router: NoiseRouter,
     /// `sampler` — the climate sampler over the flattened router.
     sampler: Sampler,
-    /// `surfaceSystem` — the `levelgen::surface_rules` STUB identity.
-    surface_system: SurfaceSystem,
+    /// `surfaceSystem` — the `levelgen::surface_rules` system, `Arc`-shared so
+    /// the `Context`/`SurfaceContext` layers reuse the same per-world noise set
+    /// Java shares by reference (the `SurfaceSystem` value is deep — ten
+    /// `NormalNoise` — so it is never cloned).
+    surface_system: Arc<SurfaceSystem>,
     /// `aquiferRandom`.
     aquifer_random: AlgorithmPositionalRandomFactory,
     /// `oreRandom`.
@@ -153,13 +160,33 @@ impl<'a> RandomState<'a> {
             }
         };
 
+        // Java: `new SurfaceSystem(this, settings.defaultBlock(), settings.seaLevel(),
+        // this.random)` — the constructor resolves its nine `Noises.*` keys through
+        // `getOrCreateNoise`, which is unavailable while this struct is still being
+        // built. The closure is the same `computeIfAbsent` the method performs, over
+        // the shared `noise_instances` cache.
+        let surface_system = Arc::new({
+            let get_or_create_noise = |name: &ResourceKey<NoiseParameters>| -> NormalNoise {
+                let mut map = noise_instances.lock().unwrap();
+                map.entry(name.clone())
+                    .or_insert_with(|| noises::instantiate(noises, &random, name))
+                    .clone()
+            };
+            SurfaceSystem::new(
+                &get_or_create_noise,
+                settings.default_block,
+                settings.sea_level,
+                random,
+            )
+        });
+
         RandomState {
             random,
             noises,
             functions,
             router,
             sampler,
-            surface_system: SurfaceSystem,
+            surface_system,
             aquifer_random,
             ore_random,
             noise_instances,
@@ -203,9 +230,9 @@ impl<'a> RandomState<'a> {
         &self.sampler
     }
 
-    /// `surfaceSystem()`.
-    pub fn surface_system(&self) -> SurfaceSystem {
-        self.surface_system
+    /// `surfaceSystem()` — the shared `Arc`, cloned cheaply per caller.
+    pub fn surface_system(&self) -> Arc<SurfaceSystem> {
+        self.surface_system.clone()
     }
 
     /// `aquiferRandom()`.

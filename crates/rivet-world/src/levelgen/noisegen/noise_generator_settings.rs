@@ -18,10 +18,13 @@
 //! - `spawnTarget` inlines `new OverworldBiomeBuilder().spawnTarget()` (the
 //!   two `ParameterPoint`s the biome unit's builder returns — the only leaf
 //!   this SCC reads; see the module doc).
-//! - `SurfaceRuleData.end/nether/overworld/overworldLike/air` are STUBs in
-//!   `levelgen::surface_rules` (the owning `mc.world.level.levelgen.surface`
-//!   unit ports the real builders); every preset carries the `Air` stand-in so
-//!   the record composes.
+//! - `SurfaceRuleData.end/nether/overworld/overworldLike` are STUBs in
+//!   `levelgen::surface_rules` (the real builders belong to the
+//!   `mc.data.worldgen` unit, still pending); each preset carries the same AIR
+//!   block-state `block` rule — the real `SurfaceRules.state(Blocks.AIR)`
+//!   (Java's `makeStateRule`), whether via `surface_rule_air()` directly or
+//!   one of the STUB builders that resolve to it — so the `surface_rule` field
+//!   composes and round-trips through the `MATERIAL_RULE` codec.
 //! - `Blocks.END_STONE/NETHERRACK/LAVA/STONE/WATER/AIR` all have
 //!   `default_block_state()` handles.
 //! - `WorldgenRandom.Algorithm` — `rivet_util::worldgen_random::Algorithm`.
@@ -892,5 +895,43 @@ mod tests {
         assert_eq!(ids[5], "minecraft:caves");
         assert_eq!(ids[6], "minecraft:floating_islands");
         assert_eq!(ids[3], NETHER.identifier().to_string());
+    }
+
+    /// The `DIRECT_CODEC` must round-trip the full settings record — in
+    /// particular the `surface_rule` field, which carries
+    /// `surface_rule_air()` = `SurfaceRules.state(Blocks.AIR)` (the real
+    /// `block` rule, Java's `makeStateRule`). Before the audit this field was a
+    /// fabricated `Air` with an unregistered `"air"` type id, which made the
+    /// settings record unencodable. This pins encodability end-to-end.
+    #[test]
+    fn direct_codec_round_trips_settings_including_surface_rule() {
+        use crate::levelgen::surface_rules::BlockRuleSource;
+        use rivet_registry::registry_ops::RegistryOps;
+        use rivet_serialization::json_ops::JsonOps;
+
+        type TestOps = RegistryOps<serde_json::Value, JsonOps>;
+        let access = make_access();
+        let ops = TestOps::create_from_access(&JsonOps::INSTANCE, access);
+        let settings = dummy();
+        let codec = NoiseGeneratorSettings::direct_codec::<TestOps>();
+
+        let encoded = codec
+            .encode_start(&ops, &settings)
+            .get_or_throw("encode settings")
+            .clone();
+        // The `surface_rule` field round-trips as the Java `block` rule.
+        assert_eq!(
+            encoded.get("surface_rule"),
+            Some(&serde_json::json!({
+                "type": "minecraft:block",
+                "result_state": {"Name": "minecraft:air"}
+            }))
+        );
+        let (decoded, _rest) = codec
+            .decode(&ops, &encoded)
+            .result()
+            .expect("decode settings")
+            .clone();
+        assert!(decoded.surface_rule.as_any().is::<BlockRuleSource>());
     }
 }
