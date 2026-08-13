@@ -12,10 +12,14 @@
 //!
 //! - **Spawner map order.** Java's `Builder` holds an `EnumMap<MobCategory,
 //!   Builder>` (enum declaration order) and `ImmutableMap.copyOf`s it at
-//!   `build()`; the CODEC's `simple_map` decodes into a `HashMap`. The port
-//!   mirrors the field as an `IndexMap` (insertion order) and converts the
-//!   decode-time `HashMap` into it (hash iteration order, exactly what Java's
-//!   `ImmutableMap.copyOf(HashMap)` would preserve).
+//!   `build()`; the CODEC encodes that stored map in declaration order and
+//!   decodes through `SimpleMapCodec`'s `HashMap` (hash iteration order) into
+//!   `ImmutableMap.copyOf(HashMap)`. The port mirrors the field as an `IndexMap`
+//!   (insertion order): the codec (`ordered_map_codec`) encodes by iterating
+//!   the `IndexMap` directly (Java's stored order) and decodes through
+//!   `simple_map`'s `HashMap`, collecting into the `IndexMap` in hash iteration
+//!   order (exactly what Java's `ImmutableMap.copyOf(HashMap)` would preserve).
+//!   The same holds for `spawn_costs` (Java `LinkedHashMap` insertion order).
 //! - **`SpawnerData` compact constructor.** `type.getCategory() == MISC`
 //!   replaces the type with `EntityTypes.PIG`. The record `toString` is
 //!   `EntityType.getKey(type) + "*(" + minCount + "-" + maxCount + ")"`.
