@@ -3258,11 +3258,21 @@ fn print_usage() {
         "                                             negative control; --sample regenerates from"
     );
     println!("                                             the pinned Paper runtime");
+    println!("  cargo run -p rivet-oracle -- surface-column [--tamper | --sample]");
+    println!(
+        "                                             surface-column golden comparison: verify the"
+    );
+    println!("                                             seed-42 SURFACE-checkpoint goldens +");
+    println!(
+        "                                             non-vacuity checks; --tamper is the negative"
+    );
+    println!("                                             control; --sample regenerates from the");
+    println!("                                             pinned Paper runtime");
     println!("  cargo run -p rivet-oracle -- regenerate     regenerate ALL fixture kinds");
     println!(
         "                                             (sub-select: --m0 / --m2 / --full / --samples / --text /"
     );
-    println!("                                              --composed-noise;");
+    println!("                                              --composed-noise / --surface-column;");
     println!(
         "                                              --to <dir> — exactly one of --m0/--m2/--full"
     );
@@ -3365,13 +3375,19 @@ fn run() -> Result<(), Error> {
             //   cargo run -p rivet-oracle -- surface-column --tamper   negative control
             //   cargo run -p rivet-oracle -- surface-column --sample   regenerate from pinned Paper
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            // --help is accepted only as the sole argument; combined with a mode
+            // or another flag it is a hard usage error via parse_mode below.
+            if matches!(rest.as_slice(), ["--help"] | ["-h"]) {
+                print_usage();
+                return Ok(());
+            }
             let dir = crate_dir().join("fixtures/surface-column");
-            if rest.contains(&"--tamper") {
-                surface_column::tamper_negative_control(&dir)
-            } else if rest.contains(&"--sample") {
-                surface_column::run_probe(&dir)
-            } else {
-                surface_column::verify_surface_column(&dir)
+            match surface_column::parse_mode(&rest)? {
+                surface_column::SurfaceColumnMode::Tamper => {
+                    surface_column::tamper_negative_control(&dir)
+                }
+                surface_column::SurfaceColumnMode::Sample => surface_column::run_probe(&dir),
+                surface_column::SurfaceColumnMode::Verify => verify_surface_column_step(&dir),
             }
         }
         Some("sample") => regenerate_samples(),

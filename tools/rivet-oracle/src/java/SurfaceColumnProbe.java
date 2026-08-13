@@ -195,10 +195,13 @@ public final class SurfaceColumnProbe {
         // Paper injects `paper:optionally_flat_bedrock_condition_source` at the
         // top of the overworld surface sequence; the real class derefs
         // context.level() for generateFlatBedrock. This probe builds surface
-        // with a Level-free WorldGenerationContext, so the probe registers a
-        // shadow of that condition source under the same codec id with the
-        // DEFAULT config (generateFlatBedrock = false) — exact for these
-        // default-overworld columns. The fixture is pinned to this substitution.
+        // with a Level-free WorldGenerationContext, so it ships a shadow of that
+        // condition source under the same codec id with the DEFAULT config
+        // (generateFlatBedrock = false) — exact for these default-overworld
+        // columns. The runner puts the shadow's class FIRST on the classpath, so
+        // Bootstrap.bootStrap() (which registers the FQN with a class literal)
+        // loads the shadow instead of the jar's class. The fixture is pinned to
+        // this substitution.
         root.addProperty("flat-bedrock-substitution", "generateFlatBedrock=false (Paper default)");
         root.addProperty("format", 1);
 

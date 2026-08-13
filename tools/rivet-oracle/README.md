@@ -399,8 +399,13 @@ column records:
 - `any-surface-changed` / `any-height-changed` flags plus the pre-surface
   snapshot, so a no-op capture is detectable: the pre snapshot is taken on an
   all-air chunk with unprimed heightmaps (`-65` = `MIN_Y-1`), so a probe that
-  skipped `buildSurface` (or a rules set that never applied) would emit
-  all-false deltas and be rejected by verification.
+  recorded the chunk before any generation (or a rules set that never applied)
+  would emit all-false deltas and be rejected by verification. Separately,
+  verification requires the corpus to contain at least one surface-rule block
+  (grass_block/dirt/sand/gravel/sulfur/...), which the fill pass cannot emit —
+  so a probe that ran `fillFromNoise` but dropped the `buildSurface` call
+  (post = plain fill output) is rejected as fill-only, not relabeled
+  "post-surface".
 
 One load-bearing substitution is documented in the fixture metadata
 (`flat-bedrock-substitution`): Paper injects
@@ -409,11 +414,12 @@ surface sequence, and that class derefs `context.level()` for
 `generateFlatBedrock`. The probe drives surface with a Level-free
 `WorldGenerationContext`, so it ships a shadow of that condition source under
 the same FQN and codec id with the DEFAULT config (`generateFlatBedrock=false`),
-exact for these default-overworld columns. The probe registers the shadow after
-`Bootstrap.bootStrap()` and before datapack load, and the runner places the
-shadow's compiled classes FIRST on the classpath so the JVM loads it instead of
-the jar's class. The fixture is pinned to this substitution and to the
-`26.2-DEV-main@0a99345` Paper commit.
+exact for these default-overworld columns. The shadow's class is placed FIRST
+on the classpath, so `Bootstrap.bootStrap()` — which registers the FQN with a
+class literal — loads the shadow instead of the jar's class; the runner
+preserves that ordering (shadow classes before the server jar) so the
+substitution is effective during the probe run. The fixture is pinned to this
+substitution and to the `26.2-DEV-main@0a99345` Paper commit.
 
 Verify / regenerate:
 

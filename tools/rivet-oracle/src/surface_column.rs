@@ -16,18 +16,23 @@
 //!     port asserts the exact post-surface block id per sampled Y,
 //!   * pre/post WORLD_SURFACE_WG and OCEAN_FLOOR_WG heights (the pre-surface
 //!     snapshot is an all-air chunk whose heightmaps are unprimed, so a capture
-//!     that ran surface before fill, or skipped buildSurface entirely, is
-//!     visible as a null pre/post delta),
+//!     that recorded the chunk before any generation is visible as a null
+//!     pre/post delta; a capture that ran surface before fill — heightmaps
+//!     primed early — is visible via the unprimed pre-heightmap check),
 //!   * the surface biome the surface pass saw at the top of the column.
 //!
 //! The verify command asserts the committed golden's provenance (Paper pin +
-//! manifest SHA-256s), the pinned seed/generator/height shape, and that every
-//! column really had surface blocks changed (non-vacuity: a no-op capture that
-//! recorded the chunk pre-surface fails). The surface-biome ids are part of the
-//! fixture — pinned byte-for-byte by the manifest SHA-256 like every other
-//! field — but are not individually interpreted: verify never asserts they are
-//! the seed-42 overworld biomes. The tamper negative control proves the
-//! comparison detects a flipped byte (the manifest SHA-256 gate).
+//! manifest SHA-256s), the pinned seed/generator/height shape, and that the
+//! capture really ran post-surface. The per-column checks prove real
+//! pre/post deltas (a no-op capture that recorded the chunk pre-surface fails)
+//! and unprimed pre-heightmaps; the corpus-level check proves the surface pass
+//! emitted material the fill pass cannot (a fill-only capture that dropped
+//! `buildSurface` — post = plain air/water/stone/deepslate/bedrock — fails).
+//! The surface-biome ids are part of the fixture — pinned byte-for-byte by the
+//! manifest SHA-256 like every other field — but are not individually
+//! interpreted: verify never asserts they are the seed-42 overworld biomes.
+//! The tamper negative control proves the comparison detects a flipped byte
+//! (the manifest SHA-256 gate).
 
 use crate::{CapturedFile, Error, sha256_hex};
 use std::collections::BTreeMap;
@@ -48,6 +53,27 @@ const HEIGHTMAP_COUNT: usize = 16 * 16; // 256
 /// The Paper commit the surface-column golden is captured against (both the
 /// fixture/manifest provenance and the runtime jar's `Git-Commit` attribute).
 const PINNED_COMMIT: &str = "0a99345";
+
+/// Blocks the overworld surface rules can emit that the density/fill pass
+/// (`fillFromNoise`) never produces. The fill pass yields only air, water,
+/// lava, stone, deepslate and the bedrock floor; every block in this set is
+/// surface-rule material. The corpus must contain at least one of them, which
+/// is what separates a genuine post-surface capture from a fill-only one (a
+/// probe that dropped the `buildSurface` call would relabel fill output as
+/// "post-surface" and pass every per-column check).
+///
+/// `minecraft:sulfur` is the sulfur-caves surface rule (26.2 `sulfur_caves`
+/// biome), not a typo — the committed golden contains 3 sampled sulfur samples
+/// in the `flower_forest` column (-31,-31).
+const SURFACE_RULE_BLOCKS: &[&str] = &[
+    "minecraft:grass_block",
+    "minecraft:dirt",
+    "minecraft:sand",
+    "minecraft:gravel",
+    "minecraft:sulfur",
+    "minecraft:clay",
+    "minecraft:snow_block",
+];
 
 /// A captured block state.
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq)]
@@ -138,6 +164,47 @@ const CORPUS_CHUNK_COORDS: [(i64, i64); 8] = [
     (-1, 0),
     (0, -1),
 ];
+
+/// The surface-column subcommand mode selected by its `--tamper` / `--sample`
+/// flags (default: verify + non-vacuity checks).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SurfaceColumnMode {
+    Verify,
+    Tamper,
+    Sample,
+}
+
+/// Parse the surface-column subcommand flags into a mode. Unknown flags are a
+/// usage error — a typo'd `--sampple` used to fall through to the verify branch
+/// and exit 0 after verifying, so strictness here prevents a silent misread of
+/// the intended mode (the same bug composed-noise already guards against).
+/// `--tamper` and `--sample` are mutually exclusive (repeats of the same flag
+/// are fine). Sole `--help`/`-h` is intercepted by the dispatcher; in any
+/// combination it is a hard usage error here.
+pub fn parse_mode(flags: &[&str]) -> Result<SurfaceColumnMode, Error> {
+    let mut mode: Option<SurfaceColumnMode> = None;
+    for flag in flags {
+        let m = match *flag {
+            "--tamper" => SurfaceColumnMode::Tamper,
+            "--sample" => SurfaceColumnMode::Sample,
+            other => {
+                return Err(Error::Gate(format!(
+                    "surface-column takes only --tamper/--sample, got {other}"
+                )));
+            }
+        };
+        match mode {
+            None => mode = Some(m),
+            Some(prev) if prev == m => {}
+            Some(_) => {
+                return Err(Error::Gate(
+                    "surface-column --tamper and --sample are mutually exclusive".into(),
+                ));
+            }
+        }
+    }
+    Ok(mode.unwrap_or(SurfaceColumnMode::Verify))
+}
 
 /// Parse + structurally validate the committed surface-column fixture.
 pub fn load(dir: &Path) -> Result<SurfaceColumn, Error> {
@@ -236,6 +303,14 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
             manifest.kind
         )));
     }
+    // The manifest's SHA-256 gate is only load-bearing if it actually records
+    // the golden — an empty `captured` list would verify nothing.
+    if !manifest.captured.iter().any(|c| c.path == FIXTURE_BASENAME) {
+        return Err(Error::Manifest(format!(
+            "surface-column manifest records no captured {FIXTURE_BASENAME} — the \
+             SHA-256 gate cannot protect the golden"
+        )));
+    }
     if crate::parse_paper_pin(manifest.paper.as_deref()).as_deref() != Some(PINNED_COMMIT) {
         return Err(Error::Manifest(format!(
             "surface-column fixture not pinned to Paper 0a99345: {:?}",
@@ -267,6 +342,19 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
             return Err(Error::Manifest(format!(
                 "surface-column ({},{}) not in the #175 matrix",
                 col.cx, col.cz
+            )));
+        }
+        // The block origin must be the chunk coords times 16 — a hand-edited or
+        // mismatched capture would break the column-to-chunk mapping.
+        if col.min_block_x != col.cx * 16 || col.min_block_z != col.cz * 16 {
+            return Err(Error::Manifest(format!(
+                "column ({},{}) min-block ({},{}) != chunk coords x16 ({},{})",
+                col.cx,
+                col.cz,
+                col.min_block_x,
+                col.min_block_z,
+                col.cx * 16,
+                col.cz * 16
             )));
         }
         *seen_columns.entry(key).or_default() += 1;
@@ -312,6 +400,20 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
                 col.cx,
                 col.cz,
                 col.heightmap.len()
+            )));
+        }
+        // The 256 heightmap cells must be the unique 16x16 grid — duplicated
+        // cells would let a hand-rolled fixture under-cover the column.
+        let mut seen_cells: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+        for h in &col.heightmap {
+            *seen_cells.entry((h.x, h.z)).or_default() += 1;
+        }
+        if seen_cells.len() != HEIGHTMAP_COUNT {
+            return Err(Error::Manifest(format!(
+                "column ({},{}) heightmap covers {} distinct cells, expected {HEIGHTMAP_COUNT}",
+                col.cx,
+                col.cz,
+                seen_cells.len()
             )));
         }
         // Non-vacuity: the capture must prove it ran post-surface. A probe that
@@ -364,6 +466,26 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
                 col.cx, col.cz
             )));
         }
+    }
+    // Corpus-level non-vacuity: the surface pass must have emitted material the
+    // fill pass cannot. A fill-only capture (buildSurface dropped or skipped)
+    // yields only air/water/stone/deepslate/bedrock, so requiring at least one
+    // surface-rule block anywhere in the corpus separates a genuine post-surface
+    // golden from a relabeled fill-only one. (Ocean columns may not sample the
+    // 1-2 block floor cap at SAMPLE_STEP resolution, so this is a corpus-level
+    // assertion, not per-column.)
+    let has_surface_block = fixture.columns.iter().any(|col| {
+        col.samples
+            .iter()
+            .any(|s| SURFACE_RULE_BLOCKS.contains(&s.post.block.as_str()))
+    });
+    if !has_surface_block {
+        return Err(Error::Manifest(
+            "no surface-rule block (grass_block/dirt/sand/gravel/sulfur/...) anywhere \
+             in the corpus — the capture is fill-only (buildSurface never ran), not a \
+             post-surface golden"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -616,6 +738,86 @@ mod tests {
         let dir = fixtures_dir().join("surface-column");
         require_fixture(&dir);
         tamper_negative_control(&dir).expect("tamper must be detected");
+    }
+
+    #[test]
+    fn parse_mode_maps_no_flags_to_verify() {
+        assert!(matches!(parse_mode(&[]), Ok(SurfaceColumnMode::Verify)));
+        assert!(matches!(
+            parse_mode(&["--tamper"]),
+            Ok(SurfaceColumnMode::Tamper)
+        ));
+        assert!(matches!(
+            parse_mode(&["--sample"]),
+            Ok(SurfaceColumnMode::Sample)
+        ));
+    }
+
+    #[test]
+    fn parse_mode_rejects_unknown_flags() {
+        let err = parse_mode(&["--sampple"]).expect_err("unknown flag must be rejected");
+        assert!(err.to_string().contains("--sampple"), "unexpected: {err}");
+        assert!(parse_mode(&["--tamper", "--nope"]).is_err());
+    }
+
+    #[test]
+    fn parse_mode_rejects_tamper_and_sample_together() {
+        assert!(parse_mode(&["--tamper", "--sample"]).is_err());
+        assert!(parse_mode(&["--sample", "--tamper"]).is_err());
+        // Repeats of the same flag are fine.
+        assert!(matches!(
+            parse_mode(&["--tamper", "--tamper"]),
+            Ok(SurfaceColumnMode::Tamper)
+        ));
+    }
+
+    #[test]
+    fn parse_mode_rejects_help_in_combination() {
+        // Sole --help/-h is intercepted by the dispatcher; here it is an unknown
+        // flag, so a --tamper --help never silently skips the control.
+        assert!(parse_mode(&["--help"]).is_err());
+        assert!(parse_mode(&["--tamper", "--help"]).is_err());
+    }
+
+    /// A fill-only capture — post = plain fill output (air/water/stone/
+    /// deepslate/bedrock), with no surface-rule block anywhere — must be
+    /// rejected even though every per-column check (deltas, unprimed
+    /// pre-heightmaps, terrain exists) passes. This is the probe regression the
+    /// corpus-level check catches: dropping the buildSurface call relabels fill
+    /// output as "post-surface". Operates on a scratch copy (with a regenerated
+    /// manifest) so the committed fixtures stay untouched.
+    #[test]
+    fn fill_only_capture_is_rejected() {
+        let dir = fixtures_dir().join("surface-column");
+        require_fixture(&dir);
+        let mut fixture = load(&dir).unwrap();
+        // Replace every surface-rule block with stone — the fill pass emits no
+        // dirt/grass/sand/gravel/sulfur, so this models a fill-only capture.
+        for col in fixture.columns.iter_mut() {
+            for s in col.samples.iter_mut() {
+                if SURFACE_RULE_BLOCKS.contains(&s.post.block.as_str()) {
+                    s.post.block = "minecraft:stone".to_string();
+                }
+                s.changed = s.pre != s.post;
+            }
+        }
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-sc-fillonly-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::write(
+            scratch.join(FIXTURE_BASENAME),
+            serde_json::to_string_pretty(&fixture).unwrap(),
+        )
+        .unwrap();
+        regenerate_manifest(&scratch).unwrap();
+        let result = verify_surface_column(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err("fill-only capture must be rejected");
+        assert!(
+            err.to_string().contains("no surface-rule block"),
+            "unexpected error: {err}"
+        );
     }
 
     /// A no-op capture (all-air post states, no surface changes) must be
