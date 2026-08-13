@@ -1824,6 +1824,7 @@ mod tests {
     use crate::levelgen::synth::normal_noise::NoiseParameters;
     use rivet_registry::RegistrationInfo;
     use rivet_registry::RegistryBuilder;
+    use rivet_registry::holder::RegistryId;
     use rivet_registry::holder_lookup::HolderGetter;
     use rivet_registry::registry::Registry;
 
@@ -2233,5 +2234,90 @@ mod tests {
         let offset = BlendOffset::new(chunk.state.clone(), Blender::empty());
         assert_eq!(offset.compute(&chunk), 0.0);
         chunk.stop_interpolation();
+    }
+
+    /// The empty-registry/None path of `HolderHolder::Reference` resolution:
+    /// a wrap visitor with no density-function registry (`functions: None`)
+    /// reports `resolve_holder` as `None`, and `HolderHolder.map_children`
+    /// panics — Java's unbound `holder.value()` error. This is the inverse of
+    /// `noise_chunk_resolves_holderholder_references` (which exercises the
+    /// registry-set resolution through `NoiseChunk::new`); together they pin
+    /// both arms of the `Visitor::resolve_holder` seam.
+    #[test]
+    #[should_panic(expected = "HolderHolder.value() requires a HolderLookup (RivetTodo #177)")]
+    fn holderholder_reference_without_registry_panics() {
+        let reference = Holder::reference(RegistryId(999), 0);
+        let holder: Arc<dyn DensityFunction> = Arc::new(fns::HolderHolder::new(reference));
+
+        // `NoiseChunkWrap` with `functions: None` (the test-only empty-registry
+        // state; `NoiseChunk::new` always wires `Some(random_state.functions())`).
+        let wrap_visitor = NoiseChunkWrap {
+            state: Arc::new(Mutex::new(InterpolationState::new())),
+            blender: Blender::empty(),
+            beardifier: Arc::new(BeardifierMarker::instance()) as Arc<dyn DensityFunction>,
+            blend_alpha: None,
+            blend_offset: None,
+            cell_width: 4,
+            cell_height: 8,
+            cell_count_y: 24,
+            cell_count_xz: 4,
+            first_cell_z: 0,
+            first_noise_x: 0,
+            first_noise_z: 0,
+            noise_size_xz: 16,
+            wrapped: Arc::new(Mutex::new(HashMap::new())),
+            functions: None,
+        };
+
+        // `map_all` → `map_children` on the Reference → `resolve_holder` None →
+        // the unbound-value panic.
+        let _ = map_all(&holder, &wrap_visitor);
+    }
+
+    /// The shared wrap cache (Java's single `this.wrapped` map): the
+    /// `NoiseChunk` construction `mapAll(this::wrap)` wraps the router fields
+    /// and `cachedClimateSampler` must reuse those exact instances — the
+    /// `FlatCache`/`CacheOnce` values are filled through the registered
+    /// instance, so a re-wrapped copy would read never-filled zeros. Asserts
+    /// `Arc::ptr_eq` on the sampler fields vs `wrap` of the same raw router
+    /// field (Java passes `randomState.router()` to `cachedClimateSampler`).
+    #[test]
+    fn cached_climate_sampler_reuses_construction_wraps() {
+        let settings = test_settings();
+        let (noise_registry, df_registry) = empty_registries();
+        let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
+        let chunk = NoiseChunk::new(
+            4,
+            &state,
+            0,
+            0,
+            &OVERWORLD_NOISE_SETTINGS,
+            Arc::new(BeardifierMarker::instance()) as Arc<dyn DensityFunction>,
+            &settings,
+            Box::new(create_fluid_picker(&settings)),
+            Blender::empty(),
+        );
+
+        // `NoiseChunk` does not retain the raw router (Java's `NoiseChunk`
+        // doesn't either — `cachedClimateSampler` receives it as an argument);
+        // the chunk's `wrap` is the seam under test, and the router fields are
+        // the same `Arc`s the construction `mapAll` wrapped.
+        let router = state.router();
+        let sampler = chunk.cached_climate_sampler(router, &[]);
+        for (name, sample, raw) in [
+            ("temperature", &sampler.temperature, router.temperature()),
+            ("humidity", &sampler.humidity, router.vegetation()),
+            ("continentalness", &sampler.continentalness, router.continents()),
+            ("erosion", &sampler.erosion, router.erosion()),
+            ("depth", &sampler.depth, router.depth()),
+            ("weirdness", &sampler.weirdness, router.ridges()),
+        ] {
+            let wrapped = chunk.wrap(raw);
+            assert!(
+                Arc::ptr_eq(sample, &wrapped),
+                "{name}: cachedClimateSampler must reuse the construction-time \
+                 wrap for the same raw router field (single this.wrapped map)"
+            );
+        }
     }
 }
