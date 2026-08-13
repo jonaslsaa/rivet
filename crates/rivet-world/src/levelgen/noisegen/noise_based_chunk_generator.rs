@@ -34,11 +34,12 @@
 //!   (an un-threaded lookup) panics — the same "unbound value" contract as
 //!   `Holder::value`.
 //!
-//! The world/level surfaces (`WorldGenRegion`, `StructureManager`,
-//! `BiomeManager`/`BiomeSource`, `CarvingContext`/`CarvingMask`,
-//! `NaturalSpawner`, `NoiseColumn`, `BiomeGenerationSettings`,
+//! The still-unported world/level surfaces this slice touches (`WorldGenRegion`,
+//! `StructureManager`, `BiomeSource`, `NaturalSpawner`, `NoiseColumn`) defer
+//! with their owning units; the surfaces that have landed (`BiomeManager`,
+//! `CarvingContext`/`CarvingMask`, `BiomeGenerationSettings`,
 //! `ConfiguredWorldCarver`, `LevelChunkSection`, `ProtoChunk`, `Heightmap`)
-//! are not ported; see the noisegen module doc.
+//! are consumed directly; see the noisegen module doc.
 
 use crate::block::BlockState;
 use crate::block::blocks::Blocks;
@@ -422,9 +423,13 @@ impl NoiseBasedChunkGenerator {
     /// Java's carver loop needs `WorldGenRegion`, `BiomeManager.withDifferentSource`,
     /// `BiomeSource.getNoiseBiome`, `CarvingContext`, `CarvingMask`,
     /// `BiomeGenerationSettings.getCarvers`, `ConfiguredWorldCarver.carve`, and
-    /// `WorldgenRandom.setLargeFeatureSeed` — all unported surfaces (the
-    /// `chunk.generator`/`carver` waves, RivetTodo #185). The
-    /// `NoiseChunk.aquifer()` seam it consumes is ported (see `noise_chunk.rs`).
+    /// `WorldgenRandom.setLargeFeatureSeed`. The carver loop surface is ported —
+    /// `CarvingContext`, `CarvingMask`, `BiomeGenerationSettings.getCarvers`,
+    /// `ConfiguredWorldCarver.carve`, and `BiomeManager.withDifferentSource` live in
+    /// their owning units, and `NoiseChunk.aquifer()` is here (see `noise_chunk.rs`).
+    /// Only `WorldGenRegion`, `BiomeSource.getNoiseBiome`, and
+    /// `WorldgenRandom.setLargeFeatureSeed` defer with the `chunk.generator` wave
+    /// (RivetTodo #185).
     pub fn apply_carvers_stub(&self) {}
 
     /// `fillFromNoise(Blender, RandomState, StructureManager, ChunkAccess)` —

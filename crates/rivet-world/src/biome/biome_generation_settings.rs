@@ -273,28 +273,80 @@ impl std::fmt::Debug for Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::levelgen::carver::CarverConfiguration;
+    use crate::levelgen::carver::carver_configuration::{
+        CarverConfiguration, CarverConfigurationBase,
+    };
+    use crate::levelgen::carver::carver_debug_settings::CarverDebugSettings;
     use crate::levelgen::carver::world_carver::WorldCarverId;
+    use crate::levelgen::heightproviders::constant_height::ConstantHeight;
+    use crate::levelgen::heightproviders::height_provider::HeightProvider;
     use crate::levelgen::placement::PlacedFeature;
+    use crate::levelgen::vertical_anchor::VerticalAnchor;
     use rivet_registry::access::RegistryAccess;
     use rivet_registry::builder::RegistryBuilder;
+    use rivet_registry::holder_set::HolderSet;
+    use rivet_registry::registries::BlockType;
     use rivet_registry::registry_ops::RegistryOps;
     use rivet_serialization::json_ops::JsonOps;
     use rivet_serialization::map_codec;
+    use rivet_util::valueproviders::constant_float::ConstantFloat;
+    use rivet_util::valueproviders::float_provider::FloatProvider;
     use serde_json::json;
+    use std::any::Any;
     use std::sync::Arc;
 
     type TestOps = RegistryOps<serde_json::Value, JsonOps>;
 
+    /// A minimal `CarverConfiguration` for the erased-holder round-trip tests
+    /// (the config value is never read — only its erased `Arc<dyn>` identity).
     #[derive(Debug)]
-    struct TestCarverConfig;
+    struct TestCarverConfig {
+        base: CarverConfigurationBase,
+    }
 
-    impl CarverConfiguration for TestCarverConfig {}
+    impl TestCarverConfig {
+        fn new() -> Self {
+            TestCarverConfig {
+                base: CarverConfigurationBase::new(
+                    1.0,
+                    HeightProvider::Constant(ConstantHeight::of(VerticalAnchor::absolute(0))),
+                    FloatProvider::Constant(ConstantFloat::of(1.0)),
+                    VerticalAnchor::absolute(0),
+                    CarverDebugSettings::default(),
+                    HolderSet::Direct(Vec::new()),
+                ),
+            }
+        }
+    }
+
+    impl CarverConfiguration for TestCarverConfig {
+        fn probability(&self) -> f32 {
+            self.base.probability()
+        }
+        fn y(&self) -> &HeightProvider {
+            self.base.y()
+        }
+        fn y_scale(&self) -> &FloatProvider {
+            self.base.y_scale()
+        }
+        fn lava_level(&self) -> &VerticalAnchor {
+            self.base.lava_level()
+        }
+        fn debug_settings(&self) -> &CarverDebugSettings {
+            self.base.debug_settings()
+        }
+        fn replaceable(&self) -> &HolderSet<BlockType> {
+            self.base.replaceable()
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
 
     fn carver_holder() -> Holder<ConfiguredWorldCarverErased> {
         let erased = ConfiguredWorldCarverErased::new(
             WorldCarverId::new(0, "minecraft:cave"),
-            Arc::new(TestCarverConfig),
+            Arc::new(TestCarverConfig::new()),
         );
         Holder::direct(erased)
     }

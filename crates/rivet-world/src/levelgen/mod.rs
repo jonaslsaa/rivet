@@ -7,9 +7,11 @@
 //! `configurations` slice (the
 //! `mc.world.level.levelgen.feature.configurations.core` unit), the `placement`
 //! core slice (the
-//! `mc.world.level.levelgen.placement.core` unit), the `carver` type shell
-//! (the `mc.world.level.levelgen.carver` unit's `ConfiguredWorldCarver`
-//! record/identity skeleton — the `#180` algorithm stays a STUB), the
+//! `mc.world.level.levelgen.placement.core` unit), the full `carver` unit (the
+//! `mc.world.level.levelgen.carver` — `CarverConfiguration` + base codec,
+//! `CarverDebugSettings`, `CarvingContext`, the concrete carvers, and
+//! `ConfiguredWorldCarver` with `carve`/`isStartChunk`; the `#399` `CarveChunk`
+//! block-surface trait and the `#126` dispatch codecs stay unbound), the
 //! `blockpredicates` slice (issue #399 — the block-predicate value/codec
 //! framework), the `synth` primitive-noise classes (the
 //! `mc.world.level.levelgen.synth` unit — issue #177), the
