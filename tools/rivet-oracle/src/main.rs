@@ -3179,7 +3179,7 @@ fn print_usage() {
     println!(
         "  cargo run -p rivet-oracle -- sample         regenerate worldgen/ semantic samples + manifest"
     );
-    println!("  cargo run -p rivet-oracle -- composed-noise [--tamper] [--sample]");
+    println!("  cargo run -p rivet-oracle -- composed-noise [--tamper | --sample]");
     println!(
         "                                             composed-noise golden comparison: verify the"
     );
