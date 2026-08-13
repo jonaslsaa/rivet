@@ -19,7 +19,7 @@
 //! the small `getDebugStringFor*` methods, and `MultiNoiseBiomeSource::addDebugInfo`
 //! depends on them.
 
-use crate::biome::biomes;
+use crate::biome::biomes::register_from_full_name;
 use crate::biome::climate::{Parameter, ParameterPoint, quantize_coord};
 use crate::levelgen::noisegen::noise_router_data::peaks_and_valleys_f32;
 use rivet_registry::ResourceKey;
@@ -114,7 +114,7 @@ impl OverworldBiomeBuilder {
                 Parameter::new(generated.weirdness.0, generated.weirdness.1),
                 generated.offset,
             );
-            biomes((point, biomes::register_from_full_name(generated.biome)));
+            biomes((point, register_from_full_name(generated.biome)));
         }
     }
 
