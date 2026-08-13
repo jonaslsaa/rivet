@@ -1,6 +1,6 @@
 //! Port of `net.minecraft.world.level.chunk.status.WorldGenContext` (MC 26.2)
-//! — the record of per-step worldgen dependencies — plus the honest executor
-//! seam that runs the value-layer DAG through NOISE.
+//! — the record of per-step worldgen dependencies — plus the value-layer
+//! executor seam that runs the generation DAG through NOISE.
 //!
 //! Java: `WorldGenContext.java` in `working/Paper` — a 6-field record
 //! `(ServerLevel, ChunkGenerator, StructureTemplateManager,
@@ -13,8 +13,10 @@
 //! The closures are owned (like the record owns its fields), so the context is
 //! `'static`-agnostic — the real worldgen closures capture owned state.
 //!
-//! The executor seam is `run_step`/`generate_through`. It is *honest* about the
-//! `BIOMES`-before-`NOISE` ordering in three ways:
+//! The seam is the value-layer dispatch surface for the task identities and the
+//! `BIOMES`-before-`NOISE` ordering contract (spec §3.2); the #185 scheduler
+//! realization (spec §10 slice 3) drives the same task identities through the
+//! holder/chunk-generation path. The seam is *honest* about the ordering:
 //!
 //! 1. `generate_through` walks the pyramid in status order, so it cannot skip
 //!    the BIOMES step on the way to NOISE.
@@ -22,9 +24,10 @@
 //!    be at/after `BIOMES` — the record the BIOMES dispatch writes. A chunk is
 //!    never labeled `NOISE` unless the BIOMES task actually ran (either in this
 //!    generation run or in the generation that produced its persisted status).
-//! 3. The NOISE seam closure receives a [`BiomesComplete`] proof token that only
-//!    the executor can mint, so a NOISE task cannot even be written to run
-//!    without the proof.
+//! 3. A pass-through step (one that produces no data) is refused when it would
+//!    advance a chunk to `BIOMES`/`NOISE` that does not already carry that
+//!    status — so the LOADING pyramid's loading stubs cannot fabricate a
+//!    NOISE-labeled chunk from an `EMPTY` one.
 //!
 //! The SURFACE..FULL task bodies are *not wired* (RivetTodo #185): dispatching
 //! one returns [`GenError::UnsupportedStatus`].
@@ -37,8 +40,8 @@ use crate::chunk::status::{ChunkPyramid, ChunkStatus};
 
 /// The `generateBiomes` seam closure type.
 type BiomesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
-/// The `generateNoise` seam closure type (receives the `BiomesComplete` proof).
-type NoiseSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>, BiomesComplete);
+/// The `generateNoise` seam closure type.
+type NoiseSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES and
 /// NOISE worldgen closures, generic over the chunk's block/biome value types.
@@ -53,23 +56,18 @@ where
     /// caller supplies the closure through this seam.
     biomes: Box<BiomesSeam<T, B, S>>,
     /// The `ChunkStatusTasks::generateNoise` seam — fills the chunk's blocks.
-    /// The real body is `ChunkGenerator.fillFromNoise` (deferred #185). The
-    /// `BiomesComplete` proof makes it structurally impossible to invoke the
-    /// NOISE work before the BIOMES task ran.
+    /// The real body is `ChunkGenerator.fillFromNoise` (deferred #185); the
+    /// seam's ordering guards are what keep this from running before BIOMES.
     noise: Box<NoiseSeam<T, B, S>>,
 }
-
-/// Proof that the BIOMES task ran for a column. Only the executor seam inside
-/// this module can construct it — the NOISE seam closure receives it so the
-/// "BIOMES before NOISE" ordering is structurally enforced, not merely asserted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BiomesComplete(());
 
 /// The executor seam's failure modes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GenError {
-    /// The NOISE task was dispatched while the chunk's persisted status is
-    /// before `BIOMES` — the BIOMES task has not actually run for this column.
+    /// A step would label the chunk `BIOMES` or `NOISE` without the data being
+    /// present: either the `NOISE` task dispatched before `BIOMES` ran, or a
+    /// pass-through (loading) step was asked to advance a chunk that does not
+    /// already carry the target status's data.
     BiomesNotGenerated,
     /// The target status is beyond NOISE (SURFACE..FULL are not wired in the
     /// value layer — the real worldgen defers with #185).
@@ -113,7 +111,7 @@ where
     /// Wraps the two worldgen seam closures (owned, mirroring the record).
     pub fn new(
         biomes: impl FnMut(&mut ProtoChunk<T, B, S>) + 'static,
-        noise: impl FnMut(&mut ProtoChunk<T, B, S>, BiomesComplete) + 'static,
+        noise: impl FnMut(&mut ProtoChunk<T, B, S>) + 'static,
     ) -> Self {
         WorldGenContext {
             biomes: Box::new(biomes),
@@ -127,8 +125,11 @@ where
     /// The `EMPTY`/`STRUCTURE_STARTS`/`STRUCTURE_REFERENCES` bodies are the
     /// value-layer pass-through (RivetTodo #185: the real structure bodies call
     /// `generator.createStructures`/`createReferences` + `level
-    /// .onStructureStartsAvailable`, deferred with the generator wave). The
-    /// `NOISE` body is gated on the persisted-status record.
+    /// .onStructureStartsAvailable`, deferred with the generator wave). A
+    /// pass-through produces no data, so it is refused when it would advance a
+    /// chunk to `BIOMES`/`NOISE` that does not already carry that status — the
+    /// LOADING pyramid's loading stubs cannot fabricate a NOISE-labeled chunk.
+    /// The `NOISE` body is gated on the persisted-status record.
     pub fn run_step(
         &mut self,
         step: &ChunkStep,
@@ -136,15 +137,18 @@ where
     ) -> Result<(), GenError> {
         match step.task() {
             // EMPTY, and the STRUCTURE_STARTS/STRUCTURE_REFERENCES pass-through.
-            ChunkStatusTask::PassThrough => chunk_status_tasks::pass_through(chunk),
-            ChunkStatusTask::GenerateStructureStarts => {
-                chunk_status_tasks::generate_structure_starts(chunk)
-            }
-            ChunkStatusTask::LoadStructureStarts => {
-                chunk_status_tasks::load_structure_starts(chunk)
-            }
-            ChunkStatusTask::GenerateStructureReferences => {
-                chunk_status_tasks::generate_structure_references(chunk)
+            ChunkStatusTask::PassThrough
+            | ChunkStatusTask::GenerateStructureStarts
+            | ChunkStatusTask::LoadStructureStarts
+            | ChunkStatusTask::GenerateStructureReferences => {
+                if step.target_status().is_or_after(ChunkStatus::Biomes)
+                    && !chunk
+                        .get_persisted_status()
+                        .is_or_after(step.target_status())
+                {
+                    return Err(GenError::BiomesNotGenerated);
+                }
+                chunk_status_tasks::pass_through(chunk);
             }
             ChunkStatusTask::GenerateBiomes => {
                 (self.biomes)(chunk);
@@ -156,7 +160,7 @@ where
                 {
                     return Err(GenError::BiomesNotGenerated);
                 }
-                (self.noise)(chunk, BiomesComplete(()));
+                (self.noise)(chunk);
             }
             ChunkStatusTask::GenerateSurface
             | ChunkStatusTask::GenerateCarvers
@@ -182,11 +186,12 @@ where
     /// passes through the `BIOMES` step requires the biomes data to be present
     /// — either carried in (the chunk's persisted status was already at/after
     /// `BIOMES`) or produced by this run's `BIOMES` step. A pyramid whose
-    /// `BIOMES` step is a pass-through (the `LOADING_PYRAMID`'s loading stub)
-    /// cannot advance an `EMPTY` chunk to `BIOMES`/`NOISE`, because that would
-    /// label the chunk without any biomes task having run. A target beyond
-    /// `NOISE` is rejected before any work runs; a target before the current
-    /// status is a demotion error.
+    /// `BIOMES` or `NOISE` step is a pass-through (the `LOADING_PYRAMID`'s
+    /// loading stubs) cannot advance an `EMPTY` chunk past it, because that
+    /// would label the chunk with data that was never generated. The whole
+    /// path is validated before any work runs — a refused promotion leaves the
+    /// chunk untouched. A target beyond `NOISE` is rejected before any work
+    /// runs; a target before the current status is a demotion error.
     pub fn generate_through(
         &mut self,
         pyramid: &ChunkPyramid,
@@ -200,16 +205,34 @@ where
         if target.index() < current.index() {
             return Err(GenError::Demotion { target, current });
         }
-        // Reaching BIOMES (and thus NOISE) requires biomes data. When the chunk
-        // does not already carry it, the pyramid's BIOMES step must be the
-        // generation task — a pass-through (loading) BIOMES step advances the
-        // status without writing biomes data.
-        if target.index() >= ChunkStatus::Biomes.index()
-            && !current.is_or_after(ChunkStatus::Biomes)
-        {
-            let biomes_step = pyramid.get_step_to(ChunkStatus::Biomes);
-            if biomes_step.task() != ChunkStatusTask::GenerateBiomes {
-                return Err(GenError::BiomesNotGenerated);
+        // Validate the whole path before running any step: every step the loop
+        // would run must be either a wired generation task or a pass-through
+        // that does not fabricate BIOMES/NOISE data.
+        for index in current.index() + 1..=target.index() {
+            let step = pyramid.get_step_to(ChunkStatus::ALL[index]);
+            match step.task() {
+                ChunkStatusTask::GenerateBiomes | ChunkStatusTask::GenerateNoise => {}
+                ChunkStatusTask::GenerateSurface
+                | ChunkStatusTask::GenerateCarvers
+                | ChunkStatusTask::GenerateFeatures
+                | ChunkStatusTask::InitializeLight
+                | ChunkStatusTask::Light
+                | ChunkStatusTask::GenerateSpawn
+                | ChunkStatusTask::Full => {
+                    return Err(GenError::UnsupportedStatus(step.target_status()));
+                }
+                // Pass-through produces no data: reaching BIOMES/NOISE through
+                // it requires the target status's data to already be carried.
+                ChunkStatusTask::PassThrough
+                | ChunkStatusTask::GenerateStructureStarts
+                | ChunkStatusTask::LoadStructureStarts
+                | ChunkStatusTask::GenerateStructureReferences => {
+                    if step.target_status().is_or_after(ChunkStatus::Biomes)
+                        && !current.is_or_after(step.target_status())
+                    {
+                        return Err(GenError::BiomesNotGenerated);
+                    }
+                }
             }
         }
         for index in current.index() + 1..=target.index() {
@@ -299,9 +322,7 @@ mod tests {
         let noise_log = Rc::clone(&noise_calls);
         let ctx = WorldGenContext::new(
             move |_c: &mut ProtoChunk<u8, u8, &'static str>| biomes_log.borrow_mut().push("biomes"),
-            move |_c: &mut ProtoChunk<u8, u8, &'static str>, _proof: BiomesComplete| {
-                noise_log.borrow_mut().push("noise")
-            },
+            move |_c: &mut ProtoChunk<u8, u8, &'static str>| noise_log.borrow_mut().push("noise"),
         );
         (ctx, biomes_calls, noise_calls)
     }
@@ -442,17 +463,90 @@ mod tests {
     }
 
     #[test]
-    fn loading_pyramid_can_promote_a_chunk_that_already_has_biomes() {
-        // Loading is honest when the chunk already carries the biomes data: a
-        // chunk persisted at BIOMES may advance to NOISE through the loading
-        // pyramid's pass-through NOISE step (the data is present).
-        let (mut ctx, biomes_calls, _noise_calls) = recording_context();
+    fn loading_pyramid_cannot_promote_a_biomes_chunk_to_noise() {
+        // Even a chunk that already carries biomes cannot be advanced to NOISE
+        // through the loading pyramid: its NOISE step is a pass-through that
+        // produces no noise data, so the promotion would label the chunk NOISE
+        // with no blocks. Loading only reflects data the chunk already has.
+        let (mut ctx, biomes_calls, noise_calls) = recording_context();
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::Biomes);
-        ctx.generate_through(&LOADING_PYRAMID, &mut chunk, ChunkStatus::Noise)
-            .expect("biomes already present");
+        let err = ctx
+            .generate_through(&LOADING_PYRAMID, &mut chunk, ChunkStatus::Noise)
+            .expect_err("loading cannot fabricate noise");
+        assert_eq!(err, GenError::BiomesNotGenerated);
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Biomes);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn run_step_loading_noise_stub_on_fresh_chunk_is_refused() {
+        // The public single-step seam must not label a fresh EMPTY chunk NOISE
+        // through the LOADING pyramid's pass-through NOISE stub (which produces
+        // no noise data).
+        let (mut ctx, biomes_calls, noise_calls) = recording_context();
+        let mut chunk = proto();
+        let noise_step = LOADING_PYRAMID.get_step_to(ChunkStatus::Noise);
+        let err = ctx.run_step(noise_step, &mut chunk).expect_err("no data");
+        assert_eq!(err, GenError::BiomesNotGenerated);
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_pass_through_noise_step_cannot_fabricate_noise() {
+        // Finding-2 guard: a pyramid whose BIOMES step generates biomes but
+        // whose NOISE step is a pass-through would label a fresh chunk NOISE
+        // with no blocks. The pre-check refuses it before any work runs.
+        let (mut ctx, biomes_calls, noise_calls) = recording_context();
+        let mut chunk = proto();
+        // Build a minimal 5-rung pyramid: EMPTY -> SS -> SR ->
+        // BIOMES(GenerateBiomes) -> NOISE(pass-through). The NOISE step
+        // produces no noise data.
+        let pyramid = ChunkPyramid::builder()
+            .step(ChunkStatus::Empty, |s| s)
+            .step(ChunkStatus::StructureStarts, |s| {
+                s.set_task(ChunkStatusTask::GenerateStructureStarts)
+            })
+            .step(ChunkStatus::StructureReferences, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateStructureReferences)
+            })
+            .step(ChunkStatus::Biomes, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateBiomes)
+            })
+            .step(ChunkStatus::Noise, |s| {
+                s.add_requirement(ChunkStatus::Biomes, 1)
+                    .add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::PassThrough)
+            })
+            .build();
+        let err = ctx
+            .generate_through(&pyramid, &mut chunk, ChunkStatus::Noise)
+            .expect_err("pass-through noise cannot fabricate blocks");
+        assert_eq!(err, GenError::BiomesNotGenerated);
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn loading_noise_step_is_idempotent_on_a_chunk_at_noise() {
+        // Loading a chunk that already carries NOISE data: the pass-through
+        // NOISE step is allowed (the data is present) and leaves the status at
+        // NOISE, running no worldgen seam.
+        let (mut ctx, biomes_calls, noise_calls) = recording_context();
+        let mut chunk = proto();
+        chunk.set_persisted_status(ChunkStatus::Noise);
+        let noise_step = LOADING_PYRAMID.get_step_to(ChunkStatus::Noise);
+        ctx.run_step(noise_step, &mut chunk)
+            .expect("noise data already present");
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Noise);
         assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
     }
 
     #[test]

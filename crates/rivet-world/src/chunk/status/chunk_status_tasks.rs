@@ -14,11 +14,13 @@
 //! The persisted-status advance through these pass-through stubs is Java's
 //! `ChunkStep.apply`/`completeChunkGeneration` behavior (the status is advanced
 //! after *any* task body when the chunk was below the target) — it is the
-//! value-layer ordering contract, and the executor seam is a test/demo surface,
-//! not the production pipeline. When #185 wires the real bodies, the
-//! holder-driven `ChunkGenerationTask` path replaces this seam wholesale, so a
-//! chunk promoted through the stubs is never fed back through the real
-//! `ChunkStep.apply` (whose `isBefore` guard would skip the deferred work).
+//! value-layer ordering contract. The #185 scheduler realization (spec §10
+//! slice 3) drives the same task identities through the holder/chunk-generation
+//! path; the executor seam is the value-layer dispatch surface that pins the
+//! ordering contract today, and the real bodies land here with the
+//! `chunk.generator` wave. The seam's ordering guards (`world_gen_context.rs`)
+//! ensure a chunk promoted through the stubs is only ever a value-layer test
+//! artifact, never fed back through the real `ChunkStep.apply`.
 
 use crate::chunk::proto_chunk::ProtoChunk;
 

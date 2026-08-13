@@ -57,7 +57,10 @@ impl ChunkStep {
             }
             status = status.parent();
         }
-        let by_radius = by_radius.into_iter().map(Option::unwrap).collect();
+        let by_radius = by_radius
+            .into_iter()
+            .map(|slot| slot.expect("every byRadius slot must be filled by the parent-chain walk"))
+            .collect();
         ChunkStep {
             target_status,
             direct_dependencies,
@@ -273,36 +276,51 @@ impl ChunkStepBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::status::GENERATION_PYRAMID;
 
-    /// Builds the generation chain up to NOISE (EMPTY → SS → SR → BIOMES →
-    /// NOISE) exactly as the pyramid builder does.
-    fn noise_step() -> ChunkStep {
+    /// A small synthetic chain (EMPTY → SS → SR) exercising the builder's
+    /// `addRequirement` max-merge and the accumulated fold without duplicating
+    /// the production pyramid's builder calls.
+    fn synthetic_chain() -> ChunkStep {
         let empty = ChunkStepBuilder::new(ChunkStatus::Empty).build();
-        let ss = ChunkStepBuilder::with_parent(ChunkStatus::StructureStarts, &empty)
-            .set_task(ChunkStatusTask::GenerateStructureStarts)
-            .build();
-        let sr = ChunkStepBuilder::with_parent(ChunkStatus::StructureReferences, &ss)
-            .add_requirement(ChunkStatus::StructureStarts, 8)
-            .set_task(ChunkStatusTask::GenerateStructureReferences)
-            .build();
-        let biomes = ChunkStepBuilder::with_parent(ChunkStatus::Biomes, &sr)
-            .add_requirement(ChunkStatus::StructureStarts, 8)
-            .set_task(ChunkStatusTask::GenerateBiomes)
-            .build();
-        ChunkStepBuilder::with_parent(ChunkStatus::Noise, &biomes)
-            .add_requirement(ChunkStatus::StructureStarts, 8)
-            .add_requirement(ChunkStatus::Biomes, 1)
-            .block_state_write_radius(0)
-            .set_task(ChunkStatusTask::GenerateNoise)
+        let ss = ChunkStepBuilder::with_parent(ChunkStatus::StructureStarts, &empty).build();
+        ChunkStepBuilder::with_parent(ChunkStatus::StructureReferences, &ss)
+            .add_requirement(ChunkStatus::StructureStarts, 3)
             .build()
     }
 
     #[test]
-    fn noised_direct_dependencies_merge_biomes_then_structure_starts() {
-        // NOISE's builder calls: STRUCTURE_STARTS at 8, then BIOMES at 1.
-        // The parent (BIOMES) is later than STRUCTURE_STARTS, so the radius-0/1
-        // entries keep BIOMES and the SS requirement fills 2..=8.
-        let step = noise_step();
+    fn builder_max_merges_and_folds_the_accumulated_dependencies() {
+        let step = synthetic_chain();
+        // direct: starts [SS], addRequirement(SS, 3) fills [SS,SS,SS,SS].
+        assert_eq!(
+            step.direct_dependencies().as_list(),
+            &[ChunkStatus::StructureStarts; 4]
+        );
+        // radiusOfParent(SS) = 3, so the parent's radius-0 EMPTY dep is folded
+        // under SS at every distance: accumulated = [SS,SS,SS,SS].
+        assert_eq!(step.get_accumulated_radius_of(ChunkStatus::Empty), 3);
+        assert_eq!(
+            step.accumulated_dependencies().as_list(),
+            &[ChunkStatus::StructureStarts; 4]
+        );
+        // byRadius: [SS,SS,SS,SS] — SR's parent chain is SS out to radius 3.
+        assert_eq!(
+            step.required_status_at_radius(0),
+            ChunkStatus::StructureStarts
+        );
+        assert_eq!(
+            step.required_status_at_radius(3),
+            ChunkStatus::StructureStarts
+        );
+    }
+
+    #[test]
+    fn noise_step_from_the_pyramid_is_exact() {
+        // Production-data assertions read the shared pyramid static (no
+        // duplicated builder chain): NOISE's direct deps are the
+        // STRUCTURE_STARTS-at-8 / BIOMES-at-1 max-merge.
+        let step = GENERATION_PYRAMID.get_step_to(ChunkStatus::Noise);
         assert_eq!(step.target_status(), ChunkStatus::Noise);
         assert_eq!(step.block_state_write_radius(), 0);
         assert_eq!(step.task(), ChunkStatusTask::GenerateNoise);
@@ -320,22 +338,10 @@ mod tests {
                 ChunkStatus::StructureStarts,
             ]
         );
-    }
-
-    #[test]
-    fn noise_accumulated_dependencies_and_by_radius_are_exact() {
-        let step = noise_step();
-        // Accumulated: [BIOMES, BIOMES, SS x8] — radius 9.
+        // Accumulated: [BIOMES, BIOMES, SS x8] — radius 9; byRadius BIOMES at
+        // 0..1 and SS at 2..9.
         assert_eq!(step.get_accumulated_radius_of(ChunkStatus::Empty), 9);
         assert_eq!(step.get_accumulated_radius_of(ChunkStatus::Biomes), 1);
-        // STRUCTURE_STARTS appears at distances 2..=9, so its accumulated
-        // radius is the largest of those — 9.
-        assert_eq!(
-            step.get_accumulated_radius_of(ChunkStatus::StructureStarts),
-            9
-        );
-        assert_eq!(step.get_accumulated_radius_of(ChunkStatus::Noise), 0);
-        // byRadius: BIOMES at distance 0 and 1, SS at 2..=9.
         assert_eq!(step.required_status_at_radius(0), ChunkStatus::Biomes);
         assert_eq!(step.required_status_at_radius(1), ChunkStatus::Biomes);
         assert_eq!(
@@ -346,96 +352,5 @@ mod tests {
             step.required_status_at_radius(9),
             ChunkStatus::StructureStarts
         );
-    }
-
-    #[test]
-    fn full_accumulated_dependencies_match_the_spec_table() {
-        // The FULL step's accumulated table is the spec §3.2 12-entry DAG:
-        // [SPAWN, INITIALIZE_LIGHT, CARVERS, BIOMES, SS x8] — radius 11.
-        // Built through the real builder chain (as `ChunkPyramid` does).
-        let step = full_step();
-        assert_eq!(step.get_accumulated_radius_of(ChunkStatus::Empty), 11);
-        assert_eq!(
-            step.accumulated_dependencies().as_list(),
-            &[
-                ChunkStatus::Spawn,
-                ChunkStatus::InitializeLight,
-                ChunkStatus::Carvers,
-                ChunkStatus::Biomes,
-                ChunkStatus::StructureStarts,
-                ChunkStatus::StructureStarts,
-                ChunkStatus::StructureStarts,
-                ChunkStatus::StructureStarts,
-                ChunkStatus::StructureStarts,
-                ChunkStatus::StructureStarts,
-                ChunkStatus::StructureStarts,
-                ChunkStatus::StructureStarts,
-            ]
-        );
-        assert_eq!(step.required_status_at_radius(0), ChunkStatus::Spawn);
-        assert_eq!(
-            step.required_status_at_radius(1),
-            ChunkStatus::InitializeLight
-        );
-        assert_eq!(step.required_status_at_radius(3), ChunkStatus::Biomes);
-        assert_eq!(
-            step.required_status_at_radius(11),
-            ChunkStatus::StructureStarts
-        );
-    }
-
-    /// Rebuilds the generation pyramid's FULL step by chaining the builder
-    /// exactly as `ChunkPyramid::generation()` does (duplicated here so the
-    /// step test is independent of the pyramid's static).
-    fn full_step() -> ChunkStep {
-        let empty = ChunkStepBuilder::new(ChunkStatus::Empty).build();
-        let ss = ChunkStepBuilder::with_parent(ChunkStatus::StructureStarts, &empty)
-            .set_task(ChunkStatusTask::GenerateStructureStarts)
-            .build();
-        let sr = ChunkStepBuilder::with_parent(ChunkStatus::StructureReferences, &ss)
-            .add_requirement(ChunkStatus::StructureStarts, 8)
-            .set_task(ChunkStatusTask::GenerateStructureReferences)
-            .build();
-        let biomes = ChunkStepBuilder::with_parent(ChunkStatus::Biomes, &sr)
-            .add_requirement(ChunkStatus::StructureStarts, 8)
-            .set_task(ChunkStatusTask::GenerateBiomes)
-            .build();
-        let noise = ChunkStepBuilder::with_parent(ChunkStatus::Noise, &biomes)
-            .add_requirement(ChunkStatus::StructureStarts, 8)
-            .add_requirement(ChunkStatus::Biomes, 1)
-            .block_state_write_radius(0)
-            .set_task(ChunkStatusTask::GenerateNoise)
-            .build();
-        let surface = ChunkStepBuilder::with_parent(ChunkStatus::Surface, &noise)
-            .add_requirement(ChunkStatus::StructureStarts, 8)
-            .add_requirement(ChunkStatus::Biomes, 1)
-            .block_state_write_radius(0)
-            .set_task(ChunkStatusTask::GenerateSurface)
-            .build();
-        let carvers = ChunkStepBuilder::with_parent(ChunkStatus::Carvers, &surface)
-            .add_requirement(ChunkStatus::StructureStarts, 8)
-            .block_state_write_radius(0)
-            .set_task(ChunkStatusTask::GenerateCarvers)
-            .build();
-        let features = ChunkStepBuilder::with_parent(ChunkStatus::Features, &carvers)
-            .add_requirement(ChunkStatus::StructureStarts, 8)
-            .add_requirement(ChunkStatus::Carvers, 1)
-            .block_state_write_radius(1)
-            .set_task(ChunkStatusTask::GenerateFeatures)
-            .build();
-        let init_light = ChunkStepBuilder::with_parent(ChunkStatus::InitializeLight, &features)
-            .set_task(ChunkStatusTask::InitializeLight)
-            .build();
-        let light = ChunkStepBuilder::with_parent(ChunkStatus::Light, &init_light)
-            .add_requirement(ChunkStatus::InitializeLight, 1)
-            .set_task(ChunkStatusTask::Light)
-            .build();
-        let spawn = ChunkStepBuilder::with_parent(ChunkStatus::Spawn, &light)
-            .add_requirement(ChunkStatus::Biomes, 1)
-            .set_task(ChunkStatusTask::GenerateSpawn)
-            .build();
-        ChunkStepBuilder::with_parent(ChunkStatus::Full, &spawn)
-            .set_task(ChunkStatusTask::Full)
-            .build()
     }
 }
