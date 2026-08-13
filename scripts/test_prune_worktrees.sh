@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034  # DRY/IDLE_HOURS/freed_kb/pruned are consumed by the sourced functions
 # Focused tests for prune-worktrees.sh's cargo-scratch classification and sweeps.
 #
 # Regression: the tmp sweep originally treated any /tmp child whose root had
@@ -28,7 +29,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-# shellcheck source=./prune-worktrees.sh
+# shellcheck source=scripts/prune-worktrees.sh
+# shellcheck disable=SC1091  # sources a sibling script; shellcheck only follows it with -x
 source "$SCRIPT_DIR/prune-worktrees.sh"
 
 fail() { echo "FAIL: $1"; exit 1; }
