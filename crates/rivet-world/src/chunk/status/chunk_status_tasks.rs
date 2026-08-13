@@ -5,62 +5,15 @@
 //! Java: `ChunkStatusTasks.java` in `working/Paper`. The real bodies touch the
 //! `ChunkGenerator`/`ServerLevel`/`WorldGenRegion` surfaces that defer with the
 //! `mc.world.level.chunk.generator` wave, so the STRUCTURE_STARTS and
-//! STRUCTURE_REFERENCES bodies are pass-throughs here (the pyramid still
-//! advances the persisted status; the actual structure work is marked with a
-//! sparse RivetTodo). The BIOMES and NOISE bodies are the seam hooks — the
-//! `WorldGenContext` closures carry the real work; they are invoked by the
-//! executor, not duplicated here.
-//!
-//! The persisted-status advance through these pass-through stubs is Java's
-//! `ChunkStep.apply`/`completeChunkGeneration` behavior (the status is advanced
-//! after *any* task body when the chunk was below the target) — it is the
-//! value-layer ordering contract. The #185 scheduler realization (spec §10
-//! slice 3) drives the same task identities through the holder/chunk-generation
-//! path; the executor seam is the value-layer dispatch surface that pins the
-//! ordering contract today, and the real bodies land here with the
-//! `chunk.generator` wave. The seam's ordering guards (`world_gen_context.rs`)
-//! ensure a chunk promoted through the stubs is only ever a value-layer test
-//! artifact, never fed back through the real `ChunkStep.apply`.
+//! STRUCTURE_REFERENCES bodies are pass-throughs here, and the BIOMES/NOISE
+//! bodies are the seam hooks invoked by the `WorldGenContext` executor. The
+//! `ChunkStatusTask` enum preserves the Java method-name identities for
+//! greppability.
 
 use crate::chunk::proto_chunk::ProtoChunk;
 
 /// `ChunkStatusTasks.passThrough` — the chunk is returned unchanged.
 pub fn pass_through<T, B, S>(_chunk: &mut ProtoChunk<T, B, S>)
-where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    S: Eq + std::hash::Hash,
-{
-}
-
-/// `ChunkStatusTasks.generateStructureStarts` — pass-through in the value layer.
-///
-/// RivetTodo(#185): the real body calls `generator.createStructures(...)` and
-/// `level.onStructureStartsAvailable(chunk)`; both defer with the generator
-/// wave.
-pub fn generate_structure_starts<T, B, S>(_chunk: &mut ProtoChunk<T, B, S>)
-where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    S: Eq + std::hash::Hash,
-{
-}
-
-/// `ChunkStatusTasks.loadStructureStarts` (LOADING pyramid) — pass-through in
-/// the value layer. RivetTodo(#185): the real body calls
-/// `level.onStructureStartsAvailable(chunk)`.
-pub fn load_structure_starts<T, B, S>(_chunk: &mut ProtoChunk<T, B, S>)
-where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    S: Eq + std::hash::Hash,
-{
-}
-
-/// `ChunkStatusTasks.generateStructureReferences` — pass-through in the value
-/// layer. RivetTodo(#185): the real body builds a `WorldGenRegion` and calls
-/// `generator.createReferences(...)` (the generator wave).
-pub fn generate_structure_references<T, B, S>(_chunk: &mut ProtoChunk<T, B, S>)
 where
     T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
     B: Clone + PartialEq + Send + std::fmt::Debug + 'static,

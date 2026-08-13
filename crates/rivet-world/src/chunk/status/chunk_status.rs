@@ -101,11 +101,6 @@ impl ChunkStatus {
         self.index() > other.index()
     }
 
-    /// `ChunkStatus.isOrBefore`.
-    pub const fn is_or_before(self, other: Self) -> bool {
-        self.index() <= other.index()
-    }
-
     /// `ChunkStatus.isBefore` — strict.
     pub const fn is_before(self, other: Self) -> bool {
         self.index() < other.index()
@@ -125,8 +120,7 @@ impl ChunkStatus {
     }
 
     /// `ChunkStatus.max(a, b)` — the later status (higher index). Java uses
-    /// strict `isAfter`, so `max(a, a) == b`; the enum makes them equal
-    /// values, so the result is indistinguishable.
+    /// strict `isAfter`, so `max(a, a)` falls through to `b` (equal values).
     pub const fn max(a: Self, b: Self) -> Self {
         if a.is_after(b) { a } else { b }
     }

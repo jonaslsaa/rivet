@@ -34,8 +34,10 @@ pub struct ChunkPyramid {
 }
 
 impl ChunkPyramid {
-    /// `new Builder().step(...)...build()`.
-    pub fn builder() -> ChunkPyramidBuilder {
+    /// `new Builder().step(...)...build()`. Crate-internal: the public value
+    /// layer is the two static pyramids; the builder exists to construct them
+    /// and for the module's malformed-pyramid tests.
+    pub(crate) fn builder() -> ChunkPyramidBuilder {
         ChunkPyramidBuilder::new()
     }
 
@@ -69,7 +71,7 @@ pub static ACCESS_RADIUS_TABLE: LazyLock<[i32; 12]> =
     LazyLock::new(|| access_radius_table(&GENERATION_PYRAMID, &LOADING_PYRAMID));
 
 /// `ChunkPyramid.Builder` — the chainable step builder.
-pub struct ChunkPyramidBuilder {
+pub(crate) struct ChunkPyramidBuilder {
     steps: Vec<ChunkStep>,
 }
 
@@ -212,6 +214,11 @@ pub fn access_radius_table(generation: &ChunkPyramid, loading: &ChunkPyramid) ->
 mod tests {
     use super::*;
 
+    /// Spec §3.5 access radii, in status order: EMPTY 0, SS 0, SR 8, BIOMES 8,
+    /// NOISE 9, SURFACE 9, CARVERS 9, FEATURES 10, INIT_LIGHT 10, LIGHT 11,
+    /// SPAWN 11, FULL 11.
+    const EXPECTED_ACCESS_RADII: [i32; 12] = [0, 0, 8, 8, 9, 9, 9, 10, 10, 11, 11, 11];
+
     #[test]
     fn generation_pyramid_steps_are_in_exact_status_order() {
         let steps = GENERATION_PYRAMID.steps();
@@ -351,13 +358,10 @@ mod tests {
 
     #[test]
     fn access_radius_table_matches_the_spec() {
-        // Spec §3.5: EMPTY 0, SS 0, SR 8, BIOMES 8, NOISE 9, SURFACE 9,
-        // CARVERS 9, FEATURES 10, INIT_LIGHT 10, LIGHT 11, SPAWN 11, FULL 11.
-        let expected = [0, 0, 8, 8, 9, 9, 9, 10, 10, 11, 11, 11];
         for (i, status) in ChunkStatus::ALL.iter().enumerate() {
             assert_eq!(
                 ChunkPyramid::access_radius(*status),
-                expected[i],
+                EXPECTED_ACCESS_RADII[i],
                 "status {status:?}"
             );
         }
@@ -369,7 +373,6 @@ mod tests {
         // The two-argument form agrees with the convenience form (which uses
         // the statics), proving the table is a pure function of the pyramids.
         let table = access_radius_table(&GENERATION_PYRAMID, &LOADING_PYRAMID);
-        let expected = [0, 0, 8, 8, 9, 9, 9, 10, 10, 11, 11, 11];
-        assert_eq!(table, expected);
+        assert_eq!(table, EXPECTED_ACCESS_RADII);
     }
 }

@@ -14,8 +14,7 @@
 //! The value-layer pyramid through NOISE is built by `ChunkPyramid`; the task
 //! bodies and the ordering enforcement live in the executor seam
 //! (`world_gen_context.rs`). `ChunkStep.apply`'s async `CompletableFuture`
-//! dispatch is deferred with the scheduler (#185); the synchronous
-//! `WorldGenContext::run_step` mirrors it.
+//! dispatch is deferred with the scheduler (#185).
 
 use crate::chunk::status::ChunkStatus;
 use crate::chunk::status::chunk_dependencies::ChunkDependencies;
@@ -74,11 +73,7 @@ impl ChunkStep {
     /// `getAccumulatedRadiusOf(ChunkStatus)` — the accumulated radius of a
     /// transitive dependency, or `0` for the target itself.
     pub fn get_accumulated_radius_of(&self, status: ChunkStatus) -> usize {
-        if status == self.target_status {
-            0
-        } else {
-            self.accumulated_dependencies.get_radius_of(status)
-        }
+        accumulated_radius_of(&self.accumulated_dependencies, self.target_status, status)
     }
 
     /// `moonrise$getRequiredStatusAtRadius(int)` (the `ChunkSystemChunkStep`
@@ -183,25 +178,27 @@ impl ChunkStepBuilder {
     }
 
     /// `addRequirement(ChunkStatus, int)` — require `status` at `radius`,
-    /// max-merging into the direct table (later status wins).
+    /// max-merging into the direct table (later status wins). Matches Java's
+    /// allocation behavior: grows in place only when `radius` exceeds the
+    /// current table (filling the new slots with `status`), then max-merges
+    /// every slot `0..=radius`.
     pub fn add_requirement(mut self, status: ChunkStatus, radius: usize) -> Self {
         assert!(
             !status.is_or_after(self.status),
             "Status {status:?} can not be required by {:?}",
             self.status
         );
-        let previous = self.direct_dependencies_by_radius.clone();
         let new_length = radius + 1;
-        if new_length > previous.len() {
-            self.direct_dependencies_by_radius = vec![status; new_length];
+        if new_length > self.direct_dependencies_by_radius.len() {
+            self.direct_dependencies_by_radius
+                .resize(new_length, status);
         }
-        for (slot, prev) in self
+        for slot in self
             .direct_dependencies_by_radius
             .iter_mut()
-            .zip(previous.iter())
-            .take(new_length.min(previous.len()))
+            .take(new_length)
         {
-            *slot = ChunkStatus::max(*prev, status);
+            *slot = ChunkStatus::max(*slot, status);
         }
         self
     }
