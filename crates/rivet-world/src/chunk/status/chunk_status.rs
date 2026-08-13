@@ -95,6 +95,35 @@ impl ChunkStatus {
     pub const fn is_or_after(self, other: Self) -> bool {
         self.index() >= other.index()
     }
+
+    /// `ChunkStatus.isAfter` — strict.
+    pub const fn is_after(self, other: Self) -> bool {
+        self.index() > other.index()
+    }
+
+    /// `ChunkStatus.isBefore` — strict.
+    pub const fn is_before(self, other: Self) -> bool {
+        self.index() < other.index()
+    }
+
+    /// `ChunkStatus.getParent()` — the previous rung of the ladder; `EMPTY`
+    /// is its own parent (Java stores `this` when the parent is null). Derived
+    /// from `ALL`/index order so there is a single source of truth for the
+    /// chain (a transposed hand-written match would silently corrupt
+    /// `byRadius`/`required_status_at_radius`).
+    pub const fn parent(self) -> Self {
+        if self.index() == 0 {
+            Self::Empty
+        } else {
+            Self::ALL[self.index() - 1]
+        }
+    }
+
+    /// `ChunkStatus.max(a, b)` — the later status (higher index). Java uses
+    /// strict `isAfter`, so `max(a, a)` falls through to `b` (equal values).
+    pub const fn max(a: Self, b: Self) -> Self {
+        if a.is_after(b) { a } else { b }
+    }
 }
 
 #[cfg(test)]
