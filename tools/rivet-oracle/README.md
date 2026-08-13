@@ -404,9 +404,20 @@ generator pipeline on REAL `ProtoChunk`s at seed 42:
 chunk-coordinate matrix (8 chunks: positive/negative/region-seam), and every
 column records:
 
-- pre/post block states at every 4th Y (block registry key + raw state id),
-  so the exact post-surface block id per sampled Y is pinned;
+- pre/post block states at every 4th Y (block registry key + raw state id) for
+  the chunk's own block-origin corner column (`(0,0)` in chunk-local
+  coordinates, i.e. the block at `min-block-x`, y, `min-block-z`), so the exact
+  post-surface block id per sampled Y is pinned at that column;
 - pre/post `WORLD_SURFACE_WG` + `OCEAN_FLOOR_WG` heights for all 256 columns;
+
+So a green pins the exact post-surface block id down the corner column of every
+chunk, and pins the surface/floor height across all 256 columns of every chunk.
+It does NOT pin the sub-surface block id at the other 255 columns — a surface
+port whose cave/biome-driven subsurface differs off the corner column (while
+matching top heights and the corner column) would still pass this golden. That
+bound is intentional for the #179 SURFACE checkpoint; the exact per-column block
+id coverage is a follow-up (e.g. a full-column sample matrix).
+
 - the surface biome the surface pass read at the top of the column (captured
   and hash-pinned with the rest of the fixture; verification does not
   semantically assert the id);
@@ -434,6 +445,21 @@ class literal — loads the shadow instead of the jar's class; the runner
 preserves that ordering (shadow classes before the server jar) so the
 substitution is effective during the probe run. The fixture is pinned to this
 substitution and to the `26.2-DEV-main@0a99345` Paper commit.
+
+Another load-bearing property is that the seed-42 corpus is **structure-free**.
+The probe pre-sets each `NoiseChunk` with `Beardifier.EMPTY` (mirroring the
+composed-noise oracle) instead of Paper's real
+`Beardifier.forStructuresInChunk(...)`. That is exact only because no
+beard-affecting structure start (village, pillager outpost, ancient city, trail
+ruins, trial chambers, stronghold) comes within beard reach of any corpus chunk.
+This was verified against the pinned Paper 0a99345 runtime (real
+`ChunkGeneratorStructureState` + `StructurePlacement.isStructureChunk` + the
+`Structure.isValidBiome` gate at the real start position): zero beard-affecting
+starts within 6 chunks of any corpus chunk, and no corpus chunk is a placement
+chunk. The Rust regression test
+`committed_surface_column_is_structure_free` replays the placement predicate
+over the committed coordinates and encodes the verified in-reach placement
+chunks, so a future regeneration that stops being structure-free fails loudly.
 
 Verify / regenerate:
 

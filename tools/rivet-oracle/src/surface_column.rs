@@ -33,6 +33,30 @@
 //! interpreted: verify never asserts they are the seed-42 overworld biomes.
 //! The tamper negative control proves the comparison detects a flipped byte
 //! (the manifest SHA-256 gate).
+//!
+//! # Structure-freeness of the corpus (load-bearing assumption)
+//!
+//! The probe pre-sets each `NoiseChunk` with `Beardifier.EMPTY` instead of the
+//! real `Beardifier.forStructuresInChunk(...)`, mirroring the composed-noise
+//! oracle. This is exact ONLY because the seed-42 #175 corpus chunks are
+//! structure-free: a beard-affecting structure start (village, pillager
+//! outpost, ancient city, trail ruins, trial chambers, stronghold, ...) whose
+//! pieces come within `BEARD_KERNEL_RADIUS` (12 blocks) of a corpus chunk would
+//! change its density field and therefore its surface — the golden would then
+//! capture a world real Paper does not produce at these coordinates.
+//!
+//! Verified against the pinned Paper 0a99345 runtime (via the real
+//! `ChunkGeneratorStructureState` + `StructurePlacement.isStructureChunk` +
+//! the `Structure.isValidBiome` biome gate at the real `onTopOfChunkCenter`
+//! start position): **zero** beard-affecting structure starts land within 6
+//! chunks of any of the 8 corpus chunks, and no corpus chunk is a placement
+//! chunk for any structure set. 6 chunks of margin covers the 12-block beard
+//! kernel plus any piece reach. The seed-42 matrix is genuinely structure-free;
+//! `Beardifier.EMPTY` is the exact Paper density input, not a weakening.
+//! `committed_surface_column_is_structure_free` locks this in: it replays the
+//! placement-chunk predicate over the committed corpus coords and would fail
+//! loudly if a future regeneration's coordinates ever stopped being
+//! structure-free.
 
 use crate::{CapturedFile, Error, sha256_hex};
 use std::collections::BTreeMap;
@@ -323,6 +347,16 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
             fixture.paper, manifest.paper
         )));
     }
+    // The manifest's informational seed string must match the pinned seed too.
+    // The golden's own `seed` field is the structural gate (checked above); the
+    // manifest string is the writer's self-description, so a manifest that
+    // claims a different seed is drift even if the golden's hash still matches.
+    if manifest.seed.as_deref() != Some("42") {
+        return Err(Error::Manifest(format!(
+            "surface-column manifest seed {:?} != pinned seed 42",
+            manifest.seed
+        )));
+    }
     // 2. Structural + non-vacuity assertions. The committed fixture is
     //    hash-gated, so the bytes are the probe's exact output; here we pin the
     //    shape (the #175 matrix, the sample Y slice) and — crucially — that the
@@ -403,9 +437,16 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
             )));
         }
         // The 256 heightmap cells must be the unique 16x16 grid — duplicated
-        // cells would let a hand-rolled fixture under-cover the column.
+        // cells would let a hand-rolled fixture under-cover the column, and
+        // out-of-range cells (x/z outside 0..15) are not this chunk's grid.
         let mut seen_cells: BTreeMap<(i64, i64), usize> = BTreeMap::new();
         for h in &col.heightmap {
+            if !(0..16).contains(&h.x) || !(0..16).contains(&h.z) {
+                return Err(Error::Manifest(format!(
+                    "column ({},{}) heightmap cell ({},{}) outside the 16x16 grid",
+                    col.cx, col.cz, h.x, h.z
+                )));
+            }
             *seen_cells.entry((h.x, h.z)).or_default() += 1;
         }
         if seen_cells.len() != HEIGHTMAP_COUNT {
@@ -473,7 +514,12 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
     // surface-rule block anywhere in the corpus separates a genuine post-surface
     // golden from a relabeled fill-only one. (Ocean columns may not sample the
     // 1-2 block floor cap at SAMPLE_STEP resolution, so this is a corpus-level
-    // assertion, not per-column.)
+    // assertion, not per-column.) The surface-rule blocks must land on the
+    // 4-aligned sample grid (e.g. grass at odd Y=63 is never sampled), so a
+    // legitimately different-but-correct regeneration whose surface tops fall
+    // off-grid could false-reject — stable for the pinned seed-42 matrix
+    // (4/8 columns carry a surface-rule block), but a known sampling-resolution
+    // caveat, not a per-column guarantee.
     let has_surface_block = fixture.columns.iter().any(|col| {
         col.samples
             .iter()
@@ -498,6 +544,12 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
 /// dir so the committed fixtures are never mutated — a panic or `?`
 /// early-return can never leave `fixtures/surface-column/` corrupted.
 pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
+    // The committed golden must be green before it is tampered; otherwise any
+    // scratch failure would be credited to the flip and the control would pass
+    // vacuously on an already-broken golden (a dev running `surface-column
+    // --tamper` on a drifted tree would get a green that masks the breakage).
+    // Mirrors composed_noise::tamper_negative_control's baseline guard.
+    verify_surface_column(dir)?;
     let scratch = std::env::temp_dir().join(format!(
         "rivet-oracle-surface-column-{}",
         std::process::id()
@@ -640,6 +692,206 @@ mod tests {
         verify_surface_column(&dir).expect("committed surface-column golden should verify");
     }
 
+    /// The seed-42 #175 corpus is structure-free — the load-bearing input
+    /// assumption that makes `Beardifier.EMPTY` exact. This replays Paper's
+    /// `RandomSpreadStructurePlacement` / `ConcentricRingsStructurePlacement`
+    /// placement-chunk predicate over the committed corpus coordinates and
+    /// asserts no beard-affecting start comes within beard reach of any corpus
+    /// chunk. The scan parameters mirror the probe's documented claim (6 chunks
+    /// of margin around the 12-block `BEARD_KERNEL_RADIUS`).
+    #[test]
+    fn committed_surface_column_is_structure_free() {
+        let dir = fixtures_dir().join("surface-column");
+        require_fixture(&dir);
+        let fixture = load(&dir).unwrap();
+
+        // This replays Paper's placement-chunk predicate over the committed
+        // corpus coordinates and asserts the structure-freeness invariant that
+        // makes `Beardifier.EMPTY` exact. It matches the real Paper 0a99345
+        // scan (ChunkGeneratorStructureState + StructurePlacement.isStructureChunk
+        // + the Structure.isValidBiome gate at the onTopOfChunkCenter start
+        // position), which found ZERO beard-affecting structure starts within
+        // 6 chunks of any corpus chunk. The exact placement chunks reported by
+        // `isStructureChunk` near each corpus chunk (biome-unfiltered
+        // over-reports) are recorded below as a truth table so a future
+        // regeneration that changes the corpus coordinates would fail loudly
+        // instead of silently capturing a non-structure-free world.
+
+        // Beard-affecting overworld structure sets at seed 42: villages (salt
+        // 10387312, spacing 34, sep 8), pillager outposts (salt 165745296,
+        // spacing 32, sep 8), ancient cities (salt 20083232, spacing 24, sep 8),
+        // trail ruins (salt 83469867, spacing 34, sep 8), trial chambers (salt
+        // 94251327, spacing 34, sep 12). Strongholds (concentric rings) are
+        // handled separately by ring membership; none reach the corpus (verified
+        // empirically: 0 starts in range).
+        const BEARD_SPREADS: &[(i64, i64, i64)] = &[
+            // (salt, spacing, separation)
+            (10387312, 34, 8),  // villages
+            (165745296, 32, 8), // pillager outposts
+            (20083232, 24, 8),  // ancient cities
+            (83469867, 34, 8),  // trail ruins
+            (94251327, 34, 12), // trial chambers
+        ];
+
+        let corpus: Vec<(i64, i64)> = fixture.columns.iter().map(|c| (c.cx, c.cz)).collect();
+
+        // Direct placement-chunk property on the corpus chunks themselves. Real
+        // Paper reports NONE of the 8 corpus chunks as a placement chunk for any
+        // beard-affecting set. If a future coordinate change makes a corpus chunk
+        // itself a placement chunk, that is a hard regression.
+        for &(cx, cz) in &corpus {
+            for &(salt, spacing, sep) in BEARD_SPREADS {
+                let potential = potential_spread_chunk(fixture.seed, salt, spacing, sep, cx, cz);
+                assert_ne!(
+                    potential,
+                    (cx, cz),
+                    "corpus chunk ({cx},{cz}) is a direct placement chunk for a \
+                     beard-affecting set (salt {salt}) — the seed-42 matrix is NOT \
+                     structure-free, so Beardifier.EMPTY would capture a world real \
+                     Paper does not produce"
+                );
+            }
+        }
+
+        // The beard-reach invariant: no beard-affecting placement chunk comes
+        // within `SEARCH` chunks of a corpus chunk AND is biome-eligible. Real
+        // Paper's isStructureChunk (placement-only, no biome gate) reports
+        // several over-reports near the corpus; every one is biome-rejected for
+        // its structure (the biomes at those positions are dark_forest/ocean/
+        // deep_ocean/flower_forest, none of which any village/outpost/
+        // ancient-city/trail-ruins/trial-chambers biome tag accepts), so no
+        // beard start actually generates. The only over-reports within beard
+        // reach (<= SEARCH chunks, chebyshev) are:
+        //   (15,15): (9,11)   [village salt 10387312]
+        //   (31,31): (36,25)  [village salt 10387312]
+        //   (-31,-31): (-25,-27)  [trail ruins salt 83469867]
+        // The rest ((17,7), (23,19), (35,38), (38,31), (-29,-21), (-22,-36),
+        // (-13,-24)) are farther than beard reach and cannot affect the corpus.
+        // This truth table is verified against the pinned Paper 0a99345 runtime.
+        const SEARCH: i64 = 6;
+        // (corpus chunk, set salt, placement chunk) — the verified in-reach
+        // over-reports, all biome-rejected. A named tuple type avoids the
+        // type-complexity lint while keeping the truth table readable.
+        type InReach = ((i64, i64), i64, (i64, i64));
+        const VERIFIED_IN_REACH: &[InReach] = &[
+            ((15, 15), 10387312, (9, 11)),
+            ((31, 31), 10387312, (36, 25)),
+            ((-31, -31), 83469867, (-25, -27)),
+        ];
+
+        // The full-search sweep: any beard-affecting placement chunk within
+        // SEARCH chunks of a corpus chunk must be one of the verified in-reach
+        // over-reports (all biome-rejected). A placement chunk at exactly a
+        // corpus coordinate, or any placement chunk within reach that is NOT in
+        // the verified set, is a hard regression.
+        for &(cx, cz) in &corpus {
+            for dx in -SEARCH..=SEARCH {
+                for dz in -SEARCH..=SEARCH {
+                    let sx = cx + dx;
+                    let sz = cz + dz;
+                    for &(salt, spacing, sep) in BEARD_SPREADS {
+                        let potential =
+                            potential_spread_chunk(fixture.seed, salt, spacing, sep, sx, sz);
+                        if potential == (sx, sz) {
+                            let known =
+                                VERIFIED_IN_REACH
+                                    .iter()
+                                    .any(|&((ccx, ccz), s, (pcx, pcz))| {
+                                        s == salt
+                                            && (pcx, pcz) == (sx, sz)
+                                            && (ccx, ccz) == (cx, cz)
+                                    });
+                            assert!(
+                                known,
+                                "unverified beard-affecting placement chunk ({sx},{sz}) for \
+                                 salt {salt} within {SEARCH} chunks of corpus chunk ({cx},{cz}) \
+                                 — the structure-freeness truth table must be updated (this \
+                                 could be a real beard start)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Paper's `WorldgenRandom.setLargeFeatureWithSalt` + `LegacyRandomSource`,
+    /// reproduced exactly: a 48-bit LCG initialized from the seed via
+    /// `setSeed` (xor-masked), then advanced by (gridX * 341873128712 + gridZ *
+    /// 132897987541 + salt + seed) with the standard LCG constants.
+    /// `RandomSpreadStructurePlacement.getPotentialStructureChunk`.
+    fn potential_spread_chunk(
+        seed: i64,
+        salt: i64,
+        spacing: i64,
+        separation: i64,
+        sx: i64,
+        sz: i64,
+    ) -> (i64, i64) {
+        // Minecraft's LegacyRandomSource: setSeed(s) = (s ^ 0x5DEECE66D) & ((1<<48)-1)
+        // WorldgenRandom.setLargeFeatureWithSalt(seed, gridX, gridZ, salt):
+        //   setSeed(gridX * 341873128712L + gridZ * 132897987541L + seed + salt)
+        // (addition, NOT xor — mirrors Paper's WorldgenRandom.java). Then the two
+        // spreadType.evaluate draws via nextInt(limit).
+        let grid_x = sx.div_euclid(spacing);
+        let grid_z = sz.div_euclid(spacing);
+        let feature_seed = grid_x
+            .wrapping_mul(341873128712i64)
+            .wrapping_add(grid_z.wrapping_mul(132897987541i64))
+            .wrapping_add(seed)
+            .wrapping_add(salt);
+        let limit = (spacing - separation) as i32;
+        let mut rng = LegacyRandomSource::new(feature_seed);
+        let spread_x = rng.next_int(limit);
+        let spread_z = rng.next_int(limit);
+        (grid_x * spacing + spread_x, grid_z * spacing + spread_z)
+    }
+
+    /// Minecraft's `LegacyRandomSource`: a 48-bit LCG with the standard
+    /// constants, `nextInt(bound)` consuming the top 31 bits.
+    struct LegacyRandomSource {
+        seed: i64,
+    }
+
+    impl LegacyRandomSource {
+        const MULTIPLIER: i64 = 0x5DEECE66D;
+        const ADDEND: i64 = 0xB;
+        const MASK: i64 = (1 << 48) - 1;
+
+        fn new(seed: i64) -> Self {
+            let seed = (seed ^ Self::MULTIPLIER) & Self::MASK;
+            Self { seed }
+        }
+
+        fn next(&mut self, bits: i32) -> i64 {
+            // LegacyRandomSource.next(bits): advance the LCG, then take the top
+            // `bits` bits of the new seed.
+            self.seed = (self
+                .seed
+                .wrapping_mul(Self::MULTIPLIER)
+                .wrapping_add(Self::ADDEND))
+                & Self::MASK;
+            self.seed >> (48 - bits)
+        }
+
+        fn next_int(&mut self, bound: i32) -> i64 {
+            // BitRandomSource.nextInt(bound): for a non-power-of-2 bound this is
+            // rejection sampling: sample = next(31); modulo = sample % bound;
+            // retry while (sample - modulo + (bound - 1)) overflows into the sign
+            // bit (i.e. < 0). All our limits (spacing - separation) are
+            // non-powers-of-2, so the power-of-2 shortcut never applies.
+            if bound <= 0 {
+                return 0;
+            }
+            let sample = self.next(31) as i32;
+            let modulo = sample % bound;
+            if (sample - modulo + (bound - 1)) < 0 {
+                return self.next_int(bound); // reject and redraw, exactly like Paper
+            }
+            modulo as i64
+        }
+    }
+
     #[test]
     fn committed_surface_column_is_non_vacuous() {
         let dir = fixtures_dir().join("surface-column");
@@ -738,6 +990,31 @@ mod tests {
         let dir = fixtures_dir().join("surface-column");
         require_fixture(&dir);
         tamper_negative_control(&dir).expect("tamper must be detected");
+    }
+
+    /// A committed golden that is already broken (wrong seed) must make the
+    /// tamper control hard-fail at the baseline pre-verify — never pass
+    /// vacuously by crediting the flip for a pre-existing failure.
+    #[test]
+    fn tamper_reports_broken_baseline_instead_of_passing_vacuously() {
+        let dir = fixtures_dir().join("surface-column");
+        require_fixture(&dir);
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-sc-tamper-broken-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::copy(dir.join("manifest.json"), scratch.join("manifest.json")).unwrap();
+        let raw = fs::read_to_string(dir.join(FIXTURE_BASENAME)).unwrap();
+        let corrupt = raw.replace("\"seed\": 42", "\"seed\": 43");
+        fs::write(scratch.join(FIXTURE_BASENAME), corrupt).unwrap();
+        let result = tamper_negative_control(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        assert!(
+            !matches!(result, Ok(())),
+            "a broken baseline must not pass the tamper control vacuously: {result:?}"
+        );
     }
 
     #[test]
