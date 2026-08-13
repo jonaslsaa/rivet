@@ -95,19 +95,32 @@ mkdir -p "$CLASSES"
 CP="$RUNTIME_JAR:$LIBS$CLASSES"
 
 javac -cp "$CP" -d "$CLASSES" "$ROOT/src/java/BiomeTemperatureProbe.java"
-mkdir -p "$OUT_DIR"
+
+# Stage the regeneration in a temp dir, then move the two files into place only
+# after the whole run (probe + manifest) succeeds. The probe truncates its
+# output on open, so writing straight into the committed OUT_DIR would leave a
+# partial/corrupted golden if the JVM crashed mid-write.
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/biome-temperature.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
 java -Xms256M -Xmx2G -cp "$CP" BiomeTemperatureProbe \
-  --output "$OUT_DIR" --paper "$PAPER_PIN"
+  --output "$STAGE" --paper "$PAPER_PIN"
 # The probe hardcodes the output basename `biome-temperature.json`
 # (BiomeTemperatureProbe writes `output/biome-temperature.json`), so the first
 # argument selects the output directory, not a file. Hash what the probe
 # actually wrote, never an assumed file path.
-FIXTURE_FILE="$OUT_DIR/biome-temperature.json"
-echo "wrote $FIXTURE_FILE"
+FIXTURE_FILE="$STAGE/biome-temperature.json"
 
 # Refresh the fixture manifest so the regenerated goldens hash matches what the
 # gate's `rivet-oracle verify` expects (the text/worldgen kinds regenerate their
 # manifests in-process; this kind is script-driven, so the script owns it).
 . "$ROOT/scripts/write_fixture_manifest.sh"
 NOTE="bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis uses the raw frozenLarge/frozenEdge/frozenSmall noise samples plus the per-sample frozenPins flag so the inner and outer sub-checks are independently discriminable. Deterministic across boots."
-write_fixture_manifest "$OUT_DIR" "biome-temperature" "$PAPER_PIN" "$NOTE" "$FIXTURE_FILE"
+write_fixture_manifest "$STAGE" "biome-temperature" "$PAPER_PIN" "$NOTE" "$FIXTURE_FILE" >/dev/null
+
+mkdir -p "$OUT_DIR"
+mv "$STAGE/biome-temperature.json" "$OUT_DIR/biome-temperature.json"
+mv "$STAGE/manifest.json" "$OUT_DIR/manifest.json"
+trap - EXIT
+rm -rf "$STAGE"
+echo "wrote $OUT_DIR/biome-temperature.json"
+echo "wrote $OUT_DIR/manifest.json"

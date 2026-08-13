@@ -21,14 +21,19 @@ trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "ok:   $1"; }
 
-# A shim `javac` so the guard tests can detect that the runner got past every
-# guard without coupling to any real JDK's javac diagnostic wording. It prints
-# a fixed marker and fails (exit 1), which also stops the runner before it
-# would invoke `java`.
+# Shim `javac`/`java` so the guard tests can prove the runner got past every
+# guard without coupling to any real JDK's diagnostics. The javac shim
+# succeeds (exit 0); the java shim records its args (so the test can assert
+# --output/--paper are passed through) and writes a stub fixture the runner's
+# manifest step hashes, then exits 0 — exercising the full success path.
 BIN_DIR="$TMP/bin"
 mkdir -p "$BIN_DIR"
-printf '#!/bin/bash\necho "MOCK_JAVAC_INVOKED"\nexit 1\n' > "$BIN_DIR/javac"
-chmod +x "$BIN_DIR/javac"
+printf '#!/bin/bash\nexit 0\n' > "$BIN_DIR/javac"
+MOCK_JAVA_ARGS="$TMP/java_args.txt"
+printf '#!/bin/bash\necho "$@" > "%s"\n' "$MOCK_JAVA_ARGS" > "$BIN_DIR/java"
+printf 'out=""; while [ $# -gt 0 ]; do if [ "$1" = "--output" ]; then out="$2"; shift 2; else shift; fi; done; mkdir -p "$out"; printf "{}\\n" > "$out/biome-temperature.json"\n' >> "$BIN_DIR/java"
+printf 'exit 0\n' >> "$BIN_DIR/java"
+chmod +x "$BIN_DIR/javac" "$BIN_DIR/java"
 
 # A real (if tiny) zip carrying a Git-Commit manifest attribute.
 JAR_DIR="$TMP/jar"
@@ -88,31 +93,40 @@ expect_exit 1
 echo "$RUN_OUT" | grep -q "no library jars under" || fail "t4 diagnostic: $RUN_OUT"
 pass "empty libraries dir -> controlled diagnostic, exit 1"
 
-# T5: valid jar + non-empty libs -> the guards pass; the script proceeds to
-# javac (the shim). Assert no guard diagnostic is emitted and the shim was
-# reached.
+# T5: valid jar + non-empty libs -> the full success path: guards pass, javac
+# (shim) succeeds, java (shim) is invoked with --output/--paper and writes a
+# fixture, the manifest step runs, and the fixture lands in OUT_DIR. This
+# catches a regression that drops the probe's --output/--paper args, which the
+# failure-path tests cannot.
 printf 'stub.jar' > "$LIBS_DIR/stub.jar"
 run "$TMP/paper.jar" "$LIBS_DIR"
+expect_exit 0
 for guard in "failed to read META-INF/MANIFEST.MF" "libraries dir not found" \
              "but the pin is" "no library jars under" "has no Git-Commit attribute"; do
   if echo "$RUN_OUT" | grep -q "$guard"; then
     fail "t5 emitted a guard diagnostic ($guard): $RUN_OUT"
   fi
 done
-echo "$RUN_OUT" | grep -q "MOCK_JAVAC_INVOKED" || fail "t5 did not reach javac: $RUN_OUT"
-pass "valid jar + libs -> guards pass (proceeds to javac shim)"
+# The runner stages the regeneration in a temp dir, so assert the flags are
+# present and non-empty (not the specific stage path).
+grep -Eq -- "--output [^ ]+" "$MOCK_JAVA_ARGS" || fail "t5 java did not receive --output: $(cat "$MOCK_JAVA_ARGS")"
+grep -q -- "--paper 26.2-DEV-main@0a99345" "$MOCK_JAVA_ARGS" || fail "t5 java did not receive --paper: $(cat "$MOCK_JAVA_ARGS")"
+[ -f "$TMP/out/biome-temperature.json" ] || fail "t5 fixture not written: $RUN_OUT"
+[ -f "$TMP/out/manifest.json" ] || fail "t5 manifest not written: $RUN_OUT"
+pass "valid jar + libs -> full success path (java gets --output/--paper, fixture+manifest land in OUT_DIR)"
 
 # T6: a hostile `X-Git-Commit:` substring before the real attribute must not
 # be misread as the pin (the awk match is anchored to line start). The guard
-# reads the real 0a99345 and passes; the script proceeds to the javac shim.
+# reads the real 0a99345 and passes; the success path runs.
 run "$TMP/hostile.jar" "$LIBS_DIR"
+expect_exit 0
 for guard in "failed to read META-INF/MANIFEST.MF" "libraries dir not found" \
              "but the pin is" "no library jars under" "has no Git-Commit attribute"; do
   if echo "$RUN_OUT" | grep -q "$guard"; then
     fail "t6 emitted a guard diagnostic ($guard): $RUN_OUT"
   fi
 done
-echo "$RUN_OUT" | grep -q "MOCK_JAVAC_INVOKED" || fail "t6 did not reach javac: $RUN_OUT"
+[ -f "$TMP/out/biome-temperature.json" ] || fail "t6 fixture not written: $RUN_OUT"
 pass "hostile X-Git-Commit substring -> real commit read, guards pass"
 
 # T7: a valid jar with no Git-Commit attribute at all -> controlled refusal.

@@ -9,8 +9,13 @@
 //!
 //! Coverage rationale not evident from the test names:
 //! - the position grid sits within ~1e-5 of the FROZEN branch thresholds, so a
-//!   constant drift in `modify_temperature` flips a sampled branch decision;
-//! - high-Y samples straddle the 0.15 `warmEnoughToRain` boundary (FROZEN -> SNOW);
+//!   constant drift in `modify_temperature` (the `* 7.0` amplitude, the 0.3/0.8
+//!   gates, the 0.2 edge scale) flips a sampled branch decision. A zero-width
+//!   operator change (`< 0.3` to `<= 0.3`) is not caught by sampling — no noise
+//!   value lands exactly on the threshold — so only the gate *values* are
+//!   pinned, not the comparison direction at exact equality.
+//! - high-Y samples straddle the 0.15 `warmEnoughToRain` boundary (FROZEN -> SNOW),
+//!   and one sample lands exactly on 0.15, pinning the `>= 0.15` direction;
 //! - every sample is captured at two `seaLevel` values (63 and 0), so a port
 //!   that hardcodes the overworld snow level (80) fails the sl=0 goldens;
 //! - the fixture's SHA-256 is asserted against its sibling manifest, so a
@@ -131,13 +136,17 @@ fn noise_map(noise: &Value) -> HashMap<(i64, i64), NoiseAt> {
 }
 
 /// `icePatches = frozenLarge * 7.0 + frozenEdge` (the FROZEN modifier's outer
-/// gate). The one shared copy of the FROZEN formula; used only by the branch
-/// coverage test to classify grid positions.
+/// gate). This is the test's copy of the Paper FROZEN spec, used only to
+/// classify grid positions for the branch-coverage invariant; it deliberately
+/// mirrors the spec (not the Rust `modify_temperature`), so the coverage check
+/// cannot silently follow a production drift. Production drift is caught by
+/// the aggregate getTemperature goldens.
 fn frozen_ice_patches(n: &NoiseAt) -> f64 {
     n.frozen_large * 7.0 + n.frozen_edge
 }
 
-/// The FROZEN pin fires when `icePatches < 0.3 && frozenSmall < 0.8`.
+/// The FROZEN pin fires when `icePatches < 0.3 && frozenSmall < 0.8` (the
+/// Paper spec; see `TemperatureModifier.FROZEN`).
 fn frozen_pins(n: &NoiseAt) -> bool {
     frozen_ice_patches(n) < 0.3 && n.frozen_small < 0.8
 }
@@ -146,7 +155,17 @@ fn frozen_pins(n: &NoiseAt) -> bool {
 fn temperature_outputs_match_paper_exactly() {
     let data = fixture();
     let biomes = data["biomes"].as_array().expect("biomes is an array");
-    let noise_by_pos = noise_map(&data["noise"]);
+    let noise = &data["noise"];
+    let noise_by_pos = noise_map(noise);
+
+    // `noise_map` keys by (x, z), which would silently collapse duplicate grid
+    // positions; the fixture must not contain any, or a probe grid edit that
+    // adds a duplicate would be invisible to both tests.
+    assert_eq!(
+        noise.as_array().expect("noise is an array").len(),
+        noise_by_pos.len(),
+        "noise array must have unique (x, z) entries"
+    );
 
     // The raw noise the arithmetic consumes depends only on (x, z), so pin it
     // once per grid position rather than once per (x, y, z, seaLevel) sample.

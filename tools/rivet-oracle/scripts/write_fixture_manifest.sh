@@ -23,8 +23,14 @@ write_fixture_manifest() {
   local lines=('{'
     '  "format": 1,'
     "  \"paper\": \"$paper_pin\","
-    "  \"kind\": \"$kind\","
-    "  \"note\": \"$note\","
+    "  \"kind\": \"$kind\",")
+  # JSON-escape the note (backslash first, then double-quote) so a future note
+  # containing either cannot silently emit a malformed manifest. The current
+  # notes contain neither, so the emitted bytes are unchanged.
+  local note_escaped
+  note_escaped="${note//\\/\\\\}"
+  note_escaped="${note_escaped//\"/\\\"}"
+  lines+=("  \"note\": \"$note_escaped\","
     '  "captured": [')
   local file sha bytes last_idx i
   last_idx=$(($# - 1))
