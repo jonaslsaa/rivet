@@ -24,6 +24,7 @@
 
 use crate::biome::biome_id_codec::biome_id_field_codec;
 use crate::biome::biome_manager::NoiseBiomeSource;
+use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::biome_source::BiomeSource;
 use crate::biome::biome_source_type::{BiomeSourceTypeId, BiomeSourceTypes};
 use crate::biome::climate::Sampler;
@@ -183,6 +184,14 @@ impl BiomeSource for FixedBiomeSource {
         vec![self.biome.clone()]
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The source is its own resolver (Java `BiomeSource implements
+/// BiomeResolver`): every quart resolves to the fixed biome.
+impl BiomeResolver for FixedBiomeSource {
     fn get_noise_biome(
         &self,
         _quart_x: i32,
@@ -191,10 +200,6 @@ impl BiomeSource for FixedBiomeSource {
         _sampler: &Sampler,
     ) -> Holder<BiomeId> {
         self.biome.clone()
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
@@ -310,12 +315,19 @@ mod tests {
     #[test]
     fn get_noise_biome_is_fixed() {
         let src = FixedBiomeSource::new(holder());
-        // UFCS: `FixedBiomeSource` implements both `BiomeSource` (4-arg) and
-        // `NoiseBiomeSource` (3-arg) `get_noise_biome` — qualify the sampler
+        // `FixedBiomeSource` implements `BiomeResolver` (4-arg, inherited by
+        // `BiomeSource`) and `NoiseBiomeSource` (3-arg) `get_noise_biome` —
+        // two traits define the same method name, so qualify the resolver
         // overload.
         assert_eq!(
             src.biome,
-            BiomeSource::get_noise_biome(&src, -5, 64, 9, &crate::biome::climate::Climate::empty())
+            BiomeResolver::get_noise_biome(
+                &src,
+                -5,
+                64,
+                9,
+                &crate::biome::climate::Climate::empty()
+            )
         );
     }
 
