@@ -22,7 +22,9 @@
 /// `ChunkResult<T>` — `Success(T)` or `Fail(error supplier)`.
 pub enum ChunkResult<T> {
     Success(T),
-    Fail { error: Box<dyn Fn() -> String + Send + Sync> },
+    Fail {
+        error: Box<dyn Fn() -> String + Send + Sync>,
+    },
 }
 
 impl<T> ChunkResult<T> {
@@ -121,17 +123,28 @@ impl<T> ChunkResult<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::LazyLock;
 
     /// The boxed supplier must cross async scheduler seams: `ChunkResult` is
-    /// `Send + Sync` when `T` is, and a static unloaded-chunk constant (Paper's
-    /// `ChunkMap.UNLOADED_CHUNK_LIST_RESULT` / `GenerationChunkHolder.
-    /// UNLOADED_CHUNK`) can be a `static` item.
+    /// `Send + Sync` when `T` is. Paper's static unloaded-chunk results are
+    /// `ChunkResult.error(...)` (Fail with a supplier); in Rust a heap-allocated
+    /// `Box<dyn Fn>` static needs `LazyLock` (Java's `static final`), while
+    /// `Success` statics work directly via `const of`.
     #[test]
     fn result_is_send_sync_and_static_construable() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ChunkResult<i32>>();
 
-        static UNLOADED: ChunkResult<i32> = ChunkResult::error("unloaded chunk");
+        // A Success result is a plain `const` static.
+        static LOADED: ChunkResult<i32> = ChunkResult::of(7);
+        assert!(LOADED.is_success());
+        assert_eq!(LOADED.get_error(), None);
+
+        // Paper's unloaded-chunk error constants (ChunkMap.
+        // UNLOADED_CHUNK_LIST_RESULT, GenerationChunkHolder.UNLOADED_CHUNK) are
+        // Fail-with-supplier; the heap allocation requires LazyLock.
+        static UNLOADED: LazyLock<ChunkResult<i32>> =
+            LazyLock::new(|| ChunkResult::error("unloaded chunk"));
         assert!(!UNLOADED.is_success());
         assert_eq!(UNLOADED.get_error(), Some("unloaded chunk".to_string()));
     }

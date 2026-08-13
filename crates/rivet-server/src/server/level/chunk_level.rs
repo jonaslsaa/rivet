@@ -9,10 +9,17 @@
 //! pipeline class reads.
 //!
 //! `ChunkLevel` is where the level numbers meet the chunk-status ladder. The
-//! only external dependency is `ChunkStatus` (`rivet-world::chunk::status`,
-//! the 12-rung 26.2 ladder ported ahead of `mc.world.level.chunk.status`).
+//! level↔status mappings are pure functions of the generation pyramid's FULL
+//! step: Java computes them from
+//! `ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL)
+//! .accumulatedDependencies()`. The pyramid is owned by the
+//! `mc.world.level.chunk.status` manifest unit and is now ported (#594,
+//! `rivet-world::chunk::status::GENERATION_PYRAMID`); this module consumes it
+//! directly — there is no parallel copy of the dependency tables.
 
 use rivet_world::chunk::status::ChunkStatus;
+use rivet_world::chunk::status::chunk_pyramid::GENERATION_PYRAMID;
+use rivet_world::chunk::status::chunk_step::ChunkStep;
 
 use super::FullChunkStatus;
 
@@ -26,65 +33,20 @@ pub const ENTITY_TICKING_LEVEL: i32 = 31;
 /// (`FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK`).
 pub const MAX_LEVEL: i32 = FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK;
 
-/// RivetTodo(#185): `RADIUS_AROUND_FULL_CHUNK` and the two tables below are the
-/// generation pyramid's FULL step, owned by `mc.world.level.chunk.status`
-/// (ChunkPyramid/ChunkStep/ChunkDependencies — the parallel chunk-pyramid
-/// track). Java computes them as
-/// `ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL)
-/// .accumulatedDependencies()`. Rather than implement the pyramid here, this
-/// seam encodes the derived values for the pinned 26.2 pyramid and verifies
-/// them against the Paper golden fixture
-/// (`tools/rivet-oracle/fixtures/chunk-level/`, ChunkLevelProbe); replace with
-/// the real `ChunkPyramid` when the chunk-pyramid unit lands.
-///
-/// `RADIUS_AROUND_FULL_CHUNK` — the FULL step's accumulated-dependency radius
-/// (the number of levels a chunk can be below FULL and still be in generation
-/// range).
+/// `ChunkLevel.RADIUS_AROUND_FULL_CHUNK` — the FULL step's accumulated-
+/// dependency radius (the number of levels a chunk can be below FULL and still
+/// be in generation range). Java derives it from
+/// `FULL_CHUNK_STEP.accumulatedDependencies().getRadius()`; `const` here is
+/// Java's `static final int`, and the value is pinned against the authoritative
+/// pyramid in `tests::radius_matches_the_generation_pyramid`.
 pub const RADIUS_AROUND_FULL_CHUNK: i32 = 11;
 
-/// The FULL step's accumulated dependencies indexed by distance, for
-/// `distance` in `0..=RADIUS_AROUND_FULL_CHUNK`. Java:
-/// `FULL_CHUNK_STEP.accumulatedDependencies().get(distance)`.
-///
-/// Authoritative Java (queried from the pinned Paper 26.2 runtime via
-/// `ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL)`):
-/// `[spawn, initialize_light, carvers, biomes, structure_starts × 8]`. Index 0
-/// is SPAWN — the FULL step's direct parent — even though `ChunkLevel` never
-/// reads it: `getStatusAroundFullChunk` short-circuits `distance <= 0` to FULL
-/// before indexing. The entry is pinned here so the table is the faithful
-/// `accumulatedDependencies()` and stays swappable for the real pyramid.
-static FULL_STEP_ACCUMULATED_DEPENDENCIES: [ChunkStatus; 12] = [
-    ChunkStatus::Spawn,
-    ChunkStatus::InitializeLight,
-    ChunkStatus::Carvers,
-    ChunkStatus::Biomes,
-    ChunkStatus::StructureStarts,
-    ChunkStatus::StructureStarts,
-    ChunkStatus::StructureStarts,
-    ChunkStatus::StructureStarts,
-    ChunkStatus::StructureStarts,
-    ChunkStatus::StructureStarts,
-    ChunkStatus::StructureStarts,
-    ChunkStatus::StructureStarts,
-];
-
-/// Compile-time invariant: the table is `0..=RADIUS_AROUND_FULL_CHUNK`.
-const _: () = assert!(
-    FULL_STEP_ACCUMULATED_DEPENDENCIES.len() == RADIUS_AROUND_FULL_CHUNK as usize + 1
-);
-
-/// `ChunkStep.getAccumulatedRadiusOf(status)` for the FULL step — the radius
-/// at which each status first appears in the FULL step's accumulated
-/// dependencies (0 for the statuses whose requirement radius is the FULL chunk
-/// itself, up to 11 for EMPTY/STRUCTURE_STARTS at the pyramid's outer edge).
-const fn full_step_accumulated_radius_of(status: ChunkStatus) -> i32 {
-    match status {
-        ChunkStatus::Empty | ChunkStatus::StructureStarts => 11,
-        ChunkStatus::StructureReferences | ChunkStatus::Biomes => 3,
-        ChunkStatus::Noise | ChunkStatus::Surface | ChunkStatus::Carvers => 2,
-        ChunkStatus::Features | ChunkStatus::InitializeLight => 1,
-        ChunkStatus::Light | ChunkStatus::Spawn | ChunkStatus::Full => 0,
-    }
+/// `ChunkLevel.FULL_CHUNK_STEP` — the generation pyramid's FULL step
+/// (`ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL)`), consumed
+/// from the `mc.world.level.chunk.status` port (#594). Java reads its
+/// `accumulatedDependencies()` for the level↔status mappings below.
+fn full_step() -> &'static ChunkStep {
+    GENERATION_PYRAMID.get_step_to(ChunkStatus::Full)
 }
 
 /// `ChunkLevel.generationStatus(int level)` — the generation status a chunk at
@@ -108,7 +70,11 @@ pub fn get_status_around_full_chunk_with_default(
     } else if distance_to_full_chunk <= 0 {
         Some(ChunkStatus::Full)
     } else {
-        Some(FULL_STEP_ACCUMULATED_DEPENDENCIES[distance_to_full_chunk as usize])
+        Some(
+            full_step()
+                .accumulated_dependencies()
+                .get(distance_to_full_chunk as usize),
+        )
     }
 }
 
@@ -122,9 +88,10 @@ pub fn get_status_around_full_chunk(distance_to_full_chunk: i32) -> ChunkStatus 
 }
 
 /// `ChunkLevel.byStatus(ChunkStatus status)` — the minimum level a chunk must
-/// be at for `status` to be its generation status.
+/// be at for `status` to be its generation status. Java:
+/// `FULL_CHUNK_LEVEL + FULL_CHUNK_STEP.getAccumulatedRadiusOf(status)`.
 pub fn by_status(status: ChunkStatus) -> i32 {
-    FULL_CHUNK_LEVEL + full_step_accumulated_radius_of(status)
+    FULL_CHUNK_LEVEL + full_step().get_accumulated_radius_of(status) as i32
 }
 
 /// `ChunkLevel.fullStatus(int level)` — the `FullChunkStatus` ladder rung a
@@ -198,6 +165,34 @@ mod tests {
             "BLOCK_TICKING" => FullChunkStatus::BlockTicking,
             "ENTITY_TICKING" => FullChunkStatus::EntityTicking,
             other => panic!("unknown FullChunkStatus {other}"),
+        }
+    }
+
+    /// The `const` level↔status constants must match the authoritative
+    /// generation pyramid (`#594`), which is the same source Java derives them
+    /// from. This is the composition seam: no parallel table exists, so the
+    /// consts (Java's `static final int`) are pinned against the pyramid here.
+    #[test]
+    fn radius_and_constants_match_the_generation_pyramid() {
+        let full = GENERATION_PYRAMID.get_step_to(ChunkStatus::Full);
+        assert_eq!(
+            RADIUS_AROUND_FULL_CHUNK,
+            full.accumulated_dependencies().get_radius() as i32
+        );
+        assert_eq!(MAX_LEVEL, FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK);
+        // Index 0 of the FULL accumulated dependencies is SPAWN (the parent),
+        // never FULL itself — the #594 arbitration (the target status is never
+        // its own dependency). ChunkLevel never reads it (distance <= 0
+        // short-circuits to FULL), but the table must be the faithful
+        // accumulatedDependencies().
+        assert_eq!(full.accumulated_dependencies().get(0), ChunkStatus::Spawn);
+        // Every by_status level agrees with the pyramid's radius table.
+        for status in ChunkStatus::ALL {
+            assert_eq!(
+                by_status(status),
+                FULL_CHUNK_LEVEL + full.get_accumulated_radius_of(status) as i32,
+                "by_status({status:?}) vs pyramid"
+            );
         }
     }
 
