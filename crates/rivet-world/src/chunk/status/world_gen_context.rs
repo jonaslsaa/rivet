@@ -148,6 +148,25 @@ impl std::fmt::Display for GenError {
 
 impl std::error::Error for GenError {}
 
+/// A wired generation task is honored only at its canonical rung —
+/// `GenerateBiomes` at `BIOMES`, `GenerateNoise` at `NOISE`. Shared by
+/// `run_step` and the `generate_through` pre-check so both seams reject a
+/// rung mismatch identically.
+fn ensure_canonical_rung(task: ChunkStatusTask, target: ChunkStatus) -> Result<(), GenError> {
+    let canonical = match task {
+        ChunkStatusTask::GenerateBiomes => ChunkStatus::Biomes,
+        ChunkStatusTask::GenerateNoise => ChunkStatus::Noise,
+        _ => return Ok(()),
+    };
+    if target != canonical {
+        return Err(GenError::TaskStatusMismatch {
+            status: target,
+            task,
+        });
+    }
+    Ok(())
+}
+
 impl<T, B, S> WorldGenContext<T, B, S>
 where
     T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
@@ -205,21 +224,11 @@ where
                 chunk_status_tasks::pass_through(chunk);
             }
             ChunkStatusTask::GenerateBiomes => {
-                if step.target_status() != ChunkStatus::Biomes {
-                    return Err(GenError::TaskStatusMismatch {
-                        status: step.target_status(),
-                        task: step.task(),
-                    });
-                }
+                ensure_canonical_rung(step.task(), step.target_status())?;
                 (self.biomes)(chunk);
             }
             ChunkStatusTask::GenerateNoise => {
-                if step.target_status() != ChunkStatus::Noise {
-                    return Err(GenError::TaskStatusMismatch {
-                        status: step.target_status(),
-                        task: step.task(),
-                    });
-                }
+                ensure_canonical_rung(step.task(), step.target_status())?;
                 if !chunk
                     .get_persisted_status()
                     .is_or_after(ChunkStatus::Biomes)
@@ -295,21 +304,11 @@ where
             let step = pyramid.get_step_to(ChunkStatus::ALL[index]);
             match step.task() {
                 ChunkStatusTask::GenerateBiomes => {
-                    if step.target_status() != ChunkStatus::Biomes {
-                        return Err(GenError::TaskStatusMismatch {
-                            status: step.target_status(),
-                            task: step.task(),
-                        });
-                    }
+                    ensure_canonical_rung(step.task(), step.target_status())?;
                     projected = step.target_status();
                 }
                 ChunkStatusTask::GenerateNoise => {
-                    if step.target_status() != ChunkStatus::Noise {
-                        return Err(GenError::TaskStatusMismatch {
-                            status: step.target_status(),
-                            task: step.task(),
-                        });
-                    }
+                    ensure_canonical_rung(step.task(), step.target_status())?;
                     if !projected.is_or_after(ChunkStatus::Biomes) {
                         return Err(GenError::BiomesNotGenerated);
                     }
