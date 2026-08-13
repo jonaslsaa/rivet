@@ -293,6 +293,28 @@ mod tests {
     }
 
     #[test]
+    fn burst_mutation_still_trips_on_a_fixed_burst_layout() {
+        // With commands (16) no longer in PLAY_BURST_ORDER, the Burst mutation
+        // must still find an adjacent fixed-burst pair on a real join layout and
+        // swap it into an ordering violation — `each_mutation_trips_its_expected_detector`
+        // stays non-vacuous for the fixed packets.
+        let mut raw = vec![pkt(State::Handshake, Direction::Serverbound, 0, vec![0x00])];
+        for id in crate::ordering::PLAY_BURST_ORDER {
+            raw.push(pkt(State::Play, Direction::Clientbound, *id, vec![]));
+        }
+        let mutated = mutate_raw(MutationKind::Burst, &raw);
+        assert_ne!(
+            mutated, raw,
+            "Burst must swap a pair of fixed burst packets"
+        );
+        let failures = crate::ordering::check(&mutated);
+        assert!(
+            failures.iter().any(|f| f.kind == "ordering"),
+            "Burst mutation must produce an ordering failure, got {failures:?}"
+        );
+    }
+
+    #[test]
     fn entity_id_corrupts_update_attributes() {
         let m = mutate_raw(MutationKind::EntityId, &sample_raw());
         let p = m.iter().find(|p| {
