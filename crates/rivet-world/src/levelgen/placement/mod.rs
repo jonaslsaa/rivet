@@ -84,7 +84,7 @@ mod surface_water_depth_filter;
 
 pub use biome_filter::BiomeFilter;
 pub use block_predicate_filter::BlockPredicateFilter;
-pub use cave_surface::CaveSurface;
+pub use cave_surface::{CaveSurface, cave_surface_codec};
 pub use count_on_every_layer_placement::CountOnEveryLayerPlacement;
 pub use count_placement::{CountPlacement, count_placement_codec};
 pub use environment_scan_placement::EnvironmentScanPlacement;

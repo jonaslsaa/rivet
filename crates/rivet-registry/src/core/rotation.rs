@@ -8,6 +8,7 @@
 //! `getRandom`/`getShuffled` (RNG in rivet-util) defer with their owning units.
 
 use super::direction::Direction;
+use rivet_serialization::codec::JavaEquals;
 
 /// `Rotation` — a quarter-turn rotation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -16,6 +17,14 @@ pub enum Rotation {
     Clockwise90,
     Clockwise180,
     Counterclockwise90,
+}
+
+impl JavaEquals for Rotation {
+    fn java_equals(&self, other: &Self) -> bool {
+        // Java enum `equals` is reference identity; enum constants are
+        // singletons, so value equality (`==`) is identical.
+        self == other
+    }
 }
 
 impl Rotation {

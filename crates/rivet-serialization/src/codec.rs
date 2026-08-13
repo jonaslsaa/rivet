@@ -373,6 +373,14 @@ impl JavaEquals for f32 {
     }
 }
 
+impl<T: JavaEquals> JavaEquals for Vec<T> {
+    fn java_equals(&self, other: &Self) -> bool {
+        // Java `List.equals` — element-wise `equals`, short-circuiting on the
+        // first unequal element (Rust `==` on `Vec` is the same deep equality).
+        self.len() == other.len() && self.iter().zip(other.iter()).all(|(a, b)| a.java_equals(b))
+    }
+}
+
 /// `Codec.optionalFieldOf(String, F default)` — the with-default form of a
 /// NON-lenient optional field.
 ///
@@ -1343,4 +1351,55 @@ impl<Ops: DynamicOps + 'static> Codec<crate::dynamic::Dynamic<Ops::Output>, Ops>
 /// Debug formatting of an ops value for `PASSTHROUGH` error messages.
 fn debug_str<T: Debug>(value: T) -> String {
     format!("{:?}", value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::json_ops::JsonOps;
+    use serde_json::json;
+
+    /// `Codec.optionalFieldOf(String, F default)` — the NON-lenient with-default
+    /// optional field: absent → default on decode, value-equal-to-default →
+    /// omitted on encode, present-but-malformed → decode error.
+    #[test]
+    fn optional_field_of_defaults_when_absent_and_omits_when_default() {
+        let field = optional_field_of::<i32, JsonOps>("count", int_codec::<JsonOps>(), 4);
+        let codec = crate::map_codec::codec_of(field);
+        // Absent on decode → default.
+        let decoded = *codec
+            .parse(&JsonOps::INSTANCE, &json!({}))
+            .result()
+            .expect("decode should succeed");
+        assert_eq!(decoded, 4);
+        // Default value on encode → omitted.
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &4)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(encoded, json!({}));
+        // Non-default value round-trips.
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &7)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(encoded, json!({"count": 7}));
+        let decoded = *codec
+            .parse(&JsonOps::INSTANCE, &encoded)
+            .result()
+            .expect("decode should succeed");
+        assert_eq!(decoded, 7);
+    }
+
+    /// The NON-lenient form errors on a present-but-malformed value (unlike
+    /// `lenient_optional_field_of`, which silently falls back to the default).
+    #[test]
+    fn optional_field_of_rejects_present_malformed_value() {
+        let field = optional_field_of::<i32, JsonOps>("count", int_codec::<JsonOps>(), 4);
+        let codec = crate::map_codec::codec_of(field);
+        let result = codec.parse(&JsonOps::INSTANCE, &json!({"count": "not an int"}));
+        assert!(result.result().is_none());
+    }
 }
