@@ -49,12 +49,13 @@
 //! - `OverworldBiomeBuilder` (biome unit): only the two leaves this SCC reads
 //!   are inlined — `isDeepDarkRegion` (in `Aquifer`) and `spawnTarget()` (in
 //!   `NoiseGeneratorSettings`).
-//! - The world/level surfaces `NoiseBasedChunkGenerator` touches
-//!   (`WorldGenRegion`, `StructureManager`, `BiomeManager`/`BiomeSource`,
-//!   `CarvingContext`/`CarvingMask`, `NaturalSpawner`, `NoiseColumn`,
+//! - The still-unported world/level surfaces `NoiseBasedChunkGenerator` touches
+//!   (`WorldGenRegion`, `StructureManager`, `BiomeSource`, `NaturalSpawner`,
+//!   `NoiseColumn`) defer with their owning units; the methods that need them
+//!   are `STUB`/`todo!`-free markers (see `noise_based_chunk_generator`). The
+//!   surfaces that have landed (`BiomeManager`, `CarvingContext`/`CarvingMask`,
 //!   `BiomeGenerationSettings`, `ConfiguredWorldCarver`, `LevelChunkSection`,
-//!   `ProtoChunk`, `Heightmap`) are not ported; the methods that need them are
-//!   `STUB`/`todo!`-free markers (see `noise_based_chunk_generator`).
+//!   `ProtoChunk`, `Heightmap`) are consumed directly.
 
 pub mod aquifer;
 pub mod column_pos;
