@@ -6,8 +6,8 @@
 //! the id-handle [`Block`] wrapping the registry id from the generated table.
 //! The constant values are the generated ids (verified against `BLOCK_BY_ID` by
 //! the tests), so `Blocks::STONE == Block::new(BlockId::from_name
-//! ("minecraft:stone"))`. Constants are ordered by registry id to match the
-//! generated table order.
+//! ("minecraft:stone"))`. The constants are grouped by use-site (worldgen /
+//! surface / lighting), not ordered by registry id; each wraps the generated id.
 
 use super::Block;
 use rivet_registry::generated::blocks::BlockId;
@@ -76,6 +76,22 @@ impl Blocks {
     pub const ORANGE_STAINED_GLASS: Block = Block::new(BlockId(301));
     /// `Blocks.SNOW_BLOCK`.
     pub const SNOW_BLOCK: Block = Block::new(BlockId(278));
+    /// `Blocks.WHITE_TERRACOTTA` (surface: `SurfaceSystem` clay bands).
+    pub const WHITE_TERRACOTTA: Block = Block::new(BlockId(484));
+    /// `Blocks.ORANGE_TERRACOTTA` (surface: `SurfaceSystem` clay bands).
+    pub const ORANGE_TERRACOTTA: Block = Block::new(BlockId(485));
+    /// `Blocks.YELLOW_TERRACOTTA` (surface: `SurfaceSystem` clay bands).
+    pub const YELLOW_TERRACOTTA: Block = Block::new(BlockId(488));
+    /// `Blocks.LIGHT_GRAY_TERRACOTTA` (surface: `SurfaceSystem` clay bands).
+    pub const LIGHT_GRAY_TERRACOTTA: Block = Block::new(BlockId(492));
+    /// `Blocks.BROWN_TERRACOTTA` (surface: `SurfaceSystem` clay bands).
+    pub const BROWN_TERRACOTTA: Block = Block::new(BlockId(496));
+    /// `Blocks.RED_TERRACOTTA` (surface: `SurfaceSystem` clay bands).
+    pub const RED_TERRACOTTA: Block = Block::new(BlockId(498));
+    /// `Blocks.TERRACOTTA` (surface: `SurfaceSystem` clay bands).
+    pub const TERRACOTTA: Block = Block::new(BlockId(554));
+    /// `Blocks.PACKED_ICE` (surface: `SurfaceSystem` iceberg).
+    pub const PACKED_ICE: Block = Block::new(BlockId(556));
     /// `Blocks.NETHERRACK`.
     pub const NETHERRACK: Block = Block::new(BlockId(285));
     /// `Blocks.SOUL_SAND`.
@@ -149,6 +165,14 @@ mod tests {
             Blocks::ICE,
             Blocks::ORANGE_STAINED_GLASS,
             Blocks::SNOW_BLOCK,
+            Blocks::WHITE_TERRACOTTA,
+            Blocks::ORANGE_TERRACOTTA,
+            Blocks::YELLOW_TERRACOTTA,
+            Blocks::LIGHT_GRAY_TERRACOTTA,
+            Blocks::BROWN_TERRACOTTA,
+            Blocks::RED_TERRACOTTA,
+            Blocks::TERRACOTTA,
+            Blocks::PACKED_ICE,
             Blocks::NETHERRACK,
             Blocks::SOUL_SAND,
             Blocks::ACACIA_BUTTON,
