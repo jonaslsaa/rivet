@@ -478,6 +478,13 @@ impl Blender {
     fn blend_biome(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> Option<Holder<BiomeId>> {
         let mut closest_distance = f64::INFINITY;
         let mut closest_biome: Option<Holder<BiomeId>> = None;
+        // `BTreeMap` yields the chunk keys in ascending order, so on equidistant
+        // cells (a strict `<` comparison — the first-encountered wins) the
+        // selected biome is deterministic run-to-run; Paper iterates the fastutil
+        // `Long2ObjectOpenHashMap` in probe-slot order (NOT ascending), which can
+        // pick a different biome on such ties. Unlike the height/density blends
+        // there is no f64 sum here, but the tie-break is equally iteration-order-
+        // sensitive — `RivetTodo(#177)`; see the struct doc.
         for (chunk_pos, blending_data) in &self.height_and_biome_blending_data {
             blending_data.iterate_biomes(
                 QuartPos::from_section(ChunkPos::get_x(*chunk_pos)),
