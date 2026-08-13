@@ -3561,6 +3561,40 @@ mod tests {
         assert_eq!(steep_neighbor_probes(7, 3), (2, 4, 6, 8));
     }
 
+    /// The `#185` heightmap seam firing path: `SteepMaterialCondition` reads
+    /// the `WORLD_SURFACE_WG` snapshot `build_surface` captured at its start
+    /// (never the `&mut` chunk), so a column whose south neighbor is >= 4 blocks
+    /// higher must report steep exactly as Java's live `getHeight` reads would.
+    #[test]
+    fn steep_condition_fires_on_the_primed_heightmap_snapshot() {
+        // A helper building a steep condition over a given height snapshot.
+        fn condition_for(heights: Option<Arc<[i32; 256]>>) -> SteepMaterialCondition {
+            let sc = Arc::new(SurfaceContext {
+                system: Arc::new(stub_surface_system()),
+                cells: SharedCells::new(),
+                biome_getter: Arc::new(|_: &BlockPos| Holder::direct(BiomeId::from_id(0))),
+                worldgen_context: Arc::new(worldgen_context(-64, 384, 384)),
+                world_surface_heights: heights,
+            });
+            sc.update_xz(0, 1);
+            SteepMaterialCondition {
+                cache: LazyCache::new(sc.cells.last_update_xz()),
+                surface_context: sc,
+            }
+        }
+        // A snapshot where the chunk-local column (0, 1) probes north height 10
+        // (z=0) and south height 14 (z=2): 14 >= 10 + 4 -> steep.
+        let mut heights = [0i32; 256];
+        heights[0] = 10; // (0, 0) — the north probe at chunk-block z 0.
+        heights[32] = 14; // (0, 2) — the south probe at chunk-block z 2.
+        assert!(condition_for(Some(Arc::new(heights))).test());
+        // Flat snapshot: north == south == 10 -> not steep.
+        let flat = [10i32; 256];
+        assert!(!condition_for(Some(Arc::new(flat))).test());
+        // No snapshot (the single-column carver probe): cannot fire.
+        assert!(!condition_for(None).test());
+    }
+
     /// `SurfaceRuleData.air()` must round-trip through `rule_source_codec` as a
     /// `block` rule (Java's `makeStateRule(Blocks.AIR)`), never fail with
     /// "Material rule type 'air' is not ported".
