@@ -303,6 +303,7 @@ mod tests {
     use crate::levelgen::synth::normal_noise::NoiseParameters;
     use rivet_registry::RegistryBuilder;
     use rivet_registry::registry::Registry;
+    use std::sync::Arc;
 
     /// A mock generator that answers the surfaces the faithful defaults need:
     /// the abstract getters and the real `getBaseHeight` the height-read
@@ -356,19 +357,42 @@ mod tests {
     }
 
     /// The `noisegen` test pattern — `noise_based_chunk_generator::tests::
-    /// empty_registries`: a registry-free settings router (`NoiseRouterData.none`)
-    /// needs no registry content, so `RandomState::create` never touches the
-    /// empty registries. The registries are returned so the caller keeps them
-    /// alive in the same scope as the `RandomState` that borrows them.
-    fn empty_registries() -> (Registry<NoiseParameters>, Registry<DensityFunctionValue>) {
+    /// populated_registries`: a noise registry populated via `NoiseData.bootstrap`
+    /// because `RandomState::create` eagerly constructs the `SurfaceSystem`,
+    /// which resolves its nine `Noises.*` keys (including `clay_bands_offset`)
+    /// through the registry. The density-function registry stays empty: the
+    /// test router carries no `HolderHolder`/`NoiseHolder` nodes. The registries
+    /// are returned so the caller keeps them alive in the same scope as the
+    /// `RandomState` that borrows them.
+    fn populated_registries() -> (Registry<NoiseParameters>, Registry<DensityFunctionValue>) {
+        use crate::data::worldgen::bootstrap_context::RecordingContext;
+        use crate::data::worldgen::noise_data;
+        use rivet_registry::RegistrationInfo;
+        use rivet_registry::RegistryAccess;
+        use rivet_registry::holder::RegistryId;
+
         let noise_key = &crate::levelgen::noise::registry_keys::NOISE;
-        let noise_registry: Registry<NoiseParameters> = RegistryBuilder::new(noise_key).freeze();
+        let mut noise_builder: RegistryBuilder<NoiseParameters> = RegistryBuilder::new(noise_key);
+        let mut noise_ctx = RecordingContext::<NoiseParameters>::new(
+            RegistryId(0),
+            (*noise_key).clone(),
+            RegistryAccess::empty(),
+        );
+        noise_data::bootstrap(&mut noise_ctx);
+        for reg in noise_ctx.registrations() {
+            noise_builder.register(
+                &reg.key,
+                Arc::new(reg.value.clone()),
+                RegistrationInfo::BUILT_IN,
+            );
+        }
+        let noise_registry = noise_builder.freeze();
         let df_key = &crate::levelgen::noise::registry_keys::DENSITY_FUNCTION;
         let df_registry: Registry<DensityFunctionValue> = RegistryBuilder::new(df_key).freeze();
         (noise_registry, df_registry)
     }
 
-    /// `RandomState.create` over the [`empty_registries`] fixtures, borrowing
+    /// `RandomState.create` over the [`populated_registries`] fixtures, borrowing
     /// them for the returned state's lifetime.
     fn random_state<'a>(
         noise_registry: &'a Registry<NoiseParameters>,
@@ -402,7 +426,7 @@ mod tests {
         // The default body routes through the vtable too: `get_first_free_height`
         // is a default delegating to the mock's `get_base_height` override.
         let accessor = accessor();
-        let (noise_registry, df_registry) = empty_registries();
+        let (noise_registry, df_registry) = populated_registries();
         let random_state = random_state(&noise_registry, &df_registry);
         assert_eq!(
             dyn_gen.get_first_free_height(3, 7, Types::WorldSurfaceWg, &accessor, &random_state),
@@ -436,7 +460,7 @@ mod tests {
             base_height: 100,
         };
         let accessor = accessor();
-        let (noise_registry, df_registry) = empty_registries();
+        let (noise_registry, df_registry) = populated_registries();
         let random_state = random_state(&noise_registry, &df_registry);
         assert_eq!(
             ChunkGenerator::get_first_free_height(
@@ -462,7 +486,7 @@ mod tests {
             base_height: 100,
         };
         let accessor = accessor();
-        let (noise_registry, df_registry) = empty_registries();
+        let (noise_registry, df_registry) = populated_registries();
         let random_state = random_state(&noise_registry, &df_registry);
         assert_eq!(
             ChunkGenerator::get_first_occupied_height(
@@ -505,7 +529,7 @@ mod tests {
         // default seam is exercised at its exact default.
         let generator = SeamOnlyGenerator;
         let accessor = accessor();
-        let (noise_registry, df_registry) = empty_registries();
+        let (noise_registry, df_registry) = populated_registries();
         let random_state = random_state(&noise_registry, &df_registry);
         let mut result = Vec::new();
         let feet = BlockPos::new(0, 0, 0);
