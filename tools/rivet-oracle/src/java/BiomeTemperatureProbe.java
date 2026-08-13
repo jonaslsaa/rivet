@@ -102,6 +102,15 @@ public final class BiomeTemperatureProbe {
             e.addProperty("frozenLarge", Double.doubleToLongBits(frozenLarge(p[0], p[1])));
             e.addProperty("frozenEdge", Double.doubleToLongBits(frozenEdge(p[0], p[1])));
             e.addProperty("frozenSmall", Double.doubleToLongBits(frozenSmall(p[0], p[1])));
+            // The same BIOME_INFO_NOISE edge term sampled at the * 0.1 scale
+            // (Java's `getValue(x * 0.1, z * 0.1, false)`) — pins the 0.2 edge
+            // scale itself: the grid includes positions like (0,8) where the
+            // 0.2-scale branch pins but a 0.1-scale edge would not, so a scale
+            // drift flips a sampled decision.
+            e.addProperty(
+                "frozenEdge01",
+                Double.doubleToLongBits(noiseValue("BIOME_INFO_NOISE", p[0] * 0.1, p[1] * 0.1))
+            );
             noise.add(e);
         }
         root.add("noise", noise);

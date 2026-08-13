@@ -94,6 +94,7 @@ struct NoiseAt {
     snow_level_v: f32,
     frozen_large: f64,
     frozen_edge: f64,
+    frozen_edge01: f64,
     frozen_small: f64,
 }
 
@@ -102,12 +103,14 @@ fn noise_at(noise: &Value, x: i64, z: i64) -> NoiseAt {
         if entry["x"].as_i64() == Some(x) && entry["z"].as_i64() == Some(z) {
             let frozen_large = f64::from_bits(double_bits(&entry["frozenLarge"]));
             let frozen_edge = f64::from_bits(double_bits(&entry["frozenEdge"]));
+            let frozen_edge01 = f64::from_bits(double_bits(&entry["frozenEdge01"]));
             let frozen_small = f64::from_bits(double_bits(&entry["frozenSmall"]));
             return NoiseAt {
                 temperature_noise: f64::from_bits(double_bits(&entry["temperatureNoise"])),
                 snow_level_v: f32::from_bits(float_bits(&entry["snowLevelV"])),
                 frozen_large,
                 frozen_edge,
+                frozen_edge01,
                 frozen_small,
             };
         }
@@ -216,6 +219,19 @@ fn temperature_outputs_match_paper_exactly() {
                         .to_bits(),
                     n.frozen_small.to_bits(),
                     "BIOME_INFO_NOISE (small) at ({x},{z})"
+                );
+                // The edge scale itself is pinned: Java samples the edge term
+                // at `x * 0.2`. The fixture also carries the `x * 0.1` sample
+                // so a scale drift (0.2 -> 0.1) is caught even though Rust
+                // never reads the 0.1 value — the grid includes positions like
+                // (0,8) where the 0.2-scale branch pins but a 0.1-scale edge
+                // would not (ice_patches 0.2026 vs 0.4136).
+                assert_eq!(
+                    BIOME_INFO_NOISE
+                        .get_value(x as f64 * 0.1, z as f64 * 0.1, false)
+                        .to_bits(),
+                    n.frozen_edge01.to_bits(),
+                    "BIOME_INFO_NOISE (edge 0.1) at ({x},{z})"
                 );
                 let ice_patches = n.frozen_large * 7.0 + n.frozen_edge;
                 let pins = ice_patches < 0.3 && n.frozen_small < 0.8;
