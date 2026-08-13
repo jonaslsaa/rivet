@@ -23,13 +23,16 @@
 //!
 //! The `registryAccess`/`noiseChunk`/`surfaceRule` fields exist in Java only
 //! to feed `topMaterial`'s `randomState.surfaceSystem().topMaterial(...)`
-//! call; `SurfaceSystem` is the `levelgen::surface_rules` unit STUB (no
-//! `topMaterial` method), so `topMaterial` is a **typed closure seam** — the
-//! caller binds the closure (capturing its `biomeGetter`/`noiseChunk`/
-//! `surfaceRule`), and an unbound seam returns `None`, Java's `Optional.empty()`
-//! when the surface system yields no replacement. The three fields are
-//! consequently not ported (no state is fabricated to hold them).
-//! RivetTodo(#399): bind the `top_material` seam when the surface unit lands.
+//! call. The port keeps those fields out of the struct and instead exposes
+//! `topMaterial` as a **typed closure seam** — the caller binds a closure that
+//! captures its `ruleSource`/`noiseChunk`/`biomeGetter` plus the shared
+//! [`SurfaceSystem`](crate::levelgen::surface_rules::SurfaceSystem), and an
+//! unbound seam returns `None`, Java's `Optional.empty()` when the surface
+//! system yields no replacement. The closure rides the `CarvingContext`'s
+//! lifetime (`TopMaterialFn<'a>`) so it can capture the borrowed
+//! `RandomState`; the surface unit's
+//! [`bind_carver_top_material`](crate::levelgen::surface_rules::bind_carver_top_material)
+//! constructs it once the surface system is available (see `surface_rules.rs`).
 
 use crate::chunk::chunk_generator::ChunkGenerator;
 use crate::level::height_accessor::LevelHeightAccessor;
@@ -45,9 +48,11 @@ use std::sync::Arc;
 ///
 /// The closure returns the surface replacement for a block position (Java's
 /// `Optional<BlockState>`); `None` means "no replacement" (`Optional.empty()`).
-/// `SurfaceSystem` is the `levelgen::surface_rules` STUB, so the seam is
-/// unbound by default.
-pub type TopMaterialFn = dyn Fn(&BlockPos, bool) -> Option<BlockState> + Send + Sync;
+/// The `'a` is the `RandomState` borrow the closure captures (the
+/// `SurfaceSystem` probe's `Context` carries it); the surface unit's
+/// [`SurfaceSystem::top_material`](crate::levelgen::surface_rules::SurfaceSystem::top_material)
+/// is the bound implementation. The seam is unbound (`None`) until bound.
+pub type TopMaterialFn<'a> = dyn Fn(&BlockPos, bool) -> Option<BlockState> + Send + Sync + 'a;
 
 /// `net.minecraft.world.level.levelgen.carver.CarvingContext`.
 pub struct CarvingContext<'a> {
@@ -55,9 +60,8 @@ pub struct CarvingContext<'a> {
     world: WorldGenerationContext,
     /// `randomState` — `randomState()`.
     random_state: &'a RandomState<'a>,
-    /// `topMaterial` seam — `None` when the surface system is not bound
-    /// (RivetTodo(#399)).
-    top_material: Option<Arc<TopMaterialFn>>,
+    /// `topMaterial` seam — `None` when the surface system is not bound.
+    top_material: Option<Arc<TopMaterialFn<'a>>>,
 }
 
 impl<'a> CarvingContext<'a> {
@@ -96,15 +100,17 @@ impl<'a> CarvingContext<'a> {
         &self.world
     }
 
-    /// `randomState()`.
-    pub fn random_state(&self) -> &RandomState<'a> {
+    /// `randomState()`. Returns the full `'a` borrow (not shortened to the
+    /// `&self` borrow) so a bound seam closure can capture it — the reference
+    /// is a `Copy` field whose validity is independent of the `&self` borrow.
+    pub fn random_state(&self) -> &'a RandomState<'a> {
         self.random_state
     }
 
-    /// Bind the `topMaterial` surface seam (the #399 wiring; the surface unit
-    /// owns the closure). Java's `topMaterial` is always available (it
-    /// delegates to `surfaceSystem`), so binding is a one-way set.
-    pub fn set_top_material(&mut self, top_material: Arc<TopMaterialFn>) {
+    /// Bind the `topMaterial` surface seam. Java's `topMaterial` is always
+    /// available (it delegates to `surfaceSystem`), so binding is a one-way
+    /// set; the surface unit's `bind_carver_top_material` is the caller.
+    pub fn set_top_material(&mut self, top_material: Arc<TopMaterialFn<'a>>) {
         self.top_material = Some(top_material);
     }
 
