@@ -53,4 +53,32 @@ OUT_DIR="$(dirname "$OUT_FILE")"
 mkdir -p "$OUT_DIR"
 java -Xms256M -Xmx2G -cp "$CP" BiomeTemperatureProbe \
   --output "$OUT_DIR" --paper "$PAPER_PIN"
-echo "wrote $OUT_FILE"
+# The probe hardcodes the output basename `biome-temperature.json`
+# (BiomeTemperatureProbe writes `output/biome-temperature.json`), so the first
+# argument selects the output directory, not a file. Hash what the probe
+# actually wrote, never an assumed file path.
+FIXTURE_FILE="$OUT_DIR/biome-temperature.json"
+echo "wrote $FIXTURE_FILE"
+
+# Refresh the fixture manifest so the regenerated goldens hash matches what the
+# gate's `rivet-oracle verify` expects (the text/worldgen kinds regenerate their
+# manifests in-process; this kind is script-driven, so the script owns it).
+SHA="$(shasum -a 256 "$FIXTURE_FILE" | awk '{print $1}')"
+BYTES="$(wc -c < "$FIXTURE_FILE" | tr -d ' ')"
+MANIFEST="$OUT_DIR/manifest.json"
+NOTE="bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis (frozenIcePatches/frozenSmall/frozenPins) is computed from Paper's raw noise so the inner and outer sub-checks are independently discriminable. Deterministic across boots."
+printf '%s\n' \
+  '{' \
+  '  "format": 1,' \
+  "  \"paper\": \"$PAPER_PIN\"," \
+  '  "kind": "biome-temperature",' \
+  "  \"note\": \"$NOTE\"," \
+  '  "captured": [' \
+  '    {' \
+  '      "path": "biome-temperature.json",' \
+  "      \"sha256\": \"$SHA\"," \
+  "      \"bytes\": $BYTES" \
+  '    }' \
+  '  ]' \
+  '}' > "$MANIFEST"
+echo "wrote $MANIFEST"

@@ -21,8 +21,10 @@
 //! oracle validates.
 
 use rivet_registry::core::BlockPos;
-use rivet_world::biome::biome::TEMPERATURE_NOISE;
-use rivet_world::biome::biome::{Biome, BiomeBuilder, Precipitation, TemperatureModifier};
+use rivet_world::biome::biome::{
+    BIOME_INFO_NOISE, Biome, BiomeBuilder, FROZEN_TEMPERATURE_NOISE, Precipitation,
+    TEMPERATURE_NOISE, TemperatureModifier,
+};
 use rivet_world::biome::biome_special_effects::BiomeSpecialEffectsBuilder;
 use rivet_world::biome::{BiomeGenerationSettings, MobSpawnSettings};
 use serde_json::Value;
@@ -155,6 +157,31 @@ fn temperature_outputs_match_paper_exactly() {
             // The FROZEN modifier's branch decision, recomputed from Paper's
             // raw noise, must match the probe's flag and the aggregate result.
             if name == "frozen" {
+                // Pin the two FROZEN noise statics directly against Paper's
+                // raw samples (seed 3456 / 2345) so an amplitude/octave drift
+                // in either port fails even when it does not flip a sampled
+                // branch decision.
+                assert_eq!(
+                    FROZEN_TEMPERATURE_NOISE
+                        .get_value(x as f64 * 0.05, z as f64 * 0.05, false)
+                        .to_bits(),
+                    n.frozen_large.to_bits(),
+                    "FROZEN_TEMPERATURE_NOISE at ({x},{z})"
+                );
+                assert_eq!(
+                    BIOME_INFO_NOISE
+                        .get_value(x as f64 * 0.2, z as f64 * 0.2, false)
+                        .to_bits(),
+                    n.frozen_edge.to_bits(),
+                    "BIOME_INFO_NOISE (edge) at ({x},{z})"
+                );
+                assert_eq!(
+                    BIOME_INFO_NOISE
+                        .get_value(x as f64 * 0.09, z as f64 * 0.09, false)
+                        .to_bits(),
+                    n.frozen_small.to_bits(),
+                    "BIOME_INFO_NOISE (small) at ({x},{z})"
+                );
                 let ice_patches = n.frozen_large * 7.0 + n.frozen_edge;
                 let pins = ice_patches < 0.3 && n.frozen_small < 0.8;
                 assert_eq!(
