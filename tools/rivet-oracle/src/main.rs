@@ -117,6 +117,8 @@
 //! different commit than the resolved paperclip). A stale, swapped, or
 //! unverifiable Paper never passes silently (see gate.sh).
 
+mod chunk_level;
+mod composed_noise;
 mod corpus;
 mod hash;
 mod hash_manifest;
@@ -919,6 +921,32 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
         "PASS: all {} fixture kinds match their manifest SHA-256s",
         kinds.len()
     );
+    // The composed-noise golden comparison: beyond the manifest hashes, assert
+    // the NOISE-checkpoint goldens (provenance, FULL_CHUNK_STEP reachability,
+    // non-vacuous #175 matrix) and print the status/provenance scoreboard. The
+    // committed seed-42 golden is a load-bearing deliverable — if the fixture
+    // tree is absent this is UNVERIFIED (exit 3), never a silent green (D8:
+    // never weaken/delete fixtures to go green).
+    verify_composed_noise_step(&crate_dir().join("fixtures/composed-noise"))?;
+    Ok(())
+}
+
+/// Verify the committed composed-noise golden, failing with `Error::Unverified`
+/// (exit 3) when the fixture tree is absent rather than silently skipping it.
+fn verify_composed_noise_step(dir: &Path) -> Result<(), Error> {
+    if !dir.join("manifest.json").is_file() {
+        return Err(Error::Unverified(format!(
+            "composed-noise fixtures {} are ABSENT — the seed-42 golden and its \
+             NOISE-checkpoint gate cannot verify (git checkout or regenerate via \
+             --composed-noise); refusing to pass green without them",
+            dir.display()
+        )));
+    }
+    composed_noise::verify_composed_noise(dir)?;
+    println!(
+        "PASS: composed-noise seed-42 golden verified (pinned Paper 0a99345 provenance, reachability, value↔bits round-trip)"
+    );
+    composed_noise::print_scoreboard();
     Ok(())
 }
 
@@ -2319,7 +2347,10 @@ fn regenerate_full(dest: &Path) -> Result<(), Error> {
 /// M0-verify-in-a-temporary-destination path.
 fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     for flag in only {
-        if !matches!(*flag, "--m0" | "--m2" | "--full" | "--samples" | "--text") {
+        if !matches!(
+            *flag,
+            "--m0" | "--m2" | "--full" | "--samples" | "--text" | "--composed-noise"
+        ) {
             return Err(Error::Gate(format!("unknown regenerate flag: {flag}")));
         }
     }
@@ -2336,9 +2367,9 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
         };
         return Err(Error::Gate(format!(
             "regenerate --to <dir> requires exactly one of --m0/--m2/--full — bare \
-             and combined selections, and the derived kinds --samples/--text \
-             (which regenerate their committed fixture trees and ignore --to), \
-             are refused; got {what}"
+             and combined selections, and the derived kinds --samples/--text/\
+             --composed-noise (which regenerate their committed fixture trees and \
+             ignore --to), are refused; got {what}"
         )));
     }
     let m0 = regenerates_kind("--m0", only);
@@ -2346,6 +2377,7 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     let full = regenerates_kind("--full", only);
     let samples = regenerates_kind("--samples", only);
     let text = regenerates_kind("--text", only);
+    let composed_noise = regenerates_kind("--composed-noise", only);
     let m0_default = crate_dir().join("fixtures");
     let m2_default = crate_dir().join("fixtures/regions/overworld-normal");
     let full_default = crate_dir().join("fixtures/regions/superflat-full");
@@ -2371,6 +2403,10 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     if text {
         println!("==> regenerating text fixture corpus (corpus.json + golden.json)");
         regenerate_text()?;
+    }
+    if composed_noise {
+        println!("==> regenerating composed-noise seed-42 goldens from pinned Paper");
+        composed_noise::run_probe(&crate_dir().join("fixtures/composed-noise"))?;
     }
     Ok(())
 }
@@ -3160,10 +3196,25 @@ fn print_usage() {
     println!(
         "  cargo run -p rivet-oracle -- sample         regenerate worldgen/ semantic samples + manifest"
     );
+    println!("  cargo run -p rivet-oracle -- composed-noise [--tamper | --sample]");
+    println!(
+        "                                             composed-noise golden comparison: verify the"
+    );
+    println!(
+        "                                             seed-42 NOISE-checkpoint goldens + print the"
+    );
+    println!(
+        "                                             status/provenance scoreboard; --tamper is the"
+    );
+    println!(
+        "                                             negative control; --sample regenerates from"
+    );
+    println!("                                             the pinned Paper runtime");
     println!("  cargo run -p rivet-oracle -- regenerate     regenerate ALL fixture kinds");
     println!(
-        "                                             (sub-select: --m0 / --m2 / --full / --samples / --text;"
+        "                                             (sub-select: --m0 / --m2 / --full / --samples / --text /"
     );
+    println!("                                              --composed-noise;");
     println!(
         "                                              --to <dir> — exactly one of --m0/--m2/--full"
     );
@@ -3235,6 +3286,23 @@ fn run() -> Result<(), Error> {
                 run_verify_negative_control(&cfg)
             } else {
                 run_verify_gate(&cfg)
+            }
+        }
+        Some("composed-noise") => {
+            // The composed-noise golden comparison slice (NOISE checkpoint).
+            //   cargo run -p rivet-oracle -- composed-noise            verify + scoreboard
+            //   cargo run -p rivet-oracle -- composed-noise --tamper   negative control
+            //   cargo run -p rivet-oracle -- composed-noise --sample   regenerate from pinned Paper
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            let dir = crate_dir().join("fixtures/composed-noise");
+            if rest.contains(&"--tamper") {
+                composed_noise::tamper_negative_control(&dir)
+            } else if rest.contains(&"--sample") {
+                composed_noise::run_probe(&dir)
+            } else {
+                composed_noise::verify_composed_noise(&dir)?;
+                composed_noise::print_scoreboard();
+                Ok(())
             }
         }
         Some("sample") => regenerate_samples(),
