@@ -54,6 +54,8 @@ use std::collections::HashMap;
 
 use indexmap::{IndexMap, IndexSet};
 
+use crate::biome::biome_resolver::BiomeResolver;
+use crate::biome::climate::Sampler;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::light_chunk::LightChunk;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
@@ -65,7 +67,9 @@ use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccess
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
 use rivet_nbt::compound_tag::CompoundTag;
-use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
+use rivet_registry::biome_id::BiomeId;
+use rivet_registry::core::{BlockPos, ChunkPos, QuartPos, SectionPos};
+use rivet_registry::holder::Holder;
 
 /// `ChunkAccess.NO_FILLED_SECTION` — `getHighestFilledSectionIndex()` for a
 /// chunk with no non-air section.
@@ -578,6 +582,44 @@ where
         self.sections[section_y as usize].get_noise_biome(quart_x & 3, rel, quart_z & 3)
     }
 
+    /// `ChunkAccess.fillBiomesFromNoise(BiomeResolver, Climate.Sampler)` — the
+    /// biomes step of the status ladder: every section, lowest first, filled
+    /// from the resolver at the chunk-absolute quart origin.
+    ///
+    /// Java verbatim: `quartMinX`/`quartMinZ` from the chunk's min block
+    /// coordinates, then per `sectionY` in `minSectionY..=maxSectionY` the
+    /// section at `getSectionIndexFromSectionY(sectionY)` is filled with
+    /// `quartMinY = QuartPos.fromSection(sectionY)`. Java resolves through
+    /// `getHeightAccessorForGeneration()`; the port uses the contained accessor
+    /// (the `UPGRADE_HEIGHT_ACCESSOR` retrogen branch defers with
+    /// `BelowZeroRetrogen`). `map_biome` converts each resolved
+    /// `Holder<BiomeId>` into the section's stored element `B` (see
+    /// [`LevelChunkSection::fill_biomes_from_noise`]).
+    pub fn fill_biomes_from_noise(
+        &mut self,
+        biome_resolver: &dyn BiomeResolver,
+        sampler: &Sampler,
+        map_biome: &impl Fn(&Holder<BiomeId>) -> B,
+    ) {
+        let pos = self.get_pos();
+        let quart_min_x = QuartPos::from_block(pos.get_min_block_x());
+        let quart_min_z = QuartPos::from_block(pos.get_min_block_z());
+        for section_y in
+            self.height_accessor.get_min_section_y()..=self.height_accessor.get_max_section_y()
+        {
+            let section_index = self.get_section_index_from_section_y(section_y);
+            let quart_min_y = QuartPos::from_section(section_y);
+            self.sections[section_index as usize].fill_biomes_from_noise(
+                biome_resolver,
+                sampler,
+                quart_min_x,
+                quart_min_y,
+                quart_min_z,
+                map_biome,
+            );
+        }
+    }
+
     /// `ChunkAccess.getBlockEntityNbt(BlockPos)` — `pendingBlockEntities.get(pos)`.
     pub fn get_block_entity_nbt(&self, pos: &BlockPos) -> Option<&CompoundTag> {
         self.pending_block_entities.get(pos)
@@ -952,11 +994,13 @@ pub fn get_pos_from_tag(base: Option<&ChunkPos>, entity_tag: &CompoundTag) -> Bl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::biome::Climate;
     use crate::chunk::palette::GlobalIdMap;
     use crate::chunk::paletted_container::PalettedContainer;
     use crate::chunk::strategy::Strategy;
     use crate::level::height_accessor::create as create_accessor;
     use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, Types};
+    use std::cell::RefCell;
 
     /// A value-map where the global id is the value (`u8`).
     #[derive(Clone, Copy)]
@@ -1414,5 +1458,123 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].1, 7);
         assert_eq!(found[0].0.coords(), (1, -62, 3));
+    }
+
+    /// A `BiomeResolver` that records every quart request in order and returns
+    /// a deterministic holder derived from the coordinates.
+    struct RecordingResolver(RefCell<Vec<(i32, i32, i32)>>);
+
+    impl BiomeResolver for RecordingResolver {
+        fn get_noise_biome(
+            &self,
+            quart_x: i32,
+            quart_y: i32,
+            quart_z: i32,
+            _sampler: &Sampler,
+        ) -> Holder<BiomeId> {
+            self.0.borrow_mut().push((quart_x, quart_y, quart_z));
+            let id = (quart_x
+                .wrapping_mul(31)
+                .wrapping_add(quart_y.wrapping_mul(7))
+                .wrapping_add(quart_z.wrapping_mul(13)))
+                & 0xff;
+            Holder::direct(BiomeId::from_id(id as u16))
+        }
+    }
+
+    fn map_biome(holder: &Holder<BiomeId>) -> u8 {
+        match holder {
+            Holder::Direct(biome) => biome.id() as u8,
+            Holder::Reference { id, .. } => *id as u8,
+        }
+    }
+
+    fn resolver_id(x: i32, y: i32, z: i32) -> u8 {
+        ((x.wrapping_mul(31)
+            .wrapping_add(y.wrapping_mul(7))
+            .wrapping_add(z.wrapping_mul(13)))
+            & 0xff) as u8
+    }
+
+    /// A base at `ChunkPos::new(2, -3)` (min block x 32, min block z -48).
+    fn base_at_2_neg_3() -> ChunkAccess<u8, u8, &'static str> {
+        ChunkAccess::new(
+            ChunkPos::new(2, -3),
+            UpgradeData::empty(accessor().get_sections_count() as usize),
+            accessor(),
+            &factory(),
+            0,
+            None,
+            &test_flags,
+        )
+    }
+
+    /// `ChunkAccess.fillBiomesFromNoise` drives the resolver with Java's exact
+    /// quart routing for a chunk at a negative position: `quartMinX`/
+    /// `quartMinZ` from the chunk's min block coords (`QuartPos.fromBlock`), and
+    /// per `sectionY` in `minSectionY..=maxSectionY` a `quartMinY` of
+    /// `QuartPos.fromSection(sectionY)`.
+    #[test]
+    fn fill_biomes_from_noise_routes_chunk_quart_origin() {
+        let resolver = RecordingResolver(RefCell::new(Vec::new()));
+        let mut base = base_at_2_neg_3();
+        let sampler = Climate::empty();
+        base.fill_biomes_from_noise(&resolver, &sampler, &map_biome);
+
+        let calls = resolver.0.into_inner();
+        // 24 sections × 4×4×4 cells.
+        assert_eq!(calls.len(), 24 * 64);
+        // Chunk (2, -3): minBlockX = 32, minBlockZ = -48 →
+        // quartMinX = 32>>2 = 8, quartMinZ = -48>>2 = -12. Bottom section
+        // (sectionY -4) has quartMinY = -16; top (sectionY 19) has 76.
+        assert_eq!(calls.first().copied(), Some((8, -16, -12)));
+        assert_eq!(calls.last().copied(), Some((11, 79, -9)));
+        // Every cell lies in the chunk's quart bounds.
+        assert!(calls.iter().all(|(x, y, z)| (8..=11).contains(x)
+            && (-12..=-9).contains(z)
+            && (-16..=79).contains(y)));
+        // Per-section groups: section i (sectionY -4+i) fills quartMinY
+        // (-4+i)<<2 with the four y offsets, ascending sections first.
+        for (i, chunk_calls) in calls.chunks_exact(64).enumerate() {
+            let section_y = -4 + i as i32;
+            let quart_min_y = section_y << 2;
+            let ys: Vec<i32> = chunk_calls.iter().map(|(_, y, _)| *y).collect();
+            assert_eq!(
+                ys.iter().copied().min(),
+                Some(quart_min_y),
+                "section {} starts at its quartMinY",
+                i
+            );
+            assert_eq!(
+                ys.iter().copied().max(),
+                Some(quart_min_y + 3),
+                "section {} stays within its quart range",
+                i
+            );
+        }
+        // Every distinct y from -16..=79 is covered (the full quart stack).
+        let distinct_y: std::collections::BTreeSet<i32> =
+            calls.iter().map(|(_, y, _)| *y).collect();
+        assert_eq!(distinct_y.len(), 96);
+        assert_eq!(*distinct_y.first().unwrap(), -16);
+        assert_eq!(*distinct_y.last().unwrap(), 79);
+    }
+
+    /// The section fill actually installs the resolved biomes (non-vacuity):
+    /// reading back the chunk's `getNoiseBiome` at absolute quart positions
+    /// yields the mapped resolver id.
+    #[test]
+    fn fill_biomes_from_noise_installs_resolved_biomes() {
+        let resolver = RecordingResolver(RefCell::new(Vec::new()));
+        let mut base = base_at_2_neg_3();
+        let sampler = Climate::empty();
+        base.fill_biomes_from_noise(&resolver, &sampler, &map_biome);
+
+        // Chunk (2, -3): absolute quart (8, -16, -12) is cell (0,0,0) of the
+        // bottom section. `getNoiseBiome` masks to the cell and reads it back.
+        assert_eq!(base.get_noise_biome(8, -16, -12), resolver_id(8, -16, -12));
+        assert_eq!(base.get_noise_biome(9, 20, -10), resolver_id(9, 20, -10));
+        // The cell at the top section (sectionY 19 → quartMinY 76) reads back.
+        assert_eq!(base.get_noise_biome(11, 79, -9), resolver_id(11, 79, -9));
     }
 }

@@ -33,6 +33,8 @@
 //! `markPosForPostProcessing`'s parent `postProcessGeneration` consumer and
 //! `addPackedPostProcess`'s `ShortList` read path remain with that owning unit.
 
+use crate::biome::biome_resolver::BiomeResolver;
+use crate::biome::climate::Sampler;
 use crate::block::BlockState;
 use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
@@ -46,7 +48,9 @@ use crate::levelgen::surface_rules::ChunkSurface;
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
 use indexmap::IndexMap;
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
+use rivet_registry::holder::Holder;
 
 /// `net.minecraft.world.level.chunk.ProtoChunk` — the worldgen chunk value.
 pub struct ProtoChunk<T, B, S>
@@ -208,6 +212,21 @@ where
     /// block writes (`NoiseBasedChunkGenerator.doFill`).
     pub fn get_section_mut(&mut self, section_index: usize) -> &mut LevelChunkSection<T, B> {
         self.base.get_section_mut(section_index)
+    }
+
+    /// `ChunkAccess.fillBiomesFromNoise(BiomeResolver, Climate.Sampler)` — the
+    /// biomes step of the status ladder, forwarded to the base (`ProtoChunk`
+    /// inherits the method from `ChunkAccess` in Java). `map_biome` converts
+    /// each resolved `Holder<BiomeId>` into the section's stored element `B`
+    /// (see [`ChunkAccess::fill_biomes_from_noise`]).
+    pub fn fill_biomes_from_noise(
+        &mut self,
+        biome_resolver: &dyn BiomeResolver,
+        sampler: &Sampler,
+        map_biome: &impl Fn(&Holder<BiomeId>) -> B,
+    ) {
+        self.base
+            .fill_biomes_from_noise(biome_resolver, sampler, map_biome);
     }
 
     /// `ChunkAccess.getSectionIndex(int blockY)`.
@@ -504,12 +523,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::biome::Climate;
     use crate::chunk::palette::GlobalIdMap;
     use crate::chunk::paletted_container::PalettedContainer;
     use crate::chunk::strategy::Strategy;
     use crate::level::height_accessor::create as create_accessor;
     use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, WORLDGEN_HEIGHTMAPS};
     use rivet_registry::core::Vec3iLike;
+    use std::cell::RefCell;
 
     #[derive(Clone, Copy)]
     struct TestGlobalMap;
@@ -752,5 +773,46 @@ mod tests {
         for ty in WORLDGEN_HEIGHTMAPS {
             assert!(!full.base.has_primed_heightmap(ty), "FULL skips {ty:?}");
         }
+    }
+
+    /// A `BiomeResolver` that records every quart request in order.
+    struct RecordingResolver(RefCell<Vec<(i32, i32, i32)>>);
+
+    impl BiomeResolver for RecordingResolver {
+        fn get_noise_biome(
+            &self,
+            quart_x: i32,
+            quart_y: i32,
+            quart_z: i32,
+            _sampler: &Sampler,
+        ) -> Holder<BiomeId> {
+            self.0.borrow_mut().push((quart_x, quart_y, quart_z));
+            Holder::direct(BiomeId::from_id(0))
+        }
+    }
+
+    fn map_biome(holder: &Holder<BiomeId>) -> u8 {
+        match holder {
+            Holder::Direct(biome) => biome.id() as u8,
+            Holder::Reference { id, .. } => *id as u8,
+        }
+    }
+
+    /// `ProtoChunk.fillBiomesFromNoise` forwards to the base (`ProtoChunk`
+    /// inherits `ChunkAccess.fillBiomesFromNoise` in Java): the same quart
+    /// routing drives the base's section fill.
+    #[test]
+    fn fill_biomes_from_noise_forwards_to_the_base() {
+        let resolver = RecordingResolver(RefCell::new(Vec::new()));
+        let mut proto = stone_proto();
+        let sampler = Climate::empty();
+        proto.fill_biomes_from_noise(&resolver, &sampler, &map_biome);
+
+        let calls = resolver.0.into_inner();
+        assert_eq!(calls.len(), 24 * 64);
+        // ChunkPos::ZERO: quartMinX = 0, quartMinZ = 0; bottom section (Y -4)
+        // has quartMinY = -16.
+        assert_eq!(calls.first().copied(), Some((0, -16, 0)));
+        assert_eq!(calls.last().copied(), Some((3, 79, 3)));
     }
 }

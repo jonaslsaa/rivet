@@ -23,6 +23,12 @@ builds on top of these fixtures later.
   full server boot) and emits stable density/biome/surface samples for the
   normal-overworld generator; a companion script extracts Starlight light
   samples from the M0 FULL superflat chunks. Byte-identical across boots.
+- **Generated-world seed-42 ground-truth handoff** (`generated-expected 42`,
+  PR #563): the oracle boots a fresh seed-42 normal-overworld world, force-
+  generates a spawn-area grid to `minecraft:full` (the issue #51 forced-ticket
+  mechanism, from a blank chunk state so it is byte-deterministic), and commits
+  the per-chunk `surface`/`bedrock`/`below_feet` sample contract the generated
+  acceptance compares against. Twin-boot byte-identity verified.
 - The Rust runner `cargo run -p rivet-oracle` verifies every committed
   fixture kind against its manifest's SHA-256s and prints a summary.
 
@@ -62,6 +68,12 @@ rivet-oracle/
     spline/             # CubicSpline/BoundedFloatFunction value-leaf goldens
       manifest.json     # hash of spline-goldens.json (kind: spline, issue #372)
       spline-goldens.json  # Paper's exact min/max/sample outputs as hex-float (plus parity strings)
+    biome-temperature/  # Biome.getTemperature/FROZEN value-leaf goldens
+      manifest.json     # hash of biome-temperature.json (kind: biome-temperature)
+      biome-temperature.json  # Paper's bit-exact getTemperature/coldEnoughToSnow samples + raw noise
+    generated-expected/ # seed-42 generated-world ground-truth handoff (PR #563)
+      manifest.json     # hash of generated-expected.json (kind: generated-expected)
+      generated-expected.json  # 81 FULL spawn-grid chunks' surface/bedrock/below_feet
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
@@ -196,12 +208,13 @@ The no-arg form discovers every `manifest.json` under `fixtures/` — the M0
 superflat slice (`fixtures/`), the worldgen semantic samples
 (`fixtures/worldgen/`), the normal-overworld region payloads
 (`fixtures/regions/overworld-normal/`), the text component-JSON corpus
-(`fixtures/text/`, issue #98), and the spline value-leaf goldens
-(`fixtures/spline/`, issue #372) — and verifies each against its own
-manifest. Prints `OK: all N captured files match manifest SHA-256s` and a
-summary per kind (seed, level-type, region-file-compression, per-dimension
-chunk counts). Exits nonzero on any hash or size mismatch, or if any kind
-fails.
+(`fixtures/text/`, issue #98), and the script-driven value-leaf goldens
+(`fixtures/spline/` #372, `fixtures/seq/`, `fixtures/biome-temperature/`,
+`fixtures/dataconverter/` #535, `fixtures/data-worldgen/`) — and verifies
+each against its own manifest. Prints `OK: all N captured files match
+manifest SHA-256s` and a summary per kind (seed, level-type,
+region-file-compression, per-dimension chunk counts). Exits nonzero on any
+hash or size mismatch, or if any kind fails.
 
 ## One-command M0 sanity gate: `verify`
 
@@ -377,6 +390,68 @@ cargo run -p rivet-oracle -- sample
 The manifest is serialized in committed field order, so regeneration is
 byte-identical (git-clean) for unchanged samples — verified by a unit test.
 
+## Generated-world ground-truth handoff: `generated-expected`
+
+The generated-world acceptance (PR #563) compares the seed-42 content a
+`rivet-server --seed 42` serves against a Paper-captured reference — never
+against nothing, and never against a superflat fallback. `generated-expected`
+builds that reference.
+
+```bash
+cargo run -p rivet-oracle -- generated-expected 42             # verify the committed handoff
+cargo run -p rivet-oracle -- generated-expected 42 --to out.json  # capture a fresh handoff
+cargo run -p rivet-oracle -- generated-expected 42 --tamper    # negative control
+cargo run -p rivet-oracle -- regenerate --generated-expected   # twin-boot regenerate the fixture
+```
+
+The capture boots the pinned Paper runtime on a fresh seed-42 normal-overworld
+world, discards boot1's partial spawn-area chunks (regenerating those is not
+byte-deterministic), injects level-33 forced tickets for a -6..6 spawn grid
+(the issue #51 mechanism), and boot2 finishes them to `minecraft:full`. The
+committed handoff is the -4..4 interior subset — every committed chunk's
+neighbors are forced FULL too, keeping border-tree placement deterministic. The
+capture runs in its own dedicated scratch run dir (a self-contained Paper
+runtime, never symlinked from the shared oracle run dirs) and binds
+`server-port=0` (an OS-assigned free port) so it never collides with a
+concurrent release gate booting on the shared 25599 or any other fixed port. It
+also enforces provenance: the booted server jar's `Git-Commit` must match the
+pinned `0a99345` before any content is written, so a wrong-commit jar can never
+be stamped with the pinned provenance. The
+`regenerate --generated-expected` path requires two independent captures to be
+byte-identical AND contract-valid before committing anything — two equally-wrong
+captures are refused, never committed.
+
+Verify mode is pinned to seed 42: `generated-expected 999` is a usage error,
+never a silent verify of the wrong reference (the `--to` capture path accepts
+any seed whose spawn grid passes the anti-superflat sample contract, e.g. seed
+42 — an arbitrary seed whose spawn grid is uniform, such as an all-ocean one,
+is refused like any superflat echo).
+
+The golden is seed-self-describing (PR #595): `generated-expected.json` is a
+`GoldenWorld` — the per-chunk `WorldManifest` (`format`/`overworld_region`/
+`chunks`) flattened together with the `seed` field it was actually captured
+under. `--to <seed>` writes the real seed into the golden, so a wrong-seed
+capture carries its true seed. The committed verification requires the golden
+seed to be exactly the pinned `42` (a wrong-seed capture is drift, refused even
+if the manifest hash is freshly rebuilt around it), and `regenerate
+--generated-expected` reads the seed back OUT of the golden rather than
+stamping the constant — the manifest's `seed` always describes the bytes it
+hashes. The seed field sits inside the hashed bytes, so it is bound both
+structurally and by the manifest SHA-256. The shared loaded-world
+`WorldManifest` schema is unchanged — only the generated-expected golden wraps
+it.
+
+The per-chunk contract is exactly what the acceptance compares: 16×16
+`surface`/`bedrock`/`below_feet` arrays indexed row-major `z*16+x`, sampled at
+the chunk center offset (8,8), with the surface being the highest non-air
+block, `bedrock` the block at `y=-60`, and `below_feet` at `y=-61`, up to
+`WORLD_CEILING_Y=320`. The verify path pins the provenance (Paper 0a99345,
+seed 42), the manifest SHA-256s, the forced-grid shape, and the anti-superflat
+contract: a superflat echo (all-air bedrock plane at -60, one repeated surface
+pattern, a tiny distinct-block set) is refused loudly, never handed off as
+ground truth. A missing runtime or a missing fixture tree is typed UNVERIFIED
+(exit 3), never a fabricated green.
+
 ## Regenerate: `regenerate`
 
 Full regeneration of every fixture kind (boots Paper where a boot is required):
@@ -387,10 +462,16 @@ cargo run -p rivet-oracle -- regenerate --m0       # M0 superflat slice only
 cargo run -p rivet-oracle -- regenerate --m2       # M2 region payloads only
 cargo run -p rivet-oracle -- regenerate --samples  # worldgen samples only
 cargo run -p rivet-oracle -- regenerate --text     # text corpus only (Paper oracle op)
+cargo run -p rivet-oracle -- regenerate --composed-noise   # composed-noise goldens only
+cargo run -p rivet-oracle -- regenerate --generated-expected  # generated-expected handoff only
 ```
 
-The `spline/` value-leaf goldens (issue #372) are regenerated script-driven, not
-via `regenerate`: `scripts/run_spline_probe.sh` (see the fixture manifest note).
+The script-driven value-leaf goldens are regenerated outside `regenerate`:
+`spline/` (issue #372) via `scripts/run_spline_probe.sh`, `seq/` via
+`scripts/run_seq_probe.sh`, `biome-temperature/` via
+`scripts/run_biome_temperature_probe.sh`, `dataconverter/` (issue #535) via
+`scripts/run_dataconverter_probe.sh`, and `data-worldgen/` via
+`scripts/run_data_worldgen_probe.sh` (see each fixture's manifest note).
 
 The `text/` corpus (issue #98) records the exact component JSON a chat/title/
 player-info/scoreboard packet carries, Paper's accept/reject verdict in the
