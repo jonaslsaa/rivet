@@ -702,9 +702,7 @@ mod tests {
     use rivet_world::chunk::strategy::Strategy;
 
     use crate::server::level::region_backed::boot_level;
-    use crate::server::level::test_support::{
-        ChunkPayload, load_fixture, loaded_world_fixture, loaded_world_root, write_region_chunks,
-    };
+    use crate::server::level::test_support::loaded_world_root;
 
     /// Decode a `sections_buffer` through the client read path — the exact
     /// `LevelChunkSection::read`/`PalettedContainer::read` a client applies to
@@ -1047,10 +1045,11 @@ mod tests {
     }
 
     /// The #328 sentinel: boot the disposable loaded-world fixture, obtain the
-    /// fringe chunk (-6,-5) (the chunk holding the real-save block (-82,70,-65))
-    /// on demand from the region, decode its exact `sections_buffer` through the
-    /// client `LevelChunkSection`/`PalettedContainer` packet read path, and
-    /// compare every decoded `StateId` against the authoritative
+    /// fringe chunk (-6,-5) (the x-edge column of the 117-chunk boot view; the
+    /// chunk holding the real-save block (-82,70,-65)), decode its exact
+    /// `sections_buffer` through the client
+    /// `LevelChunkSection`/`PalettedContainer` packet read path, and compare
+    /// every decoded `StateId` against the authoritative
     /// `LevelChunk::get_block_state` at the same absolute coordinate. A
     /// tampered packet (one cell re-encoded to a different state through the
     /// same wire format) is caught at exactly that position — the comparator is
@@ -1058,28 +1057,18 @@ mod tests {
     #[test]
     fn loaded_world_packet_sections_decode_to_authoritative_block_states() {
         // Boot the disposable loaded-world fixture (the committed synthetic
-        // clean spawn chunk installed at every view position) and extend the
-        // region with the fringe chunk (-6,-5) — the launcher save and the
-        // `working/` tree are never touched.
+        // clean spawn chunk installed at every view position) — the launcher
+        // save and the `working/` tree are never touched. The boot installs the
+        // fringe chunk (-6,-5) (view center (-1,-3), radius 4 → x -6..4,
+        // z -8..2 minus the four corners), reconstructed through the same
+        // region read path the on-demand recenter uses.
         let temp = tempfile::tempdir().unwrap();
         loaded_world_root(&temp);
-        let region_dir = temp.path().join("dimensions/minecraft/overworld/region");
-        let mut fringe = load_fixture(&loaded_world_fixture());
-        fringe.put_int("xPos", -6);
-        fringe.put_int("zPos", -5);
-        write_region_chunks(
-            &region_dir,
-            &[(ChunkPos::new(-6, -5), ChunkPayload::Valid(fringe))],
-        );
-
-        let mut world = boot_level(temp.path()).expect("the loaded world boots");
-        world
-            .load_chunk_from_region(ChunkPos::new(-6, -5))
-            .expect("the fringe chunk loads on demand from the region");
+        let world = boot_level(temp.path()).expect("the loaded world boots");
         let chunk = world
             .chunk_map()
             .get_chunk(ChunkPos::new(-6, -5))
-            .expect("the fringe chunk is installed");
+            .expect("the fringe chunk is installed by the boot");
         assert_eq!(chunk.pos(), ChunkPos::new(-6, -5));
 
         // Decode the exact wire bytes a client reads and compare every state.
