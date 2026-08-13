@@ -57,22 +57,6 @@ echo "wrote $GOLDENS_FILE"
 # Refresh the fixture manifest so the regenerated goldens hash matches what the
 # gate's `rivet-oracle verify` expects (the text/worldgen kinds regenerate their
 # manifests in-process; the spline kind is script-driven, so the script owns it).
-SHA="$(shasum -a 256 "$GOLDENS_FILE" | awk '{print $1}')"
-BYTES="$(wc -c < "$GOLDENS_FILE" | tr -d ' ')"
-MANIFEST="$OUT_DIR/manifest.json"
+. "$ROOT/scripts/write_fixture_manifest.sh"
 NOTE="Paper-grounded CubicSpline/BoundedFloatFunction value-leaf goldens (issue #372): \`spline-goldens.json\` records Paper's exact min/max/sample outputs as hex-float, asserted bit-exactly by crates/rivet-util/tests/cubic_spline.rs; the parity strings are Paper's \`parityString()\` output, asserted against Rust's parity output (coordinate token normalized) by the same tests. Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/SplineProbe.java; regenerate with \`scripts/run_spline_probe.sh\`."
-printf '%s\n' \
-  '{' \
-  '  "format": 1,' \
-  "  \"paper\": \"$PAPER_PIN\"," \
-  '  "kind": "spline",' \
-  "  \"note\": \"$NOTE\"," \
-  '  "captured": [' \
-  '    {' \
-  '      "path": "spline-goldens.json",' \
-  "      \"sha256\": \"$SHA\"," \
-  "      \"bytes\": $BYTES" \
-  '    }' \
-  '  ]' \
-  '}' > "$MANIFEST"
-echo "wrote $MANIFEST"
+write_fixture_manifest "$OUT_DIR" "spline" "$PAPER_PIN" "$NOTE" "$GOLDENS_FILE"
