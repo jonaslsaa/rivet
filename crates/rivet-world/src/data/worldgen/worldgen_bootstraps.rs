@@ -201,7 +201,7 @@ mod tests {
     use rivet_registry::HolderGetter;
 
     #[test]
-    fn builds_all_three_registries() {
+    fn builds_all_four_registries() {
         let access = build_worldgen_registries();
         let noise = access
             .lookup(&registry_keys::NOISE)
@@ -212,6 +212,11 @@ mod tests {
         let settings = access
             .lookup(&registry_keys::NOISE_SETTINGS)
             .expect("NOISE_SETTINGS registry");
+        // The biome registry rides along for the SurfaceRuleData builders the
+        // settings bootstrap resolves.
+        let biomes = access
+            .lookup(&*rivet_registry::registries::BIOME)
+            .expect("BIOME registry");
         // The registries are the bootstrapped sets, not empty stubs.
         assert!(noise.key_set().len() >= 60, "noise registry populated");
         assert!(
@@ -222,6 +227,11 @@ mod tests {
             settings.key_set().len(),
             7,
             "the seven NOISE_SETTINGS presets"
+        );
+        assert_eq!(
+            biomes.key_set().len(),
+            33,
+            "the SurfaceRuleData-referenced biomes"
         );
         // The overworld preset resolves to the real settings (never dummy()).
         let holder = settings.get_or_throw(&OVERWORLD);

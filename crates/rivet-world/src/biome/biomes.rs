@@ -214,12 +214,13 @@ pub static SMALL_END_ISLANDS: LazyLock<ResourceKey<BiomeId>> =
 pub static END_BARRENS: LazyLock<ResourceKey<BiomeId>> = LazyLock::new(|| register("end_barrens"));
 
 /// The 33 `Biomes` keys the `SurfaceRuleData` builders reference (the nether's
-/// 5 + the overworld's 28 — the surface-rule-data fixture's `biomes` set,
-/// PR #597). Anywhere a surface-rule tree is built or a bootstrap access that
-/// feeds the `SurfaceRuleData` builders is assembled must register exactly
-/// these keys (plus any caller-local extras) so the builders' `getOrThrow`
-/// resolves. Single source of truth for the settings-bootstrap and the
-/// worldgen-registry assembly.
+/// 5 + the overworld's 28 — exactly the set Paper's `SurfaceRuleData.java`
+/// resolves, cross-checked against the PR #597 golden harness). Anywhere a
+/// surface-rule tree is built or a bootstrap access that feeds the
+/// `SurfaceRuleData` builders is assembled must register exactly these keys
+/// (plus any caller-local extras) so the builders' `getOrThrow` resolves.
+/// Single source of truth for the settings-bootstrap and the worldgen-registry
+/// assembly.
 pub const SURFACE_RULE_BIOMES: &[&str] = &[
     "badlands",
     "basalt_deltas",

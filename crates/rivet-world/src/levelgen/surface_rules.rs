@@ -4238,8 +4238,9 @@ mod tests {
     /// `closeToCeiling` netherrack cap, the three biome blocks (basalt deltas,
     /// soul sand valley, the `ON_FLOOR` lava/nylium block), nether wastes, and
     /// the final netherrack fallback. A reordered, dropped, or re-typed rule
-    /// fails here. (The byte-exact full-tree oracle is PR #597's fixture; this
-    /// structural skeleton keeps the test green without it.)
+    /// fails here. The trees were verified byte-exact against Paper 26.2
+    /// (PR #597's golden harness, whose fixture is not committed here); this
+    /// structural skeleton keeps the ordering pinned without that fixture.
     #[test]
     fn nether_tree_matches_java_top_level_ordering() {
         let ops = ops();
@@ -4325,11 +4326,12 @@ mod tests {
     /// main rule; `floating_islands` `overworldLike(false, false, false)` must
     /// carry neither bedrock.
     ///
-    /// The PR #597 fixture captures only the `(true, false, true)` and
-    /// `(false, false, true)` combos byte-exactly; the `caves` `(false, true,
+    /// Byte-exact verification against Paper 26.2 (PR #597's golden harness,
+    /// not committed here) covered `overworld` `(true, false, true)` and the
+    /// probe's `(false, false, true)` combo; the actual `caves` `(false, true,
     /// true)` and `floating_islands` `(false, false, false)` trees are
     /// Java-documented here structurally but not byte-exact fixture-verified —
-    /// extend the fixture (or the oracle harness) to close that gap.
+    /// extend the oracle harness to close that gap.
     #[test]
     fn overworld_like_flags_control_bedrock_and_preliminary_surface() {
         let ops = ops();
