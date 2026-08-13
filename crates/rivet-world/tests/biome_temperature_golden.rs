@@ -8,9 +8,11 @@
 //! noise, or promotion drift from Java fails.
 //!
 //! Coverage rationale not evident from the test names:
-//! - the position grid sits within ~1e-5 of the FROZEN branch thresholds, so a
-//!   constant drift in `modify_temperature` (the `* 7.0` amplitude, the 0.3/0.8
-//!   gates, the 0.2 edge scale) flips a sampled branch decision. A zero-width
+//! - the position grid sits within ~1e-6 to ~5e-5 of the FROZEN branch
+//!   thresholds (the tightest positions are ice_patches = 0.3 + 1.17e-6 and
+//!   small = 0.8 + 3.32e-5), so a constant drift in `modify_temperature` (the
+//!   `* 7.0` amplitude, the 0.3/0.8 gates, the 0.2 edge scale) flips a sampled
+//!   branch decision. A zero-width
 //!   operator change (`< 0.3` to `<= 0.3`) is not caught by sampling — no noise
 //!   value lands exactly on the threshold — so only the gate *values* are
 //!   pinned, not the comparison direction at exact equality.
