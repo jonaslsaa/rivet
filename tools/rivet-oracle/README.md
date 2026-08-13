@@ -392,6 +392,11 @@ cargo run -p rivet-oracle -- regenerate --text     # text corpus only (Paper ora
 The `spline/` value-leaf goldens (issue #372) are regenerated script-driven, not
 via `regenerate`: `scripts/run_spline_probe.sh` (see the fixture manifest note).
 
+The `surface-rule-data/` goldens (the SurfaceRuleData surface trees under
+`RuleSource.CODEC`/`ConditionSource.CODEC`, issue #179) are likewise
+script-driven: `scripts/run_surface_rule_data_probe.sh` (see the fixture
+manifest note).
+
 The `text/` corpus (issue #98) records the exact component JSON a chat/title/
 player-info/scoreboard packet carries, Paper's accept/reject verdict in the
 Bootstrap-only oracle context, and Paper's canonical `ComponentSerialization.
