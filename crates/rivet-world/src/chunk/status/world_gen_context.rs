@@ -30,6 +30,14 @@
 //!    advance a chunk to `BIOMES`/`NOISE` that does not already carry that
 //!    status — so the LOADING pyramid's loading stubs cannot fabricate a
 //!    NOISE-labeled chunk from an `EMPTY` one.
+//! 4. `generate_through` validates the *whole* path against the projected
+//!    persisted status before any step runs, so a refused promotion (including
+//!    a mispositioned `NOISE` task) leaves the chunk untouched.
+//!
+//! A target already at/after the chunk's status is handled before any work:
+//! `target == current` is an idempotent no-op at *any* status (so a loaded
+//! chunk persisted past `NOISE` can be confirmed through the LOADING pyramid),
+//! and a lower target is a demotion error rather than an unwired-status error.
 //!
 //! The SURFACE..FULL task bodies are *not wired* (RivetTodo #185): dispatching
 //! one returns [`GenError::UnsupportedStatus`].
@@ -204,20 +212,38 @@ where
         chunk: &mut ProtoChunk<T, B, S>,
         target: ChunkStatus,
     ) -> Result<(), GenError> {
-        if target.index() > ChunkStatus::Noise.index() {
-            return Err(GenError::UnsupportedStatus(target));
-        }
         let current = chunk.get_persisted_status();
+        // Idempotent no-op at any status: a chunk already at the target (even an
+        // unwired one, e.g. a loaded FULL chunk) needs no work — this is what
+        // lets the LOADING pyramid confirm persisted chunks past NOISE.
+        if target == current {
+            return Ok(());
+        }
         if target.index() < current.index() {
             return Err(GenError::Demotion { target, current });
         }
-        // Validate the whole path before running any step: every step the loop
+        if target.index() > ChunkStatus::Noise.index() {
+            return Err(GenError::UnsupportedStatus(target));
+        }
+        // Validate the whole path before running any step, tracking the
+        // persisted status each step will leave behind (`projected` mirrors the
+        // run loop, so a step the loop would refuse fails here instead and a
+        // refused promotion leaves the chunk untouched). Every step the loop
         // would run must be either a wired generation task or a pass-through
         // that does not fabricate BIOMES/NOISE data.
+        let mut projected = current;
         for index in current.index() + 1..=target.index() {
             let step = pyramid.get_step_to(ChunkStatus::ALL[index]);
             match step.task() {
-                ChunkStatusTask::GenerateBiomes | ChunkStatusTask::GenerateNoise => {}
+                ChunkStatusTask::GenerateBiomes => {
+                    projected = step.target_status();
+                }
+                ChunkStatusTask::GenerateNoise => {
+                    if !projected.is_or_after(ChunkStatus::Biomes) {
+                        return Err(GenError::BiomesNotGenerated);
+                    }
+                    projected = step.target_status();
+                }
                 ChunkStatusTask::GenerateSurface
                 | ChunkStatusTask::GenerateCarvers
                 | ChunkStatusTask::GenerateFeatures
@@ -234,10 +260,11 @@ where
                 | ChunkStatusTask::LoadStructureStarts
                 | ChunkStatusTask::GenerateStructureReferences => {
                     if step.target_status().is_or_after(ChunkStatus::Biomes)
-                        && !current.is_or_after(step.target_status())
+                        && !projected.is_or_after(step.target_status())
                     {
                         return Err(GenError::BiomesNotGenerated);
                     }
+                    projected = step.target_status();
                 }
             }
         }
@@ -615,5 +642,78 @@ mod tests {
             }
         );
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Noise);
+    }
+
+    #[test]
+    fn loading_a_full_chunk_is_an_idempotent_no_op() {
+        // A chunk loaded from disk at FULL is confirmed as a no-op through the
+        // LOADING pyramid: target == current returns Ok without wiring any
+        // SURFACE..FULL task body (RivetTodo #185).
+        let (mut ctx, biomes_calls, noise_calls) = recording_context();
+        let mut chunk = proto();
+        chunk.set_persisted_status(ChunkStatus::Full);
+        ctx.generate_through(&LOADING_PYRAMID, &mut chunk, ChunkStatus::Full)
+            .expect("already at full");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Full);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn demotion_is_reported_for_unwired_targets() {
+        // The Demotion error is not shadowed by the unwired-status check: a
+        // regression against a chunk at an unwired status reports Demotion, so
+        // callers matching on it can short-circuit.
+        let (mut ctx, _biomes_calls, _noise_calls) = recording_context();
+        let mut chunk = proto();
+        chunk.set_persisted_status(ChunkStatus::Full);
+        let err = ctx
+            .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Surface)
+            .expect_err("surface is below full");
+        assert_eq!(
+            err,
+            GenError::Demotion {
+                target: ChunkStatus::Surface,
+                current: ChunkStatus::Full,
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Full);
+    }
+
+    #[test]
+    fn mispositioned_generate_noise_is_refused_atomically() {
+        // A pyramid that places the GenerateNoise task at the BIOMES rung (so
+        // run_step would refuse it mid-loop after the SS/SR stubs advanced the
+        // chunk) must be refused by the pre-check before any work runs — the
+        // documented atomicity holds for the run-step failure path too.
+        let (mut ctx, biomes_calls, noise_calls) = recording_context();
+        let mut chunk = proto();
+        let pyramid = ChunkPyramid::builder()
+            .step(ChunkStatus::Empty, |s| s)
+            .step(ChunkStatus::StructureStarts, |s| {
+                s.set_task(ChunkStatusTask::GenerateStructureStarts)
+            })
+            .step(ChunkStatus::StructureReferences, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateStructureReferences)
+            })
+            .step(ChunkStatus::Biomes, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateNoise)
+            })
+            .step(ChunkStatus::Noise, |s| {
+                s.add_requirement(ChunkStatus::Biomes, 1)
+                    .add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateBiomes)
+            })
+            .build();
+        let err = ctx
+            .generate_through(&pyramid, &mut chunk, ChunkStatus::Noise)
+            .expect_err("mispositioned noise refused");
+        assert_eq!(err, GenError::BiomesNotGenerated);
+        // The chunk is untouched AND neither seam ran.
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
     }
 }
