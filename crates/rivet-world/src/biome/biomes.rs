@@ -1,4 +1,4 @@
-//! STUB(mc.world.level.biome.data) — `net.minecraft.world.level.biome.Biomes`.
+//! STUB(#178) — `net.minecraft.world.level.biome.Biomes`.
 //!
 //! `Biomes.java` is the generated registry hub of biome `ResourceKey`s (owned
 //! by the `mc.world.level.biome.data` manifest unit). This unit's `the_end`

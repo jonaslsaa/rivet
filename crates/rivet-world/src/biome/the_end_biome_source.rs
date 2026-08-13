@@ -32,10 +32,10 @@ use rivet_registry::registry_ops::{RegistryOpsLookup, retrieve_element};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec::{self, MapCodec};
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// `TheEndBiomeSource` — the End's five-biome source.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct TheEndBiomeSource {
     /// `this.end` — `Biomes.THE_END`.
     pub end: Holder<BiomeId>,
@@ -47,6 +47,34 @@ pub struct TheEndBiomeSource {
     pub islands: Holder<BiomeId>,
     /// `this.barrens` — `Biomes.END_BARRENS`.
     pub barrens: Holder<BiomeId>,
+    /// The `possibleBiomes` memo — Java's `Suppliers.memoize` on the abstract
+    /// `BiomeSource` base (computed once on first read; the other sources also
+    /// port it as a per-instance `OnceLock`). Not part of equality (the derived
+    /// cache value).
+    possible_biomes: OnceLock<Vec<Holder<BiomeId>>>,
+}
+
+impl Clone for TheEndBiomeSource {
+    fn clone(&self) -> Self {
+        TheEndBiomeSource {
+            end: self.end.clone(),
+            highlands: self.highlands.clone(),
+            midlands: self.midlands.clone(),
+            islands: self.islands.clone(),
+            barrens: self.barrens.clone(),
+            possible_biomes: OnceLock::new(),
+        }
+    }
+}
+
+impl PartialEq for TheEndBiomeSource {
+    fn eq(&self, other: &Self) -> bool {
+        self.end == other.end
+            && self.highlands == other.highlands
+            && self.midlands == other.midlands
+            && self.islands == other.islands
+            && self.barrens == other.barrens
+    }
 }
 
 impl TheEndBiomeSource {
@@ -64,6 +92,7 @@ impl TheEndBiomeSource {
             midlands,
             islands,
             barrens,
+            possible_biomes: OnceLock::new(),
         }
     }
 
@@ -128,6 +157,15 @@ impl BiomeSource for TheEndBiomeSource {
             self.islands.clone(),
             self.barrens.clone(),
         ]
+    }
+
+    fn possible_biomes(&self) -> Vec<Holder<BiomeId>> {
+        // Java's `Suppliers.memoize` lives on the abstract `BiomeSource` base,
+        // so the End source memoizes too (the five holders are fixed at
+        // construction).
+        self.possible_biomes
+            .get_or_init(|| self.collect_possible_biomes())
+            .clone()
     }
 
     fn get_noise_biome(

@@ -60,12 +60,12 @@ pub fn bootstrap(context: &mut impl BootstrapContext<MultiNoiseBiomeSourceParame
             .expect("the nether preset is never deferred")
     };
     context.register_default(&NETHER, nether);
-    // RivetTodo(mc.world.level.biome.data): the OVERWORLD registration is
-    // deferred until the `.data` unit's `OverworldBiomeBuilder::add_biomes`
-    // table lands (applying `Preset::overworld` currently returns
-    // `Err(OverworldDeferred)`). Removal condition: the table emits the
-    // overworld parameter list, then add the OVERWORLD registration after the
-    // NETHER line (Paper's declaration order) with no other call-site changes.
+    // RivetTodo(#178): the OVERWORLD registration is deferred until the `.data`
+    // unit's `OverworldBiomeBuilder::add_biomes` table lands (applying
+    // `Preset::overworld` currently returns `Err(OverworldDeferred)`). Removal
+    // condition: the table emits the overworld parameter list, then add the
+    // OVERWORLD registration after the NETHER line (Paper's declaration order)
+    // with no other call-site changes.
 }
 
 /// `MultiNoiseBiomeSourceParameterLists.register(String)` —
@@ -134,10 +134,9 @@ mod tests {
         bootstrap(&mut context);
 
         // Only the nether preset is supported today: the overworld preset's
-        // `add_biomes` is the `STUB(mc.world.level.biome.data)` table (see
-        // `overworld_biome_builder`), so applying it is the typed deferral and
-        // `bootstrap` never registers it. A full overworld entry lands with the
-        // `.data` unit.
+        // `add_biomes` is the `STUB(#178)` table (see `overworld_biome_builder`),
+        // so applying it is the typed deferral and `bootstrap` never registers
+        // it. A full overworld entry lands with the `.data` unit.
         let regs: Vec<RecordedRegistration<MultiNoiseBiomeSourceParameterList>> =
             context.registrations().iter().cloned().collect();
         assert_eq!(regs.len(), 1);

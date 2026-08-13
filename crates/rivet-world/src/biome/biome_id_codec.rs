@@ -80,7 +80,7 @@ pub fn biome_id_list_field_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>(
     codec::field_of(biome_id_list_codec::<Ops>(), field.to_string())
 }
 
-/// `Identifier.CODEC.comapFlatMap(BiomeId::fromName, BiomeId::name)` — the
+/// `Identifier.CODEC.flatXmap(BiomeId::fromName, validated name)` — the
 /// element value codec of the biome registry.
 ///
 /// Java's `RegistryFileCodec` element is `Biome.DIRECT_CODEC` (the full biome
@@ -92,9 +92,11 @@ pub fn biome_id_list_field_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>(
 /// (a string input resolved through the ops' getter) is handled by the
 /// `RegistryFileCodec` itself, which reports `"Failed to get element <key>"`
 /// for an unknown name; this element codec only runs on the inline (non-string)
-/// path.
+/// path. Encode validates the id against the generated table (`BiomeId::is_valid`)
+/// so an out-of-range id errors instead of silently encoding as the first
+/// table entry (`name()`'s display fallback).
 fn identifier_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<BiomeId, Ops>> {
-    codec::comap_flat_map::<Identifier, BiomeId, Ops>(
+    codec::flat_xmap::<Identifier, BiomeId, Ops>(
         rivet_registry::identifier::identifier_codec::<Ops>(),
         Arc::new(
             |name: &Identifier| match BiomeId::from_name(name.to_string().as_str()) {
@@ -106,6 +108,55 @@ fn identifier_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<BiomeId, Ops>>
                 )),
             },
         ),
-        Arc::new(|id: &BiomeId| Identifier::parse(id.name())),
+        Arc::new(|id: &BiomeId| {
+            if id.is_valid() {
+                DataResult::success(Identifier::parse(id.name()))
+            } else {
+                DataResult::error(format!(
+                    "Unknown registry key in {}: {}",
+                    *registries::BIOME,
+                    id.id()
+                ))
+            }
+        }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivet_serialization::json_ops::JsonOps;
+
+    #[test]
+    fn direct_identifier_round_trips_for_valid_ids() {
+        let codec = identifier_codec::<JsonOps>();
+        // Decode by name, encode back to the identifier string.
+        let parsed = codec.parse(&JsonOps::INSTANCE, &serde_json::json!("minecraft:plains"));
+        let decoded = *parsed.result().expect("decode should succeed");
+        assert_eq!(decoded.id(), 40);
+        let re_encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(re_encoded, serde_json::json!("minecraft:plains"));
+    }
+
+    #[test]
+    fn encode_rejects_an_out_of_range_id_instead_of_badlands_fallback() {
+        // `BiomeId::name()` degrades an out-of-range id to the first table
+        // entry (`minecraft:badlands`); the codec must not silently emit that.
+        let codec = identifier_codec::<JsonOps>();
+        let invalid = BiomeId::from_id(999);
+        assert!(!invalid.is_valid());
+        let result = codec.encode_start(&JsonOps::INSTANCE, &invalid);
+        let message = result
+            .error_ref()
+            .map(|e| e.message().to_string())
+            .expect("invalid id must fail encode");
+        assert!(
+            message.contains("Unknown registry key in ResourceKey[minecraft:root / minecraft:worldgen/biome]: 999"),
+            "{message}"
+        );
+    }
 }

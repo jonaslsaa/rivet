@@ -85,16 +85,20 @@ impl OverworldBiomeBuilder {
         }
     }
 
-    /// STUB(mc.world.level.biome.data) — `addBiomes(Consumer<Pair<ParameterPoint,
-    /// ResourceKey<Biome>>>)`.
+    /// STUB(#178) — `addBiomes(Consumer<Pair<ParameterPoint, ResourceKey<Biome>>>)`.
     ///
     /// The `addPeaks`/`addHighSlice`/`addLowSlice`/`addValleys`/
     /// `addOffCoastBiomes` tables that emit the full overworld parameter list
     /// belong to the `.data` unit (which owns `OverworldBiomeBuilder.java`).
     /// Until it lands, this emits nothing — the `Preset::OVERWORLD` parameter
     /// list is empty (see the STUB marker on this module). The signature mirrors
-    /// Java exactly so the `.data` port can fill the body in place.
-    pub fn add_biomes(&self, _biomes: &mut dyn FnMut((ParameterPoint, ResourceKey<BiomeId>))) {}
+    /// Java exactly so the `.data` port can fill the body in place;
+    /// `pub(crate)` keeps the no-op unobservable outside this crate.
+    pub(crate) fn add_biomes(
+        &self,
+        _biomes: &mut dyn FnMut((ParameterPoint, ResourceKey<BiomeId>)),
+    ) {
+    }
 
     /// `OverworldBiomeBuilder.getDebugStringForPeaksAndValleys(double)` (static).
     ///
