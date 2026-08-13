@@ -61,6 +61,7 @@ fn default_config() -> ServerConfig {
         enable_join: false,
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
+        seed: 42,
     }
 }
 

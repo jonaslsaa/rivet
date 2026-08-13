@@ -207,14 +207,18 @@ pub struct SessionManagerConfig {
     pub keepalive_timeout_ns: i64,
 }
 
-/// The default M1 play-session config: the superflat `ServerLevel` (seed 42,
-/// view distance 4, spawn (0,-63,0)) the #153 capture records, the M1 join
-/// config (`max_players 20`, offline, flat), and the two single-registry
-/// accesses the registry-aware play bodies resolve (the same construction the
-/// `join_burst.rs` tests use). This is what `Server` builds when
-/// `ServerConfig.enable_join` is set.
-pub fn default_session_config(compression_threshold: i32) -> SessionManagerConfig {
-    let level = ServerLevel::new(ServerLevelConfig::default());
+/// The default M1 play-session config: the superflat `ServerLevel` (seed
+/// `seed`, view distance 4, spawn (0,-63,0)) the #153 capture records (seed 42
+/// reproduces the capture), the M1 join config (`max_players 20`, offline,
+/// flat), and the two single-registry accesses the registry-aware play bodies
+/// resolve (the same construction the `join_burst.rs` tests use). This is what
+/// `Server` builds when `ServerConfig.enable_join` is set, passing the
+/// server's generated-world seed.
+pub fn default_session_config(compression_threshold: i32, seed: i64) -> SessionManagerConfig {
+    let level = ServerLevel::new(ServerLevelConfig {
+        seed,
+        ..ServerLevelConfig::default()
+    });
     let is_flat = level.is_flat();
     SessionManagerConfig {
         compression_threshold,
@@ -1400,7 +1404,7 @@ mod tests {
     #[test]
     fn frames_before_handoff_are_buffered_then_delivered_without_loss_or_duplication() {
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         // Tick 1: play frames arrive before the handoff — buffered FIFO. The
         // frames are non-keepalive so the buffering path is exercised without
@@ -1433,7 +1437,7 @@ mod tests {
     #[test]
     fn connection_loss_prunes_session_and_pending() {
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         // Buffer a frame pre-handoff, then apply the handoff and spawn.
         manager = run_tick(manager, &mut registry, vec![(ID, keepalive_frame(1))]);
@@ -1463,7 +1467,7 @@ mod tests {
     #[test]
     fn pre_handoff_frame_flood_disconnects_bounded() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         // A connection flooding play frames before its handoff exceeds the
         // bounded pending budget and is disconnected (anti-flood policy) — no
@@ -1492,7 +1496,7 @@ mod tests {
     #[test]
     fn hostile_truncated_play_frames_are_dropped_not_panicked() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         apply_enter_play(&mut registry);
 
@@ -1545,7 +1549,7 @@ mod tests {
     #[test]
     fn keep_alive_beyond_handoff_is_routed_and_decoded() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         apply_enter_play(&mut registry);
         manager = run_tick(
@@ -1621,7 +1625,7 @@ mod tests {
     #[test]
     fn create_default_handoff_resolves_the_81_chunk_send_set() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry); // create_default: view distance 2
         manager = run_tick(manager, &mut registry, vec![]);
         assert_eq!(manager.session_count(), 1);
@@ -1687,7 +1691,7 @@ mod tests {
     #[test]
     fn spawn_session_places_player_at_the_level_spawn() {
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
         manager = run_tick(manager, &mut registry, vec![]);
         assert_eq!(manager.session_count(), 1);
@@ -1711,7 +1715,7 @@ mod tests {
     #[test]
     fn spawn_skips_an_in_use_id_at_the_spawn_seam() {
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         // Advance the counter to 1 (id 1 consumed, unused) and hold id 2 in
         // use, as a pre-existing entity in the world would.
         assert_eq!(manager.entity_ids.next_id(), 1);
@@ -1735,7 +1739,7 @@ mod tests {
     #[test]
     fn matching_ack_snaps_to_awaited_position_and_clears_pending() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
 
         // The session spawns this tick at the world spawn (0,-63,0) with the
@@ -1772,7 +1776,7 @@ mod tests {
     #[test]
     fn wrong_ack_id_is_silently_ignored_and_teleport_stays_pending() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
 
         manager = run_tick(
@@ -1809,7 +1813,7 @@ mod tests {
     #[test]
     fn movement_before_ack_ignores_position_but_snaps_rotation() {
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
 
         // A position move while the teleport is pending: ignored (the player
@@ -1840,7 +1844,7 @@ mod tests {
     #[test]
     fn movement_after_ack_is_accepted_into_the_tick_owned_player() {
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
 
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
@@ -1875,7 +1879,7 @@ mod tests {
     #[test]
     fn non_finite_rotation_move_disconnects_with_invalid_player_movement() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
 
         manager = run_tick(
@@ -1897,7 +1901,7 @@ mod tests {
     #[test]
     fn nan_position_move_disconnects_but_infinite_position_is_accepted() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
 
@@ -1927,7 +1931,7 @@ mod tests {
     #[test]
     fn invalid_movement_kick_queues_disconnect_frame_before_disconnect() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
 
         // NaN rotation fires `containsInvalidValues` — the same kick the
@@ -2026,7 +2030,7 @@ mod tests {
             )
             .expect("the single-slot channel takes one queued frame");
 
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         let mut ctx = TickContext {
             tick: 1,
             now_ns: 0,
@@ -2064,7 +2068,7 @@ mod tests {
     #[test]
     fn move_frame_before_handoff_is_buffered_not_dropped() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         manager = run_tick(
             manager,
@@ -2110,7 +2114,7 @@ mod tests {
     #[test]
     fn move_anchors_reset_to_tick_start_position_every_tick() {
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
 
@@ -2144,7 +2148,7 @@ mod tests {
     #[test]
     fn responding_client_survives_beyond_the_timeout_window() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         // Spawn at t=0 (the session seeds its keepalive state this tick). Then
         // run 40s of 1s cycles: transmit a challenge each second, answer it the
@@ -2182,7 +2186,7 @@ mod tests {
     #[test]
     fn silent_client_is_disconnected_after_the_timeout_window() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         apply_enter_play(&mut registry);
         manager = run_tick_at(manager, &mut registry, vec![], 0);
@@ -2219,7 +2223,7 @@ mod tests {
     #[test]
     fn wrong_keepalive_id_disconnects() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         apply_enter_play(&mut registry);
         manager = run_tick_at(manager, &mut registry, vec![], 0);
@@ -2250,7 +2254,7 @@ mod tests {
     #[test]
     fn configurable_keepalive_timeout_shortens_the_kick() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut config = default_session_config(256);
+        let mut config = default_session_config(256, 42);
         config.keepalive_timeout_ns = 2_000 * 1_000_000;
         let mut manager = PlayerSessionManager::new(config);
 
@@ -2276,7 +2280,7 @@ mod tests {
     #[test]
     fn matching_keepalive_reply_is_accepted() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
 
         apply_enter_play(&mut registry);
         manager = run_tick_at(manager, &mut registry, vec![], 0);
@@ -2342,7 +2346,7 @@ mod tests {
             true,
         );
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
 
         // The session spawns with the spawn teleport (id 1) pending; the move
@@ -2390,7 +2394,7 @@ mod tests {
             true,
         );
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
 
         // Pre-ack: nothing accepted yet.
@@ -2456,7 +2460,7 @@ mod tests {
             true,
         );
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
 
@@ -2487,7 +2491,7 @@ mod tests {
             false,
         );
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
         manager = run_tick(
@@ -2522,7 +2526,7 @@ mod tests {
             true,
         );
         let (mut registry, _out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         let cases: &[(DisconnectReason, bool, Option<&str>)] = &[
             (
                 DisconnectReason::EndOfStream,
@@ -2659,7 +2663,7 @@ mod tests {
     #[test]
     fn official_client_boundary_move_recenters_and_sends_the_missing_view() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play_vd(&mut registry, 8);
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
         // The send-4 join burst is 135 frames; drain it before the move.
@@ -2736,7 +2740,7 @@ mod tests {
     #[test]
     fn intra_chunk_move_emits_no_recenter() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
         drain_outbound_frames(&mut out_rx);
@@ -2764,7 +2768,7 @@ mod tests {
     #[test]
     fn negative_coordinate_move_recenters() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
         drain_outbound_frames(&mut out_rx);
@@ -2817,7 +2821,7 @@ mod tests {
                 .chunk_map_mut()
                 .install(pos, crate::server::level::LevelChunk::new(pos));
         }
-        let mut config = default_session_config(256);
+        let mut config = default_session_config(256, 42);
         config.level = level;
 
         let (mut registry, mut out_rx) = connected_registry();
@@ -2900,7 +2904,7 @@ mod tests {
         assert_eq!(level.chunk_map().len(), 117);
         let booted = *level.view();
 
-        let mut config = default_session_config(256);
+        let mut config = default_session_config(256, 42);
         config.level = level;
         let (mut registry, mut out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(config);
@@ -2998,7 +3002,7 @@ mod tests {
             .expect("the loaded world boots with its read-only region source");
         assert!(level.is_region_backed());
 
-        let mut config = default_session_config(256);
+        let mut config = default_session_config(256, 42);
         config.level = level;
         let (mut registry, mut out_rx) = connected_registry();
         let mut manager = PlayerSessionManager::new(config);
@@ -3052,7 +3056,7 @@ mod tests {
     #[test]
     fn consecutive_boundary_moves_never_duplicate_chunks() {
         let (mut registry, mut out_rx) = connected_registry();
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         apply_enter_play(&mut registry);
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
         drain_outbound_frames(&mut out_rx);
@@ -3094,7 +3098,7 @@ mod tests {
         let (mut registry, _out_rx) = connected_registry_with_capacity(150);
         apply_enter_play_vd(&mut registry, 8);
 
-        let mut manager = PlayerSessionManager::new(default_session_config(256));
+        let mut manager = PlayerSessionManager::new(default_session_config(256, 42));
         manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
 
         // Drive the move directly (not through `tick`, whose end-of-tick

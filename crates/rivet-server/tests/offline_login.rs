@@ -98,6 +98,7 @@ fn config_with_threshold(compression_threshold: i32) -> ServerConfig {
         enable_join: false,
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
+        seed: 42,
     }
 }
 
@@ -1180,6 +1181,7 @@ fn config_with_join() -> ServerConfig {
         enable_join: true,
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
+        seed: 42,
     }
 }
 

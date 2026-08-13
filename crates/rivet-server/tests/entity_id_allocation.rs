@@ -139,7 +139,7 @@ fn spawned_manager(
         enter_play(&mut registry, *id);
     }
     let manager = run_tick(
-        PlayerSessionManager::new(default_session_config(256)),
+        PlayerSessionManager::new(default_session_config(256, 42)),
         &mut registry,
     );
     (manager, registry, receivers)
@@ -281,7 +281,7 @@ fn failed_join_burst_consumes_the_id_without_registering_it() {
     let _stuck_out = connect_with_outbound_capacity(&mut registry, FIRST, 1);
     enter_play(&mut registry, FIRST);
     let manager = run_tick(
-        PlayerSessionManager::new(default_session_config(256)),
+        PlayerSessionManager::new(default_session_config(256, 42)),
         &mut registry,
     );
     assert_eq!(
