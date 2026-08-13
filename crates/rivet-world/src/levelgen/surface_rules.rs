@@ -561,7 +561,7 @@ pub(crate) struct SurfaceContext {
     worldgen_context: Arc<WorldGenerationContext>,
 }
 
-// RivetTodo #177 — the surface-build runtime is test-exercised through the
+// RivetTodo(#177): the surface-build runtime is test-exercised through the
 // `build_surface` seam driver until `NoiseBasedChunkGenerator` wires it; the
 // non-test build sees the reachable-by-tests-only methods as dead.
 #[allow(dead_code)]
@@ -1040,7 +1040,7 @@ impl Condition for TemperatureHelperCondition {
 
 /// The `#185`-seam heightmap read — see the module doc.
 fn seam_get_height(_x: i32, _z: i32) -> i32 {
-    // STUB(mc.world.level.levelgen.surface): the `ChunkAccess.getHeight(
+    // STUB(mc.world.level.chunk.access): the `ChunkAccess.getHeight(
     // WORLD_SURFACE_WG, x, z)` read needs the `&mut` heightmap prime (the
     // `#216` write slice / `#185` worldgen chunk seam). Returning 0 keeps the
     // steep condition from spuriously triggering; the real caller replaces
@@ -1050,7 +1050,7 @@ fn seam_get_height(_x: i32, _z: i32) -> i32 {
 
 /// The `#185`/biome-value seam — `getBiome().value().coldEnoughToSnow(...)`.
 fn seam_cold_enough_to_snow() -> bool {
-    // STUB(mc.world.level.levelgen.surface): `BiomeManager` yields
+    // STUB(mc.world.level.biome.core): `BiomeManager` yields
     // `Holder<BiomeId>`; the `Biome`-value registry is unported, so the
     // temperature condition is deferred (RivetTodo #185).
     false
@@ -2661,7 +2661,7 @@ impl SurfaceSystem {
         _pos: &BlockPos,
         _under_fluid: bool,
     ) -> Option<BlockState> {
-        // STUB(mc.world.level.levelgen.surface): `CarvingContext`/`ChunkAccess`
+        // STUB(mc.world.level.levelgen.carver): `CarvingContext`/`ChunkAccess`
         // are the carver/`#185` shells; the port keeps the value surface
         // (updateXZ/updateY + tryApply) behind the seam.
         None
