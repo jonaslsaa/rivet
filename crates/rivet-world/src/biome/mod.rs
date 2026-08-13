@@ -3,12 +3,24 @@
 //!
 //! The biome value core: [`climate`] ports the full `Climate` value layer
 //! (parameters, parameter lists, the RTree index, the spawn finder, and the
-//! quantization/wrapping/order semantics), [`biome_resolver`] ports the
-//! `BiomeResolver` interface over `Holder<BiomeId>`, and the remaining five
-//! classes (`Biome`, `BiomeGenerationSettings`, `BiomeManager`,
-//! `BiomeSpecialEffects`, `MobSpawnSettings`) land as minimal compile-safe
-//! identity shells — the value/codec/behavior surface of each defers to this
-//! unit (sparse `RivetTodo(#178)` markers; no fake behavior or codecs).
+//! quantization/wrapping/order semantics); [`biome_resolver`] ports the
+//! `BiomeResolver` interface over `Holder<BiomeId>`; and the five value types
+//! port their 26.2 surfaces:
+//!
+//! - [`biome`] — `Biome` (the `ClimateSettings` record, the
+//!   `Precipitation`/`TemperatureModifier` enums, the `DIRECT_CODEC`/
+//!   `NETWORK_CODEC`/`CODEC`/`LIST_CODEC`, the temperature/color behavior, and
+//!   the `BiomeBuilder`) plus the `EnvironmentAttributeMap` STUB.
+//! - [`biome_special_effects`] — the `BiomeSpecialEffects` record, its
+//!   `CODEC`, `Builder`, and the `GrassColorModifier` enum.
+//! - [`biome_generation_settings`] — the carvers/features settings, `CODEC`,
+//!   `Builder`/`PlainBuilder`, and `EMPTY` (the `CONFIGURED_CARVER`/
+//!   `PLACED_FEATURE` registry keys and the carver holder-set codec land here).
+//! - [`mob_spawn_settings`] — the per-category spawner lists, spawn costs,
+//!   `CODEC`, `Builder` (with the Paper perf subclasses), and the
+//!   `SpawnerData`/`MobSpawnCost` records.
+//! - [`biome_manager`] — the fiddled-distance corner interpolation over the
+//!   `NoiseBiomeSource`, `obfuscateSeed`, and `CHUNK_CENTER_QUART`.
 //!
 //! The `mc.world.level.biome.data`/`.source` units build on top of this core.
 

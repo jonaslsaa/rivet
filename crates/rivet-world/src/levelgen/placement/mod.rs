@@ -35,29 +35,10 @@
 //! `place_walk` there for the authoritative parity account (why the ordering of
 //! RNG draws and level-state reads matters, and the #181 revisit note).
 
-use crate::levelgen::synth::perlin_simplex_noise::PerlinSimplexNoise;
-use rivet_util::random::LegacyRandomSource;
-use rivet_util::worldgen_random::WorldgenRandom;
-use std::sync::LazyLock;
-
-/// `Biome.BIOME_INFO_NOISE` — `new PerlinSimplexNoise(new WorldgenRandom(new
-/// LegacyRandomSource(2345L)), ImmutableList.of(0))`, marked
-/// `@Deprecated(forRemoval = true)` in Java.
-///
-/// STUB(mc.world.level.biome.core) — the `Biome` value core (issue #178) owns
-/// this static noise field. It has not landed yet, and the placement modifiers
-/// (`mc.world.level.levelgen.placement.repeating`) sample `BIOME_INFO_NOISE` in
-/// their `count` hooks, so it is declared HERE as a functional out-of-unit stub
-/// built on the already-ported `synth::PerlinSimplexNoise` — the exact
-/// seed/RNG construction from `Biome.java`'s static initializer. The
-/// declaration deliberately lives in this consuming unit, NOT `biome.rs`, so it
-/// cannot collide with the owning `biome.core` declaration (issue #178) when
-/// that unit lands it; the placement unit then reads it through `crate::biome::`
-/// and this stub is deleted.
-pub static BIOME_INFO_NOISE: LazyLock<PerlinSimplexNoise> = LazyLock::new(|| {
-    let mut random = WorldgenRandom::new(LegacyRandomSource::new(2345));
-    PerlinSimplexNoise::new(&mut random, &[0])
-});
+// `Biome.BIOME_INFO_NOISE` is owned by the `mc.world.level.biome.core` unit
+// (declared in `biome::biome`); the `placement.repeating` modifiers read it
+// through `crate::biome::biome::BIOME_INFO_NOISE` (see `noise_based_count_placement`
+// and `noise_threshold_count_placement`).
 
 mod biome_filter;
 mod block_predicate_filter;

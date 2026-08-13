@@ -641,6 +641,127 @@ where
     )
 }
 
+// ---------------------------------------------------------------------------
+// stringRgbColor
+// ---------------------------------------------------------------------------
+
+/// `ExtraCodecs.STRING_RGB_COLOR` — a color codec accepting either the primary
+/// `#RRGGBB` hex-string form (`hexColor(6)` xmapped through `ARGB::opaque`/
+/// `ARGB::transparent`) or the alternative `RGB_COLOR_CODEC` (a bare int, or a
+/// `[r, g, b]` float vector). Required by `BiomeSpecialEffects.CODEC` (issue
+/// #178, the `mc.world.level.biome` unit). Pure `com.mojang.serialization`
+/// surface plus the ARGB bit arithmetic (inlined here so the DFU crate stays
+/// free of the Minecraft-bound `ARGB`).
+///
+/// Decode tries the hex string first, then the int/vector forms; encode always
+/// emits the hex string (`#RRGGBB`, lowercase, zero-padded — Java
+/// `HexFormat.toHexDigits(value, 6)` over the low 24 bits).
+pub fn string_rgb_color<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i32, Ops>> {
+    let hex = codec::xmap(
+        hex_color::<Ops>(6),
+        // `ARGB.opaque` — decode applies `color | 0xFF000000`.
+        Arc::new(|color: &i32| color | 0xFF000000u32 as i32),
+        // `ARGB.transparent` — encode strips the alpha channel.
+        Arc::new(|color: &i32| color & 0xFFFFFF),
+    );
+    codec::with_alternative(hex, rgb_color_codec::<Ops>())
+}
+
+/// `ExtraCodecs.RGB_COLOR_CODEC` — `Codec.withAlternative(Codec.INT, VECTOR3F,
+/// v -> ARGB.colorFromFloat(1.0F, v.x(), v.y(), v.z()))`. Decode tries the bare
+/// int first, then the `[r, g, b]` float vector; encode always uses the int.
+fn rgb_color_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<i32, Ops>> {
+    let vector3f = codec::comap_flat_map(
+        codec::list(codec::float_codec::<Ops>()),
+        Arc::new(|list: &Vec<f32>| {
+            // Java `Util.fixedSize(list, 3)` — the message shape only (the
+            // partial-result `subList` is dropped; the alternative path fails).
+            if list.len() != 3 {
+                DataResult::error("Input is not a list of 3 elements".to_string())
+            } else {
+                DataResult::success(color_from_float(1.0f32, list[0], list[1], list[2]))
+            }
+        }),
+        // Encode always goes through the primary int codec (`withAlternative`),
+        // so this direction is never exercised; return a valid-but-unused triple.
+        Arc::new(|_color: &i32| vec![0.0f32, 0.0, 0.0]),
+    );
+    codec::with_alternative(codec::int_codec::<Ops>(), vector3f)
+}
+
+/// `ExtraCodecs.hexColor(int expectedDigits)` — the `#RRGGBB` string form.
+/// Decode requires the `#` prefix and exactly `expectedDigits` hex digits;
+/// encode emits `#` + `expectedDigits` lowercase zero-padded hex digits of the
+/// low bits.
+fn hex_color<Ops: DynamicOps + 'static>(expected_digits: u32) -> Arc<dyn Codec<i32, Ops>> {
+    let max_value: u64 = (1u64 << (expected_digits * 4)) - 1;
+    codec::comap_flat_map(
+        codec::string_codec::<Ops>(),
+        Arc::new(move |string: &String| {
+            if !string.starts_with('#') {
+                return DataResult::error("Hex color must begin with #".to_string());
+            }
+            // Java `string.length() - "#".length()` counts UTF-16 code units
+            // (`String.length()`), not bytes — so a malformed non-ASCII input
+            // reports the same "got N" as Paper (`encode_utf16` counts
+            // surrogate pairs as 2, matching Java exactly).
+            let digits = string[1..].encode_utf16().count();
+            if digits != expected_digits as usize {
+                return DataResult::error(format!(
+                    "Hex color is wrong size, expected {} digits but got {}",
+                    expected_digits, digits
+                ));
+            }
+            // Java `HexFormat.fromHexDigitsToLong` — hex digits only, no sign,
+            // no whitespace, case-insensitive.
+            let digits_str = &string[1..];
+            if digits_str.is_empty() || !digits_str.chars().all(|c| c.is_ascii_hexdigit()) {
+                return DataResult::error(format!("Invalid color value: {}", string));
+            }
+            match u64::from_str_radix(digits_str, 16) {
+                Ok(value) if value <= max_value => DataResult::success(value as i32),
+                Ok(_) => DataResult::error(format!("Color value out of range: {}", string)),
+                Err(_) => DataResult::error(format!("Invalid color value: {}", string)),
+            }
+        }),
+        Arc::new(move |value: &i32| {
+            // Java `HexFormat.of().toHexDigits(value.intValue(), expectedDigits)`
+            // — the low `expectedDigits*4` bits, lowercase, zero-padded. The
+            // mask is computed in `u64` so `expected_digits = 8` (the full
+            // 32-bit ARGB surface) doesn't overflow `1 << 32` on a 32-bit
+            // shift (`HexFormat` rejects digits > 8 for `int`).
+            let mask = (1u64 << (expected_digits * 4)) - 1;
+            format!(
+                "#{:0width$x}",
+                (*value as i64) & mask as i64,
+                width = expected_digits as usize
+            )
+        }),
+    )
+}
+
+/// `ARGB.colorFromFloat(float alpha, float red, float green, float blue)` —
+/// `color(as8BitChannel(...) ×4)`, inlined so the DFU crate stays free of the
+/// Minecraft-bound `ARGB` (issue #206 owns the full `ARGB` port).
+fn color_from_float(alpha: f32, red: f32, green: f32, blue: f32) -> i32 {
+    argb_color(
+        as8_bit_channel(alpha),
+        as8_bit_channel(red),
+        as8_bit_channel(green),
+        as8_bit_channel(blue),
+    )
+}
+
+/// `ARGB.as8BitChannel(float)` — `Mth.floor(value * 255.0F)`.
+fn as8_bit_channel(value: f32) -> i32 {
+    (value * 255.0f32).floor() as i32
+}
+
+/// `ARGB.color(int alpha, int red, int green, int blue)`.
+fn argb_color(alpha: i32, red: i32, green: i32, blue: i32) -> i32 {
+    (alpha & 0xFF) << 24 | (red & 0xFF) << 16 | (green & 0xFF) << 8 | blue & 0xFF
+}
+
 #[cfg(test)]
 mod interval_codec_tests {
     use super::*;
@@ -823,6 +944,182 @@ mod interval_codec_tests {
         assert!(
             encoded.is_null(),
             "distinct NaN payloads are equal under Float.equals -> bare point, got {encoded}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod string_rgb_color_tests {
+    use super::*;
+    use crate::json_ops::JsonOps;
+    use serde_json::json;
+
+    fn error_message<T: std::fmt::Debug>(result: &DataResult<T>) -> String {
+        result
+            .error_ref()
+            .unwrap_or_else(|| panic!("expected an error, got {:?}", result.result()))
+            .message()
+            .to_string()
+    }
+
+    #[test]
+    fn hex_form_round_trips() {
+        let codec = string_rgb_color::<JsonOps>();
+        // Decode "#7d8c6e" -> opaque 0xFF7D8C6E.
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!("#7d8c6e"))
+            .result()
+            .cloned()
+            .expect("decode");
+        assert_eq!(decoded, 0xFF7D8C6Eu32 as i32);
+        // Encode back to the same lowercase hex form.
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .cloned()
+            .expect("encode");
+        assert_eq!(encoded, json!("#7d8c6e"));
+    }
+
+    #[test]
+    fn hex_form_is_case_insensitive_and_pads() {
+        let codec = string_rgb_color::<JsonOps>();
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!("#Ff0000"))
+            .result()
+            .cloned()
+            .expect("decode");
+        assert_eq!(decoded, 0xFFFF0000u32 as i32);
+        // Encode pads to 6 digits.
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &(0xFF000001u32 as i32))
+            .result()
+            .cloned()
+            .expect("encode");
+        assert_eq!(encoded, json!("#000001"));
+    }
+
+    #[test]
+    fn hex_form_rejects_malformed() {
+        let codec = string_rgb_color::<JsonOps>();
+        // A malformed value falls through both alternatives; the `either`
+        // error composes the two inner messages (Java `EitherCodec.decode`).
+        assert_eq!(
+            error_message(&codec.parse(&JsonOps::INSTANCE, &json!("7d8c6e"))),
+            "Failed to parse either. First: Hex color must begin with #; Second: Failed to parse either. First: Not a number: \"7d8c6e\"; Second: Not a json array: \"7d8c6e\""
+        );
+        assert_eq!(
+            error_message(&codec.parse(&JsonOps::INSTANCE, &json!("#7d8c6"))),
+            "Failed to parse either. First: Hex color is wrong size, expected 6 digits but got 5; Second: Failed to parse either. First: Not a number: \"#7d8c6\"; Second: Not a json array: \"#7d8c6\""
+        );
+        assert_eq!(
+            error_message(&codec.parse(&JsonOps::INSTANCE, &json!("#7d8c6g"))),
+            "Failed to parse either. First: Invalid color value: #7d8c6g; Second: Failed to parse either. First: Not a number: \"#7d8c6g\"; Second: Not a json array: \"#7d8c6g\""
+        );
+        // A leading '+' is not a hex digit (Java HexFormat rejects it), but
+        // the size check (5 digits) fires first, exactly as the Java
+        // `HexFormat` boundary check does.
+        assert_eq!(
+            error_message(&codec.parse(&JsonOps::INSTANCE, &json!("#+7d8c"))),
+            "Failed to parse either. First: Hex color is wrong size, expected 6 digits but got 5; Second: Failed to parse either. First: Not a number: \"#+7d8c\"; Second: Not a json array: \"#+7d8c\""
+        );
+    }
+
+    #[test]
+    fn hex_form_wrong_size_counts_utf16_units_like_java() {
+        let codec = string_rgb_color::<JsonOps>();
+        // `"#7d8c6e\u{e9}"` is 8 UTF-16 code units (1 prefix + 6 hex + 1 for
+        // the BMP 'é'), so Java `string.length() - 1` reports 7 — NOT 8 (which
+        // a byte count would produce for the 2-byte UTF-8 'é'). The message
+        // must match Paper's exact "got 7".
+        assert_eq!(
+            error_message(&codec.parse(&JsonOps::INSTANCE, &json!("#7d8c6e\u{e9}"))),
+            "Failed to parse either. First: Hex color is wrong size, expected 6 digits but got 7; Second: Failed to parse either. First: Not a number: \"#7d8c6e\u{e9}\"; Second: Not a json array: \"#7d8c6e\u{e9}\""
+        );
+    }
+
+    #[test]
+    fn hex_color_8_digit_argb_round_trips_without_overflow() {
+        // `hexColor(8)` is the `#RRGGBBAA`-style full 32-bit surface
+        // (`STRING_ARGB_COLOR` when ported). The encode mask must not overflow
+        // `1 << 32` and must preserve the high (alpha) bits of a negative i32.
+        let codec = hex_color::<JsonOps>(8);
+        // 0xFFFF0000 (negative i32) — the high bit survives the encode mask.
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!("#ffff0000"))
+            .result()
+            .cloned()
+            .expect("decode");
+        assert_eq!(decoded, 0xFFFF0000u32 as i32);
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .cloned()
+            .expect("encode");
+        assert_eq!(encoded, json!("#ffff0000"));
+        // Full 8-digit round trip with alpha bits set.
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!("#ff334455"))
+            .result()
+            .cloned()
+            .expect("decode");
+        assert_eq!(decoded, 0xFF334455u32 as i32);
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .cloned()
+            .expect("encode");
+        assert_eq!(encoded, json!("#ff334455"));
+        // All-ones (0xFFFFFFFF, i32 -1).
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!("#ffffffff"))
+            .result()
+            .cloned()
+            .expect("decode");
+        assert_eq!(decoded, -1);
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .cloned()
+            .expect("encode");
+        assert_eq!(encoded, json!("#ffffffff"));
+    }
+
+    #[test]
+    fn int_alternative_decodes() {
+        // `RGB_COLOR_CODEC` — a bare int falls back to the int form.
+        let codec = string_rgb_color::<JsonOps>();
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!(0x7D8C6E))
+            .result()
+            .cloned()
+            .expect("decode");
+        // Hex form is NOT hit (int input); the int is already a color, and the
+        // outer hex xmap only wraps the hex path — so the raw int is returned
+        // unchanged (Java `RGB_COLOR_CODEC`'s INT arm).
+        assert_eq!(decoded, 0x7D8C6E);
+    }
+
+    #[test]
+    fn vector_alternative_decodes() {
+        let codec = string_rgb_color::<JsonOps>();
+        // [1.0, 0.5, 0.0] -> color(255, floor(0.5*255)=127, 0) = 0xFFFF7F00.
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &json!([1.0, 0.5, 0.0]))
+            .result()
+            .cloned()
+            .expect("decode");
+        assert_eq!(decoded, 0xFFFF7F00u32 as i32);
+    }
+
+    #[test]
+    fn vector_alternative_rejects_wrong_length() {
+        let codec = string_rgb_color::<JsonOps>();
+        // A wrong-length vector falls through both alternatives; the `either`
+        // error composes the nested messages (Java `EitherCodec.decode`).
+        assert_eq!(
+            error_message(&codec.parse(&JsonOps::INSTANCE, &json!([1.0, 0.0]))),
+            "Failed to parse either. First: Not a string: [1.0,0.0]; Second: Failed to parse either. First: Not a number: [1.0,0.0]; Second: Input is not a list of 3 elements"
         );
     }
 }

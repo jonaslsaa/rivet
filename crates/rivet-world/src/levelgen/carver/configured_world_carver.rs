@@ -17,6 +17,7 @@
 use crate::levelgen::carver::CarverConfiguration;
 use crate::levelgen::carver::world_carver::{WorldCarverId, carver_is_start_chunk};
 use rivet_util::RandomSource;
+use std::sync::Arc;
 
 /// `net.minecraft.world.level.levelgen.carver.ConfiguredWorldCarver<WC extends
 /// CarverConfiguration>` — the record pairing a carver with its configuration.
@@ -49,6 +50,41 @@ impl<C: CarverConfiguration> ConfiguredWorldCarver<C> {
     /// the `#180` carver hub.
     pub fn is_start_chunk<R: RandomSource>(&self, random: &mut R) -> bool {
         carver_is_start_chunk(self.world_carver.clone(), &self.config, random)
+    }
+
+    /// Erase to the wildcard `ConfiguredWorldCarver<?>` — the form stored in
+    /// `BiomeGenerationSettings.carvers` and the `LIST_CODEC` holder sets.
+    pub fn into_erased(self) -> ConfiguredWorldCarverErased {
+        ConfiguredWorldCarverErased {
+            world_carver: self.world_carver,
+            config: Arc::new(self.config),
+        }
+    }
+}
+
+/// Java's `ConfiguredWorldCarver<?>` wildcard, erased. Java erases both the
+/// configuration and the carver to their bounds; the Rust port erases the
+/// carver to its `WorldCarverId` identity and the configuration to a
+/// `dyn CarverConfiguration`. The concrete configuration type is recovered by
+/// the `#180` dispatch, which downcasts before calling the concrete carver's
+/// behavior.
+#[derive(Debug, Clone)]
+pub struct ConfiguredWorldCarverErased {
+    /// `ConfiguredWorldCarver.worldCarver` — the carver's registry-held
+    /// identity.
+    pub world_carver: WorldCarverId,
+    /// `ConfiguredWorldCarver.config`, erased to the `CarverConfiguration`
+    /// surface.
+    pub config: Arc<dyn CarverConfiguration>,
+}
+
+impl ConfiguredWorldCarverErased {
+    /// `new ConfiguredWorldCarver(WorldCarver, config)` from the erased halves.
+    pub fn new(world_carver: WorldCarverId, config: Arc<dyn CarverConfiguration>) -> Self {
+        ConfiguredWorldCarverErased {
+            world_carver,
+            config,
+        }
     }
 }
 

@@ -24,7 +24,7 @@
 //! (`rivet_serialization::codec::optional_field_of`), not a
 //! placement-modifier concern.
 
-use crate::levelgen::placement::BIOME_INFO_NOISE;
+use crate::biome::biome::BIOME_INFO_NOISE;
 use crate::levelgen::placement::placement_modifier_type::{
     PlacementModifierTypeId, PlacementModifierTypes,
 };
