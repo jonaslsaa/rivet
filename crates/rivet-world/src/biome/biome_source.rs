@@ -30,7 +30,7 @@
 //! `getNoiseBiome`) over `Holder<BiomeId>` and its codecs over the id holder
 //! codecs in [`biome_id_codec`] (the `Biome.CODEC`/`Biome.LIST_CODEC`
 //! analogues). The `.data`-unit `Biomes` `ResourceKey`s and the
-//! `OverworldBiomeBuilder` surface are declared as STUBs (see [`biomes`] /
+//! `OverworldBiomeBuilder` table are complete (see [`biomes`] /
 //! [`overworld_biome_builder`]); the concrete preset/`the_end` sources bridge
 //! by identifier through the generated `BiomeId` tables.
 //!
