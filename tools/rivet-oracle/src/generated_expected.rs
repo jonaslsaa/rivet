@@ -359,6 +359,28 @@ fn validate_world(world: &WorldManifest) -> Result<(), Error> {
                 fp.status
             )));
         }
+        // The chunk's stored xPos/zPos must match the grid key — a relabeled or
+        // fabricated chunk is refused, not silently accepted as ground truth.
+        let parsed: [i32; 2] = {
+            let mut parts = key.split(',');
+            [
+                parts
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(i32::MAX),
+                parts
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(i32::MAX),
+            ]
+        };
+        if fp.stored_pos != parsed {
+            return Err(Error::Manifest(format!(
+                "generated-expected chunk {key} has stored_pos {:?} — the chunk's internal \
+                 xPos/zPos do not match its grid key; refusing a relabeled chunk",
+                fp.stored_pos
+            )));
+        }
         if !fp.capability_flags.is_empty() {
             return Err(Error::Manifest(format!(
                 "generated-expected chunk {key} carries #519-uncarried capability flags \
