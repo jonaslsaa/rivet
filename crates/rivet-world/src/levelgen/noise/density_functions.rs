@@ -602,6 +602,7 @@ impl DensityFunction for Marker {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         // Java `MarkerOrMarked.mapChildren` default: `new Marker(type,
         // visitor.apply(wrapped))`. The wrap visitor then re-creates the
@@ -766,6 +767,7 @@ impl DensityFunction for Mapped {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(Mapped::create(self.mapped_type, visitor.apply(&self.input)))
     }
@@ -846,6 +848,7 @@ impl DensityFunction for Clamp {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(Clamp::new(
             visitor.apply(&self.input),
@@ -950,6 +953,7 @@ impl DensityFunction for RangeChoice {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(RangeChoice::new(
             visitor.apply(&self.input),
@@ -1074,6 +1078,7 @@ impl DensityFunction for IntervalSelect {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         let functions = self
             .functions
@@ -1154,6 +1159,7 @@ impl DensityFunction for Noise {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(Noise::new(
             visitor.visit_noise(&self.noise),
@@ -1254,6 +1260,7 @@ impl DensityFunction for Shift {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(Shift::new(visitor.visit_noise(&self.offset_noise)))
     }
@@ -1305,6 +1312,7 @@ impl DensityFunction for ShiftA {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(ShiftA::new(visitor.visit_noise(&self.offset_noise)))
     }
@@ -1356,6 +1364,7 @@ impl DensityFunction for ShiftB {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(ShiftB::new(visitor.visit_noise(&self.offset_noise)))
     }
@@ -1445,6 +1454,7 @@ impl DensityFunction for ShiftedNoise {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(ShiftedNoise::new(
             visitor.apply(&self.shift_x),
@@ -1659,6 +1669,7 @@ impl DensityFunction for MulOrAdd {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         let function = visitor.apply(&self.input);
         let min = function.min_value();
@@ -1835,6 +1846,7 @@ impl DensityFunction for Ap2 {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         two_argument_create(
             self.two_arg_type,
@@ -1903,6 +1915,7 @@ impl DensityFunction for Spline {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         let mapped = self
             .spline
@@ -2172,6 +2185,7 @@ impl DensityFunction for FindTopSurface {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(FindTopSurface::new(
             visitor.apply(&self.density),
@@ -2414,6 +2428,7 @@ impl DensityFunction for HolderHolder {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         // Java `new HolderHolder(Holder.direct(visitor.apply(this.function.value())))`
         // — `value()` resolves a bound reference (Java's `BuildState` binds
@@ -3781,7 +3796,7 @@ where
 mod tests {
     use super::*;
     use crate::levelgen::noise::density_function::{
-        ContextProvider, SinglePointContext, Visitor, density_function_codec, map_all,
+        ContextProvider, IdentityKey, SinglePointContext, Visitor, density_function_codec, map_all,
     };
     use rivet_registry::Identifier;
     use rivet_registry::ResourceKey;
@@ -3790,6 +3805,8 @@ mod tests {
     use rivet_registry::registry_ops::RegistryOps;
     use rivet_serialization::json_ops::JsonOps;
     use serde_json;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     fn at(x: i32, y: i32, z: i32) -> SinglePointContext {
         SinglePointContext::new(x, y, z)
@@ -4091,6 +4108,43 @@ mod tests {
         // (this))`).
         let mapped = map_all(&constant(3.0), &SquareConstant);
         assert_eq!(mapped.compute(&at(0, 0, 0)), 9.0);
+    }
+
+    #[test]
+    fn map_all_reuses_wrap_for_simple_function_leaf() {
+        // An identity-keyed wrap visitor (the NoiseChunkWrap/RandomState
+        // pattern). Java's `SimpleFunction.mapChildren` returns `this`, so the
+        // identity-preserving default keys the wrap cache on the ORIGINAL leaf
+        // Arc; a second `mapAll` over the same leaf reuses the first wrap. A
+        // `clone_arc` default would key on a fresh clone and produce a second,
+        // distinct wrap.
+        struct WrapCache {
+            cache: Mutex<HashMap<IdentityKey, Arc<dyn DensityFunction>>>,
+        }
+        impl Visitor for WrapCache {
+            fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction> {
+                let key = IdentityKey::new(input.clone());
+                if let Some(value) = self.cache.lock().unwrap().get(&key) {
+                    return value.clone();
+                }
+                let value: Arc<dyn DensityFunction> =
+                    Arc::new(Marker::new(MarkerType::CacheOnce, input.clone()));
+                self.cache.lock().unwrap().insert(key, value.clone());
+                value
+            }
+        }
+
+        let leaf = constant(3.0);
+        let visitor = WrapCache {
+            cache: Mutex::new(HashMap::new()),
+        };
+        let first = map_all(&leaf, &visitor);
+        let second = map_all(&leaf, &visitor);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a second mapAll over the same SimpleFunction leaf must reuse the \
+             first wrap (Java mapChildren returns `this`)"
+        );
     }
 
     // ------------------------------------------------------------------

@@ -23,7 +23,10 @@
 //! is replaced by [`DensityFunction::type_id`] — the erased value's registry
 //! identity — and the `#177` dispatch table in `density_functions` resolves
 //! that id to the concrete `MapCodec`. `clone_arc` is the object-safe clone the
-//! `SimpleFunction::map_children` identity default needs (Java `return this`).
+//! combinator defaults (`clamp`/`abs`/...) and the non-`SimpleFunction`
+//! `wrap_new` paths use; the `SimpleFunction::map_children` identity default
+//! instead returns the caller's original `Arc` (Java `return this`), so a wrap
+//! cache keys on the original object.
 //!
 //! ## `DensityFunction.CODEC`
 //!
@@ -122,10 +125,17 @@ pub trait DensityFunction: Any + Debug + Send + Sync + 'static {
     /// `mapChildren(Visitor)`.
     ///
     /// The default is `DensityFunction.SimpleFunction`'s — identity (`return
-    /// this`), via `clone_arc`. Functions whose children carry transformable
-    /// state (child functions, `NoiseHolder`s) override it.
-    fn map_children(&self, _visitor: &dyn Visitor) -> Arc<dyn DensityFunction> {
-        self.clone_arc()
+    /// this`). `original` is the owned `Arc` the caller holds (Java's `this`):
+    /// the default returns it unchanged, so a wrap cache keys on the original
+    /// object and later `mapAll`s reuse the wrap — Java's reference identity.
+    /// Functions whose children carry transformable state (child functions,
+    /// `NoiseHolder`s) override it and rebuild.
+    fn map_children(
+        &self,
+        _visitor: &dyn Visitor,
+        original: &Arc<dyn DensityFunction>,
+    ) -> Arc<dyn DensityFunction> {
+        original.clone()
     }
 
     /// `minValue()`.
@@ -143,8 +153,10 @@ pub trait DensityFunction: Any + Debug + Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
 
     /// Object-safe clone — `Arc::new(self.clone())` on the concrete type. The
-    /// `SimpleFunction::map_children` identity default needs it (Java
-    /// `return this`).
+    /// combinator defaults (`clamp`/`abs`/...) and the non-`SimpleFunction`
+    /// `wrap_new` paths use it; the `SimpleFunction::map_children` identity
+    /// default instead returns the caller's original `Arc` (Java `return
+    /// this`).
     fn clone_arc(&self) -> Arc<dyn DensityFunction>;
 }
 
@@ -168,7 +180,7 @@ pub fn map_all(
 
     impl Visitor for RecursiveVisitor<'_> {
         fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction> {
-            let mapped = input.map_children(self);
+            let mapped = input.map_children(self, input);
             self.visitor.apply(&mapped)
         }
 

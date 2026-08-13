@@ -446,20 +446,54 @@ impl NoiseChunk {
         }
     }
 
+    /// The shared `wrap` visitor — the same configuration the constructor's
+    /// `router.mapAll(this::wrap)` used, so `cachedClimateSampler` reuses the
+    /// construction-time wraps (Java's single `this.wrapped` map keyed on the
+    /// router-original functions).
+    ///
+    /// `functions` is `None`: the `NoiseChunk` cannot borrow the
+    /// density-function registry (it must be `'static` to serve as a
+    /// `FunctionContext`), and the climate fields `cachedClimateSampler` wraps
+    /// are the already-wired router (`RandomState`'s `NoiseWiringHelper`
+    /// resolved every `HolderHolder::Reference`), so no reference resolution is
+    /// needed here.
+    fn wrap_visitor(&self) -> NoiseChunkWrap<'_> {
+        NoiseChunkWrap {
+            state: self.state.clone(),
+            blender: self.blender.clone(),
+            beardifier: self.beardifier.clone(),
+            blend_alpha: self.blend_alpha.clone(),
+            blend_offset: self.blend_offset.clone(),
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+            cell_count_y: self.cell_count_y,
+            cell_count_xz: self.cell_count_xz,
+            first_cell_z: self.first_cell_z,
+            first_noise_x: self.first_noise_x,
+            first_noise_z: self.first_noise_z,
+            noise_size_xz: self.noise_size_xz,
+            wrapped: self.wrapped.clone(),
+            functions: None,
+        }
+    }
+
     /// `cachedClimateSampler(NoiseRouter noises, List<ParameterPoint> spawnTarget)`.
     pub fn cached_climate_sampler(
         &self,
         noises: &NoiseRouter,
         spawn_target: &[ParameterPoint],
     ) -> Sampler {
-        let wrap = |f: &Arc<dyn DensityFunction>| self.wrap(f);
+        // Java's `noises.temperature().mapAll(this::wrap)` — the recursive
+        // visitor re-wraps each field through the shared `wrapped` map, so the
+        // SimpleFunction leaves reuse the construction-time wraps.
+        let wrap = self.wrap_visitor();
         Sampler {
-            temperature: wrap(noises.temperature()),
-            humidity: wrap(noises.vegetation()),
-            continentalness: wrap(noises.continents()),
-            erosion: wrap(noises.erosion()),
-            depth: wrap(noises.depth()),
-            weirdness: wrap(noises.ridges()),
+            temperature: map_all(noises.temperature(), &wrap),
+            humidity: map_all(noises.vegetation(), &wrap),
+            continentalness: map_all(noises.continents(), &wrap),
+            erosion: map_all(noises.erosion(), &wrap),
+            depth: map_all(noises.depth(), &wrap),
+            weirdness: map_all(noises.ridges(), &wrap),
             spawn_target: spawn_target.to_vec(),
         }
     }
@@ -837,8 +871,9 @@ struct NoiseChunkWrap<'a> {
     /// (Java's `this.wrapped` `computeIfAbsent` used by `this::wrap`). Shared
     /// with the `NoiseChunk` so `cachedClimateSampler` and the construction
     /// `mapAll` key the same cache (Java's single `this.wrapped` map; the
-    /// construction keys on clones — see the
-    /// `cached_climate_sampler_and_wrap_share_the_wrapped_cache` test).
+    /// identity-preserving `map_children` keys it on the original router
+    /// fields — see the `cached_climate_sampler_reuses_construction_wraps`
+    /// test).
     wrapped: Arc<Mutex<HashMap<IdentityKey, Arc<dyn DensityFunction>>>>,
     /// The density-function registry — resolves `HolderHolder::Reference`
     /// values during the wrap (Java's `holder.value()`, which `BuildState`
@@ -2293,25 +2328,18 @@ mod tests {
     }
 
     /// The shared wrap cache (Java's single `this.wrapped` map) is used by both
-    /// the construction `mapAll(this::wrap)` and `cachedClimateSampler`/`wrap`.
+    /// the construction `mapAll(this::wrap)` and `cachedClimateSampler`.
     ///
-    /// RivetTodo(#183): Java's `cachedClimateSampler` reuses the
-    /// construction-time wraps — `mapAll` keys its `HashMap` on the *original*
-    /// node references (recursive `apply(input.mapChildren(this))`, and
-    /// `SimpleFunction.mapChildren` returns `this`), so the second `mapAll`
-    /// hits the same cache entries and reads the FlatCache/CacheOnce values
-    /// filled during construction. Rust's `map_all` is bottom-up and the
-    /// `map_children` default returns a *clone* `Arc`, so the construction
-    /// cache is keyed on clones; wrapping the original router fields here
-    /// misses and re-wraps fresh instances. Value-neutral today (FlatCache and
-    /// the `CacheAllInCell` fill on demand through shared state, so the fresh
-    /// wraps read identical values) but latent for a future climate function
-    /// whose cache is filled by an earlier pass. Asserts `Arc::ptr_eq` between
-    /// the sampler fields and `wrap` of the same raw router field — the two
-    /// call sites of the shared `wrapped` map agree (Java passes
-    /// `randomState.router()` to `cachedClimateSampler`).
+    /// The identity-preserving `map_children` default (Java
+    /// `SimpleFunction.mapChildren` returns `this`) means the construction
+    /// `mapAll` keys the cache on the ORIGINAL router fields, and
+    /// `cachedClimateSampler`'s recursive `mapAll` (Java's
+    /// `.mapAll(this::wrap)`) reuses those exact construction-time wraps —
+    /// not two wraps freshly computed after the sampler. Asserts both: the
+    /// construction cache holds the original router fields, and the sampler
+    /// fields ARE the wraps `wrap(original)` returns (the construction wraps).
     #[test]
-    fn cached_climate_sampler_and_wrap_share_the_wrapped_cache() {
+    fn cached_climate_sampler_reuses_construction_wraps() {
         let settings = test_settings();
         let (noise_registry, df_registry) = empty_registries();
         let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
@@ -2326,13 +2354,32 @@ mod tests {
             Box::new(create_fluid_picker(&settings)),
             Blender::empty(),
         );
-
-        // `NoiseChunk` does not retain the raw router (Java's `NoiseChunk`
-        // doesn't either — `cachedClimateSampler` receives it as an argument);
-        // the chunk's `wrap` is the seam under test, and the router fields are
-        // the original `Arc`s both `cachedClimateSampler` and `wrap` key on
-        // (the construction `mapAll` wrapped clones — see the doc note).
         let router = state.router();
+
+        // Construction (`router.mapAll(&wrap_visitor)`) must have cached the
+        // wrap under the ORIGINAL router field Arc — the identity-preserving
+        // `map_children` default returns `this`, exactly Java's
+        // `SimpleFunction.mapChildren`. A `clone`-keyed cache would hold a
+        // different key and this check fails.
+        for (name, raw) in [
+            ("temperature", router.temperature()),
+            ("humidity", router.vegetation()),
+            ("continentalness", router.continents()),
+            ("erosion", router.erosion()),
+            ("depth", router.depth()),
+            ("weirdness", router.ridges()),
+        ] {
+            let key = IdentityKey::new(raw.clone());
+            assert!(
+                chunk.wrapped.lock().unwrap().contains_key(&key),
+                "{name}: construction must cache the wrap under the original \
+                 router field (Java `SimpleFunction.mapChildren` returns `this`)"
+            );
+        }
+
+        // `cachedClimateSampler` re-wraps recursively through the same cache, so
+        // each sampler field is the SAME construction-time wrap — not a fresh
+        // wrap computed after the sampler.
         let sampler = chunk.cached_climate_sampler(router, &[]);
         for (name, sample, raw) in [
             ("temperature", &sampler.temperature, router.temperature()),
@@ -2346,11 +2393,12 @@ mod tests {
             ("depth", &sampler.depth, router.depth()),
             ("weirdness", &sampler.weirdness, router.ridges()),
         ] {
-            let wrapped = chunk.wrap(raw);
+            let construction_wrap = chunk.wrap(raw);
             assert!(
-                Arc::ptr_eq(sample, &wrapped),
-                "{name}: cachedClimateSampler and wrap must agree for the same \
-                 raw router field (single this.wrapped map)"
+                Arc::ptr_eq(sample, &construction_wrap),
+                "{name}: cachedClimateSampler must reuse the construction-time \
+                 wrap of the original router field (Java passes \
+                 `randomState.router()` to `cachedClimateSampler`)"
             );
         }
     }
