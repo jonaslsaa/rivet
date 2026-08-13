@@ -520,7 +520,7 @@ impl NoiseChunk {
     fn fill_slice(&self, slice0: bool, cell_x: i32) {
         {
             let mut state = self.state.lock().unwrap();
-            state.cell_start_block_x = cell_x * self.cell_width;
+            state.cell_start_block_x = cell_x.wrapping_mul(self.cell_width);
             state.in_cell_x = 0;
         }
         let provider = SliceFillingContextProvider {
@@ -535,7 +535,7 @@ impl NoiseChunk {
             let cell_z = self.first_cell_z + cell_z_index;
             {
                 let mut state = self.state.lock().unwrap();
-                state.cell_start_block_z = cell_z * self.cell_width;
+                state.cell_start_block_z = cell_z.wrapping_mul(self.cell_width);
                 state.in_cell_z = 0;
                 state.array_interpolation_counter += 1;
             }
@@ -568,8 +568,10 @@ impl NoiseChunk {
     /// `advanceCellX(int cellXIndex)`.
     pub fn advance_cell_x(&self, cell_x_index: i32) {
         self.fill_slice(false, self.first_cell_x + cell_x_index + 1);
-        self.state.lock().unwrap().cell_start_block_x =
-            (self.first_cell_x + cell_x_index) * self.cell_width;
+        self.state.lock().unwrap().cell_start_block_x = self
+            .first_cell_x
+            .wrapping_add(cell_x_index)
+            .wrapping_mul(self.cell_width);
     }
 
     /// `selectCellYZ(int cellYIndex, int cellZIndex)`.
@@ -581,8 +583,13 @@ impl NoiseChunk {
         {
             let mut state = self.state.lock().unwrap();
             state.filling_cell = true;
-            state.cell_start_block_y = (cell_y_index + self.cell_noise_min_y) * self.cell_height;
-            state.cell_start_block_z = (self.first_cell_z + cell_z_index) * self.cell_width;
+            state.cell_start_block_y = cell_y_index
+                .wrapping_add(self.cell_noise_min_y)
+                .wrapping_mul(self.cell_height);
+            state.cell_start_block_z = self
+                .first_cell_z
+                .wrapping_add(cell_z_index)
+                .wrapping_mul(self.cell_width);
             state.array_interpolation_counter += 1;
         }
         let cell_caches = self.state.lock().unwrap().cell_caches.clone();
@@ -1067,7 +1074,9 @@ struct SliceFillingContextProvider<'a> {
 impl ContextProvider for SliceFillingContextProvider<'_> {
     fn for_index(&self, index: usize) -> &dyn FunctionContext {
         let mut state = self.state.lock().unwrap();
-        state.cell_start_block_y = (index as i32 + self.cell_noise_min_y) * self.cell_height;
+        state.cell_start_block_y = (index as i32)
+            .wrapping_add(self.cell_noise_min_y)
+            .wrapping_mul(self.cell_height);
         state.interpolation_counter += 1;
         state.in_cell_y = 0;
         state.array_index = index;
@@ -1086,8 +1095,9 @@ impl ContextProvider for SliceFillingContextProvider<'_> {
             // consideration as `NoiseChunk::fill_all_directly`).
             {
                 let mut state = self.state.lock().unwrap();
-                state.cell_start_block_y =
-                    (cell_y_index + self.cell_noise_min_y) * self.cell_height;
+                state.cell_start_block_y = cell_y_index
+                    .wrapping_add(self.cell_noise_min_y)
+                    .wrapping_mul(self.cell_height);
                 state.interpolation_counter += 1;
                 state.in_cell_y = 0;
                 state.array_index = cell_y_index as usize;
@@ -1360,8 +1370,14 @@ impl DensityFunction for CacheAllInCell {
             && z < self.cell_width
         {
             let values = self.values.lock().unwrap();
-            values[(((self.cell_height - 1 - y) * self.cell_width + x) * self.cell_width + z)
-                as usize]
+            // Java's index arithmetic (`*`/`+`) wraps on i32 overflow; the bounds
+            // check keeps the result within the allocation, so the wrapping forms
+            // are behavior-identical but debug-panic-free.
+            values[((self.cell_height - 1 - y)
+                .wrapping_mul(self.cell_width)
+                .wrapping_add(x))
+            .wrapping_mul(self.cell_width)
+            .wrapping_add(z) as usize]
         } else {
             drop(state);
             self.noise_filler.compute(context)
