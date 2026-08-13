@@ -135,6 +135,19 @@ impl BlockPos {
         xd.max(yd).max(zd)
     }
 
+    /// `Vec3i.distManhattan(Vec3i)` — float absolute values summed then cast
+    /// to int (Java: `(int)(xd + yd + zd)`; the float sum truncates).
+    ///
+    /// Re-declared on `BlockPos` like the other Java-inherited `Vec3i` methods
+    /// so `LinearPosTest` (Java `LinearPosTest.test` calling
+    /// `worldPos.distManhattan(worldReference)`) can call it on a `BlockPos`.
+    pub fn dist_manhattan(&self, pos: &BlockPos) -> i32 {
+        let xd = self.x.wrapping_sub(pos.x).wrapping_abs() as f32;
+        let yd = self.y.wrapping_sub(pos.y).wrapping_abs() as f32;
+        let zd = self.z.wrapping_sub(pos.z).wrapping_abs() as f32;
+        (xd + yd + zd) as i32
+    }
+
     /// `BlockPos.asLong()`.
     pub fn as_long(&self) -> i64 {
         Self::as_long_coords(self.x, self.y, self.z)
@@ -1006,6 +1019,36 @@ impl MutableBlockPos {
     pub fn immutable(&self) -> BlockPos {
         BlockPos::new(self.x, self.y, self.z)
     }
+
+    /// `MutableBlockPos.offset(int, int, int)` — Java override returns an
+    /// immutable `BlockPos` (`super.offset(x, y, z).immutable()`).
+    pub fn offset(&self, x: i32, y: i32, z: i32) -> BlockPos {
+        self.immutable().offset(x, y, z)
+    }
+
+    /// `MutableBlockPos.multiply(int)` — Java override returns an immutable
+    /// `BlockPos` (`super.multiply(scale).immutable()`).
+    pub fn multiply(&self, scale: i32) -> BlockPos {
+        self.immutable().multiply(scale)
+    }
+
+    /// `MutableBlockPos.relative(Direction, int)` — Java override returns an
+    /// immutable `BlockPos` (`super.relative(direction, steps).immutable()`).
+    pub fn relative_steps(&self, direction: &Direction, steps: i32) -> BlockPos {
+        self.immutable().relative_steps(direction, steps)
+    }
+
+    /// `MutableBlockPos.relative(Direction.Axis, int)` — Java override returns
+    /// an immutable `BlockPos` (`super.relative(axis, steps).immutable()`).
+    pub fn relative_axis(&self, axis: &Axis, steps: i32) -> BlockPos {
+        self.immutable().relative_axis(axis, steps)
+    }
+
+    /// `MutableBlockPos.rotate(Rotation)` — Java override returns an immutable
+    /// `BlockPos` (`super.rotate(rotation).immutable()`).
+    pub fn rotate(&self, rotation: &Rotation) -> BlockPos {
+        self.immutable().rotate(rotation)
+    }
 }
 
 impl std::fmt::Display for MutableBlockPos {
@@ -1048,5 +1091,55 @@ mod tests {
         let encoded = codec.encode_start(&ops, &BlockPos::new(1, -60, 3));
         assert_eq!(encoded.lifecycle(), Lifecycle::Stable);
         assert_eq!(encoded.get_or_throw("encode"), &json!([1, -60, 3]));
+    }
+
+    #[test]
+    fn mutable_block_pos_override_delegates_to_immutable_copy() {
+        // The MutableBlockPos overrides call the immutable overload on the
+        // `immutable()` copy (Java `super.offset(...).immutable()`), so each
+        // result equals the same transform applied to a plain `BlockPos`.
+        let m = MutableBlockPos::new(1, 2, 3);
+        let expected = BlockPos::new(1, 2, 3);
+        assert_eq!(m.offset(4, -5, 6), expected.offset(4, -5, 6));
+        assert_eq!(m.multiply(3), expected.multiply(3));
+        assert_eq!(
+            m.relative_steps(&Direction::Up, 7),
+            expected.relative_steps(&Direction::Up, 7)
+        );
+        assert_eq!(
+            m.relative_axis(&Axis::X, -2),
+            expected.relative_axis(&Axis::X, -2)
+        );
+        assert_eq!(
+            m.rotate(&Rotation::Clockwise90),
+            expected.rotate(&Rotation::Clockwise90)
+        );
+    }
+
+    #[test]
+    fn mutable_block_pos_override_does_not_mutate_receiver() {
+        // `MutableBlockPos` overrides return a fresh immutable `BlockPos` and
+        // leave the receiver untouched (Java overrides construct from
+        // `super.offset(...)` without mutating `this`).
+        let m = MutableBlockPos::new(1, 2, 3);
+        let before = (m.get_x(), m.get_y(), m.get_z());
+        m.offset(4, -5, 6);
+        m.multiply(3);
+        m.relative_steps(&Direction::Up, 7);
+        m.relative_axis(&Axis::X, -2);
+        m.rotate(&Rotation::Clockwise90);
+        assert_eq!((m.get_x(), m.get_y(), m.get_z()), before);
+    }
+
+    #[test]
+    fn mutable_block_pos_override_returns_immutable_block_pos() {
+        // The overrides return `BlockPos`, not `MutableBlockPos` (Java return
+        // type of the overrides); the returned value is a distinct immutable
+        // copy equal to the receiver.
+        let m = MutableBlockPos::new(1, 2, 3);
+        let result: BlockPos = m.offset(0, 0, 0);
+        assert_eq!(result, m);
+        // A zero offset still yields a value equal to the immutable copy.
+        assert_eq!(result, m.immutable());
     }
 }

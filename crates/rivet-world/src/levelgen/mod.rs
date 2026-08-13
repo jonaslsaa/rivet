@@ -48,7 +48,9 @@ pub mod placement;
 // `SurfaceRuleData` builder stand-ins, and the `SurfaceSystem` type identity
 // (RivetTodo to the surface unit — see the module).
 pub mod surface_rules;
-
+// The `mc.world.level.levelgen.structure.templatesystem.rules` unit (issue
+// #182) — the `RuleTest`/`PosRuleTest` template-system rule tests.
+pub mod structure;
 // The `mc.world.level.levelgen.random` unit's registry-aware overloads (issue
 // #208) live here because `BlockPos`/`Identifier` come from `rivet-registry`,
 // which `rivet-util` cannot depend on without a Cargo cycle. The registry-free
