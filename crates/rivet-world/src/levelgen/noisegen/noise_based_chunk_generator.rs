@@ -194,8 +194,10 @@ impl NoiseBasedChunkGenerator {
     /// A faithful port of the single-column walk with the
     /// `Heightmap.Types.isOpaque` tester (`NOT_AIR` for `WORLD_SURFACE_WG`,
     /// `blocksMotion` for `OCEAN_FLOOR_WG`) resolved over the block-state flags.
-    /// Not wired to the `ChunkGenerator` trait (a `mc.world.level.chunk.generator`
-    /// STUB) — the value shell exposes it directly.
+    /// Not wired to the `ChunkGenerator` trait — the trait surface is ported
+    /// (rivet-world::chunk::chunk_generator), but this value shell is not the
+    /// `NoiseBasedChunkGenerator` realization (RivetTodo #185) — so the shell
+    /// exposes it directly.
     pub fn get_base_height(
         &self,
         x: i32,
