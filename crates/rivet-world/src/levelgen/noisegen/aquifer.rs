@@ -445,7 +445,7 @@ impl NoiseBasedAquifer {
         let mut fluid_type = global_fluid.fluid_type;
         if fluid_surface_level <= -10
             && fluid_surface_level != WAY_BELOW_MIN_Y
-            && global_fluid.fluid_type.block() != Blocks::LAVA.id()
+            && global_fluid.fluid_type != Blocks::LAVA.default_block_state()
         {
             let fluid_type_cell_width = 64;
             let fluid_type_cell_height = 40;
