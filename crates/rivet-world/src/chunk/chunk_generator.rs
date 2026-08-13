@@ -10,20 +10,31 @@
 //! `NoiseBasedChunkGenerator` realization, server wiring, status executor, and
 //! `WorldGenRegion` remain with that unit / the worldgen pipeline.
 //!
-//! ## The abstract surface
+//! ## The abstract contract
+//!
+//! Only `getMinY`/`getGenDepth` are required (Java abstract, no default, and
+//! consumed by the ported `WorldGenerationContext`/`CarvingContext` windows).
+//! The rest of the Java surface is defaulted: the methods either have real
+//! ported bodies, or are explicit capability-unavailable seams that panic with
+//! a Paper-grounded message rather than fabricate a result.
+//!
+//! ## The deferred lifecycle seams
 //!
 //! The five worldgen lifecycle steps (`create_biomes`/`apply_carvers`/
-//! `build_surface`/`spawn_original_mobs`/`fill_from_noise`) are declared
-//! abstract with no world-touching parameters. Java's signatures take
+//! `build_surface`/`spawn_original_mobs`/`fill_from_noise`) are **default
+//! panic seams**, not abstract methods. Java's signatures take
 //! `WorldGenRegion`, `StructureManager`, and the generic `ChunkAccess` — none
 //! of which can be named in an object-safe trait method (the Rust chunk types
 //! are generic over their storage strategies, so `&dyn ChunkGenerator` cannot
 //! carry them), and `WorldGenRegion`/`StructureManager` defer with their owning
-//! units. The trait therefore declares each abstract step and documents its
-//! exact Java signature; the owning realization provides the faithful
-//! parameter surface when the status executor lands (the same deferral the
-//! noisegen unit's `*_stub` value-shell methods make — see
-//! `noise_based_chunk_generator.rs`).
+//! units. No production caller exists in this crate, so requiring the steps
+//! would force every implementor to supply empty bodies with no fidelity gain
+//! — and the owning realization must change the signatures anyway (adding the
+//! world-touching parameters) when the status executor lands (RivetTodo #185).
+//! `createBiomes` in particular has a Java *default* body (not abstract), so a
+//! panic seam is the honest unavailable-capability boundary until
+//! `fillBiomesFromNoise` is ported. Each seam documents its exact Java
+//! signature; the owning realization provides the faithful parameter surface.
 //!
 //! ## The default surface
 //!
@@ -42,11 +53,21 @@
 //!
 //! The world-surface reads that are Java-abstract but not yet consumable
 //! (`getSeaLevel`, `getBaseHeight`, `getBaseColumn`, `addDebugScreenInfo`,
-//! `getBiomeSource`) are likewise panicking seams: the noisegen unit ports the
-//! real bodies on the value shell, and the owning realization overrides the
-//! seams when it lands. `getFirstFreeHeight`/`getFirstOccupiedHeight` delegate
-//! to the `getBaseHeight` seam, so they stay executable once an implementor
-//! provides a real `getBaseHeight`.
+//! `getBiomeSource`) are likewise panicking seams: the noisegen value shell
+//! (`NoiseBasedChunkGenerator`) ports the real bodies on a separate type, and
+//! the owning realization overrides the seams when it lands.
+//! `getFirstFreeHeight`/`getFirstOccupiedHeight` delegate to the
+//! `getBaseHeight` seam, so they stay executable once an implementor provides
+//! a real `getBaseHeight`.
+//!
+//! RivetTodo(#185) integration blocker: the noisegen value shell already has
+//! real bodies for `getSeaLevel`/`getBaseHeight`/`getBaseColumn`/
+//! `addDebugScreenInfo` (and `fill_from_noise`/the `*_stub` lifecycle shells)
+//! under the same names on `NoiseBasedChunkGenerator`, which does not implement
+//! this trait. The owning `.chunk.generator` realization must reconcile the two
+//! — either implement the trait by delegating to the value-shell bodies, or
+//! move those bodies onto the realization — so the trait seams and the shell
+//! do not become two sources of truth.
 
 use crate::biome::biome_source::BiomeSource;
 use crate::level::height_accessor::LevelHeightAccessor;
@@ -69,20 +90,22 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// `ChunkGenerator.getGenDepth()` — abstract in Java (no default).
     fn get_gen_depth(&self) -> i32;
 
-    // -- The abstract worldgen lifecycle steps (see the module doc).
+    // -- The deferred worldgen lifecycle seams (see the module doc).
 
     /// `ChunkGenerator.createBiomes(RandomState, Blender, StructureManager,
     /// ChunkAccess)` — the biomes step of the chunk status ladder.
     ///
     /// Java declares a default body (`protoChunk.fillBiomesFromNoise(
     /// this.biomeSource, randomState.sampler())`); `fillBiomesFromNoise` on the
-    /// chunk surface is not ported, so the trait requires the step instead of
-    /// fabricating a body. The world-touching parameters (`StructureManager`,
-    /// the `ChunkAccess`) and the `CompletableFuture` async wrapper defer with
-    /// the owning `.chunk.generator` pipeline (RivetTodo #185); the owning
-    /// `NoiseBasedChunkGenerator` realization provides the faithful signature
-    /// when the status executor lands.
-    fn create_biomes(&self);
+    /// chunk surface is not ported, so the trait cannot carry that body and the
+    /// step is a capability-unavailable seam. The world-touching parameters
+    /// (`StructureManager`, the `ChunkAccess`) and the `CompletableFuture` async
+    /// wrapper defer with the owning `.chunk.generator` pipeline (RivetTodo
+    /// #185); the owning `NoiseBasedChunkGenerator` realization provides the
+    /// faithful signature when the status executor lands.
+    fn create_biomes(&self) {
+        panic!("ChunkGenerator.createBiomes is not implemented (RivetTodo #185)")
+    }
 
     /// `ChunkGenerator.applyCarvers(WorldGenRegion, long, RandomState,
     /// BiomeManager, StructureManager, ChunkAccess)` — the carvers step of the
@@ -92,21 +115,27 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// `ChunkAccess`) defer with their owning units (RivetTodo #185); the
     /// owning realization provides the faithful signature when the status
     /// executor lands.
-    fn apply_carvers(&self);
+    fn apply_carvers(&self) {
+        panic!("ChunkGenerator.applyCarvers is not implemented (RivetTodo #185)")
+    }
 
     /// `ChunkGenerator.buildSurface(WorldGenRegion, StructureManager,
     /// RandomState, ChunkAccess)` — the surface step of the status ladder.
     ///
     /// `RandomState` is ported; `WorldGenRegion`, `StructureManager`, and the
     /// `ChunkAccess` defer with their owning units (RivetTodo #185).
-    fn build_surface(&self);
+    fn build_surface(&self) {
+        panic!("ChunkGenerator.buildSurface is not implemented (RivetTodo #185)")
+    }
 
     /// `ChunkGenerator.spawnOriginalMobs(WorldGenRegion)` — the original-mob
     /// spawn step (`NaturalSpawner.spawnMobsForChunkGeneration`).
     ///
     /// The sole `WorldGenRegion` parameter defers with its owning unit
     /// (RivetTodo #185).
-    fn spawn_original_mobs(&self);
+    fn spawn_original_mobs(&self) {
+        panic!("ChunkGenerator.spawnOriginalMobs is not implemented (RivetTodo #185)")
+    }
 
     /// `ChunkGenerator.fillFromNoise(Blender, RandomState, StructureManager,
     /// ChunkAccess)` — the block-fill step of the status ladder.
@@ -115,9 +144,11 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// `ChunkAccess` defer with their owning units (RivetTodo #185). The
     /// noisegen unit ports the real body on the value shell
     /// (`NoiseBasedChunkGenerator::fill_from_noise`); the owning realization
-    /// overrides this abstract step with the faithful signature when the
-    /// status executor lands.
-    fn fill_from_noise(&self);
+    /// overrides this seam with the faithful signature when the status executor
+    /// lands (see the module-doc #185 integration blocker).
+    fn fill_from_noise(&self) {
+        panic!("ChunkGenerator.fillFromNoise is not implemented (RivetTodo #185)")
+    }
 
     // -- The faithful defaults existing infrastructure supports.
 
@@ -156,8 +187,8 @@ pub trait ChunkGenerator: Send + Sync + 'static {
             .wrapping_sub(1)
     }
 
-    // -- The deferred world-surface reads (Java abstract; the capability is
-    // -- unavailable until the owning realization overrides the seam).
+    // -- The deferred world-surface reads (the capability is unavailable until
+    // -- the owning realization overrides the seam).
 
     /// `ChunkGenerator.getSeaLevel()` — abstract in Java (no default). The
     /// noisegen value shell ports the real body; the seam fails explicitly
@@ -272,10 +303,10 @@ mod tests {
     use rivet_registry::RegistryBuilder;
     use rivet_registry::registry::Registry;
 
-    /// A mock generator that answers the surfaces the faithful defaults and the
-    /// panicking seams need: the abstract getters, the abstract lifecycle steps
-    /// (empty — the world-touching bodies defer), and the `getBaseHeight`/
-    /// `getSeaLevel` seams the defaults delegate to.
+    /// A mock generator that answers the surfaces the faithful defaults need:
+    /// the abstract getters and the real `getBaseHeight` the height-read
+    /// defaults delegate to. (It also overrides `get_sea_level` so the seam has
+    /// a real value, though no default delegates to it.)
     struct MockGenerator {
         min_y: i32,
         gen_depth: i32,
@@ -291,12 +322,6 @@ mod tests {
         fn get_gen_depth(&self) -> i32 {
             self.gen_depth
         }
-
-        fn create_biomes(&self) {}
-        fn apply_carvers(&self) {}
-        fn build_surface(&self) {}
-        fn spawn_original_mobs(&self) {}
-        fn fill_from_noise(&self) {}
 
         fn get_sea_level(&self) -> i32 {
             self.sea_level
@@ -314,9 +339,9 @@ mod tests {
         }
     }
 
-    /// A generator implementing only the abstract required surface — the
-    /// default seams (which panic) must not be overridden, so the deferred
-    /// seam test observes the exact default behavior.
+    /// A generator implementing only the abstract required surface — every
+    /// default seam (which panics) is left at its exact default, so the
+    /// deferred-seam test observes the default behavior.
     struct SeamOnlyGenerator;
 
     impl ChunkGenerator for SeamOnlyGenerator {
@@ -327,29 +352,27 @@ mod tests {
         fn get_gen_depth(&self) -> i32 {
             384
         }
-
-        fn create_biomes(&self) {}
-        fn apply_carvers(&self) {}
-        fn build_surface(&self) {}
-        fn spawn_original_mobs(&self) {}
-        fn fill_from_noise(&self) {}
     }
 
-    /// An empty `RandomState` — the `noisegen` test pattern: a registry-free
-    /// settings router (`NoiseRouterData.none`) needs no registry content, so
-    /// `RandomState::create` never touches the empty registries.
-    ///
-    /// The registries are leaked so the returned `RandomState<'static>` can
-    /// borrow them (a test-only fixture; the noisegen tests keep them alive in
-    /// the same scope instead).
-    fn empty_random_state() -> RandomState<'static> {
+    /// The `noisegen` test pattern — `noise_based_chunk_generator::tests::
+    /// empty_registries`: a registry-free settings router (`NoiseRouterData.none`)
+    /// needs no registry content, so `RandomState::create` never touches the
+    /// empty registries. The registries are returned so the caller keeps them
+    /// alive in the same scope as the `RandomState` that borrows them.
+    fn empty_registries() -> (Registry<NoiseParameters>, Registry<DensityFunctionValue>) {
         let noise_key = &crate::levelgen::noise::registry_keys::NOISE;
         let noise_registry: Registry<NoiseParameters> = RegistryBuilder::new(noise_key).freeze();
         let df_key = &crate::levelgen::noise::registry_keys::DENSITY_FUNCTION;
         let df_registry: Registry<DensityFunctionValue> = RegistryBuilder::new(df_key).freeze();
-        let noise_registry: &'static Registry<NoiseParameters> =
-            Box::leak(Box::new(noise_registry));
-        let df_registry: &'static Registry<DensityFunctionValue> = Box::leak(Box::new(df_registry));
+        (noise_registry, df_registry)
+    }
+
+    /// `RandomState.create` over the [`empty_registries`] fixtures, borrowing
+    /// them for the returned state's lifetime.
+    fn random_state<'a>(
+        noise_registry: &'a Registry<NoiseParameters>,
+        df_registry: &'a Registry<DensityFunctionValue>,
+    ) -> RandomState<'a> {
         RandomState::create(
             &noise_generator_settings::dummy(),
             noise_registry,
@@ -375,6 +398,15 @@ mod tests {
         let dyn_gen: &dyn ChunkGenerator = &generator;
         assert_eq!(dyn_gen.get_min_y(), -64);
         assert_eq!(dyn_gen.get_gen_depth(), 384);
+        // The default body routes through the vtable too: `get_first_free_height`
+        // is a default delegating to the mock's `get_base_height` override.
+        let accessor = accessor();
+        let (noise_registry, df_registry) = empty_registries();
+        let random_state = random_state(&noise_registry, &df_registry);
+        assert_eq!(
+            dyn_gen.get_first_free_height(3, 7, Types::WorldSurfaceWg, &accessor, &random_state),
+            100
+        );
     }
 
     /// `getSpawnHeight` — Paper's default returns a constant `64` regardless of
@@ -403,7 +435,8 @@ mod tests {
             base_height: 100,
         };
         let accessor = accessor();
-        let random_state = empty_random_state();
+        let (noise_registry, df_registry) = empty_registries();
+        let random_state = random_state(&noise_registry, &df_registry);
         assert_eq!(
             ChunkGenerator::get_first_free_height(
                 &generator,
@@ -428,7 +461,8 @@ mod tests {
             base_height: 100,
         };
         let accessor = accessor();
-        let random_state = empty_random_state();
+        let (noise_registry, df_registry) = empty_registries();
+        let random_state = random_state(&noise_registry, &df_registry);
         assert_eq!(
             ChunkGenerator::get_first_occupied_height(
                 &generator,
@@ -470,7 +504,8 @@ mod tests {
         // default seam is exercised at its exact default.
         let generator = SeamOnlyGenerator;
         let accessor = accessor();
-        let random_state = empty_random_state();
+        let (noise_registry, df_registry) = empty_registries();
+        let random_state = random_state(&noise_registry, &df_registry);
         let mut result = Vec::new();
         let feet = BlockPos::new(0, 0, 0);
         let biome = Holder::reference(rivet_registry::holder::RegistryId(0), 0);
@@ -486,10 +521,16 @@ mod tests {
             Vec::new(),
         );
 
-        // Each Java-abstract / deferred seam must panic with a Paper-grounded
-        // message naming the Java method and the owning issue, rather than
-        // fabricate a result.
+        // Each Java-abstract / deferred seam (the five lifecycle steps, the
+        // world-surface reads, and the structure/codec seams) must panic with a
+        // Paper-grounded message naming the Java method and the owning issue,
+        // rather than fabricate a result.
         for method in [
+            "createBiomes",
+            "applyCarvers",
+            "buildSurface",
+            "spawnOriginalMobs",
+            "fillFromNoise",
             "getSeaLevel",
             "getBaseHeight",
             "getBaseColumn",
@@ -501,6 +542,21 @@ mod tests {
             let mut call = |g: &SeamOnlyGenerator| {
                 let panic_result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match method {
+                        "createBiomes" => {
+                            ChunkGenerator::create_biomes(g);
+                        }
+                        "applyCarvers" => {
+                            ChunkGenerator::apply_carvers(g);
+                        }
+                        "buildSurface" => {
+                            ChunkGenerator::build_surface(g);
+                        }
+                        "spawnOriginalMobs" => {
+                            ChunkGenerator::spawn_original_mobs(g);
+                        }
+                        "fillFromNoise" => {
+                            ChunkGenerator::fill_from_noise(g);
+                        }
                         "getSeaLevel" => {
                             ChunkGenerator::get_sea_level(g);
                         }
