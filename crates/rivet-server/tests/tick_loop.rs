@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use rivet_server::server::level::ServerLevelConfig;
 use rivet_server::server::network::connection_id::ConnectionId;
 use rivet_server::server::network::packet_listener::DisconnectReason;
 use rivet_server::server::tick::channels::{
@@ -368,7 +369,7 @@ fn default_config() -> ServerConfig {
         enable_join: false,
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
-        seed: 42,
+        seed: ServerLevelConfig::M1_FIXTURE_SEED,
     }
 }
 

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use flate2::read::ZlibDecoder;
 use rivet_protocol::generated::packets::play::clientbound::PacketType;
+use rivet_server::server::level::ServerLevelConfig;
 use rivet_server::server::{Server, ServerConfig};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -98,7 +99,7 @@ fn config_with_threshold(compression_threshold: i32) -> ServerConfig {
         enable_join: false,
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
-        seed: 42,
+        seed: ServerLevelConfig::M1_FIXTURE_SEED,
     }
 }
 
@@ -1181,7 +1182,7 @@ fn config_with_join() -> ServerConfig {
         enable_join: true,
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
-        seed: 42,
+        seed: ServerLevelConfig::M1_FIXTURE_SEED,
     }
 }
 

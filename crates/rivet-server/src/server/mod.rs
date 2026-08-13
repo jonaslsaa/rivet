@@ -83,7 +83,7 @@ pub struct ServerConfig {
     /// `level-seed`). The superflat no-level boot uses it for the world object
     /// and the login packet's obfuscated seed; the region-backed boot always
     /// reads the real seed from `world_gen_settings.dat` instead (loaded-world
-    /// behavior is untouched). Defaults to 42, the M1 superflat fixture.
+    /// behavior is untouched). Defaults to the M1 superflat fixture seed.
     pub seed: i64,
 }
 
@@ -103,7 +103,7 @@ impl Default for ServerConfig {
             enable_join: false,
             keepalive_timeout: Duration::from_secs(30),
             level_path: None,
-            seed: 42,
+            seed: level::ServerLevelConfig::M1_FIXTURE_SEED,
         }
     }
 }

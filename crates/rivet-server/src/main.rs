@@ -166,6 +166,8 @@ mod tests {
     use super::*;
     use std::net::IpAddr;
 
+    use rivet_server::server::level::ServerLevelConfig;
+
     #[test]
     fn default_config_binds_any_interface_on_25565() {
         let config = config_from_args(Vec::<String>::new().into_iter());
@@ -243,10 +245,10 @@ mod tests {
 
     #[test]
     fn seed_defaults_to_the_m1_fixture() {
-        // No `--seed` keeps the M1 superflat fixture seed 42 (the #153 capture's
-        // flat world), so the byte-exact join burst is unchanged.
+        // No `--seed` keeps the M1 superflat fixture seed, so the byte-exact
+        // join burst is unchanged.
         let config = config_from_args(Vec::<String>::new().into_iter());
-        assert_eq!(config.seed, 42);
+        assert_eq!(config.seed, ServerLevelConfig::M1_FIXTURE_SEED);
     }
 
     #[test]
@@ -280,7 +282,7 @@ mod tests {
         );
         assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 25599);
-        assert_eq!(config.seed, 42);
+        assert_eq!(config.seed, ServerLevelConfig::M1_FIXTURE_SEED);
         assert_eq!(
             config.level_path.as_deref(),
             Some(std::path::Path::new("/tmp/rivet-disposable-world"))
