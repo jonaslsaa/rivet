@@ -1204,9 +1204,9 @@ mod tests {
     }
 
     /// `Server::try_new` with an explicit generated-world seed: the no-level
-    /// superflat world and login advertise it (draft PR #563's
-    /// `rivet-server --seed 42` contract). A non-default seed proves the config
-    /// value is carried, not the M1 fixture default.
+    /// superflat world and login advertise it (the `generated-world` contract's
+    /// `rivet-server --seed 42`). A non-default seed proves the config value is
+    /// carried, not the M1 fixture default.
     #[test]
     fn try_new_carries_the_config_seed_into_the_superflat_world() {
         let server = crate::server::Server::try_new(crate::server::ServerConfig {
