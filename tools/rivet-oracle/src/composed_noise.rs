@@ -662,6 +662,35 @@ mod tests {
         assert!(columns.contains_key(&(-31, -31)));
     }
 
+    /// Regenerating the composed-noise manifest in Rust is byte-identical to the
+    /// committed manifest (given an unchanged golden) — regeneration is git-clean
+    /// and the committed manifest is what the writer would produce, exactly like
+    /// the worldgen/text manifest convention.
+    #[test]
+    fn manifest_regeneration_is_byte_identical() {
+        let dir = fixtures_dir().join("composed-noise");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-cn-regen-{}", std::process::id()));
+        if scratch.exists() {
+            fs::remove_dir_all(&scratch).unwrap();
+        }
+        fs::create_dir_all(&scratch).unwrap();
+        fs::copy(dir.join(FIXTURE_BASENAME), scratch.join(FIXTURE_BASENAME)).unwrap();
+        regenerate_manifest(&scratch).unwrap();
+        let committed = fs::read(dir.join("manifest.json")).unwrap();
+        let regenerated = fs::read(scratch.join("manifest.json")).unwrap();
+        assert_eq!(
+            committed, regenerated,
+            "regenerating the composed-noise manifest must be byte-identical (git-clean)"
+        );
+        // And the regenerated manifest is self-consistent: it verifies its files.
+        crate::verify_fixtures(&scratch).unwrap();
+        let _ = fs::remove_dir_all(&scratch);
+    }
+
     #[test]
     fn tamper_negative_control_detects_corruption() {
         let dir = fixtures_dir().join("composed-noise");
