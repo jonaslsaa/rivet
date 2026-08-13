@@ -92,6 +92,18 @@ impl Blocks {
     pub const BASALT: Block = Block::new(BlockId(288));
     /// `Blocks.ACACIA_BUTTON` (carver: `CarverDebugSettings.DEFAULT` air state).
     pub const ACACIA_BUTTON: Block = Block::new(BlockId(447));
+    /// `Blocks.DYED_TERRACOTTA.white()` (SurfaceRuleData: overworld badlands
+    /// `notUnderDeepWater`).
+    pub const WHITE_TERRACOTTA: Block = Block::new(BlockId(484));
+    /// `Blocks.DYED_TERRACOTTA.orange()` (SurfaceRuleData: overworld badlands
+    /// `badlandsTop`/`aboveOverworldSeaLevel`).
+    pub const ORANGE_TERRACOTTA: Block = Block::new(BlockId(485));
+    /// `Blocks.TERRACOTTA` (SurfaceRuleData: overworld badlands
+    /// `clayBand1`-`clayBand3` terracotta bands).
+    pub const TERRACOTTA: Block = Block::new(BlockId(554));
+    /// `Blocks.PACKED_ICE` (SurfaceRuleData: overworld `FROZEN_PEAKS` on
+    /// `Noises.PACKED_ICE`).
+    pub const PACKED_ICE: Block = Block::new(BlockId(556));
     /// `Blocks.RED_SANDSTONE` (SurfaceRuleData: overworld badlands `ON_CEILING`).
     pub const RED_SANDSTONE: Block = Block::new(BlockId(595));
     /// `Blocks.NETHER_WART_BLOCK` (SurfaceRuleData: nether `crimsonForest`
@@ -194,6 +206,10 @@ mod tests {
             Blocks::SOUL_SOIL,
             Blocks::BASALT,
             Blocks::ACACIA_BUTTON,
+            Blocks::WHITE_TERRACOTTA,
+            Blocks::ORANGE_TERRACOTTA,
+            Blocks::TERRACOTTA,
+            Blocks::PACKED_ICE,
             Blocks::RED_SANDSTONE,
             Blocks::NETHER_WART_BLOCK,
             Blocks::WARPED_NYLIUM,
@@ -237,10 +253,18 @@ mod tests {
     /// and the generated-table mapping must all agree.
     #[test]
     fn surface_rule_data_constants_pin_raw_ids() {
-        let cases: [(Block, u16, &str); 14] = [
+        let cases: [(Block, u16, &str); 18] = [
             (Blocks::SANDSTONE, 106, "minecraft:sandstone"),
             (Blocks::SOUL_SOIL, 287, "minecraft:soul_soil"),
             (Blocks::BASALT, 288, "minecraft:basalt"),
+            (Blocks::WHITE_TERRACOTTA, 484, "minecraft:white_terracotta"),
+            (
+                Blocks::ORANGE_TERRACOTTA,
+                485,
+                "minecraft:orange_terracotta",
+            ),
+            (Blocks::TERRACOTTA, 554, "minecraft:terracotta"),
+            (Blocks::PACKED_ICE, 556, "minecraft:packed_ice"),
             (Blocks::RED_SANDSTONE, 595, "minecraft:red_sandstone"),
             (
                 Blocks::NETHER_WART_BLOCK,
