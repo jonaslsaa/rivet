@@ -701,8 +701,7 @@ mod tests {
                 .expect("nether preset present")
                 .clone(),
             &NameGetter,
-        )
-        .expect("the nether preset is never deferred");
+        );
         let preset_src = MultiNoiseBiomeSource::create_from_preset(direct_preset);
         assert!(!preset_src.stable(&preset_key));
     }
@@ -840,8 +839,7 @@ mod tests {
                 .expect("nether preset present")
                 .clone(),
             &NameGetter,
-        )
-        .expect("the nether preset is never deferred");
+        );
         let mut builder =
             rivet_registry::RegistryBuilder::<MultiNoiseBiomeSourceParameterList>::new(
                 &preset_registry_key,
