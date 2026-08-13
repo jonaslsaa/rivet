@@ -51,18 +51,22 @@ impl ChunkPyramid {
 
     /// `ChunkTaskScheduler.getAccessRadius(ChunkStatus)` — the maximum
     /// neighbour distance a chunk operation for `status` can read or write
-    /// (spec §3.5). Combined max of the GENERATION and LOADING pyramids.
+    /// (spec §3.5). Combined max of the GENERATION and LOADING pyramids,
+    /// computed once into [`ACCESS_RADIUS_TABLE`] (Java's static-final array).
     pub fn access_radius(status: ChunkStatus) -> i32 {
-        let table = access_radius_table(&GENERATION_PYRAMID, &LOADING_PYRAMID);
-        table[status.index()]
+        ACCESS_RADIUS_TABLE[status.index()]
     }
 
     /// `ChunkTaskScheduler.getMaxAccessRadius()` — `11` for the full status.
     pub fn max_access_radius() -> i32 {
-        let table = access_radius_table(&GENERATION_PYRAMID, &LOADING_PYRAMID);
-        table[ChunkStatus::Full.index()]
+        ACCESS_RADIUS_TABLE[ChunkStatus::Full.index()]
     }
 }
+
+/// The combined `ACCESS_RADIUS_TABLE` — Java's static-final `getAccessRadius`
+/// lookup, computed once from the two pyramids.
+pub static ACCESS_RADIUS_TABLE: LazyLock<[i32; 12]> =
+    LazyLock::new(|| access_radius_table(&GENERATION_PYRAMID, &LOADING_PYRAMID));
 
 /// `ChunkPyramid.Builder` — the chainable step builder.
 pub struct ChunkPyramidBuilder {
@@ -310,6 +314,27 @@ mod tests {
                 ChunkStatus::StructureStarts,
                 ChunkStatus::StructureStarts,
             ]
+        );
+    }
+
+    #[test]
+    fn full_step_accumulated_index_zero_is_spawn_not_full() {
+        // Arbitration for the FULL step's dependency representation (pipeline
+        // PR #591): FULL's builder is parent=SPAWN with no addRequirement calls,
+        // so direct = [SPAWN]. radiusOfParent(SPAWN) = 0, and the accumulated
+        // fold gives accumulated[0] = max(direct[0]=SPAWN, SPAWN.accum[0]=LIGHT)
+        // = SPAWN (index 10 > 9). byRadius[0] = targetStatus.parent() = SPAWN.
+        // The target status is never its own dependency in either the
+        // accumulated list or the byRadius table.
+        let full = GENERATION_PYRAMID.get_step_to(ChunkStatus::Full);
+        assert_eq!(full.accumulated_dependencies().get(0), ChunkStatus::Spawn);
+        assert_eq!(full.direct_dependencies().get(0), ChunkStatus::Spawn);
+        assert_eq!(full.required_status_at_radius(0), ChunkStatus::Spawn);
+        assert!(
+            !full
+                .accumulated_dependencies()
+                .as_list()
+                .contains(&ChunkStatus::Full)
         );
     }
 

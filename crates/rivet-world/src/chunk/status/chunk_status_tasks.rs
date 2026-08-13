@@ -10,6 +10,15 @@
 //! sparse RivetTodo). The BIOMES and NOISE bodies are the seam hooks — the
 //! `WorldGenContext` closures carry the real work; they are invoked by the
 //! executor, not duplicated here.
+//!
+//! The persisted-status advance through these pass-through stubs is Java's
+//! `ChunkStep.apply`/`completeChunkGeneration` behavior (the status is advanced
+//! after *any* task body when the chunk was below the target) — it is the
+//! value-layer ordering contract, and the executor seam is a test/demo surface,
+//! not the production pipeline. When #185 wires the real bodies, the
+//! holder-driven `ChunkGenerationTask` path replaces this seam wholesale, so a
+//! chunk promoted through the stubs is never fed back through the real
+//! `ChunkStep.apply` (whose `isBefore` guard would skip the deferred work).
 
 use crate::chunk::proto_chunk::ProtoChunk;
 

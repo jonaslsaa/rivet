@@ -177,11 +177,16 @@ where
     /// Generate a chunk from its current persisted status through `target`
     /// (inclusive, ≤ `NOISE`), running each step's task in status order.
     ///
-    /// Because the loop covers every status between the current status and the
-    /// target, a chunk can only be labeled `NOISE` by passing through the
-    /// `BIOMES` step (whose dispatch runs the caller's biomes closure and
-    /// records the status). A target beyond `NOISE` is rejected before any work
-    /// runs; a target before the current status is a demotion error.
+    /// The `BIOMES`-before-`NOISE` ordering is enforced at the *status-order*
+    /// layer, not just inside the `NOISE` task body: a promotion whose target
+    /// passes through the `BIOMES` step requires the biomes data to be present
+    /// — either carried in (the chunk's persisted status was already at/after
+    /// `BIOMES`) or produced by this run's `BIOMES` step. A pyramid whose
+    /// `BIOMES` step is a pass-through (the `LOADING_PYRAMID`'s loading stub)
+    /// cannot advance an `EMPTY` chunk to `BIOMES`/`NOISE`, because that would
+    /// label the chunk without any biomes task having run. A target beyond
+    /// `NOISE` is rejected before any work runs; a target before the current
+    /// status is a demotion error.
     pub fn generate_through(
         &mut self,
         pyramid: &ChunkPyramid,
@@ -194,6 +199,18 @@ where
         let current = chunk.get_persisted_status();
         if target.index() < current.index() {
             return Err(GenError::Demotion { target, current });
+        }
+        // Reaching BIOMES (and thus NOISE) requires biomes data. When the chunk
+        // does not already carry it, the pyramid's BIOMES step must be the
+        // generation task — a pass-through (loading) BIOMES step advances the
+        // status without writing biomes data.
+        if target.index() >= ChunkStatus::Biomes.index()
+            && !current.is_or_after(ChunkStatus::Biomes)
+        {
+            let biomes_step = pyramid.get_step_to(ChunkStatus::Biomes);
+            if biomes_step.task() != ChunkStatusTask::GenerateBiomes {
+                return Err(GenError::BiomesNotGenerated);
+            }
         }
         for index in current.index() + 1..=target.index() {
             let step = pyramid.get_step_to(ChunkStatus::ALL[index]);
@@ -208,7 +225,7 @@ mod tests {
     use super::*;
     use crate::chunk::palette::GlobalIdMap;
     use crate::chunk::paletted_container_factory::PalettedContainerFactory;
-    use crate::chunk::status::GENERATION_PYRAMID;
+    use crate::chunk::status::{GENERATION_PYRAMID, LOADING_PYRAMID};
     use crate::chunk::strategy::Strategy;
     use crate::chunk::upgrade_data::UpgradeData;
     use crate::level::height_accessor::create as create_accessor;
@@ -400,6 +417,42 @@ mod tests {
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
         assert!(biomes_calls.borrow().is_empty());
         assert!(noise_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn loading_pyramid_cannot_promote_a_fresh_chunk_past_empty() {
+        // The LOADING pyramid's BIOMES/NOISE steps are pass-through loading
+        // stubs — they would advance the persisted status without running any
+        // biomes task. The seam refuses that on a fresh (EMPTY) chunk: the
+        // chunk must not be labeled BIOMES (let alone NOISE) through them.
+        let (mut ctx, biomes_calls, noise_calls) = recording_context();
+        let mut chunk = proto();
+        let err = ctx
+            .generate_through(&LOADING_PYRAMID, &mut chunk, ChunkStatus::Biomes)
+            .expect_err("loading cannot generate biomes");
+        assert_eq!(err, GenError::BiomesNotGenerated);
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        let err = ctx
+            .generate_through(&LOADING_PYRAMID, &mut chunk, ChunkStatus::Noise)
+            .expect_err("loading cannot generate noise");
+        assert_eq!(err, GenError::BiomesNotGenerated);
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn loading_pyramid_can_promote_a_chunk_that_already_has_biomes() {
+        // Loading is honest when the chunk already carries the biomes data: a
+        // chunk persisted at BIOMES may advance to NOISE through the loading
+        // pyramid's pass-through NOISE step (the data is present).
+        let (mut ctx, biomes_calls, _noise_calls) = recording_context();
+        let mut chunk = proto();
+        chunk.set_persisted_status(ChunkStatus::Biomes);
+        ctx.generate_through(&LOADING_PYRAMID, &mut chunk, ChunkStatus::Noise)
+            .expect("biomes already present");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Noise);
+        assert!(biomes_calls.borrow().is_empty());
     }
 
     #[test]
