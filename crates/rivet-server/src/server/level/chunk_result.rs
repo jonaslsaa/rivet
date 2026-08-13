@@ -8,38 +8,44 @@
 //!
 //! Java models this as an interface with two records (`Success(T value)` and
 //! `Fail(Supplier<String> error)`); Rust models it as an enum. The `Fail`
-//! error is a lazily-evaluated supplier (`Box<dyn Fn() -> String>`), faithful
-//! to Java's `Supplier<String>`: `getError()` evaluates it on each call, and
-//! `map` carries the same supplier across (Java shares the reference). Java's
-//! `@Nullable` value is modeled with `Option<T>` at the call sites that need
-//! it — `Success(T)` cannot hold null, so the static `orElse`'s null-through
-//! branch cannot arise.
+//! error is a lazily-evaluated supplier, faithful to Java's `Supplier<String>`:
+//! `getError()` evaluates it on each call, and `map` carries the same supplier
+//! across (Java shares the reference). The supplier is `dyn Fn() -> String +
+//! Send + Sync` because the pipeline passes `ChunkResult` through async
+//! scheduler seams (CompletableFuture chains, chunk-task dispatchers) and holds
+//! static unloaded-chunk constants (Paper's `ChunkMap.UNLOADED_CHUNK_LIST_RESULT`
+//! / `GenerationChunkHolder.UNLOADED_CHUNK`) — the boxed closure must cross
+//! thread boundaries. Java's `@Nullable` value is modeled with `Option<T>` at
+//! the call sites that need it — `Success(T)` cannot hold null, so the static
+//! `orElse`'s null-through branch cannot arise.
 
 /// `ChunkResult<T>` — `Success(T)` or `Fail(error supplier)`.
 pub enum ChunkResult<T> {
     Success(T),
-    Fail { error: Box<dyn Fn() -> String> },
+    Fail { error: Box<dyn Fn() -> String + Send + Sync> },
 }
 
 impl<T> ChunkResult<T> {
-    /// `ChunkResult.of(T value)` — `new ChunkResult.Success<>(value)`.
-    pub fn of(value: T) -> Self {
+    /// `ChunkResult.of(T value)` — `new ChunkResult.Success<>(value)`. `const`
+    /// so a `Success` result can be a `static` item (the pipeline's unloaded
+    /// chunk results; Paper's `error` statics need `LazyLock` in Rust — see
+    /// the `Send`/`Sync` test).
+    pub const fn of(value: T) -> Self {
         Self::Success(value)
     }
 
     /// `ChunkResult.error(String)` — the eager form; the message is captured
     /// and returned lazily by `getError` (Java wraps the eager `String` in
-    /// `() -> error`).
-    pub fn error(message: impl Into<String>) -> Self {
+    /// `() -> error`). The clone on each call models Java's re-read of the
+    /// same message; a `Fn` closure cannot move the captured `String` out.
+    pub fn error(message: impl Into<String> + Send + Sync + 'static) -> Self {
         let message = message.into();
-        Self::Fail {
-            error: Box::new(move || message.clone()),
-        }
+        Self::error_lazy(move || message.clone())
     }
 
     /// `ChunkResult.error(Supplier<String>)` — the deferred form; the supplier
     /// runs on each `getError` call.
-    pub fn error_lazy(error: impl Fn() -> String + 'static) -> Self {
+    pub fn error_lazy(error: impl Fn() -> String + Send + Sync + 'static) -> Self {
         Self::Fail {
             error: Box::new(error),
         }
@@ -116,6 +122,20 @@ impl<T> ChunkResult<T> {
 mod tests {
     use super::*;
 
+    /// The boxed supplier must cross async scheduler seams: `ChunkResult` is
+    /// `Send + Sync` when `T` is, and a static unloaded-chunk constant (Paper's
+    /// `ChunkMap.UNLOADED_CHUNK_LIST_RESULT` / `GenerationChunkHolder.
+    /// UNLOADED_CHUNK`) can be a `static` item.
+    #[test]
+    fn result_is_send_sync_and_static_construable() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ChunkResult<i32>>();
+
+        static UNLOADED: ChunkResult<i32> = ChunkResult::error("unloaded chunk");
+        assert!(!UNLOADED.is_success());
+        assert_eq!(UNLOADED.get_error(), Some("unloaded chunk".to_string()));
+    }
+
     #[test]
     fn of_is_success_and_carries_the_value() {
         let ok = ChunkResult::of(42);
@@ -140,17 +160,18 @@ mod tests {
 
     #[test]
     fn error_lazy_defers_the_supplier() {
-        use std::cell::Cell;
-        use std::rc::Rc;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         // Java's `Supplier.get()` may have side effects; the `Fn` supplier
-        // models that with interior mutability (`Cell`), and each `getError`
-        // re-runs it, so the counter advances.
-        let calls = Rc::new(Cell::new(0));
+        // models that with interior mutability (`AtomicUsize`), and each
+        // `getError` re-runs it, so the counter advances. The atomic also
+        // keeps the closure `Send + Sync`, like the real pipeline's.
+        let calls = Arc::new(AtomicUsize::new(0));
         let err = {
-            let calls = Rc::clone(&calls);
+            let calls = Arc::clone(&calls);
             ChunkResult::<i32>::error_lazy(move || {
-                calls.set(calls.get() + 1);
-                format!("call {}", calls.get())
+                let n = calls.fetch_add(1, Ordering::Relaxed) + 1;
+                format!("call {n}")
             })
         };
         assert!(!err.is_success());

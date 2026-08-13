@@ -42,23 +42,36 @@ pub const MAX_LEVEL: i32 = FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK;
 /// range).
 pub const RADIUS_AROUND_FULL_CHUNK: i32 = 11;
 
-/// The FULL step's accumulated dependencies by distance: `[distance]` →
-/// `ChunkStatus`, for `distance` in `0..=RADIUS_AROUND_FULL_CHUNK`. Java:
+/// The FULL step's accumulated dependencies indexed by distance, for
+/// `distance` in `0..=RADIUS_AROUND_FULL_CHUNK`. Java:
 /// `FULL_CHUNK_STEP.accumulatedDependencies().get(distance)`.
+///
+/// Authoritative Java (queried from the pinned Paper 26.2 runtime via
+/// `ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL)`):
+/// `[spawn, initialize_light, carvers, biomes, structure_starts × 8]`. Index 0
+/// is SPAWN — the FULL step's direct parent — even though `ChunkLevel` never
+/// reads it: `getStatusAroundFullChunk` short-circuits `distance <= 0` to FULL
+/// before indexing. The entry is pinned here so the table is the faithful
+/// `accumulatedDependencies()` and stays swappable for the real pyramid.
 static FULL_STEP_ACCUMULATED_DEPENDENCIES: [ChunkStatus; 12] = [
-    ChunkStatus::Spawn,           // 0
-    ChunkStatus::InitializeLight, // 1
-    ChunkStatus::Carvers,         // 2
-    ChunkStatus::Biomes,          // 3
-    ChunkStatus::StructureStarts, // 4
-    ChunkStatus::StructureStarts, // 5
-    ChunkStatus::StructureStarts, // 6
-    ChunkStatus::StructureStarts, // 7
-    ChunkStatus::StructureStarts, // 8
-    ChunkStatus::StructureStarts, // 9
-    ChunkStatus::StructureStarts, // 10
-    ChunkStatus::StructureStarts, // 11
+    ChunkStatus::Spawn,
+    ChunkStatus::InitializeLight,
+    ChunkStatus::Carvers,
+    ChunkStatus::Biomes,
+    ChunkStatus::StructureStarts,
+    ChunkStatus::StructureStarts,
+    ChunkStatus::StructureStarts,
+    ChunkStatus::StructureStarts,
+    ChunkStatus::StructureStarts,
+    ChunkStatus::StructureStarts,
+    ChunkStatus::StructureStarts,
+    ChunkStatus::StructureStarts,
 ];
+
+/// Compile-time invariant: the table is `0..=RADIUS_AROUND_FULL_CHUNK`.
+const _: () = assert!(
+    FULL_STEP_ACCUMULATED_DEPENDENCIES.len() == RADIUS_AROUND_FULL_CHUNK as usize + 1
+);
 
 /// `ChunkStep.getAccumulatedRadiusOf(status)` for the FULL step — the radius
 /// at which each status first appears in the FULL step's accumulated
@@ -100,10 +113,12 @@ pub fn get_status_around_full_chunk_with_default(
 }
 
 /// `ChunkLevel.getStatusAroundFullChunk(int distanceToFullChunk)` — the
-/// single-arg overload defaulting to `ChunkStatus.EMPTY`.
+/// single-arg overload defaulting to `ChunkStatus.EMPTY`. The default is
+/// non-null, so the wrapped call can never return `None`; the `expect` is the
+/// invariant that Java's `@Nullable` return is always non-null here.
 pub fn get_status_around_full_chunk(distance_to_full_chunk: i32) -> ChunkStatus {
     get_status_around_full_chunk_with_default(distance_to_full_chunk, Some(ChunkStatus::Empty))
-        .unwrap_or(ChunkStatus::Empty)
+        .expect("getStatusAroundFullChunk(distance) has a non-null EMPTY default")
 }
 
 /// `ChunkLevel.byStatus(ChunkStatus status)` — the minimum level a chunk must
