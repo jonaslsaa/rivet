@@ -23,15 +23,21 @@
 //!   `"Unknown preset: <name>"` error.
 //! - The `OVERWORLD` preset applies the `.data`-owned
 //!   `OverworldBiomeBuilder.add_biomes`, which emits the 7594-point overworld
-//!   table from the generated `OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS`. The
-//!   provider application is infallible — both presets always build a nonempty
-//!   `ParameterList`.
+//!   table from the generated `OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS`; the
+//!   `NETHER` preset iterates the generated `NETHER_BIOME_SOURCE_PARAMETER_POINTS`.
+//!   Both applications are infallible — each preset always builds a nonempty
+//!   `ParameterList`. A biome registry missing one of the referenced keys panics
+//!   in `get_or_throw` (`"Missing element ..."`), which is Java-faithful:
+//!   `HolderGetter.getOrThrow` throws `IllegalStateException`, propagating out of
+//!   `MultiNoiseBiomeSourceParameterList::new` in the same codec-decode and
+//!   bootstrap paths.
 
 use crate::biome::biome_source::keys;
-use crate::biome::biomes;
-use crate::biome::climate::{Climate, ParameterList};
+use crate::biome::biomes::register_from_full_name;
+use crate::biome::climate::{ParameterList, ParameterPoint};
 use crate::biome::overworld_biome_builder::OverworldBiomeBuilder;
 use rivet_registry::biome_id::BiomeId;
+use rivet_registry::generated::worldgen::NETHER_BIOME_SOURCE_PARAMETER_POINTS;
 use rivet_registry::holder::Holder;
 use rivet_registry::holder_lookup::{HolderGetter, RegistryGetter};
 use rivet_registry::identifier::{Identifier, identifier_codec};
@@ -281,21 +287,19 @@ impl Preset {
     }
 
     /// `Preset.NETHER` — `Identifier.withDefaultNamespace("nether")` and the
-    /// five-entry nether parameter list.
+    /// five-entry nether parameter list from the generated
+    /// `NETHER_BIOME_SOURCE_PARAMETER_POINTS` (Paper `knownPresets()`, the
+    /// builder's value order).
     pub fn nether() -> Preset {
         Preset::new(
             Identifier::with_default_namespace("nether"),
             PresetProvider::new(|biomes| {
-                let biome = |key: &ResourceKey<BiomeId>| biomes.get_or_throw(key);
-                let params =
-                    |t: f32, h: f32, w: f32| Climate::parameters(t, h, 0.0, 0.0, 0.0, 0.0, w);
-                ParameterList::new(vec![
-                    (params(0.0, 0.0, 0.0), biome(&biomes::NETHER_WASTES)),
-                    (params(0.0, -0.5, 0.0), biome(&biomes::SOUL_SAND_VALLEY)),
-                    (params(0.4, 0.0, 0.0), biome(&biomes::CRIMSON_FOREST)),
-                    (params(0.0, 0.5, 0.375), biome(&biomes::WARPED_FOREST)),
-                    (params(-0.5, 0.0, 0.175), biome(&biomes::BASALT_DELTAS)),
-                ])
+                let mut builder = Vec::with_capacity(NETHER_BIOME_SOURCE_PARAMETER_POINTS.len());
+                for generated in NETHER_BIOME_SOURCE_PARAMETER_POINTS {
+                    let key = register_from_full_name(generated.biome);
+                    builder.push((ParameterPoint::from(generated), biomes.get_or_throw(&key)));
+                }
+                ParameterList::new(builder)
             }),
         )
     }
@@ -310,11 +314,10 @@ impl Preset {
         Preset::new(
             Identifier::with_default_namespace("overworld"),
             PresetProvider::new(|biomes| {
-                let mut builder: Vec<(crate::biome::climate::ParameterPoint, Holder<BiomeId>)> =
-                    Vec::new();
+                let mut builder: Vec<(ParameterPoint, Holder<BiomeId>)> = Vec::new();
                 let biome_builder = OverworldBiomeBuilder::new();
                 biome_builder.add_biomes(&mut |(point, key): (
-                    crate::biome::climate::ParameterPoint,
+                    ParameterPoint,
                     ResourceKey<BiomeId>,
                 )| {
                     builder.push((point, biomes.get_or_throw(&key)));

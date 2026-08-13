@@ -4,8 +4,16 @@
 //! `Biomes.java` is the generated registry hub of biome `ResourceKey`s. All 66
 //! keys are declared here as id-model constants (`ResourceKey<BiomeId>` over
 //! the pure [`rivet_registry::biome_id::BiomeId`] handle), in `Biomes.java`
-//! declaration order. The nether/overworld preset builders, the `the_end`
-//! source, and the `OverworldBiomeBuilder` tables all bridge by these keys.
+//! declaration order — the complete canonical key set, cross-checked against
+//! the generated `minecraft:worldgen/biome` table.
+//!
+//! The `the_end` source and the nether preset bridge by these constants
+//! directly. The overworld preset builds its 55 keys from the generated preset
+//! table's `minecraft:<path>` names via [`register_from_full_name`] — the
+//! result is value-equal to the hub constant for the same biome (the two
+//! resolution paths agree; a test pins the equality), so the emitted
+//! `ResourceKey`s ARE the hub keys even though the table is projected from its
+//! generated names rather than matched against the 66 constants.
 //!
 //! `register_from_full_name` resolves the full `minecraft:<path>` identifiers
 //! carried by the generated preset tables (`worldgen.rs` `ParameterPoint.biome`)

@@ -25,6 +25,7 @@ use crate::levelgen::noisegen::noise_router_data::peaks_and_valleys_f32;
 use rivet_registry::ResourceKey;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::generated::worldgen::OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS;
+use std::collections::HashMap;
 
 /// `OverworldBiomeBuilder` — the `.data`-owned overworld biome builder. The
 /// header parameter spans and the debug-string surface live here; `add_biomes`
@@ -97,24 +98,22 @@ impl OverworldBiomeBuilder {
     /// Emits the full overworld parameter list — the 7594 points of
     /// `OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS` (extracted from Paper's
     /// `knownPresets()` in the builder's value order), each projected to a
-    /// runtime [`ParameterPoint`] and the matching `ResourceKey<BiomeId>`.
+    /// runtime [`ParameterPoint`] and the matching `ResourceKey<BiomeId>`. The
+    /// 55 distinct biome names are resolved to keys once (memoized across the
+    /// table); the per-point span projection is [`ParameterPoint::from`].
     /// Java's package-private scope maps to `pub(crate)`: the preset builder in
     /// `multi_noise_biome_source_parameter_list` is the only caller.
     pub(crate) fn add_biomes(
         &self,
         biomes: &mut dyn FnMut((ParameterPoint, ResourceKey<BiomeId>)),
     ) {
+        let mut keys: HashMap<&'static str, ResourceKey<BiomeId>> = HashMap::new();
         for generated in OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS {
-            let point = ParameterPoint::new(
-                Parameter::new(generated.temperature.0, generated.temperature.1),
-                Parameter::new(generated.humidity.0, generated.humidity.1),
-                Parameter::new(generated.continentalness.0, generated.continentalness.1),
-                Parameter::new(generated.erosion.0, generated.erosion.1),
-                Parameter::new(generated.depth.0, generated.depth.1),
-                Parameter::new(generated.weirdness.0, generated.weirdness.1),
-                generated.offset,
-            );
-            biomes((point, register_from_full_name(generated.biome)));
+            let key = keys
+                .entry(generated.biome)
+                .or_insert_with(|| register_from_full_name(generated.biome))
+                .clone();
+            biomes((ParameterPoint::from(generated), key));
         }
     }
 
@@ -222,15 +221,7 @@ mod tests {
             let generated = &OVERWORLD_BIOME_SOURCE_PARAMETER_POINTS[i];
             assert_eq!(
                 point,
-                &ParameterPoint::new(
-                    Parameter::new(generated.temperature.0, generated.temperature.1),
-                    Parameter::new(generated.humidity.0, generated.humidity.1),
-                    Parameter::new(generated.continentalness.0, generated.continentalness.1),
-                    Parameter::new(generated.erosion.0, generated.erosion.1),
-                    Parameter::new(generated.depth.0, generated.depth.1),
-                    Parameter::new(generated.weirdness.0, generated.weirdness.1),
-                    generated.offset,
-                ),
+                &ParameterPoint::from(generated),
                 "point {i} must match the generated table bit-for-bit"
             );
             assert_eq!(
