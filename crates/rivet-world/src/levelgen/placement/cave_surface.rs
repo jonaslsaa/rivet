@@ -4,8 +4,8 @@
 //! Java: a `StringRepresentable` enum with the two cave surfaces — `CEILING`
 //! (direction UP, y `+1`) and `FLOOR` (direction DOWN, y `-1`) — whose `CODEC`
 //! is `StringRepresentable.fromEnum(CaveSurface::values)`. It is the enum the
-//! `.blender` unit's `CaveSurfacePlacement` (the namesake of this worktree)
-//! consumes for its `surface` codec field.
+//! placement package owns and `VegetationPatchConfiguration`'s `"surface"`
+//! field consumes.
 //!
 //! The `CODEC` is the ops-generic `cave_surface_codec::<Ops>()` factory, reusing
 //! the heightmap `types_codec` shape (`string_representable::from_enum`).
@@ -74,10 +74,7 @@ impl std::fmt::Display for CaveSurface {
 /// `CaveSurface.CODEC` — `StringRepresentable.fromEnum(CaveSurface::values)`,
 /// as the ops-generic `cave_surface_codec::<Ops>()` factory. Callers erase it
 /// at the field-builder site (`Arc::new(cave_surface_codec::<Ops>())`), exactly
-/// like the heightmap `types_codec` reuse. The consuming `.blender` unit's
-/// `CaveSurfacePlacement` lands next wave, so the factory is forward-declared
-/// (exercised here by the codec tests).
-#[allow(dead_code)]
+/// like the heightmap `types_codec` reuse.
 pub fn cave_surface_codec<Ops: DynamicOps + 'static>() -> EnumCodec<CaveSurface, Ops> {
     const VALUES: [CaveSurface; 2] = [CaveSurface::Ceiling, CaveSurface::Floor];
     string_representable::from_enum::<CaveSurface, Ops>(&VALUES)
