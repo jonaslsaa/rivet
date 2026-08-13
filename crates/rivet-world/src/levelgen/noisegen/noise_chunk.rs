@@ -30,7 +30,9 @@
 //! - `Beardifier.forStructuresInChunk` (the structure unit) defers: the
 //!   `beardifier` field is the `BeardifierMarker` value shell (RivetTodo #177).
 //! - `Aquifer.create`'s `noiseChunk` self-reference is broken with the
-//!   `preliminary_surface_level` closure (see `aquifer.rs`).
+//!   `preliminary_surface_level` closure (see `aquifer.rs`). The closure and
+//!   the public `preliminary_surface_level` share one
+//!   `preliminarySurfaceLevelCache` `Arc` (Java's single `Long2IntMap`).
 //! - `MaterialRuleList` (`mc.world.level.levelgen.material`) is a STUB value
 //!   struct here (the 2-line iteration; the owning material unit replaces it).
 
@@ -206,8 +208,11 @@ pub struct NoiseChunk {
     blend_alpha: Option<Arc<FlatCache>>,
     /// `blendOffset` — the `@Nullable` blend-offset flat cache.
     blend_offset: Option<Arc<FlatCache>>,
-    /// `preliminarySurfaceLevelCache` — the `Long2IntMap` cache.
-    preliminary_surface_level_cache: Mutex<HashMap<i64, i32>>,
+    /// `preliminarySurfaceLevelCache` — the `Long2IntMap` cache. Shared
+    /// (`Arc`) with the aquifer's `preliminary_fn` closure so both paths hit
+    /// Java's single map (Java's `Aquifer` calls back into the same
+    /// `NoiseChunk.preliminarySurfaceLevel`).
+    preliminary_surface_level_cache: Arc<Mutex<HashMap<i64, i32>>>,
     /// `aquifer`.
     aquifer: Arc<dyn Aquifer>,
     /// `preliminarySurfaceLevel` — the wrapped router function.
@@ -347,13 +352,18 @@ impl NoiseChunk {
         let wrapped_router = router.map_all(&wrap_visitor);
         let preliminary_surface_level = wrapped_router.preliminary_surface_level().clone();
 
+        // Java's single `preliminarySurfaceLevelCache` (Long2IntMap): the
+        // public `preliminarySurfaceLevel` method and the Aquifer's
+        // `noiseChunk.preliminarySurfaceLevel` back-call share one map. The
+        // closure clones the same `Arc` the struct stores.
+        let preliminary_cache = Arc::new(Mutex::new(HashMap::<i64, i32>::new()));
         let aquifer = if !settings.is_aquifers_enabled() {
             aquifer::create_disabled(global_fluid_picker)
         } else {
             let chunk_x = SectionPos::block_to_section_coord(chunk_min_block_x);
             let chunk_z = SectionPos::block_to_section_coord(chunk_min_block_z);
             let preliminary_fn: PreliminarySurfaceLevelFn = {
-                let cache = Mutex::new(HashMap::<i64, i32>::new());
+                let cache = preliminary_cache.clone();
                 let preliminary = preliminary_surface_level.clone();
                 Arc::new(move |sample_x: i32, sample_z: i32| {
                     let quantized_x = QuartPos::to_block(QuartPos::from_block(sample_x));
@@ -425,7 +435,7 @@ impl NoiseChunk {
             wrapped: wrapped.clone(),
             blend_alpha,
             blend_offset,
-            preliminary_surface_level_cache: Mutex::new(HashMap::new()),
+            preliminary_surface_level_cache: preliminary_cache,
             aquifer,
             preliminary_surface_level,
             full_noise_density,
@@ -1116,10 +1126,18 @@ impl BlendAlpha {
 
 impl DensityFunction for BlendAlpha {
     fn compute(&self, context: &dyn FunctionContext) -> f64 {
+        // Read the block coordinates BEFORE locking `self.state`: the owning
+        // `NoiseChunk` context resolves `block_x()`/`block_z()` by re-locking
+        // the same `InterpolationState`, so holding the guard across the read
+        // would self-deadlock the non-reentrant mutex. Java has no lock and
+        // evaluates the arguments first (`getOrComputeBlendingOutput(context
+        // .blockX(), context.blockZ())`).
+        let block_x = context.block_x();
+        let block_z = context.block_z();
         self.state
             .lock()
             .unwrap()
-            .get_or_compute_blending_output(&self.blender, context.block_x(), context.block_z())
+            .get_or_compute_blending_output(&self.blender, block_x, block_z)
             .alpha()
     }
     fn min_value(&self) -> f64 {
@@ -1154,10 +1172,15 @@ impl BlendOffset {
 
 impl DensityFunction for BlendOffset {
     fn compute(&self, context: &dyn FunctionContext) -> f64 {
+        // Same lock-order as `BlendAlpha::compute` — read the block coordinates
+        // before acquiring the guard so an owning `NoiseChunk` context does not
+        // self-deadlock the shared non-reentrant mutex.
+        let block_x = context.block_x();
+        let block_z = context.block_z();
         self.state
             .lock()
             .unwrap()
-            .get_or_compute_blending_output(&self.blender, context.block_x(), context.block_z())
+            .get_or_compute_blending_output(&self.blender, block_x, block_z)
             .blending_offset()
     }
     fn min_value(&self) -> f64 {
@@ -1360,12 +1383,19 @@ impl DensityFunction for CacheAllInCell {
         self
     }
     fn clone_arc(&self) -> Arc<dyn DensityFunction> {
-        Arc::new(CacheAllInCell::new(
-            self.noise_filler.clone(),
-            self.state.clone(),
-            self.cell_width,
-            self.cell_height,
-        ))
+        // Share `values`: the second `map_all` (full-noise expression) reaches
+        // the already-wrapped `CacheAllInCell` through `Add.mapChildren`'s
+        // `clone_arc`, and the cell loop fills the registered instance's buffer
+        // through `cellCaches` — a fresh copy would read the never-updated
+        // zeros (Java re-wraps to a new instance registered into `cellCaches`,
+        // so the tree reads what the loop writes).
+        Arc::new(CacheAllInCell {
+            noise_filler: self.noise_filler.clone(),
+            values: self.values.clone(),
+            state: self.state.clone(),
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+        })
     }
 }
 
@@ -1530,13 +1560,17 @@ impl DensityFunction for FlatCache {
         self
     }
     fn clone_arc(&self) -> Arc<dyn DensityFunction> {
-        Arc::new(FlatCache::new(
-            self.noise_filler.clone(),
-            false,
-            self.size_xz - 1,
-            self.first_noise_x,
-            self.first_noise_z,
-        ))
+        // Share `values`: the second `map_all` (full-noise expression) reaches
+        // the already-wrapped `FlatCache` through `clone_arc`, and Java's
+        // `MarkerOrMarked.mapChildren` re-Marks it so `wrapNew` re-FILLS the
+        // values — a fresh zeroed copy would read never-filled zeros.
+        Arc::new(FlatCache {
+            noise_filler: self.noise_filler.clone(),
+            values: self.values.clone(),
+            size_xz: self.size_xz,
+            first_noise_x: self.first_noise_x,
+            first_noise_z: self.first_noise_z,
+        })
     }
 }
 
@@ -1788,7 +1822,9 @@ mod tests {
     use crate::levelgen::noisegen::noise_router_data::DensityFunctionValue;
     use crate::levelgen::surface_rules::surface_rule_air;
     use crate::levelgen::synth::normal_noise::NoiseParameters;
+    use rivet_registry::RegistrationInfo;
     use rivet_registry::RegistryBuilder;
+    use rivet_registry::holder_lookup::HolderGetter;
     use rivet_registry::registry::Registry;
 
     /// A settings record whose router's `finalDensity` is a non-trivial
@@ -2121,6 +2157,80 @@ mod tests {
                 }
             }
         }
+        chunk.stop_interpolation();
+    }
+
+    /// A real-preset `HolderHolder::Reference` regression: the frozen
+    /// `Registry::get` returns a `Holder::Reference`, and a router that carries
+    /// it as a `HolderHolder` must resolve through the density-function
+    /// registry during BOTH `RandomState::create`'s wiring visit and the
+    /// `NoiseChunk` construction wrap (Java's `BuildState`-bound
+    /// `holder.value()`). Before `Visitor::resolve_holder` was threaded through
+    /// `map_all`'s `RecursiveVisitor` and `NoiseChunkWrap`, this panicked on the
+    /// Reference holder.
+    #[test]
+    fn noise_chunk_resolves_holderholder_references() {
+        let df_key = &crate::levelgen::noise::registry_keys::DENSITY_FUNCTION;
+        let mut df_builder: RegistryBuilder<DensityFunctionValue> = RegistryBuilder::new(df_key);
+        df_builder.register(
+            &crate::levelgen::noisegen::noise_router_data::FACTOR,
+            Arc::new(fns::constant(7.0)),
+            RegistrationInfo::BUILT_IN,
+        );
+        let df_registry = df_builder.freeze();
+        let reference = df_registry.get_or_throw(&crate::levelgen::noisegen::noise_router_data::FACTOR);
+        let final_density = Arc::new(fns::HolderHolder::new(reference));
+
+        let settings = test_settings_with_final_density(final_density);
+        let (noise_registry, _) = empty_registries();
+        let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
+
+        let chunk = NoiseChunk::new(
+            4,
+            &state,
+            0,
+            0,
+            &OVERWORLD_NOISE_SETTINGS,
+            Arc::new(BeardifierMarker::instance()) as Arc<dyn DensityFunction>,
+            &settings,
+            Box::new(create_fluid_picker(&settings)),
+            Blender::empty(),
+        );
+        chunk.initialize_for_first_cell_x();
+        chunk.advance_cell_x(0);
+        chunk.select_cell_yz(40, 0);
+        chunk.update_for_y(260, 0.5);
+        chunk.update_for_x(2, 0.5);
+        chunk.update_for_z(2, 0.5);
+
+        // The Reference resolved to the registered constant 7.0 (plus the 0.0
+        // beardifier), so the interpolated density is 7.0 — not a panic on the
+        // unbound Reference.
+        let density = chunk.get_interpolated_density();
+        assert!(
+            (density - 7.0).abs() < 1e-9,
+            "expected the registered constant 7.0, got {density}"
+        );
+        chunk.stop_interpolation();
+    }
+
+    /// The `BlendAlpha`/`BlendOffset` self-deadlock regression: both compute
+    /// paths read `context.block_x()`/`context.block_z()` BEFORE locking the
+    /// shared `InterpolationState`. With the owning `NoiseChunk` as the context
+    /// those accessors re-lock the same non-reentrant mutex, so holding the
+    /// guard across the read would deadlock. This constructs the inner
+    /// function directly with the chunk's state and evaluates it against the
+    /// chunk — the pre-fix code hangs (a non-reentrant lock acquisition on the
+    /// sync thread).
+    #[test]
+    fn blend_alpha_offset_read_coordinates_before_locking() {
+        let chunk = interpolating_chunk();
+        // `Blender::empty()` → `blendOffsetAndFactor` returns
+        // `BlendingOutput(1.0, 0.0)`, so alpha is 1.0 and offset is 0.0.
+        let alpha = BlendAlpha::new(chunk.state.clone(), Blender::empty());
+        assert_eq!(alpha.compute(&chunk), 1.0);
+        let offset = BlendOffset::new(chunk.state.clone(), Blender::empty());
+        assert_eq!(offset.compute(&chunk), 0.0);
         chunk.stop_interpolation();
     }
 }
