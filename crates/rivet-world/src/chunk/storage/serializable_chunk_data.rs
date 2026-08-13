@@ -1097,10 +1097,10 @@ pub fn parse_heightmaps(chunk_data: &CompoundTag, heightmaps_after: &[Types]) ->
 /// `parse_heightmaps`; `write` adds no second copy on either path.)
 ///
 /// The `copyOf` filter — keep only types the persisted status's
-/// `heightmapsAfter()` allows — lives at the stored-build boundary
-/// ([`parse_heightmaps`], which is passed the status slice), not here. `write`
-/// emits whatever the map holds, exactly as Java's `write` takes no status
-/// argument.
+/// `heightmapsAfter()` allows — lives at the stored-build boundaries: the
+/// parse's [`parse_heightmaps`] and the writer's `chunk_heightmaps` (both
+/// passed the status slice), not here. `write` emits whatever the map holds,
+/// exactly as Java's `write` takes no status argument.
 ///
 /// The key order this produces is NOT the order Paper's own chunk files store
 /// heightmap keys in: Java's `CompoundTag` is a fastutil hash map, so the
