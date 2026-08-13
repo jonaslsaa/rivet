@@ -43,8 +43,10 @@ fi
 # against a drifted runtime: capture a golden against a different commit and
 # the fixture would silently re-pin to this stamp, passing every gate. The
 # materialized server jar carries the `Git-Commit` manifest attribute.
+# (run_seq_probe.sh / run_spline_probe.sh predate this guard and are tracked
+# separately; this runner is the first to verify the pin it stamps.)
 RUNTIME_COMMIT="$(unzip -p "$RUNTIME_JAR" META-INF/MANIFEST.MF 2>/dev/null \
-  | sed -n 's/^Git-Commit:[[:space:]]*//p' | tr -d '\r' | head -n 1)"
+  | awk '/[[:space:]]*Git-Commit:[[:space:]]*/ { v=$0; sub(/^[[:space:]]*Git-Commit:[[:space:]]*/, "", v); sub(/[[:space:]\r]+$/, "", v); if (v != "") { print v; exit } }')"
 PIN_COMMIT="${PAPER_PIN##*@}"
 if [ -z "$RUNTIME_COMMIT" ]; then
   echo "materialized server jar $RUNTIME_JAR has no Git-Commit attribute; cannot verify the pin" >&2

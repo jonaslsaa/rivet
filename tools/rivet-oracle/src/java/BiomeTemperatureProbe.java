@@ -84,13 +84,9 @@ public final class BiomeTemperatureProbe {
         root.addProperty("paper", paper);
 
         JsonArray biomes = new JsonArray();
-        // plain: NONE modifier, temp 0.8, hasPrecipitation true.
         biomes.add(sampleBiome("plain", true, 0.8f, Biome.TemperatureModifier.NONE, grid));
-        // cold: NONE modifier, temp 0.0, hasPrecipitation true.
         biomes.add(sampleBiome("cold", true, 0.0f, Biome.TemperatureModifier.NONE, grid));
-        // frozen: FROZEN modifier, temp 0.7, hasPrecipitation true.
         biomes.add(sampleBiome("frozen", true, 0.7f, Biome.TemperatureModifier.FROZEN, grid));
-        // no-precip: NONE modifier, temp -1.0, hasPrecipitation false.
         biomes.add(sampleBiome("arid", false, -1.0f, Biome.TemperatureModifier.NONE, grid));
         root.add("biomes", biomes);
 
