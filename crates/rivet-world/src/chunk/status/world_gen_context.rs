@@ -34,6 +34,12 @@
 //! 4. `generate_through` validates the *whole* path against the projected
 //!    persisted status before any step runs, so a refused promotion (including
 //!    a mispositioned `NOISE` task) leaves the chunk untouched.
+//! 5. A wired generation task is honored only at its canonical rung — the
+//!    `BIOMES` rung carries `GenerateBiomes`, the `NOISE` rung
+//!    `GenerateNoise`. A malformed crate-internal pyramid that installs one
+//!    elsewhere (e.g. `GenerateBiomes` at the `NOISE` rung) is refused before
+//!    any work runs, so a chunk is never labeled `NOISE` by a task that
+//!    produces no noise data.
 //!
 //! A target already at/after the chunk's status is handled before any work:
 //! `target == current` is an idempotent no-op at *any* status (so a loaded
@@ -41,7 +47,7 @@
 //! and a lower target is a demotion error rather than an unwired-status error.
 //!
 //! The SURFACE..FULL task bodies are *not wired* (RivetTodo #185): dispatching
-//! one returns [`GenError::UnsupportedStatus`].
+//! one returns [`GenError::UnsupportedTask`].
 
 use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::status::chunk_status_task::ChunkStatusTask;
@@ -92,6 +98,15 @@ pub enum GenError {
         status: ChunkStatus,
         task: ChunkStatusTask,
     },
+    /// A wired generation task is installed at a rung it does not own —
+    /// `GenerateBiomes` away from `BIOMES`, `GenerateNoise` away from `NOISE`.
+    /// Only a malformed crate-internal pyramid can produce this: dispatching it
+    /// would label the chunk with the target rung's status while running the
+    /// wrong (or, for `GenerateBiomes` at `NOISE`, no) data-producing task.
+    TaskStatusMismatch {
+        status: ChunkStatus,
+        task: ChunkStatusTask,
+    },
     /// The target is before the chunk's current persisted status (generation
     /// never regresses a column).
     Demotion {
@@ -120,6 +135,9 @@ impl std::fmt::Display for GenError {
                 f,
                 "task {task:?} at status {status:?} is not wired in the value layer (RivetTodo #185)"
             ),
+            GenError::TaskStatusMismatch { status, task } => {
+                write!(f, "task {task:?} is not the task of the {status:?} rung")
+            }
             GenError::Demotion { target, current } => write!(
                 f,
                 "cannot generate to {target:?}: the chunk is already at {current:?}"
@@ -129,6 +147,21 @@ impl std::fmt::Display for GenError {
 }
 
 impl std::error::Error for GenError {}
+
+fn ensure_canonical_rung(task: ChunkStatusTask, target: ChunkStatus) -> Result<(), GenError> {
+    let canonical = match task {
+        ChunkStatusTask::GenerateBiomes => ChunkStatus::Biomes,
+        ChunkStatusTask::GenerateNoise => ChunkStatus::Noise,
+        _ => return Ok(()),
+    };
+    if target != canonical {
+        return Err(GenError::TaskStatusMismatch {
+            status: target,
+            task,
+        });
+    }
+    Ok(())
+}
 
 impl<T, B, S> WorldGenContext<T, B, S>
 where
@@ -157,7 +190,9 @@ where
     /// pass-through produces no data, so it is refused when it would advance a
     /// chunk to `BIOMES`/`NOISE` that does not already carry that status — the
     /// LOADING pyramid's loading stubs cannot fabricate a NOISE-labeled chunk.
-    /// The `NOISE` body is gated on the persisted-status record.
+    /// The `NOISE` body is gated on the persisted-status record, and a wired
+    /// generation task is honored only at its canonical rung
+    /// (`GenerateBiomes` at `BIOMES`, `GenerateNoise` at `NOISE`).
     pub fn run_step(
         &mut self,
         step: &ChunkStep,
@@ -185,9 +220,11 @@ where
                 chunk_status_tasks::pass_through(chunk);
             }
             ChunkStatusTask::GenerateBiomes => {
+                ensure_canonical_rung(step.task(), step.target_status())?;
                 (self.biomes)(chunk);
             }
             ChunkStatusTask::GenerateNoise => {
+                ensure_canonical_rung(step.task(), step.target_status())?;
                 if !chunk
                     .get_persisted_status()
                     .is_or_after(ChunkStatus::Biomes)
@@ -227,8 +264,12 @@ where
     /// loading stubs) cannot advance an `EMPTY` chunk past it, because that
     /// would label the chunk with data that was never generated. The whole
     /// path is validated before any work runs — a refused promotion leaves the
-    /// chunk untouched. A target beyond `NOISE` is rejected before any work
-    /// runs; a target before the current status is a demotion error.
+    /// chunk untouched. A wired generation task is honored only at its
+    /// canonical rung (a malformed pyramid installing `GenerateBiomes` at
+    /// `NOISE`, for example, is refused here, so the chunk is never labeled
+    /// `NOISE` by a task that produces no noise data). A target beyond `NOISE`
+    /// is rejected before any work runs; a target before the current status is
+    /// a demotion error.
     pub fn generate_through(
         &mut self,
         pyramid: &ChunkPyramid,
@@ -259,9 +300,11 @@ where
             let step = pyramid.get_step_to(ChunkStatus::ALL[index]);
             match step.task() {
                 ChunkStatusTask::GenerateBiomes => {
+                    ensure_canonical_rung(step.task(), step.target_status())?;
                     projected = step.target_status();
                 }
                 ChunkStatusTask::GenerateNoise => {
+                    ensure_canonical_rung(step.task(), step.target_status())?;
                     if !projected.is_or_after(ChunkStatus::Biomes) {
                         return Err(GenError::BiomesNotGenerated);
                     }
@@ -748,10 +791,10 @@ mod tests {
 
     #[test]
     fn mispositioned_generate_noise_is_refused_atomically() {
-        // A pyramid that places the GenerateNoise task at the BIOMES rung (so
-        // run_step would refuse it mid-loop after the SS/SR stubs advanced the
-        // chunk) must be refused by the pre-check before any work runs — the
-        // documented atomicity holds for the run-step failure path too.
+        // A pyramid that places the GenerateNoise task at the BIOMES rung must
+        // be refused by the pre-check before any work runs — the documented
+        // atomicity holds for the task/status mismatch too. The chunk is
+        // untouched and neither seam ran.
         let (mut ctx, biomes_calls, noise_calls) = recording_context();
         let mut chunk = proto();
         let pyramid = ChunkPyramid::builder()
@@ -776,8 +819,93 @@ mod tests {
         let err = ctx
             .generate_through(&pyramid, &mut chunk, ChunkStatus::Noise)
             .expect_err("mispositioned noise refused");
-        assert_eq!(err, GenError::BiomesNotGenerated);
+        assert_eq!(
+            err,
+            GenError::TaskStatusMismatch {
+                status: ChunkStatus::Biomes,
+                task: ChunkStatusTask::GenerateNoise,
+            }
+        );
         // The chunk is untouched AND neither seam ran.
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+
+        // The single-step seam refuses the same rung mismatch for the NOISE
+        // task before running the misplaced task.
+        let biomes_step = pyramid.get_step_to(ChunkStatus::Biomes);
+        let err = ctx
+            .run_step(biomes_step, &mut chunk)
+            .expect_err("run_step refuses the rung mismatch");
+        assert_eq!(
+            err,
+            GenError::TaskStatusMismatch {
+                status: ChunkStatus::Biomes,
+                task: ChunkStatusTask::GenerateNoise,
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn generate_biomes_at_the_noise_rung_is_refused_atomically() {
+        // The task's headline malformed pyramid: GenerateBiomes installed at
+        // the NOISE rung. Dispatching it would run the biomes seam and label
+        // the chunk NOISE with no noise data — both the pre-check and the
+        // runtime guard refuse it before any mutation.
+        let (mut ctx, biomes_calls, noise_calls) = recording_context();
+        let mut chunk = proto();
+        let pyramid = ChunkPyramid::builder()
+            .step(ChunkStatus::Empty, |s| s)
+            .step(ChunkStatus::StructureStarts, |s| {
+                s.set_task(ChunkStatusTask::GenerateStructureStarts)
+            })
+            .step(ChunkStatus::StructureReferences, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateStructureReferences)
+            })
+            .step(ChunkStatus::Biomes, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateBiomes)
+            })
+            .step(ChunkStatus::Noise, |s| {
+                s.add_requirement(ChunkStatus::Biomes, 1)
+                    .add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateBiomes)
+            })
+            .build();
+        // The pre-check walks the whole path first and refuses at the NOISE
+        // rung, before the BIOMES step (which would otherwise run first) does.
+        let err = ctx
+            .generate_through(&pyramid, &mut chunk, ChunkStatus::Noise)
+            .expect_err("generate biomes at the noise rung refused");
+        assert_eq!(
+            err,
+            GenError::TaskStatusMismatch {
+                status: ChunkStatus::Noise,
+                task: ChunkStatusTask::GenerateBiomes,
+            }
+        );
+        // The chunk is untouched AND neither seam ran.
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+
+        // The single-step seam refuses the same rung mismatch before running
+        // the misplaced task.
+        let noise_step = pyramid.get_step_to(ChunkStatus::Noise);
+        let err = ctx
+            .run_step(noise_step, &mut chunk)
+            .expect_err("run_step refuses the rung mismatch");
+        assert_eq!(
+            err,
+            GenError::TaskStatusMismatch {
+                status: ChunkStatus::Noise,
+                task: ChunkStatusTask::GenerateBiomes,
+            }
+        );
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
         assert!(biomes_calls.borrow().is_empty());
         assert!(noise_calls.borrow().is_empty());
