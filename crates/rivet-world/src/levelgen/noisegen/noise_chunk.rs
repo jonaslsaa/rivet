@@ -566,7 +566,7 @@ impl NoiseChunk {
         };
         let interpolators = self.state.lock().unwrap().interpolators.clone();
         for cell_z_index in 0..(self.cell_count_xz + 1) {
-            let cell_z = self.first_cell_z + cell_z_index;
+            let cell_z = self.first_cell_z.wrapping_add(cell_z_index);
             {
                 let mut state = self.state.lock().unwrap();
                 state.cell_start_block_z = cell_z.wrapping_mul(self.cell_width);
@@ -601,7 +601,10 @@ impl NoiseChunk {
 
     /// `advanceCellX(int cellXIndex)`.
     pub fn advance_cell_x(&self, cell_x_index: i32) {
-        self.fill_slice(false, self.first_cell_x + cell_x_index + 1);
+        self.fill_slice(
+            false,
+            self.first_cell_x.wrapping_add(cell_x_index).wrapping_add(1),
+        );
         self.state.lock().unwrap().cell_start_block_x = self
             .first_cell_x
             .wrapping_add(cell_x_index)
@@ -642,7 +645,7 @@ impl NoiseChunk {
     pub fn update_for_y(&self, pos_y: i32, factor_y: f64) {
         {
             let mut state = self.state.lock().unwrap();
-            state.in_cell_y = pos_y - state.cell_start_block_y;
+            state.in_cell_y = pos_y.wrapping_sub(state.cell_start_block_y);
         }
         let interpolators = self.state.lock().unwrap().interpolators.clone();
         for i in &interpolators {
@@ -654,7 +657,7 @@ impl NoiseChunk {
     pub fn update_for_x(&self, pos_x: i32, factor_x: f64) {
         {
             let mut state = self.state.lock().unwrap();
-            state.in_cell_x = pos_x - state.cell_start_block_x;
+            state.in_cell_x = pos_x.wrapping_sub(state.cell_start_block_x);
         }
         let interpolators = self.state.lock().unwrap().interpolators.clone();
         for i in &interpolators {
@@ -666,7 +669,7 @@ impl NoiseChunk {
     pub fn update_for_z(&self, pos_z: i32, factor_z: f64) {
         {
             let mut state = self.state.lock().unwrap();
-            state.in_cell_z = pos_z - state.cell_start_block_z;
+            state.in_cell_z = pos_z.wrapping_sub(state.cell_start_block_z);
             state.interpolation_counter += 1;
         }
         let interpolators = self.state.lock().unwrap().interpolators.clone();
@@ -1040,15 +1043,15 @@ fn render_unbound() -> String {
 impl FunctionContext for NoiseChunk {
     fn block_x(&self) -> i32 {
         let state = self.state.lock().unwrap();
-        state.cell_start_block_x + state.in_cell_x
+        state.cell_start_block_x.wrapping_add(state.in_cell_x)
     }
     fn block_y(&self) -> i32 {
         let state = self.state.lock().unwrap();
-        state.cell_start_block_y + state.in_cell_y
+        state.cell_start_block_y.wrapping_add(state.in_cell_y)
     }
     fn block_z(&self) -> i32 {
         let state = self.state.lock().unwrap();
-        state.cell_start_block_z + state.in_cell_z
+        state.cell_start_block_z.wrapping_add(state.in_cell_z)
     }
 }
 
@@ -2043,6 +2046,61 @@ mod tests {
             (3, 264, 3)
         );
         chunk.stop_interpolation();
+    }
+
+    /// The cell-geometry arithmetic wraps exactly like Java's plain int
+    /// `+`/`-` (NoiseChunk.java `cellStartBlockX + inCellX`, `updateForX`'s
+    /// `posX - cellStartBlockX`). The wrapping spelling is a PORTING.md hard
+    /// rule: the plain forms would panic in debug builds on overflow instead
+    /// of wrapping.
+    #[test]
+    fn cell_geometry_arithmetic_wraps_like_java() {
+        let settings = test_settings();
+        let (noise_registry, df_registry) = empty_registries();
+        let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
+        let chunk = NoiseChunk::new(
+            4,
+            &state,
+            0,
+            0,
+            &OVERWORLD_NOISE_SETTINGS,
+            Arc::new(BeardifierMarker::instance()) as Arc<dyn DensityFunction>,
+            &settings,
+            Box::new(create_fluid_picker(&settings)),
+            Blender::empty(),
+        );
+
+        // `blockX/Y/Z()` = `cellStartBlock + inCell` — Java's plain `+` wraps.
+        {
+            let mut s = chunk.state.lock().unwrap();
+            s.cell_start_block_x = i32::MAX;
+            s.cell_start_block_y = i32::MAX;
+            s.cell_start_block_z = i32::MAX;
+            s.in_cell_x = 1;
+            s.in_cell_y = 1;
+            s.in_cell_z = 1;
+        }
+        assert_eq!(chunk.block_x(), i32::MIN);
+        assert_eq!(chunk.block_y(), i32::MIN);
+        assert_eq!(chunk.block_z(), i32::MIN);
+
+        // `updateForX/Y/Z` = `pos - cellStartBlock` — Java's plain `-` wraps.
+        {
+            let mut s = chunk.state.lock().unwrap();
+            s.cell_start_block_x = i32::MIN;
+            s.cell_start_block_y = i32::MIN;
+            s.cell_start_block_z = i32::MIN;
+        }
+        chunk.update_for_x(0, 0.0);
+        chunk.update_for_y(0, 0.0);
+        chunk.update_for_z(0, 0.0);
+        {
+            let s = chunk.state.lock().unwrap();
+            // `0 - i32::MIN` = `2^31`, which overflows i32 and wraps to i32::MIN.
+            assert_eq!(s.in_cell_x, i32::MIN);
+            assert_eq!(s.in_cell_y, i32::MIN);
+            assert_eq!(s.in_cell_z, i32::MIN);
+        }
     }
 
     /// `Ap2.fill_array` on the `Mul` branch computes `v1 * argument2.compute
