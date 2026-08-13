@@ -770,6 +770,7 @@ dependencies = [
  "rivet-serialization",
  "rivet-util",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "xxhash-rust",
