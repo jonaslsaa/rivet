@@ -239,27 +239,30 @@ impl<
         // branch below still reads the caller's `state` (`T: Clone`), so clone
         // here rather than re-reading the container.
         let previous = self.states.get_and_set(x, y, z, state.clone());
+        // All counts are Java `short` fields; Java's compound assignment narrows
+        // the `int` result back to `short` (wrapping on overflow), so the port
+        // uses wrapping arithmetic (PORTING.md) rather than debug-build panics.
         if !is_air(&previous) {
-            self.non_empty_block_count -= 1;
+            self.non_empty_block_count = self.non_empty_block_count.wrapping_sub(1);
             if is_randomly_ticking(&previous) {
-                self.ticking_block_count -= 1;
+                self.ticking_block_count = self.ticking_block_count.wrapping_sub(1);
             }
             if !fluid_is_empty(&previous) {
-                self.fluid_count -= 1;
+                self.fluid_count = self.fluid_count.wrapping_sub(1);
                 if fluid_is_randomly_ticking(&previous) {
-                    self.ticking_fluid_count -= 1;
+                    self.ticking_fluid_count = self.ticking_fluid_count.wrapping_sub(1);
                 }
             }
         }
         if !is_air(&state) {
-            self.non_empty_block_count += 1;
+            self.non_empty_block_count = self.non_empty_block_count.wrapping_add(1);
             if is_randomly_ticking(&state) {
-                self.ticking_block_count += 1;
+                self.ticking_block_count = self.ticking_block_count.wrapping_add(1);
             }
             if !fluid_is_empty(&state) {
-                self.fluid_count += 1;
+                self.fluid_count = self.fluid_count.wrapping_add(1);
                 if fluid_is_randomly_ticking(&state) {
-                    self.ticking_fluid_count += 1;
+                    self.ticking_fluid_count = self.ticking_fluid_count.wrapping_add(1);
                 }
             }
         }
@@ -269,9 +272,9 @@ impl<
             let is_special_new = is_special_colliding(&state);
             if is_special_old != is_special_new {
                 if is_special_old {
-                    self.special_colliding_blocks -= 1;
+                    self.special_colliding_blocks = self.special_colliding_blocks.wrapping_sub(1);
                 } else {
-                    self.special_colliding_blocks += 1;
+                    self.special_colliding_blocks = self.special_colliding_blocks.wrapping_add(1);
                 }
             }
             let old_ticking = is_randomly_ticking(&previous);
