@@ -12,7 +12,7 @@
 //! (`Codec.INT`) fields. The noise draw is read-only — the only world state
 //! these modifiers touch — so `count` stays a pure function of `(origin, this)`.
 
-use crate::levelgen::placement::BIOME_INFO_NOISE;
+use crate::biome::biome::BIOME_INFO_NOISE;
 use crate::levelgen::placement::placement_modifier_type::{
     PlacementModifierTypeId, PlacementModifierTypes,
 };

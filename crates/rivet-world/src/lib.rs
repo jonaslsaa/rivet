@@ -72,6 +72,11 @@ pub mod chunk;
 /// `net.minecraft.data.worldgen` package (the 26-file residual of the
 /// `mc.data.worldgen` row) stays pending.
 pub mod data;
+/// `net.minecraft.world.entity` — the entity-identity slice: the `MobCategory`
+/// enum and the `EntityType` id-handle STUB (`MobSpawnSettings`'s spawner and
+/// spawn-cost map keys; issue #178). The full `mc.world.entity` unit defers
+/// with the entity crate. See `entity::mod`.
+pub mod entity;
 pub mod flag;
 pub mod level;
 pub mod levelgen;
