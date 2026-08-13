@@ -51,9 +51,10 @@
 //! Paper-grounded message rather than fabricate a result, so callers fail
 //! loudly until the owning unit lands.
 //!
-//! The world-surface reads that are Java-abstract but not yet consumable
-//! (`getSeaLevel`, `getBaseHeight`, `getBaseColumn`, `addDebugScreenInfo`,
-//! `getBiomeSource`) are likewise panicking seams: the noisegen value shell
+//! The world-surface reads that are not yet consumable (`getSeaLevel`,
+//! `getBaseHeight`, `getBaseColumn`, `addDebugScreenInfo` — Java abstract — and
+//! `getBiomeSource`, whose Java body returns the `biomeSource` field a trait
+//! cannot hold) are likewise panicking seams: the noisegen value shell
 //! (`NoiseBasedChunkGenerator`) ports the real bodies on a separate type, and
 //! the owning realization overrides the seams when it lands.
 //! `getFirstFreeHeight`/`getFirstOccupiedHeight` delegate to the
