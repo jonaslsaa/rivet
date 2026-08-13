@@ -23,6 +23,12 @@ builds on top of these fixtures later.
   full server boot) and emits stable density/biome/surface samples for the
   normal-overworld generator; a companion script extracts Starlight light
   samples from the M0 FULL superflat chunks. Byte-identical across boots.
+- **Generated-world seed-42 ground-truth handoff** (`generated-expected 42`,
+  PR #563): the oracle boots a fresh seed-42 normal-overworld world, force-
+  generates a spawn-area grid to `minecraft:full` (the issue #51 forced-ticket
+  mechanism, from a blank chunk state so it is byte-deterministic), and commits
+  the per-chunk `surface`/`bedrock`/`below_feet` sample contract the generated
+  acceptance compares against. Twin-boot byte-identity verified.
 - The Rust runner `cargo run -p rivet-oracle` verifies every committed
   fixture kind against its manifest's SHA-256s and prints a summary.
 
@@ -62,6 +68,9 @@ rivet-oracle/
     spline/             # CubicSpline/BoundedFloatFunction value-leaf goldens
       manifest.json     # hash of spline-goldens.json (kind: spline, issue #372)
       spline-goldens.json  # Paper's exact min/max/sample outputs as hex-float (plus parity strings)
+    generated-expected/ # seed-42 generated-world ground-truth handoff (PR #563)
+      manifest.json     # hash of generated-expected.json (kind: generated-expected)
+      generated-expected.json  # 81 FULL spawn-grid chunks' surface/bedrock/below_feet
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
@@ -377,6 +386,40 @@ cargo run -p rivet-oracle -- sample
 The manifest is serialized in committed field order, so regeneration is
 byte-identical (git-clean) for unchanged samples — verified by a unit test.
 
+## Generated-world ground-truth handoff: `generated-expected`
+
+The generated-world acceptance (PR #563) compares the seed-42 content a
+`rivet-server --seed 42` serves against a Paper-captured reference — never
+against nothing, and never against a superflat fallback. `generated-expected`
+builds that reference.
+
+```bash
+cargo run -p rivet-oracle -- generated-expected 42             # verify the committed handoff
+cargo run -p rivet-oracle -- generated-expected 42 --to out.json  # capture a fresh handoff
+cargo run -p rivet-oracle -- generated-expected 42 --tamper    # negative control
+cargo run -p rivet-oracle -- regenerate --generated-expected   # twin-boot regenerate the fixture
+```
+
+The capture boots the pinned Paper runtime on a fresh seed-42 normal-overworld
+world, discards boot1's partial spawn-area chunks (regenerating those is not
+byte-deterministic), injects level-33 forced tickets for a -6..6 spawn grid
+(the issue #51 mechanism), and boot2 finishes them to `minecraft:full`. The
+committed handoff is the -4..4 interior subset — every committed chunk's
+neighbors are forced FULL too, keeping border-tree placement deterministic. The
+`regenerate --generated-expected` path requires two independent captures to be
+byte-identical before committing anything.
+
+The per-chunk contract is exactly what the acceptance compares: 16×16
+`surface`/`bedrock`/`below_feet` arrays indexed row-major `z*16+x`, sampled at
+the chunk center offset (8,8), with the surface being the highest non-air
+block, `bedrock` the block at `y=-60`, and `below_feet` at `y=-61`, up to
+`WORLD_CEILING_Y=320`. The verify path pins the provenance (Paper 0a99345,
+seed 42), the manifest SHA-256s, the forced-grid shape, and the anti-superflat
+contract: a superflat echo (all-air bedrock plane at -60, one repeated surface
+pattern, a tiny distinct-block set) is refused loudly, never handed off as
+ground truth. A missing runtime or a missing fixture tree is typed UNVERIFIED
+(exit 3), never a fabricated green.
+
 ## Regenerate: `regenerate`
 
 Full regeneration of every fixture kind (boots Paper where a boot is required):
@@ -387,6 +430,8 @@ cargo run -p rivet-oracle -- regenerate --m0       # M0 superflat slice only
 cargo run -p rivet-oracle -- regenerate --m2       # M2 region payloads only
 cargo run -p rivet-oracle -- regenerate --samples  # worldgen samples only
 cargo run -p rivet-oracle -- regenerate --text     # text corpus only (Paper oracle op)
+cargo run -p rivet-oracle -- regenerate --composed-noise   # composed-noise goldens only
+cargo run -p rivet-oracle -- regenerate --generated-expected  # generated-expected handoff only
 ```
 
 The `spline/` value-leaf goldens (issue #372) are regenerated script-driven, not
