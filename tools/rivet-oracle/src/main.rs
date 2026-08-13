@@ -902,49 +902,57 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
 /// loop's `Error::Manifest` (exit 1).
 fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
     let kinds = all_fixture_manifests_from(root);
-    if kinds.is_empty() {
+    let composed_noise_dir = root.join("composed-noise");
+    // A root whose ONLY manifest-bearing kind is composed-noise still reaches
+    // the composed-noise classification; the generic no-manifests diagnostic
+    // only fires when there are truly no fixtures at all.
+    if kinds.is_empty() && !composed_noise_dir.join("manifest.json").is_file() {
         return Err(Error::Manifest(
             "no fixture manifests found under fixtures/ (run scripts/extract_fixtures.py first)"
                 .into(),
         ));
     }
-    println!("verifying all committed fixture kinds:");
-    for d in &kinds {
-        // The root fixture kind labels as the root dir's name (e.g. "fixtures"),
-        // never the empty relative path.
-        let rel = if d == root {
-            root.file_name()
-                .unwrap_or(d.as_os_str())
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            d.strip_prefix(root).unwrap_or(d).display().to_string()
-        };
-        println!("  - {rel}");
-    }
-    println!();
-    let mut failed = 0;
-    for d in &kinds {
-        match verify_fixtures_dir(d) {
-            Ok(()) => println!(),
-            Err(e) => {
-                eprintln!("rivet-oracle: {e}");
-                eprintln!();
-                failed += 1;
+    if !kinds.is_empty() {
+        println!("verifying all committed fixture kinds:");
+        for d in &kinds {
+            // The root fixture kind labels as the root dir's name (e.g. "fixtures"),
+            // never the empty relative path.
+            let rel = if d == root {
+                root.file_name()
+                    .unwrap_or(d.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                d.strip_prefix(root).unwrap_or(d).display().to_string()
+            };
+            println!("  - {rel}");
+        }
+        println!();
+        let mut failed = 0;
+        for d in &kinds {
+            match verify_fixtures_dir(d) {
+                Ok(()) => println!(),
+                Err(e) => {
+                    eprintln!("rivet-oracle: {e}");
+                    eprintln!();
+                    failed += 1;
+                }
             }
         }
-    }
-    if failed != 0 {
-        return Err(Error::Manifest(format!(
-            "{failed} of {} fixture kinds failed verification",
+        if failed != 0 {
+            return Err(Error::Manifest(format!(
+                "{failed} of {} fixture kinds failed verification",
+                kinds.len()
+            )));
+        }
+        // Qualified to the generic kinds: the composed-noise golden is verified
+        // separately below, so this line never claims an overall green early.
+        println!(
+            "PASS: all {} generic fixture kinds match their manifest SHA-256s",
             kinds.len()
-        )));
+        );
     }
-    println!(
-        "PASS: all {} fixture kinds match their manifest SHA-256s",
-        kinds.len()
-    );
-    verify_composed_noise_step(&root.join("composed-noise"))?;
+    verify_composed_noise_step(&composed_noise_dir)?;
     Ok(())
 }
 
@@ -3306,7 +3314,7 @@ fn run() -> Result<(), Error> {
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
             // --help is accepted only as the sole argument; combined with a mode
             // or another flag it is a hard usage error via parse_mode below.
-            if rest.as_slice() == ["--help"] || rest.as_slice() == ["-h"] {
+            if matches!(rest.as_slice(), ["--help"] | ["-h"]) {
                 print_usage();
                 return Ok(());
             }
