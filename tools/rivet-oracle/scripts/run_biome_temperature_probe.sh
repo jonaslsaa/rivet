@@ -39,6 +39,23 @@ if [ ! -f "$RUNTIME_JAR" ]; then
   exit 1
 fi
 
+# The paper pin is stamped into the fixture and manifest, so refuse to run
+# against a drifted runtime: capture a golden against a different commit and
+# the fixture would silently re-pin to this stamp, passing every gate. The
+# materialized server jar carries the `Git-Commit` manifest attribute.
+RUNTIME_COMMIT="$(unzip -p "$RUNTIME_JAR" META-INF/MANIFEST.MF 2>/dev/null \
+  | sed -n 's/^Git-Commit:[[:space:]]*//p' | tr -d '\r' | head -n 1)"
+PIN_COMMIT="${PAPER_PIN##*@}"
+if [ -z "$RUNTIME_COMMIT" ]; then
+  echo "materialized server jar $RUNTIME_JAR has no Git-Commit attribute; cannot verify the pin" >&2
+  exit 1
+fi
+if [ "$RUNTIME_COMMIT" != "$PIN_COMMIT" ]; then
+  echo "materialized server jar is Git-Commit $RUNTIME_COMMIT but the pin is $PAPER_PIN" >&2
+  echo "set RIVET_PAPER_RUNTIME_JAR to the jar built from the pinned commit, or change the pin" >&2
+  exit 1
+fi
+
 LIBS_DIR="${RIVET_PAPER_LIBRARIES:-$ROOT/work/run/libraries}"
 LIBS="$(find "$LIBS_DIR" -name '*.jar' 2>/dev/null | tr '\n' ':')"
 if [ -z "$LIBS" ]; then
@@ -64,22 +81,6 @@ echo "wrote $FIXTURE_FILE"
 # Refresh the fixture manifest so the regenerated goldens hash matches what the
 # gate's `rivet-oracle verify` expects (the text/worldgen kinds regenerate their
 # manifests in-process; this kind is script-driven, so the script owns it).
-SHA="$(shasum -a 256 "$FIXTURE_FILE" | awk '{print $1}')"
-BYTES="$(wc -c < "$FIXTURE_FILE" | tr -d ' ')"
-MANIFEST="$OUT_DIR/manifest.json"
+. "$ROOT/scripts/write_fixture_manifest.sh"
 NOTE="bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis uses the raw frozenLarge/frozenEdge/frozenEdge01/frozenSmall noise samples plus the per-sample frozenPins flag so the inner and outer sub-checks are independently discriminable. Deterministic across boots."
-printf '%s\n' \
-  '{' \
-  '  "format": 1,' \
-  "  \"paper\": \"$PAPER_PIN\"," \
-  '  "kind": "biome-temperature",' \
-  "  \"note\": \"$NOTE\"," \
-  '  "captured": [' \
-  '    {' \
-  '      "path": "biome-temperature.json",' \
-  "      \"sha256\": \"$SHA\"," \
-  "      \"bytes\": $BYTES" \
-  '    }' \
-  '  ]' \
-  '}' > "$MANIFEST"
-echo "wrote $MANIFEST"
+write_fixture_manifest "$OUT_DIR" "biome-temperature" "$PAPER_PIN" "$NOTE" "$FIXTURE_FILE"

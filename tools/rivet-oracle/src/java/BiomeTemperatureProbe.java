@@ -31,8 +31,18 @@ public final class BiomeTemperatureProbe {
         String paper = "26.2-DEV-main@0a99345";
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
-                case "--output" -> output = args[++i];
-                case "--paper" -> paper = args[++i];
+                case "--output" -> {
+                    if (i + 1 >= args.length) {
+                        throw new IllegalArgumentException("--output requires a value");
+                    }
+                    output = args[++i];
+                }
+                case "--paper" -> {
+                    if (i + 1 >= args.length) {
+                        throw new IllegalArgumentException("--paper requires a value");
+                    }
+                    paper = args[++i];
+                }
                 default -> throw new IllegalArgumentException("Unknown arg: " + args[i]);
             }
         }
@@ -147,48 +157,65 @@ public final class BiomeTemperatureProbe {
         out.addProperty("temperatureModifier", mod.getSerializedName());
         JsonArray samples = new JsonArray();
         for (int[] p : grid) {
-            int seaLevel = 63;
             int x = p[0], z = p[1];
+            // The FROZEN noise terms depend only on (x, z), so read them once
+            // per grid position instead of once per y-sample (each read is a
+            // reflection round-trip into the package-private Biome statics).
+            double frozenLarge = 0.0;
+            double frozenEdge = 0.0;
+            double frozenSmall = 0.0;
+            if (mod == Biome.TemperatureModifier.FROZEN) {
+                frozenLarge = frozenLarge(x, z);
+                frozenEdge = frozenEdge(x, z);
+                frozenSmall = frozenSmall(x, z);
+            }
+            // Vary the sea_level parameter: the temperature arithmetic threads
+            // it through `snowLevel = seaLevel + 17` and the
+            // `pos.getY() > snowLevel` boundary, so a port that hardcodes the
+            // overworld boundary (63 + 17 = 80) and ignores the argument must
+            // fail a golden. The overworld (63) and the End (0) give different
+            // snow levels (80 vs 17), so the y-grid straddles each boundary.
+            int[] seaLevels = {63, 0};
             // Sample at the column top, at/above the snow level (y > seaLevel+17
-            // = 80), and high enough that a FROZEN pin (0.2) minus the snow-level
-            // drop crosses the 0.15 warmEnoughToRain boundary into SNOW: at
-            // (0,0) y=150 the drop is (150-80)*0.05/40 = 0.0875, so the FROZEN
-            // temperature is 0.2 - 0.0875 = 0.1125 < 0.15. The 0.15 boundary
-            // (>= vs >, or a drifted threshold) is only caught by sampling below
-            // AND above it.
+            // = 80 for the overworld, 17 for the End), and high enough that a
+            // FROZEN pin (0.2) minus the snow-level drop crosses the 0.15
+            // warmEnoughToRain boundary into SNOW: at (0,0) y=150 the overworld
+            // drop is (150-80)*0.05/40 = 0.0875, so the FROZEN temperature is
+            // 0.2 - 0.0875 = 0.1125 < 0.15. The 0.15 boundary (>= vs >, or a
+            // drifted threshold) is only caught by sampling below AND above it.
             int[] ys = {1, 80, 81, 100, 120, 150, 200};
-            for (int y : ys) {
-                JsonObject s = new JsonObject();
-                s.addProperty("x", x);
-                s.addProperty("y", y);
-                s.addProperty("z", z);
-                s.addProperty("seaLevel", seaLevel);
-                float t = b.getTemperature(new BlockPos(x, y, z), seaLevel);
-                s.addProperty("getTemperature", Float.floatToIntBits(t));
-                s.addProperty(
-                    "coldEnoughToSnow",
-                    b.coldEnoughToSnow(new BlockPos(x, y, z), seaLevel)
-                );
-                s.addProperty(
-                    "warmEnoughToRain",
-                    b.warmEnoughToRain(new BlockPos(x, y, z), seaLevel)
-                );
-                s.addProperty(
-                    "getPrecipitationAt",
-                    b.getPrecipitationAt(new BlockPos(x, y, z), seaLevel).getSerializedName()
-                );
-                // The FROZEN modifier's independent branch outcome computed from
-                // Paper's raw noise (see TemperatureModifier.FROZEN): the test
-                // recomputes it from the noise-array values it already pins
-                // bit-exactly against Rust, so a branch-logic drift is caught.
-                if (mod == Biome.TemperatureModifier.FROZEN) {
-                    double large = frozenLarge(x, z) * 7.0;
-                    double edge = frozenEdge(x, z);
-                    double icePatches = large + edge;
-                    double small = frozenSmall(x, z);
-                    s.addProperty("frozenPins", icePatches < 0.3 && small < 0.8);
+            for (int seaLevel : seaLevels) {
+                for (int y : ys) {
+                    JsonObject s = new JsonObject();
+                    s.addProperty("x", x);
+                    s.addProperty("y", y);
+                    s.addProperty("z", z);
+                    s.addProperty("seaLevel", seaLevel);
+                    float t = b.getTemperature(new BlockPos(x, y, z), seaLevel);
+                    s.addProperty("getTemperature", Float.floatToIntBits(t));
+                    s.addProperty(
+                        "coldEnoughToSnow",
+                        b.coldEnoughToSnow(new BlockPos(x, y, z), seaLevel)
+                    );
+                    s.addProperty(
+                        "warmEnoughToRain",
+                        b.warmEnoughToRain(new BlockPos(x, y, z), seaLevel)
+                    );
+                    s.addProperty(
+                        "getPrecipitationAt",
+                        b.getPrecipitationAt(new BlockPos(x, y, z), seaLevel).getSerializedName()
+                    );
+                    // The FROZEN modifier's independent branch outcome computed
+                    // from Paper's raw noise (see TemperatureModifier.FROZEN):
+                    // the test recomputes it from the noise-array values it
+                    // already pins bit-exactly against Rust, so a branch-logic
+                    // drift is caught.
+                    if (mod == Biome.TemperatureModifier.FROZEN) {
+                        double icePatches = frozenLarge * 7.0 + frozenEdge;
+                        s.addProperty("frozenPins", icePatches < 0.3 && frozenSmall < 0.8);
+                    }
+                    samples.add(s);
                 }
-                samples.add(s);
             }
         }
         out.add("samples", samples);

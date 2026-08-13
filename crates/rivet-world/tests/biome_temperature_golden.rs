@@ -28,6 +28,12 @@
 //! fixture straddles it (rain above, snow below), exercising the `>= 0.15`
 //! comparison and the FROZEN -> SNOW precipitation path.
 //!
+//! Every sample is captured at two `seaLevel` values (the overworld's 63 and
+//! the End's 0), which thread through `snowLevel = seaLevel + 17` and the
+//! `pos.getY() > snowLevel` boundary. A port that hardcodes the overworld
+//! snow level (80) and ignores the `sea_level` argument fails the sl=0
+//! goldens.
+//!
 //! The fixture is auto-discovered by `rivet-oracle verify`; this test embeds
 //! the same JSON via `include_str!` so it cannot silently drift from what the
 //! oracle validates.
@@ -280,17 +286,6 @@ fn frozen_fixture_covers_all_three_branch_outcomes() {
         pin_fires && outer_fails && inner_fails,
         "frozen fixture must cover pin-fires ({pin_fires}), outer-fails ({outer_fails}), inner-fails ({inner_fails})"
     );
-
-    // Sanity: the probe's per-sample `frozenPins` flag is consistent with the
-    // raw noise (the golden assert above also recomputes it per sample).
-    for s in frozen["samples"].as_array().unwrap() {
-        let x = s["x"].as_i64().unwrap();
-        let z = s["z"].as_i64().unwrap();
-        let n = noise_at(noise, x, z);
-        let ice_patches = n.frozen_large * 7.0 + n.frozen_edge;
-        let pins = ice_patches < 0.3 && n.frozen_small < 0.8;
-        assert_eq!(pins, s["frozenPins"].as_bool().unwrap(), "at ({x},{z})");
-    }
 
     // The fixture must also cross the 0.15 `warmEnoughToRain` boundary on both
     // sides so the `>= 0.15` comparison itself (and the FROZEN -> SNOW path)
