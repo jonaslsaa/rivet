@@ -1,5 +1,5 @@
-//! STUB(mc.world.level.levelgen.feature.core) — `FeatureCountTracker` (26.2),
-//! BLOCKED.
+//! STUB(mc.server.level) — `FeatureCountTracker` (26.2), BLOCKED on the
+//! `server.level` unit.
 //!
 //! Static debug-only bookkeeping (`SharedConstants.DEBUG_FEATURE_COUNT`, off in
 //! production), keyed by `ServerLevel`. Both call sites — `ChunkGenerator`'s
@@ -7,7 +7,8 @@
 //! flag. Not ported: `ServerLevel` and the logger / `Registry<PlacedFeature>`
 //! are out of this crate. Placeholder keeps the `feature.core` surface and the
 //! `PlacedFeature`→tracker edge until the `server.level` unit and a
-//! debug-count flag exist.
+//! debug-count flag exist. The tracker's real port belongs to
+//! `mc.server.level` (pending), not `feature.core`, so the marker points there.
 
 /// `net.minecraft.world.level.levelgen.feature.FeatureCountTracker`.
 ///

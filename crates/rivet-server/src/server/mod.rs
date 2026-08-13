@@ -79,6 +79,12 @@ pub struct ServerConfig {
     /// Disposable world copy supplied by the load-world harness. `None` keeps
     /// the deterministic no-level superflat boot path.
     pub level_path: Option<PathBuf>,
+    /// The world seed for the generated world (`--seed` CLI argument; Paper
+    /// `level-seed`). The superflat no-level boot uses it for the world object
+    /// and the login packet's obfuscated seed; the region-backed boot always
+    /// reads the real seed from `world_gen_settings.dat` instead (loaded-world
+    /// behavior is untouched). Defaults to the M1 superflat fixture seed.
+    pub seed: i64,
 }
 
 impl Default for ServerConfig {
@@ -97,6 +103,7 @@ impl Default for ServerConfig {
             enable_join: false,
             keepalive_timeout: Duration::from_secs(30),
             level_path: None,
+            seed: level::ServerLevelConfig::M1_FIXTURE_SEED,
         }
     }
 }
@@ -119,6 +126,13 @@ pub struct Server {
     /// `JoinConfig.is_flat`; this copy makes the `try_new` wiring observable
     /// to integration tests.
     join_is_flat: bool,
+    /// The seed the session's level advertises — the region-backed world's real
+    /// `ServerLevel.seed()` (from `world_gen_settings.dat`) when a disk level is
+    /// configured, or the config's generated-world seed (the no-level superflat
+    /// boot's seed, defaulting to the M1 fixture) otherwise. Mirrors
+    /// [`Self::join_is_flat`]; makes the `try_new` seed wiring observable to
+    /// integration tests without exposing the session's level.
+    join_seed: i64,
 }
 
 impl Server {
@@ -145,21 +159,23 @@ impl Server {
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(config.lifecycle_capacity);
         let endpoint = Arc::new(NetworkEndpoint::new(lifecycle_tx, shutdown.clone()));
         let mut tickables: Vec<Tickable> = Vec::new();
-        // The login `is_flat` flag this server advertises: `ServerLevel.isFlat()`
-        // of the booted region-backed world (the real generator type from
-        // `world_gen_settings.dat`), or the superflat default `true` when no disk
-        // level is configured.
-        let join_is_flat = region_level
-            .as_ref()
-            .map(level::ServerLevel::is_flat)
-            .unwrap_or(true);
         // Live play sessions (issue #101 Slice B): the tick-owned session manager
         // that consumes configuration→play handoffs and fires the join burst. Off
         // by default so the offline-login tests exercise the handoff seam without
         // the burst; the M1 binary enables it. The session manager is moved into
         // the tick thread by `serve` (`std::mem::take`).
-        if config.enable_join {
-            let mut session = player::session::default_session_config(config.compression_threshold);
+        //
+        // The login flags this server advertises are read from the *selected*
+        // session level after world selection: the region-backed overworld (real
+        // generator type and seed from `world_gen_settings.dat`) when a disk
+        // level is configured, the superflat default otherwise. Deriving the
+        // mirrors from the authoritative session level (rather than an
+        // independently recomputed `region_level`) means a broken
+        // `session.level` swap is caught by the integration tests, not silently
+        // masked.
+        let (join_is_flat, join_seed) = if config.enable_join {
+            let mut session =
+                player::session::default_session_config(config.compression_threshold, config.seed);
             if let Some(level) = region_level {
                 session.level = level;
                 // `ServerLevel.isFlat()` drives the login packet's `is_flat`
@@ -169,8 +185,25 @@ impl Server {
                 session.join.is_flat = session.level.is_flat();
             }
             session.keepalive_timeout_ns = config.keepalive_timeout.as_nanos() as i64;
+            let level = &session.level;
+            let flags = (level.is_flat(), level.seed());
             tickables.push(player::session::session_manager_tickable(session));
-        }
+            flags
+        } else {
+            // No live session manager installed: what a session would advertise
+            // is the booted region-backed world, or the config's generated-world
+            // seed for the no-level superflat boot.
+            (
+                region_level
+                    .as_ref()
+                    .map(level::ServerLevel::is_flat)
+                    .unwrap_or(true),
+                region_level
+                    .as_ref()
+                    .map(level::ServerLevel::seed)
+                    .unwrap_or(config.seed),
+            )
+        };
         Ok(Server {
             config,
             endpoint,
@@ -179,6 +212,7 @@ impl Server {
             tickables,
             lifecycle_rx: Some(lifecycle_rx),
             join_is_flat,
+            join_seed,
         })
     }
 
@@ -221,6 +255,12 @@ impl Server {
     /// makes the wiring observable to integration tests.
     pub fn join_is_flat(&self) -> bool {
         self.join_is_flat
+    }
+
+    /// The seed the session's level advertises — the real region-backed seed or
+    /// the config's generated-world seed.
+    pub fn join_seed(&self) -> i64 {
+        self.join_seed
     }
 
     /// Bind the TCP listener without accepting yet (tests use this to learn the
