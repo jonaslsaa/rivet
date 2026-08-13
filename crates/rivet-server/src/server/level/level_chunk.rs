@@ -1168,20 +1168,20 @@ mod tests {
             "the tamper must replace the decoded state with a different one"
         );
         let mut tampered = sections;
-        // Real predicates, so the tamper mirrors what the server would send:
-        // the air cell becoming stone bumps `nonEmptyBlockCount` by exactly one
-        // (the faithful count bookkeeping). The comparison reads states only,
-        // so the counts do not affect it.
+        // Real predicates, so the tamper mirrors what the server would send;
+        // `is_air` derives from the behavior tables, not a registry-id
+        // assumption. The comparison reads states only, so the count
+        // bookkeeping does not affect it.
         tampered[8].set_block_state(
             14,
             6,
             15,
             tampered_state,
-            &|s: &StateId| s.0 == 0, // is_air — StateId 0 is air
-            &|_| false,              // is_randomly_ticking
-            &|_| true,               // fluid_is_empty
-            &|_| false,              // fluid_is_randomly_ticking
-            &|_| false,              // is_special_colliding
+            &|s: &StateId| BlockState::new(*s).is_air(),
+            &|_| false, // is_randomly_ticking
+            &|_| true,  // fluid_is_empty
+            &|_| false, // fluid_is_randomly_ticking
+            &|_| false, // is_special_colliding
         );
         let tampered_buffer = encode_sections(&tampered);
         let tampered_sections = decode_sections(
