@@ -27,15 +27,22 @@ fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "ok:   $1"; }
 
 # --- sandbox fixtures (all old, so sweep_tmp treats them as idle) ------------
+CARGO_TAG='Signature: 8a477f597d28d172789f06886806bc55
+# This file is a cache directory tag created by cargo.
+# For information about cache directory tags see https://bford.info/cachedir/'
+GENERIC_TAG='Signature: 8a477f597d28d172789f06886806bc55
+# This file is a cache directory tag.
+# For information about cache directory tags see https://bford.info/cachedir/'
+
 mk_cargo_target() { # $1 dir; a recognizable cargo CARGO_TARGET_DIR
   mkdir -p "$1/debug/.fingerprint"
-  printf 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag.\n' > "$1/CACHEDIR.TAG"
+  printf '%s\n' "$CARGO_TAG" > "$1/CACHEDIR.TAG"
   printf '{}\n' > "$1/.rustc_info.json"
   touch -m -t 202001010000 "$1" "$1/CACHEDIR.TAG" "$1/.rustc_info.json" "$1/debug" "$1/debug/.fingerprint"
 }
 mk_tagged() { # $1 dir; generic cache: CACHEDIR.TAG only, no cargo artifacts
   mkdir -p "$1"
-  printf 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag.\n' > "$1/CACHEDIR.TAG"
+  printf '%s\n' "$GENERIC_TAG" > "$1/CACHEDIR.TAG"
   touch -m -t 202001010000 "$1" "$1/CACHEDIR.TAG"
 }
 
@@ -66,6 +73,19 @@ if is_cargo_target "$SANDBOX/$R/tag-no-profile"; then
   fail "tag + .rustc_info.json but no profile dir was classified disposable"
 else
   pass "tag + .rustc_info.json but no profile dir is refused"
+fi
+
+# hostile: generic (non-cargo) CACHEDIR.TAG content plus cargo-shaped extras
+# must still be refused — the tag's origin line is the cargo discriminator
+foreign="$SANDBOX/$R/foreign-tag"
+mkdir -p "$foreign/debug"
+printf 'Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag.\n' > "$foreign/CACHEDIR.TAG"
+printf '{}\n' > "$foreign/.rustc_info.json"
+touch -m -t 202001010000 "$foreign" "$foreign/CACHEDIR.TAG" "$foreign/.rustc_info.json" "$foreign/debug"
+if is_cargo_target "$foreign"; then
+  fail "dir with generic tag content + .rustc_info.json + profile was classified disposable"
+else
+  pass "generic tag content is refused even with cargo-shaped extras"
 fi
 
 mk_cargo_target "$SANDBOX/$R/source-root"

@@ -2,7 +2,7 @@
 # prune-worktrees.sh — reclaim disk from accumulated git worktrees and tmp scratch.
 #
 # Rebuilds are cheap in this workspace (cold cargo check ~8s, cold test build
-# ~18s as of 2026-08), so target/ dirs are disposable cache. Policy:
+# ~18s as of 2026-08), so cargo target/ dirs are disposable cache. Policy:
 #   - worktree clean AND fully merged into origin/main  -> remove worktree (+ branch)
 #   - anything else idle for more than IDLE_HOURS        -> delete its build caches
 #   - dirty or unmerged checkouts are never removed
@@ -14,13 +14,14 @@
 # Agents also build into throwaway CARGO_TARGET_DIRs under /tmp (review checkouts,
 # probe dirs, per-ticket target dirs), which no worktree sweep can see. Those
 # accumulated to 39GB unnoticed in 2026-08, so the tmp sweep runs by default.
-# A /tmp child is removed wholesale only when it is an unambiguous bare cargo
-# target dir: CACHEDIR.TAG plus cargo's own .rustc_info.json and a profile dir,
-# and no source/VCS evidence. CACHEDIR.TAG alone is not enough — generic cache
-# tools drop that marker too, and a checkout can carry one at its root; the old
-# tag-only check would have rm -rf'd both a source checkout and an unrelated
-# cache. A checkout's nested target/ dirs are pruned on their own, never the
-# checkout.
+#
+# Both sweeps remove a directory only when it is clearly disposable cargo build
+# scratch: a CACHEDIR.TAG that cargo itself wrote, cargo's .rustc_info.json, a
+# profile output dir, and no source/VCS evidence (Cargo.toml/.git). The generic
+# CACHEDIR.TAG marker alone is not enough — any cache tool drops one, and a
+# checkout can carry one at its root; the old tag-only check would have rm -rf'd
+# both a source checkout and an unrelated cache. A checkout's nested target/
+# dirs are pruned individually, never the checkout itself.
 #
 # Usage: scripts/prune-worktrees.sh [--dry-run] [--idle-hours N] [--no-tmp]  (default 24)
 set -uo pipefail
@@ -41,11 +42,11 @@ act() { # mutation verb for this mode; a dry run must not claim it happened
 
 dir_kb() { local kb; kb=$(du -sk "$1" 2>/dev/null | cut -f1); echo "${kb:-0}"; }
 
-cache_dirs() { # tools/* are excluded from the workspace, so each has its own target/
+cache_dirs() { # only clearly disposable cargo scratch; tools/* have their own target/
   local d
-  [ -d "$1/target" ] && echo "$1/target"
+  [ -d "$1/target" ] && is_cargo_target "$1/target" && echo "$1/target"
   for d in "$1"/tools/*/target; do
-    [ -d "$d" ] && echo "$d"
+    [ -d "$d" ] && is_cargo_target "$d" && echo "$d"
   done
   return 0
 }
@@ -70,13 +71,15 @@ has_cargo_profile() { # any profile output tree, native or cross-compiled
 }
 
 is_cargo_target() { # is $1 an unambiguous cargo CARGO_TARGET_DIR (safe to delete)?
-  # Cargo marks every target dir with CACHEDIR.TAG, but that marker alone is
-  # too generic: any cache tool can drop one, so the old tag-only check would
-  # rm -rf a whole /tmp child (source checkout or unrelated cache) on that
-  # basis. Only a dir carrying cargo's own build markers and no source/VCS
-  # evidence is disposable build scratch.
+  # Cargo marks every target dir with a CACHEDIR.TAG it wrote itself, so the
+  # tag's origin line identifies it; generic cache tools drop their own tag
+  # with a different (or no) origin, and a checkout can carry one at its root.
+  # The old tag-presence-only check would rm -rf a whole /tmp child (source
+  # checkout or unrelated cache) on that basis. Only a dir carrying cargo's own
+  # build markers and no source/VCS evidence is disposable build scratch.
   local d=$1
   [ -f "$d/CACHEDIR.TAG" ] || return 1
+  grep -q "cache directory tag created by cargo" "$d/CACHEDIR.TAG" || return 1
   [ -f "$d/.rustc_info.json" ] || return 1
   has_cargo_profile "$d" || return 1
   [ -e "$d/Cargo.toml" ] && return 1
