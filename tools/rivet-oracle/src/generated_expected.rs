@@ -769,6 +769,13 @@ fn parse_cli(rest: &[&str]) -> Result<CliArgs, Error> {
                         "generated-expected --to requires a destination path".into(),
                     ));
                 };
+                // An option token is never a destination: `--to --tamper` is a
+                // usage error, not a capture written to a file named `--tamper`.
+                if path.starts_with('-') {
+                    return Err(Error::Gate(
+                        "generated-expected --to requires a destination path, not an option".into(),
+                    ));
+                }
                 to = Some(PathBuf::from(path));
                 i += 2;
             }
@@ -1251,6 +1258,12 @@ mod tests {
         // Missing --to value -> Gate.
         assert!(matches!(
             parse_cli(&["42", "--to"]),
+            Err(crate::Error::Gate(_))
+        ));
+        // --to swallowing an option token is a usage error, never a capture
+        // written to a file named after the option.
+        assert!(matches!(
+            parse_cli(&["42", "--to", "--tamper"]),
             Err(crate::Error::Gate(_))
         ));
         // Unknown option -> Gate.
