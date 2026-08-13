@@ -42,8 +42,9 @@
 //! `getSpawnHeight` (64) and `getFirstFreeHeight`/`getFirstOccupiedHeight`
 //! (delegating to `getBaseHeight`). The remaining Java defaults (`createState`,
 //! `findNearestMapStructure`, `addVanillaDecorations`, `applyBiomeDecoration`,
-//! `getMobsAt`, `validate`, `getTypeNameForDataFixer`) defer with their owning
-//! units (RivetTodo #185).
+//! `getMobsAt`, `validate`, `getTypeNameForDataFixer`) and the protected
+//! abstract `codec()` (the `CODEC` dispatch key) defer with their owning units
+//! (RivetTodo #185).
 //!
 //! `createStructures`/`createReferences` and the biome-membership read
 //! (`getBiomeGenerationSettings(biome).hasFeature(feature)`, RivetTodo #178)
