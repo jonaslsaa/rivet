@@ -42,6 +42,7 @@ pub mod mth_stubs;
 pub mod problem_reporter;
 pub mod random;
 pub mod simple_bit_storage;
+pub mod static_cache2d;
 pub mod string_representable;
 pub mod util;
 pub mod valueproviders;
@@ -75,6 +76,7 @@ pub use random::{PositionalRandomFactory, RandomSource};
 // Module alias for the generated `mth_golden_tests.rs`, which references the
 // RNG unit as `crate::random_source` (Java class `RandomSource`).
 pub use random as random_source;
+pub use static_cache2d::StaticCache2D;
 pub use string_representable::StringRepresentable;
 pub use util::{
     LazyValueMap, fixed_size, fixed_size_i32, fixed_size_i64, get_random, get_random_safe,
