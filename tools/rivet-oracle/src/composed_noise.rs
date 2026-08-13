@@ -1180,6 +1180,50 @@ mod tests {
         ));
     }
 
+    /// In the full flow, an unrelated scratch verification failure must
+    /// propagate, never be reported as a detected tamper. A committed tree
+    /// whose manifest also captures a second file (present on disk, so the
+    /// baseline verifies) is tampered: the scratch copy omits that second file
+    /// (tamper copies only the manifest + golden), so scratch verification
+    /// fails with "captured file ... missing" before the golden hash is even
+    /// reached — and the control must surface that Manifest error, not Ok.
+    #[test]
+    fn tamper_propagates_unrelated_scratch_failure() {
+        let src = fixtures_dir().join("composed-noise");
+        require_fixture(&src);
+        let dir = scratch("tamper-unrelated");
+        fs::copy(
+            src.join(FIXTURE_BASENAME),
+            dir.path().join(FIXTURE_BASENAME),
+        )
+        .unwrap();
+        // A second captured file, present in the committed tree (baseline
+        // verifies) and ordered BEFORE the golden so the scratch hash loop hits
+        // it (missing) first.
+        fs::write(dir.path().join("extra.bin"), b"extra").unwrap();
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(src.join("manifest.json")).unwrap()).unwrap();
+        let golden_entry = manifest["captured"][0].clone();
+        manifest["captured"] = serde_json::json!([
+            { "path": "extra.bin", "sha256": sha256_hex(b"extra"), "bytes": 5 },
+            golden_entry
+        ]);
+        fs::write(
+            dir.path().join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        // Baseline verify must pass (both files present).
+        verify_composed_noise(dir.path()).expect("baseline with the extra file must verify");
+        // The control must hard-fail with the missing extra.bin error — NOT
+        // report detection (Ok).
+        let result = tamper_negative_control(dir.path());
+        assert!(
+            matches!(result, Err(crate::Error::Manifest(_))),
+            "an unrelated scratch failure must propagate, not pass as a detected tamper: {result:?}"
+        );
+    }
+
     /// The flip must keep the golden valid UTF-8 JSON so the tamper is caught
     /// by the hash gate, not a decode failure: flipping one digit of a sample
     /// `bits` value changes the raw bytes while staying parseable.
