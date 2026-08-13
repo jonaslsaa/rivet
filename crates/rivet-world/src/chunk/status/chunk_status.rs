@@ -106,6 +106,13 @@ impl ChunkStatus {
         self.index() < other.index()
     }
 
+    /// `ChunkStatus.isOrBefore(ChunkStatus)` — `this.getIndex() <=
+    /// other.getIndex()` (the pipeline ring/status contract `WorldGenRegion`
+    /// uses to bound a requested status by the step's per-ring dependency).
+    pub const fn is_or_before(self, other: Self) -> bool {
+        self.index() <= other.index()
+    }
+
     /// `ChunkStatus.getParent()` — the previous rung of the ladder; `EMPTY`
     /// is its own parent (Java stores `this` when the parent is null). Derived
     /// from `ALL`/index order so there is a single source of truth for the
@@ -167,7 +174,20 @@ mod tests {
                 }
             );
             assert_eq!(status.is_or_after(ChunkStatus::Light), status.index() >= 9);
+            assert_eq!(status.is_or_before(ChunkStatus::Light), status.index() <= 9);
+            assert_eq!(status.is_before(ChunkStatus::Light), status.index() < 9);
+            assert_eq!(status.is_after(ChunkStatus::Light), status.index() > 9);
         }
+        // The exact ladder bounds: `is_or_before` is inclusive, `is_or_after`
+        // is inclusive, and the strict `is_before`/`is_after` are exclusive.
+        assert!(ChunkStatus::Empty.is_or_before(ChunkStatus::Full));
+        assert!(!ChunkStatus::Full.is_or_before(ChunkStatus::Features));
+        assert!(!ChunkStatus::Light.is_before(ChunkStatus::Light));
+        assert!(!ChunkStatus::Light.is_after(ChunkStatus::Light));
+        assert_eq!(
+            ChunkStatus::Features.serialization_name(),
+            "minecraft:features"
+        );
         assert_eq!(
             ChunkStatus::Surface.heightmaps_after(),
             &WORLDGEN_HEIGHTMAPS

@@ -853,22 +853,27 @@ fn verify_fixtures_dir(dir: &Path) -> Result<(), Error> {
 }
 
 /// Every fixture *kind* that carries its own manifest under `fixtures/`: the
-/// M0 root (`fixtures/manifest.json`) plus each subdir with a `manifest.json`
+/// M0 root (`<root>/manifest.json`) plus each subdir with a `manifest.json`
 /// (recursive — `fixtures/worldgen/` and `fixtures/regions/overworld-normal/`
 /// both qualify today, and kinds may nest arbitrarily). Kinds verify
-/// independently and can grow without a format migration.
-fn all_fixture_manifests() -> Vec<PathBuf> {
-    let root = crate_dir().join("fixtures");
+/// independently and can grow without a format migration. The
+/// `<root>/composed-noise` dir is excluded: its golden has a strict
+/// missing-prerequisite contract of its own, handled after the generic kinds.
+fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
+    let composed_noise = root.join("composed-noise");
     let mut out = Vec::new();
     if root.join("manifest.json").is_file() {
-        out.push(root.clone());
+        out.push(root.to_path_buf());
     }
-    let mut walk = vec![root.clone()];
+    let mut walk = vec![root.to_path_buf()];
     while let Some(dir) = walk.pop() {
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if !path.is_dir() {
+                    continue;
+                }
+                if path == composed_noise {
                     continue;
                 }
                 if path.join("manifest.json").is_file() {
@@ -884,51 +889,62 @@ fn all_fixture_manifests() -> Vec<PathBuf> {
 
 /// The default (no-arg) mode: verify every committed fixture kind.
 fn verify_all_fixture_kinds() -> Result<(), Error> {
-    let kinds = all_fixture_manifests();
-    if kinds.is_empty() {
-        return Err(Error::Manifest(
-            "no fixture manifests found under fixtures/ (run scripts/extract_fixtures.py first)"
-                .into(),
-        ));
-    }
-    println!("verifying all committed fixture kinds:");
-    for d in &kinds {
-        let rel = d
-            .strip_prefix(crate_dir())
-            .unwrap_or(d)
-            .display()
-            .to_string();
-        println!("  - {rel}");
-    }
-    println!();
-    let mut failed = 0;
-    for d in &kinds {
-        match verify_fixtures_dir(d) {
-            Ok(()) => println!(),
-            Err(e) => {
-                eprintln!("rivet-oracle: {e}");
-                eprintln!();
-                failed += 1;
+    verify_all_fixture_kinds_from(&crate_dir().join("fixtures"))
+}
+
+/// Verify every committed fixture kind under `root`.
+///
+/// Generic kinds (auto-discovered by manifest) verify first, surfacing their
+/// hard failures (exit 1) before the composed-noise golden is consulted. The
+/// composed-noise dir is excluded from the generic walk: its golden is
+/// load-bearing in every run and carries its own tri-state contract
+/// (`composed_noise::FixtureState`) — wholly absent is `Error::Unverified`
+/// (exit 3), partial/corrupt hard-fails (exit 1) — asserted after the generic
+/// kinds pass. A root with no generic kinds still reaches that classification.
+fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
+    let kinds = all_fixture_manifests_from(root);
+    let composed_noise_dir = root.join("composed-noise");
+    if !kinds.is_empty() {
+        println!("verifying all committed fixture kinds:");
+        for d in &kinds {
+            // The root fixture kind labels as the root dir's name (e.g. "fixtures"),
+            // never the empty relative path.
+            let rel = if d == root {
+                root.file_name()
+                    .unwrap_or(d.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                d.strip_prefix(root).unwrap_or(d).display().to_string()
+            };
+            println!("  - {rel}");
+        }
+        println!();
+        let mut failed = 0;
+        for d in &kinds {
+            match verify_fixtures_dir(d) {
+                Ok(()) => println!(),
+                Err(e) => {
+                    eprintln!("rivet-oracle: {e}");
+                    eprintln!();
+                    failed += 1;
+                }
             }
         }
-    }
-    if failed != 0 {
-        return Err(Error::Manifest(format!(
-            "{failed} of {} fixture kinds failed verification",
+        if failed != 0 {
+            return Err(Error::Manifest(format!(
+                "{failed} of {} fixture kinds failed verification",
+                kinds.len()
+            )));
+        }
+        // Qualified to the generic kinds: the composed-noise golden is verified
+        // separately below, so this line never claims an overall green early.
+        println!(
+            "PASS: all {} generic fixture kinds match their manifest SHA-256s",
             kinds.len()
-        )));
+        );
     }
-    println!(
-        "PASS: all {} fixture kinds match their manifest SHA-256s",
-        kinds.len()
-    );
-    // The composed-noise golden comparison: beyond the manifest hashes, assert
-    // the NOISE-checkpoint goldens (provenance, FULL_CHUNK_STEP reachability,
-    // non-vacuous #175 matrix) and print the status/provenance scoreboard. The
-    // committed seed-42 golden is a load-bearing deliverable — if the fixture
-    // tree is absent this is UNVERIFIED (exit 3), never a silent green (D8:
-    // never weaken/delete fixtures to go green).
-    verify_composed_noise_step(&crate_dir().join("fixtures/composed-noise"))?;
+    verify_composed_noise_step(&composed_noise_dir)?;
     // The post-surface column oracle (issue #179): beyond the manifest hashes,
     // assert the SURFACE-checkpoint goldens (pinned provenance, the #175 matrix,
     // and non-vacuity — every column must show real post-surface block changes,
@@ -957,17 +973,10 @@ fn verify_surface_column_step(dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Verify the committed composed-noise golden, failing with `Error::Unverified`
-/// (exit 3) when the fixture tree is absent rather than silently skipping it.
+/// Verify the committed composed-noise golden; the absent-golden exit-3
+/// contract lives in `composed_noise::require_fixture_tree`.
 fn verify_composed_noise_step(dir: &Path) -> Result<(), Error> {
-    if !dir.join("manifest.json").is_file() {
-        return Err(Error::Unverified(format!(
-            "composed-noise fixtures {} are ABSENT — the seed-42 golden and its \
-             NOISE-checkpoint gate cannot verify (git checkout or regenerate via \
-             --composed-noise); refusing to pass green without them",
-            dir.display()
-        )));
-    }
+    composed_noise::require_fixture_tree(dir)?;
     composed_noise::verify_composed_noise(dir)?;
     println!(
         "PASS: composed-noise seed-42 golden verified (pinned Paper 0a99345 provenance, reachability, value↔bits round-trip)"
@@ -3333,15 +3342,21 @@ fn run() -> Result<(), Error> {
             //   cargo run -p rivet-oracle -- composed-noise --tamper   negative control
             //   cargo run -p rivet-oracle -- composed-noise --sample   regenerate from pinned Paper
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            // --help is accepted only as the sole argument; combined with a mode
+            // or another flag it is a hard usage error via parse_mode below.
+            if matches!(rest.as_slice(), ["--help"] | ["-h"]) {
+                print_usage();
+                return Ok(());
+            }
             let dir = crate_dir().join("fixtures/composed-noise");
-            if rest.contains(&"--tamper") {
-                composed_noise::tamper_negative_control(&dir)
-            } else if rest.contains(&"--sample") {
-                composed_noise::run_probe(&dir)
-            } else {
-                composed_noise::verify_composed_noise(&dir)?;
-                composed_noise::print_scoreboard();
-                Ok(())
+            match composed_noise::parse_mode(&rest)? {
+                composed_noise::ComposedNoiseMode::Tamper => {
+                    composed_noise::tamper_negative_control(&dir)
+                }
+                composed_noise::ComposedNoiseMode::Sample => composed_noise::run_probe(&dir),
+                composed_noise::ComposedNoiseMode::Verify => {
+                    crate::verify_composed_noise_step(&dir)
+                }
             }
         }
         Some("surface-column") => {

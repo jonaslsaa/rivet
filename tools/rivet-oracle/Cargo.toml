@@ -23,9 +23,9 @@ rivet-util = { path = "../../crates/rivet-util" }
 # table. It is a pure read of the disposable world copy — never a write.
 rivet-world = { path = "../../crates/rivet-world" }
 rivet-registry = { path = "../../crates/rivet-registry", features = ["blocks"] }
+# The composed-noise tamper negative control tampers a scratch copy so the
+# committed golden is never mutated; TempDir guarantees the scratch dir is
+# removed on every path.
+tempfile = { workspace = true }
 
 [dev-dependencies]
-# The loaded-world extractor tests build synthetic disposable worlds (a real
-# 26.2 region file inside a tempdir) and assert the extraction never mutates
-# them.
-tempfile = { workspace = true }
