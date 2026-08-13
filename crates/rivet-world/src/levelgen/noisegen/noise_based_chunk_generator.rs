@@ -763,7 +763,15 @@ pub fn create_fluid_picker(settings: &NoiseGeneratorSettings) -> GlobalFluidPick
 /// The per-state flags a `Heightmap.Types` predicate needs (`getBaseHeight`'s
 /// tester). `has_fluid`/`is_leaves` are unused by the two worldgen types
 /// (`WORLD_SURFACE_WG` reads `is_air`, `OCEAN_FLOOR_WG` reads `blocks_motion`)
-/// but resolved faithfully (`!fluidState.isEmpty()`, `BlockTags.LEAVES`).
+/// but resolved: `has_fluid` faithfully (`!fluidState.isEmpty()`); `is_leaves`
+/// by the generated `minecraft:leaves` tag — a deliberate approximation of
+/// Java's `getBlock() instanceof LeavesBlock`, which is a concrete-class
+/// check, not a tag-membership check. The generated tag holds exactly the 11
+/// vanilla `*_leaves` blocks, every one a `LeavesBlock` subclass, so the two
+/// agree for all vanilla blocks; they would only diverge for a custom block
+/// added to the tag without being a `LeavesBlock` subclass — a latent
+/// deviation if the generic `Types.isOpaque` path is ever wired to
+/// `MOTION_BLOCKING_NO_LEAVES` with such a block.
 ///
 /// This places the string-based `is_in_tag("minecraft:leaves")` lookup — a
 /// HashMap lookup plus a linear scan over the leaves tag, explicitly not on
