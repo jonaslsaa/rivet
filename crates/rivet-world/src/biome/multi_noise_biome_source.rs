@@ -439,7 +439,7 @@ fn from_decoded<Ops: DynamicOps + 'static + RegistryOpsLookup>(
                 None,
             ))
         }
-        Either::Right(holder @ Holder::Reference { registry, .. }) => {
+        Either::Right(holder @ Holder::Reference { .. }) => {
             match resolve_reference_preset(&holder, ops) {
                 Some((resolved, preset_key)) => DataResult::success(MultiNoiseBiomeSource::new(
                     Either::right(holder),
@@ -448,7 +448,7 @@ fn from_decoded<Ops: DynamicOps + 'static + RegistryOpsLookup>(
                 )),
                 None => DataResult::error(format!(
                     "Trying to access unbound value 'null' from registry {}",
-                    registry.0
+                    *keys::MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST
                 )),
             }
         }

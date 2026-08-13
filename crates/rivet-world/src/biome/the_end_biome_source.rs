@@ -160,11 +160,14 @@ impl BiomeSource for TheEndBiomeSource {
     }
 
     fn possible_biomes(&self) -> Vec<Holder<BiomeId>> {
-        // Java's `Suppliers.memoize` lives on the abstract `BiomeSource` base,
-        // so the End source memoizes too (the five holders are fixed at
-        // construction).
+        // Java's `Suppliers.memoize` lives on the abstract `BiomeSource` base
+        // (`collectPossibleBiomes().distinct().collect(toImmutableSet())`), so
+        // the End source memoizes the collect+dedup too (the five holders are
+        // fixed at construction).
         self.possible_biomes
-            .get_or_init(|| self.collect_possible_biomes())
+            .get_or_init(|| {
+                crate::biome::biome_source::dedupe_possible_biomes(self.collect_possible_biomes())
+            })
             .clone()
     }
 
@@ -219,6 +222,16 @@ mod tests {
     fn end_source() -> TheEndBiomeSource {
         let h = |id: u16| Holder::direct(BiomeId::from_id(id));
         TheEndBiomeSource::new(h(9), h(40), h(41), h(42), h(43))
+    }
+
+    #[test]
+    fn possible_biomes_dedupes_value_equal_duplicates() {
+        // Java's abstract `possibleBiomes` = `collectPossibleBiomes().distinct()
+        // .collect(toImmutableSet())`; a source whose fields alias the same
+        // biome reports the deduped set, not the five raw fields.
+        let h = |id: u16| Holder::direct(BiomeId::from_id(id));
+        let src = TheEndBiomeSource::new(h(9), h(9), h(40), h(40), h(43));
+        assert_eq!(src.possible_biomes(), vec![h(9), h(40), h(43)]);
     }
 
     #[test]

@@ -56,13 +56,12 @@
 //! `i32::wrapping_abs`.
 //! `possibleBiomes` is Java's `Suppliers.memoize` over
 //! `distinct().collect(toImmutableSet())` — computed once on first read and
-//! cached. The `fixed`/`checkerboard`/`multi_noise` sources port the memo as a
-//! per-instance `OnceLock` (see [`BiomeSource::possible_biomes`] and
-//! [`dedupe_possible_biomes`]); `the_end` uses the trait default, which
-//! recomputes the collect+dedup per call. Either way the sources are immutable
-//! value tables, so the recomputed set matches Java's memoized one (Guava's
-//! `ImmutableSet` preserves iteration order, so the port's insertion-order
-//! `Vec` matches; `Holder` is not `Hash`, so the dedup is a linear scan).
+//! cached. All four sources port the memo as a per-instance `OnceLock` (see
+//! [`BiomeSource::possible_biomes`] and [`dedupe_possible_biomes`]), the
+//! `the_end` source included. The sources are immutable value tables, so the
+//! cached collect+dedup matches Java's memoized set (Guava's `ImmutableSet`
+//! preserves iteration order, so the port's insertion-order `Vec` matches;
+//! `Holder` is not `Hash`, so the dedup is a linear scan).
 //! `getBiomesWithin` is Java's unordered `Sets.newHashSet` — the port keeps the
 //! quart-scan order in a `Vec`, an order Java does not guarantee.
 //!
