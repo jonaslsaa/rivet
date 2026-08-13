@@ -383,7 +383,7 @@ impl NoiseBasedChunkGenerator {
     ) -> BlockState {
         if rivet_core::shared_constants::DEBUG_AQUIFERS && pos_z >= 0 && pos_z % 4 == 0 {
             let preliminary_surface_level = noise_chunk.preliminary_surface_level(pos_x, pos_z);
-            let adjusted_surface_level = preliminary_surface_level + 8;
+            let adjusted_surface_level = preliminary_surface_level.wrapping_add(8);
             if pos_y == adjusted_surface_level {
                 if adjusted_surface_level < self.get_sea_level() {
                     return Blocks::SLIME_BLOCK.default_block_state();
