@@ -1771,7 +1771,9 @@ mod tests {
     }
 
     /// The `test_settings` router with an arbitrary `finalDensity`.
-    fn test_settings_with_final_density(final_density: Arc<dyn DensityFunction>) -> NoiseGeneratorSettings {
+    fn test_settings_with_final_density(
+        final_density: Arc<dyn DensityFunction>,
+    ) -> NoiseGeneratorSettings {
         let z = fns::zero();
         let router = NoiseRouter::new(
             z.clone(),
@@ -2069,11 +2071,7 @@ mod tests {
         // Read the one registered `CacheAllInCell` (the `fullNoiseDensity`
         // wrapper) and verify its in-cell values are the lerp3 `y/8` — not the
         // raw `(y/8)^2` the pre-fix `forIndex` snapshot produced.
-        let values = chunk
-            .state
-            .lock()
-            .unwrap()
-            .cell_caches[0]
+        let values = chunk.state.lock().unwrap().cell_caches[0]
             .values
             .lock()
             .unwrap()
