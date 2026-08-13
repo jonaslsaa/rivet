@@ -137,6 +137,10 @@ where
     ) -> Result<(), GenError> {
         match step.task() {
             // EMPTY, and the STRUCTURE_STARTS/STRUCTURE_REFERENCES pass-through.
+            // RivetTodo(#185): the real structure bodies call
+            // `generator.createStructures`/`createReferences` and
+            // `level.onStructureStartsAvailable` (the `mc.world.level.chunk
+            // .generator` wave); they are pass-throughs in the value layer.
             ChunkStatusTask::PassThrough
             | ChunkStatusTask::GenerateStructureStarts
             | ChunkStatusTask::LoadStructureStarts
