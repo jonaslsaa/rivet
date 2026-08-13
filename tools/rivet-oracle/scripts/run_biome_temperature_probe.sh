@@ -15,18 +15,20 @@
 # and `RIVET_PAPER_LIBRARIES` override it.
 #
 # Usage:
-#   scripts/run_biome_temperature_probe.sh [out-file] [paper-pin]
+#   scripts/run_biome_temperature_probe.sh [out-dir] [paper-pin]
 #   RIVET_PAPER_RUNTIME_JAR=/path/to/versions/26.2/paper-26.2.jar \
 #   RIVET_PAPER_LIBRARIES=/path/to/libraries scripts/run_biome_temperature_probe.sh
 #
-# The default output is `fixtures/biome-temperature/biome-temperature.json` (in
-# place), so after a run the committed fixture + its manifest SHA-256s are
-# byte-identical iff the runtime is unchanged. Re-run `rivet-oracle verify`
-# after any output change.
+# The first argument is the OUTPUT DIRECTORY, not a file path: the probe
+# hardcodes the basename `biome-temperature.json` and writes it (plus a
+# refreshed manifest.json) into that directory. The default is
+# `fixtures/biome-temperature/` (in place), so after a run the committed
+# fixture + its manifest SHA-256s are byte-identical iff the runtime is
+# unchanged. Re-run `rivet-oracle verify` after any output change.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_FILE="${1:-$ROOT/fixtures/biome-temperature/biome-temperature.json}"
+OUT_DIR="${1:-$ROOT/fixtures/biome-temperature}"
 PAPER_PIN="${2:-26.2-DEV-main@0a99345}"
 
 RUNTIME_JAR="${RIVET_PAPER_RUNTIME_JAR:-$ROOT/work/run/versions/26.2/paper-26.2.jar}"
@@ -49,7 +51,6 @@ mkdir -p "$CLASSES"
 CP="$RUNTIME_JAR:$LIBS$CLASSES"
 
 javac -cp "$CP" -d "$CLASSES" "$ROOT/src/java/BiomeTemperatureProbe.java"
-OUT_DIR="$(dirname "$OUT_FILE")"
 mkdir -p "$OUT_DIR"
 java -Xms256M -Xmx2G -cp "$CP" BiomeTemperatureProbe \
   --output "$OUT_DIR" --paper "$PAPER_PIN"

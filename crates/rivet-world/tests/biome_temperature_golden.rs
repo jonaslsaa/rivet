@@ -9,12 +9,22 @@
 //! raw noise samples into
 //! `tools/rivet-oracle/fixtures/biome-temperature/biome-temperature.json`. Each
 //! `assert_eq!` compares the full 32-bit float pattern, so any arithmetic,
-//! noise, or promotion drift from Java fails the test. The FROZEN modifier's
-//! branch analysis (`frozenIcePatches`/`frozenSmall`/`frozenPins`) is computed
-//! from Paper's raw noise in the probe, so the outer (`icePatches < 0.3`) and
-//! inner (`groundValueSmallVariation < 0.8`) sub-checks are independently
-//! discriminable — the fixture includes positions for all three outcomes (pin
-//! fires, outer fails, inner fails).
+//! noise, or promotion drift from Java fails the test.
+//!
+//! The fixture pins the FROZEN modifier's branch decision two ways:
+//! - the raw `FROZEN_TEMPERATURE_NOISE` / `BIOME_INFO_NOISE` samples are
+//!   asserted bit-exactly against Rust, so an amplitude/octave drift in either
+//!   noise port fails even when it does not flip a sampled branch decision;
+//! - the position grid includes coordinates that sit near the branch
+//!   thresholds (`ice_patches ~ 0.3`, `groundValueSmallVariation ~ 0.8`) so a
+//!   moderate constant drift in `modify_temperature` (the `* 7.0` amplitude,
+//!   the `0.3`/`0.8` gates, the `0.2` edge scale) flips a sampled branch
+//!   decision and the aggregate `getTemperature` golden fails.
+//!
+//! The grid also samples high Y values so the FROZEN pin (`0.2`) minus the
+//! snow-level drop crosses the `0.15` `warmEnoughToRain` boundary — the
+//! fixture straddles it (rain above, snow below), exercising the `>= 0.15`
+//! comparison and the FROZEN -> SNOW precipitation path.
 //!
 //! The fixture is auto-discovered by `rivet-oracle verify`; this test embeds
 //! the same JSON via `include_str!` so it cannot silently drift from what the
@@ -34,6 +44,21 @@ const FIXTURE: &str =
 
 fn fixture() -> Value {
     serde_json::from_str(FIXTURE).expect("fixture JSON parses")
+}
+
+/// The pinned Paper commit the fixture was captured against. The probe and the
+/// runner default to this same pin; a drifted oracle (regenerated against a
+/// different commit) fails this test instead of silently becoming truth.
+const PAPER_PIN: &str = "26.2-DEV-main@0a99345";
+
+#[test]
+fn fixture_was_captured_against_pinned_paper() {
+    let data = fixture();
+    assert_eq!(
+        data["paper"].as_str().unwrap(),
+        PAPER_PIN,
+        "fixture must be captured against the pinned Paper commit"
+    );
 }
 
 /// `Float.floatToIntBits` stored as a JSON number (an int, possibly negative).
@@ -63,6 +88,7 @@ fn build_biome(has_precipitation: bool, temperature: f32, modifier: TemperatureM
 
 /// The per-(x,z) raw noise the temperature arithmetic consumes.
 struct NoiseAt {
+    temperature_noise: f64,
     snow_level_v: f32,
     frozen_large: f64,
     frozen_edge: f64,
@@ -76,6 +102,7 @@ fn noise_at(noise: &Value, x: i64, z: i64) -> NoiseAt {
             let frozen_edge = f64::from_bits(double_bits(&entry["frozenEdge"]));
             let frozen_small = f64::from_bits(double_bits(&entry["frozenSmall"]));
             return NoiseAt {
+                temperature_noise: f64::from_bits(double_bits(&entry["temperatureNoise"])),
                 snow_level_v: f32::from_bits(float_bits(&entry["snowLevelV"])),
                 frozen_large,
                 frozen_edge,
@@ -108,14 +135,20 @@ fn temperature_outputs_match_paper_exactly() {
             let sea_level = s["seaLevel"].as_i64().unwrap() as i32;
             let pos = BlockPos::new(x as i32, y as i32, z as i32);
 
-            // The snow-level `v` term — `(float)(TEMPERATURE_NOISE.getValue(
-            // x / 8.0F, z / 8.0F, false) * 8.0)` — validated directly against
-            // Paper's raw noise, independent of the aggregate output.
+            // The snow-level noise — `TEMPERATURE_NOISE.getValue(x / 8.0F,
+            // z / 8.0F, false)` — pinned against Paper's raw double AND its
+            // `(float)(raw * 8.0)` truncation, independent of the aggregate
+            // output.
             let n = noise_at(noise, x, z);
             let raw = TEMPERATURE_NOISE.get_value(
                 (x as f32 / 8.0) as f64,
                 (z as f32 / 8.0) as f64,
                 false,
+            );
+            assert_eq!(
+                raw.to_bits(),
+                n.temperature_noise.to_bits(),
+                "TEMPERATURE_NOISE raw double at ({x},{z})"
             );
             assert_eq!(
                 ((raw * 8.0) as f32).to_bits(),
@@ -240,4 +273,35 @@ fn frozen_fixture_covers_all_three_branch_outcomes() {
         let pins = ice_patches < 0.3 && n.frozen_small < 0.8;
         assert_eq!(pins, s["frozenPins"].as_bool().unwrap(), "at ({x},{z})");
     }
+
+    // The fixture must also cross the 0.15 `warmEnoughToRain` boundary on both
+    // sides so the `>= 0.15` comparison itself (and the FROZEN -> SNOW path)
+    // is exercised: a drift to `> 0.15` or a shifted threshold is otherwise
+    // masked by every sample landing on one side. FROZEN reaches the boundary
+    // only at high y (the pin 0.2 minus the snow-level drop).
+    let mut above_015 = false;
+    let mut below_015 = false;
+    for s in frozen["samples"].as_array().unwrap() {
+        let t = f32::from_bits(float_bits(&s["getTemperature"]));
+        if t >= 0.15 {
+            above_015 = true;
+        } else {
+            below_015 = true;
+        }
+    }
+    assert!(
+        above_015 && below_015,
+        "frozen fixture must straddle the 0.15 warmEnoughToRain boundary (above {above_015}, below {below_015})"
+    );
+
+    // ... and the FROZEN -> SNOW precipitation path must actually fire.
+    let any_snow = frozen["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["getPrecipitationAt"] == "snow");
+    assert!(
+        any_snow,
+        "frozen fixture must produce at least one SNOW sample"
+    );
 }

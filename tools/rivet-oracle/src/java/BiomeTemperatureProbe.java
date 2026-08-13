@@ -44,11 +44,22 @@ public final class BiomeTemperatureProbe {
         net.minecraft.server.Bootstrap.bootStrap();
 
         // The shared position grid: every sample and every noise probe use the
-        // same (x, z) set so the Rust side can correlate them.
+        // same (x, z) set so the Rust side can correlate them. Includes
+        // positions that sit near the FROZEN modifier's branch thresholds
+        // (ice_patches ~ 0.3, groundValueSmallVariation ~ 0.8) so a moderate
+        // constant drift (e.g. the * 7.0 amplitude, the 0.3/0.8 gates, the
+        // edge scale) flips a sampled branch decision instead of being masked.
+        // `outer` positions bracket the 0.3 gate on both sides; `inner`
+        // positions bracket the 0.8 small-variation gate (with ice < 0.3 so
+        // the inner gate is the deciding one).
         int[][] grid = {
             {0, 0}, {0, 8}, {8, 0}, {16, 16}, {32, 0}, {0, 32}, {100, 50}, {-50, 100},
             {200, 200}, {1234, 4321}, {7, 3}, {15, 15}, {0, 63}, {0, 1}, {8, 8}, {16, 8},
             {1, 49}, {2, 50},
+            // outer: ice_patches just above/below 0.3.
+            {0, 112}, {4, 175}, {5, 97},
+            // inner: ice_patches < 0.3, small-variation just above/below 0.8.
+            {2, 55}, {3, 52},
         };
 
         JsonObject root = new JsonObject();
@@ -117,8 +128,14 @@ public final class BiomeTemperatureProbe {
         for (int[] p : grid) {
             int seaLevel = 63;
             int x = p[0], z = p[1];
-            // Sample at the column top and above the snow level (y > seaLevel+17).
-            int[] ys = {1, 80, 81, 100};
+            // Sample at the column top, at/above the snow level (y > seaLevel+17
+            // = 80), and high enough that a FROZEN pin (0.2) minus the snow-level
+            // drop crosses the 0.15 warmEnoughToRain boundary into SNOW: at
+            // (0,0) y=150 the drop is (150-80)*0.05/40 = 0.0875, so the FROZEN
+            // temperature is 0.2 - 0.0875 = 0.1125 < 0.15. The 0.15 boundary
+            // (>= vs >, or a drifted threshold) is only caught by sampling below
+            // AND above it.
+            int[] ys = {1, 80, 81, 100, 120, 150, 200};
             for (int y : ys) {
                 JsonObject s = new JsonObject();
                 s.addProperty("x", x);
@@ -139,15 +156,17 @@ public final class BiomeTemperatureProbe {
                     "getPrecipitationAt",
                     b.getPrecipitationAt(new BlockPos(x, y, z), seaLevel).getSerializedName()
                 );
-                // The FROZEN modifier's independent branch analysis, computed
-                // from Paper's raw noise values (see TemperatureModifier.FROZEN).
-                double large = frozenLarge(x, z) * 7.0;
-                double edge = frozenEdge(x, z);
-                double icePatches = large + edge;
-                double small = frozenSmall(x, z);
-                s.addProperty("frozenIcePatches", Double.doubleToLongBits(icePatches));
-                s.addProperty("frozenSmall", Double.doubleToLongBits(small));
-                s.addProperty("frozenPins", icePatches < 0.3 && small < 0.8);
+                // The FROZEN modifier's independent branch outcome computed from
+                // Paper's raw noise (see TemperatureModifier.FROZEN): the test
+                // recomputes it from the noise-array values it already pins
+                // bit-exactly against Rust, so a branch-logic drift is caught.
+                if (mod == Biome.TemperatureModifier.FROZEN) {
+                    double large = frozenLarge(x, z) * 7.0;
+                    double edge = frozenEdge(x, z);
+                    double icePatches = large + edge;
+                    double small = frozenSmall(x, z);
+                    s.addProperty("frozenPins", icePatches < 0.3 && small < 0.8);
+                }
                 samples.add(s);
             }
         }
