@@ -28,14 +28,10 @@
 //! Issue #287 Part A adds the worldgen/live slice this module deferred: the
 //! four `FINAL_HEIGHTMAPS`/`WORLDGEN_HEIGHTMAPS` predicates (`is_opaque`),
 //! the per-block `update` mutator, and the on-demand `primeHeightmaps`/
-//! `getHeight` compute on `ChunkAccess` (see `chunk::chunk_access`). The
-//! `WorldSurfaceHeight` seam trait + `WorldSurfaceWgHeightmap` adapter at the
-//! bottom of this module are the typed interface that compute is consumed
-//! through (`SurfaceRules.SteepMaterialCondition`'s `WORLD_SURFACE_WG` reads;
-//! RivetTodo(#185): the `ChunkAccess` implementer lands with the #287
-//! heightmap compute). Note `updateFromChunk` does NOT exist in the pinned
-//! Paper 26.2 `Heightmap` — only `update` — so the issue's mention of it is
-//! stale and only `update` is ported.
+//! `getHeight` compute on `ChunkAccess` (see `chunk::chunk_access`). Note
+//! `updateFromChunk` does NOT exist in the pinned Paper 26.2 `Heightmap` —
+//! only `update` — so the issue's mention of it is stale and only `update` is
+//! ported.
 //!
 //! The `MOTION_BLOCKING_NO_LEAVES` exclusion is `state.is(TagKey)`
 //! (`getBlock() instanceof LeavesBlock`), resolved by the caller through the
@@ -454,81 +450,9 @@ fn get_index(x: i32, z: i32) -> usize {
     (x + z * 16) as usize
 }
 
-// ---------------------------------------------------------------------------
-// The worldgen-heightmap seam (RivetTodo #185 / #216 / #287)
-// ---------------------------------------------------------------------------
-
-/// `ChunkAccess.getHeight(Heightmap.Types.WORLD_SURFACE_WG, x, z)` — the typed
-/// worldgen-heightmap read `SurfaceRules.SteepMaterialCondition` performs (its
-/// four neighbor probes around each XZ position — `zNorth`/`zSouth`/`xWest`/
-/// `xEast`, clamped to the chunk edge — feeding `heightSouth >= heightNorth +
-/// 4` / `heightWest >= heightEast + 4`).
-///
-/// Java reads `this.chunk.getHeight(WORLD_SURFACE_WG, ...)` directly off the
-/// `ChunkAccess`. The Rust `surface_rules` port cannot — the
-/// `mc.world.level.chunk.access` unit (issue #183) is unported, so the
-/// `SurfaceRules` context holds this capability (`Arc<dyn WorldSurfaceHeight +
-/// Send + Sync>`) and the #287 `ChunkAccess` implements it by selecting the
-/// `WORLD_SURFACE_WG` entry and delegating to [`Heightmap::get_height_at`].
-/// The owning adapter [`WorldSurfaceWgHeightmap`] lifts an already-selected
-/// `Heightmap` value into the seam without waiting for the chunk type.
-pub trait WorldSurfaceHeight: Send + Sync {
-    /// `ChunkAccess.getHeight(WORLD_SURFACE_WG, x, z)` — the column's topmost
-    /// non-air Y, or `min_y - 1` for a never-set (unprimed) column. `x`/`z`
-    /// are masked to the local `0..=15` chunk range by the implementer (Java's
-    /// `getHeight` does `x & 15, z & 15`), exactly like Java: the mask
-    /// prevents an out-of-bounds read, but a coordinate outside the chunk's own
-    /// 16-block range silently selects a different local column — callers pass
-    /// chunk-local or already-masked coordinates (`SteepMaterialCondition`
-    /// probes `blockX & 15` then clamps the +/-1 neighbors to the chunk edge).
-    fn get_world_surface_wg_height(&self, x: i32, z: i32) -> i32;
-}
-
-/// Owning adapter: a [`Heightmap`] value assumed to be the chunk's
-/// `WORLD_SURFACE_WG` entry, exposed as the [`WorldSurfaceHeight`] seam.
-///
-/// `ChunkAccess.getHeight(type, x, z)` looks up the `EnumMap` entry and reads
-/// `getFirstAvailable(x & 15, z & 15) - 1` — the `& 15` local-coordinate mask
-/// is part of the `getHeight` contract (the raw [`Heightmap::get_height_at`]
-/// does not mask; the mask lives on the `ChunkAccess` accessor). This adapter
-/// reproduces the full `getHeight` read: mask, then `get_height_at(x & 15,
-/// z & 15, min_y)`. `& 15` on a negative coordinate is two's-complement
-/// (`-1 & 15 == 15`), bit-identical to Java's `x & 15`. `'static` (owns the
-/// `Heightmap`) so it coerces to `Arc<dyn WorldSurfaceHeight>` for the
-/// surface-rules context.
-///
-/// The adapter is a **snapshot** of the heightmap at wrap time — it does not
-/// observe later `update` calls, so it suits the test/stand-in role, not the
-/// live surface pass. The production [`WorldSurfaceHeight`] implementer is the
-/// #287 `ChunkAccess`, whose `get_height_at` reads the live `WORLD_SURFACE_WG`
-/// entry during surface building. The caller must pass the actual
-/// `WORLD_SURFACE_WG`-primed heightmap and the matching `min_y` (a mismatched
-/// pair silently decodes shifted heights).
-pub struct WorldSurfaceWgHeightmap {
-    heightmap: Heightmap,
-    min_y: i32,
-}
-
-impl WorldSurfaceWgHeightmap {
-    /// Wrap a `WORLD_SURFACE_WG` heightmap value with its world's `min_y`.
-    /// The `heightmap` must be the chunk's `WORLD_SURFACE_WG` entry and `min_y`
-    /// the world it was primed against; a mismatched pair decodes shifted
-    /// heights silently (see the type doc).
-    pub fn new(heightmap: Heightmap, min_y: i32) -> Self {
-        WorldSurfaceWgHeightmap { heightmap, min_y }
-    }
-}
-
-impl WorldSurfaceHeight for WorldSurfaceWgHeightmap {
-    fn get_world_surface_wg_height(&self, x: i32, z: i32) -> i32 {
-        self.heightmap.get_height_at(x & 15, z & 15, self.min_y)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     /// The superflat air (id 0) / stone (id 1) flags, driven by value.
     fn state_flags(value: u8) -> StateFlags {
@@ -918,87 +842,5 @@ mod tests {
             .get_or_throw("decode")
             .clone();
         assert_eq!(decoded.0, Types::OceanFloor);
-    }
-
-    #[test]
-    fn world_surface_wg_height_adapter_reads_primed_heights() {
-        // Prime a WorldSurfaceWg-style heightmap: stone at y = -64 stores
-        // offset 1, so `get_height_at` = -64 (the topmost non-air Y).
-        let mut hm = Heightmap::new(384);
-        let min_y = -64;
-        assert!(hm.update(
-            3,
-            -64,
-            7,
-            Types::WorldSurfaceWg,
-            state_flags(1),
-            min_y,
-            |_| state_flags(0)
-        ));
-        let seam = WorldSurfaceWgHeightmap::new(hm, min_y);
-        assert_eq!(seam.get_world_surface_wg_height(3, 7), -64);
-        // A never-set column reads `min_y - 1` (Java's unprimed read).
-        assert_eq!(seam.get_world_surface_wg_height(0, 0), -65);
-        // Raising the column re-arms the read (the update path stores y + 1).
-        let mut hm = Heightmap::new(384);
-        hm.update(
-            0,
-            100,
-            0,
-            Types::WorldSurfaceWg,
-            state_flags(1),
-            min_y,
-            |_| state_flags(0),
-        );
-        let seam = WorldSurfaceWgHeightmap::new(hm, min_y);
-        assert_eq!(seam.get_world_surface_wg_height(0, 0), 100);
-    }
-
-    #[test]
-    fn world_surface_wg_height_adapter_masks_to_local_coordinates() {
-        // `ChunkAccess.getHeight` masks `x & 15, z & 15` before the heightmap
-        // read; the adapter reproduces that contract. Prime two columns so the
-        // mask is observable: local (0, 0) at -64 and local (15, 15) at 100.
-        let mut hm = Heightmap::new(384);
-        let min_y = -64;
-        assert!(hm.update(
-            0,
-            -64,
-            0,
-            Types::WorldSurfaceWg,
-            state_flags(1),
-            min_y,
-            |_| { state_flags(0) }
-        ));
-        assert!(hm.update(
-            15,
-            100,
-            15,
-            Types::WorldSurfaceWg,
-            state_flags(1),
-            min_y,
-            |_| state_flags(0)
-        ));
-        let seam = WorldSurfaceWgHeightmap::new(hm, min_y);
-        // In-range reads hit the primed columns.
-        assert_eq!(seam.get_world_surface_wg_height(0, 0), -64);
-        assert_eq!(seam.get_world_surface_wg_height(15, 15), 100);
-        // Absolute/out-of-range coordinates wrap into the local 0..=15 range
-        // (`x & 15`, two's-complement: 16 -> 0, -1 -> 15).
-        assert_eq!(seam.get_world_surface_wg_height(16, 16), -64);
-        assert_eq!(seam.get_world_surface_wg_height(-1, -1), 100);
-        assert_eq!(seam.get_world_surface_wg_height(32, 32), -64);
-    }
-
-    #[test]
-    fn world_surface_wg_height_seam_is_dyn_usable() {
-        // The surface-rules context holds `Arc<dyn WorldSurfaceHeight>`; the
-        // owning adapter is `'static` + `Send + Sync`, so it coerces.
-        let hm = Heightmap::new(384);
-        let seam: Arc<dyn WorldSurfaceHeight> = Arc::new(WorldSurfaceWgHeightmap::new(hm, -64));
-        assert_eq!(seam.get_world_surface_wg_height(5, 5), -65);
-        // The trait is `Send + Sync` (the Arc-shared context requires it).
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<WorldSurfaceWgHeightmap>();
     }
 }

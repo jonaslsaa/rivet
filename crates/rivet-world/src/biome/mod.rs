@@ -49,7 +49,6 @@ pub mod overworld_biome_builder;
 pub mod the_end_biome_source;
 
 pub use biome::Biome;
-pub use biome::ColdEnoughToSnow;
 pub use biome_generation_settings::BiomeGenerationSettings;
 pub use biome_manager::BiomeManager;
 pub use biome_resolver::BiomeResolver;

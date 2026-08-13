@@ -391,42 +391,6 @@ impl Biome {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The biome-value seam (RivetTodo #185)
-// ---------------------------------------------------------------------------
-
-/// `getBiome().value().coldEnoughToSnow(pos, seaLevel)` — the typed biome-value
-/// read `SurfaceRules.Context.TemperatureHelperCondition` performs.
-///
-/// Java reads the resolved `Holder<Biome>`'s value and tests it directly. The
-/// Rust `surface_rules` port cannot — `BiomeManager` yields the pure-id
-/// `Holder<BiomeId>` and the `Biome`-value registry is unported (RivetTodo
-/// #185, `mc.world.level.biome.core`), so the `SurfaceRules` context holds this
-/// capability (`Arc<dyn ColdEnoughToSnow + Send + Sync>`) and a production
-/// resolver wires `getBiome()` through the eventual value registry. [`Biome`]
-/// itself implements it (the value test, exactly
-/// [`Biome::cold_enough_to_snow`]).
-///
-/// The temperature noise terms the test computes depend only on `(x, z)`, so a
-/// caller evaluating a full column re-samples them once per `y`. Java's
-/// `ThreadLocal` `temperatureCache` field is declared but never read in the
-/// pinned Paper 26.2 `Biome` — Java re-evaluates the noise per call too — so
-/// this port is not trading away a Java memoization. A per-column memoization,
-/// if ever wanted, belongs to the production `SurfaceRules` wiring — not this
-/// capability seam.
-pub trait ColdEnoughToSnow: Send + Sync {
-    /// `Biome.coldEnoughToSnow(BlockPos, int seaLevel)` — whether the biome is
-    /// cold enough to snow at `pos` (`!warmEnoughToRain`, i.e.
-    /// `getTemperature(pos, seaLevel) < 0.15F`).
-    fn cold_enough_to_snow(&self, pos: &BlockPos, sea_level: i32) -> bool;
-}
-
-impl ColdEnoughToSnow for Biome {
-    fn cold_enough_to_snow(&self, pos: &BlockPos, sea_level: i32) -> bool {
-        Biome::cold_enough_to_snow(self, pos, sea_level)
-    }
-}
-
 /// The `DIRECT_CODEC`/`NETWORK_CODEC` field constructor.
 fn biome_from_codec_fields(
     climate_settings: ClimateSettings,
@@ -1281,24 +1245,6 @@ mod tests {
                 .to_bits(),
             0x3f2e13c6 // 0.67998922
         );
-    }
-
-    #[test]
-    fn snow_coverage_trait_delegates_to_inherent() {
-        // The seam trait is the typed capability `TemperatureHelperCondition`
-        // consumes; `Biome` implements it by delegating to the inherent
-        // `coldEnoughToSnow`.
-        let biome = plains();
-        let pos = BlockPos::new(0, 100, 0);
-        let via_trait = <Biome as ColdEnoughToSnow>::cold_enough_to_snow(&biome, &pos, 63);
-        assert_eq!(via_trait, biome.cold_enough_to_snow(&pos, 63));
-        assert!(!via_trait);
-        // The trait is `Send + Sync` + `'static` (the Arc-shared surface-rules
-        // context holds `Arc<dyn ColdEnoughToSnow + Send + Sync>`).
-        let seam: std::sync::Arc<dyn ColdEnoughToSnow> = std::sync::Arc::new(biome);
-        assert!(!seam.cold_enough_to_snow(&pos, 63));
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<Biome>();
     }
 
     #[test]
