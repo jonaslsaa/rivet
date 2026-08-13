@@ -1,0 +1,115 @@
+//! The generated biome-registry bootstrap for current-version generated chunks
+//! (issue #178, `mc.world.level.biome.core` unit).
+//!
+//! `ChunkAccess.fillBiomesFromNoise` needs a `BiomeResolver` producing the
+//! dense biome ids a worldgen chunk's sections store. Java reaches that through
+//! the runtime `RegistryAccess` (the `BuiltInRegistries.BIOME` getter); the port
+//! resolves the same biomes straight from the generated
+//! `minecraft:worldgen/biome` tables (`rivet-registry::generated::biomes`), so
+//! a generated chunk can be filled without booting a registry.
+//!
+//! [`overworld_biome_source`] builds the resolved overworld
+//! `MultiNoiseBiomeSource` over that getter (Java
+//! `MultiNoiseBiomeSourceParameterLists.OVERWORLD`), and [`dense_biome_id`] is
+//! the `Holder<BiomeId>` → dense `u16` conversion the section fill's
+//! `map_biome` seam needs for the `section_reconstruction::BiomeId` container.
+
+use crate::biome::multi_noise_biome_source::MultiNoiseBiomeSource;
+use crate::biome::multi_noise_biome_source_parameter_list::{
+    BY_NAME, MultiNoiseBiomeSourceParameterList,
+};
+use rivet_registry::ResourceKey;
+use rivet_registry::TagKey;
+use rivet_registry::biome_id::BiomeId;
+use rivet_registry::holder::Holder;
+use rivet_registry::holder_lookup::HolderGetter;
+use rivet_registry::holder_set::HolderSet;
+
+/// `BuiltInRegistries.BIOME` getter resolved over the generated biome tables.
+///
+/// Java's `RegistryGetter` resolves a biome `ResourceKey` to its registered
+/// holder; the port resolves the generated name to a `Direct` id holder. Every
+/// name in the generated table resolves (`BIOME_BY_NAME` is total over the
+/// registry), so `get_or_throw` never trips for a valid key.
+pub struct GeneratedBiomeGetter;
+
+impl HolderGetter<BiomeId> for GeneratedBiomeGetter {
+    fn get(&self, key: &ResourceKey<BiomeId>) -> Option<Holder<BiomeId>> {
+        BiomeId::from_name(&key.identifier().to_string()).map(Holder::direct)
+    }
+
+    fn get_tag(&self, _tag: &TagKey<BiomeId>) -> Option<HolderSet<BiomeId>> {
+        None
+    }
+}
+
+/// The resolved overworld `MultiNoiseBiomeSource` — Java's
+/// `MultiNoiseBiomeSourceParameterLists.OVERWORLD` (the `overworld` preset
+/// applied through the generated biome getter, with the 7594-point table built
+/// by the `.data`-owned `OverworldBiomeBuilder`). No registry bootstrapping is
+/// required.
+pub fn overworld_biome_source() -> MultiNoiseBiomeSource {
+    let preset = BY_NAME
+        .get("minecraft:overworld")
+        .expect("overworld preset is generated");
+    let parameter_list =
+        MultiNoiseBiomeSourceParameterList::new(preset.clone(), &GeneratedBiomeGetter);
+    MultiNoiseBiomeSource::create_from_preset(parameter_list)
+}
+
+/// `Holder<BiomeId>` → dense `u16` — the `map_biome` seam's conversion for the
+/// worldgen chunk's `section_reconstruction::BiomeId` container. A `Direct`
+/// holder reads its id; a `Reference` holder (the codec-produced form) carries
+/// the registry id. Matches the `surface_rules::holder_biome_id` conversion.
+pub fn dense_biome_id(holder: &Holder<BiomeId>) -> u16 {
+    match holder {
+        Holder::Direct(biome) => biome.id(),
+        Holder::Reference { id, .. } => *id as u16,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::biome::biome_source::BiomeSource;
+
+    #[test]
+    fn overworld_biome_source_resolves_from_the_generated_tables() {
+        let source = overworld_biome_source();
+        // The overworld preset's table is non-empty (7594 points) and every
+        // biome name resolves through the generated getter.
+        assert!(!source.collect_possible_biomes().is_empty());
+        // `minecraft:plains` (id 40) is among the possible overworld biomes.
+        assert!(
+            source
+                .collect_possible_biomes()
+                .contains(&Holder::direct(BiomeId::from_id(40)))
+        );
+    }
+
+    #[test]
+    fn generated_biome_getter_resolves_names_and_rejects_unknowns() {
+        let plains_key = ResourceKey::create(
+            &rivet_registry::registries::BIOME,
+            rivet_registry::Identifier::with_default_namespace("plains"),
+        );
+        assert_eq!(
+            GeneratedBiomeGetter.get(&plains_key),
+            Some(Holder::direct(BiomeId::from_id(40)))
+        );
+        let unknown = ResourceKey::create(
+            &rivet_registry::registries::BIOME,
+            rivet_registry::Identifier::with_default_namespace("not_a_biome"),
+        );
+        assert_eq!(GeneratedBiomeGetter.get(&unknown), None);
+    }
+
+    #[test]
+    fn dense_biome_id_extracts_the_direct_id_and_reference_id() {
+        assert_eq!(dense_biome_id(&Holder::direct(BiomeId::from_id(40))), 40);
+        assert_eq!(
+            dense_biome_id(&Holder::reference(rivet_registry::holder::RegistryId(0), 7)),
+            7
+        );
+    }
+}
