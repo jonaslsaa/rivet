@@ -70,7 +70,7 @@ impl WorldCarverBehavior<CanyonCarverConfiguration> for CanyonWorldCarver {
             .wrapping_sub(1)
             .wrapping_mul(16);
         let x = source_chunk_pos.get_block_x(random.next_int_bound(16)) as f64;
-        let y = configuration.y().sample(random, context.world_context());
+        let y = configuration.y().sample(random, context.world_context()) as f64;
         let z = source_chunk_pos.get_block_z(random.next_int_bound(16)) as f64;
         let horizontal_rotation = random.next_float() * mth::TWO_PI;
         let vertical_rotation = configuration.vertical_rotation.sample(random);
@@ -113,7 +113,7 @@ impl CanyonWorldCarver {
         tunnel_seed: i64,
         aquifer: &dyn Aquifer,
         mut x: f64,
-        mut y: i32,
+        mut y: f64,
         mut z: f64,
         thickness: f32,
         mut horizontal_rotation: f32,
@@ -152,7 +152,7 @@ impl CanyonWorldCarver {
             let xc = mth::cos(vertical_rotation as f64);
             let xs = mth::sin(vertical_rotation as f64);
             x += mth::cos(horizontal_rotation as f64) as f64 * xc as f64;
-            y = y.wrapping_add(xs as i32);
+            y += xs as f64;
             z += mth::sin(horizontal_rotation as f64) as f64 * xc as f64;
             vertical_rotation *= 0.7_f32;
             vertical_rotation += x_rota * 0.05_f32;
@@ -180,7 +180,7 @@ impl CanyonWorldCarver {
                     chunk,
                     aquifer,
                     x,
-                    y as f64,
+                    y,
                     z,
                     horizontal_radius,
                     vertical_radius,
