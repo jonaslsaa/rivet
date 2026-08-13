@@ -86,11 +86,7 @@ mod tests {
             .expect("encode")
             .clone();
         assert_eq!(encoded, json!({}));
-        let decoded = codec
-            .parse(&ops, &encoded)
-            .result()
-            .expect("decode")
-            .clone();
+        let decoded = *codec.parse(&ops, &encoded).result().expect("decode");
         assert_eq!(decoded, settings);
 
         let custom = GeodeLayerSettings::new(1.0, 2.5, 3.0, 5.0);

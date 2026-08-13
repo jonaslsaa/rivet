@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn get_block_state_for_reads_the_grid() {
         // `(3, 3)` halves to grid cell `(1, 1)` -> `abs(1 * GRID_WIDTH + 1)`.
-        let index = mth::abs_i32(1 * *GRID_WIDTH + 1);
+        let index = mth::abs_i32(*GRID_WIDTH + 1);
         assert!(index < ALL_BLOCKS.len() as i32);
         assert_eq!(
             DebugLevelSource::get_block_state_for(3, 3),
