@@ -19,7 +19,7 @@
 //! `MatchingBiomesPredicate` never dereferences `name()`, so the fallback only
 //! surfaces in diagnostics.
 
-use crate::generated::biomes::{BIOME_BY_ID, BIOME_BY_NAME};
+use crate::generated::biomes::{BIOME_BY_ID, BIOME_BY_NAME, BIOME_COUNT};
 
 /// A numeric vanilla biome id (index into the `minecraft:worldgen/biome` registry).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -42,6 +42,14 @@ impl BiomeId {
             .get(self.0 as usize)
             .copied()
             .unwrap_or(BIOME_BY_ID[0])
+    }
+
+    /// Whether the id is a real `minecraft:worldgen/biome` table entry
+    /// (`0 <= id < BIOME_COUNT`). `name()` degrades an out-of-range id to the
+    /// first entry, so a serializer must validate with this rather than trust
+    /// the display fallback.
+    pub const fn is_valid(self) -> bool {
+        (self.0 as usize) < BIOME_COUNT
     }
 
     #[inline]
