@@ -16,6 +16,7 @@ use crate::level::height_accessor::LevelHeightAccessor;
 use std::cmp;
 
 /// `net.minecraft.world.level.levelgen.WorldGenerationContext`.
+#[derive(Clone, Copy)]
 pub struct WorldGenerationContext {
     /// `minY` — `Math.max(heightAccessor.getMinY(), generator.getMinY())`.
     min_y: i32,

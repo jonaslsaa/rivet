@@ -498,6 +498,26 @@ impl ParameterPoint {
     }
 }
 
+/// Project a generated `worldgen::ParameterPoint` (the codegen `(i64, i64)`
+/// spans + offset, exactly as stored in the runtime `ParameterPoint`) to the
+/// runtime value. Field-for-field copy — the generated spans are already the
+/// quantized longs, so this is the single place that maps the two struct shapes
+/// and both preset builders (`OverworldBiomeBuilder::add_biomes` and the nether
+/// preset) go through it.
+impl From<&rivet_registry::generated::worldgen::ParameterPoint> for ParameterPoint {
+    fn from(generated: &rivet_registry::generated::worldgen::ParameterPoint) -> Self {
+        ParameterPoint::new(
+            Parameter::new(generated.temperature.0, generated.temperature.1),
+            Parameter::new(generated.humidity.0, generated.humidity.1),
+            Parameter::new(generated.continentalness.0, generated.continentalness.1),
+            Parameter::new(generated.erosion.0, generated.erosion.1),
+            Parameter::new(generated.depth.0, generated.depth.1),
+            Parameter::new(generated.weirdness.0, generated.weirdness.1),
+            generated.offset,
+        )
+    }
+}
+
 /// The seven-field `MapEncoder` for `ParameterPoint`.
 struct ParameterPointEncoder<Ops: DynamicOps + 'static> {
     temperature: Arc<dyn MapEncoder<Parameter, Ops>>,
