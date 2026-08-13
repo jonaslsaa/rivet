@@ -21,6 +21,7 @@ use crate::biome::multi_noise_biome_source_parameter_list::{
 use rivet_registry::ResourceKey;
 use rivet_registry::TagKey;
 use rivet_registry::biome_id::BiomeId;
+use rivet_registry::generated::tags::WORLDGEN_BIOME_TAG_BY_NAME;
 use rivet_registry::holder::Holder;
 use rivet_registry::holder_lookup::HolderGetter;
 use rivet_registry::holder_set::HolderSet;
@@ -38,8 +39,26 @@ impl HolderGetter<BiomeId> for GeneratedBiomeGetter {
         BiomeId::from_name(&key.identifier().to_string()).map(Holder::direct)
     }
 
-    fn get_tag(&self, _tag: &TagKey<BiomeId>) -> Option<HolderSet<BiomeId>> {
-        None
+    /// The generated `minecraft:worldgen/biome` tag tables
+    /// (`WORLDGEN_BIOME_TAG_BY_NAME`, element names resolved through
+    /// `BIOME_BY_NAME`). Both tables are generated from the same MC 26.2
+    /// registry load, so every tag element resolves; an unknown tag key reports
+    /// `None` like Java's `Optional.empty()`. The set is `Direct` (a registry
+    /// `Named` set needs a `RegistryId` owner the registry-less getter does not
+    /// have); the generated paths consume the member holders, not the named
+    /// identity.
+    fn get_tag(&self, tag: &TagKey<BiomeId>) -> Option<HolderSet<BiomeId>> {
+        let names = WORLDGEN_BIOME_TAG_BY_NAME.get(&tag.location().to_string())?;
+        Some(HolderSet::direct(
+            names
+                .iter()
+                .map(|name| {
+                    Holder::direct(BiomeId::from_name(name).unwrap_or_else(|| {
+                        panic!("generated biome tag element {name} does not resolve")
+                    }))
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -57,10 +76,11 @@ pub fn overworld_biome_source() -> MultiNoiseBiomeSource {
     MultiNoiseBiomeSource::create_from_preset(parameter_list)
 }
 
-/// `Holder<BiomeId>` → dense `u16` — the `map_biome` seam's conversion for the
-/// worldgen chunk's `section_reconstruction::BiomeId` container. A `Direct`
-/// holder reads its id; a `Reference` holder (the codec-produced form) carries
-/// the registry id. Matches the `surface_rules::holder_biome_id` conversion.
+/// `Holder<BiomeId>` → dense `u16` — the shared holder→dense-id conversion for
+/// the biome-id element model: the `map_biome` seam of the worldgen chunk's
+/// `section_reconstruction::BiomeId` container, and the `#177` surface-build
+/// runtime. A `Direct` holder reads its id; a `Reference` holder (the
+/// codec-produced form) carries the registry id.
 pub fn dense_biome_id(holder: &Holder<BiomeId>) -> u16 {
     match holder {
         Holder::Direct(biome) => biome.id(),
@@ -111,5 +131,28 @@ mod tests {
             dense_biome_id(&Holder::reference(rivet_registry::holder::RegistryId(0), 7)),
             7
         );
+    }
+
+    #[test]
+    fn generated_biome_getter_resolves_generated_tags_and_rejects_unknowns() {
+        let tag_key = |name: &str| {
+            rivet_registry::TagKey::create(
+                &rivet_registry::registries::BIOME,
+                rivet_registry::Identifier::with_default_namespace(name),
+            )
+        };
+        // `minecraft:allows_surface_slime_spawns` → [swamp, mangrove_swamp].
+        let set = GeneratedBiomeGetter
+            .get_tag(&tag_key("allows_surface_slime_spawns"))
+            .expect("generated tag resolves");
+        let swamp = Holder::direct(BiomeId::from_id(
+            BiomeId::from_name("minecraft:swamp").unwrap().id(),
+        ));
+        let mangrove_swamp = Holder::direct(BiomeId::from_id(
+            BiomeId::from_name("minecraft:mangrove_swamp").unwrap().id(),
+        ));
+        assert_eq!(set, HolderSet::direct(vec![swamp, mangrove_swamp]));
+        // An unknown tag key reports `None` (Java `Optional.empty()`).
+        assert_eq!(GeneratedBiomeGetter.get_tag(&tag_key("not_a_tag")), None);
     }
 }

@@ -316,7 +316,7 @@ impl<
     /// Java stores the resolved `Holder<Biome>` directly; the port's section is
     /// generic over the stored element `B` (the worldgen chunk's dense `BiomeId`
     /// or a test's u8), so the caller's `map_biome` converts the resolved
-    /// `Holder<BiomeId>` handle into `B` (the `holder_biome_id` seam). The
+    /// `Holder<BiomeId>` handle into `B` (the `dense_biome_id` seam). The
     /// recreate-then-fill is Java verbatim: a fresh single-value container
     /// holding the old palette's first entry, each cell written with
     /// `getAndSetUnchecked` (the previous value is discarded), then installed.

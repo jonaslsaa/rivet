@@ -556,19 +556,6 @@ impl BiomeSource for MultiNoiseBiomeSource {
             .clone()
     }
 
-    fn get_noise_biome(
-        &self,
-        quart_x: i32,
-        quart_y: i32,
-        quart_z: i32,
-        sampler: &Sampler,
-    ) -> Holder<BiomeId> {
-        // Java: `getNoiseBiome(sampler.sample(quartX, quartY, quartZ))` →
-        // `parameters().findValue(target)`.
-        let target = sampler.sample(quart_x, quart_y, quart_z);
-        self.parameters().find_value(&target)
-    }
-
     fn add_debug_info(&self, result: &mut Vec<String>, feet_pos: &BlockPos, sampler: &Sampler) {
         let quart_x = QuartPos::from_block(feet_pos.get_x());
         let quart_y = QuartPos::from_block(feet_pos.get_y());
@@ -601,12 +588,10 @@ impl BiomeSource for MultiNoiseBiomeSource {
     }
 }
 
-/// Java's `MultiNoiseBiomeSource extends BiomeSource implements BiomeResolver`
-/// — the source IS its own resolver (`BiomeSource` extends `BiomeResolver` in
-/// the port's trait mirror too, but the separate `BiomeResolver` trait is the
-/// quart-resolver contract `ChunkAccess.fillBiomesFromNoise` consumes). The
-/// impl delegates to the source's `get_noise_biome`, so there is no duplicated
-/// resolution logic.
+/// The source is its own resolver (Java `BiomeSource implements
+/// BiomeResolver`): the `BiomeResolver` supertrait method, with the body the
+/// `BiomeSource` impl used to carry — `getNoiseBiome(sampler.sample(x, y, z))`
+/// → `parameters().findValue(target)`.
 impl BiomeResolver for MultiNoiseBiomeSource {
     fn get_noise_biome(
         &self,
@@ -615,7 +600,10 @@ impl BiomeResolver for MultiNoiseBiomeSource {
         quart_z: i32,
         sampler: &Sampler,
     ) -> Holder<BiomeId> {
-        BiomeSource::get_noise_biome(self, quart_x, quart_y, quart_z, sampler)
+        // Java: `getNoiseBiome(sampler.sample(quartX, quartY, quartZ))` →
+        // `parameters().findValue(target)`.
+        let target = sampler.sample(quart_x, quart_y, quart_z);
+        self.parameters().find_value(&target)
     }
 }
 
@@ -656,12 +644,10 @@ mod tests {
         let src = MultiNoiseBiomeSource::create_from_list(nether_list());
         // `Climate.empty()` samples all zeros → the nether_wastes entry
         // (0, 0, 0, 0, 0, 0, offset 0) wins (every other entry carries a
-        // nonzero offset or parameter).
+        // nonzero offset or parameter). The source is its own resolver, so the
+        // resolution goes through the inherited `BiomeResolver` method.
         assert_eq!(
-            // The source is its own resolver (`BiomeSource` extends
-            // `BiomeResolver`); the inherent/trait call is ambiguous with the
-            // new resolver impl, so disambiguate to the source resolution.
-            BiomeSource::get_noise_biome(&src, 0, 0, 0, &crate::biome::climate::Climate::empty()),
+            src.get_noise_biome(0, 0, 0, &crate::biome::climate::Climate::empty()),
             holder(34)
         );
     }
@@ -776,16 +762,10 @@ mod tests {
         assert!(!decoded.stable(&overworld_key));
         // `get_noise_biome` resolves through the stored search list (the nether
         // preset's first entry — nether_wastes, the all-zero sample winner).
-        // The source is its own resolver, so the call disambiguates to the
-        // `BiomeSource` resolution.
+        // The source is its own resolver, so the resolution goes through the
+        // inherited `BiomeResolver` method.
         assert_eq!(
-            BiomeSource::get_noise_biome(
-                &decoded,
-                0,
-                0,
-                0,
-                &crate::biome::climate::Climate::empty()
-            ),
+            decoded.get_noise_biome(0, 0, 0, &crate::biome::climate::Climate::empty()),
             holder(34)
         );
         // Encode preserves the Reference preset form (the `Either` is retained).
