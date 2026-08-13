@@ -527,9 +527,22 @@ impl EnumOrdinal for Precipitation {
     }
 }
 
+impl Precipitation {
+    /// The Java constant name (`Enum.toString()`) — the UPPER_SNAKE constant.
+    /// Distinct from the serialized lowercase name: Java's enums never override
+    /// `toString()`, so `String.valueOf(Precipitation.NONE)` is `"NONE"`.
+    pub fn const_name(self) -> &'static str {
+        match self {
+            Precipitation::None => "NONE",
+            Precipitation::Rain => "RAIN",
+            Precipitation::Snow => "SNOW",
+        }
+    }
+}
+
 impl fmt::Display for Precipitation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.get_serialized_name())
+        write!(f, "{}", self.const_name())
     }
 }
 
@@ -609,9 +622,21 @@ impl EnumOrdinal for TemperatureModifier {
     }
 }
 
+impl TemperatureModifier {
+    /// The Java constant name (`Enum.toString()`) — the UPPER_SNAKE constant.
+    /// Distinct from the serialized lowercase name: Java's enums never override
+    /// `toString()`, so `String.valueOf(TemperatureModifier.NONE)` is `"NONE"`.
+    pub fn const_name(self) -> &'static str {
+        match self {
+            TemperatureModifier::None => "NONE",
+            TemperatureModifier::Frozen => "FROZEN",
+        }
+    }
+}
+
 impl fmt::Display for TemperatureModifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.get_serialized_name())
+        write!(f, "{}", self.const_name())
     }
 }
 
@@ -750,57 +775,81 @@ impl BiomeBuilder {
     /// biome\n" + this)` when any of temperature/downfall/specialEffects/
     /// mobSpawnSettings/generationSettings is unset.
     pub fn build(self) -> Biome {
-        // Clone for the panic message: the destructure below moves the `Option`
-        // fields out of `self`, so the error path prints a pristine copy.
-        let for_error = self.clone();
-        if let (
-            Some(temperature),
-            Some(downfall),
-            Some(special_effects),
-            Some(mob_spawn_settings),
-            Some(generation_settings),
-        ) = (
-            self.temperature,
-            self.downfall,
-            self.special_effects,
-            self.mob_spawn_settings,
-            self.generation_settings,
-        ) {
-            Biome::new(
-                ClimateSettings {
-                    has_precipitation: self.has_precipitation,
-                    temperature,
-                    temperature_modifier: self.temperature_modifier,
-                    downfall,
-                },
-                self.attributes,
-                special_effects,
-                generation_settings,
-                mob_spawn_settings,
-            )
-        } else {
+        // Java's `build()` throws `new IllegalStateException("You are missing
+        // parameters to build a proper biome\n" + this)` — it formats the
+        // pristine builder via `toString()`. Check-first so the panic path can
+        // format `self` before the destructure moves the `Option` fields out
+        // (no clone on the success path).
+        if self.temperature.is_none()
+            || self.downfall.is_none()
+            || self.special_effects.is_none()
+            || self.mob_spawn_settings.is_none()
+            || self.generation_settings.is_none()
+        {
             panic!(
                 "You are missing parameters to build a proper biome\n{}",
-                for_error
+                self
             );
         }
+        let (temperature, downfall, special_effects, mob_spawn_settings, generation_settings) = (
+            self.temperature.unwrap(),
+            self.downfall.unwrap(),
+            self.special_effects.unwrap(),
+            self.mob_spawn_settings.unwrap(),
+            self.generation_settings.unwrap(),
+        );
+        Biome::new(
+            ClimateSettings {
+                has_precipitation: self.has_precipitation,
+                temperature,
+                temperature_modifier: self.temperature_modifier,
+                downfall,
+            },
+            self.attributes,
+            special_effects,
+            generation_settings,
+            mob_spawn_settings,
+        )
     }
 }
 
 impl fmt::Display for BiomeBuilder {
-    /// `BiomeBuilder.toString()`.
+    /// `BiomeBuilder.toString()` — Java string-concatenates each field:
+    /// `String.valueOf(Float)` for the nullable temperature/downfall (`"null"`
+    /// when unset), `Enum.toString()` (the UPPER_SNAKE constant name) for the
+    /// modifier, and the object `toString()` for the settings. The object types
+    /// are ported as `Debug` (no Java `toString` is ported for them).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "BiomeBuilder{{\nhasPrecipitation={},\ntemperature={:?},\ntemperatureModifier={},\ndownfall={:?},\nspecialEffects={:?},\nmobSpawnSettings={:?},\ngenerationSettings={:?},\n}}",
+            "BiomeBuilder{{\nhasPrecipitation={},\ntemperature={},\ntemperatureModifier={},\ndownfall={},\nspecialEffects={},\nmobSpawnSettings={},\ngenerationSettings={},\n}}",
             self.has_precipitation,
-            self.temperature,
+            fmt_opt_float(&self.temperature),
             self.temperature_modifier,
-            self.downfall,
-            self.special_effects,
-            self.mob_spawn_settings,
-            self.generation_settings,
+            fmt_opt_float(&self.downfall),
+            fmt_opt_debug(self.special_effects.as_ref()),
+            fmt_opt_debug(self.mob_spawn_settings.as_ref()),
+            fmt_opt_debug(self.generation_settings.as_ref()),
         )
+    }
+}
+
+/// `String.valueOf(Float)` — a nullable `Float`'s `toString()`, or `"null"`
+/// when unset (Java `"" + this.temperature` with a null `Float`).
+fn fmt_opt_float(value: &Option<f32>) -> String {
+    match value {
+        Some(v) => v.to_string(),
+        None => "null".to_string(),
+    }
+}
+
+/// `String.valueOf(Object)` — the object's `toString()`. The settings types
+/// don't port a Java `toString`, so render the `Debug` of the present value,
+/// or `"null"` when unset.
+fn fmt_opt_debug<T: fmt::Debug>(value: Option<&T>) -> String {
+    match value {
+        Some(inner) => format!("{inner:?}"),
+        None => "null".to_string(),
     }
 }
 
@@ -880,6 +929,65 @@ mod tests {
     #[should_panic(expected = "You are missing parameters to build a proper biome")]
     fn builder_missing_parameters_panics_with_exact_prefix() {
         let _ = BiomeBuilder::new().temperature(0.5).build();
+    }
+
+    #[test]
+    fn builder_missing_parameters_panic_message_matches_java_string_concat() {
+        // Java `throw new IllegalStateException("You are missing parameters to
+        // build a proper biome\n" + this)` — the message is the builder's
+        // `toString()`. `String.valueOf(Float)` renders the bare float or
+        // "null" for the unset fields; the modifier is the UPPER_SNAKE constant.
+        let result = std::panic::catch_unwind(|| {
+            let _ = BiomeBuilder::new().temperature(0.5).build();
+        });
+        let panic = result.expect_err("build must panic");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("panic payload is a string");
+        assert_eq!(
+            message,
+            "You are missing parameters to build a proper biome\n\
+             BiomeBuilder{\n\
+             hasPrecipitation=true,\n\
+             temperature=0.5,\n\
+             temperatureModifier=NONE,\n\
+             downfall=null,\n\
+             specialEffects=null,\n\
+             mobSpawnSettings=null,\n\
+             generationSettings=null,\n\
+             }"
+        );
+    }
+
+    #[test]
+    fn biome_builder_display_is_java_string_concat() {
+        // Java `"" + this.temperature` renders `String.valueOf(Float)` or
+        // `"null"`; the modifier is the UPPER_SNAKE `Enum.toString()` constant.
+        let builder = BiomeBuilder::new().temperature(0.8).downfall(0.4);
+        let s = builder.to_string();
+        assert!(s.starts_with("BiomeBuilder{\nhasPrecipitation=true,"));
+        assert!(s.contains("temperature=0.8,"));
+        assert!(s.contains("temperatureModifier=NONE,"));
+        assert!(s.contains("downfall=0.4,"));
+        assert!(s.contains("specialEffects=null,"));
+        assert!(s.contains("mobSpawnSettings=null,"));
+        assert!(s.contains("generationSettings=null,"));
+        assert!(s.ends_with(",\n}"));
+        // Unset floats render as the Java null `Float` string.
+        let unset = BiomeBuilder::new();
+        assert!(unset.to_string().contains("temperature=null,"));
+        assert!(unset.to_string().contains("downfall=null,"));
+        // A FROZEN modifier formats the Java constant name.
+        let frozen = BiomeBuilder::new().temperature_adjustment(TemperatureModifier::Frozen);
+        assert!(frozen.to_string().contains("temperatureModifier=FROZEN,"));
+    }
+
+    #[test]
+    fn temperature_modifier_display_is_the_java_constant_name() {
+        assert_eq!(TemperatureModifier::None.to_string(), "NONE");
+        assert_eq!(TemperatureModifier::Frozen.to_string(), "FROZEN");
     }
 
     #[test]

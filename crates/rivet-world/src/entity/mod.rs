@@ -123,6 +123,22 @@ impl MobCategory {
     pub fn no_despawn_distance(self) -> i32 {
         32
     }
+
+    /// The Java constant name (`Enum.toString()`) — the UPPER_SNAKE constant.
+    /// Distinct from the serialized lowercase name: Java's enums never override
+    /// `toString()`, so `String.valueOf(MobCategory.MONSTER)` is `"MONSTER"`.
+    pub fn const_name(self) -> &'static str {
+        match self {
+            MobCategory::Monster => "MONSTER",
+            MobCategory::Creature => "CREATURE",
+            MobCategory::Ambient => "AMBIENT",
+            MobCategory::Axolotls => "AXOLOTLS",
+            MobCategory::UndergroundWaterCreature => "UNDERGROUND_WATER_CREATURE",
+            MobCategory::WaterCreature => "WATER_CREATURE",
+            MobCategory::WaterAmbient => "WATER_AMBIENT",
+            MobCategory::Misc => "MISC",
+        }
+    }
 }
 
 /// `MobCategory.values()` — declaration order.
@@ -160,7 +176,7 @@ impl EnumOrdinal for MobCategory {
 
 impl fmt::Display for MobCategory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
+        write!(f, "{}", self.const_name())
     }
 }
 
@@ -282,6 +298,20 @@ mod tests {
         assert_eq!(MobCategory::Creature.despawn_distance(), 128);
         assert_eq!(MobCategory::Monster.no_despawn_distance(), 32);
         assert_eq!(MobCategory::Misc.max_instances_per_chunk(), -1);
+    }
+
+    #[test]
+    fn mob_category_display_is_the_java_constant_name() {
+        // Java enums never override `toString()`, so `String.valueOf(MobCategory.MONSTER)`
+        // is the UPPER_SNAKE constant — not the serialized lowercase key.
+        assert_eq!(MobCategory::Monster.to_string(), "MONSTER");
+        assert_eq!(
+            MobCategory::UndergroundWaterCreature.to_string(),
+            "UNDERGROUND_WATER_CREATURE"
+        );
+        assert_eq!(MobCategory::Misc.to_string(), "MISC");
+        // The serialized key stays lowercase.
+        assert_eq!(MobCategory::Monster.name(), "monster");
     }
 
     #[test]

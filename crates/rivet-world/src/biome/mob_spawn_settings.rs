@@ -36,6 +36,9 @@ use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec;
 use rivet_serialization::map_codec::MapCodec;
+use rivet_serialization::map_codec::MapCodecDecoderHalf;
+use rivet_serialization::map_decoder;
+use rivet_serialization::map_encoder;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use rivet_util::extra_codecs::positive_int;
 use rivet_util::string_representable;
@@ -62,6 +65,61 @@ pub struct MobSpawnSettings {
     spawners: indexmap::IndexMap<MobCategory, WeightedSpawnerDataList<SpawnerData>>,
     /// `this.mobSpawnCosts` — the per-entity spawn costs.
     mob_spawn_costs: indexmap::IndexMap<EntityType, MobSpawnCost>,
+}
+
+/// A `Codec.simpleMap`-shaped `MapCodec` over an ordered `IndexMap` field.
+///
+/// Java's `MobSpawnSettings` encodes `b.spawners`/`b.mobSpawnCosts` in their
+/// stored map order — `ImmutableMap` preserves the `EnumMap` declaration order
+/// for spawners and the `LinkedHashMap` insertion order for spawn_costs — but
+/// decodes through `SimpleMapCodec`'s `HashMap` and then
+/// `ImmutableMap.copyOf(HashMap)` (hash order). The port mirrors the stored
+/// order with an `IndexMap`; this codec encodes by iterating the `IndexMap`
+/// directly (Java's stored order) and decodes through the hash-ordered
+/// `simple_map` (Java's `ImmutableMap.copyOf(HashMap)`), transcoding each
+/// value between the serialized `VS` and stored `VF` types.
+fn ordered_map_codec<K, VS, VF, Ops: DynamicOps + 'static>(
+    key_codec: Arc<dyn Codec<K, Ops>>,
+    value_codec: Arc<dyn Codec<VS, Ops>>,
+    keys: Arc<dyn rivet_serialization::dynamic_ops::Keyable<Ops>>,
+    decode_value: Arc<dyn Fn(&VS) -> VF + Send + Sync>,
+    encode_value: Arc<dyn Fn(&VF) -> VS + Send + Sync>,
+) -> Arc<dyn MapCodec<indexmap::IndexMap<K, VF>, Ops>>
+where
+    K: 'static + Clone + Send + Sync + std::hash::Hash + Eq + std::fmt::Display,
+    VS: 'static + Clone + Send + Sync,
+    VF: 'static + Clone + Send + Sync,
+{
+    // Decode: `SimpleMapCodec` into a `HashMap` (hash order), then
+    // `ImmutableMap.copyOf(HashMap)`-style into the `IndexMap` (hash order
+    // preserved) — exactly Java's decode ordering.
+    let decoder = map_decoder::map(
+        Arc::new(MapCodecDecoderHalf(codec::simple_map(
+            key_codec.clone(),
+            value_codec.clone(),
+            keys.clone(),
+        ))),
+        Arc::new(move |hm: &HashMap<K, VS>| {
+            hm.iter()
+                .map(|(k, v)| (k.clone(), decode_value(v)))
+                .collect()
+        }),
+    );
+    // Encode: iterate the `IndexMap` in stored (insertion) order.
+    let key_encode = key_codec.clone();
+    let value_encode = value_codec.clone();
+    let encoder = map_encoder::of(
+        Arc::new(move |input: &indexmap::IndexMap<K, VF>, ops, prefix| {
+            for (k, v) in input {
+                prefix.add_result_result(
+                    key_encode.encode_start(ops, k),
+                    value_encode.encode_start(ops, &encode_value(v)),
+                );
+            }
+        }),
+        Arc::new(move |ops| keys.keys(ops)),
+    );
+    map_codec::of(encoder, decoder, "ordered_map".to_string())
 }
 
 impl MobSpawnSettings {
@@ -108,18 +166,6 @@ impl MobSpawnSettings {
             weighted_list_codec_map(SpawnerData::map_codec_of::<Ops>()),
             Arc::new(|_| {}),
         );
-        let spawners_map: Arc<dyn MapCodec<HashMap<MobCategory, WeightedList<SpawnerData>>, Ops>> =
-            codec::simple_map(
-                MobCategory::codec::<Ops>(),
-                spawner_list,
-                Arc::new(string_representable::keys(MOB_CATEGORY_VALUES)),
-            );
-        let spawn_costs_map: Arc<dyn MapCodec<HashMap<EntityType, MobSpawnCost>, Ops>> =
-            codec::simple_map(
-                EntityType::codec::<Ops>(),
-                MobSpawnCost::codec::<Ops>(),
-                entity_type_keys::<Ops>(),
-            );
 
         record_builder::map_codec(|instance| {
             instance
@@ -132,26 +178,30 @@ impl MobSpawnSettings {
                     ),
                 ))
                 .and(RecordCodecBuilder::of(
-                    Arc::new(|m: &MobSpawnSettings| {
-                        m.spawners
-                            .iter()
-                            .map(|(k, v)| (*k, (**v).clone()))
-                            .collect::<HashMap<_, _>>()
-                    }),
+                    Arc::new(|m: &MobSpawnSettings| m.spawners.clone()),
                     codec::field_of(
-                        map_codec::codec_of(spawners_map),
+                        map_codec::codec_of(ordered_map_codec(
+                            MobCategory::codec::<Ops>(),
+                            spawner_list,
+                            Arc::new(string_representable::keys(MOB_CATEGORY_VALUES)),
+                            Arc::new(|v: &WeightedList<SpawnerData>| {
+                                WeightedSpawnerDataList::from_weighted_list(v.clone())
+                            }),
+                            Arc::new(|v: &WeightedSpawnerDataList<SpawnerData>| (**v).clone()),
+                        )),
                         "spawners".to_string(),
                     ),
                 ))
                 .and(RecordCodecBuilder::of(
-                    Arc::new(|m: &MobSpawnSettings| {
-                        m.mob_spawn_costs
-                            .iter()
-                            .map(|(k, v)| (*k, *v))
-                            .collect::<HashMap<_, _>>()
-                    }),
+                    Arc::new(|m: &MobSpawnSettings| m.mob_spawn_costs.clone()),
                     codec::field_of(
-                        map_codec::codec_of(spawn_costs_map),
+                        map_codec::codec_of(ordered_map_codec(
+                            EntityType::codec::<Ops>(),
+                            MobSpawnCost::codec::<Ops>(),
+                            entity_type_keys::<Ops>(),
+                            Arc::new(|c: &MobSpawnCost| *c),
+                            Arc::new(|c: &MobSpawnCost| *c),
+                        )),
                         "spawn_costs".to_string(),
                     ),
                 ))
@@ -159,13 +209,11 @@ impl MobSpawnSettings {
                     instance,
                     Arc::new(
                         |creature_generation_probability: f32,
-                         spawners: HashMap<MobCategory, WeightedList<SpawnerData>>,
-                         mob_spawn_costs: HashMap<EntityType, MobSpawnCost>| {
-                            let spawners = spawners
-                                .into_iter()
-                                .map(|(k, v)| (k, WeightedSpawnerDataList::from_weighted_list(v)))
-                                .collect();
-                            let mob_spawn_costs = mob_spawn_costs.into_iter().collect();
+                         spawners: indexmap::IndexMap<
+                            MobCategory,
+                            WeightedSpawnerDataList<SpawnerData>,
+                         >,
+                         mob_spawn_costs: indexmap::IndexMap<EntityType, MobSpawnCost>| {
                             MobSpawnSettings::new(
                                 creature_generation_probability,
                                 spawners,
@@ -666,6 +714,42 @@ mod tests {
             .expect("decode")
             .clone();
         assert_eq!(decoded, settings);
+    }
+
+    #[test]
+    fn codec_encodes_spawners_in_mobcategory_declaration_order() {
+        let codec = map_codec::codec_of(MobSpawnSettings::map_codec_of::<JsonOps>());
+        // Add in a deliberately non-declaration order; the Builder's EnumMap
+        // (and the port's IndexMap) still stores declaration order, and the
+        // CODEC must encode it in that order — Java emits `b.spawners` (the
+        // ImmutableMap copy of the EnumMap) key-by-key in declaration order.
+        let settings = MobSpawnSettingsBuilder::new()
+            .add_spawn(MobCategory::Misc, 1, pig_spawner())
+            .add_spawn(MobCategory::Monster, 10, pig_spawner())
+            .add_spawn(MobCategory::Creature, 5, pig_spawner())
+            .build();
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &settings)
+            .result()
+            .expect("encode")
+            .clone();
+        // serde_json is built with `preserve_order`; the encoded object keeps
+        // the order the codec added entries, so the key order is observable.
+        let spawners = encoded["spawners"].as_object().expect("spawners object");
+        let keys: Vec<&str> = spawners.keys().map(|s| s.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "monster",
+                "creature",
+                "ambient",
+                "axolotls",
+                "underground_water_creature",
+                "water_creature",
+                "water_ambient",
+                "misc",
+            ]
+        );
     }
 
     #[test]

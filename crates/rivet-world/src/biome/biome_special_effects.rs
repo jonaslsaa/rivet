@@ -254,9 +254,23 @@ impl EnumOrdinal for GrassColorModifier {
     }
 }
 
+impl GrassColorModifier {
+    /// The Java constant name (`Enum.toString()`) — the UPPER_SNAKE constant.
+    /// Distinct from the serialized lowercase name: Java's enums never override
+    /// `toString()`, so `String.valueOf(GrassColorModifier.DARK_FOREST)` is
+    /// `"DARK_FOREST"`.
+    pub fn const_name(self) -> &'static str {
+        match self {
+            GrassColorModifier::None => "NONE",
+            GrassColorModifier::DarkForest => "DARK_FOREST",
+            GrassColorModifier::Swamp => "SWAMP",
+        }
+    }
+}
+
 impl fmt::Display for GrassColorModifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.get_serialized_name())
+        write!(f, "{}", self.const_name())
     }
 }
 
