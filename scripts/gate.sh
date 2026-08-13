@@ -708,13 +708,15 @@ run_scenario_loaded_world() {
 # the rivet-server binary on demand.
 #
 # The row is milestone-gated exactly like the Paper-vs-Rivet hash-diff
-# (RIVET_HASH_DIR): until BOTH the rivet-server `--seed` capability and the
-# Paper seed-42 ground-truth reference land, the runner exits UNVERIFIED (3)
-# with the exact pinned reason — it never falls back to a superflat boot or a
-# copied loaded world, so this row can never fabricate a PASS. While that
-# capability/reference pair is absent the row is recorded as an explicit NOTICE
-# (never a silent skip, never a green-looking pass) and stays mergeable, so it
-# does not block the serialized release lane ahead of the generator. Setting
+# (RIVET_HASH_DIR): the rivet-server `--seed` launch option now exists but
+# still serves the superflat M1 fixture, and the Paper seed-42 ground-truth
+# reference is not captured yet, so the runner exits UNVERIFIED (3) with the
+# exact pinned reason — it never falls back to a superflat boot or a copied
+# loaded world, so this row can never fabricate a PASS. While real
+# generated-world serving and the Paper seed-42 `generated-expected` ground
+# truth are absent the row is recorded as an explicit NOTICE (never a silent
+# skip, never a green-looking pass) and stays mergeable, so it does not block
+# the serialized release lane ahead of the generator. Setting
 # RIVET_GENERATED_WORLD=1 opts into the strict check: the comparison then runs
 # and any UNVERIFIED (exit 3) sets ORACLE_UNVERIFIED so the gate exits 3, and
 # under --require-oracle it is a hard failure (exit 1) — exactly the
@@ -725,8 +727,8 @@ run_scenario_generated_world() {
   # value other than "0" enables the strict check, so an operator can disable
   # the row explicitly with RIVET_GENERATED_WORLD=0 (never silently enabling it).
   if [ -z "${RIVET_GENERATED_WORLD:-}" ] || [ "$RIVET_GENERATED_WORLD" = "0" ]; then
-    echo "    NOTICE — generated-world acceptance is UNVERIFIED and milestone-gated: the"
-    echo "      rivet-server --seed capability and/or the Paper seed-42 ground-truth reference"
+    echo "    NOTICE — generated-world acceptance is UNVERIFIED and milestone-gated: real"
+    echo "      generated-world serving and/or the Paper seed-42 generated-expected ground truth"
     echo "      are not present yet (the runner exits 3 with the exact pinned"
     echo "      GENERATED_WORLD_UNVERIFIED_REASON; it never falls back to superflat or a copied"
     echo "      loaded world). Set RIVET_GENERATED_WORLD=1 to require this row."
@@ -740,9 +742,10 @@ run_scenario_generated_world() {
     echo "    FAILED — generated-world acceptance found a divergence (exit $rc; see the output above)"
     exit 1
   elif [ "$rc" -eq 3 ]; then
-    # UNVERIFIED: the rivet-server has no generated-world capability yet (no
-    # --seed launch option) or the seed-42 ground-truth reference is not
-    # captured. The comparison never ran to completion and MUST NOT look green.
+    # UNVERIFIED: the rivet-server --seed option still serves the superflat M1
+    # fixture (real generated-world serving) and/or the seed-42 ground-truth
+    # reference is not captured. The comparison never ran to completion and
+    # MUST NOT look green.
     echo "    UNVERIFIED — generated-world acceptance did not complete (exit $rc; see the output above)"
     ORACLE_UNVERIFIED=1
     if [ "$REQUIRE_ORACLE" = 1 ]; then
@@ -1049,18 +1052,20 @@ main() {
   #                         --require-oracle hard-fails it at exit 1).
   #   generated-world       Rivet-only official-client acceptance (seed-42
   #                         generated-world contract, ahead of the generator):
-  #                         boot Rivet with `--seed 42` (the explicit generated
-  #                         capability) on a fresh disposable seed world, drive
+  #                         boot Rivet with `--seed 42` (the generated-world
+  #                         launch seam) on a fresh disposable seed world, drive
   #                         the real Azalea client in generated mode, and compare
   #                         the served per-coordinate content against the seed-42
   #                         ground-truth handoff (rivet-oracle
   #                         generated-expected). Milestone-gated behind
-  #                         RIVET_GENERATED_WORLD=1 (like RIVET_HASH_DIR): while
-  #                         the rivet-server --seed capability and/or the Paper
-  #                         seed-42 reference are absent, the row is an explicit
-  #                         NOTICE and stays mergeable — never a silent skip or a
-  #                         fabricated PASS. With the flag set the exit contract
-  #                         matches loaded-world (0 PASS / 1 FAIL / 3
+  #                         RIVET_GENERATED_WORLD=1 (like RIVET_HASH_DIR): the
+  #                         `--seed` option still serves the superflat M1
+  #                         fixture, and the Paper seed-42 reference is not
+  #                         captured yet, so while real generated-world serving
+  #                         and/or the ground truth are absent the row is an
+  #                         explicit NOTICE and stays mergeable — never a silent
+  #                         skip or a fabricated PASS. With the flag set the exit
+  #                         contract matches loaded-world (0 PASS / 1 FAIL / 3
   #                         UNVERIFIED; exit 3 sets ORACLE_UNVERIFIED, and
   #                         --require-oracle hard-fails it at exit 1).
   #

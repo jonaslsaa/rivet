@@ -1104,7 +1104,8 @@ fn one_join(
         None,
         &[],
         None,
-            None,)?;
+        None,
+    )?;
     println!("[run  {idx}] joining via rivet-client ...");
     let client_run = run_client(
         client_bin,
@@ -1303,7 +1304,8 @@ fn one_move(
         None,
         &[],
         None,
-            None,)?;
+        None,
+    )?;
     println!("[run  {idx}] walking via rivet-client (move mode) ...");
     let client_run = run_client(
         client_bin,
@@ -1516,7 +1518,8 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
             None,
             &[],
             None,
-            None,)?;
+            None,
+        )?;
         println!("[run  {idx}] connecting via rivet-client ...");
         let client_run = run_client(
             &client_bin,
@@ -2049,7 +2052,8 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[],
         None,
-            None,)?;
+        None,
+    )?;
     let paper_client = run_client(
         &client_bin,
         &ClientSpec {
@@ -2099,7 +2103,8 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[],
         None,
-            None,)?;
+        None,
+    )?;
     let rivet_client = run_client(
         &client_bin,
         &ClientSpec {
@@ -2265,7 +2270,8 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[],
         None,
-            None,)?;
+        None,
+    )?;
     let paper_client = run_client(
         &client_bin,
         &ClientSpec {
@@ -2313,7 +2319,8 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[(trace::TRACE_MOVEMENT_ENV, "1")],
         None,
-            None,)?;
+        None,
+    )?;
     let rivet_client = run_client(
         &client_bin,
         &ClientSpec {
@@ -2519,7 +2526,8 @@ fn run_dwell(args: &Args) -> Result<(), RunnerError> {
         None,
         &[],
         None,
-            None,)?;
+        None,
+    )?;
     println!("[run  1] dwelling via rivet-client (dwell mode) ...");
     let client_run = run_client(
         &client_bin,
@@ -2668,7 +2676,8 @@ fn run_kick(args: &Args) -> Result<(), RunnerError> {
         None,
         &[],
         None,
-            None,)?;
+        None,
+    )?;
     println!("[run  1] kicking via rivet-client (kick mode) ...");
     let client_run = run_client(
         &client_bin,
@@ -2810,7 +2819,8 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         None,
         &[],
         None,
-            None,)?;
+        None,
+    )?;
     let client_run = run_client(
         &client_bin,
         &ClientSpec {
@@ -2888,7 +2898,8 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
             None,
             &[],
             Some(&server_world_path),
-            None,) {
+            None,
+        ) {
             Ok(mut srv) => match server::shutdown(&mut srv) {
                 Ok(()) => Err(RunnerError::Unverified(
                     "rivet-server accepted the loaded-world path and reached READY, but this #316 \
@@ -3010,7 +3021,8 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
             None,
             &[],
             Some(&server_world_path),
-            None,) {
+            None,
+        ) {
             Ok(srv) => srv,
             Err(error) => return Err(classify_load_world_boot_failure(error, &log_path)),
         };
@@ -3095,12 +3107,14 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
 }
 
 /// The exact, test-pinned UNVERIFIED reason the generated-world acceptance
-/// reports while the explicit generated-world server capability is absent. A
-/// rivet-server build with only `--host`/`--port`/`--level` (the state at this
-/// harness's landing) has no way to boot a fresh generated seed world, so the
-/// scenario must exit UNVERIFIED (3) with exactly this reason — it must never
-/// fall back to the superflat no-level boot or a copied loaded world, which
-/// would fabricate a PASS on the wrong world.
+/// reports on a rivet-server build that rejects the `--seed` launch option
+/// (only `--host`/`--port`/`--level`). Such a build has no way to boot a fresh
+/// generated seed world, so the scenario must exit UNVERIFIED (3) with exactly
+/// this reason — it must never fall back to the superflat no-level boot or a
+/// copied loaded world, which would fabricate a PASS on the wrong world. (The
+/// current rivet-server accepts `--seed` but still serves the superflat M1
+/// fixture; the row then reaches the oracle `generated-expected` UNVERIFIED
+/// handoff instead of this boot-rejection reason.)
 pub const GENERATED_WORLD_UNVERIFIED_REASON: &str = "generated-world acceptance is UNVERIFIED: rivet-server has no generated-world capability \
      yet (no --seed launch option; only --host/--port/--level). The scenario will not boot a \
      superflat or copied-loaded-world stand-in. It reports UNVERIFIED until the rivet-server \
@@ -3108,20 +3122,22 @@ pub const GENERATED_WORLD_UNVERIFIED_REASON: &str = "generated-world acceptance 
 
 /// The official-client generated-world acceptance probe (seed-42 contract).
 ///
-/// Boots Rivet with `--seed 42` — the explicit generated-world capability — on
-/// an isolated port with no world path, drives the real Azalea client in
+/// Boots Rivet with `--seed 42` — the generated-world launch seam — on an
+/// isolated port with no world path, drives the real Azalea client in
 /// `generated` mode (join + dwell + bounded walk + per-coordinate content
 /// sampling from the client's own loaded `ChunkStorage`), compares the observed
 /// content against the seed-42 ground-truth handoff (`rivet-oracle
 /// generated-expected`), and requires a clean SIGTERM shutdown.
 ///
-/// Until the rivet-server `--seed` capability lands, the boot is rejected and
-/// the seed probe classifies it `Absent`; the runner then exits UNVERIFIED (3)
-/// with the exact [`GENERATED_WORLD_UNVERIFIED_REASON`] — never a superflat or
-/// loaded-world fallback. When the capability IS present but the Paper
-/// seed-42 ground-truth reference has not been captured yet, the oracle
-/// `generated-expected` handoff is UNVERIFIED and the acceptance stays
-/// honestly UNVERIFIED rather than comparing against nothing.
+/// The rivet-server `--seed` option now exists but still serves the superflat
+/// M1 fixture, and the Paper seed-42 ground-truth reference is not captured
+/// yet, so the runner boots the server and the acceptance stays honestly
+/// UNVERIFIED — via the oracle `generated-expected` handoff's own UNVERIFIED
+/// reason — rather than comparing against nothing or fabricating a PASS. A
+/// build that rejects `--seed` entirely is classified `Absent` and exits
+/// UNVERIFIED (3) with the exact
+/// [`GENERATED_WORLD_UNVERIFIED_REASON`] — never a superflat or loaded-world
+/// fallback.
 fn run_generated_world(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-generated-world");
@@ -3520,7 +3536,8 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
             None,
             &[(trace::TRACE_MOVEMENT_ENV, "1")],
             Some(&server_world_path),
-            None,) {
+            None,
+        ) {
             Ok(srv) => srv,
             Err(error) => return Err(classify_load_world_boot_failure(error, &log_path)),
         };
@@ -3750,7 +3767,8 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
             Some(reservations.remove(0)),
             &[(trace::TRACE_MOVEMENT_ENV, "1")],
             Some(&negative_temp.server_path()),
-            None,) {
+            None,
+        ) {
             Ok(srv) => srv,
             Err(error) => return Err(classify_load_world_boot_failure(error, &negative_log_path)),
         };
@@ -4720,7 +4738,6 @@ mod tests {
     /// The generated-world transcript carries its samples under
     /// `transcript["generated"]["samples"]` (the generated client record), so
     /// the compare helpers mirror the loaded shape with that key.
-
     fn generated_transcript_with(sample: Value) -> Value {
         json!({ "generated": { "samples": [sample] } })
     }
@@ -5003,7 +5020,6 @@ mod tests {
         fs::remove_file(log).unwrap();
     }
 
-    #[test]
     #[test]
     fn accepts_rivet_and_both_servers() {
         let a = parse(&["join", "--server", "rivet", "--pairs", "paper:rivet"]).unwrap();

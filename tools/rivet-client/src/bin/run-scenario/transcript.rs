@@ -227,6 +227,12 @@ fn outcome(records: &[Value]) -> &'static str {
     }
     if records
         .iter()
+        .any(|r| r.get("event") == Some(&json!("generated")))
+    {
+        return "generated";
+    }
+    if records
+        .iter()
         .any(|r| r.get("event") == Some(&json!("timeout")))
     {
         return "timeout";
