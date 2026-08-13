@@ -17,10 +17,8 @@
 //! `bootstrap_context` module docs), so an absent biome registry reports `None`
 //! and is treated as a bootstrap error.
 //!
-//! The `OVERWORLD` registration is deferred: `Preset::overworld` application is
-//! fallible (`OverworldDeferred`) while the `.data`-owned
-//! `OverworldBiomeBuilder::add_biomes` STUB emits nothing, so `bootstrap`
-//! registers only the `NETHER` preset. See the RivetTodo on [`bootstrap`].
+//! Both preset keys are registered: `bootstrap` registers `NETHER` then
+//! `OVERWORLD` (Paper's declaration order).
 
 use crate::biome::biome_source::keys;
 use crate::biome::multi_noise_biome_source_parameter_list::{
@@ -42,30 +40,24 @@ pub static OVERWORLD: LazyLock<ResourceKey<MultiNoiseBiomeSourceParameterList>> 
 /// MultiNoiseBiomeSourceParameterList>)` — resolves the biome getter and
 /// registers the supported preset lists (Java `context.register`, the stable
 /// lifecycle default).
-///
-/// Only the `NETHER` preset is registered today. The `OVERWORLD` registration
-/// is deferred — see the RivetTodo — and is not applied, so the fallible
-/// `Preset::overworld` provider is never invoked here.
 pub fn bootstrap(context: &mut impl BootstrapContext<MultiNoiseBiomeSourceParameterList>) {
-    // Java's `context.lookup(Registries.BIOME)` — the list is built inside a
+    // Java's `context.lookup(Registries.BIOME)` — each list is built inside a
     // block that releases the `&mut context` borrow before the register call
     // (the `NoiseRouterData.bootstrap` idiom).
     let nether = {
         let biomes = context
             .lookup(&rivet_registry::registries::BIOME)
             .expect("biome registry present in bootstrap");
-        // The nether provider builds its five entries directly and never
-        // returns the overworld deferral.
         MultiNoiseBiomeSourceParameterList::new(Preset::nether(), biomes)
-            .expect("the nether preset is never deferred")
     };
     context.register_default(&NETHER, nether);
-    // RivetTodo(#178): the OVERWORLD registration is deferred until the `.data`
-    // unit's `OverworldBiomeBuilder::add_biomes` table lands (applying
-    // `Preset::overworld` currently returns `Err(OverworldDeferred)`). Removal
-    // condition: the table emits the overworld parameter list, then add the
-    // OVERWORLD registration after the NETHER line (Paper's declaration order)
-    // with no other call-site changes.
+    let overworld = {
+        let biomes = context
+            .lookup(&rivet_registry::registries::BIOME)
+            .expect("biome registry present in bootstrap");
+        MultiNoiseBiomeSourceParameterList::new(Preset::overworld(), biomes)
+    };
+    context.register_default(&OVERWORLD, overworld);
 }
 
 /// `MultiNoiseBiomeSourceParameterLists.register(String)` —
@@ -93,29 +85,26 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_registers_the_nether_preset_while_overworld_is_deferred() {
-        use crate::biome::biomes;
+    fn bootstrap_registers_both_presets_in_declaration_order() {
         use crate::data::worldgen::bootstrap_context::{RecordedRegistration, RecordingContext};
         use rivet_registry::biome_id::BiomeId;
+        use rivet_registry::generated::biomes::BIOME_BY_ID;
         use rivet_registry::holder::RegistryId;
         use rivet_registry::{RegistrationInfo, RegistryAccess, RegistryBuilder};
         use rivet_serialization::lifecycle::Lifecycle;
         use std::sync::Arc;
 
         // Java's `context.lookup(Registries.BIOME)` resolves the real biome
-        // registry, so the access carries one with the five nether keys (the
-        // `Preset::nether` provider `getOrThrow`s exactly these).
-        let nether_keys = [
-            &biomes::NETHER_WASTES,
-            &biomes::SOUL_SAND_VALLEY,
-            &biomes::CRIMSON_FOREST,
-            &biomes::WARPED_FOREST,
-            &biomes::BASALT_DELTAS,
-        ];
+        // registry, so the access carries one with every generated biome key
+        // (both presets `getOrThrow` exactly these — the nether's five and the
+        // overworld's 55).
         let mut builder = RegistryBuilder::<BiomeId>::new(&rivet_registry::registries::BIOME);
-        for (i, key) in nether_keys.iter().enumerate() {
+        for (i, name) in BIOME_BY_ID.iter().enumerate() {
             builder.register(
-                key,
+                &rivet_registry::ResourceKey::create(
+                    &rivet_registry::registries::BIOME,
+                    rivet_registry::Identifier::parse(name),
+                ),
                 Arc::new(BiomeId::from_id(i as u16)),
                 RegistrationInfo::BUILT_IN,
             );
@@ -133,26 +122,24 @@ mod tests {
         );
         bootstrap(&mut context);
 
-        // Only the nether preset is supported today: the overworld preset's
-        // `add_biomes` is the `STUB(#178)` table (see `overworld_biome_builder`),
-        // so applying it is the typed deferral and `bootstrap` never registers
-        // it. A full overworld entry lands with the `.data` unit.
         let regs: Vec<RecordedRegistration<MultiNoiseBiomeSourceParameterList>> =
             context.registrations().iter().cloned().collect();
-        assert_eq!(regs.len(), 1);
+        // Both presets register, nether first (Paper's declaration order).
+        assert_eq!(regs.len(), 2);
         assert_eq!(regs[0].key.identifier().to_string(), "minecraft:nether");
         assert_eq!(regs[0].lifecycle, Lifecycle::stable());
+        assert_eq!(regs[1].key.identifier().to_string(), "minecraft:overworld");
+        assert_eq!(regs[1].lifecycle, Lifecycle::stable());
         // The nether preset's five biome keys are present in declaration order.
-        let used: Vec<String> = regs[0]
+        let nether_used: Vec<String> = regs[0]
             .value
             .preset
             .used_biomes()
-            .expect("the nether preset is never deferred")
             .iter()
             .map(|k| k.identifier().to_string())
             .collect();
         assert_eq!(
-            used,
+            nether_used,
             vec![
                 "minecraft:nether_wastes",
                 "minecraft:soul_sand_valley",
@@ -161,5 +148,9 @@ mod tests {
                 "minecraft:basalt_deltas",
             ]
         );
+        // The overworld preset carries the full 7594-point list (55 distinct
+        // biomes) — the `.data` table is applied, not deferred.
+        assert_eq!(regs[1].value.parameters().values().len(), 7594);
+        assert_eq!(regs[1].value.preset.used_biomes().len(), 55);
     }
 }
