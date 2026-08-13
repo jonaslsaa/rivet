@@ -26,7 +26,10 @@ pub struct ChunkDependencies {
 impl ChunkDependencies {
     /// The Java constructor: `size = list.isEmpty() ? 0 :
     /// list.getFirst().getIndex() + 1`, then the prefix fill
-    /// `radiusByDependency[0..=dep.index] = radius` for every radius.
+    /// `radiusByDependency[0..=dep.index] = radius` for every radius. A
+    /// dependency whose index is beyond `size` overflows the Java array
+    /// (`ArrayIndexOutOfBoundsException`); the port panics with the same
+    /// contract.
     pub fn new(dependency_by_radius: Vec<ChunkStatus>) -> Self {
         let size = match dependency_by_radius.first() {
             Some(first) => first.index() + 1,
@@ -35,6 +38,12 @@ impl ChunkDependencies {
         let mut radius_by_dependency = vec![0usize; size];
         for (radius, dependency) in dependency_by_radius.iter().enumerate() {
             let index = dependency.index();
+            assert!(
+                index < radius_by_dependency.len(),
+                "dependency {dependency:?} at radius {radius} is outside the dependency range \
+                 (size {}) — like Java's ArrayIndexOutOfBoundsException",
+                radius_by_dependency.len()
+            );
             for entry in radius_by_dependency.iter_mut().take(index + 1) {
                 *entry = radius;
             }

@@ -112,21 +112,15 @@ impl ChunkStatus {
     }
 
     /// `ChunkStatus.getParent()` — the previous rung of the ladder; `EMPTY`
-    /// is its own parent (Java stores `this` when the parent is null).
+    /// is its own parent (Java stores `this` when the parent is null). Derived
+    /// from `ALL`/index order so there is a single source of truth for the
+    /// chain (a transposed hand-written match would silently corrupt
+    /// `byRadius`/`required_status_at_radius`).
     pub const fn parent(self) -> Self {
-        match self {
-            Self::Empty => Self::Empty,
-            Self::StructureStarts => Self::Empty,
-            Self::StructureReferences => Self::StructureStarts,
-            Self::Biomes => Self::StructureReferences,
-            Self::Noise => Self::Biomes,
-            Self::Surface => Self::Noise,
-            Self::Carvers => Self::Surface,
-            Self::Features => Self::Carvers,
-            Self::InitializeLight => Self::Features,
-            Self::Light => Self::InitializeLight,
-            Self::Spawn => Self::Light,
-            Self::Full => Self::Spawn,
+        if self.index() == 0 {
+            Self::Empty
+        } else {
+            Self::ALL[self.index() - 1]
         }
     }
 
