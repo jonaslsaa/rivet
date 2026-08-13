@@ -1590,14 +1590,13 @@ impl NoiseInterpolator {
     }
 
     /// `fillArray(double[] slice, ContextProvider provider)` — via the slice
-    /// provider's `fillAllDirectly` (the interpolation loop). The caller owns
-    /// the slice (`clone`d out of the shared buffer) and writes it back.
-    ///
-    /// Java's `NoiseChunk.fillSlice` hands the interpolator a *live* column
-    /// from its own `slice0`/`slice1` arrays and fills it in place; the Rust
-    /// port must write the filled column back into the shared buffers (the
-    /// `fill_slice_column` caller), otherwise the `selectCellYZ` reads would
-    /// see the untouched zeros.
+    /// provider's `fillAllDirectly` (the interpolation loop). `slice0`/`slice1`
+    /// are `Arc<Mutex<Vec<Vec<f64>>>>`, so the `slice0`/`slice1` clone below is
+    /// an Arc clone aliasing the SAME shared buffer: the column is filled IN
+    /// PLACE through the shared `Arc<Mutex>`, exactly Java's `fillSlice` handing
+    /// the interpolator a live column from its own arrays (the
+    /// `interpolation_loop_reads_filled_slices` test reads the filled slices,
+    /// and `selectCellYZ` reads this same buffer).
     fn fill_slice_column(&self, slice0: bool, cell_z_index: usize, provider: &dyn ContextProvider) {
         // Clone the Arc so the `&mut column` borrow no longer ties to `self`
         // (the `fill_array` call below takes `&self`).
