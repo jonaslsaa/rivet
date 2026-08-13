@@ -852,17 +852,16 @@ fn verify_fixtures_dir(dir: &Path) -> Result<(), Error> {
 }
 
 /// Every fixture *kind* that carries its own manifest under `fixtures/`: the
-/// M0 root (`fixtures/manifest.json`) plus each subdir with a `manifest.json`
+/// M0 root (`<root>/manifest.json`) plus each subdir with a `manifest.json`
 /// (recursive — `fixtures/worldgen/` and `fixtures/regions/overworld-normal/`
 /// both qualify today, and kinds may nest arbitrarily). Kinds verify
 /// independently and can grow without a format migration.
-fn all_fixture_manifests() -> Vec<PathBuf> {
-    let root = crate_dir().join("fixtures");
+fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if root.join("manifest.json").is_file() {
-        out.push(root.clone());
+        out.push(root.to_path_buf());
     }
-    let mut walk = vec![root.clone()];
+    let mut walk = vec![root.to_path_buf()];
     while let Some(dir) = walk.pop() {
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
@@ -883,7 +882,20 @@ fn all_fixture_manifests() -> Vec<PathBuf> {
 
 /// The default (no-arg) mode: verify every committed fixture kind.
 fn verify_all_fixture_kinds() -> Result<(), Error> {
-    let kinds = all_fixture_manifests();
+    verify_all_fixture_kinds_from(&crate_dir().join("fixtures"))
+}
+
+/// Verify every committed fixture kind under `root`.
+///
+/// The composed-noise golden is load-bearing: its presence is asserted BEFORE
+/// the generic hash loop, so a missing golden (whole tree absent, or manifest
+/// present but the golden file missing) is classified `Error::Unverified`
+/// (exit 3) — the same classification the composed-noise subcommand gives it —
+/// never the generic loop's `Error::Manifest` (exit 1). A present-but-corrupt
+/// golden still fails hard (exit 1) once the generic hash loop compares it.
+fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
+    composed_noise::require_fixture_tree(&root.join("composed-noise"))?;
+    let kinds = all_fixture_manifests_from(root);
     if kinds.is_empty() {
         return Err(Error::Manifest(
             "no fixture manifests found under fixtures/ (run scripts/extract_fixtures.py first)"
@@ -892,11 +904,7 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
     }
     println!("verifying all committed fixture kinds:");
     for d in &kinds {
-        let rel = d
-            .strip_prefix(crate_dir())
-            .unwrap_or(d)
-            .display()
-            .to_string();
+        let rel = d.strip_prefix(root).unwrap_or(d).display().to_string();
         println!("  - {rel}");
     }
     println!();
@@ -923,11 +931,9 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
     );
     // The composed-noise golden comparison: beyond the manifest hashes, assert
     // the NOISE-checkpoint goldens (provenance, FULL_CHUNK_STEP reachability,
-    // non-vacuous #175 matrix) and print the status/provenance scoreboard. The
-    // committed seed-42 golden is a load-bearing deliverable — if the fixture
-    // tree is absent this is UNVERIFIED (exit 3), never a silent green (D8:
-    // never weaken/delete fixtures to go green).
-    verify_composed_noise_step(&crate_dir().join("fixtures/composed-noise"))?;
+    // non-vacuous #175 matrix) and print the status/provenance scoreboard.
+    // Presence was already asserted above; this runs the actual comparison.
+    verify_composed_noise_step(&root.join("composed-noise"))?;
     Ok(())
 }
 

@@ -552,19 +552,19 @@ pub fn parse_mode(flags: &[&str]) -> Result<ComposedNoiseMode, Error> {
     })
 }
 
-/// Assert the committed composed-noise fixture tree is present, classifying a
-/// fully absent tree (no manifest) as `Error::Unverified` (exit 3) — the
-/// missing-prerequisite contract — never a hard FAIL. This mirrors the gate:
-/// `verify_all_fixture_kinds` reaches `verify_composed_noise_step` only after
-/// the generic hash loop, and both agree that a tree with no `manifest.json`
-/// is a missing golden. A *partial* tree (manifest present, golden missing or
-/// empty) is corruption, not absence: it fails hard downstream (exit 1), the
-/// same way the gate's generic hash loop fails it. Every operation that
-/// consumes the committed golden (verify and the tamper negative control)
-/// must pass this first; `--sample` regeneration does not, since it writes
-/// the golden from the Paper runtime.
+/// Assert the committed composed-noise fixture tree is present — both the
+/// manifest AND the golden file. A missing golden (whole tree absent, or
+/// manifest present but the golden file missing) is a missing prerequisite:
+/// `Error::Unverified` (exit 3), never a hard FAIL. The comparison cannot run
+/// against an absent golden, so "unverified" is the honest classification;
+/// a present-but-corrupt golden (empty, unparsable, hash-mismatched) instead
+/// fails hard (exit 1) once the comparison runs. Every consumer of the golden
+/// routes through this guard: the default gate (`verify_all_fixture_kinds`,
+/// before the generic hash loop), the composed-noise verify subcommand, and
+/// the tamper negative control. `--sample` regeneration does not, since it
+/// writes the golden from the Paper runtime.
 pub fn require_fixture_tree(dir: &Path) -> Result<(), Error> {
-    if !dir.join("manifest.json").is_file() {
+    if !dir.join("manifest.json").is_file() || !dir.join(FIXTURE_BASENAME).is_file() {
         return Err(Error::Unverified(format!(
             "composed-noise fixtures {} are ABSENT — the seed-42 golden and its \
              NOISE-checkpoint gate cannot verify (git checkout or regenerate via \
@@ -850,12 +850,10 @@ mod tests {
         );
     }
 
-    /// A partial tree (manifest present, golden absent) is corruption, not
-    /// absence: `require_fixture_tree` passes it (the absent-golden exit-3
-    /// contract is for a fully missing tree), and verification hard-fails
-    /// (exit 1) — the same classification the gate's generic hash loop gives it.
+    /// A partial tree (manifest present, golden absent) is still a missing
+    /// golden — UNVERIFIED, never a hard FAIL via a later read error.
     #[test]
-    fn partial_fixture_tree_hard_fails_not_unverified() {
+    fn partial_fixture_tree_is_unverified() {
         let scratch =
             std::env::temp_dir().join(format!("rivet-oracle-cn-partial-{}", std::process::id()));
         let _ = fs::remove_dir_all(&scratch);
@@ -864,8 +862,27 @@ mod tests {
         let result = require_fixture_tree(&scratch);
         let _ = fs::remove_dir_all(&scratch);
         assert!(
-            result.is_ok(),
-            "manifest present must not be classified UNVERIFIED: {result:?}"
+            matches!(result, Err(crate::Error::Unverified(_))),
+            "expected Error::Unverified (exit 3), got {result:?}"
+        );
+    }
+
+    /// The default gate (`verify_all_fixture_kinds`) must classify a missing
+    /// composed-noise golden as UNVERIFIED (exit 3) — checked at the shared
+    /// layer before the generic hash loop, which would otherwise report a hard
+    /// FAIL (exit 1) via `Error::Manifest`.
+    #[test]
+    fn gate_path_classifies_missing_composed_noise_golden_as_unverified() {
+        let root =
+            std::env::temp_dir().join(format!("rivet-oracle-cn-gate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("composed-noise")).unwrap();
+        fs::write(root.join("composed-noise/manifest.json"), "{}").unwrap();
+        let result = crate::verify_all_fixture_kinds_from(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            matches!(result, Err(crate::Error::Unverified(_))),
+            "gate must classify a missing composed-noise golden as UNVERIFIED (exit 3), got {result:?}"
         );
     }
 
