@@ -38,11 +38,12 @@ import net.minecraft.resources.RegistryOps;
  * occurrence-count stats and the referenced biome holder list.
  *
  * This is the byte-exactness oracle for the merged surface-rules codec port:
- * the Rust `surface_rule_data_golden.rs` integration test re-encodes the nether
- * tree with `rule_source_codec`/`condition_source_codec` under `RegistryOps`
- * and asserts the re-encoded bytes equal the canonical bytes here (both
- * sides normalized by serde_json, so the `1.7976931348623157E308` Java
- * exponent casing is a shared, pinned deviation).
+ * the Rust `surface_rule_data_golden.rs` integration test re-encodes every
+ * preset (nether, overworld, both overworldLike flag combos, end and air) with
+ * `rule_source_codec`/`condition_source_codec` under `RegistryOps` and asserts
+ * the re-encoded bytes equal the canonical bytes here (both sides normalized by
+ * serde_json, so the `1.7976931348623157E308` Java exponent casing is a shared,
+ * pinned deviation).
  *
  * The probe boots the vanilla registries exactly like ComposedNoiseProbe (no
  * server boot) so the `BIOME` registry is populated for

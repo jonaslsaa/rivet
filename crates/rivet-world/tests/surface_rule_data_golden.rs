@@ -7,14 +7,17 @@
 //! Paper 26.2 runtime (`0a99345`), plus structural occurrence-count stats.
 //! Regenerate with `scripts/run_surface_rule_data_probe.sh`.
 //!
-//! The nether tree is the only one verified here: it exercises ten of the
-//! fifteen dispatch types the merged codec surface ports (the other five —
-//! `above_preliminary_surface`, `bandlands`, `steep`, `temperature`, `water` —
-//! appear only in the overworld trees) and needs only the five nether biomes in
-//! the test registry. The overworld / overworldLike trees stay present in the
-//! fixture but UNVERIFIED (see `overworld_trees_are_unverified`) because their
-//! `biome_is` holder sets reference the 28 overworld biomes, which the nether-
-//! only test registry cannot resolve.
+//! Every preset — nether, overworld, both overworldLike flag combos, end and
+//! air — parses through `rule_source_codec` and re-encodes byte-identically
+//! (see `all_presets_parse_and_reencode_byte_exactly`), so all fifteen dispatch
+//! types the merged codec surface ports are exercised by real Paper trees (see
+//! `dispatch_coverage_spans_all_15_types`). Only the nether tree (five nether
+//! biomes) and the overworld / overworldLike trees (the 28 overworld biomes)
+//! reference holders; the end and air presets are trivial single-`block` rules
+//! with no biome holders. The overworld-biome-data slice merged via PR #589
+//! supplies the overworld holder statics, so the test registry registers the 33
+//! referenced biomes. This replaced the original UNVERIFIED status, which
+//! existed only while those biome statics were still missing.
 //!
 //! Byte-exactness notes:
 //! - Both the canonical fixture and the Rust re-encode are serde_json Values
@@ -75,17 +78,48 @@ fn preset<'a>(fixture: &'a Value, name: &str) -> &'a Value {
         .expect("preset json")
 }
 
-/// A biome registry with the five nether biomes (ids 0..5) under
-/// `Registries.BIOME` — enough to resolve every `biome_is` holder the nether
-/// tree references.
-fn nether_access() -> RegistryAccess {
+/// A biome registry registering the 33 holder names the fixture's surface trees
+/// reference (the five nether biomes plus the 28 overworld biomes; the end and
+/// air presets are single-`block` rules and reference none). The
+/// overworld-biome-data slice (PR #589) merged into `biomes.rs` is what makes
+/// the overworld / overworldLike trees resolvable; the fixture's bare holder
+/// ids re-encode as bare identifiers, so registry ids are not load-bearing.
+fn all_biomes_access() -> RegistryAccess {
     let mut builder = RegistryBuilder::new(&*rivet_registry::registries::BIOME);
     for (id, key) in [
-        (0, &*biomes::NETHER_WASTES),
-        (1, &*biomes::SOUL_SAND_VALLEY),
-        (2, &*biomes::CRIMSON_FOREST),
-        (3, &*biomes::WARPED_FOREST),
-        (4, &*biomes::BASALT_DELTAS),
+        (4, &*biomes::ICE_SPIKES),
+        (5, &*biomes::DESERT),
+        (6, &*biomes::SWAMP),
+        (7, &*biomes::MANGROVE_SWAMP),
+        (14, &*biomes::OLD_GROWTH_PINE_TAIGA),
+        (15, &*biomes::OLD_GROWTH_SPRUCE_TAIGA),
+        (20, &*biomes::WINDSWEPT_HILLS),
+        (21, &*biomes::WINDSWEPT_GRAVELLY_HILLS),
+        (23, &*biomes::WINDSWEPT_SAVANNA),
+        (27, &*biomes::BADLANDS),
+        (28, &*biomes::ERODED_BADLANDS),
+        (29, &*biomes::WOODED_BADLANDS),
+        (32, &*biomes::GROVE),
+        (33, &*biomes::SNOWY_SLOPES),
+        (34, &*biomes::FROZEN_PEAKS),
+        (35, &*biomes::JAGGED_PEAKS),
+        (36, &*biomes::STONY_PEAKS),
+        (39, &*biomes::BEACH),
+        (40, &*biomes::SNOWY_BEACH),
+        (41, &*biomes::STONY_SHORE),
+        (42, &*biomes::WARM_OCEAN),
+        (43, &*biomes::LUKEWARM_OCEAN),
+        (44, &*biomes::DEEP_LUKEWARM_OCEAN),
+        (49, &*biomes::FROZEN_OCEAN),
+        (50, &*biomes::DEEP_FROZEN_OCEAN),
+        (51, &*biomes::MUSHROOM_FIELDS),
+        (52, &*biomes::DRIPSTONE_CAVES),
+        (55, &*biomes::SULFUR_CAVES),
+        (56, &*biomes::NETHER_WASTES),
+        (57, &*biomes::WARPED_FOREST),
+        (58, &*biomes::CRIMSON_FOREST),
+        (59, &*biomes::SOUL_SAND_VALLEY),
+        (60, &*biomes::BASALT_DELTAS),
     ] {
         builder.register(
             key,
@@ -100,8 +134,8 @@ fn nether_access() -> RegistryAccess {
     )])
 }
 
-fn nether_ops() -> TestOps {
-    RegistryOps::create_from_access(&JsonOps::INSTANCE, nether_access())
+fn all_biomes_ops() -> TestOps {
+    RegistryOps::create_from_access(&JsonOps::INSTANCE, all_biomes_access())
 }
 
 // -- structural walkers (mirror `SurfaceRuleDataProbe.countStruct`) ---------
@@ -266,11 +300,11 @@ fn nether_preset_present_with_provenance() {
     assert!(preset(&fixture, "nether").is_object());
 }
 
-/// The canonical nether tree parses through `rule_source_codec` under a
-/// nether-only biome registry and re-encodes byte-identically.
+/// The canonical nether tree parses through `rule_source_codec` under a full
+/// biome registry and re-encodes byte-identically.
 #[test]
 fn nether_tree_parses_and_reencodes_byte_exactly() {
-    let ops = nether_ops();
+    let ops = all_biomes_ops();
     let codec = rule_source_codec::<TestOps>();
     let canonical = preset(&fixture(), "nether").clone();
     let decoded = codec
@@ -347,41 +381,81 @@ fn nether_structural_stats_match_capture() {
     );
 }
 
-/// The overworld / overworldLike trees stay present in the fixture but are
-/// UNVERIFIED: their `biome_is` holder sets reference the 28 overworld biomes,
-/// which the nether-only test registry cannot resolve. A decode attempt fails
-/// at the first missing biome holder, so this test pins the boundary — wiring
-/// the overworld biomes into the test registry flips the expectation and must
-/// be a deliberate extension, not a silent one.
+/// Every preset — nether, overworld, both overworldLike flag combos, end and
+/// air — parses through `rule_source_codec` under the full biome registry and
+/// re-encodes byte-identically to the Paper capture. The overworld trees were
+/// originally UNVERIFIED only because the overworld biome statics were missing;
+/// the overworld-biome-data slice (PR #589) merged into `biomes.rs` supplies
+/// them, so the byte-exact contract now holds for every surface tree.
 #[test]
-fn overworld_trees_are_unverified() {
+fn all_presets_parse_and_reencode_byte_exactly() {
+    let ops = all_biomes_ops();
+    let codec = rule_source_codec::<TestOps>();
     let fixture = fixture();
     for name in [
+        "nether",
         "overworld",
         "overworld_like_true_false_true",
         "overworld_like_false_false_true",
+        "end",
+        "air",
     ] {
-        let json = preset(&fixture, name);
-        // The trees reference the 28 overworld biomes — none registered in the
-        // nether-only test registry.
-        let mut biomes = BTreeMap::new();
-        count_biome_names(json, &mut biomes);
-        assert_eq!(biomes.len(), 28, "{name} references 28 biomes");
-
-        let ops = nether_ops();
-        let codec = rule_source_codec::<TestOps>();
-        assert!(
-            codec.parse(&ops, json).result().is_none(),
-            "{name} is UNVERIFIED: decode must fail on the missing overworld biome holders"
+        let canonical = preset(&fixture, name).clone();
+        let decoded = codec
+            .parse(&ops, &canonical)
+            .get_or_throw(format!("decode {name} tree"))
+            .clone();
+        let reencoded = codec
+            .encode_start(&ops, &decoded)
+            .get_or_throw(format!("re-encode {name} tree"))
+            .clone();
+        assert_eq!(
+            serde_json::to_vec(&reencoded).expect("re-encoded JSON serializes"),
+            serde_json::to_vec(&canonical).expect("canonical JSON serializes"),
+            "{name} tree must re-encode byte-identically to the Paper capture"
         );
     }
+}
+
+/// The fixture's presets exercise all fifteen dispatch `"type"` keys the merged
+/// codec surface ports: the nether tree covers ten and the overworld trees
+/// bring in the remaining five (`above_preliminary_surface`, `bandlands`,
+/// `steep`, `temperature`, `water`). Asserting the exact union pins that the
+/// golden covers the full surface, not a silent subset.
+#[test]
+fn dispatch_coverage_spans_all_15_types() {
+    let fixture = fixture();
+    let mut covered = BTreeMap::new();
+    for p in fixture["presets"].as_array().expect("presets array") {
+        count_node_types(&p["json"], &mut covered);
+    }
+    assert_eq!(
+        covered,
+        BTreeMap::from([
+            ("minecraft:above_preliminary_surface".to_string(), 2),
+            ("minecraft:bandlands".to_string(), 6),
+            ("minecraft:biome".to_string(), 131),
+            ("minecraft:block".to_string(), 357),
+            ("minecraft:condition".to_string(), 487),
+            ("minecraft:hole".to_string(), 12),
+            ("minecraft:noise_threshold".to_string(), 137),
+            ("minecraft:not".to_string(), 22),
+            ("minecraft:sequence".to_string(), 171),
+            ("minecraft:steep".to_string(), 15),
+            ("minecraft:stone_depth".to_string(), 76),
+            ("minecraft:temperature".to_string(), 3),
+            ("minecraft:vertical_gradient".to_string(), 8),
+            ("minecraft:water".to_string(), 60),
+            ("minecraft:y_above".to_string(), 43),
+        ])
+    );
 }
 
 /// Reordering a sequence's elements changes the canonical bytes: byte-exactness
 /// is order-sensitive, not a vacuous pass.
 #[test]
 fn reordered_sequence_does_not_reencode_byte_exactly() {
-    let ops = nether_ops();
+    let ops = all_biomes_ops();
     let codec = rule_source_codec::<TestOps>();
     let canonical = preset(&fixture(), "nether").clone();
     let mut tampered = canonical.clone();
@@ -405,7 +479,7 @@ fn reordered_sequence_does_not_reencode_byte_exactly() {
 /// A bogus dispatch type on the root rule must be rejected.
 #[test]
 fn wrong_rule_type_is_rejected() {
-    let ops = nether_ops();
+    let ops = all_biomes_ops();
     let codec = rule_source_codec::<TestOps>();
     let mut tampered = preset(&fixture(), "nether").clone();
     tampered["type"] = Value::String("minecraft:no_such_rule".into());
@@ -418,7 +492,7 @@ fn wrong_rule_type_is_rejected() {
 /// Dropping the required `biome_is` field from a biome condition is rejected.
 #[test]
 fn missing_biome_holder_is_rejected() {
-    let ops = nether_ops();
+    let ops = all_biomes_ops();
     let codec = rule_source_codec::<TestOps>();
     let mut tampered = preset(&fixture(), "nether").clone();
     mutate_type_nodes(&mut tampered, "minecraft:biome", &|map| {
@@ -432,15 +506,17 @@ fn missing_biome_holder_is_rejected() {
 
 /// A biome identifier that is not in the registry is rejected by the
 /// `HolderSetCodec` list arm (`RegistryFixedCodec` cannot resolve it).
+/// `deep_dark` is registered in `biomes.rs`, so use a name outside every
+/// static.
 #[test]
 fn unregistered_biome_holder_is_rejected() {
-    let ops = nether_ops();
+    let ops = all_biomes_ops();
     let codec = rule_source_codec::<TestOps>();
     let mut tampered = preset(&fixture(), "nether").clone();
     mutate_type_nodes(&mut tampered, "minecraft:biome", &|map| {
         map.insert(
             "biome_is".into(),
-            Value::String("minecraft:deep_dark".into()),
+            Value::String("minecraft:not_a_biome".into()),
         );
     });
     assert!(
@@ -452,7 +528,7 @@ fn unregistered_biome_holder_is_rejected() {
 /// A block rule carrying a name outside the generated block table is rejected.
 #[test]
 fn unknown_block_name_is_rejected() {
-    let ops = nether_ops();
+    let ops = all_biomes_ops();
     let codec = rule_source_codec::<TestOps>();
     let mut tampered = preset(&fixture(), "nether").clone();
     mutate_type_nodes(&mut tampered, "minecraft:block", &|map| {
@@ -469,7 +545,7 @@ fn unknown_block_name_is_rejected() {
 /// A malformed vertical anchor is rejected.
 #[test]
 fn malformed_anchor_is_rejected() {
-    let ops = nether_ops();
+    let ops = all_biomes_ops();
     let codec = rule_source_codec::<TestOps>();
     let mut tampered = preset(&fixture(), "nether").clone();
     mutate_type_nodes(&mut tampered, "minecraft:y_above", &|map| {
@@ -486,7 +562,7 @@ fn malformed_anchor_is_rejected() {
 /// strict — but must NOT re-encode to the canonical bytes.
 #[test]
 fn mutated_values_do_not_reencode_byte_exactly() {
-    let ops = nether_ops();
+    let ops = all_biomes_ops();
     let codec = rule_source_codec::<TestOps>();
     let canonical = preset(&fixture(), "nether").clone();
 
