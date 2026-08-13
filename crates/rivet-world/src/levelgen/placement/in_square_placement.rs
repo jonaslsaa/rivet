@@ -103,6 +103,11 @@ mod tests {
     struct NoopGenerator;
 
     impl crate::chunk::ChunkGenerator for NoopGenerator {
+        fn create_biomes(&self) {}
+        fn apply_carvers(&self) {}
+        fn build_surface(&self) {}
+        fn spawn_original_mobs(&self) {}
+        fn fill_from_noise(&self) {}
         fn get_min_y(&self) -> i32 {
             0
         }
