@@ -830,6 +830,23 @@ mod tests {
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
         assert!(biomes_calls.borrow().is_empty());
         assert!(noise_calls.borrow().is_empty());
+
+        // The single-step seam refuses the same rung mismatch for the NOISE
+        // task before running the misplaced task.
+        let biomes_step = pyramid.get_step_to(ChunkStatus::Biomes);
+        let err = ctx
+            .run_step(biomes_step, &mut chunk)
+            .expect_err("run_step refuses the rung mismatch");
+        assert_eq!(
+            err,
+            GenError::TaskStatusMismatch {
+                status: ChunkStatus::Biomes,
+                task: ChunkStatusTask::GenerateNoise,
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
     }
 
     #[test]
