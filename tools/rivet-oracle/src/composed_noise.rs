@@ -146,6 +146,13 @@ pub fn load(dir: &Path) -> Result<ComposedNoise, Error> {
     let path = dir.join(FIXTURE_BASENAME);
     let raw = fs::read_to_string(&path)
         .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
+    if raw.is_empty() {
+        return Err(Error::Manifest(format!(
+            "composed-noise golden {} is EMPTY — restore the committed fixture \
+             (git checkout), it is corrupt",
+            path.display()
+        )));
+    }
     let v: ComposedNoise = serde_json::from_str(&raw)
         .map_err(|e| Error::Manifest(format!("invalid {FIXTURE_BASENAME}: {e}")))?;
     if v.format != 1 {
@@ -508,43 +515,203 @@ fn verify_value_bits(fixture: &ComposedNoise) -> Result<(), Error> {
     Ok(())
 }
 
-/// The tamper negative control: corrupt a committed bit pattern (flip one byte
-/// of the JSON) and assert the verification FAILS — proving the comparison is
-/// not vacuous (a green is impossible with tampered goldens).
-///
-/// Like the other negative controls (`tamper_baseline_copy`), it operates on a
-/// scratch copy in the temp dir so the committed fixtures are never mutated —
-/// a panic or `?` early-return can never leave `fixtures/composed-noise/`
-/// corrupted.
-pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
-    let scratch = std::env::temp_dir().join(format!(
-        "rivet-oracle-composed-noise-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&scratch);
-    fs::create_dir_all(&scratch)
-        .map_err(|e| Error::Gate(format!("cannot create scratch {}: {e}", scratch.display())))?;
-    // Copy the fixture + manifest so `verify_composed_noise` has a complete
-    // (manifest-hash-gated) fixture tree to run against.
-    fs::copy(dir.join(FIXTURE_BASENAME), scratch.join(FIXTURE_BASENAME))?;
-    fs::copy(dir.join("manifest.json"), scratch.join("manifest.json"))?;
-    let fixture_path = scratch.join(FIXTURE_BASENAME);
-    let original = fs::read(&fixture_path)
-        .map_err(|e| Error::Gate(format!("cannot read {}: {e}", fixture_path.display())))?;
-    // Flip one byte in the middle of the file — a deterministic, minimal tamper.
-    let i = (original.len() / 2).min(original.len().saturating_sub(1));
-    let mut tampered = original.clone();
-    tampered[i] ^= 0xFF;
-    fs::write(&fixture_path, &tampered)?;
-    let result = verify_composed_noise(&scratch);
-    // Discard the scratch copy; the committed fixtures are untouched.
-    let _ = fs::remove_dir_all(&scratch);
+/// The composed-noise subcommand mode selected by its `--tamper` / `--sample`
+/// flags (default: verify + scoreboard).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ComposedNoiseMode {
+    Verify,
+    Tamper,
+    Sample,
+}
+
+/// Parse the composed-noise subcommand flags into a mode. Unknown flags are a
+/// usage error — a typo'd `--sampple` used to fall through to the verify branch
+/// and exit 0 after verifying, so strictness here prevents a silent misread of
+/// the intended mode. `--tamper` and `--sample` are mutually exclusive (repeats
+/// of the same flag are fine). Sole `--help`/`-h` is intercepted by the
+/// dispatcher; in any combination it is a hard usage error here (the
+/// subcommand accepts no positional arguments, unlike `verify`).
+pub fn parse_mode(flags: &[&str]) -> Result<ComposedNoiseMode, Error> {
+    let mut mode: Option<ComposedNoiseMode> = None;
+    for flag in flags {
+        let m = match *flag {
+            "--tamper" => ComposedNoiseMode::Tamper,
+            "--sample" => ComposedNoiseMode::Sample,
+            other => {
+                return Err(Error::Gate(format!(
+                    "composed-noise takes only --tamper/--sample, got {other}"
+                )));
+            }
+        };
+        match mode {
+            None => mode = Some(m),
+            Some(prev) if prev == m => {}
+            Some(_) => {
+                return Err(Error::Gate(
+                    "composed-noise --tamper and --sample are mutually exclusive".into(),
+                ));
+            }
+        }
+    }
+    Ok(mode.unwrap_or(ComposedNoiseMode::Verify))
+}
+
+/// The committed composed-noise tree state, classified by which files exist:
+/// `Absent` (neither file — the regenerate case), `Partial` (exactly one — a
+/// broken checked-in tree), or `Present` (both). `Present` means present, not
+/// valid: a zero-byte golden still hard-fails in `load`.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum FixtureState {
+    Absent,
+    Partial,
+    Present,
+}
+
+/// Classify the committed composed-noise tree by which of `manifest.json` /
+/// the golden file exist.
+pub fn fixture_state(dir: &Path) -> FixtureState {
+    match (
+        dir.join("manifest.json").is_file(),
+        dir.join(FIXTURE_BASENAME).is_file(),
+    ) {
+        (false, false) => FixtureState::Absent,
+        (true, true) => FixtureState::Present,
+        _ => FixtureState::Partial,
+    }
+}
+
+/// Assert the composed-noise tree is not wholly absent. `FixtureState::Absent`
+/// is a missing prerequisite — `Error::Unverified` (exit 3), the regenerate
+/// case; a partial or corrupt tree (manifest-only, golden-only, zero-byte
+/// golden) is a broken checked-in fixture and hard-fails (exit 1) once the
+/// comparison runs. `--sample` regeneration does not route through this guard,
+/// since it writes the golden from the Paper runtime.
+pub fn require_fixture_tree(dir: &Path) -> Result<(), Error> {
+    if fixture_state(dir) == FixtureState::Absent {
+        return Err(Error::Unverified(format!(
+            "composed-noise fixtures {} are ABSENT — the seed-42 golden and its \
+             NOISE-checkpoint gate cannot verify (git checkout or regenerate via \
+             `composed-noise --sample`); refusing to pass green without them",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Flip one digit of a sample `bits` value — the first `"bits": ` field's
+/// number, skipping its optional sign and leading digit (so the tampered file
+/// stays valid JSON — no leading zero). A digit flipped to the adjacent digit
+/// keeps the file valid UTF-8 and parseable, so the tamper is caught by the
+/// raw-bytes SHA-256 hash mismatch, exercising the hash comparison rather than
+/// a decode failure. Returns a hard `Error::Manifest` if there is no
+/// `"bits": ` field to flip (the control cannot run, so it must not pass
+/// vacuously).
+fn flip_sample_bits_digit(golden: &mut [u8]) -> Result<(), Error> {
+    const MARKER: &[u8] = b"\"bits\": ";
+    let start = golden
+        .windows(MARKER.len())
+        .position(|w| w == MARKER)
+        .ok_or_else(|| {
+            Error::Manifest(
+                "composed-noise golden has no \"bits\": field to flip for the tamper control"
+                    .into(),
+            )
+        })?
+        + MARKER.len();
+    let mut idx = start;
+    if golden.get(idx) == Some(&b'-') {
+        idx += 1;
+    }
+    // Skip the leading digit: flipping it could produce a leading zero, which
+    // is invalid JSON.
+    idx += 1;
+    let flip = golden[idx..]
+        .iter()
+        .position(|b| b.is_ascii_digit())
+        .map(|d| idx + d)
+        .ok_or_else(|| {
+            Error::Manifest("composed-noise golden has no flip-able digit after \"bits\":".into())
+        })?;
+    golden[flip] ^= 0x01;
+    Ok(())
+}
+
+/// Classify the verification result of a tampered scratch copy. The expected
+/// tamper signature is a SHA-256 hash mismatch on the golden itself
+/// (`Error::HashMismatch` with `path == FIXTURE_BASENAME`): that alone is
+/// detection (Ok). A green result means the tamper was not detected
+/// (`Error::NegativeControl` — vacuous). Any other error — a missing captured
+/// file, a hash mismatch on another path, a decode failure — is unrelated to
+/// the flip and propagates, never masquerading as a detected tamper.
+fn classify_tamper_result(result: Result<(), Error>) -> Result<(), Error> {
     match result {
         Ok(()) => Err(Error::NegativeControl {
             message: "composed-noise tamper was NOT detected — the comparison is vacuous".into(),
         }),
-        Err(_) => Ok(()),
+        Err(Error::HashMismatch { path, .. }) if path == FIXTURE_BASENAME => Ok(()),
+        Err(other) => Err(other),
     }
+}
+
+/// The tamper negative control: corrupt a committed bit pattern (flip one digit
+/// of a sample `bits` value) and assert the verification FAILS — proving the
+/// comparison is not vacuous (a green is impossible with tampered goldens).
+///
+/// The control is load-bearing: it first verifies the committed golden is
+/// green, so a broken baseline is reported (exit 1) rather than passing
+/// vacuously. An absent or partial tree is a hard `Error::Gate` (exit 1) — the
+/// control cannot run vacuous. An empty golden is a hard `Error::Manifest`.
+///
+/// It tampers a `tempfile` scratch copy, so the committed fixtures are never
+/// mutated and the scratch dir is removed on every path when the `TempDir`
+/// drops. Only the expected tamper signature — a SHA-256 hash mismatch on the
+/// golden itself — counts as detection; any unrelated scratch verification
+/// failure propagates rather than masquerading as a detected tamper.
+pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
+    match fixture_state(dir) {
+        FixtureState::Present => {}
+        FixtureState::Absent => {
+            return Err(Error::Gate(format!(
+                "composed-noise fixtures {} are ABSENT — the tamper negative control \
+                 cannot run without the committed golden (git checkout or regenerate \
+                 via `composed-noise --sample`); refusing a vacuous pass",
+                dir.display()
+            )));
+        }
+        FixtureState::Partial => {
+            return Err(Error::Gate(format!(
+                "composed-noise fixtures {} are INCOMPLETE (manifest or golden missing) — \
+                 the tamper negative control cannot run without the committed golden \
+                 (git checkout); refusing a vacuous pass",
+                dir.display()
+            )));
+        }
+    }
+    // The baseline must be green before it is tampered; otherwise any scratch
+    // failure would be credited to the flip and the control would pass
+    // vacuously on an already-broken golden.
+    verify_composed_noise(dir)?;
+    let scratch = tempfile::tempdir()
+        .map_err(|e| Error::Gate(format!("cannot create composed-noise scratch dir: {e}")))?;
+    // Scratch setup I/O: any failure propagates — it is an infrastructure
+    // error, never a tamper detection.
+    fs::copy(
+        dir.join("manifest.json"),
+        scratch.path().join("manifest.json"),
+    )?;
+    let mut tampered = fs::read(dir.join(FIXTURE_BASENAME))?;
+    if tampered.is_empty() {
+        return Err(Error::Manifest(format!(
+            "composed-noise golden {} is EMPTY — the tamper negative control needs a \
+             payload to flip; restore the committed fixture (git checkout), it is corrupt",
+            dir.join(FIXTURE_BASENAME).display()
+        )));
+    }
+    flip_sample_bits_digit(&mut tampered)?;
+    fs::write(scratch.path().join(FIXTURE_BASENAME), &tampered)?;
+    // Only the golden's own hash mismatch is the tamper signature; any other
+    // scratch failure propagates via classify_tamper_result.
+    classify_tamper_result(verify_composed_noise(scratch.path()))
 }
 
 /// `fixtures/composed-noise/manifest.json`, serialized in the exact committed
@@ -624,19 +791,26 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
     }
 
+    /// A unique scratch dir per test, auto-removed on drop (`TempDir`), so
+    /// parallel tests never collide and never leak.
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("rivet-oracle-cn-{tag}-"))
+            .tempdir()
+            .expect("create scratch tempdir")
+    }
+
     /// The committed composed-noise golden is a load-bearing deliverable: a test
     /// that needs it must FAIL when it is absent, never silently return (D8:
     /// never weaken/delete fixtures to go green; a missing load-bearing fixture
     /// is a hard failure).
     fn require_fixture(dir: &std::path::Path) {
-        if !dir.join("manifest.json").is_file() {
+        require_fixture_tree(dir).unwrap_or_else(|e| {
             panic!(
-                "committed composed-noise fixtures {} are ABSENT — the seed-42 golden \
-                 and its NOISE-checkpoint gate cannot verify; restore them (git \
-                 checkout) or this test is red, never silently skipped",
+                "committed composed-noise fixtures at {} are unusable: {e}",
                 dir.display()
-            );
-        }
+            )
+        });
     }
 
     #[test]
@@ -752,49 +926,364 @@ mod tests {
         assert!(msg.contains("is NaN"), "unexpected error: {msg}");
     }
 
-    /// The default `verify` path must fail UNVERIFIED when the committed
-    /// composed-noise fixture tree is absent — never silently skip (D8).
     #[test]
     fn missing_fixture_tree_is_unverified() {
-        let scratch =
-            std::env::temp_dir().join(format!("rivet-oracle-cn-missing-{}", std::process::id()));
-        if scratch.exists() {
-            fs::remove_dir_all(&scratch).unwrap();
-        }
-        fs::create_dir_all(&scratch).unwrap();
-        let result = crate::verify_composed_noise_step(&scratch);
-        let _ = fs::remove_dir_all(&scratch);
+        let dir = scratch("missing");
+        let result = crate::verify_composed_noise_step(dir.path());
         assert!(
             matches!(result, Err(crate::Error::Unverified(_))),
             "expected Error::Unverified (exit 3), got {result:?}"
         );
     }
 
-    /// Regenerating the composed-noise manifest in Rust is byte-identical to the
-    /// committed manifest (given an unchanged golden) — regeneration is git-clean
-    /// and the committed manifest is what the writer would produce, exactly like
-    /// the worldgen/text manifest convention.
+    #[test]
+    fn gate_path_classifies_fully_absent_composed_noise_tree_as_unverified() {
+        let root = scratch("gate");
+        fs::write(
+            root.path().join("manifest.json"),
+            r#"{"format":1,"captured":[]}"#,
+        )
+        .unwrap();
+        // No composed-noise dir at all: a fully absent golden tree is the
+        // "regenerate the fixture" case — UNVERIFIED (exit 3).
+        let result = crate::verify_all_fixture_kinds_from(root.path());
+        assert!(
+            matches!(result, Err(crate::Error::Unverified(_))),
+            "gate must classify a fully absent composed-noise tree as UNVERIFIED (exit 3), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn gate_path_classifies_partial_composed_noise_tree_as_hard_fail() {
+        let root = scratch("gate-partial");
+        fs::write(
+            root.path().join("manifest.json"),
+            r#"{"format":1,"captured":[]}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join("composed-noise")).unwrap();
+        fs::write(root.path().join("composed-noise/manifest.json"), "{}").unwrap();
+        let result = crate::verify_all_fixture_kinds_from(root.path());
+        assert!(
+            matches!(result, Err(crate::Error::Manifest(_))),
+            "a manifest-present/golden-missing tree is a corrupt checked-in fixture and must hard-FAIL (exit 1), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn gate_path_surfaces_other_kind_corruption_before_missing_composed_noise() {
+        let root = scratch("gate-corrupt");
+        // A corrupt generic kind: the manifest references a missing file, so
+        // the generic hash loop hard-fails it before composed-noise is reached.
+        fs::write(
+            root.path().join("manifest.json"),
+            r#"{"format":1,"captured":[{"path":"missing.bin","sha256":"00"}]}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join("composed-noise")).unwrap();
+        fs::write(root.path().join("composed-noise/manifest.json"), "{}").unwrap();
+        let result = crate::verify_all_fixture_kinds_from(root.path());
+        assert!(
+            matches!(result, Err(crate::Error::Manifest(_))),
+            "other-kind corruption must surface as a hard FAIL (exit 1), not be masked by missing composed-noise: {result:?}"
+        );
+    }
+
+    #[test]
+    fn gate_path_load_bearing_goldens_only_root_is_verified() {
+        let src = fixtures_dir().join("composed-noise");
+        require_fixture(&src);
+        let ge_src = fixtures_dir().join("generated-expected");
+        assert!(
+            ge_src.join("manifest.json").is_file()
+                && ge_src
+                    .join(crate::generated_expected::FIXTURE_BASENAME)
+                    .is_file(),
+            "committed generated-expected fixtures at {} are unusable",
+            ge_src.display()
+        );
+        let root = scratch("gate-cn-only");
+        fs::create_dir_all(root.path().join("composed-noise")).unwrap();
+        fs::copy(
+            src.join("manifest.json"),
+            root.path().join("composed-noise/manifest.json"),
+        )
+        .unwrap();
+        fs::copy(
+            src.join(FIXTURE_BASENAME),
+            root.path().join("composed-noise/composed-noise.json"),
+        )
+        .unwrap();
+        // generated-expected is equally load-bearing (PR #563/#595): carry both
+        // goldens so the gate's positive path exercises the full composed
+        // contract — neither golden alone may claim an overall green.
+        fs::create_dir_all(root.path().join("generated-expected")).unwrap();
+        fs::copy(
+            ge_src.join("manifest.json"),
+            root.path().join("generated-expected/manifest.json"),
+        )
+        .unwrap();
+        fs::copy(
+            ge_src.join(crate::generated_expected::FIXTURE_BASENAME),
+            root.path()
+                .join("generated-expected/generated-expected.json"),
+        )
+        .unwrap();
+        let result = crate::verify_all_fixture_kinds_from(root.path());
+        assert!(
+            result.is_ok(),
+            "goldens-only root must verify green: {result:?}"
+        );
+    }
+
+    #[test]
+    fn gate_path_composed_noise_only_root_absent_is_unverified() {
+        let root = scratch("gate-cn-only-absent");
+        // A root with no generic kinds and no composed-noise tree at all: the
+        // load-bearing composed-noise golden is wholly absent, so the gate is
+        // UNVERIFIED (exit 3) — the missing-prerequisite classification.
+        let result = crate::verify_all_fixture_kinds_from(root.path());
+        assert!(
+            matches!(result, Err(crate::Error::Unverified(_))),
+            "composed-noise-only root with a wholly absent tree must be UNVERIFIED (exit 3), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn gate_path_composed_noise_only_root_partial_tree_is_hard_fail() {
+        let root = scratch("gate-cn-only-partial");
+        fs::create_dir_all(root.path().join("composed-noise")).unwrap();
+        fs::write(root.path().join("composed-noise/manifest.json"), "{}").unwrap();
+        let result = crate::verify_all_fixture_kinds_from(root.path());
+        assert!(
+            matches!(result, Err(crate::Error::Manifest(_))),
+            "composed-noise-only root with a manifest-present/golden-missing tree must hard-FAIL (exit 1), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn gate_path_composed_noise_only_root_golden_only_is_hard_fail() {
+        let root = scratch("gate-cn-only-golden");
+        fs::create_dir_all(root.path().join("composed-noise")).unwrap();
+        fs::write(root.path().join("composed-noise/composed-noise.json"), "{}").unwrap();
+        let result = crate::verify_all_fixture_kinds_from(root.path());
+        assert!(
+            matches!(result, Err(crate::Error::Manifest(_))),
+            "composed-noise-only root with a golden-only tree is a corrupt checked-in fixture and must hard-FAIL (exit 1), got {result:?}"
+        );
+    }
+
+    /// A golden-only tree (golden present, manifest missing) is a partial
+    /// tree, not a whole-tree absence: the verify path hard-fails (exit 1).
+    #[test]
+    fn verify_golden_only_tree_is_a_hard_error() {
+        let dir = scratch("verify-golden-only");
+        fs::write(dir.path().join(FIXTURE_BASENAME), "{}").unwrap();
+        let result = crate::verify_composed_noise_step(dir.path());
+        assert!(
+            !matches!(result, Err(crate::Error::Unverified(_))),
+            "golden-only tree must not be UNVERIFIED: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_empty_golden_is_a_hard_error() {
+        let dir = scratch("verify-empty");
+        fs::write(dir.path().join("manifest.json"), "{}").unwrap();
+        fs::write(dir.path().join(FIXTURE_BASENAME), "").unwrap();
+        let result = verify_composed_noise(dir.path());
+        assert!(
+            matches!(result, Err(crate::Error::Manifest(_))),
+            "empty golden must hard-fail (exit 1), not UNVERIFIED: {result:?}"
+        );
+    }
+
+    #[test]
+    fn tamper_absent_tree_is_a_hard_error() {
+        let dir = scratch("tamper-absent");
+        // No manifest and no golden: wholly absent.
+        let result = tamper_negative_control(dir.path());
+        assert!(
+            matches!(result, Err(crate::Error::Gate(_))),
+            "absent tamper tree must hard-FAIL (exit 1), not UNVERIFIED: {result:?}"
+        );
+    }
+
+    #[test]
+    fn tamper_partial_tree_message_names_incomplete() {
+        let dir = scratch("tamper-partial");
+        fs::write(dir.path().join("manifest.json"), "{}").unwrap();
+        let result = tamper_negative_control(dir.path());
+        let msg = result
+            .expect_err("partial tamper tree must hard-FAIL (exit 1)")
+            .to_string();
+        assert!(
+            msg.contains("INCOMPLETE"),
+            "partial tree must be reported as INCOMPLETE, not ABSENT: {msg}"
+        );
+    }
+
+    #[test]
+    fn tamper_empty_golden_is_a_hard_error() {
+        let dir = scratch("tamper-empty");
+        fs::write(dir.path().join("manifest.json"), "{}").unwrap();
+        fs::write(dir.path().join(FIXTURE_BASENAME), "").unwrap();
+        let result = tamper_negative_control(dir.path());
+        assert!(
+            matches!(result, Err(crate::Error::Manifest(_))),
+            "empty golden must hard-fail, not panic: {result:?}"
+        );
+    }
+
+    /// A committed golden that is already broken (wrong seed) must make the
+    /// tamper control hard-fail at the baseline pre-verify — never pass
+    /// vacuously by crediting the flip for a pre-existing failure.
+    #[test]
+    fn tamper_reports_broken_baseline_instead_of_passing_vacuously() {
+        let src = fixtures_dir().join("composed-noise");
+        require_fixture(&src);
+        let dir = scratch("tamper-broken");
+        fs::copy(src.join("manifest.json"), dir.path().join("manifest.json")).unwrap();
+        let raw = fs::read_to_string(src.join(FIXTURE_BASENAME)).unwrap();
+        let corrupt = raw.replace("\"seed\": 42,", "\"seed\": 43,");
+        fs::write(dir.path().join(FIXTURE_BASENAME), corrupt).unwrap();
+        let result = tamper_negative_control(dir.path());
+        assert!(
+            !matches!(result, Ok(())),
+            "a broken baseline must not pass the tamper control vacuously: {result:?}"
+        );
+    }
+
+    /// The expected tamper signature — a SHA-256 hash mismatch on the golden
+    /// itself — counts as detection.
+    #[test]
+    fn classify_tamper_detection_on_golden_hash_mismatch() {
+        let result = classify_tamper_result(Err(Error::HashMismatch {
+            path: FIXTURE_BASENAME.into(),
+            expected: "e".into(),
+            actual: "a".into(),
+        }));
+        assert!(
+            result.is_ok(),
+            "golden hash mismatch must count as detection: {result:?}"
+        );
+    }
+
+    /// A green tampered copy means the comparison did not notice the tamper —
+    /// vacuous.
+    #[test]
+    fn classify_tamper_green_is_vacuous() {
+        let result = classify_tamper_result(Ok(()));
+        assert!(
+            matches!(result, Err(Error::NegativeControl { .. })),
+            "a green tampered copy is vacuous: {result:?}"
+        );
+    }
+
+    /// Any failure unrelated to the flipped golden must propagate, never
+    /// masquerade as a detected tamper: a manifest that gained a captured file
+    /// (missing on disk), a hash mismatch on another path, or an
+    /// infrastructure/verification error.
+    #[test]
+    fn classify_tamper_propagates_unrelated_failures() {
+        assert!(matches!(
+            classify_tamper_result(Err(Error::Manifest("captured file x missing".into()))),
+            Err(Error::Manifest(_))
+        ));
+        assert!(matches!(
+            classify_tamper_result(Err(Error::HashMismatch {
+                path: "other.json".into(),
+                expected: "e".into(),
+                actual: "a".into(),
+            })),
+            Err(Error::HashMismatch { path, .. }) if path == "other.json"
+        ));
+        assert!(matches!(
+            classify_tamper_result(Err(Error::Unverified("no prereq".into()))),
+            Err(Error::Unverified(_))
+        ));
+    }
+
+    /// In the full flow, an unrelated scratch verification failure must
+    /// propagate, never be reported as a detected tamper. A committed tree
+    /// whose manifest also captures a second file (present on disk, so the
+    /// baseline verifies) is tampered: the scratch copy omits that second file
+    /// (tamper copies only the manifest + golden), so scratch verification
+    /// fails with "captured file ... missing" before the golden hash is even
+    /// reached — and the control must surface that Manifest error, not Ok.
+    #[test]
+    fn tamper_propagates_unrelated_scratch_failure() {
+        let src = fixtures_dir().join("composed-noise");
+        require_fixture(&src);
+        let dir = scratch("tamper-unrelated");
+        fs::copy(
+            src.join(FIXTURE_BASENAME),
+            dir.path().join(FIXTURE_BASENAME),
+        )
+        .unwrap();
+        // A second captured file, present in the committed tree (baseline
+        // verifies) and ordered BEFORE the golden so the scratch hash loop hits
+        // it (missing) first.
+        fs::write(dir.path().join("extra.bin"), b"extra").unwrap();
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(src.join("manifest.json")).unwrap()).unwrap();
+        let golden_entry = manifest["captured"][0].clone();
+        manifest["captured"] = serde_json::json!([
+            { "path": "extra.bin", "sha256": sha256_hex(b"extra"), "bytes": 5 },
+            golden_entry
+        ]);
+        fs::write(
+            dir.path().join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        // Baseline verify must pass (both files present).
+        verify_composed_noise(dir.path()).expect("baseline with the extra file must verify");
+        // The control must hard-fail with the missing extra.bin error — NOT
+        // report detection (Ok).
+        let result = tamper_negative_control(dir.path());
+        assert!(
+            matches!(result, Err(crate::Error::Manifest(_))),
+            "an unrelated scratch failure must propagate, not pass as a detected tamper: {result:?}"
+        );
+    }
+
+    /// The flip must keep the golden valid UTF-8 JSON so the tamper is caught
+    /// by the hash gate, not a decode failure: flipping one digit of a sample
+    /// `bits` value changes the raw bytes while staying parseable.
+    #[test]
+    fn flip_sample_bits_digit_keeps_golden_parseable() {
+        let src = fixtures_dir().join("composed-noise");
+        require_fixture(&src);
+        let mut bytes = fs::read(src.join(FIXTURE_BASENAME)).unwrap();
+        flip_sample_bits_digit(&mut bytes).unwrap();
+        // Still valid UTF-8 JSON, and parseable to the same structure.
+        let text = std::str::from_utf8(&bytes).expect("flip must keep valid UTF-8");
+        let v: serde_json::Value = serde_json::from_str(text).expect("flip must keep valid JSON");
+        assert_eq!(v["seed"], 42, "flip must not touch a pinned header field");
+        // The raw bytes changed (the hash gate will catch it).
+        assert_ne!(bytes, fs::read(src.join(FIXTURE_BASENAME)).unwrap());
+    }
+
     #[test]
     fn manifest_regeneration_is_byte_identical() {
         let dir = fixtures_dir().join("composed-noise");
         require_fixture(&dir);
-        let scratch =
-            std::env::temp_dir().join(format!("rivet-oracle-cn-regen-{}", std::process::id()));
-        if scratch.exists() {
-            fs::remove_dir_all(&scratch).unwrap();
-        }
-        fs::create_dir_all(&scratch).unwrap();
-        fs::copy(dir.join(FIXTURE_BASENAME), scratch.join(FIXTURE_BASENAME)).unwrap();
-        regenerate_manifest(&scratch).unwrap();
+        let scratch = scratch("regen");
+        fs::copy(
+            dir.join(FIXTURE_BASENAME),
+            scratch.path().join(FIXTURE_BASENAME),
+        )
+        .unwrap();
+        regenerate_manifest(scratch.path()).unwrap();
         let committed = fs::read(dir.join("manifest.json")).unwrap();
-        let regenerated = fs::read(scratch.join("manifest.json")).unwrap();
+        let regenerated = fs::read(scratch.path().join("manifest.json")).unwrap();
         assert_eq!(
             committed, regenerated,
             "regenerating the composed-noise manifest must be byte-identical (git-clean)"
         );
-        // And the regenerated manifest is self-consistent: it verifies its files.
-        crate::verify_fixtures(&scratch).unwrap();
-        let _ = fs::remove_dir_all(&scratch);
+        // The regenerated manifest is self-consistent: it verifies its files.
+        crate::verify_fixtures(scratch.path()).unwrap();
     }
 
     #[test]
@@ -824,5 +1313,51 @@ mod tests {
         // world scoreboard must reproduce Paper's non-monotonic reachability.
         let levels: Vec<i64> = rows.iter().map(|r| r.level).collect();
         assert_eq!(levels, vec![36, 35, 35, 35, 34, 33, 33]);
+    }
+
+    #[test]
+    fn parse_mode_maps_no_flags_to_verify() {
+        assert!(matches!(parse_mode(&[]), Ok(ComposedNoiseMode::Verify)));
+    }
+
+    #[test]
+    fn parse_mode_maps_each_flag() {
+        assert!(matches!(
+            parse_mode(&["--tamper"]),
+            Ok(ComposedNoiseMode::Tamper)
+        ));
+        assert!(matches!(
+            parse_mode(&["--sample"]),
+            Ok(ComposedNoiseMode::Sample)
+        ));
+    }
+
+    /// A typo'd flag must be a usage error, never a silent fallback to verify
+    /// (previously `--sampple` exited 0 after verifying — a silent misread of
+    /// the intended mode).
+    #[test]
+    fn parse_mode_rejects_unknown_flags() {
+        let err = parse_mode(&["--sampple"]).expect_err("unknown flag must be rejected");
+        assert!(err.to_string().contains("--sampple"), "unexpected: {err}");
+        assert!(parse_mode(&["--tamper", "--nope"]).is_err());
+    }
+
+    #[test]
+    fn parse_mode_rejects_tamper_and_sample_together() {
+        let err = parse_mode(&["--tamper", "--sample"]).expect_err("mutually exclusive");
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// `--help` is valid only as the sole argument (intercepted by the
+    /// dispatcher); in any combination with a mode or another flag it is a hard
+    /// usage error, so a `--tamper --help` never silently skips the control.
+    #[test]
+    fn parse_mode_rejects_help_in_combination() {
+        assert!(parse_mode(&["--help"]).is_err());
+        assert!(parse_mode(&["--tamper", "--help"]).is_err());
+        assert!(parse_mode(&["--help", "--bogus"]).is_err());
     }
 }

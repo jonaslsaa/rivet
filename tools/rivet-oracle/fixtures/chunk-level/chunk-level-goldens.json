@@ -1,0 +1,663 @@
+{
+  "paper": "26.2-DEV-main@0a99345",
+  "constants": {
+    "FULL_CHUNK_LEVEL": 33,
+    "BLOCK_TICKING_LEVEL": 32,
+    "ENTITY_TICKING_LEVEL": 31,
+    "RADIUS_AROUND_FULL_CHUNK": 11,
+    "MAX_LEVEL": 44
+  },
+  "byStatus": [
+    {
+      "status": "minecraft:empty",
+      "index": 0,
+      "level": 44
+    },
+    {
+      "status": "minecraft:structure_starts",
+      "index": 1,
+      "level": 44
+    },
+    {
+      "status": "minecraft:structure_references",
+      "index": 2,
+      "level": 36
+    },
+    {
+      "status": "minecraft:biomes",
+      "index": 3,
+      "level": 36
+    },
+    {
+      "status": "minecraft:noise",
+      "index": 4,
+      "level": 35
+    },
+    {
+      "status": "minecraft:surface",
+      "index": 5,
+      "level": 35
+    },
+    {
+      "status": "minecraft:carvers",
+      "index": 6,
+      "level": 35
+    },
+    {
+      "status": "minecraft:features",
+      "index": 7,
+      "level": 34
+    },
+    {
+      "status": "minecraft:initialize_light",
+      "index": 8,
+      "level": 34
+    },
+    {
+      "status": "minecraft:light",
+      "index": 9,
+      "level": 33
+    },
+    {
+      "status": "minecraft:spawn",
+      "index": 10,
+      "level": 33
+    },
+    {
+      "status": "minecraft:full",
+      "index": 11,
+      "level": 33
+    }
+  ],
+  "generationStatus": [
+    {
+      "level": -2147483648
+    },
+    {
+      "level": -100,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 0,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 1,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 2,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 3,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 4,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 5,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 6,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 7,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 8,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 9,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 10,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 11,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 12,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 13,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 14,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 15,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 16,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 17,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 18,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 19,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 20,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 21,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 22,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 23,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 24,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 25,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 26,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 27,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 28,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 29,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 30,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 31,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 32,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 33,
+      "status": "minecraft:full"
+    },
+    {
+      "level": 34,
+      "status": "minecraft:initialize_light"
+    },
+    {
+      "level": 35,
+      "status": "minecraft:carvers"
+    },
+    {
+      "level": 36,
+      "status": "minecraft:biomes"
+    },
+    {
+      "level": 37,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "level": 38,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "level": 39,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "level": 40,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "level": 41,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "level": 42,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "level": 43,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "level": 44,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "level": 45
+    },
+    {
+      "level": 46
+    },
+    {
+      "level": 47
+    },
+    {
+      "level": 48
+    },
+    {
+      "level": 49
+    },
+    {
+      "level": 50
+    },
+    {
+      "level": 100
+    },
+    {
+      "level": 2147483647
+    }
+  ],
+  "statusAroundFullChunk": [
+    {
+      "distance": -2147483648,
+      "status": "minecraft:full"
+    },
+    {
+      "distance": -100,
+      "status": "minecraft:full"
+    },
+    {
+      "distance": -7,
+      "status": "minecraft:full"
+    },
+    {
+      "distance": -1,
+      "status": "minecraft:full"
+    },
+    {
+      "distance": 0,
+      "status": "minecraft:full"
+    },
+    {
+      "distance": 1,
+      "status": "minecraft:initialize_light"
+    },
+    {
+      "distance": 2,
+      "status": "minecraft:carvers"
+    },
+    {
+      "distance": 3,
+      "status": "minecraft:biomes"
+    },
+    {
+      "distance": 4,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "distance": 5,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "distance": 6,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "distance": 7,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "distance": 8,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "distance": 9,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "distance": 10,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "distance": 11,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "distance": 12,
+      "status": "minecraft:empty"
+    },
+    {
+      "distance": 13,
+      "status": "minecraft:empty"
+    },
+    {
+      "distance": 100,
+      "status": "minecraft:empty"
+    },
+    {
+      "distance": 2147483647,
+      "status": "minecraft:empty"
+    }
+  ],
+  "statusAroundFullChunkDefault": [
+    {
+      "distance": -7,
+      "status": "minecraft:full"
+    },
+    {
+      "distance": 0,
+      "status": "minecraft:full"
+    },
+    {
+      "distance": 1,
+      "status": "minecraft:initialize_light"
+    },
+    {
+      "distance": 11,
+      "status": "minecraft:structure_starts"
+    },
+    {
+      "distance": 12,
+      "status": "minecraft:biomes"
+    },
+    {
+      "distance": 13,
+      "status": "minecraft:biomes"
+    },
+    {
+      "distance": 2147483647,
+      "status": "minecraft:biomes"
+    }
+  ],
+  "byFullStatus": [
+    {
+      "fullStatus": "INACCESSIBLE",
+      "ordinal": 0,
+      "level": 44
+    },
+    {
+      "fullStatus": "FULL",
+      "ordinal": 1,
+      "level": 33
+    },
+    {
+      "fullStatus": "BLOCK_TICKING",
+      "ordinal": 2,
+      "level": 32
+    },
+    {
+      "fullStatus": "ENTITY_TICKING",
+      "ordinal": 3,
+      "level": 31
+    }
+  ],
+  "fullStatus": [
+    {
+      "level": -2147483648,
+      "fullStatus": "ENTITY_TICKING"
+    },
+    {
+      "level": -100,
+      "fullStatus": "ENTITY_TICKING"
+    },
+    {
+      "level": 0,
+      "fullStatus": "ENTITY_TICKING"
+    },
+    {
+      "level": 1,
+      "fullStatus": "ENTITY_TICKING"
+    },
+    {
+      "level": 30,
+      "fullStatus": "ENTITY_TICKING"
+    },
+    {
+      "level": 31,
+      "fullStatus": "ENTITY_TICKING"
+    },
+    {
+      "level": 32,
+      "fullStatus": "BLOCK_TICKING"
+    },
+    {
+      "level": 33,
+      "fullStatus": "FULL"
+    },
+    {
+      "level": 34,
+      "fullStatus": "INACCESSIBLE"
+    },
+    {
+      "level": 43,
+      "fullStatus": "INACCESSIBLE"
+    },
+    {
+      "level": 44,
+      "fullStatus": "INACCESSIBLE"
+    },
+    {
+      "level": 45,
+      "fullStatus": "INACCESSIBLE"
+    },
+    {
+      "level": 100,
+      "fullStatus": "INACCESSIBLE"
+    },
+    {
+      "level": 2147483647,
+      "fullStatus": "INACCESSIBLE"
+    }
+  ],
+  "predicates": [
+    {
+      "level": -2147483648,
+      "isEntityTicking": true,
+      "isBlockTicking": true,
+      "isLoaded": true
+    },
+    {
+      "level": -100,
+      "isEntityTicking": true,
+      "isBlockTicking": true,
+      "isLoaded": true
+    },
+    {
+      "level": 0,
+      "isEntityTicking": true,
+      "isBlockTicking": true,
+      "isLoaded": true
+    },
+    {
+      "level": 1,
+      "isEntityTicking": true,
+      "isBlockTicking": true,
+      "isLoaded": true
+    },
+    {
+      "level": 30,
+      "isEntityTicking": true,
+      "isBlockTicking": true,
+      "isLoaded": true
+    },
+    {
+      "level": 31,
+      "isEntityTicking": true,
+      "isBlockTicking": true,
+      "isLoaded": true
+    },
+    {
+      "level": 32,
+      "isEntityTicking": false,
+      "isBlockTicking": true,
+      "isLoaded": true
+    },
+    {
+      "level": 33,
+      "isEntityTicking": false,
+      "isBlockTicking": false,
+      "isLoaded": true
+    },
+    {
+      "level": 34,
+      "isEntityTicking": false,
+      "isBlockTicking": false,
+      "isLoaded": true
+    },
+    {
+      "level": 43,
+      "isEntityTicking": false,
+      "isBlockTicking": false,
+      "isLoaded": true
+    },
+    {
+      "level": 44,
+      "isEntityTicking": false,
+      "isBlockTicking": false,
+      "isLoaded": true
+    },
+    {
+      "level": 45,
+      "isEntityTicking": false,
+      "isBlockTicking": false,
+      "isLoaded": false
+    },
+    {
+      "level": 100,
+      "isEntityTicking": false,
+      "isBlockTicking": false,
+      "isLoaded": false
+    },
+    {
+      "level": 2147483647,
+      "isEntityTicking": false,
+      "isBlockTicking": false,
+      "isLoaded": false
+    }
+  ],
+  "fullChunkStatusOrdinals": [
+    {
+      "ordinal": 0,
+      "name": "INACCESSIBLE"
+    },
+    {
+      "ordinal": 1,
+      "name": "FULL"
+    },
+    {
+      "ordinal": 2,
+      "name": "BLOCK_TICKING"
+    },
+    {
+      "ordinal": 3,
+      "name": "ENTITY_TICKING"
+    }
+  ],
+  "fullChunkStatusIsOrAfter": [
+    {
+      "this": "INACCESSIBLE",
+      "step": "INACCESSIBLE",
+      "result": true
+    },
+    {
+      "this": "INACCESSIBLE",
+      "step": "FULL",
+      "result": false
+    },
+    {
+      "this": "INACCESSIBLE",
+      "step": "BLOCK_TICKING",
+      "result": false
+    },
+    {
+      "this": "INACCESSIBLE",
+      "step": "ENTITY_TICKING",
+      "result": false
+    },
+    {
+      "this": "FULL",
+      "step": "INACCESSIBLE",
+      "result": true
+    },
+    {
+      "this": "FULL",
+      "step": "FULL",
+      "result": true
+    },
+    {
+      "this": "FULL",
+      "step": "BLOCK_TICKING",
+      "result": false
+    },
+    {
+      "this": "FULL",
+      "step": "ENTITY_TICKING",
+      "result": false
+    },
+    {
+      "this": "BLOCK_TICKING",
+      "step": "INACCESSIBLE",
+      "result": true
+    },
+    {
+      "this": "BLOCK_TICKING",
+      "step": "FULL",
+      "result": true
+    },
+    {
+      "this": "BLOCK_TICKING",
+      "step": "BLOCK_TICKING",
+      "result": true
+    },
+    {
+      "this": "BLOCK_TICKING",
+      "step": "ENTITY_TICKING",
+      "result": false
+    },
+    {
+      "this": "ENTITY_TICKING",
+      "step": "INACCESSIBLE",
+      "result": true
+    },
+    {
+      "this": "ENTITY_TICKING",
+      "step": "FULL",
+      "result": true
+    },
+    {
+      "this": "ENTITY_TICKING",
+      "step": "BLOCK_TICKING",
+      "result": true
+    },
+    {
+      "this": "ENTITY_TICKING",
+      "step": "ENTITY_TICKING",
+      "result": true
+    }
+  ]
+}
