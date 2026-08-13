@@ -211,34 +211,34 @@ impl NoiseBasedChunkGenerator {
     /// `NoiseColumn` result.
     ///
     /// The walk is faithful; `NoiseColumn` (the unported `world.level.NoiseColumn`
-    /// value) defers with its owning unit, so the column is written into a
-    /// `Vec<BlockState>` (the shape the `NoiseColumn` constructor takes). The
-    /// `Option` mirrors Java's nullable result: `None` when the column was
-    /// never set (the `cellCountY <= 0` degenerate path, where Java's
-    /// `MutableObject` stays null), `Some` otherwise. Java's null-filled array
-    /// tail (`height - cellCountY*cellHeight` unwritten entries) is
-    /// substituted with `AIR` in the `Vec` seam (a no-op for the standard
-    /// presets, where `height` is an exact multiple of `cellHeight`). A future
-    /// `NoiseColumn` unit porting the null tail must special-case this
-    /// substitution — or store the `Vec` length as `cellCountY*cellHeight` and
-    /// let the `NoiseColumn` seam pad — if null fidelity is ever required: the
-    /// tail is only observable for a custom or height-accessor-clamped
-    /// `NoiseSettings` whose `height` is not a multiple of `cellHeight`.
-    /// RivetTodo(#232): the `mc.world.level` NoiseColumn wave (pending) owns
-    /// the null-padding decision; this AIR substitution must not be carried
-    /// into it silently.
+    /// value) defers with its owning unit, so the column is carried as
+    /// `(clamped_min_y, Vec<BlockState>)` — Java's `new NoiseColumn(minY,
+    /// writeTo)` value, where `minY` is the height-accessor-clamped minimum Y
+    /// computed inside `iterate_noise_column`. The `Option` mirrors Java's
+    /// nullable result: `None` when the column was never set (the
+    /// `cellCountY <= 0` degenerate path, where Java's `MutableObject` stays
+    /// null), `Some` otherwise. The `Vec` is sized to the *written* length
+    /// `cellCountY*cellHeight` — Java's array is `height()` long with a null
+    /// tail (`height - cellCountY*cellHeight` unwritten entries) that this
+    /// seam does not carry (a no-op for the standard presets, where `height`
+    /// is an exact multiple of `cellHeight`). A future `NoiseColumn` unit
+    /// porting the null tail must pad the `Vec` to `height()` with nulls when
+    /// it constructs the value. RivetTodo(#232): the `mc.world.level`
+    /// NoiseColumn wave (pending) owns the null-padding decision; this seam
+    /// must not inherit the null tail as `AIR` silently.
     pub fn get_base_column(
         &self,
         x: i32,
         z: i32,
         height_accessor: &dyn LevelHeightAccessor,
         random_state: &RandomState,
-    ) -> Option<Vec<BlockState>> {
+    ) -> Option<(i32, Vec<BlockState>)> {
         // `Some` signals "allocate the column" (Java passes a non-null
         // `MutableObject<NoiseColumn>`); `iterate_noise_column` fills it and
         // resets it to `None` on the `cellCountY <= 0` degenerate path
-        // (mirroring Java's un-set `MutableObject` → null).
-        let mut column = Some(Vec::new());
+        // (mirroring Java's un-set `MutableObject` → null). The placeholder
+        // min_y is overwritten by `iterate_noise_column` on allocation.
+        let mut column = Some((0, Vec::new()));
         self.iterate_noise_column(
             height_accessor,
             random_state,
@@ -253,8 +253,9 @@ impl NoiseBasedChunkGenerator {
     /// `iterateNoiseColumn(LevelHeightAccessor, RandomState, int, int,
     /// @Nullable MutableObject<NoiseColumn>, @Nullable Predicate<BlockState>)`.
     ///
-    /// The `NoiseColumn` reference is written into the `column` slot (the
-    /// `MutableObject` seam): `Some(..)` mirrors Java's non-null
+    /// The `NoiseColumn` value (`(clamped_min_y, Vec<BlockState>)` — Java's
+    /// `new NoiseColumn(minY, writeTo)`) is written into the `column` slot
+    /// (the `MutableObject` seam): `Some(..)` mirrors Java's non-null
     /// `MutableObject` (allocate + fill), `None` mirrors a null reference
     /// (leave unwritten). On the `cellCountY <= 0` degenerate path the slot is
     /// reset to `None` — Java never sets the `MutableObject`, so `getBaseColumn`
@@ -265,7 +266,7 @@ impl NoiseBasedChunkGenerator {
         random_state: &RandomState,
         block_x: i32,
         block_z: i32,
-        column: &mut Option<Vec<BlockState>>,
+        column: &mut Option<(i32, Vec<BlockState>)>,
         tester: Option<T>,
     ) -> Option<i32> {
         let settings = settings_value(&self.settings);
@@ -288,19 +289,26 @@ impl NoiseBasedChunkGenerator {
         }
 
         // Java allocates `writeTo` (when `columnReference != null`) only after
-        // the `cellCountY <= 0` early-return. The `NoiseColumn` array is
-        // null-filled and only indices `[0, cellCountY*cellHeight)` are written;
-        // the `Vec<BlockState>` seam substitutes `AIR` for Java's null (a
-        // no-op for the standard presets, where `height` is an exact multiple
-        // of `cellHeight`). A future `NoiseColumn` unit porting the null tail
-        // must special-case this substitution for non-multiple heights (see
-        // `get_base_column`). RivetTodo(#232): the `mc.world.level` NoiseColumn
-        // wave (pending) owns the null-padding decision.
+        // the `cellCountY <= 0` early-return, as a null-filled array of length
+        // `noiseSettings.height()` with only indices `[0, cellCountY*cellHeight)`
+        // written (the tail `[cellCountY*cellHeight, height)` stays null). The
+        // `(min_y, Vec)` seam carries the clamped minY (Java's `new
+        // NoiseColumn(minY, writeTo)`) and sizes the `Vec` to the *written*
+        // length `cellCountY*cellHeight`, so the null tail is not inherited as
+        // `AIR`: the owning `NoiseColumn` unit pads the `Vec` to `height()` when
+        // it constructs the value (a no-op for the standard presets, where
+        // `height` is an exact multiple of `cellHeight`). Every index is
+        // overwritten below, so the `AIR` filler is never observed.
+        // RivetTodo(#232): the `mc.world.level` NoiseColumn wave (pending) owns
+        // the null-padding decision.
         if column.is_some() {
-            *column = Some(vec![
-                Blocks::AIR.default_block_state();
-                noise_settings.height() as usize
-            ]);
+            *column = Some((
+                min_y,
+                vec![
+                    Blocks::AIR.default_block_state();
+                    (cell_count_y.wrapping_mul(cell_height)) as usize
+                ],
+            ));
         }
 
         let cell_width = noise_settings.get_cell_width();
@@ -337,9 +345,9 @@ impl NoiseBasedChunkGenerator {
                 noise_chunk.update_for_z(block_z, factor_z);
                 let base_state = noise_chunk.get_interpolated_state();
                 let state = base_state.unwrap_or(settings.default_block);
-                if column.is_some() {
+                if let Some((_, block_states)) = column.as_mut() {
                     let y_index = cell_y_index * cell_height + y_in_cell;
-                    column.as_mut().unwrap()[y_index as usize] = state;
+                    block_states[y_index as usize] = state;
                 }
 
                 if let Some(tester) = &tester

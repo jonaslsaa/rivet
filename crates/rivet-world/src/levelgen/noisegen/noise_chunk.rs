@@ -288,7 +288,7 @@ impl NoiseChunk {
         let first_cell_z = mth::floor_div(chunk_min_block_z, cell_width);
         let first_noise_x = QuartPos::from_block(chunk_min_block_x);
         let first_noise_z = QuartPos::from_block(chunk_min_block_z);
-        let noise_size_xz = QuartPos::from_block(cell_count_xz * cell_width);
+        let noise_size_xz = QuartPos::from_block(cell_count_xz.wrapping_mul(cell_width));
         let state = Arc::new(Mutex::new(InterpolationState::new()));
         // Java's single `this.wrapped` map, shared by the constructor's
         // `this::wrap` visitor AND the chunk's `wrap`/`cachedClimateSampler`.
@@ -330,15 +330,17 @@ impl NoiseChunk {
                 first_noise_z,
             ));
             for x in 0..=noise_size_xz {
-                let quart_x = first_noise_x + x;
+                let quart_x = first_noise_x.wrapping_add(x);
                 let block_x = QuartPos::to_block(quart_x);
                 for z in 0..=noise_size_xz {
-                    let quart_z = first_noise_z + z;
+                    let quart_z = first_noise_z.wrapping_add(z);
                     let block_z = QuartPos::to_block(quart_z);
                     let blending_output = blender.blend_offset_and_factor(block_x, block_z);
-                    blend_alpha.values.lock().unwrap()[(x + z * blend_alpha.size_xz) as usize] =
+                    blend_alpha.values.lock().unwrap()
+                        [x.wrapping_add(z.wrapping_mul(blend_alpha.size_xz)) as usize] =
                         blending_output.alpha();
-                    blend_offset.values.lock().unwrap()[(x + z * blend_offset.size_xz) as usize] =
+                    blend_offset.values.lock().unwrap()
+                        [x.wrapping_add(z.wrapping_mul(blend_offset.size_xz)) as usize] =
                         blending_output.blending_offset();
                 }
             }
@@ -842,7 +844,10 @@ impl NoiseChunk {
         let z_in_cell = mth::positive_modulo(cell_index, self.cell_width);
         let xy_index = mth::floor_div(cell_index, self.cell_width);
         let x_in_cell = mth::positive_modulo(xy_index, self.cell_width);
-        let y_in_cell = self.cell_height - 1 - mth::floor_div(xy_index, self.cell_width);
+        let y_in_cell = self
+            .cell_height
+            .wrapping_sub(1)
+            .wrapping_sub(mth::floor_div(xy_index, self.cell_width));
         let mut state = self.state.lock().unwrap();
         state.in_cell_x = x_in_cell;
         state.in_cell_y = y_in_cell;
@@ -1375,8 +1380,7 @@ impl CacheAllInCell {
     ) -> Self {
         let values = Arc::new(Mutex::new(vec![
             0.0;
-            (cell_width * cell_width * cell_height)
-                as usize
+            (cell_width.wrapping_mul(cell_width).wrapping_mul(cell_height)) as usize
         ]));
         CacheAllInCell {
             noise_filler,
@@ -1413,7 +1417,10 @@ impl DensityFunction for CacheAllInCell {
             // Java's index arithmetic (`*`/`+`) wraps on i32 overflow; the bounds
             // check keeps the result within the allocation, so the wrapping forms
             // are behavior-identical but debug-panic-free.
-            values[((self.cell_height - 1 - y)
+            values[(self
+                .cell_height
+                .wrapping_sub(1)
+                .wrapping_sub(y)
                 .wrapping_mul(self.cell_width)
                 .wrapping_add(x))
             .wrapping_mul(self.cell_width)
@@ -1564,16 +1571,16 @@ impl FlatCache {
         first_noise_x: i32,
         first_noise_z: i32,
     ) -> Self {
-        let size_xz = noise_size_xz + 1;
-        let mut data = vec![0.0; (size_xz * size_xz) as usize];
+        let size_xz = noise_size_xz.wrapping_add(1);
+        let mut data = vec![0.0; (size_xz.wrapping_mul(size_xz)) as usize];
         if fill {
             for x in 0..=noise_size_xz {
-                let quart_x = first_noise_x + x;
+                let quart_x = first_noise_x.wrapping_add(x);
                 let block_x = QuartPos::to_block(quart_x);
                 for z in 0..=noise_size_xz {
-                    let quart_z = first_noise_z + z;
+                    let quart_z = first_noise_z.wrapping_add(z);
                     let block_z = QuartPos::to_block(quart_z);
-                    data[(x + z * size_xz) as usize] =
+                    data[x.wrapping_add(z.wrapping_mul(size_xz)) as usize] =
                         noise_filler.compute(&SinglePointContext::new(block_x, 0, block_z));
                 }
             }
@@ -1592,10 +1599,10 @@ impl DensityFunction for FlatCache {
     fn compute(&self, context: &dyn FunctionContext) -> f64 {
         let quart_x = QuartPos::from_block(context.block_x());
         let quart_z = QuartPos::from_block(context.block_z());
-        let x = quart_x - self.first_noise_x;
-        let z = quart_z - self.first_noise_z;
+        let x = quart_x.wrapping_sub(self.first_noise_x);
+        let z = quart_z.wrapping_sub(self.first_noise_z);
         if x >= 0 && z >= 0 && x < self.size_xz && z < self.size_xz {
-            self.values.lock().unwrap()[(x + z * self.size_xz) as usize]
+            self.values.lock().unwrap()[x.wrapping_add(z.wrapping_mul(self.size_xz)) as usize]
         } else {
             self.noise_filler.compute(context)
         }

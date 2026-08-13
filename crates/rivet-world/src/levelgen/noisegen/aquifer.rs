@@ -417,7 +417,9 @@ impl NoiseBasedAquifer {
         let fluid_level_cell_x = mth::floor_div(x, fluid_cell_width);
         let fluid_level_cell_y = mth::floor_div(y, fluid_cell_height);
         let fluid_level_cell_z = mth::floor_div(z, fluid_cell_width);
-        let fluid_cell_middle_y = fluid_level_cell_y * 40 + 20;
+        let fluid_cell_middle_y = fluid_level_cell_y
+            .wrapping_mul(fluid_cell_height)
+            .wrapping_add(20);
         let max_spread = 10;
         let fluid_level_spread = self
             .fluid_level_spread_noise
@@ -759,7 +761,7 @@ fn grid_x(block_coord: i32) -> i32 {
 
 /// `fromGridX(int gridCoord, int blockOffset)` — `(gridCoord << 4) + blockOffset`.
 fn from_grid_x(grid_coord: i32, block_offset: i32) -> i32 {
-    (grid_coord << 4) + block_offset
+    (grid_coord << 4).wrapping_add(block_offset)
 }
 
 /// `gridY(int blockCoord)` — `Math.floorDiv(blockCoord, 12)`.
@@ -769,7 +771,7 @@ fn grid_y(block_coord: i32) -> i32 {
 
 /// `fromGridY(int gridCoord, int blockOffset)` — `gridCoord * 12 + blockOffset`.
 fn from_grid_y(grid_coord: i32, block_offset: i32) -> i32 {
-    grid_coord * 12 + block_offset
+    grid_coord.wrapping_mul(12).wrapping_add(block_offset)
 }
 
 /// `gridZ(int blockCoord)` — `blockCoord >> 4`.
@@ -779,7 +781,7 @@ fn grid_z(block_coord: i32) -> i32 {
 
 /// `fromGridZ(int gridCoord, int blockOffset)` — `(gridCoord << 4) + blockOffset`.
 fn from_grid_z(grid_coord: i32, block_offset: i32) -> i32 {
-    (grid_coord << 4) + block_offset
+    (grid_coord << 4).wrapping_add(block_offset)
 }
 
 /// `adjustSurfaceLevel(int preliminarySurfaceLevel)` — `preliminarySurfaceLevel + 8`.
