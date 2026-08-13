@@ -1356,6 +1356,12 @@ const TICKET_DIMS: &[(&str, &str)] = &[
     ("the_end", "dimensions/minecraft/the_end"),
 ];
 
+/// The generated-expected handoff extracts only the overworld (PR #563/#595):
+/// forcing or verifying the nether/end is dead work and a spurious failure
+/// mode (a nether/end that fails to load its grid must not refuse a valid
+/// overworld ground-truth capture). The corpus path keeps all of `TICKET_DIMS`.
+const OVERWORLD_DIM: &[(&str, &str)] = &[("overworld", "dimensions/minecraft/overworld")];
+
 /// Write a level-33 `minecraft:forced` ticket for every coordinate in `coords`
 /// into each dimension's `chunk_tickets.dat` (gzip NBT), mirroring the Moonrise
 /// `TicketStorage`/`Ticket` codec:
@@ -1368,7 +1374,11 @@ const TICKET_DIMS: &[(&str, &str)] = &[
 /// coordinate to `minecraft:full` — the forced generation that a spawn boot
 /// never reaches (issue #51 for the corpus; the generated-expected handoff
 /// forces its spawn-area grid the same way).
-fn inject_forced_tickets(world_dir: &Path, coords: &[(i32, i32)]) -> Result<(), Error> {
+fn inject_forced_tickets(
+    world_dir: &Path,
+    coords: &[(i32, i32)],
+    dims: &[(&str, &str)],
+) -> Result<(), Error> {
     let mut tickets = Vec::new();
     for (cx, cz) in coords {
         let mut ticket = CompoundTag::new();
@@ -1387,7 +1397,7 @@ fn inject_forced_tickets(world_dir: &Path, coords: &[(i32, i32)]) -> Result<(), 
     root.put_int("DataVersion", FORCED_TICKET_DATA_VERSION);
     root.put("data".to_string(), Tag::Compound(data));
 
-    for (_, sub) in TICKET_DIMS {
+    for (_, sub) in dims {
         let dir = world_dir.join(sub).join("data/minecraft");
         fs::create_dir_all(&dir)?;
         let path = dir.join("chunk_tickets.dat");
@@ -1402,7 +1412,7 @@ fn inject_forced_tickets(world_dir: &Path, coords: &[(i32, i32)]) -> Result<(), 
     println!(
         "      injected level-{FORCED_TICKET_LEVEL} forced tickets for {} coordinates x {} dimensions",
         coords.len(),
-        TICKET_DIMS.len()
+        dims.len()
     );
     Ok(())
 }
@@ -1516,7 +1526,11 @@ fn rehash_captured(dir: &Path) -> Result<(), Error> {
 /// dimension to have loaded at least `expected` chunks. The check is
 /// dimension-aware, so a partially-succeeded injection (some dimensions loaded,
 /// others 0) is refused too.
-fn verify_forced_load(log_path: &Path, expected: usize) -> Result<(), Error> {
+fn verify_forced_load(
+    log_path: &Path,
+    expected: usize,
+    dims: &[(&str, &str)],
+) -> Result<(), Error> {
     let log_text = fs::read(log_path)?;
     let log_text = String::from_utf8_lossy(&log_text);
     let mut per_dim: Vec<(String, usize)> = Vec::new();
@@ -1542,11 +1556,15 @@ fn verify_forced_load(log_path: &Path, expected: usize) -> Result<(), Error> {
         }
     }
     let mut short: Vec<String> = Vec::new();
-    for (dim, _) in TICKET_DIMS {
+    for (dim, _) in dims {
+        // Paper can log the load line more than once per dimension (an initial
+        // 0-loaded line before tickets apply, or a level reload mid-boot); the
+        // first match must not mask a later genuine load, so take the max.
         let loaded = per_dim
             .iter()
-            .find(|(d, _)| d == dim)
+            .filter(|(d, _)| d == dim)
             .map(|(_, n)| *n)
+            .max()
             .unwrap_or(0);
         if loaded < expected {
             short.push(format!("{dim} loaded {loaded}"));
@@ -1592,10 +1610,14 @@ fn full_forced_extraction(
     prepare_run_dir(run_dir, &cfg.props_src)?;
     println!("      [boot1] creating the superflat world...");
     boot_and_shutdown(run_dir, &create_log, jar)?;
-    inject_forced_tickets(&run_dir.join("world"), crate::corpus::COORDINATES)?;
+    inject_forced_tickets(
+        &run_dir.join("world"),
+        crate::corpus::COORDINATES,
+        TICKET_DIMS,
+    )?;
     println!("      [boot2] capturing the forced FULL chunks...");
     boot_and_shutdown(run_dir, &capture_log, jar)?;
-    verify_forced_load(&capture_log, crate::corpus::COORDINATES.len())?;
+    verify_forced_load(&capture_log, crate::corpus::COORDINATES.len(), TICKET_DIMS)?;
 
     let tmp = env::temp_dir().join(format!("rivet-oracle-verify-{}-{tag}", std::process::id()));
     if tmp.exists() {
@@ -2575,9 +2597,14 @@ fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
     let json = serde_json::to_string(&manifest)
         .map_err(|e| Error::Gate(format!("serializing loaded-world manifest: {e}")))?;
     match to {
-        Some(path) => fs::write(path, json.as_bytes())
-            .map_err(Error::Io)
-            .map(|_| ())?,
+        Some(path) => {
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                fs::create_dir_all(parent).map_err(Error::Io)?;
+            }
+            fs::write(path, json.as_bytes()).map_err(Error::Io)?;
+        }
         None => println!("{json}"),
     }
     Ok(())
@@ -5374,7 +5401,7 @@ mod tests {
             ),
         )
         .unwrap();
-        verify_forced_load(&log, 8).expect("all dimensions loaded the forced chunks");
+        verify_forced_load(&log, 8, TICKET_DIMS).expect("all dimensions loaded the forced chunks");
 
         // A create boot: zero persistent chunks everywhere — the injection never ran.
         fs::write(
@@ -5387,7 +5414,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            verify_forced_load(&log, 8).is_err(),
+            verify_forced_load(&log, 8, TICKET_DIMS).is_err(),
             "a spawn boot must be refused"
         );
 
@@ -5402,15 +5429,30 @@ mod tests {
         )
         .unwrap();
         assert!(
-            verify_forced_load(&log, 8).is_err(),
+            verify_forced_load(&log, 8, TICKET_DIMS).is_err(),
             "a partial injection must be refused"
         );
+
+        // A duplicated load line (an initial 0-loaded line before tickets apply,
+        // then the genuine load) must not mask the later genuine load.
+        fs::write(
+            &log,
+            concat!(
+                "[00:00:01 INFO]: Loading 0 persistent chunks for level 'minecraft:overworld'...\n",
+                "[00:00:01 INFO]: Loading 8 persistent chunks for level 'minecraft:overworld'...\n",
+                "[00:00:01 INFO]: Loading 8 persistent chunks for level 'minecraft:the_nether'...\n",
+                "[00:00:01 INFO]: Loading 8 persistent chunks for level 'minecraft:the_end'...\n",
+            ),
+        )
+        .unwrap();
+        verify_forced_load(&log, 8, TICKET_DIMS)
+            .expect("the later genuine load must win over the earlier 0-loaded line");
 
         // A boot whose message the parser cannot match is refused (never silently
         // accepted as a forced capture).
         fs::write(&log, "[00:00:01 INFO]: Done (7.2s)!\n").unwrap();
         assert!(
-            verify_forced_load(&log, 8).is_err(),
+            verify_forced_load(&log, 8, TICKET_DIMS).is_err(),
             "an unmatchable log must be refused"
         );
 

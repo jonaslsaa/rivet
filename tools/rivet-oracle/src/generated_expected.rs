@@ -49,10 +49,25 @@
 //!     proof — two equally-wrong captures are refused, never committed.
 //!   * the tamper negative control proves a flipped byte in the golden fails
 //!     verification (the manifest SHA-256 gate is not vacuous).
+//!
+//! Seed enforcement (PR #595): the golden is seed-self-describing — it is a
+//! `GoldenWorld`, the per-chunk `WorldManifest` flattened together with the
+//! `seed` it was actually captured under. The committed verification requires
+//! the golden seed to be exactly `PINNED_SEED` (a wrong-seed capture is drift,
+//! refused even if the manifest hash is freshly rebuilt around it), and
+//! `regenerate_manifest` reads the seed back out of the golden rather than
+//! stamping the constant — the manifest's `seed` always describes the bytes it
+//! hashes. `--to <seed>` writes the real seed into the golden, so a fresh
+//! wrong-seed capture self-reports its true seed. The handoff captures only
+//! the overworld (the acceptance never consults nether/end ground truth): the
+//! forced tickets are injected and verified for `OVERWORLD_DIM` only, while
+//! the corpus paths keep all of `TICKET_DIMS`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use crate::loaded_world::{self, WorldManifest};
 use crate::{CapturedFile, Error};
@@ -86,6 +101,22 @@ pub const GRID_MAX: i32 = 4;
 /// also forced FULL — the buffer that keeps border-tree placement deterministic.
 pub const FORCE_GRID_MIN: i32 = -6;
 pub const FORCE_GRID_MAX: i32 = 6;
+
+/// The committed golden: the per-chunk `WorldManifest` wrapped with the seed it
+/// was actually captured under (PR #595). The `seed` field sits at the golden's
+/// top level (`#[serde(flatten)]` keeps the world fields at top level too), so
+/// it is both structurally bound — verification reads it back and requires
+/// `PINNED_SEED` — and hash-bound — it is inside the bytes the manifest SHA-256
+/// covers, so an attacker editing it to fake the pinned seed breaks the hash
+/// gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoldenWorld {
+    /// The seed the golden content was generated under (the `--to` capture
+    /// writes the actual seed; committed verification requires `PINNED_SEED`).
+    pub seed: i64,
+    #[serde(flatten)]
+    pub world: WorldManifest,
+}
 
 /// The committed grid coordinates, deterministically ordered (x-major).
 pub fn grid_coordinates() -> Vec<(i32, i32)> {
@@ -253,15 +284,19 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
     // forced grid from a blank chunk state — which IS byte-deterministic
     // (verified across independent boots). The forced grid is a superset of the
     // committed grid so every committed chunk's neighbors are forced FULL too.
-    clear_region_files(&run_dir.join("world"))?;
+    clear_region_files(&run_dir.join("world"), crate::OVERWORLD_DIM)?;
 
-    // Inject level-33 forced tickets for the spawn grid into every dimension,
-    // then boot2 loads those persistent chunks and finishes them to FULL.
-    crate::inject_forced_tickets(&run_dir.join("world"), &forced)?;
+    // Inject level-33 forced tickets for the spawn grid, then boot2 loads those
+    // persistent chunks and finishes them to FULL. The handoff extracts only the
+    // overworld (PR #563/#595), so only the overworld is forced and verified:
+    // forcing the nether/end is dead work and a spurious failure mode (a
+    // nether/end that fails to load its grid must not refuse a valid overworld
+    // ground-truth capture).
+    crate::inject_forced_tickets(&run_dir.join("world"), &forced, crate::OVERWORLD_DIM)?;
     let capture_log = run_dir.with_file_name("boot-generated.log");
     println!("      [boot2] capturing the forced FULL spawn grid...");
     crate::boot_and_shutdown(&run_dir, &capture_log, &jar)?;
-    crate::verify_forced_load(&capture_log, forced.len())?;
+    crate::verify_forced_load(&capture_log, forced.len(), crate::OVERWORLD_DIM)?;
 
     // Provenance: the content this capture is about to be stamped with
     // `PINNED_PAPER` in the committed manifest must have actually been generated
@@ -278,16 +313,18 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
     filter_to_grid(&manifest, &grid)
 }
 
-/// Delete every `.mca` region/entities/poi file under a world root's three
+/// Delete every `.mca` region/entities/poi file under a world root's `dims`
 /// dimension dirs, leaving the world metadata (level.dat, seed, spawn, injected
 /// ticket data) intact. Used to discard a create boot's partial spawn-area
 /// chunks so the capture boot regenerates the forced grid from a blank chunk
 /// state. The entities/poi files carry no block content (spawn-limits are 0),
 /// but they are boot1 leftovers that do not participate in the regenerated
 /// chunk state — clearing them keeps the capture's blank chunk state complete.
-fn clear_region_files(world_dir: &Path) -> Result<(), Error> {
+/// The generated-expected handoff passes `crate::OVERWORLD_DIM` (it only ever
+/// reads the overworld); the corpus paths pass `TICKET_DIMS`.
+fn clear_region_files(world_dir: &Path, dims: &[(&str, &str)]) -> Result<(), Error> {
     let mut cleared = 0usize;
-    for dim in ["overworld", "the_nether", "the_end"] {
+    for (dim, _) in dims {
         let base = world_dir.join("dimensions/minecraft").join(dim);
         for sub in ["region", "entities", "poi"] {
             let dir = base.join(sub);
@@ -340,19 +377,21 @@ fn filter_to_grid(manifest: &WorldManifest, grid: &[(i32, i32)]) -> Result<World
 }
 
 /// Capture mode for the PR `--to <out>` invocation: the two-boot create +
-/// forced-capture sequence (`capture_world`), written as compact JSON to `to`.
+/// forced-capture sequence (`capture_world`), written as compact JSON to `to`
+/// wrapped in a `GoldenWorld` that records the actual captured `seed` (PR #595).
 /// A stale `to` file is removed first so a failed capture never leaves a
 /// previous success behind.
 pub fn capture_to(seed: i64, to: &Path) -> Result<(), Error> {
     if to.exists() {
         fs::remove_file(to)?;
     }
-    let manifest = capture_world(seed)?;
+    let world = capture_world(seed)?;
     // Refuse a capture that does not meet the anti-superflat sample contract —
     // a bad capture must never be handed to the acceptance as ground truth.
-    validate_world(&manifest)?;
-    let json = serde_json::to_string(&manifest)
-        .map_err(|e| Error::Gate(format!("serializing generated-expected manifest: {e}")))?;
+    validate_world(&world)?;
+    let golden = GoldenWorld { seed, world };
+    let json = serde_json::to_string(&golden)
+        .map_err(|e| Error::Gate(format!("serializing generated-expected golden: {e}")))?;
     if let Some(parent) = to.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -360,27 +399,28 @@ pub fn capture_to(seed: i64, to: &Path) -> Result<(), Error> {
     }
     fs::write(to, json.as_bytes())?;
     println!(
-        "captured seed-{seed} generated-expected manifest ({} FULL grid chunks) -> {}",
-        manifest.chunks.len(),
+        "captured seed-{seed} generated-expected golden ({} FULL grid chunks) -> {}",
+        golden.world.chunks.len(),
         to.display()
     );
     Ok(())
 }
 
-/// Parse + structurally validate the committed golden (`WorldManifest` shape).
-pub fn load(dir: &Path) -> Result<WorldManifest, Error> {
+/// Parse + structurally validate the committed golden (`GoldenWorld` shape: the
+/// `WorldManifest` wrapped with the seed it was captured under).
+pub fn load(dir: &Path) -> Result<GoldenWorld, Error> {
     let path = dir.join(FIXTURE_BASENAME);
     let raw = fs::read_to_string(&path)
         .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
-    let world: WorldManifest = serde_json::from_str(&raw)
+    let golden: GoldenWorld = serde_json::from_str(&raw)
         .map_err(|e| Error::Manifest(format!("invalid {FIXTURE_BASENAME}: {e}")))?;
-    if world.format != 1 {
+    if golden.world.format != 1 {
         return Err(Error::Manifest(format!(
             "unsupported generated-expected format {} (expected 1)",
-            world.format
+            golden.world.format
         )));
     }
-    Ok(world)
+    Ok(golden)
 }
 
 /// Verify the committed generated-expected golden. Failing with
@@ -417,14 +457,28 @@ fn verify_generated_expected(dir: &Path) -> Result<(), Error> {
             manifest.paper
         )));
     }
-    if manifest.seed.as_deref() != Some("42") {
+    // 2. Seed provenance, bound two ways (PR #595). The manifest's seed string
+    //    must be the pinned seed AND — the structural half — the golden itself
+    //    must self-describe that same seed. A capture generated under a wrong
+    //    seed carries its real seed in the golden, so verification refuses it
+    //    even if the manifest hash is freshly rebuilt around the wrong content.
+    if manifest.seed.as_deref() != Some(&PINNED_SEED.to_string()) {
         return Err(Error::Manifest(format!(
-            "generated-expected fixture seed {:?} != pinned seed 42",
+            "generated-expected fixture seed {:?} != pinned seed {PINNED_SEED}",
             manifest.seed
         )));
     }
+    let golden = load(dir)?;
+    if golden.seed != PINNED_SEED {
+        return Err(Error::Manifest(format!(
+            "generated-expected golden self-describes seed {} != pinned seed {PINNED_SEED} — \
+             the captured content was generated under a different seed; refusing a wrong-seed \
+             handoff",
+            golden.seed
+        )));
+    }
 
-    validate_world(&load(dir)?)?;
+    validate_world(&golden.world)?;
     Ok(())
 }
 
@@ -603,13 +657,18 @@ struct GeneratedExpectedManifest<'a> {
 }
 
 /// Write `fixtures/generated-expected/manifest.json` from the freshly generated
-/// golden (byte-identical field order).
+/// golden (byte-identical field order). The seed is READ BACK OUT OF THE GOLDEN
+/// (PR #595) — regeneration never stamps a hardcoded 42, so the manifest always
+/// describes the seed the golden content was actually captured under.
 pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
     let data = fs::read(dir.join(FIXTURE_BASENAME))?;
+    let golden: GoldenWorld = serde_json::from_slice(&data)
+        .map_err(|e| Error::Manifest(format!("cannot read seed from {FIXTURE_BASENAME}: {e}")))?;
+    let seed_str = golden.seed.to_string();
     let manifest = GeneratedExpectedManifest {
         format: 1,
         paper: PINNED_PAPER,
-        seed: &PINNED_SEED.to_string(),
+        seed: &seed_str,
         level_type: "minecraft:normal",
         kind: KIND,
         note: "Seed-42 generated-world ground-truth handoff (PR #563): the per-chunk \
@@ -662,15 +721,21 @@ pub fn run_probe(dir: &Path) -> Result<(), Error> {
 
     println!("[3/3] byte-identical + contract-valid; writing the committed handoff...");
     fs::create_dir_all(dir)?;
-    let json = serde_json::to_string(&a)
-        .map_err(|e| Error::Gate(format!("serializing generated-expected manifest: {e}")))?;
+    // The committed golden self-describes its seed (PR #595): the pinned seed is
+    // wrapped into the golden, and the manifest seed is then read back out of it.
+    let golden = GoldenWorld {
+        seed: PINNED_SEED,
+        world: a,
+    };
+    let json = serde_json::to_string(&golden)
+        .map_err(|e| Error::Gate(format!("serializing generated-expected golden: {e}")))?;
     fs::write(dir.join(FIXTURE_BASENAME), json.as_bytes())?;
     regenerate_manifest(dir)?;
     println!(
-        "regenerated generated-expected seed-42 handoff under {} (twin-boot byte-identical; \
+        "regenerated generated-expected seed-{PINNED_SEED} handoff under {} (twin-boot byte-identical; \
          {} FULL grid chunks)",
         dir.display(),
-        a.chunks.len()
+        golden.world.chunks.len()
     );
     Ok(())
 }
@@ -714,8 +779,10 @@ pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
 ///   cargo run -p rivet-oracle -- generated-expected <seed> --tamper    negative control
 ///
 /// Verify mode is pinned to the committed seed-42 handoff (`<seed>` must be 42);
-/// the `--to` capture path accepts any seed. `--tamper` and `--to` are mutually
-/// exclusive.
+/// the `--to` capture path accepts any seed whose spawn grid passes the
+/// anti-superflat sample contract (an arbitrary seed whose grid is uniform —
+/// e.g. an all-ocean one — is refused like any superflat echo). `--tamper` and
+/// `--to` are mutually exclusive.
 ///
 /// `args` is everything after the subcommand name (the dispatch strips
 /// `"generated-expected"` and the program name), so `args` is `[<seed>, ...]`.
@@ -795,7 +862,8 @@ fn parse_cli(rest: &[&str]) -> Result<CliArgs, Error> {
                 i += 1;
             }
             // A negative seed (`-5`) must be read as a seed, not an unknown
-            // option — the `--to` capture accepts any i64 seed. A `--`-prefixed
+            // option — the `--to` capture accepts any i64 seed (the anti-superflat
+            // contract still refuses a uniform grid, e.g. an all-ocean one). A `--`-prefixed
             // token is always an option (unknown ones are refused below); only a
             // single-dash token whose tail is an integer is a negative seed.
             other
@@ -934,7 +1002,11 @@ mod tests {
     fn committed_generated_expected_is_non_vacuous() {
         let dir = fixtures_dir().join("generated-expected");
         require_fixture(&dir);
-        let world = load(&dir).unwrap();
+        let golden = load(&dir).unwrap();
+        // The golden self-describes the pinned seed (PR #595): the committed
+        // content is bound to the seed it was captured under.
+        assert_eq!(golden.seed, PINNED_SEED);
+        let world = &golden.world;
         assert_eq!(world.format, 1);
         assert_eq!(world.chunks.len(), 81);
         // Every chunk is FULL with a 16×16 row-major contract.
@@ -1013,18 +1085,104 @@ mod tests {
         tamper_negative_control(&dir).expect("tamper must be detected");
     }
 
+    /// A wrong-seed golden — content generated under a seed OTHER than the pinned
+    /// 42 — must be refused even when its manifest SHA-256 is freshly rebuilt
+    /// around it (PR #595). The golden self-describes its seed, so a wrong-seed
+    /// capture cannot be laundered into the committed handoff by re-hashing.
+    #[test]
+    fn wrong_seed_golden_is_rejected_even_with_fresh_hash() {
+        let dir = fixtures_dir().join("generated-expected");
+        require_fixture(&dir);
+        let mut golden = load(&dir).unwrap();
+        // Simulate a capture that was actually generated under seed 999: flip the
+        // golden's self-described seed. The chunk content is still the genuine
+        // seed-42 content (the anti-superflat contract would pass), so the ONLY
+        // thing that can catch this is the seed gate.
+        golden.seed = 999;
+
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-ge-wrongseed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::write(
+            scratch.join(FIXTURE_BASENAME),
+            serde_json::to_string(&golden).unwrap(),
+        )
+        .unwrap();
+        // Rebuild the manifest hash around the wrong-seed golden so the hash gate
+        // passes — the seed gate must still refuse it.
+        let data = fs::read(scratch.join(FIXTURE_BASENAME)).unwrap();
+        let manifest = serde_json::json!({
+            "format": 1,
+            "paper": PINNED_PAPER,
+            "seed": "42",
+            "level-type": "minecraft:normal",
+            "kind": KIND,
+            "note": "test",
+            "captured": [{ "path": FIXTURE_BASENAME, "sha256": crate::sha256_hex(&data), "bytes": data.len() }],
+        });
+        fs::write(
+            scratch.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let result = verify_generated_expected(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err("a wrong-seed golden must be refused by the seed gate");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("self-describes seed") && msg.contains("999"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// `regenerate_manifest` reads the seed OUT of the golden rather than
+    /// stamping `PINNED_SEED` (PR #595): a golden whose content is seed 999
+    /// regenerates a manifest whose `seed` field is "999", so the manifest
+    /// always describes the bytes it hashes.
+    #[test]
+    fn regenerate_manifest_reads_seed_from_golden() {
+        let dir = fixtures_dir().join("generated-expected");
+        require_fixture(&dir);
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-ge-regen-seed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        let mut golden = load(&dir).unwrap();
+        golden.seed = 999;
+        fs::write(
+            scratch.join(FIXTURE_BASENAME),
+            serde_json::to_string(&golden).unwrap(),
+        )
+        .unwrap();
+        regenerate_manifest(&scratch).unwrap();
+        let text = fs::read_to_string(scratch.join("manifest.json")).unwrap();
+        let _ = fs::remove_dir_all(&scratch);
+        assert!(
+            text.contains("\"seed\": \"999\""),
+            "regenerated manifest must carry the golden's actual seed, got: {text}"
+        );
+    }
+
     /// Write `world` into a scratch dir under a valid hash-gated manifest and run
     /// the full verify against it. Returns the verify error (the caller asserts
     /// it is a rejection). A valid manifest is essential: a failure must come
-    /// from the anti-superflat contract, never from the hash gate.
+    /// from the anti-superflat contract, never from the hash gate. The golden is
+    /// wrapped in a `GoldenWorld` carrying the pinned seed (PR #595), so the
+    /// rejection the caller asserts is the anti-superflat contract — not the
+    /// seed gate.
     fn verify_scratch_world(world: &WorldManifest, tag: &str) -> crate::Error {
         let scratch =
             std::env::temp_dir().join(format!("rivet-oracle-ge-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&scratch);
         fs::create_dir_all(&scratch).unwrap();
+        let golden = GoldenWorld {
+            seed: PINNED_SEED,
+            world: world.clone(),
+        };
         fs::write(
             scratch.join(FIXTURE_BASENAME),
-            serde_json::to_string(&world).unwrap(),
+            serde_json::to_string(&golden).unwrap(),
         )
         .unwrap();
         let data = fs::read(scratch.join(FIXTURE_BASENAME)).unwrap();
@@ -1174,12 +1332,12 @@ mod tests {
     fn relabeled_chunk_is_rejected() {
         let dir = fixtures_dir().join("generated-expected");
         require_fixture(&dir);
-        let mut world = load(&dir).unwrap();
+        let mut golden = load(&dir).unwrap();
         // Relabel the genuine (0,0) chunk as if it were (1,0): the chunk's
         // internal xPos/zPos no longer match its grid key.
-        let fp = world.chunks.get_mut("0,0").expect("grid chunk 0,0");
+        let fp = golden.world.chunks.get_mut("0,0").expect("grid chunk 0,0");
         fp.stored_pos = [1, 0];
-        let err = verify_scratch_world(&world, "relabeled");
+        let err = verify_scratch_world(&golden.world, "relabeled");
         let msg = err.to_string();
         assert!(
             msg.contains("stored_pos") && msg.contains("relabeled"),
@@ -1282,7 +1440,7 @@ mod tests {
 
     /// Verify mode is pinned to seed 42: a different seed is a usage error, not
     /// a silent verify of the wrong reference. (The --to capture path still
-    /// accepts any seed.)
+    /// accepts any seed whose grid passes the anti-superflat contract.)
     #[test]
     fn verify_mode_rejects_non_42_seed() {
         // run_cli's verify branch refuses a non-42 seed without touching the

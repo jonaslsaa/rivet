@@ -419,7 +419,23 @@ captures are refused, never committed.
 
 Verify mode is pinned to seed 42: `generated-expected 999` is a usage error,
 never a silent verify of the wrong reference (the `--to` capture path accepts
-any seed).
+any seed whose spawn grid passes the anti-superflat sample contract, e.g. seed
+42 — an arbitrary seed whose spawn grid is uniform, such as an all-ocean one,
+is refused like any superflat echo).
+
+The golden is seed-self-describing (PR #595): `generated-expected.json` is a
+`GoldenWorld` — the per-chunk `WorldManifest` (`format`/`overworld_region`/
+`chunks`) flattened together with the `seed` field it was actually captured
+under. `--to <seed>` writes the real seed into the golden, so a wrong-seed
+capture carries its true seed. The committed verification requires the golden
+seed to be exactly the pinned `42` (a wrong-seed capture is drift, refused even
+if the manifest hash is freshly rebuilt around it), and `regenerate
+--generated-expected` reads the seed back OUT of the golden rather than
+stamping the constant — the manifest's `seed` always describes the bytes it
+hashes. The seed field sits inside the hashed bytes, so it is bound both
+structurally and by the manifest SHA-256. The shared loaded-world
+`WorldManifest` schema is unchanged — only the generated-expected golden wraps
+it.
 
 The per-chunk contract is exactly what the acceptance compares: 16×16
 `surface`/`bedrock`/`below_feet` arrays indexed row-major `z*16+x`, sampled at
