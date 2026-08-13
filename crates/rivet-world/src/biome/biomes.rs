@@ -213,6 +213,49 @@ pub static SMALL_END_ISLANDS: LazyLock<ResourceKey<BiomeId>> =
 /// `Biomes.END_BARRENS` — `register("end_barrens")`.
 pub static END_BARRENS: LazyLock<ResourceKey<BiomeId>> = LazyLock::new(|| register("end_barrens"));
 
+/// The 33 `Biomes` keys the `SurfaceRuleData` builders reference (the nether's
+/// 5 + the overworld's 28 — the surface-rule-data fixture's `biomes` set,
+/// PR #597). Anywhere a surface-rule tree is built or a bootstrap access that
+/// feeds the `SurfaceRuleData` builders is assembled must register exactly
+/// these keys (plus any caller-local extras) so the builders' `getOrThrow`
+/// resolves. Single source of truth for the settings-bootstrap and the
+/// worldgen-registry assembly.
+pub const SURFACE_RULE_BIOMES: &[&str] = &[
+    "badlands",
+    "basalt_deltas",
+    "beach",
+    "crimson_forest",
+    "deep_frozen_ocean",
+    "deep_lukewarm_ocean",
+    "desert",
+    "dripstone_caves",
+    "eroded_badlands",
+    "frozen_ocean",
+    "frozen_peaks",
+    "grove",
+    "ice_spikes",
+    "jagged_peaks",
+    "lukewarm_ocean",
+    "mangrove_swamp",
+    "mushroom_fields",
+    "nether_wastes",
+    "old_growth_pine_taiga",
+    "old_growth_spruce_taiga",
+    "snowy_beach",
+    "snowy_slopes",
+    "soul_sand_valley",
+    "stony_peaks",
+    "stony_shore",
+    "sulfur_caves",
+    "swamp",
+    "warm_ocean",
+    "warped_forest",
+    "windswept_gravelly_hills",
+    "windswept_hills",
+    "windswept_savanna",
+    "wooded_badlands",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;

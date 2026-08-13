@@ -83,6 +83,15 @@
 //! ported faithfully (the `mc.data.worldgen` unit, RivetTodo #179) with the
 //! biome `HolderGetter` threaded through the settings bootstrap (the
 //! `noise_generator_settings` callers).
+//!
+//! RivetTodo(#179): the `is_biome` `HolderSet`s the builders resolve are
+//! bound to whatever `HolderGetter<BiomeId>` is handed in. The bootstrap-time
+//! registries (the `worldgen_bootstraps` access and the unit-test accesses)
+//! freeze their own biome registries with fabricated `BiomeId` handles, so the
+//! surface-rule holder identity will NOT match the runtime biome-source
+//! registry until the `#185`/`#177` wiring resolves the same registry both the
+//! `BiomeCondition` and the biome source read. Encode is byte-exact today; the
+//! apply path must not compare holders across registries until then.
 //! The `@Deprecated` single-column [`SurfaceSystem::top_material`] probe (the
 //! carver's grass-replacement call) is ported and composed into the carver
 //! `CarvingContext` seam through [`bind_carver_top_material`]; the production
@@ -4057,53 +4066,19 @@ mod tests {
         })
     }
 
-    /// The 33 `Biomes` keys the `SurfaceRuleData` builders reference (the
-    /// nether's 5 + the overworld's 28 — the surface-rule-data fixture's
-    /// `biomes` set, PR #597), plus `plains` (the older tests' holder). The
-    /// codec tests encode the real
-    /// trees, so every referenced key must resolve through the access.
-    const SURFACE_RULE_BIOMES: &[&str] = &[
-        "plains",
-        "badlands",
-        "basalt_deltas",
-        "beach",
-        "crimson_forest",
-        "deep_frozen_ocean",
-        "deep_lukewarm_ocean",
-        "desert",
-        "dripstone_caves",
-        "eroded_badlands",
-        "frozen_ocean",
-        "frozen_peaks",
-        "grove",
-        "ice_spikes",
-        "jagged_peaks",
-        "lukewarm_ocean",
-        "mangrove_swamp",
-        "mushroom_fields",
-        "nether_wastes",
-        "old_growth_pine_taiga",
-        "old_growth_spruce_taiga",
-        "snowy_beach",
-        "snowy_slopes",
-        "soul_sand_valley",
-        "stony_peaks",
-        "stony_shore",
-        "sulfur_caves",
-        "swamp",
-        "warm_ocean",
-        "warped_forest",
-        "windswept_gravelly_hills",
-        "windswept_hills",
-        "windswept_savanna",
-        "wooded_badlands",
-    ];
-
-    /// A biome registry with the 33 `SurfaceRuleData`-referenced keys under
-    /// `Registries.BIOME` (id = the hub index).
+    /// A biome registry with the 33 `SurfaceRuleData`-referenced keys (the
+    /// single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) plus
+    /// `plains` (the older tests' holder) under `Registries.BIOME` (id = the
+    /// hub index). The codec tests encode the real trees, so every referenced
+    /// key must resolve through the access.
     fn biome_access() -> RegistryAccess {
         let mut builder = RegistryBuilder::new(&*rivet_registry::registries::BIOME);
-        for (i, name) in SURFACE_RULE_BIOMES.iter().enumerate() {
+        let names: Vec<&str> = ["plains"]
+            .iter()
+            .chain(biomes::SURFACE_RULE_BIOMES.iter())
+            .copied()
+            .collect();
+        for (i, name) in names.iter().enumerate() {
             builder.register(
                 &ResourceKey::create(
                     &*rivet_registry::registries::BIOME,
@@ -4349,6 +4324,12 @@ mod tests {
     /// `overworldLike(false, true, true)` must carry both bedrocks and the bare
     /// main rule; `floating_islands` `overworldLike(false, false, false)` must
     /// carry neither bedrock.
+    ///
+    /// The PR #597 fixture captures only the `(true, false, true)` and
+    /// `(false, false, true)` combos byte-exactly; the `caves` `(false, true,
+    /// true)` and `floating_islands` `(false, false, false)` trees are
+    /// Java-documented here structurally but not byte-exact fixture-verified —
+    /// extend the fixture (or the oracle harness) to close that gap.
     #[test]
     fn overworld_like_flags_control_bedrock_and_preliminary_surface() {
         let ops = ops();
@@ -4505,10 +4486,27 @@ mod tests {
             sulfur[2]["if_true"]["max_threshold"].as_f64(),
             Some(f64::MAX)
         );
-        // `surfaceNoiseAbove(1.0)` = `noiseCondition2d(SURFACE, 1.0 / 8.25, MAX)`.
         assert_eq!(
             sulfur[0]["if_true"]["noise"],
             json!("minecraft:sulfur_cave_gradient")
+        );
+        // `surfaceNoiseAbove(threshold)` = `noiseCondition2d(SURFACE,
+        // threshold / 8.25, MAX)` — Java's private helper. The overworld tree's
+        // `windswept_hills` rule (`surfaceNoiseAbove(1.0)`) must carry the
+        // `1.0 / 8.25` double threshold, never `1.0` or a float-widened value.
+        let windswept_hills = &encoded["sequence"][1]["then_run"]["sequence"][2]["then_run"]["then_run"]
+            ["sequence"][1]["sequence"][4]["sequence"][2]["then_run"];
+        assert_eq!(
+            windswept_hills["if_true"]["noise"],
+            json!("minecraft:surface")
+        );
+        assert_eq!(
+            windswept_hills["if_true"]["min_threshold"].as_f64(),
+            Some(1.0 / 8.25)
+        );
+        assert_eq!(
+            windswept_hills["if_true"]["max_threshold"].as_f64(),
+            Some(f64::MAX)
         );
     }
 

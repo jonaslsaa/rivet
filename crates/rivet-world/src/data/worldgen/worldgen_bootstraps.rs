@@ -122,50 +122,11 @@ fn biome_key() -> ErasedKey {
     ResourceKey::create_registry_key(rivet_registry::registries::BIOME.identifier().clone())
 }
 
-/// The 33 `Biomes` keys the `SurfaceRuleData` builders reference (the nether's
-/// 5 + the overworld's 28 — the surface-rule-data fixture's `biomes` set,
-/// PR #597). The settings bootstrap resolves each through `getOrThrow`, so
-/// every referenced biome must
-/// be registered.
-const SURFACE_RULE_BIOMES: &[&str] = &[
-    "badlands",
-    "basalt_deltas",
-    "beach",
-    "crimson_forest",
-    "deep_frozen_ocean",
-    "deep_lukewarm_ocean",
-    "desert",
-    "dripstone_caves",
-    "eroded_badlands",
-    "frozen_ocean",
-    "frozen_peaks",
-    "grove",
-    "ice_spikes",
-    "jagged_peaks",
-    "lukewarm_ocean",
-    "mangrove_swamp",
-    "mushroom_fields",
-    "nether_wastes",
-    "old_growth_pine_taiga",
-    "old_growth_spruce_taiga",
-    "snowy_beach",
-    "snowy_slopes",
-    "soul_sand_valley",
-    "stony_peaks",
-    "stony_shore",
-    "sulfur_caves",
-    "swamp",
-    "warm_ocean",
-    "warped_forest",
-    "windswept_gravelly_hills",
-    "windswept_hills",
-    "windswept_savanna",
-    "wooded_badlands",
-];
-
 /// A frozen biome registry carrying the 33 `SurfaceRuleData`-referenced keys
-/// as `BiomeId` handles (the surface trees only need the holder identity).
+/// (the single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) as
+/// `BiomeId` handles (the surface trees only need the holder identity).
 fn build_biome_registry() -> Registry<rivet_registry::biome_id::BiomeId> {
+    use crate::biome::biomes::SURFACE_RULE_BIOMES;
     use rivet_registry::biome_id::BiomeId;
     let biome_key = &*rivet_registry::registries::BIOME;
     let mut builder: RegistryBuilder<BiomeId> = RegistryBuilder::new(biome_key);

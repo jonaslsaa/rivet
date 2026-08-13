@@ -766,6 +766,7 @@ impl<Ops: DynamicOps + 'static> MapDecoder<NoiseGeneratorSettings, Ops>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::biome::biomes::SURFACE_RULE_BIOMES;
     use crate::data::worldgen::bootstrap_context::RecordingContext;
     use crate::data::worldgen::noise_data;
     use crate::levelgen::noisegen::noise_router_data::bootstrap as density_function_bootstrap;
@@ -800,51 +801,11 @@ mod tests {
         noise_builder.freeze()
     }
 
-    /// The 33 `Biomes` keys the `SurfaceRuleData` builders reference (the
-    /// nether's 5 + the overworld's 28 — the surface-rule-data fixture's
-    /// `biomes` set, PR #597). The settings bootstrap resolves each through
-    /// `getOrThrow`, so every
-    /// referenced biome must be registered in the test access.
-    const SURFACE_RULE_BIOMES: &[&str] = &[
-        "badlands",
-        "basalt_deltas",
-        "beach",
-        "crimson_forest",
-        "deep_frozen_ocean",
-        "deep_lukewarm_ocean",
-        "desert",
-        "dripstone_caves",
-        "eroded_badlands",
-        "frozen_ocean",
-        "frozen_peaks",
-        "grove",
-        "ice_spikes",
-        "jagged_peaks",
-        "lukewarm_ocean",
-        "mangrove_swamp",
-        "mushroom_fields",
-        "nether_wastes",
-        "old_growth_pine_taiga",
-        "old_growth_spruce_taiga",
-        "snowy_beach",
-        "snowy_slopes",
-        "soul_sand_valley",
-        "stony_peaks",
-        "stony_shore",
-        "sulfur_caves",
-        "swamp",
-        "warm_ocean",
-        "warped_forest",
-        "windswept_gravelly_hills",
-        "windswept_hills",
-        "windswept_savanna",
-        "wooded_badlands",
-    ];
-
     /// A frozen biome registry carrying the 33 `SurfaceRuleData`-referenced
-    /// keys as `BiomeId` handles (the surface trees only need the holder
-    /// identity, so every key maps to its hub index — a `Direct`/registry
-    /// `Reference` the `HolderSet` composes identically).
+    /// keys (the single source of truth in
+    /// `biome::biomes::SURFACE_RULE_BIOMES`) as `BiomeId` handles (the surface
+    /// trees only need the holder identity, so every key maps to its hub index
+    /// — a `Direct`/registry `Reference` the `HolderSet` composes identically).
     fn build_biome_registry() -> Registry<BiomeId> {
         let biome_key = &*rivet_registry::registries::BIOME;
         let mut builder: RegistryBuilder<BiomeId> = RegistryBuilder::new(biome_key);
