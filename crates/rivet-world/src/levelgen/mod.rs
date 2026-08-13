@@ -36,7 +36,18 @@ pub mod heightproviders;
 // The `mc.world.level.levelgen.noise` unit's density-function/noise-router
 // value slice (issue #177).
 pub mod noise;
+// The `mc.world.level.levelgen.noisegen` unit (issue #183): the
+// noise-based-chunk-generator class-level SCC (`NoiseGeneratorSettings`,
+// `NoiseRouterData`, `RandomState`, `Aquifer`, `NoiseChunk`,
+// `NoiseBasedChunkGenerator`, `OreVeinifier`).
+pub mod noisegen;
 pub mod placement;
+// The `mc.world.level.levelgen.surface` unit's `SurfaceRules` value shell:
+// the `RuleSource`/`SurfaceRule`/`Context` type identities + the erased
+// `ArcRuleSource` carrier `NoiseGeneratorSettings` stores, the
+// `SurfaceRuleData` builder stand-ins, and the `SurfaceSystem` type identity
+// (RivetTodo to the surface unit — see the module).
+pub mod surface_rules;
 // The `mc.world.level.levelgen.structure.templatesystem.rules` unit (issue
 // #182) — the `RuleTest`/`PosRuleTest` template-system rule tests.
 pub mod structure;

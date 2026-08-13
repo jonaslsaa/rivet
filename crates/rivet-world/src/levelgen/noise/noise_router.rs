@@ -145,21 +145,21 @@ impl NoiseRouter {
     /// `DensityFunction.mapAll`.
     pub fn map_all(&self, visitor: &dyn Visitor) -> NoiseRouter {
         NoiseRouter::new(
-            map_all(&*self.barrier_noise, visitor),
-            map_all(&*self.fluid_level_floodedness_noise, visitor),
-            map_all(&*self.fluid_level_spread_noise, visitor),
-            map_all(&*self.lava_noise, visitor),
-            map_all(&*self.temperature, visitor),
-            map_all(&*self.vegetation, visitor),
-            map_all(&*self.continents, visitor),
-            map_all(&*self.erosion, visitor),
-            map_all(&*self.depth, visitor),
-            map_all(&*self.ridges, visitor),
-            map_all(&*self.preliminary_surface_level, visitor),
-            map_all(&*self.final_density, visitor),
-            map_all(&*self.vein_toggle, visitor),
-            map_all(&*self.vein_ridged, visitor),
-            map_all(&*self.vein_gap, visitor),
+            map_all(&self.barrier_noise, visitor),
+            map_all(&self.fluid_level_floodedness_noise, visitor),
+            map_all(&self.fluid_level_spread_noise, visitor),
+            map_all(&self.lava_noise, visitor),
+            map_all(&self.temperature, visitor),
+            map_all(&self.vegetation, visitor),
+            map_all(&self.continents, visitor),
+            map_all(&self.erosion, visitor),
+            map_all(&self.depth, visitor),
+            map_all(&self.ridges, visitor),
+            map_all(&self.preliminary_surface_level, visitor),
+            map_all(&self.final_density, visitor),
+            map_all(&self.vein_toggle, visitor),
+            map_all(&self.vein_ridged, visitor),
+            map_all(&self.vein_gap, visitor),
         )
     }
 }
@@ -885,14 +885,14 @@ mod tests {
         // `apply`). All 15 fields are constants, so every field is rewritten.
         struct Square;
         impl Visitor for Square {
-            fn apply(&self, input: &dyn DensityFunction) -> Arc<dyn DensityFunction> {
+            fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction> {
                 if let Some(c) = input
                     .as_any()
                     .downcast_ref::<crate::levelgen::noise::density_functions::Constant>()
                 {
                     constant(c.value() * c.value())
                 } else {
-                    input.clone_arc()
+                    input.clone()
                 }
             }
         }

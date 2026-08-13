@@ -18,7 +18,7 @@ pub mod blocks;
 /// value types themselves live in `rivet-registry` (issue #228).
 pub mod state;
 
-use rivet_registry::block_state::BlockState;
+pub use rivet_registry::block_state::BlockState;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::state_definition::StateDefinition;
 

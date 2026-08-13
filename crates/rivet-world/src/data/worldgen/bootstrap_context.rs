@@ -28,21 +28,30 @@
 //! - `lookup` is Java's `<S> HolderGetter<S> lookup(ResourceKey<? extends
 //!   Registry<? extends S>> key)` — generic over the *element* type `S`. The
 //!   Rust signature is `fn lookup<S: Send + Sync + 'static>(&self, key:
-//!   &RegistryKey<S>) -> Option<&dyn HolderGetter<S>>`. The `Option` is a
-//!   documented seam deviation: Java always returns a getter (the empty
+//!   &RegistryKey<S>) -> Option<&dyn HolderGetter<S>>`. The `Option` is
+//!   a documented seam deviation: Java always returns a getter (the empty
 //!   `UniversalLookup` fallback for unknown registries), but an owned getter
 //!   value is not constructible outside `rivet-registry` (`RegistryGetter::new`
-//!   is `pub(crate)`), so the borrow is resolved through the access and an
+//!   is `pub(crate)`), so the getter resolves through the access and an
 //!   absent registry reports `None` — the empty answer. The deferred
 //!   `RegistrySetBuilder` implementation (inside `rivet-registry`) returns
 //!   `Some` for every key, matching `getOrDefault`.
+//! - A `BootstrapContext` answers `lookup` for the registry it is *building*
+//!   with the in-progress registrations — Java's `BuildState` universal lookup,
+//!   which the `NoiseRouterData`/`NoiseGeneratorSettings` bootstraps rely on
+//!   (they read back functions registered moments earlier). `RecordingContext`
+//!   stores the building registry's `RegistryKey<T>` and serves the pending
+//!   values as `Direct` holders (Java's `getOrCreate`: a duplicate key is a
+//!   `Duplicate registration` error — unreachable in this slice — so the
+//!   first registration stands).
 //! - The default `register(key, value)` delegates with `Lifecycle::stable()`.
 
 use rivet_registry::holder::{Holder, RegistryId};
 use rivet_registry::registry::RegistryKey;
-use rivet_registry::{HolderGetter, RegistryAccess, ResourceKey};
+use rivet_registry::{HolderGetter, HolderSet, Identifier, RegistryAccess, ResourceKey, TagKey};
 use rivet_serialization::lifecycle::Lifecycle;
-use std::collections::VecDeque;
+use std::any::Any;
+use std::collections::{HashMap, VecDeque};
 
 /// `net.minecraft.data.worldgen.BootstrapContext<T>` — the registry bootstrap
 /// contract.
@@ -59,16 +68,24 @@ pub trait BootstrapContext<T> {
     /// `BootstrapContext.lookup(ResourceKey<? extends Registry<? extends S>>)`
     /// — `HolderGetter<S>` (borrowed; see the module docs for the `Option`).
     ///
-    /// RivetTodo(#126): Java's `lookup` always returns a non-null `HolderGetter`
-    /// (falling back to an empty `UniversalLookup` for unknown registries), but
-    /// this trait returns `Option<&dyn HolderGetter<S>>` — an owned getter is
-    /// not constructible outside `rivet-registry` (`RegistryGetter::new` is
-    /// `pub(crate)`), so the borrow resolves through the `RegistryAccess` and an
-    /// absent registry reports `None`. The deferred `RegistrySetBuilder`
-    /// implementation (inside `rivet-registry`) returns `Some` for every key,
-    /// matching Java's `getOrDefault`; removable when that implementation lands
-    /// and the empty-fallback guarantee is reproduced.
-    fn lookup<S: Send + Sync + 'static>(
+    /// Java's `lookup` always returns a non-null `HolderGetter` (falling back to
+    /// an empty `UniversalLookup` for unknown registries). The Rust signature is
+    /// `Option<&dyn HolderGetter<S>>` — the `Option` is a documented seam
+    /// deviation (an absent registry reports `None`, the empty answer; an owned
+    /// getter is not constructible outside `rivet-registry`, `RegistryGetter::new`
+    /// is `pub(crate)`). The deferred `RegistrySetBuilder` implementation
+    /// (inside `rivet-registry`) returns `Some` for every key, matching Java's
+    /// `getOrDefault`; removable when that implementation lands and the
+    /// empty-fallback guarantee is reproduced.
+    ///
+    /// The `S: Clone` bound is the `RecordingContext` Direct-holder seam:
+    /// `lookup` hands out `Holder::Direct(S)` values (owned copies), because the
+    /// `Holder` back-reference model (`OWNERSHIP`) cannot share a registry-keyed
+    /// reference without a real build state. Every registry element type in this
+    /// slice (`NoiseParameters`, the erased `DensityFunction` carrier) is
+    /// `Clone`; the deferred production implementation resolves references by id
+    /// and can relax it.
+    fn lookup<S: Send + Sync + Clone + 'static>(
         &self,
         key: &RegistryKey<S>,
     ) -> Option<&dyn HolderGetter<S>>;
@@ -100,21 +117,37 @@ pub struct RecordedRegistration<T> {
 /// `RegistryAccess`; a registry absent from the access reports `None` (Java's
 /// empty `UniversalLookup` fallback).
 pub struct RecordingContext<T> {
+    /// The owning `RegistryId` of the registry being built (returned `register`
+    /// references).
     owner: RegistryId,
+    /// The registry being built — `lookup` answers this key with the
+    /// in-progress registrations (Java's `BuildState` universal lookup), and
+    /// every other key from the access.
+    key: RegistryKey<T>,
     access: RegistryAccess,
     next_id: u32,
     registrations: VecDeque<RecordedRegistration<T>>,
+    /// The in-progress keyed holders — Java's `UniversalLookup.getOrCreate`
+    /// view: a value registered earlier in the same pass is visible to
+    /// `lookup`; a duplicate key is a `Duplicate registration` error
+    /// (unreachable here), so the first holder stands. Stored as
+    /// the type-erased `PendingLookup` getter so `lookup` can borrow it
+    /// directly for any requested element type.
+    pending: PendingLookup,
 }
 
 impl<T> RecordingContext<T> {
-    /// Build a recording context over a `RegistryAccess` (answers `lookup`)
+    /// Build a recording context over the registry `key` (the registry being
+    /// built) and a `RegistryAccess` (answers `lookup` for every other key),
     /// with the given owner `RegistryId`.
-    pub fn new(owner: RegistryId, access: RegistryAccess) -> Self {
+    pub fn new(owner: RegistryId, key: RegistryKey<T>, access: RegistryAccess) -> Self {
         RecordingContext {
             owner,
+            key,
             access,
             next_id: 0,
             registrations: VecDeque::new(),
+            pending: PendingLookup::default(),
         }
     }
 
@@ -129,16 +162,21 @@ impl<T> RecordingContext<T> {
     }
 }
 
-impl<T: Send + Sync + 'static> BootstrapContext<T> for RecordingContext<T> {
+impl<T: Send + Sync + Clone + 'static> BootstrapContext<T> for RecordingContext<T> {
     /// RivetTodo(#126): Java's `BuildState.register` returns
     /// `lookup.getOrCreate(key)` — a holder keyed by `ResourceKey`, so a
     /// duplicate key returns the *same* holder. This recording context assigns
     /// a fresh id per call (see `RecordingContext`), a deliberate test-seam
     /// deviation; the keyed `getOrCreate` semantics land with the deferred
-    /// `RegistrySetBuilder` implementation.
+    /// `RegistrySetBuilder` implementation. The in-progress `pending` view is
+    /// keyed (a duplicate key is a `Duplicate registration` error, unreachable
+    /// here, so the first registration stands).
     fn register(&mut self, key: &ResourceKey<T>, value: T, lifecycle: Lifecycle) -> Holder<T> {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
+        // `Holder::Direct` carries the value (no lookup needed at read time);
+        // the keyed reference id lands with the deferred `RegistrySetBuilder`.
+        self.pending.register(key, value.clone());
         self.registrations.push_back(RecordedRegistration {
             key: key.clone(),
             value,
@@ -147,13 +185,70 @@ impl<T: Send + Sync + 'static> BootstrapContext<T> for RecordingContext<T> {
         Holder::reference(self.owner, id)
     }
 
-    fn lookup<S: Send + Sync + 'static>(
+    fn lookup<S: Send + Sync + Clone + 'static>(
         &self,
         key: &RegistryKey<S>,
     ) -> Option<&dyn HolderGetter<S>> {
+        // The registry being built: Java's `BuildState` universal lookup serves
+        // values registered earlier in the same pass. `PendingLookup` is
+        // type-erased, so the borrow works for any requested `S`; a mismatch
+        // (wrong key for `S`) yields the empty answer.
+        if key.identifier() == self.key.identifier() {
+            return Some(self.pending.as_getter::<S>());
+        }
         self.access
             .lookup(key)
             .map(|registry| registry as &dyn HolderGetter<S>)
+    }
+}
+
+/// The type-erased in-progress `HolderGetter` view — serves the values
+/// registered earlier in the same bootstrap pass as `Direct` holders (Java's
+/// `BuildState` universal lookup over the registry being built). Values are
+/// stored erased (`Box<dyn Any>`) so the same pending map serves any requested
+/// element type, downcasting per entry on read (the erased-boundary seam this
+/// crate's `OWNERSHIP` model sanctions).
+#[derive(Debug, Default)]
+struct PendingLookup {
+    entries: HashMap<Identifier, Box<dyn Any>>,
+}
+
+impl PendingLookup {
+    /// Record a value under its key — the first registration stands (Java's
+    /// `BuildState` collect path is last-wins for a duplicate key and records
+    /// a `Duplicate registration` error; unreachable in this slice, so the
+    /// pending view keeps the first value, matching `getOrCreate`'s holder
+    /// identity).
+    fn register<T: Any>(&mut self, key: &ResourceKey<T>, value: T) {
+        self.entries
+            .entry(key.identifier().clone())
+            .or_insert_with(|| Box::new(value));
+    }
+
+    /// The erased-boundary `&dyn HolderGetter<S>` view over the pending map.
+    ///
+    /// The `Box<dyn Any>` values downcast per key on read (the erased-registry
+    /// downcast seam); a `S` mismatched with the stored element type reports
+    /// `None` for every key, matching Java's empty `UniversalLookup`.
+    fn as_getter<S: Send + Sync + Clone + 'static>(&self) -> &dyn HolderGetter<S> {
+        self
+    }
+}
+
+impl<S: Send + Sync + Clone + 'static> HolderGetter<S> for PendingLookup {
+    fn get(&self, key: &ResourceKey<S>) -> Option<Holder<S>> {
+        let erased = self.entries.get(key.identifier())?;
+        // `S: 'static`, so the type-erased box downcasts to `S` if — and only
+        // if — the value was registered under this key with element type `S`
+        // (the erased-boundary downcast, same soundness argument as
+        // `RegistryAccess::lookup`).
+        let value = erased.downcast_ref::<S>()?;
+        Some(Holder::Direct(value.clone()))
+    }
+
+    fn get_tag(&self, _tag: &TagKey<S>) -> Option<HolderSet<S>> {
+        // No named sets exist for in-progress registrations.
+        None
     }
 }
 
@@ -175,7 +270,11 @@ mod tests {
 
     #[test]
     fn register_records_order_lifecycle_and_returns_incrementing_references() {
-        let mut context = RecordingContext::<Element>::new(RegistryId(7), RegistryAccess::empty());
+        let mut context = RecordingContext::<Element>::new(
+            RegistryId(7),
+            registry_key(),
+            RegistryAccess::empty(),
+        );
         let k1 = key("a");
         let k2 = key("b");
         context.register(&k1, Element(1), Lifecycle::stable());
@@ -202,7 +301,11 @@ mod tests {
 
     #[test]
     fn register_default_uses_stable_lifecycle() {
-        let mut context = RecordingContext::<Element>::new(RegistryId(7), RegistryAccess::empty());
+        let mut context = RecordingContext::<Element>::new(
+            RegistryId(7),
+            registry_key(),
+            RegistryAccess::empty(),
+        );
         let k = key("a");
         context.register_default(&k, Element(5));
         let reg = context.registrations().front().unwrap();
@@ -211,23 +314,63 @@ mod tests {
 
     #[test]
     fn lookup_resolves_registries_in_the_access_and_is_none_for_absent() {
-        let context = RecordingContext::<Element>::new(RegistryId(7), RegistryAccess::empty());
-        // An absent registry reports `None` (Java's empty UniversalLookup).
-        assert!(context.lookup(&registry_key()).is_none());
+        let context = RecordingContext::<Element>::new(
+            RegistryId(7),
+            registry_key(),
+            RegistryAccess::empty(),
+        );
+        // A key that is neither the built registry nor in the access reports
+        // `None` (Java's empty UniversalLookup). The built registry key itself
+        // resolves to the in-progress (pending) view, always `Some`.
+        let unrelated_key: rivet_registry::ResourceKey<rivet_registry::Registry<Element>> =
+            rivet_registry::ResourceKey::create_registry_key(
+                rivet_registry::Identifier::with_default_namespace("unrelated"),
+            );
+        assert!(context.lookup(&unrelated_key).is_none());
+        assert!(context.lookup(&registry_key()).is_some());
 
         // A registry present in the access resolves to its getter; a missing
-        // element inside it is `Optional.empty`.
-        let mut builder = rivet_registry::RegistryBuilder::new(&registry_key());
+        // element inside it is `Optional.empty`. The access registry lives under
+        // a *different* key than the built registry — `lookup` serves the built
+        // key with the in-progress (pending) view (Java's `BuildState`), and
+        // every other key from the access.
+        let other_key = rivet_registry::ResourceKey::create_registry_key(
+            rivet_registry::Identifier::with_default_namespace("other"),
+        );
+        let mut builder = rivet_registry::RegistryBuilder::new(&other_key);
         builder.register(
             &key("a"),
             std::sync::Arc::new(Element(1)),
             rivet_registry::RegistrationInfo::BUILT_IN,
         );
         let registry = builder.freeze();
-        let access = RegistryAccess::from_single_registry(registry_key(), registry);
-        let context = RecordingContext::<Element>::new(RegistryId(7), access);
-        let getter = context.lookup(&registry_key()).expect("registry present");
+        let access = RegistryAccess::from_single_registry(other_key.clone(), registry);
+        let context = RecordingContext::<Element>::new(RegistryId(7), registry_key(), access);
+        let getter = context.lookup(&other_key).expect("registry present");
         assert!(getter.get(&key("a")).is_some());
         assert!(getter.get(&key("missing")).is_none());
+    }
+
+    #[test]
+    fn lookup_serves_in_progress_registrations_for_the_built_registry() {
+        // Java's `BuildState` universal lookup: values registered earlier in the
+        // same pass are visible through `lookup` (the `NoiseRouterData`/
+        // `NoiseGeneratorSettings` bootstraps read back functions this way).
+        let mut context = RecordingContext::<Element>::new(
+            RegistryId(7),
+            registry_key(),
+            RegistryAccess::empty(),
+        );
+        let k = key("a");
+        context.register(&k, Element(1), Lifecycle::stable());
+        let getter = context
+            .lookup(&registry_key())
+            .expect("built registry present");
+        let holder = getter.get_or_throw(&k);
+        // Served as a `Direct` holder carrying the registered value.
+        match holder {
+            Holder::Direct(value) => assert_eq!(value, Element(1)),
+            other => panic!("expected a Direct in-progress holder, got {other:?}"),
+        }
     }
 }

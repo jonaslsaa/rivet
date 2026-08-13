@@ -17,6 +17,7 @@
 
 use crate::levelgen::noise::density_function::DensityFunction;
 use crate::levelgen::noise::density_function_type::DensityFunctionTypeId;
+use crate::levelgen::noisegen::noise_generator_settings::NoiseGeneratorSettings;
 use crate::levelgen::synth::normal_noise::NoiseParameters;
 use rivet_registry::Identifier;
 use rivet_registry::{Registry, ResourceKey};
@@ -36,6 +37,15 @@ pub static DENSITY_FUNCTION: LazyLock<ResourceKey<Registry<Arc<dyn DensityFuncti
     LazyLock::new(|| {
         ResourceKey::create_registry_key(Identifier::with_default_namespace(
             "worldgen/density_function",
+        ))
+    });
+
+/// `Registries.NOISE_SETTINGS` — `createRegistryKey("worldgen/noise_settings")`,
+/// the `NoiseGeneratorSettings` registry key.
+pub static NOISE_SETTINGS: LazyLock<ResourceKey<Registry<NoiseGeneratorSettings>>> =
+    LazyLock::new(|| {
+        ResourceKey::create_registry_key(Identifier::with_default_namespace(
+            "worldgen/noise_settings",
         ))
     });
 
@@ -67,6 +77,10 @@ mod tests {
         assert_eq!(
             DENSITY_FUNCTION_TYPE.identifier().to_string(),
             "minecraft:worldgen/density_function_type"
+        );
+        assert_eq!(
+            NOISE_SETTINGS.identifier().to_string(),
+            "minecraft:worldgen/noise_settings"
         );
         assert_eq!(
             NOISE.registry(),
