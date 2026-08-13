@@ -1091,11 +1091,14 @@ mod tests {
             &biome_strategy,
         );
         // Vacuity guard: the fixture carries real terrain, so the decode must
-        // not be all-air. The pinned cell mirrors the `region_backed` boot
-        // test's deep-underground assertion — local (0,4,0) of section 0 (the
-        // fixture's dense block at absolute (0,-60,-48) when re-anchored at the
-        // spawn position). An all-air fixture or all-air decode fails here
-        // instead of passing the empty-mismatch comparison vacuously.
+        // not be all-air. The pinned cell — local (0,4,0) of section 0, i.e.
+        // the fixture's chunk-local (0,-60,0) deep cell; absolute (-96,-60,-80)
+        // at this (-6,-5) position — is the same cell the `region_backed` boot
+        // test reads via `get_block_state(0, -60, -48)` on the spawn chunk
+        // (-1,-3) (z & 15 masks to the same (0,-60,0) cell): the clean spawn
+        // chunk fixture is installed identically at every view position, so the
+        // cell is dense at both positions. An all-air fixture or all-air decode
+        // fails here instead of passing the empty-mismatch comparison vacuously.
         let deep = sections[0].get_block_state(0, 4, 0);
         assert!(
             !BlockState::new(deep).is_air(),
