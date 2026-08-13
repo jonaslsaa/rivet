@@ -55,6 +55,9 @@ pub const DEBUG_DISABLE_AQUIFERS: bool = false;
 pub const DEBUG_DISABLE_SURFACE: bool = false;
 /// `SharedConstants.DEBUG_DISABLE_CARVERS` — `debugFlag("DISABLE_CARVERS")`.
 pub const DEBUG_DISABLE_CARVERS: bool = false;
+/// `SharedConstants.DEBUG_CARVERS` — `debugFlag("CARVERS")`; the carver unit
+/// (`mc.world.level.levelgen.carver`) reads it in `WorldCarver.isDebugEnabled`.
+pub const DEBUG_CARVERS: bool = false;
 /// `SharedConstants.DEBUG_DISABLE_ORE_VEINS` — `debugFlag("DISABLE_ORE_VEINS")`.
 pub const DEBUG_DISABLE_ORE_VEINS: bool = false;
 /// `SharedConstants.DEBUG_ONLY_GENERATE_HALF_THE_WORLD` —
