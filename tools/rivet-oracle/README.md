@@ -196,8 +196,10 @@ The no-arg form discovers every `manifest.json` under `fixtures/` — the M0
 superflat slice (`fixtures/`), the worldgen semantic samples
 (`fixtures/worldgen/`), the normal-overworld region payloads
 (`fixtures/regions/overworld-normal/`), the text component-JSON corpus
-(`fixtures/text/`, issue #98), and the spline value-leaf goldens
-(`fixtures/spline/`, issue #372) — and verifies each against its own
+(`fixtures/text/`, issue #98), the spline value-leaf goldens
+(`fixtures/spline/`, issue #372), the composed-noise goldens
+(`fixtures/composed-noise/`, issue #177), and the post-surface column goldens
+(`fixtures/surface-column/`, issue #179) — and verifies each against its own
 manifest. Prints `OK: all N captured files match manifest SHA-256s` and a
 summary per kind (seed, level-type, region-file-compression, per-dimension
 chunk counts). Exits nonzero on any hash or size mismatch, or if any kind
@@ -377,6 +379,54 @@ cargo run -p rivet-oracle -- sample
 The manifest is serialized in committed field order, so regeneration is
 byte-identical (git-clean) for unchanged samples — verified by a unit test.
 
+## Post-surface column oracle (issue #179)
+
+`fixtures/surface-column/surface-columns.json` is the independent Paper 26.2
+post-surface column golden that the surface checkpoint of a chunk-production
+port must reproduce. It is produced by `SurfaceColumnProbe.java`, which boots
+only the vanilla registries (no server boot) and then drives the REAL overworld
+generator pipeline on REAL `ProtoChunk`s at seed 42:
+`createBiomes` -> `fillFromNoise` -> `buildSurface`. The corpus is the #175
+chunk-coordinate matrix (8 chunks: positive/negative/region-seam), and every
+column records:
+
+- pre/post block states at every 4th Y (block registry key + raw state id),
+  so the exact post-surface block id per sampled Y is pinned;
+- pre/post `WORLD_SURFACE_WG` + `OCEAN_FLOOR_WG` heights for all 256 columns;
+- the surface biome the surface pass read at the top of the column;
+- `any-surface-changed` / `any-height-changed` flags plus the pre-surface
+  snapshot, so a no-op capture is detectable: the pre snapshot is taken on an
+  all-air chunk with unprimed heightmaps (`-65` = `MIN_Y-1`), so a probe that
+  skipped `buildSurface` (or a rules set that never applied) would emit
+  all-false deltas and be rejected by verification.
+
+One load-bearing substitution is documented in the fixture metadata
+(`flat-bedrock-substitution`): Paper injects
+`paper:optionally_flat_bedrock_condition_source` at the top of the overworld
+surface sequence, and that class derefs `context.level()` for
+`generateFlatBedrock`. The probe drives surface with a Level-free
+`WorldGenerationContext`, so it ships a shadow of that condition source under
+the same FQN and codec id with the DEFAULT config (`generateFlatBedrock=false`),
+exact for these default-overworld columns. The probe registers the shadow after
+`Bootstrap.bootStrap()` and before datapack load, and the runner places the
+shadow's compiled classes FIRST on the classpath so the JVM loads it instead of
+the jar's class. The fixture is pinned to this substitution and to the
+`26.2-DEV-main@0a99345` Paper commit.
+
+Verify / regenerate:
+
+```bash
+cargo run -p rivet-oracle -- surface-column            # verify golden + non-vacuity
+cargo run -p rivet-oracle -- surface-column --tamper   # negative control (must fail)
+cargo run -p rivet-oracle -- surface-column --sample   # regenerate from pinned Paper
+scripts/run_surface_column_probe.sh <out-dir>          # raw probe into an out-dir
+```
+
+Regeneration requires the materialized pinned runtime (or
+`RIVET_PAPER_RUNTIME_JAR` / `RIVET_PAPER_LIBRARIES`). `verify` (and the
+no-arg `cargo run -p rivet-oracle`) gates on this golden exactly like the
+composed-noise fixtures; a missing fixture tree exits nonzero with `UNVERIFIED`.
+
 ## Regenerate: `regenerate`
 
 Full regeneration of every fixture kind (boots Paper where a boot is required):
@@ -387,6 +437,8 @@ cargo run -p rivet-oracle -- regenerate --m0       # M0 superflat slice only
 cargo run -p rivet-oracle -- regenerate --m2       # M2 region payloads only
 cargo run -p rivet-oracle -- regenerate --samples  # worldgen samples only
 cargo run -p rivet-oracle -- regenerate --text     # text corpus only (Paper oracle op)
+cargo run -p rivet-oracle -- regenerate --composed-noise   # composed-noise goldens only
+cargo run -p rivet-oracle -- regenerate --surface-column   # post-surface column goldens only
 ```
 
 The `spline/` value-leaf goldens (issue #372) are regenerated script-driven, not
