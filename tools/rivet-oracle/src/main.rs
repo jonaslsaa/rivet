@@ -931,8 +931,8 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
     Ok(())
 }
 
-/// Verify the committed composed-noise golden, failing with `Error::Unverified`
-/// (exit 3) when the fixture tree is absent rather than silently skipping it.
+/// Verify the committed composed-noise golden; the absent-golden exit-3
+/// contract lives in `composed_noise::require_fixture_tree`.
 fn verify_composed_noise_step(dir: &Path) -> Result<(), Error> {
     composed_noise::require_fixture_tree(dir)?;
     composed_noise::verify_composed_noise(dir)?;
@@ -3293,16 +3293,13 @@ fn run() -> Result<(), Error> {
             }
             let dir = crate_dir().join("fixtures/composed-noise");
             match composed_noise::parse_mode(&rest)? {
+                // The absent-golden exit-3 contract lives in require_fixture_tree
+                // (shared by verify and the tamper control, matching the gate).
                 composed_noise::ComposedNoiseMode::Tamper => {
-                    composed_noise::require_fixture_tree(&dir)?;
                     composed_noise::tamper_negative_control(&dir)
                 }
                 composed_noise::ComposedNoiseMode::Sample => composed_noise::run_probe(&dir),
                 composed_noise::ComposedNoiseMode::Verify => {
-                    // Same missing-fixture classification as the gate path: an
-                    // absent fixture tree is UNVERIFIED (exit 3), never a hard
-                    // FAIL (the gate path and this subcommand must agree on the
-                    // missing-golden exit-code contract).
                     crate::verify_composed_noise_step(&dir)
                 }
             }
