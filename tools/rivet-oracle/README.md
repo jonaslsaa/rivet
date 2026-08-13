@@ -68,6 +68,9 @@ rivet-oracle/
     spline/             # CubicSpline/BoundedFloatFunction value-leaf goldens
       manifest.json     # hash of spline-goldens.json (kind: spline, issue #372)
       spline-goldens.json  # Paper's exact min/max/sample outputs as hex-float (plus parity strings)
+    biome-temperature/  # Biome.getTemperature/FROZEN value-leaf goldens
+      manifest.json     # hash of biome-temperature.json (kind: biome-temperature)
+      biome-temperature.json  # Paper's bit-exact getTemperature/coldEnoughToSnow samples + raw noise
     generated-expected/ # seed-42 generated-world ground-truth handoff (PR #563)
       manifest.json     # hash of generated-expected.json (kind: generated-expected)
       generated-expected.json  # 81 FULL spawn-grid chunks' surface/bedrock/below_feet
@@ -205,12 +208,13 @@ The no-arg form discovers every `manifest.json` under `fixtures/` — the M0
 superflat slice (`fixtures/`), the worldgen semantic samples
 (`fixtures/worldgen/`), the normal-overworld region payloads
 (`fixtures/regions/overworld-normal/`), the text component-JSON corpus
-(`fixtures/text/`, issue #98), and the spline value-leaf goldens
-(`fixtures/spline/`, issue #372) — and verifies each against its own
-manifest. Prints `OK: all N captured files match manifest SHA-256s` and a
-summary per kind (seed, level-type, region-file-compression, per-dimension
-chunk counts). Exits nonzero on any hash or size mismatch, or if any kind
-fails.
+(`fixtures/text/`, issue #98), and the script-driven value-leaf goldens
+(`fixtures/spline/` #372, `fixtures/seq/`, `fixtures/biome-temperature/`,
+`fixtures/dataconverter/` #535, `fixtures/data-worldgen/`) — and verifies
+each against its own manifest. Prints `OK: all N captured files match
+manifest SHA-256s` and a summary per kind (seed, level-type,
+region-file-compression, per-dimension chunk counts). Exits nonzero on any
+hash or size mismatch, or if any kind fails.
 
 ## One-command M0 sanity gate: `verify`
 
@@ -462,8 +466,12 @@ cargo run -p rivet-oracle -- regenerate --composed-noise   # composed-noise gold
 cargo run -p rivet-oracle -- regenerate --generated-expected  # generated-expected handoff only
 ```
 
-The `spline/` value-leaf goldens (issue #372) are regenerated script-driven, not
-via `regenerate`: `scripts/run_spline_probe.sh` (see the fixture manifest note).
+The script-driven value-leaf goldens are regenerated outside `regenerate`:
+`spline/` (issue #372) via `scripts/run_spline_probe.sh`, `seq/` via
+`scripts/run_seq_probe.sh`, `biome-temperature/` via
+`scripts/run_biome_temperature_probe.sh`, `dataconverter/` (issue #535) via
+`scripts/run_dataconverter_probe.sh`, and `data-worldgen/` via
+`scripts/run_data_worldgen_probe.sh` (see each fixture's manifest note).
 
 The `text/` corpus (issue #98) records the exact component JSON a chat/title/
 player-info/scoreboard packet carries, Paper's accept/reject verdict in the
