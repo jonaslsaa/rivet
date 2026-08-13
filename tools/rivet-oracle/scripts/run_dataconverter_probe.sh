@@ -62,22 +62,6 @@ echo "wrote $FIXTURE_FILE"
 # gate's `rivet-oracle verify` expects (the text/worldgen kinds regenerate their
 # manifests in-process; the dataconverter kind is script-driven, so the script
 # owns it).
-SHA="$(shasum -a 256 "$FIXTURE_FILE" | awk '{print $1}')"
-BYTES="$(wc -c < "$FIXTURE_FILE" | tr -d ' ')"
-MANIFEST="$OUT_DIR/manifest.json"
+. "$ROOT/scripts/write_fixture_manifest.sh"
 NOTE="Ground-truth samples of the DataConverter foundation classes (issue #535): DataConverter.encodeVersions/getVersion/getStep/encodedToString + LOWEST_VERSION_COMPARATOR ordering, DataType.convertOrOriginal, DataHook/DataWalker contract, ObjectType.getType boundaries (incl. the NPE on null), and the MapType/ListType default-method dispatch (setGeneric, getList(type), getOrCreateList/Map, getBoolean coercion) exercised over the real NBT backing. Captured from the pinned Paper 26.2 runtime via DataConverterProbe. Deterministic across boots."
-printf '%s\n' \
-  '{' \
-  '  "format": 1,' \
-  "  \"paper\": \"$PAPER_PIN\"," \
-  '  "kind": "dataconverter-foundation",' \
-  "  \"note\": \"$NOTE\"," \
-  '  "captured": [' \
-  '    {' \
-  '      "path": "dataconverter-foundation.json",' \
-  "      \"sha256\": \"$SHA\"," \
-  "      \"bytes\": $BYTES" \
-  '    }' \
-  '  ]' \
-  '}' > "$MANIFEST"
-echo "wrote $MANIFEST"
+write_fixture_manifest "$OUT_DIR" "dataconverter-foundation" "$PAPER_PIN" "$NOTE" "$FIXTURE_FILE"
