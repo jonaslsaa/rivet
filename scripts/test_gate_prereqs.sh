@@ -665,5 +665,23 @@ grep -q "^    PASS" "$TMP/out_rc5" && fail "recenter: PASS printed despite a cra
 grep -q "^    UNVERIFIED" "$TMP/out_rc5" && fail "recenter: UNVERIFIED printed for a crash (classification is FAIL, exit 1)"
 pass "recenter: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
 
+# --- test 9: loaded-world + recenter rows are wired into the full-gate block -----
+# The classification tests above drive run_scenario_loaded_world and
+# run_scenario_recenter directly, but a row could still silently drop off the
+# gate if its invocation sat outside the `if [ "$FULL_GATE" = true ]` guard (or
+# vanished from main()). Assert the source wires both rows inside the guard:
+# the scenario block is the LAST `if [ "$FULL_GATE" = true ]` in main() — extract
+# from that guard through its closing `fi` and require both row invocations.
+GATE_SOURCE="$SCRIPT_DIR/gate.sh"
+GATE_GUARD_LINE="$(grep -nF 'if [ "$FULL_GATE" = true ]; then' "$GATE_SOURCE" | tail -1 | cut -d: -f1)"
+SCENARIO_BLOCK="$(sed -n "${GATE_GUARD_LINE},\$p" "$GATE_SOURCE" | awk '/^  fi$/ { print; exit } { print }')"
+printf '%s\n' "$SCENARIO_BLOCK" | grep -qF 'if [ "$FULL_GATE" = true ]; then' \
+  || fail "gate: the scenario rows are not inside the FULL_GATE guard (block missing the guard)"
+printf '%s\n' "$SCENARIO_BLOCK" | grep -q '^    run_scenario_loaded_world$' \
+  || fail "gate: run_scenario_loaded_world not invoked in the full-gate scenario block"
+printf '%s\n' "$SCENARIO_BLOCK" | grep -q '^    run_scenario_recenter$' \
+  || fail "gate: run_scenario_recenter not invoked in the full-gate scenario block"
+pass "gate: loaded-world + recenter rows are wired inside the full-gate scenario block"
+
 echo
 echo "ALL GATE PREREQ TESTS PASSED"

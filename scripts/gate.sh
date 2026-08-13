@@ -1037,8 +1037,8 @@ main() {
   #                         demand — plus a tampered-copy negative control proving the
   #                         acceptance is non-vacuous. Needs no jar — only the
   #                         rivet-server binary (built on demand by run-scenario.sh)
-  #                         plus the rivet-oracle/rivet-client binaries. Exits
-  #                         0 PASS / 1 FAIL / 3 UNVERIFIED; exit 3 sets
+  #                         plus the rivet-client binary the harness resolves.
+  #                         Exits 0 PASS / 1 FAIL / 3 UNVERIFIED; exit 3 sets
   #                         ORACLE_UNVERIFIED so the gate exits 3 (and
   #                         --require-oracle hard-fails it at exit 1).
   #
@@ -1049,10 +1049,11 @@ main() {
   # that could conceal the missing comparison behind a green-looking run (issue
   # #160). The dwell/kick/loaded-world/recenter rows are Rivet-only — they need
   # no jar, only the rivet-server binary (which run-scenario.sh builds on
-  # demand; the loaded-world/recenter rows additionally need the rivet-oracle
-  # and rivet-client binaries the harness resolves). Every row exits 0 PASS / 1
-  # FAIL / 3 UNVERIFIED, so a missing prereq or a failed scenario can never look
-  # green. Skipped when gating a crate subset (the scenario drives a whole server).
+  # demand; the loaded-world row additionally needs the rivet-oracle and
+  # rivet-client binaries the harness resolves, the recenter row only the
+  # rivet-client binary). Every row exits 0 PASS / 1 FAIL / 3 UNVERIFIED, so a
+  # missing prereq or a failed scenario can never look green. Skipped when
+  # gating a crate subset (the scenario drives a whole server).
   if [ "$FULL_GATE" = true ]; then
     run_scenario_paper_rows
     echo "==> scenario runner (dwell: wall-clock keepalive survival past the 30s kick limit)"
