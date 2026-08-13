@@ -76,9 +76,11 @@ impl WorldCarverBehavior<CanyonCarverConfiguration> for CanyonWorldCarver {
         let vertical_rotation = configuration.vertical_rotation.sample(random);
         let y_scale = configuration.y_scale().sample(random) as f64;
         let thickness = configuration.shape.thickness.sample(random);
-        let distance = (max_distance as f64
-            * configuration.shape.distance_factor.sample(random) as f64)
-            as i32;
+        // Java: `(int)(maxDistance * distanceFactor.sample(random))` — the int
+        // `maxDistance` widens to float, the product is float math, then
+        // truncated.
+        let distance =
+            (max_distance as f32 * configuration.shape.distance_factor.sample(random)) as i32;
         self.do_carve(
             context,
             configuration,
@@ -132,10 +134,11 @@ impl CanyonWorldCarver {
         while current_step < distance {
             // Java: `Mth.sin(currentStep * Mth.PI / distance)` — int * float
             // (`currentStep * Mth.PI`) is float math, then / distance (int,
-            // widened), widened to the double `Mth.sin` argument.
+            // widened), widened to the double `Mth.sin` argument; `1.5 +
+            // sin * thickness` widens the f32 product to the double literal.
             let horizontal_radius = 1.5
-                + mth::sin((current_step as f32 * mth::PI / distance as f32) as f64) as f64
-                    * thickness as f64;
+                + (mth::sin((current_step as f32 * mth::PI / distance as f32) as f64) * thickness)
+                    as f64;
             let mut vertical_radius = horizontal_radius * y_scale;
             let horizontal_radius = horizontal_radius
                 * configuration
@@ -151,9 +154,9 @@ impl CanyonWorldCarver {
             );
             let xc = mth::cos(vertical_rotation as f64);
             let xs = mth::sin(vertical_rotation as f64);
-            x += mth::cos(horizontal_rotation as f64) as f64 * xc as f64;
+            x += (mth::cos(horizontal_rotation as f64) * xc) as f64;
             y += xs as f64;
-            z += mth::sin(horizontal_rotation as f64) as f64 * xc as f64;
+            z += (mth::sin(horizontal_rotation as f64) * xc) as f64;
             vertical_rotation *= 0.7_f32;
             vertical_rotation += x_rota * 0.05_f32;
             horizontal_rotation += y_rota * 0.05_f32;

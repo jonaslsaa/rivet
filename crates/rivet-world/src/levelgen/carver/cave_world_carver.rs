@@ -323,8 +323,9 @@ fn create_room<H>(
     H: CaveCarverHooks + WorldCarverBehavior<CaveCarverConfiguration>,
 {
     // Java: `1.5 + Mth.sin((float)(Math.PI / 2)) * thickness` — `sin(π/2)` as
-    // a float, times the float thickness, widened to the double literal.
-    let horizontal_radius = 1.5 + mth::sin(mth::HALF_PI as f64) as f64 * thickness as f64;
+    // a float, times the float thickness (f32 product), widened to the double
+    // literal.
+    let horizontal_radius = 1.5 + (mth::sin(mth::HALF_PI as f64) * thickness) as f64;
     let vertical_radius = horizontal_radius * y_scale;
     hooks.carve_ellipsoid(
         context,
@@ -382,13 +383,12 @@ fn create_tunnel<H>(
         // double `Mth.sin` argument; `1.5 + sin * thickness` widens the f32
         // product to the double literal.
         let horizontal_radius = 1.5
-            + mth::sin((mth::PI * current_step as f32 / dist as f32) as f64) as f64
-                * thickness as f64;
+            + (mth::sin((mth::PI * current_step as f32 / dist as f32) as f64) * thickness) as f64;
         let vertical_radius = horizontal_radius * y_scale;
         let cos_x = mth::cos(vertical_rotation as f64);
-        x += mth::cos(horizontal_rotation as f64) as f64 * cos_x as f64;
+        x += (mth::cos(horizontal_rotation as f64) * cos_x) as f64;
         y += mth::sin(vertical_rotation as f64) as f64;
-        z += mth::sin(horizontal_rotation as f64) as f64 * cos_x as f64;
+        z += (mth::sin(horizontal_rotation as f64) * cos_x) as f64;
         vertical_rotation *= if steep { 0.92_f32 } else { 0.7_f32 };
         vertical_rotation += x_rota * 0.1_f32;
         horizontal_rotation += y_rota * 0.1_f32;
