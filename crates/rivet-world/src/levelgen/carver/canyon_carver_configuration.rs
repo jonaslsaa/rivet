@@ -45,10 +45,9 @@ use std::sync::Arc;
 pub struct CanyonCarverConfiguration {
     /// The flattened `CarverConfiguration` base (the `super` fields).
     pub base: CarverConfigurationBase,
-    /// `verticalRotation` — the `FloatProvider` `CanyonWorldCarver.updateY`
-    /// rotates the canyon's forward vector by (a signed angle, in degrees? —
-    /// `updateY` adds `Mth.wrapDegrees((double)(currentStep + 1) *
-    /// this.getY(sample, step)`-style rotation, see the carver).
+    /// `verticalRotation` — the `FloatProvider` sampled once in `carve` as the
+    /// canyon's starting vertical rotation; `doCarve` uses it directly in the
+    /// forward-vector increments and decays it each step.
     pub vertical_rotation: FloatProvider,
     /// `shape` — the nested `CanyonShapeConfiguration` (the canyon's width/
     /// thickness profile fields).
