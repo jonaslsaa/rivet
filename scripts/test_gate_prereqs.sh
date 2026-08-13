@@ -675,9 +675,13 @@ pass "recenter: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
 # last FULL_GATE guard in the file): a new full-gate-guarded step appended later
 # (e.g. before machete) must not move the extraction to the wrong block.
 GATE_SOURCE="$SCRIPT_DIR/gate.sh"
-PAPER_LINE="$(grep -n '^    run_scenario_paper_rows$' "$GATE_SOURCE" | cut -d: -f1)"
+# `|| true` on each assignment: under `set -euo pipefail`, a grep/awk with no
+# match would abort the $(...) assignment (silent, no diagnostic) before the
+# [ -n ... ] guard below can print its named failure. Let the assignment
+# complete with an empty value so the guard fires the intended message.
+PAPER_LINE="$(grep -n '^    run_scenario_paper_rows$' "$GATE_SOURCE" | cut -d: -f1 || true)"
 [ -n "$PAPER_LINE" ] || fail "gate: '    run_scenario_paper_rows' not found in gate.sh (scenario block anchor missing)"
-GATE_GUARD_LINE="$(grep -nF 'if [ "$FULL_GATE" = true ]; then' "$GATE_SOURCE" | awk -F: -v target="$PAPER_LINE" '$1 <= target { last = $1 } END { print last }')"
+GATE_GUARD_LINE="$(grep -nF 'if [ "$FULL_GATE" = true ]; then' "$GATE_SOURCE" | awk -F: -v target="$PAPER_LINE" '$1 <= target { last = $1 } END { print last }' || true)"
 [ -n "$GATE_GUARD_LINE" ] || fail "gate: no FULL_GATE guard at or before line $PAPER_LINE (scenario block not guarded)"
 SCENARIO_BLOCK="$(sed -n "${GATE_GUARD_LINE},\$p" "$GATE_SOURCE" | awk '/^  fi$/ { print; exit } { print }')"
 printf '%s\n' "$SCENARIO_BLOCK" | grep -q '^    run_scenario_loaded_world$' \
