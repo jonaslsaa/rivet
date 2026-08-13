@@ -271,7 +271,7 @@ mod tests {
                 "--host",
                 "127.0.0.1",
                 "--seed",
-                "42",
+                "7",
                 "--level",
                 "/tmp/rivet-disposable-world",
                 "--port",
@@ -282,7 +282,10 @@ mod tests {
         );
         assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 25599);
-        assert_eq!(config.seed, ServerLevelConfig::M1_FIXTURE_SEED);
+        // A non-default seed proves the `--seed` arm overrides in the
+        // combined-flag path (the default equals M1_FIXTURE_SEED, so 42 would
+        // pass even if the arm were dropped).
+        assert_eq!(config.seed, 7);
         assert_eq!(
             config.level_path.as_deref(),
             Some(std::path::Path::new("/tmp/rivet-disposable-world"))
