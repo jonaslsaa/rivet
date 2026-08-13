@@ -779,6 +779,13 @@ pub fn run_probe(dir: &Path) -> Result<(), Error> {
             "run_composed_noise_probe.sh exited {status} — see its stderr"
         )));
     }
+    // Validate the freshly probed golden BEFORE committing it: a structurally
+    // valid but semantically broken capture (e.g. NaN densities from a
+    // malfunctioning Paper runtime) must never be written as the committed
+    // handoff. The value-bit check reads only the golden (not the manifest), so
+    // it runs safely before the manifest is regenerated around the new content.
+    let fresh = load(dir)?;
+    verify_value_bits(&fresh)?;
     regenerate_manifest(dir)?;
     Ok(())
 }
