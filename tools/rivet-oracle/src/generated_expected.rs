@@ -13,12 +13,15 @@
 //! The per-chunk contract is exactly what the generated acceptance compares
 //! (`compare_generated_content` in the PR): 16×16 `surface`/`bedrock`/
 //! `below_feet` arrays indexed row-major `z*16+x`, sampled at the chunk center
-//! offset (8,8) → index `8*16+8`, with the surface being the highest non-air
-//! block, `bedrock` the block at `y=-60`, and `below_feet` the block at
-//! `y=-61`, up to `WORLD_CEILING_Y=320`. The extractor (already tested in
-//! `loaded_world.rs`) produces exactly this shape from the region files; the
-//! verify path here pins the provenance, the manifest hashes, the forced-grid
-//! shape, and the anti-superflat sample contract.
+//! offset (8,8) → index `8*16+8`. `surface` is the highest non-air block in the
+//! column, which the extractor computes across the full column height; because
+//! the overworld's ceiling is `WORLD_CEILING_Y=320`, this equals exactly what
+//! the acceptance observes scanning down from y=320 to `BELOW_BEDROCK_Y`.
+//! `bedrock` is the block at `y=-60` and `below_feet` the block at `y=-61`. The
+//! extractor (already tested in `loaded_world.rs`) produces exactly this shape
+//! from the region files; the verify path here pins the provenance, the
+//! manifest hashes, the forced-grid shape, and the anti-superflat sample
+//! contract.
 //!
 //! Honesty rules (D8: never fabricate expected content, never silently fall
 //! back to superflat):
@@ -27,12 +30,18 @@
 //!     pinned Paper runtime is absent — it never writes an empty or fabricated
 //!     manifest, and it removes a stale `--to` file first so a failed capture
 //!     cannot leave a previous success behind.
+//!   * capture is a two-boot sequence (a create boot, then a forced-ticket
+//!     capture boot) that discards boot1's partial spawn-area chunks so the
+//!     forced grid is generated from a blank chunk state (byte-deterministic).
 //!   * verify returns `Error::Unverified` (exit 3) when the committed fixture
 //!     tree is absent — never a silent green.
 //!   * verify rejects a fixture that is not exactly the forced grid of FULL
 //!     chunks with real generated variety: a superflat echo (all-air bedrock
 //!     plane at -60, uniform surface arrays, a tiny distinct-block set) is
 //!     refused loudly, so the handoff can never be gamed into a vacuous pass.
+//!   * the regenerate path validates a capture against the anti-superflat
+//!     contract BEFORE committing it, in addition to the twin-boot byte-identity
+//!     proof — two equally-wrong captures are refused, never committed.
 //!   * the tamper negative control proves a flipped byte in the golden fails
 //!     verification (the manifest SHA-256 gate is not vacuous).
 
@@ -88,10 +97,54 @@ pub fn forced_coordinates() -> Vec<(i32, i32)> {
         .collect()
 }
 
+/// The capture boot's dedicated `server-port`, isolated from the oracle's
+/// default 25599 (which the serialized release-gate boots and the generated-
+/// world runner reuse). The capture is headless (no client joins, `enable-status
+/// =false`), so the port only needs to be free for the server to bind; pinning a
+/// distinct port keeps a concurrent strict gate on 25599 from colliding.
+const CAPTURE_SERVER_PORT: &str = "25600";
+
+/// Rewrite the committed M2 `server.properties` text for a capture: pin `level-
+/// seed` to `seed` and isolate `server-port` to `CAPTURE_SERVER_PORT` (the
+/// committed 25599 is shared by the M2 gate and the generated-world runner; a
+/// concurrent strict gate must not collide with the capture boot). Returns
+/// `Error::Gate` when either line is absent — the capture config must not be
+/// silently derived from a config that lacks the lines it depends on.
+fn rewrite_properties(text: &str, seed: i64) -> Result<String, Error> {
+    let seed_line = format!("level-seed={seed}");
+    let mut rewritten = String::new();
+    let mut replaced_seed = false;
+    let mut replaced_port = false;
+    for line in text.lines() {
+        if line.starts_with("level-seed=") {
+            rewritten.push_str(&seed_line);
+            replaced_seed = true;
+        } else if line.starts_with("server-port=") {
+            rewritten.push_str(&format!("server-port={CAPTURE_SERVER_PORT}"));
+            replaced_port = true;
+        } else {
+            rewritten.push_str(line);
+        }
+        rewritten.push('\n');
+    }
+    if !replaced_seed {
+        return Err(Error::Gate(
+            "server-normal.properties has no level-seed line to rewrite".into(),
+        ));
+    }
+    if !replaced_port {
+        return Err(Error::Gate(
+            "server-normal.properties has no server-port line to rewrite".into(),
+        ));
+    }
+    Ok(rewritten)
+}
+
 /// Write a seed-customized `server.properties` (the committed
-/// `server-normal.properties` with `level-seed` rewritten) into the capture
-/// work dir, so a capture can generate any seed while seed 42 stays
-/// byte-identical to the committed config. Returns the temp properties path.
+/// `server-normal.properties` with `level-seed` rewritten and `server-port`
+/// isolated from the shared 25599) into the capture work dir, so a capture can
+/// generate any seed while seed 42 stays byte-identical to the committed config.
+/// Returns the temp properties path.
 fn seed_properties(seed: i64) -> Result<PathBuf, Error> {
     let src = crate::crate_dir().join("fixtures/server-normal.properties");
     let text = fs::read_to_string(&src).map_err(|e| {
@@ -100,23 +153,7 @@ fn seed_properties(seed: i64) -> Result<PathBuf, Error> {
             src.display()
         ))
     })?;
-    let seed_line = format!("level-seed={seed}");
-    let mut rewritten = String::new();
-    let mut replaced = false;
-    for line in text.lines() {
-        if line.starts_with("level-seed=") {
-            rewritten.push_str(&seed_line);
-            replaced = true;
-        } else {
-            rewritten.push_str(line);
-        }
-        rewritten.push('\n');
-    }
-    if !replaced {
-        return Err(Error::Gate(
-            "server-normal.properties has no level-seed line to rewrite".into(),
-        ));
-    }
+    let rewritten = rewrite_properties(&text, seed)?;
     let dir = crate::crate_dir().join("work/generated-expected");
     fs::create_dir_all(&dir)?;
     let path = dir.join("server.properties");
@@ -180,31 +217,34 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
     filter_to_grid(&manifest, &grid)
 }
 
-/// Delete every `.mca` region file under a world root's three dimension region
-/// dirs, leaving the world metadata (level.dat, seed, spawn, injected ticket
-/// data) intact. Used to discard a create boot's partial spawn-area chunks so
-/// the capture boot regenerates the forced grid from a blank chunk state.
+/// Delete every `.mca` region/entities/poi file under a world root's three
+/// dimension dirs, leaving the world metadata (level.dat, seed, spawn, injected
+/// ticket data) intact. Used to discard a create boot's partial spawn-area
+/// chunks so the capture boot regenerates the forced grid from a blank chunk
+/// state. The entities/poi files carry no block content (spawn-limits are 0),
+/// but they are boot1 leftovers that do not participate in the regenerated
+/// chunk state — clearing them keeps the capture's blank chunk state complete.
 fn clear_region_files(world_dir: &Path) -> Result<(), Error> {
     let mut cleared = 0usize;
     for dim in ["overworld", "the_nether", "the_end"] {
-        let region = world_dir
-            .join("dimensions/minecraft")
-            .join(dim)
-            .join("region");
-        if !region.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&region)? {
-            let path = entry?.path();
-            if path.extension().map(|e| e == "mca").unwrap_or(false) {
-                fs::remove_file(&path)?;
-                cleared += 1;
+        let base = world_dir.join("dimensions/minecraft").join(dim);
+        for sub in ["region", "entities", "poi"] {
+            let dir = base.join(sub);
+            if !dir.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&dir)? {
+                let path = entry?.path();
+                if path.extension().map(|e| e == "mca").unwrap_or(false) {
+                    fs::remove_file(&path)?;
+                    cleared += 1;
+                }
             }
         }
     }
     println!(
-        "      discarded boot1 partial chunks ({cleared} region files cleared; the capture \
-         boot regenerates the forced grid from a blank chunk state)"
+        "      discarded boot1 partial chunks ({cleared} region/entities/poi files cleared; \
+         the capture boot regenerates the forced grid from a blank chunk state)"
     );
     Ok(())
 }
@@ -238,9 +278,10 @@ fn filter_to_grid(manifest: &WorldManifest, grid: &[(i32, i32)]) -> Result<World
     })
 }
 
-/// Capture mode for the PR `--to <out>` invocation: one pinned-Paper boot +
-/// forced-grid extraction, written as compact JSON to `to`. A stale `to` file is
-/// removed first so a failed capture never leaves a previous success behind.
+/// Capture mode for the PR `--to <out>` invocation: the two-boot create +
+/// forced-capture sequence (`capture_world`), written as compact JSON to `to`.
+/// A stale `to` file is removed first so a failed capture never leaves a
+/// previous success behind.
 pub fn capture_to(seed: i64, to: &Path) -> Result<(), Error> {
     if to.exists() {
         fs::remove_file(to)?;
@@ -551,8 +592,13 @@ pub fn run_probe(dir: &Path) -> Result<(), Error> {
                 .into(),
         ));
     }
+    // Validate the (byte-identical) capture against the anti-superflat contract
+    // BEFORE committing — two equally-wrong captures (e.g. both a superflat echo
+    // from a config or code drift) must be refused, not committed as ground
+    // truth.
+    validate_world(&a)?;
 
-    println!("[3/3] byte-identical; writing the committed handoff...");
+    println!("[3/3] byte-identical + contract-valid; writing the committed handoff...");
     fs::create_dir_all(dir)?;
     let json = serde_json::to_string(&a)
         .map_err(|e| Error::Gate(format!("serializing generated-expected manifest: {e}")))?;
@@ -605,6 +651,10 @@ pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
 ///   cargo run -p rivet-oracle -- generated-expected <seed> --to <out>  capture: boot Paper -> write <out>
 ///   cargo run -p rivet-oracle -- generated-expected <seed> --tamper    negative control
 ///
+/// Verify mode is pinned to the committed seed-42 handoff (`<seed>` must be 42);
+/// the `--to` capture path accepts any seed. `--tamper` and `--to` are mutually
+/// exclusive.
+///
 /// `args` is everything after the subcommand name (the dispatch strips
 /// `"generated-expected"` and the program name), so `args` is `[<seed>, ...]`.
 pub fn run_cli(args: &[&str]) -> Result<(), Error> {
@@ -615,6 +665,16 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
     }
     if let Some(to) = parsed.to {
         return capture_to(parsed.seed, &to);
+    }
+    // Verify mode only understands the committed seed-42 handoff. A different
+    // seed is a usage error (the committed fixture is pinned to 42), not a
+    // silent verify of the wrong reference.
+    if parsed.seed != PINNED_SEED {
+        return Err(Error::Gate(format!(
+            "generated-expected verify is pinned to seed {PINNED_SEED}; got {} — the \
+             committed handoff only carries the seed-42 ground truth",
+            parsed.seed
+        )));
     }
     verify_generated_expected_step(&dir)?;
     println!(
@@ -673,6 +733,11 @@ fn parse_cli(rest: &[&str]) -> Result<CliArgs, Error> {
         }
     }
     let seed = seed.ok_or_else(|| Error::Gate("generated-expected requires a seed".into()))?;
+    if tamper && to.is_some() {
+        return Err(Error::Gate(
+            "generated-expected --tamper and --to are mutually exclusive".into(),
+        ));
+    }
     Ok(CliArgs { seed, to, tamper })
 }
 
@@ -708,6 +773,66 @@ mod tests {
         assert!(grid.contains(&(4, 4)));
         assert!(!grid.contains(&(-5, 0)));
         assert!(!grid.contains(&(0, 5)));
+    }
+
+    /// The capture config must isolate the capture boot from the shared oracle
+    /// port: the committed `server-normal.properties` serves the M2 gate on
+    /// 25599, so a capture that reuses it concurrently collides with the
+    /// serialized release gate. `rewrite_properties` pins both the seed and a
+    /// dedicated port.
+    #[test]
+    fn capture_properties_rewrite_seed_and_isolate_port() {
+        let src = fixtures_dir().join("server-normal.properties");
+        let text = fs::read_to_string(&src).unwrap();
+        let rewritten = rewrite_properties(&text, 42).unwrap();
+        assert!(
+            rewritten.contains("level-seed=42\n"),
+            "seed not pinned in the capture config"
+        );
+        assert!(
+            !rewritten.contains("level-seed=0\n"),
+            "unexpected seed in the capture config"
+        );
+        assert!(
+            rewritten.contains(&format!("server-port={CAPTURE_SERVER_PORT}\n")),
+            "capture server-port {} not pinned",
+            CAPTURE_SERVER_PORT
+        );
+        assert!(
+            !rewritten.contains("server-port=25599"),
+            "the capture must not bind the shared oracle port 25599"
+        );
+        // The rewrite is the committed config plus exactly the seed/port lines —
+        // nothing else drifts.
+        assert_eq!(rewritten.lines().count(), text.lines().count());
+        assert_eq!(
+            rewritten
+                .lines()
+                .filter(|l| l.starts_with("level-seed="))
+                .count(),
+            1
+        );
+        assert_eq!(
+            rewritten
+                .lines()
+                .filter(|l| l.starts_with("server-port="))
+                .count(),
+            1
+        );
+    }
+
+    /// A config missing the lines the capture depends on is refused loudly —
+    /// the capture config is never silently derived from an unexpected source.
+    #[test]
+    fn capture_properties_rewrite_refuses_missing_lines() {
+        assert!(matches!(
+            rewrite_properties("# no seed, no port\n", 42),
+            Err(crate::Error::Gate(_))
+        ));
+        assert!(matches!(
+            rewrite_properties("level-seed=42\n", 42),
+            Err(crate::Error::Gate(_))
+        ));
     }
 
     #[test]
@@ -782,6 +907,74 @@ mod tests {
         tamper_negative_control(&dir).expect("tamper must be detected");
     }
 
+    /// Write `world` into a scratch dir under a valid hash-gated manifest and run
+    /// the full verify against it. Returns the verify error (the caller asserts
+    /// it is a rejection). A valid manifest is essential: a failure must come
+    /// from the anti-superflat contract, never from the hash gate.
+    fn verify_scratch_world(world: &WorldManifest, tag: &str) -> crate::Error {
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-ge-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::write(
+            scratch.join(FIXTURE_BASENAME),
+            serde_json::to_string(&world).unwrap(),
+        )
+        .unwrap();
+        let data = fs::read(scratch.join(FIXTURE_BASENAME)).unwrap();
+        let manifest = serde_json::json!({
+            "format": 1,
+            "paper": PINNED_PAPER,
+            "seed": "42",
+            "level-type": "minecraft:normal",
+            "kind": KIND,
+            "note": "test",
+            "captured": [{ "path": FIXTURE_BASENAME, "sha256": crate::sha256_hex(&data), "bytes": data.len() }],
+        });
+        fs::write(
+            scratch.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let result = verify_generated_expected(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        result.expect_err("the handoff must be rejected by the anti-superflat contract")
+    }
+
+    /// A uniform grid of identical FULL chunks (one surface pattern, one
+    /// below-feet pattern, a 3-block distinct set).
+    fn uniform_chunks(bedrock_plane: &str) -> WorldManifest {
+        let mut chunks = BTreeMap::new();
+        for (x, z) in grid_coordinates() {
+            let surface = vec!["minecraft:grass_block".to_owned(); 256];
+            let bedrock = vec![bedrock_plane.to_owned(); 256];
+            let below = vec!["minecraft:dirt".to_owned(); 256];
+            chunks.insert(
+                format!("{x},{z}"),
+                ChunkFingerprint {
+                    status: "minecraft:full".to_owned(),
+                    stored_pos: [x, z],
+                    capability_flags: vec![],
+                    distinct: vec![
+                        "minecraft:bedrock".to_owned(),
+                        "minecraft:dirt".to_owned(),
+                        "minecraft:grass_block".to_owned(),
+                    ],
+                    surface,
+                    bedrock,
+                    below_feet: below,
+                    distinct_state_ids: 3,
+                    section_count: 1,
+                },
+            );
+        }
+        WorldManifest {
+            format: 1,
+            overworld_region: "dimensions/minecraft/overworld/region".to_owned(),
+            chunks,
+        }
+    }
+
     /// A superflat-shaped handoff must be rejected: an all-air bedrock plane at
     /// y=-60, a single repeated surface pattern, and a 3-block distinct set is
     /// the flat-floor echo the generated-world acceptance must never pass
@@ -822,41 +1015,47 @@ mod tests {
             overworld_region: "dimensions/minecraft/overworld/region".to_owned(),
             chunks,
         };
-        let scratch =
-            std::env::temp_dir().join(format!("rivet-oracle-ge-superflat-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&scratch);
-        fs::create_dir_all(&scratch).unwrap();
-        fs::write(
-            scratch.join(FIXTURE_BASENAME),
-            serde_json::to_string(&world).unwrap(),
-        )
-        .unwrap();
-        // A valid manifest hashing the superflat golden, so the failure must
-        // come from the anti-superflat contract, not the hash gate.
-        let data = fs::read(scratch.join(FIXTURE_BASENAME)).unwrap();
-        let manifest = serde_json::json!({
-            "format": 1,
-            "paper": PINNED_PAPER,
-            "seed": "42",
-            "level-type": "minecraft:normal",
-            "kind": KIND,
-            "note": "test",
-            "captured": [{ "path": FIXTURE_BASENAME, "sha256": crate::sha256_hex(&data), "bytes": data.len() }],
-        });
-        fs::write(
-            scratch.join("manifest.json"),
-            serde_json::to_string_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
-        let err = verify_generated_expected(&scratch).expect_err(
-            "a superflat-shaped handoff must be rejected by the anti-superflat contract",
-        );
+        let err = verify_scratch_world(&world, "superflat");
         let msg = err.to_string();
         assert!(
             msg.contains("bedrock") || msg.contains("superflat"),
             "unexpected error: {msg}"
         );
-        let _ = fs::remove_dir_all(&scratch);
+    }
+
+    /// A uniform grid with a fully non-air bedrock plane (so the bedrock-plane
+    /// density check alone would pass) must still be rejected: the repeated
+    /// surface pattern and uniform below-feet array are the superflat signature
+    /// the generated-world acceptance must never pass against. This proves the
+    /// anti-superflat contract does not rest on the bedrock-plane check alone.
+    #[test]
+    fn uniform_bedrock_floor_is_rejected() {
+        let err = verify_scratch_world(&uniform_chunks("minecraft:bedrock"), "bedrock-floor");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("surface array") || msg.contains("below_feet array"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// A uniform grid whose surface arrays vary per chunk (fake variety) but
+    /// whose below_feet arrays are uniform must still be rejected — the
+    /// below-feet (y=-61) depth evidence is an independent anti-superflat
+    /// dimension.
+    #[test]
+    fn uniform_below_floor_is_rejected() {
+        let mut world = uniform_chunks("minecraft:bedrock");
+        for (i, (key, fp)) in world.chunks.iter_mut().enumerate() {
+            let variant = if i % 2 == 0 {
+                "minecraft:grass_block"
+            } else {
+                "minecraft:sand"
+            };
+            fp.surface = vec![variant.to_owned(); 256];
+        }
+        let err = verify_scratch_world(&world, "below-floor");
+        let msg = err.to_string();
+        assert!(msg.contains("below_feet array"), "unexpected error: {msg}");
     }
 
     /// Regenerating the manifest in Rust is byte-identical to the committed
@@ -920,5 +1119,23 @@ mod tests {
             parse_cli(&["42", "--bogus"]),
             Err(crate::Error::Gate(_))
         ));
+        // --tamper and --to together are refused (mutually exclusive modes).
+        assert!(matches!(
+            parse_cli(&["42", "--tamper", "--to", "/tmp/x.json"]),
+            Err(crate::Error::Gate(_))
+        ));
+    }
+
+    /// Verify mode is pinned to seed 42: a different seed is a usage error, not
+    /// a silent verify of the wrong reference. (The --to capture path still
+    /// accepts any seed.)
+    #[test]
+    fn verify_mode_rejects_non_42_seed() {
+        // run_cli's verify branch refuses a non-42 seed without touching the
+        // committed fixture.
+        let err = run_cli(&["999"]).expect_err("verify must refuse a non-42 seed");
+        assert!(matches!(err, crate::Error::Gate(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("seed 42"), "unexpected error: {msg}");
     }
 }
