@@ -19,19 +19,18 @@
 //!   `blending_data` compound `serializable_chunk_data` carries; both agree on
 //!   `CELL_COLUMN_COUNT == 16`).
 //!
-//! The chunk-reading half defers as `RivetTodo(#177)` owned by the blending
-//! unit (it needs the `ChunkAccess`/`WorldGenRegion` surfaces):
-//!
-//! - `getOrUpdateBlendingData(WorldGenRegion, ...)` + `sideByGenerationAge`
-//!   (needs `WorldGenRegion.getChunk` + `ChunkAccess` status/blending-data
-//!   reads);
-//! - `calculateData`/`addValuesForColumn`/`getHeightAtXZ`/`read1`/`read7`/
-//!   `getDensityColumn`/`getBiomeColumn`/`isGround` (block-state, heightmap,
-//!   fluid and collision-shape reads) and the private constants they own
-//!   (`SOLID_DENSITY`, `AIR_DENSITY`, `CELLS_PER_SECTION_Y`,
-//!   `SURFACE_BLOCKS`). Until that lands, `densities`/`biomes` columns are
-//!   always `None`, which the value consumers faithfully report as
-//!   `NO_VALUE`/absent (matching a freshly-unpacked Java instance).
+//! RivetTodo(#177): the chunk-reading half of this unit defers (it needs the
+//! `ChunkAccess`/`WorldGenRegion` surfaces).
+//! RivetTodo(#177): `getOrUpdateBlendingData(WorldGenRegion, ...)` +
+//! `sideByGenerationAge` (needs `WorldGenRegion.getChunk` + `ChunkAccess`
+//! status/blending-data reads).
+//! RivetTodo(#177): `calculateData`/`addValuesForColumn`/`getHeightAtXZ`/
+//! `read1`/`read7`/`getDensityColumn`/`getBiomeColumn`/`isGround` (block-state,
+//! heightmap, fluid and collision-shape reads) and the private constants they
+//! own (`SOLID_DENSITY`, `AIR_DENSITY`, `CELLS_PER_SECTION_Y`,
+//! `SURFACE_BLOCKS`). Until that lands, `densities`/`biomes` columns are
+//! always `None`, which the value consumers faithfully report as
+//! `NO_VALUE`/absent (matching a freshly-unpacked Java instance).
 
 use std::sync::Arc;
 
@@ -95,9 +94,7 @@ pub struct BlendingData {
     heights: Vec<f64>,
     /// Per-column biome lists; `None` until the deferred `calculateData` chunk
     /// reads land (RivetTodo #177). `pub(crate)` because `Blender` and the
-    /// unit's tests build populated instances. Dead in the lib target until the
-    /// chunk-reading `iterateBiomes` consumers land with `of(WorldGenRegion)`.
-    #[allow(dead_code)]
+    /// unit's tests build populated instances.
     pub(crate) biomes: Vec<Option<Vec<Option<Holder<BiomeId>>>>>,
     /// Per-column density arrays; `None` until the deferred `calculateData`
     /// chunk reads land (RivetTodo #177). `pub(crate)` because `Blender` and
@@ -214,9 +211,9 @@ impl BlendingData {
     }
 
     /// `iterateBiomes(int minCellX, int quartY, int minCellZ, BiomeConsumer)`
-    /// (BlendingData.java lines 287-301). Dead in the lib target until the
-    /// chunk-reading `getBiomeColumn` consumers land (RivetTodo #177).
-    #[allow(dead_code)]
+    /// (BlendingData.java lines 287-301). Read live by
+    /// `Blender::blend_biome`; the columns are populated only once the deferred
+    /// `calculateData` chunk reads land (RivetTodo #177).
     pub(crate) fn iterate_biomes(
         &self,
         min_cell_x: i32,
