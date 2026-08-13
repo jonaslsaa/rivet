@@ -96,8 +96,12 @@ async fn run_server(server: Server) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Parse the bind config. `--host` and `--port` override the defaults so the
-/// binary is runnable without a `server.properties` parser (a later M1 slice).
+/// Parse the bind config. `--host`, `--port`, and `--seed` override the
+/// defaults so the binary is runnable without a `server.properties` parser (a
+/// later M1 slice). `--seed <i64>` is the generated-world seed (draft PR #563's
+/// `generated-world` capability contract: the scenario runner boots
+/// `rivet-server --seed 42`); the no-level superflat boot carries it into the
+/// world object and the login packet's obfuscated seed.
 ///
 /// The production binary always enables the live play path: `Server::new`
 /// wires the tick-owned session manager that consumes the configuration→play
@@ -143,7 +147,14 @@ fn config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
                     .expect("--level requires a disposable world directory path");
                 config.level_path = Some(raw.into());
             }
-            other => panic!("unknown argument {other:?} (expected --host/--port/--level)"),
+            "--seed" => {
+                i += 1;
+                let raw = args.get(i).expect("--seed requires a value (e.g. 42)");
+                config.seed = raw
+                    .parse()
+                    .expect("invalid --seed (expected a signed 64-bit integer)");
+            }
+            other => panic!("unknown argument {other:?} (expected --host/--port/--level/--seed)"),
         }
         i += 1;
     }
@@ -222,5 +233,69 @@ mod tests {
             config.enable_join,
             "the M1 binary must run the live play path (issue #101 Slice B)"
         );
+    }
+
+    #[test]
+    fn parses_seed_override() {
+        let config = config_from_args(["--seed", "7"].into_iter().map(str::to_owned));
+        assert_eq!(config.seed, 7);
+    }
+
+    #[test]
+    fn seed_defaults_to_the_m1_fixture() {
+        // No `--seed` keeps the M1 superflat fixture seed 42 (the #153 capture's
+        // flat world), so the byte-exact join burst is unchanged.
+        let config = config_from_args(Vec::<String>::new().into_iter());
+        assert_eq!(config.seed, 42);
+    }
+
+    #[test]
+    fn parses_seed_negative_and_i64_boundaries() {
+        for (raw, expected) in [
+            ("-1", -1i64),
+            ("0", 0i64),
+            (&i64::MIN.to_string(), i64::MIN),
+            (&i64::MAX.to_string(), i64::MAX),
+        ] {
+            let config = config_from_args(["--seed", raw].into_iter().map(str::to_owned));
+            assert_eq!(config.seed, expected, "seed {raw}");
+        }
+    }
+
+    #[test]
+    fn parses_seed_with_bind_overrides() {
+        let config = config_from_args(
+            [
+                "--host",
+                "127.0.0.1",
+                "--seed",
+                "42",
+                "--level",
+                "/tmp/rivet-disposable-world",
+                "--port",
+                "25599",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
+        assert_eq!(config.port, 25599);
+        assert_eq!(config.seed, 42);
+        assert_eq!(
+            config.level_path.as_deref(),
+            Some(std::path::Path::new("/tmp/rivet-disposable-world"))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "--seed requires a value")]
+    fn seed_requires_a_value() {
+        let _ = config_from_args(["--seed"].into_iter().map(str::to_owned));
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid --seed (expected a signed 64-bit integer)")]
+    fn seed_rejects_non_integer() {
+        let _ = config_from_args(["--seed", "not-a-seed"].into_iter().map(str::to_owned));
     }
 }
