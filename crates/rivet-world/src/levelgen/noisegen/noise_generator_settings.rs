@@ -69,7 +69,9 @@ pub struct NoiseGeneratorSettings {
     pub default_fluid: BlockState,
     /// `noiseRouter`.
     pub noise_router: NoiseRouter,
-    /// `surfaceRule` — the erased `ArcRuleSource` (STUB carrier).
+    /// `surfaceRule` — the erased `ArcRuleSource`: the ported end-stone rule
+    /// plus the AIR `block`-rule shims for the pending `mc.data.worldgen`
+    /// nether/overworld/overworldLike builders (RivetTodo #179).
     pub surface_rule: ArcRuleSource,
     /// `spawnTarget`.
     pub spawn_target: Vec<ParameterPoint>,

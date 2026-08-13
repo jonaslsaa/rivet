@@ -320,7 +320,7 @@ fn material_condition_type_by_name_codec<Ops: DynamicOps + 'static>()
     codec::comap_flat_map::<Identifier, ConditionSourceTypeId, Ops>(
         rivet_registry::identifier::identifier_codec::<Ops>(),
         Arc::new(
-            |name: &Identifier| match material_condition_type_by_name(&name.to_string()) {
+            |name: &Identifier| match material_condition_type_by_name(name) {
                 Some(id) => DataResult::success(id),
                 None => DataResult::error(format!(
                     "Unknown registry key in ResourceKey[minecraft:root / minecraft:worldgen/material_condition]: {}",
@@ -332,11 +332,14 @@ fn material_condition_type_by_name_codec<Ops: DynamicOps + 'static>()
     )
 }
 
-fn material_condition_type_by_name(name: &str) -> Option<ConditionSourceTypeId> {
-    // The dispatch `Identifier` carries the `minecraft:` namespace (the registry
-    // keys are full identifiers); match on the path.
-    let name = name.rsplit(':').next().unwrap_or(name);
-    match name {
+fn material_condition_type_by_name(name: &Identifier) -> Option<ConditionSourceTypeId> {
+    // `Registry.byNameCodec` resolves the full identifier against the registry
+    // keys, which are registered in the `minecraft` (default) namespace; a
+    // foreign namespace must not match.
+    if name.namespace() != rivet_registry::identifier::DEFAULT_NAMESPACE {
+        return None;
+    }
+    match name.path() {
         "biome" => Some(material_condition_types::BIOME),
         "noise_threshold" => Some(material_condition_types::NOISE_THRESHOLD),
         "vertical_gradient" => Some(material_condition_types::VERTICAL_GRADIENT),
@@ -406,22 +409,22 @@ fn material_rule_type_by_name_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn Codec<ConditionSourceTypeId, Ops>> {
     codec::comap_flat_map::<Identifier, ConditionSourceTypeId, Ops>(
         rivet_registry::identifier::identifier_codec::<Ops>(),
-        Arc::new(
-            |name: &Identifier| match material_rule_type_by_name(&name.to_string()) {
-                Some(id) => DataResult::success(id),
-                None => DataResult::error(format!(
-                    "Unknown registry key in ResourceKey[minecraft:root / minecraft:worldgen/material_rule]: {}",
-                    name
-                )),
-            },
-        ),
+        Arc::new(|name: &Identifier| match material_rule_type_by_name(name) {
+            Some(id) => DataResult::success(id),
+            None => DataResult::error(format!(
+                "Unknown registry key in ResourceKey[minecraft:root / minecraft:worldgen/material_rule]: {}",
+                name
+            )),
+        }),
         Arc::new(|id: &ConditionSourceTypeId| Identifier::parse(id.location)),
     )
 }
 
-fn material_rule_type_by_name(name: &str) -> Option<ConditionSourceTypeId> {
-    let name = name.rsplit(':').next().unwrap_or(name);
-    match name {
+fn material_rule_type_by_name(name: &Identifier) -> Option<ConditionSourceTypeId> {
+    if name.namespace() != rivet_registry::identifier::DEFAULT_NAMESPACE {
+        return None;
+    }
+    match name.path() {
         "bandlands" => Some(material_rule_types::BANDLANDS),
         "block" => Some(material_rule_types::BLOCK),
         "sequence" => Some(material_rule_types::SEQUENCE),
@@ -2997,14 +3000,15 @@ pub(crate) fn surface_rule_overworld() -> ArcRuleSource {
     state(Blocks::AIR.default_block_state())
 }
 
-/// `SurfaceRuleData.overworldLike(HolderGetter<Biome>, boolean hasCeiling,
-/// boolean hasFloor, boolean isFrozen)` — the overworld tree parametrized for
-/// the `caves`/`floating_islands` presets. The port keeps an AIR shim for the
-/// same reason as `surface_rule_nether` (see there).
+/// `SurfaceRuleData.overworldLike(HolderGetter<Biome>, boolean
+/// doPreliminarySurfaceCheck, boolean bedrockRoof, boolean bedrockFloor)` — the
+/// overworld tree parametrized for the `caves`/`floating_islands` presets. The
+/// port keeps an AIR shim for the same reason as `surface_rule_nether` (see
+/// there).
 pub(crate) fn surface_rule_overworld_like(
-    _has_ceiling: bool,
-    _has_floor: bool,
-    _is_frozen: bool,
+    _do_preliminary_surface_check: bool,
+    _bedrock_roof: bool,
+    _bedrock_floor: bool,
 ) -> ArcRuleSource {
     state(Blocks::AIR.default_block_state())
 }
