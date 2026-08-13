@@ -388,6 +388,30 @@ echo "$out" | grep -q "WOULD PRUNE" || fail "dry-run line does not say WOULD PRU
 echo "$out" | grep -q "DRY: rm -rf" || fail "dry-run did not report the pending rm -rf"
 pass "dry-run reports WOULD PRUNE and touches nothing"
 
+# --- a failed rm is not counted as pruned/reclaimed ---------------------------
+# run() must propagate the mutation's exit status: a rm that fails (here an
+# immutable file blocks deletion) must not bump pruned/freed_kb, or the summary
+# would over-claim reclaimed space.
+if command -v chflags >/dev/null 2>&1; then
+  SWEEP_ROOT3="$SANDBOX/root-sweep3"
+  mkdir -p "$SWEEP_ROOT3"
+  mk_cargo_target "$SWEEP_ROOT3/bare"
+  chflags uchg "$SWEEP_ROOT3/bare/.rustc_info.json" 2>/dev/null && immutable=1 || immutable=0
+  if [ "$immutable" = 1 ]; then
+    DRY=0; IDLE_HOURS=24; freed_kb=0; pruned=0
+    sweep_tmp "$SWEEP_ROOT3" >/dev/null 2>&1
+    [ "$pruned" -eq 0 ] || fail "failed rm was still counted as pruned: $pruned"
+    [ "$freed_kb" -eq 0 ] || fail "failed rm was still counted as reclaimed: $freed_kb"
+    [ -e "$SWEEP_ROOT3/bare/.rustc_info.json" ] || fail "failed rm deleted the blocked file"
+    chflags nouchg "$SWEEP_ROOT3/bare/.rustc_info.json" 2>/dev/null || true
+    pass "failed rm is not counted as pruned/reclaimed"
+  else
+    pass "chflags unavailable; skipping failed-rm accounting test"
+  fi
+else
+  pass "chflags unavailable; skipping failed-rm accounting test"
+fi
+
 # --- TMPDIR dedup: two names for one tree sweep once --------------------------
 # /tmp is a symlink to /private/tmp on macOS, so $TMPDIR can name the same
 # directory as the primary tmp root; canonical_dir must resolve both to one
@@ -457,6 +481,64 @@ echo "$out" | grep -q "PRUNE .*wt/target" || fail "wt sweep missing PRUNE line f
 [ -d "$E2E2/wt/target" ] && fail "wt sweep did not prune the dirty worktree's nested target" || true
 [ -d "$E2E2/wt" ] || fail "wt sweep removed the dirty worktree"
 pass "wt sweep prunes a dirty worktree's nested target and keeps the worktree"
+
+# --- e2e: a corrupted linked-worktree index is never read as "clean" -----------
+# A merged worktree whose index is corrupt makes `git status --porcelain` exit
+# nonzero with empty output; the old `| head -1` swallowed that failure and the
+# worktree — holding a real uncommitted file — was removed wholesale. The sweep
+# must refuse instead: the file survives, the worktree stays, the branch stays.
+E2E3="$SANDBOX/e2e3"
+mkdir -p "$E2E3/main"
+git init -q "$E2E3/main"
+git -C "$E2E3/main" config user.email test@example.com
+git -C "$E2E3/main" config user.name "test"
+git -C "$E2E3/main" config commit.gpgsign false
+printf 'x\n' > "$E2E3/main/a.txt"
+git -C "$E2E3/main" add a.txt
+git -C "$E2E3/main" commit -qm c1
+git -C "$E2E3/main" update-ref refs/remotes/origin/main HEAD
+git -C "$E2E3/main" worktree add -q -b feature/corrupt "$E2E3/wt" HEAD
+printf 'uncommitted\n' > "$E2E3/wt/keep.txt"
+idx=$(git -C "$E2E3/wt" rev-parse --git-path index)
+printf 'not a git index\n' > "$idx"
+cd "$E2E3/main"
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --no-tmp 2>&1)
+echo "$out" | grep -q "status probe failed" || fail "corrupt-index worktree not reported as probe failure: $out"
+[ -f "$E2E3/wt/keep.txt" ] || fail "corrupt-index worktree removed; real uncommitted file lost"
+[ -d "$E2E3/wt" ] || fail "corrupt-index worktree removed wholesale"
+git -C "$E2E3/main" branch --list feature/corrupt | grep -q . || fail "corrupt-index branch was deleted"
+pass "e2e corrupted linked-worktree index: uncommitted file survives, removal refused"
+
+# --- e2e: a refused branch -d is visible, accounted, and never force-deleted ---
+# The worktree is clean and merged into origin/main, so it is removed. But the
+# branch tip is NOT merged into MAIN's HEAD and has no upstream, so `git branch
+# -d` refuses: the ref must survive and the summary must say so honestly.
+E2E4="$SANDBOX/e2e4"
+mkdir -p "$E2E4/main"
+git init -q "$E2E4/main"
+git -C "$E2E4/main" config user.email test@example.com
+git -C "$E2E4/main" config user.name "test"
+git -C "$E2E4/main" config commit.gpgsign false
+printf 'x\n' > "$E2E4/main/a.txt"
+git -C "$E2E4/main" add a.txt
+git -C "$E2E4/main" commit -qm c0
+git -C "$E2E4/main" update-ref refs/remotes/origin/main HEAD
+git -C "$E2E4/main" worktree add -q -b feature/stranded "$E2E4/wt" HEAD
+# advance the worktree branch past main@c0 so it is merged into origin/main but
+# not into MAIN's HEAD (no upstream => branch -d checks HEAD and refuses)
+printf 'y\n' >> "$E2E4/wt/a.txt"
+git -C "$E2E4/wt" add a.txt
+git -C "$E2E4/wt" commit -qm c1
+origin_head=$(git -C "$E2E4/wt" rev-parse HEAD)
+git -C "$E2E4/main" update-ref refs/remotes/origin/main "$origin_head"
+cd "$E2E4/main"
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --no-tmp 2>&1)
+echo "$out" | grep -q "REMOVE .*feature/stranded" || fail "stranded: missing REMOVE line: $out"
+echo "$out" | grep -q "WARN: branch 'feature/stranded' survived" || fail "stranded: missing WARN line: $out"
+echo "$out" | grep -q "note: 1 branch ref(s) left in place" || fail "stranded: missing stranded note: $out"
+[ -d "$E2E4/wt" ] && fail "stranded: worktree was not removed" || true
+git -C "$E2E4/main" branch --list feature/stranded | grep -q . || fail "stranded: branch was force-deleted"
+pass "e2e refused branch -d is reported and the ref survives (never force-deleted)"
 
 # --- zsh: sourcing + classification works (no failglob abort) ----------------
 if command -v zsh >/dev/null 2>&1; then

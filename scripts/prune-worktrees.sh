@@ -3,7 +3,9 @@
 #
 # Rebuilds are cheap in this workspace (cold cargo check ~8s, cold test build
 # ~18s as of 2026-08), so cargo target/ dirs are disposable cache. Policy:
-#   - worktree clean AND fully merged into origin/main  -> remove worktree (+ branch)
+#   - worktree clean AND fully merged into origin/main  -> remove worktree (+ branch);
+#     "clean" requires the status probe to succeed — a corrupt/unreadable index is
+#     never clean, and a refused `git branch -d` is reported with the ref left in place
 #   - anything else idle for more than IDLE_HOURS        -> delete its build caches
 #   - dirty or unmerged checkouts are never removed
 #
@@ -45,6 +47,7 @@ SWEEP_TMP=1
 freed_kb=0
 removed=0
 pruned=0
+stranded=0
 
 say() { echo "$@"; }
 run() { if [ "$DRY" = 1 ]; then say "  DRY: $*"; else "$@"; fi; }
@@ -140,8 +143,9 @@ sweep_tmp() {
         fi
         kb=$(dir_kb "$cache")
         say "$(act PRUNE)  $cache  [tmp scratch: idle, $((kb / 1024))MB]"
-        run rm -rf "$cache"
-        freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
+        if run rm -rf "$cache"; then
+          freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
+        fi
       done <<< "$caches"
     done < <(find "$root" -maxdepth 1 -mindepth 1 -type d -not -name '.*' 2>/dev/null)
   done
@@ -178,18 +182,27 @@ main() {
 
     branch=$(git -C "$wt" symbolic-ref --short -q HEAD || echo "(detached)")
     head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || continue
-    dirty=$(git -C "$wt" status --porcelain 2>/dev/null | head -1)
+    # A failing status probe must never read as clean: `git status --porcelain`
+    # exits nonzero on a corrupt linked-worktree index while printing nothing,
+    # so without this guard the sweep would treat such a worktree as clean and
+    # remove it wholesale — taking any real uncommitted file with it.
+    status_fail=""
+    dirty=$(git -C "$wt" status --porcelain 2>/dev/null) || status_fail="status probe failed"
     merged=""
     git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null && merged=merged
+    state="${dirty:+dirty, }${merged:-unmerged}"
+    [ -n "$status_fail" ] && state="status probe failed"
 
-    if [ -z "$dirty" ] && [ -n "$merged" ]; then
+    if [ -z "$status_fail" ] && [ -z "$dirty" ] && [ -n "$merged" ]; then
       kb=$(dir_kb "$wt")
       say "$(act REMOVE) $wt  [$branch: clean, merged, $((kb / 1024))MB]"
-      run git -C "$MAIN" worktree remove --force "$wt"
-      if [ "$branch" != "(detached)" ]; then
-        run git -C "$MAIN" branch -d "$branch"
+      if run git -C "$MAIN" worktree remove --force "$wt"; then
+        freed_kb=$((freed_kb + kb)); removed=$((removed + 1))
+        if [ "$branch" != "(detached)" ] && ! run git -C "$MAIN" branch -d "$branch"; then
+          say "  WARN: branch '$branch' survived worktree removal (branch -d refused; ref left in place, never force-deleted)"
+          stranded=$((stranded + 1))
+        fi
       fi
-      freed_kb=$((freed_kb + kb)); removed=$((removed + 1))
       continue
     fi
 
@@ -200,20 +213,21 @@ main() {
         while read -r cache; do
           [ -n "$cache" ] || continue
           if touched_within "$cache" "$mins"; then
-            say "KEEP   $cache  [$branch: ${dirty:+dirty, }${merged:-unmerged}, active within ${IDLE_HOURS}h]"
+            say "KEEP   $cache  [$branch: $state, active within ${IDLE_HOURS}h]"
             continue
           fi
           kb=$(dir_kb "$cache")
           cache_age_h=$(( (NOW - $(stat -f %m "$cache" 2>/dev/null || echo 0)) / 3600 ))
-          say "$(act PRUNE)  $cache  [$branch: ${dirty:+dirty, }${merged:-unmerged}, idle ${cache_age_h}h, $((kb / 1024))MB]"
-          run rm -rf "$cache"
-          freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
+          say "$(act PRUNE)  $cache  [$branch: $state, idle ${cache_age_h}h, $((kb / 1024))MB]"
+          if run rm -rf "$cache"; then
+            freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
+          fi
         done <<< "$caches"
       else
         say "KEEP   $wt  [$branch: active ${age_h}h ago]"
       fi
     else
-      say "KEEP   $wt  [$branch: ${dirty:+dirty, }${merged:-unmerged}, no build caches]"
+      say "KEEP   $wt  [$branch: $state, no build caches]"
     fi
   done < <(git -C "$MAIN" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}')
 
@@ -237,6 +251,9 @@ main() {
     say "would remove $removed worktree(s), would prune $pruned build cache(s), would reclaim ~$((freed_kb / 1024 / 1024))GB (dry-run; nothing touched)"
   else
     say "removed $removed worktree(s), pruned $pruned build cache(s), reclaimed ~$((freed_kb / 1024 / 1024))GB"
+  fi
+  if [ "$stranded" -gt 0 ]; then
+    say "note: $stranded branch ref(s) left in place after worktree removal (branch -d refused; refs are never force-deleted)"
   fi
 }
 
