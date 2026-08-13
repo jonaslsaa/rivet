@@ -2307,7 +2307,11 @@ mod tests {
         for (name, sample, raw) in [
             ("temperature", &sampler.temperature, router.temperature()),
             ("humidity", &sampler.humidity, router.vegetation()),
-            ("continentalness", &sampler.continentalness, router.continents()),
+            (
+                "continentalness",
+                &sampler.continentalness,
+                router.continents(),
+            ),
             ("erosion", &sampler.erosion, router.erosion()),
             ("depth", &sampler.depth, router.depth()),
             ("weirdness", &sampler.weirdness, router.ridges()),
