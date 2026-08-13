@@ -417,8 +417,8 @@ impl Args {
             return Err(
                 "--seed only applies to the generated-world scenario (the seed-42 generated \
                  acceptance contract); join/move/dwell/kick/capture/load-world/loaded-world \
-                 recenter never boot a fresh generated world, so an explicit value would be a \
-                 silent no-op — drop it"
+                 and recenter never boot a fresh generated world, so an explicit value would be \
+                 a silent no-op — drop it"
                     .to_owned(),
             );
         }
