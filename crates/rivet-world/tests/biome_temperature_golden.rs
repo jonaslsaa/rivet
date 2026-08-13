@@ -134,14 +134,13 @@ fn noise_map(noise: &Value) -> HashMap<(i64, i64), NoiseAt> {
 }
 
 /// `icePatches = frozenLarge * 7.0 + frozenEdge` (the FROZEN modifier's outer
-/// gate). Shared by the branch helpers so the formula is written once.
+/// gate). The one shared copy of the FROZEN formula; used only by the branch
+/// coverage test to classify grid positions.
 fn frozen_ice_patches(n: &NoiseAt) -> f64 {
     n.frozen_large * 7.0 + n.frozen_edge
 }
 
-/// The FROZEN pin fires when `icePatches < 0.3 && frozenSmall < 0.8` — the
-/// probe emits this as the per-sample `frozenPins` flag, which this helper is
-/// asserted against once per grid position.
+/// The FROZEN pin fires when `icePatches < 0.3 && frozenSmall < 0.8`.
 fn frozen_pins(n: &NoiseAt) -> bool {
     frozen_ice_patches(n) < 0.3 && n.frozen_small < 0.8
 }
@@ -151,28 +150,9 @@ fn temperature_outputs_match_paper_exactly() {
     let data = fixture();
     let biomes = data["biomes"].as_array().expect("biomes is an array");
     let noise_by_pos = noise_map(&data["noise"]);
-    let frozen_biome = biomes
-        .iter()
-        .find(|b| b["name"] == "frozen")
-        .expect("frozen biome in fixture");
 
     // The raw noise the arithmetic consumes depends only on (x, z), so pin it
     // once per grid position rather than once per (x, y, z, seaLevel) sample.
-    // The probe emits `frozenPins` on every frozen sample; all samples at a
-    // given (x, z) share it (it is sea-level-independent), so collect it from
-    // the sl=63 sample.
-    let frozen_pins_by_pos: HashMap<(i64, i64), bool> = frozen_biome["samples"]
-        .as_array()
-        .expect("frozen samples is an array")
-        .iter()
-        .filter(|s| s["seaLevel"].as_i64() == Some(63))
-        .map(|s| {
-            (
-                (s["x"].as_i64().unwrap(), s["z"].as_i64().unwrap()),
-                s["frozenPins"].as_bool().unwrap(),
-            )
-        })
-        .collect();
     for ((x, z), n) in &noise_by_pos {
         // The snow-level noise — `TEMPERATURE_NOISE.getValue(x / 8.0F,
         // z / 8.0F, false)` — pinned against Paper's raw double AND its
@@ -224,11 +204,6 @@ fn temperature_outputs_match_paper_exactly() {
             n.frozen_edge01.to_bits(),
             "BIOME_INFO_NOISE (edge 0.1) at ({x},{z})"
         );
-        assert_eq!(
-            frozen_pins(n),
-            frozen_pins_by_pos[&(*x, *z)],
-            "frozen pin decision at ({x},{z})"
-        );
     }
 
     // The y- and sea-level-dependent aggregate outputs.
@@ -255,6 +230,23 @@ fn temperature_outputs_match_paper_exactly() {
                 got, want,
                 "{name} getTemperature at ({x},{y},{z}) sl={sea_level}"
             );
+
+            // The FROZEN pin is production-observable: below the snow level
+            // the adjusted temperature is exactly the 0.2F pin (branch fires)
+            // or the base 0.7F. At y=1 (below both the sl=63 and sl=0 snow
+            // levels, 80 and 17) tie the probe's emitted flag to that output
+            // without re-deriving the FROZEN formula.
+            if name == "frozen" && y == 1 {
+                let expect = if s["frozenPins"].as_bool().unwrap() {
+                    0.2f32.to_bits()
+                } else {
+                    0.7f32.to_bits()
+                };
+                assert_eq!(
+                    got, expect,
+                    "frozen pin observable at ({x},{y},{z}) sl={sea_level}"
+                );
+            }
 
             assert_eq!(
                 biome.cold_enough_to_snow(&pos, sea_level),

@@ -62,6 +62,9 @@ rivet-oracle/
     spline/             # CubicSpline/BoundedFloatFunction value-leaf goldens
       manifest.json     # hash of spline-goldens.json (kind: spline, issue #372)
       spline-goldens.json  # Paper's exact min/max/sample outputs as hex-float (plus parity strings)
+    biome-temperature/  # Biome.getTemperature/FROZEN value-leaf goldens
+      manifest.json     # hash of biome-temperature.json (kind: biome-temperature)
+      biome-temperature.json  # Paper's bit-exact getTemperature/coldEnoughToSnow samples + raw noise
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars

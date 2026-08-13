@@ -45,8 +45,23 @@ fi
 # materialized server jar carries the `Git-Commit` manifest attribute.
 # (run_seq_probe.sh / run_spline_probe.sh predate this guard and are tracked
 # separately; this runner is the first to verify the pin it stamps.)
-RUNTIME_COMMIT="$(unzip -p "$RUNTIME_JAR" META-INF/MANIFEST.MF 2>/dev/null \
-  | awk '/[[:space:]]*Git-Commit:[[:space:]]*/ { v=$0; sub(/^[[:space:]]*Git-Commit:[[:space:]]*/, "", v); sub(/[[:space:]\r]+$/, "", v); if (v != "") { print v; exit } }')"
+# `A && B || C` (rather than a bare assignment) so the `set -e` exit is
+# suppressed while still capturing unzip's real exit status.
+RUNTIME_MANIFEST="$(unzip -p "$RUNTIME_JAR" META-INF/MANIFEST.MF 2>&1)" && UNZIP_STATUS=0 || UNZIP_STATUS=$?
+if [ "$UNZIP_STATUS" -ne 0 ]; then
+  echo "failed to read META-INF/MANIFEST.MF from $RUNTIME_JAR (unzip exit $UNZIP_STATUS)" >&2
+  exit 1
+fi
+# Consume the whole manifest (no early-exit, so the upstream writer never sees
+# SIGPIPE) while keeping the first trimmed `Git-Commit:` value — mirroring the
+# Rust `parse_manifest_commit` (trimmed line, trimmed non-empty value).
+RUNTIME_COMMIT="$(printf '%s\n' "$RUNTIME_MANIFEST" | awk '
+  /[[:space:]]*Git-Commit:[[:space:]]*/ {
+    v = $0
+    sub(/^[[:space:]]*Git-Commit:[[:space:]]*/, "", v)
+    sub(/[[:space:]\r]+$/, "", v)
+    if (v != "" && !found) { print v; found = 1 }
+  }')"
 PIN_COMMIT="${PAPER_PIN##*@}"
 if [ -z "$RUNTIME_COMMIT" ]; then
   echo "materialized server jar $RUNTIME_JAR has no Git-Commit attribute; cannot verify the pin" >&2
@@ -59,7 +74,14 @@ if [ "$RUNTIME_COMMIT" != "$PIN_COMMIT" ]; then
 fi
 
 LIBS_DIR="${RIVET_PAPER_LIBRARIES:-$ROOT/work/run/libraries}"
-LIBS="$(find "$LIBS_DIR" -name '*.jar' 2>/dev/null | tr '\n' ':')"
+if [ ! -d "$LIBS_DIR" ]; then
+  echo "libraries dir not found: $LIBS_DIR" >&2
+  exit 1
+fi
+if ! LIBS="$(find "$LIBS_DIR" -name '*.jar' 2>/dev/null | tr '\n' ':')"; then
+  echo "failed to scan $LIBS_DIR for library jars" >&2
+  exit 1
+fi
 if [ -z "$LIBS" ]; then
   echo "no library jars under $LIBS_DIR" >&2
   exit 1
