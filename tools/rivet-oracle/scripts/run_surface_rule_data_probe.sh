@@ -23,6 +23,11 @@
 # The default output directory is `fixtures/surface-rule-data/` (in place). The
 # probe always writes the file `surface-rule-data.json` inside the given
 # directory, and the manifest is regenerated there too.
+#
+# After a re-capture (Paper pin bump), also update FIXTURE_SHA256 and
+# FIXTURE_BYTES in crates/rivet-world/tests/surface_rule_data_golden.rs: the
+# digest test is the deliberate backstop against silent golden edits, so a
+# legitimate re-capture needs the matching constant bump.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

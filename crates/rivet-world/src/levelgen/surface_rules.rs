@@ -3543,22 +3543,27 @@ mod tests {
         assert!(decoded.as_any().is::<BlockRuleSource>());
     }
 
-    /// The three real `SurfaceRuleData` production builders
-    /// (`nether`/`overworld`/`overworldLike`) are still AIR shims (RivetTodo
-    /// #179). This is a **non-ignored tripwire**: once a faithful port replaces
-    /// a shim, this test must fail so the golden harness is extended to the now
-    /// real tree. Until then it pins the deferral — the shims must encode as
-    /// `minecraft:air`, never silently as some other placeholder.
+    /// The four real `SurfaceRuleData` production builders (`nether`,
+    /// `overworld`, and the two `overworldLike` flag combos the fixture pins)
+    /// are still AIR shims (RivetTodo #179). This is a **non-ignored
+    /// tripwire**: once a faithful port replaces a shim, this test must fail
+    /// so the golden harness is extended to the now real tree. Until then it
+    /// pins the deferral — the shims must encode as `minecraft:air`, never
+    /// silently as some other placeholder.
     #[test]
     fn surface_rule_production_builders_are_still_air_shims() {
         let ops = ops();
         let codec = rule_source_codec::<TestOps>();
-        let builders: [(&str, ArcRuleSource); 3] = [
+        let builders: [(&str, ArcRuleSource); 4] = [
             ("nether", surface_rule_nether()),
             ("overworld", surface_rule_overworld()),
             (
-                "overworld_like",
+                "overworld_like_true_false_true",
                 surface_rule_overworld_like(true, false, true),
+            ),
+            (
+                "overworld_like_false_false_true",
+                surface_rule_overworld_like(false, false, true),
             ),
         ];
         for (name, rule) in builders {

@@ -51,8 +51,9 @@ import net.minecraft.resources.RegistryOps;
  * `SurfaceRuleData.*` builders take a `HolderGetter<Biome>`.
  *
  * Emits `surface-rule-data.json`:
- *   - `presets`: for each of `nether`, `overworld`, `overworldLike` (both
- *     flag combos), `end`, `air`, the canonical `RuleSource.CODEC` JSON under
+ *   - `presets`: for each of `nether`, `overworld`, the two `overworldLike`
+ *     combos the harness pins (`(true,false,true)` and `(false,false,true)`),
+ *     `end`, `air`, the canonical `RuleSource.CODEC` JSON under
  *     `RegistryOps`.
  *   - `node-types`: occurrence-count stats over all dispatch `"type"`
  *     discriminators (both condition and rule arms, unclassified — the Rust
@@ -150,6 +151,11 @@ public final class SurfaceRuleDataProbe {
         java.nio.file.Files.createDirectories(outDir);
         try (PrintWriter writer = new PrintWriter(outDir.resolve("surface-rule-data.json").toFile(), "UTF-8")) {
             writer.println(new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create().toJson(root));
+            // PrintWriter swallows IOExceptions; fail loudly on a truncated
+            // capture instead of hashing garbage into the manifest below.
+            if (writer.checkError()) {
+                throw new java.io.IOException("failed writing " + outDir.resolve("surface-rule-data.json"));
+            }
         }
         System.out.println(
             "captured " + presets.size() + " surface-rule presets ("
