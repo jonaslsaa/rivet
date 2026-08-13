@@ -729,6 +729,9 @@ mod tests {
                 |_| false, // fluid_is_randomly_ticking
                 |_| false, // is_special_colliding
             );
+            // The `is_special_colliding` predicate is intentionally inert here:
+            // it only drives the client-derived `specialCollidingBlocks` sentinel
+            // (off-wire), never the block states this comparison reads.
             section.read(&mut reader, &|_| false);
             sections.push(section);
         }
@@ -1054,6 +1057,13 @@ mod tests {
     /// booted world's synthetic content). A tampered packet (one cell
     /// re-encoded to a different state through the same wire format) is caught
     /// at exactly that position — the comparator is non-vacuous.
+    ///
+    /// Both sides of the round trip run the port's own wire codecs (`write` and
+    /// `read`), so a wire-format bug that corrupts symmetrically on both sides
+    /// would round-trip to identity and pass; real-client byte conformance is
+    /// the oracle's job (`rivet-parity` vs Paper). This sentinel's boundary is
+    /// the #328 class: the packet body the server sends diverging from the
+    /// authoritative collision/mining state it was built from.
     #[test]
     fn loaded_world_packet_sections_decode_to_authoritative_block_states() {
         // Boot the disposable loaded-world fixture (the committed synthetic
@@ -1080,6 +1090,22 @@ mod tests {
             &block_strategy,
             &biome_strategy,
         );
+        // Vacuity guard: the fixture carries real terrain, so the decode must
+        // not be all-air. The pinned cell mirrors the `region_backed` boot
+        // test's deep-underground assertion — local (0,4,0) of section 0 (the
+        // fixture's dense block at absolute (0,-60,-48) when re-anchored at the
+        // spawn position). An all-air fixture or all-air decode fails here
+        // instead of passing the empty-mismatch comparison vacuously.
+        let deep = sections[0].get_block_state(0, 4, 0);
+        assert!(
+            !BlockState::new(deep).is_air(),
+            "the decoded chunk must carry real non-air terrain, got StateId {deep:?}"
+        );
+        assert!(
+            BlockState::new(deep).blocks_motion(),
+            "the decoded deep block must block motion, got StateId {deep:?}"
+        );
+
         let mismatches = compare_packet_to_authority(chunk, &sections);
         assert!(
             mismatches.is_empty(),
@@ -1137,16 +1163,20 @@ mod tests {
             "the tamper must replace the decoded state with a different one"
         );
         let mut tampered = sections;
+        // Real predicates, so the tamper mirrors what the server would send:
+        // the air cell becoming stone bumps `nonEmptyBlockCount` by exactly one
+        // (the faithful count bookkeeping). The comparison reads states only,
+        // so the counts do not affect it.
         tampered[8].set_block_state(
             14,
             6,
             15,
             tampered_state,
-            &|_| false, // is_air — the wire counts are bookkeeping only here
-            &|_| false, // is_randomly_ticking
-            &|_| true,  // fluid_is_empty
-            &|_| false, // fluid_is_randomly_ticking
-            &|_| false, // is_special_colliding
+            &|s: &StateId| s.0 == 0, // is_air — StateId 0 is air
+            &|_| false,              // is_randomly_ticking
+            &|_| true,               // fluid_is_empty
+            &|_| false,              // fluid_is_randomly_ticking
+            &|_| false,              // is_special_colliding
         );
         let tampered_buffer = encode_sections(&tampered);
         let tampered_sections = decode_sections(
