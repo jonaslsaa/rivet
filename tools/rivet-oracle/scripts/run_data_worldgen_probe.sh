@@ -64,29 +64,6 @@ echo "wrote $NOISE_GOLDENS"
 
 # Refresh the fixture manifest so the regenerated goldens hash matches what the
 # gate's `rivet-oracle verify` expects.
-SHA1="$(shasum -a 256 "$TERRAIN_GOLDENS" | awk '{print $1}')"
-BYTES1="$(wc -c < "$TERRAIN_GOLDENS" | tr -d ' ')"
-SHA2="$(shasum -a 256 "$NOISE_GOLDENS" | awk '{print $1}')"
-BYTES2="$(wc -c < "$NOISE_GOLDENS" | tr -d ' ')"
-MANIFEST="$OUT_DIR/manifest.json"
+. "$ROOT/scripts/write_fixture_manifest.sh"
 NOTE="Paper-grounded TerrainProvider/NoiseData value-leaf goldens (the mc.data.worldgen.prereq unit): \`terrain-provider-goldens.json\` records the overworld offset/factor/jaggedness CubicSpline min/max/sample outputs and the peaksAndValleys sweep as hex-float, plus Paper's \`parityString()\` output, asserted bit-exactly by crates/rivet-world/src/data/worldgen/terrain_provider.rs tests; \`noise-data-goldens.json\` records NoiseData.bootstrap's registered key/parameter order, asserted by crates/rivet-world/src/data/worldgen/noise_data.rs tests. Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/TerrainProviderProbe.java and NoiseDataProbe.java; regenerate with \`scripts/run_data_worldgen_probe.sh\`."
-printf '%s\n' \
-  '{' \
-  '  "format": 1,' \
-  "  \"paper\": \"$PAPER_PIN\"," \
-  '  "kind": "data-worldgen",' \
-  "  \"note\": \"$NOTE\"," \
-  '  "captured": [' \
-  '    {' \
-  '      "path": "terrain-provider-goldens.json",' \
-  "      \"sha256\": \"$SHA1\"," \
-  "      \"bytes\": $BYTES1" \
-  '    },' \
-  '    {' \
-  '      "path": "noise-data-goldens.json",' \
-  "      \"sha256\": \"$SHA2\"," \
-  "      \"bytes\": $BYTES2" \
-  '    }' \
-  '  ]' \
-  '}' > "$MANIFEST"
-echo "wrote $MANIFEST"
+write_fixture_manifest "$OUT_DIR" "data-worldgen" "$PAPER_PIN" "$NOTE" "$TERRAIN_GOLDENS" "$NOISE_GOLDENS"
