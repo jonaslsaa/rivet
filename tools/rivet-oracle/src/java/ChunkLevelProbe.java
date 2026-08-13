@@ -2,6 +2,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import java.io.PrintWriter;
 import java.nio.file.Path;
 import net.minecraft.server.level.ChunkLevel;
@@ -80,7 +81,9 @@ public final class ChunkLevelProbe {
             JsonObject e = new JsonObject();
             e.addProperty("level", level);
             ChunkStatus status = ChunkLevel.generationStatus(level);
-            e.add("status", status == null ? JsonNull() : new Gson().toJsonTree(status.getName()));
+            if (status != null) {
+                e.add("status", new JsonPrimitive(status.getName()));
+            }
             generationStatus.add(e);
         }
         root.add("generationStatus", generationStatus);
@@ -193,9 +196,5 @@ public final class ChunkLevelProbe {
             Integer.MIN_VALUE, -100, -7, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 100,
             Integer.MAX_VALUE
         };
-    }
-
-    private static com.google.gson.JsonElement JsonNull() {
-        return com.google.gson.JsonNull.INSTANCE;
     }
 }

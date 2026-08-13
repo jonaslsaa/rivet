@@ -39,6 +39,12 @@ if [ ! -f "$RUNTIME_JAR" ]; then
 fi
 
 LIBS_DIR="${RIVET_PAPER_LIBRARIES:-$ROOT/work/run/libraries}"
+if [ ! -d "$LIBS_DIR" ]; then
+  echo "materialized library dir not found: $LIBS_DIR" >&2
+  echo "boot the M0 fixture server once (tools/rivet-oracle/README.md) or set" >&2
+  echo "RIVET_PAPER_LIBRARIES to the run's libraries/ dir" >&2
+  exit 1
+fi
 LIBS="$(find "$LIBS_DIR" -name '*.jar' 2>/dev/null | tr '\n' ':')"
 if [ -z "$LIBS" ]; then
   echo "no library jars under $LIBS_DIR" >&2

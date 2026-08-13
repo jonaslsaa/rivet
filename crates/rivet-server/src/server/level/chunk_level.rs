@@ -38,7 +38,7 @@ pub const MAX_LEVEL: i32 = FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK;
 /// be in generation range). Java derives it from
 /// `FULL_CHUNK_STEP.accumulatedDependencies().getRadius()`; `const` here is
 /// Java's `static final int`, and the value is pinned against the authoritative
-/// pyramid in `tests::radius_matches_the_generation_pyramid`.
+/// pyramid in `tests::radius_and_constants_match_the_generation_pyramid`.
 pub const RADIUS_AROUND_FULL_CHUNK: i32 = 11;
 
 /// `ChunkLevel.FULL_CHUNK_STEP` — the generation pyramid's FULL step
@@ -239,7 +239,9 @@ mod tests {
     fn generation_status_matches_paper() {
         for entry in fixture()["generationStatus"].as_array().unwrap() {
             let level = entry["level"].as_i64().unwrap() as i32;
-            let expected = entry.get("status").map(|s| status(s.as_str().unwrap()));
+            // The probe omits the `status` key for null (Gson drops null
+            // entries); handle both an omitted key and an explicit JSON null.
+            let expected = entry.get("status").and_then(|s| s.as_str()).map(status);
             assert_eq!(
                 generation_status(level),
                 expected,
