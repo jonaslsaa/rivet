@@ -128,7 +128,8 @@ pub struct Server {
     join_is_flat: bool,
     /// The seed the session's level advertises — the region-backed world's real
     /// `ServerLevel.seed()` (from `world_gen_settings.dat`) when a disk level is
-    /// configured, or the superflat default seed otherwise. Mirrors
+    /// configured, or the config's generated-world seed (the no-level superflat
+    /// boot's seed, defaulting to the M1 fixture) otherwise. Mirrors
     /// [`Self::join_is_flat`]; makes the `try_new` seed wiring observable to
     /// integration tests without exposing the session's level.
     join_seed: i64,
@@ -257,7 +258,7 @@ impl Server {
     }
 
     /// The seed the session's level advertises — the real region-backed seed or
-    /// the config's generated-world seed (see [`Self::join_seed`]).
+    /// the config's generated-world seed.
     pub fn join_seed(&self) -> i64 {
         self.join_seed
     }

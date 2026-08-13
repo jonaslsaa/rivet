@@ -1150,6 +1150,32 @@ mod tests {
         );
     }
 
+    /// The `enable_join: false` mirror branch: `Server::try_new` with no live
+    /// session manager still advertises the booted region-backed world's real
+    /// seed (the recomputed `region_level` path), so the `join_seed` accessor is
+    /// identical whether or not a session manager is installed.
+    #[test]
+    fn try_new_wires_region_backed_seed_without_join() {
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+
+        let server = crate::server::Server::try_new(crate::server::ServerConfig {
+            enable_join: false,
+            level_path: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .expect("a real region-backed world boots the server");
+        assert!(
+            !server.join_is_flat(),
+            "the noise overworld must advertise not-flat in the login"
+        );
+        assert_eq!(
+            server.join_seed(),
+            REAL_SEED,
+            "the loaded world keeps its real seed without a session manager"
+        );
+    }
+
     /// The `Server::try_new` login `is_flat` integration for a flat generator:
     /// a `minecraft:flat` overworld keeps the login flag true, the same
     /// `ServerLevel.isFlat()` semantics as the superflat default.
