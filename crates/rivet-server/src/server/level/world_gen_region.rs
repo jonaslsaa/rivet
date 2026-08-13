@@ -729,8 +729,8 @@ fn chunk_block_state(
 /// guards the free function's contract).
 ///
 /// Java's `setBlockState` also runs, past `INITIALIZE_LIGHT`, the light-engine
-/// update; the value layer defers that (no light engine on `ChunkAccess`,
-/// RivetTodo #185), as it defers the `UPDATE_SKIP_POI` POI update and the
+/// update; the value layer defers that — the light engine is not on `ChunkAccess`
+/// (#185) — as it defers the `UPDATE_SKIP_POI` POI update and the
 /// `UPDATE_KNOWN_SHAPE` post-process mark (see [`set_block`](Self::set_block)).
 /// The section write itself — the paletted-container set plus the
 /// `BlockBehaviour` count and ticking bookkeeping — is faithful.
