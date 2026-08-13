@@ -1159,6 +1159,15 @@ mod tests {
     /// `defaultBlock` (stone) everywhere (the disabled aquifer returns `None`
     /// for `density > 0` and the `unwrap_or(defaultBlock)` fallback runs).
     fn test_settings() -> NoiseGeneratorSettings {
+        test_settings_with_final_density(fns::interpolated(fns::cache_once(fns::constant(3.5))))
+    }
+
+    /// The `test_settings` router with an arbitrary `finalDensity` — the same
+    /// shape as `noise_chunk::tests::test_settings_with_final_density`, keeping
+    /// `preliminarySurfaceLevel = constant(100)` and aquifers disabled.
+    fn test_settings_with_final_density(
+        final_density: Arc<dyn DensityFunction>,
+    ) -> NoiseGeneratorSettings {
         let z = fns::zero();
         let router = NoiseRouter::new(
             z.clone(),
@@ -1172,7 +1181,7 @@ mod tests {
             z.clone(),
             z.clone(),
             fns::constant(100.0),
-            fns::interpolated(fns::cache_once(fns::constant(3.5))),
+            final_density,
             z.clone(),
             z.clone(),
             z,
@@ -1348,6 +1357,78 @@ mod tests {
             proto.get_section(0).non_empty_block_count(),
             0,
             "the cellCountY <= 0 path must return before writing"
+        );
+    }
+
+    /// A `fillFromNoise` fill over a fluid column: `finalDensity` is the
+    /// `yClampedGradient(-64, 63, 1.0, -1.0)` (linearly +1.0 at the world floor
+    /// down to -1.0 at sea level, crossing zero at `y = -0.5`) through the same
+    /// `interpolated(cacheOnce(...))` shape the real router's `finalDensity`
+    /// takes. With the disabled aquifer (`Aquifer.createDisabled`), `density >
+    /// 0` yields `null` → the `settings.defaultBlock()` (stone) fallback, and
+    /// `density <= 0` yields `fluidRule.computeFluid(x, y, z).at(y)` — water
+    /// for `y < 63` (the overworld sea level), air at/above 63. So every
+    /// column is stone at `-64..-1`, water at `0..62`, air at `63+`.
+    ///
+    /// The point is the heightmap divergence Java's two `Usage.WORLDGEN`
+    /// predicates produce on that column: `WORLD_SURFACE_WG` is `NOT_AIR` (the
+    /// water surface, height 62), while `OCEAN_FLOOR_WG` is
+    /// `MATERIAL_MOTION_BLOCKING` — water does not block motion, so the floor
+    /// resolves to the topmost stone at `y = -1` (height -1). The doFill
+    /// top-down write makes both updates deterministic. The disabled aquifer's
+    /// `shouldScheduleFluidUpdate()` is a constant `false`, so the fill must
+    /// mark nothing for post-processing.
+    #[test]
+    fn fill_from_noise_writes_fluid_column_and_diverges_worldgen_heightmaps() {
+        let gradient =
+            fns::interpolated(fns::cache_once(fns::y_clamped_gradient(-64, 63, 1.0, -1.0)));
+        let settings = test_settings_with_final_density(gradient);
+        let (noise_registry, df_registry) = empty_registries();
+        let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
+        let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
+        let mut proto = worldgen_proto(ChunkPos::ZERO);
+
+        generator.fill_from_noise(Blender::empty(), &state, &mut proto);
+
+        let stone = Blocks::STONE.default_block_state();
+        let water = Blocks::WATER.default_block_state();
+        let air = Blocks::AIR.default_block_state();
+        // The density crosses zero between y=-1 (stone) and y=0 (water); the
+        // fluid picker returns water below the sea level 63 and air at/above.
+        for y in -64..=-1 {
+            assert_eq!(proto.get_block_state(0, y, 0), stone, "stone at y {y}");
+        }
+        for y in 0..=62 {
+            assert_eq!(proto.get_block_state(0, y, 0), water, "water at y {y}");
+        }
+        assert_eq!(proto.get_block_state(0, 63, 0), air);
+
+        // WORLD_SURFACE_WG (NOT_AIR) tops out at the water surface; OCEAN_FLOOR_WG
+        // (MATERIAL_MOTION_BLOCKING) ignores the water and tops out at the stone
+        // floor — the two diverge by exactly the water depth.
+        let min_y = -64;
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::WorldSurfaceWg)
+                .get_height_at(0, 0, min_y),
+            62
+        );
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::OceanFloorWg)
+                .get_height_at(0, 0, min_y),
+            -1
+        );
+
+        // The disabled aquifer never schedules a fluid update, so no block is
+        // marked for post-processing (`markPosForPostProcessing` is gated on
+        // `aquifer.shouldScheduleFluidUpdate()`).
+        assert!(
+            proto
+                .get_post_processing()
+                .iter()
+                .all(|list| list.is_empty()),
+            "the disabled aquifer must not mark fluid updates"
         );
     }
 }
