@@ -82,13 +82,17 @@ is_cargo_target() { # $1 = dir; an unambiguous bare CARGO_TARGET_DIR (safe to rm
   return 0
 }
 
-cache_dirs() { # worktree build caches: nested target/ dirs, pruned on their own
+nested_cargo_targets() { # nested target/ dirs inside a checkout; pruned on their own
   local d
   [ -d "$1/target" ] && is_cargo_scratch "$1/target" && echo "$1/target"
   while IFS= read -r d; do
     [ -d "$d" ] && is_cargo_scratch "$d" && echo "$d"
   done < <(find "$1/tools" -maxdepth 2 -type d -name target 2>/dev/null)
   return 0
+}
+
+cache_dirs() { # worktree build caches: nested target/ dirs, pruned on their own
+  nested_cargo_targets "$1"
 }
 
 newest_mtime() { # $1 = path to stat; reads cache dirs (one per line) from stdin
@@ -108,17 +112,15 @@ newest_mtime() { # $1 = path to stat; reads cache dirs (one per line) from stdin
 }
 
 tmp_cache_dirs() { # a bare cargo target dir, or the cargo target dirs in a checkout
-  local d=$1 c
-  if is_cargo_target "$d"; then echo "$d"; return 0; fi
-  [ -d "$d/target" ] && is_cargo_scratch "$d/target" && echo "$d/target"
-  while IFS= read -r c; do
-    [ -d "$c" ] && is_cargo_scratch "$c" && echo "$c"
-  done < <(find "$d/tools" -maxdepth 2 -type d -name target 2>/dev/null)
-  return 0
+  if is_cargo_target "$1"; then echo "$1"; return 0; fi
+  nested_cargo_targets "$1"
 }
 
 touched_within() { # cargo writes deep, so a root stat alone would call live builds idle
-  [ -n "$(find "$1" -maxdepth 3 -mmin "-$2" -print -quit 2>/dev/null)" ]
+  # maxdepth 4: cargo rewrites existing fingerprint files (e.g. .fingerprint/
+  # <hash>/lib-<crate>.json) in place at depth 4, which does not bump the
+  # depth-3 hash dir's mtime — a shallower probe would miss an active build.
+  [ -n "$(find "$1" -maxdepth 4 -mmin "-$2" -print -quit 2>/dev/null)" ]
 }
 
 sweep_tmp() {

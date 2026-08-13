@@ -300,12 +300,16 @@ mkdir -p "$W4/target/debug/.fingerprint/hash1"
 printf '%s\n' "$CARGO_TAG" > "$W4/target/CACHEDIR.TAG"
 printf '[workspace]\n' > "$W4/Cargo.toml"
 mkdir "$W4/.git"
+printf '{}\n' > "$W4/target/debug/.fingerprint/hash1/lib-x.json"
 oldtouch "$W4"
-oldtouch "$W4/target" "$W4/target/CACHEDIR.TAG" "$W4/target/debug" "$W4/target/debug/.fingerprint" "$W4/target/debug/.fingerprint/hash1"
+oldtouch "$W4/target" "$W4/target/CACHEDIR.TAG" "$W4/target/debug" "$W4/target/debug/.fingerprint" "$W4/target/debug/.fingerprint/hash1" "$W4/target/debug/.fingerprint/hash1/lib-x.json"
 touched_within "$W4/target" 1440 && fail "fixture: deep files should be fresh" || true
-touch -m "$W4/target/debug/.fingerprint/hash1" # a fresh deep cargo write bumps the hash dir (depth 3)
+# cargo rewrites an existing fingerprint file (lib-<crate>.json) IN PLACE at
+# depth 4, which does not bump the depth-3 hash dir's mtime: only a maxdepth-4
+# probe can see this as fresh.
+touch -m "$W4/target/debug/.fingerprint/hash1/lib-x.json"
 touched_within "$W4/target" 1440 || fail "deep-fresh target was not detected by touched_within"
-pass "touched_within detects a deep fresh cargo write in a worktree target/"
+pass "touched_within detects a fresh depth-4 fingerprint write in a worktree target/"
 
 # --- sweep_tmp end to end ----------------------------------------------------
 SWEEP_ROOT="$SANDBOX/root-sweep"
