@@ -319,7 +319,7 @@ impl Visitor for NoiseWiringHelper<'_> {
         &self,
         holder: &Holder<Arc<dyn DensityFunction>>,
     ) -> Option<Arc<dyn DensityFunction>> {
-        Some(holder.value(&*self.functions).clone())
+        Some(holder.value(self.functions).clone())
     }
 }
 
@@ -361,7 +361,7 @@ impl Visitor for NoiseFlattener<'_> {
         &self,
         holder: &Holder<Arc<dyn DensityFunction>>,
     ) -> Option<Arc<dyn DensityFunction>> {
-        Some(holder.value(&*self.functions).clone())
+        Some(holder.value(self.functions).clone())
     }
 }
 
