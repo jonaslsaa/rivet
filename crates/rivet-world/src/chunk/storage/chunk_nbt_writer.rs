@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn vanilla_fixture_write_drops_is_light_on_and_light_arrays() {
+    fn vanilla_fixture_write_drops_is_light_on_and_keeps_light_arrays() {
         // The unmodified fixture is a vanilla-format save: `light_correct`
         // false, so Paper's own `write()` writes no `isLightOn` and no Starlight
         // state INTs. The reconstructed chunk carries the vanilla light arrays
@@ -694,18 +694,45 @@ mod tests {
     #[test]
     fn root_fields_preserve_paper_field_order_and_status() {
         // Field order mirrors `SerializableChunkData.write()` exactly: the
-        // DataVersion prefix, position, times, status, then the aux compounds.
+        // DataVersion prefix, position, times, status, sections, `isLightOn`
+        // (light-correct), the aux compounds, then the Starlight tail. On this
+        // genuine FULL fixture the conditional fields are absent (no
+        // blending_data/below_zero_retrogen, empty UpgradeData, no PDC), so the
+        // assertion pins the complete fixture-specific sequence — a regression
+        // reordering any field would fail the prefix check.
         let lit = make_starlight_lit(fixture("-1.-3.nbt"));
         let written = write_once(&lit);
-        let keys: Vec<&str> = written.key_set().map(String::as_str).collect();
+        let keys: Vec<String> = written.key_set().cloned().collect();
+        let expected = [
+            "DataVersion",
+            "xPos",
+            "yPos",
+            "zPos",
+            "LastUpdate",
+            "InhabitedTime",
+            "Status",
+            "sections",
+            "isLightOn",
+            "block_entities",
+            "block_ticks",
+            "fluid_ticks",
+            "PostProcessing",
+            "Heightmaps",
+            "structures",
+            "starlight.light_version",
+        ];
         assert_eq!(
-            keys[0], "DataVersion",
-            "DataVersion is written first (NbtUtils.addCurrentDataVersion)"
+            keys, expected,
+            "root fields follow SerializableChunkData.write() insertion order"
         );
+        // `isLightOn` sits at its step-12 slot: the Starlight tail's
+        // `putBoolean("isLightOn", false)` updates the existing key in place
+        // (Paper's NbtAccounter `put` semantics) rather than re-appending, with
+        // `starlight.light_version` appended last.
         assert_eq!(
-            &keys[1..5],
-            &["xPos", "yPos", "zPos", "LastUpdate"],
-            "position and last-update follow in Paper order"
+            written.get_boolean("isLightOn"),
+            Some(false),
+            "the tail clobber keeps the key at its original slot"
         );
         assert_eq!(
             written.get_string("Status").map(String::as_str),

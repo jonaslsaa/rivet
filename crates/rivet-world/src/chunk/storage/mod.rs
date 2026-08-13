@@ -31,12 +31,15 @@
 // (`moonrise$startWrite`/`moonrise$finishWrite`/`moonrise$readData`/
 // `moonrise$finishRead`), `IOWorker`'s `PendingStore` coalescing, and
 // `SimpleRegionStorage`'s coordinate guard land with the write worker wave.
-// `SerializableChunkData.write` is deferred. The Aikar `setOversized` clear
-// path is wired into the write lifecycle exactly like Paper: `write` clears the
-// legacy flag only on a successful store, while the delete and
-// `RegionFileSizeException` paths only `clear` (no `set_oversized`). The Aikar
-// recalc branches remain deferred. Codec coverage per DECISIONS.md D13: all
-// four registered read codecs are wired; deflate/lz4 writes stay deferred.
+// `chunk_nbt_writer::write` produces the current-version chunk `CompoundTag`;
+// the live save wiring that hands it to `RegionFileStorage`'s write lifecycle
+// (the `copyOf`-style live-chunk snapshot) lands with the write worker wave.
+// The Aikar `setOversized` clear path is wired into the write lifecycle exactly
+// like Paper: `write` clears the legacy flag only on a successful store, while
+// the delete and `RegionFileSizeException` paths only `clear` (no
+// `set_oversized`). The Aikar recalc branches remain deferred. Codec coverage
+// per DECISIONS.md D13: all four registered read codecs are wired; deflate/lz4
+// writes stay deferred.
 
 pub mod block_entity_materialization;
 pub mod chunk_nbt_writer;
