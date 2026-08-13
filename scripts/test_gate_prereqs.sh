@@ -575,5 +575,120 @@ grep -q "^    PASS" "$TMP/out_lw5" && fail "loaded-world: PASS printed despite a
 grep -q "^    UNVERIFIED" "$TMP/out_lw5" && fail "loaded-world: UNVERIFIED printed for a crash (classification is FAIL, exit 1)"
 pass "loaded-world: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
 
+# --- test 8: recenter scenario row (issues #185/#561) never silently skips ------
+# run_scenario_recenter always invokes `run-scenario.sh recenter` — the
+# Rivet-only row needs no paperclip jar — and classifies its machine-stable exit
+# code exactly like run_scenario_loaded_world: 0 PASS, 1 FAIL (hard exit 1,
+# never UNVERIFIED), 3 UNVERIFIED (sets ORACLE_UNVERIFIED so the gate exits 3,
+# or hard exit 1 under --require-oracle), and any other nonzero (crash) FAIL
+# (exit 1, never green). The shim records its argv and exits with the code in
+# $RC_EXIT_FILE.
+RC_SCENARIO_LOG="$TMP/rc-invocations.log"
+RC_EXIT_FILE="$TMP/rc-exit"
+printf '%s\n' 0 > "$RC_EXIT_FILE"
+set_rc_exit() { printf '%s\n' "$1" > "$RC_EXIT_FILE"; }
+# The existing test-7 shim is replaced here (test 7 already ran); the argv log
+# is separate so the recenter assertions stay isolated.
+cat > "$SCENARIO_SHIM_DIR/run-scenario.sh" <<RCEOF
+#!/bin/bash
+echo "\$@" >> '$RC_SCENARIO_LOG'
+exit "\$(cat '$RC_EXIT_FILE')"
+RCEOF
+chmod +x "$SCENARIO_SHIM_DIR/run-scenario.sh"
+
+# PASS (exit 0): the row reports PASS, sets no UNVERIFIED, and the wrapper is
+# invoked with exactly `recenter`.
+set_rc_exit 0
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+: > "$RC_SCENARIO_LOG"
+run_scenario_recenter > "$TMP/out_rc1" 2>&1
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "recenter: ORACLE_UNVERIFIED set on a PASS"
+grep -q "^    PASS" "$TMP/out_rc1" || fail "recenter: PASS not printed for exit 0"
+[ "$(wc -l < "$RC_SCENARIO_LOG" | tr -d ' ')" = 1 ] || fail "recenter: expected exactly 1 run-scenario invocation, got $(wc -l < "$RC_SCENARIO_LOG")"
+grep -qx "recenter" "$RC_SCENARIO_LOG" || fail "recenter: run-scenario.sh not invoked with exactly 'recenter' (got $(cat "$RC_SCENARIO_LOG"))"
+pass "recenter: exit 0 -> PASS, stays verified, invoked with exactly 'recenter'"
+
+# FAIL (exit 1): hard exit 1, reported FAILED, never UNVERIFIED, no
+# ORACLE_UNVERIFIED. run_scenario_recenter exits the shell in this branch, so it
+# runs in a subshell.
+set_rc_exit 1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+( run_scenario_recenter > "$TMP/out_rc2" 2>&1 )
+rc_rc2=$?
+set -e
+[ "$rc_rc2" = 1 ] || fail "recenter: FAIL should exit 1 (got $rc_rc2)"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "recenter: FAIL should not set ORACLE_UNVERIFIED"
+grep -q "^    FAILED" "$TMP/out_rc2" || fail "recenter: FAILED not printed for exit 1"
+grep -q "^    UNVERIFIED" "$TMP/out_rc2" && fail "recenter: UNVERIFIED printed for a FAIL (exit 1)"
+grep -q "^    PASS" "$TMP/out_rc2" && fail "recenter: PASS printed for a FAIL"
+pass "recenter: exit 1 -> FAILED, hard exit 1, never UNVERIFIED"
+
+# UNVERIFIED (exit 3) without --require-oracle: sets ORACLE_UNVERIFIED, returns
+# 0 (main turns it into gate exit 3).
+set_rc_exit 3
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+run_scenario_recenter > "$TMP/out_rc3" 2>&1
+rc_rc3=$?
+set -e
+[ "$rc_rc3" = 0 ] || fail "recenter: UNVERIFIED without --require-oracle should return 0 (got $rc_rc3)"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "recenter: ORACLE_UNVERIFIED not set on exit 3"
+grep -q "^    UNVERIFIED" "$TMP/out_rc3" || fail "recenter: UNVERIFIED not printed for exit 3"
+grep -q "^    PASS" "$TMP/out_rc3" && fail "recenter: PASS printed for an UNVERIFIED run"
+pass "recenter: exit 3 -> UNVERIFIED, ORACLE_UNVERIFIED set"
+
+# UNVERIFIED (exit 3) with --require-oracle: hard failure (exit 1), after
+# reporting UNVERIFIED. run_scenario_recenter exits the shell here.
+set_rc_exit 3
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=1; REPO_DIR="$FAKE_FULL"
+set +e
+( run_scenario_recenter > "$TMP/out_rc4" 2>&1 )
+rc_rc4=$?
+set -e
+REQUIRE_ORACLE=0
+[ "$rc_rc4" = 1 ] || fail "recenter: UNVERIFIED + --require-oracle should exit 1 (got $rc_rc4)"
+grep -q "^    UNVERIFIED" "$TMP/out_rc4" || fail "recenter: UNVERIFIED not printed before the hard failure"
+grep -q "hard failure" "$TMP/out_rc4" || fail "recenter: --require-oracle hard-failure message missing"
+pass "recenter: exit 3 + --require-oracle -> hard exit 1"
+
+# Crash / unexpected exit (101): FAIL (exit 1), reported FAILED, never green.
+set_rc_exit 101
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+set +e
+( run_scenario_recenter > "$TMP/out_rc5" 2>&1 )
+rc_rc5=$?
+set -e
+[ "$rc_rc5" = 1 ] || fail "recenter: crash should exit 1 (got $rc_rc5)"
+grep -q "^    FAILED" "$TMP/out_rc5" || fail "recenter: FAILED not printed for exit 101"
+grep -q "^    PASS" "$TMP/out_rc5" && fail "recenter: PASS printed despite a crash"
+grep -q "^    UNVERIFIED" "$TMP/out_rc5" && fail "recenter: UNVERIFIED printed for a crash (classification is FAIL, exit 1)"
+pass "recenter: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
+
+# --- test 9: loaded-world + recenter rows are wired into the full-gate block -----
+# The classification tests above drive run_scenario_loaded_world and
+# run_scenario_recenter directly, but a row could still silently drop off the
+# gate if its invocation sat outside the `if [ "$FULL_GATE" = true ]` guard (or
+# vanished from main()). Assert the source wires both rows inside the guard.
+# The scenario block is the FULL_GATE-guarded block whose first call is
+# run_scenario_paper_rows, so anchor the extraction on that unique call (not the
+# last FULL_GATE guard in the file): a new full-gate-guarded step appended later
+# (e.g. before machete) must not move the extraction to the wrong block.
+GATE_SOURCE="$SCRIPT_DIR/gate.sh"
+# `|| true` on each assignment: under `set -euo pipefail`, a grep/awk with no
+# match would abort the $(...) assignment (silent, no diagnostic) before the
+# [ -n ... ] guard below can print its named failure. Let the assignment
+# complete with an empty value so the guard fires the intended message.
+PAPER_LINE="$(grep -n '^    run_scenario_paper_rows$' "$GATE_SOURCE" | cut -d: -f1 || true)"
+[ -n "$PAPER_LINE" ] || fail "gate: '    run_scenario_paper_rows' not found in gate.sh (scenario block anchor missing)"
+GATE_GUARD_LINE="$(grep -nF 'if [ "$FULL_GATE" = true ]; then' "$GATE_SOURCE" | awk -F: -v target="$PAPER_LINE" '$1 <= target { last = $1 } END { print last }' || true)"
+[ -n "$GATE_GUARD_LINE" ] || fail "gate: no FULL_GATE guard at or before line $PAPER_LINE (scenario block not guarded)"
+SCENARIO_BLOCK="$(sed -n "${GATE_GUARD_LINE},\$p" "$GATE_SOURCE" | awk '/^  fi$/ { print; exit } { print }')"
+printf '%s\n' "$SCENARIO_BLOCK" | grep -q '^    run_scenario_loaded_world$' \
+  || fail "gate: run_scenario_loaded_world not invoked in the full-gate scenario block"
+printf '%s\n' "$SCENARIO_BLOCK" | grep -q '^    run_scenario_recenter$' \
+  || fail "gate: run_scenario_recenter not invoked in the full-gate scenario block"
+pass "gate: loaded-world + recenter rows are wired inside the full-gate scenario block"
+
 echo
 echo "ALL GATE PREREQ TESTS PASSED"
