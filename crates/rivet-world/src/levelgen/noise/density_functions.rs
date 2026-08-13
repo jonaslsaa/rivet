@@ -2282,8 +2282,10 @@ impl EndIslandDensityFunction {
         let mut cache = self.cache.lock().unwrap();
         for xo in -12..=12i32 {
             for zo in -12..=12i32 {
-                let total_chunk_x = chunk_x as i64 + xo as i64;
-                let total_chunk_z = chunk_z as i64 + zo as i64;
+                // Java `long totalChunkX = chunkX + xo;` — the int add wraps at
+                // 32 bits, then sign-extends to long.
+                let total_chunk_x = chunk_x.wrapping_add(xo) as i64;
+                let total_chunk_z = chunk_z.wrapping_add(zo) as i64;
                 let chunk_key = ChunkPos::pack_coords(total_chunk_x as i32, total_chunk_z as i32);
                 let cache_index = (mix_i64(chunk_key) & 8191) as usize;
                 // Java `float islandSize = Float.MIN_VALUE` — the smallest
