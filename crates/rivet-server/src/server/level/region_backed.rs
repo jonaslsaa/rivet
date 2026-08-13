@@ -1172,6 +1172,13 @@ mod tests {
             server.join_is_flat(),
             "minecraft:flat must keep the login is_flat flag true"
         );
+        // A flat generator still carries the persisted seed from
+        // world_gen_settings.dat, not the config's generated-world seed.
+        assert_eq!(
+            server.join_seed(),
+            REAL_SEED,
+            "the loaded flat world keeps its real seed"
+        );
     }
 
     /// The superflat default: `Server::try_new` with no `level_path` advertises
@@ -1188,8 +1195,12 @@ mod tests {
             "the no-level superflat boot must advertise flat"
         );
         // The no-level superflat boot carries the config's generated-world seed
-        // into the world and login; the default stays the M1 fixture 42.
-        assert_eq!(server.join_seed(), 42, "the superflat default seed is 42");
+        // into the world and login; the default stays the M1 fixture seed.
+        assert_eq!(
+            server.join_seed(),
+            ServerLevelConfig::M1_FIXTURE_SEED,
+            "the superflat default seed is the M1 fixture"
+        );
     }
 
     /// `Server::try_new` with an explicit generated-world seed: the no-level

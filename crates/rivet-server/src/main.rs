@@ -96,9 +96,9 @@ async fn run_server(server: Server) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Parse the bind config. `--host`, `--port`, and `--seed` override the
-/// defaults so the binary is runnable without a `server.properties` parser (a
-/// later M1 slice). `--seed <i64>` is the generated-world seed (draft PR #563's
+/// Parse the bind config. `--host`, `--port`, `--level`, and `--seed` override
+/// the defaults so the binary is runnable without a `server.properties` parser.
+/// `--seed <i64>` is the generated-world seed (draft PR #563's
 /// `generated-world` capability contract: the scenario runner boots
 /// `rivet-server --seed 42`); the no-level superflat boot carries it into the
 /// world object and the login packet's obfuscated seed.
