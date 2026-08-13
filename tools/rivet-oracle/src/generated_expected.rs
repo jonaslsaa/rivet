@@ -39,6 +39,11 @@
 //!     chunks with real generated variety: a superflat echo (all-air bedrock
 //!     plane at -60, uniform surface arrays, a tiny distinct-block set) is
 //!     refused loudly, so the handoff can never be gamed into a vacuous pass.
+//!   * capture enforces provenance: after the capture boot, the materialized
+//!     server jar's `Git-Commit` must match the pinned `0a99345` before any
+//!     content is written — a wrong-commit jar (a `RIVET_ORACLE_JAR` override or
+//!     a stale `work/jars/` paperclip) is refused, never stamped with the pinned
+//!     provenance.
 //!   * the regenerate path validates a capture against the anti-superflat
 //!     contract BEFORE committing it, in addition to the twin-boot byte-identity
 //!     proof — two equally-wrong captures are refused, never committed.
@@ -171,44 +176,36 @@ fn capture_run_dir() -> PathBuf {
     crate::crate_dir().join("work/generated-expected/run")
 }
 
-/// Link an existing materialized Paper runtime into the capture run dir so the
-/// capture does not re-materialize ~160MB of libraries on first use. Reuses
-/// whatever runtime is already materialized: the dedicated dir's own copy
-/// first, then the shared `work/run` (the M0 fixture-boot runtime), then the
-/// shared `work/verify/run`. Each `sub` (`libraries`, `versions`, `cache`) is
-/// symlinked only when the capture dir lacks it. `prepare_run_dir` reuses
-/// linked dirs exactly like real dirs (it keeps them across prepares), so this
-/// is safe across the capture's two boots and across captures.
-fn ensure_runtime_reuse(run_dir: &Path) -> Result<(), Error> {
-    let root = crate::crate_dir().join("work");
-    let candidates = [
-        run_dir.to_path_buf(),
-        root.join("run"),
-        root.join("verify/run"),
-    ];
-    for sub in ["libraries", "versions", "cache"] {
-        let dest = run_dir.join(sub);
-        if dest.exists() {
-            continue;
+/// Confirm the server jar the capture actually booted carries the pinned Paper
+/// commit (`0a99345`, the commit part of `PINNED_PAPER`).
+///
+/// The captured content is stamped with `PINNED_PAPER` provenance in the
+/// committed manifest, so a boot from a different commit (a `RIVET_ORACLE_JAR`
+/// override or a stale `work/jars/` paperclip) must be refused — otherwise a
+/// wrong-commit capture would be handed off as the pinned ground truth, which is
+/// fabricated provenance (D8). Mirrors the gate's `check_pin`: the source of
+/// truth is the materialized server jar the paperclip produced into the run dir
+/// and the JVM actually loaded.
+fn check_capture_pin(run_dir: &Path) -> Result<(), Error> {
+    let expected = crate::parse_paper_pin(Some(PINNED_PAPER)).ok_or_else(|| {
+        Error::Gate("PINNED_PAPER carries no @<commit> pin to verify the capture against".into())
+    })?;
+    let jar = crate::materialized_server_jar(run_dir);
+    let actual = crate::read_jar_git_commit(&jar)?;
+    // Reuse the gate's already-tested classification (main.rs `classify_pin`):
+    // Match / Mismatch / Unavailable, where Unavailable is never a silent pass.
+    match crate::classify_pin(Some(expected), actual) {
+        crate::PinVerdict::Match => Ok(()),
+        crate::PinVerdict::Mismatch { expected, actual } => {
+            Err(Error::PinMismatch { expected, actual })
         }
-        for cand in &candidates {
-            let src = cand.join(sub);
-            if src.is_dir() {
-                if !run_dir.exists() {
-                    fs::create_dir_all(run_dir)?;
-                }
-                std::os::unix::fs::symlink(&src, &dest).map_err(|e| {
-                    Error::Gate(format!(
-                        "cannot symlink {} -> {}: {e}",
-                        src.display(),
-                        dest.display()
-                    ))
-                })?;
-                break;
-            }
-        }
+        crate::PinVerdict::Unavailable { reason } => Err(Error::PinUnavailable {
+            reason: format!(
+                "{reason} — the generated-expected capture's content would be stamped with \
+                 {PINNED_PAPER} provenance; refusing to fabricate it"
+            ),
+        }),
     }
-    Ok(())
 }
 
 /// Boot the pinned Paper on a fresh seed world, force-generate the spawn grid
@@ -228,10 +225,12 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
     })?;
     let props = seed_properties(seed)?;
     let run_dir = capture_run_dir();
-    // Reuse the materialized Paper runtime (libraries/versions/cache) from any
-    // existing oracle runtime so the first capture does not re-materialize
-    // ~160MB; the dedicated dir's own copies are reused on later captures.
-    ensure_runtime_reuse(&run_dir)?;
+    // The capture's runtime is self-contained in this dedicated dir: the first
+    // boot's `prepare_run_dir` materializes libraries/versions/cache here, and
+    // later boots and captures reuse them. We deliberately never symlink/copy
+    // from the shared `work/verify/run` (the dir the oracle gates boot in): a
+    // concurrent gate may `remove_dir_all` it or write to its `cache/` mid-boot,
+    // which would dangle a link or hand the capture a half-written runtime.
     let grid = grid_coordinates();
     let forced = forced_coordinates();
 
@@ -262,6 +261,13 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
     println!("      [boot2] capturing the forced FULL spawn grid...");
     crate::boot_and_shutdown(&run_dir, &capture_log, &jar)?;
     crate::verify_forced_load(&capture_log, forced.len())?;
+
+    // Provenance: the content this capture is about to be stamped with
+    // `PINNED_PAPER` in the committed manifest must have actually been generated
+    // by that commit's server jar (the materialized jar the JVM loaded). A
+    // different jar (wrong RIVET_ORACLE_JAR / stale work/jars override) is
+    // fabricated provenance and is refused before anything is written.
+    check_capture_pin(&run_dir)?;
 
     let manifest = loaded_world::extract_world(&run_dir.join("world")).map_err(|e| match e {
         loaded_world::ExtractError::Unverified(m) => Error::Unverified(m),
@@ -380,11 +386,12 @@ pub fn load(dir: &Path) -> Result<WorldManifest, Error> {
 /// `Error::Unverified` (exit 3) when the fixture tree is absent rather than
 /// silently skipping it (D8).
 pub fn verify_generated_expected_step(dir: &Path) -> Result<(), Error> {
-    if !dir.join("manifest.json").is_file() {
+    if !dir.join("manifest.json").is_file() || !dir.join(FIXTURE_BASENAME).is_file() {
         return Err(Error::Unverified(format!(
-            "generated-expected fixtures {} are ABSENT — the seed-42 ground-truth handoff \
-             and its per-chunk gate cannot verify (git checkout or regenerate via \
-             --generated-expected); refusing to pass green without them",
+            "generated-expected fixtures {} are ABSENT (need both manifest.json and \
+             {FIXTURE_BASENAME}) — the seed-42 ground-truth handoff and its per-chunk gate \
+             cannot verify (git checkout or regenerate via --generated-expected); refusing to \
+             pass green without them",
             dir.display()
         )));
     }
@@ -779,6 +786,25 @@ fn parse_cli(rest: &[&str]) -> Result<CliArgs, Error> {
                 })?);
                 i += 1;
             }
+            // A negative seed (`-5`) must be read as a seed, not an unknown
+            // option — the `--to` capture accepts any i64 seed. A `--`-prefixed
+            // token is always an option (unknown ones are refused below); only a
+            // single-dash token whose tail is an integer is a negative seed.
+            other
+                if other.starts_with('-')
+                    && !other.starts_with("--")
+                    && other[1..].parse::<i64>().is_ok() =>
+            {
+                if seed.is_some() {
+                    return Err(Error::Gate(
+                        "generated-expected takes exactly one seed".into(),
+                    ));
+                }
+                seed = Some(other.parse().map_err(|_| {
+                    Error::Gate(format!("generated-expected seed {other} is not an integer"))
+                })?);
+                i += 1;
+            }
             other => {
                 return Err(Error::Gate(format!(
                     "generated-expected: unknown option {other}"
@@ -954,6 +980,24 @@ mod tests {
         );
     }
 
+    /// A PARTIALLY absent fixture tree (manifest present, golden deleted) is
+    /// still UNVERIFIED (exit 3), not a FAIL — the runner must not misclassify a
+    /// missing prereq as a comparison failure.
+    #[test]
+    fn partially_absent_fixture_tree_is_unverified() {
+        let scratch =
+            std::env::temp_dir().join(format!("rivet-oracle-ge-half-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::write(scratch.join("manifest.json"), b"{}").unwrap();
+        let result = verify_generated_expected_step(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        assert!(
+            matches!(result, Err(crate::Error::Unverified(_))),
+            "expected Error::Unverified (exit 3) for a missing golden, got {result:?}"
+        );
+    }
+
     #[test]
     fn tamper_negative_control_detects_corruption() {
         let dir = fixtures_dir().join("generated-expected");
@@ -1099,7 +1143,7 @@ mod tests {
     #[test]
     fn uniform_below_floor_is_rejected() {
         let mut world = uniform_chunks("minecraft:bedrock");
-        for (i, (key, fp)) in world.chunks.iter_mut().enumerate() {
+        for (i, (_, fp)) in world.chunks.iter_mut().enumerate() {
             let variant = if i % 2 == 0 {
                 "minecraft:grass_block"
             } else {
@@ -1110,6 +1154,40 @@ mod tests {
         let err = verify_scratch_world(&world, "below-floor");
         let msg = err.to_string();
         assert!(msg.contains("below_feet array"), "unexpected error: {msg}");
+    }
+
+    /// A relabeled chunk — one whose internal `stored_pos` does not match its
+    /// grid key — must be rejected even when every other chunk is the genuine
+    /// committed golden. The stored_pos/key agreement is what stops a chunk
+    /// captured elsewhere from being relabeled into a real grid slot, so it must
+    /// be covered by its own negative test (regression: the check could silently
+    /// rot without one).
+    #[test]
+    fn relabeled_chunk_is_rejected() {
+        let dir = fixtures_dir().join("generated-expected");
+        require_fixture(&dir);
+        let mut world = load(&dir).unwrap();
+        // Relabel the genuine (0,0) chunk as if it were (1,0): the chunk's
+        // internal xPos/zPos no longer match its grid key.
+        let fp = world.chunks.get_mut("0,0").expect("grid chunk 0,0");
+        fp.stored_pos = [1, 0];
+        let err = verify_scratch_world(&world, "relabeled");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stored_pos") && msg.contains("relabeled"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// The capture's provenance pin is the commit part of PINNED_PAPER — the
+    /// committed handoff is only honest if the booted server jar is at 0a99345
+    /// (this is what `check_capture_pin` enforces against the materialized jar).
+    #[test]
+    fn pinned_paper_commit_is_the_capture_provenance_pin() {
+        assert_eq!(
+            crate::parse_paper_pin(Some(PINNED_PAPER)).as_deref(),
+            Some("0a99345")
+        );
     }
 
     /// Regenerating the manifest in Rust is byte-identical to the committed
@@ -1150,6 +1228,12 @@ mod tests {
         let parsed = parse_cli(&["42"]).unwrap();
         assert_eq!(parsed.seed, 42);
         assert!(parsed.to.is_none());
+
+        // Negative seeds are valid for the --to capture path (a leading `-` must
+        // not be mistaken for an unknown option).
+        let parsed = parse_cli(&["-5", "--to", "/tmp/out.json"]).unwrap();
+        assert_eq!(parsed.seed, -5);
+        assert_eq!(parsed.to, Some(PathBuf::from("/tmp/out.json")));
     }
 
     #[test]
@@ -1173,6 +1257,8 @@ mod tests {
             parse_cli(&["42", "--bogus"]),
             Err(crate::Error::Gate(_))
         ));
+        // A `--`-prefixed token is never a negative seed — unknown option -> Gate.
+        assert!(matches!(parse_cli(&["--5"]), Err(crate::Error::Gate(_))));
         // --tamper and --to together are refused (mutually exclusive modes).
         assert!(matches!(
             parse_cli(&["42", "--tamper", "--to", "/tmp/x.json"]),
