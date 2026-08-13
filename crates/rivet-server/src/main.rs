@@ -101,9 +101,7 @@ async fn run_server(server: Server) -> ExitCode {
 /// `--seed <i64>` is the generated-world seed (the `generated-world`
 /// capability contract: the scenario runner boots `rivet-server --seed 42`);
 /// the no-level superflat boot carries it into the world object and the login
-/// packet's obfuscated seed. `--seed` is rejected when combined with `--level`:
-/// a loaded world keeps its persisted seed from `world_gen_settings.dat`, so an
-/// explicit seed would otherwise be silently ignored.
+/// packet's obfuscated seed.
 ///
 /// The production binary always enables the live play path: `Server::new`
 /// wires the tick-owned session manager that consumes the configuration→play
@@ -126,7 +124,6 @@ fn production_config_from_args(args: impl Iterator<Item = String>) -> ServerConf
 
 fn config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
     let mut config = ServerConfig::default();
-    let mut seed_given = false;
     let mut i = 0;
     let args: Vec<String> = args.collect();
     while i < args.len() {
@@ -156,17 +153,10 @@ fn config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
                 config.seed = raw
                     .parse()
                     .expect("invalid --seed (expected a signed 64-bit integer)");
-                seed_given = true;
             }
             other => panic!("unknown argument {other:?} (expected --host/--port/--level/--seed)"),
         }
         i += 1;
-    }
-    // A loaded world keeps its persisted seed from world_gen_settings.dat, so
-    // an explicit `--seed` would be silently ignored; reject the combination
-    // rather than drop the caller's input.
-    if seed_given && config.level_path.is_some() {
-        panic!("--seed cannot be combined with --level (a loaded world keeps its persisted seed)");
     }
     config
 }
@@ -277,9 +267,18 @@ mod tests {
     #[test]
     fn parses_seed_with_bind_overrides() {
         let config = config_from_args(
-            ["--host", "127.0.0.1", "--seed", "7", "--port", "25599"]
-                .into_iter()
-                .map(str::to_owned),
+            [
+                "--host",
+                "127.0.0.1",
+                "--seed",
+                "7",
+                "--level",
+                "/tmp/rivet-disposable-world",
+                "--port",
+                "25599",
+            ]
+            .into_iter()
+            .map(str::to_owned),
         );
         assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 25599);
@@ -287,25 +286,9 @@ mod tests {
         // combined-flag path (the default equals M1_FIXTURE_SEED, so 42 would
         // pass even if the arm were dropped).
         assert_eq!(config.seed, 7);
-    }
-
-    #[test]
-    #[should_panic(expected = "--seed cannot be combined with --level")]
-    fn seed_with_level_is_rejected() {
-        let _ = config_from_args(
-            ["--seed", "7", "--level", "/tmp/rivet-disposable-world"]
-                .into_iter()
-                .map(str::to_owned),
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "--seed cannot be combined with --level")]
-    fn level_with_seed_is_rejected_either_order() {
-        let _ = config_from_args(
-            ["--level", "/tmp/rivet-disposable-world", "--seed", "7"]
-                .into_iter()
-                .map(str::to_owned),
+        assert_eq!(
+            config.level_path.as_deref(),
+            Some(std::path::Path::new("/tmp/rivet-disposable-world"))
         );
     }
 
