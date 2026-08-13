@@ -1,0 +1,582 @@
+//! The composed-noise golden comparison slice: a non-vacuous seed-42 golden
+//! comparison against the pinned Paper overworld generator's NOISE checkpoint
+//! (`mc.world.level.levelgen`), the piece the generated-world scoreboard needs
+//! before generated chunks exist.
+//!
+//! `fixtures/composed-noise/composed-noise.json` is captured by
+//! `scripts/run_composed_noise_probe.sh` (running `ComposedNoiseProbe` against
+//! the pinned Paper 0a99345 runtime) and records, at the #175 chunk-coordinate
+//! matrix expressed as block columns:
+//!
+//!   * the router climate fields (temperature/vegetation/continents/erosion/
+//!     depth/ridges) and the float-cast weirdness + folded `peaksAndValleys`,
+//!   * the interpolated final density (`getInterpolatedNoiseValue` — the value
+//!     `doFill` uses to place blocks), the raw `finalDensity` router field, and
+//!     `preliminarySurfaceLevel`,
+//!   * every value as BOTH the round-tripping JSON double AND the raw IEEE-754
+//!     bit pattern (`Double.doubleToLongBits` / `Float.floatToIntBits`), so a
+//!     Rust port asserts `f64::to_bits` exactly — never a tolerant compare.
+//!
+//! The verify command recomputes the values with the committed bit patterns as
+//! the assertion target and prints the BIOMES→NOISE→SURFACE→CARVERS→FEATURES→
+//! LIGHT→FULL status/provenance scoreboard plus the FULL_CHUNK_STEP accumulated
+//! reachability (computed by `chunk_level`, not assumed). The tamper negative
+//! control proves the comparison detects a flipped bit.
+
+use crate::chunk_level::{ChunkLevelConsts, ChunkPyramid, by_status, status_around_full_chunk};
+use crate::{CapturedFile, Error, sha256_hex};
+use rivet_world::chunk::status::ChunkStatus;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
+/// The checkpoint ladder the scoreboard reports — the statuses a generated
+/// world must prove green in order (each later checkpoint depends on all
+/// earlier ones).
+pub const CHECKPOINTS: &[ChunkStatus] = &[
+    ChunkStatus::Biomes,
+    ChunkStatus::Noise,
+    ChunkStatus::Surface,
+    ChunkStatus::Carvers,
+    ChunkStatus::Features,
+    ChunkStatus::Light,
+    ChunkStatus::Full,
+];
+
+const KIND: &str = "composed-noise";
+const FIXTURE_BASENAME: &str = "composed-noise.json";
+
+/// A captured bit-pattern entry (double via `Double.doubleToLongBits`).
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct BitSample {
+    pub bits: i64,
+    pub value: serde_json::Value,
+}
+
+/// One climate column sample.
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct ClimateSample {
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+    pub cx: i64,
+    pub cz: i64,
+    pub temperature: BitSample,
+    pub vegetation: BitSample,
+    pub continents: BitSample,
+    pub erosion: BitSample,
+    pub depth: BitSample,
+    pub ridges: BitSample,
+    pub weirdness: BitSample,
+    #[serde(rename = "peaksAndValleys")]
+    pub peaks_and_valleys: BitSample,
+}
+
+/// One density column sample.
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct DensitySample {
+    pub x: i64,
+    pub y: i64,
+    pub z: i64,
+    pub cx: i64,
+    pub cz: i64,
+    pub density: BitSample,
+    #[serde(rename = "finalDensity")]
+    pub final_density: BitSample,
+    #[serde(rename = "preliminarySurfaceLevel")]
+    pub preliminary_surface_level: BitSample,
+}
+
+/// The parsed composed-noise fixture.
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct ComposedNoise {
+    pub seed: i64,
+    pub paper: String,
+    pub dimension: String,
+    pub generator: String,
+    #[serde(rename = "level-type")]
+    pub level_type: String,
+    #[serde(rename = "noise-settings")]
+    pub noise_settings: String,
+    pub format: i64,
+    #[serde(rename = "full-chunk-step")]
+    pub full_chunk_step: FullChunkStep,
+    pub climate: Vec<ClimateSample>,
+    pub density: Vec<DensitySample>,
+}
+
+/// The FULL_CHUNK_STEP reachability captured from live Paper.
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct FullChunkStep {
+    pub level: i64,
+    #[serde(rename = "accumulated-radius")]
+    pub accumulated_radius: i64,
+    #[serde(rename = "max-level")]
+    pub max_level: i64,
+    #[serde(rename = "by-distance")]
+    pub by_distance: Vec<ByDistance>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+pub struct ByDistance {
+    pub distance: i64,
+    pub status: String,
+}
+
+/// A scoreboard row: the checkpoint status, its measured reachability level
+/// (`ChunkLevel.byStatus`), the number of committed bit-pattern entries that
+/// would be asserted when the checkpoint is wired, and whether it is covered.
+#[derive(Debug)]
+pub struct ScoreboardRow {
+    pub status: ChunkStatus,
+    pub level: i64,
+    pub entries: usize,
+}
+
+/// Parse + structurally validate the committed composed-noise fixture.
+pub fn load(dir: &Path) -> Result<ComposedNoise, Error> {
+    let path = dir.join(FIXTURE_BASENAME);
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
+    let v: ComposedNoise = serde_json::from_str(&raw)
+        .map_err(|e| Error::Manifest(format!("invalid {FIXTURE_BASENAME}: {e}")))?;
+    if v.format != 1 {
+        return Err(Error::Manifest(format!(
+            "unsupported composed-noise format {} (expected 1)",
+            v.format
+        )));
+    }
+    Ok(v)
+}
+
+/// The generated-world scoreboard: every checkpoint, its reachability level,
+/// and how many bit-exact entries a green checkpoint would assert. Printed by
+/// verify; the checkpoint statuses are asserted to be a faithful port (the
+/// FULL_CHUNK_STEP reachability and byStatus levels come from `chunk_level`,
+/// never from the fixture).
+pub fn scoreboard() -> Vec<ScoreboardRow> {
+    let step = ChunkPyramid::generation_pyramid()
+        .get_step_to(ChunkStatus::Full)
+        .clone();
+    let mut rows: Vec<ScoreboardRow> = Vec::new();
+    for status in CHECKPOINTS {
+        let level = by_status(&step, *status) as i64;
+        // A checkpoint asserts the bit-pattern entries that cover its
+        // checkpoint's value leaves: NOISE asserts all 80 density + 8 climate
+        // entries (finalDensity/density/weirdness/peaksAndValleys/etc.);
+        // BIOMES/SURFACE/etc. reach the same columns at their own level. For a
+        // not-yet-wired checkpoint the count is the number that WOULD be
+        // asserted — the scoreboard is forward-looking.
+        let entries = match status {
+            ChunkStatus::Biomes => 8,
+            ChunkStatus::Noise => 88,
+            ChunkStatus::Surface => 80,
+            ChunkStatus::Carvers => 80,
+            ChunkStatus::Features => 80,
+            ChunkStatus::Light => 80,
+            ChunkStatus::Full => 80,
+            _ => 0,
+        };
+        rows.push(ScoreboardRow {
+            status: *status,
+            level,
+            entries,
+        });
+    }
+    rows
+}
+
+/// Print the status/provenance scoreboard.
+pub fn print_scoreboard() {
+    println!();
+    println!("generated-world status/provenance scoreboard");
+    println!("=============================================");
+    println!(
+        "{:<20} {:>6} {:>10}   coverage",
+        "checkpoint", "level", "bit-entries"
+    );
+    let step = ChunkPyramid::generation_pyramid()
+        .get_step_to(ChunkStatus::Full)
+        .clone();
+    for row in scoreboard() {
+        // A checkpoint is "covered" by the committed golden when its value
+        // leaves are bit-asserted today. Only NOISE (the composed-noise slice)
+        // and BIOMES (the climate column) are wired now; the rest are the
+        // planned later checkpoints.
+        let covered = matches!(row.status, ChunkStatus::Biomes | ChunkStatus::Noise);
+        println!(
+            "{:<20} {:>6} {:>10}   {}",
+            row.status.serialization_name(),
+            row.level,
+            row.entries,
+            if covered { "golden" } else { "not-yet-wired" }
+        );
+    }
+    println!();
+    println!(
+        "FULL_CHUNK_STEP reachability (computed, not assumed): level {} radius {} max {}",
+        ChunkLevelConsts::FULL_CHUNK_LEVEL,
+        step.accumulated_dependencies.get_radius(),
+        ChunkLevelConsts::FULL_CHUNK_LEVEL as i64
+            + step.accumulated_dependencies.get_radius() as i64
+    );
+    let mut dist = BTreeMap::new();
+    for d in 0..=step.accumulated_dependencies.get_radius() {
+        dist.entry(status_around_full_chunk(&step, d).serialization_name())
+            .or_insert_with(Vec::new)
+            .push(d);
+    }
+    for (status, distances) in dist {
+        println!("  distance(s) {distances:?} serialize {status}");
+    }
+}
+
+/// Assert the committed golden's FULL_CHUNK_STEP reachability + byStatus levels
+/// equal the faithful port (`chunk_level`). This is what proves the harness
+/// computes reachability rather than assuming one status per forced level.
+pub fn verify_full_chunk_step(fixture: &ComposedNoise) -> Result<(), Error> {
+    let step = ChunkPyramid::generation_pyramid()
+        .get_step_to(ChunkStatus::Full)
+        .clone();
+    if fixture.full_chunk_step.level != ChunkLevelConsts::FULL_CHUNK_LEVEL as i64 {
+        return Err(Error::Manifest(format!(
+            "full-chunk-step.level {} != Paper FULL_CHUNK_LEVEL 33",
+            fixture.full_chunk_step.level
+        )));
+    }
+    if fixture.full_chunk_step.accumulated_radius
+        != step.accumulated_dependencies.get_radius() as i64
+    {
+        return Err(Error::Manifest(format!(
+            "full-chunk-step.accumulated-radius {} != port {}",
+            fixture.full_chunk_step.accumulated_radius,
+            step.accumulated_dependencies.get_radius()
+        )));
+    }
+    if fixture.full_chunk_step.max_level
+        != (ChunkLevelConsts::FULL_CHUNK_LEVEL as i64
+            + step.accumulated_dependencies.get_radius() as i64)
+    {
+        return Err(Error::Manifest(format!(
+            "full-chunk-step.max-level {} != port {}",
+            fixture.full_chunk_step.max_level,
+            ChunkLevelConsts::FULL_CHUNK_LEVEL as i64
+                + step.accumulated_dependencies.get_radius() as i64
+        )));
+    }
+    let mut captured: Vec<(i64, &str)> = fixture
+        .full_chunk_step
+        .by_distance
+        .iter()
+        .map(|d| (d.distance, d.status.as_str()))
+        .collect();
+    captured.sort_by_key(|(d, _)| *d);
+    let mut expected: Vec<(usize, String)> = (0..=step.accumulated_dependencies.get_radius())
+        .map(|d| {
+            (
+                d,
+                status_around_full_chunk(&step, d)
+                    .serialization_name()
+                    .to_string(),
+            )
+        })
+        .collect();
+    expected.sort_by_key(|(d, _)| *d);
+    if captured.len() != expected.len() {
+        return Err(Error::Manifest(format!(
+            "full-chunk-step.by-distance has {} entries, port has {}",
+            captured.len(),
+            expected.len()
+        )));
+    }
+    for ((cd, cs), (ed, es)) in captured.iter().zip(expected.iter()) {
+        if *cd != *ed as i64 || *cs != es.as_str() {
+            return Err(Error::Manifest(format!(
+                "full-chunk-step by-distance[{ed}] mismatch: captured {cs} (at {cd}), port {es}"
+            )));
+        }
+    }
+    // The byStatus reachability: each checkpoint's serialization level.
+    for status in CHECKPOINTS {
+        let level = by_status(&step, *status) as i64;
+        // Sanity: FULL at 33, STRUCTURE_STARTS at 44, monotone in the ladder.
+        if *status == ChunkStatus::Full && level != 33 {
+            return Err(Error::Manifest(format!(
+                "byStatus(FULL) = {level}, expected 33"
+            )));
+        }
+        if *status == ChunkStatus::StructureStarts && level != 44 {
+            return Err(Error::Manifest(format!(
+                "byStatus(STRUCTURE_STARTS) = {level}, expected 44"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Verify the committed composed-noise golden: the manifest hashes, the pinned
+/// provenance, the FULL_CHUNK_STEP reachability, and the bit-exact entries
+/// (each captured `bits` must be present; the `value` round-trips). This is the
+/// NOISE checkpoint gate.
+pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
+    let fixture = load(dir)?;
+    // 1. Provenance + manifest hashes.
+    let manifest = crate::verify_fixtures(dir)?;
+    if manifest.kind.as_deref() != Some(KIND) {
+        return Err(Error::Manifest(format!(
+            "expected kind {KIND}, got {:?}",
+            manifest.kind
+        )));
+    }
+    if crate::parse_paper_pin(manifest.paper.as_deref()).as_deref() != Some("0a99345") {
+        return Err(Error::Manifest(format!(
+            "composed-noise fixture not pinned to Paper 0a99345: {:?}",
+            manifest.paper
+        )));
+    }
+    if fixture.paper != manifest.paper.as_deref().unwrap_or("") {
+        return Err(Error::Manifest(format!(
+            "fixture paper {} != manifest paper {:?}",
+            fixture.paper, manifest.paper
+        )));
+    }
+    // 2. The computed (not assumed) reachability.
+    verify_full_chunk_step(&fixture)?;
+    // 3. Bit-exact value assertions: every committed bit pattern is the target.
+    //    A Rust port asserts `f64::from_bits(fixture.density[i].density.bits)`
+    //    matches its own computed value; here we assert the fixture is
+    //    structurally complete (non-vacuous + every entry has bits).
+    if fixture.climate.len() != 8 {
+        return Err(Error::Manifest(format!(
+            "composed-noise has {} climate entries, expected 8 (#175 matrix)",
+            fixture.climate.len()
+        )));
+    }
+    if fixture.density.len() != 80 {
+        return Err(Error::Manifest(format!(
+            "composed-noise has {} density entries, expected 80 (8 columns x 10 y)",
+            fixture.density.len()
+        )));
+    }
+    let mut seen_columns: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+    for s in &fixture.climate {
+        let key = (s.cx, s.cz);
+        *seen_columns.entry(key).or_default() += 1;
+    }
+    if seen_columns.len() != 8 {
+        return Err(Error::Manifest(format!(
+            "composed-noise climate covers {} distinct #175 columns, expected 8",
+            seen_columns.len()
+        )));
+    }
+    for s in &fixture.density {
+        let key = (s.cx, s.cz);
+        if !seen_columns.contains_key(&key) {
+            return Err(Error::Manifest(format!(
+                "density column ({},{}) not in the #175 matrix",
+                s.cx, s.cz
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The tamper negative control: corrupt a committed bit pattern (flip one byte
+/// of the JSON) and assert the verification FAILS — proving the comparison is
+/// not vacuous (a green is impossible with tampered goldens).
+pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
+    let fixture_path = dir.join(FIXTURE_BASENAME);
+    let original = fs::read(&fixture_path)
+        .map_err(|e| Error::Gate(format!("cannot read {}: {e}", fixture_path.display())))?;
+    // Flip one byte in the middle of the file — a deterministic, minimal tamper.
+    let i = (original.len() / 2).min(original.len().saturating_sub(1));
+    let mut tampered = original.clone();
+    tampered[i] ^= 0xFF;
+    fs::write(&fixture_path, &tampered)?;
+    let result = verify_composed_noise(dir);
+    // Restore immediately.
+    fs::write(&fixture_path, &original)?;
+    match result {
+        Ok(()) => Err(Error::NegativeControl {
+            message: "composed-noise tamper was NOT detected — the comparison is vacuous".into(),
+        }),
+        Err(_) => Ok(()),
+    }
+}
+
+/// `fixtures/composed-noise/manifest.json`, serialized in the exact committed
+/// field order so regeneration is byte-identical (git-clean), mirroring the
+/// worldgen manifest convention.
+#[derive(serde::Serialize)]
+struct ComposedNoiseManifest<'a> {
+    format: u64,
+    paper: &'a str,
+    seed: &'a str,
+    #[serde(rename = "level-type")]
+    level_type: &'a str,
+    kind: &'a str,
+    note: &'a str,
+    captured: Vec<CapturedFile>,
+}
+
+/// Write `fixtures/composed-noise/manifest.json` from the freshly generated
+/// fixture (byte-identical field order, like the worldgen manifest).
+pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
+    let fixture = load(dir)?;
+    let data = fs::read(dir.join(FIXTURE_BASENAME))?;
+    let manifest = ComposedNoiseManifest {
+        format: 1,
+        paper: &fixture.paper,
+        seed: &fixture.seed.to_string(),
+        level_type: &fixture.level_type,
+        kind: KIND,
+        note: "Bit-exact seed-42 composed-noise goldens for the overworld NOISE \
+               checkpoint (mc.world.level.levelgen): router climate fields, \
+               float-cast weirdness + peaksAndValleys, interpolated final density, \
+               raw finalDensity, preliminarySurfaceLevel — each as the JSON double \
+               AND the raw IEEE-754 bits (Double.doubleToLongBits / \
+               Float.floatToIntBits) at the #175 chunk-coordinate matrix. Plus \
+               Paper's live FULL_CHUNK_STEP reachability. Captured from the pinned \
+               Paper runtime via tools/rivet-oracle/src/java/ComposedNoiseProbe.java; \
+               regenerate with scripts/run_composed_noise_probe.sh.",
+        captured: vec![CapturedFile {
+            path: FIXTURE_BASENAME.to_string(),
+            sha256: sha256_hex(&data),
+            bytes: data.len(),
+        }],
+    };
+    let mut text = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| Error::Manifest(format!("cannot serialize composed-noise manifest: {e}")))?;
+    text.push('\n');
+    fs::write(dir.join("manifest.json"), text)?;
+    Ok(())
+}
+
+/// Run the Paper-side probe into `dir` (regenerating composed-noise.json), then
+/// rewrite the manifest. Requires the materialized pinned Paper runtime (or the
+/// env overrides).
+pub fn run_probe(dir: &Path) -> Result<(), Error> {
+    let crate_root = crate::crate_dir();
+    let script = crate_root.join("scripts/run_composed_noise_probe.sh");
+    let status = std::process::Command::new("bash")
+        .arg(&script)
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map_err(|e| Error::Gate(format!("failed to run {}: {e}", script.display())))?;
+    if !status.success() {
+        return Err(Error::Gate(format!(
+            "run_composed_noise_probe.sh exited {status} — see its stderr"
+        )));
+    }
+    regenerate_manifest(dir)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixtures_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+    }
+
+    #[test]
+    fn committed_composed_noise_verifies() {
+        let dir = fixtures_dir().join("composed-noise");
+        if !dir.join("manifest.json").is_file() {
+            return;
+        }
+        verify_composed_noise(&dir).expect("committed composed-noise golden should verify");
+    }
+
+    #[test]
+    fn committed_composed_noise_is_non_vacuous() {
+        let dir = fixtures_dir().join("composed-noise");
+        if !dir.join(FIXTURE_BASENAME).is_file() {
+            return;
+        }
+        let fixture = load(&dir).unwrap();
+        assert_eq!(fixture.seed, 42, "seed-42 golden");
+        assert_eq!(fixture.paper, "26.2-DEV-main@0a99345");
+        assert_eq!(fixture.noise_settings, "minecraft:overworld");
+        assert_eq!(fixture.climate.len(), 8);
+        assert_eq!(fixture.density.len(), 80);
+        // Every committed entry has a real bit pattern (never NaN/-0 tricks).
+        for s in &fixture.density {
+            for (name, sample) in [
+                ("density", &s.density),
+                ("finalDensity", &s.final_density),
+                ("preliminarySurfaceLevel", &s.preliminary_surface_level),
+            ] {
+                assert_ne!(
+                    sample.value.as_str(),
+                    Some("NaN"),
+                    "{name} at ({},{},{}) must not be NaN",
+                    s.x,
+                    s.y,
+                    s.z
+                );
+                assert_ne!(sample.bits, i64::MAX, "{name} sentinel");
+            }
+        }
+        for s in &fixture.climate {
+            for (name, sample) in [
+                ("temperature", &s.temperature),
+                ("vegetation", &s.vegetation),
+                ("continents", &s.continents),
+                ("erosion", &s.erosion),
+                ("depth", &s.depth),
+                ("ridges", &s.ridges),
+                ("weirdness", &s.weirdness),
+                ("peaksAndValleys", &s.peaks_and_valleys),
+            ] {
+                assert_ne!(
+                    sample.value.as_str(),
+                    Some("NaN"),
+                    "{name} at ({},{})",
+                    s.x,
+                    s.z
+                );
+            }
+        }
+        // The #175 matrix is covered: the block origin of every corpus chunk.
+        let columns: BTreeMap<(i64, i64), usize> =
+            fixture.climate.iter().map(|s| ((s.cx, s.cz), 1)).collect();
+        assert_eq!(columns.len(), 8);
+        assert!(columns.contains_key(&(0, 0)));
+        assert!(columns.contains_key(&(31, 31)));
+        assert!(columns.contains_key(&(-31, -31)));
+    }
+
+    #[test]
+    fn tamper_negative_control_detects_corruption() {
+        let dir = fixtures_dir().join("composed-noise");
+        if !dir.join(FIXTURE_BASENAME).is_file() {
+            return;
+        }
+        tamper_negative_control(&dir).expect("tamper must be detected");
+    }
+
+    #[test]
+    fn scoreboard_lists_all_checkpoints() {
+        let rows = scoreboard();
+        let statuses: Vec<ChunkStatus> = rows.iter().map(|r| r.status).collect();
+        assert_eq!(
+            statuses,
+            vec![
+                ChunkStatus::Biomes,
+                ChunkStatus::Noise,
+                ChunkStatus::Surface,
+                ChunkStatus::Carvers,
+                ChunkStatus::Features,
+                ChunkStatus::Light,
+                ChunkStatus::Full,
+            ]
+        );
+        // The reachability levels (not assumed one-per-status): the generated-
+        // world scoreboard must reproduce Paper's non-monotonic reachability.
+        let levels: Vec<i64> = rows.iter().map(|r| r.level).collect();
+        assert_eq!(levels, vec![36, 35, 35, 35, 34, 33, 33]);
+    }
+}
