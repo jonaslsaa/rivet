@@ -525,12 +525,12 @@ pub enum ComposedNoiseMode {
 }
 
 /// Parse the composed-noise subcommand flags into a mode. Unknown flags are a
-/// usage error — before, a typo'd `--sampple` fell through to the verify
-/// branch and exited 0 after verifying, silently misreading the intended mode.
-/// `--tamper` and `--sample` are mutually exclusive (repeats of the same flag
-/// are fine). Sole `--help`/`-h` is intercepted by the dispatcher before this
-/// runs; in any combination it is a hard usage error here (the subcommand
-/// accepts no positional arguments, unlike `verify`).
+/// usage error — a typo'd `--sampple` used to fall through to the verify branch
+/// and exit 0 after verifying, so strictness here prevents a silent misread of
+/// the intended mode. `--tamper` and `--sample` are mutually exclusive (repeats
+/// of the same flag are fine). Sole `--help`/`-h` is intercepted by the
+/// dispatcher; in any combination it is a hard usage error here (the
+/// subcommand accepts no positional arguments, unlike `verify`).
 pub fn parse_mode(flags: &[&str]) -> Result<ComposedNoiseMode, Error> {
     let mut mode: Option<ComposedNoiseMode> = None;
     for flag in flags {
@@ -556,10 +556,10 @@ pub fn parse_mode(flags: &[&str]) -> Result<ComposedNoiseMode, Error> {
     Ok(mode.unwrap_or(ComposedNoiseMode::Verify))
 }
 
-/// The committed composed-noise tree state, classified by which files exist.
-/// `Absent` — neither the manifest nor the golden file — is the "regenerate
-/// the fixture" case. `Partial` — exactly one of the two — is a broken
-/// checked-in tree. `Present` — both — is the complete golden.
+/// The committed composed-noise tree state, classified by which files exist:
+/// `Absent` (neither file — the regenerate case), `Partial` (exactly one — a
+/// broken checked-in tree), or `Present` (both). `Present` means present, not
+/// valid: a zero-byte golden still hard-fails in `load`.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum FixtureState {
     Absent,
@@ -567,10 +567,8 @@ pub enum FixtureState {
     Present,
 }
 
-/// Classify the committed composed-noise tree: whole absence (neither file),
-/// partial (exactly one of manifest/golden — including golden-only), or
-/// present (both). `Present` still means present, not necessarily valid: a
-/// zero-byte golden hard-fails in `load`.
+/// Classify the committed composed-noise tree by which of `manifest.json` /
+/// the golden file exist.
 pub fn fixture_state(dir: &Path) -> FixtureState {
     match (
         dir.join("manifest.json").is_file(),
@@ -582,13 +580,12 @@ pub fn fixture_state(dir: &Path) -> FixtureState {
     }
 }
 
-/// Assert the composed-noise golden tree is not fully absent. Only a whole-tree
-/// absence (`FixtureState::Absent`) is a missing prerequisite —
-/// `Error::Unverified` (exit 3) — the "regenerate the fixture" case. A partial
-/// tree (manifest-only, golden-only, or a zero-byte golden) is a broken
-/// checked-in fixture and hard-fails (exit 1) when the comparison runs
-/// (`load`/`verify_fixtures`). `--sample` regeneration does not route through
-/// this guard, since it writes the golden from the Paper runtime.
+/// Assert the composed-noise tree is not wholly absent. `FixtureState::Absent`
+/// is a missing prerequisite — `Error::Unverified` (exit 3), the regenerate
+/// case; a partial or corrupt tree (manifest-only, golden-only, zero-byte
+/// golden) is a broken checked-in fixture and hard-fails (exit 1) once the
+/// comparison runs. `--sample` regeneration does not route through this guard,
+/// since it writes the golden from the Paper runtime.
 pub fn require_fixture_tree(dir: &Path) -> Result<(), Error> {
     if fixture_state(dir) == FixtureState::Absent {
         return Err(Error::Unverified(format!(
@@ -608,13 +605,12 @@ pub fn require_fixture_tree(dir: &Path) -> Result<(), Error> {
 /// The control is load-bearing: it first verifies the committed golden is
 /// green, so a broken baseline is reported (exit 1) rather than passing
 /// vacuously. An absent or partial tree is a hard `Error::Gate` (exit 1) — the
-/// control cannot run — unlike the verify path whose whole-tree absence is a
-/// missing prerequisite (exit 3). A present-but-empty golden hard-fails in
+/// control cannot run vacuous. A present-but-empty golden hard-fails in
 /// `load`.
 ///
 /// It tampers a `tempfile` scratch copy, so the committed fixtures are never
-/// mutated and the scratch dir is removed on every path (including setup I/O
-/// failure) when the `TempDir` drops.
+/// mutated and the scratch dir is removed on every path when the `TempDir`
+/// drops.
 pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
     match fixture_state(dir) {
         FixtureState::Present => {}

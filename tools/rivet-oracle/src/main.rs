@@ -895,16 +895,11 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
 ///
 /// Generic kinds (auto-discovered by manifest) verify first, surfacing their
 /// hard failures (exit 1) before the composed-noise golden is consulted. The
-/// composed-noise golden has a strict missing-prerequisite contract of its
-/// own, asserted after the generic kinds pass: a whole-tree absence
-/// (`composed_noise::FixtureState::Absent`) is `Error::Unverified` (exit 3),
-/// while a partial/corrupt tree (manifest-only, golden-only, or zero-byte
-/// golden) is a broken checked-in fixture and hard-fails (exit 1) once the
-/// comparison runs. The composed-noise dir is excluded from the generic walk
-/// so its classification never depends on the generic loop. A root with no
-/// generic kinds still gets the composed-noise classification (its golden is
-/// load-bearing in every run), so there is no separate "no fixture manifests"
-/// early exit.
+/// composed-noise dir is excluded from the generic walk: its golden is
+/// load-bearing in every run and carries its own tri-state contract
+/// (`composed_noise::FixtureState`) — wholly absent is `Error::Unverified`
+/// (exit 3), partial/corrupt hard-fails (exit 1) — asserted after the generic
+/// kinds pass. A root with no generic kinds still reaches that classification.
 fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
     let kinds = all_fixture_manifests_from(root);
     let composed_noise_dir = root.join("composed-noise");
