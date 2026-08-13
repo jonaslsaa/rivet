@@ -22,21 +22,20 @@
 //!   (the `SHIFT_NOISE` `NormalNoise` static mirrors Blender.java line 53).
 //! - [`Blender::height_to_offset`] — the fixed height-to-blend-offset formula.
 //!
-//! The chunk/region-reading half defers as `RivetTodo(#177)` owned by the
-//! blending unit (it needs `WorldGenRegion`, which is not ported yet, plus the
-//! `ChunkAccess` block/heightmap/status surfaces):
-//!
-//! - `of(WorldGenRegion)` — the `Long2ObjectOpenHashMap` square-distance scan
-//!   over `BlendingData.getOrUpdateBlendingData` (needs `region.getCenter`/
-//!   `isOldChunkAround`/`getChunk`). Until it lands, the only constructible
-//!   `Blender` is the empty one; a `pub(crate)` constructor mirrors the private
-//!   Java ctor for the crate's tests.
-//! - `generateBorderTicks`/`generateBorderTick` and
-//!   `addAroundOldChunksCarvingMaskFilter`/`makeOldChunkDistanceGetter`/
-//!   `makeOffsetOldChunkDistanceGetter`/`distanceToCube` (`ChunkAccess`/
-//!   `ProtoChunk`/`WorldGenLevel` reads). The range constants those deferrals
-//!   consume are still declared (`HEIGHT_BLENDING_RANGE_CHUNKS`,
-//!   `DENSITY_BLENDING_RANGE_CHUNKS`, `OLD_CHUNK_XZ_RADIUS`).
+//! RivetTodo(#177): the chunk/region-reading half of this unit defers (it
+//! needs `WorldGenRegion`, which is not ported yet, plus the `ChunkAccess`
+//! block/heightmap/status surfaces).
+//! RivetTodo(#177): `of(WorldGenRegion)` — the `Long2ObjectOpenHashMap`
+//! square-distance scan over `BlendingData.getOrUpdateBlendingData` (needs
+//! `region.getCenter`/`isOldChunkAround`/`getChunk`). Until it lands, the only
+//! constructible `Blender` is the empty one; a `pub(crate)` constructor
+//! mirrors the private Java ctor for the crate's tests.
+//! RivetTodo(#177): `generateBorderTicks`/`generateBorderTick` and
+//! `addAroundOldChunksCarvingMaskFilter`/`makeOldChunkDistanceGetter`/
+//! `makeOffsetOldChunkDistanceGetter`/`distanceToCube` (`ChunkAccess`/
+//! `ProtoChunk`/`WorldGenLevel` reads). The range constants those deferrals
+//! consume are still declared (`HEIGHT_BLENDING_RANGE_CHUNKS`,
+//! `DENSITY_BLENDING_RANGE_CHUNKS`, `OLD_CHUNK_XZ_RADIUS`).
 
 use std::collections::BTreeMap;
 
@@ -160,11 +159,19 @@ impl BlendingOutput {
 /// Paper iterates the fastutil `Long2ObjectOpenHashMap` in probe-slot order
 /// (a fixed `HashCommon.mix`-derived layout for the same insertions), which is
 /// NOT ascending key order, so byte-for-byte parity of these f64 sums with
-/// Paper may require reproducing that slot order once `of(WorldGenRegion)`
-/// builds a multi-chunk Blender (RivetTodo #177). Until then the only
-/// constructible production Blender is the empty one and the crate's tests use
-/// single-entry maps, so no order-sensitive input is reachable; the
-/// slot-order parity must be verified when `of()` lands.
+/// Paper requires reproducing that slot order once `of(WorldGenRegion)` builds
+/// a multi-chunk Blender (RivetTodo #177). The port must then reproduce
+/// fastutil 8.5.18's `mix` (a test-only `hash_common_mix` already exists in
+/// `flag::feature_flag_set`), its `arraySize` capacity growth, linear-probe
+/// insert, and `forEach` index-slot scan, over exactly the key set and
+/// insertion sequence `of()` produces, and verify the weighted f64 sums and the
+/// `blendBiome` tie-break against Paper via the oracle before wiring the
+/// Blender into the noisegen. Until then the only constructible production
+/// Blender is the empty one and the crate's tests use single-entry maps, so no
+/// order-sensitive input is reachable — [`Blender::new`] enforces that
+/// `len() <= 1` invariant with an unconditional `assert!`, not a
+/// release-elided `debug_assert!`, so a future multi-entry construction cannot
+/// silently diverge from Paper.
 #[derive(Debug, Clone)]
 pub struct Blender {
     height_and_biome_blending_data: BTreeMap<i64, BlendingData>,
@@ -174,11 +181,31 @@ pub struct Blender {
 impl Blender {
     /// The private constructor (Blender.java lines 102-105). Only the crate's
     /// tests reach it today — `of(WorldGenRegion)` is deferred (RivetTodo #177).
+    ///
+    /// Each map must hold at most one entry: the iteration-order parity with
+    /// Paper's fastutil `Long2ObjectOpenHashMap` probe-slot order is not ported
+    /// (see the struct doc), so a multi-entry map's weighted f64 sums and the
+    /// `blendBiome` tie-break would diverge from Paper. The `assert!` enforces
+    /// that documented precondition unconditionally — a release-build
+    /// multi-entry Blender must never be constructed silently; `of()` must port
+    /// the fastutil slot order before it can build a multi-entry Blender.
     #[allow(dead_code)]
     pub(crate) fn new(
         height_and_biome_blending_data: BTreeMap<i64, BlendingData>,
         density_blending_data: BTreeMap<i64, BlendingData>,
     ) -> Blender {
+        assert!(
+            height_and_biome_blending_data.len() <= 1,
+            "height/biome BlendingData map must hold <= 1 entry until the \
+             fastutil Long2ObjectOpenHashMap probe-slot iteration order is \
+             ported (RivetTodo #177)"
+        );
+        assert!(
+            density_blending_data.len() <= 1,
+            "density BlendingData map must hold <= 1 entry until the fastutil \
+             Long2ObjectOpenHashMap probe-slot iteration order is ported \
+             (RivetTodo #177)"
+        );
         Blender {
             height_and_biome_blending_data,
             density_blending_data,
@@ -851,10 +878,45 @@ mod tests {
         data
     }
 
+    /// `SHIFT_NOISE` (Blender.java line 53) — `NormalNoise.create(new
+    /// XoroshiroRandomSource(42L), NoiseData.DEFAULT_SHIFT)` — reproduces the
+    /// real Paper 26.2 values bit-for-bit. Samples derived from the materialized
+    /// `paper-26.2.jar` via `NormalNoise.create(new XoroshiroRandomSource(42L),
+    /// NoiseData.DEFAULT_SHIFT)`; the `to_bits` exactness pins the `NormalNoise`
+    /// pipeline (random source, permutation, octave interpolation) against the
+    /// Java oracle so a future change to the noisegen cannot silently shift the
+    /// `blendBiome` alpha gate.
+    #[test]
+    fn shift_noise_reproduces_paper_samples() {
+        let sample_000 = SHIFT_NOISE.get_value(0.0, 0.0, 0.0);
+        assert_eq!(sample_000.to_bits(), 0x3fc0_8b71_d973_3aa8);
+        assert_eq!(sample_000, 0.12925551526719414);
+        let sample_100 = SHIFT_NOISE.get_value(1.0, 0.0, 0.0);
+        assert_eq!(sample_100.to_bits(), 0x3fc2_a40a_a410_17a8);
+        assert_eq!(sample_100, 0.14563115130311854);
+        // The `blendBiome` alpha at distance 0 (Blender.java lines 260-262):
+        // `clamp((0 + shiftNoise) / (RANGE + 1), 0, 1)` with `shiftNoise =
+        // getValue * 12.0`. The 0.055... value is `<= 0.5`, which is why the
+        // stored biome wins in `blend_biome_distance_zero_returns_stored_biome`.
+        let shift_noise = sample_000 * 12.0;
+        let alpha = mth::clamp_f64(
+            shift_noise / (HEIGHT_BLENDING_RANGE_CELLS + 1) as f64,
+            0.0,
+            1.0,
+        );
+        assert_eq!(shift_noise, 1.5510661832063297);
+        assert_eq!(alpha, 0.05539522082879749);
+    }
+
     /// `blendBiome` distance-zero path (Blender.java lines 239-263): a stored
-    /// biome at the queried quart cell wins regardless of the `SHIFT_NOISE`
-    /// alpha (distance 0 clamps the alpha to 0). The query quart (0, y, 0)
-    /// lands on the interior cell (0, 0) of chunk (0, 0).
+    /// biome at the queried quart cell wins only when the `SHIFT_NOISE`-shifted
+    /// alpha is `<= 0.5`. At distance 0 Java computes
+    /// `alpha = clamp((0 + shiftNoise) / (RANGE + 1), 0, 1)` (Blender.java
+    /// lines 260-262), which is not clamped to 0 — the alpha is 0 only when
+    /// `shiftNoise <= 0`. The stored biome wins here because the deterministic
+    /// `SHIFT_NOISE` sample at quart (0, 0, 0) happens to keep the alpha
+    /// `<= 0.5` (see `shift_noise_reproduces_paper_samples`). The query quart
+    /// (0, y, 0) lands on the interior cell (0, 0) of chunk (0, 0).
     #[test]
     fn blend_biome_distance_zero_returns_stored_biome() {
         let biome = Holder::direct(BiomeId(12));
