@@ -390,6 +390,34 @@ impl Biome {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The biome-value seam (RivetTodo #185)
+// ---------------------------------------------------------------------------
+
+/// `getBiome().value().coldEnoughToSnow(pos, seaLevel)` — the typed biome-value
+/// read `SurfaceRules.Context.TemperatureHelperCondition` performs.
+///
+/// Java reads the resolved `Holder<Biome>`'s value and tests it directly. The
+/// Rust `surface_rules` port cannot — `BiomeManager` yields the pure-id
+/// `Holder<BiomeId>` and the `Biome`-value registry is unported (RivetTodo
+/// #185, `mc.world.level.biome.core`), so the `SurfaceRules` context holds this
+/// capability (`Arc<dyn ColdEnoughToSnow + Send + Sync>`) and a production
+/// resolver wires `getBiome()` through the eventual value registry. [`Biome`]
+/// itself implements it (the value test, exactly
+/// [`Biome::cold_enough_to_snow`]).
+pub trait ColdEnoughToSnow: Send + Sync {
+    /// `Biome.coldEnoughToSnow(BlockPos, int seaLevel)` — whether the biome is
+    /// cold enough to snow at `pos` (`!warmEnoughToRain`, i.e.
+    /// `getTemperature(pos, seaLevel) < 0.15F`).
+    fn cold_enough_to_snow(&self, pos: &BlockPos, sea_level: i32) -> bool;
+}
+
+impl ColdEnoughToSnow for Biome {
+    fn cold_enough_to_snow(&self, pos: &BlockPos, sea_level: i32) -> bool {
+        Biome::cold_enough_to_snow(self, pos, sea_level)
+    }
+}
+
 /// The `DIRECT_CODEC`/`NETWORK_CODEC` field constructor.
 fn biome_from_codec_fields(
     climate_settings: ClimateSettings,
@@ -1084,10 +1112,123 @@ mod tests {
     }
 
     #[test]
-    fn temperature_adjustment_frozen_uses_noise() {
-        // FROZEN at a position whose noise pushes below 0.3 ice-patches and
-        // 0.8 small-variation returns 0.2F; the (0,0) sample on the pinned
-        // seeded noise is deterministic.
+    fn snow_level_temperature_drop_matches_paper() {
+        // Paper 26.2 golden (oracle probe): a NONE-modifier biome with base
+        // temperature 0.8, sea level 63. `snowLevel = seaLevel + 17 = 80`;
+        // `getHeightAdjustedTemperature` applies
+        // `adjustedTemperature - (v + y - snowLevel) * 0.05F / 40.0F` only when
+        // `y > 80`, with `v = (float)(TEMPERATURE_NOISE.getValue(x/8.0F,
+        // z/8.0F, false) * 8.0)` — float-widened int/float promotion,
+        // left-to-right float sum, exact Java arithmetic.
+        let biome = plains();
+        let sea_level = 63;
+        // At/below the snow level (y <= 80) the temperature is the base 0.8F.
+        assert_eq!(
+            biome
+                .get_temperature(&BlockPos::new(0, 64, 0), sea_level)
+                .to_bits(),
+            0.8f32.to_bits()
+        );
+        assert_eq!(
+            biome
+                .get_temperature(&BlockPos::new(0, 80, 0), sea_level)
+                .to_bits(),
+            0.8f32.to_bits()
+        );
+        // Above the snow level the noise-adjusted drop kicks in (Paper
+        // floatToIntBits goldens).
+        assert_eq!(
+            biome
+                .get_temperature(&BlockPos::new(0, 100, 0), sea_level)
+                .to_bits(),
+            0x3f466667 // 0.77500004
+        );
+        assert_eq!(
+            biome
+                .get_temperature(&BlockPos::new(0, 81, 0), sea_level)
+                .to_bits(),
+            0x3f4c7ae1 // 0.79875
+        );
+        assert_eq!(
+            biome
+                .get_temperature(&BlockPos::new(8, 100, 8), sea_level)
+                .to_bits(),
+            0x3f48af84 // 0.78392816
+        );
+        assert_eq!(
+            biome
+                .get_temperature(&BlockPos::new(16, 100, 16), sea_level)
+                .to_bits(),
+            0x3f47ad60 // 0.77998924
+        );
+        // The drop never crosses the 0.15 warm-enough-to-rain threshold for a
+        // 0.8-temp biome: still rain, not snow.
+        assert!(biome.warm_enough_to_rain(&BlockPos::new(0, 100, 0), sea_level));
+        assert!(!biome.cold_enough_to_snow(&BlockPos::new(0, 100, 0), sea_level));
+        assert_eq!(
+            biome.get_precipitation_at(&BlockPos::new(0, 100, 0), sea_level),
+            Precipitation::Rain
+        );
+    }
+
+    #[test]
+    fn cold_biome_snow_level_drop_matches_paper() {
+        // A 0.0-temp biome: below/at the snow level it reads exactly 0.0F (so
+        // snow); above it the drop pushes the temperature negative. Paper
+        // 26.2 goldens (oracle probe).
+        let effects = BiomeSpecialEffectsBuilder::default()
+            .water_color(0x3F76E4)
+            .build();
+        let cold = BiomeBuilder::new()
+            .has_precipitation(true)
+            .temperature(0.0)
+            .downfall(0.5)
+            .special_effects(effects)
+            .mob_spawn_settings(MobSpawnSettings::empty())
+            .generation_settings(BiomeGenerationSettings::EMPTY)
+            .build();
+        let sea_level = 63;
+        assert_eq!(
+            cold.get_temperature(&BlockPos::new(0, 80, 0), sea_level)
+                .to_bits(),
+            0.0f32.to_bits()
+        );
+        assert_eq!(
+            cold.get_temperature(&BlockPos::new(0, 81, 0), sea_level)
+                .to_bits(),
+            0xbaa3d70a // -0.0012500000
+        );
+        assert_eq!(
+            cold.get_temperature(&BlockPos::new(0, 100, 0), sea_level)
+                .to_bits(),
+            0xbccccccd // -0.025000000
+        );
+        assert_eq!(
+            cold.get_temperature(&BlockPos::new(8, 100, 8), sea_level)
+                .to_bits(),
+            0xbc83a91a // -0.016071845
+        );
+        for pos in [
+            BlockPos::new(0, 80, 0),
+            BlockPos::new(0, 81, 0),
+            BlockPos::new(0, 100, 0),
+            BlockPos::new(8, 100, 8),
+        ] {
+            assert!(cold.cold_enough_to_snow(&pos, sea_level), "{pos:?}");
+            assert!(!cold.warm_enough_to_rain(&pos, sea_level), "{pos:?}");
+            assert_eq!(
+                cold.get_precipitation_at(&pos, sea_level),
+                Precipitation::Snow,
+                "{pos:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn frozen_modifier_exact_paper_goldens() {
+        // FROZEN (base 0.7) at (0, 0): the ice-patch check (`< 0.3` and
+        // small-variation `< 0.8`) kicks in and pins the temperature to
+        // exactly 0.2F (Java's `return 0.2F`). Paper 26.2 golden.
         let effects = BiomeSpecialEffectsBuilder::default()
             .water_color(0x3F76E4)
             .build();
@@ -1100,12 +1241,53 @@ mod tests {
             .mob_spawn_settings(MobSpawnSettings::empty())
             .generation_settings(BiomeGenerationSettings::EMPTY)
             .build();
-        let pos = BlockPos::new(0, 64, 0);
-        let base = frozen.get_base_temperature();
-        let adjusted = frozen.get_temperature(&pos, 63);
-        // The adjusted temperature is either 0.2 (FROZEN kicked in) or the
-        // noise-adjusted base — both deterministic on the pinned seeds.
-        assert!(adjusted == 0.2 || adjusted != base);
+        let sea_level = 63;
+        assert_eq!(
+            frozen
+                .get_temperature(&BlockPos::new(0, 64, 0), sea_level)
+                .to_bits(),
+            0x3e4ccccd // 0.2
+        );
+        // Same column, above the snow level: 0.2 - the (0,0) noise drop
+        // (v = 0, so exactly 0.175).
+        assert_eq!(
+            frozen
+                .get_temperature(&BlockPos::new(0, 100, 0), sea_level)
+                .to_bits(),
+            0x3e333333 // 0.175
+        );
+        // At (8, 8) the FROZEN small-variation check falls through (noise
+        // >= 0.8), so the base 0.7 gets the snow-level drop — Paper golden.
+        assert_eq!(
+            frozen
+                .get_temperature(&BlockPos::new(8, 100, 8), sea_level)
+                .to_bits(),
+            0x3f2f15ea // 0.68392813
+        );
+        assert_eq!(
+            frozen
+                .get_temperature(&BlockPos::new(16, 100, 16), sea_level)
+                .to_bits(),
+            0x3f2e13c6 // 0.67998922
+        );
+    }
+
+    #[test]
+    fn snow_coverage_trait_delegates_to_inherent() {
+        // The seam trait is the typed capability `TemperatureHelperCondition`
+        // consumes; `Biome` implements it by delegating to the inherent
+        // `coldEnoughToSnow`.
+        let biome = plains();
+        let pos = BlockPos::new(0, 100, 0);
+        let via_trait = <Biome as ColdEnoughToSnow>::cold_enough_to_snow(&biome, &pos, 63);
+        assert_eq!(via_trait, biome.cold_enough_to_snow(&pos, 63));
+        assert!(!via_trait);
+        // The trait is `Send + Sync` + `'static` (the Arc-shared surface-rules
+        // context holds `Arc<dyn ColdEnoughToSnow + Send + Sync>`).
+        let seam: std::sync::Arc<dyn ColdEnoughToSnow> = std::sync::Arc::new(biome);
+        assert!(!seam.cold_enough_to_snow(&pos, 63));
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Biome>();
     }
 
     #[test]
