@@ -34,8 +34,10 @@ pub struct ChunkPyramid {
 }
 
 impl ChunkPyramid {
-    /// `new Builder().step(...)...build()`.
-    pub fn builder() -> ChunkPyramidBuilder {
+    /// `new Builder().step(...)...build()`. Crate-internal: the public value
+    /// layer is the two static pyramids; the builder exists to construct them
+    /// and for the module's malformed-pyramid tests.
+    pub(crate) fn builder() -> ChunkPyramidBuilder {
         ChunkPyramidBuilder::new()
     }
 
@@ -69,7 +71,7 @@ pub static ACCESS_RADIUS_TABLE: LazyLock<[i32; 12]> =
     LazyLock::new(|| access_radius_table(&GENERATION_PYRAMID, &LOADING_PYRAMID));
 
 /// `ChunkPyramid.Builder` — the chainable step builder.
-pub struct ChunkPyramidBuilder {
+pub(crate) struct ChunkPyramidBuilder {
     steps: Vec<ChunkStep>,
 }
 
