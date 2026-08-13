@@ -206,7 +206,9 @@ impl EntityType {
     /// the ops-generic by-name codec. Resolves against the small `ENTITY_TYPES`
     /// constant list; an unknown name errors with Paper's exact
     /// `Registry.byNameCodec` diagnostic (`"Unknown registry key in " + key() +
-    /// ": " + name`, `Registries.ENTITY_TYPE` = `minecraft:entity_type`).
+    /// ": " + name`, where `Registries.ENTITY_TYPE` is
+    /// `createRegistryKey("entity_type")`, whose `toString()` renders
+    /// `ResourceKey[minecraft:root / minecraft:entity_type]`).
     pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<EntityType, Ops>> {
         codec::comap_flat_map(
             codec::string_codec::<Ops>(),
@@ -214,7 +216,7 @@ impl EntityType {
                 |name: &String| match entity_types().iter().find(|t| t.name == *name) {
                     Some(t) => DataResult::success(*t),
                     None => DataResult::error(format!(
-                        "Unknown registry key in minecraft:entity_type: {}",
+                        "Unknown registry key in ResourceKey[minecraft:root / minecraft:entity_type]: {}",
                         name
                     )),
                 },
@@ -367,7 +369,7 @@ mod tests {
         let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
         assert_eq!(
             msg,
-            "Unknown registry key in minecraft:entity_type: minecraft:zombie"
+            "Unknown registry key in ResourceKey[minecraft:root / minecraft:entity_type]: minecraft:zombie"
         );
     }
 
