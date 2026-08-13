@@ -83,7 +83,7 @@ use rivet_world::level::WorldGenLevel;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::levelgen::heightmap::Types;
 
-use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StructureKey};
+use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StructureKey, state_flags};
 
 /// `Block.UPDATE_ALL` — `UPDATE_NEIGHBORS | UPDATE_CLIENTS` (1 | 2), the flag
 /// `removeBlock`/`destroyBlock` pass to `setBlock`.
@@ -173,10 +173,16 @@ pub struct UnavailableChunkDiagnostic {
 
 impl std::fmt::Display for UnavailableChunkDiagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let actual = self.actual_status.map_or_else(
-            || "[out of cache bounds]".to_string(),
-            |s| s.name().to_string(),
-        );
+        // Java renders "[out of cache bounds]" only when the request is beyond
+        // the dependency list (`chunkHolder == null`). A request inside the
+        // list whose holder holds no chunk yet would NPE in Java's crash-report
+        // supplier; the port renders that distinct case honestly instead.
+        let actual = if self.max_allowed_status.is_none() {
+            "[out of cache bounds]".to_string()
+        } else {
+            self.actual_status
+                .map_or_else(|| "[no chunk held]".to_string(), |s| s.name().to_string())
+        };
         let max_allowed = self
             .max_allowed_status
             .map_or_else(|| "null".to_string(), |s| s.name().to_string());
@@ -333,7 +339,9 @@ impl WorldGenRegion {
         let distance = self
             .center_pos
             .get_chessboard_distance_coords(chunk_x, chunk_z);
-        let dependencies: Vec<ChunkStatus> = self.generating_step.direct_dependencies().to_vec();
+        // The per-ring dependency slice is only materialized for the error
+        // diagnostic; the happy path reads it by index (no per-access Vec).
+        let dependencies = self.generating_step.direct_dependencies();
         let max_allowed_status = if distance >= dependencies.len() as i32 {
             None
         } else {
@@ -359,7 +367,7 @@ impl WorldGenRegion {
             requested_status: target_status,
             actual_status,
             max_allowed_status,
-            dependencies,
+            dependencies: dependencies.to_vec(),
             distance,
             generating_chunk: self.center_pos,
         })
@@ -378,11 +386,16 @@ impl WorldGenRegion {
         let distance = self
             .center_pos
             .get_chessboard_distance_coords(chunk_x, chunk_z);
-        let dependencies: Vec<ChunkStatus> = self.generating_step.direct_dependencies().to_vec();
-        let max_allowed_status = if distance >= dependencies.len() as i32 {
-            None
-        } else {
-            Some(dependencies[distance as usize])
+        // The per-ring dependency slice is scoped so its immutable borrow of
+        // `self` ends before the mutable `cache` access below (no per-access
+        // Vec on the happy path; the diagnostic re-fetches it).
+        let max_allowed_status = {
+            let dependencies = self.generating_step.direct_dependencies();
+            if distance >= dependencies.len() as i32 {
+                None
+            } else {
+                Some(dependencies[distance as usize])
+            }
         };
 
         let actual_status = if let Some(max_allowed) = max_allowed_status {
@@ -408,7 +421,7 @@ impl WorldGenRegion {
             requested_status: target_status,
             actual_status,
             max_allowed_status,
-            dependencies,
+            dependencies: self.generating_step.direct_dependencies().to_vec(),
             distance,
             generating_chunk: self.center_pos,
         })
@@ -505,11 +518,16 @@ impl WorldGenRegion {
         }
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        // The base `ChunkAccess` carries no persisted status (the concrete chunk
+        // types do), so the `heightmapsAfter()` set the write must update is
+        // threaded from the holder seam (Java's `ProtoChunk.setBlockState` reads
+        // `getPersistedStatus().heightmapsAfter()`).
+        let persisted_status = self.cache.get(chunk_x, chunk_z).get_persisted_status();
         let chunk = self.get_chunk_mut(chunk_x, chunk_z);
         // `oldState` — the previous state `chunk.setBlockState` returns; the
         // block-entity removal (`oldState.hasBlockEntity()`) and POI update
         // read it, so the write retains it for those deferred seams (#185).
-        let _old_state = write_block(chunk, pos, block_state);
+        let _old_state = write_block(chunk, pos, block_state, persisted_status);
         true
     }
 
@@ -641,29 +659,41 @@ impl WorldGenLevel for WorldGenRegion {
     /// `LevelReader.getHeight(Heightmap.Types, int, int)` — the gated heightmap
     /// read.
     ///
-    /// Java primes a missing heightmap on demand (`ChunkAccess.getHeight`);
-    /// the chunk's `get_height_at` takes `&mut` (the priming write), which is
-    /// incompatible with the trait's `&self` read, so the port reads the
-    /// already-primed entry immutably and returns Java's unprimed value
-    /// (`minY - 1`, plus the region's `+ 1` → `minY`) when absent (RivetTodo
-    /// #228).
+    /// [`Heightmap::get_height_at`] is the Java `ChunkAccess.getHeight` value
+    /// (`getFirstAvailable(x, z) - 1` — the topmost opaque block's Y; a
+    /// never-set entry reads `minY - 1`), so a primed entry is returned
+    /// directly. When the entry is absent the port cannot prime it here —
+    /// `ChunkAccess::prime_heightmaps` takes `&mut` (`ChunkAccess::get_height_at`
+    /// is the `&mut`-typed half) — and returns the superflat floor's height
+    /// `minY` (the topmost block sits at `minY`, so Java's primed `getHeight` is
+    /// `minY`; a genuinely all-air column would be `minY - 1`, deferred with the
+    /// `&mut` seam, RivetTodo #228). Since `write_block` primes and updates the
+    /// `heightmapsAfter()` entries on every write, the None branch is only a
+    /// never-written chunk; written chunks return the real post-write height.
     fn get_height_at(&self, ty: Types, x: i32, z: i32) -> i32 {
         let chunk_x = SectionPos::block_to_section_coord(x);
         let chunk_z = SectionPos::block_to_section_coord(z);
         self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
         let chunk = self.get_chunk(chunk_x, chunk_z);
         match chunk.heightmaps()[ty as usize].as_ref() {
-            Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()) + 1,
+            Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()),
             None => chunk.get_min_y(),
         }
     }
 }
 
-/// The region's block-state read — `LevelChunk.getBlockState`-style: air for an
-/// out-of-build-height or all-air position, else the section storage read.
+/// The region's block-state read — the `ChunkAccess` block-state spine: air for
+/// an out-of-build-height or all-air position, else the section storage read.
 ///
-/// The base `ChunkAccess` carries no `air` value (the concrete chunk types do),
-/// so the port reads through the server's dense `StateId` where air is id 0.
+/// Java `ProtoChunk.getBlockState` returns `Blocks.VOID_AIR` for an
+/// out-of-build-height read (a distinct block from `AIR`); `LevelChunk` returns
+/// `AIR` (`getBlockStateFinal`'s empty/out-of-range section). The region reads
+/// the base `ChunkAccess`, which carries no `void_air` value — the concrete
+/// chunk types own theirs — so the port reads the server's dense `StateId`
+/// where air is id 0 for both. That matches the `LevelChunk` read; the
+/// `ProtoChunk` `VOID_AIR` (block id 794) divergence is block-identity only —
+/// both states are `isAir()` with an empty fluid, which is all the value-layer
+/// consumers observe.
 fn chunk_block_state(
     chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
     pos: &BlockPos,
@@ -681,13 +711,34 @@ fn chunk_block_state(
 }
 
 /// The region's block-state write — the section-level `setBlockState` with the
-/// server `StateId` behavior predicates. Out-of-build-height positions return
-/// the previous (air) state without writing, matching Java `ProtoChunk`'s
-/// `setBlockStateFinal` early-return.
+/// server `StateId` behavior predicates, then the `heightmapsAfter()` update.
+///
+/// This mirrors the core of Java `ProtoChunk.setBlockState` /
+/// `LevelChunk.setBlockState` (the region's chunks are the generic
+/// `ChunkAccess` base, and during worldgen they are `ProtoChunk`s until FULL).
+/// Out-of-build-height positions return air — Java returns
+/// `Blocks.VOID_AIR.defaultBlockState()` (block 794; both air) — without
+/// writing, matching Java's early return.
+///
+/// For an in-build-height write the section write is followed by Java's
+/// unconditional `getPersistedStatus().heightmapsAfter()` update loop (prime
+/// missing entries, then `update` per type). The base `ChunkAccess` carries no
+/// persisted status — the concrete chunk types do — so the caller threads it in
+/// from the holder seam (`persisted_status`); `None` skips the heightmap update
+/// (a holder with no chunk is unreachable for an in-ring write, so this only
+/// guards the free function's contract).
+///
+/// Java's `setBlockState` also runs, past `INITIALIZE_LIGHT`, the light-engine
+/// update; the value layer defers that (no light engine on `ChunkAccess`,
+/// RivetTodo #185), as it defers the `UPDATE_SKIP_POI` POI update and the
+/// `UPDATE_KNOWN_SHAPE` post-process mark (see [`set_block`](Self::set_block)).
+/// The section write itself — the paletted-container set plus the
+/// `BlockBehaviour` count and ticking bookkeeping — is faithful.
 fn write_block(
     chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
     pos: &BlockPos,
     block_state: BlockState,
+    persisted_status: Option<ChunkStatus>,
 ) -> StateId {
     let y = pos.get_y();
     if chunk.is_outside_build_height(y) {
@@ -695,7 +746,7 @@ fn write_block(
     }
     let section_index = chunk.get_section_index(y);
     let section = chunk.get_section_mut(section_index as usize);
-    section.set_block_state(
+    let old_state = section.set_block_state(
         pos.get_x() & 15,
         y & 15,
         pos.get_z() & 15,
@@ -705,7 +756,20 @@ fn write_block(
         &fluid_is_empty,
         &fluid_is_randomly_ticking,
         &state_is_special_colliding,
-    )
+    );
+    // Java `ProtoChunk.setBlockState`: `getPersistedStatus().heightmapsAfter()`
+    // — primed by `update_heightmaps_after` — updated with `localX, y, localZ`
+    // and the placed state, unconditionally for every in-build-height write.
+    if let Some(status) = persisted_status {
+        chunk.update_heightmaps_after(
+            status.heightmaps_after(),
+            pos.get_x() & 15,
+            y,
+            pos.get_z() & 15,
+            state_flags(block_state.id()),
+        );
+    }
+    old_state
 }
 
 // The `BlockBehaviour` predicate set `LevelChunkSection.setBlockState` needs —
@@ -809,6 +873,31 @@ mod tests {
             status: ChunkStatus,
         ) -> Option<&mut ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
             self.status.is_or_after(status).then_some(&mut self.chunk)
+        }
+    }
+
+    /// A test holder with no chunk held (Java `GenerationChunkHolder` whose
+    /// `getPersistedStatus()` returns null) — exercises the in-ring diagnostic
+    /// branch that has no actual status to report.
+    struct TestEmptyHolder;
+
+    impl GenerationChunkHolderView for TestEmptyHolder {
+        fn get_chunk_if_present_unchecked(
+            &self,
+            _status: ChunkStatus,
+        ) -> Option<&ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
+            None
+        }
+
+        fn get_persisted_status(&self) -> Option<ChunkStatus> {
+            None
+        }
+
+        fn get_chunk_if_present_unchecked_mut(
+            &mut self,
+            _status: ChunkStatus,
+        ) -> Option<&mut ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
+            None
         }
     }
 
@@ -1012,6 +1101,47 @@ mod tests {
         );
     }
 
+    /// An in-ring request whose holder holds no chunk yet renders "[no chunk
+    /// held]" — the branch Java would NPE on (its `getPersistedStatus().getName()`
+    /// supplier), rendered honestly instead of conflated with out-of-cache.
+    #[test]
+    fn in_ring_diagnostic_distinguishes_no_chunk_held_from_out_of_cache() {
+        let deps = vec![
+            ChunkStatus::Biomes,
+            ChunkStatus::Noise,
+            ChunkStatus::Features,
+            ChunkStatus::Full,
+        ];
+        let step = TestStep::new(deps.clone(), ChunkStatus::Features, 1);
+        let cache = StaticCache2D::create(0, 0, 1, &|_x, _z| {
+            Box::new(TestEmptyHolder) as Box<dyn GenerationChunkHolderView>
+        });
+        let region = WorldGenRegion::new(
+            cache,
+            ChunkPos::new(0, 0),
+            Box::new(step),
+            0,
+            SUPERFLAT_MIN_Y,
+            SUPERFLAT_HEIGHT,
+            -63,
+            Arc::new(TestBiomeSource {
+                biome: BiomeId::from_id(40),
+            }),
+        );
+
+        // Ring 1 (chunk (1,0)) allows NOISE; the holder has no chunk, so a
+        // request for NOISE fails with no actual status to report.
+        let diagnostic = region
+            .try_get_chunk(1, 0, ChunkStatus::Noise, true)
+            .err()
+            .expect("in-ring empty holder cannot serve the request");
+        assert_eq!(diagnostic.max_allowed_status, Some(ChunkStatus::Noise));
+        assert_eq!(diagnostic.actual_status, None);
+        let message = diagnostic.to_string();
+        assert!(message.contains("actual status: [no chunk held]"));
+        assert!(message.contains("maximum allowed status: minecraft:noise"));
+    }
+
     /// `hasChunk` is the same distance bound as the ring contract.
     #[test]
     fn has_chunk_matches_the_ring_bound() {
@@ -1133,11 +1263,36 @@ mod tests {
         assert_eq!(region.get_sky_darken(), 0);
         assert!(!region.is_client_side());
         assert_eq!(region.get_center(), center());
-        // `getHeight` of the all-air superflat content: unprimed heightmap →
-        // minY (the value Java returns for a missing heightmap after the
-        // region's `+ 1`).
+        // `getHeight` of the superflat content: `WorldSurface` is a
+        // FINAL_HEIGHTMAPS entry never primed by a BIOMES-persisted chunk, so
+        // the None fallback returns `minY` — Java's primed `getHeight` for the
+        // stone floor whose topmost block sits at `minY`.
         assert_eq!(
             region.get_height_at(Types::WorldSurface, 0, 0),
+            SUPERFLAT_MIN_Y
+        );
+    }
+
+    /// `set_block` primes and updates the `heightmapsAfter()` entries, so a
+    /// written block moves `getHeight` to its Y (Java `ProtoChunk.setBlockState`
+    /// runs the update unconditionally after every in-build-height write).
+    #[test]
+    fn set_block_updates_the_worldgen_heightmap() {
+        let mut region = feature_region();
+        // Write stone at block (0, 0, 0) — chunk (0, 0), inside the write radius.
+        let pos = BlockPos::new(0, 0, 0);
+        assert!(region.set_block(&pos, BlockState::new(StateId(1)), UPDATE_ALL, 0));
+        // The center chunk's persisted status is BIOMES (< CARVERS), so the
+        // WORLDGEN_HEIGHTMAPS types are maintained. `getHeight` is the topmost
+        // block's Y — the written stone at 0 (the floor at -64 is below it).
+        assert_eq!(region.get_height_at(Types::WorldSurfaceWg, 0, 0), 0);
+        // `OceanFloorWg` (blocks-motion) tracks the same column.
+        assert_eq!(region.get_height_at(Types::OceanFloorWg, 0, 0), 0);
+        // The block itself reads back as non-air.
+        assert!(!region.get_block_state(&pos).is_air());
+        // A column that was never written still reads the floor's `minY`.
+        assert_eq!(
+            region.get_height_at(Types::WorldSurfaceWg, 15, 15),
             SUPERFLAT_MIN_Y
         );
     }
