@@ -23,7 +23,10 @@
 //! is replaced by [`DensityFunction::type_id`] — the erased value's registry
 //! identity — and the `#177` dispatch table in `density_functions` resolves
 //! that id to the concrete `MapCodec`. `clone_arc` is the object-safe clone the
-//! `SimpleFunction::map_children` identity default needs (Java `return this`).
+//! combinator defaults (`clamp`/`abs`/...) and the non-`SimpleFunction`
+//! `wrap_new` paths use; the `SimpleFunction::map_children` identity default
+//! instead returns the caller's original `Arc` (Java `return this`), so a wrap
+//! cache keys on the original object.
 //!
 //! ## `DensityFunction.CODEC`
 //!
@@ -54,7 +57,44 @@ use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use std::any::Any;
 use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+/// A `HashMap` key that hashes on object identity and holds its
+/// `Arc<dyn DensityFunction>` key strongly.
+///
+/// Java's visitor wrap caches (`NoiseChunk.wrapped`,
+/// `RandomState`'s anonymous visitors) are `HashMap<DensityFunction,
+/// DensityFunction>` keyed on reference identity, and the map keeps its keys
+/// strongly reachable. The `#177` value model has no `Hash` on
+/// `dyn DensityFunction`, so identity is the Arc allocation address — but the
+/// key must ALSO be retained: `mapChildren` produces fresh intermediate `Arc`s
+/// that would otherwise be dropped and their addresses recycled by a later
+/// allocation, giving a spurious cache hit (Java's strong keys make that
+/// impossible).
+#[derive(Clone)]
+pub struct IdentityKey(Arc<dyn DensityFunction>);
+
+impl IdentityKey {
+    /// Wraps an owned function reference as an identity key.
+    pub fn new(arc: Arc<dyn DensityFunction>) -> Self {
+        IdentityKey(arc)
+    }
+}
+
+impl PartialEq for IdentityKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for IdentityKey {}
+
+impl Hash for IdentityKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0).cast::<()>() as usize).hash(state)
+    }
+}
 
 /// `net.minecraft.world.level.levelgen.DensityFunction` — the behavior contract
 /// of every density function.
@@ -77,18 +117,25 @@ pub trait DensityFunction: Any + Debug + Send + Sync + 'static {
     /// run through a trait object).
     fn fill_array(&self, output: &mut [f64], context_provider: &dyn ContextProvider) {
         for (i, slot) in output.iter_mut().enumerate() {
-            let point = context_provider.for_index(i);
-            *slot = self.compute(&point);
+            let context = context_provider.for_index(i);
+            *slot = self.compute(context);
         }
     }
 
     /// `mapChildren(Visitor)`.
     ///
     /// The default is `DensityFunction.SimpleFunction`'s — identity (`return
-    /// this`), via `clone_arc`. Functions whose children carry transformable
-    /// state (child functions, `NoiseHolder`s) override it.
-    fn map_children(&self, _visitor: &dyn Visitor) -> Arc<dyn DensityFunction> {
-        self.clone_arc()
+    /// this`). `original` is the owned `Arc` the caller holds (Java's `this`):
+    /// the default returns it unchanged, so a wrap cache keys on the original
+    /// object and later `mapAll`s reuse the wrap — Java's reference identity.
+    /// Functions whose children carry transformable state (child functions,
+    /// `NoiseHolder`s) override it and rebuild.
+    fn map_children(
+        &self,
+        _visitor: &dyn Visitor,
+        original: &Arc<dyn DensityFunction>,
+    ) -> Arc<dyn DensityFunction> {
+        original.clone()
     }
 
     /// `minValue()`.
@@ -106,27 +153,52 @@ pub trait DensityFunction: Any + Debug + Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
 
     /// Object-safe clone — `Arc::new(self.clone())` on the concrete type. The
-    /// `SimpleFunction::map_children` identity default needs it (Java
-    /// `return this`).
+    /// combinator defaults (`clamp`/`abs`/...) and the non-`SimpleFunction`
+    /// `wrap_new` paths use it; the `SimpleFunction::map_children` identity
+    /// default instead returns the caller's original `Arc` (Java `return
+    /// this`).
     fn clone_arc(&self) -> Arc<dyn DensityFunction>;
 }
 
 /// `DensityFunction.mapAll(Visitor)` — the recursive visitor: `apply(input
 /// .mapChildren(this))`. Ported as a free function because Rust has no
 /// anonymous local classes; the `RecursiveVisitor` is a local struct.
-pub fn map_all(function: &dyn DensityFunction, visitor: &dyn Visitor) -> Arc<dyn DensityFunction> {
+///
+/// The function is handed to the visitor as the owned `&Arc` so a wrap cache
+/// can key on object identity AND retain the key (see [`IdentityKey`]) —
+/// Java's `mapAll` passes its `DensityFunction` references and the visitor's
+/// `HashMap` keeps them strongly reachable, so a rebuilt intermediate whose
+/// address would otherwise be recycled can never spuriously alias a live cache
+/// key.
+pub fn map_all(
+    function: &Arc<dyn DensityFunction>,
+    visitor: &dyn Visitor,
+) -> Arc<dyn DensityFunction> {
     struct RecursiveVisitor<'a> {
         visitor: &'a dyn Visitor,
     }
 
     impl Visitor for RecursiveVisitor<'_> {
-        fn apply(&self, input: &dyn DensityFunction) -> Arc<dyn DensityFunction> {
-            let mapped = input.map_children(self);
-            self.visitor.apply(&*mapped)
+        fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction> {
+            let mapped = input.map_children(self, input);
+            self.visitor.apply(&mapped)
         }
 
         fn visit_noise(&self, noise: &NoiseHolder) -> NoiseHolder {
             self.visitor.visit_noise(noise)
+        }
+
+        // `mapChildren` runs against `self` (Java's anonymous `RecursiveVisitor`),
+        // so `HolderHolder.mapChildren` reaches the resolve seam through THIS
+        // visitor — forward it to the wrapped visitor (Java's reference
+        // resolution has no equivalent seam; the bound holder is a plain
+        // `Holder`). Without the forward a registry-backed visitor's
+        // `resolve_holder` would never fire.
+        fn resolve_holder(
+            &self,
+            holder: &Holder<Arc<dyn DensityFunction>>,
+        ) -> Option<Arc<dyn DensityFunction>> {
+            self.visitor.resolve_holder(holder)
         }
     }
 
@@ -184,9 +256,19 @@ impl dyn DensityFunction {
 // ---------------------------------------------------------------------------
 
 /// `DensityFunction.ContextProvider` — per-index context + direct array fill.
+///
+/// Java's `forIndex(int)` returns the *owning* context (`NoiseChunk.this` for
+/// both `NoiseChunk` and its `sliceFillingContextProvider`), so the inner
+/// functions reached through the per-index fill paths take the interpolation
+/// loop branch (`context != NoiseChunk.this` is false). The Rust trait returns
+/// a `&dyn FunctionContext` borrow of the provider so the concrete
+/// `NoiseChunk` identity survives — the `NoiseChunk` impls return `&self`, and
+/// [`crate::levelgen::noisegen::noise_chunk`]'s `is_owning_chunk` recognizes
+/// them by downcast + shared-state identity exactly like Java's reference
+/// comparison.
 pub trait ContextProvider {
-    /// `forIndex(int index)`.
-    fn for_index(&self, index: usize) -> SinglePointContext;
+    /// `forIndex(int index)` — the owning context for that cell index.
+    fn for_index(&self, index: usize) -> &dyn FunctionContext;
 
     /// `fillAllDirectly(double[], DensityFunction)` — fills `output` by
     /// `compute`ing the function once per index (the `SimpleFunction` default
@@ -195,7 +277,13 @@ pub trait ContextProvider {
 }
 
 /// `DensityFunction.FunctionContext` — the block coordinates a function reads.
-pub trait FunctionContext: Debug + Send + Sync {
+///
+/// `Any` is a supertrait (like `DensityFunction`) because the noisegen unit's
+/// `NoiseChunk` inner classes must distinguish their owning chunk from an
+/// arbitrary context — Java's `context != NoiseChunk.this` reference-identity
+/// check — by downcasting the context (`(context as &dyn Any).downcast_ref`).
+/// `SinglePointContext` is `'static`, so the bound adds no new impl burden.
+pub trait FunctionContext: Debug + Send + Sync + Any {
     /// `blockX()`.
     fn block_x(&self) -> i32;
 
@@ -243,11 +331,33 @@ impl FunctionContext for SinglePointContext {
 /// `DensityFunction.Visitor` — the `mapChildren`/`mapAll` transformer.
 pub trait Visitor: Send + Sync {
     /// `apply(DensityFunction)`.
-    fn apply(&self, input: &dyn DensityFunction) -> Arc<dyn DensityFunction>;
+    ///
+    /// Receives the owned `&Arc` so an identity-keyed wrap cache can retain the
+    /// key (Java's `HashMap<DensityFunction, DensityFunction>` keeps its keys
+    /// strongly reachable; an address-keyed cache must too, or a freed
+    /// intermediate's recycled address would spuriously hit a live entry).
+    fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction>;
 
     /// `visitNoise(NoiseHolder)` — default identity.
     fn visit_noise(&self, noise: &NoiseHolder) -> NoiseHolder {
         noise.clone()
+    }
+
+    /// Resolve a `Holder::Reference` to its value (default: the visitor has no
+    /// registry view, so the holder stays unresolved).
+    ///
+    /// Java's `HolderHolder.mapChildren` calls `function.value()`, which resolves
+    /// a bound reference (Java's `BuildState` binds every reference before the
+    /// router is used). The Rust holder model stores references as
+    /// `(RegistryId, id)` back-references (OWNERSHIP) that only resolve through
+    /// a `HolderLookup`, so the value layer cannot resolve them — the visitor
+    /// supplies the lookup. `RandomState`'s noise-wiring visitor overrides this
+    /// to resolve through the density-function registry.
+    fn resolve_holder(
+        &self,
+        _holder: &Holder<Arc<dyn DensityFunction>>,
+    ) -> Option<Arc<dyn DensityFunction>> {
+        None
     }
 }
 

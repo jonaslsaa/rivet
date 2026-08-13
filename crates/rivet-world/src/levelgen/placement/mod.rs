@@ -26,19 +26,59 @@
 //! per-type `MapCodec` defers with the codec surface (`#126`).
 //!
 //! Every Java modifier draws eagerly *inside* `getPositions` and returns a
-//! pure stream, so the port's `get_positions` returns an eager `Vec<BlockPos>`;
-//! Java's laziness is in *when* `getPositions` runs — its lazy `flatMap` invokes
-//! it per upstream position, interleaved with placements. `PlacedFeature`
-//! reproduces that with a depth-first walk; see `place_walk` there for the
-//! authoritative parity account (why the ordering of RNG draws and level-state
-//! reads matters, and the #181 revisit note).
+//! lazy `Stream<BlockPos>`, so the port's `get_positions` draws eagerly and
+//! returns a lazy `Box<dyn Iterator<Item = BlockPos> + 'a>` (Java's laziness in
+//! *when* `getPositions` runs — its lazy `flatMap` invokes it per upstream
+//! position, interleaved with placements — is reproduced by `PlacedFeature`'s
+//! depth-first walk; the iterator form additionally keeps `RepeatingPlacement`'s
+//! unbounded `count` from materializing a `count`-length `Vec`). See
+//! `place_walk` there for the authoritative parity account (why the ordering of
+//! RNG draws and level-state reads matters, and the #181 revisit note).
 
+// `Biome.BIOME_INFO_NOISE` is owned by the `mc.world.level.biome.core` unit
+// (declared in `biome::biome`); the `placement.repeating` modifiers read it
+// through `crate::biome::biome::BIOME_INFO_NOISE` (see `noise_based_count_placement`
+// and `noise_threshold_count_placement`).
+
+mod biome_filter;
+mod block_predicate_filter;
+mod cave_surface;
+mod count_on_every_layer_placement;
+mod count_placement;
+mod environment_scan_placement;
+mod fixed_placement;
+mod height_range_placement;
+mod heightmap_placement;
+mod in_square_placement;
+mod noise_based_count_placement;
+mod noise_threshold_count_placement;
 mod placed_feature;
 mod placement_context;
 mod placement_filter;
 mod placement_modifier;
 mod placement_modifier_type;
+mod random_offset_placement;
+mod rarity_filter;
+mod repeating_placement;
+mod surface_relative_threshold_filter;
+mod surface_water_depth_filter;
 
+pub use biome_filter::BiomeFilter;
+pub use block_predicate_filter::BlockPredicateFilter;
+pub use cave_surface::{CaveSurface, cave_surface_codec};
+pub use count_on_every_layer_placement::CountOnEveryLayerPlacement;
+pub use count_placement::{CountPlacement, count_placement_codec};
+pub use environment_scan_placement::EnvironmentScanPlacement;
+pub use fixed_placement::FixedPlacement;
+pub use height_range_placement::HeightRangePlacement;
+pub use heightmap_placement::HeightmapPlacement;
+pub use in_square_placement::InSquarePlacement;
+pub use noise_based_count_placement::{
+    NoiseBasedCountPlacement, noise_based_count_placement_codec,
+};
+pub use noise_threshold_count_placement::{
+    NoiseThresholdCountPlacement, noise_threshold_count_placement_codec,
+};
 pub use placed_feature::PlacedFeature;
 pub use placement_context::PlacementContext;
 pub use placement_filter::PlacementFilter;
@@ -46,3 +86,8 @@ pub use placement_modifier::{ErasedPlacementModifier, PlacementModifier, placeme
 pub use placement_modifier_type::{
     PlacementModifierType, PlacementModifierTypeId, placement_modifier_type,
 };
+pub use random_offset_placement::RandomOffsetPlacement;
+pub use rarity_filter::RarityFilter;
+pub use repeating_placement::RepeatingPlacement;
+pub use surface_relative_threshold_filter::SurfaceRelativeThresholdFilter;
+pub use surface_water_depth_filter::SurfaceWaterDepthFilter;

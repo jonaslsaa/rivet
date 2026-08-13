@@ -33,6 +33,12 @@ pub const MAX_Y: i32 = (Y_SIZE >> 1) - 1;
 /// `DimensionType.MIN_Y` — `MAX_Y - Y_SIZE + 1`.
 pub const MIN_Y: i32 = MAX_Y - Y_SIZE + 1;
 
+/// `DimensionType.WAY_ABOVE_MAX_Y` — `MAX_Y << 4`.
+pub const WAY_ABOVE_MAX_Y: i32 = MAX_Y << 4;
+
+/// `DimensionType.WAY_BELOW_MIN_Y` — `MIN_Y << 4`.
+pub const WAY_BELOW_MIN_Y: i32 = MIN_Y << 4;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,6 +51,9 @@ mod tests {
         assert_eq!(Y_SIZE, 4064);
         assert_eq!(MAX_Y, 2031);
         assert_eq!(MIN_Y, -2032);
+        // `WAY_ABOVE_MAX_Y = MAX_Y << 4`, `WAY_BELOW_MIN_Y = MIN_Y << 4`.
+        assert_eq!(WAY_ABOVE_MAX_Y, 2031 << 4);
+        assert_eq!(WAY_BELOW_MIN_Y, -2032 << 4);
         // The derived relation MAX_Y = MIN_Y + Y_SIZE - 1 holds.
         assert_eq!(MAX_Y, MIN_Y + Y_SIZE - 1);
     }

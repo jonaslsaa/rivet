@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "seed": "42",
+  "level-type": "minecraft:normal",
+  "kind": "composed-noise",
+  "note": "Bit-exact seed-42 composed-noise goldens for the overworld NOISE checkpoint (mc.world.level.levelgen): router climate fields, float-cast weirdness + peaksAndValleys, interpolated final density, raw finalDensity, preliminarySurfaceLevel — each as the JSON double AND the raw IEEE-754 bits (Double.doubleToLongBits / Float.floatToIntBits) at the #175 chunk-coordinate matrix. Plus Paper's live FULL_CHUNK_STEP reachability. Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/ComposedNoiseProbe.java; regenerate with scripts/run_composed_noise_probe.sh.",
+  "captured": [
+    {
+      "path": "composed-noise.json",
+      "sha256": "dafaa68f5911a5aae9c5f44c874726c56507df0fc30b18854b9cac395b936e5f",
+      "bytes": 40556
+    }
+  ]
+}

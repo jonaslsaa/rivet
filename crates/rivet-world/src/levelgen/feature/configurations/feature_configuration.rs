@@ -14,6 +14,7 @@
 
 use crate::levelgen::feature::configurations::NoneFeatureConfiguration;
 use rivet_registry::Holder;
+use std::any::Any;
 use std::fmt::Debug;
 
 /// `net.minecraft.world.level.levelgen.feature.configurations.FeatureConfiguration`.
@@ -26,7 +27,15 @@ use std::fmt::Debug;
 /// lazy iterator (`Box<dyn Iterator<...>>`), preserving Java's lazy `Stream`
 /// semantics for overriders: sub-features are produced on demand and can be
 /// short-circuited, never materialized eagerly.
-pub trait FeatureConfiguration: Debug + Send + Sync + 'static {
+///
+/// The `Any` supertrait gives the `#181` feature dispatch (`feature_place`,
+/// `feature.core`) its downcast seam: a `dyn FeatureConfiguration` is upcast to
+/// `&dyn Any` and downcast to the concrete config type before a concrete
+/// feature's `place_with_config` runs — the same erased-cast seam
+/// `BlockStateProvider`/`ErasedBlockStateProvider` and `FeatureSize` expose via
+/// their `as_any` methods. `'static` is already a supertrait bound, so `Any` is
+/// satisfied by every implementer for free.
+pub trait FeatureConfiguration: Debug + Send + Sync + Any + 'static {
     /// `getSubFeatures()` — the default returns an empty stream.
     ///
     /// The element type is the erased wildcard `ConfiguredFeatureErased`

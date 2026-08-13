@@ -602,10 +602,15 @@ impl DensityFunction for Marker {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         // Java `MarkerOrMarked.mapChildren` default: `new Marker(type,
-        // visitor.apply(wrapped))`.
-        Arc::new(Marker::new(self.marker_type, visitor.apply(&*self.wrapped)))
+        // visitor.apply(wrapped))`. The wrap visitor then re-creates the
+        // concrete inner class (`NoiseChunk.wrapNew`), so a re-Marked
+        // FlatCache is re-FILLED and a re-Marked interpolator re-registered —
+        // Java's identity semantics for a second `mapAll`.
+        let child = visitor.apply(&self.wrapped);
+        Arc::new(Marker::new(self.marker_type, child))
     }
     fn min_value(&self) -> f64 {
         if self.marker_type == MarkerType::BlendDensity {
@@ -762,11 +767,9 @@ impl DensityFunction for Mapped {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
-        Arc::new(Mapped::create(
-            self.mapped_type,
-            visitor.apply(&*self.input),
-        ))
+        Arc::new(Mapped::create(self.mapped_type, visitor.apply(&self.input)))
     }
     fn min_value(&self) -> f64 {
         self.min_value
@@ -845,9 +848,10 @@ impl DensityFunction for Clamp {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(Clamp::new(
-            visitor.apply(&*self.input),
+            visitor.apply(&self.input),
             self.min_value,
             self.max_value,
         ))
@@ -938,24 +942,25 @@ impl DensityFunction for RangeChoice {
         for (i, slot) in output.iter_mut().enumerate() {
             let v = *slot;
             if v >= self.min_inclusive && v < self.max_exclusive {
-                *slot = self.when_in_range.compute(&context_provider.for_index(i));
+                *slot = self.when_in_range.compute(context_provider.for_index(i));
             } else {
                 *slot = self
                     .when_out_of_range
-                    .compute(&context_provider.for_index(i));
+                    .compute(context_provider.for_index(i));
             }
         }
     }
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(RangeChoice::new(
-            visitor.apply(&*self.input),
+            visitor.apply(&self.input),
             self.min_inclusive,
             self.max_exclusive,
-            visitor.apply(&*self.when_in_range),
-            visitor.apply(&*self.when_out_of_range),
+            visitor.apply(&self.when_in_range),
+            visitor.apply(&self.when_out_of_range),
         ))
     }
     fn min_value(&self) -> f64 {
@@ -1067,20 +1072,21 @@ impl DensityFunction for IntervalSelect {
     ) {
         self.input.fill_array(output, context_provider);
         for (i, slot) in output.iter_mut().enumerate() {
-            *slot = self.compute_with_input(&context_provider.for_index(i), *slot);
+            *slot = self.compute_with_input(context_provider.for_index(i), *slot);
         }
     }
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         let functions = self
             .functions
             .iter()
-            .map(|f| visitor.apply(&**f))
+            .map(|f| visitor.apply(f))
             .collect::<Vec<_>>();
         Arc::new(IntervalSelect::new(
-            visitor.apply(&*self.input),
+            visitor.apply(&self.input),
             self.thresholds.clone(),
             functions,
         ))
@@ -1153,6 +1159,7 @@ impl DensityFunction for Noise {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(Noise::new(
             visitor.visit_noise(&self.noise),
@@ -1253,6 +1260,7 @@ impl DensityFunction for Shift {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(Shift::new(visitor.visit_noise(&self.offset_noise)))
     }
@@ -1304,6 +1312,7 @@ impl DensityFunction for ShiftA {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(ShiftA::new(visitor.visit_noise(&self.offset_noise)))
     }
@@ -1355,6 +1364,7 @@ impl DensityFunction for ShiftB {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(ShiftB::new(visitor.visit_noise(&self.offset_noise)))
     }
@@ -1444,11 +1454,12 @@ impl DensityFunction for ShiftedNoise {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(ShiftedNoise::new(
-            visitor.apply(&*self.shift_x),
-            visitor.apply(&*self.shift_y),
-            visitor.apply(&*self.shift_z),
+            visitor.apply(&self.shift_x),
+            visitor.apply(&self.shift_y),
+            visitor.apply(&self.shift_z),
             self.xz_scale,
             self.y_scale,
             visitor.visit_noise(&self.noise),
@@ -1658,8 +1669,9 @@ impl DensityFunction for MulOrAdd {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
-        let function = visitor.apply(&*self.input);
+        let function = visitor.apply(&self.input);
         let min = function.min_value();
         let max = function.max_value();
         let (min_value, max_value) = match self.specific_type {
@@ -1803,7 +1815,7 @@ impl DensityFunction for Ap2 {
                     *slot = if v == 0.0 {
                         0.0
                     } else {
-                        v * self.argument2.compute(&context_provider.for_index(i))
+                        v * self.argument2.compute(context_provider.for_index(i))
                     };
                 }
             }
@@ -1814,7 +1826,7 @@ impl DensityFunction for Ap2 {
                     *slot = if v < min {
                         v
                     } else {
-                        mth::min_f64(v, self.argument2.compute(&context_provider.for_index(i)))
+                        mth::min_f64(v, self.argument2.compute(context_provider.for_index(i)))
                     };
                 }
             }
@@ -1825,7 +1837,7 @@ impl DensityFunction for Ap2 {
                     *slot = if v > max {
                         v
                     } else {
-                        mth::max_f64(v, self.argument2.compute(&context_provider.for_index(i)))
+                        mth::max_f64(v, self.argument2.compute(context_provider.for_index(i)))
                     };
                 }
             }
@@ -1834,11 +1846,12 @@ impl DensityFunction for Ap2 {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         two_argument_create(
             self.two_arg_type,
-            visitor.apply(&*self.argument1),
-            visitor.apply(&*self.argument2),
+            visitor.apply(&self.argument1),
+            visitor.apply(&self.argument2),
         )
     }
     fn min_value(&self) -> f64 {
@@ -1902,6 +1915,7 @@ impl DensityFunction for Spline {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         let mapped = self
             .spline
@@ -1957,7 +1971,7 @@ impl SplineCoordinate {
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
     ) -> SplineCoordinate {
-        SplineCoordinate::new(visitor.apply(&*self.function))
+        SplineCoordinate::new(visitor.apply(&self.function))
     }
 }
 
@@ -2171,10 +2185,11 @@ impl DensityFunction for FindTopSurface {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
         Arc::new(FindTopSurface::new(
-            visitor.apply(&*self.density),
-            visitor.apply(&*self.upper_bound),
+            visitor.apply(&self.density),
+            visitor.apply(&self.upper_bound),
             self.lower_bound,
             self.cell_height,
         ))
@@ -2281,8 +2296,10 @@ impl EndIslandDensityFunction {
         let mut cache = self.cache.lock().unwrap();
         for xo in -12..=12i32 {
             for zo in -12..=12i32 {
-                let total_chunk_x = chunk_x as i64 + xo as i64;
-                let total_chunk_z = chunk_z as i64 + zo as i64;
+                // Java `long totalChunkX = chunkX + xo;` — the int add wraps at
+                // 32 bits, then sign-extends to long.
+                let total_chunk_x = chunk_x.wrapping_add(xo) as i64;
+                let total_chunk_z = chunk_z.wrapping_add(zo) as i64;
                 let chunk_key = ChunkPos::pack_coords(total_chunk_x as i32, total_chunk_z as i32);
                 let cache_index = (mix_i64(chunk_key) & 8191) as usize;
                 // Java `float islandSize = Float.MIN_VALUE` — the smallest
@@ -2411,13 +2428,20 @@ impl DensityFunction for HolderHolder {
     fn map_children(
         &self,
         visitor: &dyn crate::levelgen::noise::density_function::Visitor,
+        _original: &Arc<dyn DensityFunction>,
     ) -> Arc<dyn DensityFunction> {
-        // Java `new HolderHolder(Holder.direct(visitor.apply(this.function.value())))`.
+        // Java `new HolderHolder(Holder.direct(visitor.apply(this.function.value())))`
+        // — `value()` resolves a bound reference (Java's `BuildState` binds
+        // every reference before the router reaches `NoiseChunk`). The Rust
+        // holder model cannot resolve a `(RegistryId, id)` back-reference
+        // without a `HolderLookup`; the visitor supplies it (see
+        // [`crate::levelgen::noise::density_function::Visitor::resolve_holder`]).
         match &self.function {
-            Holder::Direct(f) => Arc::new(HolderHolder::new(Holder::direct(visitor.apply(&**f)))),
-            Holder::Reference { .. } => {
-                panic!("HolderHolder.value() requires a HolderLookup (RivetTodo #177)")
-            }
+            Holder::Direct(f) => Arc::new(HolderHolder::new(Holder::direct(visitor.apply(f)))),
+            Holder::Reference { .. } => match visitor.resolve_holder(&self.function) {
+                Some(value) => Arc::new(HolderHolder::new(Holder::direct(visitor.apply(&value)))),
+                None => panic!("HolderHolder.value() requires a HolderLookup (RivetTodo #177)"),
+            },
         }
     }
     fn min_value(&self) -> f64 {
@@ -3772,7 +3796,7 @@ where
 mod tests {
     use super::*;
     use crate::levelgen::noise::density_function::{
-        ContextProvider, SinglePointContext, Visitor, density_function_codec, map_all,
+        ContextProvider, IdentityKey, SinglePointContext, Visitor, density_function_codec, map_all,
     };
     use rivet_registry::Identifier;
     use rivet_registry::ResourceKey;
@@ -3781,6 +3805,8 @@ mod tests {
     use rivet_registry::registry_ops::RegistryOps;
     use rivet_serialization::json_ops::JsonOps;
     use serde_json;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     fn at(x: i32, y: i32, z: i32) -> SinglePointContext {
         SinglePointContext::new(x, y, z)
@@ -4003,12 +4029,12 @@ mod tests {
 
     struct LinearCtx(Vec<SinglePointContext>);
     impl ContextProvider for LinearCtx {
-        fn for_index(&self, index: usize) -> SinglePointContext {
-            self.0[index]
+        fn for_index(&self, index: usize) -> &dyn FunctionContext {
+            &self.0[index]
         }
         fn fill_all_directly(&self, output: &mut [f64], function: &dyn DensityFunction) {
             for (i, slot) in output.iter_mut().enumerate() {
-                *slot = function.compute(&self.for_index(i));
+                *slot = function.compute(self.for_index(i));
             }
         }
     }
@@ -4037,11 +4063,11 @@ mod tests {
     /// A visitor that squares every `Constant` it reaches.
     struct SquareConstant;
     impl Visitor for SquareConstant {
-        fn apply(&self, input: &dyn DensityFunction) -> Arc<dyn DensityFunction> {
+        fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction> {
             if let Some(c) = input.as_any().downcast_ref::<Constant>() {
                 constant(c.value() * c.value())
             } else {
-                input.clone_arc()
+                input.clone()
             }
         }
     }
@@ -4051,7 +4077,7 @@ mod tests {
         // `cache2d(clamp(constant(3), 0, 10))` — the visitor rewrites the
         // inner constant to 9, recursing through the marker and the clamp.
         let f = cache2d(constant(3.0).clamp(0.0, 10.0));
-        let mapped = map_all(&*f, &SquareConstant);
+        let mapped = map_all(&f, &SquareConstant);
         assert_eq!(
             DensityFunction::type_id(&*mapped),
             DensityFunctionTypes::CACHE_2D
@@ -4080,8 +4106,45 @@ mod tests {
         // A `Constant` leaf's `map_children` returns itself; `map_all` then
         // applies the visitor to the same leaf (Java `apply(input.mapChildren
         // (this))`).
-        let mapped = map_all(&*constant(3.0), &SquareConstant);
+        let mapped = map_all(&constant(3.0), &SquareConstant);
         assert_eq!(mapped.compute(&at(0, 0, 0)), 9.0);
+    }
+
+    #[test]
+    fn map_all_reuses_wrap_for_simple_function_leaf() {
+        // An identity-keyed wrap visitor (the NoiseChunkWrap/RandomState
+        // pattern). Java's `SimpleFunction.mapChildren` returns `this`, so the
+        // identity-preserving default keys the wrap cache on the ORIGINAL leaf
+        // Arc; a second `mapAll` over the same leaf reuses the first wrap. A
+        // `clone_arc` default would key on a fresh clone and produce a second,
+        // distinct wrap.
+        struct WrapCache {
+            cache: Mutex<HashMap<IdentityKey, Arc<dyn DensityFunction>>>,
+        }
+        impl Visitor for WrapCache {
+            fn apply(&self, input: &Arc<dyn DensityFunction>) -> Arc<dyn DensityFunction> {
+                let key = IdentityKey::new(input.clone());
+                if let Some(value) = self.cache.lock().unwrap().get(&key) {
+                    return value.clone();
+                }
+                let value: Arc<dyn DensityFunction> =
+                    Arc::new(Marker::new(MarkerType::CacheOnce, input.clone()));
+                self.cache.lock().unwrap().insert(key, value.clone());
+                value
+            }
+        }
+
+        let leaf = constant(3.0);
+        let visitor = WrapCache {
+            cache: Mutex::new(HashMap::new()),
+        };
+        let first = map_all(&leaf, &visitor);
+        let second = map_all(&leaf, &visitor);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "a second mapAll over the same SimpleFunction leaf must reuse the \
+             first wrap (Java mapChildren returns `this`)"
+        );
     }
 
     // ------------------------------------------------------------------

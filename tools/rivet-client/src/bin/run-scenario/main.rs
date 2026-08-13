@@ -88,12 +88,12 @@
 //!   the explicit generated-world launch option (`--seed 42`), drive the real
 //!   Azalea client in `generated` mode (join + dwell + bounded walk +
 //!   per-coordinate content sampling), and compare the observed content against
-//!   the seed-42 ground-truth handoff (`rivet-oracle generated-expected`).
-//!   Until the rivet-server `--seed` capability lands, the runner exits
-//!   UNVERIFIED (3) with the exact pinned
-//!   [`GENERATED_WORLD_UNVERIFIED_REASON`] — it never falls back to a superflat
-//!   boot or a copied loaded world, which would fabricate a PASS on the wrong
-//!   world.
+//!   the seed-42 ground-truth handoff (`rivet-oracle generated-expected`). The
+//!   server accepts `--seed` but still serves the superflat M1 fixture, so the
+//!   acceptance stays honestly UNVERIFIED until real generated-world serving
+//!   and the Paper seed-42 ground-truth handoff land — it never falls back to a
+//!   superflat boot or a copied loaded world, which would fabricate a PASS on
+//!   the wrong world.
 //!
 //! ## Deterministic Paper config (issue #266 / #333)
 //!
@@ -238,6 +238,7 @@ enum Subcommand {
     LoadWorld,
     LoadedWorld,
     GeneratedWorld,
+    Recenter,
     Help,
 }
 
@@ -300,9 +301,6 @@ struct Args {
     timeout_seconds: u64,
     runs: usize,
     dwell_seconds: u64,
-    /// The seed the generated-world acceptance boots and compares. Only valid
-    /// for `generated-world` (which pins it to `server::GENERATED_SEED`); an
-    /// explicit `--seed` on any other command is a silent no-op and is rejected.
     seed: Option<u64>,
 }
 
@@ -321,13 +319,13 @@ impl Args {
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
         let mut runs = DEFAULT_RUNS;
         let mut dwell_seconds = DEFAULT_DWELL_SECONDS;
-        let mut seed: Option<u64> = None;
         let mut server_explicit = false;
         let mut runs_explicit = false;
         let mut pairs_explicit = false;
         let mut dwell_explicit = false;
         let mut username_explicit = false;
         let mut timeout_explicit = false;
+        let mut seed: Option<u64> = None;
         let mut seed_explicit = false;
 
         if let Some(sub) = args.next() {
@@ -340,6 +338,7 @@ impl Args {
                 "load-world" => Subcommand::LoadWorld,
                 "loaded-world" => Subcommand::LoadedWorld,
                 "generated-world" => Subcommand::GeneratedWorld,
+                "recenter" => Subcommand::Recenter,
                 "--help" | "-h" | "help" => Subcommand::Help,
                 _ => return Err(format!("unknown subcommand: {sub}\n\n{}", usage())),
             };
@@ -359,19 +358,19 @@ impl Args {
                         .map_err(|_| format!("invalid --timeout-seconds value: {v}"))?;
                     timeout_explicit = true;
                 }
-                "--seed" => {
-                    let v = next_value(&mut args, "--seed")?;
-                    seed = Some(v.parse().map_err(|_| {
-                        format!("invalid --seed value: {v} (expected an unsigned 64-bit seed)")
-                    })?);
-                    seed_explicit = true;
-                }
                 "--runs" => {
                     let v = next_value(&mut args, "--runs")?;
                     runs = v
                         .parse()
                         .map_err(|_| format!("invalid --runs value: {v}"))?;
                     runs_explicit = true;
+                }
+                "--seed" => {
+                    let v = next_value(&mut args, "--seed")?;
+                    seed = Some(v.parse().map_err(|_| {
+                        format!("invalid --seed value: {v} (expected an unsigned 64-bit seed)")
+                    })?);
+                    seed_explicit = true;
                 }
                 "--server" => {
                     let v = next_value(&mut args, "--server")?;
@@ -399,15 +398,15 @@ impl Args {
         }
 
         // `--dwell-seconds` only has meaning for the dwell scenario; on
-        // join/move/kick/capture/load-world/loaded-world the client is never
-        // asked to dwell, so an explicit value would be a silent no-op. Reject
-        // it (exit 64) rather than ignore it — the same no-silent-noop policy
-        // as --runs/--pairs on dwell.
+        // join/move/kick/capture/load-world/loaded-world/recenter the client is
+        // never asked to dwell, so an explicit value would be a silent no-op.
+        // Reject it (exit 64) rather than ignore it — the same no-silent-noop
+        // policy as --runs/--pairs on dwell.
         if dwell_explicit && command != Subcommand::Dwell {
             return Err(
                 "--dwell-seconds only applies to the dwell scenario (the keepalive-survival \
-                 gate); join/move/kick/capture/load-world/loaded-world/generated-world never \
-                 dwell, so an explicit value would be a silent no-op — drop it"
+                 gate); join/move/kick/capture/load-world/loaded-world/recenter/generated-world \
+                 never dwell, so an explicit value would be a silent no-op — drop it"
                     .to_owned(),
             );
         }
@@ -417,9 +416,9 @@ impl Args {
         if seed_explicit && command != Subcommand::GeneratedWorld {
             return Err(
                 "--seed only applies to the generated-world scenario (the seed-42 generated \
-                 acceptance contract); join/move/dwell/kick/capture/load-world/loaded-world never \
-                 boot a fresh generated world, so an explicit value would be a silent no-op — \
-                 drop it"
+                 acceptance contract); join/move/dwell/kick/capture/load-world/loaded-world \
+                 recenter never boot a fresh generated world, so an explicit value would be a \
+                 silent no-op — drop it"
                     .to_owned(),
             );
         }
@@ -714,11 +713,14 @@ impl Args {
         if command == Subcommand::GeneratedWorld {
             // `generated-world` (the generated-world acceptance contract, seed
             // 42) boots exactly one Rivet server with `--seed 42` — the explicit
-            // generated-world capability. Until the rivet-server capability
-            // lands, the runner reports the exact pinned UNVERIFIED reason and
-            // never falls back to superflat or a copied loaded world. Paper has
-            // no place here; `--pairs`/`--runs` would be silent no-ops, and the
-            // client is driven only via its default timeout/username.
+            // generated-world capability. The server now accepts `--seed` but
+            // still serves the superflat M1 fixture, so the runner boots it and
+            // reports the exact pinned UNVERIFIED reason — never a fabricated
+            // PASS, superflat echo, or copied loaded world fallback — until real
+            // generated-world serving and the Paper seed-42 ground-truth handoff
+            // land. Paper has no place here; `--pairs`/`--runs` would be silent
+            // no-ops, and the client is driven only via its default
+            // timeout/username.
             if server_explicit && server != ServerSelection::Rivet {
                 return Err(format!(
                     "generated-world only supports --server rivet (the generated-world capability \
@@ -771,6 +773,55 @@ impl Args {
             seed = Some(server::GENERATED_SEED);
         }
 
+        if command == Subcommand::Recenter {
+            // `recenter` (issues #185/#561) boots exactly one Rivet server
+            // against a disposable copy of the safe copied world
+            // (`--level <copy>`), drives the loaded-recenter client's
+            // deterministic +x route across repeated chunk boundaries, and
+            // REQUIRES the positive sustained-walking acceptance (the region-backed
+            // recenter stays connected and receives every beyond-boot chunk) plus
+            // a tampered-copy negative control. Paper has no place here;
+            // `--pairs`/`--runs`/`--username`/`--timeout-seconds` would be
+            // silent no-ops.
+            if server_explicit && server != ServerSelection::Rivet {
+                return Err(format!(
+                    "recenter only supports --server rivet (Paper does not use Rivet's \
+                     world-path launch seam); got --server {}",
+                    server.as_str()
+                ));
+            }
+            server = ServerSelection::Rivet;
+            if pairs_explicit {
+                return Err(
+                    "recenter is a single-server sustained-walking acceptance (plus a \
+                     tampered-copy negative control) and has no --pairs comparison; drop it"
+                        .to_owned(),
+                );
+            }
+            if runs_explicit {
+                return Err(
+                    "recenter always performs exactly one Rivet launch + loaded-recenter client \
+                     run, so --runs is a silent no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if username_explicit {
+                return Err(
+                    "recenter does not take a client username override; --username is a silent \
+                     no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            if timeout_explicit {
+                return Err(
+                    "recenter uses the client's default timeout; --timeout-seconds is a silent \
+                     no-op; drop it"
+                        .to_owned(),
+                );
+            }
+            runs = 1;
+        }
+
         Ok(Self {
             command,
             server,
@@ -792,9 +843,9 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: run-scenario <join|move|dwell|kick|capture|load-world|loaded-world|generated-world> [options]\n\
+        "Usage: run-scenario <join|move|dwell|kick|capture|load-world|loaded-world|recenter|generated-world> [options]\n\
          Options:\n\
-         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick/load-world/loaded-world/generated-world are always rivet)\n\
+         \x20 --server paper|rivet|both  which servers to boot (default paper; dwell/kick/load-world/loaded-world/recenter/generated-world are always rivet)\n\
          \x20 --pairs paper:paper|paper:rivet\n\
          \x20                            comparison to run (default paper:paper)\n\
          \x20 --address HOST:PORT        server address (default {DEFAULT_ADDRESS})\n\
@@ -1053,8 +1104,7 @@ fn one_join(
         None,
         &[],
         None,
-        None,
-    )?;
+            None,)?;
     println!("[run  {idx}] joining via rivet-client ...");
     let client_run = run_client(
         client_bin,
@@ -1253,8 +1303,7 @@ fn one_move(
         None,
         &[],
         None,
-        None,
-    )?;
+            None,)?;
     println!("[run  {idx}] walking via rivet-client (move mode) ...");
     let client_run = run_client(
         client_bin,
@@ -1467,8 +1516,7 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
             None,
             &[],
             None,
-            None,
-        )?;
+            None,)?;
         println!("[run  {idx}] connecting via rivet-client ...");
         let client_run = run_client(
             &client_bin,
@@ -2001,8 +2049,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[],
         None,
-        None,
-    )?;
+            None,)?;
     let paper_client = run_client(
         &client_bin,
         &ClientSpec {
@@ -2052,8 +2099,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[],
         None,
-        None,
-    )?;
+            None,)?;
     let rivet_client = run_client(
         &client_bin,
         &ClientSpec {
@@ -2219,8 +2265,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[],
         None,
-        None,
-    )?;
+            None,)?;
     let paper_client = run_client(
         &client_bin,
         &ClientSpec {
@@ -2268,8 +2313,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         Some(reservations.remove(0)),
         &[(trace::TRACE_MOVEMENT_ENV, "1")],
         None,
-        None,
-    )?;
+            None,)?;
     let rivet_client = run_client(
         &client_bin,
         &ClientSpec {
@@ -2475,8 +2519,7 @@ fn run_dwell(args: &Args) -> Result<(), RunnerError> {
         None,
         &[],
         None,
-        None,
-    )?;
+            None,)?;
     println!("[run  1] dwelling via rivet-client (dwell mode) ...");
     let client_run = run_client(
         &client_bin,
@@ -2625,8 +2668,7 @@ fn run_kick(args: &Args) -> Result<(), RunnerError> {
         None,
         &[],
         None,
-        None,
-    )?;
+            None,)?;
     println!("[run  1] kicking via rivet-client (kick mode) ...");
     let client_run = run_client(
         &client_bin,
@@ -2768,8 +2810,7 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         None,
         &[],
         None,
-        None,
-    )?;
+            None,)?;
     let client_run = run_client(
         &client_bin,
         &ClientSpec {
@@ -2847,8 +2888,7 @@ fn run_load_world(args: &Args) -> Result<(), RunnerError> {
             None,
             &[],
             Some(&server_world_path),
-            None,
-        ) {
+            None,) {
             Ok(mut srv) => match server::shutdown(&mut srv) {
                 Ok(()) => Err(RunnerError::Unverified(
                     "rivet-server accepted the loaded-world path and reached READY, but this #316 \
@@ -2970,8 +3010,7 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
             None,
             &[],
             Some(&server_world_path),
-            None,
-        ) {
+            None,) {
             Ok(srv) => srv,
             Err(error) => return Err(classify_load_world_boot_failure(error, &log_path)),
         };
@@ -3350,6 +3389,581 @@ fn compare_generated_content(manifest: &Value, transcript: &Value) -> Result<(),
     Ok(())
 }
 
+/// The load-bearing rivet-server log fragment that proves the movement-driven
+/// recenter failed typed in the NEGATIVE control: the session-level warn emitted
+/// in `session.rs` `dispatch_move_player`'s `Err` arm (`disconnecting play
+/// session on chunk-loader update failure`) when the on-demand load fails. The
+/// positive acceptance REQUIRES this fragment to be ABSENT; the tampered-copy
+/// negative control REQUIRES it to be PRESENT.
+const RECENTER_FAILURE_LOG_FRAGMENT: &str =
+    "disconnecting play session on chunk-loader update failure";
+
+/// The typed failure the on-demand region load surfaces when a chunk is corrupt
+/// at the storage boundary: the `RegionRead` `RegionBackedBootError` displays
+/// `UNVERIFIED read-only region read failed: <io error>`, and the corrupt chunk
+/// the negative control creates surfaces `<io error>` =
+/// `corrupt chunk [5, -7] in read-only region: external stream is missing or
+/// unsupported`. This is the narrow typed signal the negative control REQUIRES
+/// and the positive acceptance REQUIRES to be absent — narrower than a bare
+/// `UNVERIFIED` grep, so an unrelated future `UNVERIFIED`-prefixed log line
+/// cannot spuriously fail the acceptance.
+const RECENTER_UNVERIFIED_TEXT: &str = "UNVERIFIED read-only region read failed";
+
+/// The overworld region file that holds the route's beyond-boot enter cells:
+/// chunks (0..7, -7..1) live in the region rooted at `(0, -1)`, whose file is
+/// `r.0.-1.mca` under `dimensions/minecraft/overworld/region/`. The negative
+/// control corrupts the chunk DATA for one of those cells here — the first cell
+/// the second beyond-boot crossing enters — so the boot succeeds (the header
+/// stays valid and the booted 117-chunk square never reads the cell) and the
+/// on-demand recenter read fails typed at the storage boundary.
+const RECENTER_TAMPER_REGION_X: i32 = 0;
+const RECENTER_TAMPER_REGION_Z: i32 = -1;
+/// The chunk cell the negative control corrupts in the disposable copy's region
+/// file: the first cell of the second beyond-boot enter column (x=5), which the
+/// route's +32 block frame enters. It is OUTSIDE the booted 117-chunk square, so
+/// the boot still succeeds and only the on-demand recenter load hits it.
+const RECENTER_TAMPER_CHUNK: [i32; 2] = [5, -7];
+
+/// The `recenter` runner (issues #185/#561): boot Rivet against a disposable
+/// copy of the safe copied world, drive the `loaded-recenter` client's
+/// deterministic +x route across repeated chunk boundaries, and REQUIRE the
+/// positive sustained-walking result — the client stays connected and receives
+/// every beyond-boot chunk the region-backed recenter loads on demand.
+///
+/// This proves the #185 fix: the previous two-boundary route (the merged #569
+/// negative reproduction) now REMAINS CONNECTED and RECEIVES the newly loaded
+/// chunks instead of disconnecting typed at the boot authority edge. It is not
+/// the loaded-world content acceptance (`loaded-world` keeps its own bounded
+/// walk/content verdict); this scenario proves the MOVEMENT-driven on-demand
+/// region load keeps the session alive across repeated chunk boundaries.
+///
+/// The positive acceptance cross-requires:
+///
+/// - the client transcript: outcome `walked` after spawn, the pinned Azalea
+///   revision, the announced route, all four `move_frame` records landing in
+///   chunks [0,-3] .. [3,-3], and the `walked` terminal's received chunk list
+///   containing every `transcript::RECENTER_BEYOND_BOOT_CELLS` cell (the 27
+///   cells the route enters outside the booted 117-chunk square — the proof the
+///   recenter "received the newly loaded chunks").
+/// - the rivet-server log: `connection established`, an accepted teleport ack +
+///   accepted move frames (the route reached the authoritative movement path),
+///   NO `read timeout` kick (not keepalive), and NO
+///   `RECENTER_FAILURE_LOG_FRAGMENT` / `RECENTER_UNVERIFIED_TEXT` text (the
+///   on-demand loads all succeeded — a single typed failure would have
+///   disconnected the session mid-route).
+///
+/// The source world stays immutable (fingerprint verified before and after) and
+/// the disposable copy lifecycle is exactly the `load_world::TempWorld` one the
+/// loaded-world acceptance uses — never superflat/generation fallback (the
+/// `RequireLoaded` policy forbids it).
+///
+/// A NON-VACUOUS negative control then corrupts a beyond-boot chunk in a SECOND
+/// disposable copy (never the source) and boots a second rivet-server on an
+/// isolated port. The same route now REQUIRES the typed `RECENTER_UNVERIFIED_TEXT`
+/// disconnect — the server must fail typed on the corrupt/missing chunk
+/// (no generation, no superflat fallback, no silent substitution), the client
+/// must surface `disconnected` (not `walked`), and the source + both copies'
+/// safety checks must still pass. This proves the positive acceptance is
+/// non-vacuous: the same harness that PASSes a genuine sustained walk FAILs
+/// typed when the beyond-boot data is genuinely missing/corrupt.
+fn run_recenter(args: &Args) -> Result<(), RunnerError> {
+    let crate_root = crate_root();
+    let work = crate_root.join("work/scenario-recenter");
+    let source_path = load_world::resolve_loaded_world_src()?;
+    let source = load_world::SourceTree::open(&source_path)?;
+    load_world::validate_prospective_storage(&source, &work)?;
+    fs::create_dir_all(&work)?;
+
+    let source_before = source.fingerprint()?;
+    let rivet_bin = server::ensure_rivet_binary(&crate_root)?;
+    let client_bin = ensure_client_binary()?;
+    let base = base_address(args)?;
+    let run_dir = work.join("rivet");
+    let log_path = work.join("rivet.log");
+    let mut temp = load_world::TempWorld::create(&source, &work)?;
+
+    let result = (|| -> Result<(), RunnerError> {
+        load_world::assert_copy_equals_source(&source_before, &temp.hash_tree()?)?;
+        let server_world_path = temp.server_path();
+
+        println!("rivet scenario runner: recenter (#185/#561 sustained-walking acceptance)");
+        println!(
+            "    source world      : {} (read only; never passed to a server)",
+            source.configured_path().display()
+        );
+        println!("    disposable copy  : {}", temp.path().display());
+        println!("    rivet-server bin : {}", rivet_bin.display());
+        println!(
+            "    launch seam      : {} <disposable-copy>",
+            server::WORLD_PATH_ARG
+        );
+        println!();
+        println!("    expected result  : the region-backed recenter (issue #185) loads every");
+        println!(
+            "                      beyond-boot chunk on demand, so the +x route stays connected"
+        );
+        println!("                      and the client RECEIVES all 27 beyond-boot cells — the");
+        println!(
+            "                      positive sustained-walking acceptance (was the #561 negative"
+        );
+        println!("                      regression before the #185 fix).");
+        println!();
+
+        let mut srv = match server::boot(
+            server::ServerKind::Rivet,
+            &run_dir,
+            &log_path,
+            &rivet_bin,
+            None,
+            None,
+            base,
+            None,
+            &[(trace::TRACE_MOVEMENT_ENV, "1")],
+            Some(&server_world_path),
+            None,) {
+            Ok(srv) => srv,
+            Err(error) => return Err(classify_load_world_boot_failure(error, &log_path)),
+        };
+
+        // The post-boot acceptance body, mirroring the loaded-world wrapper's
+        // shutdown discipline: the server is always shut down cleanly before the
+        // disposable-copy cleanup.
+        let body = (|| -> Result<(), RunnerError> {
+            // Drive the real Azalea client in loaded-recenter mode against the
+            // booted server.
+            let client_run = run_client(
+                &client_bin,
+                &ClientSpec {
+                    address: base.to_string(),
+                    username: args.username.clone(),
+                    timeout_seconds: args.timeout_seconds,
+                    dwell_seconds: 0,
+                    mode: "loaded-recenter".to_owned(),
+                },
+                &work,
+                "recenter-client",
+            )?;
+
+            // The client genuinely reached the Rivet port.
+            verify_rivet_connection(&log_path)?;
+
+            // The client transcript must prove the spawn + the full sustained
+            // route + the positive `walked` terminal with the received chunk list.
+            let transcript = transcript::normalize_recenter(&client_run.stdout_text)
+                .map_err(RunnerError::Transcript)?;
+            let transcript_path = work.join("recenter.transcript.json");
+            fs::write(&transcript_path, serde_json::to_string_pretty(&transcript)?)?;
+            let boundary =
+                transcript::rivet_recenter_verdict(&transcript).map_err(RunnerError::Transcript)?;
+
+            // Server-side half: the on-demand loads all succeeded. Require the
+            // route was accepted (accepted teleport ack + accepted moves), the
+            // close was NOT a keepalive timeout (no `read timeout` kick), and NO
+            // typed UNVERIFIED failure appeared (a single missing/corrupt
+            // beyond-boot chunk would have disconnected the session mid-route —
+            // the transcript would show `disconnected`, and the verdict above
+            // would already have refused PASS). RIVET_SESSION_END is NOT
+            // excluded here: after the client emits `walked` and hard-exits, the
+            // server prunes the connection on EndOfStream — a traced close that
+            // legitimately records a session end. Only the typed recenter
+            // failure and a keepalive kick are forbidden.
+            let rivet_log = fs::read_to_string(&log_path)?;
+            if rivet_log.contains(RECENTER_FAILURE_LOG_FRAGMENT) {
+                return Err(RunnerError::Gate(format!(
+                    "rivet log {} shows '{}' — the movement-driven recenter failed typed on a \
+                     beyond-boot chunk. The #185 on-demand region load did NOT keep the session \
+                     connected: a missing/corrupt chunk (or a regression in the load path) \
+                     disconnected the client mid-route.",
+                    log_path.display(),
+                    RECENTER_FAILURE_LOG_FRAGMENT
+                )));
+            }
+            if rivet_log.contains(RECENTER_UNVERIFIED_TEXT) {
+                return Err(RunnerError::Gate(format!(
+                    "rivet log {} shows '{}' — an on-demand region load surfaced a typed \
+                     UNVERIFIED missing/corrupt chunk. The recenter must not substitute \
+                     generation or a superflat fallback; a genuine load failure is a FAIL here.",
+                    log_path.display(),
+                    RECENTER_UNVERIFIED_TEXT
+                )));
+            }
+            if rivet_log.contains("read timeout") {
+                return Err(RunnerError::Gate(format!(
+                    "rivet log {} shows a 'read timeout' kick — the client was disconnected by \
+                     the keepalive timeout, not kept connected by the sustained recenter.",
+                    log_path.display()
+                )));
+            }
+            let movement_trace = trace::parse(&rivet_log).map_err(RunnerError::Transcript)?;
+            if !movement_trace
+                .teleport_acks
+                .iter()
+                .any(|a| a.outcome == "accepted")
+            {
+                return Err(RunnerError::Gate(format!(
+                    "rivet log {} has no accepted teleport ack — the client never completed the \
+                     spawn teleport, so the movement route never ran against an authoritative \
+                     player",
+                    log_path.display()
+                )));
+            }
+            if movement_trace.moves.is_empty() {
+                return Err(RunnerError::Gate(format!(
+                    "rivet log {} has no accepted move frames — the driven route never reached \
+                     the server's authoritative movement path (the first boundary crossing did not \
+                     succeed)",
+                    log_path.display()
+                )));
+            }
+
+            // Preserve the movement audit as a diagnostic artifact (mirroring the
+            // move differential's dump).
+            let trace_tp = work.join("recenter.trace.json");
+            let trace_dump = serde_json::json!({
+                "teleport_acks": movement_trace.teleport_acks.iter().map(|a| json!({
+                    "ack_id": a.ack_id,
+                    "outcome": a.outcome,
+                    "position": a.position,
+                })).collect::<Vec<_>>(),
+                "moves": movement_trace.moves.len(),
+                "final_position": movement_trace.final_position(),
+                "session_end_reason": movement_trace.session_end.as_ref().map(|e| e.reason.clone()),
+            });
+            fs::write(&trace_tp, serde_json::to_string_pretty(&trace_dump)?)?;
+
+            println!("\nSustained-walking boundary reached: {boundary}");
+            println!(
+                "    client route    : {} move frame(s), last in chunk {:?}",
+                transcript["move_frames"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0),
+                transcript["move_frames"]
+                    .as_array()
+                    .and_then(|a| a.last())
+                    .and_then(|f| f.get("chunk"))
+            );
+            println!(
+                "    received chunks : {} (must include every beyond-boot enter cell)",
+                transcript["walked"]
+                    .get("chunk_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            );
+            println!(
+                "    movement audit  : accepted teleport ack + {} accepted move(s); no typed \
+                 UNVERIFIED recenter failure, no keepalive kick",
+                movement_trace.moves.len()
+            );
+            println!(
+                "    artifacts       : {} (transcript), {} (trace)",
+                transcript_path.display(),
+                trace_tp.display()
+            );
+
+            // The client's `walked` terminal is the load-bearing evidence that
+            // every beyond-boot chunk was delivered: the transcript verdict
+            // already required all 27 RECENTER_BEYOND_BOOT_CELLS cells in the
+            // received list. Confirm the count is the deterministic final set
+            // (81 spawn view + 36 beyond-boot = 117) as a coherence cross-check.
+            let received_count = transcript["walked"]
+                .get("chunk_count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if received_count != 117 {
+                return Err(RunnerError::Gate(format!(
+                    "loaded-recenter client received {received_count} chunks (expected the \
+                     deterministic 117: 81 spawn view + 36 beyond-boot) — the sustained-walking \
+                     route did not settle on the full expected view"
+                )));
+            }
+            println!();
+            println!("VERDICT: PASS — sustained movement across repeated chunk boundaries;");
+            println!("    the region-backed recenter (issue #185) stayed connected and received");
+            println!("    every on-demand loaded beyond-boot chunk (the previous #561 negative");
+            println!("    reproduction is now the positive acceptance).");
+            Ok(())
+        })();
+
+        let shutdown_result = server::shutdown(&mut srv);
+        if let Err(e) = body {
+            if let Err(shutdown_err) = shutdown_result {
+                eprintln!(
+                    "    warning: clean shutdown after a failed recenter run also errored: \
+                     {shutdown_err}"
+                );
+            }
+            return Err(e);
+        }
+        shutdown_result?;
+
+        // Negative control: the positive acceptance is non-vacuous only if the
+        // same harness FAILS typed when a beyond-boot chunk is genuinely missing
+        // or corrupt. Corrupt the chunk DATA of the first cell of the second
+        // beyond-boot enter column in a SECOND disposable copy (the source world
+        // is never touched — the copy is the only writable tree), boot a second
+        // rivet-server on an isolated port, drive the same route, and REQUIRE
+        // the typed `UNVERIFIED` disconnect (the session disconnects on the
+        // on-demand load failure, never a superflat/generation substitution).
+        println!();
+        println!("Negative case (tamper a beyond-boot chunk in a second disposable copy)");
+        let negative_temp = load_world::TempWorld::create(&source, &work)?;
+        {
+            let negative_copy_region = negative_temp
+                .path()
+                .join("dimensions")
+                .join("minecraft")
+                .join("overworld")
+                .join("region")
+                .join(format!(
+                    "r.{}.{}.mca",
+                    RECENTER_TAMPER_REGION_X, RECENTER_TAMPER_REGION_Z
+                ));
+            corrupt_region_chunk_entry(&negative_copy_region, RECENTER_TAMPER_CHUNK).map_err(
+                |e| {
+                    RunnerError::Gate(format!(
+                        "negative control FAILED to corrupt the disposable copy's region data for \
+                     chunk {:?}: {e}",
+                        RECENTER_TAMPER_CHUNK
+                    ))
+                },
+            )?;
+            println!(
+                "    corrupted chunk ({},{}) in the copy's region {} (compression id -> 0xFF)",
+                RECENTER_TAMPER_CHUNK[0],
+                RECENTER_TAMPER_CHUNK[1],
+                negative_copy_region.display()
+            );
+        }
+        let negative_run_dir = work.join("rivet-negative");
+        let negative_log_path = work.join("rivet-negative.log");
+        let mut reservations = reserve_ports(1)?;
+        let negative_addr = SocketAddr::new(base.ip(), reservations[0].port());
+        let mut negative_srv = match server::boot(
+            server::ServerKind::Rivet,
+            &negative_run_dir,
+            &negative_log_path,
+            &rivet_bin,
+            None,
+            None,
+            negative_addr,
+            Some(reservations.remove(0)),
+            &[(trace::TRACE_MOVEMENT_ENV, "1")],
+            Some(&negative_temp.server_path()),
+            None,) {
+            Ok(srv) => srv,
+            Err(error) => return Err(classify_load_world_boot_failure(error, &negative_log_path)),
+        };
+
+        let negative_body = (|| -> Result<(), RunnerError> {
+            let negative_run = run_client(
+                &client_bin,
+                &ClientSpec {
+                    address: negative_addr.to_string(),
+                    username: args.username.clone(),
+                    timeout_seconds: args.timeout_seconds,
+                    dwell_seconds: 0,
+                    mode: "loaded-recenter".to_owned(),
+                },
+                &work,
+                "recenter-negative-client",
+            )?;
+            verify_rivet_connection(&negative_log_path)?;
+
+            // The transcript must surface `disconnected` (the client was closed
+            // by the server mid-route — it never emitted `walked`).
+            let negative_transcript = transcript::normalize_recenter(&negative_run.stdout_text)
+                .map_err(RunnerError::Transcript)?;
+            let negative_transcript_path = work.join("recenter-negative.transcript.json");
+            fs::write(
+                &negative_transcript_path,
+                serde_json::to_string_pretty(&negative_transcript)?,
+            )?;
+            if negative_transcript["outcome"].as_str() != Some("disconnected") {
+                return Err(RunnerError::Gate(format!(
+                    "negative control FAILED: the tampered copy run surfaced outcome {:?} \
+                     (expected disconnected) — the corrupt beyond-boot chunk did not disconnect \
+                     the session, so the positive acceptance is not provably non-vacuous",
+                    negative_transcript["outcome"].as_str()
+                )));
+            }
+
+            // The server must have failed typed: the `disconnecting play session
+            // on chunk-loader update failure` warn with the `UNVERIFIED
+            // region-backed chunk` text, an accepted teleport ack + accepted
+            // moves before the failure, and NO keepalive kick.
+            let negative_log = fs::read_to_string(&negative_log_path)?;
+            if !negative_log.contains(RECENTER_FAILURE_LOG_FRAGMENT) {
+                return Err(RunnerError::Gate(format!(
+                    "negative control FAILED: the tampered-copy rivet log {} does not show '{}' — \
+                     the corrupt beyond-boot chunk did not fail typed on the RequireLoaded \
+                     policy (a silent substitution or generation fallback would make the positive \
+                     acceptance vacuous)",
+                    negative_log_path.display(),
+                    RECENTER_FAILURE_LOG_FRAGMENT
+                )));
+            }
+            if !negative_log.contains(RECENTER_UNVERIFIED_TEXT) {
+                return Err(RunnerError::Gate(format!(
+                    "negative control FAILED: the tampered-copy rivet log {} shows the recenter \
+                     failure warn but not the typed '{RECENTER_UNVERIFIED_TEXT}' text — the failure \
+                     was not the RequireLoaded missing-chunk policy",
+                    negative_log_path.display()
+                )));
+            }
+            if negative_log.contains("read timeout") {
+                return Err(RunnerError::Gate(format!(
+                    "negative control FAILED: the tampered-copy rivet log {} shows a 'read \
+                     timeout' kick — the client was disconnected by keepalive, not by the typed \
+                     recenter failure on the corrupt chunk",
+                    negative_log_path.display()
+                )));
+            }
+            let negative_trace = trace::parse(&negative_log).map_err(RunnerError::Transcript)?;
+            if !negative_trace
+                .teleport_acks
+                .iter()
+                .any(|a| a.outcome == "accepted")
+            {
+                return Err(RunnerError::Gate(format!(
+                    "negative control FAILED: the tampered-copy rivet log {} has no accepted \
+                     teleport ack — the route never reached an authoritative player",
+                    negative_log_path.display()
+                )));
+            }
+            if negative_trace.moves.is_empty() {
+                return Err(RunnerError::Gate(format!(
+                    "negative control FAILED: the tampered-copy rivet log {} has no accepted move \
+                     frames — the route never reached the authoritative movement path before the \
+                     typed failure",
+                    negative_log_path.display()
+                )));
+            }
+
+            println!("    transcript      : outcome disconnected (client never reached `walked`)");
+            println!(
+                "    server failure  : '{}' with '{RECENTER_UNVERIFIED_TEXT}' (typed, no \
+                 generation/superflat fallback)",
+                RECENTER_FAILURE_LOG_FRAGMENT
+            );
+            println!(
+                "    movement audit  : accepted teleport ack + {} accepted move(s) before the \
+                 typed failure",
+                negative_trace.moves.len()
+            );
+            println!(
+                "    artifacts       : {} (transcript), {} (log)",
+                negative_transcript_path.display(),
+                negative_log_path.display()
+            );
+            println!();
+            println!(
+                "VERDICT: PASS — the tampered-copy negative control failed typed UNVERIFIED, so"
+            );
+            println!(
+                "    the positive sustained-walking acceptance is non-vacuous: the same harness"
+            );
+            println!("    refuses PASS when a beyond-boot chunk is genuinely missing/corrupt.");
+            Ok(())
+        })();
+
+        let negative_shutdown = server::shutdown(&mut negative_srv);
+        match negative_body {
+            Err(e) => {
+                if let Err(shutdown_err) = negative_shutdown {
+                    eprintln!(
+                        "    warning: clean shutdown after a failed negative-control run also \
+                         errored: {shutdown_err}"
+                    );
+                }
+                Err(e)
+            }
+            Ok(()) => negative_shutdown.map_err(Into::into),
+        }
+    })();
+
+    // Run all safety checks even when the acceptance returns UNVERIFIED: an
+    // untouched source and unchanged disposable copies are mandatory on every
+    // exit path. The negative control's copy is intentionally tampered, so its
+    // hash check runs before the corruption.
+    let copy_check = temp
+        .hash_tree()
+        .and_then(|after| load_world::assert_copy_equals_source(&source_before, &after));
+    let source_check = source.verify_unchanged(&source_before);
+    let cleanup = temp.cleanup();
+
+    source_check?;
+    copy_check?;
+    cleanup?;
+    result
+}
+
+/// Corrupt one chunk's DATA payload in the DISPOSABLE copy's `.mca` file:
+/// overwrite the chunk's 1-byte compression id (the byte after the 4-byte
+/// stream length in the chunk's first sector) with `0xFF` — a compression id no
+/// valid chunk can carry. The region file layout is the standard §6 header: the
+/// first 4096 bytes are 1024 4-byte entries (`offset = bytes 0..2`,
+/// `sector_count = byte 3`), each entry index `z*32 + x` for the local
+/// `(x % 32, z % 32)` coordinate, and each chunk's data starts at
+/// `sector_offset * 4096` with `[4-byte length][compression id]`.
+///
+/// `0xFF` sets the external-stream high bit, so the read path treats the chunk
+/// as an external `.mcc` stream: no external file exists for the cell, so the
+/// read-only storage surfaces the typed `corrupt chunk ... in read-only region:
+/// external stream is missing or unsupported` `InvalidData` (never a panic,
+/// never a silent absence). The HEADER stays valid — the boot's read-only
+/// region open scans every header entry, and the booted 117-chunk square never
+/// reads this beyond-view cell — so the server reaches READY, and the on-demand
+/// recenter read of the corrupted cell fails typed `UNVERIFIED` — exactly the
+/// no-generation/no-fallback failure the negative control requires. Only the
+/// copy is touched; the source world is never mutated.
+fn corrupt_region_chunk_entry(region_path: &Path, chunk: [i32; 2]) -> io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(region_path)?;
+    let local_x = chunk[0].rem_euclid(32);
+    let local_z = chunk[1].rem_euclid(32);
+    let entry_index = (local_z * 32 + local_x) as u64;
+    let entry_offset = entry_index * 4;
+
+    let mut entry = [0u8; 4];
+    file.seek(SeekFrom::Start(entry_offset))?;
+    file.read_exact(&mut entry)?;
+    if entry == [0u8; 4] {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "region {} has no allocated entry for chunk {:?} (all-zero header) — cannot \
+                 tamper an absent chunk",
+                region_path.display(),
+                chunk
+            ),
+        ));
+    }
+    // The header entry is big-endian `[sector_offset 24 bits][sector_count 8 bits]`.
+    let sector_offset = u32::from(entry[0]) << 16 | u32::from(entry[1]) << 8 | u32::from(entry[2]);
+    if sector_offset < 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "region {} has an invalid sector offset {} for chunk {:?} — cannot tamper the \
+                 data of a chunk whose header is already corrupt",
+                region_path.display(),
+                sector_offset,
+                chunk
+            ),
+        ));
+    }
+    // The compression id lives at `sector_offset * 4096 + 4` (after the 4-byte
+    // stream length). Overwrite it with an unregistered id.
+    file.seek(SeekFrom::Start(u64::from(sector_offset) * 4096 + 4))?;
+    file.write_all(&[0xFF])?;
+    Ok(())
+}
+
 /// Resolve the `rivet-oracle` binary: a sibling in the same target dir (the
 /// common `cargo build` layout), then an explicit `RIVET_ORACLE_BIN`, then the
 /// workspace `target/debug` default.
@@ -3562,10 +4176,11 @@ fn compare_loaded_content(manifest: &Value, transcript: &Value) -> Result<(), Ru
             )));
         }
         // A FULL chunk may still carry content the #519 capability boundary
-        // cannot yet construct (non-empty structures.starts, entities). The
-        // extractor records these flags honestly; refusing PASS here keeps the
-        // capability boundary honest instead of comparing a chunk the server
-        // could not have served faithfully.
+        // cannot yet construct (non-empty entities). The extractor records
+        // these flags honestly; refusing PASS here keeps the capability
+        // boundary honest instead of comparing a chunk the server could not
+        // have served faithfully. (Non-empty `structures.starts` is carried
+        // verbatim off the parse, #369, and is no longer a flag.)
         let flags: Vec<&str> = fingerprint["capability_flags"]
             .as_array()
             .map(|a| a.iter().filter_map(Value::as_str).collect())
@@ -3651,6 +4266,7 @@ fn main() -> ExitCode {
         Subcommand::LoadWorld => run_load_world(&args),
         Subcommand::LoadedWorld => run_loaded_world(&args),
         Subcommand::GeneratedWorld => run_generated_world(&args),
+        Subcommand::Recenter => run_recenter(&args),
         Subcommand::Help => {
             println!("{}", usage());
             Ok(())
@@ -3751,6 +4367,32 @@ mod tests {
         assert!(parse(&["loaded-world", "--seed", "7"]).is_err());
         assert!(parse(&["dwell", "--seed", "7"]).is_err());
         assert!(parse(&["generated-world", "--seed", "99"]).is_err());
+    }
+
+    /// A minimal ground-truth manifest with one FULL chunk (0,0) carrying a
+    /// genuine terrain signature at the center sample index.
+
+    #[test]
+    fn recenter_is_a_single_rivet_sustained_walk_with_no_silent_options() {
+        // `recenter` (#185/#561) boots exactly one Rivet server against a
+        // disposable world copy and requires the positive sustained-walking
+        // acceptance (the region-backed recenter stays connected and receives
+        // every beyond-boot chunk), plus a tampered-copy negative control; Paper
+        // has no place, and --pairs/--runs/--username/--timeout-seconds would be
+        // silent no-ops.
+        let args = parse(&["recenter"]).unwrap();
+        assert_eq!(args.command, Subcommand::Recenter);
+        assert_eq!(args.server, ServerSelection::Rivet);
+        assert_eq!(args.runs, 1);
+
+        assert!(parse(&["recenter", "--server", "rivet"]).is_ok());
+        assert!(parse(&["recenter", "--server", "paper"]).is_err());
+        assert!(parse(&["recenter", "--server", "both"]).is_err());
+        assert!(parse(&["recenter", "--pairs", "paper:rivet"]).is_err());
+        assert!(parse(&["recenter", "--runs", "1"]).is_err());
+        assert!(parse(&["recenter", "--dwell-seconds", "35"]).is_err());
+        assert!(parse(&["recenter", "--username", DEFAULT_USERNAME]).is_err());
+        assert!(parse(&["recenter", "--timeout-seconds", "40"]).is_err());
     }
 
     /// A minimal ground-truth manifest with one FULL chunk (0,0) carrying a
@@ -4078,6 +4720,7 @@ mod tests {
     /// The generated-world transcript carries its samples under
     /// `transcript["generated"]["samples"]` (the generated client record), so
     /// the compare helpers mirror the loaded shape with that key.
+
     fn generated_transcript_with(sample: Value) -> Value {
         json!({ "generated": { "samples": [sample] } })
     }
@@ -4360,6 +5003,7 @@ mod tests {
         fs::remove_file(log).unwrap();
     }
 
+    #[test]
     #[test]
     fn accepts_rivet_and_both_servers() {
         let a = parse(&["join", "--server", "rivet", "--pairs", "paper:rivet"]).unwrap();

@@ -34,6 +34,7 @@ pub mod inclusive_range;
 pub mod java_float_format;
 pub mod java_hash;
 pub mod known_pack;
+pub mod linear_congruential_generator;
 pub mod mth;
 pub mod mth_atan_tables;
 pub mod mth_sin_table;

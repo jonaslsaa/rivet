@@ -31,6 +31,8 @@ impl Blocks {
     pub const GRASS_BLOCK: Block = Block::new(BlockId(8));
     /// `Blocks.DIRT`.
     pub const DIRT: Block = Block::new(BlockId(9));
+    /// `Blocks.MYCELIUM` (carver: `carveBlock`'s grass/myc hasGrass check).
+    pub const MYCELIUM: Block = Block::new(BlockId(373));
     /// `Blocks.COARSE_DIRT`.
     pub const COARSE_DIRT: Block = Block::new(BlockId(10));
     /// `Blocks.PODZOL`.
@@ -69,14 +71,44 @@ impl Blocks {
     pub const GLASS: Block = Block::new(BlockId(101));
     /// `Blocks.ICE`.
     pub const ICE: Block = Block::new(BlockId(277));
+    /// `Blocks.ORANGE_STAINED_GLASS` (carver: `CarverDebugSettings.DEFAULT`
+    /// water state, `Blocks.STAINED_GLASS.orange().defaultBlockState()`).
+    pub const ORANGE_STAINED_GLASS: Block = Block::new(BlockId(301));
     /// `Blocks.SNOW_BLOCK`.
     pub const SNOW_BLOCK: Block = Block::new(BlockId(278));
     /// `Blocks.NETHERRACK`.
     pub const NETHERRACK: Block = Block::new(BlockId(285));
     /// `Blocks.SOUL_SAND`.
     pub const SOUL_SAND: Block = Block::new(BlockId(286));
+    /// `Blocks.ACACIA_BUTTON` (carver: `CarverDebugSettings.DEFAULT` air state).
+    pub const ACACIA_BUTTON: Block = Block::new(BlockId(447));
     /// `Blocks.DEEPSLATE`.
     pub const DEEPSLATE: Block = Block::new(BlockId(1151));
+    /// `Blocks.DEEPSLATE_IRON_ORE` (noisegen: `OreVeinifier.VeinType.IRON`).
+    pub const DEEPSLATE_IRON_ORE: Block = Block::new(BlockId(45));
+    /// `Blocks.END_STONE` (noisegen: `NoiseGeneratorSettings.end`).
+    pub const END_STONE: Block = Block::new(BlockId(393));
+    /// `Blocks.OAK_BUTTON` (noisegen: `OreVeinifier` debug ore-veins).
+    pub const OAK_BUTTON: Block = Block::new(BlockId(443));
+    /// `Blocks.SLIME_BLOCK` (noisegen: `debugPreliminarySurfaceLevel`).
+    pub const SLIME_BLOCK: Block = Block::new(BlockId(523));
+    /// `Blocks.BARRIER` (carver: `CarverDebugSettings.DEFAULT` barrier state).
+    pub const BARRIER: Block = Block::new(BlockId(524));
+    /// `Blocks.CAVE_AIR` (carver: `WorldCarver.CAVE_AIR`, the nether carver's
+    /// carved-block state above lava level).
+    pub const CAVE_AIR: Block = Block::new(BlockId(795));
+    /// `Blocks.CANDLE` (carver: `CarverDebugSettings.DEFAULT` lava state).
+    pub const CANDLE: Block = Block::new(BlockId(944));
+    /// `Blocks.TUFF` (noisegen: `OreVeinifier.VeinType.IRON` filler).
+    pub const TUFF: Block = Block::new(BlockId(984));
+    /// `Blocks.COPPER_ORE` (noisegen: `OreVeinifier.VeinType.COPPER`).
+    pub const COPPER_ORE: Block = Block::new(BlockId(1042));
+    /// `Blocks.RAW_IRON_BLOCK` (noisegen: `OreVeinifier.VeinType.IRON`).
+    pub const RAW_IRON_BLOCK: Block = Block::new(BlockId(1173));
+    /// `Blocks.RAW_COPPER_BLOCK` (noisegen: `OreVeinifier.VeinType.COPPER`).
+    pub const RAW_COPPER_BLOCK: Block = Block::new(BlockId(1174));
+    /// `Blocks.HONEY_BLOCK` (noisegen: `debugPreliminarySurfaceLevel`).
+    pub const HONEY_BLOCK: Block = Block::new(BlockId(913));
 }
 
 #[cfg(test)]
@@ -95,6 +127,7 @@ mod tests {
             Blocks::ANDESITE,
             Blocks::GRASS_BLOCK,
             Blocks::DIRT,
+            Blocks::MYCELIUM,
             Blocks::COARSE_DIRT,
             Blocks::PODZOL,
             Blocks::COBBLESTONE,
@@ -114,10 +147,24 @@ mod tests {
             Blocks::OAK_LEAVES,
             Blocks::GLASS,
             Blocks::ICE,
+            Blocks::ORANGE_STAINED_GLASS,
             Blocks::SNOW_BLOCK,
             Blocks::NETHERRACK,
             Blocks::SOUL_SAND,
+            Blocks::ACACIA_BUTTON,
             Blocks::DEEPSLATE,
+            Blocks::DEEPSLATE_IRON_ORE,
+            Blocks::END_STONE,
+            Blocks::OAK_BUTTON,
+            Blocks::SLIME_BLOCK,
+            Blocks::BARRIER,
+            Blocks::CAVE_AIR,
+            Blocks::CANDLE,
+            Blocks::TUFF,
+            Blocks::COPPER_ORE,
+            Blocks::RAW_IRON_BLOCK,
+            Blocks::RAW_COPPER_BLOCK,
+            Blocks::HONEY_BLOCK,
         ];
         for block in all {
             let by_name = BlockId::from_name(block.name())

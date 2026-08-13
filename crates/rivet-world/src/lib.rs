@@ -23,11 +23,13 @@
 //!   `mc.world.level.levelgen.feature.configurations.core` unit), plus an
 //!   out-of-unit proactive port of `ProbabilityFeatureConfiguration` (owned by
 //!   the `.probabilityfeature` unit)
-//! - `levelgen::carver` — the `ConfiguredWorldCarver` type shell (the
-//!   `mc.world.level.levelgen.carver` unit): `CarverConfiguration` (the bound
-//!   as a marker trait), `WorldCarverId`/`WorldCarverBehavior`, and the
-//!   `ConfiguredWorldCarver` record; the `#180` carver algorithm and the
-//!   `carve` surface stay a STUB
+//! - `levelgen::carver` — the full `mc.world.level.levelgen.carver` unit:
+//!   `CarverConfiguration` (+ `CarverConfigurationBase` and the ops-generic
+//!   codec), `CarverDebugSettings`, `CarvingContext`, the concrete carvers
+//!   (`CaveWorldCarver`/`NetherWorldCarver`/`CanyonWorldCarver` + their
+//!   configurations), `ConfiguredWorldCarver` with `carve`/`isStartChunk`, and
+//!   `WorldCarverId`/`WorldCarverBehavior`; the `#399` `CarveChunk`
+//!   block-surface trait and the `#126` dispatch codecs stay unbound
 //! - `levelgen::generation_step` — the `GenerationStep.Decoration` enum,
 //!   proactively ported from the pending `mc.world.level.levelgen.settings`
 //!   unit (the settings wave must not re-port it)
@@ -64,6 +66,19 @@
 pub mod biome;
 pub mod block;
 pub mod chunk;
+/// `net.minecraft.data.worldgen` — the `mc.data.worldgen.prereq` unit's
+/// `data::worldgen` slice: the `BootstrapContext` registry-bootstrap contract
+/// (+ test-only `RecordingContext` until `RegistrySetBuilder` lands), the
+/// `TerrainProvider` overworld terrain splines (`#178`/`#177` consumers), and
+/// the `NoiseData` noise registration table. The rest of the
+/// `net.minecraft.data.worldgen` package (the 26-file residual of the
+/// `mc.data.worldgen` row) stays pending.
+pub mod data;
+/// `net.minecraft.world.entity` — the entity-identity slice: the `MobCategory`
+/// enum and the `EntityType` id-handle STUB (`MobSpawnSettings`'s spawner and
+/// spawn-cost map keys; issue #178). The full `mc.world.entity` unit defers
+/// with the entity crate. See `entity::mod`.
+pub mod entity;
 pub mod flag;
 pub mod level;
 pub mod levelgen;

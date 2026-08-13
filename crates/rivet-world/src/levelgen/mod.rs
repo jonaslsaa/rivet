@@ -7,9 +7,11 @@
 //! `configurations` slice (the
 //! `mc.world.level.levelgen.feature.configurations.core` unit), the `placement`
 //! core slice (the
-//! `mc.world.level.levelgen.placement.core` unit), the `carver` type shell
-//! (the `mc.world.level.levelgen.carver` unit's `ConfiguredWorldCarver`
-//! record/identity skeleton — the `#180` algorithm stays a STUB), the
+//! `mc.world.level.levelgen.placement.core` unit), the full `carver` unit (the
+//! `mc.world.level.levelgen.carver` — `CarverConfiguration` + base codec,
+//! `CarverDebugSettings`, `CarvingContext`, the concrete carvers, and
+//! `ConfiguredWorldCarver` with `carve`/`isStartChunk`; the `#399` `CarveChunk`
+//! block-surface trait and the `#126` dispatch codecs stay unbound), the
 //! `blockpredicates` slice (issue #399 — the block-predicate value/codec
 //! framework), the `synth` primitive-noise classes (the
 //! `mc.world.level.levelgen.synth` unit — issue #177), the
@@ -36,7 +38,21 @@ pub mod heightproviders;
 // The `mc.world.level.levelgen.noise` unit's density-function/noise-router
 // value slice (issue #177).
 pub mod noise;
+// The `mc.world.level.levelgen.noisegen` unit (issue #183): the
+// noise-based-chunk-generator class-level SCC (`NoiseGeneratorSettings`,
+// `NoiseRouterData`, `RandomState`, `Aquifer`, `NoiseChunk`,
+// `NoiseBasedChunkGenerator`, `OreVeinifier`).
+pub mod noisegen;
 pub mod placement;
+// The `mc.world.level.levelgen.surface` unit's `SurfaceRules` value shell:
+// the `RuleSource`/`SurfaceRule`/`Context` type identities + the erased
+// `ArcRuleSource` carrier `NoiseGeneratorSettings` stores, the
+// `SurfaceRuleData` builder stand-ins, and the `SurfaceSystem` type identity
+// (RivetTodo to the surface unit — see the module).
+pub mod surface_rules;
+// The `mc.world.level.levelgen.structure.templatesystem.rules` unit (issue
+// #182) — the `RuleTest`/`PosRuleTest` template-system rule tests.
+pub mod structure;
 // The `mc.world.level.levelgen.random` unit's registry-aware overloads (issue
 // #208) live here because `BlockPos`/`Identifier` come from `rivet-registry`,
 // which `rivet-util` cannot depend on without a Cargo cycle. The registry-free

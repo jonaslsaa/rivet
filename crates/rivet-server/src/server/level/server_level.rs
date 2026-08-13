@@ -38,6 +38,7 @@ use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
 
 use super::chunk_map::ChunkMap;
 use super::chunk_tracking_view::ChunkTrackingView;
+use super::region_backed::{RegionBackedBootError, RegionChunkSource};
 
 /// How the player send path handles a position absent from `ChunkMap`.
 /// Repeating spawn content is confined to the legacy no-level fixture;
@@ -64,7 +65,11 @@ pub fn overworld_dimension() -> ResourceKey<Level> {
 pub struct ServerLevelConfig {
     /// The dimension key (`Level.OVERWORLD` for the M1 world).
     pub dimension: ResourceKey<Level>,
-    /// The world seed (the `level-seed=42` oracle fixture).
+    /// The world seed. The default is the M1 superflat fixture 42 (the #153
+    /// capture's `level-seed=42` flat world, which the byte-exact join-burst
+    /// fixtures pin); the server boot path supplies the generated-world seed
+    /// from `ServerConfig.seed` (the `--seed` CLI argument) instead, and the
+    /// region-backed boot reads the real seed from `world_gen_settings.dat`.
     pub seed: i64,
     /// The superflat world's min Y (`min_y=-64`).
     pub min_y: i32,
@@ -93,13 +98,25 @@ pub struct ServerLevelConfig {
     pub is_flat: bool,
 }
 
+impl ServerLevelConfig {
+    /// The M1 superflat fixture seed — the #153 capture's `level-seed=42` flat
+    /// world, which the byte-exact join-burst fixtures pin (`obfuscate_seed(42)`).
+    /// Single source of truth for the fixture value so a recapture changes one
+    /// constant instead of stale literals at every test call site.
+    pub const M1_FIXTURE_SEED: i64 = 42;
+}
+
 impl Default for ServerLevelConfig {
     fn default() -> Self {
         let dimension = overworld_dimension();
         let spawn_pos = BlockPos::new(0, SUPERFLAT_MIN_Y + 1, 0); // y = -63
         ServerLevelConfig {
             dimension: dimension.clone(),
-            seed: 42,
+            // The M1 superflat fixture seed (see
+            // [`ServerLevelConfig::M1_FIXTURE_SEED`]). The server boot path
+            // overrides it from `ServerConfig.seed`; loaded worlds use their
+            // real seed from `world_gen_settings.dat`.
+            seed: Self::M1_FIXTURE_SEED,
             min_y: SUPERFLAT_MIN_Y,
             height: SUPERFLAT_HEIGHT,
             sea_level: -63,
@@ -136,6 +153,16 @@ pub struct ServerLevel {
     simulation_distance: i32,
     missing_chunk_policy: MissingChunkPolicy,
     is_flat: bool,
+    /// The read-only region chunk source (issue #185): `Some` only for the
+    /// region-backed boot, which moves its prepared source in after installing
+    /// the boot-time view square. The `PlayerChunkLoader` recenter resolves a
+    /// chunk outside that view on demand through this source (existing-only
+    /// read + preflight + reconstruct + bridge, then install into `ChunkMap`).
+    /// The superflat M1 world keeps `None` and never takes the on-demand path.
+    /// Tick-thread-owned like the `ChunkMap`; `RegionChunkSource` is `Send`
+    /// (the region `fs::File` handles are owned, not shared), so the world
+    /// stays `Send + !Sync` under the confinement marker.
+    region_source: Option<RegionChunkSource>,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
     /// would cross threads.
@@ -183,6 +210,7 @@ impl ServerLevel {
             simulation_distance: config.simulation_distance,
             missing_chunk_policy: config.missing_chunk_policy,
             is_flat: config.is_flat,
+            region_source: None,
             _confinement: std::marker::PhantomData,
         }
     }
@@ -279,6 +307,40 @@ impl ServerLevel {
     /// (`minecraft:noise` → not flat); the superflat M1 world stays flat.
     pub fn is_flat(&self) -> bool {
         self.is_flat
+    }
+
+    /// Whether this world is backed by a read-only region source (issue #185):
+    /// only the region-backed boot installs one. The superflat M1 world has
+    /// none, so its recenter path never takes the on-demand load branch.
+    pub fn is_region_backed(&self) -> bool {
+        self.region_source.is_some()
+    }
+
+    /// Install the read-only region chunk source the boot prepared — the world's
+    /// on-demand authority for chunks outside the boot-time view (issue #185).
+    /// The boot calls this only after installing the full 117-chunk view square,
+    /// so `RequireLoaded` still governs every boot-time position while the
+    /// source resolves the beyond-view positions.
+    pub fn set_region_source(&mut self, source: RegionChunkSource) {
+        self.region_source = Some(source);
+    }
+
+    /// Load one chunk on demand from the read-only region source (issue #185):
+    /// read + preflight + reconstruct + bridge the existing current-version
+    /// chunk, then install it into the `ChunkMap` so the send path resolves it
+    /// from the single authority. Synchronous tick-thread work, existing-only —
+    /// no writes, no generation, no superflat fallback. A missing or corrupt
+    /// chunk fails typed with the [`RegionBackedBootError`] the source
+    /// surfaces. `Err` leaves the map unchanged (the chunk was never
+    /// installed), so a later retry re-reads the region.
+    pub fn load_chunk_from_region(&mut self, pos: ChunkPos) -> Result<(), RegionBackedBootError> {
+        let source = self
+            .region_source
+            .as_mut()
+            .expect("region-backed world carries its read-only source");
+        let chunk = super::region_backed::load_and_reconstruct_chunk(source, pos)?;
+        self.chunk_map_mut().install(pos, chunk);
+        Ok(())
     }
 }
 
