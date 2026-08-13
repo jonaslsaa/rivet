@@ -1265,8 +1265,10 @@ mod tests {
                 .to_bits(),
             0x3e333333 // 0.175
         );
-        // At (8, 8) the FROZEN small-variation check falls through (noise
-        // >= 0.8), so the base 0.7 gets the snow-level drop — Paper golden.
+        // At (8, 8) the FROZEN ice-patch pin did not fire (the aggregate
+        // result is the 0.7 base with the snow-level drop, not the 0.2 pin) —
+        // Paper golden. The test pins the net result, not which sub-check
+        // (ice-patches >= 0.3 vs. small-variation >= 0.8) fell through.
         assert_eq!(
             frozen
                 .get_temperature(&BlockPos::new(8, 100, 8), sea_level)

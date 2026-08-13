@@ -460,8 +460,9 @@ fn get_index(x: i32, z: i32) -> usize {
 
 /// `ChunkAccess.getHeight(Heightmap.Types.WORLD_SURFACE_WG, x, z)` — the typed
 /// worldgen-heightmap read `SurfaceRules.SteepMaterialCondition` performs (its
-/// four neighbor probes per column, `heightSouth >= heightNorth + 4` /
-/// `heightWest >= heightEast + 4`).
+/// four neighbor probes around each XZ position — `zNorth`/`zSouth`/`xWest`/
+/// `xEast`, clamped to the chunk edge — feeding `heightSouth >= heightNorth +
+/// 4` / `heightWest >= heightEast + 4`).
 ///
 /// Java reads `this.chunk.getHeight(WORLD_SURFACE_WG, ...)` directly off the
 /// `ChunkAccess`. The Rust `surface_rules` port cannot — the
@@ -479,7 +480,7 @@ pub trait WorldSurfaceHeight: Send + Sync {
     /// prevents an out-of-bounds read, but a coordinate outside the chunk's own
     /// 16-block range silently selects a different local column — callers pass
     /// chunk-local or already-masked coordinates (`SteepMaterialCondition`
-    /// probes `blockX & 15`).
+    /// probes `blockX & 15` then clamps the +/-1 neighbors to the chunk edge).
     fn get_world_surface_wg_height(&self, x: i32, z: i32) -> i32;
 }
 
@@ -495,6 +496,14 @@ pub trait WorldSurfaceHeight: Send + Sync {
 /// (`-1 & 15 == 15`), bit-identical to Java's `x & 15`. `'static` (owns the
 /// `Heightmap`) so it coerces to `Arc<dyn WorldSurfaceHeight>` for the
 /// surface-rules context.
+///
+/// The adapter is a **snapshot** of the heightmap at wrap time — it does not
+/// observe later `update` calls, so it suits the test/stand-in role, not the
+/// live surface pass. The production [`WorldSurfaceHeight`] implementer is the
+/// #287 `ChunkAccess`, whose `get_height_at` reads the live `WORLD_SURFACE_WG`
+/// entry during surface building. The caller must pass the actual
+/// `WORLD_SURFACE_WG`-primed heightmap and the matching `min_y` (a mismatched
+/// pair silently decodes shifted heights).
 pub struct WorldSurfaceWgHeightmap {
     heightmap: Heightmap,
     min_y: i32,
@@ -502,6 +511,9 @@ pub struct WorldSurfaceWgHeightmap {
 
 impl WorldSurfaceWgHeightmap {
     /// Wrap a `WORLD_SURFACE_WG` heightmap value with its world's `min_y`.
+    /// The `heightmap` must be the chunk's `WORLD_SURFACE_WG` entry and `min_y`
+    /// the world it was primed against; a mismatched pair decodes shifted
+    /// heights silently (see the type doc).
     pub fn new(heightmap: Heightmap, min_y: i32) -> Self {
         WorldSurfaceWgHeightmap { heightmap, min_y }
     }
