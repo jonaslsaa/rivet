@@ -12,6 +12,12 @@
 //! RivetTodo(#232): `setCurrentlyGenerating(Supplier<String>)` is omitted — the
 //! Java default is a no-op body and only `WorldGenRegion` (server.level)
 //! overrides it for debug narration, so no current consumer reads it.
+//!
+//! The trait is `Send` but deliberately NOT `Sync`: the worldgen level is
+//! exclusively `&mut`-borrowed by the feature placement stack on the sync tick
+//! thread (OWNERSHIP.md), and `WorldGenRegion` owns non-`Sync` `ChunkAccess`
+//! values (the paletted-container `dyn` internals are `Send`-only). A `Sync`
+//! bound would force a shared worldgen view that the ownership model forbids.
 
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::levelgen::heightmap::Types;
@@ -27,7 +33,7 @@ use rivet_registry::holder::Holder;
 /// rest of the Java `ServerLevelAccessor` ancestor chain (`LevelAccessor`/
 /// `LevelReader`/`BlockGetter`, plus the `LevelWriter` write surface) is ported
 /// by the owning unit.
-pub trait WorldGenLevel: LevelHeightAccessor + Send + Sync + 'static {
+pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64;
 
