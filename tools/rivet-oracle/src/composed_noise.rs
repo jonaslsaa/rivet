@@ -616,13 +616,24 @@ pub fn require_fixture_tree(dir: &Path) -> Result<(), Error> {
 /// mutated and the scratch dir is removed on every path (including setup I/O
 /// failure) when the `TempDir` drops.
 pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
-    if fixture_state(dir) != FixtureState::Present {
-        return Err(Error::Gate(format!(
-            "composed-noise fixtures {} are ABSENT — the tamper negative control \
-             cannot run without the committed golden (git checkout or regenerate \
-             via `composed-noise --sample`); refusing a vacuous pass",
-            dir.display()
-        )));
+    match fixture_state(dir) {
+        FixtureState::Present => {}
+        FixtureState::Absent => {
+            return Err(Error::Gate(format!(
+                "composed-noise fixtures {} are ABSENT — the tamper negative control \
+                 cannot run without the committed golden (git checkout or regenerate \
+                 via `composed-noise --sample`); refusing a vacuous pass",
+                dir.display()
+            )));
+        }
+        FixtureState::Partial => {
+            return Err(Error::Gate(format!(
+                "composed-noise fixtures {} are INCOMPLETE (manifest or golden missing) — \
+                 the tamper negative control cannot run without the committed golden \
+                 (git checkout); refusing a vacuous pass",
+                dir.display()
+            )));
+        }
     }
     // The baseline must be green before it is tampered; otherwise any scratch
     // failure would be credited to the flip and the control would pass
@@ -950,15 +961,15 @@ mod tests {
     }
 
     #[test]
-    fn gate_path_composed_noise_only_root_no_manifest_is_no_fixtures() {
-        let root = scratch("gate-cn-only-empty");
-        // A root with no generic kinds AND no composed-noise manifest is a
-        // genuinely empty fixtures tree — the existing no-manifests diagnostic
-        // is preserved (exit 1), not misreported as composed-noise UNVERIFIED.
+    fn gate_path_composed_noise_only_root_absent_is_unverified() {
+        let root = scratch("gate-cn-only-absent");
+        // A root with no generic kinds and no composed-noise tree at all: the
+        // load-bearing composed-noise golden is wholly absent, so the gate is
+        // UNVERIFIED (exit 3) — the missing-prerequisite classification.
         let result = crate::verify_all_fixture_kinds_from(root.path());
         assert!(
-            matches!(result, Err(crate::Error::Manifest(_))),
-            "a root with no manifests at all is the no-fixtures hard error (exit 1), got {result:?}"
+            matches!(result, Err(crate::Error::Unverified(_))),
+            "composed-noise-only root with a wholly absent tree must be UNVERIFIED (exit 3), got {result:?}"
         );
     }
 
@@ -971,6 +982,18 @@ mod tests {
         assert!(
             matches!(result, Err(crate::Error::Manifest(_))),
             "composed-noise-only root with a manifest-present/golden-missing tree must hard-FAIL (exit 1), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn gate_path_composed_noise_only_root_golden_only_is_hard_fail() {
+        let root = scratch("gate-cn-only-golden");
+        fs::create_dir_all(root.path().join("composed-noise")).unwrap();
+        fs::write(root.path().join("composed-noise/composed-noise.json"), "{}").unwrap();
+        let result = crate::verify_all_fixture_kinds_from(root.path());
+        assert!(
+            matches!(result, Err(crate::Error::Manifest(_))),
+            "composed-noise-only root with a golden-only tree is a corrupt checked-in fixture and must hard-FAIL (exit 1), got {result:?}"
         );
     }
 
@@ -1002,11 +1025,25 @@ mod tests {
     #[test]
     fn tamper_absent_tree_is_a_hard_error() {
         let dir = scratch("tamper-absent");
-        fs::write(dir.path().join("manifest.json"), "{}").unwrap();
+        // No manifest and no golden: wholly absent.
         let result = tamper_negative_control(dir.path());
         assert!(
             matches!(result, Err(crate::Error::Gate(_))),
             "absent tamper tree must hard-FAIL (exit 1), not UNVERIFIED: {result:?}"
+        );
+    }
+
+    #[test]
+    fn tamper_partial_tree_message_names_incomplete() {
+        let dir = scratch("tamper-partial");
+        fs::write(dir.path().join("manifest.json"), "{}").unwrap();
+        let result = tamper_negative_control(dir.path());
+        let msg = result
+            .expect_err("partial tamper tree must hard-FAIL (exit 1)")
+            .to_string();
+        assert!(
+            msg.contains("INCOMPLETE"),
+            "partial tree must be reported as INCOMPLETE, not ABSENT: {msg}"
         );
     }
 
