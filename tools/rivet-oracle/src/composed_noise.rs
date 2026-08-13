@@ -508,6 +508,44 @@ fn verify_value_bits(fixture: &ComposedNoise) -> Result<(), Error> {
     Ok(())
 }
 
+/// The composed-noise subcommand mode selected by its `--tamper` / `--sample`
+/// flags (default: verify + scoreboard).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ComposedNoiseMode {
+    Verify,
+    Tamper,
+    Sample,
+}
+
+/// Parse the composed-noise subcommand flags into a mode. Unknown flags are a
+/// usage error — before, a typo'd `--sampple` fell through to the verify
+/// branch and exited 0 after verifying, silently misreading the intended mode.
+/// `--tamper` and `--sample` are mutually exclusive, mirroring the `verify`
+/// subcommand's `--m2`/`--full` handling.
+pub fn parse_mode(flags: &[&str]) -> Result<ComposedNoiseMode, Error> {
+    let tamper = flags.contains(&"--tamper");
+    let sample = flags.contains(&"--sample");
+    for flag in flags {
+        if *flag != "--tamper" && *flag != "--sample" {
+            return Err(Error::Gate(format!(
+                "composed-noise takes only --tamper/--sample, got {flag}"
+            )));
+        }
+    }
+    if tamper && sample {
+        return Err(Error::Gate(
+            "composed-noise --tamper and --sample are mutually exclusive".into(),
+        ));
+    }
+    Ok(if tamper {
+        ComposedNoiseMode::Tamper
+    } else if sample {
+        ComposedNoiseMode::Sample
+    } else {
+        ComposedNoiseMode::Verify
+    })
+}
+
 /// The tamper negative control: corrupt a committed bit pattern (flip one byte
 /// of the JSON) and assert the verification FAILS — proving the comparison is
 /// not vacuous (a green is impossible with tampered goldens).
@@ -824,5 +862,41 @@ mod tests {
         // world scoreboard must reproduce Paper's non-monotonic reachability.
         let levels: Vec<i64> = rows.iter().map(|r| r.level).collect();
         assert_eq!(levels, vec![36, 35, 35, 35, 34, 33, 33]);
+    }
+
+    #[test]
+    fn parse_mode_maps_no_flags_to_verify() {
+        assert!(matches!(parse_mode(&[]), Ok(ComposedNoiseMode::Verify)));
+    }
+
+    #[test]
+    fn parse_mode_maps_each_flag() {
+        assert!(matches!(
+            parse_mode(&["--tamper"]),
+            Ok(ComposedNoiseMode::Tamper)
+        ));
+        assert!(matches!(
+            parse_mode(&["--sample"]),
+            Ok(ComposedNoiseMode::Sample)
+        ));
+    }
+
+    /// A typo'd flag must be a usage error, never a silent fallback to verify
+    /// (previously `--sampple` exited 0 after verifying — a silent misread of
+    /// the intended mode).
+    #[test]
+    fn parse_mode_rejects_unknown_flags() {
+        let err = parse_mode(&["--sampple"]).expect_err("unknown flag must be rejected");
+        assert!(err.to_string().contains("--sampple"), "unexpected: {err}");
+        assert!(parse_mode(&["--tamper", "--nope"]).is_err());
+    }
+
+    #[test]
+    fn parse_mode_rejects_tamper_and_sample_together() {
+        let err = parse_mode(&["--tamper", "--sample"]).expect_err("mutually exclusive");
+        assert!(
+            err.to_string().contains("mutually exclusive"),
+            "unexpected: {err}"
+        );
     }
 }

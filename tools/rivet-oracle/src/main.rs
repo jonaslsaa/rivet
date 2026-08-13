@@ -3295,14 +3295,18 @@ fn run() -> Result<(), Error> {
             //   cargo run -p rivet-oracle -- composed-noise --sample   regenerate from pinned Paper
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
             let dir = crate_dir().join("fixtures/composed-noise");
-            if rest.contains(&"--tamper") {
-                composed_noise::tamper_negative_control(&dir)
-            } else if rest.contains(&"--sample") {
-                composed_noise::run_probe(&dir)
-            } else {
-                composed_noise::verify_composed_noise(&dir)?;
-                composed_noise::print_scoreboard();
-                Ok(())
+            match composed_noise::parse_mode(&rest)? {
+                composed_noise::ComposedNoiseMode::Tamper => {
+                    composed_noise::tamper_negative_control(&dir)
+                }
+                composed_noise::ComposedNoiseMode::Sample => composed_noise::run_probe(&dir),
+                composed_noise::ComposedNoiseMode::Verify => {
+                    // Same missing-fixture classification as the gate path: an
+                    // absent fixture tree is UNVERIFIED (exit 3), never a hard
+                    // FAIL (the gate path and this subcommand must agree on the
+                    // missing-golden exit-code contract).
+                    crate::verify_composed_noise_step(&dir)
+                }
             }
         }
         Some("sample") => regenerate_samples(),
