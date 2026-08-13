@@ -92,13 +92,18 @@ cache_dirs() { # worktree build caches: nested target/ dirs, pruned on their own
 }
 
 newest_mtime() { # $1 = path to stat; reads cache dirs (one per line) from stdin
-  local newest m d
+  local newest m d list
   newest=$(stat -f %m "$1" 2>/dev/null || echo 0)
+  if [ -t 0 ]; then
+    list=$(cache_dirs "$1") # stdin is a tty (interactive call): derive the list
+  else
+    list=$(cat)             # consume stdin; an empty pipe yields nothing to block on
+  fi
   while read -r d; do
     [ -n "$d" ] || continue
     m=$(stat -f %m "$d" 2>/dev/null || echo 0)
     [ "$m" -gt "$newest" ] && newest=$m
-  done
+  done <<< "$list"
   echo "$newest"
 }
 
@@ -150,10 +155,11 @@ main() {
     shift
   done
 
-  local MAIN NOW
+  local MAIN NOW mins
   MAIN=$(git rev-parse --path-format=absolute --git-common-dir)/..
   MAIN=$(cd "$MAIN" && pwd)
   NOW=$(date +%s)
+  mins=$((IDLE_HOURS * 60))
   freed_kb=0; removed=0; pruned=0
 
   git -C "$MAIN" fetch origin main -q 2>/dev/null || true
@@ -185,6 +191,10 @@ main() {
       if [ "$age_h" -ge "$IDLE_HOURS" ]; then
         while read -r cache; do
           [ -n "$cache" ] || continue
+          if touched_within "$cache" "$mins"; then
+            say "KEEP   $cache  [$branch: ${dirty:+dirty, }${merged:-unmerged}, active within ${IDLE_HOURS}h]"
+            continue
+          fi
           kb=$(dir_kb "$cache")
           say "$(act PRUNE)  $cache  [$branch: ${dirty:+dirty, }${merged:-unmerged}, idle ${age_h}h, $((kb / 1024))MB]"
           run rm -rf "$cache"
@@ -213,7 +223,9 @@ main() {
 }
 
 # Run only when executed directly; sourcing this file just defines the
-# functions, so tests can drive the classification in isolation.
-if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
+# functions, so tests can drive the classification in isolation. The zsh
+# branch covers `zsh scripts/prune-worktrees.sh` (ZSH_EVAL_CONTEXT is "toplevel"
+# only for a direct exec, never for `source`), where BASH_SOURCE is empty.
+if [[ "${BASH_SOURCE[0]:-}" == "$0" ]] || [[ "${ZSH_EVAL_CONTEXT:-}" == toplevel ]]; then
   main "$@"
 fi

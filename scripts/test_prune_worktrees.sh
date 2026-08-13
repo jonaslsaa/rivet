@@ -286,6 +286,27 @@ newest=$(newest_mtime "$W3" <<< "$W3/target")
 [ "$newest" -eq "$want" ] || fail "newest_mtime did not max cache mtimes: got $newest want $want"
 pass "newest_mtime takes the cache list on stdin and maxes mtimes"
 
+# newest_mtime with an empty/closed stdin must not hang or crash: it falls back
+# to the root mtime (the caller omitted the cache list)
+noinput=$(newest_mtime "$W3" </dev/null)
+[ "$noinput" -eq "$root_m" ] || fail "newest_mtime with empty stdin: got $noinput want $root_m"
+pass "newest_mtime with empty stdin returns the root mtime (no hang)"
+
+# a worktree target/ that was actively built has deep cargo files that never
+# bump the root or the target/ dir itself: the deep touched_within probe must
+# keep it, even when newest_mtime says it is idle
+W4="$SANDBOX/$R3/wt-deep-fresh"
+mkdir -p "$W4/target/debug/.fingerprint/hash1"
+printf '%s\n' "$CARGO_TAG" > "$W4/target/CACHEDIR.TAG"
+printf '[workspace]\n' > "$W4/Cargo.toml"
+mkdir "$W4/.git"
+oldtouch "$W4"
+oldtouch "$W4/target" "$W4/target/CACHEDIR.TAG" "$W4/target/debug" "$W4/target/debug/.fingerprint" "$W4/target/debug/.fingerprint/hash1"
+touched_within "$W4/target" 1440 && fail "fixture: deep files should be fresh" || true
+touch -m "$W4/target/debug/.fingerprint/hash1" # a fresh deep cargo write bumps the hash dir (depth 3)
+touched_within "$W4/target" 1440 || fail "deep-fresh target was not detected by touched_within"
+pass "touched_within detects a deep fresh cargo write in a worktree target/"
+
 # --- sweep_tmp end to end ----------------------------------------------------
 SWEEP_ROOT="$SANDBOX/root-sweep"
 mkdir -p "$SWEEP_ROOT"
@@ -432,6 +453,22 @@ if command -v zsh >/dev/null 2>&1; then
     pass "zsh: source + classification works, no failglob abort"
   else
     fail "zsh source/use test failed (rc=$zrc)"
+  fi
+
+  # regression: direct exec under zsh must run main (BASH_SOURCE is empty there,
+  # so the old bash-only guard silently no-op'd). A --no-tmp --dry-run run must
+  # print the summary line.
+  zout=$(zsh "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp 2>&1) || zrc=$?
+  echo "$zout" | grep -q "would remove" || fail "zsh direct exec did not run main(): $zout"
+  pass "zsh direct exec runs main()"
+
+  # interactive sourcing must NOT run main (guard false-positive would sweep)
+  zrc=0
+  zsh -i -c 'source "$1"; echo "sourced-ok"' _ "$SCRIPT_DIR/prune-worktrees.sh" 2>/dev/null | grep -q "sourced-ok" || zrc=1
+  if [ "$zrc" -eq 0 ]; then
+    pass "zsh interactive source does not run main()"
+  else
+    fail "zsh interactive source test failed"
   fi
 else
   pass "zsh not installed; skipping zsh source/use test"
