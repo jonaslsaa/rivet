@@ -773,6 +773,12 @@ pub fn create_fluid_picker(settings: &NoiseGeneratorSettings) -> GlobalFluidPick
 /// deviation if the generic `Types.isOpaque` path is ever wired to
 /// `MOTION_BLOCKING_NO_LEAVES` with such a block.
 ///
+/// RivetTodo(#228): the `instanceof LeavesBlock` vs `minecraft:leaves` tag gap
+/// is latent today (only the CLIENT `MOTION_BLOCKING_NO_LEAVES` predicate reads
+/// `is_leaves`, never the two WORLDGEN types this unit produces); resolve it to
+/// a class-based `LeavesBlock` discriminator once #228 lands the block-class
+/// modeling that distinguishes `LeavesBlock` subclasses from tag membership.
+///
 /// This places the string-based `is_in_tag("minecraft:leaves")` lookup — a
 /// HashMap lookup plus a linear scan over the leaves tag, explicitly not on
 /// the per-block hot path in `rivet-registry::block_state` — on every block of
