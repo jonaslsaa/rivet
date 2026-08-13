@@ -111,9 +111,16 @@ struct Rule {
 /// chunk stream. `canonicalize` groups by id, so this order is otherwise erased
 /// — a port that reorders the burst still byte-matches the fixture. Each burst
 /// packet's first occurrence must not regress against this sequence (packets
-/// absent from a capture are skipped). Chunks (45) and keep_alive (44) are
-/// deliberately excluded: their within-stream placement is timing-flexible and
-/// chunk order is outside the parity contract.
+/// absent from a capture are skipped). Excluded because their wire position is
+/// timing-flexible, not fixed send order:
+///
+/// - chunks (45) and keep_alive (44): within-stream placement is timing-flexible
+///   and chunk order is outside the parity contract.
+/// - commands (16): `Commands.sendCommands` dispatches to the fixed
+///   `COMMAND_SENDING_POOL` (2 threads) and `sendAsync` reschedules to the
+///   server thread, so the clientbound packet lands wherever that completes
+///   relative to the synchronous join-tick sends (e.g. the tracker's
+///   `set_entity_data`, 99) — it has no fixed wire position.
 pub const PLAY_BURST_ORDER: &[i32] = &[
     49,  // login
     10,  // change_difficulty
@@ -138,7 +145,6 @@ pub const PLAY_BURST_ORDER: &[i32] = &[
     95,  // set_chunk_cache_radius
     111, // set_simulation_distance
     94,  // set_chunk_cache_center
-    16,  // commands
     99,  // set_entity_data
     130, // update_advancements
     104, // set_health
@@ -569,10 +575,22 @@ mod tests {
         // play: the deterministic join burst (Paper's fixed send order), then
         // one chunk + a keepalive, then the serverbound ack + movement +
         // player_loaded. The ordering check only inspects (state, dir, id), so
-        // the bodies are minimal.
+        // the bodies are minimal. commands (16) is not in PLAY_BURST_ORDER (it
+        // is async) but is a real join packet: insert it at its observed
+        // reference position, between set_chunk_cache_center and set_entity_data.
         for id in PLAY_BURST_ORDER {
             v.push(pkt(State::Play, Direction::Clientbound, *id, vec![]));
         }
+        let set_entity_data = v
+            .iter()
+            .position(|p| {
+                p.state == State::Play && p.direction == Direction::Clientbound && p.id == 99
+            })
+            .expect("set_entity_data in the burst");
+        v.insert(
+            set_entity_data,
+            pkt(State::Play, Direction::Clientbound, 16, vec![]),
+        );
         let mut chunk = Vec::new();
         chunk.extend_from_slice(&0i32.to_be_bytes());
         chunk.extend_from_slice(&0i32.to_be_bytes());
@@ -614,6 +632,38 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("login_compression") && s.contains("login_finished")),
             "expected the login_compression/login_finished edge to be named, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn commands_may_follow_set_entity_data() {
+        // Paper's commands packet is sent asynchronously (`Commands.sendCommands`
+        // dispatches to COMMAND_SENDING_POOL, then `sendAsync` reschedules to the
+        // server thread), so its wire position relative to the synchronous
+        // join-tick sends is timing-flexible. It must be allowed to land after
+        // set_entity_data — treating it as fixed mid-burst order is the #101
+        // false positive. Re-adding 16 to PLAY_BURST_ORDER makes this fail.
+        let mut v = valid_join();
+        // Drop any commands packets the burst construction may have emitted, so
+        // the single packet placed below is the capture's only occurrence of 16.
+        v.retain(|p| {
+            !(p.state == State::Play && p.direction == Direction::Clientbound && p.id == 16)
+        });
+        let after_set_entity_data = v
+            .iter()
+            .position(|p| {
+                p.state == State::Play && p.direction == Direction::Clientbound && p.id == 99
+            })
+            .expect("set_entity_data")
+            + 1;
+        v.insert(
+            after_set_entity_data,
+            pkt(State::Play, Direction::Clientbound, 16, vec![]),
+        );
+        let fails = check(&v);
+        assert!(
+            fails.is_empty(),
+            "commands after set_entity_data is a valid Paper layout, got {fails:?}"
         );
     }
 
