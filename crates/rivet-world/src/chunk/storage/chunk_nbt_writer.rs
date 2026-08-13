@@ -15,9 +15,12 @@
 //! `blending_data`/`below_zero_retrogen` when the raw carried compound is
 //! present, `UpgradeData` only when non-empty, the `sections` list (each entry
 //! carrying `block_states`/`biomes` when the block section is present, plain
-//! `BlockLight`/`SkyLight` byte arrays when the saved nibble carried data, the
-//! Starlight state INTs only when > 0, and `Y` added last only on a non-empty
-//! section tag), `isLightOn` when light-correct, `block_entities`, the
+//! `BlockLight`/`SkyLight` byte arrays and the Starlight state INTs only for a
+//! light-correct chunk when the saved nibble carried data / a state > 0 —
+//! Paper's `copyOf` snapshots these from the live nibbles, which are all-Null
+//! on a `!lightCorrect` chunk, so a non-light-correct write emits neither —
+//! and `Y` added last only on a non-empty section tag), `isLightOn` when
+//! light-correct, `block_entities`, the
 //! proto-only `entities`/`carving_mask`, `block_ticks`/`fluid_ticks` via the
 //! faithful tick codecs, `PostProcessing` via `packOffsets`, `Heightmaps`
 //! (ordinal order — the `compound_key_order` divergence, see
@@ -234,6 +237,12 @@ pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> C
     let block_nibbles = chunk.block_nibbles();
     let sky_nibbles = chunk.sky_nibbles();
 
+    // `this.lightCorrect`, which `copyOf` snapshots from the live chunk's
+    // `isLightCorrect()`. Hoisted before the section loop: it also gates the
+    // per-section light-array/state-INT emission (see below), not just
+    // `isLightOn` and the Starlight tail.
+    let light_correct = chunk.is_light_correct();
+
     let mut section_tags = ListTag::new();
     // The Starlight loop bounds: min light section = minSection - 1, max light
     // section = maxSection + 1 (`WorldUtil.getMin/MaxLightSection`). The block
@@ -260,36 +269,49 @@ pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> C
         if let Some(chunk_section) = chunk_section {
             store_section_containers(&mut section_tag, chunk_section);
         }
-        // `SaveUtil` writes `BlockLight`/`SkyLight` only when the saved state
-        // carried data (a `null` data array becomes no byte array).
-        if let Some(state) = &block_nibble
-            && let Some(bytes) = &state.data
-        {
-            section_tag.put_byte_array(
-                BLOCK_LIGHT_TAG,
-                bytes.iter().map(|byte| *byte as i8).collect(),
-            );
-        }
-        if let Some(state) = &sky_nibble
-            && let Some(bytes) = &state.data
-        {
-            section_tag.put_byte_array(
-                SKY_LIGHT_TAG,
-                bytes.iter().map(|byte| *byte as i8).collect(),
-            );
-        }
-        // Starlight state INTs are written only when > 0 (a Null nibble has no
-        // state at all — `get_save_state` returns `None` — and an absent state
-        // stays absent, matching `getSaveState`'s `> 0` gate).
-        if let Some(state) = &block_nibble
-            && state.state.to_i32() > 0
-        {
-            section_tag.put_int(BLOCKLIGHT_STATE_TAG, state.state.to_i32());
-        }
-        if let Some(state) = &sky_nibble
-            && state.state.to_i32() > 0
-        {
-            section_tag.put_int(SKYLIGHT_STATE_TAG, state.state.to_i32());
+        // Light arrays and Starlight state INTs are written only for a
+        // light-correct chunk. Paper's `copyOf` snapshots both from the live
+        // nibbles' `getSaveState()`, and a `!lightCorrect` chunk always carries
+        // all-Null nibbles (`loadStarlightLightData` installs
+        // `getFilledEmptyLight` and returns early), so its `write()` emits
+        // neither the `BlockLight`/`SkyLight` arrays nor the state INTs. Rivet's
+        // reconstruction installs vanilla-format plain arrays as Initialised
+        // nibbles for the send path (issue #531), so the writer must not leak
+        // those onto disk: gate the emission on `light_correct` to reproduce
+        // Paper's re-save (the vanilla light is dropped, and the chunk is
+        // re-lit by Starlight).
+        if light_correct {
+            // `SaveUtil` writes `BlockLight`/`SkyLight` only when the saved
+            // state carried data (a `null` data array becomes no byte array).
+            if let Some(state) = &block_nibble
+                && let Some(bytes) = &state.data
+            {
+                section_tag.put_byte_array(
+                    BLOCK_LIGHT_TAG,
+                    bytes.iter().map(|byte| *byte as i8).collect(),
+                );
+            }
+            if let Some(state) = &sky_nibble
+                && let Some(bytes) = &state.data
+            {
+                section_tag.put_byte_array(
+                    SKY_LIGHT_TAG,
+                    bytes.iter().map(|byte| *byte as i8).collect(),
+                );
+            }
+            // Starlight state INTs are written only when > 0 (a Null nibble has
+            // no state at all — `get_save_state` returns `None` — and an absent
+            // state stays absent, matching `getSaveState`'s `> 0` gate).
+            if let Some(state) = &block_nibble
+                && state.state.to_i32() > 0
+            {
+                section_tag.put_int(BLOCKLIGHT_STATE_TAG, state.state.to_i32());
+            }
+            if let Some(state) = &sky_nibble
+                && state.state.to_i32() > 0
+            {
+                section_tag.put_int(SKYLIGHT_STATE_TAG, state.state.to_i32());
+            }
         }
 
         if !section_tag.is_empty() {
@@ -304,8 +326,8 @@ pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> C
     // from the live chunk's `isLightCorrect()`. The reconstructed chunk is that
     // authority here — `install_lights` may have lowered it (a light-array
     // validation panic forces the chunk flag to false, exactly like Paper's
-    // `loadStarlightLightData` catch).
-    let light_correct = chunk.is_light_correct();
+    // `loadStarlightLightData` catch). The flag was hoisted before the section
+    // loop above (it also gates the per-section light emission).
     if light_correct {
         tag.put_boolean("isLightOn", true);
     }
@@ -665,12 +687,16 @@ mod tests {
     }
 
     #[test]
-    fn vanilla_fixture_write_drops_is_light_on_and_keeps_light_arrays() {
+    fn vanilla_fixture_write_drops_is_light_on_and_light_arrays() {
         // The unmodified fixture is a vanilla-format save: `light_correct`
-        // false, so Paper's own `write()` writes no `isLightOn` and no Starlight
-        // state INTs. The reconstructed chunk carries the vanilla light arrays
-        // as Initialised nibbles (the #531 boundary), but without a light
-        // version the write must not stamp the Starlight tail.
+        // false, so Paper's own re-save writes no `isLightOn`, no `BlockLight`/
+        // `SkyLight` arrays, and no Starlight state INTs — its
+        // `loadStarlightLightData` installs all-Null nibbles for a
+        // `!lightCorrect` chunk, and `copyOf`/`write` emit nothing from Null
+        // nibbles. The reconstruction installs the vanilla arrays as Initialised
+        // nibbles for the send path (issue #531), but the writer must not leak
+        // them onto disk: without a light version the write also must not stamp
+        // the Starlight tail.
         let written = write_once(&fixture("-1.-3.nbt"));
         assert!(
             written.get("isLightOn").is_none(),
@@ -680,7 +706,6 @@ mod tests {
             written.get(STARLIGHT_VERSION_TAG).is_none(),
             "non-light-correct write omits starlight.light_version"
         );
-        // The sections carry the un-stamped light arrays verbatim.
         let Tag::List(sections) = written.get("sections").unwrap() else {
             panic!("sections is a list");
         };
@@ -688,7 +713,45 @@ mod tests {
             .compound_stream()
             .filter(|section| section.get_byte_array("SkyLight").is_some())
             .count();
-        assert_eq!(sky_arrays, 2, "the two sky-lit sections keep their arrays");
+        assert_eq!(
+            sky_arrays, 0,
+            "non-light-correct write drops the vanilla SkyLight arrays"
+        );
+        let block_arrays = sections
+            .compound_stream()
+            .filter(|section| section.get_byte_array("BlockLight").is_some())
+            .count();
+        assert_eq!(block_arrays, 0, "non-light-correct write drops BlockLight");
+        let state_ints = sections
+            .compound_stream()
+            .filter(|section| {
+                section.get_int(BLOCKLIGHT_STATE_TAG).is_some()
+                    || section.get_int(SKYLIGHT_STATE_TAG).is_some()
+            })
+            .count();
+        assert_eq!(
+            state_ints, 0,
+            "non-light-correct write emits no Starlight state INTs"
+        );
+        // The block sections themselves survive (block_states are still
+        // written), so the write is not lossy beyond Paper's light drop.
+        let block_sections = sections
+            .compound_stream()
+            .filter(|section| section.get_compound("block_states").is_some())
+            .count();
+        assert!(
+            block_sections > 0,
+            "block_states survive a non-light-correct write"
+        );
+    }
+
+    #[test]
+    fn vanilla_fixture_write_is_a_fixed_point() {
+        // The vanilla-format path must also be a fixed point: the first write
+        // drops the light arrays/states, and re-parsing that output must
+        // reproduce it structurally (the write adds no Starlight state side
+        // effects that a second pass would erase).
+        assert_write_idempotent(&fixture("-1.-3.nbt"));
     }
 
     #[test]
