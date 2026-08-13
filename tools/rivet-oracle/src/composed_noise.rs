@@ -384,8 +384,24 @@ pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
 /// The tamper negative control: corrupt a committed bit pattern (flip one byte
 /// of the JSON) and assert the verification FAILS — proving the comparison is
 /// not vacuous (a green is impossible with tampered goldens).
+///
+/// Like the other negative controls (`tamper_baseline_copy`), it operates on a
+/// scratch copy in the temp dir so the committed fixtures are never mutated —
+/// a panic or `?` early-return can never leave `fixtures/composed-noise/`
+/// corrupted.
 pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
-    let fixture_path = dir.join(FIXTURE_BASENAME);
+    let scratch = std::env::temp_dir().join(format!(
+        "rivet-oracle-composed-noise-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch)
+        .map_err(|e| Error::Gate(format!("cannot create scratch {}: {e}", scratch.display())))?;
+    // Copy the fixture + manifest so `verify_composed_noise` has a complete
+    // (manifest-hash-gated) fixture tree to run against.
+    fs::copy(dir.join(FIXTURE_BASENAME), scratch.join(FIXTURE_BASENAME))?;
+    fs::copy(dir.join("manifest.json"), scratch.join("manifest.json"))?;
+    let fixture_path = scratch.join(FIXTURE_BASENAME);
     let original = fs::read(&fixture_path)
         .map_err(|e| Error::Gate(format!("cannot read {}: {e}", fixture_path.display())))?;
     // Flip one byte in the middle of the file — a deterministic, minimal tamper.
@@ -393,9 +409,9 @@ pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
     let mut tampered = original.clone();
     tampered[i] ^= 0xFF;
     fs::write(&fixture_path, &tampered)?;
-    let result = verify_composed_noise(dir);
-    // Restore immediately.
-    fs::write(&fixture_path, &original)?;
+    let result = verify_composed_noise(&scratch);
+    // Discard the scratch copy; the committed fixtures are untouched.
+    let _ = fs::remove_dir_all(&scratch);
     match result {
         Ok(()) => Err(Error::NegativeControl {
             message: "composed-noise tamper was NOT detected — the comparison is vacuous".into(),
