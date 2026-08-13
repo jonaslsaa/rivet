@@ -27,10 +27,14 @@
 //! write path uses `checkThreading = false`, so the non-client branch is the
 //! only one this port's [`set_block_state`](Self::set_block_state) reaches).
 
+use crate::biome::biome_resolver::BiomeResolver;
+use crate::biome::climate::Sampler;
 use crate::chunk::moonrise_short_list::ShortList;
 use crate::chunk::paletted_container::PalettedContainer;
 use crate::chunk::strategy::Strategy;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
+use rivet_registry::biome_id::BiomeId;
+use rivet_registry::holder::Holder;
 use std::sync::LazyLock;
 
 /// `LevelChunkSection.BIOME_CONTAINER_BITS`.
@@ -299,6 +303,52 @@ impl<
         self.biomes.get(quart_x, quart_y, quart_z)
     }
 
+    /// `setNoiseBiome(int, int, int, Holder<Biome>)` (CraftBukkit) — the
+    /// single-cell biome write (section-local quart coords).
+    pub fn set_noise_biome(&mut self, quart_x: i32, quart_y: i32, quart_z: i32, biome: B) {
+        self.biomes.set(quart_x, quart_y, quart_z, biome);
+    }
+
+    /// `fillBiomesFromNoise(BiomeResolver, Climate.Sampler, int quartMinX,
+    /// int quartMinY, int quartMinZ)` — recreates the biome container and fills
+    /// the 4×4×4 cells from the resolver at `quartMin + {0..3}` per axis.
+    ///
+    /// Java stores the resolved `Holder<Biome>` directly; the port's section is
+    /// generic over the stored element `B` (the worldgen chunk's dense `BiomeId`
+    /// or a test's u8), so the caller's `map_biome` converts the resolved
+    /// `Holder<BiomeId>` handle into `B` (the `dense_biome_id` seam). The
+    /// recreate-then-fill is Java verbatim: a fresh single-value container
+    /// holding the old palette's first entry, each cell written with
+    /// `getAndSetUnchecked` (the previous value is discarded), then installed.
+    /// The `x → y → z` loop order matches Java, so the palette insertion order
+    /// is identical.
+    pub fn fill_biomes_from_noise(
+        &mut self,
+        biome_resolver: &dyn BiomeResolver,
+        sampler: &Sampler,
+        quart_min_x: i32,
+        quart_min_y: i32,
+        quart_min_z: i32,
+        map_biome: &impl Fn(&Holder<BiomeId>) -> B,
+    ) {
+        let mut new_biomes = self.biomes.recreate();
+        let size = 4;
+        for x in 0..size {
+            for y in 0..size {
+                for z in 0..size {
+                    let biome = map_biome(&biome_resolver.get_noise_biome(
+                        quart_min_x + x,
+                        quart_min_y + y,
+                        quart_min_z + z,
+                        sampler,
+                    ));
+                    new_biomes.get_and_set(x, y, z, biome);
+                }
+            }
+        }
+        self.biomes = new_biomes;
+    }
+
     /// `hasOnlyAir()`.
     pub fn has_only_air(&self) -> bool {
         self.non_empty_block_count == 0
@@ -540,10 +590,12 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::biome::Climate;
     use crate::chunk::palette::GlobalIdMap;
     use crate::chunk::paletted_container::PalettedContainer;
     use crate::chunk::strategy::Strategy;
     use bytes::BytesMut;
+    use std::cell::RefCell;
 
     #[derive(Clone, Copy)]
     struct TestGlobalMap;
@@ -970,5 +1022,84 @@ mod tests {
             ),
             counts
         );
+    }
+
+    /// A `BiomeResolver` that records every quart request in order and returns
+    /// a deterministic holder derived from the coordinates.
+    struct RecordingResolver(RefCell<Vec<(i32, i32, i32)>>);
+
+    impl BiomeResolver for RecordingResolver {
+        fn get_noise_biome(
+            &self,
+            quart_x: i32,
+            quart_y: i32,
+            quart_z: i32,
+            _sampler: &Sampler,
+        ) -> Holder<BiomeId> {
+            self.0.borrow_mut().push((quart_x, quart_y, quart_z));
+            let id = (quart_x
+                .wrapping_mul(31)
+                .wrapping_add(quart_y.wrapping_mul(7))
+                .wrapping_add(quart_z.wrapping_mul(13)))
+                & 0xff;
+            Holder::direct(BiomeId::from_id(id as u16))
+        }
+    }
+
+    /// `dense_biome_id` for the u8 test element: a `Direct` holder reads its id,
+    /// a `Reference` holder its registry id.
+    fn map_biome(holder: &Holder<BiomeId>) -> u8 {
+        match holder {
+            Holder::Direct(biome) => biome.id() as u8,
+            Holder::Reference { id, .. } => *id as u8,
+        }
+    }
+
+    /// `fillBiomesFromNoise` resolves the 4×4×4 cells at
+    /// `quartMin + {0..3}` per axis in Java's `x → y → z` order, installs a
+    /// freshly recreated container, and each cell holds the mapped resolution.
+    #[test]
+    fn fill_biomes_from_noise_resolves_cells_at_quart_min_plus_offset() {
+        let resolver = RecordingResolver(RefCell::new(Vec::new()));
+        let mut section = all_air_section();
+        let sampler = Climate::empty();
+        section.fill_biomes_from_noise(&resolver, &sampler, -4, 8, 0, &map_biome);
+
+        let calls = resolver.0.into_inner();
+        assert_eq!(calls.len(), 64);
+        // Java iterates x, then y, then z — the resolver is driven in that
+        // exact order with `quartMin + {0..3}` per axis.
+        let expected: Vec<(i32, i32, i32)> = (0..4)
+            .flat_map(|x| (0..4).flat_map(move |y| (0..4).map(move |z| (-4 + x, 8 + y, z))))
+            .collect();
+        assert_eq!(calls, expected);
+        // Each written cell holds the mapped resolution of the absolute quart —
+        // the read-back positions line up with the x→y→z write order.
+        for (index, (x, y, z)) in calls.iter().enumerate() {
+            // index = x*16 + y*4 + z (the x→y→z write order), so the section-local
+            // cell is (x, y, z) with x = index>>4, y = (index>>2)&3, z = index&3.
+            let (local_x, local_y, local_z) = ((index >> 4) & 3, (index >> 2) & 3, index & 3);
+            let id = (x
+                .wrapping_mul(31)
+                .wrapping_add(y.wrapping_mul(7))
+                .wrapping_add(z.wrapping_mul(13)))
+                & 0xff;
+            assert_eq!(
+                section.get_noise_biome(local_x as i32, local_y as i32, local_z as i32),
+                id as u8
+            );
+        }
+    }
+
+    /// `setNoiseBiome` is the single-cell biome write (CraftBukkit
+    /// `setNoiseBiome`): it writes the section-local quart cell and reads back.
+    #[test]
+    fn set_noise_biome_writes_the_single_cell() {
+        let mut section = all_air_section();
+        section.set_noise_biome(1, 2, 3, 7u8);
+        assert_eq!(section.get_noise_biome(1, 2, 3), 7);
+        // Neighboring cells are untouched.
+        assert_eq!(section.get_noise_biome(0, 2, 3), 0);
+        assert_eq!(section.get_noise_biome(1, 1, 3), 0);
     }
 }
