@@ -21,12 +21,15 @@
 //! `Success(null)` is legal, and the static `orElse` falls through to the
 //! fallback when a `Success` holds null. Rust models this with the value type
 //! `Option<R>`: `ChunkResult<Option<R>>::Success(None)` *is* Java's
-//! `Success(null)`. The instance `or_else` keeps that shape (a `Success(None)`
-//! yields `None` — Java's `Success(null).orElse(x)` returns null), and the
-//! faithful static null-through is `or_else_nullable` (Java's static `orElse`:
-//! `Success(None)` / `Fail` → the fallback, `Success(Some(r))` → `r`). The
-//! non-null static `or_else_value` is the `Success(T)`-only form, used when the
-//! pipeline holds a concrete value and the fallback is non-null.
+//! `Success(null)`. The faithful static null-through is `or_else_nullable`
+//! (Java's static `orElse`: `Success(Some(r))` → `r`, `Success(None)` / `Fail`
+//! → the fallback). The instance `or_else` is the concrete-value form (it
+//! wraps the `Success` value in `Option<T>` and returns the fallback on
+//! `Fail`); when `T = Option<R>` it yields a nested `Option<Option<R>>`, so
+//! Java's null-through on the *instance* form is intentionally not reproduced —
+//! the pipeline uses `or_else_nullable` for that. The non-null static
+//! `or_else_value` is the `Success(T)`-only form, used when the pipeline holds
+//! a concrete value and the fallback is non-null.
 
 /// `ChunkResult<T>` — `Success(T)` or `Fail(error supplier)`.
 pub enum ChunkResult<T> {
