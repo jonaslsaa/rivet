@@ -100,7 +100,6 @@ struct NoiseAt {
     snow_level_v: f32,
     frozen_large: f64,
     frozen_edge: f64,
-    frozen_edge01: f64,
     frozen_small: f64,
 }
 
@@ -116,7 +115,6 @@ fn noise_map(noise: &Value) -> HashMap<(i64, i64), NoiseAt> {
             let z = entry["z"].as_i64().unwrap();
             let frozen_large = f64::from_bits(double_bits(&entry["frozenLarge"]));
             let frozen_edge = f64::from_bits(double_bits(&entry["frozenEdge"]));
-            let frozen_edge01 = f64::from_bits(double_bits(&entry["frozenEdge01"]));
             let frozen_small = f64::from_bits(double_bits(&entry["frozenSmall"]));
             (
                 (x, z),
@@ -125,7 +123,6 @@ fn noise_map(noise: &Value) -> HashMap<(i64, i64), NoiseAt> {
                     snow_level_v: f32::from_bits(float_bits(&entry["snowLevelV"])),
                     frozen_large,
                     frozen_edge,
-                    frozen_edge01,
                     frozen_small,
                 },
             )
@@ -194,16 +191,10 @@ fn temperature_outputs_match_paper_exactly() {
             n.frozen_small.to_bits(),
             "BIOME_INFO_NOISE (small) at ({x},{z})"
         );
-        // The edge scale itself is pinned: production FROZEN reads the edge
-        // term at `x * 0.2`; the fixture also carries the `x * 0.1` sample so
-        // a scale drift (0.2 -> 0.1) is caught by the test, which does read it.
-        assert_eq!(
-            BIOME_INFO_NOISE
-                .get_value(*x as f64 * 0.1, *z as f64 * 0.1, false)
-                .to_bits(),
-            n.frozen_edge01.to_bits(),
-            "BIOME_INFO_NOISE (edge 0.1) at ({x},{z})"
-        );
+        // The edge scale production FROZEN reads is the `x * 0.2` sample
+        // asserted above (`frozen_edge`); a 0.2 -> 0.1 scale drift is caught by
+        // the aggregate getTemperature goldens (the grid's gate positions flip
+        // their branch decision), not by an extra raw sample.
     }
 
     // The y- and sea-level-dependent aggregate outputs.
@@ -233,14 +224,17 @@ fn temperature_outputs_match_paper_exactly() {
 
             // The FROZEN pin is production-observable: below the snow level
             // the adjusted temperature is exactly the 0.2F pin (branch fires)
-            // or the base 0.7F. At y=1 (below both the sl=63 and sl=0 snow
-            // levels, 80 and 17) tie the probe's emitted flag to that output
-            // without re-deriving the FROZEN formula.
+            // or the base temperature the fixture carries. At y=1 (below both
+            // the sl=63 and sl=0 snow levels, 80 and 17) tie the probe's
+            // emitted flag to that output without re-deriving the FROZEN
+            // formula. The 0.2F pin is fixed by TemperatureModifier.FROZEN; the
+            // base comes from the fixture so a regenerated base cannot leave a
+            // stale constant here.
             if name == "frozen" && y == 1 {
                 let expect = if s["frozenPins"].as_bool().unwrap() {
                     0.2f32.to_bits()
                 } else {
-                    0.7f32.to_bits()
+                    float_bits(&b["temperature"])
                 };
                 assert_eq!(
                     got, expect,

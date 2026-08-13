@@ -2,12 +2,12 @@
   "format": 1,
   "paper": "26.2-DEV-main@0a99345",
   "kind": "biome-temperature",
-  "note": "bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis uses the raw frozenLarge/frozenEdge/frozenEdge01/frozenSmall noise samples plus the per-sample frozenPins flag so the inner and outer sub-checks are independently discriminable. Deterministic across boots.",
+  "note": "bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis uses the raw frozenLarge/frozenEdge/frozenSmall noise samples plus the per-sample frozenPins flag so the inner and outer sub-checks are independently discriminable. Deterministic across boots.",
   "captured": [
     {
       "path": "biome-temperature.json",
-      "sha256": "84123eef72528be2b187ea98f786f2246c64e7932b0a9ac6e9cd7cc8fd3577e0",
-      "bytes": 406700
+      "sha256": "396376d94651252c51b9b759d8429ce061a600645949cc7752ce917fcfdfbc65",
+      "bytes": 405565
     }
   ]
 }

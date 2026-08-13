@@ -54,9 +54,12 @@ if [ "$UNZIP_STATUS" -ne 0 ]; then
 fi
 # Consume the whole manifest (no early-exit, so the upstream writer never sees
 # SIGPIPE) while keeping the first trimmed `Git-Commit:` value — mirroring the
-# Rust `parse_manifest_commit` (trimmed line, trimmed non-empty value).
+# Rust `parse_manifest_commit` (trimmed line, trimmed non-empty value). The
+# match is anchored to the line start (like the Rust `strip_prefix`) so a
+# `X-Git-Commit:` substring earlier in the manifest cannot be misread as the
+# real attribute.
 RUNTIME_COMMIT="$(printf '%s\n' "$RUNTIME_MANIFEST" | awk '
-  /[[:space:]]*Git-Commit:[[:space:]]*/ {
+  /^[[:space:]]*Git-Commit:[[:space:]]*/ {
     v = $0
     sub(/^[[:space:]]*Git-Commit:[[:space:]]*/, "", v)
     sub(/[[:space:]\r]+$/, "", v)
@@ -106,5 +109,5 @@ echo "wrote $FIXTURE_FILE"
 # gate's `rivet-oracle verify` expects (the text/worldgen kinds regenerate their
 # manifests in-process; this kind is script-driven, so the script owns it).
 . "$ROOT/scripts/write_fixture_manifest.sh"
-NOTE="bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis uses the raw frozenLarge/frozenEdge/frozenEdge01/frozenSmall noise samples plus the per-sample frozenPins flag so the inner and outer sub-checks are independently discriminable. Deterministic across boots."
+NOTE="bit-exact golden samples of net.minecraft.world.level.biome.Biome getTemperature/coldEnoughToSnow/warmEnoughToRain/getPrecipitationAt (and the raw TEMPERATURE_NOISE/FROZEN_TEMPERATURE_NOISE/BIOME_INFO_NOISE samples those read) captured from the pinned Paper 26.2 runtime via BiomeTemperatureProbe. getTemperature is Float.floatToIntBits; the noise values are Double.doubleToLongBits. The FROZEN modifier's branch analysis uses the raw frozenLarge/frozenEdge/frozenSmall noise samples plus the per-sample frozenPins flag so the inner and outer sub-checks are independently discriminable. Deterministic across boots."
 write_fixture_manifest "$OUT_DIR" "biome-temperature" "$PAPER_PIN" "$NOTE" "$FIXTURE_FILE"

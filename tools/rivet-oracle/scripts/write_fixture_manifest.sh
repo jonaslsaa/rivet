@@ -1,40 +1,51 @@
 #!/usr/bin/env bash
-# write_fixture_manifest — emit a format-1 fixture `manifest.json` for a
-# single captured file. Sourced by the script-driven probe runners so the
+# write_fixture_manifest — emit a format-1 fixture `manifest.json` for one or
+# more captured files. Sourced by the script-driven probe runners so the
 # manifest schema (and its SHA-256/bytes capture) is maintained in one place
 # instead of hand-copied into each runner.
 #
-# Usage: write_fixture_manifest <out_dir> <kind> <paper_pin> <note> <fixture_file>
+# Usage:
+#   write_fixture_manifest <out_dir> <kind> <paper_pin> <note> <fixture_file> [<fixture_file>...]
 #
-# Hashes <fixture_file>, then writes <out_dir>/manifest.json. The emitted
-# bytes match the historical script block exactly (a `printf '%s\n'` JSON
-# object ending in a newline), so swapping a runner onto this helper does not
-# churn a committed fixture's manifest.
+# Hashes each <fixture_file>, then writes <out_dir>/manifest.json with one
+# `captured` entry per file (in argument order). The emitted bytes for a
+# single file match the historical script block exactly (a `printf '%s\n'`
+# JSON object ending in a newline), so swapping a runner onto this helper does
+# not churn a committed fixture's manifest.
 
 write_fixture_manifest() {
   local out_dir="$1"
   local kind="$2"
   local paper_pin="$3"
   local note="$4"
-  local fixture_file="$5"
+  shift 4
 
-  local sha bytes
-  sha="$(shasum -a 256 "$fixture_file" | awk '{print $1}')"
-  bytes="$(wc -c < "$fixture_file" | tr -d ' ')"
+  local lines=('{'
+    '  "format": 1,'
+    "  \"paper\": \"$paper_pin\","
+    "  \"kind\": \"$kind\","
+    "  \"note\": \"$note\","
+    '  "captured": [')
+  local file sha bytes last_idx i
+  last_idx=$(($# - 1))
+  i=0
+  for file in "$@"; do
+    sha="$(shasum -a 256 "$file" | awk '{print $1}')"
+    bytes="$(wc -c < "$file" | tr -d ' ')"
+    lines+=('    {'
+      "      \"path\": \"$(basename "$file")\","
+      "      \"sha256\": \"$sha\","
+      "      \"bytes\": $bytes")
+    if [ "$i" -eq "$last_idx" ]; then
+      lines+=('    }')
+    else
+      lines+=('    },')
+    fi
+    i=$((i + 1))
+  done
+  lines+=('  ]'
+    '}')
 
-  printf '%s\n' \
-    '{' \
-    '  "format": 1,' \
-    "  \"paper\": \"$paper_pin\"," \
-    "  \"kind\": \"$kind\"," \
-    "  \"note\": \"$note\"," \
-    '  "captured": [' \
-    '    {' \
-    "      \"path\": \"$(basename "$fixture_file")\"," \
-    "      \"sha256\": \"$sha\"," \
-    "      \"bytes\": $bytes" \
-    '    }' \
-    '  ]' \
-    '}' > "$out_dir/manifest.json"
+  printf '%s\n' "${lines[@]}" > "$out_dir/manifest.json"
   echo "wrote $out_dir/manifest.json"
 }

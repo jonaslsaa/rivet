@@ -21,6 +21,15 @@ trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "ok:   $1"; }
 
+# A shim `javac` so the guard tests can detect that the runner got past every
+# guard without coupling to any real JDK's javac diagnostic wording. It prints
+# a fixed marker and fails (exit 1), which also stops the runner before it
+# would invoke `java`.
+BIN_DIR="$TMP/bin"
+mkdir -p "$BIN_DIR"
+printf '#!/bin/bash\necho "MOCK_JAVAC_INVOKED"\nexit 1\n' > "$BIN_DIR/javac"
+chmod +x "$BIN_DIR/javac"
+
 # A real (if tiny) zip carrying a Git-Commit manifest attribute.
 JAR_DIR="$TMP/jar"
 LIBS_DIR="$TMP/libs"
@@ -28,14 +37,23 @@ mkdir -p "$JAR_DIR/META-INF" "$LIBS_DIR"
 printf 'Manifest-Version: 1.0\r\nGit-Commit: 0a99345\r\n' > "$JAR_DIR/META-INF/MANIFEST.MF"
 ( cd "$JAR_DIR" && zip -q -r "$TMP/paper.jar" META-INF )
 
+# A real zip whose manifest also carries a hostile `X-Git-Commit:` substring
+# before the real attribute (the guard must anchor to line start and read the
+# real commit, mirroring Rust `parse_manifest_commit`'s strip_prefix).
+HOSTILE_DIR="$TMP/hostile"
+mkdir -p "$HOSTILE_DIR/META-INF"
+printf 'Manifest-Version: 1.0\r\nX-Git-Commit: deadbeef\r\nGit-Commit: 0a99345\r\n' > "$HOSTILE_DIR/META-INF/MANIFEST.MF"
+( cd "$HOSTILE_DIR" && zip -q -r "$TMP/hostile.jar" META-INF )
+
 # A file that exists but is not a zip.
 printf 'not a zip' > "$TMP/notazip.jar"
 
-# Runs the runner with the given jar/libs (and optional extra runner args).
-# Sets RUN_STATUS (the runner's exit code) and RUN_OUT (its combined output).
+# Runs the runner with the given jar/libs (and optional extra runner args),
+# with the javac shim first on PATH. Sets RUN_STATUS (the runner's exit code)
+# and RUN_OUT (its combined output).
 run() {
   local jar="$1" libs="$2"; shift 2
-  RUN_OUT="$(RIVET_PAPER_RUNTIME_JAR="$jar" RIVET_PAPER_LIBRARIES="$libs" \
+  RUN_OUT="$(PATH="$BIN_DIR:$PATH" RIVET_PAPER_RUNTIME_JAR="$jar" RIVET_PAPER_LIBRARIES="$libs" \
     bash "$SCRIPT_DIR/run_biome_temperature_probe.sh" "$TMP/out" "$@" 2>&1)" \
     && RUN_STATUS=0 || RUN_STATUS=$?
 }
@@ -71,8 +89,8 @@ echo "$RUN_OUT" | grep -q "no library jars under" || fail "t4 diagnostic: $RUN_O
 pass "empty libraries dir -> controlled diagnostic, exit 1"
 
 # T5: valid jar + non-empty libs -> the guards pass; the script proceeds to
-# javac, which fails on the synthetic jar (no net.minecraft classes). Assert no
-# guard diagnostic is emitted (the failure is the javac one, not a guard).
+# javac (the shim). Assert no guard diagnostic is emitted and the shim was
+# reached.
 printf 'stub.jar' > "$LIBS_DIR/stub.jar"
 run "$TMP/paper.jar" "$LIBS_DIR"
 for guard in "failed to read META-INF/MANIFEST.MF" "libraries dir not found" \
@@ -81,7 +99,31 @@ for guard in "failed to read META-INF/MANIFEST.MF" "libraries dir not found" \
     fail "t5 emitted a guard diagnostic ($guard): $RUN_OUT"
   fi
 done
-echo "$RUN_OUT" | grep -q "error reading" || fail "t5 did not reach javac (no classpath error): $RUN_OUT"
-pass "valid jar + libs -> guards pass (proceeds to javac)"
+echo "$RUN_OUT" | grep -q "MOCK_JAVAC_INVOKED" || fail "t5 did not reach javac: $RUN_OUT"
+pass "valid jar + libs -> guards pass (proceeds to javac shim)"
+
+# T6: a hostile `X-Git-Commit:` substring before the real attribute must not
+# be misread as the pin (the awk match is anchored to line start). The guard
+# reads the real 0a99345 and passes; the script proceeds to the javac shim.
+run "$TMP/hostile.jar" "$LIBS_DIR"
+for guard in "failed to read META-INF/MANIFEST.MF" "libraries dir not found" \
+             "but the pin is" "no library jars under" "has no Git-Commit attribute"; do
+  if echo "$RUN_OUT" | grep -q "$guard"; then
+    fail "t6 emitted a guard diagnostic ($guard): $RUN_OUT"
+  fi
+done
+echo "$RUN_OUT" | grep -q "MOCK_JAVAC_INVOKED" || fail "t6 did not reach javac: $RUN_OUT"
+pass "hostile X-Git-Commit substring -> real commit read, guards pass"
+
+# T7: a valid jar with no Git-Commit attribute at all -> controlled refusal.
+NOPIN_DIR="$TMP/nopin"
+mkdir -p "$NOPIN_DIR/META-INF"
+printf 'Manifest-Version: 1.0\r\n' > "$NOPIN_DIR/META-INF/MANIFEST.MF"
+( cd "$NOPIN_DIR" && zip -q -r "$TMP/nopin.jar" META-INF )
+run "$TMP/nopin.jar" "$LIBS_DIR"
+expect_exit 1
+echo "$RUN_OUT" | grep -q "has no Git-Commit attribute; cannot verify the pin" \
+  || fail "t7 diagnostic: $RUN_OUT"
+pass "missing Git-Commit attribute -> controlled refusal, exit 1"
 
 echo "all biome-temperature runner guard tests passed"
