@@ -211,10 +211,11 @@ fn check_capture_pin(run_dir: &Path) -> Result<(), Error> {
 /// Boot the pinned Paper on a fresh seed world, force-generate the spawn grid
 /// to FULL, and extract the deterministic per-chunk sample contract.
 ///
-/// This is the single-capture workhorse for both the PR `--to` path (one boot)
-/// and the committed-fixture regenerate path (twin boots, byte-compared). A
-/// missing Paper runtime is `Error::Unverified` — a missing prerequisite, never
-/// a fabricated green.
+/// This is the single-capture workhorse for both the PR `--to` path (the same
+/// two-boot create + forced-capture sequence) and the committed-fixture
+/// regenerate path (twin two-boot captures, byte-compared). A missing Paper
+/// runtime is `Error::Unverified` — a missing prerequisite, never a fabricated
+/// green.
 fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
     let jar = crate::ensure_jar().map_err(|e| {
         Error::Unverified(format!(
