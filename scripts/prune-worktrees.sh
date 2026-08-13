@@ -164,7 +164,12 @@ main() {
   mins=$((IDLE_HOURS * 60))
   freed_kb=0; removed=0; pruned=0
 
-  git -C "$MAIN" fetch origin main -q 2>/dev/null || true
+  # Merged-ness is judged against origin/main. A dry run must not touch the
+  # network or move refs (its summary claims "nothing touched"), so fetch only
+  # when actually pruning; a preview then classifies against the existing ref.
+  if [ "$DRY" != 1 ]; then
+    git -C "$MAIN" fetch origin main -q 2>/dev/null || true
+  fi
 
   while read -r wt; do
     [ "$wt" = "$MAIN" ] && continue
