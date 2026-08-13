@@ -44,6 +44,7 @@
 //! and `NoiseRouterData.peaksAndValleys(weirdness)`.
 
 use crate::biome::biome_id_codec::biome_id_field_codec;
+use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::biome_source::BiomeSource;
 use crate::biome::biome_source::keys;
 use crate::biome::biome_source_type::{BiomeSourceTypeId, BiomeSourceTypes};
@@ -600,6 +601,24 @@ impl BiomeSource for MultiNoiseBiomeSource {
     }
 }
 
+/// Java's `MultiNoiseBiomeSource extends BiomeSource implements BiomeResolver`
+/// — the source IS its own resolver (`BiomeSource` extends `BiomeResolver` in
+/// the port's trait mirror too, but the separate `BiomeResolver` trait is the
+/// quart-resolver contract `ChunkAccess.fillBiomesFromNoise` consumes). The
+/// impl delegates to the source's `get_noise_biome`, so there is no duplicated
+/// resolution logic.
+impl BiomeResolver for MultiNoiseBiomeSource {
+    fn get_noise_biome(
+        &self,
+        quart_x: i32,
+        quart_y: i32,
+        quart_z: i32,
+        sampler: &Sampler,
+    ) -> Holder<BiomeId> {
+        BiomeSource::get_noise_biome(self, quart_x, quart_y, quart_z, sampler)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,7 +658,10 @@ mod tests {
         // (0, 0, 0, 0, 0, 0, offset 0) wins (every other entry carries a
         // nonzero offset or parameter).
         assert_eq!(
-            src.get_noise_biome(0, 0, 0, &crate::biome::climate::Climate::empty()),
+            // The source is its own resolver (`BiomeSource` extends
+            // `BiomeResolver`); the inherent/trait call is ambiguous with the
+            // new resolver impl, so disambiguate to the source resolution.
+            BiomeSource::get_noise_biome(&src, 0, 0, 0, &crate::biome::climate::Climate::empty()),
             holder(34)
         );
     }
@@ -754,8 +776,16 @@ mod tests {
         assert!(!decoded.stable(&overworld_key));
         // `get_noise_biome` resolves through the stored search list (the nether
         // preset's first entry — nether_wastes, the all-zero sample winner).
+        // The source is its own resolver, so the call disambiguates to the
+        // `BiomeSource` resolution.
         assert_eq!(
-            decoded.get_noise_biome(0, 0, 0, &crate::biome::climate::Climate::empty()),
+            BiomeSource::get_noise_biome(
+                &decoded,
+                0,
+                0,
+                0,
+                &crate::biome::climate::Climate::empty()
+            ),
             holder(34)
         );
         // Encode preserves the Reference preset form (the `Either` is retained).
