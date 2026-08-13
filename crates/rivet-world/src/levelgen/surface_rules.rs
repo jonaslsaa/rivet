@@ -82,12 +82,17 @@
 //! `block` rule); the `nether`/`overworld`/`overworldLike` builders remain AIR
 //! shims (the `mc.data.worldgen` unit, RivetTodo #179) because a faithful port
 //! needs the biome `HolderGetter` threaded through the settings bootstrap.
+//! The `@Deprecated` single-column [`SurfaceSystem::top_material`] probe (the
+//! carver's grass-replacement call) is ported and composed into the carver
+//! `CarvingContext` seam through [`bind_carver_top_material`]; the production
+//! carver loop that binds it defers (RivetTodo #185).
 
 use crate::biome::BiomeManager;
 use crate::block::BlockState;
 use crate::block::blocks::Blocks;
 use crate::chunk::block_column::BlockColumn;
 use crate::level::dimension::dimension_type::WAY_BELOW_MIN_Y;
+use crate::levelgen::carver::carving_context::CarvingContext;
 use crate::levelgen::noise::noises;
 use crate::levelgen::noisegen::noise_chunk::NoiseChunk;
 use crate::levelgen::noisegen::random_state::RandomState;
@@ -2655,26 +2660,53 @@ impl SurfaceSystem {
 
     /// `topMaterial(RuleSource, CarvingContext, Function<BlockPos,
     /// Holder<Biome>>, ChunkAccess, NoiseChunk, BlockPos, boolean underFluid)`
-    /// — the `@Deprecated` single-column probe. `CarvingContext`/`ChunkAccess`
-    /// are the carver/`#185` shells, so the whole probe is deferred (RivetTodo
-    /// #216); the value surface (context updateXZ/updateY + rule.tryApply) is
-    /// ported in `Context`/the applied rules but not yet driven here.
-    #[allow(dead_code)] // #216 — the carver probe, deferred until the carver shells land.
+    /// — the `@Deprecated` single-column probe.
+    ///
+    /// Java's `CarvingContext` param is decomposed into its two consumable
+    /// parts — `carvingContext.randomState()` and the embedded
+    /// `WorldGenerationContext` base — so a bound carver seam closure can
+    /// capture them (the closure lives inside the `CarvingContext` and cannot
+    /// also borrow it). Java's `ChunkAccess chunk` is the `#185` heightmap
+    /// seam (the `Context` reads heights through the seam, so it does not
+    /// carry the chunk). The receiver is the shared `Arc` — the same object
+    /// `RandomState` holds — so the probe's fresh `Context` shares the system
+    /// without a deep clone.
+    #[allow(dead_code)] // #185 — the carver probe, exercised through the bound seam tests.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn top_material(
-        &self,
-        _rule_source: &ArcRuleSource,
-        _carving_context: &dyn Any,
-        _biome_getter: &dyn Fn(&BlockPos) -> Holder<BiomeId>,
-        _chunk: &dyn Any,
-        _noise_chunk: &NoiseChunk,
-        _pos: &BlockPos,
-        _under_fluid: bool,
+    pub(crate) fn top_material<'a>(
+        self: &Arc<SurfaceSystem>,
+        rule_source: &ArcRuleSource,
+        random_state: &'a RandomState<'a>,
+        worldgen_context: Arc<WorldGenerationContext>,
+        noise_chunk: Arc<NoiseChunk>,
+        biome_getter: BiomeGetter,
+        pos: &BlockPos,
+        under_fluid: bool,
     ) -> Option<BlockState> {
-        // STUB(mc.world.level.levelgen.carver): `CarvingContext`/`ChunkAccess`
-        // are the carver/`#185` shells; the port keeps the value surface
-        // (updateXZ/updateY + tryApply) behind the seam.
-        None
+        let context = Context::new(
+            self.clone(),
+            random_state,
+            noise_chunk,
+            biome_getter,
+            worldgen_context,
+            None,
+        );
+        let rule = rule_source.apply(&context);
+        let block_x = pos.get_x();
+        let block_y = pos.get_y();
+        let block_z = pos.get_z();
+        context.update_xz(block_x, block_z);
+        context.update_y(
+            1,
+            1,
+            if under_fluid {
+                block_y.wrapping_add(1)
+            } else {
+                i32::MIN
+            },
+            block_y,
+        );
+        rule.try_apply(block_x, block_y, block_z)
     }
 
     /// `erodedBadlandsExtension(BlockColumn, int, int, int, LevelHeightAccessor)`
@@ -2893,6 +2925,41 @@ impl SurfaceSystem {
         let index = y.wrapping_add(offset).wrapping_add(len).wrapping_rem(len);
         self.clay_bands[index as usize]
     }
+}
+
+/// Bind a [`CarvingContext`]'s `topMaterial` seam to this surface system —
+/// the `@Deprecated` grass-replacement composition the carver's
+/// `WorldCarver.carveBlock` consumes. The closure captures the rule source,
+/// noise chunk, biome getter, the shared `WorldGenerationContext`, and the
+/// borrowed `RandomState` (the `TopMaterialFn<'a>` lifetime); the shared
+/// `SurfaceSystem` Arc comes from the `RandomState`.
+///
+/// This is the surface-unit half of the carver composition: the production
+/// carver loop (`NoiseBasedChunkGenerator::apply_carvers_stub`, RivetTodo
+/// #185) is not wired, so the binding is exercised by the tests and is ready
+/// for that loop to call once the `#399`/`#185` seams land.
+#[allow(dead_code)] // #185 — the carver-loop binding, exercised by the seam tests.
+pub(crate) fn bind_carver_top_material<'a>(
+    carving_context: &mut CarvingContext<'a>,
+    rule_source: &ArcRuleSource,
+    noise_chunk: Arc<NoiseChunk>,
+    biome_getter: BiomeGetter,
+) {
+    let random_state = carving_context.random_state();
+    let system = random_state.surface_system();
+    let worldgen_context = Arc::new(*carving_context.world_context());
+    let rule_source = rule_source.clone();
+    carving_context.set_top_material(Arc::new(move |pos: &BlockPos, under_fluid: bool| {
+        system.top_material(
+            &rule_source,
+            random_state,
+            worldgen_context.clone(),
+            noise_chunk.clone(),
+            biome_getter.clone(),
+            pos,
+            under_fluid,
+        )
+    }));
 }
 
 /// The `buildSurface` chunk seam — the `BlockColumn` over the chunk + the
@@ -3968,5 +4035,70 @@ mod tests {
         );
 
         assert_eq!(chunk.writes.len(), 0);
+    }
+
+    /// The carver composition: `bind_carver_top_material` wires a
+    /// `CarvingContext`'s `@Deprecated` `topMaterial` seam to the real
+    /// `SurfaceSystem::top_material` probe, and `carving_context.top_material`
+    /// returns the rule result exactly like Java's `SurfaceSystem.topMaterial`
+    /// single-column probe (`ruleSource.apply(context)` then
+    /// `tryApply(x, y, z)` after `updateXZ`/`updateY`).
+    ///
+    /// The rule is chosen to *depend on the updated context*: `waterBlockCheck`
+    /// reads the `waterHeight` the probe threads into `updateY` (Java's
+    /// `underFluid ? blockY + 1 : Integer.MIN_VALUE`), so a `false` probe fires
+    /// the rule (water height `MIN` matches the `waterHeight == MIN` fast path)
+    /// while a `true` probe suppresses it (water height `blockY + 1` falls
+    /// through to the `blockY >= waterHeight + offset` comparison, which is
+    /// always false). A broken `updateXZ`/`updateY`/`underFluid` plumbing would
+    /// fail both assertions.
+    #[test]
+    fn carver_top_material_seam_drives_the_surface_probe() {
+        use crate::levelgen::carver::carving_context::CarvingContext;
+
+        let (_settings, random_state, noise_chunk) = build_surface_state();
+        let level = TestLevel(create(-64, 384));
+        let generator = TestGenerator {
+            min_y: -64,
+            depth: 384,
+        };
+        let mut carving_context = CarvingContext::new(&generator, &level, &random_state);
+        let unbound = CarvingContext::new(&generator, &level, &random_state);
+
+        // `waterBlockCheck(0, 0)`: a `true` probe (not under fluid) sets the
+        // water height to `MIN`, which the water condition's `== MIN` fast path
+        // matches — so the `block` rule fires. A `false` result means "no
+        // replacement" (Java `Optional.empty()`).
+        let rule_source: ArcRuleSource = if_true(
+            water_block_check(0, 0),
+            state(Blocks::GRASS_BLOCK.default_block_state()),
+        );
+        let biome_manager = Arc::new(BiomeManager::new(
+            Arc::new(FixedBiomeSource(BiomeId::from_id(0))),
+            0,
+        ));
+        let biome_getter: BiomeGetter = {
+            let bm = Arc::clone(&biome_manager);
+            Arc::new(move |pos: &BlockPos| bm.get_biome(pos))
+        };
+
+        bind_carver_top_material(
+            &mut carving_context,
+            &rule_source,
+            noise_chunk,
+            biome_getter,
+        );
+
+        let pos = BlockPos::new(3, 5, 7);
+        let replacement = carving_context.top_material(&pos, false);
+        assert_eq!(replacement, Some(Blocks::GRASS_BLOCK.default_block_state()));
+
+        // `underFluid = true` threads `blockY + 1` as the water height — the
+        // `blockY >= waterHeight + offset` comparison is false, so the rule
+        // yields no replacement (Java's `Optional.empty()`).
+        assert_eq!(carving_context.top_material(&pos, true), None);
+
+        // An unbound seam yields Java's `Optional.empty()` (no replacement).
+        assert_eq!(unbound.top_material(&pos, false), None);
     }
 }
