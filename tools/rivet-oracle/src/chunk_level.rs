@@ -64,7 +64,16 @@ impl ChunkDependencies {
     }
 
     fn get_radius_of(&self, status: ChunkStatus) -> usize {
-        self.radius_by_dependency[status.index()]
+        // Mirrors ChunkDependencies.getRadiusOf's IllegalArgumentException for a
+        // status outside the dependency range (never hit by the harness, which
+        // only queries statuses within FULL_CHUNK_STEP's range).
+        let index = status.index();
+        assert!(
+            index < self.radius_by_dependency.len(),
+            "Requesting a ChunkStatus({status:?}) outside of dependency range({:?})",
+            self.dependency_by_radius
+        );
+        self.radius_by_dependency[index]
     }
 
     pub fn get_radius(&self) -> usize {

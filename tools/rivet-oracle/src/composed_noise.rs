@@ -17,11 +17,13 @@
 //!     bit pattern (`Double.doubleToLongBits` / `Float.floatToIntBits`), so a
 //!     Rust port asserts `f64::to_bits` exactly — never a tolerant compare.
 //!
-//! The verify command recomputes the values with the committed bit patterns as
-//! the assertion target and prints the BIOMES→NOISE→SURFACE→CARVERS→FEATURES→
-//! LIGHT→FULL status/provenance scoreboard plus the FULL_CHUNK_STEP accumulated
-//! reachability (computed by `chunk_level`, not assumed). The tamper negative
-//! control proves the comparison detects a flipped bit.
+//! The verify command asserts the committed golden's provenance (Paper pin +
+//! manifest SHA-256s), its FULL_CHUNK_STEP reachability (computed by
+//! `chunk_level`, not assumed), the #175 matrix shape, and that every value
+//! round-trips to its raw IEEE-754 bits exactly; then it prints the
+//! BIOMES→NOISE→SURFACE→CARVERS→FEATURES→LIGHT→FULL status/provenance
+//! scoreboard. The tamper negative control proves the comparison detects a
+//! flipped byte (the manifest SHA-256 gate).
 
 use crate::chunk_level::{ChunkLevelConsts, ChunkPyramid, by_status, status_around_full_chunk};
 use crate::{CapturedFile, Error, sha256_hex};
@@ -45,6 +47,10 @@ pub const CHECKPOINTS: &[ChunkStatus] = &[
 
 const KIND: &str = "composed-noise";
 const FIXTURE_BASENAME: &str = "composed-noise.json";
+
+/// The vertical slice the probe samples per column (`DENSITY_YS` in
+/// `ComposedNoiseProbe.java`).
+const DENSITY_YS: [i64; 10] = [-60, -40, -20, 0, 20, 40, 60, 80, 100, 120];
 
 /// A captured bit-pattern entry (double via `Double.doubleToLongBits`).
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq)]
@@ -199,17 +205,19 @@ pub fn print_scoreboard() {
         .get_step_to(ChunkStatus::Full)
         .clone();
     for row in scoreboard() {
-        // A checkpoint is "covered" by the committed golden when its value
-        // leaves are bit-asserted today. Only NOISE (the composed-noise slice)
-        // and BIOMES (the climate column) are wired now; the rest are the
-        // planned later checkpoints.
-        let covered = matches!(row.status, ChunkStatus::Biomes | ChunkStatus::Noise);
+        // A checkpoint is "captured" by the committed golden when its value
+        // leaves are present in the fixture today (hash-gated + structurally
+        // verified). Only NOISE (the composed-noise slice) and BIOMES (the
+        // climate column) are captured now; the rest are the planned later
+        // checkpoints, which will assert Rust-computed values against the
+        // same committed bit patterns.
+        let captured = matches!(row.status, ChunkStatus::Biomes | ChunkStatus::Noise);
         println!(
             "{:<20} {:>6} {:>10}   {}",
             row.status.serialization_name(),
             row.level,
             row.entries,
-            if covered { "golden" } else { "not-yet-wired" }
+            if captured { "captured" } else { "not-wired" }
         );
     }
     println!();
@@ -320,7 +328,15 @@ pub fn verify_full_chunk_step(fixture: &ComposedNoise) -> Result<(), Error> {
 /// NOISE checkpoint gate.
 pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
     let fixture = load(dir)?;
-    // 1. Provenance + manifest hashes.
+    // 1. Provenance + manifest hashes. The golden is pinned to seed 42 and to
+    //    Paper 0a99345; a fixture regenerated under a different seed or commit
+    //    is drift, not the pinned golden.
+    if fixture.seed != 42 {
+        return Err(Error::Manifest(format!(
+            "composed-noise seed {} != pinned seed 42",
+            fixture.seed
+        )));
+    }
     let manifest = crate::verify_fixtures(dir)?;
     if manifest.kind.as_deref() != Some(KIND) {
         return Err(Error::Manifest(format!(
@@ -342,10 +358,12 @@ pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
     }
     // 2. The computed (not assumed) reachability.
     verify_full_chunk_step(&fixture)?;
-    // 3. Bit-exact value assertions: every committed bit pattern is the target.
-    //    A Rust port asserts `f64::from_bits(fixture.density[i].density.bits)`
-    //    matches its own computed value; here we assert the fixture is
-    //    structurally complete (non-vacuous + every entry has bits).
+    // 3. Structural + exact value assertions. The committed fixture is
+    //    hash-gated (verify_fixtures above), so the bytes are the probe's exact
+    //    output; here we pin the shape (the #175 matrix, the density Y slice)
+    //    and that every value round-trips to its raw IEEE-754 bits exactly —
+    //    the assertion a Rust port would make (`f64::from_bits(bits)`), made
+    //    against the fixture's own self-consistency.
     if fixture.climate.len() != 8 {
         return Err(Error::Manifest(format!(
             "composed-noise has {} climate entries, expected 8 (#175 matrix)",
@@ -369,6 +387,9 @@ pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
             seen_columns.len()
         )));
     }
+    // Every density column samples the full 10-y vertical slice the probe
+    // records (DENSITY_YS), exactly once per y.
+    let mut density_by_column: BTreeMap<(i64, i64), Vec<i64>> = BTreeMap::new();
     for s in &fixture.density {
         let key = (s.cx, s.cz);
         if !seen_columns.contains_key(&key) {
@@ -376,6 +397,82 @@ pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
                 "density column ({},{}) not in the #175 matrix",
                 s.cx, s.cz
             )));
+        }
+        density_by_column.entry(key).or_default().push(s.y);
+    }
+    for key in seen_columns.keys() {
+        let mut ys = density_by_column
+            .get(key)
+            .ok_or_else(|| {
+                Error::Manifest(format!(
+                    "density column ({},{}) has no entries",
+                    key.0, key.1
+                ))
+            })?
+            .clone();
+        ys.sort_unstable();
+        if ys != DENSITY_YS.to_vec() {
+            return Err(Error::Manifest(format!(
+                "density column ({},{}) ys {ys:?} != expected {DENSITY_YS:?}",
+                key.0, key.1
+            )));
+        }
+    }
+    // 4. Every entry's `value` must round-trip to its `bits` exactly (density:
+    //    f64::from_bits; climate: the float-cast f32::from_bits widened), and
+    //    density must never be NaN — a NaN density would be un-placeable
+    //    garbage, not a golden.
+    verify_value_bits(&fixture)?;
+    Ok(())
+}
+
+/// Assert every committed entry's `value` round-trips to its raw IEEE-754
+/// `bits` exactly, and that density entries are finite.
+fn verify_value_bits(fixture: &ComposedNoise) -> Result<(), Error> {
+    for (ci, s) in fixture.climate.iter().enumerate() {
+        for (name, sample) in [
+            ("temperature", &s.temperature),
+            ("vegetation", &s.vegetation),
+            ("continents", &s.continents),
+            ("erosion", &s.erosion),
+            ("depth", &s.depth),
+            ("ridges", &s.ridges),
+            ("weirdness", &s.weirdness),
+            ("peaksAndValleys", &s.peaks_and_valleys),
+        ] {
+            // Climate fields are float-cast (`(double) f` in the probe), so
+            // the JSON value must equal the widened f32 the bits encode.
+            // A "NaN" string (probe float NaN) skips the value comparison.
+            let Some(v) = sample.value.as_f64() else {
+                continue;
+            };
+            let rt = f32::from_bits(sample.bits as u32) as f64;
+            if rt != v {
+                return Err(Error::Manifest(format!(
+                    "climate[{ci}] {name} value {v} != f32::from_bits({}) {rt}",
+                    sample.bits
+                )));
+            }
+        }
+    }
+    for (di, s) in fixture.density.iter().enumerate() {
+        for (name, sample) in [
+            ("density", &s.density),
+            ("finalDensity", &s.final_density),
+            ("preliminarySurfaceLevel", &s.preliminary_surface_level),
+        ] {
+            let v = sample.value.as_f64().ok_or_else(|| {
+                Error::Manifest(format!(
+                    "density[{di}] {name} is NaN — density goldens must be finite"
+                ))
+            })?;
+            let rt = f64::from_bits(sample.bits as u64);
+            if rt != v {
+                return Err(Error::Manifest(format!(
+                    "density[{di}] {name} value {v} != f64::from_bits({}) {rt}",
+                    sample.bits
+                )));
+            }
         }
     }
     Ok(())

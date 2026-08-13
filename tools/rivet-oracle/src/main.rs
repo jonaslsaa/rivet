@@ -927,7 +927,9 @@ fn verify_all_fixture_kinds() -> Result<(), Error> {
     let composed = crate_dir().join("fixtures/composed-noise");
     if composed.join("manifest.json").is_file() {
         composed_noise::verify_composed_noise(&composed)?;
-        println!("PASS: composed-noise seed-42 golden matches pinned Paper 26.2-DEV-main@0a99345");
+        println!(
+            "PASS: composed-noise seed-42 golden verified (pinned Paper 0a99345 provenance, reachability, value↔bits round-trip)"
+        );
         composed_noise::print_scoreboard();
     }
     Ok(())
