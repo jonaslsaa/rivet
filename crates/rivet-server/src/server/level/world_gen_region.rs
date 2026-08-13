@@ -659,25 +659,31 @@ impl WorldGenLevel for WorldGenRegion {
     /// `LevelReader.getHeight(Heightmap.Types, int, int)` — the gated heightmap
     /// read.
     ///
+    /// Java's `WorldGenRegion.getHeight` (WorldGenRegion.java:514) is
+    /// `getChunk(...).getHeight(type, x & 15, z & 15) + 1` — the same `+ 1`
+    /// `Level.getHeight` applies (Level.java:1289) — i.e. the chunk's
+    /// `getFirstAvailable` height, one ABOVE the topmost opaque block.
     /// [`Heightmap::get_height_at`] is the Java `ChunkAccess.getHeight` value
-    /// (`getFirstAvailable(x, z) - 1` — the topmost opaque block's Y; a
-    /// never-set entry reads `minY - 1`), so a primed entry is returned
-    /// directly. When the entry is absent the port cannot prime it here —
+    /// (`getFirstAvailable(x, z) - 1` — the topmost opaque block's Y), so the
+    /// port adds `+ 1` to recover the region method's contract.
+    ///
+    /// When the entry is absent the port cannot prime it here —
     /// `ChunkAccess::prime_heightmaps` takes `&mut` (`ChunkAccess::get_height_at`
-    /// is the `&mut`-typed half) — and returns the superflat floor's height
-    /// `minY` (the topmost block sits at `minY`, so Java's primed `getHeight` is
-    /// `minY`; a genuinely all-air column would be `minY - 1`, deferred with the
-    /// `&mut` seam, RivetTodo #228). Since `write_block` primes and updates the
-    /// `heightmapsAfter()` entries on every write, the None branch is only a
-    /// never-written chunk; written chunks return the real post-write height.
+    /// is the `&mut`-typed half) — so it returns the value the chunk's primed
+    /// heightmap would carry: `minY + 1` for the superflat floor whose topmost
+    /// block sits at `minY` (first available = `minY + 1`). A genuinely all-air
+    /// column would read `minY`, deferred with the `&mut` seam (RivetTodo
+    /// #228). Since `write_block` primes and updates the `heightmapsAfter()`
+    /// entries on every write, the None branch is only a never-written chunk;
+    /// written chunks return the real post-write height.
     fn get_height_at(&self, ty: Types, x: i32, z: i32) -> i32 {
         let chunk_x = SectionPos::block_to_section_coord(x);
         let chunk_z = SectionPos::block_to_section_coord(z);
         self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
         let chunk = self.get_chunk(chunk_x, chunk_z);
         match chunk.heightmaps()[ty as usize].as_ref() {
-            Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()),
-            None => chunk.get_min_y(),
+            Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()) + 1,
+            None => chunk.get_min_y() + 1,
         }
     }
 }
@@ -1265,17 +1271,19 @@ mod tests {
         assert_eq!(region.get_center(), center());
         // `getHeight` of the superflat content: `WorldSurface` is a
         // FINAL_HEIGHTMAPS entry never primed by a BIOMES-persisted chunk, so
-        // the None fallback returns `minY` — Java's primed `getHeight` for the
-        // stone floor whose topmost block sits at `minY`.
+        // the None fallback returns `minY + 1` — Java's region `getHeight` for
+        // the stone floor whose topmost block sits at `minY` (first available
+        // = `minY + 1`).
         assert_eq!(
             region.get_height_at(Types::WorldSurface, 0, 0),
-            SUPERFLAT_MIN_Y
+            SUPERFLAT_MIN_Y + 1
         );
     }
 
     /// `set_block` primes and updates the `heightmapsAfter()` entries, so a
-    /// written block moves `getHeight` to its Y (Java `ProtoChunk.setBlockState`
-    /// runs the update unconditionally after every in-build-height write).
+    /// written block moves the region `getHeight` to one above its Y — the
+    /// `WorldGenRegion.getHeight` `+ 1` (Java `ProtoChunk.setBlockState` runs
+    /// the heightmap update unconditionally after every in-build-height write).
     #[test]
     fn set_block_updates_the_worldgen_heightmap() {
         let mut region = feature_region();
@@ -1283,17 +1291,19 @@ mod tests {
         let pos = BlockPos::new(0, 0, 0);
         assert!(region.set_block(&pos, BlockState::new(StateId(1)), UPDATE_ALL, 0));
         // The center chunk's persisted status is BIOMES (< CARVERS), so the
-        // WORLDGEN_HEIGHTMAPS types are maintained. `getHeight` is the topmost
-        // block's Y — the written stone at 0 (the floor at -64 is below it).
-        assert_eq!(region.get_height_at(Types::WorldSurfaceWg, 0, 0), 0);
+        // WORLDGEN_HEIGHTMAPS types are maintained. `getHeight` is first
+        // available — one above the topmost block — so the written stone at 0
+        // reads 1 (the floor at -64 is below it).
+        assert_eq!(region.get_height_at(Types::WorldSurfaceWg, 0, 0), 1);
         // `OceanFloorWg` (blocks-motion) tracks the same column.
-        assert_eq!(region.get_height_at(Types::OceanFloorWg, 0, 0), 0);
+        assert_eq!(region.get_height_at(Types::OceanFloorWg, 0, 0), 1);
         // The block itself reads back as non-air.
         assert!(!region.get_block_state(&pos).is_air());
-        // A column that was never written still reads the floor's `minY`.
+        // A column that was never written still reads above the floor's topmost
+        // block (`minY + 1`).
         assert_eq!(
             region.get_height_at(Types::WorldSurfaceWg, 15, 15),
-            SUPERFLAT_MIN_Y
+            SUPERFLAT_MIN_Y + 1
         );
     }
 }
