@@ -28,10 +28,9 @@ OUT_DIR="${1:?usage: run_composed_noise_probe.sh <out-dir> [seed] [paper-pin]}"
 SEED="${2:-42}"
 # Resolve a relative out-dir against the invoking cwd, then pin Paper's logs/
 # (written into the process cwd) under ROOT, which is already gitignored.
-case "$OUT_DIR" in
-  /*) OUT_DIR="$OUT_DIR" ;;
-  *)  OUT_DIR="$(pwd)/$OUT_DIR" ;;
-esac
+if [[ "$OUT_DIR" != /* ]]; then
+  OUT_DIR="$(pwd)/$OUT_DIR"
+fi
 cd "$ROOT"
 PAPER_PIN="${3:-26.2-DEV-main@0a99345}"
 
