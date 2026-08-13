@@ -534,6 +534,49 @@ mod tests {
     }
 
     #[test]
+    fn refused_promotion_is_atomic_across_the_whole_path() {
+        // Atomicity: when any step in the target path is refused, no earlier
+        // step runs either. A chunk already at STRUCTURE_REFERENCES promoted
+        // to NOISE through a pyramid whose NOISE step is a pass-through would
+        // have BIOMES (an earlier, valid step) in the dispatch loop — the
+        // pre-check must refuse before BIOMES runs, leaving the chunk and the
+        // biomes seam untouched.
+        let (mut ctx, biomes_calls, noise_calls) = recording_context();
+        let mut chunk = proto();
+        chunk.set_persisted_status(ChunkStatus::StructureReferences);
+        let pyramid = ChunkPyramid::builder()
+            .step(ChunkStatus::Empty, |s| s)
+            .step(ChunkStatus::StructureStarts, |s| {
+                s.set_task(ChunkStatusTask::GenerateStructureStarts)
+            })
+            .step(ChunkStatus::StructureReferences, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateStructureReferences)
+            })
+            .step(ChunkStatus::Biomes, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateBiomes)
+            })
+            .step(ChunkStatus::Noise, |s| {
+                s.add_requirement(ChunkStatus::Biomes, 1)
+                    .add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::PassThrough)
+            })
+            .build();
+        let err = ctx
+            .generate_through(&pyramid, &mut chunk, ChunkStatus::Noise)
+            .expect_err("pass-through noise refused");
+        assert_eq!(err, GenError::BiomesNotGenerated);
+        // The chunk is unchanged AND the earlier valid BIOMES step never ran.
+        assert_eq!(
+            chunk.get_persisted_status(),
+            ChunkStatus::StructureReferences
+        );
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+    }
+
+    #[test]
     fn loading_noise_step_is_idempotent_on_a_chunk_at_noise() {
         // Loading a chunk that already carries NOISE data: the pass-through
         // NOISE step is allowed (the data is present) and leaves the status at
