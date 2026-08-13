@@ -69,3 +69,6 @@ serde_json = { workspace = true }
 # block-state table (rivet-registry `blocks` feature). Dev-only: normal
 # builds of rivet-world stay feature-free.
 rivet-registry = { workspace = true, features = ["blocks"] }
+# The surface-rule-data golden test recomputes the fixture sha256 to detect a
+# tampered golden (sha2 is a workspace dep).
+sha2 = { workspace = true }

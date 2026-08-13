@@ -3543,6 +3543,37 @@ mod tests {
         assert!(decoded.as_any().is::<BlockRuleSource>());
     }
 
+    /// The three real `SurfaceRuleData` production builders
+    /// (`nether`/`overworld`/`overworldLike`) are still AIR shims (RivetTodo
+    /// #179). This is a **non-ignored tripwire**: once a faithful port replaces
+    /// a shim, this test must fail so the golden harness is extended to the now
+    /// real tree. Until then it pins the deferral — the shims must encode as
+    /// `minecraft:air`, never silently as some other placeholder.
+    #[test]
+    fn surface_rule_production_builders_are_still_air_shims() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let builders: [(&str, ArcRuleSource); 3] = [
+            ("nether", surface_rule_nether()),
+            ("overworld", surface_rule_overworld()),
+            (
+                "overworld_like",
+                surface_rule_overworld_like(true, false, true),
+            ),
+        ];
+        for (name, rule) in builders {
+            let encoded = codec
+                .encode_start(&ops, &rule)
+                .get_or_throw("encode")
+                .clone();
+            assert_eq!(
+                encoded,
+                json!({"type": "minecraft:block", "result_state": {"Name": "minecraft:air"}}),
+                "SurfaceRuleData.{name}() is still an AIR shim (RivetTodo #179)"
+            );
+        }
+    }
+
     #[test]
     fn generate_bands_has_192_entries_and_all_band_colors() {
         let mut random = LegacyRandomSource::new(1234);
