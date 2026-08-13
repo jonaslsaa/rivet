@@ -669,14 +669,15 @@ pass "recenter: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
 # The classification tests above drive run_scenario_loaded_world and
 # run_scenario_recenter directly, but a row could still silently drop off the
 # gate if its invocation sat outside the `if [ "$FULL_GATE" = true ]` guard (or
-# vanished from main()). Assert the source wires both rows inside the guard:
-# the scenario block is the LAST `if [ "$FULL_GATE" = true ]` in main() — extract
-# from that guard through its closing `fi` and require both row invocations.
+# vanished from main()). Assert the source wires both rows inside the guard.
+# The scenario block is the FULL_GATE-guarded block whose first call is
+# run_scenario_paper_rows, so anchor the extraction on that unique call (not the
+# last FULL_GATE guard in the file): a new full-gate-guarded step appended later
+# (e.g. before machete) must not move the extraction to the wrong block.
 GATE_SOURCE="$SCRIPT_DIR/gate.sh"
-GATE_GUARD_LINE="$(grep -nF 'if [ "$FULL_GATE" = true ]; then' "$GATE_SOURCE" | tail -1 | cut -d: -f1)"
+PAPER_LINE="$(grep -n '^    run_scenario_paper_rows$' "$GATE_SOURCE" | cut -d: -f1)"
+GATE_GUARD_LINE="$(grep -nF 'if [ "$FULL_GATE" = true ]; then' "$GATE_SOURCE" | awk -F: -v target="$PAPER_LINE" '$1 <= target { last = $1 } END { print last }')"
 SCENARIO_BLOCK="$(sed -n "${GATE_GUARD_LINE},\$p" "$GATE_SOURCE" | awk '/^  fi$/ { print; exit } { print }')"
-printf '%s\n' "$SCENARIO_BLOCK" | grep -qF 'if [ "$FULL_GATE" = true ]; then' \
-  || fail "gate: the scenario rows are not inside the FULL_GATE guard (block missing the guard)"
 printf '%s\n' "$SCENARIO_BLOCK" | grep -q '^    run_scenario_loaded_world$' \
   || fail "gate: run_scenario_loaded_world not invoked in the full-gate scenario block"
 printf '%s\n' "$SCENARIO_BLOCK" | grep -q '^    run_scenario_recenter$' \
