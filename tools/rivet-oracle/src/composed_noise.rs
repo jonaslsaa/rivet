@@ -990,9 +990,18 @@ mod tests {
     }
 
     #[test]
-    fn gate_path_composed_noise_only_root_is_verified() {
+    fn gate_path_load_bearing_goldens_only_root_is_verified() {
         let src = fixtures_dir().join("composed-noise");
         require_fixture(&src);
+        let ge_src = fixtures_dir().join("generated-expected");
+        assert!(
+            ge_src.join("manifest.json").is_file()
+                && ge_src
+                    .join(crate::generated_expected::FIXTURE_BASENAME)
+                    .is_file(),
+            "committed generated-expected fixtures at {} are unusable",
+            ge_src.display()
+        );
         let root = scratch("gate-cn-only");
         fs::create_dir_all(root.path().join("composed-noise")).unwrap();
         fs::copy(
@@ -1005,10 +1014,25 @@ mod tests {
             root.path().join("composed-noise/composed-noise.json"),
         )
         .unwrap();
+        // generated-expected is equally load-bearing (PR #563/#595): carry both
+        // goldens so the gate's positive path exercises the full composed
+        // contract — neither golden alone may claim an overall green.
+        fs::create_dir_all(root.path().join("generated-expected")).unwrap();
+        fs::copy(
+            ge_src.join("manifest.json"),
+            root.path().join("generated-expected/manifest.json"),
+        )
+        .unwrap();
+        fs::copy(
+            ge_src.join(crate::generated_expected::FIXTURE_BASENAME),
+            root.path()
+                .join("generated-expected/generated-expected.json"),
+        )
+        .unwrap();
         let result = crate::verify_all_fixture_kinds_from(root.path());
         assert!(
             result.is_ok(),
-            "composed-noise-only root must verify green: {result:?}"
+            "goldens-only root must verify green: {result:?}"
         );
     }
 
