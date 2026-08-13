@@ -61,14 +61,13 @@
 //! `getBaseHeight` seam, so they stay executable once an implementor provides
 //! a real `getBaseHeight`.
 //!
-//! RivetTodo(#185): integration blocker — the noisegen value shell already has
-//! real bodies for `getSeaLevel`/`getBaseHeight`/`getBaseColumn`/
-//! `addDebugScreenInfo` (and `fill_from_noise`/the `*_stub` lifecycle shells)
-//! under the same names on `NoiseBasedChunkGenerator`, which does not implement
-//! this trait. The owning `.chunk.generator` realization must reconcile the two
-//! — either implement the trait by delegating to the value-shell bodies, or
-//! move those bodies onto the realization — so the trait seams and the shell
-//! do not become two sources of truth.
+//! RivetTodo(#185): the owning `.chunk.generator` realization must reconcile the
+//! trait's deferred seams with the noisegen value shell's real bodies
+//! (`getSeaLevel`/`getBaseHeight`/`getBaseColumn`/`addDebugScreenInfo`, plus
+//! `fill_from_noise` and the `*_stub` lifecycle shells) — the shell does not
+//! implement this trait, so the two must not become separate sources of truth
+//! (either implement the trait by delegating to the shell bodies, or move the
+//! bodies onto the realization).
 
 use crate::biome::biome_source::BiomeSource;
 use crate::level::height_accessor::LevelHeightAccessor;
@@ -146,7 +145,7 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// noisegen unit ports the real body on the value shell
     /// (`NoiseBasedChunkGenerator::fill_from_noise`); the owning realization
     /// overrides this seam with the faithful signature when the status executor
-    /// lands (see the module-doc #185 integration blocker).
+    /// lands (see the module-doc `RivetTodo(#185)` reconciliation note).
     fn fill_from_noise(&self) {
         panic!("ChunkGenerator.fillFromNoise is not implemented (RivetTodo #185)")
     }
