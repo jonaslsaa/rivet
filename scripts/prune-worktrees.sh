@@ -29,9 +29,11 @@
 #     it is unambiguous cargo scratch: cargo CACHEDIR.TAG + .rustc_info.json +
 #     .fingerprint, and no source/VCS evidence (Cargo.toml/.git).
 #   - a nested target/ dir (inside a worktree or tmp checkout) is pruned on its
-#     own when it is clearly cargo scratch (cargo CACHEDIR.TAG + .fingerprint);
-#     the checkout itself is never removed on that path, so the .rustc_info.json
-#     and source/VCS guards are not required there.
+#     own when it is clearly cargo scratch: cargo CACHEDIR.TAG + .fingerprint,
+#     and no source/VCS evidence. The .rustc_info.json is not required there (a
+#     partial cleanup can drop it), but the source/VCS refusal applies to every
+#     tier — a nested target/ path can itself be a checkout root, and must never
+#     be removed wholesale.
 # Ambiguous tagged directories are left alone.
 #
 # Usage: scripts/prune-worktrees.sh [--dry-run] [--idle-hours N] [--no-tmp]  (default 24)
@@ -66,17 +68,17 @@ has_cargo_fingerprint() { # $1 = dir; cargo writes .fingerprint dirs under each 
   [ -n "$(find "$1" -maxdepth 4 -type d -name .fingerprint -print -quit 2>/dev/null)" ]
 }
 
-is_cargo_scratch() { # $1 = dir; clearly cargo build scratch (nested-target tier)
+is_cargo_scratch() { # $1 = dir; clearly cargo build scratch (never a source/VCS root)
   has_cargo_tag "$1" || return 1
   has_cargo_fingerprint "$1" || return 1
+  [ -e "$1/Cargo.toml" ] && return 1
+  [ -e "$1/.git" ] && return 1
   return 0
 }
 
 is_cargo_target() { # $1 = dir; an unambiguous bare CARGO_TARGET_DIR (safe to rm -rf wholesale)
   is_cargo_scratch "$1" || return 1
   [ -f "$1/.rustc_info.json" ] || return 1
-  [ -e "$1/Cargo.toml" ] && return 1
-  [ -e "$1/.git" ] && return 1
   return 0
 }
 

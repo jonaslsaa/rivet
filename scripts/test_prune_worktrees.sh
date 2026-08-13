@@ -140,6 +140,32 @@ else
   pass "bare-dir tier still refuses a dir without .rustc_info.json"
 fi
 
+# the nested tier still requires cargo's .fingerprint marker: a cargo-text tag
+# with no .fingerprint anywhere is ambiguous and must be refused
+SCRATCH2="$SANDBOX/$R/nested-tag-no-fingerprint"
+mkdir -p "$SCRATCH2"
+printf '%s\n' "$CARGO_TAG" > "$SCRATCH2/CACHEDIR.TAG"
+oldtouch "$SCRATCH2" "$SCRATCH2/CACHEDIR.TAG"
+if is_cargo_scratch "$SCRATCH2"; then
+  fail "nested tier accepted cargo-tagged dir without .fingerprint"
+else
+  pass "nested tier refuses a cargo-tagged dir without .fingerprint"
+fi
+
+# a cargo-marked nested dir that is itself a source/VCS root must never be
+# pruned wholesale, even though it sits at a target/ path
+SCRATCH3="$SANDBOX/$R/nested-checkout-root"
+mkdir -p "$SCRATCH3/debug/.fingerprint"
+printf '%s\n' "$CARGO_TAG" > "$SCRATCH3/CACHEDIR.TAG"
+printf '[workspace]\n' > "$SCRATCH3/Cargo.toml"
+mkdir "$SCRATCH3/.git"
+oldtouch "$SCRATCH3" "$SCRATCH3/CACHEDIR.TAG" "$SCRATCH3/Cargo.toml" "$SCRATCH3/.git" "$SCRATCH3/debug" "$SCRATCH3/debug/.fingerprint"
+if is_cargo_scratch "$SCRATCH3"; then
+  fail "nested tier accepted a cargo-marked dir that is a checkout root"
+else
+  pass "nested tier refuses a cargo-marked dir that is a checkout root"
+fi
+
 # --- classification: tmp_cache_dirs (what the tmp sweep would consider) ------
 R2="root-dirs"
 mkdir -p "$SANDBOX/$R2"
@@ -160,6 +186,20 @@ mk_cargo_target "$CK/target"
 got=$(classify "$CK")
 [ "$got" = "$CK/target" ] || fail "tagged source checkout returned unexpected caches: [$got]"
 pass "tagged source checkout yields only its nested target/"
+
+# hostile: the tmp child's nested target/ is ITSELF a git checkout root that
+# carries a cargo CACHEDIR.TAG + .fingerprint (e.g. CARGO_TARGET_DIR pointed at
+# a subdir, or a vendored target tree). It must never be returned for wholesale
+# prune — only a genuine nested target/ that is not a source/VCS root may be.
+CKN="$SANDBOX/$R2/nested-checkout-root"
+mkdir -p "$CKN/target/debug/.fingerprint"
+printf '%s\n' "$CARGO_TAG" > "$CKN/target/CACHEDIR.TAG"
+printf '[workspace]\n' > "$CKN/target/Cargo.toml"
+mkdir "$CKN/target/.git"
+oldtouch "$CKN/target" "$CKN/target/CACHEDIR.TAG" "$CKN/target/Cargo.toml" "$CKN/target/.git" "$CKN/target/debug" "$CKN/target/debug/.fingerprint"
+got=$(classify "$CKN")
+[ -z "$got" ] || fail "nested checkout-root at a target/ path returned caches: [$got]"
+pass "nested target-path checkout root is never returned for wholesale prune"
 
 # hostile: unrelated generic cache must not be touched at all
 mk_tagged "$SANDBOX/$R2/unrelated-cache"
@@ -268,6 +308,14 @@ printf '[workspace]\n' > "$CK6/Cargo.toml"
 mkdir "$CK6/.git"
 printf '%s\n' "$CARGO_TAG" > "$CK6/target/CACHEDIR.TAG"
 oldtouch "$CK6/target" "$CK6/target/CACHEDIR.TAG" "$CK6/target/dist" "$CK6/target/dist/.fingerprint"
+# hostile: the nested target/ path is ITSELF a git checkout root carrying a
+# cargo tag + .fingerprint — it must survive wholesale, never be pruned
+CK7="$SWEEP_ROOT/checkout-as-target"
+mkdir -p "$CK7/target/debug/.fingerprint"
+printf '[workspace]\n' > "$CK7/target/Cargo.toml"
+mkdir "$CK7/target/.git"
+printf '%s\n' "$CARGO_TAG" > "$CK7/target/CACHEDIR.TAG"
+oldtouch "$CK7" "$CK7/target" "$CK7/target/CACHEDIR.TAG" "$CK7/target/Cargo.toml" "$CK7/target/.git" "$CK7/target/debug" "$CK7/target/debug/.fingerprint"
 
 DRY=0; IDLE_HOURS=24; freed_kb=0; pruned=0
 sweep_tmp "$SWEEP_ROOT" >/dev/null
@@ -279,6 +327,8 @@ sweep_tmp "$SWEEP_ROOT" >/dev/null
 [ -f "$SWEEP_ROOT/cache/data.bin" ] || fail "generic cache contents were deleted"
 [ -d "$CK6" ] || fail "custom-profile checkout was deleted wholesale"
 [ -d "$CK6/target" ] && fail "custom-profile checkout's nested target/ not deleted" || true
+[ -d "$CK7" ] || fail "checkout-at-target-path was deleted wholesale"
+[ -d "$CK7/target" ] || fail "checkout-at-target-path's nested checkout was pruned wholesale"
 pass "real sweep: bare target + nested targets pruned; generic cache and checkouts survive"
 
 # --- dry-run reporting is prospective, not a claim of completed deletion -----
