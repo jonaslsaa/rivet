@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "seed": "42",
+  "level-type": "minecraft:normal",
+  "kind": "surface-column",
+  "note": "Deterministic seed-42 post-surface column goldens for the overworld SURFACE checkpoint: the REAL generator pipeline (createBiomes -> fillFromNoise -> buildSurface) run on REAL ProtoChunks at the #175 chunk-coordinate matrix. Each column records pre/post block states at every 4th Y (block registry key + raw state id), pre/post WORLD_SURFACE_WG + OCEAN_FLOOR_WG heights, and the surface biome. The pre snapshot is taken before buildSurface (all-air, heightmaps unprimed), so a no-op capture is detected. Captured from the pinned Paper runtime via tools/rivet-oracle/src/java/SurfaceColumnProbe.java with a Level-free OptionallyFlatBedrockConditionSource shadow (generateFlatBedrock=false, Paper default); regenerate with scripts/run_surface_column_probe.sh.",
+  "captured": [
+    {
+      "path": "surface-columns.json",
+      "sha256": "dd15bbe8d14776f6bb46d69cd6fb261855143b97bac7bc1536f6c3f3ee975ff9",
+      "bytes": 605263
+    }
+  ]
+}
