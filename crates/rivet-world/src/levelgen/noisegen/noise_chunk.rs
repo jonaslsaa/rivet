@@ -16,13 +16,17 @@
 //!   constructors do. The per-instance mutable values (the interpolator's
 //!   `noise000..value`, `Cache2D`/`CacheOnce` caches) live in their own
 //!   `Mutex`es.
-//! - Java's `context != NoiseChunk.this` identity checks become shared-state
-//!   flag checks: the `ContextProvider.forIndex` seam returns an owned
-//!   `SinglePointContext` (never the chunk), so "is this the interpolation
-//!   loop?" is answered by the `interpolating`/`filling_cell` flags. Standalone
-//!   `SinglePointContext`s (outside the loop) keep the flags false, so the
-//!   functions delegate to their noise filler exactly as Java delegates for a
-//!   non-chunk context.
+//! - Java's `context != NoiseChunk.this` reference-identity checks become the
+//!   [`is_owning_chunk`] test: a downcast of the `FunctionContext` to
+//!   `NoiseChunk` plus a shared-`InterpolationState` `Arc` identity compare.
+//!   The `ContextProvider.forIndex` seam returns the owning chunk (`&self` /
+//!   `&NoiseChunk.this`, exactly Java's `return this`) so every inner function
+//!   reached through the per-index fill paths — `Ap2` Mul/Min/Max,
+//!   `IntervalSelect`, `RangeChoice`, `BlendDensity` — evaluates with the chunk
+//!   context and takes the interpolation/cache branch. A standalone
+//!   `SinglePointContext` (outside the loop) never downcasts to the chunk, so
+//!   the functions delegate to their noise filler exactly as Java delegates for
+//!   a non-chunk context.
 //! - `Beardifier.forStructuresInChunk` (the structure unit) defers: the
 //!   `beardifier` field is the `BeardifierMarker` value shell (RivetTodo #177).
 //! - `Aquifer.create`'s `noiseChunk` self-reference is broken with the
@@ -189,7 +193,12 @@ pub struct NoiseChunk {
     /// `cellHeight`.
     pub cell_height: i32,
     /// `wrapped` — the `HashMap<DensityFunction, DensityFunction>` wrap cache.
-    wrapped: Mutex<HashMap<IdentityKey, Arc<dyn DensityFunction>>>,
+    ///
+    /// Shared (`Arc`) with the construction-time `wrap` visitor so
+    /// `cachedClimateSampler` reuses the already-wrapped router fields — Java's
+    /// single `this.wrapped` map used by both the constructor's `this::wrap`
+    /// and `cachedClimateSampler`'s `this::wrap`.
+    wrapped: Arc<Mutex<HashMap<IdentityKey, Arc<dyn DensityFunction>>>>,
     /// `blendAlpha` — the `@Nullable` blend-alpha flat cache (non-null iff the
     /// blender is non-empty).
     blend_alpha: Option<Arc<FlatCache>>,
@@ -274,6 +283,9 @@ impl NoiseChunk {
         let first_noise_z = QuartPos::from_block(chunk_min_block_z);
         let noise_size_xz = QuartPos::from_block(cell_count_xz * cell_width);
         let state = Arc::new(Mutex::new(InterpolationState::new()));
+        // Java's single `this.wrapped` map, shared by the constructor's
+        // `this::wrap` visitor AND the chunk's `wrap`/`cachedClimateSampler`.
+        let wrapped = Arc::new(Mutex::new(HashMap::new()));
 
         // The `wrap` visitor used for the router wiring (Java's `this::wrap`).
         let wrap_visitor = NoiseChunkWrap {
@@ -290,7 +302,7 @@ impl NoiseChunk {
             first_noise_x,
             first_noise_z,
             noise_size_xz,
-            wrapped: Mutex::new(HashMap::new()),
+            wrapped: wrapped.clone(),
         };
 
         // The `blendAlpha`/`blendOffset` flat caches (Java's constructor block).
@@ -407,7 +419,7 @@ impl NoiseChunk {
             noise_size_xz,
             cell_width,
             cell_height,
-            wrapped: Mutex::new(HashMap::new()),
+            wrapped: wrapped.clone(),
             blend_alpha,
             blend_offset,
             preliminary_surface_level_cache: Mutex::new(HashMap::new()),
@@ -500,6 +512,7 @@ impl NoiseChunk {
         }
         let provider = SliceFillingContextProvider {
             state: self.state.clone(),
+            chunk: self,
             cell_noise_min_y: self.cell_noise_min_y,
             cell_height: self.cell_height,
             cell_count_y: self.cell_count_y,
@@ -801,8 +814,10 @@ struct NoiseChunkWrap {
     first_noise_z: i32,
     noise_size_xz: i32,
     /// `wrapped` — the `HashMap<DensityFunction, DensityFunction>` wrap cache
-    /// (Java's `this.wrapped` `computeIfAbsent` used by `this::wrap`).
-    wrapped: Mutex<HashMap<IdentityKey, Arc<dyn DensityFunction>>>,
+    /// (Java's `this.wrapped` `computeIfAbsent` used by `this::wrap`). Shared
+    /// with the `NoiseChunk` so `cachedClimateSampler` reuses the
+    /// construction-time wraps (Java's single `this.wrapped` map).
+    wrapped: Arc<Mutex<HashMap<IdentityKey, Arc<dyn DensityFunction>>>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -955,18 +970,19 @@ impl FunctionContext for NoiseChunk {
 }
 
 impl ContextProvider for NoiseChunk {
-    fn for_index(&self, index: usize) -> SinglePointContext {
-        // Java's `forIndex` mutates the in-cell coordinates and returns `this`;
-        // the Rust `ContextProvider` trait must return an owned point, so call
-        // the inherent `NoiseChunk::for_index` (which sets the shared in-cell
-        // coordinates exactly like Java — `floorMod`/`floorDiv` against the
-        // cell geometry) and snapshot the resulting block coordinates. The
-        // fully-qualified call is deliberate: the inherent method has the same
-        // name, so a bare `self.for_index(index)` would already resolve to it,
-        // but spelling the dispatch out removes any ambiguity with this trait
-        // method (the prior no-base-case form recursed into itself).
-        NoiseChunk::for_index(self, index);
-        SinglePointContext::new(self.block_x(), self.block_y(), self.block_z())
+    fn for_index(&self, index: usize) -> &dyn FunctionContext {
+        // Java's `forIndex` mutates the in-cell coordinates and returns `this`
+        // — the owning chunk — so every inner function reached through the
+        // per-index fill paths evaluates with `context == NoiseChunk.this` and
+        // takes the interpolation/cache branch (`is_owning_chunk` matches).
+        // The inherent `NoiseChunk::for_index` sets the shared in-cell
+        // coordinates exactly like Java (`floorMod`/`floorDiv` against the
+        // cell geometry) and returns `&self`, which coerces to the trait
+        // object. The fully-qualified call is deliberate: the inherent method
+        // has the same name, so a bare `self.for_index(index)` would already
+        // resolve to it, but spelling the dispatch out removes any ambiguity
+        // with this trait method.
+        NoiseChunk::for_index(self, index)
     }
 
     fn fill_all_directly(&self, output: &mut [f64], function: &dyn DensityFunction) {
@@ -995,42 +1011,33 @@ impl ContextProvider for NoiseChunk {
 }
 
 /// The shared `sliceFillingContextProvider` — sets the chunk's cell-start
-/// block-y and fills via `fillAllDirectly` (see the module doc's seam note).
+/// block-y and fills via `fillAllDirectly` on the owning chunk (Java's
+/// anonymous `ContextProvider` returns `NoiseChunk.this` from `forIndex` and
+/// computes with it in `fillAllDirectly`).
 #[derive(Debug)]
-struct SliceFillingContextProvider {
+struct SliceFillingContextProvider<'a> {
     state: Arc<Mutex<InterpolationState>>,
+    /// The owning chunk — `NoiseChunk.this`, so inner functions reached
+    /// through the per-index fill paths take the interpolation branch.
+    chunk: &'a NoiseChunk,
     cell_noise_min_y: i32,
     cell_height: i32,
     cell_count_y: i32,
 }
 
-impl FunctionContext for SliceFillingContextProvider {
-    fn block_x(&self) -> i32 {
-        let state = self.state.lock().unwrap();
-        state.cell_start_block_x + state.in_cell_x
-    }
-    fn block_y(&self) -> i32 {
-        let state = self.state.lock().unwrap();
-        state.cell_start_block_y + state.in_cell_y
-    }
-    fn block_z(&self) -> i32 {
-        let state = self.state.lock().unwrap();
-        state.cell_start_block_z + state.in_cell_z
-    }
-}
-
-impl ContextProvider for SliceFillingContextProvider {
-    fn for_index(&self, index: usize) -> SinglePointContext {
+impl ContextProvider for SliceFillingContextProvider<'_> {
+    fn for_index(&self, index: usize) -> &dyn FunctionContext {
         let mut state = self.state.lock().unwrap();
         state.cell_start_block_y = (index as i32 + self.cell_noise_min_y) * self.cell_height;
         state.interpolation_counter += 1;
         state.in_cell_y = 0;
         state.array_index = index;
-        SinglePointContext::new(
-            state.cell_start_block_x + state.in_cell_x,
-            state.cell_start_block_y + state.in_cell_y,
-            state.cell_start_block_z + state.in_cell_z,
-        )
+        // Java's `forIndex` returns `NoiseChunk.this` — the owning chunk, so
+        // every inner function reached through the per-index fill takes the
+        // interpolation/cache branch. The lock guard is dropped at the end of
+        // this method (before the caller's `compute`), so the returned
+        // `&NoiseChunk` borrow is deadlock-free.
+        self.chunk
     }
 
     fn fill_all_directly(&self, output: &mut [f64], function: &dyn DensityFunction) {
@@ -1046,7 +1053,7 @@ impl ContextProvider for SliceFillingContextProvider {
                 state.in_cell_y = 0;
                 state.array_index = cell_y_index as usize;
             }
-            output[cell_y_index as usize] = function.compute(self);
+            output[cell_y_index as usize] = function.compute(self.chunk);
         }
     }
 }
@@ -1163,7 +1170,7 @@ impl DensityFunction for BlendDensity {
         self.input.fill_array(output, context_provider);
         for (i, slot) in output.iter_mut().enumerate() {
             let context = context_provider.for_index(i);
-            *slot = self.blender.blend_density(&context, *slot);
+            *slot = self.blender.blend_density(context, *slot);
         }
     }
     fn min_value(&self) -> f64 {
@@ -1245,10 +1252,11 @@ pub struct CacheAllInCell {
 
 /// Java's `context != NoiseChunk.this` reference-identity check: downcasts the
 /// `FunctionContext` to `NoiseChunk` and compares the shared
-/// `InterpolationState` `Arc` identity. Any other context — a
-/// `SinglePointContext`, the `SliceFillingContextProvider`, or a *different*
-/// `NoiseChunk` — never matches, exactly like Java's outer-class identity
-/// comparison. Lock-free (only pointer compares).
+/// `InterpolationState` `Arc` identity. Any other context — a standalone
+/// `SinglePointContext`, or a *different* `NoiseChunk` — never matches, exactly
+/// like Java's outer-class identity comparison. The owning chunk's own
+/// `forIndex`/`fillAllDirectly` seam returns `&self`, so the in-loop fills hit
+/// this test with a matching state. Lock-free (only pointer compares).
 fn is_owning_chunk(state: &Arc<Mutex<InterpolationState>>, context: &dyn FunctionContext) -> bool {
     match (context as &dyn Any).downcast_ref::<NoiseChunk>() {
         Some(chunk) => Arc::ptr_eq(&chunk.state, state),
@@ -1743,7 +1751,7 @@ mod tests {
     use crate::block::blocks::Blocks;
     use crate::levelgen::blending::blender::Blender;
     use crate::levelgen::noise::beardifier_marker::BeardifierMarker;
-    use crate::levelgen::noise::density_functions as fns;
+    use crate::levelgen::noise::density_functions::{self as fns, MappedType};
     use crate::levelgen::noise::noise_router::NoiseRouter;
     use crate::levelgen::noise::noise_settings::OVERWORLD_NOISE_SETTINGS;
     use crate::levelgen::noisegen::noise_based_chunk_generator::create_fluid_picker;
@@ -1759,8 +1767,12 @@ mod tests {
     /// aquifer/ore-vein fields are disabled so `NoiseChunk::new` uses the
     /// disabled aquifer; the remaining router fields are zero constants.
     fn test_settings() -> NoiseGeneratorSettings {
+        test_settings_with_final_density(fns::interpolated(fns::cache_once(fns::constant(3.5))))
+    }
+
+    /// The `test_settings` router with an arbitrary `finalDensity`.
+    fn test_settings_with_final_density(final_density: Arc<dyn DensityFunction>) -> NoiseGeneratorSettings {
         let z = fns::zero();
-        let final_density = fns::interpolated(fns::cache_once(fns::constant(3.5)));
         let router = NoiseRouter::new(
             z.clone(),
             z.clone(),
@@ -1778,6 +1790,7 @@ mod tests {
             z.clone(),
             z,
         );
+
         NoiseGeneratorSettings::new(
             OVERWORLD_NOISE_SETTINGS,
             Blocks::STONE.default_block_state(),
@@ -1929,7 +1942,7 @@ mod tests {
         f.fill_array(&mut out, &chunk);
         for (i, slot) in out.iter().enumerate() {
             let point = ContextProvider::for_index(&chunk, i);
-            let expected = f.compute(&point);
+            let expected = f.compute(point);
             assert!(
                 (slot - expected).abs() < 1e-9,
                 "mul fill_array slot {i} = {}, expected per-index compute {expected}",
@@ -1955,7 +1968,7 @@ mod tests {
         f.fill_array(&mut out, &chunk);
         for (i, slot) in out.iter().enumerate() {
             let point = ContextProvider::for_index(&chunk, i);
-            let expected = f.compute(&point);
+            let expected = f.compute(point);
             assert!(
                 (slot - expected).abs() < 1e-9,
                 "min fill_array slot {i} = {}, expected per-index compute {expected}",
@@ -1978,7 +1991,7 @@ mod tests {
         f.fill_array(&mut out, &chunk);
         for (i, slot) in out.iter().enumerate() {
             let point = ContextProvider::for_index(&chunk, i);
-            let expected = f.compute(&point);
+            let expected = f.compute(point);
             assert!(
                 (slot - expected).abs() < 1e-9,
                 "max fill_array slot {i} = {}, expected per-index compute {expected}",
@@ -2001,12 +2014,85 @@ mod tests {
         blend.fill_array(&mut out, &chunk);
         for (i, slot) in out.iter().enumerate() {
             let point = ContextProvider::for_index(&chunk, i);
-            let expected = input.compute(&point);
+            let expected = input.compute(point);
             assert!(
                 (slot - expected).abs() < 1e-9,
                 "blend_density fill_array slot {i} = {}, expected per-index compute {expected}",
                 slot
             );
+        }
+        chunk.stop_interpolation();
+    }
+
+    /// The critical per-index seam: during `selectCellYZ` the registered
+    /// `CacheAllInCell` fill runs its wrapped function's `fillArray` (the 128
+    /// `cellWidth*cellWidth*cellHeight` in-cell samples), whose per-index loop
+    /// samples the noodle through `argument2.compute(provider.forIndex(i))`.
+    /// Java's `forIndex` returns `NoiseChunk.this`, so the wrapped
+    /// `NoiseInterpolator` takes the interpolation branch and produces the
+    /// trilinear-lerped `interpolated` value. The old port returned a
+    /// `SinglePointContext`, delegating to the raw `square` noise — so at a
+    /// mid-cell in-cell y the cell read the raw `(y/8)^2` instead of the lerp3
+    /// `y/8`. This asserts the cell cache holds the interpolated values.
+    #[test]
+    fn ap2_min_per_index_argument2_takes_interpolation_branch() {
+        // finalDensity = min(constant(4.0), interpolated(square(y_gradient))),
+        // with the y-gradient spanning exactly the cell's y-range
+        // `[256, 264)` (`cellNoiseMinY = -8`, `cellHeight = 8`,
+        // `selectCellYZ(40, 0)` → `cellStartBlockY = 256`). The interpolator's
+        // y-corners are then `square(0.0) = 0.0` (bottom) and `square(1.0) =
+        // 1.0` (top) — a pure y-lerp, so the in-cell sample at in-cell y
+        // reads `y/8`. The raw `square` noise at that block is `(y/8)^2`, so
+        // the two branches diverge at any interior y. The `min` is on the
+        // interpolated arm everywhere (both span `[0, 1] < 4.0`), keeping the
+        // assertion exact.
+        let y_grad = fns::y_clamped_gradient(256, 264, 0.0, 1.0);
+        let noodle = fns::interpolated(fns::mapped(&*y_grad, MappedType::Square));
+        let settings = test_settings_with_final_density(fns::min(fns::constant(4.0), noodle));
+        let (noise_registry, df_registry) = empty_registries();
+        let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
+        let chunk = NoiseChunk::new(
+            4,
+            &state,
+            0,
+            0,
+            &OVERWORLD_NOISE_SETTINGS,
+            Arc::new(BeardifierMarker::instance()) as Arc<dyn DensityFunction>,
+            &settings,
+            Box::new(create_fluid_picker(&settings)),
+            Blender::empty(),
+        );
+        chunk.initialize_for_first_cell_x();
+        chunk.advance_cell_x(0);
+        chunk.select_cell_yz(40, 0);
+
+        // Read the one registered `CacheAllInCell` (the `fullNoiseDensity`
+        // wrapper) and verify its in-cell values are the lerp3 `y/8` — not the
+        // raw `(y/8)^2` the pre-fix `forIndex` snapshot produced.
+        let values = chunk
+            .state
+            .lock()
+            .unwrap()
+            .cell_caches[0]
+            .values
+            .lock()
+            .unwrap()
+            .clone();
+        let cell_width = chunk.cell_width as usize; // 4
+        let cell_height = chunk.cell_height as usize; // 8
+        for y in 0..cell_height {
+            for x in 0..cell_width {
+                for z in 0..cell_width {
+                    let index = ((cell_height - 1 - y) * cell_width + x) * cell_width + z;
+                    let expected = y as f64 / cell_height as f64;
+                    assert!(
+                        (values[index] - expected).abs() < 1e-9,
+                        "cell ({x}, {y}, {z}) value {} = expected lerp3 {expected}, not the raw (y/8)^2 {}",
+                        values[index],
+                        (y as f64 / cell_height as f64).powi(2)
+                    );
+                }
+            }
         }
         chunk.stop_interpolation();
     }
