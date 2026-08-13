@@ -37,6 +37,4 @@ pub use region_backed::{
     RegionBackedBootError, RegionChunkSource, RegionLevelPreparation, RegionWorldLayout,
 };
 pub use server_level::{MissingChunkPolicy, ServerLevel, ServerLevelConfig, overworld_dimension};
-pub use world_gen_region::{
-    GenerationChunkHolderView, UnavailableChunkDiagnostic, WorldGenRegion,
-};
+pub use world_gen_region::{GenerationChunkHolderView, UnavailableChunkDiagnostic, WorldGenRegion};

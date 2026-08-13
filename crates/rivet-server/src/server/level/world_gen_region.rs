@@ -400,7 +400,11 @@ impl WorldGenRegion {
             requested_status: target_status,
             actual_status,
             max_allowed_status,
-            dependencies: self.generating_step.direct_dependencies().as_list().to_vec(),
+            dependencies: self
+                .generating_step
+                .direct_dependencies()
+                .as_list()
+                .to_vec(),
             distance,
             generating_chunk: self.center_pos,
         })
