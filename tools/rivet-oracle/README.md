@@ -473,6 +473,11 @@ The script-driven value-leaf goldens are regenerated outside `regenerate`:
 `scripts/run_dataconverter_probe.sh`, and `data-worldgen/` via
 `scripts/run_data_worldgen_probe.sh` (see each fixture's manifest note).
 
+The `surface-rule-data/` goldens (the SurfaceRuleData surface trees under
+`RuleSource.CODEC`/`ConditionSource.CODEC`, issue #179) are likewise
+script-driven: `scripts/run_surface_rule_data_probe.sh` (see the fixture
+manifest note).
+
 The `text/` corpus (issue #98) records the exact component JSON a chat/title/
 player-info/scoreboard packet carries, Paper's accept/reject verdict in the
 Bootstrap-only oracle context, and Paper's canonical `ComponentSerialization.
