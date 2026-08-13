@@ -500,13 +500,18 @@ if command -v zsh >/dev/null 2>&1; then
   echo "$zout" | grep -q "would remove" || fail "zsh direct exec did not run main(): $zout"
   pass "zsh direct exec runs main()"
 
-  # interactive sourcing must NOT run main (guard false-positive would sweep)
+  # interactive sourcing must NOT run main (guard false-positive would sweep).
+  # Source with --dry-run --no-tmp: a regression stays harmless (no fetch, no
+  # removal, no /private/tmp sweep) and is caught by main()'s own output, not
+  # by the incidental exit-2 a stray positional arg currently produces.
   zrc=0
-  zsh -i -c 'source "$1"; echo "sourced-ok"' _ "$SCRIPT_DIR/prune-worktrees.sh" 2>/dev/null | grep -q "sourced-ok" || zrc=1
-  if [ "$zrc" -eq 0 ]; then
+  zout=$(zsh -i -c 'source "$1" --dry-run --no-tmp; echo "sourced-ok"' _ "$SCRIPT_DIR/prune-worktrees.sh" 2>/dev/null) || zrc=$?
+  if [ "$zrc" -eq 0 ] \
+     && printf '%s\n' "$zout" | grep -q "sourced-ok" \
+     && ! printf '%s\n' "$zout" | grep -qE 'WOULD|would remove|would prune|DRY:'; then
     pass "zsh interactive source does not run main()"
   else
-    fail "zsh interactive source test failed"
+    fail "zsh interactive source ran main() (or failed): $zout"
   fi
 else
   pass "zsh not installed; skipping zsh source/use test"
