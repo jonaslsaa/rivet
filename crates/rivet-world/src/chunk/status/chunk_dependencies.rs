@@ -51,6 +51,9 @@ impl ChunkDependencies {
     }
 
     /// `size()`.
+    ///
+    /// Mirrors Java's accessor; the deferred scheduler (#185) consumes it when
+    /// reading `ChunkDependencies.size()` for the pyramid's radius bounds.
     pub fn size(&self) -> usize {
         self.dependency_by_radius.len()
     }
@@ -70,11 +73,17 @@ impl ChunkDependencies {
     }
 
     /// `getRadius()` — `Math.max(0, size() - 1)`.
+    ///
+    /// Mirrors Java's accessor; the deferred scheduler (#185) reads it as the
+    /// step's accumulated radius bound.
     pub fn get_radius(&self) -> usize {
         self.dependency_by_radius.len().saturating_sub(1)
     }
 
     /// `get(int distance)` — the required status at that distance.
+    ///
+    /// Mirrors Java's accessor; the deferred scheduler (#185) reads it from the
+    /// FULL step's accumulated dependencies for the status-by-radius dispatch.
     pub fn get(&self, distance: usize) -> ChunkStatus {
         self.dependency_by_radius[distance]
     }
