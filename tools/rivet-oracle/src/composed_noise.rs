@@ -598,19 +598,75 @@ pub fn require_fixture_tree(dir: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// The tamper negative control: corrupt a committed bit pattern (flip one byte
-/// of the JSON) and assert the verification FAILS — proving the comparison is
-/// not vacuous (a green is impossible with tampered goldens).
+/// Flip one digit of a sample `bits` value — the first `"bits": ` field's
+/// number, skipping its optional sign and leading digit (so the tampered file
+/// stays valid JSON — no leading zero). A digit flipped to the adjacent digit
+/// keeps the file valid UTF-8 and parseable, so the tamper is caught by the
+/// raw-bytes SHA-256 hash mismatch, exercising the hash comparison rather than
+/// a decode failure. Returns a hard `Error::Manifest` if there is no
+/// `"bits": ` field to flip (the control cannot run, so it must not pass
+/// vacuously).
+fn flip_sample_bits_digit(golden: &mut [u8]) -> Result<(), Error> {
+    const MARKER: &[u8] = b"\"bits\": ";
+    let start = golden
+        .windows(MARKER.len())
+        .position(|w| w == MARKER)
+        .ok_or_else(|| {
+            Error::Manifest(
+                "composed-noise golden has no \"bits\": field to flip for the tamper control"
+                    .into(),
+            )
+        })?
+        + MARKER.len();
+    let mut idx = start;
+    if golden.get(idx) == Some(&b'-') {
+        idx += 1;
+    }
+    // Skip the leading digit: flipping it could produce a leading zero, which
+    // is invalid JSON.
+    idx += 1;
+    let flip = golden[idx..]
+        .iter()
+        .position(|b| b.is_ascii_digit())
+        .map(|d| idx + d)
+        .ok_or_else(|| {
+            Error::Manifest("composed-noise golden has no flip-able digit after \"bits\":".into())
+        })?;
+    golden[flip] ^= 0x01;
+    Ok(())
+}
+
+/// Classify the verification result of a tampered scratch copy. The expected
+/// tamper signature is a SHA-256 hash mismatch on the golden itself
+/// (`Error::HashMismatch` with `path == FIXTURE_BASENAME`): that alone is
+/// detection (Ok). A green result means the tamper was not detected
+/// (`Error::NegativeControl` — vacuous). Any other error — a missing captured
+/// file, a hash mismatch on another path, a decode failure — is unrelated to
+/// the flip and propagates, never masquerading as a detected tamper.
+fn classify_tamper_result(result: Result<(), Error>) -> Result<(), Error> {
+    match result {
+        Ok(()) => Err(Error::NegativeControl {
+            message: "composed-noise tamper was NOT detected — the comparison is vacuous".into(),
+        }),
+        Err(Error::HashMismatch { path, .. }) if path == FIXTURE_BASENAME => Ok(()),
+        Err(other) => Err(other),
+    }
+}
+
+/// The tamper negative control: corrupt a committed bit pattern (flip one digit
+/// of a sample `bits` value) and assert the verification FAILS — proving the
+/// comparison is not vacuous (a green is impossible with tampered goldens).
 ///
 /// The control is load-bearing: it first verifies the committed golden is
 /// green, so a broken baseline is reported (exit 1) rather than passing
 /// vacuously. An absent or partial tree is a hard `Error::Gate` (exit 1) — the
-/// control cannot run vacuous. A present-but-empty golden hard-fails in
-/// `load`.
+/// control cannot run vacuous. An empty golden is a hard `Error::Manifest`.
 ///
 /// It tampers a `tempfile` scratch copy, so the committed fixtures are never
 /// mutated and the scratch dir is removed on every path when the `TempDir`
-/// drops.
+/// drops. Only the expected tamper signature — a SHA-256 hash mismatch on the
+/// golden itself — counts as detection; any unrelated scratch verification
+/// failure propagates rather than masquerading as a detected tamper.
 pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
     match fixture_state(dir) {
         FixtureState::Present => {}
@@ -644,18 +700,18 @@ pub fn tamper_negative_control(dir: &Path) -> Result<(), Error> {
         scratch.path().join("manifest.json"),
     )?;
     let mut tampered = fs::read(dir.join(FIXTURE_BASENAME))?;
-    let mid = tampered.len() / 2;
-    tampered[mid] ^= 0xFF;
-    fs::write(scratch.path().join(FIXTURE_BASENAME), &tampered)?;
-    // Only the verification of the tampered copy is classified: the baseline
-    // was green above, so any failure here is caused by the flipped byte —
-    // that is the detection we are proving non-vacuous.
-    match verify_composed_noise(scratch.path()) {
-        Ok(()) => Err(Error::NegativeControl {
-            message: "composed-noise tamper was NOT detected — the comparison is vacuous".into(),
-        }),
-        Err(_) => Ok(()),
+    if tampered.is_empty() {
+        return Err(Error::Manifest(format!(
+            "composed-noise golden {} is EMPTY — the tamper negative control needs a \
+             payload to flip; restore the committed fixture (git checkout), it is corrupt",
+            dir.join(FIXTURE_BASENAME).display()
+        )));
     }
+    flip_sample_bits_digit(&mut tampered)?;
+    fs::write(scratch.path().join(FIXTURE_BASENAME), &tampered)?;
+    // Only the golden's own hash mismatch is the tamper signature; any other
+    // scratch failure propagates via classify_tamper_result.
+    classify_tamper_result(verify_composed_noise(scratch.path()))
 }
 
 /// `fixtures/composed-noise/manifest.json`, serialized in the exact committed
@@ -1072,6 +1128,73 @@ mod tests {
             !matches!(result, Ok(())),
             "a broken baseline must not pass the tamper control vacuously: {result:?}"
         );
+    }
+
+    /// The expected tamper signature — a SHA-256 hash mismatch on the golden
+    /// itself — counts as detection.
+    #[test]
+    fn classify_tamper_detection_on_golden_hash_mismatch() {
+        let result = classify_tamper_result(Err(Error::HashMismatch {
+            path: FIXTURE_BASENAME.into(),
+            expected: "e".into(),
+            actual: "a".into(),
+        }));
+        assert!(
+            result.is_ok(),
+            "golden hash mismatch must count as detection: {result:?}"
+        );
+    }
+
+    /// A green tampered copy means the comparison did not notice the tamper —
+    /// vacuous.
+    #[test]
+    fn classify_tamper_green_is_vacuous() {
+        let result = classify_tamper_result(Ok(()));
+        assert!(
+            matches!(result, Err(Error::NegativeControl { .. })),
+            "a green tampered copy is vacuous: {result:?}"
+        );
+    }
+
+    /// Any failure unrelated to the flipped golden must propagate, never
+    /// masquerade as a detected tamper: a manifest that gained a captured file
+    /// (missing on disk), a hash mismatch on another path, or an
+    /// infrastructure/verification error.
+    #[test]
+    fn classify_tamper_propagates_unrelated_failures() {
+        assert!(matches!(
+            classify_tamper_result(Err(Error::Manifest("captured file x missing".into()))),
+            Err(Error::Manifest(_))
+        ));
+        assert!(matches!(
+            classify_tamper_result(Err(Error::HashMismatch {
+                path: "other.json".into(),
+                expected: "e".into(),
+                actual: "a".into(),
+            })),
+            Err(Error::HashMismatch { path, .. }) if path == "other.json"
+        ));
+        assert!(matches!(
+            classify_tamper_result(Err(Error::Unverified("no prereq".into()))),
+            Err(Error::Unverified(_))
+        ));
+    }
+
+    /// The flip must keep the golden valid UTF-8 JSON so the tamper is caught
+    /// by the hash gate, not a decode failure: flipping one digit of a sample
+    /// `bits` value changes the raw bytes while staying parseable.
+    #[test]
+    fn flip_sample_bits_digit_keeps_golden_parseable() {
+        let src = fixtures_dir().join("composed-noise");
+        require_fixture(&src);
+        let mut bytes = fs::read(src.join(FIXTURE_BASENAME)).unwrap();
+        flip_sample_bits_digit(&mut bytes).unwrap();
+        // Still valid UTF-8 JSON, and parseable to the same structure.
+        let text = std::str::from_utf8(&bytes).expect("flip must keep valid UTF-8");
+        let v: serde_json::Value = serde_json::from_str(text).expect("flip must keep valid JSON");
+        assert_eq!(v["seed"], 42, "flip must not touch a pinned header field");
+        // The raw bytes changed (the hash gate will catch it).
+        assert_ne!(bytes, fs::read(src.join(FIXTURE_BASENAME)).unwrap());
     }
 
     #[test]
