@@ -338,8 +338,9 @@ impl FlatLevelGeneratorSettings {
 
     /// `updateLayers()` — clears the expanded column and rebuilds it from
     /// `layersInfo`, then recomputes `voidGen` (`allMatch(s ->
-    /// s.is(Blocks.AIR))` — the air block's default state, a `None` slot never
-    /// qualifies: the null slots from `adjustGenerationSettings` are never air).
+    /// s.is(Blocks.AIR))` — Java's `is(Block)` is block identity, not state
+    /// equality; a `None` slot never qualifies: the null slots from
+    /// `adjustGenerationSettings` are never air).
     pub fn update_layers(&mut self) {
         self.layers.clear();
         for layer in &self.layers_info {
@@ -351,7 +352,7 @@ impl FlatLevelGeneratorSettings {
         self.void_gen = self
             .layers
             .iter()
-            .all(|s| s == &Some(Blocks::AIR.default_block_state()));
+            .all(|s| s.is_some_and(|st| st.block() == Blocks::AIR.id()));
     }
 
     /// `getDefault(HolderGetter<Biome>, HolderGetter<StructureSet>,
@@ -842,5 +843,49 @@ mod tests {
         // always false).
         let direct = Holder::direct(BiomeId::from_id(58));
         assert!(!is_the_void(&direct, biomes));
+    }
+
+    /// `updateLayers` recomputes `voidGen` by BLOCK identity
+    /// (`allMatch(s -> s.is(Blocks.AIR))` — `state.getBlock() == Blocks.AIR`),
+    /// not state equality. A column of air layers is void; any non-air layer
+    /// is not.
+    #[test]
+    fn update_layers_sets_void_gen_by_block_identity() {
+        let registry_id = block_registry_id(&access());
+        let mut air = FlatLevelGeneratorSettings::new(None, plains_holder(&access()), Vec::new());
+        air.layers_info.push(FlatLayerInfo::from_block(
+            1,
+            crate::block::blocks::Blocks::AIR,
+            registry_id,
+        ));
+        air.update_layers();
+        assert!(air.void_gen, "an all-air column must be void");
+
+        let mut stone = FlatLevelGeneratorSettings::new(None, plains_holder(&access()), Vec::new());
+        stone.layers_info.push(FlatLayerInfo::from_block(
+            1,
+            crate::block::blocks::Blocks::STONE,
+            registry_id,
+        ));
+        stone.update_layers();
+        assert!(!stone.void_gen, "a stone column must not be void");
+    }
+
+    /// The block registry's real `RegistryId` (assigned by the global counter)
+    /// — the reference-id the hand-built layer holders carry.
+    fn block_registry_id(access: &RegistryAccess) -> rivet_registry::holder::RegistryId {
+        access
+            .lookup::<registries::BlockType>(&*registries::BLOCK)
+            .expect("block registry")
+            .registry_id()
+    }
+
+    /// A `plains` biome holder resolved through the test access (the settings
+    /// constructors need a biome holder; only the id is carried).
+    fn plains_holder(access: &RegistryAccess) -> Holder<BiomeId> {
+        access
+            .lookup::<BiomeId>(&*registries::BIOME)
+            .expect("biome registry")
+            .get_or_throw(&biomes::PLAINS)
     }
 }
