@@ -746,7 +746,10 @@ impl Aquifer for NoiseBasedAquifer {
 /// `similarity(int distanceSqr1, int distanceSqr2)` — `1.0 - (d2 - d1) / 25.0`.
 fn similarity(distance_sqr1: i32, distance_sqr2: i32) -> f64 {
     let threshold = 25.0;
-    1.0 - (distance_sqr2 - distance_sqr1) as f64 / threshold
+    // Java's int subtraction wraps; `wrapping_sub` is the PORTING.md-idiomatic
+    // spelling so debug builds match release (the values never overflow in
+    // practice — 4-closest-cell distances — but the arithmetic is wrapping).
+    1.0 - distance_sqr2.wrapping_sub(distance_sqr1) as f64 / threshold
 }
 
 /// `gridX(int blockCoord)` — `blockCoord >> 4`.
