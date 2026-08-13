@@ -20,10 +20,14 @@
 //! - `NoiseData` — the noise registry bootstrap: `DEFAULT_SHIFT` plus the
 //!   63 declaration-ordered `register` calls and the `registerBiomeNoises`
 //!   /`register` helpers.
+//! - `WorldgenBootstraps` — the production bootstrap consumer: drives the
+//!   NOISE / DENSITY_FUNCTION / NOISE_SETTINGS bootstraps through
+//!   `RecordingContext` into frozen `Registry<T>`s, bundled in a `RegistryAccess`
+//!   (the real overworld composition for probes/offline samplers).
 //!
-//! The `data::worldgen` module is deliberately kept minimal: no speculative
-//! production registry bootstrap yet — the test-only `RecordingContext` is the
-//! seam until `RegistrySetBuilder` lands.
+//! The `data::worldgen` module stays otherwise minimal: the test-only
+//! `RecordingContext` is the seam until `RegistrySetBuilder` (`#126`) lands, and
+//! `WorldgenBootstraps` is its production consumer.
 
 pub mod bootstrap_context;
 pub mod noise_data;
