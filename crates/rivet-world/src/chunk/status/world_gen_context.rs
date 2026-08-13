@@ -88,7 +88,10 @@ pub enum GenError {
     /// A step at a wired status (≤ NOISE) carries a task body that is not wired
     /// in the value layer (the SURFACE..FULL bodies defer with #185) — only a
     /// malformed custom pyramid can produce this.
-    UnsupportedTask { status: ChunkStatus, task: ChunkStatusTask },
+    UnsupportedTask {
+        status: ChunkStatus,
+        task: ChunkStatusTask,
+    },
     /// The target is before the chunk's current persisted status (generation
     /// never regresses a column).
     Demotion {
