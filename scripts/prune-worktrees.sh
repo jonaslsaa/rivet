@@ -14,9 +14,13 @@
 # Agents also build into throwaway CARGO_TARGET_DIRs under /tmp (review checkouts,
 # probe dirs, per-ticket target dirs), which no worktree sweep can see. Those
 # accumulated to 39GB unnoticed in 2026-08, so the tmp sweep runs by default.
-# Scratch is identified by cargo's CACHEDIR.TAG marker rather than by name —
-# a name pattern silently missed store-probe/guard-probe/merge-probe. A tmp dir
-# holding source but no build cache (a Cargo.toml with no target/) is left alone.
+# A /tmp child is removed wholesale only when it is an unambiguous bare cargo
+# target dir: CACHEDIR.TAG plus cargo's own .rustc_info.json and a profile dir,
+# and no source/VCS evidence. CACHEDIR.TAG alone is not enough — generic cache
+# tools drop that marker too, and a checkout can carry one at its root; the old
+# tag-only check would have rm -rf'd both a source checkout and an unrelated
+# cache. A checkout's nested target/ dirs are pruned on their own, never the
+# checkout.
 #
 # Usage: scripts/prune-worktrees.sh [--dry-run] [--idle-hours N] [--no-tmp]  (default 24)
 set -uo pipefail
@@ -24,25 +28,16 @@ set -uo pipefail
 DRY=0
 IDLE_HOURS=24
 SWEEP_TMP=1
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --dry-run) DRY=1 ;;
-    --idle-hours) shift; IDLE_HOURS=${1:?--idle-hours needs a value} ;;
-    --no-tmp) SWEEP_TMP=0 ;;
-    *) echo "unknown argument: $1" >&2; exit 2 ;;
-  esac
-  shift
-done
-
-MAIN=$(git rev-parse --path-format=absolute --git-common-dir)/..
-MAIN=$(cd "$MAIN" && pwd)
-NOW=$(date +%s)
 freed_kb=0
 removed=0
 pruned=0
 
 say() { echo "$@"; }
 run() { if [ "$DRY" = 1 ]; then say "  DRY: $*"; else "$@"; fi; }
+
+act() { # mutation verb for this mode; a dry run must not claim it happened
+  if [ "$DRY" = 1 ]; then printf 'WOULD %s' "$1"; else printf '%s' "$1"; fi
+}
 
 dir_kb() { local kb; kb=$(du -sk "$1" 2>/dev/null | cut -f1); echo "${kb:-0}"; }
 
@@ -66,13 +61,34 @@ newest_mtime() { # worktree root + every build cache: whichever was touched last
   echo "$newest"
 }
 
-is_cargo_cache() { [ -f "$1/CACHEDIR.TAG" ]; }
+has_cargo_profile() { # any profile output tree, native or cross-compiled
+  local d=$1 p
+  for p in "$d"/debug "$d"/release "$d"/*/debug "$d"/*/release; do
+    [ -d "$p" ] && return 0
+  done
+  return 1
+}
 
-tmp_cache_dirs() { # the dir may be a bare CARGO_TARGET_DIR, or a checkout holding one
+is_cargo_target() { # is $1 an unambiguous cargo CARGO_TARGET_DIR (safe to delete)?
+  # Cargo marks every target dir with CACHEDIR.TAG, but that marker alone is
+  # too generic: any cache tool can drop one, so the old tag-only check would
+  # rm -rf a whole /tmp child (source checkout or unrelated cache) on that
+  # basis. Only a dir carrying cargo's own build markers and no source/VCS
+  # evidence is disposable build scratch.
+  local d=$1
+  [ -f "$d/CACHEDIR.TAG" ] || return 1
+  [ -f "$d/.rustc_info.json" ] || return 1
+  has_cargo_profile "$d" || return 1
+  [ -e "$d/Cargo.toml" ] && return 1
+  [ -e "$d/.git" ] && return 1
+  return 0
+}
+
+tmp_cache_dirs() { # a bare cargo target dir, or the cargo target dirs in a checkout
   local d=$1 c
-  if is_cargo_cache "$d"; then echo "$d"; return 0; fi
+  if is_cargo_target "$d"; then echo "$d"; return 0; fi
   for c in "$d/target" "$d"/tools/*/target; do
-    is_cargo_cache "$c" && echo "$c"
+    is_cargo_target "$c" && echo "$c"
   done
   return 0
 }
@@ -97,7 +113,7 @@ sweep_tmp() {
           continue
         fi
         kb=$(dir_kb "$cache")
-        say "PRUNE  $cache  [tmp scratch: idle, $((kb / 1024))MB]"
+        say "$(act PRUNE)  $cache  [tmp scratch: idle, $((kb / 1024))MB]"
         run rm -rf "$cache"
         freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
       done <<< "$caches"
@@ -105,55 +121,81 @@ sweep_tmp() {
   done
 }
 
-git -C "$MAIN" fetch origin main -q 2>/dev/null || true
+main() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY=1 ;;
+      --idle-hours) shift; IDLE_HOURS=${1:?--idle-hours needs a value} ;;
+      --no-tmp) SWEEP_TMP=0 ;;
+      *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+  done
 
-while read -r wt; do
-  [ "$wt" = "$MAIN" ] && continue
-  [ -d "$wt" ] || continue
+  local MAIN NOW
+  MAIN=$(git rev-parse --path-format=absolute --git-common-dir)/..
+  MAIN=$(cd "$MAIN" && pwd)
+  NOW=$(date +%s)
+  freed_kb=0; removed=0; pruned=0
 
-  branch=$(git -C "$wt" symbolic-ref --short -q HEAD || echo "(detached)")
-  head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || continue
-  dirty=$(git -C "$wt" status --porcelain 2>/dev/null | head -1)
-  merged=""
-  git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null && merged=merged
+  git -C "$MAIN" fetch origin main -q 2>/dev/null || true
 
-  if [ -z "$dirty" ] && [ -n "$merged" ]; then
-    kb=$(dir_kb "$wt")
-    say "REMOVE $wt  [$branch: clean, merged, $((kb / 1024))MB]"
-    run git -C "$MAIN" worktree remove --force "$wt"
-    if [ "$branch" != "(detached)" ]; then
-      run git -C "$MAIN" branch -d "$branch"
+  while read -r wt; do
+    [ "$wt" = "$MAIN" ] && continue
+    [ -d "$wt" ] || continue
+
+    branch=$(git -C "$wt" symbolic-ref --short -q HEAD || echo "(detached)")
+    head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || continue
+    dirty=$(git -C "$wt" status --porcelain 2>/dev/null | head -1)
+    merged=""
+    git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null && merged=merged
+
+    if [ -z "$dirty" ] && [ -n "$merged" ]; then
+      kb=$(dir_kb "$wt")
+      say "$(act REMOVE) $wt  [$branch: clean, merged, $((kb / 1024))MB]"
+      run git -C "$MAIN" worktree remove --force "$wt"
+      if [ "$branch" != "(detached)" ]; then
+        run git -C "$MAIN" branch -d "$branch"
+      fi
+      freed_kb=$((freed_kb + kb)); removed=$((removed + 1))
+      continue
     fi
-    freed_kb=$((freed_kb + kb)); removed=$((removed + 1))
-    continue
-  fi
 
-  caches=$(cache_dirs "$wt")
-  if [ -n "$caches" ]; then
-    age_h=$(( (NOW - $(newest_mtime "$wt")) / 3600 ))
-    if [ "$age_h" -ge "$IDLE_HOURS" ]; then
-      while read -r cache; do
-        [ -n "$cache" ] || continue
-        kb=$(dir_kb "$cache")
-        say "PRUNE  $cache  [$branch: ${dirty:+dirty, }${merged:-unmerged}, idle ${age_h}h, $((kb / 1024))MB]"
-        run rm -rf "$cache"
-        freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
-      done <<< "$caches"
+    caches=$(cache_dirs "$wt")
+    if [ -n "$caches" ]; then
+      age_h=$(( (NOW - $(newest_mtime "$wt")) / 3600 ))
+      if [ "$age_h" -ge "$IDLE_HOURS" ]; then
+        while read -r cache; do
+          [ -n "$cache" ] || continue
+          kb=$(dir_kb "$cache")
+          say "$(act PRUNE)  $cache  [$branch: ${dirty:+dirty, }${merged:-unmerged}, idle ${age_h}h, $((kb / 1024))MB]"
+          run rm -rf "$cache"
+          freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
+        done <<< "$caches"
+      else
+        say "KEEP   $wt  [$branch: active ${age_h}h ago]"
+      fi
     else
-      say "KEEP   $wt  [$branch: active ${age_h}h ago]"
+      say "KEEP   $wt  [$branch: ${dirty:+dirty, }${merged:-unmerged}, no build caches]"
     fi
-  else
-    say "KEEP   $wt  [$branch: ${dirty:+dirty, }${merged:-unmerged}, no build caches]"
+  done < <(git -C "$MAIN" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}')
+
+  run git -C "$MAIN" worktree prune
+
+  if [ "$SWEEP_TMP" = 1 ]; then
+    sweep_tmp /private/tmp "${TMPDIR:-}"
   fi
-done < <(git -C "$MAIN" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}')
 
-run git -C "$MAIN" worktree prune
+  say "----"
+  if [ "$DRY" = 1 ]; then
+    say "would remove $removed worktree(s), would prune $pruned build cache(s), would reclaim ~$((freed_kb / 1024 / 1024))GB (dry-run; nothing touched)"
+  else
+    say "removed $removed worktree(s), pruned $pruned build cache(s), reclaimed ~$((freed_kb / 1024 / 1024))GB"
+  fi
+}
 
-if [ "$SWEEP_TMP" = 1 ]; then
-  sweep_tmp /private/tmp "${TMPDIR:-}"
+# Run only when executed directly; sourcing this file just defines the
+# functions, so tests can drive the classification in isolation.
+if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
+  main "$@"
 fi
-
-say "----"
-suffix=""
-[ "$DRY" = 1 ] && suffix=" (dry-run: nothing touched)"
-say "removed $removed worktree(s), pruned $pruned build cache(s), reclaimed ~$((freed_kb / 1024 / 1024))GB$suffix"
