@@ -3300,9 +3300,9 @@ fn run() -> Result<(), Error> {
             } else if rest.contains(&"--sample") {
                 composed_noise::run_probe(&dir)
             } else {
-                composed_noise::verify_composed_noise(&dir)?;
-                composed_noise::print_scoreboard();
-                Ok(())
+                // Same missing-fixture classification as the gate path: an
+                // absent fixture tree is UNVERIFIED (exit 3), never a hard FAIL.
+                crate::verify_composed_noise_step(&dir)
             }
         }
         Some("sample") => regenerate_samples(),
