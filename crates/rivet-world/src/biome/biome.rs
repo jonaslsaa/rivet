@@ -60,6 +60,7 @@ use rivet_serialization::map_codec::{self, MapCodec};
 use rivet_serialization::map_decoder;
 use rivet_serialization::map_encoder;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
+use rivet_util::java_float_format::java_float_to_string;
 use rivet_util::mth;
 use rivet_util::random::LegacyRandomSource;
 use rivet_util::string_representable::{self, EnumOrdinal, StringRepresentable};
@@ -817,8 +818,17 @@ impl fmt::Display for BiomeBuilder {
     /// `BiomeBuilder.toString()` — Java string-concatenates each field:
     /// `String.valueOf(Float)` for the nullable temperature/downfall (`"null"`
     /// when unset), `Enum.toString()` (the UPPER_SNAKE constant name) for the
-    /// modifier, and the object `toString()` for the settings. The object types
-    /// are ported as `Debug` (no Java `toString` is ported for them).
+    /// modifier, and the object `toString()` for the settings.
+    ///
+    /// The float and enum fields are byte-exact (Java `Float.toString` via
+    /// `java_float_to_string`, `Enum.toString` constant name). The object-typed
+    /// settings render as Rust `Debug`, which diverges from Java: Java's
+    /// `MobSpawnSettings`/`BiomeGenerationSettings` are plain classes whose
+    /// default `Object.toString` is an identity hashcode (non-deterministic
+    /// across JVM runs, so not reproducible byte-for-byte), and
+    /// `BiomeSpecialEffects` is a record whose `toString` is not ported. The
+    /// byte-exact panic-message parity therefore holds for the scalar/enum
+    /// fields and the all-unset case (where the settings render `"null"`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -835,17 +845,23 @@ impl fmt::Display for BiomeBuilder {
 }
 
 /// `String.valueOf(Float)` — a nullable `Float`'s `toString()`, or `"null"`
-/// when unset (Java `"" + this.temperature` with a null `Float`).
+/// when unset (Java `"" + this.temperature` with a null `Float`). Uses
+/// `java_float_to_string` (Java `Float.toString` parity — `1.0`, `-0.0`,
+/// `1.0E7`, `Infinity`), not Rust `{}`.
 fn fmt_opt_float(value: &Option<f32>) -> String {
     match value {
-        Some(v) => v.to_string(),
+        Some(v) => java_float_to_string(*v),
         None => "null".to_string(),
     }
 }
 
-/// `String.valueOf(Object)` — the object's `toString()`. The settings types
-/// don't port a Java `toString`, so render the `Debug` of the present value,
-/// or `"null"` when unset.
+/// `String.valueOf(Object)` — the object's `toString()`, or `"null"` when
+/// unset. Renders the present value's `Debug`. This is a deliberate divergence
+/// from Java (see the `BiomeBuilder` `Display` doc): the settings types don't
+/// port a Java `toString` — `MobSpawnSettings`/`BiomeGenerationSettings` are
+/// plain classes whose default `Object.toString` is a non-deterministic
+/// identity hashcode, and `BiomeSpecialEffects`'s record `toString` is not
+/// ported. `Debug` is deterministic and self-describing.
 fn fmt_opt_debug<T: fmt::Debug>(value: Option<&T>) -> String {
     match value {
         Some(inner) => format!("{inner:?}"),
@@ -982,6 +998,31 @@ mod tests {
         // A FROZEN modifier formats the Java constant name.
         let frozen = BiomeBuilder::new().temperature_adjustment(TemperatureModifier::Frozen);
         assert!(frozen.to_string().contains("temperatureModifier=FROZEN,"));
+    }
+
+    #[test]
+    fn biome_builder_display_floats_use_java_float_to_string() {
+        // Java `String.valueOf(Float)` — NOT Rust `{}`: integral values keep a
+        // decimal point, exponents render `1.0E7`, infinities render
+        // `Infinity`. The builder's `temperature`/`downfall` go through the
+        // same `java_float_to_string` path, so the panic message stays
+        // byte-exact with Java's `"" + this.temperature`.
+        let builder = BiomeBuilder::new().temperature(1.0).downfall(0.0);
+        let s = builder.to_string();
+        assert!(s.contains("temperature=1.0,"), "integral keeps .0: {s}");
+        assert!(s.contains("downfall=0.0,"), "zero renders 0.0: {s}");
+        let huge = BiomeBuilder::new().temperature(1.0e7);
+        assert!(
+            huge.to_string().contains("temperature=1.0E7,"),
+            "exponent renders 1.0E7: {}",
+            huge
+        );
+        let inf = BiomeBuilder::new().temperature(f32::INFINITY);
+        assert!(
+            inf.to_string().contains("temperature=Infinity,"),
+            "infinity renders Infinity: {}",
+            inf
+        );
     }
 
     #[test]
