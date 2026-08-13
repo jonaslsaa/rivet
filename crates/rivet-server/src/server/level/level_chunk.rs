@@ -527,7 +527,7 @@ mod maps {
 
 /// The `PalettedContainerFactory` the `LevelChunk` constructor uses for any
 /// default (all-air) sections.
-fn container_factory() -> PalettedContainerFactory<StateId, BiomeId> {
+pub(crate) fn container_factory() -> PalettedContainerFactory<StateId, BiomeId> {
     let (block_strategy, biome_strategy) = strategies();
     PalettedContainerFactory::new(block_strategy, StateId(0), biome_strategy, BiomeId(40))
 }
@@ -545,8 +545,9 @@ fn strategies() -> (Strategy<StateId>, Strategy<BiomeId>) {
 /// dense `StateId` via `BlockState::new`. This is the `resolve` closure stored
 /// on a chunk rebuilt by `from_reconstructed`, so on-demand heightmap primes
 /// classify real reconstructed states (not the all-air/all-motion superflat
-/// predicates).
-fn state_flags(state: StateId) -> StateFlags {
+/// predicates). `pub(crate)` for the `WorldGenRegion` `setBlock` heightmap
+/// update (the same server `StateId` resolver).
+pub(crate) fn state_flags(state: StateId) -> StateFlags {
     let s = BlockState::new(state);
     StateFlags {
         is_air: s.is_air(),
@@ -619,7 +620,8 @@ pub enum LevelChunkBridgeError {
 /// 0, stone = state 1, plains biome = id 40) — byte-identical to the
 /// `rivet-world` golden test's `build_superflat` output. The light payload is
 /// retained by `LevelChunk::new` (prebuilt once, cloned per send).
-fn superflat_content() -> rivet_world::superflat::SuperflatChunkContent<StateId, BiomeId> {
+pub(crate) fn superflat_content() -> rivet_world::superflat::SuperflatChunkContent<StateId, BiomeId>
+{
     let (block_strategy, biome_strategy) = strategies();
 
     // The superflat air + stone content: air (state 0) is air, stone (state 1)
