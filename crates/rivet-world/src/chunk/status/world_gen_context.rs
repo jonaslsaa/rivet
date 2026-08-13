@@ -148,10 +148,6 @@ impl std::fmt::Display for GenError {
 
 impl std::error::Error for GenError {}
 
-/// A wired generation task is honored only at its canonical rung —
-/// `GenerateBiomes` at `BIOMES`, `GenerateNoise` at `NOISE`. Shared by
-/// `run_step` and the `generate_through` pre-check so both seams reject a
-/// rung mismatch identically.
 fn ensure_canonical_rung(task: ChunkStatusTask, target: ChunkStatus) -> Result<(), GenError> {
     let canonical = match task {
         ChunkStatusTask::GenerateBiomes => ChunkStatus::Biomes,
