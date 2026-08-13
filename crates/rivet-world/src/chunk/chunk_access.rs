@@ -257,6 +257,85 @@ where
         &self.sections[section_index]
     }
 
+    /// `ChunkAccess.getSection(int sectionIndex)` — the mutable half, for the
+    /// worldgen block writes (`NoiseBasedChunkGenerator.doFill`'s
+    /// `section.setBlockState`). Java returns the same array slot for both;
+    /// the port splits the borrow into `get_section`/`get_section_mut`.
+    pub fn get_section_mut(&mut self, section_index: usize) -> &mut LevelChunkSection<T, B> {
+        &mut self.sections[section_index]
+    }
+
+    /// `NoiseBasedChunkGenerator.doFill`'s per-block write — Java's
+    /// `section.setBlockState(xInSection, yInSection, zInSection, state,
+    /// false)` followed by the two worldgen heightmap `update`s
+    /// (`oceanFloor.update(...)` then `worldSurface.update(...)`, in that
+    /// order). The `placed` flags are resolved from the state once, then the
+    /// section write and both heightmap updates run inside one method so the
+    /// heightmap entries can be mutably borrowed while the sections/accessor/
+    /// resolver are immutably borrowed for the `Heightmap.update` downward
+    /// re-scan (the same field-split `update_heightmaps_after` uses — Java
+    /// reaches the same flags through `chunk.getBlockState`).
+    ///
+    /// The two worldgen heightmaps must already exist (`doFill` creates them
+    /// via `getOrCreateHeightmapUnprimed` before the loop); the `expect`
+    /// mirrors that contract.
+    #[allow(clippy::too_many_arguments)] // the 5 coords/state + the 5 `BlockBehaviour` predicates.
+    pub fn write_worldgen_block(
+        &mut self,
+        section_index: i32,
+        x_in_section: i32,
+        y_in_section: i32,
+        z_in_section: i32,
+        pos_y: i32,
+        state: T,
+        is_air: &dyn Fn(&T) -> bool,
+        is_randomly_ticking: &dyn Fn(&T) -> bool,
+        fluid_is_empty: &dyn Fn(&T) -> bool,
+        fluid_is_randomly_ticking: &dyn Fn(&T) -> bool,
+        is_special_colliding: &dyn Fn(&T) -> bool,
+    ) {
+        let placed = (self.resolve)(&state);
+        let min_y = self.get_min_y();
+        self.sections[section_index as usize].set_block_state(
+            x_in_section,
+            y_in_section,
+            z_in_section,
+            state,
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
+        );
+        // `Heightmap.update`'s re-scan reads the section stack immutably; the
+        // field split keeps those borrows disjoint from the mutable heightmap
+        // borrow (see `update_heightmaps_after`).
+        let (sections, accessor, resolve) = (&self.sections, &self.height_accessor, self.resolve);
+        for ty in [Types::OceanFloorWg, Types::WorldSurfaceWg] {
+            self.heightmaps[ty as usize]
+                .as_mut()
+                .expect("doFill creates the worldgen heightmaps up front")
+                .update(
+                    x_in_section,
+                    pos_y,
+                    z_in_section,
+                    ty,
+                    placed,
+                    min_y,
+                    |abs_y| {
+                        flags_at(
+                            sections,
+                            accessor,
+                            resolve,
+                            x_in_section,
+                            abs_y,
+                            z_in_section,
+                        )
+                    },
+                );
+        }
+    }
+
     /// `ChunkAccess.getSectionIndex(int blockY)` — delegates to the accessor.
     pub fn get_section_index(&self, block_y: i32) -> i32 {
         self.height_accessor.get_section_index(block_y)

@@ -12,6 +12,7 @@
 
 use std::time::Duration;
 
+use rivet_server::server::level::ServerLevelConfig;
 use rivet_server::server::{Server, ServerConfig};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -61,6 +62,7 @@ fn default_config() -> ServerConfig {
         enable_join: false,
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
+        seed: ServerLevelConfig::M1_FIXTURE_SEED,
     }
 }
 

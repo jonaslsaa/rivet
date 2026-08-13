@@ -620,6 +620,41 @@ fn login_encodes_non_default_config_booleans_distinctly() {
 }
 
 #[test]
+fn login_encodes_the_world_seed_obfuscated() {
+    // `CommonPlayerSpawnInfo.seed` is `BiomeManager.obfuscateSeed(level.getSeed())`
+    // (`ServerPlayer.createCommonSpawnInfo`): the world the player joins must
+    // surface as its SHA-256-obfuscated seed in the login body. A non-default
+    // world seed proves the wire value comes from the world's seed, not the M1
+    // fixture default 42.
+    let seed = 12345;
+    let config = ServerLevelConfig {
+        seed,
+        ..ServerLevelConfig::default()
+    };
+    let mut world = ServerLevel::new(config);
+    assert_eq!(world.seed(), seed, "the world carries the config seed");
+
+    let packets = run_burst_with(&mut world, &join_config());
+    let login_body = packets
+        .iter()
+        .find(|(id, _)| *id == ids::LOGIN)
+        .map(|(_, body)| body.clone())
+        .expect("login in burst");
+    let login = decode_login_body(&login_body);
+    let obfuscated = login.common_player_spawn_info().seed();
+    assert_eq!(
+        obfuscated,
+        rivet_util::java_hash::obfuscate_seed(seed),
+        "the login seed is the obfuscated world seed"
+    );
+    assert_ne!(
+        obfuscated,
+        rivet_util::java_hash::obfuscate_seed(ServerLevelConfig::default().seed),
+        "a non-default world seed must differ from the M1 fixture"
+    );
+}
+
+#[test]
 fn send_level_info_order_and_bodies() {
     let mut sender = play_sender();
     let (mut connections, mut out_rx) = registry_with_connection();
