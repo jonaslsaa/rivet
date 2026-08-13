@@ -337,7 +337,6 @@ mod tests {
         let base = WorldOptions::new(5, true, false);
         assert_eq!(base.with_seed(Some(9)).seed, 9);
         assert!(base.with_seed(None).seed != 5); // falls back to randomSeed()
-        assert!(!base.with_bonus_chest(true).generate_bonus_chest == false);
         assert!(base.with_bonus_chest(true).generate_bonus_chest);
         assert!(!base.with_structures(false).generate_structures);
         // The source is unchanged (immutable copies).
