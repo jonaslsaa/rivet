@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "chunk-level",
+  "note": "golden samples of the ChunkLevel value layer (FULL_CHUNK_LEVEL/BLOCK_TICKING_LEVEL/ENTITY_TICKING_LEVEL/RADIUS_AROUND_FULL_CHUNK/MAX_LEVEL; generationStatus(level); getStatusAroundFullChunk(distance[, default]); byStatus(ChunkStatus)/byStatus(FullChunkStatus); fullStatus(level); isEntityTicking/isBlockTicking/isLoaded; the FullChunkStatus ordinal ladder + isOrAfter), captured from the pinned Paper 26.2 runtime via ChunkLevelProbe. ChunkLevel's mappings derive from ChunkPyramid.GENERATION_PYRAMID.getStepTo(ChunkStatus.FULL).accumulatedDependencies(); the values are the exact Java outputs (level ints, status names, booleans). Deterministic across boots.",
+  "captured": [
+    {
+      "path": "chunk-level-goldens.json",
+      "sha256": "0597bb6ee52fe5741096b2decbe0dedcf79efd02d90baa74bb91b181655556b4",
+      "bytes": 11589
+    }
+  ]
+}
