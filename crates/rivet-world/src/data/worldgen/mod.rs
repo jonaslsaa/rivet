@@ -28,3 +28,4 @@
 pub mod bootstrap_context;
 pub mod noise_data;
 pub mod terrain_provider;
+pub mod worldgen_bootstraps;
