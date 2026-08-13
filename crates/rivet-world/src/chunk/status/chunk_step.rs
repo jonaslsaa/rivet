@@ -74,11 +74,7 @@ impl ChunkStep {
     /// `getAccumulatedRadiusOf(ChunkStatus)` — the accumulated radius of a
     /// transitive dependency, or `0` for the target itself.
     pub fn get_accumulated_radius_of(&self, status: ChunkStatus) -> usize {
-        if status == self.target_status {
-            0
-        } else {
-            self.accumulated_dependencies.get_radius_of(status)
-        }
+        accumulated_radius_of(&self.accumulated_dependencies, self.target_status, status)
     }
 
     /// `moonrise$getRequiredStatusAtRadius(int)` (the `ChunkSystemChunkStep`

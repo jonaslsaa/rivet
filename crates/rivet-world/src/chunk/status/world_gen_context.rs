@@ -5,9 +5,11 @@
 //! Java: `WorldGenContext.java` in `working/Paper` — a 6-field record
 //! `(ServerLevel, ChunkGenerator, StructureTemplateManager,
 //! ThreadedLevelLightEngine, Executor, UnsavedListener)`. In the value layer
-//! those surfaces do not exist yet (the generator trait and the server/chunk
-//! types defer with their owning units), so the record is reduced to the task
-//! seam the generation pyramid through NOISE actually needs: the caller-supplied
+//! the server/light/template surfaces do not exist yet (they defer with their
+//! owning units), and the full `ChunkGenerator` is owned by the generator wave
+//! (#306/#185 — today only the `&dyn ChunkGenerator` seam in
+//! `chunk::chunk_generator` exists), so the record is reduced to the task seam
+//! the generation pyramid through NOISE actually needs: the caller-supplied
 //! closures that perform the BIOMES and NOISE work. The full record shape
 //! returns with the `mc.world.level.chunk.generator` wave (RivetTodo #185).
 //! The closures are owned (like the record owns its fields), so the context is

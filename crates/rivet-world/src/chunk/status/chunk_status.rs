@@ -101,11 +101,6 @@ impl ChunkStatus {
         self.index() > other.index()
     }
 
-    /// `ChunkStatus.isOrBefore`.
-    pub const fn is_or_before(self, other: Self) -> bool {
-        self.index() <= other.index()
-    }
-
     /// `ChunkStatus.isBefore` — strict.
     pub const fn is_before(self, other: Self) -> bool {
         self.index() < other.index()

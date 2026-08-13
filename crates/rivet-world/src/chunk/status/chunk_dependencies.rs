@@ -6,9 +6,11 @@
 //! the neighbour at Chebyshev distance `d` must have reached), which the
 //! constructor folds into the inverse `radiusByDependency` table
 //! (`radiusByDependency[status]` = the distance at which that status is
-//! required). The list is monotonic non-decreasing in status (the builder's
-//! max-merge), so the prefix-fill in the constructor leaves the last distance
-//! at which each status appears.
+//! required). The builder's max-merge fills each distance slot with the *latest*
+//! status required there, so the list is not monotonic in status — NOISE
+//! requires BIOMES at radius 0..=1 but only STRUCTURE_STARTS at 2..=8. The
+//! constructor's prefix-fill is what makes `radiusByDependency` correct: it
+//! records the last distance at which each status (or a later one) is required.
 
 use crate::chunk::status::ChunkStatus;
 
