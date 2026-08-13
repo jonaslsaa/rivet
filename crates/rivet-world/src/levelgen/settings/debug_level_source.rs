@@ -317,6 +317,32 @@ mod tests {
     }
 
     #[test]
+    fn all_blocks_are_the_dense_state_table_in_registry_order() {
+        // Java's `ALL_BLOCKS` is `BuiltInRegistries.BLOCK` (registry order) ×
+        // `getPossibleStates()` (the mixed-radix state order) — exactly the
+        // dense global state table. `ALL_BLOCKS[i].id() == i` is the
+        // construction; the independent checks are the mid-list block
+        // identities (against the `Blocks` constants, a separate table) and
+        // the monotonic, contiguous block ownership (a transposed base table
+        // would break it).
+        for (i, state) in ALL_BLOCKS.iter().enumerate() {
+            assert_eq!(state.id().0, i as u16, "ALL_BLOCKS[{i}] out of sequence");
+        }
+        // Mid-list identities: air/stone at 0/1, grass_block's two states at
+        // 8/9 (base 8, count 2), dirt at 10 (the next base).
+        assert_eq!(ALL_BLOCKS[0].block(), Blocks::AIR.id());
+        assert_eq!(ALL_BLOCKS[1].block(), Blocks::STONE.id());
+        assert_eq!(ALL_BLOCKS[8].block(), Blocks::GRASS_BLOCK.id());
+        assert_eq!(ALL_BLOCKS[9].block(), Blocks::GRASS_BLOCK.id());
+        assert_eq!(ALL_BLOCKS[10].block(), Blocks::DIRT.id());
+        // Block ownership is monotonic with contiguous per-block runs.
+        for pair in ALL_BLOCKS.windows(2) {
+            let (a, b) = (pair[0].block().0, pair[1].block().0);
+            assert!(b >= a, "block ownership regressed: {b} < {a}");
+        }
+    }
+
+    #[test]
     fn get_block_state_for_is_air_outside_the_grid() {
         // Not both positive.
         assert_eq!(DebugLevelSource::get_block_state_for(0, 5), *AIR);

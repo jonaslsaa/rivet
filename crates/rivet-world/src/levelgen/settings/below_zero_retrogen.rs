@@ -452,4 +452,111 @@ mod tests {
             ]
         );
     }
+
+    /// The overworld chunk shape the below-zero writes target (the noisegen
+    /// `worldgen_proto` pattern): 24 all-air sections over `-64..=319`.
+    fn worldgen_proto()
+    -> ProtoChunk<BlockState, crate::chunk::storage::section_reconstruction::BiomeId, &'static str>
+    {
+        use crate::chunk::level_chunk_section::LevelChunkSection;
+        use crate::chunk::storage::chunk_reconstruction::resolve_state_flags;
+        use crate::chunk::storage::section_reconstruction::{
+            BiomeId as SectionBiomeId, current_version_container_factory,
+        };
+        use crate::chunk::upgrade_data::UpgradeData;
+        use crate::level::height_accessor::create as create_accessor;
+        use rivet_registry::core::ChunkPos;
+
+        let factory = current_version_container_factory();
+        let air = Blocks::AIR.default_block_state();
+        let sections: Vec<LevelChunkSection<BlockState, SectionBiomeId>> = (0..24)
+            .map(|_| {
+                LevelChunkSection::new_all_air(
+                    factory.create_for_block_states(),
+                    factory.create_for_biomes(),
+                )
+            })
+            .collect();
+        ProtoChunk::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(24),
+            create_accessor(-64, 384),
+            &factory,
+            Some(sections),
+            air,
+            air,
+            &resolve_state_flags,
+        )
+    }
+
+    #[test]
+    fn replace_old_bedrock_writes_deepslate_through_the_real_chunk() {
+        // Fill the old bedrock roof `[0, 4]` (the below-zero upgrade source),
+        // then `replaceOldBedrock` swaps it for deepslate via the real worldgen
+        // block write (section write + worldgen heightmap updates).
+        let bedrock = Blocks::BEDROCK.default_block_state();
+        let mut proto = worldgen_proto();
+        for y in 0..=4 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    write_block(&mut proto, &BlockPos::new(x, y, z), bedrock);
+                }
+            }
+        }
+        assert_eq!(proto.get_block_state(0, 2, 0), bedrock);
+
+        replace_old_bedrock(&mut proto);
+        let deepslate = Blocks::DEEPSLATE.default_block_state();
+        assert_eq!(proto.get_block_state(0, 2, 0), deepslate);
+        assert_eq!(proto.get_block_state(15, 0, 15), deepslate);
+        assert_eq!(proto.get_block_state(7, 4, 7), deepslate);
+        // The block just below the roof is untouched (still air).
+        assert_eq!(
+            proto.get_block_state(0, -1, 0),
+            Blocks::AIR.default_block_state()
+        );
+        // The worldgen heightmaps tracked the write (topmost non-air = 4).
+        let min_y = -64;
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::OceanFloorWg)
+                .get_height_at(0, 0, min_y),
+            4
+        );
+    }
+
+    #[test]
+    fn apply_bedrock_mask_clears_the_hole_column_to_air() {
+        // A bedrock roof plus a mask hole at (x=0, z=0): `applyBedrockMask`
+        // clears the full column to air, leaving neighboring columns intact.
+        let bedrock = Blocks::BEDROCK.default_block_state();
+        let mut proto = worldgen_proto();
+        for y in 0..=4 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    write_block(&mut proto, &BlockPos::new(x, y, z), bedrock);
+                }
+            }
+        }
+        // Bit `(z & 15) * 16 + (x & 15)` = bit 0 for (x=0, z=0).
+        let mask = BitSet::value_of(&[1i64]);
+        let retrogen = BelowZeroRetrogen::new(ChunkStatus::Full, Some(mask));
+        retrogen.apply_bedrock_mask(&mut proto);
+        // The hole column is air from the floor to the top of the chunk.
+        assert_eq!(
+            proto.get_block_state(0, -64, 0),
+            Blocks::AIR.default_block_state()
+        );
+        assert_eq!(
+            proto.get_block_state(0, 2, 0),
+            Blocks::AIR.default_block_state()
+        );
+        assert_eq!(
+            proto.get_block_state(0, 319, 0),
+            Blocks::AIR.default_block_state()
+        );
+        // The neighboring column is untouched.
+        assert_eq!(proto.get_block_state(1, 2, 0), bedrock);
+        assert_eq!(proto.get_block_state(1, 4, 0), bedrock);
+    }
 }

@@ -143,7 +143,7 @@ impl WorldOptions {
     /// `long`, falling back to `String.hashCode()` (Java `int` widened to
     /// `long`) on `NumberFormatException`.
     pub fn parse_seed(seed_string: &str) -> Option<i64> {
-        let seed_string = seed_string.trim();
+        let seed_string = java_trim(seed_string);
         if seed_string.is_empty() {
             return None;
         }
@@ -158,6 +158,24 @@ impl WorldOptions {
         let mut random = random_source_create();
         random.next_long()
     }
+}
+
+/// Java `String.trim()` — strips leading/trailing code points `<= U+0020`
+/// (the ASCII whitespace set: space, tab, LF, VT, FF, CR). Rust's
+/// `str::trim()` strips Unicode whitespace, which also includes e.g. `U+00A0`
+/// NBSP — a seed string like `"\u{00a0}123"` must NOT be trimmed (Java's
+/// `Long.parseLong` then throws and `parseSeed` falls back to
+/// `String.hashCode()`), so `parseSeed` needs the exact Java set.
+fn java_trim(s: &str) -> &str {
+    let start = s
+        .char_indices()
+        .find(|(_, c)| *c > '\u{20}')
+        .map_or(s.len(), |(i, _)| i);
+    let end = s
+        .char_indices()
+        .rfind(|(_, c)| *c > '\u{20}')
+        .map_or(start, |(i, c)| i + c.len_utf8());
+    &s[start..end]
 }
 
 /// `WorldOptions.CODEC` — the ops-generic `world_options_map_codec::<Ops>()`
@@ -258,6 +276,31 @@ mod tests {
         assert_eq!(
             WorldOptions::parse_seed("abc"),
             Some(string_hash("abc") as i64)
+        );
+        // Java `String.trim()` strips only `<= U+0020`: NBSP (U+00A0) is NOT
+        // trimmed, so `"\u{00a0}123"` is not a valid `long` in Java and falls
+        // back to `String.hashCode()`. Rust `str::trim()` would have trimmed it
+        // to "123" — the Java set is exact.
+        assert_eq!(
+            WorldOptions::parse_seed("\u{00a0}123"),
+            Some(string_hash("\u{00a0}123") as i64)
+        );
+        assert_eq!(
+            WorldOptions::parse_seed("123\u{00a0}"),
+            Some(string_hash("123\u{00a0}") as i64)
+        );
+        // The control boundary: U+001F (unit separator) and U+0020 (space) are
+        // trimmed; U+0021 is the first char Java keeps.
+        assert_eq!(WorldOptions::parse_seed("\u{1f}42"), Some(42));
+        assert_eq!(WorldOptions::parse_seed("\u{20}42"), Some(42));
+        assert_eq!(
+            WorldOptions::parse_seed("42\u{1f}"),
+            Some(42),
+            "trailing U+001F is trimmed by Java"
+        );
+        assert_eq!(
+            WorldOptions::parse_seed("\u{21}42"),
+            Some(string_hash("\u{21}42") as i64)
         );
     }
 

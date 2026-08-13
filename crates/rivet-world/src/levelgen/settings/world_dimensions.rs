@@ -37,6 +37,7 @@ use rivet_registry::holder::Holder;
 use rivet_registry::registries;
 use rivet_registry::resource_key::resource_key_codec;
 use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec::{self, MapCodec};
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
@@ -71,6 +72,13 @@ impl WorldDimensions {
         if !dimensions.contains_key(&*level_stem::OVERWORLD) {
             panic!("Overworld settings missing");
         }
+        WorldDimensions::from_map(dimensions)
+    }
+
+    /// The unchecked store — Java's compact-constructor throw, surfaced as a
+    /// `DataResult::error` by the codec's `validate` (not a panic through the
+    /// decode machinery); see [`world_dimensions_map_codec`].
+    fn from_map(dimensions: HashMap<ResourceKey<registries::LevelStem>, LevelStem>) -> Self {
         WorldDimensions { dimensions }
     }
 
@@ -227,6 +235,12 @@ pub struct Complete {
 /// Registries.LEVEL_STEM), LevelStem.CODEC).fieldOf("dimensions")`. The
 /// `LevelStem.CODEC` leaf is a poison seam (see the module doc), so the map
 /// round-trip errors until that codec lands; the structure is faithful.
+///
+/// The compact-constructor overworld check is a `validate` on the built codec:
+/// a decoded map without the overworld stem surfaces as a `DataResult::error`
+/// ("Overworld settings missing") rather than unwinding a panic through the
+/// decode machinery (Java throws the `IllegalStateException`; DFU does not
+/// convert it, but the codec-idiomatic failure here is a `DataResult`).
 pub fn world_dimensions_map_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn MapCodec<WorldDimensions, Ops>> {
     let dimensions_field = codec::field_of(
@@ -236,14 +250,24 @@ pub fn world_dimensions_map_codec<Ops: DynamicOps + 'static>()
         ),
         "dimensions".to_string(),
     );
-    map_codec::stable(record_builder::map_codec(|instance| {
+    let base = map_codec::stable(record_builder::map_codec(|instance| {
         instance
             .group(RecordCodecBuilder::of(
                 Arc::new(|w: &WorldDimensions| w.dimensions.clone()),
                 dimensions_field,
             ))
-            .apply(instance, Arc::new(WorldDimensions::new))
-    }))
+            .apply(instance, Arc::new(WorldDimensions::from_map))
+    }));
+    map_codec::validate(
+        base,
+        Arc::new(|w: &WorldDimensions| {
+            if w.dimensions.contains_key(&*level_stem::OVERWORLD) {
+                DataResult::success(w.clone())
+            } else {
+                DataResult::error("Overworld settings missing")
+            }
+        }),
+    )
 }
 
 /// `WorldDimensions.CODEC` lifted to a full `Codec` — `map_codec::codec_of`.
@@ -258,6 +282,7 @@ mod tests {
     use rivet_registry::biome_id::BiomeId;
     use rivet_registry::holder::Holder;
     use rivet_serialization::json_ops::JsonOps;
+    use serde_json::json;
     use std::collections::HashMap;
 
     fn debug_stem() -> LevelStem {
@@ -337,6 +362,31 @@ mod tests {
         assert_eq!(levels.len(), 2);
         assert!(levels.contains(&crate::level::overworld()));
         assert!(levels.contains(&crate::level::nether()));
+    }
+
+    #[test]
+    fn codec_missing_overworld_is_an_error_not_a_panic() {
+        let codec = map_codec::codec_of(world_dimensions_map_codec::<JsonOps>());
+        // An empty stem map decodes (no stems hit the LevelStem poison leaf),
+        // then the overworld check errors with Java's constructor message —
+        // not a panic through the decode.
+        let decoded = codec.parse(&JsonOps::INSTANCE, &json!({"dimensions": {}}));
+        let error = decoded
+            .error_ref()
+            .expect("a missing overworld must be a DataResult error");
+        assert_eq!(error.message(), "Overworld settings missing");
+        // A map with the overworld present still errors through the LevelStem
+        // leaf (the codec never round-trips a real stem).
+        let with_overworld = json!({
+            "dimensions": {
+                "minecraft:overworld": {"type": {}, "generator": {}}
+            }
+        });
+        let decoded = codec.parse(&JsonOps::INSTANCE, &with_overworld);
+        assert!(
+            decoded.error_ref().is_some(),
+            "a stem decode must error through the LevelStem poison seam"
+        );
     }
 
     #[test]
