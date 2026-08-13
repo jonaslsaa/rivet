@@ -137,8 +137,8 @@ impl Blocks {
     /// `Blocks.CALCITE` (SurfaceRuleData: overworld calcite bands on
     /// `CALCITE` noise).
     pub const CALCITE: Block = Block::new(BlockId(1025));
-    /// `Blocks.POWDER_SNOW` (SurfaceRuleData: overworld `powderSnow` on
-    /// snowy slopes/jagged peaks).
+    /// `Blocks.POWDER_SNOW` (SurfaceRuleData: overworld
+    /// `powderSnowUnderRule`/`powderSnowSurfaceRule` in `SNOWY_SLOPES`/`GROVE`).
     pub const POWDER_SNOW: Block = Block::new(BlockId(1027));
     /// `Blocks.COPPER_ORE` (noisegen: `OreVeinifier.VeinType.COPPER`).
     pub const COPPER_ORE: Block = Block::new(BlockId(1042));
