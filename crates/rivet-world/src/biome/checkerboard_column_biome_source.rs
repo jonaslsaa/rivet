@@ -21,6 +21,7 @@
 //! debug builds for counts >= 32; see [`CheckerboardColumnBiomeSource::get_noise_biome`]).
 
 use crate::biome::biome_id_codec::biome_id_list_field_codec;
+use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::biome_source::BiomeSource;
 use crate::biome::biome_source_type::{BiomeSourceTypeId, BiomeSourceTypes};
 use crate::biome::climate::Sampler;
@@ -113,6 +114,14 @@ impl BiomeSource for CheckerboardColumnBiomeSource {
             .clone()
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The source is its own resolver (Java `BiomeSource implements
+/// BiomeResolver`): the checkerboard quart resolution.
+impl BiomeResolver for CheckerboardColumnBiomeSource {
     fn get_noise_biome(
         &self,
         quart_x: i32,
@@ -133,10 +142,6 @@ impl BiomeSource for CheckerboardColumnBiomeSource {
             .wrapping_add(quart_z >> bit_shift_masked)
             .rem_euclid(self.allowed_biomes.size() as i32);
         self.allowed_biomes.get(index as usize).clone()
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
