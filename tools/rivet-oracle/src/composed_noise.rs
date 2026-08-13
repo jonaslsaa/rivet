@@ -1422,6 +1422,21 @@ mod tests {
         assert!(!dir.path().join("manifest.json").exists());
     }
 
+    /// A capture recorded against a different Paper commit is drift, not the
+    /// pinned golden: the provenance gate rejects it before the manifest rewrite.
+    #[test]
+    fn capture_rejects_wrong_paper_pin_without_rewriting_manifest() {
+        let dir = write_hostile_golden("capture-paper", |f| {
+            f.paper = "26.2-DEV-main@badbeef".into();
+        });
+        let result = capture(dir.path());
+        assert!(
+            matches!(result, Err(Error::Manifest(_))),
+            "non-pinned Paper commit must be rejected, got {result:?}"
+        );
+        assert!(!dir.path().join("manifest.json").exists());
+    }
+
     /// The happy path without a live Java probe: capturing the committed golden
     /// (a valid fresh output) rewrites the manifest byte-identical to the
     /// committed one (git-clean), and the captured tree verifies green.
