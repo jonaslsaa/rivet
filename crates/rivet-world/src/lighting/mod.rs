@@ -15,7 +15,9 @@
 //! subclass seam), [`leveled_priority_queue`] (the graph's bucket queue),
 //! [`spatial_long_set`] (the packed spatial long set), and the live
 //! [`light_event_listener`]/[`layer_light_event_listener`] interfaces the
-//! engines consume. The `LightEngine` propagation surface and the
+//! engines consume. [`star_light_engine`] carries the pure `StarLightEngine`
+//! static (`getEmptySectionsForChunk`) the light tasks consume; the
+//! `LightEngine` propagation surface and the
 //! `LayerLightSectionStorage`/`BlockLightSectionStorage`/`SkyLightSectionStorage`
 //! storages defer with the `mc.world.level.lighting.engine` unit; the Starlight
 //! engines that consume these nibbles defer with the
@@ -29,5 +31,6 @@ pub mod leveled_priority_queue;
 pub mod light_event_listener;
 pub mod light_update_data;
 pub mod spatial_long_set;
+pub mod star_light_engine;
 pub mod star_light_provider;
 pub mod swmr_nibble_array;

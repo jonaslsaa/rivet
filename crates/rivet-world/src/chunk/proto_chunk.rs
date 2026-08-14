@@ -300,6 +300,18 @@ where
         self.base.mark_unsaved();
     }
 
+    /// `ChunkAccess.isLightCorrect()` — the light-correct flag the LIGHT task
+    /// toggles around `lightChunk` (`ChunkLightTask.LightTask`).
+    pub fn is_light_correct(&self) -> bool {
+        self.base.is_light_correct()
+    }
+
+    /// `ChunkAccess.setLightCorrect(boolean)` — forwarded to the base (which
+    /// marks the chunk unsaved, matching `ChunkAccess.setLightCorrect`).
+    pub fn set_light_correct(&mut self, light_correct: bool) {
+        self.base.set_light_correct(light_correct);
+    }
+
     /// `ProtoChunk.addEntity(CompoundTag)`.
     pub fn add_entity(&mut self, tag: CompoundTag) {
         self.entities.push(tag);

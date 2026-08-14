@@ -13,6 +13,9 @@
 //! path `world.level.ChunkPos` resolves — never re-ported.
 
 pub mod block_getter;
+// `world.level.border` — the `mc.world.level.border` unit (`WorldBorder`,
+// `BorderStatus`, `BorderChangeListener` + `package-info` @NullMarked; wave 3).
+pub mod border;
 // `world.level.DataPackConfig` — the `WorldDataConfiguration` prerequisite
 // (#387).
 pub mod data_pack_config;
@@ -20,6 +23,11 @@ pub mod data_pack_config;
 // ported here (the minimal slice issue #388 needs); the full record/codec
 // defers with the owning unit. Never re-ported.
 pub mod dimension;
+// `world.level.gamerules` — the game-rules unit: `GameRule` (+ its erased
+// wildcard and value), `GameRuleMap`, `GameRules` (with the 59 built-in rules
+// and the GAME_RULE registry), `GameRuleCategory`, `GameRuleType` and the
+// `GameRuleTypeVisitor`.
+pub mod gamerules;
 pub mod height_accessor;
 // `world.level.LevelSettings` — the level.dat settings record (+ nested
 // `DifficultySettings`) and the `Dynamic` parse (#486).
@@ -45,7 +53,17 @@ pub mod world_gen_level;
 pub mod world_data_configuration;
 
 pub use block_getter::BlockGetter;
+pub use border::{
+    BorderChangeListener, BorderStatus, Settings as WorldBorderSettings, WorldBorder,
+};
 pub use data_pack_config::DataPackConfig;
+pub use gamerules::{
+    ArgumentErased, Builder as GameRuleMapBuilder, CHAT, DROPS, GAME_RULE, GameRuleCategory,
+    GameRuleErased, GameRuleMap, GameRuleType, GameRuleTypeVisitor, GameRuleValue,
+    GameRuleValueCodec, MISC, MOBS, PLAYER, SPAWNING, UPDATES,
+    VisitorCaller as GameRuleVisitorCaller, built_in_registry as game_rule_registry,
+    last_game_rule_index,
+};
 pub use height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor, create};
 pub use level::{Level, end, nether, overworld, resource_key_codec};
 pub use level_accessor::LevelAccessor;
