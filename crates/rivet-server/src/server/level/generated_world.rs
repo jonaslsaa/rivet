@@ -12,6 +12,14 @@
 //! sampler. [`GenerationChunkHolder`] owns a real `ProtoChunk` and drives it
 //! BIOMES→NOISE through the `GENERATION_PYRAMID` executor.
 //!
+//! **This is the standalone foundation, not yet the live ticket path.** No
+//! production caller (ticket, `ChunkMap`, or boot) creates a holder yet — the
+//! `RivetTodo(#185)`s mark the wiring that lands with the `.chunk.generator`
+//! pipeline unit. The leak of the per-world registries/`RandomState` is the
+//! mechanism that keeps the worldgen objects `'static` for the holder closures;
+//! RivetTodo(#185): the world-level registry-ownership unit replaces it with a
+//! reclaimable per-world owner before this is wired to the live path.
+//!
 //! ## The typed downstream boundary
 //!
 //! `WorldGenContext::generate_through` refuses any target past `NOISE` with a
@@ -52,6 +60,7 @@ use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::ChunkPos;
+use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::holder::Holder;
 use rivet_registry::holder_lookup::HolderGetter;
 use rivet_world::biome::BiomeResolver;
@@ -327,7 +336,11 @@ impl GenerationChunkHolder {
             &current_version_container_factory(),
             None,
             Blocks::AIR.default_block_state(),
-            Blocks::AIR.default_block_state(),
+            // Paper: `ProtoChunk.getBlockState` returns `Blocks.VOID_AIR` (raw
+            // id 830, `minecraft:void_air`) outside build height. The named
+            // `Blocks` subset has no `VOID_AIR` constant, so resolve it by raw
+            // id here (the block is registered in the generated registry).
+            BlockState::of(BlockId(830)),
             &resolve_state_flags,
         );
         let context = WorldGenContext::new(
@@ -481,22 +494,60 @@ mod tests {
         );
     }
 
-    /// The executor drives a fresh chunk EMPTY→BIOMES→NOISE, and a second run
-    /// to the same status is an idempotent no-op — the Paper status-ladder
-    /// contract through the wired rungs.
+    /// The executor drives a fresh chunk EMPTY→BIOMES→NOISE and each body
+    /// produces real data — the BIOMES body fills the biome container, the
+    /// NOISE body writes terrain blocks and the WORLDGEN heightmaps. A second
+    /// run to the same status is an idempotent no-op.
     #[test]
     fn generate_through_biomes_then_noise() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::new(1, -2));
         assert_eq!(holder.status(), ChunkStatus::Empty);
 
+        // The BIOMES body ran: it must change the biome container away from
+        // the empty default (a real overworld chunk can legitimately be a
+        // single biome, so the honest check is that generation filled it).
+        let mut before = std::collections::HashSet::new();
+        let mut after = std::collections::HashSet::new();
+        for qx in 0..4 {
+            for qz in 0..4 {
+                before.insert(holder.chunk.get_noise_biome(qx, 0, qz));
+            }
+        }
         holder
             .generate_through(ChunkStatus::Biomes)
             .expect("BIOMES");
         assert_eq!(holder.status(), ChunkStatus::Biomes);
+        for qx in 0..4 {
+            for qz in 0..4 {
+                after.insert(holder.chunk.get_noise_biome(qx, 0, qz));
+            }
+        }
+        assert!(
+            before != after,
+            "BIOMES must replace the empty biome container with resolved biomes; before={before:?} after={after:?}"
+        );
 
         holder.generate_through(ChunkStatus::Noise).expect("NOISE");
         assert_eq!(holder.status(), ChunkStatus::Noise);
+        // The NOISE body ran: a surface block was written above the void at a
+        // surface height, and the WORLDGEN surface heightmap was primed (an
+        // unprimed heightmap reads as `min_y - 1`).
+        let min_y = holder.chunk.get_min_y();
+        let world_surface = holder.chunk.heightmaps()[Types::WorldSurfaceWg as usize]
+            .as_ref()
+            .expect("fill_from_noise primes the WORLD_SURFACE_WG heightmap");
+        let height = world_surface.get_height_at(0, 0, min_y);
+        assert!(
+            height > min_y,
+            "NOISE should write terrain; world surface height at (0,0) = {height}"
+        );
+        let block = holder.chunk.get_block_state(0, height, 0);
+        assert_ne!(
+            block,
+            Blocks::AIR.default_block_state(),
+            "a surface block (not AIR) should sit at the surface height"
+        );
 
         // Re-running to the same status is an idempotent no-op (the chunk is
         // already at NOISE).
@@ -567,6 +618,18 @@ mod tests {
         // `LevelChunk` type, which no sub-FULL ProtoChunk can produce.
         let map = ChunkMap::empty(4);
         assert!(map.get_chunk(ChunkPos::ZERO).is_none());
+
+        // Positive control: the boundary is real — `install` accepts a genuine
+        // `LevelChunk` (the only FULL representation), proving the gate is not
+        // "reject everything" but exactly "reject everything except FULL". If a
+        // future ProtoChunk-to-LevelChunk fabrication path were added, it would
+        // have to produce this genuine FULL chunk to be served.
+        let mut map = ChunkMap::empty(4);
+        map.install(ChunkPos::ZERO, LevelChunk::new(ChunkPos::ZERO));
+        assert!(
+            map.get_chunk(ChunkPos::ZERO).is_some(),
+            "genuine FULL LevelChunk must be installable"
+        );
     }
 
     /// Ownership: the holder owns its ProtoChunk by value (no `Arc<RwLock>`
