@@ -553,6 +553,59 @@ echo "$out" | grep -q "note: 1 branch ref(s) left in place" || fail "stranded: m
 git -C "$E2E4/main" branch --list feature/stranded | grep -q . || fail "stranded: branch was force-deleted"
 pass "e2e refused branch -d is reported and the ref survives (never force-deleted)"
 
+# --- e2e: a stale upstream makes a merged-into-HEAD tip a refused branch -d -----
+# The worktree is clean and its tip is an ancestor of MAIN's HEAD, but the
+# branch tracks a stale upstream (origin/feature/upstream behind the tip). Real
+# `git branch -d` checks the upstream when it resolves, so it refuses; the
+# dry-run preview must predict that refusal and the real run must strand the
+# ref — neither may claim a clean deletion.
+E2E4u="$SANDBOX/e2e4u"
+mkdir -p "$E2E4u/main"
+git init -q "$E2E4u/main"
+git -C "$E2E4u/main" config user.email test@example.com
+git -C "$E2E4u/main" config user.name "test"
+git -C "$E2E4u/main" config commit.gpgsign false
+printf 'x\n' > "$E2E4u/main/a.txt"
+git -C "$E2E4u/main" add a.txt
+git -C "$E2E4u/main" commit -qm c0
+git -C "$E2E4u/main" update-ref refs/remotes/origin/main HEAD
+git -C "$E2E4u/main" worktree add -q -b feature/upstream "$E2E4u/wt" HEAD
+# advance the worktree branch past main@c0; make main fast-forward to that tip so
+# the tip is an ancestor of MAIN's HEAD (merged, would be removed)
+printf 'y\n' >> "$E2E4u/wt/a.txt"
+git -C "$E2E4u/wt" add a.txt
+git -C "$E2E4u/wt" commit -qm c1
+tip=$(git -C "$E2E4u/wt" rev-parse HEAD)
+git -C "$E2E4u/main" merge -q --no-edit feature/upstream
+# the tip is now MAIN's HEAD, but merged-ness is judged against the origin/main
+# ref, so advance it to the tip (as a fetched main would be)
+git -C "$E2E4u/main" update-ref refs/remotes/origin/main "$tip"
+# give the branch a remote-tracking upstream that is stale (behind the tip): a
+# configured fetch refspec plus branch.<name>.remote/merge resolve @{upstream},
+# and the tracking ref at main@c0 makes the tip NOT merged into it, so real
+# `git branch -d` refuses with "not yet merged to refs/remotes/origin/feature/upstream"
+git -C "$E2E4u/main" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+git -C "$E2E4u/main" config remote.origin.url /nonexistent
+git -C "$E2E4u/main" config branch.feature/upstream.remote origin
+git -C "$E2E4u/main" config branch.feature/upstream.merge refs/heads/feature/upstream
+git -C "$E2E4u/main" update-ref refs/remotes/origin/feature/upstream "$(git -C "$E2E4u/main" rev-parse main~1)"
+cd "$E2E4u/main"
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp 2>&1)
+echo "$out" | grep -q "WOULD REMOVE .*feature/upstream" || fail "stale-upstream dry-run: missing WOULD REMOVE line: $out"
+echo "$out" | grep -q "WARN: branch 'feature/upstream' would survive" || fail "stale-upstream dry-run: missing prospective WARN line: $out"
+echo "$out" | grep -q "note: 1 branch ref(s) would be left in place" || fail "stale-upstream dry-run: missing prospective stranded note: $out"
+[ -d "$E2E4u/wt" ] || fail "stale-upstream dry-run: removed the worktree"
+git -C "$E2E4u/main" branch --list feature/upstream | grep -q . || fail "stale-upstream dry-run: deleted the branch"
+pass "e2e stale-upstream dry-run predicts the refused branch -d despite the tip being merged into HEAD"
+# the real run strands the ref exactly as the preview predicted
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --no-tmp 2>&1)
+echo "$out" | grep -q "REMOVE .*feature/upstream" || fail "stale-upstream: missing REMOVE line: $out"
+echo "$out" | grep -q "WARN: branch 'feature/upstream' survived" || fail "stale-upstream: missing WARN line: $out"
+echo "$out" | grep -q "note: 1 branch ref(s) left in place" || fail "stale-upstream: missing stranded note: $out"
+[ -d "$E2E4u/wt" ] && fail "stale-upstream: worktree was not removed" || true
+git -C "$E2E4u/main" branch --list feature/upstream | grep -q . || fail "stale-upstream: branch was force-deleted"
+pass "e2e stale-upstream branch -d is refused and the ref survives (never force-deleted)"
+
 # --- e2e: a locked worktree is never counted as removed ------------------------
 # `git worktree remove --force` refuses a locked worktree (only remove -f -f
 # overrides), so the sweep must report it as kept — not WOULD REMOVE/REMOVE and

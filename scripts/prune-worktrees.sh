@@ -130,13 +130,17 @@ canonical_dir() { # $1 = path; canonical absolute path if it is a real dir, else
 }
 
 branch_deletable() { # $1 = repo, $2 = branch; would a no-force `git branch -d` delete it?
-  # branch -d refuses a tip not merged into HEAD or its upstream; a dry run
-  # cannot execute it (that would delete the ref), so main() predicts the
-  # refusal with this read-only check.
-  git -C "$1" merge-base --is-ancestor "$2" HEAD 2>/dev/null && return 0
+  # branch -d checks the tip against its configured upstream when that
+  # resolves, else against HEAD; a tip merged into HEAD but ahead of a stale
+  # upstream is still refused. A dry run cannot execute branch -d (that would
+  # delete the ref), so main() predicts the refusal with this read-only check
+  # that mirrors the upstream-first rule.
   local up
-  up=$(git -C "$1" rev-parse --abbrev-ref "$2@{upstream}" 2>/dev/null) || return 1
-  git -C "$1" merge-base --is-ancestor "$2" "$up" 2>/dev/null
+  if up=$(git -C "$1" rev-parse --verify --quiet "$2@{upstream}" 2>/dev/null); then
+    git -C "$1" merge-base --is-ancestor "$2" "$up" 2>/dev/null
+  else
+    git -C "$1" merge-base --is-ancestor "$2" HEAD 2>/dev/null
+  fi
 }
 
 sweep_tmp() {
